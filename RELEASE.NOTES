@@ -1,0 +1,222 @@
+Release notes for ircu2.10.12
+Last updated: 1 Sep 2005
+Written by Michael Poole <mdpoole@troilus.org>
+Based on earlier documents by Kev <klmitch@mit.edu> and
+Braden <dbtem@yahoo.com>.
+
+This document briefly describes changes in ircu2.10.12 relative to
+ircu2.10.11.  ircu2.10.12 is only compatible with servers that
+implement the P10 protocol.  It has been tested to link against
+ircu2.10.11, but some features (notably IPv6 support and oplevels) are
+not supported by ircu2.10.11.
+
+Semantic Changes (TAKE NOTE):
+
+Channel keys and passwords (see the "oplevels" enhancement below)
+listed in a JOIN are now only checked against the corresponding
+channel.  In ircu2.10.11, "JOIN #a,#b key" would attempt to use "key"
+as the key for both #a and #b.  ircu2.10.12 will only attempt to use
+it as the key for #a.  ircu2.10.12's behavior matches that documented
+in RFC 1459.
+
+Enhancements:
+
+The configuration file format has changed to one that is easier to
+read.  It is based on the configuration parser found in ircd-hybrid.
+As usual, an example configuration file can be found in the doc
+subdirectory.
+
+ircu now supports IPv6 clients.  If your operating system provides
+IPv6 socket support, ircu can accept connections on IPv6 addresses.
+Even if your operating system does not support IPv6 sockets, you can
+link (using IPv4) to a server that has IPv6 clients, and ircu will
+treat the IPv6 clients correctly.
+
+The DNS resolver has been replaced with a streamlined version (also
+from ircd-hybrid) that avoids some of the complications from using
+the full libresolv or adns libraries.
+
+The server can query an IAUTH external authorization server.  The
+protocol is described in doc/readme.iauth.  This allows an external
+program to accept or reject any client that connects to the server
+and allows that external program to assign an account stamp to the
+incoming user.
+
+A new feature called "oplevels" has been added.  It uses new channel
+keys (+A for the administrator, +U for users) to grant chanop status
+when you join using those keys.  Part of this channel protection is
+that you cannot be deopped in channel by someone who you opped.
+
+A new channel mode, +D, has been added for auditorium-style channels.
+These are channels where most users listen but do not speak or receive
+ops or voice.  The effect of +D is that the server waits to send the
+JOIN message for new users until the user gets ops or voice or sends a
+message to the channel.  A list of join-delayed users in a channel may
+be retrieved by using /NAMES -d #channel.  The response to /NAMES -d
+uses the same format as numeric 353, but uses numeric 355 instead. If
+an op removes +D while there are still join-delayed users, the server
+automatically sets mode +d, and removes +d when the last user's join
+is shown.  It is not possible to set channel mode +d manually; its
+purpose is to warn channel users that there are "hidden" users in the
+channel.
+
+More than one hashing mechanism is now supported for oper passwords,
+and a new tool (ircd/umkpasswd) is provided to generate them.
+
+Commands that send messages to specified services may be defined in
+the configuration file by using Pseudo blocks.  This lets users use
+commands like /X or /CHANSERV from their client, without tying the
+admin to a particular arrangement or naming of services.
+
+The /stats command accepts string identifiers in addition to
+single-character identifiers.  For example, "/stats access" shows the
+same data as "/stats i".  Supported names are shown by /stats.  New
+/stats options are: /stats a (nameservers), to list DNS nameservers in
+use; /stats L (modules), to list loaded modules; and /stats R
+(mappings), to list privmsg helper commands defined by Pseudo blocks.
+By default, all of these are hidden from normal users.
+
+Client blocks (previously I: lines), Operator blocks (previously O:
+and o: lines), channel bans and silences may use CIDR notation instead
+of simple wildcards.  You may also have silence exceptions by putting
+'~' before the mask; for example, if you wish to silence everyone
+except X, you could use SILENCE *!*@*,~X!cservice@undernet.org.
+
+The server will no longer kick "net riders" in keyed (+k) channels if
+both sides of the net join have the same key.
+
+IP masks (as used in bans, G-lines, etc) are now parsed in a more
+forgiving manner.  127.0.0.0/8, 127.* and 127/8 are all accepted and
+mean the same thing.  Ambiguous expressions like 127/8 are interpreted
+as IPv4 masks; to interpret it as an IPv6 mask, use 127:/8.
+
+Configuration Changes:
+
+As mentioned above, the configuration file format has changed
+radically.  Please consult doc/example.conf for details on the
+new format.  Some prominent changes follow.
+
+The old contents of H: lines have been merged into the Connect block
+that describes the peer server(s) that should be allowed to hub.
+
+Two default virtual host addresses may be specified, one for IPv4
+sockets and one for IPv6 sockets.
+
+Nickname jupes have their own blocks, and do not share structure with
+UWorld server declarations.
+
+Operator connection classes and individual operator blocks may be
+assigned privileges, rather than having them controlled globally.
+Because of this, the feature settings that controlled the privileges
+globally have been removed.
+
+The maximum number of clients allowed per IP may be set in a Client
+block (the equivalent of C: lines).
+
+New feature settings (see doc/readme.features for explanations):
+ANNOUNCE_INVITES, HIS_STATS_L, HIS_STATS_a, HIS_STATS_R,
+LOCAL_CHANNELS, TOPIC_BURST.
+
+Deleted features, since they had no effect even in 2.10.11: AUTOHIDE,
+HIS_DESYNCS, TIMESEC.
+
+Deleted features since they are now controlled by other configuration
+entries: VIRTUAL_HOST, oper and locop privilege features.
+
+Deleted feature since it no longer applies: HIS_STATS_h.
+
+Compile Time Options:
+
+A listing of supported compile-time options may be seen by running
+"./configure --help".  The defaults should be sane.  In particular,
+you should NOT compile with --enable-debug or with --disable-symbols
+on a production network.
+
+Otherwise Undocumented Features:
+
+Despite our preferences to keep these undocumented, they are
+occasionally useful, and are described here for users who may
+need them.
+
+To enable these, you need to add them to CFLAGS prior to running
+./configure, usually as in: CFLAGS="-O2 -D<option>" ./configure
+
+-DNICKLEN=20
+
+  This allows you change the maximum nick length from 15 to 20 (or
+whatever number you use at the end).  It MUST be the same on all
+servers on your network, or bad things will happen.  You should also
+use the NICKLEN feature in ircd.conf.
+
+-DNOTHROTTLE
+  This disables the throttling code.  This is used for debugging
+*only*.  It lets you connect up to 255 clients from one host with no
+time considerations.  If this is enabled on a production server Kev will
+personally drive your server into the ground.  You have been warned.
+
+
+Operating System and Kernel Requirements:
+
+If you plan allowing more than 1000 clients on your server, you may
+need to adjust your kernel resource limits for networking and
+I/O. There are two things you will need to pay particular attention
+to, the number of file descriptors available and the number of buffers
+the kernel has available to read and write data to the file
+descriptors.
+
+To calculate kernel buffer requirements a good place to start is to
+multiply the expected number connections expected on the machine by
+the amount of data we buffer for each connection.  Doubling the result
+of the above calculation and dividing it by the size of the buffers
+the kernel uses for I/O should give you a starting place.
+
+The server uses 2K kernel buffers for clients, and 64K kernel buffers
+for servers (actual use may be somewhat higher).
+
+c_count - number of clients expected
+c_q     - number of bytes buffered for each client
+s_count - number of servers expected
+s_q     - number of bytes buffered for each server
+
+buffer count = (2 * (c_count * c_q + s_count * s_q)) / kernel buffer size
+
+If the client count is 2000 and the server count is 1 (normal leaf)
+and your server uses 2K as an I/O buffer size:
+
+You need (2 * (2000 * 2048 + 1 * 65536)) / 2048 or a minimum of 4064
+buffers available, if the kernel uses 512 byte buffers you will need a
+minimum of 16256 kernel buffers.
+
+These settings may be a bit light for net-breaks under full client
+load you will need to experiment a bit to find the right settings for
+your server.
+
+FreeBSD --WildThang
+
+You may want to increase your kernel resources if you want to put a
+lot of clients on your machine here are a few values to start with:
+
+CHILD_MAX=4096
+OPEN_MAX=4096
+FD_SETSIZE=4096
+NMBCLUSTERS=8096
+
+If you have trouble connecting *out* from your machine try:
+ sysctl -w net.inet.ip.portrange.last=10000
+
+Solaris 2.6  --Tar
+
+Increase the default hard limit for file descriptors in /etc/system:
+
+set rlim_fd_max = 4096
+
+The server will raise the soft limit to the hard limit.
+
+Linux 2.2 -- [Tri]/Isomer
+
+The kernel has a kernel destination cache size of 4096.  If the kernel
+sees more than 4096 IP's in 60s it warns 'dst cache overflow'.  This
+limit can be changed by modifying /proc/sys/net/ipv4/route/max_size.
+
+A patch to select is also recommended if you have regular poll/select
+errors.
