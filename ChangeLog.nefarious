@@ -1,6 +1,15 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-04  Matthew Beecging  <jobe@mdbnet.co.uk>
+
+	* ircd/version.c.SH: Updated to use /.release for revision id
+	if it exists otherwise use hg tip.
+
+	* ircd/m_isnef.c: Forgot to add this to the repo before.
+
+	* release.sh: Added script to generate /.release tag.
+
 2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_isnef.c: Added ISNEF command.

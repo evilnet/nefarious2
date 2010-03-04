@@ -22,7 +22,12 @@ awk '{if (NF == 6) \
 else \
 	 { print $1 " " $2 " " $3 " " $7 " at " $4 " " $5 " " $6 }}'`
 
-cvs_version=`hg tip --template '{rev}:{node|short} {date|shortdate}'`
+if test -f .release
+then
+	cvs_version=`cat .release`
+else
+	cvs_version=`hg tip --template '{rev}:{node|short} {date|shortdate}'`
+fi
 
 /bin/cat >version.c <<!SUB!THIS!
 /*
