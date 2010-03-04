@@ -3,6 +3,11 @@
 
 2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_mode.c: Added fix to allow UWorld clients to send mode
+	changes.
+
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_bsd.c: Added SERVER "o" flag to announce oplevels
 	support.
 

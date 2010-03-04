@@ -228,7 +228,17 @@ ms_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		MODE_PARSE_FORCE),  /* And force it to be accepted */
 	        NULL);
   } else {
-    if (!(member = find_member_link(chptr, sptr)) || !IsChanOp(member)) {
+    if (find_conf_byhost(cli_confs(cptr), cli_name(cli_user(sptr)->server), CONF_UWORLD)) {
+      modebuf_init(&mbuf, sptr, cptr, chptr,
+                   (MODEBUF_DEST_CHANNEL | /* Send mode to clients */
+                    MODEBUF_DEST_SERVER  | /* Send mode to servers */
+                    MODEBUF_DEST_HACK4));  /* Send a HACK(4) message */
+      mode_parse(&mbuf, cptr, sptr, chptr, parc - 2, parv + 2,
+                 (MODE_PARSE_SET    | /* Set the mode */
+                  MODE_PARSE_STRICT | /* Interpret it strictly */
+                  MODE_PARSE_FORCE),  /* And force it to be accepted */
+                  NULL);
+    } else if (!(member = find_member_link(chptr, sptr)) || !IsChanOp(member)) {
       modebuf_init(&mbuf, sptr, cptr, chptr,
 		   (MODEBUF_DEST_SERVER |  /* Send mode to server */
 		    MODEBUF_DEST_HACK2  |  /* Send a HACK(2) message */
