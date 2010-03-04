@@ -27,7 +27,7 @@
  * NOTE: Changing any of these definitions (except for the
  * target-related ones at the bottom) is equivalent to a protocol
  * revision. Every server on a given network must use the same values.
- * @version $Id: ircd_defs.h 1222 2004-10-05 02:21:08Z entrope $
+ * @version $Id: ircd_defs.h 3 2010-03-03 17:36:26Z jobe1986 $
  */
 
 /** Maximum length allowed for a nickname.
@@ -38,7 +38,7 @@
  * See also F:NICKLEN in ircd.conf.
  */
 #ifndef NICKLEN
-#define NICKLEN         15
+#define NICKLEN         30
 #endif
 /** Maximum length allowed of a user name, including an optional
  * leading '~' if the user name has not been authenticated by an auth (RFC 931)
@@ -63,12 +63,12 @@
  * of greater than 63 characters are rejected by the server, and most FQDN's
  * are shorter. It is possible to have a valid FQDN longer than 63 characters.
  */
-#define HOSTLEN         63
+#define HOSTLEN         75
 /** Maximum length for the account name, which can be set
  * with the ACCOUNT (AC) command.  This is used for keeping track of who's
  * logged into which account, for the benefit of irc services.
  */
-#define ACCOUNTLEN      12
+#define ACCOUNTLEN      15
 /** Maximum length for user supplied information about a client
  * connection (gcos). This information is set at client/server registration
  * time.
@@ -83,10 +83,10 @@
 #define SOCKIPLEN 45
 /** Maximum length for channel topics and kill comments.
  */
-#define TOPICLEN        160
+#define TOPICLEN        250
 /** Maximum length for away messages.
  */
-#define AWAYLEN		160
+#define AWAYLEN		250
 /** Exactly long enough to hold one protocol message (RFC 1459)
  * including the line termination (\\r\\n).  DO NOT CHANGE THIS!!!!
  */

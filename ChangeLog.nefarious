@@ -1,0 +1,15 @@
+/***********************************************************************
+ Nefarious IRCu ChangeLog
+
+2010-03-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+        * include/icd_defs.h: Updated values to match Nefarious 1.*
+
+        * ChangeLog.nefarious: Added (oops)
+
+2010-03-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+        * include/patchlevel.h: Added Nefarious tag to version.
+
+***********************************************************************/
+
