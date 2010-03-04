@@ -86,7 +86,7 @@ sub-distclean: ${IRCD_MAKEFILES}
 
 distclean: root-distclean sub-distclean
 	${RM} -f Makefile config.h config.log config.cache config.status \
-		stamp-h
+		stamp-h include/patchlist.h
 
 maintainer-clean: root-distclean ${IRCD_MAKEFILES}
 	@for i in ${SUBDIRS}; do \

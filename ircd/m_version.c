@@ -112,7 +112,7 @@ int m_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc > 1 && match(parv[1], cli_name(&me)))
     return send_reply(sptr, ERR_NOPRIVILEGES);
 
-  send_reply(sptr, RPL_VERSION, version, debugmode, cli_name(&me),
+  send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
              debug_serveropts());
   send_supported(sptr);
   return 0;
@@ -143,7 +143,7 @@ int mo_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                            parc, parv)
                       == HUNTED_ISME)
   {
-    send_reply(sptr, RPL_VERSION, version, debugmode, cli_name(&me),
+    send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
 	       debug_serveropts());
     send_supported(sptr);
   }
@@ -174,7 +174,7 @@ int ms_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (hunt_server_cmd(sptr, CMD_VERSION, cptr, 0, ":%C", 1, parc, parv) ==
       HUNTED_ISME)
   {
-    send_reply(sptr, RPL_VERSION, version, debugmode, cli_name(&me),
+    send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
 	       debug_serveropts());
   }
 

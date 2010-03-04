@@ -314,7 +314,7 @@ uninstall:
 	@echo "Please remove the contents of ${DPATH} manually"
 
 clean:
-	${RM} -f *.o *.bak ircd umkpasswd convert-conf chattr.tab.c table_gen y.tab.* lex.yy.*
+	${RM} -f *.o *.bak ircd umkpasswd convert-conf chattr.tab.c table_gen y.tab.* lex.yy.* version.c
 
 distclean: clean
 	${RM} -f Makefile stamp-m

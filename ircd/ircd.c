@@ -480,7 +480,7 @@ static void parse_command_line(int argc, char** argv) {
     case 'f':  configfile = optarg;                    break;
     case 'h':  ircd_strncpy(cli_name(&me), optarg, HOSTLEN); break;
     case 'v':
-      printf("ircd %s\n", version);
+      printf("ircd %s+[%s]\n", version, cvs_version);
       printf("Event engines: ");
 #ifdef USE_KQUEUE
       printf("kqueue() ");

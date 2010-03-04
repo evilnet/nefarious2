@@ -1,13 +1,29 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2010-03-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* Makefile.in: Added include/patchlist.h.
+
+	* include/version.h: Added cvs_version.
+
+	* ircd/Makefile.in: Added version.c to "make clean".
+
+	* ircd/ircd.c: Added cvs_version to -v output.
+
+	* ircd/m_version.c: Added cvs_version to RPL_VERSION.
+
+	* ircd/s_err.c: Added "+[%s]" to RPL_VERSION.
+
+	* ircd/version.c.SH: Added cvs_version to version.c.
+
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
         * include/icd_defs.h: Updated values to match Nefarious 1.*
 
         * ChangeLog.nefarious: Added (oops)
 
-2010-03-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
         * include/patchlevel.h: Added Nefarious tag to version.
 

@@ -22,6 +22,8 @@ awk '{if (NF == 6) \
 else \
 	 { print $1 " " $2 " " $3 " " $7 " at " $4 " " $5 " " $6 }}'`
 
+cvs_version=`hg tip --template '{rev}:{node|short} {date|shortdate}'`
+
 /bin/cat >version.c <<!SUB!THIS!
 /*
  * IRC - Internet Relay Chat, ircd/version.c
@@ -51,6 +53,7 @@ else \
 #include "patchlist.h"
 
 const char *generation = "$generation";
+const char *cvs_version = "$cvs_version";
 const char *creation = "$creation";
 const char *version = BASE_VERSION RELEASE PATCHLEVEL PATCHLIST;
 

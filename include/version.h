@@ -7,6 +7,7 @@
 #define INCLUDED_version_h
 
 extern const char *version;
+extern const char *cvs_version;
 extern const char *creation;
 extern const char *infotext[];
 extern const char *generation;
