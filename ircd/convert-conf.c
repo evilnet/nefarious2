@@ -327,7 +327,6 @@ static void finish_features(void)
 
     fputs("Features {\n", stdout);
     fputs("\t\"OPLEVELS\" = \"FALSE\";\n", stdout);
-    fputs("\t\"ZANNELS\" = \"FALSE\";\n", stdout);
 
     for (feat = features; feat; feat = feat->next) {
         /* Display the original feature line we are talking about. */

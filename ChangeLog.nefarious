@@ -1,6 +1,16 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/convert-conf.c: Removed ZANNELS F:Line.
+
+	* ircd/ircd_features.c: Removed ZANNELS F:Line.
+
+	* include/ircd_features.h: Removed ZANNELS F:Line.
+
+	* doc/readme.features: Removed ZANNELS F:Line.
+
 2010-03-04  Matthew Beecging  <jobe@mdbnet.co.uk>
 
 	* ircd/version.c.SH: Updated to use /.release for revision id
