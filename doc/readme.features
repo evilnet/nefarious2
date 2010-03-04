@@ -239,7 +239,7 @@ service (i.e. they have the ACCOUNT flag set).
 
 HIDDEN_HOST
  * Type: string
- * Default: users.undernet.org
+ * Default: Users.Nefarious
 
 This selects the suffix for the hidden hostmask (see HOST_HIDING).
 
@@ -271,7 +271,7 @@ change this unless you really need to.
 
 MAXCHANNELSPERUSER
  * Type: integer
- * Default: 10
+ * Default: 20
 
 This is the maximum number of channels a user can be in at a time.
 The "mandatory" value on Undernet is currently 10.  Since it only
@@ -328,7 +328,7 @@ recommended value is 10 seconds.
 
 CONNECTTIMEOUT
  * Type: integer
- * Default: 90
+ * Default: 60
 
 Number of seconds to wait for a connect(2) call to complete.  NOTE:
 this must be at *LEAST* 10.  When a client connects, it has
@@ -435,7 +435,7 @@ enforce a lower limit of 20.
 
 CONFIG_OPERCMDS
  * Type: boolean
- * Default: FALSE
+ * Default: TRUE
 
 Since u2.10.11, several new oper-only features have been added that
 involve changes to the server<->server protocol.  This configuration
@@ -733,41 +733,41 @@ As per UnderNet CFV-165, this removes local channels in replies to /WHOIS.
 
 HIS_SERVERNAME
  * Type: string
- * Default: "*.undernet.org"
+ * Default: "*.Nefarious"
 
 As per UnderNet CFV-165, this is the "name" of the server shown to users on a
 /WHOIS of another user.
 
 HIS_SERVERINFO
  * Type: string
- * Default: "The Undernet Underworld"
+ * Default: "evilnet development"
 
 As per UnderNet CFV-165, this is the "info" of the server shown to users on a
 /WHOIS of another user.
 
 HIS_URLSERVERS
  * Type: string
- * Default: "http://www.undernet.org/servers.php"
+ * Default: "http://sourceforge.net/projects/evilnet/"
 
 As per UnderNet CFV-165, this is the URL shown to users when they do a /MAP or
 /LINKS.
 
 NETWORK
  * Type: string
- * Default: "UnderNet"
+ * Default: "Nefarious"
 
 This defines the network name as reported in the 005 "supported features"
 numeric, and as used by the "Failed to deliver" message.
 
 URL_CLIENTS
  * Type: string
- * Default: "ftp://ftp.undernet.org/pub/irc/clients"
+ * Default: "http://www.ircreviews.org/clients/"
 
 This defines a URL that users may visit to find compatible IRC clients.
 
 URLREG
  * Type: string
- * Default: "http://cservice.undernet.org/live/"
+ * Default: "http://sourceforge.net/projects/evilnet/"
 
 This defines a URL that is used in server response 477 (ERR_NEEDREGGEDNICK) to
 let users know which website they must visit to obtain a proper account for
@@ -775,7 +775,7 @@ authentication.
 
 NICKLEN
  * Type: integer
- * Default: 12
+ * Default: 15
 
 This is the allowed length of the nickname length.  It may not be
 larger than the NICKLEN #define, and should usually be the same
@@ -862,7 +862,7 @@ If set, allow users to create local channels.
 
 TOPIC_BURST
  * Type: boolean
- * Default: FALSE
+ * Default: TRUE
 
 If set, send the current topic value and timestamp for channels during
 burst.  This generally only makes sense for hubs to use, and it causes

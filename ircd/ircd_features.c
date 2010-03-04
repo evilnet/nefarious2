@@ -317,24 +317,24 @@ static struct FeatureDesc {
   F_S(DEFAULT_LIST_PARAM, FEAT_NULL, 0, list_set_default),
   F_I(NICKNAMEHISTORYLENGTH, 0, 800, whowas_realloc),
   F_B(HOST_HIDING, 0, 1, 0),
-  F_S(HIDDEN_HOST, FEAT_CASE, "users.undernet.org", 0),
+  F_S(HIDDEN_HOST, FEAT_CASE, "Users.Nefarious", 0),
   F_S(HIDDEN_IP, 0, "127.0.0.1", 0),
   F_B(CONNEXIT_NOTICES, 0, 0, 0),
   F_B(OPLEVELS, 0, 1, 0),
   F_B(LOCAL_CHANNELS, 0, 1, 0),
-  F_B(TOPIC_BURST, 0, 0, 0),
+  F_B(TOPIC_BURST, 0, 1, 0),
   F_B(DISABLE_GLINES, 0, 0, 0),
 
   /* features that probably should not be touched */
   F_I(KILLCHASETIMELIMIT, 0, 30, 0),
-  F_I(MAXCHANNELSPERUSER, 0, 10, 0),
-  F_I(NICKLEN, 0, 12, 0),
+  F_I(MAXCHANNELSPERUSER, 0, 20, 0),
+  F_I(NICKLEN, 0, 15, 0),
   F_I(AVBANLEN, 0, 40, 0),
   F_I(MAXBANS, 0, 45, 0),
   F_I(MAXSILES, 0, 15, 0),
   F_I(HANGONGOODLINK, 0, 300, 0),
   F_I(HANGONRETRYDELAY, 0, 10, 0),
-  F_I(CONNECTTIMEOUT, 0, 90, 0),
+  F_I(CONNECTTIMEOUT, 0, 60, 0),
   F_I(MAXIMUM_LINKS, 0, 1, init_class), /* reinit class 0 as needed */
   F_I(PINGFREQUENCY, 0, 120, init_class),
   F_I(CONNECTFREQUENCY, 0, 600, init_class),
@@ -362,7 +362,7 @@ static struct FeatureDesc {
   F_B(ANNOUNCE_INVITES, 0, 0, 0),
 
   /* features that affect all operators */
-  F_B(CONFIG_OPERCMDS, 0, 0, 0),
+  F_B(CONFIG_OPERCMDS, 0, 1, 0),
 
   /* HEAD_IN_SAND Features */
   F_B(HIS_SNOTICES, 0, 1, 0),
@@ -412,14 +412,14 @@ static struct FeatureDesc {
   F_B(HIS_REWRITE, 0, 1, 0),
   F_I(HIS_REMOTE, 0, 1, 0),
   F_B(HIS_NETSPLIT, 0, 1, 0),
-  F_S(HIS_SERVERNAME, 0, "*.undernet.org", feature_notify_servername),
-  F_S(HIS_SERVERINFO, 0, "The Undernet Underworld", feature_notify_serverinfo),
-  F_S(HIS_URLSERVERS, 0, "http://www.undernet.org/servers.php", 0),
+  F_S(HIS_SERVERNAME, 0, "*.Nefarious", feature_notify_servername),
+  F_S(HIS_SERVERINFO, 0, "evilnet development", feature_notify_serverinfo),
+  F_S(HIS_URLSERVERS, 0, "http://sourceforge.net/projects/evilnet/", 0),
 
   /* Misc. random stuff */
-  F_S(NETWORK, 0, "UnderNet", 0),
-  F_S(URL_CLIENTS, 0, "ftp://ftp.undernet.org/pub/irc/clients", 0),
-  F_S(URLREG, 0, "http://cservice.undernet.org/live/", 0),
+  F_S(NETWORK, 0, "Nefarious", 0),
+  F_S(URL_CLIENTS, 0, "http://www.ircreviews.org/clients/", 0),
+  F_S(URLREG, 0, "http://sourceforge.net/projects/evilnet/", 0),
 
 #undef F_S
 #undef F_B
