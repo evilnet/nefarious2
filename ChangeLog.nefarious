@@ -3,6 +3,10 @@
 
 2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* Makefile.in: Minor change to delete a folder I missed earlier.
+
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_mode.c: Added fix to allow UWorld clients to send mode
 	changes.
 
