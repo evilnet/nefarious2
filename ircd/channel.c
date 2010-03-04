@@ -850,7 +850,7 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
       strcat(pbuf, "*");
     previous_parameter = 1;
   }
-  if (*chptr->mode.apass) {
+  if (*chptr->mode.apass && (IsOpLevels(cptr) || !IsServer(cptr))) {
     *mbuf++ = 'A';
     if (previous_parameter)
       strcat(pbuf, " ");
@@ -860,7 +860,7 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
       strcat(pbuf, "*");
     previous_parameter = 1;
   }
-  if (*chptr->mode.upass) {
+  if (*chptr->mode.upass && (IsOpLevels(cptr) || !IsServer(cptr))) {
     *mbuf++ = 'U';
     if (previous_parameter)
       strcat(pbuf, " ");
@@ -975,7 +975,7 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
 	  else
 	    opped_members[opped_members_index++] = member;
           /* We also send oplevels if anyone is below the weakest level.  */
-          if (OpLevel(member) < MAXOPLEVEL)
+          if ((OpLevel(member) < MAXOPLEVEL) && IsOpLevels(cptr))
             send_oplevels = 1;
 	}
 	/* Only handle the members with the flags that we are interested in. */
@@ -1553,11 +1553,13 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   int *bufptr_i;
 
   char addstr[BUFSIZE]; /* accumulates MODE parameters to add */
+  char addstro[BUFSIZE]; /* accumulates MODE parameters to add */
   int addstr_i;
+  int addstro_i;
   char remstr[BUFSIZE]; /* accumulates MODE parameters to remove */
   int remstr_i;
-  char *strptr; /* more indirection to simplify the code */
-  int *strptr_i;
+  char *strptr, *strptro; /* more indirection to simplify the code */
+  int *strptr_i, *strptro_i;
 
   int totalbuflen = BUFSIZE - 200; /* fuzz factor -- don't overrun buffer! */
   int tmp;
@@ -1792,7 +1794,9 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   if (mbuf->mb_dest & MODEBUF_DEST_SERVER) {
     /* set up parameter string */
     addstr[0] = '\0';
+    addstro[0] = '\0';
     addstr_i = 0;
+    addstro_i = 0;
     remstr[0] = '\0';
     remstr_i = 0;
 
@@ -1809,6 +1813,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       if (MB_TYPE(mbuf, i) & MODE_ADD) { /* adding or removing? */
 	strptr = addstr;
 	strptr_i = &addstr_i;
+        strptro = addstro;
+        strptro_i = &addstro_i;
       } else {
 	strptr = remstr;
 	strptr_i = &remstr_i;
@@ -1816,27 +1822,33 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
       /* if we're changing oplevels and we know the oplevel, pass it on */
       if ((MB_TYPE(mbuf, i) & MODE_CHANOP)
-          && MB_OPLEVEL(mbuf, i) < MAXOPLEVEL)
+          && MB_OPLEVEL(mbuf, i) < MAXOPLEVEL) {
           *strptr_i += ircd_snprintf(0, strptr + *strptr_i, BUFSIZE - *strptr_i,
                                      " %s%s:%d",
                                      NumNick(MB_CLIENT(mbuf, i)),
                                      MB_OPLEVEL(mbuf, i));
+          *strptro_i += ircd_snprintf(0, strptro+ *strptro_i, BUFSIZE - *strptro_i,
+                                     " %s%s", NumNick(MB_CLIENT(mbuf, i)));
 
       /* deal with other modes that take clients */
-      else if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_VOICE))
+      } else if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_VOICE)) {
 	build_string(strptr, strptr_i, NumNick(MB_CLIENT(mbuf, i)), ' ');
+        build_string(strptro, strptro_i, NumNick(MB_CLIENT(mbuf, i)), ' ');
 
       /* deal with modes that take strings */
-      else if (MB_TYPE(mbuf, i) & (MODE_KEY | MODE_BAN | MODE_APASS | MODE_UPASS))
+      } else if (MB_TYPE(mbuf, i) & (MODE_KEY | MODE_BAN | MODE_APASS | MODE_UPASS)) {
 	build_string(strptr, strptr_i, MB_STRING(mbuf, i), 0, ' ');
+        build_string(strptro, strptro_i, MB_STRING(mbuf, i), 0, ' ');
 
       /*
        * deal with the limit.  Logic here is complicated; if HACK2 is set,
        * we're bouncing the mode, so sense is reversed, and we have to
        * include the original limit if it looks like it's being removed
        */
-      else if ((MB_TYPE(mbuf, i) & limitdel) == limitdel)
+      } else if ((MB_TYPE(mbuf, i) & limitdel) == limitdel) {
 	build_string(strptr, strptr_i, limitbuf, 0, ' ');
+        build_string(strptro, strptro_i, limitbuf, 0, ' ');
+      }
     }
 
     /* we were told to deop the source */
@@ -1844,6 +1856,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       addbuf[addbuf_i++] = 'o'; /* remember, sense is reversed */
       addbuf[addbuf_i] = '\0'; /* terminate the string... */
       build_string(addstr, &addstr_i, NumNick(mbuf->mb_source), ' ');
+      build_string(addstro, &addstro_i, NumNick(mbuf->mb_source), ' ');
 
       /* mark that we've done this, so we don't do it again */
       mbuf->mb_dest &= ~MODEBUF_DEST_DEOP;
@@ -1851,10 +1864,16 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
     if (mbuf->mb_dest & MODEBUF_DEST_OPMODE) {
       /* If OPMODE was set, we're propagating the mode as an OPMODE message */
-      sendcmdto_serv_butone(mbuf->mb_source, CMD_OPMODE, mbuf->mb_connect,
+      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
+                            FLAG_OPLEVELS, FLAG_LAST_FLAG,
 			    "%H %s%s%s%s%s%s", mbuf->mb_channel,
 			    rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",
 			    addbuf, remstr, addstr);
+      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
+                            FLAG_LAST_FLAG, FLAG_OPLEVELS,
+                            "%H %s%s%s%s%s%s", mbuf->mb_channel,
+                            rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",
+                            addbuf, remstr, addstro);
     } else if (mbuf->mb_dest & MODEBUF_DEST_BOUNCE) {
       /*
        * If HACK2 was set, we're bouncing; we send the MODE back to
@@ -1863,18 +1882,28 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
        */
       sendcmdto_one(&me, CMD_MODE, mbuf->mb_connect, "%H %s%s%s%s%s%s %Tu",
 		    mbuf->mb_channel, addbuf_i ? "-" : "", addbuf,
-		    rembuf_i ? "+" : "", rembuf, addstr, remstr,
-		    mbuf->mb_channel->creationtime);
+		    rembuf_i ? "+" : "", rembuf,
+                    IsOpLevels(mbuf->mb_connect) ? addstr : addstro,
+                    remstr, mbuf->mb_channel->creationtime);
     } else {
       /*
        * We're propagating a normal (or HACK3 or HACK4) MODE command
        * to the rest of the network.  We send the actual channel TS.
        */
-      sendcmdto_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
-                            "%H %s%s%s%s%s%s %Tu", mbuf->mb_channel,
-                            rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",
-                            addbuf, remstr, addstr,
-                            mbuf->mb_channel->creationtime);
+      /* Send oplevels to servers with oplevels support. */
+      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
+                                 FLAG_OPLEVELS, FLAG_LAST_FLAG,
+                                 "%H %s%s%s%s%s%s %Tu", mbuf->mb_channel,
+                                 rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",
+                                 addbuf, remstr, addstr,
+                                 mbuf->mb_channel->creationtime);
+      /* Send no oplevels to servers without oplevels support. */
+      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
+                                 FLAG_LAST_FLAG, FLAG_OPLEVELS,
+                                 "%H %s%s%s%s%s%s %Tu", mbuf->mb_channel,
+                                 rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",
+                                 addbuf, remstr, addstro,
+                                 mbuf->mb_channel->creationtime);
     }
   }
 
@@ -2071,9 +2100,10 @@ modebuf_flush(struct ModeBuf *mbuf)
  *
  * @param mbuf		The mode buffer to extract the modes from.
  * @param buf		The string buffer to write the modes into.
+ * @param oplevels	Include oplevels modes (+AU)?
  */
 void
-modebuf_extract(struct ModeBuf *mbuf, char *buf)
+modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
 {
   static int flags[] = {
 /*  MODE_CHANOP,	'o', */
@@ -2127,18 +2157,21 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf)
 
   buf[bufpos++] = '+'; /* start building buffer */
 
-  for (flag_p = flags; flag_p[0]; flag_p += 2)
-    if (*flag_p & add)
-      buf[bufpos++] = flag_p[1];
+  for (flag_p = flags; flag_p[0]; flag_p += 2) {
+    if (*flag_p & add) {
+      if (!((*flag_p & (MODE_APASS | MODE_UPASS)) && !oplevels))
+        buf[bufpos++] = flag_p[1];
+    }
+  }
 
   for (i = 0, len = bufpos; i < len; i++) {
     if (buf[i] == 'k')
       build_string(buf, &bufpos, key, 0, ' ');
     else if (buf[i] == 'l')
       build_string(buf, &bufpos, limitbuf, 0, ' ');
-    else if (buf[i] == 'U')
+    else if ((buf[i] == 'U') && oplevels)
       build_string(buf, &bufpos, upass, 0, ' ');
-    else if (buf[i] == 'A')
+    else if ((buf[i] == 'A') && oplevels)
       build_string(buf, &bufpos, apass, 0, ' ');
   }
 

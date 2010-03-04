@@ -420,7 +420,7 @@ extern void modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode,
 extern void modebuf_mode_client(struct ModeBuf *mbuf, unsigned int mode,
 				struct Client *client, int oplevel);
 extern int modebuf_flush(struct ModeBuf *mbuf);
-extern void modebuf_extract(struct ModeBuf *mbuf, char *buf);
+extern void modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels);
 
 extern void mode_ban_invalidate(struct Channel *chan);
 extern void mode_invite_clear(struct Channel *chan);

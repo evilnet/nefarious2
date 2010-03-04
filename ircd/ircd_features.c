@@ -219,6 +219,17 @@ feature_notify_hub(void)
     ClearHub(&me);
 }
 
+/** Update whether #me has oplevels support or not.
+*/
+static void
+feature_notify_oplevels(void)
+{
+  if (feature_bool(FEAT_OPLEVELS))
+    SetOpLevels(&me);
+  else
+    ClearOpLevels(&me);
+}
+
 /** Sets a feature to the given value.
  * @param[in] from Client trying to set parameters.
  * @param[in] fields Array of parameters to set.
@@ -320,7 +331,7 @@ static struct FeatureDesc {
   F_S(HIDDEN_HOST, FEAT_CASE, "Users.Nefarious", 0),
   F_S(HIDDEN_IP, 0, "127.0.0.1", 0),
   F_B(CONNEXIT_NOTICES, 0, 0, 0),
-  F_B(OPLEVELS, 0, 1, 0),
+  F_B(OPLEVELS, 0, 0, feature_notify_oplevels),
   F_B(LOCAL_CHANNELS, 0, 1, 0),
   F_B(TOPIC_BURST, 0, 1, 0),
   F_B(DISABLE_GLINES, 0, 0, 0),

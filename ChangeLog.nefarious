@@ -3,6 +3,34 @@
 
 2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_bsd.c: Added SERVER "o" flag to announce oplevels
+	support.
+
+	* ircd/m_burst.c: Only send oplevels and modes AU to servers
+	that support oplevels
+
+	* ircd/m_server.c: Added SERVER "o" flag to announce oplevels
+	support.
+
+	* ircd/s_serv.c: Added SERVER "o" flag to announce oplevels
+	support.
+
+	* ircd/channel.c: Change mode string generation to only include
+	oplevels and modes AU for servers that support oplevels.
+
+	* ircd/ircd_features.c: Set F:OPLEVELS default to FALSE.
+
+	* ircd/s_stats.c: Added flag "O" to STATS v/V output.
+
+	* include/channel.h: Added oplevels param to modebuf_extract().
+
+	* include/client.h: Added SERVER "o" flag to announce oplevels
+	support.
+
+	* doc/readme.features: Set F:OPLEVELS default to FALSE.
+
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ircd_features.c: Updated F:Line default values.
 
 	* doc/readme.features: Updated F:Line default values.

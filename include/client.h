@@ -146,6 +146,7 @@ enum Flag
     FLAG_HUB,                       /**< server is a hub */
     FLAG_IPV6,                      /**< server understands P10 IPv6 addrs */
     FLAG_SERVICE,                   /**< server is a service */
+    FLAG_OPLEVELS,                  /**< server has oplevels support */
     FLAG_GOTID,                     /**< successful ident lookup achieved */
     FLAG_DOID,                      /**< I-lines say must use ident return */
     FLAG_NONL,                      /**< No \n in buffer */
@@ -575,6 +576,8 @@ struct Client {
 #define IsIPv6(x)               HasFlag(x, FLAG_IPV6)
 /** Return non-zero if the client claims to be a services server. */
 #define IsService(x)            HasFlag(x, FLAG_SERVICE)
+/** Return non-zero if the client has oplevels support. */
+#define IsOpLevels(x)           HasFlag(x, FLAG_OPLEVELS)
 /** Return non-zero if the client has an account stamp. */
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
@@ -621,6 +624,8 @@ struct Client {
 #define SetIPv6(x)              SetFlag(x, FLAG_IPV6)
 /** Mark a client as being a services server. */
 #define SetService(x)           SetFlag(x, FLAG_SERVICE)
+/** Mark a client as having oplevels support. */
+#define SetOpLevels(x)          SetFlag(x, FLAG_OPLEVELS)
 /** Mark a client as having an account stamp. */
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */
@@ -662,6 +667,8 @@ struct Client {
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */
 #define ClearHub(x)             ClrFlag(x, FLAG_HUB)
+/** Clear the client's OPLEVELS flag. */
+#define ClearOpLevels(x)        ClrFlag(x, FLAG_OPLEVELS)
 
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */

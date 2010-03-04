@@ -210,8 +210,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct Membership *member, *nmember;
   struct Ban *lp, **lp_p;
   unsigned int parse_flags = (MODE_PARSE_FORCE | MODE_PARSE_BURST);
-  int param, nickpos = 0, banpos = 0;
-  char modestr[BUFSIZE], nickstr[BUFSIZE], banstr[BUFSIZE];
+  int param, nickpos = 0, nickposo = 0, banpos = 0;
+  char modestr[BUFSIZE], modestro[BUFSIZE], nickstr[BUFSIZE];
+  char nickstro[BUFSIZE], banstr[BUFSIZE];
 
   if (parc < 3)
     return protocol_violation(sptr,"Too few parameters for BURST");
@@ -511,28 +512,38 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
 	  /* Build nick buffer */
 	  nickstr[nickpos] = nickpos ? ',' : ' '; /* first char */
+          nickstro[nickposo] = nickposo ? ',' : ' '; /* first char */
 	  nickpos++;
+          nickposo++;
 
-	  for (ptr = nick; *ptr; ptr++) /* store nick */
+	  for (ptr = nick; *ptr; ptr++) { /* store nick */
 	    nickstr[nickpos++] = *ptr;
+            nickstro[nickposo++] = *ptr;
+          }
 
 	  if (current_mode != last_mode) { /* if mode changed... */
 	    last_mode = current_mode;
 	    last_oplevel = oplevel;
 
 	    nickstr[nickpos++] = ':'; /* add a specifier */
-	    if (current_mode & CHFL_VOICE)
+            nickstro[nickposo++] = ':'; /* add a specifier */
+	    if (current_mode & CHFL_VOICE) {
 	      nickstr[nickpos++] = 'v';
+              nickstro[nickposo++] = 'v';
+            }
 	    if (current_mode & CHFL_CHANOP)
             {
               if (oplevel != MAXOPLEVEL)
 	        nickpos += ircd_snprintf(0, nickstr + nickpos, sizeof(nickstr) - nickpos, "%u", oplevel);
               else
                 nickstr[nickpos++] = 'o';
+              nickstro[nickposo++] = 'o';
             }
 	  } else if (current_mode & CHFL_CHANOP && oplevel != last_oplevel) { /* if just op level changed... */
 	    nickstr[nickpos++] = ':'; /* add a specifier */
+            nickstro[nickposo++] = ':'; /* add a specifier */
 	    nickpos += ircd_snprintf(0, nickstr + nickpos, sizeof(nickstr) - nickpos, "%u", oplevel - last_oplevel);
+            nickstro[nickposo++] = 'o';
             last_oplevel = oplevel;
 	  }
 
@@ -562,16 +573,27 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   } /* while (param < parc) */
 
   nickstr[nickpos] = '\0';
+  nickstro[nickposo] = '\0';
   banstr[banpos] = '\0';
 
   if (parse_flags & MODE_PARSE_SET) {
-    modebuf_extract(mbuf, modestr + 1); /* for sending BURST onward */
+    modebuf_extract(mbuf, modestr + 1, 1); /* for sending BURST onward */
+    modebuf_extract(mbuf, modestro + 1, 0); /* for sending BURST onward */
     modestr[0] = modestr[1] ? ' ' : '\0';
-  } else
+    modestro[0] = modestro[1] ? ' ' : '\0';
+  } else {
     modestr[0] = '\0';
+    modestro[0] = '\0';
+  }
 
-  sendcmdto_serv_butone(sptr, CMD_BURST, cptr, "%H %Tu%s%s%s", chptr,
-			chptr->creationtime, modestr, nickstr, banstr);
+  /* Send oplevels to servers with oplevels support. */
+  sendcmdto_flag_serv_butone(sptr, CMD_BURST, cptr, FLAG_OPLEVELS, FLAG_LAST_FLAG,
+                             "%H %Tu%s%s%s", chptr, chptr->creationtime, modestr,
+                             nickstr, banstr);
+  /* Send mode o to servers without oplevels support. */
+  sendcmdto_flag_serv_butone(sptr, CMD_BURST, cptr, FLAG_LAST_FLAG, FLAG_OPLEVELS,
+                             "%H %Tu%s%s%s", chptr, chptr->creationtime, modestro,
+                             nickstro, banstr);
 
   if (parse_flags & MODE_PARSE_WIPEOUT || banpos)
     mode_ban_invalidate(chptr);

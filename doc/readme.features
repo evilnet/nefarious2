@@ -878,7 +878,7 @@ intended to ease changes in channel name length across a network.
 
 OPLEVELS
  * Type: boolean
- * Default: TRUE
+ * Default: FALSE
 
 This allows local users to set the +A and +U modes (admin and user
 passwords, respectively) on channels where they are marked as channel
