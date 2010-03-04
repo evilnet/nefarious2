@@ -135,6 +135,7 @@ IRCD_SRC = \
 	m_help.c \
 	m_info.c \
 	m_invite.c \
+        m_isnef.c \
 	m_ison.c \
 	m_join.c \
 	m_jupe.c \

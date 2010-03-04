@@ -3,6 +3,18 @@
 
 2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_isnef.c: Added ISNEF command.
+
+	* ircd/parse.c: Added m_isnef() handler for ISNEF.
+
+	* ircd/Makefile.in: Added m_isnef.c.
+
+	* include/handlers.h: Added m_isnef() handler for ISNEF.
+
+	* include/msg.h: Added m_isnef() handler for ISNEF.
+
+2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* Makefile.in: Added include/patchlist.h.
 
 	* include/version.h: Added cvs_version.

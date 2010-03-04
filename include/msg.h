@@ -368,6 +368,10 @@ struct Client;
 #define TOK_XREPLY		"XR"
 #define CMD_XREPLY		MSG_XREPLY, TOK_XREPLY
 
+#define MSG_ISNEF		"ISNEF"
+#define TOK_ISNEF		"ISNEF"
+#define CMD_ISNEF		MSG_ISNEF, TOK_ISNEF
+
 /*
  * Constants
  */
