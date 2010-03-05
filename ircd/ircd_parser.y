@@ -183,7 +183,7 @@ static void free_slist(struct SLink **link) {
 %token TPRIV_SEE_CHAN TPRIV_SHOW_INVIS TPRIV_SHOW_ALL_INVIS TPRIV_PROPAGATE
 %token TPRIV_UNLIMIT_QUERY TPRIV_DISPLAY TPRIV_SEE_OPERS TPRIV_WIDE_GLINE
 %token TPRIV_FORCE_OPMODE TPRIV_FORCE_LOCAL_OPMODE TPRIV_APASS_OPMODE
-%token TPRIV_LIST_CHAN
+%token TPRIV_LIST_CHAN TPRIV_CHECK
 /* and some types... */
 %type <num> sizespec
 %type <num> timespec timefactor factoredtimes factoredtime
@@ -681,7 +681,8 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           LOCAL { $$ = PRIV_PROPAGATE; invert = 1; } |
           TPRIV_FORCE_OPMODE { $$ = PRIV_FORCE_OPMODE; } |
           TPRIV_FORCE_LOCAL_OPMODE { $$ = PRIV_FORCE_LOCAL_OPMODE; } |
-          TPRIV_APASS_OPMODE { $$ = PRIV_APASS_OPMODE; } ;
+          TPRIV_APASS_OPMODE { $$ = PRIV_APASS_OPMODE; } |
+          TPRIV_CHECK { $$ = PRIV_CHECK; } ;
 
 yesorno: YES { $$ = 1; } | NO { $$ = 0; };
 

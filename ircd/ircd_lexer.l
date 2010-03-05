@@ -112,6 +112,7 @@ static struct lexer_token {
   { "b", BYTES },
   { "badchan", TPRIV_BADCHAN },
   { "chan_limit", TPRIV_CHAN_LIMIT },
+  { "check", TPRIV_CHECK },
   { "deop_lchan", TPRIV_DEOP_LCHAN },
   { "die", TPRIV_DIE },
   { "display", TPRIV_DISPLAY },

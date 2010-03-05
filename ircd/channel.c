@@ -844,7 +844,7 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'k';
     if (previous_parameter)
       strcat(pbuf, " ");
-    if (is_chan_op(cptr, chptr) || IsServer(cptr)) {
+    if (is_chan_op(cptr, chptr) || IsServer(cptr) || IsOper(cptr)) {
       strcat(pbuf, chptr->mode.key);
     } else
       strcat(pbuf, "*");
@@ -854,7 +854,7 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'A';
     if (previous_parameter)
       strcat(pbuf, " ");
-    if (IsServer(cptr)) {
+    if (IsServer(cptr) || IsOper(cptr)) {
       strcat(pbuf, chptr->mode.apass);
     } else
       strcat(pbuf, "*");
@@ -864,7 +864,7 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'U';
     if (previous_parameter)
       strcat(pbuf, " ");
-    if (IsServer(cptr) || (member && IsChanOp(member) && OpLevel(member) == 0)) {
+    if (IsServer(cptr) || (member && IsChanOp(member) && OpLevel(member) == 0) || IsOper(cptr)) {
       strcat(pbuf, chptr->mode.upass);
     } else
       strcat(pbuf, "*");

@@ -235,7 +235,7 @@ static struct {
   P(OPMODE),         P(LOCAL_OPMODE),   P(SET),           P(WHOX),
   P(BADCHAN),        P(LOCAL_BADCHAN),  P(SEE_CHAN),      P(PROPAGATE),
   P(DISPLAY),        P(SEE_OPERS),      P(WIDE_GLINE),    P(LIST_CHAN),
-  P(FORCE_OPMODE),   P(FORCE_LOCAL_OPMODE), P(APASS_OPMODE),
+  P(FORCE_OPMODE),   P(FORCE_LOCAL_OPMODE), P(APASS_OPMODE), P(CHECK),
 #undef P
   { 0, 0 }
 };
@@ -264,3 +264,53 @@ client_report_privs(struct Client *to, struct Client *client)
 
   return 0;
 }
+
+char *client_check_privs(struct Client *client, struct Client *replyto)
+{
+  char outbuf[BUFSIZE];
+  int i, p = 0;
+  static char privbufp[BUFSIZE] = "";
+
+  privbufp[0] = '\0';
+
+  for (i = 0; privtab[i].name; i++) {
+    if (HasPriv(client, privtab[i].priv)) {
+      p++;
+      if (p > 10) {
+        ircd_snprintf(0, outbuf, sizeof(outbuf), "     Privileges:: %s", privbufp);
+        send_reply(replyto, RPL_DATASTR, outbuf);
+
+        p = 0;
+        privbufp[strlen(privbufp)] = 0;
+        privbufp[0] = '\0';
+      }
+      strcat(privbufp, privtab[i].name);
+      strcat(privbufp, " ");
+    }
+  }
+
+  if (privbufp[0] != '\0') {
+    ircd_snprintf(0, outbuf, sizeof(outbuf), "     Privileges:: %s", privbufp);
+    send_reply(replyto, RPL_DATASTR, outbuf);
+  }
+
+  privbufp[strlen(privbufp)] = 0;
+}
+
+char *client_print_privs(struct Client *client)
+{
+  int i;
+  static char privbufp[BUFSIZE] = "";
+
+  privbufp[0] = '\0';
+  for (i = 0; privtab[i].name; i++) {
+    if (HasPriv(client, privtab[i].priv)) {
+      strcat(privbufp, privtab[i].name);
+      strcat(privbufp, " ");
+    }
+  }
+  privbufp[strlen(privbufp)] = 0;
+
+  return (char *)privbufp;
+}
+

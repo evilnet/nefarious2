@@ -126,6 +126,7 @@ enum Priv
     PRIV_FORCE_OPMODE, /**< can hack modes on quarantined channels */
     PRIV_FORCE_LOCAL_OPMODE, /**< can hack modes on quarantined local channels */
     PRIV_APASS_OPMODE, /**< can hack modes +A/-A/+U/-U */
+    PRIV_CHECK, /**< can use /CHECK */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 
@@ -214,6 +215,7 @@ struct Connection
   unsigned int        con_ping_freq; /**< cached ping freq */
   unsigned short      con_lastsq;    /**< # 2k blocks when sendqueued
                                         called last. */
+  unsigned short      con_port;       /**< and the remote port# too :-) */
   unsigned char       con_targets[MAXTARGETS]; /**< Hash values of
 						  current targets. */
   char con_sock_ip[SOCKIPLEN + 1];   /**< Remote IP address as a string. */
@@ -359,6 +361,8 @@ struct Client {
 #define cli_ping_freq(cli)	con_ping_freq(cli_connect(cli))
 /** Get lastsq for client's connection. */
 #define cli_lastsq(cli)		con_lastsq(cli_connect(cli))
+/** Get port that the client is connected to */
+#define cli_port(cli)           ((cli)->cli_connect->con_port)
 /** Get the array of current targets for the client.  */
 #define cli_targets(cli)	con_targets(cli_connect(cli))
 /** Get the string form of the client's IP address. */
@@ -742,6 +746,8 @@ extern void client_add_sendq(struct Connection* con,
 			     struct Connection** con_p);
 extern void client_set_privs(struct Client *client, struct ConfItem *oper);
 extern int client_report_privs(struct Client* to, struct Client* client);
+char *client_check_privs(struct Client *client, struct Client *replyto);
+extern char *client_print_privs(struct Client *client);
 
 #endif /* INCLUDED_client_h */
 

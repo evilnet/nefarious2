@@ -372,6 +372,10 @@ struct Client;
 #define TOK_ISNEF		"ISNEF"
 #define CMD_ISNEF		MSG_ISNEF, TOK_ISNEF
 
+#define MSG_CHECK               "CHECK"
+#define TOK_CHECK               "CC"
+#define CMD_CHECK               MSG_CHECK, TOK_CHECK
+
 /*
  * Constants
  */

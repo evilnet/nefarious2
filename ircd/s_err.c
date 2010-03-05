@@ -604,19 +604,19 @@ static Numeric replyTable[] = {
 /* 285 */
   { 0 },
 /* 286 */
-  { 0 },
+  { RPL_CHKHEAD, ":Information for %s %s", "286" },
 /* 287 */
-  { 0 },
+  { RPL_CHANUSER, ":    %s%s (%s@%s)   (%s) %s", "287" },
 /* 288 */
   { 0 },
 /* 289 */
   { 0 },
 /* 290 */
-  { 0 },
+  { RPL_DATASTR, ":%s", "290" },
 /* 291 */
-  { 0 },
+  { RPL_ENDOFCHECK, ":%s", "291" },
 /* 292 */
-  { 0 },
+  { ERR_SEARCHNOMATCH, ":%s %s No matching record(s) found", "292" },
 /* 293 */
   { 0 },
 /* 294 */

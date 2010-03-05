@@ -184,15 +184,20 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_FEATURE	     284	/* Undernet extension - features */
 /*      RPL_CHANINFO_HANDLE  285           aircd */
 /*      RPL_CHANINFO_USERS   286           aircd */
+#define RPL_CHKHEAD          286        /* QuakeNet - Asuka / Nefarious */
 /*      RPL_CHANINFO_CHOPS   287           aircd */
+#define RPL_CHANUSER         287        /* QuakeNet - Asuka / Nefarious */
 /*      RPL_CHANINFO_VOICES  288           aircd */
 /*      RPL_CHANINFO_AWAY    289           aircd */
 /*      RPL_CHANINFO_OPERS   290           aircd */
 /*	RPL_HELPHDR	     290	Numeric List: Dalnet */
+#define RPL_DATASTR          290        /* QuakeNet - Asuka / Nefarious */
 /*      RPL_CHANINFO_BANNED  291           aircd */
 /*	RPL_HELPOP	     291	Numeric List: Dalnet */
+#define RPL_ENDOFCHECK       291        /* QuakeNet - Asuka / Nefarious */
 /*      RPL_CHANINFO_BANS    292           aircd */
 /*	RPL_HELPTLR	     292	Numeric List: Dalnet */
+#define ERR_SEARCHNOMATCH    292        /* QuakeNet - Asuka / Nefarious */
 /*      RPL_CHANINFO_INVITE  293           aircd */
 /*	RPL_HELPHLP	     293	Numeric List: Dalnet */
 /*      RPL_CHANINFO_INVITES 294           aircd */

@@ -1,6 +1,41 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/client.h: Added cli_port and PRIV_CHECK.
+
+	* include/handlers.h: Added CHECK command.
+
+	* include/ircd_features.h: Added CHECK FEAT_s.
+
+	* include/msg.h: Added CHECK command.
+
+	* include/numeric.h: Added CHECK replies.
+
+	* ircd/Makefile.in: Added CHECK command.
+
+	* ircd/channel.c: Added support to channel_modes() to show +A and
+	+U passwords to opers.
+
+	* ircd/client.c: Added CHECK privs and features.
+
+	* ircd/ircd_features.c: Added CHECK FEAT_s.
+
+	* ircd/ircd_lexer.l: Added PRIV_CHECK.
+
+	* ircd/ircd_parser.y: Added PRIV_CHECK.
+
+	* ircd/parse.c: Added CHECK command.
+
+	* ircd/s_bsd.c: Added cli_port() to store remote port.
+
+	* ircd/s_err.c: Added CHECK replies.
+
+	* include/check.h: Added CHECK command.
+
+	* ircd/m_check.c: Added CHECK command.
+
 2010-03-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* Makefile.in: Minor change to delete a folder I missed earlier.

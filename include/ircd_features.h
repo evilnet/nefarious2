@@ -156,6 +156,11 @@ enum Feature {
   FEAT_URL_CLIENTS,
   FEAT_URLREG,
 
+  /* Nefarious FEAT_'s */
+  FEAT_CHECK,
+  FEAT_CHECK_EXTENDED,
+  FEAT_MAX_CHECK_OUTPUT,
+
   FEAT_LAST_F
 };
 
