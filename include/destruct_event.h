@@ -29,6 +29,17 @@
 #ifndef INCLUDED_channel_h
 #include "channel.h"
 #endif
+#ifndef INCLUDED_ircd_events_h
+#include "ircd_events.h"
+#endif
+
+/** Structure describing a destruction event. */
+struct DestructEvent {
+  struct DestructEvent* next_event; /**< Next event in the queue. */
+  struct DestructEvent* prev_event; /**< Previous event in the queue. */
+  time_t expires;                   /**< When the destruction should happen. */
+  struct Channel* chptr;            /**< Channel to destroy. */
+};
 
 extern void schedule_destruct_event_1m(struct Channel* chptr);
 extern void schedule_destruct_event_48h(struct Channel* chptr);

@@ -25,6 +25,7 @@
 #include "check.h"
 #include "class.h"
 #include "client.h"
+#include "destruct_event.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -272,18 +273,24 @@ void checkChannel(struct Client *sptr, struct Channel *chptr)
    send_reply(sptr, RPL_DATASTR, " ");
 
    /* Creation Time */
-   ircd_snprintf(sptr, outbuf, sizeof(outbuf), "  Creation time:: %s", myctime(chptr->creationtime));
+   ircd_snprintf(sptr, outbuf, sizeof(outbuf), "   Creation time:: %s", myctime(chptr->creationtime));
    send_reply(sptr, RPL_DATASTR, outbuf);
+
+   /* Destruction time (if it channel has one) */
+   if (chptr->destruct_event && (chptr->users < 1)) {
+     ircd_snprintf(sptr, outbuf, sizeof(outbuf), "Destruction time:: %s", myctime(chptr->destruct_event->expires));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
 
    /* Topic */
    if (strlen(chptr->topic) <= 0)
       send_reply(sptr, RPL_DATASTR, "          Topic:: <none>");
    else {
-      ircd_snprintf(sptr, outbuf, sizeof(outbuf), "          Topic:: %s", chptr->topic);
+      ircd_snprintf(sptr, outbuf, sizeof(outbuf), "           Topic:: %s", chptr->topic);
       send_reply(sptr, RPL_DATASTR, outbuf);
 
       /* ..set by */
-      ircd_snprintf(sptr, outbuf, sizeof(outbuf), "         Set by:: %s", chptr->topic_nick);
+      ircd_snprintf(sptr, outbuf, sizeof(outbuf), "          Set by:: %s", chptr->topic_nick);
       send_reply(sptr, RPL_DATASTR, outbuf);
    }
 

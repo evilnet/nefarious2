@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include "channel.h"	/* destruct_channel */
+#include "destruct_event.h"
 #include "s_debug.h"
 #include "ircd_alloc.h"
 #include "ircd.h"
@@ -33,14 +34,6 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
-
-/** Structure describing a destruction event. */
-struct DestructEvent {
-  struct DestructEvent* next_event; /**< Next event in the queue. */
-  struct DestructEvent* prev_event; /**< Previous event in the queue. */
-  time_t expires;                   /**< When the destruction should happen. */
-  struct Channel* chptr;            /**< Channel to destroy. */
-};
 
 /** Head of short-delay destruction events.  */
 static struct DestructEvent* minute_list_top;

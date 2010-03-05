@@ -3,6 +3,15 @@
 
 2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/destruct_event.h: Moved struct DestructEvent definition.
+
+	* ircd/destruct_event.c: Moved struct DestructEvent definition.
+
+	* ircd/m_check.c: Added channel destruction time to CHECK output
+	for empty channels with a destruction time.
+
+2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/readme.features: Re-added FEAT_ZANNELS.
 
 	* include/ircd_features.h: Re-added FEAT_ZANNELS.
