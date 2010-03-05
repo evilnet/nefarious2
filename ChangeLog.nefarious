@@ -3,9 +3,19 @@
 
 2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/res.h: Corrected a typo in irc_in_addr_type_cmp().
+
+	* ircd/gline.c: Updated gline code to ensure IPv6 CIDR masks do
+	not match any IPv4 IP addresses (eg 0::/16 would normally match
+	::ffff:192.168.1.2)
+
+	* ircd/m_check.c: Corrected a typo in irc_in_addr_type_cmp().
+
+2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/match.h: Added ipmask_clean() to clean CIDR mask addresses.
 
-	* include/res.h: Added irc_in_addr_type_cmpt() macro to compare IP
+	* include/res.h: Added irc_in_addr_type_cmp() macro to compare IP
 	address types.
 
 	* ircd/m_check.c: Updated code to only match IPv6 CIDR masks

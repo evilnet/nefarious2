@@ -155,7 +155,7 @@ extern void gethost_byaddr(const struct irc_in_addr *addr, dns_callback_f callba
                                            || (((ADDR)->in6_16[5] == 65535) \
                                                && (ntohs((ADDR)->in6_16[6]) & 0xff00) == 0x7f00)))
 /** Evaluate to non-zero if \a A is the same type of IP address (IPv4 or IPv6) as \a B. */
-#define irc_in_addr_type_cmpt(A,B) ((irc_in_addr_is_ipv4(A) && irc_in_addr_is_ipv4(B)) || \
+#define irc_in_addr_type_cmp(A,B) ((irc_in_addr_is_ipv4(A) && irc_in_addr_is_ipv4(B)) || \
                                     (!irc_in_addr_is_ipv4(A) && !irc_in_addr_is_ipv4(B)))
 
 #endif

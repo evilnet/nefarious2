@@ -34,6 +34,7 @@
 #include "ircd_string.h"
 #include "match.h"
 #include "numeric.h"
+#include "res.h"
 #include "s_bsd.h"
 #include "s_debug.h"
 #include "s_misc.h"
@@ -170,8 +171,10 @@ make_gline(char *user, char *host, char *reason, time_t expire, time_t lastmod,
     else
       gline->gl_host = NULL;
 
-    if (*user != '$' && ipmask_parse(host, &gline->gl_addr, &gline->gl_bits))
+    if (*user != '$' && ipmask_parse(host, &gline->gl_addr, &gline->gl_bits)) {
       gline->gl_flags |= GLINE_IPMASK;
+      gline->gl_addr = ipmask_clean(&gline->gl_addr, gline->gl_bits);
+    }
 
     gline->gl_next = GlobalGlineList; /* then link it into list */
     gline->gl_prev_p = &GlobalGlineList;
@@ -225,6 +228,8 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
           continue;
 
         if (GlineIsIpMask(gline)) {
+          if (!irc_in_addr_type_cmp(&cli_ip(acptr), &gline->gl_addr))
+            continue;
           if (!ipmask_check(&cli_ip(acptr), &gline->gl_addr, gline->gl_bits))
             continue;
         }
@@ -377,7 +382,8 @@ count_users(char *mask, int flags)
 
     if (!match(mask, namebuf)
         || !match(mask, ipbuf)
-        || (ipmask_valid && ipmask_check(&cli_ip(acptr), &ipmask, ipmask_len)))
+        || (ipmask_valid && ipmask_check(&cli_ip(acptr), &ipmask, ipmask_len)
+            && irc_in_addr_type_cmp(&cli_ip(acptr), &ipmask)))
       count++;
   }
 
@@ -998,6 +1004,8 @@ gline_lookup(struct Client *cptr, unsigned int flags)
         continue;
 
       if (GlineIsIpMask(gline)) {
+        if (!irc_in_addr_type_cmp(&cli_ip(cptr), &gline->gl_addr))
+          continue;
         if (!ipmask_check(&cli_ip(cptr), &gline->gl_addr, gline->gl_bits))
           continue;
       }

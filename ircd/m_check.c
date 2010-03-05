@@ -638,7 +638,7 @@ signed int checkHostmask(struct Client *sptr, char *hoststr, int flags) {
     if (flags & CHECK_CIDRMASK) {
       if (ipmask_check(&cli_ip(acptr), &cidr_check, cidr_check_bits) && !match(nickm, acptr->cli_name) 
             && (!match(userm, acptr->cli_user->username) || !match(userm, acptr->cli_user->username))
-            && irc_in_addr_type_cmpt(&cli_ip(acptr), &cidr_check))
+            && irc_in_addr_type_cmp(&cli_ip(acptr), &cidr_check))
         found = 1;
     }
     else {
