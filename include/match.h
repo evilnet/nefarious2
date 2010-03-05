@@ -30,5 +30,6 @@ extern int matchdecomp(char *mask, const char *cmask);
 extern int mmexec(const char *wcm, int wminlen, const char *rcm, int rminlen);
 
 extern int ipmask_check(const struct irc_in_addr *addr, const struct irc_in_addr *mask, unsigned char bits);
+extern struct irc_in_addr ipmask_clean(struct irc_in_addr *mask, unsigned char bits);
 
 #endif /* INCLUDED_match_h */

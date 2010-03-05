@@ -469,6 +469,12 @@ void checkClient(struct Client *sptr, struct Client *acptr)
       send_reply(sptr, RPL_DATASTR, outbuf);
       if (feature_bool(FEAT_CHECK_EXTENDED)) {
         /* Note: sendq = receiveq for a client (it makes sense really) */
+        ircd_snprintf(0, outbuf, sizeof(outbuf), "      Data sent:: %lu.%0.3u Kb (%u protocol messages)",
+            (unsigned long)cli_receiveB(acptr) / 1024, (unsigned long)cli_receiveB(acptr) % 1024, cli_receiveM(acptr));
+        send_reply(sptr, RPL_DATASTR, outbuf);
+        ircd_snprintf(0, outbuf, sizeof(outbuf), "  Data received:: %lu.%0.3lu Kb (%u protocol messages)",
+            (unsigned long)cli_sendB(acptr) / 1024, (unsigned long)cli_sendB(acptr) % 1024, cli_sendM(acptr));
+        send_reply(sptr, RPL_DATASTR, outbuf);
         ircd_snprintf(0, outbuf, sizeof(outbuf), "  receiveQ size:: %d bytes (max. %d bytes)",
            DBufLength(&(cli_recvQ(acptr))), feature_int(FEAT_CLIENT_FLOOD));
         send_reply(sptr, RPL_DATASTR, outbuf);
@@ -577,10 +583,28 @@ signed int checkHostmask(struct Client *sptr, char *hoststr, int flags) {
     }
   }
 
-  if (ipmask_parse(hostm, &cidr_check, &cidr_check_bits) || ircd_aton(&cidr_check, hostm)) {
-    if (cidr_check_bits <= 128)
-      flags |= CHECK_CIDRMASK;
+  if (ipmask_parse(hostm, &cidr_check, &cidr_check_bits) != 0) {
+    flags |= CHECK_CIDRMASK;
+    cidr_check = ipmask_clean(&cidr_check, cidr_check_bits);
   }
+
+/*
+  if ((p = strchr(hostm, '/')) || ircd_aton(&cidr_check, hostm)) {
+    if (p)
+      *p = '\0';
+    if (ircd_aton(&cidr_check, hostm)) {
+      cidr_check_bits = p ? atoi(p + 1) : 128;
+      if (cidr_check_bits <= 128) {
+        flags |= CHECK_CIDRMASK;
+        if (irc_in_addr_is_ipv4(&cidr_check) && (cidr_check_bits <= 32))
+          cidr_check_bits += 96;
+        cidr_check = ipmask_clean(&cidr_check, cidr_check_bits);
+      }
+    }
+    if (p)
+      *p = '/';
+  }
+*/
 
   /* Copy formatted string into "targhost" buffer */
   ircd_snprintf(0, targhost, sizeof(targhost),  "%s!%s@%s", nickm, userm, hostm);
@@ -613,7 +637,8 @@ signed int checkHostmask(struct Client *sptr, char *hoststr, int flags) {
 
     if (flags & CHECK_CIDRMASK) {
       if (ipmask_check(&cli_ip(acptr), &cidr_check, cidr_check_bits) && !match(nickm, acptr->cli_name) 
-            && (!match(userm, acptr->cli_user->username) || !match(userm, acptr->cli_user->username)))
+            && (!match(userm, acptr->cli_user->username) || !match(userm, acptr->cli_user->username))
+            && irc_in_addr_type_cmpt(&cli_ip(acptr), &cidr_check))
         found = 1;
     }
     else {

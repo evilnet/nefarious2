@@ -862,3 +862,24 @@ int ipmask_check(const struct irc_in_addr *addr, const struct irc_in_addr *mask,
   }
   return -1;
 }
+
+struct irc_in_addr ipmask_clean(struct irc_in_addr *mask, unsigned char bits)
+{
+  int k;
+  struct irc_in_addr res;
+
+  for (k = 0; k < 8; k++) {
+    res.in6_16[k] = mask->in6_16[k];
+    if (bits == 0)
+      res.in6_16[k] = 0;
+    if (bits < 16) {
+      res.in6_16[k] = ntohs((htons(mask->in6_16[k]) >> (16-bits)) << (16-bits));
+      bits = 0;
+    }
+    if (bits >= 16)
+      bits -= 16;
+  }
+
+  return res;
+}
+

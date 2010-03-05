@@ -3,6 +3,19 @@
 
 2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/match.h: Added ipmask_clean() to clean CIDR mask addresses.
+
+	* include/res.h: Added irc_in_addr_type_cmpt() macro to compare IP
+	address types.
+
+	* ircd/m_check.c: Updated code to only match IPv6 CIDR masks
+	against IPv6 and vice versa and re-added data sent/received lines to
+	checkClient()
+
+	* ircd/match.c: Added ipmask_clean() to clean CIDR mask addresses.
+
+2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_check.c: Removed buggy test to make sure CIDR searching
 	with CHECK didn't match IPv4 IPs with and IPv6 mask.
 
