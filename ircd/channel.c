@@ -295,10 +295,14 @@ int sub1_from_channel(struct Channel* chptr)
       return 0;
     }
   }
-  if (TStime() - chptr->creationtime < 172800)	/* Channel younger than 48 hours? */
-    schedule_destruct_event_1m(chptr);		/* Get rid of it in approximately 4-5 minutes */
-  else
-    schedule_destruct_event_48h(chptr);		/* Get rid of it in approximately 48 hours */
+  if (feature_bool(FEAT_ZANNELS)) {
+    /* Only used delayed destruction if ZANNELS enabled */
+    if (TStime() - chptr->creationtime < 172800)	/* Channel younger than 48 hours? */
+      schedule_destruct_event_1m(chptr);		/* Get rid of it in approximately 4-5 minutes */
+    else
+      schedule_destruct_event_48h(chptr);		/* Get rid of it in approximately 48 hours */
+  } else
+    destruct_channel(chptr);
 
   return 0;
 }

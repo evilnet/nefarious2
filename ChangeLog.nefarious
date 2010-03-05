@@ -3,6 +3,18 @@
 
 2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/readme.features: Re-added FEAT_ZANNELS.
+
+	* include/ircd_features.h: Re-added FEAT_ZANNELS.
+
+	* ircd/channel.c: Seperated delayed channel destruction from
+	FEAT_OPLEVELS and used FEAT_ZANNELS instead as the documentation
+	originally described.
+
+	* ircd/ircd_features.c: Re-added FEAT_ZANNELS.
+
+2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added cli_port and PRIV_CHECK.
 
 	* include/handlers.h: Added CHECK command.
