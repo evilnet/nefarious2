@@ -3,6 +3,11 @@
 
 2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_check.c: Removed buggy test to make sure CIDR searching
+	with CHECK didn't match IPv4 IPs with and IPv6 mask.
+
+2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/destruct_event.h: Moved struct DestructEvent definition.
 
 	* ircd/destruct_event.c: Moved struct DestructEvent definition.
