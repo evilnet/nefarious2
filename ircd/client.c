@@ -158,6 +158,7 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     FlagClr(&privs_global, PRIV_BADCHAN);
     FlagClr(&privs_global, PRIV_LOCAL_BADCHAN);
     FlagClr(&privs_global, PRIV_APASS_OPMODE);
+    FlagClr(&privs_global, PRIV_WHOIS_NOTICE);
 
     memset(&privs_local, 0, sizeof(privs_local));
     FlagSet(&privs_local, PRIV_CHAN_LIMIT);
@@ -236,6 +237,7 @@ static struct {
   P(BADCHAN),        P(LOCAL_BADCHAN),  P(SEE_CHAN),      P(PROPAGATE),
   P(DISPLAY),        P(SEE_OPERS),      P(WIDE_GLINE),    P(LIST_CHAN),
   P(FORCE_OPMODE),   P(FORCE_LOCAL_OPMODE), P(APASS_OPMODE), P(CHECK),
+  P(WHOIS_NOTICE),
 #undef P
   { 0, 0 }
 };

@@ -490,16 +490,17 @@ static const struct UserMode {
   unsigned int flag; /**< User mode constant. */
   char         c;    /**< Character corresponding to the mode. */
 } userModeList[] = {
-  { FLAG_OPER,        'o' },
-  { FLAG_LOCOP,       'O' },
-  { FLAG_INVISIBLE,   'i' },
-  { FLAG_WALLOP,      'w' },
-  { FLAG_SERVNOTICE,  's' },
-  { FLAG_DEAF,        'd' },
-  { FLAG_CHSERV,      'k' },
-  { FLAG_DEBUG,       'g' },
-  { FLAG_ACCOUNT,     'r' },
-  { FLAG_HIDDENHOST,  'x' }
+  { FLAG_OPER,         'o' },
+  { FLAG_LOCOP,        'O' },
+  { FLAG_INVISIBLE,    'i' },
+  { FLAG_WALLOP,       'w' },
+  { FLAG_SERVNOTICE,   's' },
+  { FLAG_DEAF,         'd' },
+  { FLAG_CHSERV,       'k' },
+  { FLAG_DEBUG,        'g' },
+  { FLAG_ACCOUNT,      'r' },
+  { FLAG_HIDDENHOST,   'x' },
+  { FLAG_WHOIS_NOTICE, 'W' }
 };
 
 /** Length of #userModeList. */
@@ -1073,6 +1074,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearDebug(sptr);
         break;
+      case 'W':
+        if (what == MODE_ADD)
+          SetWhoisNotice(sptr);
+        else
+          ClearWhoisNotice(sptr);
+        break;
       case 'x':
         if (what == MODE_ADD)
 	  do_host_hiding = 1;
@@ -1123,6 +1130,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (feature_bool(FEAT_HIS_DEBUG_OPER_ONLY) &&
         !IsAnOper(sptr) && !FlagHas(&setflags, FLAG_DEBUG))
       ClearDebug(sptr);
+    if (!HasPriv(sptr, PRIV_WHOIS_NOTICE) && IsWhoisNotice(sptr))
+      ClearWhoisNotice(sptr);
   }
   if (MyConnect(sptr))
   {

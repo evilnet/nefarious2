@@ -1,6 +1,23 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added PRIV_WHOIS_NOTICE.
+
+	* include/client.h: Added user mode +W (whois notice).
+
+	* ircd/client.c: Added user mode +W (whois notice).
+
+	* ircd/ircd_lexer.l: Added PRIV_WHOIS_NOTICE.
+
+	* ircd/ircd_parser.y: Added PRIV_WHOIS_NOTICE.
+
+	* ircd/m_whois.c: Added user mode +W (whois notice).
+
+	* ircd/s_user.c: Added user mode +W (whois notice).
+
+
 2010-03-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/res.h: Corrected a typo in irc_in_addr_type_cmp().

@@ -127,6 +127,7 @@ enum Priv
     PRIV_FORCE_LOCAL_OPMODE, /**< can hack modes on quarantined local channels */
     PRIV_APASS_OPMODE, /**< can hack modes +A/-A/+U/-U */
     PRIV_CHECK, /**< can use /CHECK */
+    PRIV_WHOIS_NOTICE, /**< oper can set/unset user mode +W */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 
@@ -168,6 +169,7 @@ enum Flag
     FLAG_DEBUG,                     /**< send global debug/anti-hack info */
     FLAG_ACCOUNT,                   /**< account name has been set */
     FLAG_HIDDENHOST,                /**< user's host is hidden */
+    FLAG_WHOIS_NOTICE,              /**< user can see WHOIS notices */
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -586,6 +588,8 @@ struct Client {
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
 #define IsHiddenHost(x)         HasFlag(x, FLAG_HIDDENHOST)
+/** Return non-zero if the client has set mode +W (whois notices). */
+#define IsWhoisNotice(x)        HasFlag(x, FLAG_WHOIS_NOTICE)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -634,6 +638,8 @@ struct Client {
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */
 #define SetHiddenHost(x)        SetFlag(x, FLAG_HIDDENHOST)
+/** Mark a client as having mode +W (whois notices). */
+#define SetWhoisNotice(x)       SetFlag(x, FLAG_WHOIS_NOTICE)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -667,6 +673,8 @@ struct Client {
 #define ClearServNotice(x)      ClrFlag(x, FLAG_SERVNOTICE)
 /** Remove mode +x (hidden host) from the client. */
 #define ClearHiddenHost(x)      ClrFlag(x, FLAG_HIDDENHOST)
+/** Remove mode +W (whois notices) from the client. */
+#define ClearWhoisNotice(x)     ClrFlag(x, FLAG_WHOIS_NOTICE)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */
