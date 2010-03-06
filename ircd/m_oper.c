@@ -173,7 +173,8 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     {
       ClearLocOp(sptr);
       SetOper(sptr);
-      ++UserStats.opers;
+      if (!IsHideOper(sptr))
+        ++UserStats.opers;
     }
     cli_handler(cptr) = OPER_HANDLER;
 
@@ -213,7 +214,8 @@ int ms_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    */
   if (!IsServer(sptr) && !IsOper(sptr))
   {
-    ++UserStats.opers;
+    if (!IsHideOper(sptr))
+      ++UserStats.opers;
     SetFlag(sptr, FLAG_OPER);
     sendcmdto_serv_butone(sptr, CMD_MODE, cptr, "%s :+o", parv[0]);
   }

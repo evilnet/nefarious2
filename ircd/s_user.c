@@ -441,7 +441,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     hide_hostmask(sptr, FLAG_HIDDENHOST);
   if (IsInvisible(sptr))
     ++UserStats.inv_clients;
-  if (IsOper(sptr))
+  if (IsOper(sptr) && !IsHideOper(sptr))
     ++UserStats.opers;
 
   tmpstr = umode_str(sptr);
@@ -500,6 +500,7 @@ static const struct UserMode {
   { FLAG_DEBUG,        'g' },
   { FLAG_ACCOUNT,      'r' },
   { FLAG_HIDDENHOST,   'x' },
+  { FLAG_HIDE_OPER,    'H' },
   { FLAG_WHOIS_NOTICE, 'W' }
 };
 
@@ -1080,6 +1081,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearWhoisNotice(sptr);
         break;
+      case 'H':
+        if (what == MODE_ADD)
+          SetHideOper(sptr);
+        else
+          ClearHideOper(sptr);
+        break;
       case 'x':
         if (what == MODE_ADD)
 	  do_host_hiding = 1;
@@ -1132,6 +1139,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearDebug(sptr);
     if (!(feature_bool(FEAT_OPER_WHOIS_PARANOIA) && HasPriv(sptr, PRIV_WHOIS_NOTICE)) && IsWhoisNotice(sptr))
       ClearWhoisNotice(sptr);
+    if (!HasPriv(sptr, PRIV_HIDE_OPER) && IsHideOper(sptr))
+      ClearHideOper(sptr);
   }
   if (MyConnect(sptr))
   {
@@ -1171,7 +1180,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   if (IsRegistered(sptr)) {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(sptr)) {
       /* user now oper */
-      ++UserStats.opers;
+      if (!IsHideOper(sptr))
+        ++UserStats.opers;
       client_set_privs(sptr, NULL); /* may set propagate privilege */
     }
     /* remember propagate privilege setting */
@@ -1181,8 +1191,19 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (FlagHas(&setflags, FLAG_OPER) && !IsOper(sptr)) {
       /* user no longer oper */
       assert(UserStats.opers > 0);
-      --UserStats.opers;
+      if (!FlagHas(&setflags, FLAG_HIDE_OPER))
+        --UserStats.opers;
       client_set_privs(sptr, NULL); /* will clear propagate privilege */
+    }
+    if (!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(sptr)) {
+      if (FlagHas(&setflags, FLAG_OPER) && IsOper(sptr)) {
+        --UserStats.opers;
+      }
+    }
+    if (FlagHas(&setflags, FLAG_HIDE_OPER) && !IsHideOper(sptr)) {
+      if (FlagHas(&setflags, FLAG_OPER) && IsOper(sptr)) {
+        ++UserStats.opers;
+      }
     }
     if (FlagHas(&setflags, FLAG_INVISIBLE) && !IsInvisible(sptr)) {
       assert(UserStats.inv_clients > 0);

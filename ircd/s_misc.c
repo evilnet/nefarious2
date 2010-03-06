@@ -227,7 +227,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       assert(UserStats.inv_clients > 0);
       --UserStats.inv_clients;
     }
-    if (IsOper(bcptr)) {
+    if (IsOper(bcptr) && !IsHideOper(bcptr)) {
       assert(UserStats.opers > 0);
       --UserStats.opers;
     }

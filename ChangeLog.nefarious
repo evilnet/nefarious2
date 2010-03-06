@@ -3,6 +3,24 @@
 
 2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added HIDE_OPER priv.
+
+	* include/client.h: Added user mode +H and HIDE_OPER priv.
+
+	* ircd/client.c: Added user mode +H and HIDE_OPER priv.
+
+	* ircd/ircd_lexer.l: Added HIDE_OPER priv.
+
+	* ircd/ircd_parser.y: Added HIDE_OPER priv.
+
+	* ircd/m_oper.c: Added user mode +H.
+
+	* ircd/s_misc.c: Added user mode +H.
+
+	* ircd/s_user.c: Added user mode +H.
+
+2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added CHECK features OPER_WHOIS_PARANOIA.
 
 	* doc/readme.features: Added missing features documentation.
