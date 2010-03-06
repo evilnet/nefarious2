@@ -3,6 +3,10 @@
 
 2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Forgot to add modes +H and +W to mode list.
+
+2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added HIDE_OPER priv.
 
 	* include/client.h: Added user mode +H and HIDE_OPER priv.
