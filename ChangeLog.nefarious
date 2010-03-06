@@ -3,6 +3,18 @@
 
 2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added CHECK features OPER_WHOIS_PARANOIA.
+
+	* doc/readme.features: Added missing features documentation.
+
+	* include/ircd_features.h: Added FEAT_OPER_WHOIS_PARANOIA.
+
+	* ircd/ircd_features.c: Added FEAT_OPER_WHOIS_PARANOIA.
+
+	* ircd/s_user.c: Added FEAT_OPER_WHOIS_PARANOIA.
+
+2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added PRIV_WHOIS_NOTICE.
 
 	* include/client.h: Added user mode +W (whois notice).

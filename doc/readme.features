@@ -894,3 +894,29 @@ impractical to become the channel manager by clearing out the channel.
 It must be set to FALSE if there are both 2.10.11.x servers and
 2.10.12.y servers on the network where y < 4.
 
+CHECK
+ * Type: boolean
+ * Default: TRUE
+
+When enabled an oper is allowed to use the CHECK command.
+
+CHECK_EXTENDED
+ * Type: boolean
+ * Default: TRUE
+
+When enabled extra information will be displayed for opers who are
+using CHECK on local clients. Extra information like traffic counts.
+
+MAX_CHECK_OUTPUT
+ * Type: integer
+ * Default: 1000
+
+Maximum number of records displayed in any CHECK query.
+
+OPER_WHOIS_PARANOIA
+ * Type: boolean
+ * Default: FALSE
+
+Allows the use of the W opermode which will show /WHOIS attempts to opers when
+they are done on themselves.
+
