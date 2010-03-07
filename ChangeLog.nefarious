@@ -3,6 +3,20 @@
 
 2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added user modes +n and +I.
+
+	* ircd/client.c: Added user modes +n and +I.
+
+	* ircd/ircd_lexer.l: Added privs for user modes +n and +I.
+
+	* ircd/ircd_parser.y: Added privs for user modes +n and +I.
+
+	* ircd/m_whois.c: Added user modes +n and +I.
+
+	* ircd/s_user.c: Added user modes +n and +I.
+
+2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added OPER_HIDE Feature for user mode +H.
 
 	* doc/readme.features: Added OPER_HIDE Feature for user mode +H.

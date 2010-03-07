@@ -90,7 +90,7 @@ typedef unsigned long flagpage_t;
 #define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "dioswkgxHW"
+#define infousermodes "dgiknoswxHNW"
 
 /** Operator privileges. */
 enum Priv
@@ -129,6 +129,8 @@ enum Priv
     PRIV_CHECK, /**< can use /CHECK */
     PRIV_WHOIS_NOTICE, /**< oper can set user mode +W */
     PRIV_HIDE_OPER, /**< oper can set user mode +H */
+    PRIV_HIDE_CHANNELS, /**< oper can set user mode +n */
+    PRIV_HIDE_IDLE, /**< oper can set user mode +I */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 
@@ -172,6 +174,8 @@ enum Flag
     FLAG_HIDDENHOST,                /**< user's host is hidden */
     FLAG_WHOIS_NOTICE,              /**< user can see WHOIS notices */
     FLAG_HIDE_OPER,                 /**< user's oper status is hidden */
+    FLAG_NOCHAN,                    /**< user's channels are hidden in WHOIS */
+    FLAG_NOIDLE,                    /**< user's idle time is hidden in WHOIS */
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -594,6 +598,10 @@ struct Client {
 #define IsWhoisNotice(x)        HasFlag(x, FLAG_WHOIS_NOTICE)
 /** Return non-zero if the client has set mode +H (hide oper status). */
 #define IsHideOper(x)           HasFlag(x, FLAG_HIDE_OPER)
+/** Return non-zero if the client has the channel hiding mode set. */
+#define IsNoChan(x)		HasFlag(x, FLAG_NOCHAN)
+/** Return non-zero if the client has the hidden idle time mode set. */
+#define IsNoIdle(x)		HasFlag(x, FLAG_NOIDLE)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -646,6 +654,10 @@ struct Client {
 #define SetWhoisNotice(x)       SetFlag(x, FLAG_WHOIS_NOTICE)
 /** Mark a client as having mode +H (hide oper status). */
 #define SetHideOper(x)          SetFlag(x, FLAG_HIDE_OPER)
+/** Mark a client as having the channel hiding mode set. */
+#define SetNoChan(x)		SetFlag(x, FLAG_NOCHAN)
+/** Mark a client as having the hidden idle time mode set. */
+#define SetNoIdle(x)		SetFlag(x, FLAG_NOIDLE)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -683,6 +695,10 @@ struct Client {
 #define ClearWhoisNotice(x)     ClrFlag(x, FLAG_WHOIS_NOTICE)
 /** Remove mode +H (hide oper status) from the client. */
 #define ClearHideOper(x)        ClrFlag(x, FLAG_HIDE_OPER)
+/** Remove mode +n (hide channels in whois) from the client. */
+#define ClearNoChan(x)		ClrFlag(x, FLAG_NOCHAN)
+/** Remove mode +I (hide idle time in whois) from the client. */
+#define ClearNoIdle(x)		ClrFlag(x, FLAG_NOIDLE)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

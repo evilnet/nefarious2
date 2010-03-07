@@ -144,7 +144,7 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
 		   cli_info(acptr));
 
   /* Display the channels this user is on. */
-  if (!IsChannelService(acptr))
+  if ((!IsChannelService(acptr) && !IsNoChan(acptr)) || (acptr==sptr) || IsAnOper(sptr))
   {
     struct Membership* chan;
     mlen = strlen(cli_name(&me)) + strlen(cli_name(sptr)) + 12 + strlen(name);
@@ -219,8 +219,9 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
      *       probably a good place to add them :)
      */
 
-    if (MyConnect(acptr) && (!feature_bool(FEAT_HIS_WHOIS_IDLETIME) ||
-                             (sptr == acptr || IsAnOper(sptr) || parc >= 3)))
+    if (MyConnect(acptr) && (IsAnOper(sptr) || (!IsNoIdle(acptr) &&
+          (!feature_bool(FEAT_HIS_WHOIS_IDLETIME) || sptr == acptr ||
+             parc >= 3))))
        send_reply(sptr, RPL_WHOISIDLE, name, CurrentTime - user->last,
                   cli_firsttime(acptr));
 

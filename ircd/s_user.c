@@ -500,7 +500,9 @@ static const struct UserMode {
   { FLAG_DEBUG,        'g' },
   { FLAG_ACCOUNT,      'r' },
   { FLAG_HIDDENHOST,   'x' },
+  { FLAG_NOCHAN,       'n' },
   { FLAG_HIDE_OPER,    'H' },
+  { FLAG_NOIDLE,       'I' },
   { FLAG_WHOIS_NOTICE, 'W' }
 };
 
@@ -1087,6 +1089,18 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearHideOper(sptr);
         break;
+      case 'I':
+        if (what == MODE_ADD)
+          SetNoIdle(sptr);
+        else
+          ClearNoIdle(sptr);
+        break;
+      case 'n':
+        if (what == MODE_ADD)
+          SetNoChan(sptr);
+        else
+          ClearNoChan(sptr);
+        break;
       case 'x':
         if (what == MODE_ADD)
 	  do_host_hiding = 1;
@@ -1141,6 +1155,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearWhoisNotice(sptr);
     if (!(feature_bool(FEAT_OPER_HIDE) && HasPriv(sptr, PRIV_HIDE_OPER)) && IsHideOper(sptr))
       ClearHideOper(sptr);
+    if (!HasPriv(sptr, PRIV_HIDE_CHANNELS) && IsNoChan(sptr))
+      ClearNoChan(sptr);
+    if (!HasPriv(sptr, PRIV_HIDE_IDLE) && IsNoIdle(sptr))
+      ClearNoIdle(sptr);
   }
   if (MyConnect(sptr))
   {

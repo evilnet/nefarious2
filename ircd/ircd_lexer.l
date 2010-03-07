@@ -122,6 +122,8 @@ static struct lexer_token {
   { "gb", GBYTES },
   { "gigabytes", GBYTES },
   { "gline", TPRIV_GLINE },
+  { "hide_channels", TPRIV_HIDE_CHANNELS },
+  { "hide_idle", TPRIV_HIDE_IDLE },
   { "hide_oper", TPRIV_HIDE_OPER },
   { "ipv4", TOK_IPV4 },
   { "ipv6", TOK_IPV6 },
