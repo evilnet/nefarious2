@@ -1,6 +1,20 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added OPER_HIDE Feature for user mode +H.
+
+	* doc/readme.features: Added OPER_HIDE Feature for user mode +H.
+
+	* include/ircd_features.h: Added OPER_HIDE Feature for user mode +H.
+
+	* ircd/ircd_features.c: Added OPER_HIDE Feature for user mode +H.
+
+	* ircd/m_whois.c: Moved WHOIS notice code.
+
+	* ircd/s_user.c: Added OPER_HIDE Feature for user mode +H.
+
 2010-03-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/client.h: Forgot to add modes +H and +W to mode list.

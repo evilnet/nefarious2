@@ -223,13 +223,13 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
                              (sptr == acptr || IsAnOper(sptr) || parc >= 3)))
        send_reply(sptr, RPL_WHOISIDLE, name, CurrentTime - user->last,
                   cli_firsttime(acptr));
-  }
 
-  if (IsOper(acptr) && IsWhoisNotice(acptr) && (sptr != acptr))
-    sendcmdto_one(&me, CMD_NOTICE, acptr,
-                  "%C :*** Notice -- %s (%s@%s) did a /whois on you.",
-                  acptr, cli_name(sptr), cli_user(sptr)->username,
-                  cli_user(sptr)->host);
+    if (IsOper(acptr) && IsWhoisNotice(acptr) && (sptr != acptr))
+      sendcmdto_one(&me, CMD_NOTICE, acptr,
+                    "%C :*** Notice -- %s (%s@%s) did a /whois on you.",
+                    acptr, cli_name(sptr), cli_user(sptr)->username,
+                    cli_user(sptr)->host);
+  }
 }
 
 /*

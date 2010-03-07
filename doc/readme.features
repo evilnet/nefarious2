@@ -920,3 +920,10 @@ OPER_WHOIS_PARANOIA
 Allows the use of the W opermode which will show /WHOIS attempts to opers when
 they are done on themselves.
 
+OPER_HIDE
+ * Type: boolean
+ * Default: FALSE
+
+Allows opers with the HIDE_OPER priv in their Class or Operator block set to
+yes to set user mode +H to hide their operator status from non-opers.
+

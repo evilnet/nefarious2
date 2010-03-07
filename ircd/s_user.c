@@ -1139,7 +1139,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearDebug(sptr);
     if (!(feature_bool(FEAT_OPER_WHOIS_PARANOIA) && HasPriv(sptr, PRIV_WHOIS_NOTICE)) && IsWhoisNotice(sptr))
       ClearWhoisNotice(sptr);
-    if (!HasPriv(sptr, PRIV_HIDE_OPER) && IsHideOper(sptr))
+    if (!(feature_bool(FEAT_OPER_HIDE) && HasPriv(sptr, PRIV_HIDE_OPER)) && IsHideOper(sptr))
       ClearHideOper(sptr);
   }
   if (MyConnect(sptr))
