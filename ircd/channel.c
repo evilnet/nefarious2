@@ -1228,6 +1228,53 @@ static void send_ban_list(struct Client* cptr, struct Channel* chptr)
   send_reply(cptr, RPL_ENDOFBANLIST, chptr->chname);
 }
 
+int SetAutoChanModes(struct Channel *chptr)
+{
+  static int chan_flags[] = {
+    MODE_INVITEONLY,    'i',
+    MODE_MODERATED,     'm',
+    MODE_NOPRIVMSGS,    'n',
+    MODE_PRIVATE,       'p',
+    MODE_SECRET,        's',
+    MODE_TOPICLIMIT,    't',
+    MODE_REGONLY,       'r',
+    MODE_DELJOINS,      'D',
+    MODE_WASDELJOINS,   'd'
+    /* MODE_REGISTERED,    'R' */
+  };
+  unsigned int *flag_p;
+  unsigned int t_mode;
+  const char *modestr;
+
+  t_mode = 0;
+
+  assert(0 != chptr);
+
+  if (!feature_bool(FEAT_AUTOCHANMODES) || !feature_str(FEAT_AUTOCHANMODES_LIST) ||
+       strlen(feature_str(FEAT_AUTOCHANMODES_LIST)) <= 1)
+    return 0;
+
+  modestr = feature_str(FEAT_AUTOCHANMODES_LIST);
+
+  for (; *modestr; modestr++) {
+    for (flag_p = (unsigned int*)chan_flags; flag_p[0];
+         flag_p += 2) /* look up flag */
+      if (flag_p[1] == *modestr)
+        break;
+
+    if (!flag_p[0]) /* didn't find it */
+      continue;
+
+    t_mode |= flag_p[0];
+
+  } /* for (; *modestr; modestr++) { */
+
+  if (t_mode != 0)
+    chptr->mode.mode = t_mode;
+
+  return 0;
+}
+
 /** Get a channel block, creating if necessary.
  *  Get Channel block for chname (and allocate a new channel
  *  block, if it didn't exists before).
@@ -1268,6 +1315,9 @@ struct Channel *get_channel(struct Client *cptr, char *chname, ChannelGetType fl
     chptr->prev = NULL;
     chptr->next = GlobalChannelList;
     chptr->creationtime = MyUser(cptr) ? TStime() : (time_t) 0;
+    if (feature_bool(FEAT_AUTOCHANMODES) && feature_str(FEAT_AUTOCHANMODES_LIST) &&
+        (strlen(feature_str(FEAT_AUTOCHANMODES_LIST)) > 0) && MyUser(cptr))
+      SetAutoChanModes(chptr);
     GlobalChannelList = chptr;
     hAddChannel(chptr);
   }
@@ -3604,6 +3654,8 @@ int
 joinbuf_flush(struct JoinBuf *jbuf)
 {
   char chanlist[BUFSIZE];
+  char *name;
+  char *p = 0;
   int chanlist_i = 0;
   int i;
 
@@ -3632,6 +3684,14 @@ joinbuf_flush(struct JoinBuf *jbuf)
   case JOINBUF_TYPE_CREATE:
     sendcmdto_serv_butone(jbuf->jb_source, CMD_CREATE, jbuf->jb_connect,
 			  "%s %Tu", chanlist, jbuf->jb_create);
+    if (feature_bool(FEAT_AUTOCHANMODES) && feature_str(FEAT_AUTOCHANMODES_LIST)
+         && strlen(feature_str(FEAT_AUTOCHANMODES_LIST)) > 0) {
+      for (name = ircd_strtok(&p, chanlist, ","); name; name = ircd_strtok(&p, 0, ",")) {
+        if (!IsLocalChannel(name))
+          sendcmdto_serv_butone(&me, CMD_MODE, jbuf->jb_connect, "%s +%s", name,
+                                feature_str(FEAT_AUTOCHANMODES_LIST));
+      }
+    }
     break;
 
   case JOINBUF_TYPE_PART:

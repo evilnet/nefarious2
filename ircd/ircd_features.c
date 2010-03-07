@@ -439,6 +439,8 @@ static struct FeatureDesc {
   F_I(MAX_CHECK_OUTPUT, 0, 1000, 0),
   F_B(OPER_WHOIS_PARANOIA, 0, 0, 0),
   F_B(OPER_HIDE, 0, 0, 0),
+  F_B(AUTOCHANMODES, 0, 0, 0),
+  F_S(AUTOCHANMODES_LIST, FEAT_CASE | FEAT_NULL, 0, 0),
 
 #undef F_S
 #undef F_B

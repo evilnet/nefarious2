@@ -927,3 +927,18 @@ OPER_HIDE
 Allows opers with the HIDE_OPER priv in their Class or Operator block set to
 yes to set user mode +H to hide their operator status from non-opers.
 
+AUTOCHANMODES
+ * Type: boolean
+ * Default: FALSE
+
+When a user joins a new channel the modes in AUTOCHANMODES_LIST will
+be automatically set
+
+AUTOCHANMODES_LIST
+ * Type: string
+ * Default: (no default)
+
+If AUTOCHANMODES is enabled then any modes in here will be the modes
+set for new channels upon join. Modes should be added in this format
+"ntmn" etc.
+

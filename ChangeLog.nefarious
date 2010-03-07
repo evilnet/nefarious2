@@ -3,6 +3,21 @@
 
 2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added auto channel modes on join.
+
+
+	* doc/readme.features: Added auto channel modes on join.
+
+	* include/channel.h: Added auto channel modes on join.
+
+	* include/ircd_features.h: Added auto channel modes on join.
+
+	* ircd/channel.c: Added auto channel modes on join.
+
+	* ircd/ircd_features.c: Added auto channel modes on join.
+
+2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added user modes +n and +I.
 
 	* ircd/client.c: Added user modes +n and +I.
