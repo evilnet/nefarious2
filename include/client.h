@@ -176,6 +176,8 @@ enum Flag
     FLAG_HIDE_OPER,                 /**< user's oper status is hidden */
     FLAG_NOCHAN,                    /**< user's channels are hidden in WHOIS */
     FLAG_NOIDLE,                    /**< user's idle time is hidden in WHOIS */
+    FLAG_NAMESX,                    /**< Client supports extended NAMES replies */
+    FLAG_UHNAMES,                   /**< Client supports user-host NAMES replies */
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -602,6 +604,10 @@ struct Client {
 #define IsNoChan(x)		HasFlag(x, FLAG_NOCHAN)
 /** Return non-zero if the client has the hidden idle time mode set. */
 #define IsNoIdle(x)		HasFlag(x, FLAG_NOIDLE)
+/** Return non-zero if the client supports extended NAMES */
+#define IsNamesX(x)             HasFlag(x, FLAG_NAMESX)
+/** Return non-zero if the client supports user-host NAMES */
+#define IsUHNames(x)            HasFlag(x, FLAG_UHNAMES)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -658,6 +664,10 @@ struct Client {
 #define SetNoChan(x)		SetFlag(x, FLAG_NOCHAN)
 /** Mark a client as having the hidden idle time mode set. */
 #define SetNoIdle(x)		SetFlag(x, FLAG_NOIDLE)
+/** Mark a client as supporting extended NAMES. */
+#define SetNamesX(x)            SetFlag(x, FLAG_NAMESX)
+/** Mark a client as supporting user-host NAMES. */
+#define SetUHNames(x)           SetFlag(x, FLAG_UHNAMES)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -699,6 +709,10 @@ struct Client {
 #define ClearNoChan(x)		ClrFlag(x, FLAG_NOCHAN)
 /** Remove mode +I (hide idle time in whois) from the client. */
 #define ClearNoIdle(x)		ClrFlag(x, FLAG_NOIDLE)
+/** Client no longer supports extended names. */
+#define ClearNamesX(x)          ClrFlag(x, FLAG_NAMESX)
+/** Client no longer supports user-host names. */
+#define ClearUHNames(x)         ClrFlag(x, FLAG_UHNAMES)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

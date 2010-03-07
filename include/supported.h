@@ -38,6 +38,8 @@
                 " USERIP"\
                 " CPRIVMSG"\
                 " CNOTICE"\
+                " NAMESX"\
+                " UHNAMES"\
                 " SILENCE=%i" \
                 " MODES=%i" \
                 " MAXCHANNELS=%i" \

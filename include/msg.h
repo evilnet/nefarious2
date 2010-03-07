@@ -376,6 +376,10 @@ struct Client;
 #define TOK_CHECK               "CC"
 #define CMD_CHECK               MSG_CHECK, TOK_CHECK
 
+#define MSG_PROTOCTL            "PROTOCTL"
+#define TOK_PROTOCTL            "PROTOCTL"
+#define CMD_PROTOCTL            MSG_PROTOCTL, CMD_PROTOCTL
+
 /*
  * Constants
  */

@@ -441,6 +441,7 @@ static struct FeatureDesc {
   F_B(OPER_HIDE, 0, 0, 0),
   F_B(AUTOCHANMODES, 0, 0, 0),
   F_S(AUTOCHANMODES_LIST, FEAT_CASE | FEAT_NULL, 0, 0),
+  F_B(UHNAMES, 0, 1, 0),
 
 #undef F_S
 #undef F_B

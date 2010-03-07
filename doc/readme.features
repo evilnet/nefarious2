@@ -942,3 +942,10 @@ If AUTOCHANMODES is enabled then any modes in here will be the modes
 set for new channels upon join. Modes should be added in this format
 "ntmn" etc.
 
+UHNAMES
+ * Type: boolean
+ * Default: TRUE
+
+If enabled NAMES replies for clients who announce UHNAMES support with
+PROTOCTL will contain user and host portions too.
+

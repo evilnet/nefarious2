@@ -3,6 +3,32 @@
 
 2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added UHNAMES feature.
+
+	* doc/readme.features: Added UHNAMES feature.
+
+	* include/client.h: Added UHNAMES and NAMESX.
+
+	* include/handlers.h: Added PROTOCTL command.
+
+	* include/ircd_features.h: Added UHNAMES feature.
+
+	* include/msg.h: Added PROTOCTL command.
+
+	* include/supported.h: Added UHNAMES and NAMESX.
+
+	* ircd/Makefile.in: Added PROTOCTL command.
+
+	* ircd/ircd_features.c: Added UHNAMES feature.
+
+	* ircd/m_names.c: Added UHNAMES and NAMESX support.
+
+	* ircd/parse.c: Added PROTOCTL command.
+
+	* ircd/m_protoctl.c: Added PROTOCTL command.
+
+2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added auto channel modes on join.
 
 

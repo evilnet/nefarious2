@@ -160,6 +160,7 @@ IRCD_SRC = \
 	m_privmsg.c \
 	m_privs.c \
 	m_proto.c \
+	m_protoctl.c \
 	m_pseudo.c \
 	m_quit.c \
 	m_rehash.c \

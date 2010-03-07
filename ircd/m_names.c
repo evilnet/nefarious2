@@ -85,6 +85,7 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -115,6 +116,7 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
   int idx;
   int flag;
   int needs_space; 
+  int done_prefix;
   int len; 
   char buf[BUFSIZE];
   struct Client *c2ptr;
@@ -139,6 +141,7 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
   idx = len + 4;
   flag = 1;
   needs_space = 0;
+  done_prefix = 0;
 
   if (!ShowChannel(sptr, chptr)) /* Don't list private channels unless we are on them. */
     return;
@@ -150,6 +153,7 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
   for (member = chptr->members; member; member = member->next_member)
   {
     c2ptr = member->user;
+    done_prefix=0;
 
     if (((filter&NAMES_VIS)!=0) && IsInvisible(c2ptr))
       continue;
@@ -166,16 +170,39 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
     if (needs_space)
       buf[idx++] = ' ';
     needs_space=1;
-    if (IsZombie(member))
-      buf[idx++] = '!';
-    else if (IsChanOp(member))
-      buf[idx++] = '@';
-    else if (HasVoice(member))
-      buf[idx++] = '+';
+    if (IsZombie(member)) {
+      if (IsNamesX(sptr) || !done_prefix) {
+        buf[idx++] = '!';
+        done_prefix = 1;
+      }
+    }
+    if (IsChanOp(member)) {
+      if (IsNamesX(sptr) || !done_prefix) {
+        buf[idx++] = '@';
+        done_prefix = 1;
+      }
+    }
+    if (HasVoice(member)) {
+      if (IsNamesX(sptr) || !done_prefix) {
+        buf[idx++] = '+';
+        done_prefix = 1;
+      }
+    }
     strcpy(buf + idx, cli_name(c2ptr));
     idx += strlen(cli_name(c2ptr));
+
+    if (feature_bool(FEAT_UHNAMES) && IsUHNames(sptr)) {
+      strcat(buf, "!");
+      strcat(buf, cli_user(c2ptr)->username);
+      strcat(buf, "@");
+      strcat(buf, cli_user(c2ptr)->host);
+      idx += strlen(cli_user(c2ptr)->username);
+      idx += strlen(cli_user(c2ptr)->host);
+      idx += 2; /* ! and @ */
+    }
+
     flag = 1;
-    if (mlen + idx + NICKLEN + 5 > BUFSIZE)
+    if (mlen + idx + NICKLEN + 7 + USERLEN + HOSTLEN + 2 > BUFSIZE)
       /* space, modifier, nick, \r \n \0 */
     {
       send_reply(sptr, (filter & NAMES_DEL) ? RPL_DELNAMREPLY : RPL_NAMREPLY, buf);
