@@ -83,6 +83,7 @@
 
 #include "client.h"
 #include "ircd.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -102,9 +103,17 @@ int mo_die(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client *acptr;
   int i;
+  char *diepass = (char *)feature_str(FEAT_DIEPASS);
+  char* password;
 
   if (!HasPriv(sptr, PRIV_DIE))
     return send_reply(sptr, ERR_NOPRIVILEGES);
+
+  if (!EmptyString(diepass)) {
+    password = parc > 1 ? parv[1] : 0;
+    if (!oper_password_match(password, diepass))
+      return send_reply(sptr, ERR_PASSWDMISMATCH);
+  }
 
   for (i = 0; i <= HighestFd; i++)
   {

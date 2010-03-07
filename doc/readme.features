@@ -949,3 +949,25 @@ UHNAMES
 If enabled NAMES replies for clients who announce UHNAMES support with
 PROTOCTL will contain user and host portions too.
 
+RESTARTPASS
+ * Type: string
+ * Default: (empty)
+
+This is the password required for a server to actually restart when
+the RESTART command is used. The if the password is empty then no
+password is required. If you do not specify an encryption type it is
+assumed that the given password is in crypt format. See the Operator
+block section in example.conf for more information on password encryption
+types.
+
+DIEPASS
+ * Type: string
+ * Default: (empty)
+
+This is the password required for a server to actually die when
+the DIE command is used. The if the password is empty then no
+password is required. If you do not specify an encryption type it is
+assumed that the given password is in crypt format. See the Operator
+block section in example.conf for more information on password encryption
+types.
+

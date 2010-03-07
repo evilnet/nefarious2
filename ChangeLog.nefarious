@@ -3,6 +3,20 @@
 
 2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added DIEPASS and RESTARTPASS features.
+
+	* doc/readme.features: Added DIEPASS and RESTARTPASS features.
+
+	* include/ircd_features.h: Added DIEPASS and RESTARTPASS features.
+
+	* ircd/ircd_features.c: Added DIEPASS and RESTARTPASS features.
+
+	* ircd/m_die.c: Added DIEPASS feature.
+
+	* ircd/m_restart.c: Added RESTARTPASS feature.
+
+2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added UHNAMES feature.
 
 	* doc/readme.features: Added UHNAMES feature.
