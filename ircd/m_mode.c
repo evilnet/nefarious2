@@ -191,7 +191,7 @@ ms_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     {
       return 0;
     }
-    else if (sptr != acptr)
+    else if ((sptr != acptr) && !IsServer(sptr))
     {
       sendwallto_group_butone(&me, WALL_WALLOPS, 0, 
                               "MODE for User %s from %s!%s", parv[1],

@@ -3,6 +3,14 @@
 
 2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_mode.c: Changed handling to allow services to set modes
+	on remote users.
+
+	* ircd/s_user.c: Changed handling to allow services to set modes
+	on remote users.
+
+2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added DIEPASS and RESTARTPASS features.
 
 	* doc/readme.features: Added DIEPASS and RESTARTPASS features.
