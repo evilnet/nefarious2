@@ -392,6 +392,10 @@ struct Client;
 #define TOK_SVSQUIT             "SX"
 #define CMD_SVSQUIT             MSG_SVSQUIT, TOK_SVSQUIT
 
+#define MSG_SNO                 "SNO"
+#define TOK_SNO                 "SNO"
+#define CMD_SNO                 MSG_SNO, TOK_SNO
+
 /*
  * Constants
  */

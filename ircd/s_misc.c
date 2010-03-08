@@ -371,7 +371,7 @@ int exit_client(struct Client *cptr,
     SetFlag(victim, FLAG_CLOSING);
 
     if (feature_bool(FEAT_CONNEXIT_NOTICES) && IsUser(victim))
-      sendto_opmask_butone(0, SNO_CONNEXIT,
+      sendto_opmask_butone_global(&me, SNO_CONNEXIT,
                            "Client exiting: %s (%s@%s) [%s] [%s] <%s%s>",
                            cli_name(victim), cli_user(victim)->username,
                            cli_user(victim)->host, comment,

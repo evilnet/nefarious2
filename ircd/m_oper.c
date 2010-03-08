@@ -150,7 +150,7 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!aconf || IsIllegal(aconf))
   {
     send_reply(sptr, ERR_NOOPERHOST);
-    sendto_opmask_butone(0, SNO_OLDREALOP, "Failed OPER attempt by %s (%s@%s)",
+    sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed OPER attempt by %s (%s@%s)",
 			 parv[0], cli_user(sptr)->username, cli_sockhost(sptr));
     return 0;
   }
@@ -162,7 +162,7 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     if (ACR_OK != attach_conf(sptr, aconf)) {
       send_reply(sptr, ERR_NOOPERHOST);
-      sendto_opmask_butone(0, SNO_OLDREALOP, "Failed OPER attempt by %s "
+      sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed OPER attempt by %s "
 			   "(%s@%s)", parv[0], cli_user(sptr)->username,
 			   cli_sockhost(sptr));
       return 0;
@@ -187,7 +187,7 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     send_umode_out(cptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
     send_reply(sptr, RPL_YOUREOPER);
 
-    sendto_opmask_butone(0, SNO_OLDSNO, "%s (%s@%s) is now operator (%c)",
+    sendto_opmask_butone_global(&me, SNO_OLDSNO, "%s (%s@%s) is now operator (%c)",
 			 parv[0], cli_user(sptr)->username, cli_sockhost(sptr),
 			 IsOper(sptr) ? 'O' : 'o');
 
@@ -196,7 +196,7 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   else
   {
     send_reply(sptr, ERR_PASSWDMISMATCH);
-    sendto_opmask_butone(0, SNO_OLDREALOP, "Failed OPER attempt by %s (%s@%s)",
+    sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed OPER attempt by %s (%s@%s)",
 			 parv[0], cli_user(sptr)->username, cli_sockhost(sptr));
   }
   return 0;

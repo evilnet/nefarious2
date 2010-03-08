@@ -388,7 +388,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (cli_snomask(sptr) & SNO_NOISY)
       set_snomask(sptr, cli_snomask(sptr) & SNO_NOISY, SNO_ADD);
     if (feature_bool(FEAT_CONNEXIT_NOTICES))
-      sendto_opmask_butone(0, SNO_CONNEXIT,
+      sendto_opmask_butone_global(&me, SNO_CONNEXIT,
                            "Client connecting: %s (%s@%s) [%s] {%s} [%s] <%s%s>",
                            cli_name(sptr), user->username, user->host,
                            cli_sock_ip(sptr), get_client_class(sptr),
@@ -632,6 +632,19 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
     }
     else
       sendcmdto_one(sptr, CMD_NICK, sptr, ":%s", nick);
+
+    /*
+     * Send out a connexit notice for the nick change before
+     * cli_name(sptr) is overwritten with the new nick. -reed
+     */
+    if (MyUser(sptr) && feature_bool(FEAT_CONNEXIT_NOTICES))
+      sendto_opmask_butone_global(&me, SNO_NICKCHG,
+                         "Nick change: From %s to %s [%s@%s] <%s%s>",
+                         cli_name(sptr), nick,
+                         cli_user(sptr)->username,
+                         cli_user(sptr)->realhost,
+                         NumNick(sptr) /* Two %'s */
+                         );
 
     if ((cli_name(sptr))[0])
       hRemClient(sptr);

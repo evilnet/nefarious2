@@ -748,13 +748,14 @@ struct Client {
 #define SNO_CONNEXIT    0x4000  /**< client connect/exit (ugh) */
 #define SNO_AUTO        0x8000  /**< AUTO G-Lines */
 #define SNO_DEBUG       0x10000 /**< debugging messages (DEBUGMODE only) */
-#define SNO_AUTH        0x20000 /**< IAuth notices */
+#define SNO_NICKCHG     0x20000 /**< Nick change notices */
+#define SNO_AUTH        0x40000 /**< IAuth notices */
 
 /** Bitmask of all valid server notice bits. */
 #ifdef DEBUGMODE
-# define SNO_ALL        0x3ffff
+# define SNO_ALL        0x7ffff
 #else
-# define SNO_ALL        0x2ffff
+# define SNO_ALL        0x6ffff
 #endif
 
 /** Server notice bits allowed to normal users. */

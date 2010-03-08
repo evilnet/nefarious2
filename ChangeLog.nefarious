@@ -3,6 +3,40 @@
 
 2010-03-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Adjusted SNO_*s to re-add SNO_NICKCHG.
+
+	* include/handlers.h: Added SNO command.
+
+	* include/msg.h: Added SNO command.
+
+	* include/send.h: Added sendto_opmask_butone_global() to send
+	server notices to all servers and opers who elected to receive the
+	specified notice.
+
+	* ircd/Makefile.in: Added SNO command.
+
+	* ircd/gline.c: Changed sendto_opmask_butone() to
+	sendto_opmask_butone_global().
+
+	* ircd/m_oper.c: Changed sendto_opmask_butone() to
+	sendto_opmask_butone_global().
+
+	* ircd/parse.c: Added SNO command.
+
+	* ircd/s_misc.c: Changed sendto_opmask_butone() to
+	sendto_opmask_butone_global().
+
+	* ircd/s_user.c: Changed sendto_opmask_butone() to
+	sendto_opmask_butone_global().
+
+	* ircd/send.c: Added sendto_opmask_butone_global() to send server
+	notices to all servers and opers who elected to receive the
+	specified notice.
+
+	* ircd/m_sno.c: Added SNO command.
+
+2010-03-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/handlers.h: Added SVSIDENT, SVSINFO and SVSQUIT
 	commands.
 

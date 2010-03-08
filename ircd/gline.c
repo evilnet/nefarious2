@@ -244,7 +244,7 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
       	   gline->gl_reason);
 
       /* let the ops know about it */
-      sendto_opmask_butone(0, SNO_GLINE, "G-line active for %s",
+      sendto_opmask_butone_global(&me, SNO_GLINE, "G-line active for %s",
                            get_client_name(acptr, SHOW_IP));
 
       /* and get rid of him */

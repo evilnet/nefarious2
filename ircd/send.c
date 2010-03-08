@@ -777,6 +777,40 @@ void sendcmdto_match_butone(struct Client *from, const char *cmd,
   msgq_clean(serv_mb);
 }
 
+/** Send a server notice out across the network before sending to all
+ * users subscribing to the indicated \a mask except for \a one.
+ * @param[in] from Client TOK_SNO is sent from.
+ * @param[in] mask One of the SNO_* constants.
+ * @param[in] pattern Format string for server notice.
+ */
+void sendto_opmask_butone_global(struct Client *one, unsigned int mask,
+				 const char *pattern, ...)
+{
+  va_list vl;
+  struct VarData vd;
+  struct MsgBuf *mb;
+  struct DLink *lp;
+
+  va_start(vl, pattern);
+
+  if (cli_serv(&me) && (lp = cli_serv(&me)->down)) {
+    vd.vd_format = pattern;
+    va_copy(vd.vd_args, vl);
+    mb = msgq_make(&me, "%C " TOK_SNO " %d :%v", &me, mask, &vd);
+
+    for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+      if (one && lp->value.cptr == cli_from(one))
+        continue;
+      send_buffer(lp->value.cptr, mb, 0);
+    }
+
+    msgq_clean(mb);
+  }
+
+  vsendto_opmask_butone(one, mask, pattern, vl);
+  va_end(vl);
+}
+
 /** Send a server notice to all users subscribing to the indicated \a
  * mask except for \a one.
  * @param[in] one Client direction to skip (or NULL).
