@@ -3,6 +3,11 @@
 
 2010-03-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/snomask.html: Updated snomask documentation regarding
+	SNO_NICKCHG.
+
+2010-03-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Adjusted SNO_*s to re-add SNO_NICKCHG.
 
 	* include/handlers.h: Added SNO command.
