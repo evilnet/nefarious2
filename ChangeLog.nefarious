@@ -1,6 +1,23 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/handlers.h: Added SVSIDENT, SVSINFO and SVSQUIT
+	commands.
+
+	* include/msg.h: Added SVSIDENT, SVSINFO and SVSQUIT commands.
+
+	* ircd/Makefile.in: Added SVSIDENT, SVSINFO and SVSQUIT commands.
+
+	* ircd/parse.c: Added SVSIDENT, SVSINFO and SVSQUIT commands.
+
+	* ircd/m_svsident.c: Added SVSIDENT command.
+
+	* ircd/m_svsinfo.c: Added SVSINFO command.
+
+	* ircd/m_svsquit.c: Added SVSQUIT command.
+
 2010-03-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_mode.c: Changed handling to allow services to set modes

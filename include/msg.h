@@ -380,6 +380,18 @@ struct Client;
 #define TOK_PROTOCTL            "PROTOCTL"
 #define CMD_PROTOCTL            MSG_PROTOCTL, CMD_PROTOCTL
 
+#define MSG_SVSIDENT		"SVSIDENT"
+#define TOK_SVSIDENT		"SID"
+#define CMD_SVSIDENT		MSG_SVSIDENT, TOK_SVSIDENT
+
+#define MSG_SVSINFO		"SVSINFO"
+#define TOK_SVSINFO		"SI"
+#define CMD_SVSINFO		MSG_SVSINFO, TOK_SVSINFO
+
+#define MSG_SVSQUIT             "SVSQUIT"
+#define TOK_SVSQUIT             "SX"
+#define CMD_SVSQUIT             MSG_SVSQUIT, TOK_SVSQUIT
+
 /*
  * Constants
  */
