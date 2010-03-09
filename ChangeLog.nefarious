@@ -3,6 +3,11 @@
 
 2010-03-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Fixed no such channel error on connect due to
+	error in set_user_mode().
+
+2010-03-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/handlers.h: Added SMO command.
 
 	* include/msg.h: Added SMO command.

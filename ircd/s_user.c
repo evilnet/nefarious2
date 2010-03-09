@@ -987,6 +987,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   if (IsServer(cptr))
     acptr = findNUser(parv[1]);
 
+  if (!(parv[1]))
+    acptr = sptr;
+
   if (!acptr && !(acptr = FindUser(parv[1])))
   {
     if (MyConnect(sptr))
