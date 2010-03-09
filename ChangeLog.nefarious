@@ -1,6 +1,22 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/handlers.h: Added SMO command.
+
+	* include/msg.h: Added SMO command.
+
+	* include/send.h: Added sendto_mode_butone().
+
+	* ircd/Makefile.in: Added SMO command.
+
+	* ircd/parse.c: Added SMO command.
+
+	* ircd/send.c: Added sendto_mode_butone().
+
+	* ircd/m_smo.c: Added SMO command.
+
 2010-03-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/snomask.html: Updated snomask documentation regarding

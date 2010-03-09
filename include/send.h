@@ -124,4 +124,12 @@ extern void sendto_opmask_butone_ratelimited(struct Client *one,
 extern void vsendto_opmask_butone(struct Client *one, unsigned int mask,
 				  const char *pattern, va_list vl);
 
+/* Send server notice to users with the supplied mode but one--one can be NULL */
+extern void sendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
+                          const char *pattern, ...);
+
+/* Same as above, but with variable argument list */
+extern void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
+                           const char *pattern, va_list vl);
+
 #endif /* INCLUDED_send_h */

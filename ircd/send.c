@@ -886,3 +886,60 @@ void vsendto_opmask_butone(struct Client *one, unsigned int mask,
 
   msgq_clean(mb);
 }
+
+/** Send a server notice to all users with the indicated \a mode except
+ * for \a one.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] mode One mode character.
+ * @param[in] pattern Format string for server notice.
+ */
+void sendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
+                          const char *pattern, ...)
+{
+  va_list vl;
+
+  va_start(vl, pattern);
+  vsendto_mode_butone(one, from, mode, pattern, vl);
+  va_end(vl);
+}
+
+/** Send a server notice to all users with the indicated \a mode except
+ * for \a one.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] mode One mode character.
+ * @param[in] pattern Format string for server notice.
+ * @param[in] vl Argument list for format string.
+ */
+void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
+                           const char *pattern, va_list vl)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  struct DLink *lp;
+  struct Client* acptr = 0;
+
+  vd.vd_format = pattern;
+  va_copy(vd.vd_args, vl);
+
+  /* send to local users */
+   mb = msgq_make(0, ":%s " MSG_NOTICE " * :*** Notice -- %v", cli_name(from),
+              &vd);
+  for (acptr = &me; acptr; acptr = cli_prev(acptr)) {
+    if (IsUser(acptr))  {
+      switch (*mode) {
+        case 'O':
+          if (IsLocOp(acptr))
+            send_buffer(acptr, mb, 0);
+          break;
+        case 'o':
+          if (IsOper(acptr))
+            send_buffer(acptr, mb, 0);
+          break;
+        default:
+          break; /* ignore, should only happen if incorrectly injected via raw */
+      }
+    }
+  }
+  msgq_clean(mb);
+}
+

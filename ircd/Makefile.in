@@ -172,6 +172,7 @@ IRCD_SRC = \
 	m_set.c \
 	m_settime.c \
 	m_silence.c \
+	m_smo.c \
 	m_sno.c \
 	m_squit.c \
 	m_stats.c \

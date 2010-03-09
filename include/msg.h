@@ -372,13 +372,13 @@ struct Client;
 #define TOK_ISNEF		"ISNEF"
 #define CMD_ISNEF		MSG_ISNEF, TOK_ISNEF
 
-#define MSG_CHECK               "CHECK"
-#define TOK_CHECK               "CC"
-#define CMD_CHECK               MSG_CHECK, TOK_CHECK
+#define MSG_CHECK		"CHECK"
+#define TOK_CHECK		"CC"
+#define CMD_CHECK		MSG_CHECK, TOK_CHECK
 
-#define MSG_PROTOCTL            "PROTOCTL"
-#define TOK_PROTOCTL            "PROTOCTL"
-#define CMD_PROTOCTL            MSG_PROTOCTL, CMD_PROTOCTL
+#define MSG_PROTOCTL		"PROTOCTL"
+#define TOK_PROTOCTL		"PROTOCTL"
+#define CMD_PROTOCTL		MSG_PROTOCTL, CMD_PROTOCTL
 
 #define MSG_SVSIDENT		"SVSIDENT"
 #define TOK_SVSIDENT		"SID"
@@ -388,13 +388,17 @@ struct Client;
 #define TOK_SVSINFO		"SI"
 #define CMD_SVSINFO		MSG_SVSINFO, TOK_SVSINFO
 
-#define MSG_SVSQUIT             "SVSQUIT"
-#define TOK_SVSQUIT             "SX"
-#define CMD_SVSQUIT             MSG_SVSQUIT, TOK_SVSQUIT
+#define MSG_SVSQUIT		"SVSQUIT"
+#define TOK_SVSQUIT		"SX"
+#define CMD_SVSQUIT		MSG_SVSQUIT, TOK_SVSQUIT
 
-#define MSG_SNO                 "SNO"
-#define TOK_SNO                 "SNO"
-#define CMD_SNO                 MSG_SNO, TOK_SNO
+#define MSG_SNO			"SNO"
+#define TOK_SNO			"SNO"
+#define CMD_SNO			MSG_SNO, TOK_SNO
+
+#define MSG_SMO			"SMO"
+#define TOK_SMO			"SMO"
+#define CMD_SMO			MSG_SMO, TOK_SMO
 
 /*
  * Constants
