@@ -69,6 +69,7 @@
   extern struct ServerConf* serverConfList;
   extern struct s_map*      GlobalServiceMapList;
   extern struct qline*      GlobalQuarantineList;
+  extern struct WebIRCConf* webircConfList;
 
   int yylex(void);
   /* Now all the globals we need :/... */
@@ -80,6 +81,7 @@
   struct ConnectionClass *c_class;
   struct DenyConf *dconf;
   struct ServerConf *sconf;
+  struct WebIRCConf *wconf;
   struct s_map *smap;
   struct Privs privs;
   struct Privs privs_dirty;
@@ -175,6 +177,7 @@ static void free_slist(struct SLink **link) {
 %token PROGRAM
 %token TOK_IPV4 TOK_IPV6
 %token DNS
+%token WEBIRC
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -203,7 +206,7 @@ blocks: blocks block | block;
 block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
-       pseudoblock | iauthblock | error ';';
+       pseudoblock | iauthblock | webircblock | error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -1166,3 +1169,56 @@ iauthprogram: PROGRAM '='
     MyFree(stringlist[stringno]);
   }
 } stringlist ';';
+
+webircblock: WEBIRC
+{
+  wconf = (struct WebIRCConf*) MyCalloc(1, sizeof(*wconf));
+} '{' webircitems '}' ';'
+{
+  if (wconf->usermask || wconf->hostmask) {
+    wconf->next = webircConfList;
+    webircConfList = wconf;
+  }
+  else
+  {
+    MyFree(wconf->usermask);
+    MyFree(wconf->hostmask);
+    MyFree(wconf->passwd);
+    MyFree(wconf);
+    parse_error("WebIRC block must match on at least one of username, host");
+  }
+  dconf = NULL;
+};
+webircitems: webircitem webircitems | webircitem;
+webircitem: webircuhost | webircusername | webircpass;
+webircuhost: HOST '=' QSTRING ';'
+{
+  char *h;
+  MyFree(wconf->hostmask);
+  MyFree(wconf->usermask);
+  if ((h = strchr($3, '@')) == NULL)
+  {
+    DupString(wconf->usermask, "*");
+    wconf->hostmask = $3;
+  }
+  else
+  {
+    *h++ = '\0';
+    DupString(wconf->hostmask, h);
+    wconf->usermask = $3;
+  }
+  ipmask_parse(wconf->hostmask, &wconf->address, &wconf->bits);
+};
+
+webircusername: USERNAME '=' QSTRING ';'
+{
+  MyFree(wconf->usermask);
+  wconf->usermask = $3;
+};
+
+webircpass: PASS '=' QSTRING ';'
+{
+  MyFree(wconf->passwd);
+  wconf->passwd = $3;
+};
+

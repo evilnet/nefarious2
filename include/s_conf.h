@@ -149,6 +149,15 @@ struct s_map {
   struct nick_host *services; /**< Linked list of possible targets. */
 };
 
+/* WebIRC configuration. */
+struct WebIRCConf {
+  struct WebIRCConf*  next;
+  char*               hostmask;
+  char*               usermask;
+  struct irc_in_addr  address;
+  unsigned char       bits;
+  char*               passwd;
+};
 
 /*
  * GLOBALS
@@ -167,6 +176,7 @@ extern int init_conf(void);
 extern const struct LocalConf* conf_get_local(void);
 extern const struct CRuleConf* conf_get_crule_list(void);
 extern const struct DenyConf*  conf_get_deny_list(void);
+extern const struct WebIRCConf* conf_get_webirc_list(void);
 
 extern const char* conf_eval_crule(const char* name, int mask);
 
@@ -187,6 +197,7 @@ extern void lookup_confhost(struct ConfItem *aconf);
 extern void conf_parse_userhost(struct ConfItem *aconf, char *host);
 extern struct ConfItem *conf_debug_iline(const char *client);
 extern void free_mapping(struct s_map *smap);
+extern struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, int* status);
 
 extern void yyerror(const char *msg);
 

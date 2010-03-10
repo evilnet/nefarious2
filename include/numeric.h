@@ -101,6 +101,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*      RPL_STATSPLINE       220           Hybrid - Because 217 was for
                                            old Q: lines. */
 /*      RPL_STATSBLINE       220	   Numerics List: Dalnet,unreal */
+#define RPL_STATSWLINE       220
 #define RPL_UMODEIS          221
 /*	RPL_SQLINE_NICK	     222	   Numerics List: Dalnet */
 #define RPL_STATSJLINE       222	/* Undernet extension */

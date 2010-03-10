@@ -971,3 +971,9 @@ assumed that the given password is in crypt format. See the Operator
 block section in example.conf for more information on password encryption
 types.
 
+HIS_STATS_W
+ * Type: boolean
+ * Default: TRUE
+
+As per UnderNet CFV-165, this removes /STATS W from users.
+

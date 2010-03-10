@@ -1,6 +1,40 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-10  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Aded WebIRC block and configuration.
+
+	* doc/readme.features: Added HIS_STATS_W feature.
+
+	* include/handlers.h: Added WEBIRC command.
+
+	* include/ircd_features.h: Added HIS_STATS_W feature.
+
+	* include/msg.h: Added WEBIRC command.
+
+	* include/numeric.h: Added RPL_STATSWLINE for STATS W.
+
+	* include/s_conf.h: Aded WebIRC block and configuration.
+
+	* ircd/Makefile.in: Added WEBIRC command/
+
+	* ircd/ircd_features.c: Added HIS_STATS_W feature.
+
+	* ircd/ircd_lexer.l: Aded WebIRC block and configuration.
+
+	* ircd/ircd_parser.y: Aded WebIRC block and configuration.
+
+	* ircd/parse.c: Added WEBIRC command.
+
+	* ircd/s_conf.c: Aded WebIRC block and configuration.
+
+	* ircd/s_err.c: Added RPL_STATSWLINE for STATS W.
+
+	* ircd/s_stats.c: Added STATS W to show WebIRC configuration.
+
+	* ircd/m_webirc.c: Added WEBIRC command.
+
 2010-03-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Fixed no such channel error on connect due to

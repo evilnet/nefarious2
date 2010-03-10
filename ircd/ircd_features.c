@@ -444,6 +444,7 @@ static struct FeatureDesc {
   F_B(UHNAMES, 0, 1, 0),
   F_S(RESTARTPASS, FEAT_NULL | FEAT_CASE | FEAT_NODISP | FEAT_READ, 0, 0),
   F_S(DIEPASS, FEAT_NULL | FEAT_CASE | FEAT_NODISP | FEAT_READ, 0, 0),
+  F_B(HIS_STATS_W, 0, 1, 0),
 
 #undef F_S
 #undef F_B

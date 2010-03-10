@@ -28,6 +28,7 @@
 #include "class.h"
 #include "client.h"
 #include "crule.h"
+#include "ircd_crypt.h"
 #include "ircd_features.h"
 #include "fileio.h"
 #include "gline.h"
@@ -84,6 +85,8 @@ struct LocalConf   localConf;
 struct CRuleConf*  cruleConfList;
 /** Global list of K-lines. */
 struct DenyConf*   denyConfList;
+/** Global list of WebIRC blocks. */
+struct WebIRCConf *webircConfList;
 
 /** Tell a user that they are banned, dumping the message from a file.
  * @param sptr Client being rejected
@@ -784,6 +787,79 @@ const struct DenyConf* conf_get_deny_list(void)
   return denyConfList;
 }
 
+/** Find WebIRC configuration for \a cptr with password matching \a passwd
+ * @param[in] cptr Client to match WebIRC configuration against.
+ * @param[in] passwd Password to compare against WebIRC configuration.
+ * @param[out] status 0 for Success, 1 for invalid password and 2 for no WebIRC configuration.
+ * @return WebIRCConf struct of matching WebIRC configuration or 0 on error.
+ */
+struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, int* status)
+{
+  struct WebIRCConf *wconf;
+  char *crypted;
+  int res;
+
+  *status = 2;
+
+  if (!passwd)
+    return 0;
+
+  for(wconf = webircConfList; wconf; wconf = wconf->next) {
+    if (wconf->usermask && match(wconf->usermask, cli_username(cptr)))
+      continue;
+    if (wconf->bits > 0) {
+      if (!ipmask_check(&cli_ip(cptr), &wconf->address, wconf->bits))
+        continue;
+    } else if (wconf->hostmask && match(wconf->hostmask, cli_sockhost(cptr)))
+      continue;
+
+    *status = 1;
+
+    if (!wconf->passwd) {
+      *status = 0;
+      return wconf;
+    }
+
+    crypted = ircd_crypt(passwd, wconf->passwd);
+
+    if (!crypted)
+      continue;
+
+    res = strcmp(crypted, wconf->passwd);
+    MyFree(crypted);
+
+    if (0 == res) {
+      *status = 0;
+      return wconf;
+    }
+  }
+
+  return 0;
+}
+
+/** Free all WebIRC configurations from #webircConfList. */
+void conf_erase_webirc_list(void)
+{
+  struct WebIRCConf* next;
+  struct WebIRCConf* p = webircConfList;
+  for ( ; p; p = next) {
+    next = p->next;
+    MyFree(p->hostmask);
+    MyFree(p->usermask);
+    MyFree(p->passwd);
+    MyFree(p);
+  }
+  webircConfList = 0;
+};
+
+/** Return #webircConfList.
+ * @return #webircConfList
+ */
+const struct WebIRCConf* conf_get_webirc_list(void)
+{
+  return webircConfList;
+}
+
 /** Find any existing quarantine for the named channel.
  * @param chname Channel name to search for.
  * @return Reason for channel's quarantine, or NULL if none exists.
@@ -935,6 +1011,7 @@ int rehash(struct Client *cptr, int sig)
   }
   conf_erase_crule_list();
   conf_erase_deny_list();
+  conf_erase_webirc_list();
   motd_clear();
 
   /*

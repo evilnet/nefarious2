@@ -494,6 +494,15 @@ stats_servers_verbose(struct Client* sptr, const struct StatDesc* sd,
   }
 }
 
+static void
+stats_webirc(struct Client* to, const struct StatDesc *sd, char* param)
+{
+  const struct WebIRCConf *wline = conf_get_webirc_list();
+
+  for (; wline; wline = wline->next)
+    send_reply(to, RPL_STATSWLINE, wline->usermask, wline->hostmask);
+}
+
 /** Display objects allocated (and total memory used by them) for
  * several types of structures.
  * @param[in] to Client requesting statistics.
@@ -612,9 +621,12 @@ struct StatDesc statsinfo[] = {
   { 'V', "vserversmach", (STAT_FLAG_OPERFEAT | STAT_FLAG_VARPARAM | STAT_FLAG_CASESENS), FEAT_HIS_STATS_v,
     stats_servers_verbose, 0,
     "Verbose server information." },
-  { 'w', "userload", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_w,
+  { 'w', "userload", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_w,
     calc_load, 0,
     "Userload statistics." },
+  { 'W', "webirc", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_W,
+    stats_webirc, 0,
+    "WEBIRC configuration." },
   { 'x', "memusage", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_x,
     stats_meminfo, 0,
     "List usage information." },
