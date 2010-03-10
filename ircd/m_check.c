@@ -352,6 +352,12 @@ void checkClient(struct Client *sptr, struct Client *acptr)
       send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
+   if (IsWebIRC(acptr))
+   {
+     ircd_snprintf(0, outbuf, sizeof(outbuf), " WEBIRC host/ip:: %s (%s)", cli_webirchost(acptr), ircd_ntoa(&cli_webircip(acptr)));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
+
    ircd_snprintf(0, outbuf, sizeof(outbuf), "      Real Name:: %s%c", cli_info(acptr), COLOR_OFF);
    send_reply(sptr, RPL_DATASTR, outbuf);
 

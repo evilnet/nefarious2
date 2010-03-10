@@ -3,6 +3,18 @@
 
 2010-03-10  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added FLAG_WEBIRC to indicate if a client is
+	a WEBIRC client and added fields to Client struct to store the
+	WEBIRC host's real host and IP.
+
+	* ircd/m_check.c: Added WEBIRC host and IP to CHECK output.
+
+	* ircd/m_webirc.c: Changed to save WEBIRC host's real host and
+	IP to additional fields in Client struct and mark the client as
+	a WEBIRC client.
+
+2010-03-10  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Aded WebIRC block and configuration.
 
 	* doc/readme.features: Added HIS_STATS_W feature.

@@ -146,6 +146,10 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                          "WEBIRC Client host: from %s [%s] to %s [%s]",
                          cli_sockhost(sptr), cli_sock_ip(sptr), hostname, ipaddr);
 
+  /* Copy old details to cli_webircip and cli_webirchost. */
+  memcpy(&cli_webircip(sptr), &cli_ip(sptr), sizeof(cli_ip(sptr)));
+  ircd_strncpy(cli_webirchost(sptr), cli_sockhost(sptr), HOSTLEN);
+
   /* Undo original IP connection in IPcheck. */
   IPcheck_connect_fail(sptr);
   /* Need to disconnect original IP otherwise the count will never go down. */
@@ -168,6 +172,8 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       ircd_strncpy(cli_user(sptr)->host, hostname, HOSTLEN);
     ircd_strncpy(cli_user(sptr)->realhost, hostname, HOSTLEN);
   }
+
+  SetWebIRC(cptr);
 
   return 0;
 }

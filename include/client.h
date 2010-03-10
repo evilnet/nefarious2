@@ -178,6 +178,7 @@ enum Flag
     FLAG_NOIDLE,                    /**< user's idle time is hidden in WHOIS */
     FLAG_NAMESX,                    /**< Client supports extended NAMES replies */
     FLAG_UHNAMES,                   /**< Client supports user-host NAMES replies */
+    FLAG_WEBIRC,                    /**< Client is a WEBIRC client */
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -271,6 +272,9 @@ struct Client {
   char cli_name[HOSTLEN + 1];     /**< Unique name of the client, nick or host */
   char cli_username[USERLEN + 1]; /**< Username determined by ident lookup */
   char cli_info[REALLEN + 1];     /**< Free form additional client information */
+
+  struct irc_in_addr cli_webircip;  /**< WEBIRC Client IP address. */
+  char cli_webirchost[HOSTLEN + 1]; /**< WEBIRC Client host name. */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -330,6 +334,10 @@ struct Client {
 #define cli_username(cli)	((cli)->cli_username)
 /** Get client realname (information field). */
 #define cli_info(cli)		((cli)->cli_info)
+/** Get client WEBIRC IP address. */
+#define cli_webircip(cli)       ((cli)->cli_webircip)
+/** Get client WEBIRC host name. */
+#define cli_webirchost(cli)     ((cli)->cli_webirchost)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))
@@ -608,6 +616,8 @@ struct Client {
 #define IsNamesX(x)             HasFlag(x, FLAG_NAMESX)
 /** Return non-zero if the client supports user-host NAMES */
 #define IsUHNames(x)            HasFlag(x, FLAG_UHNAMES)
+/** Return non-zero if the client is a WEBIRC client. */
+#define IsWebIRC(x)             HasFlag(x, FLAG_WEBIRC)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -668,6 +678,8 @@ struct Client {
 #define SetNamesX(x)            SetFlag(x, FLAG_NAMESX)
 /** Mark a client as supporting user-host NAMES. */
 #define SetUHNames(x)           SetFlag(x, FLAG_UHNAMES)
+/** Mark a client as a WEBIRC client. */
+#define SetWebIRC(x)            SetFlag(x, FLAG_WEBIRC)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -713,6 +725,8 @@ struct Client {
 #define ClearNamesX(x)          ClrFlag(x, FLAG_NAMESX)
 /** Client no longer supports user-host names. */
 #define ClearUHNames(x)         ClrFlag(x, FLAG_UHNAMES)
+/** Client is no long a WEBIRC client. */
+#define ClearWebIRC(x)          ClrFlag(x, FLAG_WEBIRC)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */
