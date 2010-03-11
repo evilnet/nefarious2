@@ -1,6 +1,13 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/channel.h: Added channel mode 'd' to the list of channel
+	modes.
+
+	* include/client.h: Added user mode 'O' to the list of user modes.
+
 2010-03-10  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/client.h: Added FLAG_WEBIRC to indicate if a client is
