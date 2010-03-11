@@ -40,6 +40,17 @@ struct Message;
 /** Checks whether the CONF_ILLEGAL bit is set on \a x. */
 #define IsIllegal(x)    ((x)->status & CONF_ILLEGAL)
 
+/* WEBIRC FlagSet */
+
+enum WebIRCFlag {
+  WFLAG_USERIDENT, /**< use USER username as ident */
+  WFLAG_NOIDENT, /**< ignore ident reply */
+  WFLAG_LAST_FLAG
+};
+
+/** Declare flagset type for WEBIRC flags. */
+DECLARE_FLAGSET(WebIRCFlags, WFLAG_LAST_FLAG);
+
 /*
  * Structures
  */
@@ -158,6 +169,7 @@ struct WebIRCConf {
   unsigned char       bits;
   char*               passwd;
   char*               ident;
+  struct WebIRCFlags  flags;
 };
 
 /*

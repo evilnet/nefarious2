@@ -3,6 +3,31 @@
 
 2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added WebIRC block options userident and
+	ignoreident.
+
+	* include/client.h: Added Client flag to indicate not to add a
+	~ to USER user name used as ident.
+
+	* include/s_conf.h: Added WebIRC block flags.
+
+	* ircd/ircd_lexer.l: Added WebIRC block options userident and
+	ignoreident.
+
+	* ircd/ircd_parser.y: Added WebIRC block options userident and
+	ignoreident.
+
+	* ircd/m_webirc.c: Added WebIRC block options userident and
+	ignoreident.
+
+	* ircd/s_conf.c: Added support for WebIRC block userident option.
+
+	* ircd/s_err.c: Added WebIRC block options to STATS W as flags.
+
+	* ircd/s_stats.c: Added WebIRC block options to STATS W as flags.
+
+2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_webirc.c: Minor change to code order.
 
 2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>

@@ -184,6 +184,12 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     SetGotId(cptr);
   }
 
+  if (FlagHas(&wline->flags, WFLAG_USERIDENT))
+    SetWebIRCUserIdent(cptr);
+
+  if (FlagHas(&wline->flags, WFLAG_NOIDENT))
+    ClrFlag(sptr, FLAG_GOTID);
+
   return 0;
 }
 

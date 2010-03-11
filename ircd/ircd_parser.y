@@ -179,6 +179,8 @@ static void free_slist(struct SLink **link) {
 %token DNS
 %token WEBIRC
 %token IDENT
+%token USERIDENT
+%token IGNOREIDENT
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -1192,7 +1194,7 @@ webircblock: WEBIRC
   dconf = NULL;
 };
 webircitems: webircitem webircitems | webircitem;
-webircitem: webircuhost | webircusername | webircpass | webircident;
+webircitem: webircuhost | webircusername | webircpass | webircident | webircuserident | webircignoreident;
 webircuhost: HOST '=' QSTRING ';'
 {
   char *h;
@@ -1230,3 +1232,18 @@ webircident: IDENT '=' QSTRING ';'
   wconf->ident = $3;
 };
 
+webircuserident: USERIDENT '=' YES ';'
+{
+ FlagSet(&wconf->flags, WFLAG_USERIDENT);
+} | USERIDENT '=' NO ';'
+{
+ FlagClr(&wconf->flags, WFLAG_USERIDENT);
+};
+
+webircignoreident: IGNOREIDENT '=' YES ';'
+{
+ FlagSet(&wconf->flags, WFLAG_NOIDENT);
+} | IGNOREIDENT '=' NO ';'
+{
+ FlagClr(&wconf->flags, WFLAG_NOIDENT);
+};
