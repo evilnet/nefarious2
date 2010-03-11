@@ -500,7 +500,8 @@ stats_webirc(struct Client* to, const struct StatDesc *sd, char* param)
   const struct WebIRCConf *wline = conf_get_webirc_list();
 
   for (; wline; wline = wline->next)
-    send_reply(to, RPL_STATSWLINE, wline->usermask, wline->hostmask);
+    send_reply(to, RPL_STATSWLINE, wline->usermask, wline->hostmask,
+               (wline->ident ? wline->ident : ""));
 }
 
 /** Display objects allocated (and total memory used by them) for

@@ -3,6 +3,22 @@
 
 2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added WebIRC block ident field.
+
+	* include/s_conf.h: Added WebIRC block ident field.
+
+	* ircd/ircd_lexer.l: Added WebIRC block ident field.
+
+	* ircd/ircd_parser.y: Added WebIRC block ident field.
+
+	* ircd/m_webirc.c: Added WebIRC block ident field.
+
+	* ircd/s_err.c: Added WebIRC block ident field to STATS W.
+
+	* ircd/s_stats.c: Added WebIRC block ident field to STATS W.
+
+2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/channel.h: Added channel mode 'd' to the list of channel
 	modes.
 

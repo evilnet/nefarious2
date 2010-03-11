@@ -178,6 +178,7 @@ static void free_slist(struct SLink **link) {
 %token TOK_IPV4 TOK_IPV6
 %token DNS
 %token WEBIRC
+%token IDENT
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -1184,13 +1185,14 @@ webircblock: WEBIRC
     MyFree(wconf->usermask);
     MyFree(wconf->hostmask);
     MyFree(wconf->passwd);
+    MyFree(wconf->ident);
     MyFree(wconf);
     parse_error("WebIRC block must match on at least one of username, host");
   }
   dconf = NULL;
 };
 webircitems: webircitem webircitems | webircitem;
-webircitem: webircuhost | webircusername | webircpass;
+webircitem: webircuhost | webircusername | webircpass | webircident;
 webircuhost: HOST '=' QSTRING ';'
 {
   char *h;
@@ -1220,5 +1222,11 @@ webircpass: PASS '=' QSTRING ';'
 {
   MyFree(wconf->passwd);
   wconf->passwd = $3;
+};
+
+webircident: IDENT '=' QSTRING ';'
+{
+  MyFree(wconf->ident);
+  wconf->ident = $3;
 };
 

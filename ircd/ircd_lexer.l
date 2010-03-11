@@ -106,6 +106,7 @@ static struct lexer_token {
   TOKEN(PROGRAM),
   TOKEN(DNS),
   TOKEN(WEBIRC),
+  TOKEN(IDENT),
 #undef TOKEN
   { "administrator", ADMIN },
   { "apass_opmode", TPRIV_APASS_OPMODE },

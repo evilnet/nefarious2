@@ -91,6 +91,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "s_conf.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -110,6 +111,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char* ipaddr = NULL;
   char* password = NULL;
   int res = 0;
+  struct WebIRCConf *wline;
 
   if (IsServerPort(cptr))
     return exit_client(cptr, sptr, &me, "Use a different port");
@@ -129,7 +131,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!password || !hostname || !ipaddr)
     return exit_client(cptr, sptr, &me, "WEBIRC parameters supplied are invalid");
 
-  find_webirc_conf(cptr, password, &res);
+  wline = find_webirc_conf(cptr, password, &res);
   switch (res)
   {
     case 2:
@@ -171,6 +173,12 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!HasHiddenHost(sptr))
       ircd_strncpy(cli_user(sptr)->host, hostname, HOSTLEN);
     ircd_strncpy(cli_user(sptr)->realhost, hostname, HOSTLEN);
+  }
+
+  /* Set users ident to WebIRC block specified ident. */
+  if (!EmptyString(wline->ident)) {
+    ircd_strncpy(cli_username(cptr), wline->ident, USERLEN);
+    SetGotId(cptr);
   }
 
   SetWebIRC(cptr);

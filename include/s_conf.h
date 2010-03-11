@@ -157,6 +157,7 @@ struct WebIRCConf {
   struct irc_in_addr  address;
   unsigned char       bits;
   char*               passwd;
+  char*               ident;
 };
 
 /*
