@@ -3,6 +3,10 @@
 
 2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_webirc.c: Minor change to code order.
+
+2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added WebIRC block ident field.
 
 	* include/s_conf.h: Added WebIRC block ident field.

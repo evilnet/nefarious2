@@ -175,13 +175,14 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ircd_strncpy(cli_user(sptr)->realhost, hostname, HOSTLEN);
   }
 
+  /* From this point the user is a WEBIRC user. */
+  SetWebIRC(cptr);
+
   /* Set users ident to WebIRC block specified ident. */
   if (!EmptyString(wline->ident)) {
     ircd_strncpy(cli_username(cptr), wline->ident, USERLEN);
     SetGotId(cptr);
   }
-
-  SetWebIRC(cptr);
 
   return 0;
 }
