@@ -1,5 +1,5 @@
 /*
- * IRC - Internet Relay Chat, ircd/m_webirc.c
+ * IRC - Internet Relay Chat, ircd/m_mark.c
  * Copyright (C) 1990 Jarkko Oikarinen and
  *                    University of Oulu, Computing Center
  *
@@ -84,114 +84,35 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
-#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "mark.h"
+#include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
-#include "s_conf.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
 /*
- * m_webirc
- *
- * parv[0] = sender prefix
- * parv[1] = password           (WEBIRC Password)
- * parv[2] = username           (ignored)
- * parv[3] = hostname           (Real host)
- * parv[4] = ip                 (Real IP in ASCII)
+ * ms_mark - server message handler
  */
-int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
-  struct irc_in_addr addr;
-  char* hostname = NULL;
-  char* ipaddr = NULL;
-  char* password = NULL;
-  int res = 0;
-  struct WebIRCConf *wline;
+  struct Client* acptr;
 
-  if (IsServerPort(cptr))
-    return exit_client(cptr, sptr, &me, "Use a different port");
+  if (!IsServer(sptr))
+    return protocol_violation(sptr, "MARK from non-server %s", cli_name(sptr));
 
-  if (parc < 5)
-    return need_more_params(sptr, "WEBIRC");
+  if (!strcmp(parv[2], MARK_WEBIRC)) {
+    if(parc < 3)
+      return protocol_violation(sptr, "MARK webirc received too few parameters (%u)", parc);
 
-  /* These shouldn't be empty, but just in case... */
-  if (!EmptyString(parv[1]))
-    password = parv[1];
-  if (!EmptyString(parv[3]))
-    hostname = parv[3];
-  if (!EmptyString(parv[4]))
-    ipaddr = parv[4];
-
-  /* And to be extra sure... */
-  if (!password || !hostname || !ipaddr)
-    return exit_client(cptr, sptr, &me, "WEBIRC parameters supplied are invalid");
-
-  wline = find_webirc_conf(cptr, password, &res);
-  switch (res)
-  {
-    case 2:
-      return exit_client(cptr, sptr, &me, "WEBIRC Not authorized from your host");
-      break;
-    case 1:
-      return exit_client(cptr, sptr, &me, "WEBIRC Password invalid for your host");
-      break;
-  }
-
-  /* Send connection notice to inform opers of the change of IP and host. */
-  if (feature_bool(FEAT_CONNEXIT_NOTICES))
-    sendto_opmask_butone_global(&me, SNO_CONNEXIT,
-                         "WEBIRC Client host: from %s [%s] to %s [%s]",
-                         cli_sockhost(sptr), cli_sock_ip(sptr), hostname, ipaddr);
-
-  /* Copy old details to cli_webircip and cli_webirchost. */
-  memcpy(&cli_webircip(sptr), &cli_ip(sptr), sizeof(cli_ip(sptr)));
-  ircd_strncpy(cli_webirchost(sptr), cli_sockhost(sptr), HOSTLEN);
-
-  /* Undo original IP connection in IPcheck. */
-  IPcheck_connect_fail(sptr);
-  /* Need to disconnect original IP otherwise the count will never go down. */
-  if (IsIPChecked(sptr))
-    IPcheck_disconnect(sptr);
-  ClearIPChecked(sptr);
-
-  /* Update the IP and charge them as a remote connect. */
-  ircd_aton(&addr, ipaddr);
-  memcpy(&cli_ip(sptr), &addr, sizeof(cli_ip(sptr)));
-  IPcheck_remote_connect(sptr);
-
-  /* Change cli_sock_ip() and cli_sockhost() to spoofed host and IP. */
-  ircd_strncpy(cli_sock_ip(sptr), ipaddr, SOCKIPLEN);
-  ircd_strncpy(cli_sockhost(sptr), hostname, HOSTLEN);
-
-  /* Update host names if already set. */
-  if (cli_user(sptr)) {
-    if (!HasHiddenHost(sptr))
-      ircd_strncpy(cli_user(sptr)->host, hostname, HOSTLEN);
-    ircd_strncpy(cli_user(sptr)->realhost, hostname, HOSTLEN);
-  }
-
-  /* From this point the user is a WEBIRC user. */
-  SetWebIRC(cptr);
-
-  if (FlagHas(&wline->flags, WFLAG_NOIDENT))
-    ClrFlag(sptr, FLAG_GOTID);
-
-  if (FlagHas(&wline->flags, WFLAG_USERIDENT))
-    SetWebIRCUserIdent(cptr);
-
-  if (!EmptyString(wline->description)) {
-    ircd_strncpy(cli_webirc(cptr), wline->description, BUFSIZE);
-  }
-
-  /* Set users ident to WebIRC block specified ident. */
-  if (!EmptyString(wline->ident)) {
-    ircd_strncpy(cli_username(cptr), wline->ident, USERLEN);
-    SetGotId(cptr);
+    if ((acptr = FindUser(parv[1]))) {
+      ircd_strncpy(cli_webirc(acptr), parv[3], BUFSIZE);
+      sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_WEBIRC, parv[3]);
+    }
   }
 
   return 0;

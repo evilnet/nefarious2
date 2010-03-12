@@ -404,6 +404,10 @@ struct Client;
 #define TOK_WEBIRC		"WEBIRC"
 #define CMD_WEBIRC		MSG_WEBIRC, TOK_WEBIRC
 
+#define MSG_MARK		"MARK"
+#define TOK_MARK		"MK"
+#define CMD_MARK		MSG_MARK, TOK_MARK
+
 /*
  * Constants
  */

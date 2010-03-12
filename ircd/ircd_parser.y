@@ -1194,7 +1194,8 @@ webircblock: WEBIRC
   dconf = NULL;
 };
 webircitems: webircitem webircitems | webircitem;
-webircitem: webircuhost | webircusername | webircpass | webircident | webircuserident | webircignoreident;
+webircitem: webircuhost | webircusername | webircpass | webircident | webircuserident
+          | webircignoreident | webircdescription;
 webircuhost: HOST '=' QSTRING ';'
 {
   char *h;
@@ -1247,3 +1248,10 @@ webircignoreident: IGNOREIDENT '=' YES ';'
 {
  FlagClr(&wconf->flags, WFLAG_NOIDENT);
 };
+
+webircdescription: DESCRIPTION '=' QSTRING ';'
+{
+  MyFree(wconf->description);
+  wconf->description = $3;
+};
+

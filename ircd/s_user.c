@@ -41,6 +41,7 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "list.h"
+#include "mark.h"
 #include "match.h"
 #include "motd.h"
 #include "msg.h"
@@ -470,6 +471,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
   if (MyUser(sptr))
   {
     static struct Flags flags; /* automatically initialized to zeros */
+
+    if (cli_webirc(sptr) && !EmptyString(cli_webirc(sptr)))
+      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_WEBIRC, cli_webirc(sptr));
+
     /* To avoid sending +r to the client due to auth-on-connect, set
      * the "old" FLAG_ACCOUNT bit to match the client's value.
      */

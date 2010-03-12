@@ -169,6 +169,7 @@ struct WebIRCConf {
   unsigned char       bits;
   char*               passwd;
   char*               ident;
+  char*               description;
   struct WebIRCFlags  flags;
 };
 

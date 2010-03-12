@@ -219,6 +219,9 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
      *       probably a good place to add them :)
      */
 
+    if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
+      send_reply(sptr, RPL_WHOISWEBIRC, name, cli_webirc(acptr));
+
     if (MyConnect(acptr) && (IsAnOper(sptr) || (!IsNoIdle(acptr) &&
           (!feature_bool(FEAT_HIS_WHOIS_IDLETIME) || sptr == acptr ||
              parc >= 3))))

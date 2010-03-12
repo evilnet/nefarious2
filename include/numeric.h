@@ -247,6 +247,7 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_CHANNELMODEIS    324
 /*      RPL_CHANNELPASSIS    325           IRCnet extension */
 /*      RPL_UNIQOPIS         325           IRCnet extension */
+#define RPL_WHOISWEBIRC      325
 /*      RPL_NOCHANPASS       326           IRCnet extension */
 /*      RPL_CHPASSUNKNOWN    327           IRCnet extension */
 /*      RPL_CHANNEL_URL      328           dalnet, anothernet */

@@ -503,7 +503,8 @@ stats_webirc(struct Client* to, const struct StatDesc *sd, char* param)
     send_reply(to, RPL_STATSWLINE, wline->usermask, wline->hostmask,
                (wline->ident ? wline->ident : "(none)"),
                (FlagHas(&wline->flags, WFLAG_USERIDENT) ? "u" : "-"),
-               (FlagHas(&wline->flags, WFLAG_NOIDENT) ? "i" : "-"));
+               (FlagHas(&wline->flags, WFLAG_NOIDENT) ? "i" : "-"),
+               (wline->description ? wline->description : ""));
 }
 
 /** Display objects allocated (and total memory used by them) for

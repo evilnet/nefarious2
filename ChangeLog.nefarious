@@ -3,6 +3,44 @@
 
 2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added WebIRC block description field.
+
+	* include/client.h: Added MARK WEBIRC.
+
+	* include/handlers.h: Added MARK command.
+
+	* include/msg.h: Added MARK command.
+
+	* include/numeric.h: Added MARK WEBIRC to WHOIS.
+
+	* include/s_conf.h: Added WebIRC block description field.
+
+	* ircd/Makefile.in: Added MARK command.
+
+	* ircd/ircd_parser.y: Added WebIRC block description field.
+
+	* ircd/m_check.c: Added MARK WEBIRC to CHECK.
+
+	* ircd/m_webirc.c: Added MARK WEBIRC.
+
+	* ircd/m_whois.c: Added MARK WEBIRC to WHOIS.
+
+	* ircd/parse.c: Added MARK command.
+
+	* ircd/s_conf.c: Added WebIRC block description field.
+
+	* ircd/s_err.c: Added MARK WEBIRC to WHOIS.
+
+	* ircd/s_stats.c: Added WebIRC block description field.
+
+	* ircd/s_user.c: Added MARK WEBIRC.
+
+	* include/mark.h: Added MARK command.
+
+	* ircd/m_mark.c: Added MARK command.
+
+2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_conf.c: Fix for memory leak on rehash.
 
 2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>

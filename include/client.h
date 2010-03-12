@@ -276,6 +276,9 @@ struct Client {
 
   struct irc_in_addr cli_webircip;  /**< WEBIRC Client IP address. */
   char cli_webirchost[HOSTLEN + 1]; /**< WEBIRC Client host name. */
+
+  /* MARKs */
+  char cli_webirc[BUFSIZE + 1];     /**< webirc description */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -339,6 +342,8 @@ struct Client {
 #define cli_webircip(cli)       ((cli)->cli_webircip)
 /** Get client WEBIRC host name. */
 #define cli_webirchost(cli)     ((cli)->cli_webirchost)
+/** Get client WEBIRC info line. */
+#define cli_webirc(cli)        ((cli)->cli_webirc)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))
