@@ -847,6 +847,7 @@ void conf_erase_webirc_list(void)
     MyFree(p->hostmask);
     MyFree(p->usermask);
     MyFree(p->passwd);
+    MyFree(p->ident);
     MyFree(p);
   }
   webircConfList = 0;

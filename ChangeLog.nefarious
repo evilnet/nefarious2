@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_conf.c: Fix for memory leak on rehash.
+
 2010-03-11  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added WebIRC block options userident and
