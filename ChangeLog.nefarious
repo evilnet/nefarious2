@@ -3,6 +3,10 @@
 
 2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_serv.c: Propagate MARK WEBIRC at burst.
+
+2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added WebIRC block description field.
 
 	* include/client.h: Added MARK WEBIRC.

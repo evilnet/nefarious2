@@ -254,6 +254,9 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
 		    *s ? "+" : "", s, *s ? " " : "",
 		    iptobase64(xxx_buf, &cli_ip(acptr), sizeof(xxx_buf), IsIPv6(cptr)),
 		    NumNick(acptr), cli_info(acptr));
+
+      if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
+        sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_WEBIRC, cli_webirc(acptr));
     }
   }
   /*
