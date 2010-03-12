@@ -408,6 +408,10 @@ struct Client;
 #define TOK_MARK		"MK"
 #define CMD_MARK		MSG_MARK, TOK_MARK
 
+#define MSG_SVSNOOP		"SVSNOOP"
+#define TOK_SVSNOOP		"SO"
+#define CMD_SVSNOOP		MSG_SVSNOOP, TOK_SVSNOOP
+
 /*
  * Constants
  */

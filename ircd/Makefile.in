@@ -179,6 +179,7 @@ IRCD_SRC = \
 	m_stats.c \
 	m_svsident.c \
 	m_svsinfo.c \
+	m_svsnoop.c \
 	m_svsquit.c \
 	m_time.c \
 	m_topic.c \

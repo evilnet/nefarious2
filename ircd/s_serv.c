@@ -41,6 +41,7 @@
 #include "ircd_crypt.h"
 #include "jupe.h"
 #include "list.h"
+#include "mark.h"
 #include "match.h"
 #include "msg.h"
 #include "msgq.h"

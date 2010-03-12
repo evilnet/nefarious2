@@ -3,6 +3,20 @@
 
 2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/handlers.h: Added SVSNOOP command.
+
+	* include/msg.h: Added SVSNOOP command.
+
+	* ircd/Makefile.in: Added SVSNOOP command.
+
+	* ircd/parse.c: Added SVSNOOP command.
+
+	* ircd/s_serv.c: Added missing #include for mark.h
+
+	* ircd/m_svsnoop.c: Added SVSNOOP command.
+
+2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_serv.c: Propagate MARK WEBIRC at burst.
 
 2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
