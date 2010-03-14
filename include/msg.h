@@ -416,6 +416,10 @@ struct Client;
 #define TOK_SVSMODE		"SM"
 #define CMD_SVSMODE		MSG_SVSMODE, TOK_SVSMODE
 
+#define MSG_SVSNICK		"SVSNICK"
+#define TOK_SVSNICK		"SN"
+#define CMD_SVSNICK		MSG_SVSNICK, TOK_SVSNICK
+
 /*
  * Constants
  */

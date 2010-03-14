@@ -3,6 +3,22 @@
 
 2010-03-14  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/handlers.h: Added SVSNICK command.
+
+	* include/msg.h: Added SVSNICK command.
+
+	* include/s_user.h: Added extern for do_nick_name().
+
+	* ircd/Makefile.in: Added SVSNICK command.
+
+	* ircd/m_nick.c: Changed definition of do_nick_name().
+
+	* ircd/parse.c: Added SVSNICK command.
+
+	* ircd/m_svsnick.c: Added SVSNICK command.
+
+2010-03-14  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/handlers.h: Added SVSMODE command.
 
 	* include/msg.h: Added SVSMODE command.

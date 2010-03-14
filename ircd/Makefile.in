@@ -180,6 +180,7 @@ IRCD_SRC = \
 	m_svsident.c \
 	m_svsinfo.c \
 	m_svsmode.c \
+	m_svsnick.c \
 	m_svsnoop.c \
 	m_svsquit.c \
 	m_time.c \
