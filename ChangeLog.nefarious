@@ -1,6 +1,22 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-14  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/handlers.h: Added SVSMODE command.
+
+	* include/msg.h: Added SVSMODE command.
+
+	* include/s_user.h: Modified set_user_mode() to work with SVSMODE.
+
+	* ircd/Makefile.in: Added SVSMODE command.
+
+	* ircd/parse.c: Added SVSMODE command.
+
+	* ircd/s_user.c: Added MAGIC_SVSMODE_OVERRIDE for set_user_mode().
+
+	* ircd/m_svsmode.c: Added SVSMODE command.
+
 2010-03-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/handlers.h: Added SVSNOOP command.

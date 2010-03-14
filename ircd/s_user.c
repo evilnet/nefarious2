@@ -981,8 +981,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   int prop = 0;
   int do_host_hiding = 0;
   int force = 0;
+  int is_svsmode = 0;
   char* account = NULL;
   struct Client *acptr = NULL;
+
+  if (MyUser(sptr) && (((int)cptr) == MAGIC_SVSMODE_OVERRIDE))
+  {
+    is_svsmode = 1;
+    cptr = sptr;
+  }
 
   what = MODE_ADD;
 
@@ -1179,7 +1186,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * Evaluate rules for new user mode
    * Stop users making themselves operators too easily:
    */
-  if (!IsServer(cptr))
+  if (!IsServer(cptr) && !is_svsmode)
   {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(acptr))
       ClearOper(acptr);

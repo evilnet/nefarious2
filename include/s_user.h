@@ -15,6 +15,8 @@ struct Channel;
 struct MsgBuf;
 struct Flags;
 
+#define MAGIC_SVSMODE_OVERRIDE 0x12345678
+
 /*
  * Macros
  */
