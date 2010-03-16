@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/handlers.h: Added SVSPART command.
+
+	* include/msg.h: Added SVSPART command.
+
+	* ircd/Makefile.in: Added SVSPART command.
+
+	* ircd/parse.c: Added SVSPART command.
+
+	* ircd/m_svspart.c: Added SVSPART command.
+
 2010-03-14  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/handlers.h: Added SVSNICK command.

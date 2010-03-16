@@ -420,6 +420,10 @@ struct Client;
 #define TOK_SVSNICK		"SN"
 #define CMD_SVSNICK		MSG_SVSNICK, TOK_SVSNICK
 
+#define MSG_SVSPART		"SVSPART"
+#define TOK_SVSPART		"SP"
+#define CMD_SVSPART		MSG_SVSPART, TOK_SVSPART
+
 /*
  * Constants
  */
