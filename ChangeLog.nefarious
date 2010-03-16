@@ -3,6 +3,18 @@
 
 2010-03-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/handlers.h: Added SVSJOIN command.
+
+	* include/msg.h: Added SVSJOIN command.
+
+	* ircd/Makefile.in: Added SVSJOIN command.
+
+	* ircd/parse.c: Added SVSJOIN command.
+
+	* ircd/m_svsjoin.c: Added SVSJOIN command.
+
+2010-03-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/handlers.h: Added SVSPART command.
 
 	* include/msg.h: Added SVSPART command.

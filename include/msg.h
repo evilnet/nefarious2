@@ -424,6 +424,10 @@ struct Client;
 #define TOK_SVSPART		"SP"
 #define CMD_SVSPART		MSG_SVSPART, TOK_SVSPART
 
+#define MSG_SVSJOIN		"SVSJOIN"
+#define TOK_SVSJOIN		"SJ"
+#define CMD_SVSJOIN		MSG_SVSJOIN, TOK_SVSJOIN
+
 /*
  * Constants
  */
