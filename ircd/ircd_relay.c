@@ -262,6 +262,15 @@ void relay_directed_message(struct Client* sptr, char* name, char* server, const
   if (host)
     *--host = '%';
 
+  /*
+   * +R check, if target is +R and we're not +r (or opered) then
+   * deny the message.
+   */
+  if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "PRIVMSG", cli_name(acptr));
+    return;
+  }
+
   if (!(is_silenced(sptr, acptr)))
     sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%s :%s", name, text);
 }
@@ -311,6 +320,15 @@ void relay_directed_notice(struct Client* sptr, char* name, char* server, const 
   if (host)
     *--host = '%';
 
+  /*
+   * +R check, if target is +R and we're not +r (or opered) then
+   * deny the message.
+   */
+  if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "NOTICE", cli_name(acptr));
+    return;
+  }
+
   if (!(is_silenced(sptr, acptr)))
     sendcmdto_one(sptr, CMD_NOTICE, acptr, "%s :%s", name, text);
 }
@@ -339,6 +357,15 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
        check_target_limit(sptr, acptr, cli_name(acptr), 0)) ||
       is_silenced(sptr, acptr))
     return;
+
+  /*
+   * +R check, if target is +R and we're not +r (or opered) then
+   * deny the message.
+   */
+  if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "PRIVMSG", cli_name(acptr));
+    return;
+  }
 
   /*
    * send away message if user away
@@ -375,6 +402,16 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
        check_target_limit(sptr, acptr, cli_name(acptr), 0)) ||
       is_silenced(sptr, acptr))
     return;
+
+  /*
+   * +R check, if target is +R and we're not +r (or opered) then
+   * deny the message.
+   */
+  if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "NOTICE", cli_name(acptr));
+    return;
+  }
+
   /*
    * deliver the message
    */

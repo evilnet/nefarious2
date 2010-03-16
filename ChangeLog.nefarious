@@ -3,6 +3,22 @@
 
 2010-03-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added user mode +R (account only PM).
+
+	* include/numeric.h: Added user mode +R (account only PM).
+
+	* ircd/ircd_relay.c: Added user mode +R (account only PM).
+
+	* ircd/m_invite.c: Added user mode +R (account only PM).
+
+	* ircd/m_whois.c: Added user mode +R (account only PM).
+
+	* ircd/s_err.c: Added user mode +R (account only PM).
+
+	* ircd/s_user.c: Added user mode +R (account only PM).
+
+2010-03-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/handlers.h: Added SVSJOIN command.
 
 	* include/msg.h: Added SVSJOIN command.

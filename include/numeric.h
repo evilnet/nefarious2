@@ -260,6 +260,7 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_LISTUSAGE        334        /* Undernet extension */
 /*	RPL_COMMANDSYNTAX    334	   Dalnet */
 /*	RPL_LISTSYNTAX	     334	   unreal */
+#define RPL_WHOISACCOUNTONLY 335	/* Nefarious extension */
 /*      RPL_CHANPASSOK       338           IRCnet extension (?)*/
 #define	RPL_WHOISACTUALLY    338	/* Undernet extension, dalnet */
 /*	RPL_BADCHANPASS	     339           IRCnet extension (?) */
@@ -420,6 +421,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*	ERR_KILLDENY         485	   unreal */
 /*	ERR_CANTKICKADMIN    485	   PTlink */
 /*	ERR_HTMDISABLED      486	   unreal */
+#define ERR_ACCOUNTONLY      486	/* Nefarious extension */
 /*      ERR_CHANTOORECENT    487           IRCnet extension (?) */
 /*      ERR_TSLESSCHAN       488           IRCnet extension (?) */
 #define ERR_VOICENEEDED      489        /* Undernet extension */

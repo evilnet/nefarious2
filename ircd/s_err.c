@@ -702,7 +702,7 @@ static Numeric replyTable[] = {
 /* 334 */
   { RPL_LISTUSAGE, ":%s", "334" },
 /* 335 */
-  { 0 },
+  { RPL_WHOISACCOUNTONLY, "%s :only accepts messages from registered users", "335" },
 /* 336 */
   { 0 },
 /* 337 */
@@ -1004,7 +1004,7 @@ static Numeric replyTable[] = {
 /* 485 */
   { 0 },
 /* 486 */
-  { 0 },
+  { ERR_ACCOUNTONLY, "%s :You need to login to services to %s %s", "486" },
 /* 487 */
   { 0 },
 /* 488 */

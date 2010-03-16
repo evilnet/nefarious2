@@ -508,6 +508,7 @@ static const struct UserMode {
   { FLAG_NOCHAN,       'n' },
   { FLAG_HIDE_OPER,    'H' },
   { FLAG_NOIDLE,       'I' },
+  { FLAG_ACCOUNTONLY,  'R' },
   { FLAG_WHOIS_NOTICE, 'W' }
 };
 
@@ -821,6 +822,11 @@ int whisper(struct Client* source, const char* nick, const char* channel,
   }
   if (is_silenced(source, dest))
     return 0;
+
+  if (IsAccountOnly(dest) && !IsAccount(source) && !IsOper(source) && (dest != source)) {
+    send_reply(source, ERR_ACCOUNTONLY, cli_name(dest), (is_notice) ? "CNOTICE" : "CPRIVMSG", cli_name(dest));
+    return 0;
+  }
           
   if (is_notice)
     sendcmdto_one(source, CMD_NOTICE, dest, "%C :%s", dest, text);
@@ -1164,6 +1170,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetNoChan(acptr);
         else
           ClearNoChan(acptr);
+        break;
+      case 'R':
+        if (what == MODE_ADD)
+          SetAccountOnly(acptr);
+        else
+          ClearAccountOnly(acptr);
         break;
       case 'x':
         if (what == MODE_ADD)

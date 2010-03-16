@@ -172,6 +172,7 @@ enum Flag
     FLAG_DEBUG,                     /**< send global debug/anti-hack info */
     FLAG_ACCOUNT,                   /**< account name has been set */
     FLAG_HIDDENHOST,                /**< user's host is hidden */
+
     FLAG_WHOIS_NOTICE,              /**< user can see WHOIS notices */
     FLAG_HIDE_OPER,                 /**< user's oper status is hidden */
     FLAG_NOCHAN,                    /**< user's channels are hidden in WHOIS */
@@ -180,6 +181,9 @@ enum Flag
     FLAG_UHNAMES,                   /**< Client supports user-host NAMES replies */
     FLAG_WEBIRC,                    /**< Client is a WEBIRC client */
     FLAG_WEBIRC_USERIDENT,          /**< Client should use USER username param as ident */
+    FLAG_ACCOUNTONLY,               /**< hide privmsgs/notices if user is
+                                       not authed or opered */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -626,6 +630,8 @@ struct Client {
 #define IsWebIRC(x)             HasFlag(x, FLAG_WEBIRC)
 /** Return non-zero if the client should use USER username as ident. */
 #define IsWebIRCUserIdent(x)    HasFlag(x, FLAG_WEBIRC_USERIDENT)
+/** Return non-zero if the client only accepts messages from clients with an account. */
+#define IsAccountOnly(x)	HasFlag(x, FLAG_ACCOUNTONLY)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -690,6 +696,8 @@ struct Client {
 #define SetWebIRC(x)            SetFlag(x, FLAG_WEBIRC)
 /** Mark a client as having to use USER username as ident. */
 #define SetWebIRCUserIdent(x)   SetFlag(x, FLAG_WEBIRC_USERIDENT)
+/** Mark a client as only accepting messages from users with accounts. */
+#define SetAccountOnly(x)	SetFlag(x, FLAG_ACCOUNTONLY)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -739,6 +747,8 @@ struct Client {
 #define ClearWebIRC(x)          ClrFlag(x, FLAG_WEBIRC)
 /** Client no longer has to use USER username as ident. */
 #define ClearWebIRCUserIdent(x) ClrFlag(x, FLAG_WEBIRC_USERIDENT)
+/** Remove mode +R (only accept pms from users with an account) from the client. */
+#define ClearAccountOnly(x)	ClrFlag(x, FLAG_ACCOUNTONLY)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */
