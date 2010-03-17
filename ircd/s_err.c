@@ -1002,7 +1002,7 @@ static Numeric replyTable[] = {
 /* 484 */
   { ERR_ISCHANSERVICE, "%s %s :Cannot kill, kick or deop a network service", "484" },
 /* 485 */
-  { 0 },
+  { ERR_COMMONCHANSONLY, "%s :You must share at least one channel with this user in order to %s them", "485" },
 /* 486 */
   { ERR_ACCOUNTONLY, "%s :You need to login to services to %s %s", "486" },
 /* 487 */

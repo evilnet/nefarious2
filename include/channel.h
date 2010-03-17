@@ -451,5 +451,6 @@ extern int apply_ban(struct Ban **banlist, struct Ban *newban, int free);
 extern void free_ban(struct Ban *ban);
 
 extern int SetAutoChanModes(struct Channel *chptr);
+extern int common_chan_count(struct Client *a, struct Client *b, int max);
 
 #endif /* INCLUDED_channel_h */

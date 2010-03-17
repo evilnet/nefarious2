@@ -3,6 +3,30 @@
 
 2010-03-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/channel.h: Added common_chan_count() function.
+
+	* include/client.h: Added user mode +q (PMs from users on common
+	channels only).
+
+	* include/numeric.h: Added user mode +q (PMs from users on common
+	channels only).
+
+	* ircd/channel.c: Added common_chan_count() function.
+
+	* ircd/ircd_relay.c: Added user mode +q (PMs from users on common
+	channels only).
+
+	* ircd/m_invite.c: Added user mode +q (PMs from users on common
+	channels only).
+
+	* ircd/s_err.c: Added user mode +q (PMs from users on common
+	channels only).
+
+	* ircd/s_user.c: Added user mode +q (PMs from users on common
+	channels only).
+
+2010-03-17  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added user mode +D (deaf to PM).
 
 	* include/numeric.h: Added user mode +D (deaf to PM).

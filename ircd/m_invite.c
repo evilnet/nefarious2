@@ -176,6 +176,11 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
 
+  if (IsCommonChansOnly(acptr) && !IsAnOper(sptr) && !common_chan_count(acptr, sptr, 1)) {
+    send_reply(sptr, ERR_COMMONCHANSONLY, cli_name(acptr), "INVITE");
+    return 0;
+  }
+
   if (check_target_limit(sptr, acptr, cli_name(acptr), 0))
     return 0;
 

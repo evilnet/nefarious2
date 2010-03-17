@@ -506,6 +506,7 @@ static const struct UserMode {
   { FLAG_ACCOUNT,      'r' },
   { FLAG_HIDDENHOST,   'x' },
   { FLAG_NOCHAN,       'n' },
+  { FLAG_COMMONCHANSONLY, 'q' },
   { FLAG_PRIVDEAF,     'D' },
   { FLAG_HIDE_OPER,    'H' },
   { FLAG_NOIDLE,       'I' },
@@ -1176,6 +1177,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetNoChan(acptr);
         else
           ClearNoChan(acptr);
+        break;
+      case 'q':
+        if (what == MODE_ADD)
+          SetCommonChansOnly(acptr);
+        else
+          ClearCommonChansOnly(acptr);
         break;
       case 'R':
         if (what == MODE_ADD)

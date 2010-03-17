@@ -184,6 +184,8 @@ enum Flag
     FLAG_ACCOUNTONLY,               /**< hide privmsgs/notices if user is
                                        not authed or opered */
     FLAG_PRIVDEAF,                  /**< Client is deaf to all private messages */
+    FLAG_COMMONCHANSONLY,           /**< SNIRCD_q: hide privmsgs/notices if in no
+                                         common channels (with +ok exceptions) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -635,6 +637,8 @@ struct Client {
 #define IsAccountOnly(x)	HasFlag(x, FLAG_ACCOUNTONLY)
 /** Return non-zero if the client is private deaf */
 #define IsPrivDeaf(x)           HasFlag(x, FLAG_PRIVDEAF)
+/** Return non-zero if the client has set mode +q (common chans only). */
+#define IsCommonChansOnly(x)    HasFlag(x, FLAG_COMMONCHANSONLY)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -703,6 +707,8 @@ struct Client {
 #define SetAccountOnly(x)	SetFlag(x, FLAG_ACCOUNTONLY)
 /** Mark a client as being private deaf. */
 #define SetPrivDeaf(x)          SetFlag(x, FLAG_PRIVDEAF)
+/** Mark a client as having mode +q (common chans only). */
+#define SetCommonChansOnly(x)   SetFlag(x, FLAG_COMMONCHANSONLY)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -756,6 +762,8 @@ struct Client {
 #define ClearAccountOnly(x)	ClrFlag(x, FLAG_ACCOUNTONLY)
 /** Client is no longer private deaf. */
 #define ClearPrivDeaf(x)        ClrFlag(x, FLAG_PRIVDEAF)
+/** Remove mode +q (common chans only) from a client */
+#define ClearCommonChansOnly(x) ClrFlag(x, FLAG_COMMONCHANSONLY)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */
