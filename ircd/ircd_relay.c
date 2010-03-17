@@ -271,6 +271,15 @@ void relay_directed_message(struct Client* sptr, char* name, char* server, const
     return;
   }
 
+  /*
+   * +D check, if target is +D and we're not opered then deny
+   * the message.
+   */
+  if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "PRIVMSG", cli_name(acptr));
+    return;
+  }
+
   if (!(is_silenced(sptr, acptr)))
     sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%s :%s", name, text);
 }
@@ -329,6 +338,15 @@ void relay_directed_notice(struct Client* sptr, char* name, char* server, const 
     return;
   }
 
+  /*
+   * +D check, if target is +D and we're not opered then deny
+   * the message.
+   */
+  if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "NOTICE", cli_name(acptr));
+    return;
+  }
+
   if (!(is_silenced(sptr, acptr)))
     sendcmdto_one(sptr, CMD_NOTICE, acptr, "%s :%s", name, text);
 }
@@ -364,6 +382,15 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
    */
   if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
     send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "PRIVMSG", cli_name(acptr));
+    return;
+  }
+
+  /*
+   * +D check, if target is +D and we're not opered then deny
+   * the message.
+   */
+  if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "PRIVMSG", cli_name(acptr));
     return;
   }
 
@@ -409,6 +436,15 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
    */
   if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr) && (acptr != sptr)) {
     send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "NOTICE", cli_name(acptr));
+    return;
+  }
+
+  /*
+   * +D check, if target is +D and we're not opered then deny
+   * the message.
+   */
+  if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "NOTICE", cli_name(acptr));
     return;
   }
 

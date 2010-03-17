@@ -664,7 +664,7 @@ static Numeric replyTable[] = {
 /* 315 */
   { RPL_ENDOFWHO, "%s :End of /WHO list.", "315" },
 /* 316 */
-  { 0 },
+  { RPL_WHOISPRIVDEAF, "%s :does not accept private messages", "316" },
 /* 317 */
   { RPL_WHOISIDLE, "%s %ld %ld :seconds idle, signon time", "317" },
 /* 318 */
@@ -1006,7 +1006,7 @@ static Numeric replyTable[] = {
 /* 486 */
   { ERR_ACCOUNTONLY, "%s :You need to login to services to %s %s", "486" },
 /* 487 */
-  { 0 },
+  { ERR_PRIVDEAF, "%s :%s to '%s' not delivered: User does not accept private messages", "487" },
 /* 488 */
   { 0 },
 /* 489 */

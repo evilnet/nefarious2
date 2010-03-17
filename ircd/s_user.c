@@ -506,6 +506,7 @@ static const struct UserMode {
   { FLAG_ACCOUNT,      'r' },
   { FLAG_HIDDENHOST,   'x' },
   { FLAG_NOCHAN,       'n' },
+  { FLAG_PRIVDEAF,     'D' },
   { FLAG_HIDE_OPER,    'H' },
   { FLAG_NOIDLE,       'I' },
   { FLAG_ACCOUNTONLY,  'R' },
@@ -825,6 +826,11 @@ int whisper(struct Client* source, const char* nick, const char* channel,
 
   if (IsAccountOnly(dest) && !IsAccount(source) && !IsOper(source) && (dest != source)) {
     send_reply(source, ERR_ACCOUNTONLY, cli_name(dest), (is_notice) ? "CNOTICE" : "CPRIVMSG", cli_name(dest));
+    return 0;
+  }
+
+  if (IsPrivDeaf(dest) && !IsOper(source) && (dest != source)) {
+    send_reply(source, ERR_PRIVDEAF, cli_name(dest), (is_notice) ? "CNOTICE" : "CPRIVMSG", cli_name(dest));
     return 0;
   }
           
@@ -1176,6 +1182,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetAccountOnly(acptr);
         else
           ClearAccountOnly(acptr);
+        break;
+      case 'D':
+        if (what == MODE_ADD)
+          SetPrivDeaf(acptr);
+        else
+          ClearPrivDeaf(acptr);
         break;
       case 'x':
         if (what == MODE_ADD)

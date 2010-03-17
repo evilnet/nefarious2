@@ -219,8 +219,11 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
      *       probably a good place to add them :)
      */
 
-    if (IsAccountOnly(acptr))
+    if (IsAccountOnly(acptr) && !IsPrivDeaf(acptr))
       send_reply(sptr, RPL_WHOISACCOUNTONLY, name);
+
+    if (IsPrivDeaf(acptr))
+      send_reply(sptr, RPL_WHOISPRIVDEAF, name);
 
     if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
       send_reply(sptr, RPL_WHOISWEBIRC, name, cli_webirc(acptr));

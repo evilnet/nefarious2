@@ -90,7 +90,7 @@ typedef unsigned long flagpage_t;
 #define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "dgiknoswxHNOW"
+#define infousermodes "dgiknoswxDHNORW"
 
 /** Operator privileges. */
 enum Priv
@@ -183,6 +183,7 @@ enum Flag
     FLAG_WEBIRC_USERIDENT,          /**< Client should use USER username param as ident */
     FLAG_ACCOUNTONLY,               /**< hide privmsgs/notices if user is
                                        not authed or opered */
+    FLAG_PRIVDEAF,                  /**< Client is deaf to all private messages */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -632,6 +633,8 @@ struct Client {
 #define IsWebIRCUserIdent(x)    HasFlag(x, FLAG_WEBIRC_USERIDENT)
 /** Return non-zero if the client only accepts messages from clients with an account. */
 #define IsAccountOnly(x)	HasFlag(x, FLAG_ACCOUNTONLY)
+/** Return non-zero if the client is private deaf */
+#define IsPrivDeaf(x)           HasFlag(x, FLAG_PRIVDEAF)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -698,6 +701,8 @@ struct Client {
 #define SetWebIRCUserIdent(x)   SetFlag(x, FLAG_WEBIRC_USERIDENT)
 /** Mark a client as only accepting messages from users with accounts. */
 #define SetAccountOnly(x)	SetFlag(x, FLAG_ACCOUNTONLY)
+/** Mark a client as being private deaf. */
+#define SetPrivDeaf(x)          SetFlag(x, FLAG_PRIVDEAF)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -749,6 +754,8 @@ struct Client {
 #define ClearWebIRCUserIdent(x) ClrFlag(x, FLAG_WEBIRC_USERIDENT)
 /** Remove mode +R (only accept pms from users with an account) from the client. */
 #define ClearAccountOnly(x)	ClrFlag(x, FLAG_ACCOUNTONLY)
+/** Client is no longer private deaf. */
+#define ClearPrivDeaf(x)        ClrFlag(x, FLAG_PRIVDEAF)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */
