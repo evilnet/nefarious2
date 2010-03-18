@@ -3,6 +3,18 @@
 
 2010-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added user mode +B (mark user as a bot).
+
+	* include/numeric.h: Added user mode +B (mark user as a bot).
+
+	* ircd/m_whois.c: Added user mode +B (mark user as a bot).
+
+	* ircd/s_err.c: Added user mode +B (mark user as a bot).
+
+	* ircd/s_user.c: Added user mode +B (mark user as a bot).
+
+2010-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Forgot to add q to infousermodes.
 
 2010-03-17  Matthew Beeching  <jobe@mdbnet.co.uk>

@@ -90,7 +90,7 @@ typedef unsigned long flagpage_t;
 #define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "dgiknoqswxDHNORW"
+#define infousermodes "dgiknoqswxBDHNORW"
 
 /** Operator privileges. */
 enum Priv
@@ -186,6 +186,7 @@ enum Flag
     FLAG_PRIVDEAF,                  /**< Client is deaf to all private messages */
     FLAG_COMMONCHANSONLY,           /**< SNIRCD_q: hide privmsgs/notices if in no
                                          common channels (with +ok exceptions) */
+    FLAG_BOT,                       /**< Bot */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -639,6 +640,8 @@ struct Client {
 #define IsPrivDeaf(x)           HasFlag(x, FLAG_PRIVDEAF)
 /** Return non-zero if the client has set mode +q (common chans only). */
 #define IsCommonChansOnly(x)    HasFlag(x, FLAG_COMMONCHANSONLY)
+/** Return non-zero if the client has set +B. */
+#define IsBot(x)                HasFlag(x, FLAG_BOT)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -709,6 +712,8 @@ struct Client {
 #define SetPrivDeaf(x)          SetFlag(x, FLAG_PRIVDEAF)
 /** Mark a client as having mode +q (common chans only). */
 #define SetCommonChansOnly(x)   SetFlag(x, FLAG_COMMONCHANSONLY)
+/** Mark a client as having mode +B (bot). */
+#define SetBot(x)               SetFlag(x, FLAG_BOT)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -764,6 +769,8 @@ struct Client {
 #define ClearPrivDeaf(x)        ClrFlag(x, FLAG_PRIVDEAF)
 /** Remove mode +q (common chans only) from a client */
 #define ClearCommonChansOnly(x) ClrFlag(x, FLAG_COMMONCHANSONLY)
+/** Remove mode +B (bot) flag from the client */
+#define ClearBot(x)             ClrFlag(x, FLAG_BOT)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

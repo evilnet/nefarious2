@@ -262,6 +262,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*	RPL_COMMANDSYNTAX    334	   Dalnet */
 /*	RPL_LISTSYNTAX	     334	   unreal */
 #define RPL_WHOISACCOUNTONLY 335	/* Nefarious extension */
+#define RPL_WHOISBOT         336	/* Nefarious extension */
 /*      RPL_CHANPASSOK       338           IRCnet extension (?)*/
 #define	RPL_WHOISACTUALLY    338	/* Undernet extension, dalnet */
 /*	RPL_BADCHANPASS	     339           IRCnet extension (?) */

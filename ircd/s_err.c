@@ -704,7 +704,7 @@ static Numeric replyTable[] = {
 /* 335 */
   { RPL_WHOISACCOUNTONLY, "%s :only accepts messages from registered users", "335" },
 /* 336 */
-  { 0 },
+  { RPL_WHOISBOT, "%s :is a bot", "336" },
 /* 337 */
   { 0 },
 /* 338 */

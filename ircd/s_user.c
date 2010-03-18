@@ -507,6 +507,7 @@ static const struct UserMode {
   { FLAG_HIDDENHOST,   'x' },
   { FLAG_NOCHAN,       'n' },
   { FLAG_COMMONCHANSONLY, 'q' },
+  { FLAG_BOT,          'B' },
   { FLAG_PRIVDEAF,     'D' },
   { FLAG_HIDE_OPER,    'H' },
   { FLAG_NOIDLE,       'I' },
@@ -1189,6 +1190,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetAccountOnly(acptr);
         else
           ClearAccountOnly(acptr);
+        break;
+      case 'B':
+        if (what == MODE_ADD)
+          SetBot(acptr);
+        else
+          ClearBot(acptr);
         break;
       case 'D':
         if (what == MODE_ADD)

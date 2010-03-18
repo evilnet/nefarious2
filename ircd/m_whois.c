@@ -225,6 +225,9 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
     if (IsPrivDeaf(acptr))
       send_reply(sptr, RPL_WHOISPRIVDEAF, name);
 
+    if (IsBot(acptr))
+      send_reply(sptr, RPL_WHOISBOT, name);
+
     if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
       send_reply(sptr, RPL_WHOISWEBIRC, name, cli_webirc(acptr));
 
