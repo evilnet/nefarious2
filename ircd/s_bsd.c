@@ -580,7 +580,7 @@ static int read_packet(struct Client *cptr, int socket_ready)
 
   if (socket_ready &&
       !(IsUser(cptr) &&
-	DBufLength(&(cli_recvQ(cptr))) > feature_int(FEAT_CLIENT_FLOOD))) {
+	DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr))) {
     switch (os_recv_nonb(cli_fd(cptr), readbuf, sizeof(readbuf), &length)) {
     case IO_SUCCESS:
       if (length)
@@ -619,7 +619,7 @@ static int read_packet(struct Client *cptr, int socket_ready)
     if (length > 0 && dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
       return exit_client(cptr, cptr, &me, "dbuf_put fail");
 
-    if (DBufLength(&(cli_recvQ(cptr))) > feature_int(FEAT_CLIENT_FLOOD))
+    if (DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr))
       return exit_client(cptr, cptr, &me, "Excess Flood");
 
     while (DBufLength(&(cli_recvQ(cptr))) && !NoNewLine(cptr) && 

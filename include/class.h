@@ -47,6 +47,7 @@ struct ConnectionClass {
   struct Privs            privs_dirty;    /**< Indication of which bits in
                                              ConnectionClass::privs are valid. */
   unsigned int            max_sendq;      /**< Maximum client SendQ in bytes. */
+  unsigned int            max_recvq;      /**< Maximum client RecvQ in bytes. */
   unsigned int            max_links;      /**< Maximum connections allowed. */
   unsigned int            ref_count;      /**< Number of references to class. */
   unsigned short          ping_freq;      /**< Ping frequency for clients. */
@@ -69,6 +70,8 @@ struct ConnectionClass {
 #define MaxLinks(x)     ((x)->max_links)
 /** Get maximum SendQ size for \a x. */
 #define MaxSendq(x)     ((x)->max_sendq)
+/** Get maximum RecvQ size for \a x. */
+#define MaxRecvq(x)     ((x)->max_recvq)
 /** Get number of references to \a x. */
 #define Links(x)        ((x)->ref_count)
 
@@ -82,6 +85,8 @@ struct ConnectionClass {
 #define ConfMaxLinks(x) ((x)->conn_class->max_links)
 /** Get maximum SendQ size for ConfItem \a x. */
 #define ConfSendq(x)    ((x)->conn_class->max_sendq)
+/** Get maximum RecvQ size for ConfItem \a x. */
+#define ConfRecvq(x)    ((x)->conn_class->max_recvq)
 /** Get number of references to class in ConfItem \a x. */
 #define ConfLinks(x)    ((x)->conn_class->ref_count)
 /** Get default usermode for ConfItem \a x. */
@@ -107,10 +112,11 @@ extern int get_conf_ping(const struct ConfItem *aconf);
 extern char *get_client_class(struct Client *acptr);
 extern void add_class(char *name, unsigned int ping,
                       unsigned int confreq, unsigned int maxli,
-                      unsigned int sendq);
+                      unsigned int sendq, unsigned int recvq);
 extern void report_classes(struct Client *sptr, const struct StatDesc *sd,
                            char *param);
 extern unsigned int get_sendq(struct Client* cptr);
+extern unsigned int get_recvq(struct Client *cptr);
 
 extern void class_send_meminfo(struct Client* cptr);
 #endif /* INCLUDED_class_h */

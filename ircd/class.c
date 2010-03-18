@@ -102,6 +102,7 @@ void init_class(void)
   ConFreq(connClassList)  = feature_int(FEAT_CONNECTFREQUENCY);
   MaxLinks(connClassList) = feature_int(FEAT_MAXIMUM_LINKS);
   MaxSendq(connClassList) = feature_int(FEAT_DEFAULTMAXSENDQLENGTH);
+  MaxRecvq(connClassList) = feature_int(FEAT_CLIENT_FLOOD);
   connClassList->valid    = 1;
   Links(connClassList)    = 1;
 }
@@ -207,12 +208,12 @@ get_client_class(struct Client *acptr)
  * @param[in] sendq Max SendQ for clients.
  */
 void add_class(char *name, unsigned int ping, unsigned int confreq,
-               unsigned int maxli, unsigned int sendq)
+               unsigned int maxli, unsigned int sendq, unsigned int recvq)
 {
   struct ConnectionClass* p;
 
-  Debug((DEBUG_DEBUG, "Add Class %s: cf: %u pf: %u ml: %u sq: %d",
-         name, confreq, ping, maxli, sendq));
+  Debug((DEBUG_DEBUG, "Add Class %s: cf: %u pf: %u ml: %u sq: %d rq: %d",
+         name, confreq, ping, maxli, sendq, recvq));
   assert(name != NULL);
   p = do_find_class(name, 1);
   if (!p)
@@ -225,6 +226,8 @@ void add_class(char *name, unsigned int ping, unsigned int confreq,
   MaxLinks(p) = maxli;
   MaxSendq(p) = (sendq > 0) ?
      sendq : feature_int(FEAT_DEFAULTMAXSENDQLENGTH);
+  MaxRecvq(p) = (recvq > 0) ?
+     recvq : feature_int(FEAT_CLIENT_FLOOD);
   p->valid = 1;
 }
 
@@ -260,7 +263,7 @@ report_classes(struct Client *sptr, const struct StatDesc *sd,
   for (cltmp = connClassList; cltmp; cltmp = cltmp->next)
     send_reply(sptr, RPL_STATSYLINE, (cltmp->valid ? 'Y' : 'y'),
                ConClass(cltmp), PingFreq(cltmp), ConFreq(cltmp),
-               MaxLinks(cltmp), MaxSendq(cltmp), Links(cltmp) - 1);
+               MaxLinks(cltmp), MaxSendq(cltmp), MaxRecvq(cltmp), Links(cltmp) - 1);
 }
 
 /** Return maximum SendQ length for a client.
@@ -290,6 +293,35 @@ get_sendq(struct Client *cptr)
     }
   }
   return feature_int(FEAT_DEFAULTMAXSENDQLENGTH);
+}
+
+/** Return maximum RecvQ length for a client.
+ * @param[in] cptr Local client to check.
+ * @return Number of bytes allowed in RecvQ for \a cptr.
+ */
+unsigned int
+get_recvq(struct Client *cptr)
+{
+  assert(0 != cptr);
+  assert(0 != cli_local(cptr));
+
+  if (cli_max_recvq(cptr))
+    return cli_max_recvq(cptr);
+
+  else if (cli_confs(cptr)) {
+    struct SLink*     tmp;
+    struct ConnectionClass* cl;
+
+    for (tmp = cli_confs(cptr); tmp; tmp = tmp->next) {
+      if (!tmp->value.aconf || !(cl = tmp->value.aconf->conn_class))
+        continue;
+      if (ConClass(cl) != NULL) {
+        cli_max_recvq(cptr) = MaxRecvq(cl);
+        return cli_max_recvq(cptr);
+      }
+    }
+  }
+  return feature_int(FEAT_CLIENT_FLOOD);
 }
 
 /** Report connection class memory statistics to a client.

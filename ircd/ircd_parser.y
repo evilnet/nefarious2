@@ -73,7 +73,7 @@
 
   int yylex(void);
   /* Now all the globals we need :/... */
-  int tping, tconn, maxlinks, sendq, port, invert, stringno, flags;
+  int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
@@ -122,6 +122,7 @@ static void free_slist(struct SLink **link) {
 %token MAXLINKS
 %token MAXHOPS
 %token SENDQ
+%token RECVQ
 %token NAME
 %token HOST
 %token IP
@@ -420,7 +421,7 @@ classblock: CLASS {
   if (name != NULL)
   {
     struct ConnectionClass *c_class;
-    add_class(name, tping, tconn, maxlinks, sendq);
+    add_class(name, tping, tconn, maxlinks, sendq, recvq);
     c_class = find_class(name);
     MyFree(c_class->default_umode);
     c_class->default_umode = pass;
@@ -435,12 +436,13 @@ classblock: CLASS {
   tconn = 0;
   maxlinks = 0;
   sendq = 0;
+  recvq = 0;
   memset(&privs, 0, sizeof(privs));
   memset(&privs_dirty, 0, sizeof(privs_dirty));
 };
 classitems: classitem classitems | classitem;
 classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
-           classsendq | classusermode | priv;
+           classsendq | classrecvq | classusermode | priv;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -461,6 +463,10 @@ classmaxlinks: MAXLINKS '=' expr ';'
 classsendq: SENDQ '=' sizespec ';'
 {
   sendq = $3;
+};
+classrecvq: RECVQ '=' sizespec ';'
+{
+  recvq = $3;
 };
 classusermode: USERMODE '=' QSTRING ';'
 {

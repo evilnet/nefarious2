@@ -3,6 +3,28 @@
 
 2010-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added recvq class option.
+
+	* include/class.h: Added recvq class optio8n.
+
+	* include/client.h: Added recvq class option.
+
+	* ircd/class.c: Added recvq class option.
+
+	* ircd/ircd_lexer.l: Added recvq class option.
+
+	* ircd/ircd_parser.y: Added recvq class option.
+
+	* ircd/m_check.c: Added recvq class option.
+
+	* ircd/m_oper.c: Added recvq class option.
+
+	* ircd/s_bsd.c: Added recvq class option.
+
+	* ircd/s_err.c: Added recvq class option.
+
+2010-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added user mode +B (mark user as a bot).
 
 	* include/numeric.h: Added user mode +B (mark user as a bot).

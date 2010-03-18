@@ -489,7 +489,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
             (unsigned long)cli_sendB(acptr) / 1024, (unsigned long)cli_sendB(acptr) % 1024, cli_sendM(acptr));
         send_reply(sptr, RPL_DATASTR, outbuf);
         ircd_snprintf(0, outbuf, sizeof(outbuf), "  receiveQ size:: %d bytes (max. %d bytes)",
-           DBufLength(&(cli_recvQ(acptr))), feature_int(FEAT_CLIENT_FLOOD));
+           DBufLength(&(cli_recvQ(acptr))), get_recvq(acptr));
         send_reply(sptr, RPL_DATASTR, outbuf);
         ircd_snprintf(0, outbuf, sizeof(outbuf), "     sendQ size:: %d bytes (max. %d bytes)",
            DBufLength(&(cli_sendQ(acptr))), get_sendq(acptr));                                

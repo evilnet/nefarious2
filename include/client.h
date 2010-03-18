@@ -232,6 +232,7 @@ struct Connection
                                         for parsing. */
   struct ListingArgs* con_listing;   /**< Current LIST status. */
   unsigned int        con_max_sendq; /**< cached max send queue for client */
+  unsigned int        con_max_recvq; /**< cached max recv queue for client */
   unsigned int        con_ping_freq; /**< cached ping freq */
   unsigned short      con_lastsq;    /**< # 2k blocks when sendqueued
                                         called last. */
@@ -389,6 +390,8 @@ struct Client {
 #define cli_listing(cli)	con_listing(cli_connect(cli))
 /** Get cached max SendQ for client. */
 #define cli_max_sendq(cli)	con_max_sendq(cli_connect(cli))
+/** Get cached max RecvQ for client. */
+#define cli_max_recvq(cli)      con_max_recvq(cli_connect(cli))
 /** Get ping frequency for client. */
 #define cli_ping_freq(cli)	con_ping_freq(cli_connect(cli))
 /** Get lastsq for client's connection. */
@@ -466,6 +469,8 @@ struct Client {
 #define con_listing(con)	((con)->con_listing)
 /** Get the maximum permitted SendQ size for the connection. */
 #define con_max_sendq(con)	((con)->con_max_sendq)
+/** Get the maximum permitted RecvQ size for the connection. */
+#define con_max_recvq(con)      ((con)->con_max_recvq)
 /** Get the ping frequency for the connection. */
 #define con_ping_freq(con)	((con)->con_ping_freq)
 /** Get the lastsq for the connection. */
