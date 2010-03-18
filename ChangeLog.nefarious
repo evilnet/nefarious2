@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/client.h: Forgot to add q to infousermodes.
+
 2010-03-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/channel.h: Added common_chan_count() function.
