@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-03-20  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_oper.c: Changed OPER to automatically set Class block
+	usermode on the user as well as oper modes.
+
 2010-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added recvq class option.

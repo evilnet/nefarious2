@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "class.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -136,6 +137,7 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   struct ConfItem* aconf;
   char*            name;
   char*            password;
+  char*            modes;
 
   assert(0 != cptr);
   assert(cptr == sptr);
@@ -186,6 +188,17 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     cli_max_sendq(sptr) = 0; /* Get the sendq from the oper's class */
     cli_max_recvq(sptr) = 0; /* Get the recvq from the oper's class */
     send_umode_out(cptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
+
+    modes = ConfUmode(aconf);
+    if (modes) {
+      char *umodev[] = { NULL, NULL, NULL, NULL };
+      umodev[1] = cli_name(sptr);
+      umodev[2] = modes;
+      old_mode = cli_flags(sptr);
+      set_user_mode(cptr, sptr, 3, umodev, ALLOWMODES_ANY);
+      send_umode(NULL, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
+    }
+
     send_reply(sptr, RPL_YOUREOPER);
 
     sendto_opmask_butone_global(&me, SNO_OLDSNO, "%s (%s@%s) is now operator (%c)",
