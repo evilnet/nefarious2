@@ -206,7 +206,7 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
        send_reply(sptr, RPL_AWAY, name, user->away);
 
     if (SeeOper(sptr,acptr))
-       send_reply(sptr, RPL_WHOISOPERATOR, name);
+       send_reply(sptr, RPL_WHOISOPERATOR, name, feature_str(FEAT_WHOIS_OPER));
 
     if (IsAccount(acptr))
       send_reply(sptr, RPL_WHOISACCOUNT, name, user->account);
@@ -218,6 +218,9 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
     /* Hint: if your looking to add more flags to a user, eg +h, here's
      *       probably a good place to add them :)
      */
+
+    if (IsChannelService(acptr))
+      send_reply(sptr, RPL_WHOISSERVICE, name, feature_str(FEAT_WHOIS_SERVICE));
 
     if (IsAccountOnly(acptr) && !IsPrivDeaf(acptr))
       send_reply(sptr, RPL_WHOISACCOUNTONLY, name);

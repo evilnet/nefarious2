@@ -1,6 +1,21 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2001-03-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added WHOIS_OPER and WHOIS_SERVICE features.
+
+	* include/ircd_features.h: Added WHOIS_OPER and WHOIS_SERVICE
+	features.
+
+	* include/numeric.h: Added RPL_WHOISSERVICE.
+
+	* ircd/ircd_features.c: Added WHOIS_OPER and WHOIS_SERVICE features.
+
+	* ircd/m_whois.c: Added RPL_WHOISSERVICE and changed RPL_WHOISOPER.
+
+	* ircd/s_err.c: Added RPL_WHOISSERVICE and changed RPL_WHOISOPER.
+
 2010-03-20  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_oper.c: Changed OPER to automatically set Class block

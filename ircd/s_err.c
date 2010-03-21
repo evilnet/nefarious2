@@ -652,13 +652,13 @@ static Numeric replyTable[] = {
 /* 309 */
   { 0 },
 /* 310 */
-  { 0 },
+  { RPL_WHOISSERVICE, "%s :%s", "310" },
 /* 311 */
   { RPL_WHOISUSER, "%s %s %s * :%s", "311" },
 /* 312 */
   { RPL_WHOISSERVER, "%s %s :%s", "312" },
 /* 313 */
-  { RPL_WHOISOPERATOR, "%s :is an IRC Operator", "313" },
+  { RPL_WHOISOPERATOR, "%s :%s", "313" },
 /* 314 */
   { RPL_WHOWASUSER, "%s %s %s * :%s", "314" },
 /* 315 */
