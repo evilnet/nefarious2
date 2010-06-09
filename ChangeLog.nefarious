@@ -3,6 +3,11 @@
 
 2010-06-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_check.c: Updated CHECK to only display op level if
+	OPLEVELS feature is enabled.
+
+2010-06-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_check.c: Added op level for users to CHECK <channel>
 	output.
 

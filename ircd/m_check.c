@@ -225,7 +225,7 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
       else
          strcat(ustat, " ");
 
-      if (opped)
+      if (feature_bool(FEAT_OPLEVELS) && opped)
          ircd_snprintf(0, oplvl, sizeof(oplvl), "%3d", OpLevel(lp));
       else
          ircd_snprintf(0, oplvl, sizeof(oplvl), "   ");
