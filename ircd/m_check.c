@@ -182,10 +182,10 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
   struct Client *acptr;
 
    char outbuf[BUFSIZE], ustat[64];
-   int cntr = 0, opcntr = 0, hopcntr = 0, vcntr = 0, clones = 0, bans = 0, excepts = 0, c = 0, authed = 0;
+   int cntr = 0, opcntr = 0, hopcntr = 0, vcntr = 0, clones = 0, bans = 0, excepts = 0, c = 0, authed = 0, delayed = 0;
 
    if (flags & CHECK_SHOWUSERS) {
-     send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, * = clone)");
+     send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, * = clone, - = join delayed)");
    }
 
    for (lp = chptr->members; lp; lp = lp->next_member)
@@ -204,7 +204,13 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
          strcpy(ustat, "   ");
       }
 
-      if (chptr && IsChanOp(lp))
+      if (chptr && IsDelayedJoin(lp))
+      {
+         strcat(ustat, "-");
+         delayed++;
+      }
+
+      else if (chptr && IsChanOp(lp))
       {
          strcat(ustat, "@");
          opcntr++;
@@ -234,8 +240,8 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
    send_reply(sptr, RPL_DATASTR, " ");
 
    ircd_snprintf(0, outbuf, sizeof(outbuf),
-      "Total users:: %d (%d ops, %d voiced, %d clones, %d authed)",
-      cntr, opcntr, vcntr, clones, authed);
+      "Total users:: %d (%d ops, %d voiced, %d clones, %d authed, %d delayed)",
+      cntr, opcntr, vcntr, clones, authed, delayed);
 
    send_reply(sptr, RPL_DATASTR, outbuf);
 

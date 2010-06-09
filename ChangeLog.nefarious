@@ -1,7 +1,13 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2001-03-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+2010-06-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_check.c: Added indicator to members list in CHECK to
+	show users who's join is delayed and added count of join delayed
+	users.
+
+2010-03-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added WHOIS_OPER and WHOIS_SERVICE features.
 
