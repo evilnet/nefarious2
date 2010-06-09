@@ -185,7 +185,7 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
    int cntr = 0, opcntr = 0, hopcntr = 0, vcntr = 0, clones = 0, bans = 0, excepts = 0, c = 0, authed = 0, delayed = 0;
 
    if (flags & CHECK_SHOWUSERS) {
-     send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, * = clone, - = join delayed)");
+     send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, < = delayed)");
    }
 
    for (lp = chptr->members; lp; lp = lp->next_member)
@@ -204,9 +204,14 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
          strcpy(ustat, "   ");
       }
 
+      if (chptr && IsZombie(lp))
+         strcat(ustat, "!");
+      else
+         strcat(ustat, " ");
+
       if (chptr && IsDelayedJoin(lp))
       {
-         strcat(ustat, "-");
+         strcat(ustat, "<");
          delayed++;
       }
 
