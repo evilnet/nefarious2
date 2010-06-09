@@ -606,7 +606,7 @@ static Numeric replyTable[] = {
 /* 286 */
   { RPL_CHKHEAD, ":Information for %s %s", "286" },
 /* 287 */
-  { RPL_CHANUSER, ":    %s%s (%s@%s)   (%s) %s", "287" },
+  { RPL_CHANUSER, ": %s %s%s (%s@%s)   (%s) %s", "287" },
 /* 288 */
   { 0 },
 /* 289 */

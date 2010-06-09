@@ -181,7 +181,7 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
   struct Ban *slp;
   struct Client *acptr;
 
-   char outbuf[BUFSIZE], ustat[64];
+   char outbuf[BUFSIZE], ustat[64], oplvl[4];
    int cntr = 0, opcntr = 0, hopcntr = 0, vcntr = 0, clones = 0, bans = 0, excepts = 0, c = 0, authed = 0, delayed = 0;
 
    if (flags & CHECK_SHOWUSERS) {
@@ -225,11 +225,16 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
       else
          strcat(ustat, " ");
 
+      if (opped)
+         ircd_snprintf(0, oplvl, sizeof(oplvl), "%3d", OpLevel(lp));
+      else
+         ircd_snprintf(0, oplvl, sizeof(oplvl), "   ");
+
       if ((c = IsAccount(acptr)) != 0) ++authed;
 
       if ((flags & CHECK_SHOWUSERS) || ((flags & CHECK_OPSONLY) && opped)) {
         ircd_snprintf(0, outbuf, sizeof(outbuf), "%s%c", acptr->cli_info, COLOR_OFF);
-        send_reply(sptr, RPL_CHANUSER, ustat, acptr->cli_name, acptr->cli_user->username,
+        send_reply(sptr, RPL_CHANUSER, oplvl, ustat, acptr->cli_name, acptr->cli_user->username,
             (flags & CHECK_SHOWIPS) ? ircd_ntoa(&cli_ip(acptr)) : acptr->cli_user->realhost, outbuf, 
             (c ? acptr->cli_user->account : ""));
       }
