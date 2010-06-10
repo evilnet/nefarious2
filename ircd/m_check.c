@@ -445,7 +445,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
       strcpy(chntext, "     Channel(s):: ");
       for (lp = acptr->cli_user->channel; lp; lp = lp->next_channel) {
          chptr = lp->channel;
-         if (len + strlen(chptr->chname) + mlen > BUFSIZE - 5) {
+         if (len + strlen(chptr->chname) + mlen > BUFSIZE - 7) {
             send_reply(sptr, RPL_DATASTR, chntext);
             *chntext = '\0';
             strcpy(chntext, "     Channel(s):: ");
@@ -453,8 +453,12 @@ void checkClient(struct Client *sptr, struct Client *acptr)
          }
          if (IsDeaf(acptr))
             *(chntext + len++) = '-';
-         if (is_chan_op(acptr, chptr))
+         if (IsDelayedJoin(lp))
+            *(chntext + len++) = '<';
+         if (IsChanOp(lp))
             *(chntext + len++) = '@';
+         if (HasVoice(lp))
+            *(chntext + len++) = '+';
          if (IsOper(sptr) && !ShowChannel(sptr,chptr))
             *(chntext + len++) = '*';
          if (IsZombie(lp))
