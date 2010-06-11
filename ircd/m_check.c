@@ -390,8 +390,10 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, "         Status:: Client");
    }
 
-   ircd_snprintf(0, outbuf, sizeof(outbuf), "          Class:: %s", get_client_class(acptr));
-   send_reply(sptr, RPL_DATASTR, outbuf);
+   if (MyUser(acptr)) {
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "          Class:: %s", get_client_class(acptr));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
 
    privs = client_print_privs(acptr);
    if (strlen(privs) > 1)
