@@ -18,7 +18,7 @@
  * $Id: patchlevel.h 1942 2010-02-02 23:29:03Z entrope $
  *
  */
-#define PATCHLEVEL "13-rc2+Nefarious(2.0.0)"
+#define PATCHLEVEL "13+Nefarious(2.0.0)"
 
 #define RELEASE ".12."
 
