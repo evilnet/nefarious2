@@ -1341,7 +1341,7 @@ void add_invite(struct Client *cptr, struct Channel *chptr)
    * Delete last link in chain if the list is max length
    */
   assert(list_length((cli_user(cptr))->invited) == (cli_user(cptr))->invites);
-  if ((cli_user(cptr))->invites >= feature_int(FEAT_MAXCHANNELSPERUSER))
+  if ((cli_user(cptr))->invites >= get_client_maxchans(cptr))
     del_invite(cptr, (cli_user(cptr))->invited->value.chptr);
   /*
    * Add client to channel invite list

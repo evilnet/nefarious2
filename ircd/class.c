@@ -324,6 +324,29 @@ get_recvq(struct Client *cptr)
   return feature_int(FEAT_CLIENT_FLOOD);
 }
 
+/** Get connection class maximum channels limit for a particular client.
+ * @param[in] acptr Client to check.
+ * @return Maximum number of channels \a acptr is allowed to join.
+ */
+unsigned int
+get_client_maxchans(struct Client *acptr)
+{
+  struct SLink *tmp;
+  struct ConnectionClass *cl;
+
+  /* Return the most recent(first on LL) client class... */
+  if (acptr && !IsMe(acptr) && (cli_confs(acptr)))
+    for (tmp = cli_confs(acptr); tmp; tmp = tmp->next)
+    {
+      if (tmp->value.aconf && (cl = tmp->value.aconf->conn_class))
+        if (MaxChans(cl))
+          return MaxChans(cl);
+        else
+          return feature_int(FEAT_MAXCHANNELSPERUSER);
+    }
+  return feature_int(FEAT_MAXCHANNELSPERUSER);
+}
+
 /** Report connection class memory statistics to a client.
  * Send number of classes and number of bytes allocated for them.
  * @param[in] cptr Client requesting statistics.

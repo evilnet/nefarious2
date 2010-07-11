@@ -74,6 +74,7 @@
   int yylex(void);
   /* Now all the globals we need :/... */
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
+  int maxchans;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
@@ -182,6 +183,7 @@ static void free_slist(struct SLink **link) {
 %token IDENT
 %token USERIDENT
 %token IGNOREIDENT
+%token MAXCHANS
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -425,6 +427,7 @@ classblock: CLASS {
     c_class = find_class(name);
     MyFree(c_class->default_umode);
     c_class->default_umode = pass;
+    c_class->max_chans = maxchans;
     memcpy(&c_class->privs, &privs, sizeof(c_class->privs));
     memcpy(&c_class->privs_dirty, &privs_dirty, sizeof(c_class->privs_dirty));
   }
@@ -437,12 +440,13 @@ classblock: CLASS {
   maxlinks = 0;
   sendq = 0;
   recvq = 0;
+  maxchans = 0;
   memset(&privs, 0, sizeof(privs));
   memset(&privs_dirty, 0, sizeof(privs_dirty));
 };
 classitems: classitem classitems | classitem;
 classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
-           classsendq | classrecvq | classusermode | priv;
+           classsendq | classrecvq | classusermode | classmaxchans | priv;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -472,6 +476,10 @@ classusermode: USERMODE '=' QSTRING ';'
 {
   MyFree(pass);
   pass = $3;
+};
+classmaxchans: MAXCHANS '=' expr ';'
+{
+  maxchans = $3;
 };
 
 connectblock: CONNECT

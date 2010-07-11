@@ -1,6 +1,22 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-07-11  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added maxchans Class block option.
+
+	* include/class.h: Added maxchans Class block option.
+
+	* ircd/channel.c: Added maxchans Class block option.
+
+	* ircd/class.c: Added maxchans Class block option.
+
+	* ircd/ircd_lexer.l: Added maxchans Class block option.
+
+	* ircd/ircd_parser.y: Added maxchans Class block option.
+
+	* ircd/m_join.c: Added maxchans Class block option.
+
 2010-06-11  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_check.c: Fix to stop class from showing in check when

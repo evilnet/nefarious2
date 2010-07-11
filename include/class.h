@@ -49,6 +49,7 @@ struct ConnectionClass {
   unsigned int            max_sendq;      /**< Maximum client SendQ in bytes. */
   unsigned int            max_recvq;      /**< Maximum client RecvQ in bytes. */
   unsigned int            max_links;      /**< Maximum connections allowed. */
+  unsigned int            max_chans;      /**< Maximum channels allowed to join. */
   unsigned int            ref_count;      /**< Number of references to class. */
   unsigned short          ping_freq;      /**< Ping frequency for clients. */
   unsigned short          conn_freq;      /**< Auto-connect frequency. */
@@ -72,6 +73,8 @@ struct ConnectionClass {
 #define MaxSendq(x)     ((x)->max_sendq)
 /** Get maximum RecvQ size for \a x. */
 #define MaxRecvq(x)     ((x)->max_recvq)
+/** Get maximum channel limit for \a x. */
+#define MaxChans(x)    ((x)->max_chans)
 /** Get number of references to \a x. */
 #define Links(x)        ((x)->ref_count)
 
@@ -117,6 +120,7 @@ extern void report_classes(struct Client *sptr, const struct StatDesc *sd,
                            char *param);
 extern unsigned int get_sendq(struct Client* cptr);
 extern unsigned int get_recvq(struct Client *cptr);
+extern unsigned int get_client_maxchans(struct Client *acptr);
 
 extern void class_send_meminfo(struct Client* cptr);
 #endif /* INCLUDED_class_h */
