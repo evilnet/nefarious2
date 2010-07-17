@@ -977,3 +977,21 @@ HIS_STATS_W
 
 As per UnderNet CFV-165, this removes /STATS W from users.
 
+GEOIP_ENABLE
+ * Type: boolean
+ * Default: FALSE
+
+Enables or disable GeoIP support.
+
+GEOIP_FILE
+ * Type: string
+ * Default: "GeoIP.dat"
+
+Path to GeoIP.dat for IPv4 GeoIP support.
+
+GEOIP_IPV6_FILE
+ * Type: string
+ * Default: "GeoIPv6.dat"
+
+Path to GeoIPv6.dat for IPv6 GeoIP support.
+

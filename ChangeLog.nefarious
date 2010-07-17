@@ -1,6 +1,40 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-07-17  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added GeoIP Feature options.
+
+	* doc/readme.features: Added base GeoIP support.
+
+	* include/client.h: Added base GeoIP support.
+
+	* include/ircd_features.h: Added base GeoIP support.
+
+	* ircd/Makefile.in: Added base GeoIP support.
+
+	* ircd/ircd.c: Added base GeoIP support.
+
+	* ircd/ircd_features.c: Added base GeoIP support.
+
+	* ircd/m_check.c: Added base GeoIP support.
+
+	* ircd/s_auth.c: Added base GeoIP support.
+
+	* ircd/s_conf.c: Added base GeoIP support.
+
+	* include/GeoIP.h: Added base GeoIP support.
+
+	* include/geoip.h: Added base GeoIP support.
+
+	* ircd/GeoIP.c: Added base GeoIP support.
+
+	* ircd/GeoIP.dat: Added base GeoIP support.
+
+	* ircd/GeoIPv6.dat: Added base GeoIP support.
+
+	* ircd/geoip.c: Added base GeoIP support.
+
 2010-07-11  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added maxchans Class block option.

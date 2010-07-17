@@ -26,6 +26,7 @@
 #include "channel.h"	/* list_set_default */
 #include "class.h"
 #include "client.h"
+#include "geoip.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -228,6 +229,24 @@ feature_notify_oplevels(void)
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
+}
+
+/** Handle update to FEAT_GEOIP_ENABLE. */
+static void feature_notify_geoip_enable(void)
+{
+  geoip_handle_enable();
+}
+
+/** Handle update to FEAT_GEOIP_FILE. */
+static void feature_notify_geoip_file(void)
+{
+  geoip_handle_file();
+}
+
+/** Handle update to FEAT_GEOIP_IPV6_FILE. */
+static void feature_notify_geoip_ipv6_file(void)
+{
+  geoip_handle_ipv6_file();
 }
 
 /** Sets a feature to the given value.
@@ -447,6 +466,11 @@ static struct FeatureDesc {
   F_B(HIS_STATS_W, 0, 1, 0),
   F_S(WHOIS_OPER, 0, "is an IRC Operator", 0),
   F_S(WHOIS_SERVICE, 0, "is a Network Service", 0),
+
+  /* GeoIP FEAT_'s */
+  F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),
+  F_S(GEOIP_FILE, 0, "GeoIP.dat", feature_notify_geoip_file),
+  F_S(GEOIP_IPV6_FILE, 0, "GeoIPv6.dat", feature_notify_geoip_ipv6_file),
 
 #undef F_S
 #undef F_B

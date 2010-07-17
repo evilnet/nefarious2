@@ -187,6 +187,7 @@ enum Flag
     FLAG_COMMONCHANSONLY,           /**< SNIRCD_q: hide privmsgs/notices if in no
                                          common channels (with +ok exceptions) */
     FLAG_BOT,                       /**< Bot */
+    FLAG_GEOIP,                     /**< User has had GeoIP data applied */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -286,6 +287,12 @@ struct Client {
   struct irc_in_addr cli_webircip;  /**< WEBIRC Client IP address. */
   char cli_webirchost[HOSTLEN + 1]; /**< WEBIRC Client host name. */
 
+  /* GeoIP data */
+  char cli_countrycode[3];          /**< GeoIP 2 letter country code. */
+  char cli_countryname[256];        /**< GeoIP country name. */
+  char cli_continentcode[3];        /**< GeoIP 2 letter continent code. */
+  char cli_continentname[256];      /**< GeoIP continent name.
+
   /* MARKs */
   char cli_webirc[BUFSIZE + 1];     /**< webirc description */
 };
@@ -352,7 +359,15 @@ struct Client {
 /** Get client WEBIRC host name. */
 #define cli_webirchost(cli)     ((cli)->cli_webirchost)
 /** Get client WEBIRC info line. */
-#define cli_webirc(cli)        ((cli)->cli_webirc)
+#define cli_webirc(cli)         ((cli)->cli_webirc)
+/** Get client GeoIP country code. */
+#define cli_countrycode(cli)    ((cli)->cli_countrycode)
+/** Get client GeoIP country name. */
+#define cli_countryname(cli)    ((cli)->cli_countryname)
+/** Get client GeoIP continent code. */
+#define cli_continentcode(cli)  ((cli)->cli_continentcode)
+/** Get client GeoIP continent name. */
+#define cli_continentname(cli)  ((cli)->cli_continentname)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))
@@ -647,6 +662,8 @@ struct Client {
 #define IsCommonChansOnly(x)    HasFlag(x, FLAG_COMMONCHANSONLY)
 /** Return non-zero if the client has set +B. */
 #define IsBot(x)                HasFlag(x, FLAG_BOT)
+/** Return non-zero if the client has got GeoIP data. */
+#define IsGeoIP(x)              HasFlag(x, FLAG_GEOIP)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -719,6 +736,8 @@ struct Client {
 #define SetCommonChansOnly(x)   SetFlag(x, FLAG_COMMONCHANSONLY)
 /** Mark a client as having mode +B (bot). */
 #define SetBot(x)               SetFlag(x, FLAG_BOT)
+/** Mark a client as having GeoIP data. */
+#define SetGeoIP(x)             SetFlag(x, FLAG_GEOIP)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -776,6 +795,8 @@ struct Client {
 #define ClearCommonChansOnly(x) ClrFlag(x, FLAG_COMMONCHANSONLY)
 /** Remove mode +B (bot) flag from the client */
 #define ClearBot(x)             ClrFlag(x, FLAG_BOT)
+/** Client no longer has GeoIP data. */
+#define ClearGeoIP(x)           ClrFlag(x, FLAG_GEOIP)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

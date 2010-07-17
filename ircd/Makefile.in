@@ -86,6 +86,7 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	umkpasswd.c
 
 IRCD_SRC = \
+	GeoIP.c \
 	IPcheck.c \
 	channel.c \
 	class.c \
@@ -94,6 +95,7 @@ IRCD_SRC = \
 	dbuf.c \
 	destruct_event.c \
 	fileio.c \
+	geoip.c \
 	gline.c \
 	hash.c \
 	ircd.c \
@@ -306,6 +308,8 @@ install-with-symlink: build mkbindir
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} umkpasswd ${BINDIR}
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} convert-conf ${BINDIR}
 	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} ${top_srcdir}/doc/example.conf ${DPATH}
+	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIP.dat ${DPATH}
+	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIPv6.dat ${DPATH}
 
 install-no-symlink: build mkbindir
 	@if [ ! -d ${DPATH} -a ! -f ${DPATH} ]; then \

@@ -374,6 +374,15 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
+   if (IsGeoIP(acptr))
+   {
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "        Country:: %s (%s)", cli_countryname(acptr), cli_countrycode(acptr));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "      Continent:: %s (%s)", cli_continentname(acptr), cli_continentcode(acptr));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
+
    ircd_snprintf(0, outbuf, sizeof(outbuf), "      Real Name:: %s%c", cli_info(acptr), COLOR_OFF);
    send_reply(sptr, RPL_DATASTR, outbuf);
 

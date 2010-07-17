@@ -28,6 +28,7 @@
 #include "class.h"
 #include "client.h"
 #include "crule.h"
+#include "geoip.h"
 #include "ircd_crypt.h"
 #include "ircd_features.h"
 #include "fileio.h"
@@ -1076,6 +1077,8 @@ int rehash(struct Client *cptr, int sig)
   }
 
   attach_conf_uworld(&me);
+
+  geoip_init();
 
   return ret;
 }

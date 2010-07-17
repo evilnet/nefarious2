@@ -756,6 +756,7 @@ int main(int argc, char **argv) {
 
   write_pidfile();
   init_counters();
+  geoip_init();
 
   Debug((DEBUG_NOTICE, "Server ready..."));
   log_write(LS_SYSTEM, L_NOTICE, 0, "Server Ready");
