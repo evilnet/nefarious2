@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-07-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_check.c: Changed CHECK to only show GeoIP data if GeoIP
+	support is enabled.
+
 2010-07-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added GeoIP Feature options.

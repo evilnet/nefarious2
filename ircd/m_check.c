@@ -374,7 +374,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
-   if (IsGeoIP(acptr))
+   if (feature_bool(FEAT_GEOIP_ENABLE) && IsGeoIP(acptr))
    {
      ircd_snprintf(0, outbuf, sizeof(outbuf), "        Country:: %s (%s)", cli_countryname(acptr), cli_countrycode(acptr));
      send_reply(sptr, RPL_DATASTR, outbuf);
