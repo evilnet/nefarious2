@@ -358,7 +358,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     Count_unknownbecomesclient(sptr, UserStats);
 
     /* Set client's GeoIP data */
-    geoip_apply(client);
+    geoip_apply(sptr);
 
     /*
      * Set user's initial modes

@@ -3,6 +3,10 @@
 
 2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Oops minor typo in variable name.
+
+2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_webirc.c: Removed GeoIP apply as it is no longer needed
 	here.
 
