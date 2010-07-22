@@ -103,22 +103,25 @@ void geoip_apply(struct Client* cptr)
 
   if (irc_in_addr_is_ipv4(&cli_ip(cptr))) {
     /* User is IPv4 so use gi4. */
-    if (gi4 == NULL)
-      return;
-
-    gcid = GeoIP_id_by_addr(gi4, cli_sock_ip(cptr));
+    if (gi4 != NULL)
+      gcid = GeoIP_id_by_addr(gi4, cli_sock_ip(cptr));
   } else {
     /* User is IPv6 so use gi6. */
     if (gi6 == NULL)
-      return;
-
-    gcid = GeoIP_id_by_addr_v6(gi6, cli_sock_ip(cptr));
+      gcid = GeoIP_id_by_addr_v6(gi6, cli_sock_ip(cptr));
   }
 
-  ircd_strncpy((char *)&cli_countrycode(cptr), GeoIP_code_by_id(gcid), 3);
-  ircd_strncpy((char *)&cli_countryname(cptr), GeoIP_name_by_id(gcid), 256);
-  ircd_strncpy((char *)&cli_continentcode(cptr), GeoIP_continent_by_id(gcid), 3);
-  ircd_strncpy((char *)&cli_continentname(cptr), geoip_continent_name_by_code(GeoIP_continent_by_id(gcid)), 256);
+  if (gcid == 0) {
+    ircd_strncpy((char *)&cli_countrycode(cptr), "--", 3);
+    ircd_strncpy((char *)&cli_countryname(cptr), "Unknown", 8);
+    ircd_strncpy((char *)&cli_continentcode(cptr), "--", 3);
+    ircd_strncpy((char *)&cli_continentname(cptr), "Unknown", 8);
+  } else {
+    ircd_strncpy((char *)&cli_countrycode(cptr), GeoIP_code_by_id(gcid), 3);
+    ircd_strncpy((char *)&cli_countryname(cptr), GeoIP_name_by_id(gcid), 256);
+    ircd_strncpy((char *)&cli_continentcode(cptr), GeoIP_continent_by_id(gcid), 3);
+    ircd_strncpy((char *)&cli_continentname(cptr), geoip_continent_name_by_code(GeoIP_continent_by_id(gcid)), 256);
+  }
 
   SetGeoIP(cptr);
 }

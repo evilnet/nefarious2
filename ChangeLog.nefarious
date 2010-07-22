@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/geoip.c: Changed geoip_apply() to set country and continent
+	to "--" and "Unknown" on error.
+
 2010-07-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_check.c: Changed CHECK to only show GeoIP data if GeoIP
