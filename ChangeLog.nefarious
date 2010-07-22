@@ -3,6 +3,20 @@
 
 2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/geoip.h: Added geoip_apply_mark().
+
+	* include/mark.h: Added MARK_GEOIP.
+
+	* ircd/geoip.c: Added geoip_apply_mark().
+
+	* ircd/m_mark.c: Added MARK_GEOIP.
+
+	* ircd/s_serv.c: Added MARK_GEOIP.
+
+	* ircd/s_user.c: Added MARK_GEOIP.
+
+2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/geoip.c: Changed geoip_apply() to set country and continent
 	to "--" and "Unknown" on error.
 

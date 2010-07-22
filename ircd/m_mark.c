@@ -82,6 +82,7 @@
 #include "config.h"
 
 #include "client.h"
+#include "geoip.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_log.h"
@@ -112,6 +113,13 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if ((acptr = FindUser(parv[1]))) {
       ircd_strncpy(cli_webirc(acptr), parv[3], BUFSIZE);
       sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_WEBIRC, parv[3]);
+    }
+  } else if (!strcmp(parv[2], MARK_GEOIP)) {
+    if(parc < 4)
+      return protocol_violation(sptr, "MARK geoip received too few parameters (%u)", parc);
+    if ((acptr = FindUser(parv[1]))) {
+      geoip_apply_mark(acptr, parv[3], parv[4]);
+      sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s %s %s", cli_name(acptr), MARK_GEOIP, parv[3], parv[4]);
     }
   }
 

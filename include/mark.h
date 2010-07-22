@@ -25,7 +25,8 @@
 #ifndef INCLUDED_mark_h
 #define INCLUDED_mark_h
 
-#define MARK_WEBIRC             "WEBIRC"          /**< WEBIRC mark */
+#define MARK_WEBIRC             "WEBIRC"                /**< WEBIRC mark. */
+#define MARK_GEOIP              "GEOIP"                 /**< GEOIP mark. */
 
 #endif /* INCLUDED_mark_h */
 

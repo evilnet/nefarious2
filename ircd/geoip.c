@@ -107,7 +107,7 @@ void geoip_apply(struct Client* cptr)
       gcid = GeoIP_id_by_addr(gi4, cli_sock_ip(cptr));
   } else {
     /* User is IPv6 so use gi6. */
-    if (gi6 == NULL)
+    if (gi6 != NULL)
       gcid = GeoIP_id_by_addr_v6(gi6, cli_sock_ip(cptr));
   }
 
@@ -122,6 +122,29 @@ void geoip_apply(struct Client* cptr)
     ircd_strncpy((char *)&cli_continentcode(cptr), GeoIP_continent_by_id(gcid), 3);
     ircd_strncpy((char *)&cli_continentname(cptr), geoip_continent_name_by_code(GeoIP_continent_by_id(gcid)), 256);
   }
+
+  SetGeoIP(cptr);
+}
+
+/** Apply GeoIP country data to a client from a MARK.
+ * @param[in] cptr Client to apply GeoIP country data to.
+ * @param[in] country Country code from MARK.
+ * @param[in] continent Continent code from MARK.
+ */
+void geoip_apply_mark(struct Client* cptr, char* country, char* continent)
+{
+  ircd_strncpy((char *)&cli_countrycode(cptr), (!country ? "--" : country), 3);
+  ircd_strncpy((char *)&cli_continentcode(cptr), (!continent ? "--" : continent), 3);
+
+  if (!country || !strcmp(country, "--"))
+    ircd_strncpy((char *)&cli_countryname(cptr), "Unknown", 8);
+  else
+    ircd_strncpy((char *)&cli_countryname(cptr), GeoIP_name_by_id(GeoIP_id_by_code(country)), 256);
+
+  if (!continent || !strcmp(continent, "--"))
+    ircd_strncpy((char *)&cli_continentname(cptr), "Unknown", 8);
+  else
+    ircd_strncpy((char *)&cli_continentname(cptr), geoip_continent_name_by_code(continent), 256);
 
   SetGeoIP(cptr);
 }

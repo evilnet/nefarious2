@@ -257,7 +257,15 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
 		    NumNick(acptr), cli_info(acptr));
 
       if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
-        sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_WEBIRC, cli_webirc(acptr));
+        sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
+                      cli_name(acptr), MARK_WEBIRC, cli_webirc(acptr));
+      if (IsGeoIP(acptr)) {
+        if (cli_countrycode(acptr) && !EmptyString(cli_countrycode(acptr)) &&
+            cli_continentcode(acptr) && !EmptyString(cli_continentcode(acptr)))
+          sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s %s %s",
+                        cli_name(acptr), MARK_GEOIP, cli_countrycode(acptr),
+                        cli_continentcode(acptr));
+      }
     }
   }
   /*
