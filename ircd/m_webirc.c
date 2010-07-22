@@ -82,6 +82,7 @@
 #include "config.h"
 
 #include "client.h"
+#include "geoip.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_features.h"
@@ -174,6 +175,9 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       ircd_strncpy(cli_user(sptr)->host, hostname, HOSTLEN);
     ircd_strncpy(cli_user(sptr)->realhost, hostname, HOSTLEN);
   }
+
+  /* Update GeoIP data */
+  geoip_apply(cptr);
 
   /* From this point the user is a WEBIRC user. */
   SetWebIRC(cptr);

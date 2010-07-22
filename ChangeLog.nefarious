@@ -3,6 +3,11 @@
 
 2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_webirc.c: Added GeoIP support to WEBIRC to make sure
+	GeoIP data is correct after WEBIRC message.
+
+2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/geoip.h: Added geoip_apply_mark().
 
 	* include/mark.h: Added MARK_GEOIP.
