@@ -3,6 +3,17 @@
 
 2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_webirc.c: Removed GeoIP apply as it is no longer needed
+	here.
+
+	* ircd/s_auth.c: Removed GeoIP apply as it is no longer needed
+	here.
+
+	* ircd/s_user.c: Moved geoip_apply() to register_user() to take
+	into account IAuth and WEBIRC.
+
+2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_webirc.c: Added GeoIP support to WEBIRC to make sure
 	GeoIP data is correct after WEBIRC message.
 

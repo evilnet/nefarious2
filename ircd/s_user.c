@@ -31,6 +31,7 @@
 #include "channel.h"
 #include "class.h"
 #include "client.h"
+#include "geoip.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -355,6 +356,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
     assert(cptr == sptr);
 
     Count_unknownbecomesclient(sptr, UserStats);
+
+    /* Set client's GeoIP data */
+    geoip_apply(client);
 
     /*
      * Set user's initial modes
