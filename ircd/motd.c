@@ -68,7 +68,7 @@ static struct {
  * @param[in] maxcount Maximum number of lines permitted for MOTD.
  */
 static struct Motd *
-motd_create(const char *hostmask, const char *path, int maxcount)
+motd_create(const char *hostmask, const char *path, int maxcount, int isgeoip)
 {
   struct Motd* tmp;
 
@@ -85,6 +85,10 @@ motd_create(const char *hostmask, const char *path, int maxcount)
 
   if (hostmask == NULL)
     tmp->type = MOTD_UNIVERSAL;
+  else if (isgeoip == 1)
+    tmp->type = MOTD_COUNTRY;
+  else if (isgeoip == 2)
+    tmp->type = MOTD_CONTINENT;
   else if (find_class(hostmask))
     tmp->type = MOTD_CLASS;
   else if (ipmask_parse(hostmask, &tmp->address, &tmp->addrbits))
@@ -269,6 +273,12 @@ motd_lookup(struct Client *cptr)
     else if (ptr->type == MOTD_IPMASK
              && ipmask_check(&cli_ip(cptr), &ptr->address, ptr->addrbits))
       return ptr;
+    else if (ptr->type == MOTD_COUNTRY
+             && !match(ptr->hostmask, cli_countrycode(cptr)))
+      return ptr;
+    else if (ptr->type == MOTD_CONTINENT
+             && !match(ptr->hostmask, cli_continentcode(cptr)))
+      return ptr;
   }
 
   return MotdList.local; /* Ok, return the default motd */
@@ -371,13 +381,13 @@ motd_init(void)
   if (MotdList.local) /* destroy old local... */
     motd_destroy(MotdList.local);
 
-  MotdList.local = motd_create(0, feature_str(FEAT_MPATH), MOTD_MAXLINES);
+  MotdList.local = motd_create(0, feature_str(FEAT_MPATH), MOTD_MAXLINES, 0);
   motd_cache(MotdList.local); /* init local and cache it */
 
   if (MotdList.remote) /* destroy old remote... */
     motd_destroy(MotdList.remote);
 
-  MotdList.remote = motd_create(0, feature_str(FEAT_RPATH), MOTD_MAXREMOTE);
+  MotdList.remote = motd_create(0, feature_str(FEAT_RPATH), MOTD_MAXREMOTE, 0);
   motd_cache(MotdList.remote); /* init remote and cache it */
 }
 
@@ -386,11 +396,11 @@ motd_init(void)
  * @param[in] path Pathname of file to send.
  */
 void
-motd_add(const char *hostmask, const char *path)
+motd_add(const char *hostmask, const char *path, int isgeoip)
 {
   struct Motd *tmp;
 
-  tmp = motd_create(hostmask, path, MOTD_MAXLINES); /* create the motd */
+  tmp = motd_create(hostmask, path, MOTD_MAXLINES, isgeoip); /* create the motd */
 
   tmp->next = MotdList.other; /* link it into the list */
   MotdList.other = tmp;

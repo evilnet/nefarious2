@@ -1,6 +1,25 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-07-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/api/motd.txt: Added isgeoip param to motd_add().
+
+	* doc/example.conf: Added country and continent fields to motd
+	block.
+
+	* include/motd.h: Added MOTD_COUNTRY and MOTD_CONTINENT types and
+	isgeoip param to motd_add().
+
+	* ircd/ircd_lexer.l: Added country and continent fields to motd
+	block.
+
+	* ircd/ircd_parser.y: Added country and continent fields to motd
+	block.
+
+	* ircd/motd.c: Added MOTD_COUNTRY and MOTD_CONTINENT types and
+	isgeoip param to motd_add() and motd_create().
+
 2010-07-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Oops minor typo in variable name.

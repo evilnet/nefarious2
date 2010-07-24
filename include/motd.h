@@ -46,7 +46,9 @@ enum MotdType {
     MOTD_UNIVERSAL, /**< MOTD for all users */
     MOTD_HOSTMASK,  /**< MOTD selected by hostmask */
     MOTD_IPMASK,    /**< MOTD selected by IP mask */
-    MOTD_CLASS      /**< MOTD selected by connection class */
+    MOTD_CLASS,     /**< MOTD selected by connection class */
+    MOTD_COUNTRY,   /**< MOTD selected by country code */
+    MOTD_CONTINENT  /**< MOTD selected by continent code */
 };
 
 /** Entry for a single Message Of The Day (MOTD). */
@@ -97,7 +99,7 @@ void motd_recache(void);
 void motd_init(void);
 
 /* This routine adds a MOTD */
-void motd_add(const char *hostmask, const char *path);
+void motd_add(const char *hostmask, const char *path, int isgeoip);
 
 /* This routine clears the list of MOTDs */
 void motd_clear(void);

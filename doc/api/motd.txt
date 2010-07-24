@@ -42,11 +42,14 @@ cache and re-read the files.
 </function>
 
 <function>
-void motd_add(const char *hostmask, const char *path);
+void motd_add(const char *hostmask, const char *path, isgeoip);
 
 This function is used to add a MOTD to be sent to clients possessing a
 given _hostmask_.  If _hostmask_ is a numerical string, it is
-interpreted as a connection class.
+interpreted as a connection class.  If _isgeoip_ is 0 then _hostmask_
+is treated as described above.  If _isgeoip_ is 1 then _hostmask_ is
+treated as a 2 letter country code and if _isgeoip_ is 2 then
+_hostmask_ is treated as a 2 letter continent code.
 </function>
 
 <function>

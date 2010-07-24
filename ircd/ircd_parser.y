@@ -184,6 +184,8 @@ static void free_slist(struct SLink **link) {
 %token USERIDENT
 %token IGNOREIDENT
 %token MAXCHANS
+%token COUNTRY
+%token CONTINENT
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -1049,19 +1051,40 @@ motdblock: MOTD '{' motditems '}' ';'
   struct SLink *link;
   if (pass != NULL)
     for (link = hosts; link != NULL; link = link->next)
-      motd_add(link->value.cp, pass);
+      motd_add(link->value.cp, pass, link->flags);
   free_slist(&hosts);
   MyFree(pass);
   pass = NULL;
 };
 
 motditems: motditem motditems | motditem;
-motditem: motdhost | motdfile;
+motditem: motdhost | motdcountry | motdcontinent | motdfile;
 motdhost: HOST '=' QSTRING ';'
 {
   struct SLink *link;
   link = make_link();
   link->value.cp = $3;
+  link->flags = 0;
+  link->next = hosts;
+  hosts = link;
+};
+
+motdcountry: COUNTRY '=' QSTRING ';'
+{
+  struct SLink *link;
+  link = make_link();
+  link->value.cp = $3;
+  link->flags = 1;
+  link->next = hosts;
+  hosts = link;
+};
+
+motdcontinent: CONTINENT '=' QSTRING ';'
+{
+  struct SLink *link;
+  link = make_link();
+  link->value.cp = $3;
+  link->flags = 2;
   link->next = hosts;
   hosts = link;
 };
