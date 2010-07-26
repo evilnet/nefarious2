@@ -291,7 +291,7 @@ struct Client {
   char cli_countrycode[3];          /**< GeoIP 2 letter country code. */
   char cli_countryname[256];        /**< GeoIP country name. */
   char cli_continentcode[3];        /**< GeoIP 2 letter continent code. */
-  char cli_continentname[256];      /**< GeoIP continent name.
+  char cli_continentname[256];      /**< GeoIP continent name. */
 
   /* MARKs */
   char cli_webirc[BUFSIZE + 1];     /**< webirc description */

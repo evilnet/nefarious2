@@ -209,7 +209,9 @@ report_deny_list(struct Client* to)
                p->usermask ? p->usermask : "*",
                p->hostmask ? p->hostmask : "*",
                p->message ? p->message : "(none)",
-               p->realmask ? p->realmask : "*");
+               p->realmask ? p->realmask : "*",
+               p->countrymask ? p->countrymask : "*",
+               p->continentmask ? p->continentmask : "*");
 }
 
 /** Report K/k-lines to a user.

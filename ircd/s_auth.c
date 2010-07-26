@@ -38,6 +38,7 @@
 #include "s_auth.h"
 #include "class.h"
 #include "client.h"
+#include "geoip.h"
 #include "IPcheck.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -1036,6 +1037,9 @@ void start_auth(struct Client* client)
     /* Try to start iauth lookup. */
     start_iauth_query(auth);
   }
+
+  /* Set client's GeoIP data */
+  geoip_apply(client);
 
   /* Add client to GlobalClientList. */
   add_client_to_list(client);

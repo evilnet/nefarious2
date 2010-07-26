@@ -925,7 +925,7 @@ killblock: KILL
   dconf = (struct DenyConf*) MyCalloc(1, sizeof(*dconf));
 } '{' killitems '}' ';'
 {
-  if (dconf->usermask || dconf->hostmask ||dconf->realmask) {
+  if (dconf->usermask || dconf->hostmask || dconf->realmask || dconf->countrymask || dconf->continentmask) {
     dconf->next = denyConfList;
     denyConfList = dconf;
   }
@@ -935,13 +935,15 @@ killblock: KILL
     MyFree(dconf->hostmask);
     MyFree(dconf->realmask);
     MyFree(dconf->message);
+    MyFree(dconf->countrymask);
+    MyFree(dconf->continentmask);
     MyFree(dconf);
-    parse_error("Kill block must match on at least one of username, host or realname");
+    parse_error("Kill block must match on at least one of username, host, country, continent or realname");
   }
   dconf = NULL;
 };
 killitems: killitem killitems | killitem;
-killitem: killuhost | killreal | killusername | killreasonfile | killreason;
+killitem: killuhost | killreal | killusername | killcountry | killcontinent | killreasonfile | killreason;
 killuhost: HOST '=' QSTRING ';'
 {
   char *h;
@@ -971,6 +973,18 @@ killreal: REAL '=' QSTRING ';'
 {
  MyFree(dconf->realmask);
  dconf->realmask = $3;
+};
+
+killcountry: COUNTRY '=' QSTRING ';'
+{
+  MyFree(dconf->countrymask);
+  dconf->countrymask = $3;
+};
+
+killcontinent: CONTINENT '=' QSTRING ';'
+{
+  MyFree(dconf->continentmask);
+  dconf->continentmask = $3;
 };
 
 killreason: REASON '=' QSTRING ';'

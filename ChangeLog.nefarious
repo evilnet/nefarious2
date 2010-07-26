@@ -1,6 +1,35 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-07-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added country and continent fields to Kill
+	block.
+
+	* include/client.h: Added a missing */ from some comments.
+
+	* include/s_conf.h: Added country and continent fields to Kill
+	block.
+
+	* ircd/ircd_parser.y: Added country and continent fields to Kill
+	block.
+
+	* ircd/m_webirc.c: Moved geoip_apply() back here.
+
+	* ircd/s_auth.c: Moved geoip_apply() back here to make sure it's
+	done before find_kill().
+
+	* ircd/s_conf.c: Updated find_kill() to check continent code and
+	country code.
+
+	* ircd/s_err.c: Updated STATS k to include country and continent
+	codes.
+
+	* ircd/s_stats.c: Updated STATS k to include country and continent
+	codes.
+
+	* ircd/s_user.c: Removed geoip_apply() from here.
+
 2010-07-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/api/motd.txt: Added isgeoip param to motd_add().

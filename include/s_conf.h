@@ -98,6 +98,8 @@ struct DenyConf {
   char*               message;  /**< Message to send to denied users. */
   char*               usermask; /**< Mask for client's username. */
   char*               realmask; /**< Mask for realname. */
+  char*               countrymask; /**< Mask for country code. */
+  char*               continentmask; /**< Mask for continent code. */
   struct irc_in_addr  address;  /**< Address for IP-based denies. */
   unsigned int        flags;    /**< Interpretation flags for the above.  */
   unsigned char       bits;     /**< Number of bits for ipkills */

@@ -775,6 +775,8 @@ void conf_erase_deny_list(void)
     MyFree(p->usermask);
     MyFree(p->message);
     MyFree(p->realmask);
+    MyFree(p->countrymask);
+    MyFree(p->continentmask);
     MyFree(p);
   }
   denyConfList = 0;
@@ -1124,6 +1126,8 @@ int find_kill(struct Client *cptr)
   const char*      host;
   const char*      name;
   const char*      realname;
+  const char*      country;
+  const char*      continent;
   struct DenyConf* deny;
   struct Gline*    agline = NULL;
 
@@ -1135,10 +1139,14 @@ int find_kill(struct Client *cptr)
   host = cli_sockhost(cptr);
   name = cli_user(cptr)->username;
   realname = cli_info(cptr);
+  country = cli_countrycode(cptr);
+  continent = cli_continentcode(cptr);
 
   assert(strlen(host) <= HOSTLEN);
   assert((name ? strlen(name) : 0) <= HOSTLEN);
   assert((realname ? strlen(realname) : 0) <= REALLEN);
+  assert(strlen(country) <= 3);
+  assert(strlen(continent) <= 3);
 
   /* 2000-07-14: Rewrote this loop for massive speed increases.
    *             -- Isomer
@@ -1147,6 +1155,10 @@ int find_kill(struct Client *cptr)
     if (deny->usermask && match(deny->usermask, name))
       continue;
     if (deny->realmask && match(deny->realmask, realname))
+      continue;
+    if (deny->countrymask && match(deny->countrymask, country))
+      continue;
+    if (deny->continentmask && match(deny->continentmask, continent))
       continue;
     if (deny->bits > 0) {
       if (!ipmask_check(&cli_ip(cptr), &deny->address, deny->bits))
