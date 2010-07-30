@@ -3,6 +3,18 @@
 
 2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added F:TARGET_LIMITING.
+
+	* doc/readme.features: Added F:TARGET_LIMITING.
+
+	* include/ircd_features.h: Added F:TARGET_LIMITING.
+
+	* ircd/ircd_features.c: Added F:TARGET_LIMITING.
+
+	* ircd/s_user.c: Added F:TARGET_LIMITING.
+
+2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added country and continent fields to Client
 	block.
 

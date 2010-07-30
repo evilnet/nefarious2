@@ -466,6 +466,7 @@ static struct FeatureDesc {
   F_B(HIS_STATS_W, 0, 1, 0),
   F_S(WHOIS_OPER, 0, "is an IRC Operator", 0),
   F_S(WHOIS_SERVICE, 0, "is a Network Service", 0),
+  F_B(TARGET_LIMITING, 0, 1, 0),
 
   /* GeoIP FEAT_'s */
   F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),

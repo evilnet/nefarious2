@@ -736,6 +736,10 @@ int check_target_limit(struct Client *sptr, void *target, const char *name,
   assert(cli_local(sptr));
   targets = cli_targets(sptr);
 
+  /* Is target limiting even enabled? */
+  if (!feature_bool(FEAT_TARGET_LIMITING))
+    return 0;
+
   /*
    * Same target as last time?
    */

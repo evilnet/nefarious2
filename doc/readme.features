@@ -977,6 +977,12 @@ HIS_STATS_W
 
 As per UnderNet CFV-165, this removes /STATS W from users.
 
+TARGET_LIMITING
+ * Type: boolean
+ * Default: TRUE
+
+Enables or disables target limit throttling.
+
 GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE
