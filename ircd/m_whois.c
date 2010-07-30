@@ -205,8 +205,12 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
     if (user->away)
        send_reply(sptr, RPL_AWAY, name, user->away);
 
-    if (SeeOper(sptr,acptr))
-       send_reply(sptr, RPL_WHOISOPERATOR, name, feature_str(FEAT_WHOIS_OPER));
+    if (SeeOper(sptr,acptr)) {
+       if (IsAdmin(acptr))
+         send_reply(sptr, RPL_WHOISOPERATOR, name, feature_str(FEAT_WHOIS_ADMIN));
+       else
+         send_reply(sptr, RPL_WHOISOPERATOR, name, feature_str(FEAT_WHOIS_OPER));
+    }
 
     if (IsAccount(acptr))
       send_reply(sptr, RPL_WHOISACCOUNT, name, user->account);

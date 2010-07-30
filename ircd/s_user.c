@@ -520,7 +520,8 @@ static const struct UserMode {
   { FLAG_HIDE_OPER,    'H' },
   { FLAG_NOIDLE,       'I' },
   { FLAG_ACCOUNTONLY,  'R' },
-  { FLAG_WHOIS_NOTICE, 'W' }
+  { FLAG_WHOIS_NOTICE, 'W' },
+  { FLAG_ADMIN,        'a' }
 };
 
 /** Length of #userModeList. */
@@ -1122,6 +1123,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else {
           ClrFlag(acptr, FLAG_OPER);
           ClrFlag(acptr, FLAG_LOCOP);
+          ClrFlag(acptr, FLAG_ADMIN);
           if (MyConnect(acptr))
           {
             tmpmask = cli_snomask(acptr) & ~SNO_OPER;
@@ -1215,6 +1217,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearPrivDeaf(acptr);
         break;
+      case 'a':
+        if (what == MODE_ADD)
+          SetAdmin(acptr);
+        else
+          ClearAdmin(acptr);
+        break;
       case 'x':
         if (what == MODE_ADD)
 	  do_host_hiding = 1;
@@ -1242,6 +1250,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearOper(acptr);
     if (!FlagHas(&setflags, FLAG_LOCOP) && IsLocOp(acptr))
       ClearLocOp(acptr);
+    if (!HasPriv(acptr, PRIV_ADMIN) && !FlagHas(&setflags, FLAG_ADMIN) && IsAdmin(acptr))
+      ClearAdmin(acptr);
     if (!FlagHas(&setflags, FLAG_ACCOUNT) && IsAccount(acptr))
       ClrFlag(acptr, FLAG_ACCOUNT);
     /*

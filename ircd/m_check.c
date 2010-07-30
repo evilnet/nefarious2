@@ -393,6 +393,8 @@ void checkClient(struct Client *sptr, struct Client *acptr)
        send_reply(sptr, RPL_DATASTR, "         Status:: IRC Operator (service)");
      else 
        send_reply(sptr, RPL_DATASTR, "         Status:: Client (service)");
+   } else if (IsAdmin(acptr)) {
+     send_reply(sptr, RPL_DATASTR, "         Status:: IRC Administrator");
    } else if (IsAnOper(acptr)) {
      send_reply(sptr, RPL_DATASTR, "         Status:: IRC Operator");
    } else {

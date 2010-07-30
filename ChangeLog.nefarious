@@ -3,6 +3,29 @@
 
 2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added admin priv for user mode +a.
+
+	* include/client.h: Added admin priv and user mode +a.
+
+	* include/ircd_features.h: Added F:WHOIS_ADMIN.
+
+	* ircd/client.c: Added admin priv for user mode +a.
+
+	* ircd/ircd_features.c: Added F:WHOIS_ADMIN.
+
+	* ircd/ircd_parser.y: Added admin priv for user mode +a.
+
+	* ircd/m_check.c: Added F:WHOIS_ADMIN.
+
+	* ircd/m_oper.c: Added user mode +a if the oper has the admin
+	priv.
+
+	* ircd/m_whois.c: Added F:WHOIS_ADMIN.
+
+	* ircd/s_user.c: Added admin priv and user mode +a.
+
+2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added F:TARGET_LIMITING.
 
 	* doc/readme.features: Added F:TARGET_LIMITING.

@@ -710,7 +710,8 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           TPRIV_WHOIS_NOTICE { $$ = PRIV_WHOIS_NOTICE; } |
           TPRIV_HIDE_OPER { $$ = PRIV_HIDE_OPER; } |
           TPRIV_HIDE_CHANNELS { $$ = PRIV_HIDE_CHANNELS; } |
-          TPRIV_HIDE_IDLE { $$ = PRIV_HIDE_IDLE; } ;
+          TPRIV_HIDE_IDLE { $$ = PRIV_HIDE_IDLE; } |
+          ADMIN { $$ = PRIV_ADMIN; } ;
 
 yesorno: YES { $$ = 1; } | NO { $$ = 0; };
 

@@ -90,7 +90,7 @@ typedef unsigned long flagpage_t;
 #define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "dgiknoqswxBDHNORW"
+#define infousermodes "adgiknoqswxBDHNORW"
 
 /** Operator privileges. */
 enum Priv
@@ -131,6 +131,7 @@ enum Priv
     PRIV_HIDE_OPER, /**< oper can set user mode +H */
     PRIV_HIDE_CHANNELS, /**< oper can set user mode +n */
     PRIV_HIDE_IDLE, /**< oper can set user mode +I */
+    PRIV_ADMIN, /**< oper is an admin (gets, can set and unset mode +a) */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 
@@ -188,6 +189,7 @@ enum Flag
                                          common channels (with +ok exceptions) */
     FLAG_BOT,                       /**< Bot */
     FLAG_GEOIP,                     /**< User has had GeoIP data applied */
+    FLAG_ADMIN,                     /**< User is an admin (user mode +a) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -588,7 +590,7 @@ struct Client {
 #define HasFlag(cli, flag)  FlagHas(&cli_flags(cli), flag)
 
 /** Return non-zero if the client is an IRC operator (global or local). */
-#define IsAnOper(x)             (IsOper(x) || IsLocOp(x))
+#define IsAnOper(x)             (IsOper(x) || IsLocOp(x) || IsAdmin(x))
 /** Return non-zero if the client's connection is blocked. */
 #define IsBlocked(x)            HasFlag(x, FLAG_BLOCKED)
 /** Return non-zero if the client's connection is still being burst. */
@@ -664,6 +666,8 @@ struct Client {
 #define IsBot(x)                HasFlag(x, FLAG_BOT)
 /** Return non-zero if the client has got GeoIP data. */
 #define IsGeoIP(x)              HasFlag(x, FLAG_GEOIP)
+/** Return non-zero if the client is an admin. */
+#define IsAdmin(x)              HasFlag(x, FLAG_ADMIN)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -738,6 +742,8 @@ struct Client {
 #define SetBot(x)               SetFlag(x, FLAG_BOT)
 /** Mark a client as having GeoIP data. */
 #define SetGeoIP(x)             SetFlag(x, FLAG_GEOIP)
+/** Mark a client as being an admin. */
+#define SetAdmin(x)             SetFlag(x, FLAG_ADMIN)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -797,6 +803,8 @@ struct Client {
 #define ClearBot(x)             ClrFlag(x, FLAG_BOT)
 /** Client no longer has GeoIP data. */
 #define ClearGeoIP(x)           ClrFlag(x, FLAG_GEOIP)
+/** Client is no long an admin. */
+#define ClearAdmin(x)           ClrFlag(x, FLAG_ADMIN)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

@@ -175,6 +175,8 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     {
       ClearLocOp(sptr);
       SetOper(sptr);
+      if (HasPriv(sptr, PRIV_ADMIN))
+        SetAdmin(sptr);
       if (!IsHideOper(sptr))
         ++UserStats.opers;
     }
