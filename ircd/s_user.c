@@ -521,7 +521,8 @@ static const struct UserMode {
   { FLAG_NOIDLE,       'I' },
   { FLAG_ACCOUNTONLY,  'R' },
   { FLAG_WHOIS_NOTICE, 'W' },
-  { FLAG_ADMIN,        'a' }
+  { FLAG_ADMIN,        'a' },
+  { FLAG_XTRAOP,       'X' }
 };
 
 /** Length of #userModeList. */
@@ -543,7 +544,8 @@ static char umodeBuf[BUFSIZE];
  * @return CPTR_KILLED if \a cptr was killed, else 0.
  */
 int set_nick_name(struct Client* cptr, struct Client* sptr,
-                  const char* nick, int parc, char* parv[])
+                  const char* nick, int parc, char* parv[],
+                  int svsnick)
 {
   if (IsServer(sptr)) {
 
@@ -598,7 +600,8 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
     if (MyUser(sptr)) {
       const char* channel_name;
       struct Membership *member;
-      if ((channel_name = find_no_nickchange_channel(sptr))) {
+      if ((channel_name = find_no_nickchange_channel(sptr))
+          && !IsXtraOp(sptr) && !svsnick) {
         return send_reply(cptr, ERR_BANNICKCHANGE, channel_name);
       }
       /*
@@ -1223,6 +1226,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearAdmin(acptr);
         break;
+      case 'X':
+        if (what == MODE_ADD)
+          SetXtraOp(acptr);
+        else
+          ClearXtraOp(acptr);
+        break;
       case 'x':
         if (what == MODE_ADD)
 	  do_host_hiding = 1;
@@ -1258,7 +1267,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
      * new umode; servers can set it, local users cannot;
      * prevents users from /kick'ing or /mode -o'ing
      */
-    if (!FlagHas(&setflags, FLAG_CHSERV))
+    if (!FlagHas(&setflags, FLAG_CHSERV) && !(feature_bool(FEAT_OPER_XTRAOP) && HasPriv(acptr, PRIV_XTRAOP)))
       ClearChannelService(acptr);
     /*
      * only send wallops to opers
@@ -1283,6 +1292,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearNoChan(acptr);
     if (!HasPriv(acptr, PRIV_HIDE_IDLE) && IsNoIdle(acptr))
       ClearNoIdle(acptr);
+    if (!(feature_bool(FEAT_OPER_XTRAOP) && HasPriv(acptr, PRIV_XTRAOP)) && IsXtraOp(acptr))
+      ClearXtraOp(acptr);
   }
   if (MyConnect(acptr))
   {

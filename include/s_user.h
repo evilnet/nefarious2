@@ -73,7 +73,8 @@ extern int          register_user(struct Client* cptr, struct Client *sptr);
 extern void         user_count_memory(size_t* count_out, size_t* bytes_out);
 
 extern int set_nick_name(struct Client* cptr, struct Client* sptr,
-                         const char* nick, int parc, char* parv[]);
+                         const char* nick, int parc, char* parv[],
+                         int svsnick);
 extern void send_umode_out(struct Client* cptr, struct Client* sptr,
                           struct Flags* old, int prop);
 extern int whisper(struct Client* source, const char* nick,

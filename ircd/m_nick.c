@@ -198,7 +198,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /*
      * No collisions, all clear...
      */
-    return set_nick_name(cptr, sptr, nick, parc, parv);
+    return set_nick_name(cptr, sptr, nick, parc, parv, 0);
   }
   if (IsServer(acptr)) {
     send_reply(sptr, ERR_NICKNAMEINUSE, nick);
@@ -221,7 +221,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /*
        * Allows change of case in his/her nick
        */
-      return set_nick_name(cptr, sptr, nick, parc, parv);
+      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
     }
     /*
      * This is just ':old NICK old' type thing.
@@ -254,7 +254,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ServerStats->is_ref++;
     IPcheck_connect_fail(acptr);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
-    return set_nick_name(cptr, sptr, nick, parc, parv);
+    return set_nick_name(cptr, sptr, nick, parc, parv, 0);
   }
   /*
    * NICK is coming from local client connection. Just
@@ -350,7 +350,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Check against nick name collisions. */
   if ((acptr = FindClient(nick)) == NULL)
     /* No collisions, all clear... */
-    return set_nick_name(cptr, sptr, nick, parc, parv);
+    return set_nick_name(cptr, sptr, nick, parc, parv, 0);
 
   /*
    * If acptr == sptr, then we have a client doing a nick
@@ -362,7 +362,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   {
     if (strcmp(cli_name(acptr), nick) != 0)
       /* Allows change of case in his/her nick */
-      return set_nick_name(cptr, sptr, nick, parc, parv);
+      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
     else
       /* Setting their nick to what it already is? Ignore it. */
       return 0;
@@ -384,7 +384,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ServerStats->is_ref++;
     IPcheck_connect_fail(acptr);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
-    return set_nick_name(cptr, sptr, nick, parc, parv);
+    return set_nick_name(cptr, sptr, nick, parc, parv, 0);
   }
   /*
    * Decide, we really have a nick collision and deal with it
@@ -497,5 +497,5 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   if (sptr == NULL)
     return 0;
-  return set_nick_name(cptr, sptr, nick, parc, parv);
+  return set_nick_name(cptr, sptr, nick, parc, parv, 0);
 }

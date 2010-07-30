@@ -983,6 +983,13 @@ TARGET_LIMITING
 
 Enables or disables target limit throttling.
 
+OPER_XTRAOP
+ * Type: boolean
+ * Default: FALSE
+
+Enables or disables the user of user mode +X for opers who have the priv
+XTRAOP.
+
 GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE

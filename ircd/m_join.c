@@ -194,6 +194,8 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         chptr->creationtime++;
       } else if (IsInvited(sptr, chptr)) {
         /* Invites bypass these other checks. */
+      } else if (IsXtraOp(sptr)) {
+        /* XtraOp bypasses all other checks. */
       } else if (chptr->mode.mode & MODE_INVITEONLY)
         err = ERR_INVITEONLYCHAN;
       else if (chptr->mode.limit && (chptr->users >= chptr->mode.limit))

@@ -132,6 +132,7 @@ enum Priv
     PRIV_HIDE_CHANNELS, /**< oper can set user mode +n */
     PRIV_HIDE_IDLE, /**< oper can set user mode +I */
     PRIV_ADMIN, /**< oper is an admin (gets, can set and unset mode +a) */
+    PRIV_XTRAOP, /**< oper can set/unset user mode +X */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 
@@ -190,6 +191,7 @@ enum Flag
     FLAG_BOT,                       /**< Bot */
     FLAG_GEOIP,                     /**< User has had GeoIP data applied */
     FLAG_ADMIN,                     /**< User is an admin (user mode +a) */
+    FLAG_XTRAOP,                    /**< User has user mode +X (XtraOp) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -668,6 +670,8 @@ struct Client {
 #define IsGeoIP(x)              HasFlag(x, FLAG_GEOIP)
 /** Return non-zero if the client is an admin. */
 #define IsAdmin(x)              HasFlag(x, FLAG_ADMIN)
+/** Return non-zero if the client has set +X. */
+#define IsXtraOp(x)             HasFlag(x, FLAG_XTRAOP)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -744,6 +748,8 @@ struct Client {
 #define SetGeoIP(x)             SetFlag(x, FLAG_GEOIP)
 /** Mark a client as being an admin. */
 #define SetAdmin(x)             SetFlag(x, FLAG_ADMIN)
+/** Mark a client as having mode +X (XtraOp). */
+#define SetXtraOp(x)            SetFlag(x, FLAG_XTRAOP)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -805,6 +811,8 @@ struct Client {
 #define ClearGeoIP(x)           ClrFlag(x, FLAG_GEOIP)
 /** Client is no long an admin. */
 #define ClearAdmin(x)           ClrFlag(x, FLAG_ADMIN)
+/** Remove mode +X (XtraOp) flag from client */
+#define ClearXtraOp(x)          ClrFlag(x, FLAG_XTRAOP)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

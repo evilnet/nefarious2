@@ -747,7 +747,7 @@ int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int r
   /*
    * Servers can always speak on channels.
    */
-  if (IsServer(cptr))
+  if (IsServer(cptr) || IsChannelService(cptr) || IsXtraOp(cptr))
     return 1;
 
   member = find_channel_member(cptr, chptr);
@@ -3155,7 +3155,8 @@ mode_process_clients(struct ParseState *state)
     if ((state->cli_change[i].flag & (MODE_DEL | MODE_CHANOP)) ==
 	(MODE_DEL | MODE_CHANOP)) {
       /* prevent +k users from being deopped */
-      if (IsChannelService(state->cli_change[i].client)) {
+      if ((IsChannelService(state->cli_change[i].client) && IsService(cli_user(state->cli_change[i].client)->server))
+          || (IsChannelService(state->cli_change[i].client) && !IsXtraOp(state->sptr))) {
 	if (state->flags & MODE_PARSE_FORCE) /* it was forced */
 	  sendto_opmask_butone(0, SNO_HACK4, "Deop of +k user on %H by %s",
 			       state->chptr,
@@ -3163,9 +3164,15 @@ mode_process_clients(struct ParseState *state)
 				cli_name((cli_user(state->sptr))->server)));
 
 	else if (MyUser(state->sptr) && state->flags & MODE_PARSE_SET) {
-	  send_reply(state->sptr, ERR_ISCHANSERVICE,
-		     cli_name(state->cli_change[i].client),
-		     state->chptr->chname);
+          if(IsService(cli_user(state->cli_change[i].client)->server) && IsChannelService(state->cli_change[i].client)){
+            send_reply(state->sptr, ERR_ISCHANSERVICE,
+                       cli_name(state->cli_change[i].client),
+                       state->chptr->chname, "a network service");
+          }else{
+            send_reply(state->sptr, ERR_ISCHANSERVICE,
+                       cli_name(state->cli_change[i].client),
+                       state->chptr->chname, "an IRC operator");
+          }
 	  continue;
 	}
       }

@@ -3,6 +3,47 @@
 
 2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added xtraop priv to allow setting user mode
+	+X.
+
+	* doc/readme.features: Added F:OPER_XTRAOP.
+
+	* include/client.h: Added user mode +X and xtraop priv.
+
+	* include/ircd_features.h: Added F:OPER_XTRAOP.
+
+	* include/s_user.h: Fixed set_nick_name() to allow SVSNICK to
+	override nick change restrictions.
+
+	* ircd/channel.c: Allow +X user to speak when dissallowed and to
+	kick +k users if not ulined.
+
+	* ircd/client.c: Added xtraop priv to allow setting user mode +X.
+
+	* ircd/ircd_features.c: Added F:OPER_XTRAOP.
+
+	* ircd/ircd_lexer.l: Added xtraop priv to allow setting user mode
+	+X.
+
+	* ircd/ircd_parser.y: Added xtraop priv to allow setting user mode
+	+X.
+
+	* ircd/m_join.c: Allow +X user to join past any join restrictions.
+
+	* ircd/m_kick.c: Allow +X user to kick +k user if not ulined.
+
+	* ircd/m_kill.c: Allow +X user to kill +k user if not ulined.
+
+	* ircd/m_nick.c: Fixed set_nick_name() to allow SVSNICK to override
+	nick change restrictions.
+
+	* ircd/s_err.c: Changed ERR_ISCHANSERVICE to allow custom client
+	type.
+
+	* ircd/s_user.c: Added user mode +X and xtraop priv.
+
+2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_user.c: Fixed crash when setting user mode -o while +H
 	is set.
 

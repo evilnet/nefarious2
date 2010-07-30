@@ -165,6 +165,7 @@ static struct lexer_token {
   { "wide_gline", TPRIV_WIDE_GLINE },
   { "whois_notice", TPRIV_WHOIS_NOTICE },
   { "whox", TPRIV_WHOX },
+  { "xtraop", TPRIV_XTRAOP },
   { NULL, 0 }
 };
 static int ntokens;
