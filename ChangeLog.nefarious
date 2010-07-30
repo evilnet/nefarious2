@@ -3,6 +3,10 @@
 
 2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Forgot to update infousermodes with +X.
+
+2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added xtraop priv to allow setting user mode
 	+X.
 
