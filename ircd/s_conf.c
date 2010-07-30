@@ -370,6 +370,10 @@ enum AuthorizationCheckResult attach_iline(struct Client* cptr)
       continue;
     if (aconf->host && match(aconf->host, cli_sockhost(cptr)))
       continue;
+    if (aconf->countrymask && match(aconf->countrymask, cli_countrycode(cptr)))
+      continue;
+    if (aconf->continentmask && match(aconf->continentmask, cli_continentcode(cptr)))
+      continue;
     if ((aconf->addrbits >= 0)
         && !ipmask_check(&cli_ip(cptr), &aconf->address.addr, aconf->addrbits))
       continue;

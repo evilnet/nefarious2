@@ -1,6 +1,23 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added country and continent fields to Client
+	block.
+
+	* include/s_conf.h: Added country and continent fields to Client
+	block.
+
+	* ircd/ircd_parser.y: Added country and continent fields to Client
+	block.
+
+	* ircd/s_auth.c: Moved geoip_apply() (again) to make sure it is
+	called before a Client block is chosen.
+
+	* ircd/s_conf.c: Added country and continent fields to Client
+	block.
+
 2010-07-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added country and continent fields to Kill

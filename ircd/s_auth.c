@@ -495,6 +495,9 @@ static int preregister_user(struct Client *cptr)
   ircd_strncpy(cli_user(cptr)->host, cli_sockhost(cptr), HOSTLEN);
   ircd_strncpy(cli_user(cptr)->realhost, cli_sockhost(cptr), HOSTLEN);
 
+  /* Set client's GeoIP data */
+  geoip_apply(cptr);
+
   if (find_conf_client(cptr)) {
     return 0;
   }
@@ -1037,9 +1040,6 @@ void start_auth(struct Client* client)
     /* Try to start iauth lookup. */
     start_iauth_query(auth);
   }
-
-  /* Set client's GeoIP data */
-  geoip_apply(client);
 
   /* Add client to GlobalClientList. */
   add_client_to_list(client);

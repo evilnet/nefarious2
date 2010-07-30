@@ -73,6 +73,8 @@ struct ConfItem
   char *name;         /**< Name of peer */
   char *hub_limit;    /**< Mask that limits servers allowed behind
                          this one. */
+  char *countrymask;  /**< Mask for country code. */
+  char *continentmask; /**< Mask for continent code. */
   time_t hold;        /**< Earliest time to attempt an outbound
                          connect on this ConfItem. */
   int dns_pending;    /**< A dns request is pending. */

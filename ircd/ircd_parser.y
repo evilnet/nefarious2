@@ -76,6 +76,7 @@
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
+  char *country, *continent;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
   struct ListenerFlags listen_flags;
@@ -850,12 +851,16 @@ clientblock: CLIENT
     aconf->conn_class = c_class;
     aconf->maximum = maxlinks;
     aconf->passwd = pass;
+    aconf->countrymask = country;
+    aconf->continentmask = continent;
   }
   if (!aconf) {
     MyFree(username);
     MyFree(host);
     MyFree(ip);
     MyFree(pass);
+    MyFree(country);
+    MyFree(continent);
   }
   host = NULL;
   username = NULL;
@@ -864,9 +869,11 @@ clientblock: CLIENT
   ip = NULL;
   pass = NULL;
   port = 0;
+  country = NULL;
+  continent = NULL;
 };
 clientitems: clientitem clientitems | clientitem;
-clientitem: clienthost | clientip | clientusername | clientclass | clientpass | clientmaxlinks | clientport;
+clientitem: clienthost | clientip | clientusername | clientclass | clientpass | clientmaxlinks | clientport | clientcountry | clientcontinent;
 clienthost: HOST '=' QSTRING ';'
 {
   char *sep = strchr($3, '@');
@@ -918,6 +925,16 @@ clientmaxlinks: MAXLINKS '=' expr ';'
 clientport: PORT '=' expr ';'
 {
   port = $3;
+};
+clientcountry: COUNTRY '=' QSTRING ';'
+{
+  MyFree(country);
+  country = $3;
+};
+clientcontinent: CONTINENT '=' QSTRING ';'
+{
+  MyFree(continent);
+  continent = $3;
 };
 
 killblock: KILL
