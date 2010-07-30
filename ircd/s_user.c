@@ -1332,9 +1332,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
     if (FlagHas(&setflags, FLAG_OPER) && !IsOper(acptr)) {
       /* user no longer oper */
-      assert(UserStats.opers > 0);
-      if (!FlagHas(&setflags, FLAG_HIDE_OPER))
+      if (!FlagHas(&setflags, FLAG_HIDE_OPER)) {
+        assert(UserStats.opers > 0);
         --UserStats.opers;
+      }
       client_set_privs(acptr, NULL); /* will clear propagate privilege */
     }
     if (!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(acptr)) {

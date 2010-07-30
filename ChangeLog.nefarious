@@ -3,6 +3,11 @@
 
 2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Fixed crash when setting user mode -o while +H
+	is set.
+
+2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added admin priv for user mode +a.
 
 	* include/client.h: Added admin priv and user mode +a.
