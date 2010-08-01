@@ -1273,7 +1273,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
      * only send wallops to opers
      */
     if (feature_bool(FEAT_WALLOPS_OPER_ONLY) && !IsAnOper(acptr) &&
-	!FlagHas(&setflags, FLAG_WALLOP))
+	SendWallops(acptr))
       ClearWallops(acptr);
     if (feature_bool(FEAT_HIS_SNOTICES_OPER_ONLY) && MyConnect(acptr) &&
         !IsAnOper(acptr) && !FlagHas(&setflags, FLAG_SERVNOTICE))

@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-01  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_user.c: Changed user mode handling so setting user mode
+	-o sets user mode -w if F:WALLOPS_OPER_ONLY is TRUE.
+
 2010-07-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/client.h: Forgot to update infousermodes with +X.
