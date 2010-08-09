@@ -196,7 +196,7 @@ static void free_slist(struct SLink **link) {
 %token TPRIV_UNLIMIT_QUERY TPRIV_DISPLAY TPRIV_SEE_OPERS TPRIV_WIDE_GLINE
 %token TPRIV_FORCE_OPMODE TPRIV_FORCE_LOCAL_OPMODE TPRIV_APASS_OPMODE
 %token TPRIV_LIST_CHAN TPRIV_CHECK TPRIV_WHOIS_NOTICE TPRIV_HIDE_OPER
-%token TPRIV_HIDE_CHANNELS TPRIV_HIDE_IDLE TPRIV_XTRAOP
+%token TPRIV_HIDE_CHANNELS TPRIV_HIDE_IDLE TPRIV_XTRAOP TPRIV_SERVICE
 /* and some types... */
 %type <num> sizespec
 %type <num> timespec timefactor factoredtimes factoredtime
@@ -712,7 +712,8 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           TPRIV_HIDE_CHANNELS { $$ = PRIV_HIDE_CHANNELS; } |
           TPRIV_HIDE_IDLE { $$ = PRIV_HIDE_IDLE; } |
           ADMIN { $$ = PRIV_ADMIN; } |
-          TPRIV_XTRAOP { $$ = PRIV_XTRAOP; } ;
+          TPRIV_XTRAOP { $$ = PRIV_XTRAOP; } |
+          TPRIV_SERVICE { $$ = PRIV_SERVICE; } ;
 
 yesorno: YES { $$ = 1; } | NO { $$ = 0; };
 

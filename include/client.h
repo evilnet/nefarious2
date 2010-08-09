@@ -133,6 +133,7 @@ enum Priv
     PRIV_HIDE_IDLE, /**< oper can set user mode +I */
     PRIV_ADMIN, /**< oper is an admin (gets, can set and unset mode +a) */
     PRIV_XTRAOP, /**< oper can set/unset user mode +X */
+    PRIV_SERVICE, /**< oper can set/unset user mode +k */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 

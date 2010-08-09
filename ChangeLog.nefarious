@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/client.h: Added PRIV_SERVICE.
+
+	* ircd/client.c: Added PRIV_SERVICE.
+
+	* ircd/ircd_lexer.l: Added PRIV_SERVICE.
+
+	* ircd/ircd_parser.y: Added PRIV_SERVICE.
+
+	* ircd/s_user.c: Changed user mode +x requirement to PRIV_SERVICE.
+
 2010-08-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Changed user mode handling so setting user mode

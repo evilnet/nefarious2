@@ -155,6 +155,7 @@ static struct lexer_token {
   { "restart", TPRIV_RESTART },
   { "see_chan", TPRIV_SEE_CHAN },
   { "see_opers", TPRIV_SEE_OPERS },
+  { "service", TPRIV_SERVICE },
   { "set", TPRIV_SET },
   { "show_all_invis", TPRIV_SHOW_ALL_INVIS },
   { "show_invis", TPRIV_SHOW_INVIS },

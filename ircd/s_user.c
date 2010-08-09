@@ -1267,7 +1267,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
      * new umode; servers can set it, local users cannot;
      * prevents users from /kick'ing or /mode -o'ing
      */
-    if (!FlagHas(&setflags, FLAG_CHSERV) && !(feature_bool(FEAT_OPER_XTRAOP) && HasPriv(acptr, PRIV_XTRAOP)))
+    if (!FlagHas(&setflags, FLAG_CHSERV) && IsChannelService(acptr) && !HasPriv(acptr, PRIV_SERVICE))
       ClearChannelService(acptr);
     /*
      * only send wallops to opers
