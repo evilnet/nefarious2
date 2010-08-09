@@ -11,7 +11,7 @@
 
 	* ircd/ircd_parser.y: Added PRIV_SERVICE.
 
-	* ircd/s_user.c: Changed user mode +x requirement to PRIV_SERVICE.
+	* ircd/s_user.c: Changed user mode +k requirement to PRIV_SERVICE.
 
 2010-08-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
