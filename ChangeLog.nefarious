@@ -1,6 +1,30 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-10  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/handlers.h: Added SWHOIS command.
+
+	* include/msg.h: Added SWHOIS command.
+
+	* include/numeric.h: Added RPL_WHOISSPECIAL reply.
+
+	* include/struct.h: Added SWHOIS field to User struct.
+
+	* ircd/Makefile.in: Added SWHOIS command.
+
+	* ircd/m_check.c: Added SWHOIS output.
+
+	* ircd/m_whois.c: Added RPL_WHOISSPECIAL reply.
+
+	* ircd/parse.c: Added SWHOIS command.
+
+	* ircd/s_err.c: Added RPL_WHOISSPECIAL reply.
+
+	* ircd/s_serv.c: Added SWHOIS propagation.
+
+	* ircd/m_swhois.c: Added SWHOIS command.
+
 2010-08-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/client.h: Added PRIV_SERVICE.

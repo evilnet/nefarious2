@@ -672,7 +672,7 @@ static Numeric replyTable[] = {
 /* 319 */
   { RPL_WHOISCHANNELS, "%s :%s", "319" },
 /* 320 */
-  { 0 },
+  { RPL_WHOISSPECIAL, "%s :%s", "320" },
 /* 321 */
   { RPL_LISTSTART, "Channel :Users  Name", "321" },
 /* 322 */

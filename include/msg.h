@@ -428,6 +428,10 @@ struct Client;
 #define TOK_SVSJOIN		"SJ"
 #define CMD_SVSJOIN		MSG_SVSJOIN, TOK_SVSJOIN
 
+#define MSG_SWHOIS		"SWHOIS"
+#define TOK_SWHOIS		"SW"
+#define CMD_SWHOIS		MSG_SWHOIS, TOK_SWHOIS
+
 /*
  * Constants
  */

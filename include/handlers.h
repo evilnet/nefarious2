@@ -232,6 +232,7 @@ extern int ms_svsnick(struct Client*, struct Client*, int, char*[]);
 extern int ms_svsnoop(struct Client*, struct Client*, int, char*[]);
 extern int ms_svspart(struct Client*, struct Client*, int, char*[]);
 extern int ms_svsquit(struct Client*, struct Client*, int, char*[]);
+extern int ms_swhois(struct Client*, struct Client*, int, char*[]);
 extern int ms_topic(struct Client*, struct Client*, int, char*[]);
 extern int ms_trace(struct Client*, struct Client*, int, char*[]);
 extern int ms_uping(struct Client*, struct Client*, int, char*[]);

@@ -235,6 +235,9 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
     if (IsBot(acptr))
       send_reply(sptr, RPL_WHOISBOT, name);
 
+    if (!EmptyString(user->swhois))
+      send_reply(sptr, RPL_WHOISSPECIAL, name, user->swhois);
+
     if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
       send_reply(sptr, RPL_WHOISWEBIRC, name, cli_webirc(acptr));
 

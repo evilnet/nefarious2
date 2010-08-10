@@ -84,6 +84,7 @@ struct User {
   char               realhost[HOSTLEN + 1];   /**< actual hostname */
   char               account[ACCOUNTLEN + 1]; /**< IRC account name */
   time_t	     acc_create;              /**< IRC account timestamp */
+  char               swhois[BUFSIZE + 1];     /**< SWHOIS message */
 };
 
 #endif /* INCLUDED_struct_h */

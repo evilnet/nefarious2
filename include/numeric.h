@@ -243,6 +243,7 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_WHOISCHANNELS    319
 /*      RPL_WHOIS_HIDDEN     320         Anothernet +h, ick! */
 /*	RPL_WHOISSPECIAL     320	unreal */
+#define RPL_WHOISSPECIAL     320
 #define RPL_LISTSTART        321
 #define RPL_LIST             322
 #define RPL_LISTEND          323
