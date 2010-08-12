@@ -470,6 +470,12 @@ static struct FeatureDesc {
   F_B(TARGET_LIMITING, 0, 1, 0),
   F_B(OPER_XTRAOP, 0, 0, 0),
 
+  /* Host hiding FEAT_'s */
+  F_B(HIDDEN_HOST_QUIT, 0, 1, 0),
+  F_S(HIDDEN_HOST_SET_MESSAGE, 0, "Registered", 0),
+  F_S(HIDDEN_HOST_UNSET_MESSAGE, 0, "UnRegistered", 0),
+  F_B(ALLOWRMX, 0, 0, 0),
+
   /* GeoIP FEAT_'s */
   F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),
   F_S(GEOIP_FILE, 0, "GeoIP.dat", feature_notify_geoip_file),

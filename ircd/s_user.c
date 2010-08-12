@@ -933,33 +933,77 @@ hide_hostmask(struct Client *cptr, unsigned int flag)
 {
   struct Membership *chan;
 
-  switch (flag) {
-  case FLAG_HIDDENHOST:
-    /* Local users cannot set +x unless FEAT_HOST_HIDING is true. */
-    if (MyConnect(cptr) && !feature_bool(FEAT_HOST_HIDING))
-      return 0;
-    break;
-  case FLAG_ACCOUNT:
-    /* Invalidate all bans against the user so we check them again */
-    for (chan = (cli_user(cptr))->channel; chan;
-         chan = chan->next_channel)
-      ClearBanValid(chan);
-    break;
-  default:
-    return 0;
-  }
-
-  SetFlag(cptr, flag);
   if (!HasFlag(cptr, FLAG_HIDDENHOST) || !HasFlag(cptr, FLAG_ACCOUNT))
     return 0;
 
-  sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":Registered");
+  /* Invalidate all bans against the user so we check them again */
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+    ClearBanValid(chan);
+
+  if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
+    sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
+                  feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
   ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, "%s.%s",
                 cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
    send_reply(cptr, RPL_HOSTHIDDEN, cli_user(cptr)->host);
+
+  if (!feature_bool(FEAT_HIDDEN_HOST_QUIT))
+    return 0;
+
+  /*
+   * Go through all channels the client was on, rejoin him
+   * and set the modes, if any
+   */
+  for (chan = cli_user(cptr)->channel; chan; chan = chan->next_channel)
+  {
+    if (IsZombie(chan))
+      continue;
+    /* Send a JOIN unless the user's join has been delayed. */
+    if (!IsDelayedJoin(chan))
+      sendcmdto_channel_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+                                         "%H", chan->channel);
+    if (IsChanOp(chan) && HasVoice(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+                                       "%H +ov %C %C", chan->channel, cptr,
+                                       cptr);
+    else if (IsChanOp(chan) || HasVoice(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+        "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : 'v', cptr);
+  }
+  return 0;
+}
+
+/** Unhide a client's hostmask.
+ * @param[in,out] cptr User who is getting a new flag.
+ * @param[in] flag Some flag that affects host-hiding (FLAG_HIDDENHOST, FLAG_ACCOUNT).
+ * @return Zero.
+ */
+int
+unhide_hostmask(struct Client *cptr)
+{
+  struct Membership *chan;
+
+  if (HasFlag(cptr, FLAG_HIDDENHOST) || !HasFlag(cptr, FLAG_ACCOUNT))
+    return 0;
+
+  /* Invalidate all bans against the user so we check them again */
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+    ClearBanValid(chan);
+
+  if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
+    sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
+                  feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
+  ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, cli_user(cptr)->realhost);
+
+  /* ok, the client is now fully hidden, so let them know -- hikari */
+  if (MyConnect(cptr))
+   send_reply(cptr, RPL_HOSTHIDDEN, cli_user(cptr)->host);
+
+  if (!feature_bool(FEAT_HIDDEN_HOST_QUIT))
+    return 0;
 
   /*
    * Go through all channels the client was on, rejoin him
@@ -1233,8 +1277,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClearXtraOp(acptr);
         break;
       case 'x':
-        if (what == MODE_ADD)
+        if (what == MODE_ADD) {
+          SetHiddenHost(acptr);
 	  do_host_hiding = 1;
+        } else {
+          if (feature_bool(FEAT_ALLOWRMX)) {
+            ClearHiddenHost(acptr);
+            unhide_hostmask(acptr);
+          }
+        }
 	break;
       case 'r':
 	if (*(p + 1) && (what == MODE_ADD)) {
@@ -1327,7 +1378,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       }
       ircd_strncpy(cli_user(acptr)->account, account, len);
   }
-  if (!FlagHas(&setflags, FLAG_HIDDENHOST) && do_host_hiding && allow_modes != ALLOWMODES_DEFAULT)
+  if (!FlagHas(&setflags, FLAG_HIDDENHOST) && do_host_hiding)
     hide_hostmask(acptr, FLAG_HIDDENHOST);
 
   if (IsRegistered(acptr)) {

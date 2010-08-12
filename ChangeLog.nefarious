@@ -1,6 +1,22 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/ircd_features.h: Added FEAT_s for custom +x QUIT
+	message, -x custom QUIT message, allowing -x and disabling QUIT
+	for host change.
+
+	* include/s_user.h: Added unhide_hostmasl() function.
+
+	* ircd/ircd_features.c: Added FEAT_s for custom +x QUIT message,
+	-x custom QUIT message, allowing -x and disabling QUIT for host
+	change.
+
+	* ircd/m_account.c: Modified user mode +x handling.
+
+	* ircd/s_user.c: Modified user mode +x handling.
+
 2010-08-10  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/handlers.h: Added SWHOIS command.
