@@ -439,7 +439,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
    * account assignment causes a numeric reply during registration.
    */
   if (HasHiddenHost(sptr))
-    hide_hostmask(sptr, FLAG_HIDDENHOST);
+    hide_hostmask(sptr);
   if (IsInvisible(sptr))
     ++UserStats.inv_clients;
   if (IsOper(sptr) && !IsHideOper(sptr))
@@ -929,7 +929,7 @@ void send_user_info(struct Client* sptr, char* names, int rpl, InfoFormatter fmt
  * @return Zero.
  */
 int
-hide_hostmask(struct Client *cptr, unsigned int flag)
+hide_hostmask(struct Client *cptr)
 {
   struct Membership *chan;
 
@@ -1379,7 +1379,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ircd_strncpy(cli_user(acptr)->account, account, len);
   }
   if (!FlagHas(&setflags, FLAG_HIDDENHOST) && do_host_hiding)
-    hide_hostmask(acptr, FLAG_HIDDENHOST);
+    hide_hostmask(acptr);
 
   if (IsRegistered(acptr)) {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {

@@ -3,6 +3,14 @@
 
 2010-08-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/s_user.h: Removed unnecessary parameter from hide_hostmask()
+
+	* ircd/m_account.c: Removed unnecessary parameter from hide_hostmask()
+
+	* ircd/s_user.c: Removed unnecessary parameter from hide_hostmask()
+
+2010-08-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ircd_features.h: Added FEAT_s for custom +x QUIT
 	message, -x custom QUIT message, allowing -x and disabling QUIT
 	for host change.

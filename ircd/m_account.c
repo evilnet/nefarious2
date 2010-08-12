@@ -138,7 +138,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
   ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN);
   SetAccount(acptr);
-  hide_hostmask(acptr, FLAG_ACCOUNT);
+  hide_hostmask(acptr);
 
   sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr,
                         cli_user(acptr)->acc_create ? "%C %s %Tu" : "%C %s",

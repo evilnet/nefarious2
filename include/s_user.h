@@ -82,7 +82,7 @@ extern int whisper(struct Client* source, const char* nick,
 extern void send_user_info(struct Client* to, char* names, int rpl,
                            InfoFormatter fmt);
 
-extern int hide_hostmask(struct Client *cptr, unsigned int flags);
+extern int hide_hostmask(struct Client *cptr);
 extern int unhide_hostmask(struct Client *cptr);
 extern int set_user_mode(struct Client *cptr, struct Client *sptr,
                          int parc, char *parv[], int allow_modes);
