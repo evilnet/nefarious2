@@ -1016,6 +1016,20 @@ ALLOWRMX
 If enabled when HOST_HIDING_STYLE is set to 1 users will be able to remove
 their hidden host (-x).
 
+OPERHOST_HIDING
+ * Type: boolean
+ * Default: TRUE
+
+When TRUE any oper setting +x will get the hidden host set via
+HIDDEN_OPERHOST instead of the host set in HIDDEN_HOST.
+
+HIDDEN_OPERHOST
+ * Type: string
+ * Default: Staff.Nefarious
+
+This selects the suffix for the hidden hostmask for IRC Operators
+(see OPERHOST_HIDING).
+
 GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE

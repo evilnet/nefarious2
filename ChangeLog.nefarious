@@ -1,6 +1,14 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Forgot to add the Features OPERHOST_HIDING
+	and HIDDEN_OPERHOST.
+
+	* doc/readme.features: Forgot to add the Features OPERHOST_HIDING
+	and HIDDEN_OPERHOST.
+
 2010-08-14  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Fixed bug where user modes were not propagating
