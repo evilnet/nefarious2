@@ -1,6 +1,15 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-14  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Fixed a typo for ALLOWRMX in the Features
+	block.
+
+	* doc/readme.features: Added HIDDEN_HOST_QUIT,
+	HIDDEN_HOST_SET_MESSAGE, HIDDEN_HOST_UNSET_MESSAGE and ALLOWRMX
+	to readme.features.
+
 2010-08-13  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added HIDDEN_HOST_QUIT, HIDDEN_HOST_SET_MESSAGE

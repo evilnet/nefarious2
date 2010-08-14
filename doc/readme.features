@@ -990,6 +990,32 @@ OPER_XTRAOP
 Enables or disables the user of user mode +X for opers who have the priv
 XTRAOP.
 
+HIDDEN_HOST_QUIT
+ * Type: boolean
+ * Default: TRUE
+
+When enabled the ircd will send "Registered" and "Unregistered" when clients
+set and unset +x (hidden host). This applies to both host hiding styles.
+
+HIDDEN_HOST_SET_MESSAGE
+ * Type: string
+ * Default: "Registered"
+
+The message sent in the quit message when a user sets +x.
+
+HIDDEN_HOST_UNSET_MESSAGE
+ * Type: string
+ * Default: "UnRegistered"
+
+The message sent in the quit message when a user sets -x.
+
+ALLOWRMX
+ * Type: boolean
+ * Default: FALSE
+
+If enabled when HOST_HIDING_STYLE is set to 1 users will be able to remove
+their hidden host (-x).
+
 GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE
