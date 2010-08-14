@@ -943,8 +943,12 @@ hide_hostmask(struct Client *cptr)
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
     sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
                   feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
-  ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, "%s.%s",
-                cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
+  if (IsAnOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
+    ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, "%s.%s",
+                  cli_user(cptr)->account, feature_str(FEAT_HIDDEN_OPERHOST));
+  else
+    ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, "%s.%s",
+                  cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
@@ -1279,11 +1283,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'x':
         if (what == MODE_ADD) {
           SetHiddenHost(acptr);
-	  do_host_hiding = 1;
         } else {
           if (feature_bool(FEAT_ALLOWRMX)) {
             ClearHiddenHost(acptr);
-            unhide_hostmask(acptr);
           }
         }
 	break;
@@ -1378,8 +1380,6 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       }
       ircd_strncpy(cli_user(acptr)->account, account, len);
   }
-  if (!FlagHas(&setflags, FLAG_HIDDENHOST) && do_host_hiding)
-    hide_hostmask(acptr);
 
   if (IsRegistered(acptr)) {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
@@ -1398,7 +1398,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         assert(UserStats.opers > 0);
         --UserStats.opers;
       }
+      if (HasHiddenHost(acptr))
+        do_host_hiding = 1;
       client_set_privs(acptr, NULL); /* will clear propagate privilege */
+    }
+    if (FlagHas(&setflags, FLAG_LOCOP) && !IsLocOp(acptr)) {
+      if (HasHiddenHost(acptr))
+        do_host_hiding = 1;
     }
     if (!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(acptr)) {
       if (FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
@@ -1417,12 +1423,24 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (!FlagHas(&setflags, FLAG_INVISIBLE) && IsInvisible(acptr)) {
       ++UserStats.inv_clients;
     }
+    if (!FlagHas(&setflags, FLAG_HIDDENHOST) && HasHiddenHost(acptr)) {
+      do_host_hiding = 1;
+    }
+    if (FlagHas(&setflags, FLAG_HIDDENHOST) && !HasHiddenHost(acptr)) {
+      unhide_hostmask(acptr);
+    }
+
     assert(UserStats.opers <= UserStats.clients + UserStats.unknowns);
     assert(UserStats.inv_clients <= UserStats.clients + UserStats.unknowns);
     send_umode_out(cptr, acptr, &setflags, prop);
 
     if (force) /* Let the user know */
       send_umode_out(acptr, acptr, &setflags, 1);
+  }
+
+  if (do_host_hiding) {
+    if (HasHiddenHost(acptr))
+      hide_hostmask(acptr);
   }
 
   return 0;

@@ -203,6 +203,8 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     send_reply(sptr, RPL_YOUREOPER);
 
+    hide_hostmask(sptr);
+
     sendto_opmask_butone_global(&me, SNO_OLDSNO, "%s (%s@%s) is now operator (%c)",
 			 parv[0], cli_user(sptr)->username, cli_sockhost(sptr),
 			 IsOper(sptr) ? 'O' : 'o');

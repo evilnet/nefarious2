@@ -3,6 +3,19 @@
 
 2010-08-14  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/ircd_features.h: Added OPERHOST_HIDING and HIDDEN_OPERHOST
+	Features.
+
+	* ircd/ircd_features.c: Added OPERHOST_HIDING and HIDDEN_OPERHOST
+	Features.
+
+	* ircd/m_oper.c: Added Oper host hiding.
+
+	* ircd/s_user.c: Added Oper host hiding and tweaked host hiding
+	logic.
+
+2010-08-14  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Fixed a typo for ALLOWRMX in the Features
 	block.
 

@@ -475,6 +475,8 @@ static struct FeatureDesc {
   F_S(HIDDEN_HOST_SET_MESSAGE, 0, "Registered", 0),
   F_S(HIDDEN_HOST_UNSET_MESSAGE, 0, "UnRegistered", 0),
   F_B(ALLOWRMX, 0, 0, 0),
+  F_B(OPERHOST_HIDING, 0, 1, 0),
+  F_S(HIDDEN_OPERHOST, FEAT_CASE, "Staff.Nefarious", 0),
 
   /* GeoIP FEAT_'s */
   F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),
