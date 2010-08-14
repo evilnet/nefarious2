@@ -3,6 +3,11 @@
 
 2010-08-14  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Fixed bug where user modes were not propagating
+	during bursting properly.
+
+2010-08-14  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ircd_features.h: Added OPERHOST_HIDING and HIDDEN_OPERHOST
 	Features.
 

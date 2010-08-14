@@ -1082,9 +1082,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
   if (!acptr && !(acptr = FindUser(parv[1])))
   {
-    if (MyConnect(sptr))
-      send_reply(sptr, ERR_NOSUCHCHANNEL, parv[1]);
-    return 0;
+    if (IsServer(cptr) && !MyConnect(sptr)) {
+      acptr = sptr;
+    } else {
+      if (MyConnect(sptr))
+        send_reply(sptr, ERR_NOSUCHCHANNEL, parv[1]);
+      return 0;
+    }
   }
 
   if (IsServer(sptr) || sptr != acptr)
