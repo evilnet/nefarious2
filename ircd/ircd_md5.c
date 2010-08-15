@@ -271,11 +271,11 @@ void MD5Transform(uint32 buf[4], uint32 const in[16])
  */
 void DoMD5(unsigned char *mdout, unsigned char *src, unsigned long n)
 {
-MD5_CTX hash;
+struct MD5Context hash;
 
-        MD5_Init(&hash);
-        MD5_Update(&hash, src, n);
-        MD5_Final(mdout, &hash);
+        MD5Init(&hash);
+        MD5Update(&hash, src, n);
+        MD5Final(mdout, &hash);
 }
 
 #endif

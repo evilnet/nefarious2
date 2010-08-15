@@ -1351,6 +1351,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearNoIdle(acptr);
     if (!(feature_bool(FEAT_OPER_XTRAOP) && HasPriv(acptr, PRIV_XTRAOP)) && IsXtraOp(acptr))
       ClearXtraOp(acptr);
+    if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr) && !feature_bool(FEAT_HOST_HIDING))
+      ClearHiddenHost(acptr);
   }
   if (MyConnect(acptr))
   {
@@ -1402,12 +1404,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         assert(UserStats.opers > 0);
         --UserStats.opers;
       }
-      if (HasHiddenHost(acptr))
+      if (IsHiddenHost(acptr))
         do_host_hiding = 1;
       client_set_privs(acptr, NULL); /* will clear propagate privilege */
     }
     if (FlagHas(&setflags, FLAG_LOCOP) && !IsLocOp(acptr)) {
-      if (HasHiddenHost(acptr))
+      if (IsHiddenHost(acptr))
         do_host_hiding = 1;
     }
     if (!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(acptr)) {
@@ -1427,10 +1429,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (!FlagHas(&setflags, FLAG_INVISIBLE) && IsInvisible(acptr)) {
       ++UserStats.inv_clients;
     }
-    if (!FlagHas(&setflags, FLAG_HIDDENHOST) && HasHiddenHost(acptr)) {
+    if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr)) {
       do_host_hiding = 1;
     }
-    if (FlagHas(&setflags, FLAG_HIDDENHOST) && !HasHiddenHost(acptr)) {
+    if (FlagHas(&setflags, FLAG_HIDDENHOST) && !IsHiddenHost(acptr)) {
       unhide_hostmask(acptr);
     }
 
@@ -1443,7 +1445,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   }
 
   if (do_host_hiding) {
-    if (HasHiddenHost(acptr))
+    if (IsHiddenHost(acptr))
       hide_hostmask(acptr);
   }
 
