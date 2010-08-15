@@ -263,4 +263,19 @@ void MD5Transform(uint32 buf[4], uint32 const in[16])
 	buf[3] += d;
 }
 
+/** Generates an MD5 checksum.
+ * @param[out] mdout Buffer to store result in, the result will be 16 bytes in binary
+ *                   (not ascii printable!).
+ * @param[in] src    The input data used to generate the checksum.
+ * @param[in] n      Length of data.
+ */
+void DoMD5(unsigned char *mdout, unsigned char *src, unsigned long n)
+{
+MD5_CTX hash;
+
+        MD5_Init(&hash);
+        MD5_Update(&hash, src, n);
+        MD5_Final(mdout, &hash);
+}
+
 #endif

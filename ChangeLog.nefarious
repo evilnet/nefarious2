@@ -3,6 +3,12 @@
 
 2010-08-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/ircd_md5.h: Added DoMD5().
+
+	* ircd/ircd_md5.c: Added DoMD5().
+
+2010-08-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Forgot to add the Features OPERHOST_HIDING
 	and HIDDEN_OPERHOST.
 

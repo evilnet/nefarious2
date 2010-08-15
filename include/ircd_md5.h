@@ -34,6 +34,7 @@ void MD5Init(struct MD5Context *);
 void MD5Update(struct MD5Context *, unsigned const char *, unsigned);
 void MD5Final(unsigned char digest[16], struct MD5Context *);
 void MD5Transform(uint32 buf[4], uint32 const in[16]);
+void DoMD5(unsigned char *mdout, unsigned char *src, unsigned long n);
 
 char *crypt_md5(const char *pw, const char *salt);
 
