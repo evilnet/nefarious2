@@ -1030,6 +1030,42 @@ HIDDEN_OPERHOST
 This selects the suffix for the hidden hostmask for IRC Operators
 (see OPERHOST_HIDING).
 
+HOST_HIDING_STYLE
+ * Type: integer
+ * Default: 1
+
+Value 1 will give you hidden hosts of ie users.network.tld, Value 2 will
+give you UnrealIRCd style hosts Prefix-554F4C88D.isp.tld and Value 3
+will give you Value 1 for authenticated users and Value 2 for
+unauthenticated users.
+
+HOST_HIDING_PREFIX
+ * Type: string
+ * Default: Nefarious
+
+This selects the suffix for the hidden hostmask style 2.
+
+HOST_HIDING_KEY1
+ * Type: string
+ * Default: aoAr1HnR6gl3sJ7hVz4Zb7x4YwpW
+
+One of the 3 unique host hiding keys used to encrypt style 2 hidden
+hosts. These must all be different.
+
+HOST_HIDING_KEY2
+ * Type: string
+ * Default: sdfjkLJKHlkjdkfjsdklfjlkjKLJ
+
+One of the 3 unique host hiding keys used to encrypt style 2 hidden
+hosts. These must all be different.
+
+HOST_HIDING_KEY3
+ * Type: string
+ * Default: KJklJSDFLkjLKDFJSLKjlKJFlkjS
+
+One of the 3 unique host hiding keys used to encrypt style 2 hidden
+hosts. These must all be different.
+
 GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE

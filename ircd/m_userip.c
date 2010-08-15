@@ -95,7 +95,19 @@
 
 static void userip_formatter(struct Client* cptr, struct Client *sptr, struct MsgBuf* mb)
 {
+  char iphost[HOSTLEN+1];
   assert(IsUser(cptr));
+
+  if ((sptr == cptr) || IsAnOper(sptr) || !IsHiddenHost(cptr))
+    ircd_snprintf(0, iphost, HOSTLEN, "%s", ircd_ntoa(&cli_ip(cptr)));
+  else if (IsHiddenHost(cptr) && IsCloakIP(cptr))
+    ircd_snprintf(0, iphost, HOSTLEN, "%s", cli_user(cptr)->cloakip);
+  else if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+           (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) || IsAccount(cptr))
+    ircd_snprintf(0, iphost, HOSTLEN, "%s", feature_str(FEAT_HIDDEN_IP));
+  else
+    ircd_snprintf(0, iphost, HOSTLEN, "%s", ircd_ntoa(&cli_ip(cptr)));
+
   msgq_append(0, mb, "%s%s=%c%s@%s", cli_name(cptr),
 	      SeeOper(sptr,cptr) ? "*" : "",
 	      cli_user(cptr)->away ? '-' : '+', cli_user(cptr)->username,
@@ -105,9 +117,7 @@ static void userip_formatter(struct Client* cptr, struct Client *sptr, struct Ms
 	       * of +x.  If an oper wants the real IP, he should go to
 	       * /whois to get it.
 	       */
-	      HasHiddenHost(cptr) && (sptr != cptr) ?
-	      feature_str(FEAT_HIDDEN_IP) :
-	      ircd_ntoa(&cli_ip(cptr)));
+	      iphost);
 }
 
 /*

@@ -477,6 +477,11 @@ static struct FeatureDesc {
   F_B(ALLOWRMX, 0, 0, 0),
   F_B(OPERHOST_HIDING, 0, 1, 0),
   F_S(HIDDEN_OPERHOST, FEAT_CASE, "Staff.Nefarious", 0),
+  F_I(HOST_HIDING_STYLE, 0, 1, 0),
+  F_S(HOST_HIDING_PREFIX, 0, "Nefarious", 0),
+  F_S(HOST_HIDING_KEY1, 0, "aoAr1HnR6gl3sJ7hVz4Zb7x4YwpW", 0),
+  F_S(HOST_HIDING_KEY2, 0, "sdfjkLJKHlkjdkfjsdklfjlkjKLJ", 0),
+  F_S(HOST_HIDING_KEY3, 0, "KJklJSDFLkjLKDFJSLKjlKJFlkjS", 0),
 
   /* GeoIP FEAT_'s */
   F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),

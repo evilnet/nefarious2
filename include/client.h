@@ -194,6 +194,9 @@ enum Flag
     FLAG_ADMIN,                     /**< User is an admin (user mode +a) */
     FLAG_XTRAOP,                    /**< User has user mode +X (XtraOp) */
 
+    FLAG_CLOAKIP,                   /**< User has a cloaked IP (+c) */
+    FLAG_CLOAKHOST,                 /**< User has a cloaked host (+C) */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -673,6 +676,10 @@ struct Client {
 #define IsAdmin(x)              HasFlag(x, FLAG_ADMIN)
 /** Return non-zero if the client has set +X. */
 #define IsXtraOp(x)             HasFlag(x, FLAG_XTRAOP)
+/** Return non-zero if the client has a cloaked IP. */
+#define IsCloakIP(x)            HasFlag(x, FLAG_CLOAKIP)
+/** Return non-zero if the client has a cloaked host. */
+#define IsCloakHost(x)          HasFlag(x, FLAG_CLOAKHOST)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -751,6 +758,10 @@ struct Client {
 #define SetAdmin(x)             SetFlag(x, FLAG_ADMIN)
 /** Mark a client as having mode +X (XtraOp). */
 #define SetXtraOp(x)            SetFlag(x, FLAG_XTRAOP)
+/** Make a client as having a cloaked IP. */
+#define SetCloakIP(x)           SetFlag(x, FLAG_CLOAKIP)
+/** Make a client as having a cloaked host. */
+#define SetCloakHost(x)         SetFlag(x, FLAG_CLOAKHOST)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -814,6 +825,10 @@ struct Client {
 #define ClearAdmin(x)           ClrFlag(x, FLAG_ADMIN)
 /** Remove mode +X (XtraOp) flag from client */
 #define ClearXtraOp(x)          ClrFlag(x, FLAG_XTRAOP)
+/** Client no longer has a cloaked IP. */
+#define ClearCloakIP(x)         ClrFlag(x, FLAG_CLOAKIP)
+/** Client no longer has a cloaked host. */
+#define ClearCloakHost(x)       ClrFlag(x, FLAG_CLOAKHOST)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

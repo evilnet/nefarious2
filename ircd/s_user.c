@@ -35,6 +35,7 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
+#include "ircd_cloaking.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -434,11 +435,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
     SetUser(sptr);
   }
 
+  /* Set the users cloaked host and IP fields. */
+  user_setcloaked(sptr);
+
   /* If they get both +x and an account during registration, hide
    * their hostmask here.  Calling hide_hostmask() from IAuth's
    * account assignment causes a numeric reply during registration.
    */
-  if (HasHiddenHost(sptr))
+  if (IsHiddenHost(sptr))
     hide_hostmask(sptr);
   if (IsInvisible(sptr))
     ++UserStats.inv_clients;
@@ -490,6 +494,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
       FlagSet(&flags, FLAG_ACCOUNT);
     else
       FlagClr(&flags, FLAG_ACCOUNT);
+    if (IsCloakHost(cptr))
+      FlagSet(&flags, FLAG_CLOAKHOST);
+    else
+      FlagClr(&flags, FLAG_CLOAKHOST);
+    if (IsCloakIP(cptr))
+      FlagSet(&flags, FLAG_CLOAKIP);
+    else
+      FlagClr(&flags, FLAG_CLOAKIP);
     client_set_privs(sptr, NULL);
     send_umode(cptr, sptr, &flags, ALL_UMODES);
     if ((cli_snomask(sptr) != SNO_DEFAULT) && HasFlag(sptr, FLAG_SERVNOTICE))
@@ -522,7 +534,9 @@ static const struct UserMode {
   { FLAG_ACCOUNTONLY,  'R' },
   { FLAG_WHOIS_NOTICE, 'W' },
   { FLAG_ADMIN,        'a' },
-  { FLAG_XTRAOP,       'X' }
+  { FLAG_XTRAOP,       'X' },
+  { FLAG_CLOAKHOST,    'C' },
+  { FLAG_CLOAKIP,      'c' }
 };
 
 /** Length of #userModeList. */
@@ -931,28 +945,53 @@ void send_user_info(struct Client* sptr, char* names, int rpl, InfoFormatter fmt
 int
 hide_hostmask(struct Client *cptr)
 {
+  char newhost[HOSTLEN+1];
   struct Membership *chan;
 
-  if (!HasFlag(cptr, FLAG_HIDDENHOST) || !HasFlag(cptr, FLAG_ACCOUNT))
+  if (!IsHiddenHost(cptr))
     return 0;
+  if ((feature_int(FEAT_HOST_HIDING_STYLE) < 1) ||
+      (feature_int(FEAT_HOST_HIDING_STYLE) > 3))
+    return 0;
+  if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) && !IsAccount(cptr))
+    return 0;
+
+  if (!IsCloakHost(cptr) && ((feature_int(FEAT_HOST_HIDING_STYLE) == 2) ||
+      (feature_int(FEAT_HOST_HIDING_STYLE) == 3)))
+    user_setcloaked(cptr);
 
   /* Invalidate all bans against the user so we check them again */
   for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
     ClearBanValid(chan);
 
+  /* Select the new host to change to. */
+  if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+      ((feature_int(FEAT_HOST_HIDING_STYLE) == 3) && IsAccount(cptr))) {
+    if (IsAnOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
+      ircd_snprintf(0, newhost, HOSTLEN, "%s.%s",
+                    cli_user(cptr)->account, feature_str(FEAT_HIDDEN_OPERHOST));
+    else
+      ircd_snprintf(0, newhost, HOSTLEN, "%s.%s",
+                    cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
+  } else if (IsCloakHost(cptr) && ((feature_int(FEAT_HOST_HIDING_STYLE) == 2) ||
+             (feature_int(FEAT_HOST_HIDING_STYLE) == 3))) {
+    ircd_snprintf(0, newhost, HOSTLEN, cli_user(cptr)->cloakhost);
+  }
+
+  /* If the new host is the same as the current host return silently. */
+  if (!ircd_strncmp(cli_user(cptr)->host, newhost, HOSTLEN))
+    return 0;
+
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
     sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
                   feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
-  if (IsAnOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
-    ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, "%s.%s",
-                  cli_user(cptr)->account, feature_str(FEAT_HIDDEN_OPERHOST));
-  else
-    ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, "%s.%s",
-                  cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
+
+  /* Finally copy the new host to the users current host. */
+  ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, newhost);
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
-   send_reply(cptr, RPL_HOSTHIDDEN, cli_user(cptr)->host);
+   send_reply(cptr, RPL_HOSTHIDDEN, cli_user(cptr)->host, " hidden");
 
   if (!feature_bool(FEAT_HIDDEN_HOST_QUIT))
     return 0;
@@ -1004,7 +1043,7 @@ unhide_hostmask(struct Client *cptr)
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
-   send_reply(cptr, RPL_HOSTHIDDEN, cli_user(cptr)->host);
+   send_reply(cptr, RPL_HOSTHIDDEN, cli_user(cptr)->host, "");
 
   if (!feature_bool(FEAT_HIDDEN_HOST_QUIT))
     return 0;
@@ -1061,6 +1100,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   int force = 0;
   int is_svsmode = 0;
   char* account = NULL;
+  char* cloakip = NULL;
+  char* cloakhost = NULL;
   struct Client *acptr = NULL;
 
   if (MyUser(sptr) && (((int)cptr) == MAGIC_SVSMODE_OVERRIDE))
@@ -1300,6 +1341,18 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 	}
 	/* There is no -r */
 	break;
+      case 'C':
+        if (*(p + 1) && (what == MODE_ADD)) {
+          cloakhost = *(++p);
+          SetCloakHost(acptr);
+        }
+        break;
+      case 'c':
+        if (*(p + 1) && (what == MODE_ADD)) {
+          cloakip = *(++p);
+          SetCloakIP(acptr);
+        }
+        break;
       default:
         send_reply(acptr, ERR_UMODEUNKNOWNFLAG, *m);
         break;
@@ -1320,11 +1373,16 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearAdmin(acptr);
     if (!FlagHas(&setflags, FLAG_ACCOUNT) && IsAccount(acptr))
       ClrFlag(acptr, FLAG_ACCOUNT);
+    if (!FlagHas(&setflags, FLAG_CLOAKIP) && IsCloakIP(acptr))
+      ClearCloakIP(acptr);
+    if (!FlagHas(&setflags, FLAG_CLOAKHOST) && IsCloakHost(acptr))
+      ClearCloakHost(acptr);
     /*
      * new umode; servers can set it, local users cannot;
      * prevents users from /kick'ing or /mode -o'ing
      */
-    if (!FlagHas(&setflags, FLAG_CHSERV) && IsChannelService(acptr) && !HasPriv(acptr, PRIV_SERVICE))
+    if (!FlagHas(&setflags, FLAG_CHSERV) && IsChannelService(acptr) &&
+        !HasPriv(acptr, PRIV_SERVICE))
       ClearChannelService(acptr);
     /*
      * only send wallops to opers
@@ -1341,7 +1399,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (feature_bool(FEAT_HIS_DEBUG_OPER_ONLY) &&
         !IsAnOper(acptr) && !FlagHas(&setflags, FLAG_DEBUG))
       ClearDebug(acptr);
-    if (!(feature_bool(FEAT_OPER_WHOIS_PARANOIA) && HasPriv(acptr, PRIV_WHOIS_NOTICE)) && IsWhoisNotice(acptr))
+    if (!(feature_bool(FEAT_OPER_WHOIS_PARANOIA) && HasPriv(acptr, PRIV_WHOIS_NOTICE)) &&
+        IsWhoisNotice(acptr))
       ClearWhoisNotice(acptr);
     if (!(feature_bool(FEAT_OPER_HIDE) && HasPriv(acptr, PRIV_HIDE_OPER)) && IsHideOper(acptr))
       ClearHideOper(acptr);
@@ -1351,7 +1410,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearNoIdle(acptr);
     if (!(feature_bool(FEAT_OPER_XTRAOP) && HasPriv(acptr, PRIV_XTRAOP)) && IsXtraOp(acptr))
       ClearXtraOp(acptr);
-    if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr) && !feature_bool(FEAT_HOST_HIDING))
+    if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr) &&
+        !(feature_bool(FEAT_HOST_HIDING) && (feature_int(FEAT_HOST_HIDING_STYLE) > 0)))
       ClearHiddenHost(acptr);
   }
   if (MyConnect(acptr))
@@ -1386,6 +1446,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       }
       ircd_strncpy(cli_user(acptr)->account, account, len);
   }
+
+  if (!FlagHas(&setflags, FLAG_CLOAKIP) && IsCloakIP(acptr))
+    ircd_strncpy(cli_user(acptr)->cloakip, cloakip, HOSTLEN);
+  if (!FlagHas(&setflags, FLAG_CLOAKHOST) && IsCloakHost(acptr))
+    ircd_strncpy(cli_user(acptr)->cloakhost, cloakhost, HOSTLEN);
 
   if (IsRegistered(acptr)) {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
@@ -1432,9 +1497,6 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr)) {
       do_host_hiding = 1;
     }
-    if (FlagHas(&setflags, FLAG_HIDDENHOST) && !IsHiddenHost(acptr)) {
-      unhide_hostmask(acptr);
-    }
 
     assert(UserStats.opers <= UserStats.clients + UserStats.unknowns);
     assert(UserStats.inv_clients <= UserStats.clients + UserStats.unknowns);
@@ -1442,6 +1504,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
     if (force) /* Let the user know */
       send_umode_out(acptr, acptr, &setflags, 1);
+
+    if (FlagHas(&setflags, FLAG_HIDDENHOST) && !IsHiddenHost(acptr)) {
+      unhide_hostmask(acptr);
+    }
   }
 
   if (do_host_hiding) {
@@ -1491,10 +1557,29 @@ char *umode_str(struct Client *cptr)
       m--; /* back up over previous nul-termination */
       while ((*m++ = *t++))
 	; /* Empty loop */
+      m--; /* back up over nul-termination */
     }
   }
 
-  *m = '\0';
+  if (IsCloakHost(cptr))
+  {
+    char* t = cli_user(cptr)->cloakhost;
+    *m++ = ' ';
+    while ((*m++ = *t++))
+      ; /* Empty loop */
+    m--; /* back up over nul-termination */
+  }
+
+  if (IsCloakIP(cptr))
+  {
+    char* t = cli_user(cptr)->cloakip;
+    *m++ = ' ';
+    while ((*m++ = *t++))
+      ; /* Empty loop */
+    m--; /* back up over nul-termination */
+  }
+
+  *(++m) = '\0';
 
   return umodeBuf;                /* Note: static buffer, gets
                                    overwritten by send_umode() */
@@ -1755,6 +1840,33 @@ send_supported(struct Client *cptr)
   send_reply(cptr, RPL_ISUPPORT, featurebuf);
 
   return 0; /* convenience return, if it's ever needed */
+}
+
+/** Set a users cloaked host and IP
+ * @param[in/out] cptr Client to set cloaked host and IP for.
+ */
+void
+user_setcloaked(struct Client *cptr)
+{
+  if ((feature_int(FEAT_HOST_HIDING_STYLE) < 2) ||
+      (feature_int(FEAT_HOST_HIDING_STYLE) > 3))
+    return;
+
+  if (!IsCloakIP(cptr)) {
+    if (irc_in_addr_is_ipv4(&(cli_ip(cptr))))
+      ircd_snprintf(0, cli_user(cptr)->cloakip, HOSTLEN, hidehost_ipv4(&(cli_ip(cptr))));
+    else
+      ircd_snprintf(0, cli_user(cptr)->cloakip, HOSTLEN, hidehost_ipv6(&(cli_ip(cptr))));
+    SetCloakIP(cptr);
+  }
+
+  if (!IsCloakHost(cptr)) {
+    if (!ircd_strncmp(cli_sock_ip(cptr), cli_user(cptr)->host, HOSTLEN))
+      ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN, cli_user(cptr)->cloakip);
+    else
+      ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN, hidehost_normalhost(cli_user(cptr)->realhost));
+    SetCloakHost(cptr);
+  }
 }
 
 /* vim: shiftwidth=2 

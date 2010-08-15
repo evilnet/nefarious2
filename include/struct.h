@@ -85,6 +85,8 @@ struct User {
   char               account[ACCOUNTLEN + 1]; /**< IRC account name */
   time_t	     acc_create;              /**< IRC account timestamp */
   char               swhois[BUFSIZE + 1];     /**< SWHOIS message */
+  char               cloakip[HOSTLEN + 1];    /**< Cloaked IP */
+  char               cloakhost[HOSTLEN + 1];  /**< Cloaked host */
 };
 
 #endif /* INCLUDED_struct_h */

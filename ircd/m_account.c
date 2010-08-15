@@ -82,6 +82,7 @@
 
 #include "client.h"
 #include "ircd.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -138,7 +139,10 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
   ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN);
   SetAccount(acptr);
-  hide_hostmask(acptr);
+
+  if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+      (feature_int(FEAT_HOST_HIDING_STYLE) == 3))
+    hide_hostmask(acptr);
 
   sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr,
                         cli_user(acptr)->acc_create ? "%C %s %Tu" : "%C %s",

@@ -109,6 +109,8 @@ extern unsigned int umode_make_snomask(unsigned int oldmask, char *arg,
 extern int send_supported(struct Client *cptr);
 extern int do_nick_name(char* nick);
 
+extern void user_setcloaked(struct Client *cptr);
+
 #define NAMES_ALL 1 /**< List all users in channel */
 #define NAMES_VIS 2 /**< List only visible users in non-secret channels */
 #define NAMES_EON 4 /**< Add an 'End Of Names' reply to the end */

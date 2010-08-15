@@ -3,6 +3,52 @@
 
 2010-08-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added HOST_HIDING_STYLE Feature and associated
+	options.
+
+	* doc/readme.features: Added HOST_HIDING_STYLE Feature and associated
+	options.
+
+	* include/client.h: Added user modes +C and +c for cloaked host and
+	IP propagation.
+
+	* include/ircd_features.h: Added HOST_HIDING_STYLE Feature and
+	associated options.
+
+	* include/s_user.h: Added Host and IP cloaking for styles 2 and 3.
+
+	* include/struct.h: Added cloakip and cloakhost fields.
+
+	* ircd/Makefile.in: Added ircd/ircd_cloaking.c
+
+	* ircd/ircd_features.c: Added HOST_HIDING_STYLE Feature and
+	associated options.
+
+	* ircd/m_account.c: Modified call to hide_hostmask().
+
+	* ircd/m_oper.c: Modified call to hide_hostmask().
+
+	* ircd/m_userhost.c: Modified to show apropriate hosts in accordance
+	with HOST_HIDING_STYLE.
+
+	* ircd/m_userip.c: Modified to show apropriate ips in accordance
+	with HOST_HIDING_STYLE.
+
+	* ircd/m_whois.c: Modified to show real host+ip without requiring
+	authed status.
+
+	* ircd/s_err.c: Modified RPL_HOSTHIDDEN to ommit " hidden" and allow
+	specifying " hidden" seperately.
+
+	* ircd/s_user.c: Added Host and IP cloaking for styles 2 and 3.
+
+	* include/ircd_cloaking.h: Added Host and IP cloaking for styles 2
+	and 3.
+
+	* ircd/ircd_cloaking.c: Added Host and IP cloaking for styles 2 and 3.
+
+2010-08-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ircd_md5.c: Fixed typos in function calls.
 
 	* ircd/s_user.c: Fixed HOST_HIDING being ignored.
