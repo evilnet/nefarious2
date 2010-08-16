@@ -362,7 +362,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    ircd_ntoa(&cli_ip(acptr)));
    send_reply(sptr, RPL_DATASTR, outbuf);
 
-   if (HasHiddenHost(acptr))
+   if (IsHiddenHost(acptr))
    {
       ircd_snprintf(0, outbuf, sizeof(outbuf), " Real User/Host:: %s@%s", acptr->cli_user->username, acptr->cli_user->realhost);
       send_reply(sptr, RPL_DATASTR, outbuf);

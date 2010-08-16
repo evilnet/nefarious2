@@ -3,6 +3,11 @@
 
 2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_check.c: Fix for CHECK not showing real host of a user
+	with user mode +x when the user is not authed.
+
+2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_user.c: Fix for bug where modes +C and +c were showing
 	in "MODE nick" output when they shouldnt be.
 
