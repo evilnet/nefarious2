@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Updated channel ban matching to check cloaked
+	IP, cloaked host, account host, real host and current host.
+
 2010-08-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added HOST_HIDING_STYLE Feature and associated

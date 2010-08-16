@@ -385,16 +385,16 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist)
   ircd_snprintf(0, nu, sizeof(nu), "%s!%s",
                 cli_name(cptr), cli_user(cptr)->username);
   ircd_ntoa_r(iphost, &cli_ip(cptr));
-  if (!IsAccount(cptr))
-    sr = NULL;
-  else if (HasHiddenHost(cptr))
-    sr = cli_user(cptr)->realhost;
-  else
+  if (IsAccount(cptr) && ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+      (feature_int(FEAT_HOST_HIDING_STYLE) == 3)))
   {
     ircd_snprintf(0, tmphost, HOSTLEN, "%s.%s",
-                  cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
+                  cli_user(cptr)->account, (feature_bool(FEAT_OPERHOST_HIDING) ?
+                  feature_str(FEAT_HIDDEN_OPERHOST) : feature_str(FEAT_HIDDEN_HOST)));
     sr = tmphost;
   }
+  else
+    sr = NULL;
 
   /* Walk through ban list. */
   for (found = NULL; banlist; banlist = banlist->next) {
@@ -413,6 +413,9 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist)
     if (!((banlist->flags & BAN_IPMASK)
          && ipmask_check(&cli_ip(cptr), &banlist->address, banlist->addrbits))
         && match(hostmask, cli_user(cptr)->host)
+        && match(hostmask, cli_user(cptr)->realhost)
+        && !(IsCloakIP(cptr) && !match(hostmask, cli_user(cptr)->cloakip))
+        && !(IsCloakHost(cptr) && !match(hostmask, cli_user(cptr)->cloakhost))
         && !(sr && !match(hostmask, sr)))
         continue;
     /* If an exception matches, no ban can match. */
