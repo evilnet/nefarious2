@@ -1160,7 +1160,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     for (i = 0; i < USERMODELIST_SIZE; i++)
     {
       if (HasFlag(sptr, userModeList[i].flag) &&
-          userModeList[i].flag != FLAG_ACCOUNT)
+          (userModeList[i].flag != FLAG_ACCOUNT) &&
+          (userModeList[i].flag != FLAG_CLOAKIP) &&
+          (userModeList[i].flag != FLAG_CLOAKHOST))
         *m++ = userModeList[i].c;
     }
     *m = '\0';

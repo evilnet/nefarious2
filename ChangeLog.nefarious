@@ -3,6 +3,11 @@
 
 2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Fix for bug where modes +C and +c were showing
+	in "MODE nick" output when they shouldnt be.
+
+2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/channel.c: Fix for minor bug where HIDDEN_OPERHOST was
 	always being used in ban checking if OPERHOST_HIDING is enabled
 	even if the user is not an oper.
