@@ -3,6 +3,12 @@
 
 2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/channel.c: Fix for minor bug where HIDDEN_OPERHOST was
+	always being used in ban checking if OPERHOST_HIDING is enabled
+	even if the user is not an oper.
+
+2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/channel.c: Updated channel ban matching to check cloaked
 	IP, cloaked host, account host, real host and current host.
 

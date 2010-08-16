@@ -389,8 +389,9 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist)
       (feature_int(FEAT_HOST_HIDING_STYLE) == 3)))
   {
     ircd_snprintf(0, tmphost, HOSTLEN, "%s.%s",
-                  cli_user(cptr)->account, (feature_bool(FEAT_OPERHOST_HIDING) ?
-                  feature_str(FEAT_HIDDEN_OPERHOST) : feature_str(FEAT_HIDDEN_HOST)));
+                  cli_user(cptr)->account, (feature_bool(FEAT_OPERHOST_HIDING) &&
+                  IsAnOper(cptr) ? feature_str(FEAT_HIDDEN_OPERHOST) :
+                  feature_str(FEAT_HIDDEN_HOST)));
     sr = tmphost;
   }
   else
