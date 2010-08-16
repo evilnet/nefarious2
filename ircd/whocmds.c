@@ -129,9 +129,10 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
 
   if (fields & WHO_FIELD_NIP)
   {
-    const char* p2 = HasHiddenHost(acptr) && !IsAnOper(sptr) ?
-      feature_str(FEAT_HIDDEN_IP) :
-      ircd_ntoa(&cli_ip(acptr));
+    const char* p2 = IsHiddenHost(acptr) && !IsAnOper(sptr) ?
+      (!IsCloakIP(acptr) ? (IsAccount(acptr) ?
+       feature_str(FEAT_HIDDEN_IP) : ircd_ntoa(&cli_ip(acptr))) :
+       cli_user(acptr)->cloakip) : ircd_ntoa(&cli_ip(acptr));
     *(p1++) = ' ';
     while ((*p2) && (*(p1++) = *(p2++)));
   }

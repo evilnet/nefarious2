@@ -3,6 +3,11 @@
 
 2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/whocmds.c: Fix for WHO not showing correct cloaked IP or
+	hidden IP for field specifier i.
+
+2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_check.c: Fix for CHECK not showing real host of a user
 	with user mode +x when the user is not authed.
 
