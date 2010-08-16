@@ -196,6 +196,7 @@ enum Flag
 
     FLAG_CLOAKIP,                   /**< User has a cloaked IP (+c) */
     FLAG_CLOAKHOST,                 /**< User has a cloaked host (+C) */
+    FLAG_FAKEHOST,                  /**< User has a fake host (+f) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -680,6 +681,8 @@ struct Client {
 #define IsCloakIP(x)            HasFlag(x, FLAG_CLOAKIP)
 /** Return non-zero if the client has a cloaked host. */
 #define IsCloakHost(x)          HasFlag(x, FLAG_CLOAKHOST)
+/** Return non-zero if the client has a fake host. */
+#define IsFakeHost(x)           HasFlag(x, FLAG_FAKEHOST)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -758,10 +761,12 @@ struct Client {
 #define SetAdmin(x)             SetFlag(x, FLAG_ADMIN)
 /** Mark a client as having mode +X (XtraOp). */
 #define SetXtraOp(x)            SetFlag(x, FLAG_XTRAOP)
-/** Make a client as having a cloaked IP. */
+/** Mark a client as having a cloaked IP. */
 #define SetCloakIP(x)           SetFlag(x, FLAG_CLOAKIP)
-/** Make a client as having a cloaked host. */
+/** Mark a client as having a cloaked host. */
 #define SetCloakHost(x)         SetFlag(x, FLAG_CLOAKHOST)
+/** Mark a client as having a fake host. */
+#define SetFakeHost(x)          SetFlag(x, FLAG_FAKEHOST)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -829,6 +834,8 @@ struct Client {
 #define ClearCloakIP(x)         ClrFlag(x, FLAG_CLOAKIP)
 /** Client no longer has a cloaked host. */
 #define ClearCloakHost(x)       ClrFlag(x, FLAG_CLOAKHOST)
+/** Client no longer has a fake host. */
+#define ClearFakeHost(x)        ClrFlag(x, FLAG_FAKEHOST)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

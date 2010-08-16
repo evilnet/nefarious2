@@ -432,6 +432,10 @@ struct Client;
 #define TOK_SWHOIS		"SW"
 #define CMD_SWHOIS		MSG_SWHOIS, TOK_SWHOIS
 
+#define MSG_FAKE		"FAKE"
+#define TOK_FAKE		"FA"
+#define CMD_FAKE		MSG_FAKE, TOK_FAKE
+
 /*
  * Constants
  */

@@ -1,5 +1,5 @@
 /*
- * IRC - Internet Relay Chat, ircd/m_swhois.c
+ * IRC - Internet Relay Chat, ircd/m_fake.c
  * Copyright (C) 1990 Jarkko Oikarinen and
  *                    University of Oulu, Computing Center
  *
@@ -90,40 +90,47 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "s_user.h"
 #include "send.h"
 #include "version.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
 /*
- * m_swhois - generic message handler
+ * m_fake - generic message handler
  *
  * parv[0] - sender prefix
  * parv[1] - numeric of client to act on
- * parv[2] - swhois message
+ * parv[2] - fake host to apply
  *
  */
-int ms_swhois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+int ms_fake(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
-  struct Client *acptr;
-  char* swhois = "";
+  struct Client *target;
 
-  if (parc < 2)
+  if (parc < 3)
+    return need_more_params(sptr, "FAKE");
+
+  if (!IsServer(sptr))
+    return protocol_violation(cptr, "FAKE from non-server %s",
+                              cli_name(sptr));
+
+  /* Locate our target user; ignore the message if we can't */
+  if (!(target = findNUser(parv[1])))
     return 0;
 
-  if (parc > 2)
-    swhois = parv[2];
-
-  if (!(acptr = findNUser(parv[1])))
+  /* Ignore the assignment if it changes nothing */
+  if (IsFakeHost(target) &&
+      ircd_strcmp(cli_user(target)->fakehost, parv[2]) == 0)
     return 0;
 
-  ircd_strncpy(cli_user(acptr)->swhois, swhois, BUFSIZE);
-  if (swhois && !EmptyString(swhois)) {
-    sendcmdto_serv_butone(sptr, CMD_SWHOIS, cptr, "%C :%s", acptr, swhois);
-  } else {
-    sendcmdto_serv_butone(sptr, CMD_SWHOIS, cptr, "%C", acptr);
-  }
+  /* Assign and propagate the fakehost */
+  SetFakeHost(target);
+  ircd_strncpy(cli_user(target)->fakehost, parv[2], HOSTLEN);
+  hide_hostmask(target);
 
+  sendcmdto_serv_butone(sptr, CMD_FAKE, cptr, "%C %s", target,
+                        cli_user(target)->fakehost);
   return 0;
 }
 

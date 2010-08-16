@@ -3,6 +3,26 @@
 
 2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added user mode +f for fake hosts.
+
+	* include/handlers.h: Added FAKE command.
+
+	* include/msg.h: Added FAKE command.
+
+	* include/struct.h: Added fakehost field to User struct.
+
+	* ircd/Makefile.in: Added FAKE command.
+
+	* ircd/m_swhois.c: Removed a few blank lines
+
+	* ircd/parse.c: Added FAKE command.
+
+	* ircd/s_user.c: Added fake host support.
+
+	* ircd/m_fake.c: Added FAKE command.
+
+2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/whocmds.c: Fix for WHO not showing correct cloaked IP or
 	hidden IP for field specifier i.
 
