@@ -180,6 +180,7 @@ static void free_slist(struct SLink **link) {
 %token PROGRAM
 %token TOK_IPV4 TOK_IPV6
 %token DNS
+%token FORWARDS
 %token WEBIRC
 %token IDENT
 %token USERIDENT
@@ -215,7 +216,7 @@ blocks: blocks block | block;
 block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
-       pseudoblock | iauthblock | webircblock | error ';';
+       pseudoblock | iauthblock | forwardsblock | webircblock | error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -1243,6 +1244,21 @@ iauthprogram: PROGRAM '='
     MyFree(stringlist[stringno]);
   }
 } stringlist ';';
+
+forwardsblock: FORWARDS {
+  unsigned int ii;
+  for(ii = 0; ii < 256; ++ii) {
+    MyFree(GlobalForwards[ii]);
+  }
+} '{' forwarditems '}' ';';
+forwarditems: forwarditems forwarditem | forwarditem;
+forwarditem: QSTRING '=' QSTRING ';'
+{
+  unsigned char ch = $1[0];
+  MyFree(GlobalForwards[ch]);
+  GlobalForwards[ch] = $3;
+  MyFree($1);
+};
 
 webircblock: WEBIRC
 {

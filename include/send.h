@@ -84,7 +84,7 @@ extern void sendcmdto_channel_servers_butone(struct Client *from,
 extern void sendcmdto_channel_butone(struct Client *from, const char *cmd,
 				     const char *tok, struct Channel *to,
 				     struct Client *one, unsigned int skip,
-				     const char *pattern, ...);
+				     unsigned char prefix, const char *pattern, ...);
 
 #define SKIP_DEAF	0x01	/**< skip users that are +d */
 #define SKIP_BURST	0x02	/**< skip users that are bursting */

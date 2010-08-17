@@ -107,7 +107,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
-			   SKIP_DEAF | SKIP_BURST, "%H :%s", chptr, text);
+			   SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
 }
 
 /** Relay a local user's notice to a channel.
@@ -137,7 +137,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
-			   SKIP_DEAF | SKIP_BURST, "%H :%s", chptr, text);
+			   SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
 }
 
 /** Relay a message to a channel.
@@ -164,7 +164,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
    */
   if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
     sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
-			     SKIP_DEAF | SKIP_BURST, "%H :%s", chptr, text);
+			     SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
   }
   else
     send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
@@ -192,7 +192,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
    */
   if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
     sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
-			     SKIP_DEAF | SKIP_BURST, "%H :%s", chptr, text);
+			     SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
   }
 }
 

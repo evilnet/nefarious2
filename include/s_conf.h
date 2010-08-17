@@ -184,6 +184,7 @@ extern struct ConfItem* GlobalConfList;
 extern int              GlobalConfCount;
 extern struct s_map*    GlobalServiceMapList;
 extern struct qline*    GlobalQuarantineList;
+extern char *           GlobalForwards[256];
 
 /*
  * Proto types

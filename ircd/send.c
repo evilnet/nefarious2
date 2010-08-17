@@ -27,6 +27,7 @@
 #include "channel.h"
 #include "class.h"
 #include "client.h"
+#include "hash.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -55,6 +56,7 @@ struct SLink *opsarray[32];     /* don't use highest bit unless you change
 				   atoi to strtoul in sendto_op_mask() */
 /** Linked list of all connections with data queued to send. */
 static struct Connection *send_queues;
+char *GlobalForwards[256];
 
 /*
  * dead_link
@@ -609,12 +611,13 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
 void sendcmdto_channel_butone(struct Client *from, const char *cmd,
 			      const char *tok, struct Channel *to,
 			      struct Client *one, unsigned int skip,
-			      const char *pattern, ...)
+			      unsigned char prefix, const char *pattern, ...)
 {
   struct Membership *member;
   struct VarData vd;
   struct MsgBuf *user_mb;
   struct MsgBuf *serv_mb;
+  struct Client *service;
 
   vd.vd_format = pattern;
 
@@ -647,6 +650,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       send_buffer(member->user, user_mb, 0);
     else
       send_buffer(member->user, serv_mb, 0);
+  }
+  /* Consult service forwarding table. */
+  if(GlobalForwards[prefix]
+      && (service = FindServer(GlobalForwards[prefix]))
+      && cli_sentalong(service) != sentalong_marker) {
+      cli_sentalong(service) = sentalong_marker;
+      send_buffer(service, serv_mb, 0);
   }
 
   msgq_clean(user_mb);

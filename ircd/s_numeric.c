@@ -100,6 +100,6 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
   else
     sendcmdto_channel_butone(feature_bool(FEAT_HIS_REWRITE) ? &me : sptr,
                              num, num, achptr, cptr, SKIP_DEAF | SKIP_BURST,
-                             "%H %s", achptr, parv[2]);
+                             '\0', "%H %s", achptr, parv[2]);
   return 0;
 }

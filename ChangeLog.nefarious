@@ -3,6 +3,30 @@
 
 2010-08-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	Applied Forwards patch supplied by cnix <cnixnz@gmail.com>:
+
+	* doc/example.conf: Added Forwards block.
+
+	* include/s_conf.h: Added GlobalForwards array.
+
+	* include/send.h: Modified sendcmdto_channel_butone() params.
+
+	* ircd/ircd_lexer.l: Added Forwards block.
+
+	* ircd/ircd_parser.y: Added Forwards block.
+
+	* ircd/ircd_relay.c: Modified sendcmdto_channel_butone() params.
+
+	* ircd/m_wallchops.c: Modified sendcmdto_channel_butone() params.
+
+	* ircd/m_wallvoices.c: Modified sendcmdto_channel_butone() params.
+
+	* ircd/s_numeric.c: Modified sendcmdto_channel_butone() params.
+
+	* ircd/send.c: Modified sendcmdto_channel_butone() params.
+
+2010-08-17  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/GeoIP.c: Changed error messages to use Nefarious' logging
 	system instead of printing directly to stdout and stderr.
 
