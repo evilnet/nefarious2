@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-17  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/GeoIP.c: Changed error messages to use Nefarious' logging
+	system instead of printing directly to stdout and stderr.
+
 2010-08-16  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/client.h: Added user mode +f for fake hosts.

@@ -18,6 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
+#include "ircd_log.h"
 #include "GeoIP.h"
 
 static geoipv6_t IPV6_NULL;
@@ -60,7 +61,7 @@ static geoipv6_t IPV6_NULL;
 
 #define CHECK_ERR(err, msg) { \
 		if (err != Z_OK) { \
-				fprintf(stderr, "%s error: %d\n", msg, err); \
+				log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: %s error: %d", msg, err); \
 				exit(1); \
 		} \
 }
@@ -216,7 +217,7 @@ static int _GeoIP_inet_pton(int af, const char *src, void *dst)
  
         if (getaddrinfo(src, NULL, &hints, &res) != 0) 
         { 
-                fprintf(stderr, "Couldn't resolve host %s\n", src); 
+                log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Couldn't resolve host %s", src); 
                 return -1; 
         } 
  
@@ -437,7 +438,7 @@ int _check_mtime(GeoIP *gi) {
 				    } else {
 					/* reload database into memory cache */
 					if ((gi->cache = (unsigned char*) realloc(gi->cache, buf.st_size)) == NULL) {
-						fprintf(stderr,"Out of memory when reloading %s\n",gi->file_path);
+						log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Out of memory when reloading %s",gi->file_path);
 						return -1;
 					}
 				    }
@@ -446,7 +447,7 @@ int _check_mtime(GeoIP *gi) {
 				fclose(gi->GeoIPDatabase);
 				gi->GeoIPDatabase = fopen(gi->file_path,"rb");
 				if (gi->GeoIPDatabase == NULL) {
-					fprintf(stderr,"Error Opening file %s when reloading\n",gi->file_path);
+					log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error Opening file %s when reloading",gi->file_path);
 					return -1;
 				}
 				gi->mtime = buf.st_mtime;
@@ -454,14 +455,14 @@ int _check_mtime(GeoIP *gi) {
 
 				if ( gi->flags & GEOIP_MMAP_CACHE) {
 #if defined(_WIN32)
-					fprintf(stderr, "GEOIP_MMAP_CACHE is not supported on WIN32\n");
+					log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: GEOIP_MMAP_CACHE is not supported on WIN32");
 					gi->cache = 0;
 					return -1;
 #else
 				    gi->cache = mmap(NULL, buf.st_size, PROT_READ, MAP_PRIVATE, fileno(gi->GeoIPDatabase), 0);
 				    if ( gi->cache == MAP_FAILED ) {
 
-					    fprintf(stderr,"Error remapping file %s when reloading\n",gi->file_path);
+					    log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error remapping file %s when reloading",gi->file_path);
 
 					    gi->cache = 0;
 					    return -1;
@@ -469,7 +470,7 @@ int _check_mtime(GeoIP *gi) {
 #endif
 				} else if ( gi->flags & GEOIP_MEMORY_CACHE ) {
 				    if (fread(gi->cache, sizeof(unsigned char), buf.st_size, gi->GeoIPDatabase) != (size_t) buf.st_size) {
-					    fprintf(stderr,"Error reading file %s when reloading\n",gi->file_path);
+					    log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error reading file %s when reloading",gi->file_path);
 					    return -1;
 					}
 				}
@@ -480,7 +481,7 @@ int _check_mtime(GeoIP *gi) {
 				}
 				_setup_segments(gi);
 				if (gi->databaseSegments == NULL) {
-					fprintf(stderr, "Error reading file %s -- corrupt\n", gi->file_path);
+					log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error reading file %s -- corrupt", gi->file_path);
 					return -1;
 				}
 				if (gi->flags & GEOIP_INDEX_CACHE) {                        
@@ -488,7 +489,7 @@ int _check_mtime(GeoIP *gi) {
 					if (gi->index_cache != NULL) {
 						fseek(gi->GeoIPDatabase, 0, SEEK_SET);
 						if (fread(gi->index_cache, sizeof(unsigned char), gi->databaseSegments[0] * (long)gi->record_length * 2, gi->GeoIPDatabase) != (size_t) (gi->databaseSegments[0]*(long)gi->record_length * 2)) {
-							fprintf(stderr,"Error reading file %s where reloading\n",gi->file_path);
+							log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error reading file %s where reloading",gi->file_path);
 							return -1;
 						}
 					}
@@ -572,7 +573,7 @@ unsigned int _GeoIP_seek_record_v6 (GeoIP *gi, geoipv6_t ipnum) {
 
        /* shouldn't reach here */
         _GeoIP_inet_ntop(AF_INET6, &ipnum.s6_addr[0], paddr, ADDR_STR_LEN); 
-       fprintf(stderr,"Error Traversing Database for ipnum = %s - Perhaps database is corrupt?\n", paddr);
+       log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error Traversing Database for ipnum = %s - Perhaps database is corrupt?", paddr);
        return 0;
 }
 
@@ -655,7 +656,7 @@ unsigned int _GeoIP_seek_record (GeoIP *gi, unsigned long ipnum) {
 	}
 
 	/* shouldn't reach here */
-	fprintf(stderr,"Error Traversing Database for ipnum = %lu - Perhaps database is corrupt?\n",ipnum);
+	log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error Traversing Database for ipnum = %lu - Perhaps database is corrupt?",ipnum);
 	return 0;
 }
 
@@ -696,13 +697,13 @@ GeoIP* GeoIP_open_type (int type, int flags) {
 	GeoIP * gi;
 	const char * filePath;
 	if (type < 0 || type >= NUM_DB_TYPES) {
-		printf("Invalid database type %d\n", type);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %d", type);
 		return NULL;
 	}
 	_GeoIP_setup_dbfilename();
 	filePath = GeoIPDBFileName[type];
 	if (filePath == NULL) {
-		printf("Invalid database type %d\n", type);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %d", type);
 		return NULL;
 	}
 	gi = GeoIP_open (filePath, flags);
@@ -733,14 +734,14 @@ GeoIP* GeoIP_open (const char * filename, int flags) {
 	strncpy(gi->file_path, filename, len);
 	gi->GeoIPDatabase = fopen(filename,"rb");
 	if (gi->GeoIPDatabase == NULL) {
-		fprintf(stderr,"Error Opening file %s\n",filename);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error Opening file %s",filename);
 		free(gi->file_path);
 		free(gi);
 		return NULL;
 	} else {
 		if (flags & (GEOIP_MEMORY_CACHE | GEOIP_MMAP_CACHE) ) {
 			if (fstat(fileno(gi->GeoIPDatabase), &buf) == -1) {
-				fprintf(stderr,"Error stating file %s\n",filename);
+				log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error stating file %s",filename);
 				free(gi->file_path);
 				free(gi);
 				return NULL;
@@ -753,7 +754,7 @@ GeoIP* GeoIP_open (const char * filename, int flags) {
 #if !defined(_WIN32)
 			    gi->cache = mmap(NULL, buf.st_size, PROT_READ, MAP_PRIVATE, fileno(gi->GeoIPDatabase), 0);
 			    if ( gi->cache == MAP_FAILED ) {
-				fprintf(stderr,"Error mmaping file %s\n",filename);
+				log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error mmaping file %s",filename);
 				free(gi->file_path);
 				free(gi);
 				return NULL;
@@ -764,7 +765,7 @@ GeoIP* GeoIP_open (const char * filename, int flags) {
 
 			    if (gi->cache != NULL) {
 				if (fread(gi->cache, sizeof(unsigned char), buf.st_size, gi->GeoIPDatabase) != (size_t) buf.st_size) {
-					fprintf(stderr,"Error reading file %s\n",filename);
+					log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error reading file %s",filename);
 					free(gi->cache);
 					free(gi->file_path);
 					free(gi);
@@ -775,7 +776,7 @@ GeoIP* GeoIP_open (const char * filename, int flags) {
 		} else {
 			if (flags & GEOIP_CHECK_CACHE) {
 				if (fstat(fileno(gi->GeoIPDatabase), &buf) == -1) {
-					fprintf(stderr,"Error stating file %s\n",filename);
+					log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error stating file %s",filename);
 					free(gi->file_path);
 					free(gi);
 					return NULL;
@@ -793,7 +794,7 @@ GeoIP* GeoIP_open (const char * filename, int flags) {
 			if (gi->index_cache != NULL) {
 				fseek(gi->GeoIPDatabase, 0, SEEK_SET);
 				if (fread(gi->index_cache, sizeof(unsigned char), gi->databaseSegments[0] * (long)gi->record_length * 2, gi->GeoIPDatabase) != (size_t) (gi->databaseSegments[0]*(long)gi->record_length * 2)) {
-					fprintf(stderr,"Error reading file %s\n",filename);
+					log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Error reading file %s",filename);
 					free(gi->databaseSegments);
 					free(gi->index_cache);
 					free(gi);
@@ -912,7 +913,7 @@ _GeoIP_lookupaddress_v6(const char *host)
   hints.ai_socktype = SOCK_STREAM;
 
   if ((gaierr = getaddrinfo(host, NULL, &hints, &aifirst)) != 0) {
-          /* fprintf(stderr, "Err: %s (%d %s)\n", host, gaierr, gai_strerror(gaierr)); */
+          /* log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Err: %s (%d %s)", host, gaierr, gai_strerror(gaierr)); */
     return IPV6_NULL;
   }
   memcpy(ipnum.s6_addr, ((struct sockaddr_in6 *) aifirst->ai_addr)->sin6_addr.s6_addr, sizeof(geoipv6_t));
@@ -929,7 +930,7 @@ int GeoIP_id_by_name (GeoIP* gi, const char *name) {
 		return 0;
 	}
 	if (gi->databaseType != GEOIP_COUNTRY_EDITION && gi->databaseType != GEOIP_PROXY_EDITION && gi->databaseType != GEOIP_NETSPEED_EDITION) {
-		printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_COUNTRY_EDITION]);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_COUNTRY_EDITION]);
 		return 0;
 	}
 	if (!(ipnum = _GeoIP_lookupaddress(name)))
@@ -946,7 +947,7 @@ int GeoIP_id_by_name_v6 (GeoIP* gi, const char *name) {
                return 0;
        }
        if (gi->databaseType != GEOIP_COUNTRY_EDITION_V6 && gi->databaseType != GEOIP_PROXY_EDITION && gi->databaseType != GEOIP_NETSPEED_EDITION) {
-               printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_COUNTRY_EDITION_V6]);
+               log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_COUNTRY_EDITION_V6]);
                return 0;
        }
         ipnum = _GeoIP_lookupaddress_v6(name);
@@ -1027,7 +1028,7 @@ int GeoIP_id_by_addr_v6 (GeoIP* gi, const char *addr) {
        if (gi->databaseType != GEOIP_COUNTRY_EDITION_V6 &&
                        gi->databaseType != GEOIP_PROXY_EDITION &&
                        gi->databaseType != GEOIP_NETSPEED_EDITION) {
-               printf("Invalid database type %s, expected %s\n",
+               log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s",
                                         GeoIPDBDescription[(int)gi->databaseType],
                                         GeoIPDBDescription[GEOIP_COUNTRY_EDITION_V6]);
                return 0;
@@ -1046,7 +1047,7 @@ int GeoIP_id_by_addr (GeoIP* gi, const char *addr) {
 	if (gi->databaseType != GEOIP_COUNTRY_EDITION &&
 			gi->databaseType != GEOIP_PROXY_EDITION &&
 			gi->databaseType != GEOIP_NETSPEED_EDITION) {
-		printf("Invalid database type %s, expected %s\n",
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s",
 					 GeoIPDBDescription[(int)gi->databaseType],
 					 GeoIPDBDescription[GEOIP_COUNTRY_EDITION]);
 		return 0;
@@ -1065,7 +1066,7 @@ int GeoIP_id_by_ipnum_v6 (GeoIP* gi, geoipv6_t ipnum) {
        if (gi->databaseType != GEOIP_COUNTRY_EDITION_V6 && 
                        gi->databaseType != GEOIP_PROXY_EDITION &&
                        gi->databaseType != GEOIP_NETSPEED_EDITION) {
-               printf("Invalid database type %s, expected %s\n",
+               log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s",
                                         GeoIPDBDescription[(int)gi->databaseType],
                                         GeoIPDBDescription[GEOIP_COUNTRY_EDITION_V6]);
                return 0;
@@ -1084,7 +1085,7 @@ int GeoIP_id_by_ipnum (GeoIP* gi, unsigned long ipnum) {
 	if (gi->databaseType != GEOIP_COUNTRY_EDITION && 
 			gi->databaseType != GEOIP_PROXY_EDITION &&
 			gi->databaseType != GEOIP_NETSPEED_EDITION) {
-		printf("Invalid database type %s, expected %s\n",
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s",
 					 GeoIPDBDescription[(int)gi->databaseType],
 					 GeoIPDBDescription[GEOIP_COUNTRY_EDITION]);
 		return 0;
@@ -1259,7 +1260,7 @@ GeoIPRegion * GeoIP_region_by_addr (GeoIP* gi, const char *addr) {
 	}
 	if (gi->databaseType != GEOIP_REGION_EDITION_REV0 &&
 			gi->databaseType != GEOIP_REGION_EDITION_REV1) {
-		printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
 		return 0;
 	}
 	ipnum = _GeoIP_addr_to_num(addr);
@@ -1273,7 +1274,7 @@ GeoIPRegion * GeoIP_region_by_addr_v6 (GeoIP* gi, const char *addr) {
        }
        if (gi->databaseType != GEOIP_REGION_EDITION_REV0 &&
                        gi->databaseType != GEOIP_REGION_EDITION_REV1) {
-               printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
+               log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
                return 0;
        }
        ipnum = _GeoIP_addr_to_num_v6(addr);
@@ -1287,7 +1288,7 @@ GeoIPRegion * GeoIP_region_by_name (GeoIP* gi, const char *name) {
 	}
 	if (gi->databaseType != GEOIP_REGION_EDITION_REV0 &&
 			gi->databaseType != GEOIP_REGION_EDITION_REV1) {
-		printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
 		return 0;
 	}
 	if (!(ipnum = _GeoIP_lookupaddress(name)))
@@ -1302,7 +1303,7 @@ GeoIPRegion * GeoIP_region_by_name_v6 (GeoIP* gi, const char *name) {
        }
        if (gi->databaseType != GEOIP_REGION_EDITION_REV0 &&
                        gi->databaseType != GEOIP_REGION_EDITION_REV1) {
-               printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
+               log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
                return 0;
        }
         
@@ -1315,7 +1316,7 @@ GeoIPRegion * GeoIP_region_by_name_v6 (GeoIP* gi, const char *name) {
 GeoIPRegion * GeoIP_region_by_ipnum (GeoIP* gi, unsigned long ipnum) {
 	if (gi->databaseType != GEOIP_REGION_EDITION_REV0 &&
 			gi->databaseType != GEOIP_REGION_EDITION_REV1) {
-		printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
 		return 0;
 	}
 	return _get_region(gi, ipnum);
@@ -1324,7 +1325,7 @@ GeoIPRegion * GeoIP_region_by_ipnum (GeoIP* gi, unsigned long ipnum) {
 GeoIPRegion * GeoIP_region_by_ipnum_v6 (GeoIP* gi, geoipv6_t ipnum) {
        if (gi->databaseType != GEOIP_REGION_EDITION_REV0 &&
                        gi->databaseType != GEOIP_REGION_EDITION_REV1) {
-               printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
+               log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_REGION_EDITION_REV1]);
                return 0;
        }
        return _get_region_v6(gi, ipnum);
@@ -1347,7 +1348,7 @@ char *_get_name (GeoIP* gi, unsigned long ipnum) {
 	if (gi->databaseType != GEOIP_ORG_EDITION &&
 			gi->databaseType != GEOIP_ISP_EDITION &&
 			gi->databaseType != GEOIP_ASNUM_EDITION) {
-		printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_ORG_EDITION]);
+		log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_ORG_EDITION]);
 		return NULL;
 	}
 
@@ -1383,7 +1384,7 @@ char *_get_name_v6 (GeoIP* gi, geoipv6_t ipnum) {
   if (gi->databaseType != GEOIP_ORG_EDITION &&
       gi->databaseType != GEOIP_ISP_EDITION &&
       gi->databaseType != GEOIP_ASNUM_EDITION) {
-    printf("Invalid database type %s, expected %s\n", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_ORG_EDITION]);
+    log_write(LS_SYSTEM, L_WARNING, 0, "GeoIP: Invalid database type %s, expected %s", GeoIPDBDescription[(int)gi->databaseType], GeoIPDBDescription[GEOIP_ORG_EDITION]);
     return NULL;
   }
 
