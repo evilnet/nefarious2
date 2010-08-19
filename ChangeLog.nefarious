@@ -1,6 +1,20 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/client.h: Added PRIV_ADD and  PRIV_DEL definitions and
+	added client_modify_priv_by_name() and clear_privs() functions.
+
+	* ircd/client.c: Added PRIVS propagation and
+	client_modify_priv_by_name() and clear_privs() functions.
+
+	* ircd/m_privs.c: Added PRIVS propagation.
+
+	* ircd/s_serv.c: Added PRIVS propagation.
+
+	* ircd/s_user.c: Added PRIVS propagation.
+
 2010-08-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	Applied Forwards patch supplied by cnix <cnixnz@gmail.com>:

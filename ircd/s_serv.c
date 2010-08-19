@@ -117,6 +117,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   struct Client* acptr = 0;
   const char*    inpath;
   int            i;
+  char*          privs;
 
   assert(0 != cptr);
   assert(0 != cli_local(cptr));
@@ -259,9 +260,11 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       if (cli_user(acptr) && !EmptyString(cli_user(acptr)->swhois))
         sendcmdto_one(cli_user(acptr)->server, CMD_SWHOIS, cptr, "%C :%s", acptr,
                       cli_user(acptr)->swhois);
+
       if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_WEBIRC, cli_webirc(acptr));
+
       if (IsGeoIP(acptr)) {
         if (cli_countrycode(acptr) && !EmptyString(cli_countrycode(acptr)) &&
             cli_continentcode(acptr) && !EmptyString(cli_continentcode(acptr)))
@@ -269,6 +272,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
                         cli_name(acptr), MARK_GEOIP, cli_countrycode(acptr),
                         cli_continentcode(acptr));
       }
+
+      privs = client_print_privs(acptr);
+      if (strlen(privs) > 1)
+        sendcmdto_one(cli_user(acptr)->server, CMD_PRIVS, cptr, "%C %s", acptr, privs);
     }
   }
   /*

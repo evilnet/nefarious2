@@ -29,6 +29,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "list.h"
+#include "msg.h"
 #include "msgq.h"
 #include "numeric.h"
 #include "s_conf.h"
@@ -139,9 +140,12 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
 {
   struct Privs *source, *defaults;
   enum Priv priv;
+  char *privbuf;
 
+/*
   if (!MyConnect(client))
     return;
+*/
 
   /* Clear out client's privileges. */
   memset(cli_privs(client), 0, sizeof(struct Privs));
@@ -226,6 +230,9 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     ClrPriv(client, PRIV_OPMODE);
     ClrPriv(client, PRIV_BADCHAN);
   }
+
+  privbuf = client_print_privs(client);
+  sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
 }
 
 /** Array mapping privilege values to names and vice versa. */
@@ -321,5 +328,31 @@ char *client_print_privs(struct Client *client)
   privbufp[strlen(privbufp)] = 0;
 
   return (char *)privbufp;
+}
+
+int client_modify_priv_by_name(struct Client *who, char *priv, int what) {
+  int i = 0;
+  assert(0 != priv);
+  assert(0 != who);
+
+  for (i = 0; privtab[i].name; i++)
+  if (0 == ircd_strcmp(privtab[i].name, priv)) {
+    if (what == PRIV_ADD) {
+      SetPriv(who, privtab[i].priv);
+    } else if (what == PRIV_DEL) {
+      ClrPriv(who, privtab[i].priv);
+    }
+  }
+  return 0;
+}
+
+int clear_privs(struct Client *who) {
+  int i = 0;
+  assert(0 != who);
+
+  for (i = 0; privtab[i].name; i++)
+    ClrPriv(who, privtab[i].priv);
+
+  return 0;
 }
 

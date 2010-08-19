@@ -471,6 +471,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
                              iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 0),
                              NumNick(sptr), cli_info(sptr));
 
+  clear_privs(sptr);
+
   /* Send user mode to client */
   if (MyUser(sptr))
   {
@@ -1482,7 +1484,6 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       /* user now oper */
       if (!IsHideOper(acptr))
         ++UserStats.opers;
-      client_set_privs(acptr, NULL); /* may set propagate privilege */
     }
     /* remember propagate privilege setting */
     if (HasPriv(acptr, PRIV_PROPAGATE)) {
@@ -1497,6 +1498,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;
       client_set_privs(acptr, NULL); /* will clear propagate privilege */
+      clear_privs(acptr);
     }
     if (FlagHas(&setflags, FLAG_LOCOP) && !IsLocOp(acptr)) {
       if (IsHiddenHost(acptr))
@@ -1554,7 +1556,7 @@ char *umode_str(struct Client *cptr)
   int i;
   struct Flags c_flags = cli_flags(cptr);
 
-  if (!HasPriv(cptr, PRIV_PROPAGATE))
+  if (MyUser(cptr) && !HasPriv(cptr, PRIV_PROPAGATE))
     FlagClr(&c_flags, FLAG_OPER);
 
   for (i = 0; i < USERMODELIST_SIZE; ++i)

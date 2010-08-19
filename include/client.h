@@ -900,6 +900,11 @@ struct Client {
 /** Revoke a privilege from a client. */
 #define ClrPriv(cli, priv)  FlagClr(cli_privs(cli), priv)
 
+/** Used in setting and unsetting privs. */
+#define PRIV_ADD 1
+/** Used in setting and unsetting privs. */
+#define PRIV_DEL 0
+
 /** Test whether a client has a capability */
 #define HasCap(cli, cap)    CapHas(cli_capab(cli), (cap))
 /** Test whether a client has the capability active */
@@ -918,6 +923,9 @@ extern void client_set_privs(struct Client *client, struct ConfItem *oper);
 extern int client_report_privs(struct Client* to, struct Client* client);
 char *client_check_privs(struct Client *client, struct Client *replyto);
 extern char *client_print_privs(struct Client *client);
+
+extern int client_modify_priv_by_name(struct Client *who, char *priv, int what);
+extern int clear_privs(struct Client *who);
 
 #endif /* INCLUDED_client_h */
 
