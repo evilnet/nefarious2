@@ -151,6 +151,7 @@ IRCD_SRC = \
 	m_lusers.c \
 	m_map.c \
 	m_mark.c \
+	m_mkpasswd.c \
 	m_mode.c \
 	m_motd.c \
 	m_names.c \

@@ -107,6 +107,7 @@ extern int m_list(struct Client*, struct Client*, int, char*[]);
 extern int m_lusers(struct Client*, struct Client*, int, char*[]);
 extern int m_map(struct Client*, struct Client*, int, char*[]);
 extern int m_map_redirect(struct Client*, struct Client*, int, char*[]);
+extern int m_mkpasswd(struct Client*, struct Client*, int, char*[]);
 extern int m_mode(struct Client*, struct Client*, int, char*[]);
 extern int m_motd(struct Client*, struct Client*, int, char*[]);
 extern int m_names(struct Client*, struct Client*, int, char*[]);

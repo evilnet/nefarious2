@@ -436,6 +436,10 @@ struct Client;
 #define TOK_FAKE		"FA"
 #define CMD_FAKE		MSG_FAKE, TOK_FAKE
 
+#define MSG_MKPASSWD            "MKPASSWD"
+#define TOK_MKPASSWD            "MKPASSWD"
+#define CMD_MKPASSWD            MSG_MKPASSWD, TOK_MKPASSWD
+
 /*
  * Constants
  */

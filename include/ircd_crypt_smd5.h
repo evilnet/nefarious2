@@ -23,6 +23,7 @@
 #ifndef INCLUDED_ircd_crypt_smd5_h
 #define INCLUDED_ircd_crypt_smd5_h
 
+extern const char* ircd_crypt_smd5(const char* key, const char* salt);
 extern void ircd_register_crypt_smd5(void);
 
 #endif /* INCLUDED_ircd_crypt_smd5_h */

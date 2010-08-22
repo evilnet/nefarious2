@@ -3,6 +3,20 @@
 
 2010-08-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/handlers.h: Added m_mkpasswd().
+
+	* include/ircd_crypt_smd5.h: Added extern for ircd_crypt_smd5().
+
+	* include/msg.h: Added MKPASSWD command.
+
+	* ircd/Makefile.in: Added m_mkpasswd.c.
+
+	* ircd/parse.c: Added MKPASSWD command.
+
+	* ircd/m_mkpasswd.c: Added MKPASSWD command.
+
+2010-08-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added PRIV_ADD and  PRIV_DEL definitions and
 	added client_modify_priv_by_name() and clear_privs() functions.
 
