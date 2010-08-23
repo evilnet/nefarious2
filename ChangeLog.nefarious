@@ -3,6 +3,47 @@
 
 2010-08-23  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added Kill block version field and CTCP
+	versioning Features.
+
+	* doc/readme.features: Added CTCP versioning Features.
+
+	* include/client.h: Added CTCP version field to Client struct.
+
+	* include/ircd_defs.h: Added CTCP version max length macro.
+
+	* include/ircd_features.h: Added CTCP versioning Features.
+
+	* include/mark.h: Added CVERSION mark.
+
+	* include/s_conf.h: Added Kill block version field.
+
+	* ircd/ircd_features.c: Added CTCP versioning Features.
+
+	* ircd/ircd_lexer.l: Added Kill block version field.
+
+	* ircd/ircd_parser.y: Added Kill block version field.
+
+	* ircd/m_check.c: Added CTCP version to CHECK output.
+
+	* ircd/m_mark.c: Added CVERSION mark.
+
+	* ircd/m_notice.c: Added CTCP versioning.
+
+	* ircd/s_conf.c: Added Kill block version field.
+
+	* ircd/s_err.c: Added Kill block version field to STATS k
+	output.
+
+	* ircd/s_serv.c: Added CVERSION mark.
+
+	* ircd/s_stats.c: Added Kill block version field to STATS k
+	output.
+
+	* ircd/s_user.c: Added CTCP versioning.
+
+2010-08-23  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ircd_string.h: Added itoa().
 
 	* include/s_user.h: Added RPL_ISUPPORT functions for dynamic

@@ -210,6 +210,7 @@ report_deny_list(struct Client* to)
                p->hostmask ? p->hostmask : "*",
                p->message ? p->message : "(none)",
                p->realmask ? p->realmask : "*",
+               p->version ? p->version : "*",
                p->countrymask ? p->countrymask : "*",
                p->continentmask ? p->continentmask : "*");
 }

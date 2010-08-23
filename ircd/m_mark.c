@@ -121,6 +121,15 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       geoip_apply_mark(acptr, parv[3], parv[4]);
       sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s %s %s", cli_name(acptr), MARK_GEOIP, parv[3], parv[4]);
     }
+  } else if (!strcmp(parv[2], MARK_CVERSION)) {
+    if(parc < 3)
+      return protocol_violation(sptr, "MARK client version received too few parameters (%u)", parc);
+
+    if ((acptr = FindUser(parv[1]))) {
+       ircd_strncpy(cli_version(acptr), parv[3], VERSIONLEN);
+       sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_CVERSION, parv[3]);
+    }
+
   }
 
   return 0;

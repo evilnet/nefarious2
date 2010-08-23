@@ -75,6 +75,10 @@
 #include <string.h>
 #include <sys/stat.h>
 
+/** Sends response \a m of length \a l to client \a c. */
+#define sendheader(c, m, l) \
+   send(cli_fd(c), m, l, 0)
+
 /** Count of allocated User structures. */
 static int userCount = 0;
 
@@ -370,6 +374,18 @@ int register_user(struct Client *cptr, struct Client *sptr)
     SetUser(sptr);
     cli_handler(sptr) = CLIENT_HANDLER;
     SetLocalNumNick(sptr);
+
+    if (feature_bool(FEAT_CTCP_VERSIONING)) {
+      if (feature_str(FEAT_CTCP_VERSIONING_NOTICE)) {
+        char strver[BUFSIZE] = "";
+        ircd_snprintf(0, strver, strlen(feature_str(FEAT_CTCP_VERSIONING_NOTICE)) + 16,
+                      "NOTICE AUTH :%s\r\n", feature_str(FEAT_CTCP_VERSIONING_NOTICE));
+        sendheader(sptr, strver, strlen(strver));
+      }
+
+      sendcmdto_one(&me, CMD_PRIVATE, sptr, "%C :\001VERSION\001", sptr);
+    }
+
     send_reply(sptr,
                RPL_WELCOME,
                feature_str(FEAT_NETWORK),

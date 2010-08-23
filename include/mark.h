@@ -27,6 +27,7 @@
 
 #define MARK_WEBIRC             "WEBIRC"                /**< WEBIRC mark. */
 #define MARK_GEOIP              "GEOIP"                 /**< GEOIP mark. */
+#define MARK_CVERSION           "CVERSION"              /**< Client Version mark */
 
 #endif /* INCLUDED_mark_h */
 

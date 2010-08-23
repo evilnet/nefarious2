@@ -1066,6 +1066,45 @@ HOST_HIDING_KEY3
 One of the 3 unique host hiding keys used to encrypt style 2 hidden
 hosts. These must all be different.
 
+CTCP_VERSIONING
+ * Type: boolean
+ * Default: FALSE
+
+Enables CTCP versioning for clients on connect.
+
+CTCP_VERSIONING_KILL
+ * Type: boolean
+ * Default: FALSE
+
+Kills clients who match specified versions.
+
+CTCP_VERSIONING_CHAN
+ * Type: boolean
+ * Default: FALSE
+
+If enabled version replies will be sent to the channel set for
+CTCP_VERSIONING_CHANNAME
+
+CTCP_VERSIONING_CHANNAME
+ * Type: string
+ * Default: #opers
+
+Channel where version replies are sent to if CTCP_VERSIONING_CHAN
+is enabled (See above).
+
+CTCP_VERSIONING_USEMSG
+ * Type: boolean
+ * Default: FALSE
+
+If enabled version replies sent to the channel set for CTCP_VERSIONING_CHANNAME
+will be sent using privmsgs instead of notices.
+
+CTCP_VERSIONING_NOTICE
+ * Type: string
+ * Default: *** Checking your client version
+
+Message sent to clients during the versioning process on connect.
+
 GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE

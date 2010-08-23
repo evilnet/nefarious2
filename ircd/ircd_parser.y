@@ -188,6 +188,7 @@ static void free_slist(struct SLink **link) {
 %token MAXCHANS
 %token COUNTRY
 %token CONTINENT
+%token VERSION
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -946,7 +947,8 @@ killblock: KILL
   dconf = (struct DenyConf*) MyCalloc(1, sizeof(*dconf));
 } '{' killitems '}' ';'
 {
-  if (dconf->usermask || dconf->hostmask || dconf->realmask || dconf->countrymask || dconf->continentmask) {
+  if (dconf->usermask || dconf->hostmask || dconf->realmask ||
+      dconf->countrymask || dconf->continentmask || dconf->version) {
     dconf->next = denyConfList;
     denyConfList = dconf;
   }
@@ -958,13 +960,15 @@ killblock: KILL
     MyFree(dconf->message);
     MyFree(dconf->countrymask);
     MyFree(dconf->continentmask);
+    MyFree(dconf->version);
     MyFree(dconf);
     parse_error("Kill block must match on at least one of username, host, country, continent or realname");
   }
   dconf = NULL;
 };
 killitems: killitem killitems | killitem;
-killitem: killuhost | killreal | killusername | killcountry | killcontinent | killreasonfile | killreason;
+killitem: killuhost | killreal | killusername | killcountry | killcontinent | killreasonfile | killreason
+                    | killversion;
 killuhost: HOST '=' QSTRING ';'
 {
   char *h;
@@ -1006,6 +1010,12 @@ killcontinent: CONTINENT '=' QSTRING ';'
 {
   MyFree(dconf->continentmask);
   dconf->continentmask = $3;
+};
+
+killversion: VERSION '=' QSTRING ';'
+{
+  MyFree(dconf->version);
+  dconf->version = $3;
 };
 
 killreason: REASON '=' QSTRING ';'

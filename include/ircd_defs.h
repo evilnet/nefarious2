@@ -74,6 +74,10 @@
  * time.
  */
 #define REALLEN         50
+/** Maximum length for user supplied information about a clients  version. This
+ * information is set at client/server after a reply to CTCP VERSION.
+ */
+#define VERSIONLEN      75
 /** Maximum length for a password used for connecting servers and clients.
  */
 #define PASSWDLEN       20

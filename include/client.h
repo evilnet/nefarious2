@@ -304,6 +304,7 @@ struct Client {
 
   /* MARKs */
   char cli_webirc[BUFSIZE + 1];     /**< webirc description */
+  char cli_version[VERSIONLEN + 1];  /**< Free form client version information */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -369,6 +370,8 @@ struct Client {
 #define cli_webirchost(cli)     ((cli)->cli_webirchost)
 /** Get client WEBIRC info line. */
 #define cli_webirc(cli)         ((cli)->cli_webirc)
+/** Get a clients CTCP version string. */
+#define cli_version(cli)        ((cli)->cli_version)
 /** Get client GeoIP country code. */
 #define cli_countrycode(cli)    ((cli)->cli_countrycode)
 /** Get client GeoIP country name. */

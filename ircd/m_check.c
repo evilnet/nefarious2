@@ -413,6 +413,13 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    ircd_snprintf(0, outbuf, sizeof(outbuf), "   Connected to:: %s", cli_name(acptr->cli_user->server));
    send_reply(sptr, RPL_DATASTR, outbuf);
 
+   if (cli_version(acptr)) {
+     if (strlen(cli_version(acptr)) > 0) {
+       ircd_snprintf(0, outbuf, sizeof(outbuf), "   CTCP Version:: %s", cli_version(acptr));
+       send_reply(sptr, RPL_DATASTR, outbuf);
+     }
+   }
+
    if (cli_user(acptr) && !EmptyString(cli_user(acptr)->swhois)) {
      ircd_snprintf(0, outbuf, sizeof(outbuf), "         SWHOIS:: %s", cli_user(acptr)->swhois);
      send_reply(sptr, RPL_DATASTR, outbuf);

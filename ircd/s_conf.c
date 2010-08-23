@@ -37,6 +37,7 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
@@ -1132,6 +1133,7 @@ int find_kill(struct Client *cptr)
   const char*      realname;
   const char*      country;
   const char*      continent;
+  const char*      version;
   struct DenyConf* deny;
   struct Gline*    agline = NULL;
 
@@ -1145,12 +1147,14 @@ int find_kill(struct Client *cptr)
   realname = cli_info(cptr);
   country = cli_countrycode(cptr);
   continent = cli_continentcode(cptr);
+  version = cli_version(cptr);
 
   assert(strlen(host) <= HOSTLEN);
   assert((name ? strlen(name) : 0) <= HOSTLEN);
   assert((realname ? strlen(realname) : 0) <= REALLEN);
-  assert(strlen(country) <= 3);
-  assert(strlen(continent) <= 3);
+  assert((country ? strlen(country) : 0) <= 3);
+  assert((continent ? strlen(continent) : 0) <= 3);
+  assert((version ? strlen(version) : 0) <= VERSIONLEN);
 
   /* 2000-07-14: Rewrote this loop for massive speed increases.
    *             -- Isomer
@@ -1160,10 +1164,14 @@ int find_kill(struct Client *cptr)
       continue;
     if (deny->realmask && match(deny->realmask, realname))
       continue;
-    if (deny->countrymask && match(deny->countrymask, country))
+    if (deny->countrymask && country && match(deny->countrymask, country))
       continue;
-    if (deny->continentmask && match(deny->continentmask, continent))
+    if (deny->continentmask && continent && match(deny->continentmask, continent))
       continue;
+    if (feature_bool(FEAT_CTCP_VERSIONING) && feature_bool(FEAT_CTCP_VERSIONING_KILL)) {
+      if (deny->version && version && match(deny->version, version))
+        continue;
+    }
     if (deny->bits > 0) {
       if (!ipmask_check(&cli_ip(cptr), &deny->address, deny->bits))
         continue;

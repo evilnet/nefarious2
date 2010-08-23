@@ -261,6 +261,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
         sendcmdto_one(cli_user(acptr)->server, CMD_SWHOIS, cptr, "%C :%s", acptr,
                       cli_user(acptr)->swhois);
 
+      if (cli_version(acptr) && !EmptyString(cli_version(acptr)))
+        sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
+                      cli_name(acptr), MARK_CVERSION, cli_version(acptr));
+
       if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_WEBIRC, cli_webirc(acptr));

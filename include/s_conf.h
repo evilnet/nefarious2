@@ -102,6 +102,7 @@ struct DenyConf {
   char*               realmask; /**< Mask for realname. */
   char*               countrymask; /**< Mask for country code. */
   char*               continentmask; /**< Mask for continent code. */
+  char*               version;  /**< Mask for CTCP version. */
   struct irc_in_addr  address;  /**< Address for IP-based denies. */
   unsigned int        flags;    /**< Interpretation flags for the above.  */
   unsigned char       bits;     /**< Number of bits for ipkills */

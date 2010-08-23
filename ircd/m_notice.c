@@ -82,11 +82,15 @@
 #include "config.h"
 
 #include "client.h"
+#include "hash.h"
+#include "ircd.h"
 #include "ircd_chattr.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_relay.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "mark.h"
 #include "match.h"
 #include "msg.h"
 #include "numeric.h"
@@ -108,7 +112,11 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char*           server;
   int             i;
   int             count;
+  int             found_g = 0;
   char*           vector[MAXTARGETS];
+  char*           temp;
+  char            cversion[VERSIONLEN + 1];
+  struct Channel* chptr;
 
   assert(0 != cptr);
   assert(cptr == sptr);
@@ -124,6 +132,46 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parv[1][0] == '@' && IsChannelPrefix(parv[1][1])) {
     parv[1]++;                        /* Get rid of '@' */
     return m_wallchops(cptr, sptr, parc, parv);
+  }
+
+  if (feature_bool(FEAT_CTCP_VERSIONING) && MyConnect(sptr) &&
+      !ircd_strcmp(parv[1], cli_name(&me))) {
+    if ((ircd_strncmp("\x01VERSION", parv[2], 8) == 0) && (strlen(parv[2]) > 10)) {
+      temp = parv[2] + 9;
+      ircd_strncpy(cversion, temp, VERSIONLEN);
+      if (cversion[strlen(cversion)-1] == '\x01')
+        cversion[strlen(cversion)-1] = '\0';
+
+      ircd_strncpy(cli_version(sptr), cversion, VERSIONLEN);
+      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s",
+                            cli_name(sptr), MARK_CVERSION, cli_version(sptr));
+
+      if (feature_bool(FEAT_CTCP_VERSIONING_CHAN)) {
+        /* Announce to channel. */
+        if ((chptr = FindChannel(feature_str(FEAT_CTCP_VERSIONING_CHANNAME)))) {
+          if (feature_bool(FEAT_CTCP_VERSIONING_USEMSG))
+            sendcmdto_channel_butone(&me, CMD_PRIVATE, chptr, &me, SKIP_DEAF | SKIP_BURST,
+                                     '\0', "%H :%s has version \002%s\002", chptr,
+                                     cli_name(sptr), cli_version(sptr));
+          else
+            sendcmdto_channel_butone(&me, CMD_NOTICE, chptr, &me, SKIP_DEAF | SKIP_BURST,
+                                     '\0', "%H :%s has version \002%s\002", chptr,
+                                     cli_name(sptr), cli_version(sptr));
+        }
+      }
+
+      if (feature_bool(FEAT_CTCP_VERSIONING_KILL)) {
+        if ((found_g = find_kill(sptr))) {
+          sendto_opmask_butone(0, found_g == -2 ? SNO_GLINE : SNO_OPERKILL,
+                               found_g == -2 ? "G-line active for %s%s" :
+                               "K-line active for %s%s",
+                               IsUnknown(sptr) ? "Unregistered Client ":"",
+                               get_client_name(sptr, SHOW_IP));
+          return exit_client_msg(cptr, sptr, &me, "Banned Client: %s", cli_version(sptr));
+        }
+      }
+      return 0;
+    }
   }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);

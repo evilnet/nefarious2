@@ -543,6 +543,14 @@ static struct FeatureDesc {
   F_S(HOST_HIDING_KEY2, 0, "sdfjkLJKHlkjdkfjsdklfjlkjKLJ", 0),
   F_S(HOST_HIDING_KEY3, 0, "KJklJSDFLkjLKDFJSLKjlKJFlkjS", 0),
 
+  /* CTCP VERSION FEAT_'s */
+  F_B(CTCP_VERSIONING, 0, 0, 0),
+  F_B(CTCP_VERSIONING_KILL, 0, 0, 0),
+  F_B(CTCP_VERSIONING_CHAN, 0, 0, 0),
+  F_S(CTCP_VERSIONING_CHANNAME, 0, "#opers", 0),
+  F_B(CTCP_VERSIONING_USEMSG, 0, 0, 0),
+  F_S(CTCP_VERSIONING_NOTICE, 0, "*** Checking your client version", 0),
+
   /* GeoIP FEAT_'s */
   F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),
   F_S(GEOIP_FILE, 0, "GeoIP.dat", feature_notify_geoip_file),
