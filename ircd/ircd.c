@@ -54,6 +54,7 @@
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_stats.h"
+#include "s_user.h"
 #include "send.h"
 #include "sys.h"
 #include "uping.h"
@@ -687,6 +688,7 @@ int main(int argc, char **argv) {
 
   setup_signals();
   feature_init(); /* initialize features... */
+  init_isupport(); /* initialize RPL_ISUPPORT... */
   log_init(*argv);
   set_nomem_handler(outofmemory);
 

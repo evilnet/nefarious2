@@ -1,6 +1,23 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-23  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/ircd_string.h: Added itoa().
+
+	* include/s_user.h: Added RPL_ISUPPORT functions for dynamic
+	RPL_ISUPPORT.
+
+	* ircd/ircd.c: Added call to init_isupport();
+
+	* ircd/ircd_features.c: Added Feature change handlers relating to
+	RPL_ISUPPORT.
+
+	* ircd/ircd_string.c: Added itoa().
+
+	* ircd/s_user.c: Added RPL_ISUPPORT functions for dynamic
+	RPL_ISUPPORT.
+
 2010-08-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/handlers.h: Added m_mkpasswd().

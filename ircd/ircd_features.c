@@ -229,6 +229,7 @@ feature_notify_oplevels(void)
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
+  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,imnpstrDdR" : "b,k,l,imnpstrDdR");
 }
 
 /** Handle update to FEAT_GEOIP_ENABLE. */
@@ -247,6 +248,65 @@ static void feature_notify_geoip_file(void)
 static void feature_notify_geoip_ipv6_file(void)
 {
   geoip_handle_ipv6_file();
+}
+
+/** Set MAXSILES (maximum silences). */
+static void
+set_isupport_maxsiles(void)
+{
+    add_isupport_i("SILENCE", feature_int(FEAT_MAXSILES));
+}
+
+/** Set MAXCHANNNELS, self explanatory */
+static void
+set_isupport_maxchannels(void)
+{
+    /* uint */
+    add_isupport_i("MAXCHANNELS", feature_int(FEAT_MAXCHANNELSPERUSER));
+}
+
+/** Set MAXBANS, self explanatory */
+static void
+set_isupport_maxbans(void)
+{
+    char imaxlist[BUFSIZE] = "";
+
+    add_isupport_i("MAXBANS", feature_int(FEAT_MAXBANS));
+
+    strcat(imaxlist, "b:");
+    strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
+
+    add_isupport_s("MAXLIST", imaxlist);    
+}
+
+/** Set NICKLEN, self explanatory */
+static void
+set_isupport_nicklen(void)
+{
+    /* uint */
+    add_isupport_i("NICKLEN", feature_int(FEAT_NICKLEN));
+}
+
+/** Set CHANNELLEN, self explanatory */
+static void
+set_isupport_channellen(void)
+{
+    /* uint */
+    add_isupport_i("CHANNELLEN", feature_int(FEAT_CHANNELLEN));
+}
+
+/** Set CHANTYPES, self explanatory */
+static void
+set_isupport_chantypes(void)
+{
+    add_isupport_s("CHANTYPES", feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#");
+}
+
+/** Set NETWORK, self explanatory */
+static void
+set_isupport_network(void)
+{
+    add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
 }
 
 /** Sets a feature to the given value.
@@ -352,17 +412,17 @@ static struct FeatureDesc {
   F_B(CONNEXIT_NOTICES, 0, 0, 0),
   F_B(OPLEVELS, 0, 0, feature_notify_oplevels),
   F_B(ZANNELS, 0, 0, 0),
-  F_B(LOCAL_CHANNELS, 0, 1, 0),
+  F_B(LOCAL_CHANNELS, 0, 1, set_isupport_chantypes),
   F_B(TOPIC_BURST, 0, 1, 0),
   F_B(DISABLE_GLINES, 0, 0, 0),
 
   /* features that probably should not be touched */
   F_I(KILLCHASETIMELIMIT, 0, 30, 0),
-  F_I(MAXCHANNELSPERUSER, 0, 20, 0),
-  F_I(NICKLEN, 0, 15, 0),
+  F_I(MAXCHANNELSPERUSER, 0, 20, set_isupport_maxchannels),
+  F_I(NICKLEN, 0, 15, set_isupport_nicklen),
   F_I(AVBANLEN, 0, 40, 0),
-  F_I(MAXBANS, 0, 50, 0),
-  F_I(MAXSILES, 0, 25, 0),
+  F_I(MAXBANS, 0, 50, set_isupport_maxbans),
+  F_I(MAXSILES, 0, 25, set_isupport_maxsiles),
   F_I(HANGONGOODLINK, 0, 300, 0),
   F_I(HANGONRETRYDELAY, 0, 10, 0),
   F_I(CONNECTTIMEOUT, 0, 60, 0),
@@ -376,7 +436,7 @@ static struct FeatureDesc {
   F_I(IPCHECK_CLONE_LIMIT, 0, 4, 0),
   F_I(IPCHECK_CLONE_PERIOD, 0, 40, 0),
   F_I(IPCHECK_CLONE_DELAY, 0, 600, 0),
-  F_I(CHANNELLEN, 0, 200, 0),
+  F_I(CHANNELLEN, 0, 200, set_isupport_channellen),
 
   /* Some misc. default paths */
   F_S(MPATH, FEAT_CASE | FEAT_MYOPER, "ircd.motd", motd_init),
@@ -448,7 +508,7 @@ static struct FeatureDesc {
   F_S(HIS_URLSERVERS, 0, "http://sourceforge.net/projects/evilnet/", 0),
 
   /* Misc. random stuff */
-  F_S(NETWORK, 0, "Nefarious", 0),
+  F_S(NETWORK, 0, "Nefarious", set_isupport_network),
   F_S(URL_CLIENTS, 0, "http://www.ircreviews.org/clients/", 0),
   F_S(URLREG, 0, "http://sourceforge.net/projects/evilnet/", 0),
 

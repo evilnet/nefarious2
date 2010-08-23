@@ -37,6 +37,8 @@ extern char*       ircd_strtok(char** save, char* str, char* fs);
 
 extern char*       canonize(char* buf);
 
+extern char*       itoa(int n);
+
 /** Make \a y a duplicate \a x, a la strdup(). */
 #define DupString(x, y)  (strcpy((x = (char*) MyMalloc(strlen(y) + 1)), y))
 

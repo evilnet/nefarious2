@@ -111,6 +111,11 @@ extern int do_nick_name(char* nick);
 
 extern void user_setcloaked(struct Client *cptr);
 
+extern void init_isupport(void);
+extern void del_isupport(const char *name);
+extern void add_isupport_s(const char *name, const char *value);
+extern void add_isupport_i(const char *name, int value);
+
 #define NAMES_ALL 1 /**< List all users in channel */
 #define NAMES_VIS 2 /**< List only visible users in non-secret channels */
 #define NAMES_EON 4 /**< Add an 'End Of Names' reply to the end */
