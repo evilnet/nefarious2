@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added some missing spaces in Features block.
+
 2010-08-23  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added Kill block version field and CTCP
