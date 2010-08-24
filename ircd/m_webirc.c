@@ -120,6 +120,9 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 5)
     return need_more_params(sptr, "WEBIRC");
 
+  if (IsWebIRC(cptr))
+    return 0;
+
   /* These shouldn't be empty, but just in case... */
   if (!EmptyString(parv[1]))
     password = parv[1];

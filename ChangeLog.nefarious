@@ -3,6 +3,11 @@
 
 2010-08-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_webirc.c: Added check to prevent extra WEBIRC commands
+	from clients who have already successfully issued a WEBIRC command.
+
+2010-08-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added some missing spaces in Features block.
 
 2010-08-23  Matthew Beeching  <jobe@mdbnet.co.uk>
