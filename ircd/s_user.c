@@ -1058,7 +1058,11 @@ unhide_hostmask(struct Client *cptr)
 {
   struct Membership *chan;
 
-  if (HasFlag(cptr, FLAG_HIDDENHOST) || !HasFlag(cptr, FLAG_ACCOUNT))
+  if (HasFlag(cptr, FLAG_HIDDENHOST))
+    return 0;
+
+  /* If the real host is the same as the current host return silently. */
+  if (!ircd_strncmp(cli_user(cptr)->host, cli_user(cptr)->realhost, HOSTLEN))
     return 0;
 
   /* Invalidate all bans against the user so we check them again */
@@ -1362,7 +1366,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         if (what == MODE_ADD) {
           SetHiddenHost(acptr);
         } else {
-          if (feature_bool(FEAT_ALLOWRMX)) {
+          if (feature_bool(FEAT_ALLOWRMX) ||
+              (feature_int(FEAT_HOST_HIDING_STYLE) == 2) ||
+              (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) {
             ClearHiddenHost(acptr);
           }
         }

@@ -3,6 +3,12 @@
 
 2010-08-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Fixed setting user mode -x for host hiding style
+	2 and 3 to match Nefarious 1 behaviour. Also fixed bug where
+	unhide_hostmask() would not unhide a host for an unauthed user.
+
+2010-08-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_webirc.c: Added check to prevent extra WEBIRC commands
 	from clients who have already successfully issued a WEBIRC command.
 
