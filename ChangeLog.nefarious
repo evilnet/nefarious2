@@ -3,6 +3,12 @@
 
 2010-08-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Fixed bug where OPER_HOSTHIDING was not applying
+	when remotely opered and also fixed bug where cli_handler was not
+	changed to OPER_HANDLER when remotely opered.
+
+2010-08-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ircd_string.h: Added functions needed for expiration
 	interval units.
 
