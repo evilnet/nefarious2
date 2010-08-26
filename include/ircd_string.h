@@ -38,6 +38,8 @@ extern char*       ircd_strtok(char** save, char* str, char* fs);
 extern char*       canonize(char* buf);
 
 extern char*       itoa(int n);
+extern unsigned long ParseInterval(const char *interval);
+extern int         is_timestamp(char *str);
 
 /** Make \a y a duplicate \a x, a la strdup(). */
 #define DupString(x, y)  (strcpy((x = (char*) MyMalloc(strlen(y) + 1)), y))

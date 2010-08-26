@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/ircd_string.h: Added functions needed for expiration
+	interval units.
+
+	* ircd/ircd_string.c: Added functions needed for expiration
+	interval units.
+
+	* ircd/m_gline.c: Added support for expiration interval units.
+
+	* ircd/m_jupe.c: Added support for expiration interval units.
+
 2010-08-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Fixed setting user mode -x for host hiding style

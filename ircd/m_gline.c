@@ -423,9 +423,12 @@ mo_gline(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return need_more_params(sptr, "GLINE");
 
     target = parv[2]; /* get the target... */
-    expire = strtol(parv[3], &end, 10) + TStime(); /* and the expiration */
-    if (*end != '\0')
-      return send_reply(sptr, SND_EXPLICIT | ERR_BADEXPIRE, "%s :Bad expire time", parv[3]);
+    if (is_timestamp(parv[3])) {
+      expire = strtol(parv[3], &end, 10) + TStime(); /* and the expiration */
+      if (*end != '\0')
+        return send_reply(sptr, SND_EXPLICIT | ERR_BADEXPIRE, "%s :Bad expire time", parv[3]);
+    } else
+      expire = ParseInterval(parv[3]) + TStime();
 
     flags |= GLINE_EXPIRE; /* remember that we got an expire time */
 
@@ -460,9 +463,12 @@ mo_gline(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (parc > 3) {
       /* get expiration and target */
       reason = parv[parc - 1];
-      expire = strtol(parv[parc - 2], &end, 10) + TStime();
-      if (*end != '\0')
-        return send_reply(sptr, SND_EXPLICIT | ERR_BADEXPIRE, "%s :Bad expire time", parv[parc - 2]);
+      if (is_timestamp(parv[parc - 2])) {
+        expire = strtol(parv[parc - 2], &end, 10) + TStime();
+        if (*end != '\0')
+          return send_reply(sptr, SND_EXPLICIT | ERR_BADEXPIRE, "%s :Bad expire time", parv[parc - 2]);
+      } else
+        expire = ParseInterval(parv[parc - 2]) + TStime();
 
       flags |= GLINE_EXPIRE | GLINE_REASON; /* remember that we got 'em */
 

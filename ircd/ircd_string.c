@@ -674,3 +674,48 @@ char* itoa(int n) {
   return u;
 }
 
+static long
+TypeLength(char type)
+{
+    switch (type) {
+    case 'y': return 365*24*60*60;
+    case 'M': return 31*24*60*60;
+    case 'w': return 7*24*60*60;
+    case 'd': return 24*60*60;
+    case 'h': return 60*60;
+    case 'm': return 60;
+    case 's': return 1;
+    default: return 0;
+    }
+}
+
+
+unsigned long
+ParseInterval(const char *interval)
+{
+    unsigned long seconds = 0;
+    int partial = 0;
+    char c;
+
+    /* process the string, resetting the count if we find a unit character */
+    while ((c = *interval++)) {
+        if (IsDigit((int)c)) {
+            partial = partial*10 + c - '0';
+        } else {
+            seconds += TypeLength(c) * partial;
+            partial = 0;
+        }
+    }
+    /* assume the last chunk is seconds (the normal case) */
+    return seconds + partial;
+}
+
+int is_timestamp(char *str)
+{
+
+  while ( IsDigit(*str) || *str == '.' )
+    ++str;
+
+  return *str == '\0';
+}
+
