@@ -1260,7 +1260,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           if (MyConnect(acptr))
           {
             tmpmask = cli_snomask(acptr) & ~SNO_OPER;
-            cli_handler(acptr) = CLIENT_HANDLER;
+            if (MyUser(acptr))
+              cli_handler(acptr) = CLIENT_HANDLER;
           }
         }
         break;
@@ -1274,7 +1275,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           if (MyConnect(acptr))
           {
             tmpmask = cli_snomask(acptr) & ~SNO_OPER;
-            cli_handler(acptr) = CLIENT_HANDLER;
+            if (MyUser(acptr))
+              cli_handler(acptr) = CLIENT_HANDLER;
           }
         }
         break;
@@ -1508,12 +1510,14 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         ++UserStats.opers;
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;
-      cli_handler(acptr) = OPER_HANDLER;
+      if (MyUser(acptr))
+        cli_handler(acptr) = OPER_HANDLER;
     }
     if (!FlagHas(&setflags, FLAG_LOCOP) && IsLocOp(acptr)) {
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;
-      cli_handler(acptr) = OPER_HANDLER;
+      if (MyUser(acptr))
+        cli_handler(acptr) = OPER_HANDLER;
     }
     /* remember propagate privilege setting */
     if (HasPriv(acptr, PRIV_PROPAGATE)) {
@@ -1529,12 +1533,14 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         do_host_hiding = 1;
       client_set_privs(acptr, NULL); /* will clear propagate privilege */
       clear_privs(acptr);
-      cli_handler(acptr) = CLIENT_HANDLER;
+      if (MyUser(acptr))
+        cli_handler(acptr) = CLIENT_HANDLER;
     }
     if (FlagHas(&setflags, FLAG_LOCOP) && !IsLocOp(acptr)) {
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;
-      cli_handler(acptr) = CLIENT_HANDLER;
+      if (MyUser(acptr))
+        cli_handler(acptr) = CLIENT_HANDLER;
     }
     if (!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(acptr)) {
       if (FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {

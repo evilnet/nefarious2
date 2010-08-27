@@ -105,6 +105,78 @@
 #include <stdlib.h>
 #include <string.h>
 
+void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
+{
+  struct Flags old_mode = cli_flags(sptr);
+  char*        modes;
+  char*        privbuf;
+
+  SetOper(sptr);
+  client_set_privs(sptr, aconf);
+  ClearOper(sptr);
+
+  if (MyUser(sptr)) {
+    SetLocOp(sptr);
+    if (HasPriv(sptr, PRIV_PROPAGATE))
+    {
+      ClearLocOp(sptr);
+      SetOper(sptr);
+      if (HasPriv(sptr, PRIV_ADMIN))
+        SetAdmin(sptr);
+      if (!IsHideOper(sptr))
+        ++UserStats.opers;
+    }
+    cli_handler(sptr) = OPER_HANDLER;
+
+    SetFlag(sptr, FLAG_WALLOP);
+    SetFlag(sptr, FLAG_SERVNOTICE);
+    SetFlag(sptr, FLAG_DEBUG);
+
+    set_snomask(sptr, SNO_OPERDEFAULT, SNO_ADD);
+    cli_max_sendq(sptr) = 0; /* Get the sendq from the oper's class */
+    cli_max_recvq(sptr) = 0; /* Get the recvq from the oper's class */
+    send_umode_out(sptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
+  } else {
+    privbuf = client_print_privs(sptr);
+    sendcmdto_one(&me, CMD_PRIVS, sptr, "%C %s", sptr, privbuf);
+
+    if (HasPriv(sptr, PRIV_PROPAGATE)) {
+      modes = (HasPriv(sptr, PRIV_ADMIN) ? "aowsg" : "owsg");
+    } else {
+      modes = "Owsg";
+    }
+
+    sendcmdto_one(&me, CMD_MODE, sptr, "%s %s", cli_name(sptr), modes);
+  }
+
+  modes = ConfUmode(aconf);
+  if (modes) {
+    if (MyUser(sptr)) {
+      char *umodev[] = { NULL, NULL, NULL, NULL };
+      umodev[1] = cli_name(sptr);
+      umodev[2] = modes;
+      old_mode = cli_flags(sptr);
+      set_user_mode(sptr, sptr, 3, umodev, ALLOWMODES_ANY);
+      send_umode(NULL, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
+    } else {
+      sendcmdto_one(&me, CMD_MODE, sptr, "%s %s", cli_name(sptr), modes);
+    }
+  }
+
+  send_reply(sptr, RPL_YOUREOPER);
+
+  if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+      (feature_int(FEAT_HOST_HIDING_STYLE) == 3))
+    hide_hostmask(sptr);
+
+  sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
+     "%s (%s@%s) is now operator (%c)",
+     cli_name(sptr), cli_user(sptr)->username, cli_sockhost(sptr),
+     IsOper(sptr) ? 'O' : 'o');
+
+  log_write(LS_OPER, L_INFO, 0, "OPER (%s) by (%#C)", aconf->name, sptr);
+}
+
 int oper_password_match(const char* to_match, const char* passwd)
 {
   char *crypted;
@@ -129,6 +201,59 @@ int oper_password_match(const char* to_match, const char* passwd)
   return 0 == res;
 }
 
+int can_oper(struct Client *cptr, struct Client *sptr, char *name,
+             char *password, struct ConfItem **_aconf)
+{
+  struct ConfItem *aconf;
+
+  aconf = find_conf_exact(name, sptr, CONF_OPERATOR);
+  if (!aconf || IsIllegal(aconf))
+  {
+    send_reply(sptr, ERR_NOOPERHOST);
+    sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s (%s@%s) "
+                         "(no operator block)", (!MyUser(sptr) ? "remote " : ""),
+                         cli_name(sptr), cli_user(sptr)->username, cli_sockhost(sptr));
+    return 0;
+  }
+  assert(0 != (aconf->status & CONF_OPERATOR));
+
+  if (!MyUser(sptr)) {
+    if (FlagHas(&aconf->privs, PRIV_REMOTE)) {
+    } else if (aconf->conn_class && FlagHas(&aconf->conn_class->privs, PRIV_REMOTE)) {
+    } else {
+      send_reply(sptr, ERR_NOOPERHOST);
+      sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s (%s@%s) "
+                           "(no remote oper priv)", (!MyUser(sptr) ? "remote " : ""),
+                           cli_name(sptr), cli_user(sptr)->username, cli_sockhost(sptr));
+      return 0;
+    }
+  }
+
+  if (oper_password_match(password, aconf->passwd))
+  {
+    int attach_result = attach_conf(sptr, aconf);
+    if ((ACR_OK != attach_result) && (ACR_ALREADY_AUTHORIZED != attach_result)) {
+      send_reply(sptr, ERR_NOOPERHOST);
+      sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s "
+                                  "(%s@%s) (no operator block)",
+                                  (!MyUser(sptr) ? "remote " : ""), cli_name(sptr),
+                                  cli_user(sptr)->username, cli_sockhost(sptr));
+      return 0;
+    }
+    *_aconf = aconf;
+    return -1;
+  }
+  else
+  {
+    send_reply(sptr, ERR_PASSWDMISMATCH);
+    sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s (%s@%s) "
+                                 "(password mis-match)", (!MyUser(sptr) ? "remote " : ""),
+                                 cli_name(sptr), cli_user(sptr)->username,
+                                 cli_sockhost(sptr));
+    return 0;
+  }
+}
+
 /*
  * m_oper - generic message handler
  */
@@ -137,10 +262,29 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   struct ConfItem* aconf;
   char*            name;
   char*            password;
-  char*            modes;
 
   assert(0 != cptr);
   assert(cptr == sptr);
+
+  if ((parc > 3) && feature_bool(FEAT_REMOTE_OPER)) {
+    struct Client *srv;
+
+    if (!string_has_wildcards(parv[1]))
+      srv = FindServer(parv[1]);
+    else
+      srv = find_match_server(parv[1]);
+
+    if (!srv)
+      return send_reply(sptr, ERR_NOOPERHOST);
+
+    if (IsMe(srv)) {
+      parv[1] = parv[2];
+      parv[2] = parv[3];
+    } else {
+      sendcmdto_one(sptr, CMD_OPER, srv, "%C %s %s", srv, parv[2], parv[3]);
+      return 0;
+    }
+  }
 
   name     = parc > 1 ? parv[1] : 0;
   password = parc > 2 ? parv[2] : 0;
@@ -148,77 +292,9 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (EmptyString(name) || EmptyString(password))
     return need_more_params(sptr, "OPER");
 
-  aconf = find_conf_exact(name, sptr, CONF_OPERATOR);
-  if (!aconf || IsIllegal(aconf))
-  {
-    send_reply(sptr, ERR_NOOPERHOST);
-    sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed OPER attempt by %s (%s@%s)",
-			 parv[0], cli_user(sptr)->username, cli_sockhost(sptr));
-    return 0;
-  }
-  assert(0 != (aconf->status & CONF_OPERATOR));
+  if (can_oper(cptr, sptr, name, password, &aconf))
+    do_oper(cptr, sptr, aconf);
 
-  if (oper_password_match(password, aconf->passwd))
-  {
-    struct Flags old_mode = cli_flags(sptr);
-
-    if (ACR_OK != attach_conf(sptr, aconf)) {
-      send_reply(sptr, ERR_NOOPERHOST);
-      sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed OPER attempt by %s "
-			   "(%s@%s)", parv[0], cli_user(sptr)->username,
-			   cli_sockhost(sptr));
-      return 0;
-    }
-    SetLocOp(sptr);
-    client_set_privs(sptr, aconf);
-    if (HasPriv(sptr, PRIV_PROPAGATE))
-    {
-      ClearLocOp(sptr);
-      SetOper(sptr);
-      if (HasPriv(sptr, PRIV_ADMIN))
-        SetAdmin(sptr);
-      if (!IsHideOper(sptr))
-        ++UserStats.opers;
-    }
-    cli_handler(cptr) = OPER_HANDLER;
-
-    SetFlag(sptr, FLAG_WALLOP);
-    SetFlag(sptr, FLAG_SERVNOTICE);
-    SetFlag(sptr, FLAG_DEBUG);
-    
-    set_snomask(sptr, SNO_OPERDEFAULT, SNO_ADD);
-    cli_max_sendq(sptr) = 0; /* Get the sendq from the oper's class */
-    cli_max_recvq(sptr) = 0; /* Get the recvq from the oper's class */
-    send_umode_out(cptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
-
-    modes = ConfUmode(aconf);
-    if (modes) {
-      char *umodev[] = { NULL, NULL, NULL, NULL };
-      umodev[1] = cli_name(sptr);
-      umodev[2] = modes;
-      old_mode = cli_flags(sptr);
-      set_user_mode(cptr, sptr, 3, umodev, ALLOWMODES_ANY);
-      send_umode(NULL, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
-    }
-
-    send_reply(sptr, RPL_YOUREOPER);
-
-    if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
-        (feature_int(FEAT_HOST_HIDING_STYLE) == 3))
-      hide_hostmask(sptr);
-
-    sendto_opmask_butone_global(&me, SNO_OLDSNO, "%s (%s@%s) is now operator (%c)",
-			 parv[0], cli_user(sptr)->username, cli_sockhost(sptr),
-			 IsOper(sptr) ? 'O' : 'o');
-
-    log_write(LS_OPER, L_INFO, 0, "OPER (%s) by (%#C)", name, sptr);
-  }
-  else
-  {
-    send_reply(sptr, ERR_PASSWDMISMATCH);
-    sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed OPER attempt by %s (%s@%s)",
-			 parv[0], cli_user(sptr)->username, cli_sockhost(sptr));
-  }
   return 0;
 }
 
@@ -227,11 +303,15 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int ms_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  struct Client *acptr;
+  struct ConfItem *aconf;
+
   assert(0 != cptr);
   assert(IsServer(cptr));
   /*
    * if message arrived from server, trust it, and set to oper
    */
+/*
   if (!IsServer(sptr) && !IsOper(sptr))
   {
     if (!IsHideOper(sptr))
@@ -239,6 +319,25 @@ int ms_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     SetFlag(sptr, FLAG_OPER);
     sendcmdto_serv_butone(sptr, CMD_MODE, cptr, "%s :+o", parv[0]);
   }
+*/
+
+  if (!IsServer(sptr) && !IsOper(sptr)) {
+    if (parc < 4)
+      return send_reply(sptr, ERR_NOOPERHOST);
+
+    if (!(acptr = FindNServer(parv[1])))
+      return send_reply(sptr, ERR_NOOPERHOST);
+    else if (!IsMe(acptr)) {
+      sendcmdto_one(sptr, CMD_OPER, acptr, "%C %s %s", acptr, parv[2],
+                    parv[3]);
+      return 0;
+    }
+
+    if (can_oper(cptr, sptr, parv[2], parv[3], &aconf))
+      do_oper(cptr, sptr, aconf);
+  } else
+    send_reply(sptr, RPL_YOUREOPER);
+
   return 0;
 }
 

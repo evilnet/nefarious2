@@ -154,6 +154,7 @@ static struct lexer_token {
   { "propagate", TPRIV_PROPAGATE },
   { "realname", REAL },
   { "rehash", TPRIV_REHASH },
+  { "remote", TPRIV_REMOTE },
   { "restart", TPRIV_RESTART },
   { "see_chan", TPRIV_SEE_CHAN },
   { "see_opers", TPRIV_SEE_OPERS },

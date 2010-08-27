@@ -529,6 +529,7 @@ static struct FeatureDesc {
   F_S(WHOIS_SERVICE, 0, "is a Network Service", 0),
   F_B(TARGET_LIMITING, 0, 1, 0),
   F_B(OPER_XTRAOP, 0, 0, 0),
+  F_B(REMOTE_OPER, 0, 1, 0),
 
   /* Host hiding FEAT_'s */
   F_B(HIDDEN_HOST_QUIT, 0, 1, 0),

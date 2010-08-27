@@ -169,6 +169,7 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     FlagClr(&privs_global, PRIV_ADMIN);
     FlagClr(&privs_global, PRIV_XTRAOP);
     FlagClr(&privs_global, PRIV_SERVICE);
+    FlagClr(&privs_global, PRIV_REMOTE);
 
     memset(&privs_local, 0, sizeof(privs_local));
     FlagSet(&privs_local, PRIV_CHAN_LIMIT);
@@ -231,6 +232,9 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     ClrPriv(client, PRIV_BADCHAN);
   }
 
+  if (MyUser(client))
+    ClrPriv(client, PRIV_REMOTE);
+
   privbuf = client_print_privs(client);
   sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
 }
@@ -251,7 +255,7 @@ static struct {
   P(DISPLAY),        P(SEE_OPERS),      P(WIDE_GLINE),    P(LIST_CHAN),
   P(FORCE_OPMODE),   P(FORCE_LOCAL_OPMODE), P(APASS_OPMODE), P(CHECK),
   P(WHOIS_NOTICE),   P(HIDE_OPER),      P(HIDE_CHANNELS), P(HIDE_IDLE),
-  P(ADMIN),          P(XTRAOP),         P(SERVICE),
+  P(ADMIN),          P(XTRAOP),         P(SERVICE),       P(REMOTE),
 #undef P
   { 0, 0 }
 };

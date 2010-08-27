@@ -1,6 +1,25 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+	* doc/example.conf: Added REMOTE priv used to allow remote OPER.
+
+	* include/client.h: Added REMOTE priv used to allow remote OPER.
+
+	* include/ircd_features.h: Added REMOTE_OPER Feature.
+
+	* ircd/client.c: Added REMOTE priv used to allow remote OPER.
+
+	* ircd/ircd_features.c: Added REMOTE_OPER Feature.
+
+	* ircd/ircd_lexer.l: Added REMOTE priv used to allow remote OPER.
+
+	* ircd/ircd_parser.y: Added REMOTE priv used to allow remote OPER.
+
+	* ircd/m_oper.c: Added remote OPER.
+
+	* ircd/s_user.c: Fixed bug where cli_handler()'s were being
+	changed when they shouldn't be.
+
 2010-08-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Fixed bug where OPER_HOSTHIDING was not applying
