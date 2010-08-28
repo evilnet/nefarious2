@@ -57,6 +57,7 @@
 static struct {
   struct Motd*	    local;     /**< Local MOTD. */
   struct Motd*	    remote;    /**< Remote MOTD. */
+  struct Motd*      oper;      /**< Oper MOTD. */
   struct Motd*	    other;     /**< MOTDs specified in configuration file. */
   struct Motd*	    freelist;  /**< Currently unused Motd structs. */
   struct MotdCache* cachelist; /**< List of MotdCache entries. */
@@ -205,6 +206,7 @@ motd_decache(struct Motd *motd)
 
   assert(0 != motd);
 
+
   if (!(cache = motd->cache)) /* we can be called for records with no cache */
     return;
 
@@ -312,6 +314,35 @@ motd_forward(struct Client *cptr, struct MotdCache *cache)
   return send_reply(cptr, RPL_ENDOFMOTD); /* end */
 }
 
+/** Send the content of a MotdCache to a user.
+ * If \a cache is NULL, simply send ERR_NOOMOTD to the client.
+ * @param[in] cptr Client to send MOTD to.
+ * @param[in] cache MOTD body to send to client.
+ */
+static int
+opermotd_forward(struct Client *cptr, struct MotdCache *cache)
+{
+  int i;
+
+  assert(0 != cptr);
+
+  if (!cache) /* no motd to send */
+    return send_reply(cptr, ERR_NOOMOTD);
+
+  /* send the motd */
+  send_reply(cptr, RPL_OMOTDSTART, cli_name(&me));
+  send_reply(cptr, SND_EXPLICIT | RPL_MOTD, ":- %d-%d-%d %d:%02d",
+             cache->modtime.tm_year + 1900, cache->modtime.tm_mon + 1,
+             cache->modtime.tm_mday, cache->modtime.tm_hour,
+             cache->modtime.tm_min);
+
+  for (i = 0; i < cache->count; i++)
+    send_reply(cptr, RPL_OMOTD, cache->motd[i]);
+
+  return send_reply(cptr, RPL_ENDOFOMOTD); /* end */
+}
+
+
 /** Find the MOTD for a client and send it.
  * @param[in] cptr Client being greeted.
  */
@@ -321,6 +352,17 @@ motd_send(struct Client* cptr)
   assert(0 != cptr);
 
   return motd_forward(cptr, motd_cache(motd_lookup(cptr)));
+}
+
+/** Find the MOTD for a client and send it.
+ * @param[in] cptr Client being greeted.
+ */
+int
+opermotd_send(struct Client* cptr)
+{
+  assert(0 != cptr);
+
+  return opermotd_forward(cptr, motd_cache(MotdList.oper));
 }
 
 /** Send the signon MOTD to a user.
@@ -363,6 +405,7 @@ motd_recache(void)
 
   motd_decache(MotdList.local); /* decache local and remote MOTDs */
   motd_decache(MotdList.remote);
+  motd_decache(MotdList.oper);
 
   for (tmp = MotdList.other; tmp; tmp = tmp->next) /* now all the others */
     motd_decache(tmp);
@@ -370,6 +413,7 @@ motd_recache(void)
   /* now recache local and remote MOTDs */
   motd_cache(MotdList.local);
   motd_cache(MotdList.remote);
+  motd_cache(MotdList.oper);
 }
 
 /** Re-cache the local and remote MOTDs.
@@ -389,6 +433,12 @@ motd_init(void)
 
   MotdList.remote = motd_create(0, feature_str(FEAT_RPATH), MOTD_MAXREMOTE, 0);
   motd_cache(MotdList.remote); /* init remote and cache it */
+
+  if (MotdList.oper) /* destroy old oper... */
+    motd_destroy(MotdList.oper);
+
+  MotdList.oper = motd_create(0, feature_str(FEAT_OMPATH), MOTD_MAXLINES, 0);
+  motd_cache(MotdList.oper); /* init remote and cache it */
 }
 
 /** Add a new MOTD.
@@ -418,6 +468,7 @@ motd_clear(void)
 
   motd_decache(MotdList.local); /* decache local and remote MOTDs */
   motd_decache(MotdList.remote);
+  motd_decache(MotdList.oper);
 
   if (MotdList.other) /* destroy other MOTDs */
     for (ptr = MotdList.other; ptr; ptr = next)
@@ -431,6 +482,7 @@ motd_clear(void)
   /* now recache local and remote MOTDs */
   motd_cache(MotdList.local);
   motd_cache(MotdList.remote);
+  motd_cache(MotdList.oper);
 }
 
 /** Report list of non-default MOTDs.
@@ -473,6 +525,13 @@ motd_memory_count(struct Client *cptr)
     mt++;
     mtm += sizeof(struct Motd);
     mtm += MotdList.remote->path ? (strlen(MotdList.remote->path) + 1) : 0;
+  }
+
+  if (MotdList.oper)
+  {
+    mt++;
+    mtm += sizeof(struct Motd);
+    mtm += MotdList.oper->path ? (strlen(MotdList.oper->path) + 1) : 0;
   }
 
   for (ptr = MotdList.other; ptr; ptr = ptr->next)

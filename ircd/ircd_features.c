@@ -530,6 +530,10 @@ static struct FeatureDesc {
   F_B(TARGET_LIMITING, 0, 1, 0),
   F_B(OPER_XTRAOP, 0, 0, 0),
   F_B(REMOTE_OPER, 0, 1, 0),
+  F_B(OPERMOTD, 0, 0, 0),
+
+  /* Some misc. Nefarious default paths */
+  F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),
 
   /* Host hiding FEAT_'s */
   F_B(HIDDEN_HOST_QUIT, 0, 1, 0),

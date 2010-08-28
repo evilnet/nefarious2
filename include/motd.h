@@ -87,6 +87,9 @@ struct MotdCache {
 /* motd_send sends a MOTD off to a user */
 int motd_send(struct Client* cptr);
 
+/* opermotd_send sends the IRC Operator MOTD off to a user */
+int opermotd_send(struct Client* cptr);
+
 /* motd_signon sends a MOTD off to a newly-registered user */
 void motd_signon(struct Client* cptr);
 

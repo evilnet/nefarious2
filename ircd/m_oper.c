@@ -110,6 +110,10 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   struct Flags old_mode = cli_flags(sptr);
   char*        modes;
   char*        privbuf;
+  char*        parv[2];
+
+  parv[0] = cli_name(sptr);
+  parv[1] = NULL;
 
   SetOper(sptr);
   client_set_privs(sptr, aconf);
@@ -173,6 +177,9 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
      "%s (%s@%s) is now operator (%c)",
      cli_name(sptr), cli_user(sptr)->username, cli_sockhost(sptr),
      IsOper(sptr) ? 'O' : 'o');
+
+  if (feature_bool(FEAT_OPERMOTD))
+    m_opermotd(sptr, sptr, 1, parv);
 
   log_write(LS_OPER, L_INFO, 0, "OPER (%s) by (%#C)", aconf->name, sptr);
 }

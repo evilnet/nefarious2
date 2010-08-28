@@ -473,6 +473,10 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_QUARANTINED      524       /* Undernet extension -Vampire */
 #define ERR_INVALIDKEY       525        /* Undernet extension */
 
+#define RPL_OMOTDSTART       535
+#define RPL_OMOTD            536
+#define RPL_ENDOFOMOTD       537
+
 #define ERR_NOTLOWEROPLEVEL  560	/* Undernet extension */
 #define ERR_NOTMANAGER       561	/* Undernet extension */
 #define ERR_CHANSECURED      562	/* Undernet extension */
@@ -481,7 +485,8 @@ extern const struct Numeric* get_error_numeric(int err);
 /*      ERR_NOMANAGER_LONG   565	no longer used */
 #define ERR_NOMANAGER        566	/* Undernet extension */
 #define ERR_UPASS_SAME_APASS 567        /* Undernet extension */
-#define ERR_LASTERROR        568
+#define ERR_NOOMOTD          568
+#define ERR_LASTERROR        569
 
 /*	RPL_LOGON	     600	dalnet,unreal
 	RPL_LOGOFF           601	dalnet,unreal

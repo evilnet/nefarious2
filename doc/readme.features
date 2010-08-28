@@ -990,6 +990,27 @@ OPER_XTRAOP
 Enables or disables the user of user mode +X for opers who have the priv
 XTRAOP.
 
+REMOTE_OPER
+ * Type: boolean
+ * Default: TRUE
+
+Allows remote users to oper up remotly witthout requiring an O:Line on the server
+they are on.
+
+OPERMOTD
+ * Type: boolean
+ * Default: FALSE
+
+Controls the use of the OPERMOTD command.
+
+OMPATH
+ * Type: string
+ * Default: "operircd.motd"
+
+OMPATH is the filename (relative to DPATH) or the full path of the
+"Message of the Day" file.  The contents of this file will be sent to
+every operator upon opering.
+
 HIDDEN_HOST_QUIT
  * Type: boolean
  * Default: TRUE

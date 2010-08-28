@@ -175,6 +175,10 @@ enum Feature {
   FEAT_TARGET_LIMITING,
   FEAT_OPER_XTRAOP,
   FEAT_REMOTE_OPER,
+  FEAT_OPERMOTD,
+
+  /* Some misc. Nefarious default paths */
+  FEAT_OMPATH,
 
   /* Host hiding FEAT_'s */
   FEAT_HIDDEN_HOST_QUIT,

@@ -1102,11 +1102,11 @@ static Numeric replyTable[] = {
 /* 534 */
   { 0 },
 /* 535 */
-  { 0 },
+  { RPL_OMOTDSTART, ":%s IRC Operator MOTD", "535" },
 /* 536 */
-  { 0 },
+  { RPL_OMOTD, ":- %s", "536" },
 /* 537 */
-  { 0 },
+  { RPL_ENDOFOMOTD, ":End of IRC Operator MOTD.", "537" },
 /* 538 */
   { 0 },
 /* 539 */
@@ -1168,7 +1168,7 @@ static Numeric replyTable[] = {
 /* 567 */
   { ERR_UPASS_SAME_APASS, "%s :Cannot use the same pass for both admin (+A) and user (+U) pass.", "567" },
 /* 568 */
-  { 0 },
+  { ERR_NOOMOTD, ":IRC Operator MOTD File is missing", "568" },
 /* 569 */
   { 0 },
 /* 570 */

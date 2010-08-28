@@ -440,6 +440,10 @@ struct Client;
 #define TOK_MKPASSWD            "MKPASSWD"
 #define CMD_MKPASSWD            MSG_MKPASSWD, TOK_MKPASSWD
 
+#define MSG_OPERMOTD            "OPERMOTD"
+#define TOK_OPERMOTD            "OPM"
+#define CMD_OPERMOTD            MSG_OPERMOTD, TOK_OPERMOTD
+
 /*
  * Constants
  */
