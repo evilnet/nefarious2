@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/client.c: Removed code commented out in a previous commit.
+
+	* ircd/m_oper.c: Removed code commented out in a previous commit.
+
 2010-08-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/readme.features: Added OPERMOTD Features.

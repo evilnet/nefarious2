@@ -142,11 +142,6 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
   enum Priv priv;
   char *privbuf;
 
-/*
-  if (!MyConnect(client))
-    return;
-*/
-
   /* Clear out client's privileges. */
   memset(cli_privs(client), 0, sizeof(struct Privs));
 

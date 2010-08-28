@@ -318,15 +318,6 @@ int ms_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /*
    * if message arrived from server, trust it, and set to oper
    */
-/*
-  if (!IsServer(sptr) && !IsOper(sptr))
-  {
-    if (!IsHideOper(sptr))
-      ++UserStats.opers;
-    SetFlag(sptr, FLAG_OPER);
-    sendcmdto_serv_butone(sptr, CMD_MODE, cptr, "%s :+o", parv[0]);
-  }
-*/
 
   if (!IsServer(sptr) && !IsOper(sptr)) {
     if (parc < 4)
@@ -342,7 +333,7 @@ int ms_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     if (can_oper(cptr, sptr, parv[2], parv[3], &aconf))
       do_oper(cptr, sptr, aconf);
-  } else
+  } else if (!IsServer(sptr))
     send_reply(sptr, RPL_YOUREOPER);
 
   return 0;
@@ -358,3 +349,4 @@ int mo_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   send_reply(sptr, RPL_YOUREOPER);
   return 0;
 }
+
