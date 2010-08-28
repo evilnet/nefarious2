@@ -496,7 +496,7 @@ static Numeric replyTable[] = {
 /* 231 */
   { 0 },
 /* 232 */
-  { 0 },
+  { RPL_RULES, ":- %s", "232" },
 /* 233 */
   { 0 },
 /* 234 */
@@ -648,9 +648,9 @@ static Numeric replyTable[] = {
 /* 307 */
   { 0 },
 /* 308 */
-  { 0 },
+  { RPL_RULESSTART, ":- %s Network Rules - ", "308" },
 /* 309 */
-  { 0 },
+  { RPL_ENDOFRULES, ":End of /RULES list.", "309" },
 /* 310 */
   { RPL_WHOISSERVICE, "%s :%s", "310" },
 /* 311 */
@@ -900,7 +900,7 @@ static Numeric replyTable[] = {
 /* 433 */
   { ERR_NICKNAMEINUSE, "%s :Nickname is already in use.", "433" },
 /* 434 */
-  { 0 },
+  { ERR_NORULES, ":RULES File is missing", "434" },
 /* 435 */
   { 0 },
 /* 436 */

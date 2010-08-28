@@ -58,10 +58,11 @@ static struct {
   struct Motd*	    local;     /**< Local MOTD. */
   struct Motd*	    remote;    /**< Remote MOTD. */
   struct Motd*      oper;      /**< Oper MOTD. */
+  struct Motd*      rules;     /**< RULES MOTD. */
   struct Motd*	    other;     /**< MOTDs specified in configuration file. */
   struct Motd*	    freelist;  /**< Currently unused Motd structs. */
   struct MotdCache* cachelist; /**< List of MotdCache entries. */
-} MotdList = { 0, 0, 0, 0, 0 };
+} MotdList = { 0, 0, 0, 0, 0, 0, 0 };
 
 /** Create a struct Motd and initialize it.
  * @param[in] hostmask Hostmask (or connection class name) to filter on.
@@ -329,9 +330,14 @@ motd_forward_type(struct Client *cptr, int type)
 
   if (type == MOTD_OPER)
     cache = motd_cache(MotdList.oper);
+  else if (type == MOTD_RULES)
+    cache = motd_cache(MotdList.rules);
+
   if (!cache) {/* no motd to send */
     if (type == MOTD_OPER)
       return send_reply(cptr, ERR_NOOMOTD);
+    else if (type == MOTD_RULES)
+      return send_reply(cptr, ERR_NORULES);
     else
       return send_reply(cptr, ERR_NOMOTD);
   }
@@ -348,7 +354,19 @@ motd_forward_type(struct Client *cptr, int type)
       send_reply(cptr, RPL_OMOTD, cache->motd[i]);
 
     return send_reply(cptr, RPL_ENDOFOMOTD); /* end */
-  } else {
+  } else if (type == MOTD_RULES) {
+    /* send the motd */
+    send_reply(cptr, RPL_RULESSTART, cli_name(&me));
+    send_reply(cptr, SND_EXPLICIT | RPL_RULES, ":- %d-%d-%d %d:%02d",
+               cache->modtime.tm_year + 1900, cache->modtime.tm_mon + 1,
+               cache->modtime.tm_mday, cache->modtime.tm_hour,
+               cache->modtime.tm_min);
+
+    for (i = 0; i < cache->count; i++)
+      send_reply(cptr, RPL_RULES, cache->motd[i]);
+
+    return send_reply(cptr, RPL_ENDOFRULES); /* end */
+  }else {
     return send_reply(cptr, ERR_NOMOTD);
   }
 }
@@ -417,6 +435,7 @@ motd_recache(void)
   motd_decache(MotdList.local); /* decache local and remote MOTDs */
   motd_decache(MotdList.remote);
   motd_decache(MotdList.oper);
+  motd_decache(MotdList.rules);
 
   for (tmp = MotdList.other; tmp; tmp = tmp->next) /* now all the others */
     motd_decache(tmp);
@@ -425,6 +444,7 @@ motd_recache(void)
   motd_cache(MotdList.local);
   motd_cache(MotdList.remote);
   motd_cache(MotdList.oper);
+  motd_cache(MotdList.rules);
 }
 
 /** Re-cache the local and remote MOTDs.
@@ -450,6 +470,12 @@ motd_init(void)
 
   MotdList.oper = motd_create(0, feature_str(FEAT_OMPATH), MOTD_MAXLINES, 0);
   motd_cache(MotdList.oper); /* init remote and cache it */
+
+  if (MotdList.rules) /* destroy old rules... */
+    motd_destroy(MotdList.rules);
+
+  MotdList.rules = motd_create(0, feature_str(FEAT_EPATH), MOTD_MAXLINES, 0);
+  motd_cache(MotdList.rules); /* init remote and cache it */
 }
 
 /** Add a new MOTD.
@@ -480,6 +506,7 @@ motd_clear(void)
   motd_decache(MotdList.local); /* decache local and remote MOTDs */
   motd_decache(MotdList.remote);
   motd_decache(MotdList.oper);
+  motd_decache(MotdList.rules);
 
   if (MotdList.other) /* destroy other MOTDs */
     for (ptr = MotdList.other; ptr; ptr = next)
@@ -494,6 +521,7 @@ motd_clear(void)
   motd_cache(MotdList.local);
   motd_cache(MotdList.remote);
   motd_cache(MotdList.oper);
+  motd_cache(MotdList.rules);
 }
 
 /** Report list of non-default MOTDs.
@@ -543,6 +571,13 @@ motd_memory_count(struct Client *cptr)
     mt++;
     mtm += sizeof(struct Motd);
     mtm += MotdList.oper->path ? (strlen(MotdList.oper->path) + 1) : 0;
+  }
+
+  if (MotdList.rules)
+  {
+    mt++;
+    mtm += sizeof(struct Motd);
+    mtm += MotdList.rules->path ? (strlen(MotdList.rules->path) + 1) : 0;
   }
 
   for (ptr = MotdList.other; ptr; ptr = ptr->next)

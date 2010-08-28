@@ -49,7 +49,8 @@ enum MotdType {
     MOTD_CLASS,     /**< MOTD selected by connection class */
     MOTD_COUNTRY,   /**< MOTD selected by country code */
     MOTD_CONTINENT, /**< MOTD selected by continent code */
-    MOTD_OPER       /**< MOTD for OPERMOTD */
+    MOTD_OPER,      /**< MOTD for OPERMOTD */
+    MOTD_RULES      /**< MOTD for RULES (OK it's actually the RULES file but it makes more sense to make use fo the MOTD system) */
 };
 
 /** Entry for a single Message Of The Day (MOTD). */

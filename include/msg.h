@@ -436,13 +436,17 @@ struct Client;
 #define TOK_FAKE		"FA"
 #define CMD_FAKE		MSG_FAKE, TOK_FAKE
 
-#define MSG_MKPASSWD            "MKPASSWD"
-#define TOK_MKPASSWD            "MKPASSWD"
-#define CMD_MKPASSWD            MSG_MKPASSWD, TOK_MKPASSWD
+#define MSG_MKPASSWD		"MKPASSWD"
+#define TOK_MKPASSWD		"MKPASSWD"
+#define CMD_MKPASSWD		MSG_MKPASSWD, TOK_MKPASSWD
 
-#define MSG_OPERMOTD            "OPERMOTD"
-#define TOK_OPERMOTD            "OPM"
-#define CMD_OPERMOTD            MSG_OPERMOTD, TOK_OPERMOTD
+#define MSG_OPERMOTD		"OPERMOTD"
+#define TOK_OPERMOTD		"OPM"
+#define CMD_OPERMOTD		MSG_OPERMOTD, TOK_OPERMOTD
+
+#define MSG_RULES		"RULES"
+#define TOK_RULES		"RL"
+#define CMD_RULES		MSG_RULES, TOK_RULES
 
 /*
  * Constants

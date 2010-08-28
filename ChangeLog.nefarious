@@ -1,7 +1,40 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2010-08-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+2010-08-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ChangeLong.nefarious: Fixed dates for todays commits.
+
+	* include/handlers.h: Added RULES command.
+
+	* include/ircd_features.h: Added RULES Features.
+
+	* include/motd.h: Updated MOTD functions to support RULES file.
+
+	* include/msg.h: Added RULES command.
+
+	* include/numeric.h: Added RULES numeric replies.
+
+	* ircd/Makefile.in: Added RULES command.
+
+	* ircd/ircd_features.c: Added RULES Features.
+
+	* ircd/m_opermotd.c: Updated MOTD functions to support RULES
+	file.
+
+	* ircd/motd.c: Updated MOTD functions to support RULES file.
+
+	* ircd/parse.c: Added RULES command.
+
+	* ircd/s_err.c: Added RULES numeric replies.
+
+	* doc/ircd.opermotd: Added sample oper MOTD file.
+
+	* doc/ircd.rules: Added sample RULES file.
+
+	* ircd/m_rules.c: Added RULES command.
+
+2010-08-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/motd.h: Updated and changed some motd functions.
 
@@ -11,7 +44,7 @@
 
 	* ircd/motd.c: Updated and changed some motd functions.
 
-2010-08-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+2010-08-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/client.c: Removed code commented out in a previous commit.
 

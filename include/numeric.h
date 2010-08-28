@@ -121,7 +121,7 @@ extern const struct Numeric* get_error_numeric(int err);
 
 /*      RPL_SERVICEINFO      231	unused */
 /*      RPL_ENDOFSERVICES    232	unused */
-/*	RPL_RULES	     232	unreal */
+#define RPL_RULES	     232
 /*      RPL_SERVICE          233	unused */
 /*      RPL_SERVLIST         234	unused */
 /*      RPL_SERVLISTEND      235	unused */
@@ -219,12 +219,12 @@ extern const struct Numeric* get_error_numeric(int err);
                                         /* NotAway, aircd */
 /*	RPL_WHOISREGNICK     307 	Numeric List: Dalnet */
 /*	RPL_SUSERHOST	     307	austnet */
-/*      RPL_NOTIFYACTION     308         aircd */
+/*	RPL_NOTIFYACTION     308         aircd */
 /*	RPL_WHOISADMIN	     308	Numeric List: Dalnet */
-/*	RPL_RULESSTART	     308	unreal */
+#define RPL_RULESSTART	     308
 /*      RPL_NICKTRACE        309         aircd */
 /*	RPL_WHOISSADMIN	     309	Numeric List: Dalnet */
-/*	RPL_ENDOFRULES	     309	unreal */
+#define RPL_ENDOFRULES	     309
 /*	RPL_WHOISHELPER	     309	austnet */
 /*      RPL_WHOISSVCMSG      310         Dalnet */
 /*	RPL_WHOISHELPOP	     310	unreal */
@@ -361,7 +361,7 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_ERRONEUSNICKNAME 432
 #define ERR_NICKNAMEINUSE    433
 /*      ERR_SERVICENAMEINUSE 434 ? */
-/*	ERR_NORULES	     434   unreal */
+#define ERR_NORULES	     434
 /*      ERR_SERVICECONFUSED  435 ? */
 /*	ERR_BANONCHAN	     435   dalnet */
 #define ERR_NICKCOLLISION    436

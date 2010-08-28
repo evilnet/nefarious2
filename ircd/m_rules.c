@@ -1,5 +1,5 @@
 /*
- * IRC - Internet Relay Chat, ircd/m_opermotd.c
+ * IRC - Internet Relay Chat, ircd/m_rules.c
  * Copyright (C) 1990 Jarkko Oikarinen and
  *                    University of Oulu, Computing Center
  *
@@ -20,7 +20,7 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Id: m_opermotd.c 1271 2004-12-11 05:14:07Z klmitch $
+ * $Id: m_rules.c 1271 2004-12-11 05:14:07Z klmitch $
  */
 
 /*
@@ -101,35 +101,34 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
 /*
- * m_opermotd - generic message handler
+ * m_rules - generic message handler
  *
  * parv[0] - sender prefix
  * parv[1] - servername
  */
-int m_opermotd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+int m_rules(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
-  if (!feature_bool(FEAT_OPERMOTD))
-    return send_reply(sptr, ERR_DISABLED, "OPERMOTD");
+  if (!feature_bool(FEAT_RULES))
+    return send_reply(sptr, ERR_DISABLED, "RULES");
 
-  if (hunt_server_cmd(sptr, CMD_OPERMOTD, cptr, feature_int(FEAT_HIS_REMOTE), "%C", 1,
+  if (hunt_server_cmd(sptr, CMD_RULES, cptr, feature_int(FEAT_HIS_REMOTE), "%C", 1,
 		      parc, parv) != HUNTED_ISME)
     return 0;
 
-  return motd_send_type(sptr, MOTD_OPER);
+  return motd_send_type(sptr, MOTD_RULES);
 }
 
 /*
- * ms_opermotd - server message handler
+ * ms_rules - server message handler
  *
  * parv[0] - sender prefix
  * parv[1] - servername
  */
-int ms_opermotd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+int ms_rules(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
-  if (hunt_server_cmd(sptr, CMD_OPERMOTD, cptr, 0, "%C", 1, parc, parv) !=
+  if (hunt_server_cmd(sptr, CMD_RULES, cptr, 0, "%C", 1, parc, parv) !=
       HUNTED_ISME)
     return 0;
 
-  return motd_send_type(sptr, MOTD_OPER);
+  return motd_send_type(sptr, MOTD_RULES);
 }
-
