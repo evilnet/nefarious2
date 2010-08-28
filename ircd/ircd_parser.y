@@ -1121,7 +1121,7 @@ motdcountry: COUNTRY '=' QSTRING ';'
   struct SLink *link;
   link = make_link();
   link->value.cp = $3;
-  link->flags = 1;
+  link->flags = MOTD_COUNTRY;
   link->next = hosts;
   hosts = link;
 };
@@ -1131,7 +1131,7 @@ motdcontinent: CONTINENT '=' QSTRING ';'
   struct SLink *link;
   link = make_link();
   link->value.cp = $3;
-  link->flags = 2;
+  link->flags = MOTD_CONTINENT;
   link->next = hosts;
   hosts = link;
 };

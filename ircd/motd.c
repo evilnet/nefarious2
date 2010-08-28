@@ -69,7 +69,7 @@ static struct {
  * @param[in] maxcount Maximum number of lines permitted for MOTD.
  */
 static struct Motd *
-motd_create(const char *hostmask, const char *path, int maxcount, int isgeoip)
+motd_create(const char *hostmask, const char *path, int maxcount, int type)
 {
   struct Motd* tmp;
 
@@ -86,9 +86,9 @@ motd_create(const char *hostmask, const char *path, int maxcount, int isgeoip)
 
   if (hostmask == NULL)
     tmp->type = MOTD_UNIVERSAL;
-  else if (isgeoip == 1)
+  else if (type == MOTD_COUNTRY)
     tmp->type = MOTD_COUNTRY;
-  else if (isgeoip == 2)
+  else if (type == MOTD_CONTINENT)
     tmp->type = MOTD_CONTINENT;
   else if (find_class(hostmask))
     tmp->type = MOTD_CLASS;
@@ -320,26 +320,37 @@ motd_forward(struct Client *cptr, struct MotdCache *cache)
  * @param[in] cache MOTD body to send to client.
  */
 static int
-opermotd_forward(struct Client *cptr, struct MotdCache *cache)
+motd_forward_type(struct Client *cptr, int type)
 {
   int i;
+  struct MotdCache *cache;
 
   assert(0 != cptr);
 
-  if (!cache) /* no motd to send */
-    return send_reply(cptr, ERR_NOOMOTD);
+  if (type == MOTD_OPER)
+    cache = motd_cache(MotdList.oper);
+  if (!cache) {/* no motd to send */
+    if (type == MOTD_OPER)
+      return send_reply(cptr, ERR_NOOMOTD);
+    else
+      return send_reply(cptr, ERR_NOMOTD);
+  }
 
-  /* send the motd */
-  send_reply(cptr, RPL_OMOTDSTART, cli_name(&me));
-  send_reply(cptr, SND_EXPLICIT | RPL_MOTD, ":- %d-%d-%d %d:%02d",
-             cache->modtime.tm_year + 1900, cache->modtime.tm_mon + 1,
-             cache->modtime.tm_mday, cache->modtime.tm_hour,
-             cache->modtime.tm_min);
+  if (type == MOTD_OPER) {
+    /* send the motd */
+    send_reply(cptr, RPL_OMOTDSTART, cli_name(&me));
+    send_reply(cptr, SND_EXPLICIT | RPL_OMOTD, ":- %d-%d-%d %d:%02d",
+               cache->modtime.tm_year + 1900, cache->modtime.tm_mon + 1,
+               cache->modtime.tm_mday, cache->modtime.tm_hour,
+               cache->modtime.tm_min);
 
-  for (i = 0; i < cache->count; i++)
-    send_reply(cptr, RPL_OMOTD, cache->motd[i]);
+    for (i = 0; i < cache->count; i++)
+      send_reply(cptr, RPL_OMOTD, cache->motd[i]);
 
-  return send_reply(cptr, RPL_ENDOFOMOTD); /* end */
+    return send_reply(cptr, RPL_ENDOFOMOTD); /* end */
+  } else {
+    return send_reply(cptr, ERR_NOMOTD);
+  }
 }
 
 
@@ -358,11 +369,11 @@ motd_send(struct Client* cptr)
  * @param[in] cptr Client being greeted.
  */
 int
-opermotd_send(struct Client* cptr)
+motd_send_type(struct Client* cptr, int type)
 {
   assert(0 != cptr);
 
-  return opermotd_forward(cptr, motd_cache(MotdList.oper));
+  return motd_forward_type(cptr, type);
 }
 
 /** Send the signon MOTD to a user.
@@ -446,11 +457,11 @@ motd_init(void)
  * @param[in] path Pathname of file to send.
  */
 void
-motd_add(const char *hostmask, const char *path, int isgeoip)
+motd_add(const char *hostmask, const char *path, int type)
 {
   struct Motd *tmp;
 
-  tmp = motd_create(hostmask, path, MOTD_MAXLINES, isgeoip); /* create the motd */
+  tmp = motd_create(hostmask, path, MOTD_MAXLINES, type); /* create the motd */
 
   tmp->next = MotdList.other; /* link it into the list */
   MotdList.other = tmp;

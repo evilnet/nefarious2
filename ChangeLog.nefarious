@@ -3,6 +3,16 @@
 
 2010-08-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/motd.h: Updated and changed some motd functions.
+
+	* ircd/ircd_parser.y: Updated and changed some motd functions.
+
+	* ircd/m_opermotd.c: Updated and changed some motd functions.
+
+	* ircd/motd.c: Updated and changed some motd functions.
+
+2010-08-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/client.c: Removed code commented out in a previous commit.
 
 	* ircd/m_oper.c: Removed code commented out in a previous commit.

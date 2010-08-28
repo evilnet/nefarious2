@@ -112,7 +112,7 @@ int m_opermotd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 		      parc, parv) != HUNTED_ISME)
     return 0;
 
-  return opermotd_send(sptr);
+  return motd_send_type(sptr, MOTD_OPER);
 }
 
 /*
@@ -127,6 +127,6 @@ int ms_opermotd(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
       HUNTED_ISME)
     return 0;
 
-  return opermotd_send(sptr);
+  return motd_send_type(sptr, MOTD_OPER);
 }
 

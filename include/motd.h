@@ -48,7 +48,8 @@ enum MotdType {
     MOTD_IPMASK,    /**< MOTD selected by IP mask */
     MOTD_CLASS,     /**< MOTD selected by connection class */
     MOTD_COUNTRY,   /**< MOTD selected by country code */
-    MOTD_CONTINENT  /**< MOTD selected by continent code */
+    MOTD_CONTINENT, /**< MOTD selected by continent code */
+    MOTD_OPER       /**< MOTD for OPERMOTD */
 };
 
 /** Entry for a single Message Of The Day (MOTD). */
@@ -87,8 +88,8 @@ struct MotdCache {
 /* motd_send sends a MOTD off to a user */
 int motd_send(struct Client* cptr);
 
-/* opermotd_send sends the IRC Operator MOTD off to a user */
-int opermotd_send(struct Client* cptr);
+/* motd_send_type sends the MOTD of the specified type off to a user */
+int motd_send_type(struct Client* cptr, int type);
 
 /* motd_signon sends a MOTD off to a newly-registered user */
 void motd_signon(struct Client* cptr);
@@ -102,7 +103,7 @@ void motd_recache(void);
 void motd_init(void);
 
 /* This routine adds a MOTD */
-void motd_add(const char *hostmask, const char *path, int isgeoip);
+void motd_add(const char *hostmask, const char *path, int type);
 
 /* This routine clears the list of MOTDs */
 void motd_clear(void);
