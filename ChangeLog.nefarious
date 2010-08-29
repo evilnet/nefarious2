@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added Features for OPERMOTD and RULES.
+
+	* doc/readme.features: Added documentation for RULES Features.
+
 2010-08-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ChangeLong.nefarious: Fixed dates for todays commits.

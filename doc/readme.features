@@ -1003,6 +1003,12 @@ OPERMOTD
 
 Controls the use of the OPERMOTD command.
 
+RULES
+ * Type: boolean
+ * Default: FALSE
+
+Controls the use of the RULES command.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"
@@ -1010,6 +1016,14 @@ OMPATH
 OMPATH is the filename (relative to DPATH) or the full path of the
 "Message of the Day" file.  The contents of this file will be sent to
 every operator upon opering.
+
+EPATH
+ * Type: string
+ * Default: "ircd.rules"
+
+EPATH is the filename (relative to DPATH) or the full path of the rules file.
+Users can see these using the rules command which will need to be enabled if you
+wish to use RULES. See the RULES feature.
 
 HIDDEN_HOST_QUIT
  * Type: boolean
