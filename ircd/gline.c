@@ -438,9 +438,9 @@ count_versions(const char *mask)
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!IsUser(acptr))
       continue;
-    if (strlen(cli_version(acptr)) < minlen)
-      continue;
     if (EmptyString(cli_version(acptr)))
+      continue;
+    if (strlen(cli_version(acptr)) < minlen)
       continue;
     if (!matchexec(cli_version(acptr), cmask, minlen))
       count++;

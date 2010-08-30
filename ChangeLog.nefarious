@@ -3,6 +3,11 @@
 
 2010-08-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/gline.c: Makes more sense to ensure the user has a CTCP
+	version before we check it's length rather then after.
+
+2010-08-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/gline.c: Fixed a minor bug where CTCP version G-lines
 	were not being limited by FEAT_GLINEMAXUSERCOUNT properly.
 
