@@ -70,25 +70,26 @@ enum GlineAction {
   GLINE_MODIFY			/**< G-line should be modified. */
 };
 
-#define GLINE_ACTIVE	0x0001  /**< G-line is active. */
-#define GLINE_IPMASK	0x0002  /**< gl_addr and gl_bits fields are valid. */
-#define GLINE_BADCHAN	0x0004  /**< G-line prohibits users from joining a channel. */
-#define GLINE_LOCAL	0x0008  /**< G-line only applies to this server. */
-#define GLINE_ANY	0x0010  /**< Search flag: Find any G-line. */
-#define GLINE_FORCE	0x0020  /**< Override normal limits on G-lines. */
-#define GLINE_EXACT	0x0040  /**< Exact match only (no wildcards). */
-#define GLINE_LDEACT	0x0080	/**< Locally deactivated. */
-#define GLINE_GLOBAL	0x0100	/**< Find only global G-lines. */
-#define GLINE_LASTMOD	0x0200	/**< Find only G-lines with non-zero lastmod. */
-#define GLINE_OPERFORCE	0x0400	/**< Oper forcing G-line to be set. */
-#define GLINE_REALNAME  0x0800  /**< G-line matches only the realname field. */
+#define GLINE_ACTIVE	0x00001 /**< G-line is active. */
+#define GLINE_IPMASK	0x00002 /**< gl_addr and gl_bits fields are valid. */
+#define GLINE_BADCHAN	0x00004 /**< G-line prohibits users from joining a channel. */
+#define GLINE_LOCAL	0x00008 /**< G-line only applies to this server. */
+#define GLINE_ANY	0x00010 /**< Search flag: Find any G-line. */
+#define GLINE_FORCE	0x00020 /**< Override normal limits on G-lines. */
+#define GLINE_EXACT	0x00040 /**< Exact match only (no wildcards). */
+#define GLINE_LDEACT	0x00080	/**< Locally deactivated. */
+#define GLINE_GLOBAL	0x00100	/**< Find only global G-lines. */
+#define GLINE_LASTMOD	0x00200	/**< Find only G-lines with non-zero lastmod. */
+#define GLINE_OPERFORCE	0x00400	/**< Oper forcing G-line to be set. */
+#define GLINE_REALNAME  0x00800 /**< G-line matches only the realname field. */
+#define GLINE_VERSION   0x10000 /**< G-line matches only the CTCP version. */
 
-#define GLINE_EXPIRE	0x1000	/**< Expiration time update */
-#define GLINE_LIFETIME	0x2000	/**< Record lifetime update */
-#define GLINE_REASON	0x4000	/**< Reason update */
+#define GLINE_EXPIRE	0x01000	/**< Expiration time update */
+#define GLINE_LIFETIME	0x02000	/**< Record lifetime update */
+#define GLINE_REASON	0x04000	/**< Reason update */
 
 /** Controllable flags that can be set on an actual G-line. */
-#define GLINE_MASK	(GLINE_ACTIVE | GLINE_BADCHAN | GLINE_LOCAL | GLINE_REALNAME)
+#define GLINE_MASK	(GLINE_ACTIVE | GLINE_BADCHAN | GLINE_LOCAL | GLINE_REALNAME | GLINE_VERSION)
 /** Mask for G-line activity flags. */
 #define GLINE_ACTMASK	(GLINE_ACTIVE | GLINE_LDEACT)
 
@@ -105,6 +106,8 @@ enum GlineAction {
 #define GlineIsIpMask(g)	((g)->gl_flags & GLINE_IPMASK)
 /** Test whether \a g is a realname-based G-line. */
 #define GlineIsRealName(g)      ((g)->gl_flags & GLINE_REALNAME)
+/** Test whether \a g is a CTCP version-based G-line. */
+#define GlineIsVersion(g)       ((g)->gl_flags & GLINE_VERSION)
 /** Test whether \a g is a BADCHAN. */
 #define GlineIsBadChan(g)	((g)->gl_flags & GLINE_BADCHAN)
 /** Test whether \a g is local to this server. */

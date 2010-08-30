@@ -222,6 +222,12 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
         if (match(gline->gl_user+2, cli_info(acptr)) != 0)
             continue;
         Debug((DEBUG_DEBUG,"Matched!"));
+      } else if (GlineIsVersion(gline)) { /* CTCP Version Gline */
+        Debug((DEBUG_DEBUG,"CTCP Version Gline: %s %s",(cli_version(acptr)),
+                                        gline->gl_user+2));
+        if (EmptyString(cli_version(acptr)) || (match(gline->gl_user+2, cli_version(acptr)) != 0))
+            continue;
+        Debug((DEBUG_DEBUG,"Matched!"));
       } else { /* Host/IP gline */
         if (cli_user(acptr)->username &&
             match(gline->gl_user, (cli_user(acptr))->username) != 0)
@@ -419,6 +425,7 @@ count_realnames(const char *mask)
  * \a userhost may be in one of four forms:
  * \li A channel name, to add a BadChan.
  * \li A string starting with $R and followed by a mask to match against their realname.
+ * \li A string starting with $V and followed by a mask to match against their CTCP version.
  * \li A user\@IP mask (user\@ part optional) to create an IP-based ban.
  * \li A user\@host mask (user\@ part optional) to create a hostname ban.
  *
@@ -461,6 +468,7 @@ gline_add(struct Client *cptr, struct Client *sptr, char *userhost,
   } else if (*userhost == '$') {
     switch (userhost[1]) {
       case 'R': flags |= GLINE_REALNAME; break;
+      case 'V': flags |= GLINE_VERSION; break;
       default:
         /* uh, what to do here? */
         /* The answer, my dear Watson, is we throw a protocol_violation()
@@ -529,8 +537,8 @@ gline_add(struct Client *cptr, struct Client *sptr, char *userhost,
                        (flags & GLINE_ACTIVE) ? "" : "deactivated ",
 		       (flags & GLINE_LOCAL) ? "local" : "global",
 		       (flags & GLINE_BADCHAN) ? "BADCHAN" : "GLINE", user,
-		       (flags & (GLINE_BADCHAN|GLINE_REALNAME)) ? "" : "@",
-		       (flags & (GLINE_BADCHAN|GLINE_REALNAME)) ? "" : host,
+		       (flags & (GLINE_BADCHAN|GLINE_REALNAME|GLINE_VERSION)) ? "" : "@",
+		       (flags & (GLINE_BADCHAN|GLINE_REALNAME|GLINE_VERSION)) ? "" : host,
 		       expire, reason);
 
   /* and log it */
@@ -538,8 +546,8 @@ gline_add(struct Client *cptr, struct Client *sptr, char *userhost,
 	    "%#C adding %s %s for %s%s%s, expiring at %Tu: %s", sptr,
 	    flags & GLINE_LOCAL ? "local" : "global",
 	    flags & GLINE_BADCHAN ? "BADCHAN" : "GLINE", user,
-	    flags & (GLINE_BADCHAN|GLINE_REALNAME) ? "" : "@",
-	    flags & (GLINE_BADCHAN|GLINE_REALNAME) ? "" : host,
+	    flags & (GLINE_BADCHAN|GLINE_REALNAME|GLINE_VERSION) ? "" : "@",
+	    flags & (GLINE_BADCHAN|GLINE_REALNAME|GLINE_VERSION) ? "" : host,
 	    expire, reason);
 
   /* make the gline */
@@ -997,6 +1005,11 @@ gline_lookup(struct Client *cptr, unsigned int flags)
     if (GlineIsRealName(gline)) {
       Debug((DEBUG_DEBUG,"realname gline: '%s' '%s'",gline->gl_user,cli_info(cptr)));
       if (match(gline->gl_user+2, cli_info(cptr)) != 0)
+        continue;
+    }
+    else if (GlineIsVersion(gline)){
+      Debug((DEBUG_DEBUG,"ctcp version gline: '%s' '%s'",gline->gl_user,cli_version(cptr)));
+      if (EmptyString(cli_version(cptr)) || (match(gline->gl_user+2, cli_version(cptr)) != 0))
         continue;
     }
     else {

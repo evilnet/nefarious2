@@ -1,6 +1,14 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/gline.h: Added support for $V G-lines to match against
+	CTCP versions.
+
+	* ircd/gline.c: Added support for $V G-lines to match against CTCP
+	versions.
+
 2010-08-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added Features for OPERMOTD and RULES.
