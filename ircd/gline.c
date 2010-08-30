@@ -421,6 +421,33 @@ count_realnames(const char *mask)
   return count;
 }
 
+/** Count number of users with a CTCP version matching \a mask.
+ * @param[in] mask Wildcard mask to match against CTCP versions.
+ * @return Count of matching users.
+ */
+static int
+count_versions(const char *mask)
+{
+  struct Client *acptr;
+  int minlen;
+  int count;
+  char cmask[BUFSIZE];
+
+  count = 0;
+  matchcomp(cmask, &minlen, NULL, mask);
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!IsUser(acptr))
+      continue;
+    if (strlen(cli_version(acptr)) < minlen)
+      continue;
+    if (EmptyString(cli_version(acptr)))
+      continue;
+    if (!matchexec(cli_version(acptr), cmask, minlen))
+      count++;
+  }
+  return count;
+}
+
 /** Create a new G-line and add it to global lists.
  * \a userhost may be in one of four forms:
  * \li A channel name, to add a BadChan.
@@ -481,7 +508,10 @@ gline_add(struct Client *cptr, struct Client *sptr, char *userhost,
     user = userhost;
     host = NULL;
     if (MyUser(sptr) || (IsUser(sptr) && flags & GLINE_LOCAL)) {
-      tmp = count_realnames(userhost + 2);
+      if (flags & GLINE_VERSION)
+        tmp = count_versions(userhost + 2);
+      else
+        tmp = count_realnames(userhost + 2);
       if ((tmp >= feature_int(FEAT_GLINEMAXUSERCOUNT))
 	  && !(flags & GLINE_OPERFORCE))
 	return send_reply(sptr, ERR_TOOMANYUSERS, tmp);

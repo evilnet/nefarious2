@@ -3,6 +3,11 @@
 
 2010-08-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/gline.c: Fixed a minor bug where CTCP version G-lines
+	were not being limited by FEAT_GLINEMAXUSERCOUNT properly.
+
+2010-08-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/gline.h: Added support for $V G-lines to match against
 	CTCP versions.
 
