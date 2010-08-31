@@ -179,6 +179,7 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     FlagSet(&privs_local, PRIV_WHOX);
     FlagSet(&privs_local, PRIV_DISPLAY);
     FlagSet(&privs_local, PRIV_FORCE_LOCAL_OPMODE);
+    FlagSet(&privs_local, PRIV_LOCAL_SHUN);
 
     privs_defaults_set = 1;
   }
@@ -251,6 +252,7 @@ static struct {
   P(FORCE_OPMODE),   P(FORCE_LOCAL_OPMODE), P(APASS_OPMODE), P(CHECK),
   P(WHOIS_NOTICE),   P(HIDE_OPER),      P(HIDE_CHANNELS), P(HIDE_IDLE),
   P(ADMIN),          P(XTRAOP),         P(SERVICE),       P(REMOTE),
+  P(SHUN),           P(LOCAL_SHUN),     P(WIDE_SHUN),
 #undef P
   { 0, 0 }
 };

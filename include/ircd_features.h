@@ -127,6 +127,7 @@ enum Feature {
   FEAT_HIS_STATS_q,
   FEAT_HIS_STATS_R,
   FEAT_HIS_STATS_r,
+  FEAT_HIS_STATS_S,
   FEAT_HIS_STATS_t,
   FEAT_HIS_STATS_T,
   FEAT_HIS_STATS_u,
@@ -177,6 +178,8 @@ enum Feature {
   FEAT_REMOTE_OPER,
   FEAT_OPERMOTD,
   FEAT_RULES,
+  FEAT_DISABLE_SHUNS,
+  FEAT_SHUNMAXUSERCOUNT,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

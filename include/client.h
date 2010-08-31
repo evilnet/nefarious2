@@ -135,6 +135,9 @@ enum Priv
     PRIV_XTRAOP, /**< oper can set/unset user mode +X */
     PRIV_SERVICE, /**< oper can set/unset user mode +k */
     PRIV_REMOTE, /**< oper can OPER from another server */
+    PRIV_SHUN, /**< oper can SHUN */
+    PRIV_LOCAL_SHUN, /**< oper can local SHUN */
+    PRIV_WIDE_SHUN, /**< oper can set wider Shuns */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 

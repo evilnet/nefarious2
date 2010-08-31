@@ -199,6 +199,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
    * our burst.
    */
   gline_burst(cptr);
+  shun_burst(cptr);
   jupe_burst(cptr);
 
   /*

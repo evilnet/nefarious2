@@ -48,6 +48,7 @@
 #include "s_numeric.h"
 #include "s_user.h"
 #include "send.h"
+#include "shun.h"
 #include "struct.h"
 #include "sys.h"
 #include "whocmds.h"
@@ -780,6 +781,13 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_unregistered, m_rules, ms_rules, m_rules, m_ignore }
   },
+  {
+    MSG_SHUN,
+    TOK_SHUN,
+    0, MAXPARA,         0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_shun, ms_shun, mo_shun, m_ignore }
+  },
   /* This command is an alias for QUIT during the unregistered part of
    * of the server.  This is because someone jumping via a broken web
    * proxy will send a 'POST' as their first command - which we will
@@ -994,6 +1002,29 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
 
   if ((s = strchr(ch, ' ')))
     *s++ = '\0';
+
+  expire_shuns();
+  if ((strcasecmp(ch, "NICK"))    &&  /* rejection handled in m_nick.c */
+      (strcasecmp(ch, "WEBIRC"))  &&  /* allow WEBIRC to still work */
+      (strcasecmp(ch, "SERVER"))  &&  /* expiring shuns with this or matching
+                                       * just causes major issues, we dont need
+                                       * to check shuns with SERVER.
+                                       */
+      (strcasecmp(ch, "USER"))    &&  /* avoid issues, doesnt matter if we
+                                         prase while shunned */
+      (strcasecmp(ch, "PASS"))    &&  /* LOC */
+      (strcasecmp(ch, "ADMIN"))   &&  /* get admin info for help*/
+      (strcasecmp(ch, "PART"))    &&  /* obvious */
+      (strcasecmp(ch, "QUIT"))    &&  /* obvious */
+      (strcasecmp(ch, "PONG"))    &&  /* survive */
+      (IsRegistered(cptr))           /* Send through unregistered clients they
+                                         will just error anyway */
+    ) {
+    if (cli_user(cptr)->username && cli_user(cptr)->host) {
+      if (shun_lookup(cptr, 0))
+        return 0;
+    }
+  }
 
   if ((mptr = msg_tree_parse(ch, &msg_tree)) == NULL)
   {

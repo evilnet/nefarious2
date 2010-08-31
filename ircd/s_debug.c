@@ -231,6 +231,7 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
       aw = 0,                   /* aways set */
       wwa = 0,                  /* whowas aways */
       gl = 0,                   /* glines */
+      sh = 0,                   /* shuns */
       ju = 0;                   /* jupes */
 
   size_t chm = 0,               /* memory used by channels */
@@ -243,6 +244,7 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
       wwam = 0,                 /* whowas away memory used */
       wwm = 0,                  /* whowas array memory used */
       glm = 0,                  /* memory used by glines */
+      shm = 0,                  /* memory used by shuns */
       jum = 0,                  /* memory used by jupes */
       com = 0,                  /* memory used by conf lines */
       dbufs_allocated = 0,      /* memory used by dbufs */
@@ -347,9 +349,10 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
   motd_memory_count(cptr);
 
   gl = gline_memory_count(&glm);
+  sh = shun_memory_count(&shm);
   ju = jupe_memory_count(&jum);
   send_reply(cptr, SND_EXPLICIT | RPL_STATSDEBUG,
-	     ":Glines %d(%zu) Jupes %d(%zu)", gl, glm, ju, jum);
+	     ":Glines %d(%zu) Shuns %d(%zu) Jupes %d(%zu)", gl, glm, sh, shm, ju, jum);
 
   send_reply(cptr, SND_EXPLICIT | RPL_STATSDEBUG,
 	     ":Hash: client %d(%zu), chan is the same", HASHSIZE,

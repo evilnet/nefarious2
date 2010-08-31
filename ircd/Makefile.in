@@ -140,7 +140,7 @@ IRCD_SRC = \
 	m_help.c \
 	m_info.c \
 	m_invite.c \
-        m_isnef.c \
+	m_isnef.c \
 	m_ison.c \
 	m_join.c \
 	m_jupe.c \
@@ -179,6 +179,7 @@ IRCD_SRC = \
 	m_server.c \
 	m_set.c \
 	m_settime.c \
+	m_shun.c \
 	m_silence.c \
 	m_smo.c \
 	m_sno.c \
@@ -233,6 +234,7 @@ IRCD_SRC = \
 	s_stats.c \
 	s_user.c \
 	send.c \
+	shun.c \
 	uping.c \
 	userload.c \
 	whocmds.c \

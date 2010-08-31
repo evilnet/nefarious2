@@ -1,6 +1,48 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-08-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added SHUN Features.
+
+	* doc/readme.features: Added SHUN Features.
+
+	* include/client.h: Added SHUN PRIV_s.
+
+	* include/handlers.h: Added SHUN command.
+
+	* include/ircd_features.h: Added SHUN FEAT_s.
+
+	* include/msg.h: Added SHUN command.
+
+	* include/numeric.h: Added SHUN RPL_s and ERR_s.
+
+	* ircd/Makefile.in: Added SHUN command.
+
+	* ircd/client.c: Added SHUN PRIV_s.
+
+	* ircd/ircd_features.c: Added SHUN FEAT_s.
+
+	* ircd/ircd_lexer.l: Added SHUN PRIV_s.
+
+	* ircd/ircd_parser.y: Added SHUN PRIV_s.
+
+	* ircd/parse.c: Added SHUN command.
+
+	* ircd/s_debug.c: Added SHUN memory stats.
+
+	* ircd/s_err.c: Added SHUN RPL_s and ERR_s.
+
+	* ircd/s_serv.c: Added SHUN bursting.
+
+	* ircd/s_stats.c: Added STATS S for SHUNs.
+
+	* include/shun.h: Added SHUN functions and API.
+
+	* ircd/m_shun.c: Added SHUN command.
+
+	* ircd/shun.c: Added SHUN functions and API.
+
 2010-08-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/gline.c: Makes more sense to ensure the user has a CTCP

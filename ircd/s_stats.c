@@ -52,6 +52,7 @@
 #include "s_stats.h"
 #include "s_user.h"
 #include "send.h"
+#include "shun.h"
 #include "struct.h"
 #include "userload.h"
 
@@ -610,6 +611,9 @@ struct StatDesc statsinfo[] = {
     send_usage, 0,
     "System resource usage (Debug only)." },
 #endif
+  { 'S', "shuns", (STAT_FLAG_OPERFEAT | STAT_FLAG_VARPARAM | STAT_FLAG_CASESENS), FEAT_HIS_STATS_S,
+    shun_stats, 0,
+    "Global Shuns." },
   { 'T', "motds", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_T,
     motd_report, 0,
     "Configured Message Of The Day files." },

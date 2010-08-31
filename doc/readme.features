@@ -600,6 +600,12 @@ HIS_STATS_R
 
 As per UnderNet CFV-165, this removes /STATS R from users.
 
+HIS_STATS_S
+ * Type: boolean
+ * Default: TRUE
+
+As per UnderNet CFV-165, this removes /STATS S from users.
+
 HIS_STATS_t
  * Type: boolean
  * Default: TRUE
@@ -1008,6 +1014,13 @@ RULES
  * Default: FALSE
 
 Controls the use of the RULES command.
+
+SHUNMAXUSERCOUNT
+ * Type: integer
+ * Default: 20
+
+Maximum amount of users a Shun can affect when a shun is set via /SHUN.
+Zlines set via services or servers will not be affected by this rule.
 
 OMPATH
  * Type: string

@@ -482,6 +482,7 @@ static struct FeatureDesc {
   F_B(HIS_STATS_q, 0, 1, 0),
   F_B(HIS_STATS_R, 0, 1, 0),
   F_B(HIS_STATS_r, 0, 1, 0),
+  F_B(HIS_STATS_S, 0, 1, 0),
   F_B(HIS_STATS_t, 0, 1, 0),
   F_B(HIS_STATS_T, 0, 1, 0),
   F_B(HIS_STATS_u, 0, 0, 0),
@@ -532,6 +533,8 @@ static struct FeatureDesc {
   F_B(REMOTE_OPER, 0, 1, 0),
   F_B(OPERMOTD, 0, 0, 0),
   F_B(RULES, 0, 0, 0),
+  F_B(DISABLE_SHUNS, 0, 0, 0),
+  F_I(SHUNMAXUSERCOUNT, 0, 20, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

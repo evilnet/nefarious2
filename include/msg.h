@@ -448,6 +448,10 @@ struct Client;
 #define TOK_RULES		"RL"
 #define CMD_RULES		MSG_RULES, TOK_RULES
 
+#define MSG_SHUN		"SHUN"
+#define TOK_SHUN		"SU"
+#define CMD_SHUN		MSG_SHUN, TOK_SHUN
+
 /*
  * Constants
  */
