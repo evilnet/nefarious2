@@ -254,8 +254,10 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
                            get_client_name(acptr, SHOW_IP));
 
       /* and get rid of him */
-      if ((tval = exit_client_msg(cptr, acptr, &me, "G-lined (%s)",
-          gline->gl_reason)))
+      if ((tval = exit_client_msg(cptr, acptr, &me, "G-lined%s%s%s",
+          (!feature_bool(FEAT_HIS_GLINE_REASON) ? " (" : ""),
+          (!feature_bool(FEAT_HIS_GLINE_REASON) ? gline->gl_reason : ""),
+          (!feature_bool(FEAT_HIS_GLINE_REASON) ? ")" : ""))))
         retval = tval; /* retain killed status */
     }
   }

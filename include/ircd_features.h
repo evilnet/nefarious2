@@ -181,6 +181,7 @@ enum Feature {
   FEAT_DISABLE_SHUNS,
   FEAT_SHUNMAXUSERCOUNT,
   FEAT_HIS_SHUN_REASON,
+  FEAT_HIS_GLINE_REASON,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

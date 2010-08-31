@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-09-01  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added HIS_GLINE_REASON Feature.
+
+	* doc/readme.features: Added HIS_GLINE_REASON Feature.
+
+	* include/ircd_features.h: Added HIS_GLINE_REASON Feature.
+
+	* ircd/gline.c: Added HIS_GLINE_REASON Feature.
+
+	* ircd/ircd_features.c: Added HIS_GLINE_REASON Feature.
+
 2010-08-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added HIS_SHUN_REASON Feature.

@@ -1029,6 +1029,13 @@ HIS_SHUN_REASON
 This HIDES the shun reason from the target when a shun is set
 on them (when TRUE).
 
+HIS_GLINE_REASON
+ * Type: boolean
+ * Default: TRUE
+
+This will hide the gline reason from quit messages. The affected user(s) will
+still see the reason via the YOURBANNEDCREEP numeric.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"
