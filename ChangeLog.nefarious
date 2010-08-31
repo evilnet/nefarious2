@@ -3,6 +3,32 @@
 
 2010-08-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added HIS_SHUN_REASON Feature.
+
+	* doc/readme.features: Added HIS_SHUN_REASON Feature.
+
+	* include/ircd_features.h: Added HIS_SHUN_REASON Feature.
+
+	* include/msg.h: Changed shun handling to use MFLG_s.
+
+	* ircd/ircd_features.c: Added HIS_SHUN_REASON Feature.
+
+	* ircd/ircd_lexer.l: Fixed TPRIV_* typos.
+
+	* ircd/ircd_parser.y: Fixed TPRIV_* typos.
+
+	* ircd/m_nick.c: Forgot to add shun handling to m_nick.
+
+	* ircd/parse.c: Changed shun handling to use MFLG_s.
+
+	* ircd/s_user.c: Added "you are shunned" notice dependant on
+	HIS_SHUN_REASON.
+
+	* ircd/shun.c: Added "you are shunned" notice dependant on
+	HIS_SHUN_REASON.
+
+2010-08-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added SHUN Features.
 
 	* doc/readme.features: Added SHUN Features.

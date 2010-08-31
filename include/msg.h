@@ -465,6 +465,7 @@ struct Client;
 #define   MFLG_EXTRA             0x08   /** Handler requests that
                                          * mptr->extra be passed in
                                          * parv[1]. */
+#define   MFLG_NOSHUN            0x10   /** Command is SHUN exempt. */
 
 /*
  * Structures

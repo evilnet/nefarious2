@@ -59,6 +59,7 @@
 #include "s_misc.h"
 #include "s_serv.h" /* max_client_count */
 #include "send.h"
+#include "shun.h"
 #include "struct.h"
 #include "supported.h"
 #include "sys.h"
@@ -350,6 +351,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
   char*            tmpstr;
   struct User*     user = cli_user(sptr);
   char             ip_base64[25];
+  struct Shun*     ashun = NULL;
 
   user->last = CurrentTime;
   parv[0] = cli_name(sptr);
@@ -374,6 +376,15 @@ int register_user(struct Client *cptr, struct Client *sptr)
     SetUser(sptr);
     cli_handler(sptr) = CLIENT_HANDLER;
     SetLocalNumNick(sptr);
+
+    if ((ashun = shun_lookup(sptr, 0))) {
+       sendto_opmask_butone_global(&me, SNO_GLINE, "Shun active for %s%s",
+                          IsUnknown(sptr) ? "Unregistered Client ":"",
+                          get_client_name(sptr, SHOW_IP));
+      if (!feature_bool(FEAT_HIS_SHUN_REASON))
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :You are shunned: %s", sptr,
+             ashun->sh_reason);
+    }
 
     if (feature_bool(FEAT_CTCP_VERSIONING)) {
       if (feature_str(FEAT_CTCP_VERSIONING_NOTICE)) {

@@ -179,7 +179,7 @@ make_shun(char *user, char *host, char *reason, time_t expire, time_t lastmod,
  * @param[in] cptr Peer connect that sent the Shun.
  * @param[in] sptr Client that originated the Shun.
  * @param[in] shun New Shun to check.
- * @return Zero, unless \a sptr Shuned himself, in which case CPTR_KILLED.
+ * @return Zero, unless \a sptr Shunned himself, in which case CPTR_KILLED.
  */
 static int
 do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
@@ -229,6 +229,11 @@ do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
             continue;
         }
       }
+
+      /* ok, here's one that got Shunned */
+      if (!feature_bool(FEAT_HIS_SHUN_REASON))
+        sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :You are shunned: %s", acptr,
+             shun->sh_reason);
 
       /* let the ops know about it */
       sendto_opmask_butone_global(&me, SNO_GLINE, "Shun active for %s",

@@ -117,7 +117,7 @@ struct Message msgtab[] = {
   {
     MSG_NICK,
     TOK_NICK,
-    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_nick, m_nick, ms_nick, m_nick, m_ignore }
   },
@@ -194,14 +194,14 @@ struct Message msgtab[] = {
   {
     MSG_QUIT,
     TOK_QUIT,
-    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_quit, m_quit, ms_quit, m_quit, m_ignore }
   },
   {
     MSG_PART,
     TOK_PART,
-    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_unregistered, m_part, ms_part, m_part, m_ignore }
   },
@@ -257,7 +257,7 @@ struct Message msgtab[] = {
   {
     MSG_PONG,
     TOK_PONG,
-    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { mr_pong, m_pong, ms_pong, m_pong, m_ignore }
   },
@@ -278,7 +278,7 @@ struct Message msgtab[] = {
   {
     MSG_USER,
     TOK_USER,
-    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_user, m_registered, m_ignore, m_registered, m_ignore }
   },
@@ -299,7 +299,7 @@ struct Message msgtab[] = {
   {
     MSG_SERVER,
     TOK_SERVER,
-    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { mr_server, m_registered, ms_server, m_registered, m_ignore }
   },
@@ -369,7 +369,7 @@ struct Message msgtab[] = {
   {
     MSG_PASS,
     TOK_PASS,
-    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { mr_pass, m_registered, m_ignore, m_registered, m_ignore }
   },
@@ -453,7 +453,7 @@ struct Message msgtab[] = {
   {
     MSG_ADMIN,
     TOK_ADMIN,
-    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0,  NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_NOSHUN, 0,  NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_admin, m_admin, ms_admin, mo_admin, m_ignore }
   },
@@ -700,7 +700,7 @@ struct Message msgtab[] = {
   {
     MSG_WEBIRC,
     TOK_WEBIRC,
-    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_webirc, m_registered, m_ignore, m_registered, m_ignore }
   },
@@ -797,7 +797,7 @@ struct Message msgtab[] = {
   {
     MSG_POST,
     TOK_POST,
-    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_quit, m_ignore, m_ignore, m_ignore, m_ignore }
   },
@@ -973,6 +973,7 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   int             i;
   int             paramcount;
   int             noprefix = 0;
+  int             isshun = 0;
   struct Message* mptr;
   MessageHandler  handler = 0;
 
@@ -1004,25 +1005,10 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     *s++ = '\0';
 
   expire_shuns();
-  if ((strcasecmp(ch, "NICK"))    &&  /* rejection handled in m_nick.c */
-      (strcasecmp(ch, "WEBIRC"))  &&  /* allow WEBIRC to still work */
-      (strcasecmp(ch, "SERVER"))  &&  /* expiring shuns with this or matching
-                                       * just causes major issues, we dont need
-                                       * to check shuns with SERVER.
-                                       */
-      (strcasecmp(ch, "USER"))    &&  /* avoid issues, doesnt matter if we
-                                         prase while shunned */
-      (strcasecmp(ch, "PASS"))    &&  /* LOC */
-      (strcasecmp(ch, "ADMIN"))   &&  /* get admin info for help*/
-      (strcasecmp(ch, "PART"))    &&  /* obvious */
-      (strcasecmp(ch, "QUIT"))    &&  /* obvious */
-      (strcasecmp(ch, "PONG"))    &&  /* survive */
-      (IsRegistered(cptr))           /* Send through unregistered clients they
-                                         will just error anyway */
-    ) {
+  if (IsRegistered(cptr)) {
     if (cli_user(cptr)->username && cli_user(cptr)->host) {
       if (shun_lookup(cptr, 0))
-        return 0;
+        isshun = 1;
     }
   }
 
@@ -1039,7 +1025,7 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
      * Hm, when is the buffer empty -- if a command
      * code has been found ?? -Armin
      */
-    if (buffer[0] != '\0')
+    if (buffer[0] != '\0' && !isshun)
     {
       if (IsUser(from))
 	send_reply(from, ERR_UNKNOWNCOMMAND, ch);
@@ -1049,6 +1035,9 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     ServerStats->is_unco++;
     return (-1);
   }
+
+  if (isshun && !(mptr->flags & MFLG_NOSHUN))
+    return 0;
 
   paramcount = mptr->parameters;
   i = bufend - ((s) ? s : ch);

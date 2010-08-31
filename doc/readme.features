@@ -1022,6 +1022,13 @@ SHUNMAXUSERCOUNT
 Maximum amount of users a Shun can affect when a shun is set via /SHUN.
 Zlines set via services or servers will not be affected by this rule.
 
+HIS_SHUN_REASON
+ * Type: boolean
+ * Default: TRUE
+
+This HIDES the shun reason from the target when a shun is set
+on them (when TRUE).
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

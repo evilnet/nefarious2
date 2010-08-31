@@ -180,6 +180,7 @@ enum Feature {
   FEAT_RULES,
   FEAT_DISABLE_SHUNS,
   FEAT_SHUNMAXUSERCOUNT,
+  FEAT_HIS_SHUN_REASON,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

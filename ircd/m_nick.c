@@ -97,6 +97,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "send.h"
+#include "shun.h"
 #include "sys.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -158,6 +159,10 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * parv[0] will be empty for clients connecting for the first time
    */
   client_name = (*(cli_name(sptr))) ? cli_name(sptr) : "*";
+
+  if (ircd_strcmp(client_name, "*") != 0)
+    if ((parv[0] != '\0') && shun_lookup(sptr, 0))
+      return 0;
 
   if (parc < 2) {
     send_reply(sptr, ERR_NONICKNAMEGIVEN);
