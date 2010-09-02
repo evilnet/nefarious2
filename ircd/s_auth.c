@@ -908,6 +908,9 @@ static void start_auth_query(struct AuthRequest* auth)
   assert(0 != auth);
   assert(0 != auth->client);
 
+  if (feature_bool(FEAT_NOIDENT))
+    return;
+
   /*
    * get the local address of the client and bind to that to
    * make the auth request.  This used to be done only for

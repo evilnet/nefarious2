@@ -3,6 +3,18 @@
 
 2010-09-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added NOIDENT Feature.
+
+	* doc/readme.features: Added NOIDENT Feature.
+
+	* include/ircd_features.h: Added NOIDENT Feature.
+
+	* ircd/ircd_features.c: Added NOIDENT Feature.
+
+	* ircd/s_auth.c: Added NOIDENT Feature.
+
+2010-09-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_misc.c: Changed server notice to show users real host.
 
 	* ircd/s_user.c: Changed server notice to show users real host.

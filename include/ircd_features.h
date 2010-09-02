@@ -182,6 +182,7 @@ enum Feature {
   FEAT_SHUNMAXUSERCOUNT,
   FEAT_HIS_SHUN_REASON,
   FEAT_HIS_GLINE_REASON,
+  FEAT_NOIDENT,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

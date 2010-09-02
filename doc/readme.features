@@ -1036,6 +1036,13 @@ HIS_GLINE_REASON
 This will hide the gline reason from quit messages. The affected user(s) will
 still see the reason via the YOURBANNEDCREEP numeric.
 
+NOIDENT
+ * Type: boolean
+ * Default: FALSE
+
+NOIDENT disables RFC 1413 (ident protocol) lookups of clients'
+usernames.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"
