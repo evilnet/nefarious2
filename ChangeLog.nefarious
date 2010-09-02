@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-09-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_misc.c: Changed server notice to show users real host.
+
+	* ircd/s_user.c: Changed server notice to show users real host.
+
 2010-09-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added HIS_GLINE_REASON Feature.

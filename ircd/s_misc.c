@@ -374,7 +374,7 @@ int exit_client(struct Client *cptr,
       sendto_opmask_butone_global(&me, SNO_CONNEXIT,
                            "Client exiting: %s (%s@%s) [%s] [%s] <%s%s>",
                            cli_name(victim), cli_user(victim)->username,
-                           cli_user(victim)->host, comment,
+                           cli_user(victim)->realhost, comment,
                            ircd_ntoa(&cli_ip(victim)),
                            NumNick(victim) /* two %s's */);
     update_load();

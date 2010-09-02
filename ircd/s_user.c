@@ -419,7 +419,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (feature_bool(FEAT_CONNEXIT_NOTICES))
       sendto_opmask_butone_global(&me, SNO_CONNEXIT,
                            "Client connecting: %s (%s@%s) [%s] {%s} [%s] <%s%s>",
-                           cli_name(sptr), user->username, user->host,
+                           cli_name(sptr), user->username, user->realhost,
                            cli_sock_ip(sptr), get_client_class(sptr),
                            cli_info(sptr), NumNick(cptr) /* two %s's */);
 
