@@ -183,6 +183,7 @@ enum Feature {
   FEAT_HIS_SHUN_REASON,
   FEAT_HIS_GLINE_REASON,
   FEAT_NOIDENT,
+  FEAT_EXTENDED_ACCOUNTS,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

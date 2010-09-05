@@ -107,6 +107,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 	       char* parv[])
 {
   struct Client *acptr;
+  char type;
 
   if (parc < 3)
     return need_more_params(sptr, "ACCOUNT");
@@ -115,39 +116,112 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
     return protocol_violation(cptr, "ACCOUNT from non-server %s",
 			      cli_name(sptr));
 
-  if (!(acptr = findNUser(parv[1])))
-    return 0; /* Ignore ACCOUNT for a user that QUIT; probably crossed */
+  if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
+    if (strlen(parv[2]) != 1)
+      return protocol_violation(cptr, "ACCOUNT detected invalid subcommand token "
+                                "'%s'. Old syntax maybe? See EXTENDED_ACCOUNTS F:line",
+                                parv[2] ? parv[2] : "");
 
-  if (IsAccount(acptr))
-    return protocol_violation(cptr, "ACCOUNT for already registered user %s "
-			      "(%s -> %s)", cli_name(acptr),
-			      cli_user(acptr)->account, parv[2]);
+    type = parv[2][0];
 
-  assert(0 == cli_user(acptr)->account[0]);
+    if (type == 'U' || type == 'M' || type == 'R') {
+      if (!(acptr = findNUser(parv[1])))
+        return 0; /* Ignore ACCOUNT for a user that QUIT; probably crossed */
 
-  if (strlen(parv[2]) > ACCOUNTLEN)
-    return protocol_violation(cptr,
-                              "Received account (%s) longer than %d for %s; "
-                              "ignoring.",
-                              parv[2], ACCOUNTLEN, cli_name(acptr));
+      if (type =='U') {
+        if (!IsAccount(acptr))
+          return protocol_violation(cptr, "User %s does not have an account set "
+                                    "(ACCOUNT Removal)", cli_name(acptr));
+        assert(0 != cli_user(acptr)->account[0]);
 
-  if (parc > 3) {
-    cli_user(acptr)->acc_create = atoi(parv[3]);
-    Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
-           "timestamp %Tu", parv[2], cli_user(acptr)->acc_create));
+        ClearAccount(acptr);
+        ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN);
+
+        sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C U", acptr);
+      } else if (type == 'R' || type == 'M') {
+        if (parc < 4)
+          return need_more_params(sptr, "ACCOUNT");
+
+        if (type == 'R') {
+          if (IsAccount(acptr))
+            return protocol_violation(cptr, "ACCOUNT for already registered user %s "
+                                      "(%s -> %s)", cli_name(acptr),
+                                      cli_user(acptr)->account, parv[3]);
+          assert(0 == cli_user(acptr)->account[0]);
+        }
+
+        if (strlen(parv[3]) > ACCOUNTLEN)
+          return protocol_violation(cptr,
+                                    "Received account (%s) longer than %d for %s; "
+                                    "ignoring.",
+                                    parv[3], ACCOUNTLEN, cli_name(acptr));
+
+        if (ircd_strncmp(cli_user(acptr)->account, parv[3], ACCOUNTLEN) == 0)
+          return 0;
+
+        ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN);
+        SetAccount(acptr);
+
+        if (parc > 4) {
+          cli_user(acptr)->acc_create = atoi(parv[4]);
+          Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
+                 "timestamp %Tu", parv[3], cli_user(acptr)->acc_create));
+        }
+
+        if (parc > 4) {
+          sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s %s",
+                                acptr, type, parv[3], parv[4]);
+        } else {
+          sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s",
+                                acptr, type, parv[3]);
+        }
+      }
+
+      if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+           (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
+          IsHiddenHost(acptr))
+        hide_hostmask(acptr);
+    } else {
+      return protocol_violation(cptr, "ACCOUNT sub-type '%s' not implemented", parv[2]);
+    }
+
+    return 0;
+  } else {
+    if (!(acptr = findNUser(parv[1])))
+      return 0; /* Ignore ACCOUNT for a user that QUIT; probably crossed */
+
+    if (IsAccount(acptr))
+      return protocol_violation(cptr, "ACCOUNT for already registered user %s "
+                                "(%s -> %s)", cli_name(acptr),
+                                cli_user(acptr)->account, parv[2]);
+
+    assert(0 == cli_user(acptr)->account[0]);
+
+    if (strlen(parv[2]) > ACCOUNTLEN)
+      return protocol_violation(cptr,
+                                "Received account (%s) longer than %d for %s; "
+                                "ignoring.",
+                                parv[2], ACCOUNTLEN, cli_name(acptr));
+
+    if (parc > 3) {
+      cli_user(acptr)->acc_create = atoi(parv[3]);
+      Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
+             "timestamp %Tu", parv[2], cli_user(acptr)->acc_create));
+    }
+
+    ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN);
+    SetAccount(acptr);
+
+    if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+         (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
+        IsHiddenHost(acptr))
+      hide_hostmask(acptr);
+
+    sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr,
+                          cli_user(acptr)->acc_create ? "%C %s %Tu" : "%C %s",
+                          acptr, cli_user(acptr)->account,
+                          cli_user(acptr)->acc_create);
   }
-
-  ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN);
-  SetAccount(acptr);
-
-  if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
-      (feature_int(FEAT_HOST_HIDING_STYLE) == 3))
-    hide_hostmask(acptr);
-
-  sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr,
-                        cli_user(acptr)->acc_create ? "%C %s %Tu" : "%C %s",
-                        acptr, cli_user(acptr)->account,
-                        cli_user(acptr)->acc_create);
 
   return 0;
 }

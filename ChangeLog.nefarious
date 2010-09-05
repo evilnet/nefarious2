@@ -3,6 +3,21 @@
 
 2010-09-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added EXTENDED_ACCOUNTS Feature.
+
+	* doc/readme.features: Added EXTENDED_ACCOUNTS Feature.
+
+	* include/client.h: Added ClearAccount() macro.
+
+	* include/ircd_features.h: Added EXTENDED_ACCOUNTS Feature.
+
+	* ircd/ircd_features.c: Added EXTENDED_ACCOUNTS Feature.
+
+	* ircd/m_account.c: Added support for extended ACCOUNT tokesn R,
+	M and U (Others are LOC specific and will be added with LOC).
+
+2010-09-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd_cloaking.c: Removed a space that was bothering me and was
 	completely unnecessary.
 

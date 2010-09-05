@@ -849,6 +849,8 @@ struct Client {
 #define ClearHub(x)             ClrFlag(x, FLAG_HUB)
 /** Clear the client's OPLEVELS flag. */
 #define ClearOpLevels(x)        ClrFlag(x, FLAG_OPLEVELS)
+/** Clear the client's account status. */
+#define ClearAccount(x)         ClrFlag(x, FLAG_ACCOUNT)
 
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */

@@ -538,6 +538,7 @@ static struct FeatureDesc {
   F_B(HIS_SHUN_REASON, 0, 1, 0),
   F_B(HIS_GLINE_REASON, 0, 0, 0),
   F_B(NOIDENT, 0, 0, 0),
+  F_B(EXTENDED_ACCOUNTS, 0, 1, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

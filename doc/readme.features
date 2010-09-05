@@ -1043,6 +1043,15 @@ NOIDENT
 NOIDENT disables RFC 1413 (ident protocol) lookups of clients'
 usernames.
 
+EXTENDED_ACCOUNTS
+ * Type: boolean
+ * Default: TRUE
+
+This enables 'extended' style AC syntax (used by your service to set
+the account name.)  TRUE uses the subcommand paramiter R,M,U,C,A,D,H
+to do LOC, rename and removal. FALSE uses old style. Set this to
+TRUE if you use X3, FALSE for other services.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"
