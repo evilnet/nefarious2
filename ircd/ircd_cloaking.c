@@ -194,6 +194,7 @@ unsigned int alpha, n;
         {
                 unsigned int len;
                 p++;
+
                 ircd_snprintf(0, result, HOSTLEN, "%s-%X.", PREFIX, alpha);
                 len = strlen(result) + strlen(p);
                 if (len <= HOSTLEN)
@@ -201,7 +202,7 @@ unsigned int alpha, n;
                 else
                         strcat(result, p + (len - HOSTLEN));
         } else
-                ircd_snprintf(0, result, HOSTLEN,  "%s-%X", PREFIX, alpha);
+                ircd_snprintf(0, result, HOSTLEN, "%s-%X", PREFIX, alpha);
 
         return result;
 }
