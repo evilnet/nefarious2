@@ -1622,6 +1622,7 @@ char *umode_str(struct Client *cptr)
     *m++ = ' ';
     while ((*m++ = *t++))
       ; /* Empty loop */
+    m--; /* back up over nul-termination */
 
     if (cli_user(cptr)->acc_create) {
       char nbuf[20];
@@ -1630,7 +1631,6 @@ char *umode_str(struct Client *cptr)
 	     cli_user(cptr)->acc_create));
       ircd_snprintf(0, t = nbuf, sizeof(nbuf), ":%Tu",
 		    cli_user(cptr)->acc_create);
-      m--; /* back up over previous nul-termination */
       while ((*m++ = *t++))
 	; /* Empty loop */
       m--; /* back up over nul-termination */
@@ -1916,8 +1916,8 @@ int is_silenced(struct Client *sptr, struct Client *acptr)
 void
 user_setcloaked(struct Client *cptr)
 {
-  if ((feature_int(FEAT_HOST_HIDING_STYLE) < 2) ||
-      (feature_int(FEAT_HOST_HIDING_STYLE) > 3))
+  if ((feature_int(FEAT_HOST_HIDING_STYLE) != 2) &&
+      (feature_int(FEAT_HOST_HIDING_STYLE) != 3))
     return;
 
   if (!IsCloakIP(cptr)) {

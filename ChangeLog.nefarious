@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-09-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_user.c: Fixed a bug where cloaked hosts and IPs were
+	not being propagated properly or displayed in CHECK properly.
+
 2010-09-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added NOIDENT Feature.
