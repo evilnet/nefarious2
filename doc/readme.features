@@ -1072,6 +1072,12 @@ LOC_DEFAULT_SERVICE
 This is what nick on irc the login-on-connect account verification is sent
 to. User can override it (to any service that supports it) using 3 param LOC.
 
+STRICTUSERNAME
+ * Type: boolean
+ * Default: FALSE
+
+If enabled then strict ident/username rules will be applied.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

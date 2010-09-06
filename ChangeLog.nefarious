@@ -3,6 +3,18 @@
 
 2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added STRICTUSERNAME Feature.
+
+	* doc/readme.features: Added STRICTUSERNAME Feature.
+
+	* include/ircd_features.h: Added STRICTUSERNAME Feature.
+
+	* ircd/ircd_features.c: Added STRICTUSERNAME Feature.
+
+	* ircd/s_auth.c: Added STRICTUSERNAME Feature.
+
+2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_webirc.c: Changed HasHiddenHost() to IsHiddenHost().
 
 	* ircd/m_who.c: Changed HasHiddenHost() to IsHiddenHost().
