@@ -90,4 +90,12 @@ struct User {
   char               fakehost[HOSTLEN + 1];   /**< Fake host */
 };
 
+/** Describes a Login on connect session on the network. */
+struct LOCInfo {
+  unsigned int       cookie;                      /**< Cookie sent to services */
+  char               service[NICKLEN + 1];        /**< Service that we are querying */
+  char               account[ACCOUNTLEN + 1];     /**< Account name we are trying to auth as */
+  char               password[ACCPASSWDLEN + 1];  /**< Password we are using */
+};
+
 #endif /* INCLUDED_struct_h */

@@ -275,6 +275,9 @@ void free_client(struct Client* cptr)
   assert(cli_next(cptr) == 0);
   assert(cli_prev(cptr) == 0);
 
+  if (cli_connect(cptr))
+    MyFree(cli_loc(cptr));
+
   if (cli_from(cptr) == cptr) { /* in other words, we're local */
     cli_from(cptr) = 0;
     /* timer must be marked as not active */

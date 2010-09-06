@@ -81,6 +81,10 @@
 /** Maximum length for a password used for connecting servers and clients.
  */
 #define PASSWDLEN       20
+/** Maximum length for a password used with the login-on-connect feature, and
+ * it should match the length used by your service bot (e.g. gnuworld)
+ */
+#define ACCPASSWDLEN    40
 /** Maximum length of a numeric IP (v4 or v6) address.
  * "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255"
  */

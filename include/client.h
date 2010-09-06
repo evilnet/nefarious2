@@ -269,6 +269,7 @@ struct Connection
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
+  struct LOCInfo*     con_loc;       /**< Login-on-connect information */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -445,6 +446,8 @@ struct Client {
 #define cli_proc(cli)		con_proc(cli_connect(cli))
 /** Get auth request for client. */
 #define cli_auth(cli)		con_auth(cli_connect(cli))
+/** Get login on connect request for client. */
+#define cli_loc(cli)            ((cli)->cli_connect->con_loc)
 /** Get sentalong marker for client. */
 #define cli_sentalong(cli)      con_sentalong(cli_connect(cli))
 

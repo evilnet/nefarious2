@@ -1,6 +1,31 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added LOC Features.
+
+	* doc/readme.features: Added LOC Features.
+
+	* include/client.h: Added con_loc field to Connection struct.
+
+	* include/ircd_defs.h: Added ACCPASSWDLEN default length for LOC
+	passwords.
+
+	* include/ircd_features.h: Added LOC Features.
+
+	* include/struct.h: Added LOCInfo struct.
+
+	* ircd/ircd_features.c: Added LOC Features.
+
+	* ircd/list.c: Added code to ensure con_loc is free'd.
+
+	* ircd/m_account.c: Added LOC ACCOUNT sub types C, H, A and D.
+
+	* ircd/m_pass.c: Added support for LOC.
+
+	* ircd/s_user.c: Added support for LOC.
+
 2010-09-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added EXTENDED_ACCOUNTS Feature.

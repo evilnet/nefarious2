@@ -539,6 +539,9 @@ static struct FeatureDesc {
   F_B(HIS_GLINE_REASON, 0, 0, 0),
   F_B(NOIDENT, 0, 0, 0),
   F_B(EXTENDED_ACCOUNTS, 0, 1, 0),
+  F_B(LOGIN_ON_CONNECT, 0, 0, 0),
+  F_B(LOC_SENDHOST, 0, 0, 0),
+  F_S(LOC_DEFAULT_SERVICE, 0, "AuthServ", 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

@@ -82,11 +82,16 @@
 #include "config.h"
 
 #include "client.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_alloc.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "s_auth.h"
 #include "send.h"
+#include "struct.h"
+
+#include <string.h>
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -96,7 +101,9 @@
 int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char password[BUFSIZE];
-  int arg, len;
+  int arg, len, i = 0, emptypass = 0;
+  char* locargv[3] = {NULL, NULL, NULL};
+  char *tmp = NULL;
 
   assert(0 != cptr);
   assert(cptr == sptr);
@@ -116,7 +123,51 @@ int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     --len;
   password[len] = '\0';
 
-  if (EmptyString(password))
+  if (feature_bool(FEAT_LOGIN_ON_CONNECT) &&
+      feature_bool(FEAT_EXTENDED_ACCOUNTS) &&
+      !cli_loc(cptr) && !EmptyString(password)) {
+    emptypass = 1;
+    tmp = password;
+    if (*tmp == '/') {
+      *tmp = '\0';
+      tmp++;
+    } else {
+      tmp = strstr(tmp, " /");
+      if (tmp != NULL) {
+        *tmp = '\0';
+        tmp += 2;
+      }
+    }
+
+    while ((tmp != NULL) && *tmp && (i<3)) {
+      locargv[i++] = tmp;
+      tmp = strstr(tmp, "/");
+      if (tmp != NULL) {
+        *tmp = '\0';
+        tmp++;
+      }
+    }
+
+    if ((i>1) && !EmptyString(locargv[i-2]) && !EmptyString(locargv[i-1])) {
+      cli_loc(cptr) = (struct LOCInfo *)MyMalloc(sizeof(struct LOCInfo));
+      memset(cli_loc(cptr), 0, sizeof(struct LOCInfo));
+
+      cli_loc(cptr)->cookie = 0;
+
+      ircd_strncpy(cli_loc(cptr)->password, locargv[--i], ACCPASSWDLEN);
+      ircd_strncpy(cli_loc(cptr)->account, locargv[--i], ACCOUNTLEN);
+
+      if ((i>0) && !EmptyString(locargv[i-1]))
+        ircd_strncpy(cli_loc(cptr)->service, locargv[--i], NICKLEN);
+      else
+        ircd_strncpy(cli_loc(cptr)->service, feature_str(FEAT_LOC_DEFAULT_SERVICE), NICKLEN);
+    }
+  }
+
+  if (!(cli_auth(cptr)) && (cli_loc(cptr) || EmptyString(password)))
+    return register_user(cptr, cptr);
+
+  if (EmptyString(password) && !(cli_loc(cptr)) && !emptypass)
     return need_more_params(cptr, "PASS");
 
   ircd_strncpy(cli_passwd(cptr), password, PASSWDLEN);

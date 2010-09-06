@@ -1052,6 +1052,26 @@ the account name.)  TRUE uses the subcommand paramiter R,M,U,C,A,D,H
 to do LOC, rename and removal. FALSE uses old style. Set this to
 TRUE if you use X3, FALSE for other services.
 
+LOGIN_ON_CONNECT
+ * Type: boolean
+ * Default: FALSE
+
+This selects whether local clients can specify a service bot login in
+the connection phase. Read doc/readme.login-on-connect for details.
+
+LOC_SENDHOST
+ * Type: boolean
+ * Default: FALSE
+
+If enabled hostnames will be sent in Login on connect messages to servers.
+
+LOC_DEFAULT_SERVICE
+  * type: string
+  * Default: authserv
+
+This is what nick on irc the login-on-connect account verification is sent
+to. User can override it (to any service that supports it) using 3 param LOC.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

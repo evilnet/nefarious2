@@ -82,12 +82,14 @@
 
 #include "client.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numnicks.h"
+#include "s_bsd.h"
 #include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
@@ -95,6 +97,31 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
 #include <string.h>
+
+/*
+ * decode the request id, as encoded in s_user.c (register_user):
+ * request-id ::= <period> <fd> <period> <cookie>
+ */
+static struct Client *decode_auth_id(const char *id)
+{
+  const char *cookiestr;
+  unsigned int fd, cookie;
+  struct Client *cptr;
+
+  if (!id)
+    return NULL;
+  if (id[0] != '.')
+    return NULL;
+  if (!(cookiestr = strchr(id + 1, '.')))
+    return NULL;
+  fd = atoi(id + 1);
+  cookie = atoi(cookiestr + 1);
+  Debug((DEBUG_DEBUG, "ACCOUNT auth id fd=%u cookie=%u", fd, cookie));
+
+  if (!(cptr = LocalClientArray[fd]) || !cli_loc(cptr) || cli_loc(cptr)->cookie != cookie)
+    return NULL;
+  return cptr;
+}
 
 /*
  * ms_account - server message handler
@@ -125,6 +152,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
     type = parv[2][0];
 
     if (type == 'U' || type == 'M' || type == 'R') {
+      /* General account changes (U=unregister, R=register, M=change account) */
       if (!(acptr = findNUser(parv[1])))
         return 0; /* Ignore ACCOUNT for a user that QUIT; probably crossed */
 
@@ -181,8 +209,74 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
           IsHiddenHost(acptr))
         hide_hostmask(acptr);
+      return 0;
+    } else if (type == 'C' || type == 'H') {
+      /* LOC requests, forward them and ignore them */
+      if (((type == 'C') && (parc < 6)) || ((type == 'H') && (parc < 7)))
+        return need_more_params(sptr, "ACCOUNT");
+
+      if (!(acptr = FindNServer(parv[1])) && !(acptr = findNUser(parv[1])))
+        return 0; /* target not online, ignore */
+
+      if (IsMe(acptr))
+        return protocol_violation(cptr, "ACCOUNT check (%s %s %s%s%s)", parv[3],
+                                  parv[4], parv[5], (parc>6 ? " ": ""),
+                                  (parc>6 ? parv[6]: ""));
+      if (parc>6)
+        sendcmdto_one(sptr, CMD_ACCOUNT, acptr, "%s %s %s %s %s :%s",
+                      parv[1], parv[2], parv[3], parv[4], parv[5], parv[6]);
+      else
+        sendcmdto_one(sptr, CMD_ACCOUNT, acptr, "%s %s %s %s :%s",
+                      parv[1], parv[2], parv[3], parv[4], parv[5]);
+      return 0;
+    } else if (type == 'A' || type == 'D') {
+      /* LOC Replies (A=accept, D=deny) */
+      if (parc < 4)
+        return need_more_params(sptr, "ACCOUNT");
+
+      if (!(acptr = FindNServer(parv[1])))
+        return 0; /* target not online, ignore */
+
+      if (!IsMe(acptr)) {
+        /* in-transit message, forward it */
+        sendcmdto_one(sptr, CMD_ACCOUNT, acptr, "%s %s %s", parv[1], parv[2],
+                      parv[3]);
+        return 0;
+      }
+
+      if (!(acptr = decode_auth_id(parv[3])))
+        return 0; /* most probably, user disconnected */
+
+      if (type == 'A') {
+        SetAccount(acptr);
+        ircd_strncpy(cli_user(acptr)->account, cli_loc(acptr)->account,
+                        ACCOUNTLEN);
+
+        if (parc > 4) {
+          cli_user(acptr)->acc_create = atoi(parv[4]);
+        }
+
+        if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) {
+          SetHiddenHost(acptr);
+          hide_hostmask(acptr);
+        }
+      }
+
+      sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :AUTHENTICATION %s as %s", acptr,
+                    type == 'A' ? "SUCCESSFUL" : "FAILED", cli_loc(acptr)->account);
+      MyFree(cli_loc(acptr));
+
+      if (type == 'D') {
+        sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :Type \002/QUOTE PASS\002 "
+                      "to connect anyway", acptr);
+        return 0;
+      }
+
+      return register_user(acptr, acptr);
     } else {
-      return protocol_violation(cptr, "ACCOUNT sub-type '%s' not implemented", parv[2]);
+      return protocol_violation(cptr, "ACCOUNT sub-type '%s' not implemented",
+                                parv[2]);
     }
 
     return 0;
