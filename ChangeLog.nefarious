@@ -3,6 +3,18 @@
 
 2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_webirc.c: Changed HasHiddenHost() to IsHiddenHost().
+
+	* ircd/m_who.c: Changed HasHiddenHost() to IsHiddenHost().
+
+	* ircd/send.c: Changed HasHiddenHost() to IsHiddenHost().
+
+	* ircd/whocmds.c: Changed HasHiddenHost() to IsHiddenHost().
+
+	* ircd/whowas.c: Changed HasHiddenHost() to IsHiddenHost().
+
+2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added LOC Features.
 
 	* doc/readme.features: Added LOC Features.

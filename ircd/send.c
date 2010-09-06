@@ -283,7 +283,7 @@ static int match_it(struct Client *from, struct Client *one, const char *mask, i
   {
     case MATCH_HOST:
       return (match(mask, cli_user(one)->host) == 0 ||
-        (HasHiddenHost(one) && match(mask, cli_user(one)->realhost) == 0));
+        (IsHiddenHost(one) && match(mask, cli_user(one)->realhost) == 0));
     case MATCH_SERVER:
     default:
       return (match(mask, cli_name(cli_user(one)->server)) == 0);

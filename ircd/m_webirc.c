@@ -174,7 +174,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* Update host names if already set. */
   if (cli_user(sptr)) {
-    if (!HasHiddenHost(sptr))
+    if (!IsHiddenHost(sptr))
       ircd_strncpy(cli_user(sptr)->host, hostname, HOSTLEN);
     ircd_strncpy(cli_user(sptr)->realhost, hostname, HOSTLEN);
   }
