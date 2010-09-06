@@ -701,7 +701,8 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
   }
 
   /* Discourage using the Apass to get op.  They should use the Upass. */
-  if (IsChannelManager(member) && member->channel->mode.apass[0])
+  if (IsChannelManager(member) && member->channel->mode.apass[0] &&
+      !feature_bool(FEAT_APASS_CANSEND))
     return 0;
 
   /* If you have voice or ops, you can speak. */

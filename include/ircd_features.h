@@ -188,6 +188,7 @@ enum Feature {
   FEAT_LOC_SENDHOST,
   FEAT_LOC_DEFAULT_SERVICE,
   FEAT_STRICTUSERNAME,
+  FEAT_APASS_CANSEND,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

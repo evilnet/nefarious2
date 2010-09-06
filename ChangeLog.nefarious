@@ -3,6 +3,18 @@
 
 2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added APASS_CANSEND Feature.
+
+	* doc/readme.features: Added APASS_CANSEND Feature.
+
+	* include/ircd_features.h: Added APASS_CANSEND Feature.
+
+	* ircd/channel.c: Added APASS_CANSEND Feature.
+
+	* ircd/ircd_features.c: Added APASS_CANSEND Feature.
+
+2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added STRICTUSERNAME Feature.
 
 	* doc/readme.features: Added STRICTUSERNAME Feature.
