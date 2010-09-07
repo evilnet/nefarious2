@@ -1923,12 +1923,12 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
     if (mbuf->mb_dest & MODEBUF_DEST_OPMODE) {
       /* If OPMODE was set, we're propagating the mode as an OPMODE message */
-      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
+      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_OPMODE, mbuf->mb_connect,
                             FLAG_OPLEVELS, FLAG_LAST_FLAG,
 			    "%H %s%s%s%s%s%s", mbuf->mb_channel,
 			    rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",
 			    addbuf, remstr, addstr);
-      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
+      sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_OPMODE, mbuf->mb_connect,
                             FLAG_LAST_FLAG, FLAG_OPLEVELS,
                             "%H %s%s%s%s%s%s", mbuf->mb_channel,
                             rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",

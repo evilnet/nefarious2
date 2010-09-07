@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-09-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Fix for OPMODE mode changes being bounced by
+	remote servers.
+
 2010-09-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added APASS_CANSEND Feature.
