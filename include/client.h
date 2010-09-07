@@ -265,7 +265,6 @@ struct Connection
                                       client */
   struct Timer        con_proc;      /**< process latent messages from
                                       client */
-  struct Privs        con_privs;     /**< Oper privileges */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
@@ -285,6 +284,7 @@ struct Client {
   struct User*   cli_user;        /**< Defined if this client is a user */
   struct Server* cli_serv;        /**< Defined if this client is a server */
   struct Whowas* cli_whowas;      /**< Pointer to ww struct to be freed on quit */
+  struct Privs   cli_privs;       /**< Oper privileges */
   char           cli_yxx[4];      /**< Numeric Nick: YY if this is a
                                      server, XXX if this is a user */
   time_t         cli_firsttime;   /**< time client was created */
@@ -358,7 +358,7 @@ struct Client {
 /** Return non-zero if the client is local. */
 #define cli_local(cli)          (cli_from(cli) == cli)
 /** Get oper privileges for client. */
-#define cli_privs(cli)		con_privs(cli_connect(cli))
+#define cli_privs(cli)		((cli)->cli_privs)
 /** Get client capabilities for client */
 #define cli_capab(cli)		con_capab(cli_connect(cli))
 /** Get active client capabilities for client */
@@ -523,8 +523,6 @@ struct Client {
 #define con_socket(con)		((con)->con_socket)
 /** Get the Timer for processing more data from the connection. */
 #define con_proc(con)		((con)->con_proc)
-/** Get the oper privilege set for the connection. */
-#define con_privs(con)          (&(con)->con_privs)
 /** Get the peer's capabilities for the connection. */
 #define con_capab(con)          (&(con)->con_capab)
 /** Get the active capabilities for the connection. */
@@ -906,11 +904,11 @@ struct Client {
 #define SNO_NOISY (SNO_SERVKILL|SNO_UNAUTH)
 
 /** Test whether a privilege has been granted to a client. */
-#define HasPriv(cli, priv)  FlagHas(cli_privs(cli), priv)
+#define HasPriv(cli, priv)  FlagHas(&cli_privs(cli), priv)
 /** Grant a privilege to a client. */
-#define SetPriv(cli, priv)  FlagSet(cli_privs(cli), priv)
+#define SetPriv(cli, priv)  FlagSet(&cli_privs(cli), priv)
 /** Revoke a privilege from a client. */
-#define ClrPriv(cli, priv)  FlagClr(cli_privs(cli), priv)
+#define ClrPriv(cli, priv)  FlagClr(&cli_privs(cli), priv)
 
 /** Used in setting and unsetting privs. */
 #define PRIV_ADD 1

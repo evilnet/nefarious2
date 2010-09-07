@@ -95,7 +95,7 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     if (parc < 3) {
       if (acptr) {
-        memset(cli_privs(acptr), 0, sizeof(struct Privs));
+        memset(&cli_privs(acptr), 0, sizeof(struct Privs));
         clear_privs(acptr);
       }
       return 0;
@@ -114,7 +114,7 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         for (tmp = ircd_strtok(&p, parv[i], ","); tmp;
              tmp = ircd_strtok(&p, 0, ",")) {
           if (!strcmp(tmp, "PRIV_NONE")) {
-            memset(cli_privs(acptr), 0, sizeof(struct Privs));
+            memset(&cli_privs(acptr), 0, sizeof(struct Privs));
             clear_privs(acptr);
             break;
           } else {
@@ -127,7 +127,7 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         for (tmp = ircd_strtok(&p, parv[i], " "); tmp;
              tmp = ircd_strtok(&p, 0, " ")) {
           if (!strcmp(tmp, "PRIV_NONE")) {
-            memset(cli_privs(acptr), 0, sizeof(struct Privs));
+            memset(&cli_privs(acptr), 0, sizeof(struct Privs));
             clear_privs(acptr);
             break;
           } else {

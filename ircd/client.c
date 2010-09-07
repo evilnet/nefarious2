@@ -143,7 +143,7 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
   char *privbuf;
 
   /* Clear out client's privileges. */
-  memset(cli_privs(client), 0, sizeof(struct Privs));
+  memset(&cli_privs(client), 0, sizeof(struct Privs));
 
   if (!IsAnOper(client) || !oper)
       return;

@@ -3697,7 +3697,7 @@ joinbuf_flush(struct JoinBuf *jbuf)
     sendcmdto_serv_butone(jbuf->jb_source, CMD_CREATE, jbuf->jb_connect,
 			  "%s %Tu", chanlist, jbuf->jb_create);
     if (feature_bool(FEAT_AUTOCHANMODES) && feature_str(FEAT_AUTOCHANMODES_LIST)
-         && strlen(feature_str(FEAT_AUTOCHANMODES_LIST)) > 0) {
+         && strlen(feature_str(FEAT_AUTOCHANMODES_LIST)) > 0 && MyUser(jbuf->jb_source)) {
       for (name = ircd_strtok(&p, chanlist, ","); name; name = ircd_strtok(&p, 0, ",")) {
         if (!IsLocalChannel(name))
           sendcmdto_serv_butone(&me, CMD_MODE, jbuf->jb_connect, "%s +%s", name,

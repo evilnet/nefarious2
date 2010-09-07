@@ -1,6 +1,19 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-09-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/client.h: Moved con_privs to cli_privs in Client struct.
+
+	* ircd/channel.c: Fix for duplicate MODE messages on channel
+	creation.
+
+	* ircd/client.c: Moved con_privs to cli_privs in Client struct.
+
+	* ircd/m_privs.c: Moved con_privs to cli_privs in Client struct.
+
+	* ircd/m_server.c: Moved con_privs to cli_privs in Client struct.
+
 2010-09-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Fix for OPMODE mode changes being bounced by

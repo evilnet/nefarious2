@@ -626,7 +626,7 @@ int mr_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   cli_serv(cptr)->timestamp = timestamp;
   cli_serv(cptr)->prot = prot;
   cli_serv(cptr)->ghost = ghost;
-  memset(cli_privs(cptr), 255, sizeof(struct Privs));
+  memset(&cli_privs(cptr), 255, sizeof(struct Privs));
   ClrPriv(cptr, PRIV_SET);
   SetServerYXX(cptr, cptr, parv[6]);
 
