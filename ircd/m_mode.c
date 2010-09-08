@@ -228,7 +228,8 @@ ms_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		MODE_PARSE_FORCE),  /* And force it to be accepted */
 	        NULL);
   } else {
-    if (find_conf_byhost(cli_confs(cptr), cli_name(cli_user(sptr)->server), CONF_UWORLD)) {
+    if (find_conf_byhost(cli_confs(cptr), cli_name(cli_user(sptr)->server), CONF_UWORLD) ||
+        IsChannelService(sptr)) {
       modebuf_init(&mbuf, sptr, cptr, chptr,
                    (MODEBUF_DEST_CHANNEL | /* Send mode to clients */
                     MODEBUF_DEST_SERVER  | /* Send mode to servers */

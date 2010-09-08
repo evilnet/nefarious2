@@ -3,6 +3,11 @@
 
 2010-09-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_mode.c: Added check to prevent channel mode changes from
+	users with user mode +k from being bounced as HACK(2).
+
+2010-09-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Moved con_privs to cli_privs in Client struct.
 
 	* ircd/channel.c: Fix for duplicate MODE messages on channel
