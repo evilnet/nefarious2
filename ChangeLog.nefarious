@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-09-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_webirc.c: Added some WEBIRC server notices for failed
+	attempts to SNO_UNAUTH.
+
 2010-09-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_mode.c: Added check to prevent channel mode changes from

@@ -131,17 +131,27 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!EmptyString(parv[4]))
     ipaddr = parv[4];
 
-  /* And to be extra sure... */
-  if (!password || !hostname || !ipaddr)
+  /* And to be extra sure... (should never occur) */
+  if (!password || !hostname || !ipaddr) {
+    sendto_opmask_butone_global(&me, SNO_UNAUTH,
+                                "WEBIRC Attempt with invalid parameters from %s [%s]",
+                                cli_sockhost(sptr), cli_sock_ip(sptr));
     return exit_client(cptr, sptr, &me, "WEBIRC parameters supplied are invalid");
+  }
 
   wline = find_webirc_conf(cptr, password, &res);
   switch (res)
   {
     case 2:
+      sendto_opmask_butone_global(&me, SNO_UNAUTH,
+                                  "WEBIRC Attempt unauthorized from %s [%s]",
+                                  cli_sockhost(sptr), cli_sock_ip(sptr));
       return exit_client(cptr, sptr, &me, "WEBIRC Not authorized from your host");
       break;
     case 1:
+      sendto_opmask_butone_global(&me, SNO_UNAUTH,
+                                  "WEBIRC Attempt with invalid password from %s [%s]",
+                                  cli_sockhost(sptr), cli_sock_ip(sptr));
       return exit_client(cptr, sptr, &me, "WEBIRC Password invalid for your host");
       break;
   }
