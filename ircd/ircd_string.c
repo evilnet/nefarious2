@@ -656,11 +656,8 @@ ipmask_parse(const char *input, struct irc_in_addr *ip, unsigned char *pbits)
 
 char* itoa(int n) {
   int i=0,j;
-  char* s;
-  char* u;
-
-  s= (char*) malloc(17);
-  u= (char*) malloc(17);
+  static char s[17];
+  static char u[17];
 
   do{
     s[i++]=(char)( n%10+48 );
@@ -671,7 +668,7 @@ char* itoa(int n) {
   u[i-1-j]=s[j];
 
   u[j]='\0';
-  return u;
+  return (char *)&u;
 }
 
 static long
