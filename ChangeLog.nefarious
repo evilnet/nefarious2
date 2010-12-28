@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2010-12-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_user.c: Fix for bug in umode_str() where mode string
+	without params was one character longer then it should be.
+
 2010-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/ircd_string.c: Fixed 2 memory leaks in itoa().

@@ -1707,7 +1707,7 @@ char *umode_str(struct Client *cptr)
     m--; /* back up over nul-termination */
   }
 
-  *(++m) = '\0';
+  *(m) = '\0';
 
   return umodeBuf;                /* Note: static buffer, gets
                                    overwritten by send_umode() */
