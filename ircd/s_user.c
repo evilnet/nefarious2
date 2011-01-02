@@ -1793,6 +1793,8 @@ int is_snomask(char *word)
 {
   if (word)
   {
+    if (ircd_strcmp(word, "all") == 0)
+      return 1;
     for (; *word; word++)
       if (IsDigit(*word))
         return 1;
@@ -1812,6 +1814,9 @@ unsigned int umode_make_snomask(unsigned int oldmask, char *arg, int what)
 {
   unsigned int sno_what;
   unsigned int newmask;
+  if (what == MODE_ADD)
+    if (ircd_strcmp(arg, "all") == 0)
+      return SNO_ALL;
   if (*arg == '+')
   {
     arg++;

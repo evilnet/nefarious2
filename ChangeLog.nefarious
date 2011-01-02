@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2011-01-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_user.c: Added user mode +s parameter keyword 'all' to set
+	all server notice masks.
+
 2010-12-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Fix for bug in umode_str() where mode string
