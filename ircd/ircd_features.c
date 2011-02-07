@@ -26,10 +26,10 @@
 #include "channel.h"	/* list_set_default */
 #include "class.h"
 #include "client.h"
-#include "geoip.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"

@@ -27,7 +27,7 @@
 
 #include "client.h"
 #include "GeoIP.h"
-#include "geoip.h"
+#include "ircd_geoip.h"
 #include "ircd_features.h"
 #include "res.h"
 

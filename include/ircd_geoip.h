@@ -1,9 +1,9 @@
-/** @file geoip.h
+/** @file ircd_geoip.h
  * @brief GeoIP routine definitions.
  * @version $Id$
  */
-#ifndef INCLUDED_geoip_h
-#define INCLUDED_geoip_h
+#ifndef INCLUDED_ircd_geoip_h
+#define INCLUDED_ircd_geoip_h
 
 #include "client.h"
 #include "GeoIP.h"
@@ -15,5 +15,5 @@ extern void geoip_handle_enable(void);
 extern void geoip_handle_file(void);
 extern void geoip_handle_ipv6_file(void);
 
-#endif /* INCLUDED_geoip_h */
+#endif /* INCLUDED_ircd_geoip_h */
 

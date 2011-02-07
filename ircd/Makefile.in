@@ -95,7 +95,6 @@ IRCD_SRC = \
 	dbuf.c \
 	destruct_event.c \
 	fileio.c \
-	geoip.c \
 	gline.c \
 	hash.c \
 	ircd.c \
@@ -104,6 +103,7 @@ IRCD_SRC = \
 	ircd_crypt.c \
 	ircd_events.c \
 	ircd_features.c \
+	ircd_geoip.c \
 	ircd_log.c \
 	ircd_relay.c \
 	ircd_reply.c \
@@ -441,10 +441,10 @@ destruct_event.o: destruct_event.c ../config.h ../include/channel.h \
   ../include/send.h ../include/msg.h ../include/ircd_handler.h
 fileio.o: fileio.c ../config.h ../include/fileio.h \
   ../include/ircd_alloc.h ../include/ircd_log.h
-geoip.o: geoip.c ../include/client.h ../include/ircd_defs.h \
+ircd_geoip.o: ircd_geoip.c ../include/client.h ../include/ircd_defs.h \
   ../include/dbuf.h ../include/msgq.h ../include/ircd_events.h \
   ../config.h ../include/ircd_handler.h ../include/res.h \
-  ../include/capab.h ../include/GeoIP.h ../include/geoip.h \
+  ../include/capab.h ../include/GeoIP.h ../include/ircd_geoip.h \
   ../include/client.h ../include/GeoIP.h ../include/ircd_features.h \
   ../include/res.h
 gline.o: gline.c ../config.h ../include/gline.h ../include/res.h \
@@ -506,7 +506,7 @@ ircd_features.o: ircd_features.c ../config.h ../include/ircd_features.h \
   ../include/channel.h ../include/ircd_defs.h ../include/res.h \
   ../config.h ../include/class.h ../include/client.h ../include/dbuf.h \
   ../include/msgq.h ../include/ircd_events.h ../include/ircd_handler.h \
-  ../include/capab.h ../include/client.h ../include/geoip.h \
+  ../include/capab.h ../include/client.h ../include/ircd_geoip.h \
   ../include/GeoIP.h ../include/hash.h ../include/ircd.h \
   ../include/struct.h ../include/ircd_alloc.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h \
@@ -904,7 +904,7 @@ m_map.o: m_map.c ../config.h ../include/client.h ../include/ircd_defs.h \
 m_mark.o: m_mark.c ../config.h ../include/client.h ../include/ircd_defs.h \
   ../include/dbuf.h ../include/msgq.h ../include/ircd_events.h \
   ../config.h ../include/ircd_handler.h ../include/res.h \
-  ../include/capab.h ../include/geoip.h ../include/client.h \
+  ../include/capab.h ../include/ircd_geoip.h ../include/client.h \
   ../include/GeoIP.h ../include/hash.h ../include/ircd.h \
   ../include/struct.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/ircd_chattr.h ../include/mark.h \
@@ -1375,7 +1375,7 @@ m_wallvoices.o: m_wallvoices.c ../config.h ../include/channel.h \
 m_webirc.o: m_webirc.c ../config.h ../include/client.h \
   ../include/ircd_defs.h ../include/dbuf.h ../include/msgq.h \
   ../include/ircd_events.h ../config.h ../include/ircd_handler.h \
-  ../include/res.h ../include/capab.h ../include/geoip.h \
+  ../include/res.h ../include/capab.h ../include/ircd_geoip.h \
   ../include/client.h ../include/GeoIP.h ../include/hash.h \
   ../include/ircd.h ../include/struct.h ../include/ircd_features.h \
   ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_string.h \
@@ -1499,7 +1499,7 @@ s_auth.o: s_auth.c ../config.h ../include/s_auth.h \
   ../include/ircd_events.h ../config.h ../include/class.h \
   ../include/client.h ../include/ircd_defs.h ../include/dbuf.h \
   ../include/msgq.h ../include/ircd_handler.h ../include/res.h \
-  ../include/capab.h ../include/client.h ../include/geoip.h \
+  ../include/capab.h ../include/client.h ../include/ircd_geoip.h \
   ../include/GeoIP.h ../include/IPcheck.h ../include/ircd.h \
   ../include/struct.h ../include/ircd_alloc.h ../include/ircd_chattr.h \
   ../include/ircd_events.h ../include/ircd_features.h \
@@ -1532,7 +1532,7 @@ s_conf.o: s_conf.c ../config.h ../include/s_conf.h ../include/client.h \
   ../include/ircd_events.h ../config.h ../include/ircd_handler.h \
   ../include/res.h ../include/capab.h ../include/IPcheck.h \
   ../include/class.h ../include/client.h ../include/crule.h \
-  ../include/geoip.h ../include/GeoIP.h ../include/ircd_crypt.h \
+  ../include/ircd_geoip.h ../include/GeoIP.h ../include/ircd_crypt.h \
   ../include/ircd_features.h ../include/fileio.h ../include/gline.h \
   ../include/hash.h ../include/ircd.h ../include/struct.h \
   ../include/ircd_alloc.h ../include/ircd_chattr.h ../include/ircd_log.h \

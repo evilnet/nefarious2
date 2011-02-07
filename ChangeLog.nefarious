@@ -1,6 +1,24 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2011-02-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/Makefile.in: Renamed include/geoip.h and ircd/geoip.c
+
+	* ircd/ircd_features.c: Renamed include/geoip.h and ircd/geoip.c
+
+	* ircd/m_mark.c: Renamed include/geoip.h and ircd/geoip.c
+
+	* ircd/m_webirc.c: Renamed include/geoip.h and ircd/geoip.c
+
+	* ircd/s_auth.c: Renamed include/geoip.h and ircd/geoip.c
+
+	* ircd/s_conf.c: Renamed include/geoip.h and ircd/geoip.c
+
+	* include/ircd_geoip.h: Renamed include/geoip.h and ircd/geoip.c
+
+	* ircd/ircd_geoip.c: Renamed include/geoip.h and ircd/geoip.c
+
 2011-01-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Added user mode +s parameter keyword 'all' to set
