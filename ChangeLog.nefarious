@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2011-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_webirc.c: Fix for differences between cli_sock_ip and
+	cli_ip.
+
 2011-02-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/Makefile.in: Renamed include/geoip.h and ircd/geoip.c

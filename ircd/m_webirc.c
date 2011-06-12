@@ -179,7 +179,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   IPcheck_remote_connect(sptr);
 
   /* Change cli_sock_ip() and cli_sockhost() to spoofed host and IP. */
-  ircd_strncpy(cli_sock_ip(sptr), ipaddr, SOCKIPLEN);
+  ircd_strncpy(cli_sock_ip(sptr), ircd_ntoa(&cli_ip(sptr)), SOCKIPLEN);
   ircd_strncpy(cli_sockhost(sptr), hostname, HOSTLEN);
 
   /* Update host names if already set. */
