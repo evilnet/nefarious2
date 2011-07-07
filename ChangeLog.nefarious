@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2011-07-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_topic.c: Added support for server to server TOPIC
+	setter parameter.
+
 2011-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_webirc.c: Fix for differences between cli_sock_ip and

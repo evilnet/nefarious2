@@ -49,7 +49,7 @@
  * @param[in] ts Timestamp that topic was set (0 for current time).
  */
 static void do_settopic(struct Client *sptr, struct Client *cptr,
-		        struct Channel *chptr, char *topic, time_t ts)
+		        struct Channel *chptr, char *topic, time_t ts, char *setter)
 {
    struct Client *from;
    int newtopic;
@@ -65,12 +65,19 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
    newtopic=ircd_strncmp(chptr->topic,topic,TOPICLEN)!=0;
    /* setting a topic */
    ircd_strncpy(chptr->topic, topic, TOPICLEN);
-   ircd_strncpy(chptr->topic_nick, cli_name(from), NICKLEN);
+   if (setter != NULL) {
+     memset(chptr->topic_nick, 0, NICKLEN);
+     ircd_strncpy(chptr->topic_nick, setter, NICKLEN);
+   } else {
+     memset(chptr->topic_nick, 0, NICKLEN);
+     ircd_strncpy(chptr->topic_nick, cli_name(from), NICKLEN);
+   }
    chptr->topic_time = ts ? ts : TStime();
    /* Fixed in 2.10.11: Don't propagate local topics */
    if (!IsLocalChannel(chptr->chname))
-     sendcmdto_serv_butone(sptr, CMD_TOPIC, cptr, "%H %Tu %Tu :%s", chptr,
-		           chptr->creationtime, chptr->topic_time, chptr->topic);
+     sendcmdto_serv_butone(sptr, CMD_TOPIC, cptr, "%H %s %Tu %Tu :%s", chptr,
+		           chptr->topic_nick, chptr->creationtime,
+                           chptr->topic_time, chptr->topic);
    if (newtopic)
    {
      struct Membership *member;
@@ -81,7 +88,8 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
        RevealDelayedJoin(member);
 
      sendcmdto_channel_butserv_butone(from, CMD_TOPIC, chptr, NULL, 0,
-      				       "%H :%s", chptr, chptr->topic);
+      				       (setter ? "%H :%s (%s)" : "%H :%s%s"),
+                                       chptr, chptr->topic, (setter ? setter : ""));
    }
       /* if this is the same topic as before we send it to the person that
        * set it (so they knew it went through ok), but don't bother sending
@@ -147,7 +155,7 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     else if (!client_can_send_to_channel(sptr, chptr, 1))
       send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
     else
-      do_settopic(sptr,cptr,chptr,topic,0);
+      do_settopic(sptr,cptr,chptr,topic,0,NULL);
   }
   return 0;
 }
@@ -155,8 +163,9 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 /** Handle a remote user's attempt to set a channel topic.
  * \a parv has the following elements:
  * \li \a parv[1] is the channel name
- * \li \a parv[2] is the channel creation timestamp (optional)
- * \li \a parv[2] is the topic's timestamp (optional)
+ * \li \a parv[\a parc - 4] is the topic setter (optional)
+ * \li \a parv[\a parc - 3] is the channel creation timestamp (optional)
+ * \li \a parv[\a parc - 2] is the topic's timestamp (optional)
  * \li \a parv[\a parc - 1] is the topic
  *
  * See @ref m_functions for discussion of the arguments.
@@ -169,6 +178,7 @@ int ms_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Channel *chptr;
   char *topic = 0, *name, *p = 0;
+  char *setter = NULL;
   time_t ts = 0;
 
   if (parc < 3)
@@ -193,15 +203,18 @@ int ms_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       continue;
     }
 
+    if (parc > 5)
+      setter = parv[parc - 4];
+
     /* If existing channel is older or has newer topic, ignore */
-    if (parc > 3 && (ts = atoi(parv[2])) && chptr->creationtime < ts)
+    if (parc > 4 && (ts = atoi(parv[parc - 3])) && chptr->creationtime < ts)
       continue;
 
     ts = 0; /* Default to the current time if no topic_time is passed. */
-    if (parc > 4 && (ts = atoi(parv[3])) && chptr->topic_time > ts)
+    if (parc > 3 && (ts = atoi(parv[parc - 2])) && chptr->topic_time > ts)
       continue;
 
-    do_settopic(sptr,cptr,chptr,topic, ts);
+    do_settopic(sptr,cptr,chptr,topic, ts, setter);
   }
   return 0;
 }
