@@ -53,7 +53,9 @@ static struct capabilities {
 } capab_list[] = {
 #define _CAP(cap, flags, name)						      \
 	{ CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1 }
-  CAPLIST
+  _CAP(NAMESX, 0, "multi-prefix"),
+  _CAP(UHNAMES, 0, "userhost-in-names"),
+/*  CAPLIST */
 #undef _CAP
 };
 

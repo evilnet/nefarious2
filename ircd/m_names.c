@@ -171,19 +171,19 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
       buf[idx++] = ' ';
     needs_space=1;
     if (IsZombie(member)) {
-      if (IsNamesX(sptr) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '!';
         done_prefix = 1;
       }
     }
     if (IsChanOp(member)) {
-      if (IsNamesX(sptr) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '@';
         done_prefix = 1;
       }
     }
     if (HasVoice(member)) {
-      if (IsNamesX(sptr) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '+';
         done_prefix = 1;
       }
@@ -191,7 +191,8 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
     strcpy(buf + idx, cli_name(c2ptr));
     idx += strlen(cli_name(c2ptr));
 
-    if (feature_bool(FEAT_UHNAMES) && IsUHNames(sptr)) {
+    if (feature_bool(FEAT_UHNAMES) &&
+        (IsUHNames(sptr) || CapActive(sptr, CAP_UHNAMES))) {
       strcat(buf, "!");
       strcat(buf, cli_user(c2ptr)->username);
       strcat(buf, "@");

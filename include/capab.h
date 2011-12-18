@@ -38,7 +38,9 @@
 /** Client capabilities */
 enum Capab {
 #define _CAP(cap, flags, name)	CAP_ ## cap
-  CAPLIST,
+  _CAP(NAMESX, 0, "multi-prefix"),
+  _CAP(UHNAMES, 0, "userhost-in-names"),
+/*  CAPLIST, */
 #undef _CAP
   _CAP_LAST_CAP
 };

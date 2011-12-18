@@ -1,6 +1,19 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2011-12-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/capab.h: Added multi-prefix and userhost-in-names client
+	capabilities.
+
+	* ircd/m_cap.c: Added multi-prefix and userhost-in-names client
+	capabilities.
+
+	* ircd/m_names.c: Added multi-prefix and userhost-in-names client
+	capabilities.
+
+	* ircd/parse.c: Enabled CAP message for client capability negotiation.	
+
 2011-07-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_topic.c: Added support for server to server TOPIC

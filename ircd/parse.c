@@ -632,7 +632,6 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_ignore, m_ignore, ms_xreply, m_ignore, m_ignore }
   },
-#if WE_HAVE_A_REAL_CAPABILITY_NOW
   {
     MSG_CAP,
     TOK_CAP,
@@ -640,7 +639,6 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_cap, m_cap, m_ignore, m_cap, m_ignore }
   },
-#endif
   {
     MSG_ISNEF,
     TOK_ISNEF,
