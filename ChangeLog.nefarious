@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2011-12-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_names.c: Replaced CapActive() with HasCap().
+
 2011-12-18  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/capab.h: Added multi-prefix and userhost-in-names client
