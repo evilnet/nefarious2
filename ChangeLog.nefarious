@@ -3,6 +3,10 @@
 
 2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/client.c: Rewrote client privilege listing in CHECK.
+
+2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/readme.features: Added HOST_IN_TOPIC Feature.
 
 	* include/channel.h: Added HOST_IN_TOPIC Feature.
