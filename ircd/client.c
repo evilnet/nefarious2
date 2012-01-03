@@ -231,8 +231,7 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
   if (MyUser(client))
     ClrPriv(client, PRIV_REMOTE);
 
-  privbuf = client_print_privs(client);
-  sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
+  client_sendtoserv_privs(client);
 }
 
 /** Array mapping privilege values to names and vice versa. */
@@ -282,7 +281,7 @@ client_report_privs(struct Client *to, struct Client *client)
   return 0;
 }
 
-char *client_check_privs(struct Client *client, struct Client *replyto)
+void client_check_privs(struct Client *client, struct Client *replyto)
 {
   char outbuf[BUFSIZE];
   int i = 0;
@@ -306,8 +305,54 @@ char *client_check_privs(struct Client *client, struct Client *replyto)
     ircd_snprintf(0, outbuf, sizeof(outbuf), "     Privileges:: %s", privbufp);
     send_reply(replyto, RPL_DATASTR, outbuf);
   }
+}
 
-  privbufp[strlen(privbufp)] = 0;
+void client_send_privs(struct Client *to, struct Client *client)
+{
+  int i;
+  int mlen = NICKLEN + 5 + NICKLEN + 7;
+  static char privbuf[BUFSIZE] = "";
+
+  memset(&privbuf, 0, BUFSIZE);
+
+  for (i = 0; privtab[i].name; i++) {
+    if (HasPriv(client, privtab[i].priv)) {
+      if (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen) {
+        sendcmdto_one(cli_user(client)->server, CMD_PRIVS, to, "%C %s", client, privbuf);
+        memset(&privbuf, 0, BUFSIZE);
+      }
+      strcat(privbuf, privtab[i].name);
+      strcat(privbuf, " ");
+    }
+  }
+
+  if (strlen(privbuf) > 0) {
+    sendcmdto_one(cli_user(client)->server, CMD_PRIVS, to, "%C %s", client, privbuf);
+  }    
+}
+
+void client_sendtoserv_privs(struct Client *client)
+{
+  int i;
+  int mlen = NICKLEN + 5 + NICKLEN + 7;
+  static char privbuf[BUFSIZE] = "";
+
+  memset(&privbuf, 0, BUFSIZE);
+
+  for (i = 0; privtab[i].name; i++) {
+    if (HasPriv(client, privtab[i].priv)) {
+      if (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen) {
+        sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
+        memset(&privbuf, 0, BUFSIZE);
+      }
+      strcat(privbuf, privtab[i].name);
+      strcat(privbuf, " ");
+    }
+  }
+
+  if (strlen(privbuf) > 0) {
+    sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
+  }
 }
 
 char *client_print_privs(struct Client *client)

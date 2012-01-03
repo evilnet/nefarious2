@@ -141,8 +141,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     cli_max_recvq(sptr) = 0; /* Get the recvq from the oper's class */
     send_umode_out(sptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
   } else {
-    privbuf = client_print_privs(sptr);
-    sendcmdto_one(&me, CMD_PRIVS, sptr, "%C %s", sptr, privbuf);
+    client_send_privs(sptr, sptr);
 
     if (HasPriv(sptr, PRIV_PROPAGATE)) {
       modes = (HasPriv(sptr, PRIV_ADMIN) ? "aowsg" : "owsg");

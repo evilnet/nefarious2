@@ -3,6 +3,23 @@
 
 2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Rewrote PRIVS sending to prevent any buffer
+	overflows.
+
+	* ircd/client.c: Rewrote PRIVS sending to prevent any buffer
+	overflows.
+
+	* ircd/m_check.c: Rewrote PRIVS sending to prevent any buffer
+	overflows.
+
+	* ircd/m_oper.c: Rewrote PRIVS sending to prevent any buffer
+	overflows.
+
+	* ircd/s_serv.c: Rewrote PRIVS sending to prevent any buffer
+	overflows.
+
+2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/client.c: Rewrote client privilege listing in CHECK.
 
 2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>

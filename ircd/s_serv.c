@@ -278,9 +278,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
                         cli_continentcode(acptr));
       }
 
-      privs = client_print_privs(acptr);
-      if (strlen(privs) > 1)
-        sendcmdto_one(cli_user(acptr)->server, CMD_PRIVS, cptr, "%C %s", acptr, privs);
+      client_send_privs(cptr, acptr);
     }
   }
   /*
