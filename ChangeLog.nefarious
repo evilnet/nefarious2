@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_names.c: Reverted previous commit.
+
 2011-12-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_names.c: Replaced CapActive() with HasCap().
@@ -1719,7 +1723,7 @@
 
 2010-03-04  Matthew Beecging  <jobe@mdbnet.co.uk>
 
-	* ircd/version.c.SH: Updated to use /.release for revision id
+	* ircd/version.c.SH: Updated to use /.release for 1revision id
 	if it exists otherwise use hg tip.
 
 	* ircd/m_isnef.c: Forgot to add this to the repo before.
