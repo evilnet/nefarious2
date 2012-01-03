@@ -3,6 +3,18 @@
 
 2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/readme.features: Added HOST_IN_TOPIC Feature.
+
+	* include/channel.h: Added HOST_IN_TOPIC Feature.
+
+	* include/ircd_features.h: Added HOST_IN_TOPIC Feature.
+
+	* ircd/ircd_features.c: Added HOST_IN_TOPIC Feature.
+
+	* ircd/m_topic.c: Added HOST_IN_TOPIC Feature.
+
+2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_names.c: Reverted previous commit.
 
 2011-12-19  Matthew Beeching  <jobe@mdbnet.co.uk>

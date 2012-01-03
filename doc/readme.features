@@ -1086,6 +1086,14 @@ If enabled users who join a chnnel using the +A key, or who set the +A key
 can send to the channel. Default is they cannot to discourage the use of
 the +A key during normal circumstances.
 
+HOST_IN_TOPIC
+ * Type: boolean
+ * Default: FALSE
+
+When an channel operator changes the channel topic their full
+nick!ident@host will be displayed for the person who set the topic.
+This can eliminate people faking other people when setting the topic.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

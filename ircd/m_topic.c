@@ -52,6 +52,9 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
 		        struct Channel *chptr, char *topic, time_t ts, char *setter)
 {
    struct Client *from;
+   char* p = 0;
+   char* nicktok = NULL;
+   char nick[NICKLEN + 1];
    int newtopic;
 
    if (feature_bool(FEAT_HIS_BANWHO) && IsServer(sptr))
@@ -66,11 +69,20 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
    /* setting a topic */
    ircd_strncpy(chptr->topic, topic, TOPICLEN);
    if (setter != NULL) {
-     memset(chptr->topic_nick, 0, NICKLEN);
-     ircd_strncpy(chptr->topic_nick, setter, NICKLEN);
+     memset(chptr->topic_nick, 0, NICKLEN + USERLEN + HOSTLEN + 3);
+     ircd_strncpy(chptr->topic_nick, setter, NICKLEN + USERLEN + HOSTLEN + 3);
+     nicktok = ircd_strtok(&p, setter, "!");
+     if (nicktok != NULL)
+       ircd_strncpy((char *)&nick, nicktok, NICKLEN);
    } else {
-     memset(chptr->topic_nick, 0, NICKLEN);
-     ircd_strncpy(chptr->topic_nick, cli_name(from), NICKLEN);
+     memset(chptr->topic_nick, 0, NICKLEN + USERLEN + HOSTLEN + 3);
+     if (feature_bool(FEAT_HOST_IN_TOPIC)) {
+       ircd_snprintf(0, chptr->topic_nick, NICKLEN + USERLEN + HOSTLEN + 3, "%s!%s@%s",
+                     cli_name(from), cli_user(from)->username, cli_user(from)->host);
+     } else {
+       ircd_strncpy(chptr->topic_nick, cli_name(from), NICKLEN + USERLEN + HOSTLEN + 3);
+     }
+     ircd_strncpy((char *)&nick, cli_name(from), NICKLEN);
    }
    chptr->topic_time = ts ? ts : TStime();
    /* Fixed in 2.10.11: Don't propagate local topics */
@@ -89,7 +101,7 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
 
      sendcmdto_channel_butserv_butone(from, CMD_TOPIC, chptr, NULL, 0,
       				       (setter ? "%H :%s (%s)" : "%H :%s%s"),
-                                       chptr, chptr->topic, (setter ? setter : ""));
+                                       chptr, chptr->topic, (setter ? nick : ""));
    }
       /* if this is the same topic as before we send it to the person that
        * set it (so they knew it went through ok), but don't bother sending

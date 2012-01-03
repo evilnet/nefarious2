@@ -275,7 +275,7 @@ struct Channel {
   struct Ban*        banlist;      /**< List of bans on this channel */
   struct Mode        mode;	   /**< This channels mode */
   char               topic[TOPICLEN + 1]; /**< Channels topic */
-  char               topic_nick[NICKLEN + 1]; /**< Nick of the person who set
+  char               topic_nick[NICKLEN + USERLEN + HOSTLEN + 3]; /**< Nick of the person who set
 						*  The topic
 						*/
   char               chname[1];	   /**< Dynamically allocated string of the 
