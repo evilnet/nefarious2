@@ -153,13 +153,13 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
         continue;
       flags[len++] = 'H';
     }
-    if (FlagHas(&listener->flags, LISTEN_IPV4))
+    if (FlagHas(&listener->flags, LISTEN_IPV4) && (listener->fd_v4 >= 0))
     {
       flags[len++] = '4';
       if (listener->fd_v4 < 0)
         flags[len++] = '-';
     }
-    if (FlagHas(&listener->flags, LISTEN_IPV6))
+    if (FlagHas(&listener->flags, LISTEN_IPV6) && (listener->fd_v6 >= 0))
     {
       flags[len++] = '6';
       if (listener->fd_v6 < 0)

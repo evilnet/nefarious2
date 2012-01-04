@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/listener.c: Tweaked STATS P flags to only show 4 and 6
+	when appropriate.
+
 2012-01-03  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/client.h: Rewrote PRIVS sending to prevent any buffer
