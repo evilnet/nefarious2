@@ -1112,7 +1112,7 @@ unhide_hostmask(struct Client *cptr)
 {
   struct Membership *chan;
 
-  if (HasFlag(cptr, FLAG_HIDDENHOST))
+  if (IsHiddenHost(cptr))
     return 0;
 
   /* If the real host is the same as the current host return silently. */
@@ -1128,7 +1128,7 @@ unhide_hostmask(struct Client *cptr)
                   feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
   ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, cli_user(cptr)->realhost);
 
-  /* ok, the client is now fully hidden, so let them know -- hikari */
+  /* ok, the client is now fully unhidden, so let them know -- hikari */
   if (MyConnect(cptr))
    send_reply(cptr, RPL_HOSTHIDDEN, cli_user(cptr)->host, "");
 

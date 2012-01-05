@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_user.c: Replaced HasFlag() with IsHiddenHost().
+
 2012-01-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/listener.c: Tweaked STATS P flags to only show 4 and 6
