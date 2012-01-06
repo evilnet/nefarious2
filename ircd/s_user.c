@@ -578,6 +578,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
       FlagSet(&flags, FLAG_FAKEHOST);
     else
       FlagClr(&flags, FLAG_FAKEHOST);
+    if (IsSetHost(cptr))
+      FlagSet(&flags, FLAG_SETHOST);
+    else
+      FlagClr(&flags, FLAG_SETHOST);
     client_set_privs(sptr, NULL);
     send_umode(cptr, sptr, &flags, ALL_UMODES);
     if ((cli_snomask(sptr) != SNO_DEFAULT) && HasFlag(sptr, FLAG_SERVNOTICE))
@@ -611,6 +615,7 @@ static const struct UserMode {
   { FLAG_ADMIN,        'a' },
   { FLAG_XTRAOP,       'X' },
   { FLAG_ACCOUNT,      'r' },
+  { FLAG_SETHOST,      'h' },
   { FLAG_FAKEHOST,     'f' },
   { FLAG_CLOAKHOST,    'C' },
   { FLAG_CLOAKIP,      'c' }
@@ -1023,7 +1028,12 @@ int
 hide_hostmask(struct Client *cptr)
 {
   char newhost[HOSTLEN+1];
+  char newuser[USERLEN+1];
+  char* sethostat = NULL;
+  char* userat = NULL;
   struct Membership *chan;
+
+  newuser[0] = '\0';
 
   if (!IsHiddenHost(cptr))
     return 0;
@@ -1044,7 +1054,15 @@ hide_hostmask(struct Client *cptr)
     ClearBanValid(chan);
 
   /* Select the new host to change to. */
-  if (IsFakeHost(cptr)) {
+  if (IsSetHost(cptr)) {
+    if ((sethostat = strstr(cli_user(cptr)->sethost, "@")) != NULL) {
+      ircd_snprintf(0, newhost, HOSTLEN, sethostat+1);
+      ircd_snprintf(0, newuser, USERLEN, cli_user(cptr)->sethost);
+      if ((userat = strstr(newuser, "@")) != NULL)
+        *userat = '\0';
+    } else
+      ircd_snprintf(0, newhost, HOSTLEN, cli_user(cptr)->sethost);
+  } else if (IsFakeHost(cptr)) {
     ircd_snprintf(0, newhost, HOSTLEN, cli_user(cptr)->fakehost);
   } else if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
       ((feature_int(FEAT_HOST_HIDING_STYLE) == 3) && IsAccount(cptr))) {
@@ -1071,6 +1089,8 @@ hide_hostmask(struct Client *cptr)
 
   /* Finally copy the new host to the users current host. */
   ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, newhost);
+  if (newuser[0] != '\0')
+    ircd_snprintf(0, cli_user(cptr)->username, USERLEN, newuser);
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
@@ -1190,6 +1210,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   char* cloakip = NULL;
   char* cloakhost = NULL;
   char* fakehost = NULL;
+  char* sethost = NULL;
   struct Client *acptr = NULL;
 
   if (MyUser(sptr) && (((int)cptr) == MAGIC_SVSMODE_OVERRIDE))
@@ -1251,7 +1272,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           (userModeList[i].flag != FLAG_ACCOUNT) &&
           (userModeList[i].flag != FLAG_CLOAKIP) &&
           (userModeList[i].flag != FLAG_CLOAKHOST) &&
-          (userModeList[i].flag != FLAG_FAKEHOST))
+          (userModeList[i].flag != FLAG_FAKEHOST) &&
+          (userModeList[i].flag != FLAG_SETHOST))
         *m++ = userModeList[i].c;
     }
     *m = '\0';
@@ -1454,6 +1476,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetFakeHost(acptr);
         }
         break;
+      case 'h':
+        if (*(p + 1) && (what == MODE_ADD)) {
+          sethost = *(++p);
+          SetSetHost(acptr);
+        }
+        break;
       default:
         send_reply(acptr, ERR_UMODEUNKNOWNFLAG, *m);
         break;
@@ -1480,6 +1508,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearCloakHost(acptr);
     if (!FlagHas(&setflags, FLAG_FAKEHOST) && IsFakeHost(acptr))
       ClearFakeHost(acptr);
+    if (!FlagHas(&setflags, FLAG_SETHOST) && IsSetHost(acptr))
+      ClearSetHost(acptr);
+    if (IsSetHost(acptr) && (sethost != NULL))
+      sethost = NULL;
     /*
      * new umode; servers can set it, local users cannot;
      * prevents users from /kick'ing or /mode -o'ing
@@ -1556,6 +1588,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     ircd_strncpy(cli_user(acptr)->cloakhost, cloakhost, HOSTLEN);
   if (!FlagHas(&setflags, FLAG_FAKEHOST) && IsFakeHost(acptr))
     ircd_strncpy(cli_user(acptr)->fakehost, fakehost, HOSTLEN);
+  if (IsSetHost(acptr) && (sethost != NULL)) {
+    if (!FlagHas(&setflags, FLAG_SETHOST) ||
+        (FlagHas(&setflags, FLAG_SETHOST) &&
+         ircd_strncmp(cli_user(acptr)->sethost, sethost, HOSTLEN))) {
+      ircd_strncpy(cli_user(acptr)->sethost, sethost, HOSTLEN);
+      if (IsHiddenHost(acptr))
+        do_host_hiding = 1;
+    }
+  }
 
   if (IsRegistered(acptr)) {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
@@ -1678,6 +1719,15 @@ char *umode_str(struct Client *cptr)
 	; /* Empty loop */
       m--; /* back up over nul-termination */
     }
+  }
+
+  if (IsSetHost(cptr))
+  {
+    char* t = cli_user(cptr)->sethost;
+    *m++ = ' ';
+    while ((*m++ = *t++))
+      ; /* Empty loop */
+    m--; /* back up over nul-termination */
   }
 
   if (IsFakeHost(cptr))

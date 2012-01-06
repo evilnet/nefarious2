@@ -88,6 +88,7 @@ struct User {
   char               cloakip[HOSTLEN + 1];    /**< Cloaked IP */
   char               cloakhost[HOSTLEN + 1];  /**< Cloaked host */
   char               fakehost[HOSTLEN + 1];   /**< Fake host */
+  char               sethost[HOSTLEN + USERLEN + 2]; /**< Set host */
 };
 
 /** Describes a Login on connect session on the network. */
