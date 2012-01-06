@@ -599,7 +599,6 @@ static const struct UserMode {
   { FLAG_DEAF,         'd' },
   { FLAG_CHSERV,       'k' },
   { FLAG_DEBUG,        'g' },
-  { FLAG_ACCOUNT,      'r' },
   { FLAG_HIDDENHOST,   'x' },
   { FLAG_NOCHAN,       'n' },
   { FLAG_COMMONCHANSONLY, 'q' },
@@ -611,6 +610,7 @@ static const struct UserMode {
   { FLAG_WHOIS_NOTICE, 'W' },
   { FLAG_ADMIN,        'a' },
   { FLAG_XTRAOP,       'X' },
+  { FLAG_ACCOUNT,      'r' },
   { FLAG_FAKEHOST,     'f' },
   { FLAG_CLOAKHOST,    'C' },
   { FLAG_CLOAKIP,      'c' }

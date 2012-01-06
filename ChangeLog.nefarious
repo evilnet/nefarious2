@@ -3,6 +3,11 @@
 
 2012-01-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Moved user mode +r to be grouped with other
+	user modes with parameters.
+
+2012-01-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added HOST_IN_TOPIC to example.conf.
 
 2012-01-05  Matthew Beeching  <jobe@mdbnet.co.uk>
