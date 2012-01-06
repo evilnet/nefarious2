@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-06  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added HOST_IN_TOPIC to example.conf.
+
 2012-01-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Replaced HasFlag() with IsHiddenHost().
