@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_user.c: Replaced some ircd_snprintf() calls with more
+	appropriate ircd_strncpy() calls.
+
 2012-01-06  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/client.h: Added internal user mode +h for set host

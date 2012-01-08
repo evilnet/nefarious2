@@ -1056,14 +1056,14 @@ hide_hostmask(struct Client *cptr)
   /* Select the new host to change to. */
   if (IsSetHost(cptr)) {
     if ((sethostat = strstr(cli_user(cptr)->sethost, "@")) != NULL) {
-      ircd_snprintf(0, newhost, HOSTLEN, sethostat+1);
-      ircd_snprintf(0, newuser, USERLEN, cli_user(cptr)->sethost);
+      ircd_strncpy(newhost, sethostat+1, HOSTLEN);
+      ircd_strncpy(newuser, cli_user(cptr)->sethost, USERLEN);
       if ((userat = strstr(newuser, "@")) != NULL)
         *userat = '\0';
     } else
-      ircd_snprintf(0, newhost, HOSTLEN, cli_user(cptr)->sethost);
+      ircd_strncpy(newhost, cli_user(cptr)->sethost, HOSTLEN);
   } else if (IsFakeHost(cptr)) {
-    ircd_snprintf(0, newhost, HOSTLEN, cli_user(cptr)->fakehost);
+    ircd_strncpy(newhost, cli_user(cptr)->fakehost, HOSTLEN);
   } else if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
       ((feature_int(FEAT_HOST_HIDING_STYLE) == 3) && IsAccount(cptr))) {
     if (IsAnOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
@@ -1074,9 +1074,9 @@ hide_hostmask(struct Client *cptr)
                     cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
   } else if (IsCloakHost(cptr) && ((feature_int(FEAT_HOST_HIDING_STYLE) == 2) ||
              (feature_int(FEAT_HOST_HIDING_STYLE) == 3))) {
-    ircd_snprintf(0, newhost, HOSTLEN, cli_user(cptr)->cloakhost);
+    ircd_strncpy(newhost, cli_user(cptr)->cloakhost, HOSTLEN);
   } else {
-    ircd_snprintf(0, newhost, HOSTLEN, cli_user(cptr)->realhost);
+    ircd_strncpy(newhost, cli_user(cptr)->realhost, HOSTLEN);
   }
 
   /* If the new host is the same as the current host return silently. */
@@ -1088,9 +1088,9 @@ hide_hostmask(struct Client *cptr)
                   feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
 
   /* Finally copy the new host to the users current host. */
-  ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, newhost);
+  ircd_strncpy(cli_user(cptr)->host, newhost, HOSTLEN);
   if (newuser[0] != '\0')
-    ircd_snprintf(0, cli_user(cptr)->username, USERLEN, newuser);
+    ircd_strncpy(cli_user(cptr)->username, newuser, USERLEN);
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
@@ -1146,7 +1146,7 @@ unhide_hostmask(struct Client *cptr)
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
     sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
                   feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
-  ircd_snprintf(0, cli_user(cptr)->host, HOSTLEN, cli_user(cptr)->realhost);
+  ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->host, HOSTLEN);
 
   /* ok, the client is now fully unhidden, so let them know -- hikari */
   if (MyConnect(cptr))
