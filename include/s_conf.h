@@ -234,6 +234,7 @@ extern void conf_parse_userhost(struct ConfItem *aconf, char *host);
 extern struct ConfItem *conf_debug_iline(const char *client);
 extern void free_mapping(struct s_map *smap);
 extern struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, int* status);
+extern struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *passwd, int *status);
 
 extern void yyerror(const char *msg);
 

@@ -3,6 +3,15 @@
 
 2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/s_conf.h: Added find_shost_conf().
+
+	* ircd/s_conf.c: Added find_shost_conf().
+
+	* ircd/s_user.c: Added automatic application of Spoofhost blocks
+	if autoapply is enabled.
+
+2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/s_conf.h: Modified SHostConf struct.
 
 	* ircd/ircd_parser.y: Modified SHostConf struct.

@@ -872,6 +872,66 @@ const struct WebIRCConf* conf_get_webirc_list(void)
   return webircConfList;
 }
 
+/** Find Spoofhost configuration for \a cptr with spoof host matching host and
+ *  a password matching \a passwd
+ * @param[in] cptr Client to match Spoofhost configuration against.
+ * @param[in] host Spoofhost host to look for, if NULL look for an autoapply Spoofhost.
+ * @param[in] passwd Password to compare against Spoofhost configuration.
+ * @param[out] status 0 for Success, 1 for invalid password and 2 for no Spoofhost configuration.
+ * @return SHostConf struct of matching Spoofhost configuration or 0 on error.
+ */
+struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *passwd, int *status)
+{
+  struct SHostConf* sconf;
+  char *crypted;
+  int res = 0;
+
+  *status = 2;
+
+  for(sconf = shostConfList; sconf; sconf = sconf->next) {
+    if ((host == NULL) && !(sconf->flags & SHFLAG_AUTOAPPLY))
+      continue;
+    if ((host != NULL) && strcmp(sconf->spoofhost, host))
+      continue;
+
+    if (sconf->usermask && match(sconf->usermask, cli_username(cptr)))
+      continue;
+    if (sconf->bits > 0) {
+      if (!ipmask_check(&cli_ip(cptr), &sconf->address, sconf->bits))
+        continue;
+    } else if (sconf->hostmask && match(sconf->hostmask, cli_sockhost(cptr)))
+      continue;
+
+    *status = 1;
+    res = 0;
+
+    if ((host == NULL) && (sconf->flags & SHFLAG_AUTOAPPLY)) {
+      *status = 0;
+      return sconf;
+    }
+
+    if (EmptyString(passwd) && !EmptyString(sconf->passwd))
+      continue;
+    if (!EmptyString(passwd) && EmptyString(sconf->passwd))
+      continue;
+    if (!EmptyString(passwd) && !EmptyString(sconf->passwd)) {
+      crypted = ircd_crypt(passwd, sconf->passwd);
+      if (!crypted)
+        continue;
+
+      res = strcmp(crypted, sconf->passwd);
+      MyFree(crypted);
+    }
+
+    if (0 == res) {
+      *status = 0;
+      return sconf;
+    }
+  }
+
+  return 0;
+}
+
 /** Free all SpoofHost configurations from #shostConfList. */
 void conf_erase_shost_list(void)
 {

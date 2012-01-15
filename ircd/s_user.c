@@ -352,6 +352,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
   struct User*     user = cli_user(sptr);
   char             ip_base64[25];
   struct Shun*     ashun = NULL;
+  int              res = 0;
+  struct SHostConf* sconf = NULL;
 
   user->last = CurrentTime;
   parv[0] = cli_name(sptr);
@@ -438,6 +440,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
 
       sendcmdto_one(&me, CMD_PRIVATE, sptr, "%C :\001VERSION\001", sptr);
+    }
+
+    /* Look for an automatic Spoofhost to apply */
+    sconf = find_shost_conf(sptr, NULL, NULL, &res);
+    if ((res == 0) && (sconf != 0)) {
+      ircd_strncpy(cli_user(cptr)->sethost, sconf->spoofhost, USERLEN + HOSTLEN + 1);
+      SetSetHost(sptr);
     }
 
     send_reply(sptr,
