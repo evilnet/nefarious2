@@ -1370,6 +1370,7 @@ spoofhostblock : SPOOFHOST QSTRING
 {
   struct SLink *link;
   struct SHostConf* sconf;
+  char *h;
 
   if (hosts == NULL)
     parse_error("Missing host(s) in spoofhost block");
@@ -1379,7 +1380,15 @@ spoofhostblock : SPOOFHOST QSTRING
     sconf = (struct SHostConf*) MyCalloc(1, sizeof(*sconf));
     if (!(flags & SHFLAG_NOPASS))
       DupString(sconf->passwd, pass);
-    DupString(sconf->hostmask, link->value.cp);
+    if ((h = strchr(link->value.cp, '@')) == NULL) {
+      DupString(sconf->usermask, "*");
+      DupString(sconf->hostmask, link->value.cp);
+    } else {
+      *h++ = '\0';
+      DupString(sconf->hostmask, h);
+      DupString(sconf->usermask, link->value.cp);
+    }
+    ipmask_parse(sconf->hostmask, &sconf->address, &sconf->bits);
     DupString(sconf->spoofhost, spoofhost);
     sconf->flags = flags;
 

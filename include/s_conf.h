@@ -183,6 +183,9 @@ struct SHostConf {
   struct SHostConf*   next;
   char*               spoofhost;
   char*               hostmask;
+  char*               usermask;
+  struct irc_in_addr  address;
+  unsigned char       bits;
   char*               passwd;
   int                 flags;
 };

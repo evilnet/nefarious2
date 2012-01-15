@@ -3,6 +3,16 @@
 
 2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/s_conf.h: Modified SHostConf struct.
+
+	* ircd/ircd_parser.y: Modified SHostConf struct.
+
+	* ircd/s_err.c: Modified STATS s output.
+
+	* ircd/s_stats.c: Modified STATS s output.
+
+2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ircd_features.h: Added HIS_STATS_s.
 
 	* doc/example.conf: Added Spoofhost block and HIS_STATS_s.

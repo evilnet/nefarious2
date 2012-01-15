@@ -537,6 +537,7 @@ stats_spoofhost(struct Client* to, const struct StatDesc *sd, char* param)
 
     send_reply(to, RPL_STATSSLINE, (param) ? y : i,
                type, sconf->spoofhost,
+               (!IsAnOper(to) || EmptyString(sconf->usermask)) ? "" : sconf->usermask,
                (!IsAnOper(to) || EmptyString(sconf->hostmask)) ? "" : sconf->hostmask);
     i++;
   }
