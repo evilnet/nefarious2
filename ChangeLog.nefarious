@@ -3,6 +3,10 @@
 
 2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Reverted previous commit due to bug caused by it.
+
+2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_user.c: Prevented a user from seeing when he is given
 	internal user mode +h.
 
