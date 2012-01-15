@@ -3,6 +3,11 @@
 
 2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Updated mode parsing to allow servers to send
+	MODE -h to allow for SETHOST UNDO.
+
+2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/s_conf.h: Added find_shost_conf().
 
 	* ircd/s_conf.c: Added find_shost_conf().

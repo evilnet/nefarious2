@@ -447,6 +447,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if ((res == 0) && (sconf != 0)) {
       ircd_strncpy(cli_user(cptr)->sethost, sconf->spoofhost, USERLEN + HOSTLEN + 1);
       SetSetHost(sptr);
+      SetHiddenHost(sptr);
     }
 
     send_reply(sptr,
@@ -1046,7 +1047,7 @@ hide_hostmask(struct Client *cptr)
 
   if (!IsHiddenHost(cptr))
     return 0;
-  if (!IsFakeHost(cptr)) {
+  if (!IsFakeHost(cptr) && !IsSetHost(cptr)) {
     if ((feature_int(FEAT_HOST_HIDING_STYLE) < 0) ||
         (feature_int(FEAT_HOST_HIDING_STYLE) > 3))
       return 0;
@@ -1155,7 +1156,7 @@ unhide_hostmask(struct Client *cptr)
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
     sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
                   feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
-  ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->host, HOSTLEN);
+  ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->realhost, HOSTLEN);
 
   /* ok, the client is now fully unhidden, so let them know -- hikari */
   if (MyConnect(cptr))
@@ -1486,10 +1487,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         }
         break;
       case 'h':
-        if (*(p + 1) && (what == MODE_ADD)) {
-          sethost = *(++p);
-          SetSetHost(acptr);
-        }
+        if (what == MODE_ADD) {
+          if (*(p + 1) && (what == MODE_ADD)) {
+            sethost = *(++p);
+            SetSetHost(acptr);
+          }
+        } else
+          ClearSetHost(acptr);
         break;
       default:
         send_reply(acptr, ERR_UMODEUNKNOWNFLAG, *m);
@@ -1519,6 +1523,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearFakeHost(acptr);
     if (!FlagHas(&setflags, FLAG_SETHOST) && IsSetHost(acptr))
       ClearSetHost(acptr);
+    if (FlagHas(&setflags, FLAG_SETHOST) && !IsSetHost(acptr))
+      SetSetHost(acptr);
     if (IsSetHost(acptr) && (sethost != NULL))
       sethost = NULL;
     /*
@@ -1662,6 +1668,18 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
     if (!FlagHas(&setflags, FLAG_INVISIBLE) && IsInvisible(acptr)) {
       ++UserStats.inv_clients;
+    }
+    if (FlagHas(&setflags, FLAG_SETHOST) && !IsSetHost(acptr)) {
+      FlagClr(&setflags, FLAG_SETHOST); /* Dont let the user see -h */
+      if (IsHiddenHost(acptr) && !IsFakeHost(acptr)) {
+        if ((feature_int(FEAT_HOST_HIDING_STYLE) == 0) ||
+            ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) && !IsAccount(acptr)) ||
+            (feature_int(FEAT_HOST_HIDING_STYLE) > 3))
+          ClearHiddenHost(acptr);
+        else
+          do_host_hiding = 1;
+      } else
+        do_host_hiding = 1;
     }
     if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr)) {
       do_host_hiding = 1;
