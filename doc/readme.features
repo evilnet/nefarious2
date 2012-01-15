@@ -1094,6 +1094,12 @@ When an channel operator changes the channel topic their full
 nick!ident@host will be displayed for the person who set the topic.
 This can eliminate people faking other people when setting the topic.
 
+HIS_STATS_s
+ * Type: boolean
+ * Default: TRUE
+
+As per UnderNet CFV-165, this removes /STATS s from users.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

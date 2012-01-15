@@ -70,12 +70,14 @@
   extern struct s_map*      GlobalServiceMapList;
   extern struct qline*      GlobalQuarantineList;
   extern struct WebIRCConf* webircConfList;
+  extern struct SHostConf*  shostConfList;
 
   int yylex(void);
   /* Now all the globals we need :/... */
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
+  char *spoofhost;
   char *country, *continent;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
@@ -189,6 +191,8 @@ static void free_slist(struct SLink **link) {
 %token COUNTRY
 %token CONTINENT
 %token VERSION
+%token SPOOFHOST
+%token AUTOAPPLY
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -218,7 +222,8 @@ blocks: blocks block | block;
 block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
-       pseudoblock | iauthblock | forwardsblock | webircblock | error ';';
+       pseudoblock | iauthblock | forwardsblock | webircblock | spoofhostblock |
+       error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -1337,23 +1342,87 @@ webircident: IDENT '=' QSTRING ';'
 
 webircuserident: USERIDENT '=' YES ';'
 {
- FlagSet(&wconf->flags, WFLAG_USERIDENT);
+  FlagSet(&wconf->flags, WFLAG_USERIDENT);
 } | USERIDENT '=' NO ';'
 {
- FlagClr(&wconf->flags, WFLAG_USERIDENT);
+  FlagClr(&wconf->flags, WFLAG_USERIDENT);
 };
 
 webircignoreident: IGNOREIDENT '=' YES ';'
 {
- FlagSet(&wconf->flags, WFLAG_NOIDENT);
+  FlagSet(&wconf->flags, WFLAG_NOIDENT);
 } | IGNOREIDENT '=' NO ';'
 {
- FlagClr(&wconf->flags, WFLAG_NOIDENT);
+  FlagClr(&wconf->flags, WFLAG_NOIDENT);
 };
 
 webircdescription: DESCRIPTION '=' QSTRING ';'
 {
   MyFree(wconf->description);
   wconf->description = $3;
+};
+
+spoofhostblock : SPOOFHOST QSTRING
+{
+  flags = SHFLAG_NOPASS;
+  spoofhost = $2;
+} '{' spoofhostitems '}' ';'
+{
+  struct SLink *link;
+  struct SHostConf* sconf;
+
+  if (hosts == NULL)
+    parse_error("Missing host(s) in spoofhost block");
+  else if (spoofhost == NULL)
+    parse_error("Missing spoofhost in spoofhost block");
+  else for (link = hosts; link != NULL; link = link->next) {
+    sconf = (struct SHostConf*) MyCalloc(1, sizeof(*sconf));
+    if (!(flags & SHFLAG_NOPASS))
+      DupString(sconf->passwd, pass);
+    DupString(sconf->hostmask, link->value.cp);
+    DupString(sconf->spoofhost, spoofhost);
+    sconf->flags = flags;
+
+    sconf->next = shostConfList;
+    shostConfList = sconf;
+  }
+  MyFree(spoofhost);
+  MyFree(pass);
+  free_slist(&hosts);
+  flags = 0;
+}
+spoofhostitems: spoofhostitem | spoofhostitems spoofhostitem;
+spoofhostitem: spoofhosthost | spoofhostpass | spoofhostautoapply;
+
+spoofhosthost: HOST '=' QSTRING ';'
+{
+  struct SLink *link;
+  link = make_link();
+  if (!strchr($3, '@'))
+  {
+    int uh_len;
+    link->value.cp = (char*) MyMalloc((uh_len = strlen($3)+3));
+    ircd_snprintf(0, link->value.cp, uh_len, "*@%s", $3);
+  }
+  else
+    DupString(link->value.cp, $3);
+  MyFree($3);
+  link->next = hosts;
+  hosts = link;
+};
+
+spoofhostpass: PASS '=' QSTRING ';'
+{
+  MyFree(pass);
+  pass = $3;
+  flags &= ~SHFLAG_NOPASS;
+};
+
+spoofhostautoapply: AUTOAPPLY '=' YES ';'
+{
+  flags |= SHFLAG_AUTOAPPLY;
+} | AUTOAPPLY '=' NO ';'
+{
+  flags &= ~SHFLAG_AUTOAPPLY;
 };
 

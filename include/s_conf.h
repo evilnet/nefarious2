@@ -178,6 +178,18 @@ struct WebIRCConf {
   struct WebIRCFlags  flags;
 };
 
+/* SpoofHost configuration. */
+struct SHostConf {
+  struct SHostConf*   next;
+  char*               spoofhost;
+  char*               hostmask;
+  char*               passwd;
+  int                 flags;
+};
+
+#define SHFLAG_AUTOAPPLY 0x1  /* SpoofHost is automatically applied on connect. */
+#define SHFLAG_NOPASS    0x2  /* SpoofHost has no password. */
+
 /*
  * GLOBALS
  */
@@ -197,6 +209,7 @@ extern const struct LocalConf* conf_get_local(void);
 extern const struct CRuleConf* conf_get_crule_list(void);
 extern const struct DenyConf*  conf_get_deny_list(void);
 extern const struct WebIRCConf* conf_get_webirc_list(void);
+extern const struct SHostConf* conf_get_shost_list(void);
 
 extern const char* conf_eval_crule(const char* name, int mask);
 

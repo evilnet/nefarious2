@@ -1,6 +1,28 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/ircd_features.h: Added HIS_STATS_s.
+
+	* doc/example.conf: Added Spoofhost block and HIS_STATS_s.
+
+	* doc/readme.features: Added HIS_STATS_s.
+
+	* include/s_conf.h: Added Spoofhost block.
+
+	* ircd/ircd_features.c: Added HIS_STATS_s.
+
+	* ircd/ircd_lexer.l: Added Spoofhost block.
+
+	* ircd/ircd_parser.y: Added Spoofhost block.
+
+	* ircd/s_conf.c: Added Spoofhost block.
+
+	* ircd/s_err.c: Corrected RPL_STATSSLINE and RPL_STATSSHUN.
+
+	* ircd/s_stats.c: Added STATS s for Spoofhost blocks.
+
 2012-01-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Replaced some ircd_snprintf() calls with more

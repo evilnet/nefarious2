@@ -522,7 +522,7 @@ static Numeric replyTable[] = {
 /* 244 */
   { 0 },
 /* 245 */
-  { RPL_STATSSLINE, "%d %s %s %s %s", "245" },
+  { RPL_STATSSLINE, "%d %s %s %s", "245" },
 /* 246 */
   { RPL_STATSTLINE, "%c %s %s", "246" },
 /* 247 */
@@ -1116,7 +1116,7 @@ static Numeric replyTable[] = {
 /* 541 */
   { 0 },
 /* 542 */
-  { RPL_STATSSLINE, "%c %s%s%s %Tu %Tu %c :%s", "542" },
+  { RPL_STATSSHUN, "%c %s%s%s %Tu %Tu %c :%s", "542" },
 /* 543 */
   { ERR_NOSUCHSHUN, "%s :No such shun", "543" },
 /* 544 */

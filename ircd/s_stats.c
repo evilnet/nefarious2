@@ -511,6 +511,37 @@ stats_webirc(struct Client* to, const struct StatDesc *sd, char* param)
                (wline->description ? wline->description : ""));
 }
 
+static void
+stats_spoofhost(struct Client* to, const struct StatDesc *sd, char* param)
+{
+  int y = 1, i = 1;
+  char* type;
+  const struct SHostConf* sconf = conf_get_shost_list();
+
+  for ( ; sconf; sconf = sconf->next) {
+    if (param && match(param, sconf->spoofhost)) { /* narrow search */
+      if (IsAnOper(to))
+        y++;
+      else
+        if (!EmptyString(sconf->passwd))
+          y++;
+      continue;
+    }
+
+    if (sconf->flags & SHFLAG_AUTOAPPLY)
+      type = "auto";
+    else if (IsAnOper(to) && EmptyString(sconf->passwd))
+      type = "oper";
+    else
+      type = "user";
+
+    send_reply(to, RPL_STATSSLINE, (param) ? y : i,
+               type, sconf->spoofhost,
+               (!IsAnOper(to) || EmptyString(sconf->hostmask)) ? "" : sconf->hostmask);
+    i++;
+  }
+}
+
 /** Display objects allocated (and total memory used by them) for
  * several types of structures.
  * @param[in] to Client requesting statistics.
@@ -614,6 +645,9 @@ struct StatDesc statsinfo[] = {
   { 'S', "shuns", (STAT_FLAG_OPERFEAT | STAT_FLAG_VARPARAM | STAT_FLAG_CASESENS), FEAT_HIS_STATS_S,
     shun_stats, 0,
     "Global Shuns." },
+  { 's', "spoofhosts", (STAT_FLAG_OPERFEAT | STAT_FLAG_VARPARAM | STAT_FLAG_CASESENS), FEAT_HIS_STATS_s,
+    stats_spoofhost, 0,
+    "Spoofed hosts information." },
   { 'T', "motds", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_T,
     motd_report, 0,
     "Configured Message Of The Day files." },

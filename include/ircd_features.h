@@ -190,6 +190,7 @@ enum Feature {
   FEAT_STRICTUSERNAME,
   FEAT_APASS_CANSEND,
   FEAT_HOST_IN_TOPIC,
+  FEAT_HIS_STATS_s,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

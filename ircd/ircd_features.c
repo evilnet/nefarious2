@@ -545,6 +545,7 @@ static struct FeatureDesc {
   F_B(STRICTUSERNAME, 0, 0, 0),
   F_B(APASS_CANSEND, 0, 0, 0),
   F_B(HOST_IN_TOPIC, 0, 1, 0),
+  F_B(HIS_STATS_s, 0, 1, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

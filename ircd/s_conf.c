@@ -88,7 +88,9 @@ struct CRuleConf*  cruleConfList;
 /** Global list of K-lines. */
 struct DenyConf*   denyConfList;
 /** Global list of WebIRC blocks. */
-struct WebIRCConf *webircConfList;
+struct WebIRCConf* webircConfList;
+/** GLobal list of SpoofHost blocks. */
+struct SHostConf*  shostConfList;
 
 /** Tell a user that they are banned, dumping the message from a file.
  * @param sptr Client being rejected
@@ -870,6 +872,30 @@ const struct WebIRCConf* conf_get_webirc_list(void)
   return webircConfList;
 }
 
+/** Free all SpoofHost configurations from #shostConfList. */
+void conf_erase_shost_list(void)
+{
+  struct SHostConf* next;
+  struct SHostConf* p = shostConfList;
+  for ( ; p; p = next) {
+    next = p->next;
+    MyFree(p->spoofhost);
+    MyFree(p->hostmask);
+    if (p->passwd != NULL)
+      MyFree(p->passwd);
+    MyFree(p);
+  }
+  shostConfList = 0;
+}
+
+/** Return #shostConfList.
+ * @return #shostConfList
+ */
+const struct SHostConf* conf_get_shost_list(void)
+{
+  return shostConfList;
+}
+
 /** Find any existing quarantine for the named channel.
  * @param chname Channel name to search for.
  * @return Reason for channel's quarantine, or NULL if none exists.
@@ -1022,6 +1048,7 @@ int rehash(struct Client *cptr, int sig)
   conf_erase_crule_list();
   conf_erase_deny_list();
   conf_erase_webirc_list();
+  conf_erase_shost_list();
   motd_clear();
 
   /*

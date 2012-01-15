@@ -115,6 +115,8 @@ static struct lexer_token {
   TOKEN(COUNTRY),
   TOKEN(CONTINENT),
   TOKEN(VERSION),
+  TOKEN(SPOOFHOST),
+  TOKEN(AUTOAPPLY),
 #undef TOKEN
   { "administrator", ADMIN },
   { "apass_opmode", TPRIV_APASS_OPMODE },
