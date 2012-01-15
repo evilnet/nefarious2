@@ -1681,6 +1681,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       } else
         do_host_hiding = 1;
     }
+    if (!FlagHas(&setflags, FLAG_SETHOST) && IsSetHost(acptr)) {
+      FlagSet(&setflags, FLAG_SETHOST); /* Dont let the user see +h */
+    }
     if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr)) {
       do_host_hiding = 1;
     }
