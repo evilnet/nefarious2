@@ -988,7 +988,7 @@ void send_umode_out(struct Client *cptr, struct Client *sptr,
   {
     if ((acptr = LocalClientArray[i]) && IsServer(acptr) &&
         (acptr != cptr) && (acptr != sptr) && *umodeBuf)
-      sendcmdto_one(sptr, CMD_MODE, acptr, "%s :%s", cli_name(sptr), umodeBuf);
+      sendcmdto_one(sptr, CMD_MODE, acptr, "%s %s", cli_name(sptr), umodeBuf);
   }
   if (cptr && MyUser(cptr))
     send_umode(cptr, sptr, old, ALL_UMODES);
@@ -1804,6 +1804,7 @@ void send_umode(struct Client *cptr, struct Client *sptr, struct Flags *old,
   int flag;
   char *m;
   int what = MODE_NULL;
+  int needsethost = 0;
 
   /*
    * Build a string in umodeBuf to represent the change in the user's
@@ -1831,6 +1832,17 @@ void send_umode(struct Client *cptr, struct Client *sptr, struct Flags *old,
         continue;
       break;      
     }
+    if (cptr && MyUser(cptr)) {
+      switch (flag)
+      {
+        case FLAG_CLOAKHOST:
+        case FLAG_CLOAKIP:
+        case FLAG_FAKEHOST:
+        case FLAG_SETHOST:
+          continue;
+          break;
+      }
+    }
     if (FlagHas(old, flag))
     {
       if (what == MODE_DEL)
@@ -1852,11 +1864,17 @@ void send_umode(struct Client *cptr, struct Client *sptr, struct Flags *old,
         *m++ = '+';
         *m++ = userModeList[i].c;
       }
+      if (flag == FLAG_SETHOST)
+        needsethost++;
     }
   }
-  *m = '\0';
+
+  if (needsethost)
+    ircd_snprintf(0, m, USERLEN + HOSTLEN + 1, " %s", cli_user(sptr)->sethost);
+  else
+    *m = '\0';
   if (*umodeBuf && cptr)
-    sendcmdto_one(sptr, CMD_MODE, cptr, "%s :%s", cli_name(sptr), umodeBuf);
+    sendcmdto_one(sptr, CMD_MODE, cptr, "%s %s", cli_name(sptr), umodeBuf);
 }
 
 /**
