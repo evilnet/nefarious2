@@ -204,6 +204,7 @@ static void free_slist(struct SLink **link) {
 %token TPRIV_LIST_CHAN TPRIV_CHECK TPRIV_WHOIS_NOTICE TPRIV_HIDE_OPER
 %token TPRIV_HIDE_CHANNELS TPRIV_HIDE_IDLE TPRIV_XTRAOP TPRIV_SERVICE
 %token TPRIV_REMOTE TPRIV_SHUN TPRIV_LOCAL_SHUN TPRIV_WIDE_SHUN
+%token TPRIV_FREEFORM
 /* and some types... */
 %type <num> sizespec
 %type <num> timespec timefactor factoredtimes factoredtime
@@ -725,7 +726,8 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           TPRIV_REMOTE { $$ = PRIV_REMOTE; } |
           TPRIV_SHUN { $$ = PRIV_SHUN; } |
           TPRIV_LOCAL_SHUN { $$ = PRIV_LOCAL_SHUN; } |
-          TPRIV_WIDE_SHUN { $$ = PRIV_WIDE_SHUN; } ;
+          TPRIV_WIDE_SHUN { $$ = PRIV_WIDE_SHUN; } |
+          TPRIV_FREEFORM { $$ = PRIV_FREEFORM; } ;
 
 yesorno: YES { $$ = 1; } | NO { $$ = 0; };
 

@@ -131,6 +131,7 @@ static struct lexer_token {
   { "file", TFILE },
   { "force_local_opmode", TPRIV_FORCE_LOCAL_OPMODE },
   { "force_opmode", TPRIV_FORCE_OPMODE },
+  { "freeform", TPRIV_FREEFORM },
   { "gb", GBYTES },
   { "gigabytes", GBYTES },
   { "gline", TPRIV_GLINE },

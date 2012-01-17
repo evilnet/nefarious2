@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-17  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added freeform priv for SETHOST command.
+
+	* include/client.h: Added freeform priv for SETHOST command.
+
+	* ircd/client.c: Added freeform priv for SETHOST command.
+
+	* ircd/ircd_lexer.l: Added freeform priv for SETHOST command.
+
+	* ircd/ircd_parser.y: Added freeform priv for SETHOST command.
+
 2012-01-15  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Reverted previous commit due to bug caused by it.
