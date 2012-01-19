@@ -1100,6 +1100,12 @@ HIS_STATS_s
 
 As per UnderNet CFV-165, this removes /STATS s from users.
 
+SETHOST
+ * Type: boolean
+ * Default: TRUE
+
+Enables the /SETHOST command for users and operators.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

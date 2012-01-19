@@ -191,6 +191,7 @@ enum Feature {
   FEAT_APASS_CANSEND,
   FEAT_HOST_IN_TOPIC,
   FEAT_HIS_STATS_s,
+  FEAT_SETHOST,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

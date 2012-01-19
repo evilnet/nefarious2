@@ -1,6 +1,34 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added SETHOST feature and FREEFORM privilege.
+
+	* doc/readme.features: Added SETHOST feature.
+
+	* include/handlers.h: Added SETHOST command.
+
+	* include/ircd_features.h: Added SETHOST feature.
+
+	* include/msg.h: Added SETHOST command.
+
+	* include/numeric.h: Added ERR_BADHOSTMASK and ERR_HOSTUNAVAIL
+	numeric replies.
+
+	* ircd/Makefile.in: Added SETHOST command.
+
+	* ircd/ircd_features.c: Added SETHOST feature.
+
+	* ircd/parse.c: Added SETHOST command.
+
+	* ircd/s_err.c: Added ERR_BADHOSTMASK and ERR_HOSTUNAVAIL
+	numeric replies.
+
+	* ircd/s_user.c: Changed cptr to sptr in register_user().
+
+	* ircd/m_sethost.c: Added SETHOST command.
+
 2012-01-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_user.c: Fixed send_umode() so it does not show +h or -h

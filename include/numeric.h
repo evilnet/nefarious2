@@ -474,6 +474,9 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_QUARANTINED      524       /* Undernet extension -Vampire */
 #define ERR_INVALIDKEY       525        /* Undernet extension */
 
+#define ERR_BADHOSTMASK      530        /* Nefarious extension (SETHOST) */
+#define ERR_HOSTUNAVAIL      531        /* Nefarious extension (SETHOST) */
+
 #define RPL_OMOTDSTART       535
 #define RPL_OMOTD            536
 #define RPL_ENDOFOMOTD       537

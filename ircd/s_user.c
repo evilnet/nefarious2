@@ -445,7 +445,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     /* Look for an automatic Spoofhost to apply */
     sconf = find_shost_conf(sptr, NULL, NULL, &res);
     if ((res == 0) && (sconf != 0)) {
-      ircd_strncpy(cli_user(cptr)->sethost, sconf->spoofhost, USERLEN + HOSTLEN + 1);
+      ircd_strncpy(cli_user(sptr)->sethost, sconf->spoofhost, USERLEN + HOSTLEN + 1);
       SetSetHost(sptr);
       SetHiddenHost(sptr);
     }
