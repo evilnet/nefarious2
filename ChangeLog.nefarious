@@ -3,6 +3,10 @@
 
 2012-01-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Fixed a couple of typos (Thanks courpse)
+
+2012-01-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added SETHOST feature and FREEFORM privilege.
 
 	* doc/readme.features: Added SETHOST feature.
