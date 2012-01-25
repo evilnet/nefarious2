@@ -1108,8 +1108,9 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
   if (opped_members)
     MyFree(opped_members);
   if (feature_bool(FEAT_TOPIC_BURST) && (chptr->topic[0] != '\0'))
-      sendcmdto_one(&me, CMD_TOPIC, cptr, "%H %Tu %Tu :%s", chptr,
-                    chptr->creationtime, chptr->topic_time, chptr->topic);
+      sendcmdto_one(&me, CMD_TOPIC, cptr, "%H %s %Tu %Tu :%s", chptr,
+                    chptr->topic_nick, chptr->creationtime,
+                    chptr->topic_time, chptr->topic);
 }
 
 /** Canonify a mask.

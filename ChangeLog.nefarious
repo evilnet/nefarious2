@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-01-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Fix for TOPIC setter perameter not being sent
+	at burst.
+
 2012-01-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Fixed a couple of typos (Thanks courpse)
