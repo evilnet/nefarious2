@@ -264,7 +264,6 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
 {
   struct Client *acptr; /* Current client we're considering */
   struct User *user; 	/* the user portion of the client */
-  const char *name; 	/* the name of this client */
   struct Membership* chan; 
   int invis; 		/* does +i apply? */
   int member;		/* Is this user on any channels? */
@@ -302,7 +301,6 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
      *   the target user(s) are on;
      */
     user = cli_user(acptr);
-    name = (!*(cli_name(acptr))) ? "?" : cli_name(acptr);
     assert(user);
 
     invis = (acptr != sptr) && IsInvisible(acptr);

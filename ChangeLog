@@ -1,3 +1,42 @@
+2011-01-23  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/ircd_res.c (proc_answer): Delete unread variable
+	query_class.
+
+	* ircd/m_nick.c (m_nick): Delete unread variable client_name.
+
+	* ircd/m_ping.c (m_ping): Delete unread variable origin.
+
+	* ircd/m_whois.c (do_whois): Delete unread variable name.
+
+	* ircd/parse.c (parse_client): Delete unread variable noprefix.
+
+	* ircd/s_conf.c (killcomment): Delete unread variable tm.
+
+	* ircd/s_stats.c (stats_configured_links): Delete unread variable
+	pass.
+
+2011-01-23  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/gline.c (gline_modify): Notify opers using SNO_AUTO rather
+	than SNO_GLINE if a G-line had, and still has, an AUTO prefix.
+
+2011-01-19  Michael Poole <mdpoole@troilus.org>
+
+	* doc/readme.iauth: Document the new 'd' IAuth command.
+
+	* ircd/s_auth.c (AuthRequestFlag): Add "soft done" flag.
+	(auth_ping_timeout): Do not impose Authorization Timeout on
+	clients with the "soft done" flag set.
+	(iauth_cmd_soft_done): New IAuth command handler.
+	(iauth_parse): Call it.
+
+2011-01-19  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/s_auth.c (start_auth): Call start_dns_query() and
+	start_auth_query() after start_iauth_query() rather than
+	before.
+
 2011-08-17  Kevin L. Mitchell <klmitch@mit.edu>
 
 	* include/client.h: Fix minor issue in IsLocOp() test

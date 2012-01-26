@@ -101,7 +101,6 @@ static void killcomment(struct Client* sptr, const char* filename)
   FBFILE*     file = 0;
   char        line[80];
   struct stat sb;
-  struct tm*  tm;
 
   if (NULL == (file = fbopen(filename, "r"))) {
     send_reply(sptr, ERR_NOMOTD);
@@ -110,7 +109,6 @@ static void killcomment(struct Client* sptr, const char* filename)
     return;
   }
   fbstat(&sb, file);
-  tm = localtime((time_t*) &sb.st_mtime);        /* NetBSD needs cast */
   while (fbgets(line, sizeof(line) - 1, file)) {
     char* end = line + strlen(line);
     while (end > line) {
