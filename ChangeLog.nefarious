@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/p10.txt: Added P10 documentation from
+	http://ircd.bircd.org/bewarep10.txt
+
 2012-01-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Fix for TOPIC setter perameter not being sent
