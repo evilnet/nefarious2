@@ -3,6 +3,11 @@
 
 2012-05-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/opercmds.c: Fixed a couple more -Wall -pedantic compiler
+	warnings.
+
+2012-05-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* 32 Files: Fixed -Wall -pedantic compiler warnings.
 
 2012-05-09  Matthew Beeching  <jobe@mdbnet.co.uk>
