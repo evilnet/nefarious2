@@ -88,6 +88,7 @@
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "s_auth.h"
+#include "s_user.h"
 #include "send.h"
 #include "struct.h"
 
@@ -125,7 +126,7 @@ int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (feature_bool(FEAT_LOGIN_ON_CONNECT) &&
       feature_bool(FEAT_EXTENDED_ACCOUNTS) &&
-      !cli_loc(cptr) && !EmptyString(password)) {
+      !cli_loc(cptr) && (password[0] != '\0')) {
     emptypass = 1;
     tmp = password;
     if (*tmp == '/') {
@@ -164,10 +165,10 @@ int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
-  if (!(cli_auth(cptr)) && (cli_loc(cptr) || EmptyString(password)))
+  if (!(cli_auth(cptr)) && (cli_loc(cptr) || (password[0] == '\0')))
     return register_user(cptr, cptr);
 
-  if (EmptyString(password) && !(cli_loc(cptr)) && !emptypass)
+  if ((password[0] == '\0') && !(cli_loc(cptr)) && !emptypass)
     return need_more_params(cptr, "PASS");
 
   ircd_strncpy(cli_passwd(cptr), password, PASSWDLEN);

@@ -78,7 +78,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define BadPtr(x) (!(x) || (*(x) == '\0'))
 #define DupString(x,y) \
         do { \
           x = (char*) MyMalloc(strlen(y)+1); \
@@ -737,7 +736,7 @@ static int crule_parsearglist(CRuleNodePtr argrootp, int *next_tokp, const char*
 #if !defined(CR_DEBUG) && !defined(CR_CHKCONF)
         collapse(currarg);
 #endif
-        if (!BadPtr(currarg))
+        if (currarg[0] != '\0')
         {
           DupString(argelemp, currarg);
           argrootp->arg[argrootp->numargs++] = (void *)argelemp;

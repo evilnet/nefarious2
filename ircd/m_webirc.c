@@ -93,6 +93,8 @@
 #include "numnicks.h"
 #include "send.h"
 #include "s_conf.h"
+#include "s_misc.h"
+#include "IPcheck.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -176,7 +178,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Update the IP and charge them as a remote connect. */
   ircd_aton(&addr, ipaddr);
   memcpy(&cli_ip(sptr), &addr, sizeof(cli_ip(sptr)));
-  IPcheck_remote_connect(sptr);
+  IPcheck_remote_connect(sptr, 0);
 
   /* Change cli_sock_ip() and cli_sockhost() to spoofed host and IP. */
   ircd_strncpy(cli_sock_ip(sptr), ircd_ntoa(&cli_ip(sptr)), SOCKIPLEN);

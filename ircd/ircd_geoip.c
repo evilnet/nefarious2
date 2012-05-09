@@ -29,6 +29,7 @@
 #include "GeoIP.h"
 #include "ircd_geoip.h"
 #include "ircd_features.h"
+#include "ircd_string.h"
 #include "res.h"
 
 /** GeoIP structs. */

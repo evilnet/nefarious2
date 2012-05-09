@@ -212,6 +212,8 @@ find_token(char *token)
 
 static FBFILE *lexer_input;
 
+#undef YY_NO_UNPUT
+#define YY_NO_UNPUT
 #undef YY_INPUT
 #define YY_INPUT(buf, res, size) res = (fbgets(buf, size, lexer_input) ? strlen(buf) : 0)
 

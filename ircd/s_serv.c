@@ -55,6 +55,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "send.h"
+#include "shun.h"
 #include "struct.h"
 #include "sys.h"
 #include "userload.h"
@@ -117,7 +118,6 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   struct Client* acptr = 0;
   const char*    inpath;
   int            i;
-  char*          privs;
 
   assert(0 != cptr);
   assert(0 != cli_local(cptr));

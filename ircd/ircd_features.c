@@ -43,6 +43,7 @@
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_stats.h"
+#include "s_user.h"
 #include "send.h"
 #include "struct.h"
 #include "sys.h"    /* FALSE bleah */

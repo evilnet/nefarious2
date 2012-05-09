@@ -244,3 +244,27 @@ void ircd_crypt_init(void)
 
 return;
 }
+
+int oper_password_match(const char* to_match, const char* passwd)
+{
+  char *crypted;
+  int res;
+  /*
+   * use first two chars of the password they send in as salt
+   *
+   * passwd may be NULL. Head it off at the pass...
+   */
+  if (!to_match || !passwd)
+    return 0;
+
+  /* we no longer do a CRYPT_OPER_PASSWORD check because a clear
+     text passwords just handled by a fallback mechanism called
+     crypt_clear if it's enabled -- hikari */
+  crypted = ircd_crypt(to_match, passwd);
+
+  if (!crypted)
+   return 0;
+  res = strcmp(crypted, passwd);
+  MyFree(crypted);
+  return 0 == res;
+}

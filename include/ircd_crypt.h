@@ -62,6 +62,7 @@ extern void ircd_crypt_init(void);
 extern char* ircd_crypt(const char* key, const char* salt);
 extern int ircd_crypt_register_mech(crypt_mech_t* mechanism);
 extern int ircd_crypt_unregister_mech(crypt_mech_t* mechanism);
+extern int oper_password_match(const char* to_match, const char* passwd);
 
 /* exported variables */
 extern crypt_mechs_t* crypt_mechs_root;

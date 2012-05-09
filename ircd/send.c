@@ -925,7 +925,6 @@ void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mo
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct DLink *lp;
   struct Client* acptr = 0;
 
   vd.vd_format = pattern;

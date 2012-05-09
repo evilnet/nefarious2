@@ -83,6 +83,7 @@
 
 #include "class.h"
 #include "client.h"
+#include "handlers.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -109,7 +110,6 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
 {
   struct Flags old_mode = cli_flags(sptr);
   char*        modes;
-  char*        privbuf;
   char*        parv[2];
 
   parv[0] = cli_name(sptr);
@@ -181,30 +181,6 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     m_opermotd(sptr, sptr, 1, parv);
 
   log_write(LS_OPER, L_INFO, 0, "OPER (%s) by (%#C)", aconf->name, sptr);
-}
-
-int oper_password_match(const char* to_match, const char* passwd)
-{
-  char *crypted;
-  int res;
-  /*
-   * use first two chars of the password they send in as salt
-   *
-   * passwd may be NULL. Head it off at the pass...
-   */
-  if (!to_match || !passwd)
-    return 0;
-
-  /* we no longer do a CRYPT_OPER_PASSWORD check because a clear 
-     text passwords just handled by a fallback mechanism called 
-     crypt_clear if it's enabled -- hikari */
-  crypted = ircd_crypt(to_match, passwd);
-
-  if (!crypted)
-   return 0;
-  res = strcmp(crypted, passwd);
-  MyFree(crypted);
-  return 0 == res;
 }
 
 int can_oper(struct Client *cptr, struct Client *sptr, char *name,

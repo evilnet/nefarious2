@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "channel.h"
+#include "class.h"
 #include "client.h"
 #include "destruct_event.h"
 #include "hash.h"
@@ -3765,7 +3766,6 @@ int common_chan_count(struct Client *a, struct Client *b, int max)
   struct Membership* member;
   struct Membership* chan;
   struct Channel *chptr;
-  struct User *ua, *ub;
 
   if (!a || !b)
     return 0;

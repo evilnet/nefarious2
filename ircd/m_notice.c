@@ -95,6 +95,8 @@
 #include "msg.h"
 #include "numeric.h"
 #include "send.h"
+#include "s_conf.h"
+#include "s_misc.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>

@@ -83,6 +83,7 @@
 
 #include "client.h"
 #include "ircd.h"
+#include "ircd_crypt.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"

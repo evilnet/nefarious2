@@ -86,6 +86,7 @@
 #include "ircd_string.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_snprintf.h"
 #include "msgq.h"
 #include "numeric.h"
 #include "s_user.h"

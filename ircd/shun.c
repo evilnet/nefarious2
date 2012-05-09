@@ -185,7 +185,7 @@ static int
 do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
 {
   struct Client *acptr;
-  int fd, tval;
+  int fd;
 
   if (feature_bool(FEAT_DISABLE_SHUNS))
     return 0; /* Shuns are disabled */

@@ -193,7 +193,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;                        /* NICK message ignored */
   }
 
-  if (!(acptr = FindClient(nick))) {
+  if (!(acptr = SeekClient(nick))) {
     /*
      * No collisions, all clear...
      */
@@ -347,7 +347,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
   /* Check against nick name collisions. */
-  if ((acptr = FindClient(nick)) == NULL)
+  if ((acptr = SeekClient(nick)) == NULL)
     /* No collisions, all clear... */
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
 

@@ -48,6 +48,7 @@
 #include "s_user.h"
 #include "s_stats.h"
 #include "send.h"
+#include "shun.h"
 #include "struct.h"
 #include "sys.h"
 #include "whowas.h"

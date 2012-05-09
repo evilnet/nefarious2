@@ -94,6 +94,7 @@
 #include "send.h"
 #include "sys.h"
 #include "s_misc.h"
+#include "s_user.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -151,7 +152,7 @@ int ms_svsnick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * If the user is the same as the person being svsnick'ed, let it
    * through as it is probably a change in the nickname's case.
    */
-  if ((acptr2 = FindClient(nick))) {
+  if ((acptr2 = SeekClient(nick))) {
     /*
      * If acptr == acptr2, then we have a client doing a nick
      * change between *equivalent* nicknames as far as server

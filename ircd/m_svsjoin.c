@@ -108,7 +108,6 @@ int ms_svsjoin(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct Channel *chptr;
   struct JoinBuf join;
   struct JoinBuf create;
-  struct Gline *gline;
   char *p = 0;
   char *chanlist;
   char *name;

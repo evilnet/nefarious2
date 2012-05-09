@@ -3,6 +3,10 @@
 
 2012-05-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* 32 Files: Fixed -Wall -pedantic compiler warnings.
+
+2012-05-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/s_user.h: Added ALLOWMODES_SVSMODE and removed
 	MAGIC_SVSMODE_OVERRIDE
 

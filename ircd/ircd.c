@@ -33,6 +33,7 @@
 #include "ircd_alloc.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
+#include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_signal.h"

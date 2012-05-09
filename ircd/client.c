@@ -28,6 +28,8 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
+#include "ircd_string.h"
 #include "list.h"
 #include "msg.h"
 #include "msgq.h"
@@ -140,7 +142,6 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
 {
   struct Privs *source, *defaults;
   enum Priv priv;
-  char *privbuf;
 
   /* Clear out client's privileges. */
   memset(&cli_privs(client), 0, sizeof(struct Privs));

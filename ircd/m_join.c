@@ -26,6 +26,7 @@
 #include "config.h"
 
 #include "channel.h"
+#include "class.h"
 #include "client.h"
 #include "gline.h"
 #include "hash.h"

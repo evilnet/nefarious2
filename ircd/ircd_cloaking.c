@@ -22,10 +22,12 @@
  */
 #include "config.h"
 
+#include "ircd_chattr.h"
 #include "ircd_cloaking.h"
 #include "ircd_defs.h"
 #include "ircd_features.h"
 #include "ircd_md5.h"
+#include "ircd_snprintf.h"
 #include "res.h"
 
 #include <netinet/in.h>
@@ -88,27 +90,27 @@ unsigned char *pch;
 
         /* ALPHA... */
         ircd_snprintf(0, buf, 512, "%s:%d.%d.%d.%d:%s", KEY2, a, b, c, d, KEY3);
-        DoMD5(res, buf, strlen(buf));
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
         strcpy(res+16, KEY1); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
-        DoMD5(res2, res, n);
-        alpha = downsample(res2);
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        alpha = downsample((unsigned char *)&res2);
 
         /* BETA... */
         ircd_snprintf(0, buf, 512, "%s:%d.%d.%d:%s", KEY3, a, b, c, KEY1);
-        DoMD5(res, buf, strlen(buf));
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
         strcpy(res+16, KEY2); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
-        DoMD5(res2, res, n);
-        beta = downsample(res2);
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        beta = downsample((unsigned char *)&res2);
 
         /* GAMMA... */
         ircd_snprintf(0, buf, 512, "%s:%d.%d:%s", KEY1, a, b, KEY2);
-        DoMD5(res, buf, strlen(buf));
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
         strcpy(res+16, KEY3); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
-        DoMD5(res2, res, n);
-        gamma = downsample(res2);
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        gamma = downsample((unsigned char *)&res2);
 
         ircd_snprintf(0, result, HOSTLEN, "%X.%X.%X.IP", alpha, beta, gamma);
         return result;
@@ -146,27 +148,27 @@ unsigned int alpha, beta, gamma;
 
         /* ALPHA... */
         ircd_snprintf(0, buf, 512, "%s:%x:%x:%x:%x:%x:%x:%x:%x:%s", KEY2, a, b, c, d, e, f, g, h, KEY3);
-        DoMD5(res, buf, strlen(buf));
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
         strcpy(res+16, KEY1); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
-        DoMD5(res2, res, n);
-        alpha = downsample(res2);
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        alpha = downsample((unsigned char *)&res2);
 
         /* BETA... */
         ircd_snprintf(0, buf, 512, "%s:%x:%x:%x:%x:%x:%x:%x:%s", KEY3, a, b, c, d, e, f, g, KEY1);
-        DoMD5(res, buf, strlen(buf));
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
         strcpy(res+16, KEY2); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
-        DoMD5(res2, res, n);
-        beta = downsample(res2);
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        beta = downsample((unsigned char *)&res2);
 
         /* GAMMA... */
         ircd_snprintf(0, buf, 512, "%s:%x:%x:%x:%x:%s", KEY1, a, b, c, d, KEY2);
-        DoMD5(res, buf, strlen(buf));
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
         strcpy(res+16, KEY3); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
-        DoMD5(res2, res, n);
-        gamma = downsample(res2);
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        gamma = downsample((unsigned char *)&res2);
 
         ircd_snprintf(0, result, HOSTLEN, "%X:%X:%X:IP", alpha, beta, gamma);
         return result;
@@ -179,15 +181,15 @@ static char buf[512], res[512], res2[512], result[HOSTLEN+1];
 unsigned int alpha, n;
 
         ircd_snprintf(0, buf, 512, "%s:%s:%s", KEY1, host, KEY2);
-        DoMD5(res, buf, strlen(buf));
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
         strcpy(res+16, KEY3); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
-        DoMD5(res2, res, n);
-        alpha = downsample(res2);
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        alpha = downsample((unsigned char *)&res2);
 
         for (p = host; *p; p++)
                 if (*p == '.')
-                        if (isalpha(*(p + 1)))
+                        if (IsAlpha(*(p + 1)))
                                 break;
 
         if (*p)

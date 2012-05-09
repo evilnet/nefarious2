@@ -860,7 +860,7 @@ void conf_erase_webirc_list(void)
     MyFree(p);
   }
   webircConfList = 0;
-};
+}
 
 /** Return #webircConfList.
  * @return #webircConfList

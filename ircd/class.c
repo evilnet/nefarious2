@@ -336,14 +336,18 @@ get_client_maxchans(struct Client *acptr)
 
   /* Return the most recent(first on LL) client class... */
   if (acptr && !IsMe(acptr) && (cli_confs(acptr)))
+  {
     for (tmp = cli_confs(acptr); tmp; tmp = tmp->next)
     {
       if (tmp->value.aconf && (cl = tmp->value.aconf->conn_class))
+      {
         if (MaxChans(cl))
           return MaxChans(cl);
         else
           return feature_int(FEAT_MAXCHANNELSPERUSER);
+      }
     }
+  }
   return feature_int(FEAT_MAXCHANNELSPERUSER);
 }
 

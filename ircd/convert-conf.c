@@ -101,6 +101,7 @@ static void simple_line(const char *block, const char **names, const char *extra
 }
 
 #define dupstring(TARGET, SOURCE) do { free(TARGET); if (SOURCE) { size_t len = strlen(SOURCE) + 1; (TARGET) = malloc(len); memcpy((TARGET), (SOURCE), len); } else (TARGET) = 0; } while(0)
+#define dupstring2(TARGET, SOURCE) do { free(TARGET); if (SOURCE[0] != '\0') { size_t len = strlen(SOURCE) + 1; (TARGET) = malloc(len); memcpy((TARGET), (SOURCE), len); } else (TARGET) = 0; } while(0)
 
 /*** MANAGING LISTS OF STRINGS ***/
 
@@ -391,7 +392,7 @@ static void do_operator(int is_local)
     dupstring(oper->password, fields[1]);
     dupstring(oper->name, fields[2]);
     dupstring(oper->class, fields[4]);
-    dupstring(oper->origin, orig_line);
+    dupstring2(oper->origin, orig_line);
     oper->is_local = is_local;
     oper->next = operators;
     operators = oper;
@@ -514,7 +515,7 @@ static void do_quarantine(void)
 {
     struct string_list *q;
     q = string_get(&quarantines, fields[0]);
-    dupstring(q->origin, orig_line);
+    dupstring2(q->origin, orig_line);
     dupstring(q->extra, fields[1]);
 }
 
