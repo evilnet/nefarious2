@@ -15,8 +15,6 @@ struct Channel;
 struct MsgBuf;
 struct Flags;
 
-#define MAGIC_SVSMODE_OVERRIDE 0x12345678
-
 /*
  * Macros
  */
@@ -55,6 +53,7 @@ struct Flags;
 /* used for parsing user modes */
 #define ALLOWMODES_ANY	0 /**< Allow any user mode */
 #define ALLOWMODES_DEFAULT  1 /**< Only allow the subset of modes that are legit defaults */
+#define ALLOWMODES_SVSMODE 2 /**< Allow any user mode to be changed ignoring restrictions */
 
 /** Formatter function for send_user_info().
  * @param who Client being displayed.

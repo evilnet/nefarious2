@@ -1,6 +1,17 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-05-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/s_user.h: Added ALLOWMODES_SVSMODE and removed
+	MAGIC_SVSMODE_OVERRIDE
+
+	* ircd/m_svsmode.c: Added ALLOWMODES_SVSMODE and removed
+	MAGIC_SVSMODE_OVERRIDE
+
+	* ircd/s_user.c: Fix for compile warning on 64 bit systems in
+	relation to SVSMODE handling.
+
 2012-03-18  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/p10.txt: Added P10 documentation from

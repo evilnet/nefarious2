@@ -1223,11 +1223,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   char* sethost = NULL;
   struct Client *acptr = NULL;
 
-  if (MyUser(sptr) && (((int)cptr) == MAGIC_SVSMODE_OVERRIDE))
-  {
+  if (MyUser(sptr) && (allow_modes & ALLOWMODES_SVSMODE))
     is_svsmode = 1;
-    cptr = sptr;
-  }
 
   what = MODE_ADD;
 

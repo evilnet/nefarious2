@@ -119,7 +119,7 @@ int ms_svsmode(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     param[2] = parv[2];
     param[3] = NULL;
 
-    set_user_mode((void *) MAGIC_SVSMODE_OVERRIDE, acptr, 3, param, ALLOWMODES_ANY);
+    set_user_mode(acptr, acptr, 3, param, ALLOWMODES_ANY | ALLOWMODES_SVSMODE);
   } else
     sendcmdto_serv_butone(sptr, CMD_SVSMODE, cptr, "%s %s", parv[1], parv[2]);
 
