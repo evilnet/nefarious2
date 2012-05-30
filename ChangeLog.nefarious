@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Fixed invalid default value for DEFAULT_LIST_PARAM
+	Feature.
+
 2012-05-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/opercmds.c: Fixed a couple more -Wall -pedantic compiler
