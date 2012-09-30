@@ -764,6 +764,8 @@ int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int r
    */
   if (!member) {
     if ((chptr->mode.mode & (MODE_NOPRIVMSGS|MODE_MODERATED)) ||
+        ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(cptr)) ||
+        ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(cptr)) ||
 	((chptr->mode.mode & MODE_REGONLY) && !IsAccount(cptr)))
       return 0;
     else
@@ -844,6 +846,10 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'd';
   if (chptr->mode.mode & MODE_REGISTERED)
     *mbuf++ = 'R';
+  if (chptr->mode.exmode & EXMODE_ADMINONLY)
+    *mbuf++ = 'a';
+  if (chptr->mode.exmode & EXMODE_OPERONLY)
+    *mbuf++ = 'O';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1597,6 +1603,11 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 /*  MODE_UPASS,		'U', */
     0x0, 0x0
   };
+  static int exflags[] = {
+    EXMODE_ADMINONLY,	'a',
+    EXMODE_OPERONLY,	'O',
+    0x0, 0x0
+  };
   static int local_flags[] = {
     MODE_WASDELJOINS,   'd',
     0x0, 0x0
@@ -1606,9 +1617,9 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
   struct Client *app_source; /* where the MODE appears to come from */
 
-  char addbuf[20], addbuf_local[20]; /* accumulates +psmtin, etc. */
+  char addbuf[40], addbuf_local[40]; /* accumulates +psmtinaO, etc. */
   int addbuf_i = 0, addbuf_local_i = 0;
-  char rembuf[20], rembuf_local[20]; /* accumulates -psmtin, etc. */
+  char rembuf[40], rembuf_local[40]; /* accumulates -psmtinaO, etc. */
   int rembuf_i = 0, rembuf_local_i = 0;
   char *bufptr; /* we make use of indirection to simplify the code */
   int *bufptr_i;
@@ -1632,7 +1643,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   assert(0 != mbuf);
 
   /* If the ModeBuf is empty, we have nothing to do */
-  if (mbuf->mb_add == 0 && mbuf->mb_rem == 0 && mbuf->mb_count == 0)
+  if (mbuf->mb_add == 0 && mbuf->mb_rem == 0 && 
+      mbuf->mb_exadd == 0 && mbuf->mb_exrem == 0 && mbuf->mb_count == 0)
     return 0;
 
   /* Ok, if we were given the OPMODE flag, or its a server, hide the source.
@@ -1674,6 +1686,13 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     if (*flag_p & mbuf->mb_add)
       addbuf[addbuf_i++] = flag_p[1];
     else if (*flag_p & mbuf->mb_rem)
+      rembuf[rembuf_i++] = flag_p[1];
+  }
+
+  for (flag_p = exflags; flag_p[0]; flag_p += 2) {
+    if (*flag_p & mbuf->mb_exadd)
+      addbuf[addbuf_i++] = flag_p[1];
+    else if (*flag_p & mbuf->mb_exrem)
       rembuf[rembuf_i++] = flag_p[1];
   }
 
@@ -1970,7 +1989,9 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
   /* We've drained the ModeBuf... */
   mbuf->mb_add = 0;
+  mbuf->mb_exadd = 0;
   mbuf->mb_rem = 0;
+  mbuf->mb_exrem = 0;
   mbuf->mb_count = 0;
 
   /* reinitialize the mode-with-arg slots */
@@ -2020,7 +2041,9 @@ modebuf_init(struct ModeBuf *mbuf, struct Client *source,
   if (IsLocalChannel(chan->chname)) dest &= ~MODEBUF_DEST_SERVER;
 
   mbuf->mb_add = 0;
+  mbuf->mb_exadd = 0;
   mbuf->mb_rem = 0;
+  mbuf->mb_exrem = 0;
   mbuf->mb_source = source;
   mbuf->mb_connect = connect;
   mbuf->mb_channel = chan;
@@ -2060,6 +2083,26 @@ modebuf_mode(struct ModeBuf *mbuf, unsigned int mode)
   } else {
     mbuf->mb_add &= ~mode;
     mbuf->mb_rem |= mode;
+  }
+}
+
+void
+modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
+{
+  assert(0 != mbuf);
+  assert(0 != (mode & (MODE_ADD | MODE_DEL)));
+
+  mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY);
+
+  if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
+    return;
+
+  if (mode & MODE_ADD) {
+    mbuf->mb_exrem &= ~mode;
+    mbuf->mb_exadd |= mode;
+  } else {
+    mbuf->mb_exadd &= ~mode;
+    mbuf->mb_exrem |= mode;
   }
 }
 
@@ -2185,7 +2228,13 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     MODE_DELJOINS,      'D',
     0x0, 0x0
   };
+  static int exflags[] = {
+    EXMODE_ADMINONLY,	'a',
+    EXMODE_OPERONLY,	'O',
+    0x0, 0x0
+  };
   unsigned int add;
+  unsigned int exadd;
   int i, bufpos = 0, len;
   int *flag_p;
   char *key = 0, limitbuf[20];
@@ -2197,6 +2246,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
   buf[0] = '\0';
 
   add = mbuf->mb_add;
+  exadd = mbuf->mb_exadd;
 
   for (i = 0; i < mbuf->mb_count; i++) { /* find keys and limits */
     if (MB_TYPE(mbuf, i) & MODE_ADD) {
@@ -2213,7 +2263,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     }
   }
 
-  if (!add)
+  if (!add && !exadd)
     return;
 
   buf[bufpos++] = '+'; /* start building buffer */
@@ -2221,6 +2271,13 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
   for (flag_p = flags; flag_p[0]; flag_p += 2) {
     if (*flag_p & add) {
       if (!((*flag_p & (MODE_APASS | MODE_UPASS)) && !oplevels))
+        buf[bufpos++] = flag_p[1];
+    }
+  }
+
+  for (flag_p = exflags; flag_p[0]; flag_p += 2) {
+    if (*flag_p & exadd) {
+      if (!(!oplevels)) /* Nothing like a double negative to wake you up in the morning */
         buf[bufpos++] = flag_p[1];
     }
   }
@@ -2295,7 +2352,9 @@ struct ParseState {
   unsigned int dir;
   unsigned int done;
   unsigned int add;
+  unsigned int exadd;
   unsigned int del;
+  unsigned int exdel;
   int args_used;
   int max_args;
   int numbans;
@@ -3297,6 +3356,28 @@ mode_parse_mode(struct ParseState *state, int *flag_p)
 	 (state->add & (MODE_SECRET | MODE_PRIVATE)));
 }
 
+static void
+mode_parse_exmode(struct ParseState *state, int *flag_p)
+{
+  /* If they're not an oper, they can't change modes */
+  if (state->flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER)) {
+    send_notoper(state);
+    return;
+  }
+  if (!state->mbuf)
+    return;
+
+  if (state->dir == MODE_ADD) {
+    state->exadd |= flag_p[0];
+    state->exdel &= ~flag_p[0];
+  } else {
+    state->exadd &= ~flag_p[0];
+    state->exdel |= flag_p[0];
+  }
+
+  assert(0 == (state->exadd & state->exdel));
+}
+
 /**
  * This routine is intended to parse MODE or OPMODE commands and effect the
  * changes (or just build the bounce buffer).
@@ -3337,9 +3418,18 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     MODE_DEL,		'-',
     0x0, 0x0
   };
+
+  static int chan_exflags[] = {
+    EXMODE_ADMINONLY,   'a',
+    EXMODE_OPERONLY,    'O',
+    0x0, 0x0
+  };
+
   int i;
   int *flag_p;
+  int isexflag;
   unsigned int t_mode;
+  unsigned int t_exmode;
   char *modestr;
   struct ParseState state;
 
@@ -3360,7 +3450,9 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
   state.dir = MODE_ADD;
   state.done = 0;
   state.add = 0;
+  state.exadd = 0;
   state.del = 0;
+  state.exdel = 0;
   state.args_used = 0;
   state.max_args = MAXMODEPARAMS;
   state.numbans = 0;
@@ -3379,14 +3471,24 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
   while (*modestr) {
     for (; *modestr; modestr++) {
+      isexflag = 0;
+
       for (flag_p = chan_flags; flag_p[0]; flag_p += 2) /* look up flag */
 	if (flag_p[1] == *modestr)
 	  break;
 
-      if (!flag_p[0]) { /* didn't find it?  complain and continue */
-	if (MyUser(state.sptr))
-	  send_reply(state.sptr, ERR_UNKNOWNMODE, *modestr);
-	continue;
+      if (!flag_p[0]) { /* didn't find it?  try chan_exflags */
+        isexflag = 1;
+
+        for (flag_p = chan_exflags; flag_p[0]; flag_p += 2) /* look up flag */
+          if (flag_p[1] == *modestr)
+            break;
+
+        if (!flag_p[0]) { /* didn't find it?  complain and continue */
+          if (MyUser(state.sptr))
+            send_reply(state.sptr, ERR_UNKNOWNMODE, *modestr);
+          continue;
+        }
       }
 
       switch (*modestr) {
@@ -3419,11 +3521,32 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
       case 'o': /* deal with ops/voice */
       case 'v':
-	mode_parse_client(&state, flag_p);
-	break;
+        mode_parse_client(&state, flag_p);
+        break;
+
+      case 'a': /* deal with admin only */
+        /* If they're not an admin, they can't +/- MODE_ADMINONLY. */
+        if ((feature_bool(FEAT_CHMODE_a) && IsAdmin(sptr)) ||
+            IsServer(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
+        break;
+
+      case 'O': /* deal with oper only */
+        /* If they're not an oper, they can't +/- MODE_OPERONLY. */
+        if ((feature_bool(FEAT_CHMODE_O) && IsOper(sptr)) ||
+            IsServer(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
+        break;
 
       default: /* deal with other modes */
-	mode_parse_mode(&state, flag_p);
+        if (isexflag)
+	  mode_parse_exmode(&state, flag_p);
+        else
+	  mode_parse_mode(&state, flag_p);
 	break;
       } /* switch (*modestr) */
     } /* for (; *modestr; modestr++) */
@@ -3463,7 +3586,9 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
              * have already been sent).
              */
             state.mbuf->mb_add = 0;
+            state.mbuf->mb_exadd = 0;
             state.mbuf->mb_rem = 0;
+            state.mbuf->mb_exrem = 0;
             state.mbuf->mb_count = 0;
             return state.args_used;
           } else {
@@ -3496,16 +3621,27 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     return state.args_used; /* tell our parent how many args we gobbled */
 
   t_mode = state.chptr->mode.mode;
+  t_exmode = state.chptr->mode.exmode;
 
   if (state.del & t_mode) { /* delete any modes to be deleted... */
     modebuf_mode(state.mbuf, MODE_DEL | (state.del & t_mode));
 
     t_mode &= ~state.del;
   }
+  if (state.exdel & t_exmode) { /* delete any extended modes to be deleted... */
+    modebuf_exmode(state.mbuf, MODE_DEL | (state.exdel & t_exmode));
+
+    t_exmode &= ~state.exdel;
+  }
   if (state.add & ~t_mode) { /* add any modes to be added... */
     modebuf_mode(state.mbuf, MODE_ADD | (state.add & ~t_mode));
 
     t_mode |= state.add;
+  }
+  if (state.exadd & ~t_exmode) { /* add any extended modes to be added... */
+    modebuf_exmode(state.mbuf, MODE_ADD | (state.exadd & ~t_exmode));
+
+    t_exmode |= state.exadd;
   }
 
   if (state.flags & MODE_PARSE_SET) { /* set the channel modes */
@@ -3514,6 +3650,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
       mode_invite_clear(state.chptr);
 
     state.chptr->mode.mode = t_mode;
+    state.chptr->mode.exmode = t_exmode;
   }
 
   if (state.flags & MODE_PARSE_WIPEOUT) {

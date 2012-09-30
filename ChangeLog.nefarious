@@ -1,6 +1,35 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_CHMODE_a and FEAT_CHMODE_O
+
+	* doc/readme.features: Added FEAT_CHMODE_a and FEAT_CHMODE_O
+
+	* include/channel.h: Modified struct Mode and struct ModeBuf
+
+	* include/ircd_features.h: Added FEAT_CHMODE_a and FEAT_CHMODE_O
+
+	* include/numeric.h: Added ERR_ADMINONLYCHAN and ERR_OPERONLYCHAN
+
+	* include/supported.h: Added channel modes +a and +O
+
+	* ircd/channel.c: Added channel modes +a and +O and expanded channel
+	mode flags system
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_a and FEAT_CHMODE_O
+
+	* ircd/m_burst.c: Added channel modes +a and +O
+
+	* ircd/m_clearmode.c: Added channel modes +a and +O
+
+	* ircd/m_join.c: Added channel modes +a and +O
+
+	* ircd/s_err.c: Added ERR_ADMINONLYCHAN and ERR_OPERONLYCHAN
+
+	* ircd/s_user.c: Added channel modes +a and +O
+
 2012-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Fixed invalid default value for DEFAULT_LIST_PARAM

@@ -135,6 +135,28 @@ netride_modes(int parc, char **parv, const char *curr_key)
   return result;
 }
 
+static int
+netride_exmodes(int parc, char **parv, const char *curr_key)
+{
+  char *modes = parv[0];
+  int result = 0;
+
+  assert(modes && modes[0] == '+');
+  while (*modes) {
+    switch (*modes++) {
+    case '-':
+      return -1;
+    case 'a':
+      result |= EXMODE_ADMINONLY;
+      break;
+    case 'O':
+      result |= EXMODE_OPERONLY;
+      break;
+    }
+  }
+  return result;
+}
+
 /*
  * ms_burst - server message handler
  *
@@ -281,17 +303,18 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      */
     for (param = 3; param < parc; param++)
     {
-      int check_modes;
+      int check_modes, check_exmodes;
       if (parv[param][0] != '+')
         continue;
       check_modes = netride_modes(parc - param, parv + param, chptr->mode.key);
-      if (check_modes < 0)
+      check_exmodes = netride_exmodes(parc - param, parv + param, chptr->mode.key);
+      if ((check_modes < 0) || (check_exmodes < 0))
       {
         if (chptr->users == 0)
           sub1_from_channel(chptr);
         return protocol_violation(sptr, "Invalid mode string in BURST");
       }
-      else if (check_modes)
+      else if (check_modes || check_exmodes)
       {
         /* Clear any outstanding rogue invites */
         mode_invite_clear(chptr);
@@ -306,7 +329,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
            */
           if (!(check_modes & MODE_KEY)
               && (!(check_modes & MODE_INVITEONLY) || IsAnOper(member->user))
-              && (!(check_modes & MODE_REGONLY) || IsAccount(member->user)))
+              && (!(check_modes & MODE_REGONLY) || IsAccount(member->user))
+              && (!(check_exmodes & EXMODE_ADMINONLY) || IsAdmin(member->user))
+              && (!(check_exmodes & EXMODE_OPERONLY) || IsAnOper(member->user)))
             continue;
           sendcmdto_serv_butone(&me, CMD_KICK, NULL, "%H %C :Net Rider", chptr, member->user);
           sendcmdto_channel_butserv_butone(&his, CMD_KICK, chptr, NULL, 0, "%H %C :Net Rider", chptr, member->user);

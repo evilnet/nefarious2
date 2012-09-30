@@ -1106,6 +1106,18 @@ SETHOST
 
 Enables the /SETHOST command for users and operators.
 
+CHMODE_a
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode a (admin only) to be used.
+
+CHMODE_O
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode O (oper only) to be used.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

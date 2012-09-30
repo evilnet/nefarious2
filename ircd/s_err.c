@@ -972,7 +972,7 @@ static Numeric replyTable[] = {
 /* 469 */
   { 0 },
 /* 470 */
-  { 0 },
+  { ERR_OPERONLYCHAN, "%s :Cannot join channel (+O)", "470" },
 /* 471 */
   { ERR_CHANNELISFULL, "%s :Cannot join channel (+l)", "471" },
 /* 472 */
@@ -992,7 +992,7 @@ static Numeric replyTable[] = {
 /* 479 */
   { ERR_BADCHANNAME, "%s :Cannot join channel (access denied on this server)", "479" },
 /* 480 */
-  { 0 },
+  { ERR_ADMINONLYCHAN, "%s :Cannot join channel (+a)", "480" },
 /* 481 */
   { ERR_NOPRIVILEGES, ":Permission Denied: Insufficient privileges", "481" },
 /* 482 */

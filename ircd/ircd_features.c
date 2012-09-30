@@ -230,7 +230,7 @@ feature_notify_oplevels(void)
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
-  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,imnpstrDdR" : "b,k,l,imnpstrDdR");
+  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aimnOpstrDdR" : "b,k,l,aimnOpstrDdR");
 }
 
 /** Handle update to FEAT_GEOIP_ENABLE. */
@@ -548,6 +548,10 @@ static struct FeatureDesc {
   F_B(HOST_IN_TOPIC, 0, 1, 0),
   F_B(HIS_STATS_s, 0, 1, 0),
   F_B(SETHOST, 0, 1, 0),
+
+  /* Extended channel modes */
+  F_B(CHMODE_a, 0, 1, 0),
+  F_B(CHMODE_O, 0, 1, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

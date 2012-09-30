@@ -2290,7 +2290,7 @@ void init_isupport(void)
   add_isupport_s("CHANTYPES", feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#");
   add_isupport_s("PREFIX", "(ov)@+");
   add_isupport_s("STATUSMSG", "@+");
-  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,imnpstrDdR" : "b,k,l,imnpstrDdR");
+  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aimnOpstrDdR" : "b,k,l,aimnOpstrDdR");
   add_isupport_s("CASEMAPPING", "rfc1459");
   add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
   add_isupport_s("MAXLIST", imaxlist);

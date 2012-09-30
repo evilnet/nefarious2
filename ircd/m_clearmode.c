@@ -126,8 +126,14 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
     MODE_DELJOINS,      'D',
     0x0, 0x0
   };
+  static int exflags[] = {
+    EXMODE_ADMINONLY,	'a',
+    EXMODE_OPERONLY,	'O',
+    0x0, 0x0
+  };
   int *flag_p;
   unsigned int del_mode = 0;
+  unsigned int del_exmode = 0;
   char control_buf[20];
   int control_buf_i = 0;
   struct ModeBuf mbuf;
@@ -141,9 +147,14 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
 	del_mode |= flag_p[0];
 	break;
       }
+    for (flag_p = exflags; flag_p[0]; flag_p += 2)
+      if (*control == flag_p[1]) {
+        del_exmode |= flag_p[0];
+        break;
+      }
   }
 
-  if (!del_mode)
+  if (!del_mode && !del_exmode)
     return 0; /* nothing to remove; ho hum. */
 
   modebuf_init(&mbuf, sptr, cptr, chptr,
@@ -152,7 +163,9 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
 		MODEBUF_DEST_HACK4));  /* Generate a HACK(4) notice */
 
   modebuf_mode(&mbuf, MODE_DEL | (del_mode & chptr->mode.mode));
+  modebuf_mode(&mbuf, MODE_DEL | (del_exmode & chptr->mode.exmode));
   chptr->mode.mode &= ~del_mode; /* and of course actually delete them */
+  chptr->mode.exmode &= ~del_exmode;
 
   /* If we're removing invite, remove all the invites */
   if (del_mode & MODE_INVITEONLY)
@@ -221,6 +234,10 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
   /* Ok, build control string again */
   for (flag_p = flags; flag_p[0]; flag_p += 2)
     if (del_mode & flag_p[0])
+      control_buf[control_buf_i++] = flag_p[1];
+
+  for (flag_p = exflags; flag_p[0]; flag_p += 2)
+    if (del_exmode & flag_p[0])
       control_buf[control_buf_i++] = flag_p[1];
 
   control_buf[control_buf_i] = '\0';

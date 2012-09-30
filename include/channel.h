@@ -112,12 +112,16 @@ struct Client;
 #define MODE_APASS	0x200000
 #define MODE_WASDELJOINS 0x400000 	/**< Not DELJOINS, but some joins 
 					 * pending */
+
+#define EXMODE_ADMINONLY 0x00000001	/**< +a User mode +a only may join */
+#define EXMODE_OPERONLY  0x00000002	/**< +O User mode +o only may join */
+
 /** mode flags which take another parameter (With PARAmeterS)
  */
 #define MODE_WPARAS     (MODE_CHANOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
 
 /** Available Channel modes */
-#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AbdiklmnopstUvrDR" : "bdiklmnopstvrDR"
+#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabdiklmnOopstUvrDR" : "abdiklmnOopstvrDR"
 /** Available Channel modes that take parameters */
 #define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? "AbkloUv" : "bklov"
 
@@ -235,6 +239,7 @@ struct Membership {
 /** Mode information for a channel */
 struct Mode {
   unsigned int mode;
+  unsigned int exmode;
   unsigned int limit;
   char key[KEYLEN + 1];
   char upass[KEYLEN + 1];
@@ -298,7 +303,9 @@ struct ListingArgs {
 
 struct ModeBuf {
   unsigned int		mb_add;		/**< Modes to add */
+  unsigned int		mb_exadd;	/**< Extended modes to add */
   unsigned int		mb_rem;		/**< Modes to remove */
+  unsigned int		mb_exrem;	/**< Extended modes to remove */
   struct Client	       *mb_source;	/**< Source of MODE changes */
   struct Client	       *mb_connect;	/**< Connection of MODE changes */
   struct Channel       *mb_channel;	/**< Channel they affect */

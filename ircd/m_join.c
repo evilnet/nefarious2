@@ -203,6 +203,10 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         err = ERR_CHANNELISFULL;
       else if ((chptr->mode.mode & MODE_REGONLY) && !IsAccount(sptr))
         err = ERR_NEEDREGGEDNICK;
+      else if ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(sptr))
+        err = ERR_ADMINONLYCHAN;
+      else if ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(sptr))
+        err = ERR_OPERONLYCHAN;
       else if (find_ban(sptr, chptr->banlist))
         err = ERR_BANNEDFROMCHAN;
       else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)))
@@ -231,6 +235,8 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         case ERR_BANNEDFROMCHAN: err = 'b'; break;
         case ERR_BADCHANNELKEY:  err = 'k'; break;
         case ERR_NEEDREGGEDNICK: err = 'r'; break;
+        case ERR_ADMINONLYCHAN:  err = 'a'; break;
+        case ERR_OPERONLYCHAN:   err = 'O'; break;
         default: err = '?'; break;
         }
         /* send accountability notice */

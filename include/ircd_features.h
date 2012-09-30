@@ -193,6 +193,10 @@ enum Feature {
   FEAT_HIS_STATS_s,
   FEAT_SETHOST,
 
+  /* Extended channel modes */
+  FEAT_CHMODE_a,
+  FEAT_CHMODE_O,
+
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,
   FEAT_EPATH,
