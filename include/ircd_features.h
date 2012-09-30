@@ -192,7 +192,7 @@ enum Feature {
   FEAT_HOST_IN_TOPIC,
   FEAT_HIS_STATS_s,
   FEAT_SETHOST,
-  FEAT_FLEXABLEKEYS,
+  FEAT_FLEXIBLEKEYS,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,

@@ -1106,7 +1106,7 @@ SETHOST
 
 Enables the /SETHOST command for users and operators.
 
-FLEXABLEKEYS
+FLEXIBLEKEYS
  * Type: boolean
  * Default: FALSE
 

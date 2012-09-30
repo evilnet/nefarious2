@@ -199,9 +199,9 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         /* XtraOp bypasses all other checks. */
       } else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)))
         err = ERR_BADCHANNELKEY;
-      else if (*chptr->mode.key && feature_bool(FEAT_FLEXABLEKEYS)) {
+      else if (*chptr->mode.key && feature_bool(FEAT_FLEXIBLEKEYS)) {
         /* Assume key checked by previous condition was found to be correct
-           and allow join because FEAT_FLEXABLEKEYS was enabled */
+           and allow join because FEAT_FLEXIBLEKEYS was enabled */
       } else if (chptr->mode.mode & MODE_INVITEONLY)
         err = ERR_INVITEONLYCHAN;
       else if (chptr->mode.limit && (chptr->users >= chptr->mode.limit))

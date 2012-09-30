@@ -3,6 +3,18 @@
 
 2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Corrected the spelling of FLEXIBLEKEYS
+
+	* doc/readme.features: Corrected the spelling of FLEXIBLEKEYS
+
+	* include/ircd_features.h: Corrected the spelling of FLEXIBLEKEYS
+
+	* ircd/ircd_features.c: Corrected the spelling of FLEXIBLEKEYS
+
+	* ircd/m_join.c: Corrected the spelling of FLEXIBLEKEYS
+
+2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_check.c: Swapped GeoIP data and Real Name around in
 	CHECK output
 
