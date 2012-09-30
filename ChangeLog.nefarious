@@ -3,6 +3,11 @@
 
 2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_check.c: Swapped GeoIP data and Real Name around in
+	CHECK output
+
+2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added F:FLEXABLEKEYS
 
 	* doc/readme.features: Added F:FLEXABLEKEYS

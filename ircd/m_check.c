@@ -373,6 +373,9 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
+   ircd_snprintf(0, outbuf, sizeof(outbuf), "      Real Name:: %s%c", cli_info(acptr), COLOR_OFF);
+   send_reply(sptr, RPL_DATASTR, outbuf);
+
    if (feature_bool(FEAT_GEOIP_ENABLE) && IsGeoIP(acptr))
    {
      ircd_snprintf(0, outbuf, sizeof(outbuf), "        Country:: %s (%s)", cli_countryname(acptr), cli_countrycode(acptr));
@@ -381,9 +384,6 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      ircd_snprintf(0, outbuf, sizeof(outbuf), "      Continent:: %s (%s)", cli_continentname(acptr), cli_continentcode(acptr));
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
-
-   ircd_snprintf(0, outbuf, sizeof(outbuf), "      Real Name:: %s%c", cli_info(acptr), COLOR_OFF);
-   send_reply(sptr, RPL_DATASTR, outbuf);
 
    if (IsService(cli_user(acptr)->server)) {
      if (acptr)
