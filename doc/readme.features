@@ -1106,6 +1106,13 @@ SETHOST
 
 Enables the /SETHOST command for users and operators.
 
+FLEXABLEKEYS
+ * Type: boolean
+ * Default: FALSE
+
+Channel key rules over all modes. Eg a user can join a channel with the correct
+key and be able to get around modes like limit and invite.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

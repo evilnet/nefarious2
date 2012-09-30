@@ -197,6 +197,11 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         /* Invites bypass these other checks. */
       } else if (IsXtraOp(sptr)) {
         /* XtraOp bypasses all other checks. */
+      } else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)))
+        err = ERR_BADCHANNELKEY;
+      else if (*chptr->mode.key && feature_bool(FEAT_FLEXABLEKEYS)) {
+        /* Assume key checked by previous condition was found to be correct
+           and allow join because FEAT_FLEXABLEKEYS was enabled */
       } else if (chptr->mode.mode & MODE_INVITEONLY)
         err = ERR_INVITEONLYCHAN;
       else if (chptr->mode.limit && (chptr->users >= chptr->mode.limit))
@@ -209,8 +214,6 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         err = ERR_OPERONLYCHAN;
       else if (find_ban(sptr, chptr->banlist))
         err = ERR_BANNEDFROMCHAN;
-      else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)))
-        err = ERR_BADCHANNELKEY;
 
       /* An oper with WALK_LCHAN privilege can join a local channel
        * he otherwise could not join by using "OVERRIDE" as the key.

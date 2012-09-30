@@ -3,6 +3,18 @@
 
 2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added F:FLEXABLEKEYS
+
+	* doc/readme.features: Added F:FLEXABLEKEYS
+
+	* include/ircd_features.h: Added F:FLEXABLEKEYS
+
+	* ircd/ircd_features.c: Added F:FLEXABLEKEYS
+
+	* ircd/m_join.c: Added F:FLEXABLEKEYS
+
+2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_CHMODE_a and FEAT_CHMODE_O
 
 	* doc/readme.features: Added FEAT_CHMODE_a and FEAT_CHMODE_O
