@@ -865,6 +865,8 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'O';
   if (chptr->mode.exmode & EXMODE_REGMODERATED)
     *mbuf++ = 'M';
+  if (chptr->mode.exmode & EXMODE_NONOTICES)
+    *mbuf++ = 'N';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1622,6 +1624,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     EXMODE_ADMINONLY,	'a',
     EXMODE_OPERONLY,	'O',
     EXMODE_REGMODERATED,	'M',
+    EXMODE_NONOTICES,	'N',
     0x0, 0x0
   };
   static int local_flags[] = {
@@ -2109,7 +2112,7 @@ modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
   assert(0 != (mode & (MODE_ADD | MODE_DEL)));
 
   mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY |
-           EXMODE_REGMODERATED);
+           EXMODE_REGMODERATED | EXMODE_NONOTICES);
 
   if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
     return;
@@ -2249,6 +2252,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     EXMODE_ADMINONLY,	'a',
     EXMODE_OPERONLY,	'O',
     EXMODE_REGMODERATED,	'M',
+    EXMODE_NONOTICES,	'N',
     0x0, 0x0
   };
   unsigned int add;
@@ -3441,6 +3445,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     EXMODE_ADMINONLY,   'a',
     EXMODE_OPERONLY,    'O',
     EXMODE_REGMODERATED,	'M',
+    EXMODE_NONOTICES,	'N',
     0x0, 0x0
   };
 
@@ -3554,6 +3559,14 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
       case 'M': /* deal with registered + moderated */
         if (feature_bool(FEAT_CHMODE_M) || IsServer(sptr) ||
+            IsOper(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
+        break;
+
+      case 'N': /* deal with no notices */
+        if (feature_bool(FEAT_CHMODE_N) || IsServer(sptr) ||
             IsOper(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);
         else

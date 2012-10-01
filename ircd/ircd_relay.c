@@ -135,6 +135,9 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
       check_target_limit(sptr, chptr, chptr->chname, 0))
     return;
 
+  if (chptr->mode.exmode & EXMODE_NONOTICES)
+    return;
+
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
 			   SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
@@ -190,7 +193,8 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
    * This first: Almost never a server/service
    * Servers may have channel services, need to check for it here
    */
-  if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
+  if ((client_can_send_to_channel(sptr, chptr, 1) &&
+       !(chptr->mode.exmode & EXMODE_NONOTICES)) || IsChannelService(sptr)) {
     sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
 			     SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
   }

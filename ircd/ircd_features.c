@@ -553,6 +553,7 @@ static struct FeatureDesc {
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),
   F_B(CHMODE_M, 0, 1, 0),
+  F_B(CHMODE_N, 0, 1, 0),
   F_B(CHMODE_O, 0, 1, 0),
 
   /* Some misc. Nefarious default paths */

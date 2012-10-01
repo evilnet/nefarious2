@@ -1125,6 +1125,12 @@ CHMODE_M
 
 Allows channel mode M (account only) to be used.
 
+CHMODE_N
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode N (no notice) to be used.
+
 CHMODE_O
  * Type: boolean
  * Default: TRUE
