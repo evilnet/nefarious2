@@ -717,6 +717,10 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
   if (member->channel->mode.mode & MODE_MODERATED)
     return 0;
 
+  /* Same as above but includes logged in users as priviledged too */
+  if (member->channel->mode.exmode & EXMODE_REGMODERATED && !IsAccount(member->user))
+    return 0;
+
   /* If only logged in users may join and you're not one, you can't speak. */
   if (member->channel->mode.mode & MODE_REGONLY && !IsAccount(member->user))
     return 0;
@@ -766,6 +770,7 @@ int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int r
     if ((chptr->mode.mode & (MODE_NOPRIVMSGS|MODE_MODERATED)) ||
         ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(cptr)) ||
         ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(cptr)) ||
+        ((chptr->mode.exmode & EXMODE_REGMODERATED) && !IsAccount(cptr)) ||
 	((chptr->mode.mode & MODE_REGONLY) && !IsAccount(cptr)))
       return 0;
     else
@@ -850,6 +855,8 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'a';
   if (chptr->mode.exmode & EXMODE_OPERONLY)
     *mbuf++ = 'O';
+  if (chptr->mode.exmode & EXMODE_REGMODERATED)
+    *mbuf++ = 'M';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1606,6 +1613,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   static int exflags[] = {
     EXMODE_ADMINONLY,	'a',
     EXMODE_OPERONLY,	'O',
+    EXMODE_REGMODERATED,	'M',
     0x0, 0x0
   };
   static int local_flags[] = {
@@ -2092,7 +2100,8 @@ modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
   assert(0 != mbuf);
   assert(0 != (mode & (MODE_ADD | MODE_DEL)));
 
-  mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY);
+  mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY |
+           EXMODE_REGMODERATED);
 
   if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
     return;
@@ -2231,6 +2240,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
   static int exflags[] = {
     EXMODE_ADMINONLY,	'a',
     EXMODE_OPERONLY,	'O',
+    EXMODE_REGMODERATED,	'M',
     0x0, 0x0
   };
   unsigned int add;
@@ -3422,6 +3432,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
   static int chan_exflags[] = {
     EXMODE_ADMINONLY,   'a',
     EXMODE_OPERONLY,    'O',
+    EXMODE_REGMODERATED,	'M',
     0x0, 0x0
   };
 
@@ -3528,6 +3539,14 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
         /* If they're not an admin, they can't +/- MODE_ADMINONLY. */
         if ((feature_bool(FEAT_CHMODE_a) && IsAdmin(sptr)) ||
             IsServer(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
+        break;
+
+      case 'M': /* deal with registered + moderated */
+        if (feature_bool(FEAT_CHMODE_M) || IsServer(sptr) ||
+            IsOper(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);
         else
           send_reply(sptr, ERR_NOPRIVILEGES);

@@ -1119,6 +1119,12 @@ CHMODE_a
 
 Allows channel mode a (admin only) to be used.
 
+CHMODE_M
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode M (account only) to be used.
+
 CHMODE_O
  * Type: boolean
  * Default: TRUE

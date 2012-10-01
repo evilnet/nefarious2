@@ -113,15 +113,16 @@ struct Client;
 #define MODE_WASDELJOINS 0x400000 	/**< Not DELJOINS, but some joins 
 					 * pending */
 
-#define EXMODE_ADMINONLY 0x00000001	/**< +a User mode +a only may join */
-#define EXMODE_OPERONLY  0x00000002	/**< +O User mode +o only may join */
+#define EXMODE_ADMINONLY    0x00000001	/**< +a User mode +a only may join */
+#define EXMODE_OPERONLY     0x00000002	/**< +O User mode +o only may join */
+#define EXMODE_REGMODERATED 0x00000004	/**< +M Like +m but allows registered users too */
 
 /** mode flags which take another parameter (With PARAmeterS)
  */
 #define MODE_WPARAS     (MODE_CHANOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
 
 /** Available Channel modes */
-#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabdiklmnOopstUvrDR" : "abdiklmnOopstvrDR"
+#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabdiklMmnOopstUvrDR" : "abdiklMmnOopstvrDR"
 /** Available Channel modes that take parameters */
 #define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? "AbkloUv" : "bklov"
 

@@ -1,6 +1,24 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-10-01  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added F:CHMODE_M
+
+	* doc/readme.features: Added F:CHMODE_M
+
+	* include/channel.h: Added channel mode +M
+
+	* include/ircd_features.h: Added F:CHMODE_M
+
+	* include/supported.h: Added channel mode +M
+
+	* ircd/channel.c: Added channel mode +M
+
+	* ircd/ircd_features.c: Added F:CHMODE_M
+
+	* ircd/s_user.c: Added channel mode +M
+
 2012-09-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Corrected the spelling of FLEXIBLEKEYS
