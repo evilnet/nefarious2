@@ -129,6 +129,7 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
   static int exflags[] = {
     EXMODE_ADMINONLY,	'a',
     EXMODE_OPERONLY,	'O',
+    EXMODE_REGMODERATED,	'M',
     0x0, 0x0
   };
   int *flag_p;
