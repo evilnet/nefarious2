@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-10-01  Matthew beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Forgot to add checks to stop non admins speaking
+	in +a channels and non IRCops speaking in +O channels.
+
 2012-10-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added F:CHMODE_M
