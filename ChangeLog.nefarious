@@ -1,6 +1,14 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-10-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/channel.h: Minor reordering or channel mode lists.
+
+	* include/supported.h: Minor reordering or channel mode lists.
+
+	* ircd/s_user.c: Minor reordering or channel mode lists.
+
 2012-10-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added F:CHMODE_N
