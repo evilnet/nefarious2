@@ -1,6 +1,16 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-10-02  Matthew Beeching  <jobe@mdbnetco.uk>
+
+	 include/channel.h: Added channel mode +z (persistant channels.)
+
+	 include/supported.h: Added channel mode +z (persistant channels.)
+
+	 ircd/channel.c: Added channel mode +z (persistant channels.)
+
+	 ircd/s_user.c: Added channel mode +z (persistant channels.)
+
 2012-10-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/ircd_features.c: Forgot to update a channel modes list.

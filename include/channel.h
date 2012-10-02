@@ -117,13 +117,14 @@ struct Client;
 #define EXMODE_OPERONLY     0x00000002	/**< +O User mode +o only may join */
 #define EXMODE_REGMODERATED 0x00000004	/**< +M Like +m but allows registered users too */
 #define EXMODE_NONOTICES    0x00000008	/**< +N No notices allowed to the channel */
+#define EXMODE_PERSIST      0x00000010  /**< +z Channel remains even if empty */
 
 /** mode flags which take another parameter (With PARAmeterS)
  */
 #define MODE_WPARAS     (MODE_CHANOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
 
 /** Available Channel modes */
-#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabDdiklMmNnOopRrstUv" : "abDdiklMmNnOopRrstv"
+#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabDdiklMmNnOopRrstUvz" : "abDdiklMmNnOopRrstvz"
 /** Available Channel modes that take parameters */
 #define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? "AbkloUv" : "bklov"
 
