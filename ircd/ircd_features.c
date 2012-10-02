@@ -230,7 +230,7 @@ feature_notify_oplevels(void)
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
-  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aiMmnOpstrDdR" : "b,k,l,aiMmnOpstrDdR");
+  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aDdiMmNnOpRrstz" : "b,k,l,aDdiMmNnOpRrstz");
 }
 
 /** Handle update to FEAT_GEOIP_ENABLE. */

@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-10-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/ircd_features.c: Forgot to update a channel modes list.
+
 2012-10-02  Matthew beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Forgot to clear extended channel modes in
