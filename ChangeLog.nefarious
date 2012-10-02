@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-10-02  Matthew beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Forgot to clear extended channel modes in
+	sub1_from_channel().
+
 2012-10-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/channel.h: Minor reordering or channel mode lists.

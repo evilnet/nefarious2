@@ -280,6 +280,7 @@ int sub1_from_channel(struct Channel* chptr)
   {
     struct Ban *link, *next;
     chptr->mode.mode = 0;
+    chptr->mode.exmode = 0;
     *chptr->mode.key = '\0';
     while (chptr->invites)
       del_invite(chptr->invites->value.cptr, chptr);
