@@ -191,7 +191,7 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                  timestamp.  This can be distinguished from case #1 by
                  checking IsBurstOrBurstAck(cli_user(sptr)->server).
 	    */
-	   !(chptr->users == 0 && !chptr->mode.apass[0]))) {
+	   !(chptr->users == 0 && !chptr->mode.apass[0] && !(chptr->mode.exmode & EXMODE_PERSIST)))) {
         if (!IsBurstOrBurstAck(cli_user(sptr)->server)) {
           modebuf_init(&mbuf, sptr, cptr, chptr,
                        (MODEBUF_DEST_SERVER |  /* Send mode to server */

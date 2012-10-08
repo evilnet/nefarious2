@@ -3,6 +3,14 @@
 
 2012-10-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_create.c: Fix for users joining an empty +z channel getting
+	opped.
+
+	* ircd/m_svsjoin.c: Fix for users joining an empty +z channel getting
+	opped.
+
+2012-10-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_join.c: Fix for users joining an empty +z channel getting
 	opped.
 

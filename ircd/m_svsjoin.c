@@ -164,7 +164,7 @@ int ms_svsjoin(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     } else {
       int flags = CHFL_DEOPPED;
 
-      if (chptr->users == 0 && !chptr->mode.apass[0]) {
+      if (chptr->users == 0 && !chptr->mode.apass[0] && !(chptr->mode.exmode & EXMODE_PERSIST)) {
         /* Joining a zombie channel (zannel): give ops and increment TS. */
         flags = CHFL_CHANOP;
         chptr->creationtime++;
