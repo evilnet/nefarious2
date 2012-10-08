@@ -189,7 +189,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         flags = CHFL_CHANOP | CHFL_CHANNEL_MANAGER;
       else if (key && !strcmp(key, chptr->mode.upass))
         flags = CHFL_CHANOP;
-      else if (chptr->users == 0 && !chptr->mode.apass[0]) {
+      else if (chptr->users == 0 && !chptr->mode.apass[0] && !(chptr->mode.exmode & EXMODE_PERSIST)) {
         /* Joining a zombie channel (zannel): give ops and increment TS. */
         flags = CHFL_CHANOP;
         chptr->creationtime++;
@@ -394,7 +394,8 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
          timestamp.)
       */
       if (creation && (creation < chptr->creationtime ||
-		       (!chptr->mode.apass[0] && chptr->users == 0))) {
+		       (!(chptr->mode.exmode & EXMODE_PERSIST) &&
+		        !chptr->mode.apass[0] && chptr->users == 0))) {
         struct Membership *member;
         struct ModeBuf mbuf;
 
