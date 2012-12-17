@@ -371,6 +371,8 @@ struct Client {
 #define cli_username(cli)	((cli)->cli_username)
 /** Get client realname (information field). */
 #define cli_info(cli)		((cli)->cli_info)
+/** Get client account string. */
+#define cli_account(cli)       (cli_user(cli) ? cli_user(cli)->account : "0")
 /** Get client WEBIRC IP address. */
 #define cli_webircip(cli)       ((cli)->cli_webircip)
 /** Get client WEBIRC host name. */

@@ -169,7 +169,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   ircd_strncpy(cli_webirchost(sptr), cli_sockhost(sptr), HOSTLEN);
 
   /* Undo original IP connection in IPcheck. */
-  IPcheck_connect_fail(sptr);
+  IPcheck_connect_fail(sptr, 1);
   /* Need to disconnect original IP otherwise the count will never go down. */
   if (IsIPChecked(sptr))
     IPcheck_disconnect(sptr);

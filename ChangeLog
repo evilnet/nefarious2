@@ -1,3 +1,84 @@
+2012-10-15  Michael Poole <mdpoole@troilus.org>
+
+	* include/IPcheck.h (IPcheck_connect_fail): Add new 'disconnect'
+	parameter.  This treats the failure as a disconnection from the
+	client's current IP address.
+
+	* ircd/IPcheck.c (ip_registry_connect_fail): Likewise.
+	(IPcheck_connect_fail): Pass it through.
+
+	* ircd/m_nick.c (m_nick): Pass zero for the new parameter.
+	(ms_nick): Likewise.
+
+	* ircd/s_auth.c (preregister_user): Likewise.
+	(iauth_cmd_ip_address): Pass one for the new parameter.
+
+2012-06-20  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/ircd_string.c (ipmask_parse): Return zero if there is junk
+	after eight valid IPv6 address elements.
+
+2012-06-13  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/s_stats.c (stats_configured_links): Correctly distinguish
+	local Operator blocks from global Operator blocks.
+
+2012-05-31  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/m_gline.c (ms_gline): If the mask was empty after removing
+	the command character(s), reject the command.
+	(mo_gline): Likewise.
+
+2012-05-31  Michael Poole <mdpoole@troilus.org>
+
+	* include/channel.h (infochanmodes): Add +d channel mode.
+
+	* include/client.h (infousermodes): Add +O user mode.
+
+2012-05-31  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/gline.c (gline_add): Add length checks for badchan and
+	realname G-lines, comparable to the existing check for traditional
+	G-lines.
+
+	* ircd/s_err.c (ERR_LONGMASK): Remove extra space in format string.
+
+
+2012-05-31  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/m_server.c (check_loop_and_lh): Mention the mechanism used
+	to control HUB.
+
+2012-05-09  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/s_user.c (set_user_mode): When a user deopers, revoke their
+	oper privileges in addition to their oper user mode.
+
+2012-05-09  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/m_who.c (m_who): Only set WHOSELECT_EXTRA for current
+	opers.  Because privileges are kept after -o, this would let
+	de-opered clients use WHOX.
+
+2012-05-07  Michael Poole <mdpoole@troilus.org>
+
+	* include/client.h (cli_account): New helper macro to return the
+	client's account name, or "0" for unstamped clients.
+
+	* ircd/s_misc.c (exit_client): Use that when logging the client's
+	exit.
+
+2012-05-07  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/gline.c (count_users): Use the client's real host, rather
+	than their masked host, for +x users.
+
+2012-04-29  Michael Poole <mdpoole@troilus.org>
+
+	* ircd/crule.c (crule_connected): Fix logic for ignoring
+	non-server Client structures.
+	(crule_via): Likewise.
+
 2012-04-29  Michael Poole <mdpoole@troilus.org>
 
 	* */.cvsignore: Rename to .gitignore.

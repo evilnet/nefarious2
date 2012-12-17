@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "gline.h"
+#include "channel.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -384,7 +385,7 @@ count_users(char *mask, int flags)
       continue;
 
     ircd_snprintf(0, namebuf, sizeof(namebuf), "%s@%s",
-		  cli_user(acptr)->username, cli_user(acptr)->host);
+		  cli_user(acptr)->username, cli_user(acptr)->realhost);
     ircd_snprintf(0, ipbuf, sizeof(ipbuf), "%s@%s", cli_user(acptr)->username,
 		  ircd_ntoa(&cli_ip(acptr)));
 
@@ -490,13 +491,21 @@ gline_add(struct Client *cptr, struct Client *sptr, char *userhost,
   if (*userhost == '#' || *userhost == '&') {
     if ((flags & GLINE_LOCAL) && !HasPriv(sptr, PRIV_LOCAL_BADCHAN))
       return send_reply(sptr, ERR_NOPRIVILEGES);
+    /* Allow maximum channel name length, plus margin for wildcards. */
+    if (strlen(userhost+1) >= CHANNELLEN + 6)
+      return send_reply(sptr, ERR_LONGMASK);
 
     flags |= GLINE_BADCHAN;
     user = userhost;
     host = NULL;
   } else if (*userhost == '$') {
     switch (userhost[1]) {
-      case 'R': flags |= GLINE_REALNAME; break;
+      case 'R':
+        /* Allow REALLEN for the real name, plus margin for wildcards. */
+        if (strlen(userhost+2) >= REALLEN + 6)
+          return send_reply(sptr, ERR_LONGMASK);
+        flags |= GLINE_REALNAME;
+        break;
       case 'V': flags |= GLINE_VERSION; break;
       default:
         /* uh, what to do here? */
