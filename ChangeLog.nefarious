@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2012-12-17  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* */.cvsignore: Ported ircu revision 9a5a983eb43fc918ad5835622afa382817b3ecc5 
+
 2012-11-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/whocmds.c: Forgot to add support for the multi-prefix CAP in
