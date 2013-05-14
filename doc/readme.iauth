@@ -262,6 +262,28 @@ Comments: Used to indicate to the iauth instance that the server
 Compatibility: This is an Undernet extension and ircd does not send
   it.
 
+W - WEBIRC Message Received From Client
+Syntax: <id> W <password> <username> <hostname> <ip>
+Example: 5 W password cgiirc localhost 127.0.0.1
+States: REGISTER
+Next State: -
+Comments: Used to forward a WEBIRC request from the client to iauthd
+  for validation and application. This message is enabled by requesting
+  the 'w' policy.
+Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
+  not send it.
+
+w - WEBIRC Message Received and Trusted From Client
+Syntax: <id> w <password> <username> <hostname> <ip>
+Example: 5 w password cgiirc localhost 127.0.0.1
+States: REGISTER
+Next State: -
+Comments: Used to forward a WEBIRC request from the client to iauthd
+  having already been validated and applied by Nefarious. This message
+  is enabled by requesting the 'w' policy.
+Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
+  not send it.
+
 IAUTH MESSAGES
 ==============
 
@@ -322,8 +344,11 @@ Comments: Sets policy options for the iauth conversation.  Old policy
        When this policy is in effect and a DNS message (N or d) is
        sent for a client, that client's registration timeout is
        extended or reset.
+   w - Send WEBIRC requests whether or not they have been validated by
+       Nefarious.
 Compatibility: The U policy is an Undernet extension and is not
-  recognized by ircd.
+  recognized by ircd. The w policy is a Nefarious extension that is
+  not recognized by Undernet ircu or ircd.
 
 V - iauth Program Version
 Syntax: V :<version string>

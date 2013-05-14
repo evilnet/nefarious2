@@ -39,6 +39,8 @@ extern int auth_set_pong(struct AuthRequest *auth, unsigned int cookie);
 extern int auth_set_user(struct AuthRequest *auth, const char *username, const char *hostname, const char *servername, const char *userinfo);
 extern int auth_set_nick(struct AuthRequest *auth, const char *nickname);
 extern int auth_set_password(struct AuthRequest *auth, const char *password);
+extern int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip);
+extern int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip);
 extern int auth_cap_start(struct AuthRequest *auth);
 extern int auth_cap_done(struct AuthRequest *auth);
 extern void destroy_auth_request(struct AuthRequest *req);

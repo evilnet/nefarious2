@@ -110,10 +110,12 @@
 int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct irc_in_addr addr;
+  char* username = NULL;
   char* hostname = NULL;
   char* ipaddr = NULL;
   char* password = NULL;
   int res = 0;
+  int ares = 0;
   struct WebIRCConf *wline;
 
   if (IsServerPort(cptr))
@@ -128,13 +130,15 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* These shouldn't be empty, but just in case... */
   if (!EmptyString(parv[1]))
     password = parv[1];
+  if (!EmptyString(parv[2]))
+    username = parv[2];
   if (!EmptyString(parv[3]))
     hostname = parv[3];
   if (!EmptyString(parv[4]))
     ipaddr = parv[4];
 
   /* And to be extra sure... (should never occur) */
-  if (!password || !hostname || !ipaddr) {
+  if (!password || !username || !hostname || !ipaddr) {
     sendto_opmask_butone_global(&me, SNO_UNAUTH,
                                 "WEBIRC Attempt with invalid parameters from %s [%s]",
                                 cli_sockhost(sptr), cli_sock_ip(sptr));
@@ -142,20 +146,30 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   wline = find_webirc_conf(cptr, password, &res);
-  switch (res)
+
+  ares = -1;
+  if (res && cli_auth(cptr))
+      ares = auth_set_webirc(cli_auth(cptr), password, username, hostname, ipaddr);
+
+  if (!ares)
+    return 0;
+  else
   {
-    case 2:
-      sendto_opmask_butone_global(&me, SNO_UNAUTH,
-                                  "WEBIRC Attempt unauthorized from %s [%s]",
-                                  cli_sockhost(sptr), cli_sock_ip(sptr));
-      return exit_client(cptr, sptr, &me, "WEBIRC Not authorized from your host");
-      break;
-    case 1:
-      sendto_opmask_butone_global(&me, SNO_UNAUTH,
-                                  "WEBIRC Attempt with invalid password from %s [%s]",
-                                  cli_sockhost(sptr), cli_sock_ip(sptr));
-      return exit_client(cptr, sptr, &me, "WEBIRC Password invalid for your host");
-      break;
+    switch (res)
+    {
+      case 2:
+        sendto_opmask_butone_global(&me, SNO_UNAUTH,
+                                    "WEBIRC Attempt unauthorized from %s [%s]",
+                                    cli_sockhost(sptr), cli_sock_ip(sptr));
+        return exit_client(cptr, sptr, &me, "WEBIRC Not authorized from your host");
+        break;
+      case 1:
+        sendto_opmask_butone_global(&me, SNO_UNAUTH,
+                                    "WEBIRC Attempt with invalid password from %s [%s]",
+                                    cli_sockhost(sptr), cli_sock_ip(sptr));
+        return exit_client(cptr, sptr, &me, "WEBIRC Password invalid for your host");
+        break;
+    }
   }
 
   /* Send connection notice to inform opers of the change of IP and host. */
@@ -170,9 +184,6 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* Undo original IP connection in IPcheck. */
   IPcheck_connect_fail(sptr, 1);
-  /* Need to disconnect original IP otherwise the count will never go down. */
-  if (IsIPChecked(sptr))
-    IPcheck_disconnect(sptr);
   ClearIPChecked(sptr);
 
   /* Update the IP and charge them as a remote connect. */
@@ -212,6 +223,8 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ircd_strncpy(cli_username(cptr), wline->ident, USERLEN);
     SetGotId(cptr);
   }
+
+  auth_set_webirc_trusted(cli_auth(cptr), password, username, hostname, ipaddr);
 
   return 0;
 }

@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-14  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/readme.iauth: Added documentation for Nefarious WEBIRC iauth
+	extensions.
+
+	* include/s_auth.h: Added Nefarious WEBIRC iauth extensions.
+
+	* ircd/m_webirc.c: Fix for bug caused by porting an ircu change, and
+	added Nefarious WEBIRC iauth extensions.
+
+	* ircd/s_auth.c: Added Nefarious WEBIRC iauth extensions.
+
 2012-12-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* Ported ircu changes up to revision 894ccd3b8d5acb0067562d26bf72228d3e617203

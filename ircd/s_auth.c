@@ -157,6 +157,7 @@ enum IAuthFlag
   IAUTH_TIMEOUT,                        /**< Refuse new connections if IAuth is behind. */
   IAUTH_EXTRAWAIT,                      /**< Give IAuth extra time to answer. */
   IAUTH_UNDERNET,                       /**< Enable Undernet extensions. */
+  IAUTH_WEBIRC,                         /**< Enable Nefarious WEBIRC extensions. */
   IAUTH_LAST_FLAG                       /**< total number of flags */
 };
 /** Declare a bitset structure indexed by IAuthFlag. */
@@ -1143,6 +1144,41 @@ int auth_set_password(struct AuthRequest *auth, const char *password)
   return 0;
 }
 
+/** Forward a clients WEBIRC request.
+ * @param[in] auth Authorization request for client.
+ * @param[in] password Password supplied in the WEBIRC message.
+ * @param[in] username User name supplied in the WEBIRC message.
+ * @param[in] hostname Host name supplied in the WEBIRC message.
+ * @param[in] ip IP address supplied in the WEBIRC message.
+ * @return Zero if client should be kept, -1 if not forwarded.
+ */
+int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip)
+{
+  assert(auth != NULL);
+  if (IAuthHas(iauth, IAUTH_WEBIRC))
+  {
+    sendto_iauth(auth->client, "W %s %s %s %s", password, username, hostname, ip);
+    return 0;
+  }
+  return -1;
+}
+
+/** Forward a clients WEBIRC request.
+ * @param[in] auth Authorization request for client.
+ * @param[in] password Password supplied in the WEBIRC message.
+ * @param[in] username User name supplied in the WEBIRC message.
+ * @param[in] hostname Host name supplied in the WEBIRC message.
+ * @param[in] ip IP address supplied in the WEBIRC message.
+ * @return Zero if client should be kept, CPTR_KILLED if rejected.
+ */
+int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip)
+{
+  assert(auth != NULL);
+  if (IAuthHas(iauth, IAUTH_WEBIRC))
+    sendto_iauth(auth->client, "w %s %s %s %s", password, username, hostname, ip);
+  return 0;
+}
+
 /** Send exit notification for \a cptr to iauth.
  * @param[in] cptr Client who is exiting.
  */
@@ -1547,6 +1583,7 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
     case 'T': IAuthSet(iauth, IAUTH_TIMEOUT); break;
     case 'W': IAuthSet(iauth, IAUTH_EXTRAWAIT); break;
     case 'U': IAuthSet(iauth, IAUTH_UNDERNET); break;
+    case 'w': IAuthSet(iauth, IAUTH_WEBIRC); break;
     }
 
   /* Optionally notify operators. */
@@ -2188,7 +2225,8 @@ static void iauth_parse(struct IAuth *iauth, char *message)
 
       /* Check IP address and port number against expected. */
       if (0 == res ||
-	  irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) ||
+	  (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
+           irc_in_addr_cmp(&addr.addr, &cli_webircip(cli))) ||
 	  (auth && addr.port != auth->port))
 	/* Report mismatch to iauth. */
 	sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],
