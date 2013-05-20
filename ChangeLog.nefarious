@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-20  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/listener.c: Added listener bind IP to STATS p
+
+	* ircd/s_err.c: Added listener bind IP to STATS p
+
 2013-05-14  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/readme.iauth: Added documentation for Nefarious WEBIRC iauth

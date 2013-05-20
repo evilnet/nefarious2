@@ -132,6 +132,7 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
 {
   struct Listener *listener = 0;
   char flags[8];
+  char bindip[SOCKIPLEN];
   int show_hidden = IsOper(sptr);
   int count = (IsOper(sptr) || MyUser(sptr)) ? 100 : 8;
   int port = 0;
@@ -167,8 +168,14 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
     }
     flags[len] = '\0';
 
+    if (irc_in_addr_unspec(&listener->addr.addr))
+      ircd_strncpy(bindip, "*", SOCKIPLEN);
+    else
+      ircd_strncpy(bindip, ircd_ntoa(&listener->addr.addr), SOCKIPLEN);
+
     send_reply(sptr, RPL_STATSPLINE, listener->addr.port, listener->ref_count,
-	       flags, listener_active(listener) ? "active" : "disabled");
+	       flags, listener_active(listener) ? "active" : "disabled",
+               IsAnOper(sptr) ? bindip : "");
     if (--count == 0)
       break;
   }
