@@ -3,6 +3,10 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_user.c: Fixed bug where +z was being treated as +zr.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Forgot to add user mode +z to infousermodes.
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>

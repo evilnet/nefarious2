@@ -1477,6 +1477,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetSSL(acptr);
         else
           ClearSSL(acptr);
+        break;
       case 'r':
 	if (*(p + 1) && (what == MODE_ADD)) {
 	  account = *(++p);
