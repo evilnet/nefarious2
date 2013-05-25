@@ -3,6 +3,10 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Forgot to add user mode +z to infousermodes.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* many files: Added basic accept and connect SSL support.
 
 	* files: config.h.in, configure, configure.in, doc/example.conf,
