@@ -3,6 +3,34 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_CHMODE_Z.
+
+	* doc/readme.features: Added FEAT_CHMODE_Z.
+
+	* include/channel.h: Added channel mode +Z (SSL only).
+
+	* include/ircd_features.h: Added FEAT_CHMODE_Z.
+
+	* include/numeric.h: Added ERR_SSLONLYCHAN for channel mode +Z.
+
+	* include/supported.h: Added channel mode +Z (SSL only).
+
+	* ircd/channel.c: Added channel mode +Z (SSL only).
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_Z.
+
+	* ircd/m_burst.c: Added channel mode +Z (SSL only).
+
+	* ircd/m_clearmode.c: Added channel mode +Z (SSL only).
+
+	* ircd/m_join.c: Added channel mode +Z (SSL only).
+
+	* ircd/s_err.c: Added ERR_SSLONLYCHAN for channel mode +Z.
+
+	* ircd/s_user.c: Added channel mode +Z (SSL only).
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_user.c: Fixed bug where +z was being treated as +zr.
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>

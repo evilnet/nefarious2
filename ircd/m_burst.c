@@ -152,6 +152,8 @@ netride_exmodes(int parc, char **parv, const char *curr_key)
     case 'O':
       result |= EXMODE_OPERONLY;
       break;
+    case 'Z':
+      result |= EXMODE_SSLONLY;
     }
   }
   return result;
@@ -331,7 +333,8 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
               && (!(check_modes & MODE_INVITEONLY) || IsAnOper(member->user))
               && (!(check_modes & MODE_REGONLY) || IsAccount(member->user))
               && (!(check_exmodes & EXMODE_ADMINONLY) || IsAdmin(member->user))
-              && (!(check_exmodes & EXMODE_OPERONLY) || IsAnOper(member->user)))
+              && (!(check_exmodes & EXMODE_OPERONLY) || IsAnOper(member->user))
+              && (!(check_exmodes & EXMODE_SSLONLY) || IsSSL(member->user)))
             continue;
           sendcmdto_serv_butone(&me, CMD_KICK, NULL, "%H %C :Net Rider", chptr, member->user);
           sendcmdto_channel_butserv_butone(&his, CMD_KICK, chptr, NULL, 0, "%H %C :Net Rider", chptr, member->user);

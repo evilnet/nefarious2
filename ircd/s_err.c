@@ -970,7 +970,7 @@ static Numeric replyTable[] = {
 /* 468 */
   { ERR_INVALIDUSERNAME, 0, "468" },
 /* 469 */
-  { 0 },
+  { ERR_SSLONLYCHAN, "%s :Cannot join channel (+Z)", "469" },
 /* 470 */
   { ERR_OPERONLYCHAN, "%s :Cannot join channel (+O)", "470" },
 /* 471 */

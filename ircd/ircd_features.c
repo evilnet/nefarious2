@@ -555,6 +555,7 @@ static struct FeatureDesc {
   F_B(CHMODE_M, 0, 1, 0),
   F_B(CHMODE_N, 0, 1, 0),
   F_B(CHMODE_O, 0, 1, 0),
+  F_B(CHMODE_Z, 0, 1, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

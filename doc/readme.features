@@ -1137,6 +1137,12 @@ CHMODE_O
 
 Allows channel mode O (oper only) to be used.
 
+CHMODE_Z
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode Z (ssl users only) to be used.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

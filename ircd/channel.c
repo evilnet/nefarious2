@@ -733,6 +733,10 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
   if (member->channel->mode.exmode & EXMODE_OPERONLY && !IsAnOper(member->user))
     return 0;
 
+  /* If only SSL users may join and you're not one, you can't speak. */
+  if (member->channel->mode.exmode & EXMODE_SSLONLY && !IsSSL(member->user))
+    return 0;
+
   /* If only logged in users may join and you're not one, you can't speak. */
   if (member->channel->mode.mode & MODE_REGONLY && !IsAccount(member->user))
     return 0;
@@ -783,6 +787,7 @@ int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int r
         ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(cptr)) ||
         ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(cptr)) ||
         ((chptr->mode.exmode & EXMODE_REGMODERATED) && !IsAccount(cptr)) ||
+        ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(cptr)) ||
 	((chptr->mode.mode & MODE_REGONLY) && !IsAccount(cptr)))
       return 0;
     else
@@ -873,6 +878,8 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'N';
   if (chptr->mode.exmode & EXMODE_PERSIST)
     *mbuf++ = 'z';
+  if (chptr->mode.exmode & EXMODE_SSLONLY)
+    *mbuf++ = 'Z';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1632,6 +1639,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     EXMODE_REGMODERATED,	'M',
     EXMODE_NONOTICES,	'N',
     EXMODE_PERSIST,	'z',
+    EXMODE_SSLONLY,	'Z',
     0x0, 0x0
   };
   static int local_flags[] = {
@@ -2119,7 +2127,8 @@ modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
   assert(0 != (mode & (MODE_ADD | MODE_DEL)));
 
   mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY |
-           EXMODE_REGMODERATED | EXMODE_NONOTICES | EXMODE_PERSIST);
+           EXMODE_REGMODERATED | EXMODE_NONOTICES | EXMODE_PERSIST |
+           EXMODE_SSLONLY);
 
   if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
     return;
@@ -2261,6 +2270,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     EXMODE_REGMODERATED,	'M',
     EXMODE_NONOTICES,	'N',
     EXMODE_PERSIST,	'z',
+    EXMODE_SSLONLY,	'Z',
     0x0, 0x0
   };
   unsigned int add;
@@ -3455,6 +3465,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     EXMODE_REGMODERATED,	'M',
     EXMODE_NONOTICES,	'N',
     EXMODE_PERSIST,	'z',
+    EXMODE_SSLONLY,	'Z',
     0x0, 0x0
   };
 
@@ -3596,6 +3607,15 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
            (!IsServer(sptr) && !IsService(cli_user(sptr)->server))))
           break;
         mode_parse_exmode(&state, flag_p);
+        break;
+
+      case 'Z': /* deal with oper only */
+        /* If they're not an SSL user, they can't +/- EXMODE_SSLONLY. */
+        if ((feature_bool(FEAT_CHMODE_Z) && IsSSL(sptr)) ||
+            IsOper(sptr) || IsServer(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
         break;
 
       default: /* deal with other modes */

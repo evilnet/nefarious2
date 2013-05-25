@@ -212,6 +212,8 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         err = ERR_ADMINONLYCHAN;
       else if ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(sptr))
         err = ERR_OPERONLYCHAN;
+      else if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
+        err = ERR_SSLONLYCHAN;
       else if (find_ban(sptr, chptr->banlist))
         err = ERR_BANNEDFROMCHAN;
 
@@ -240,6 +242,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         case ERR_NEEDREGGEDNICK: err = 'r'; break;
         case ERR_ADMINONLYCHAN:  err = 'a'; break;
         case ERR_OPERONLYCHAN:   err = 'O'; break;
+        case ERR_SSLONLYCHAN:    err = 'Z'; break;
         default: err = '?'; break;
         }
         /* send accountability notice */

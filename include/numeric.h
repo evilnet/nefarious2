@@ -399,8 +399,9 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_INVALIDUSERNAME  468        /* Undernet extension */
 /* 	ERR_ONLYSERVERSCANCHANGE 468	   Dalnet,unreal */
 /*	ERR_LINKSET	     469	unreal */
+#define ERR_SSLONLYCHAN      469	/* Nefarious extension */
 /*	ERR_LINKCHANNEL	     470	unreal */
-#define ERR_OPERONLYCHAN     470
+#define ERR_OPERONLYCHAN     470	/* Nefarious extension */
 /*      ERR_KICKEDFROMCHAN   470         aircd */
 #define ERR_CHANNELISFULL    471
 #define ERR_UNKNOWNMODE      472
@@ -415,7 +416,7 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_BADCHANNAME      479        /* EFNet extension */
                                         /* 479 Undernet extension badchan */
 /*	ERR_CANNOTKNOCK	     480	unreal */
-#define ERR_ADMINONLYCHAN    480
+#define ERR_ADMINONLYCHAN    480	/* Nefarious extension */
 /*	ERR_NOULINE	     480	austnet */
 #define ERR_NOPRIVILEGES     481
 #define ERR_CHANOPRIVSNEEDED 482
