@@ -317,7 +317,8 @@ struct Client {
 
   /* MARKs */
   char cli_webirc[BUFSIZE + 1];     /**< webirc description */
-  char cli_version[VERSIONLEN + 1];  /**< Free form client version information */
+  char cli_version[VERSIONLEN + 1]; /**< Free form client version information */
+  char cli_sslclifp[BUFSIZE + 1];   /**< SSL client certificate fingerprint if available */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -387,6 +388,8 @@ struct Client {
 #define cli_webirc(cli)         ((cli)->cli_webirc)
 /** Get a clients CTCP version string. */
 #define cli_version(cli)        ((cli)->cli_version)
+/** Get a clients SSL fingerprint string. */
+#define cli_sslclifp(cli)       ((cli)->cli_sslclifp)
 /** Get client GeoIP country code. */
 #define cli_countrycode(cli)    ((cli)->cli_countrycode)
 /** Get client GeoIP country name. */

@@ -3,6 +3,18 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added SSL client certificate fingerprint.
+
+	* include/ssl.h: Added SSL client certificate fingerprint.
+
+	* ircd/m_check.c: Added SSL client certificate fingerprint.
+
+	* ircd/s_bsd.c: Added SSL client certificate fingerprint.
+
+	* ircd/ssl.c: Added SSL client certificate fingerprint.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_CHMODE_Z.
 
 	* doc/readme.features: Added FEAT_CHMODE_Z.

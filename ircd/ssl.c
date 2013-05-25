@@ -60,6 +60,7 @@ SSL_CTX *ssl_init_server_ctx();
 SSL_CTX *ssl_init_client_ctx();
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert);
 void sslfail(char *txt);
+void binary_to_hex(unsigned char *bin, char *hex, int length);
 
 int ssl_init(void)
 {
@@ -463,6 +464,31 @@ int ssl_connect(struct Socket* sock)
   return 1; /* Connection complete */
 }
 
+char* ssl_get_fingerprint(SSL *ssl)
+{
+  X509* cert;
+  unsigned int n = 0;
+  unsigned char md[EVP_MAX_MD_SIZE];
+  const EVP_MD *digest = EVP_sha256();
+  static char hex[BUFSIZE + 1];
+
+  cert = SSL_get_peer_certificate(ssl);
+
+  if (!(cert))
+    return NULL;
+
+  if (!X509_digest(cert, digest, md, &n))
+  {
+    X509_free(cert);
+    return NULL;
+  }
+
+  binary_to_hex(md, hex, n);
+  X509_free(cert);
+
+  return (hex);
+}
+
 void sslfail(char *txt)
 {
   unsigned long err = ERR_get_error();
@@ -474,6 +500,20 @@ void sslfail(char *txt)
     ERR_error_string(err, string);
     Debug((DEBUG_FATAL, "%s: %s", txt, string));
   }
+}
+
+void binary_to_hex(unsigned char *bin, char *hex, int length)
+{
+  static const char trans[] = "0123456789ABCDEF";
+  int i;
+
+  for(i = 0; i < length; i++)
+  {
+    hex[i  << 1]      = trans[bin[i] >> 4];
+    hex[(i << 1) + 1] = trans[bin[i] & 0xf];
+  }
+
+  hex[i << 1] = '\0';
 }
 
 #endif /* USE_SSL */

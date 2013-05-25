@@ -332,6 +332,7 @@ static int completed_connection(struct Client* cptr)
   time_t newts;
   struct Client *acptr;
   int i, r;
+  char *sslfp;
 
   assert(0 != cptr);
 
@@ -361,6 +362,9 @@ static int completed_connection(struct Client* cptr)
       return 0;
     } else if (r == 0)
       return 1;
+    sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
+    if (sslfp)
+      ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
 #endif
     SetSSL(cptr);
   }
@@ -506,7 +510,8 @@ void add_connection(struct Listener* listener, int fd) {
 #endif /* USE_SSL */
   struct irc_sockaddr addr;
   struct Client      *new_client;
-  time_t             next_target = 0;
+  time_t              next_target = 0;
+  char               *sslfp;
 
   const char* const throttle_message =
          "ERROR :Your host is trying to (re)connect too fast -- throttled\r\n";
@@ -600,6 +605,9 @@ void add_connection(struct Listener* listener, int fd) {
   if (ssl) {
     SetSSL(new_client);
     cli_socket(new_client).ssl = ssl;
+    sslfp = ssl_get_fingerprint(ssl);
+    if (sslfp)
+      ircd_strncpy(cli_sslclifp(new_client), sslfp, BUFSIZE+1);
   }
 #endif
 

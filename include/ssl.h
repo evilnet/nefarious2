@@ -49,6 +49,7 @@ extern IOResult ssl_sendv(struct Socket *socket, struct MsgQ* buf, unsigned int*
 extern int ssl_send(struct Client *cptr, const char *buf, unsigned int len);
 
 extern char  *ssl_get_cipher(SSL *ssl);
+extern char* ssl_get_fingerprint(SSL *ssl);
 
 #endif /* USE_SSL */
 #endif /* INCLUDED_ssl_h */

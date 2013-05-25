@@ -429,6 +429,11 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      }
    }
 
+   if (cli_sslclifp(acptr) && (strlen(cli_sslclifp(acptr)) > 0)) {
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "SSL Fingerprint:: %s", cli_sslclifp(acptr));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
+
    /* +s (SERV_NOTICE) is not relayed to us from remote servers,
     * so we cannot tell if a remote client has that mode set.
     * And hacking it onto the end of the output of umode_str is EVIL BAD AND WRONG
@@ -558,6 +563,10 @@ void checkServer(struct Client *sptr, struct Client *acptr)
    ircd_snprintf(0, outbuf, sizeof(outbuf), "    Server name:: %s", acptr->cli_name);
    send_reply(sptr, RPL_DATASTR,  outbuf);
 
+   if (cli_sslclifp(acptr) && (strlen(cli_sslclifp(acptr)) > 0)) {
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "SSL Fingerprint:: %s", cli_sslclifp(acptr));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
 
    ircd_snprintf(0, outbuf, sizeof(outbuf), "        Numeric:: %s --> %d", NumServ(acptr), base64toint(acptr->cli_yxx));
    send_reply(sptr, RPL_DATASTR, outbuf);
