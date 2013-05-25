@@ -145,6 +145,9 @@
 /* Define to the version of this package. */
 #undef PACKAGE_VERSION
 
+/* Path to /dev/null */
+#undef PATH_DEVNULL
+
 /* Define if you have POSIX signals. */
 #undef POSIX_SIGNALS
 
@@ -169,6 +172,12 @@
 /* Path to executable for restarts */
 #undef SPATH
 
+/* Path name used as a base for the ssl include files. */
+#undef SSL_INCLUDES_PATH
+
+/* Path name used as a base for the ssl lib files. */
+#undef SSL_LIBS_PATH
+
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
@@ -192,6 +201,9 @@
 
 /* Specify whether or not to use poll() */
 #undef USE_POLL
+
+/* Specify whether or not to use SSL */
+#undef USE_SSL
 
 /* Define to 1 if your processor stores words with the most significant byte
    first (like Motorola and SPARC, unlike Intel and VAX). */

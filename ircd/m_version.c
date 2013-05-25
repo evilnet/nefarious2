@@ -99,6 +99,10 @@
 #include "supported.h"
 #include "version.h"
 
+#ifdef USE_SSL
+#include "openssl/ssl.h"
+#endif
+
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
 /*
@@ -145,6 +149,9 @@ int mo_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   {
     send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
 	       debug_serveropts());
+#ifdef USE_SSL
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, OPENSSL_VERSION_TEXT);
+#endif
     send_supported(sptr);
   }
 

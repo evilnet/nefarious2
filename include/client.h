@@ -45,6 +45,11 @@
 #include <sys/types.h>          /* time_t, size_t */
 #define INCLUDED_sys_types_h
 #endif
+#ifdef USE_SSL
+#ifndef INCLUDED_ssl_h
+#include "ssl.h"
+#endif
+#endif /* USE_SSL */
 
 struct ConfItem;
 struct Listener;
@@ -203,6 +208,7 @@ enum Flag
     FLAG_CLOAKHOST,                 /**< User has a cloaked host (+C) */
     FLAG_FAKEHOST,                  /**< User has a fake host (+f) */
     FLAG_SETHOST,                   /**< User has a set host (+h) */
+    FLAG_SSL,                       /**< User is connected via SSL (+z) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -697,6 +703,8 @@ struct Client {
 #define IsFakeHost(x)           HasFlag(x, FLAG_FAKEHOST)
 /** Return non-zero if the client has a set host. */
 #define IsSetHost(x)            HasFlag(x, FLAG_SETHOST)
+/** Return non-zero if the client is connected via SSL. */
+#define IsSSL(x)                HasFlag(x, FLAG_SSL)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -783,6 +791,8 @@ struct Client {
 #define SetFakeHost(x)          SetFlag(x, FLAG_FAKEHOST)
 /** Mark a client as having a set host. */
 #define SetSetHost(x)           SetFlag(x, FLAG_SETHOST)
+/** Mark a client as having connected via SSL. */
+#define SetSSL(x)               SetFlag(x, FLAG_SSL)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -854,6 +864,8 @@ struct Client {
 #define ClearFakeHost(x)        ClrFlag(x, FLAG_FAKEHOST)
 /** Client no longer has a set host. */
 #define ClearSetHost(x)         ClrFlag(x, FLAG_SETHOST)
+/** Client is no longer connected via SSL (this cannot be possible). */
+#define ClearSSL(x)             ClrFlag(x, FLAG_SSL)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

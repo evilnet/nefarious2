@@ -263,6 +263,25 @@ static int connect_inet(struct ConfItem* aconf, struct Client* cptr)
   return 1;
 }
 
+#ifdef USE_SSL
+/* Helper routines */
+static IOResult client_recv(struct Client *cptr, char *buf, unsigned int length, unsigned int* count_out)
+{
+  if (cli_socket(cptr).ssl)
+    return ssl_recv(&cli_socket(cptr), buf, length, count_out);
+  else
+    return os_recv_nonb(cli_fd(cptr), buf, length, count_out);
+}
+
+static IOResult client_sendv(struct Client *cptr, struct MsgQ *buf, unsigned int *count_in, unsigned int *count_out)
+{
+  if (cli_socket(cptr).ssl)
+    return ssl_sendv(&cli_socket(cptr), buf, count_in, count_out);
+  else
+    return os_sendv_nonb(cli_fd(cptr), buf, count_in, count_out);
+}
+#endif /* USE_SSL */
+
 /** Attempt to send a sequence of bytes to the connection.
  * As a side effect, updates \a cptr's FLAG_BLOCKED setting
  * and sendB/sendK fields.
@@ -277,7 +296,11 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
   unsigned int bytes_count = 0;
   assert(0 != cptr);
 
+#ifdef USE_SSL
+  switch (client_sendv(cptr, buf, &bytes_count, &bytes_written)) {
+#else
   switch (os_sendv_nonb(cli_fd(cptr), buf, &bytes_count, &bytes_written)) {
+#endif /* USE_SSL */
   case IO_SUCCESS:
     ClrFlag(cptr, FLAG_BLOCKED);
 
@@ -308,7 +331,7 @@ static int completed_connection(struct Client* cptr)
   struct ConfItem *aconf;
   time_t newts;
   struct Client *acptr;
-  int i;
+  int i, r;
 
   assert(0 != cptr);
 
@@ -328,6 +351,20 @@ static int completed_connection(struct Client* cptr)
     sendto_opmask_butone(0, SNO_OLDSNO, "Lost Server Line for %s", cli_name(cptr));
     return 0;
   }
+
+  if (aconf->flags & CONF_SSL) {
+#ifdef USE_SSL
+    r = ssl_connect(&(cli_socket(cptr)));
+    if (r == -1) {
+      sendto_opmask_butone(0, SNO_OLDSNO, "Connection failed to %s: SSL error",
+                           cli_name(cptr));
+      return 0;
+    } else if (r == 0)
+      return 1;
+#endif
+    SetSSL(cptr);
+  }
+
   if (s_state(&(cli_socket(cptr))) == SS_CONNECTING)
     socket_state(&(cli_socket(cptr)), SS_CONNECTED);
 
@@ -462,7 +499,11 @@ int net_close_unregistered_connections(struct Client* source)
  * @param listener Listening socket that received the connection.
  * @param fd File descriptor of new connection.
  */
+#ifdef USE_SSL
+void add_connection(struct Listener* listener, int fd, void *ssl) {
+#else
 void add_connection(struct Listener* listener, int fd) {
+#endif /* USE_SSL */
   struct irc_sockaddr addr;
   struct Client      *new_client;
   time_t             next_target = 0;
@@ -482,7 +523,11 @@ void add_connection(struct Listener* listener, int fd) {
    */
   if (!os_get_peername(fd, &addr) || !os_set_nonblocking(fd)) {
     ++ServerStats->is_ref;
+#ifdef USE_SSL
+    ssl_murder(ssl, fd, "");
+#else
     close(fd);
+#endif /* USE_SSL */
     return;
   }
   /*
@@ -510,8 +555,12 @@ void add_connection(struct Listener* listener, int fd) {
     if (!IPcheck_local_connect(&addr.addr, &next_target))
     {
       ++ServerStats->is_ref;
+#ifdef USE_SSL
+      ssl_murder(ssl, fd, throttle_message);
+#else
       write(fd, throttle_message, strlen(throttle_message));
       close(fd);
+#endif /* USE_SSL */
       return;
     }
     new_client = make_client(0, STAT_UNKNOWN_USER);
@@ -534,14 +583,25 @@ void add_connection(struct Listener* listener, int fd) {
   if (!socket_add(&(cli_socket(new_client)), client_sock_callback,
 		  (void*) cli_connect(new_client), SS_CONNECTED, 0, fd)) {
     ++ServerStats->is_ref;
+#ifdef USE_SSL
+    ssl_murder(ssl, fd, register_message);
+#else
     write(fd, register_message, strlen(register_message));
     close(fd);
+#endif /* USE_SSL */
     cli_fd(new_client) = -1;
     return;
   }
   cli_freeflag(new_client) |= FREEFLAG_SOCKET;
   cli_listener(new_client) = listener;
   ++listener->ref_count;
+
+#ifdef USE_SSL
+  if (ssl) {
+    SetSSL(new_client);
+    cli_socket(new_client).ssl = ssl;
+  }
+#endif
 
   Count_newunknown(UserStats);
   /* if we've made it this far we can put the client on the auth query pile */
@@ -581,7 +641,11 @@ static int read_packet(struct Client *cptr, int socket_ready)
   if (socket_ready &&
       !(IsUser(cptr) &&
 	DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr))) {
+#ifdef USE_SSL
+    switch (client_recv(cptr, readbuf, sizeof(readbuf), &length)) {
+#else
     switch (os_recv_nonb(cli_fd(cptr), readbuf, sizeof(readbuf), &length)) {
+#endif /* USE_SSL */
     case IO_SUCCESS:
       if (length)
       {
@@ -856,6 +920,9 @@ static void client_sock_callback(struct Event* ev)
 
     if (!con_freeflag(con) && !cptr)
       free_connection(con);
+#ifdef USE_SSL
+    ssl_free(ev_socket(ev));
+#endif /* USE_SSL */
     break;
 
   case ET_CONNECT: /* socket connection completed */

@@ -118,6 +118,7 @@ static struct lexer_token {
   TOKEN(SPOOFHOST),
   TOKEN(AUTOAPPLY),
 #undef TOKEN
+  { "ssl", SSLTOK },
   { "administrator", ADMIN },
   { "apass_opmode", TPRIV_APASS_OPMODE },
   { "auto", AUTOCONNECT },

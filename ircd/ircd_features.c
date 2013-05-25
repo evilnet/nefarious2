@@ -586,6 +586,10 @@ static struct FeatureDesc {
   F_S(GEOIP_FILE, 0, "GeoIP.dat", feature_notify_geoip_file),
   F_S(GEOIP_IPV6_FILE, 0, "GeoIPv6.dat", feature_notify_geoip_ipv6_file),
 
+  /* SSL FEAT_'s */
+  F_S(SSL_CERTFILE, 0, "ircd.pem", 0),
+  F_S(SSL_KEYFILE, 0, "ircd.pem", 0),
+
 #undef F_S
 #undef F_B
 #undef F_I

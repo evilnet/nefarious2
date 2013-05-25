@@ -1286,3 +1286,16 @@ GEOIP_IPV6_FILE
 
 Path to GeoIPv6.dat for IPv6 GeoIP support.
 
+SSL_CERTFILE
+ * Type: string
+ * Default: "ircd.pem"
+
+Path to SSL certificate file to use as this servers identity.
+
+SSL_KEYFILE
+ * Type: string
+ * Default: "ircd.pem"
+
+Path to the private key associated with the certificate specified
+by SSL_CERTFILE.
+

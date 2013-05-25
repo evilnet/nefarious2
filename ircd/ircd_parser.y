@@ -193,6 +193,7 @@ static void free_slist(struct SLink **link) {
 %token VERSION
 %token SPOOFHOST
 %token AUTOAPPLY
+%token SSLTOK
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -542,7 +543,7 @@ connectblock: CONNECT
 connectitems: connectitem connectitems | connectitem;
 connectitem: connectname | connectpass | connectclass | connecthost
               | connectport | connectvhost | connectleaf | connecthub
-              | connecthublimit | connectmaxhops | connectauto;
+              | connecthublimit | connectmaxhops | connectauto | connectssl;
 connectname: NAME '=' QSTRING ';'
 {
  MyFree(name);
@@ -594,6 +595,8 @@ connectmaxhops: MAXHOPS '=' expr ';'
 };
 connectauto: AUTOCONNECT '=' YES ';' { flags |= CONF_AUTOCONNECT; }
  | AUTOCONNECT '=' NO ';' { flags &= ~CONF_AUTOCONNECT; };
+connectssl: SSLTOK '=' YES ';' { flags |= CONF_SSL; }
+ | SSLTOK '=' NO ';' { flags &= ~CONF_SSL; };
 
 uworldblock: UWORLD '{' uworlditems '}' ';';
 uworlditems: uworlditem uworlditems | uworlditem;
@@ -779,7 +782,7 @@ portblock: PORT '{' portitems '}' ';' {
   port = 0;
 };
 portitems: portitem portitems | portitem;
-portitem: portnumber | portvhost | portvhostnumber | portmask | portserver | porthidden;
+portitem: portnumber | portvhost | portvhostnumber | portmask | portserver | porthidden | portssl;
 portnumber: PORT '=' address_family NUMBER ';'
 {
   if ($4 < 1 || $4 > 65535) {
@@ -836,6 +839,14 @@ porthidden: HIDDEN '=' YES ';'
 {
   FlagClr(&listen_flags, LISTEN_HIDDEN);
 };
+
+portssl: SSLTOK '=' YES ';'
+{
+  FlagSet(&listen_flags, LISTEN_SSL);
+} | SSLTOK '=' NO ';'
+{
+  FlagClr(&listen_flags, LISTEN_SSL);
+}
 
 clientblock: CLIENT
 {

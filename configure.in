@@ -688,6 +688,65 @@ fi
 
 AC_DEFINE_UNQUOTED(LPATH, "$unet_lpath", [Path to debugging log file])
 
+dnl check for /dev/null so we can use it to hold evil fd's
+AC_MSG_CHECKING([for /dev/null])
+if test -c /dev/null ; then
+        AC_DEFINE(PATH_DEVNULL, "/dev/null", [Path to /dev/null])
+        AC_MSG_RESULT(yes)
+else
+        AC_DEFINE(PATH_DEVNULL, "devnull.log", [Path to /dev/null])
+        AC_MSG_RESULT(no - using devnull.log)
+fi
+
+dnl **
+dnl **  SSL Library checks (OpenSSL)
+dnl **
+AC_MSG_CHECKING([whether to enable OpenSSL support])
+AC_ARG_ENABLE([ssl],
+[  --disable-ssl           Disable Secure Sockets Layer support],
+[unet_cv_enable_ssl=$enable_ssl],
+[AC_CACHE_VAL(unet_cv_enable_ssl,
+[unet_cv_enable_ssl=yes])])
+AC_MSG_RESULT([$unet_cv_enable_ssl])
+
+if test x"$unet_cv_enable_ssl" = xyes; then
+  AC_MSG_CHECKING([for OpenSSL includes])
+  AC_ARG_WITH([openssl-includes],
+  AS_HELP_STRING([--with-openssl-includes=dir], [Specify location of OpenSSL header files (default: /usr/include)]),
+  [base_ssl_inc=$withval],
+  [base_ssl_inc=/usr/include])
+  [unet_cv_with_openssl_inc_prefix=$base_ssl_inc]
+  AC_MSG_RESULT([$unet_cv_with_openssl_inc_prefix])
+  AC_DEFINE_UNQUOTED(SSL_INCLUDES_PATH, "$base_ssl_inc", [Path name used as a base for the ssl include files.])
+
+  AC_MSG_CHECKING([for OpenSSL libraries])
+  AC_ARG_WITH([openssl-libs],
+  AS_HELP_STRING([--with-openssl-libs=dir], [Specify location of OpenSSL libs (default: /usr/lib)]),
+  [unet_cv_with_openssl_prefix=$withval],
+  [unet_cv_with_openssl_prefix=/usr/lib])
+  AC_MSG_RESULT([$unet_cv_with_openssl_prefix])
+  AC_DEFINE_UNQUOTED(SSL_LIBS_PATH, "$unet_cv_with_openssl_prefix", [Path name used as a base for the ssl lib files.])
+
+  AC_CHECK_LIB(ssl, SSL_read, [
+    AC_CHECK_LIB(crypto, X509_new, [
+      AC_CHECK_LIB(crypto, EVP_sha256, [
+        AC_CHECK_HEADERS($base_ssl_inc/openssl/ssl.h $base_ssl_inc/openssl/err.h, [
+          enable_ssl="yes";
+          OPENSSL_LDFLAGS="-lssl -lcrypto"
+        ])
+      ])
+    ])
+  ])
+
+  if test "x$enable_ssl" = xyes; then
+    AC_DEFINE([USE_SSL], , [Define if you are using OpenSSL])
+    LIBS="$LIBS -L$unet_cv_with_openssl_prefix $OPENSSL_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_openssl_inc_prefix"
+  else
+    AC_MSG_ERROR([Unable to find OpenSSL, Maybe you need to install the openssl and libssl-dev package, or use --with-openssl-includes and --with-openssl-libs if you have openssl installed in an odd location])
+  fi
+fi
+
 dnl --with-maxcon allows us to set the maximum connections
 unet_maxcon=`ulimit -Hn`
 if test x"$unet_maxcon" = xunlimited; then

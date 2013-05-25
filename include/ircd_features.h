@@ -230,6 +230,10 @@ enum Feature {
   FEAT_GEOIP_FILE,
   FEAT_GEOIP_IPV6_FILE,
 
+  /* SSL FEAT_'s */
+  FEAT_SSL_CERTFILE,
+  FEAT_SSL_KEYFILE,
+
   FEAT_LAST_F
 };
 

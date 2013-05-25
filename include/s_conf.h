@@ -33,6 +33,7 @@ struct Message;
 #define CONF_UWORLD             0x8000     /**< ConfItem describes a Uworld server */
 
 #define CONF_AUTOCONNECT        0x0001     /**< Autoconnect to a server */
+#define CONF_SSL                0x0080     /**< Connect using SSL */
 
 /** Indicates ConfItem types that count associated clients. */
 #define CONF_CLIENT_MASK        (CONF_CLIENT | CONF_OPERATOR | CONF_SERVER)

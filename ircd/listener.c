@@ -131,7 +131,7 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
                 char* param)
 {
   struct Listener *listener = 0;
-  char flags[8];
+  char flags[9];
   char bindip[SOCKIPLEN];
   int show_hidden = IsOper(sptr);
   int count = (IsOper(sptr) || MyUser(sptr)) ? 100 : 8;
@@ -153,6 +153,10 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
       if (!show_hidden)
         continue;
       flags[len++] = 'H';
+    }
+    if (FlagHas(&listener->flags, LISTEN_SSL))
+    {
+      flags[len++] = 'E';
     }
     if (FlagHas(&listener->flags, LISTEN_IPV4) && (listener->fd_v4 >= 0))
     {
@@ -527,7 +531,14 @@ static void accept_connection(struct Event* ev)
       }
       ++ServerStats->is_ac;
       /* nextping = CurrentTime; */
+#ifdef USE_SSL
+      if (listener_ssl(listener))
+        ssl_add_connection(listener, fd);
+      else
+        add_connection(listener, fd, NULL);
+#else
       add_connection(listener, fd);
+#endif /* USE_SSL */
     }
   }
 }

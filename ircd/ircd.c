@@ -57,6 +57,7 @@
 #include "s_stats.h"
 #include "s_user.h"
 #include "send.h"
+#include "ssl.h"
 #include "sys.h"
 #include "uping.h"
 #include "userload.h"
@@ -727,6 +728,13 @@ int main(int argc, char **argv) {
   }
 
   init_server_identity();
+
+#ifdef USE_SSL
+  if (ssl_init()) {
+    Debug((DEBUG_FATAL, "Failed to initialize SSL contexts"));
+    exit(1);
+  }
+#endif
 
   uping_init();
 

@@ -496,7 +496,6 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_NOMANAGER        566	/* Undernet extension */
 #define ERR_UPASS_SAME_APASS 567        /* Undernet extension */
 #define ERR_NOOMOTD          568
-#define ERR_LASTERROR        569
 
 /*	RPL_LOGON	     600	dalnet,unreal
 	RPL_LOGOFF           601	dalnet,unreal
@@ -520,4 +519,8 @@ extern const struct Numeric* get_error_numeric(int err);
 	RPL_DUMPRPL	     641	unreal
 	RPL_EODUMP	     642	unreal
 */
+
+#define RPL_WHOISSSL         671        /* Nefarious extension (SSL WHOIS) */
+#define ERR_LASTERROR        672
+
 #endif /* INCLUDED_numeric_h */

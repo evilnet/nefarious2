@@ -1,6 +1,19 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* many files: Added basic accept and connect SSL support.
+
+	* files: config.h.in, configure, configure.in, doc/example.conf,
+	doc/readme.features, include/client.h, include/ircd_events.h,
+	include/ircd_features.h, include/listener.h, include/numeric.h,
+	include/s_bsd.h, include/s_conf.h, ircd/Makefile.in, ircd/ircd.c,
+	ircd/ircd_features.c, ircd/ircd_lexer.l, ircd/ircd_parser.y,
+	ircd/listener.c, ircd/m_rehash.c, ircd/m_version.c, ircd/m_whois.c,
+	ircd/s_auth.c, ircd/s_bsd.c, ircd/s_err.c, ircd/s_user.c,
+	include/ssl.h, ircd/ssl.c
+
 2013-05-20  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/listener.c: Added listener bind IP to STATS p

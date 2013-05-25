@@ -236,6 +236,7 @@ IRCD_SRC = \
 	s_user.c \
 	send.c \
 	shun.c \
+	ssl.c \
 	uping.c \
 	userload.c \
 	whocmds.c \
