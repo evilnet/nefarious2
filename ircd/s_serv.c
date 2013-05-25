@@ -270,6 +270,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_WEBIRC, cli_webirc(acptr));
 
+      if (cli_sslclifp(acptr) && !EmptyString(cli_sslclifp(acptr)))
+        sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
+                      cli_name(acptr), MARK_SSLCLIFP, cli_sslclifp(acptr));
+
       if (IsGeoIP(acptr)) {
         if (cli_countrycode(acptr) && !EmptyString(cli_countrycode(acptr)) &&
             cli_continentcode(acptr) && !EmptyString(cli_continentcode(acptr)))

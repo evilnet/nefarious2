@@ -574,6 +574,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (cli_webirc(sptr) && !EmptyString(cli_webirc(sptr)))
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_WEBIRC, cli_webirc(sptr));
 
+    if (cli_sslclifp(sptr) && !EmptyString(cli_sslclifp(sptr)))
+      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_SSLCLIFP, cli_sslclifp(sptr));
+
     if (IsGeoIP(sptr)) {
       if (cli_countrycode(sptr) && !EmptyString(cli_countrycode(sptr)) &&
           cli_continentcode(sptr) && !EmptyString(cli_continentcode(sptr)))

@@ -3,6 +3,20 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/mark.h: Added MARK_SSLCLIFP to propagate SSL client
+	certificate fingerprint.
+
+	* ircd/m_mark.c: Added MARK_SSLCLIFP to propagate SSL client
+	certificate fingerprint.
+
+	* ircd/s_serv.c: Added MARK_SSLCLIFP to propagate SSL client
+	certificate fingerprint.
+
+	* ircd/s_user.c: Added MARK_SSLCLIFP to propagate SSL client
+	certificate fingerprint.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added stripsslfp WebIRC block option.
 
 	* include/s_conf.h: Added stripsslfp WebIRC block option.

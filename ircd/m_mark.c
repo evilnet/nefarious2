@@ -129,7 +129,14 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        ircd_strncpy(cli_version(acptr), parv[3], VERSIONLEN);
        sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_CVERSION, parv[3]);
     }
+  } else if (!strcmp(parv[2], MARK_SSLCLIFP)) {
+    if(parc < 3)
+      return protocol_violation(sptr, "MARK client version received too few parameters (%u)", parc);
 
+    if ((acptr = FindUser(parv[1]))) {
+       ircd_strncpy(cli_sslclifp(acptr), parv[3], BUFSIZE);
+       sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_SSLCLIFP, parv[3]);
+    }
   }
 
   return 0;
