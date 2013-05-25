@@ -187,6 +187,7 @@ static void free_slist(struct SLink **link) {
 %token IDENT
 %token USERIDENT
 %token IGNOREIDENT
+%token STRIPSSLFP
 %token MAXCHANS
 %token COUNTRY
 %token CONTINENT
@@ -1315,7 +1316,7 @@ webircblock: WEBIRC
 };
 webircitems: webircitem webircitems | webircitem;
 webircitem: webircuhost | webircusername | webircpass | webircident | webircuserident
-          | webircignoreident | webircdescription;
+          | webircignoreident | webircdescription | webircstripsslfp;
 webircuhost: HOST '=' QSTRING ';'
 {
   char *h;
@@ -1367,6 +1368,14 @@ webircignoreident: IGNOREIDENT '=' YES ';'
 } | IGNOREIDENT '=' NO ';'
 {
   FlagClr(&wconf->flags, WFLAG_NOIDENT);
+};
+
+webircstripsslfp: STRIPSSLFP '=' YES ';'
+{
+  FlagSet(&wconf->flags, WFLAG_STRIPSSLFP);
+} | STRIPSSLFP '=' NO ';'
+{
+  FlagClr(&wconf->flags, WFLAG_STRIPSSLFP);
 };
 
 webircdescription: DESCRIPTION '=' QSTRING ';'

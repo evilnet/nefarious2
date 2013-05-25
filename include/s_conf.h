@@ -44,8 +44,9 @@ struct Message;
 /* WEBIRC FlagSet */
 
 enum WebIRCFlag {
-  WFLAG_USERIDENT, /**< use USER username as ident */
-  WFLAG_NOIDENT, /**< ignore ident reply */
+  WFLAG_USERIDENT,	/**< use USER username as ident */
+  WFLAG_NOIDENT,	/**< ignore ident reply */
+  WFLAG_STRIPSSLFP,	/**< strip SSL client certificate fingerprint */
   WFLAG_LAST_FLAG
 };
 

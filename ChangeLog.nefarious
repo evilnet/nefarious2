@@ -3,6 +3,22 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added stripsslfp WebIRC block option.
+
+	* include/s_conf.h: Added stripsslfp WebIRC block option.
+
+	* ircd/ircd_lexer.l: Added stripsslfp WebIRC block option.
+
+	* ircd/ircd_parser.y: Added stripsslfp WebIRC block option.
+
+	* ircd/m_webirc.c: Added stripsslfp WebIRC block option.
+
+	* ircd/s_err.c: Added stripsslfp WebIRC block option.
+
+	* ircd/s_stats.c: Added stripsslfp WebIRC block option.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/handlers.h: Added FINGERPRINT command.
 
 	* include/msg.h: Added FINGERPRINT command.

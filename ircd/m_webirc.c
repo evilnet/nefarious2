@@ -214,6 +214,9 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (FlagHas(&wline->flags, WFLAG_USERIDENT))
     SetWebIRCUserIdent(cptr);
 
+  if (FlagHas(&wline->flags, WFLAG_STRIPSSLFP))
+    ircd_strncpy(cli_sslclifp(cptr), "", BUFSIZE + 1);
+
   if (!EmptyString(wline->description)) {
     ircd_strncpy(cli_webirc(cptr), wline->description, BUFSIZE);
   }
