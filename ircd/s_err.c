@@ -1264,7 +1264,7 @@ static Numeric replyTable[] = {
 /* 615 */
   { 0 },
 /* 616 */
-  { 0 },
+  { RPL_WHOISSSLFP, "%s :has client certificate fingerprint %s", "616" },
 /* 617 */
   { 0 },
 /* 618 */

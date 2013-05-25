@@ -3,6 +3,14 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/numeric.h: Added RPL_WHOISSSLFP.
+
+	* ircd/m_whois.c: Added RPL_WHOISSSLFP.
+
+	* ircd/s_err.c: Added RPL_WHOISSSLFP.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added SSL client certificate fingerprint.
 
 	* include/ssl.h: Added SSL client certificate fingerprint.
