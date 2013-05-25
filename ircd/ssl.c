@@ -44,6 +44,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <openssl/bio.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 
@@ -59,6 +60,7 @@ SSL_CTX *ssl_client_ctx;
 SSL_CTX *ssl_init_server_ctx();
 SSL_CTX *ssl_init_client_ctx();
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert);
+void ssl_set_nonblocking(SSL *s);
 void sslfail(char *txt);
 void binary_to_hex(unsigned char *bin, char *hex, int length);
 
@@ -256,6 +258,7 @@ void ssl_add_connection(struct Listener *listener, int fd)
     return;
   }
   SSL_set_fd(data->socket.ssl, fd);
+  ssl_set_nonblocking(data->socket.ssl);
   ++listener->ref_count;
 }
 
@@ -452,6 +455,7 @@ int ssl_connect(struct Socket* sock)
   if (!sock->ssl) {
     sock->ssl = SSL_new(ssl_client_ctx);
     SSL_set_fd(sock->ssl, sock->s_fd);
+    ssl_set_nonblocking(sock->ssl);
   }
 
   r = SSL_connect(sock->ssl);
@@ -487,6 +491,12 @@ char* ssl_get_fingerprint(SSL *ssl)
   X509_free(cert);
 
   return (hex);
+}
+
+void ssl_set_nonblocking(SSL *s)
+{
+  BIO_set_nbio(SSL_get_rbio(s),1);
+  BIO_set_nbio(SSL_get_wbio(s),1);
 }
 
 void sslfail(char *txt)

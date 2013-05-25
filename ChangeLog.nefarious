@@ -3,6 +3,10 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/ssl.c: Set SSL connections to non-blocking.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/mark.h: Added MARK_SSLCLIFP to propagate SSL client
 	certificate fingerprint.
 
