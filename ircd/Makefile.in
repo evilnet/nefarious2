@@ -135,6 +135,7 @@ IRCD_SRC = \
 	m_endburst.c \
 	m_error.c \
 	m_fake.c \
+	m_fingerprint.c \
 	m_get.c \
 	m_gline.c \
 	m_help.c \

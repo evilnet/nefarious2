@@ -521,6 +521,9 @@ extern const struct Numeric* get_error_numeric(int err);
 	RPL_EODUMP	     642	unreal
 */
 
+#define RPL_SSLFP            613	/* Nefarious extension */
+#define ERR_NOSSLFP          614	/* Nefarious extension */
+
 #define RPL_WHOISSSLFP       616	/* Nefarious extension */
 
 #define RPL_WHOISSSL         671        /* Nefarious extension (SSL WHOIS) */

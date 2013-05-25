@@ -1258,9 +1258,9 @@ static Numeric replyTable[] = {
 /* 612 */
   { 0 },
 /* 613 */
-  { 0 },
+  { RPL_SSLFP, "%s :SSL fingerprint: %s", "613" },
 /* 614 */
-  { 0 },
+  { ERR_NOSSLFP, "%s :No SSL fingerprint", "614" },
 /* 615 */
   { 0 },
 /* 616 */

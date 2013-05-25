@@ -3,6 +3,22 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/handlers.h: Added FINGERPRINT command.
+
+	* include/msg.h: Added FINGERPRINT command.
+
+	* include/numeric.h: Added RPL_SSLFP and ERR_NOSSLFP numerics.
+
+	* ircd/Makefile.in: Added FINGERPRINT command.
+
+	* ircd/parse.c: Added FINGERPRINT command.
+
+	* ircd/s_err.c: Added RPL_SSLFP and ERR_NOSSLFP numerics.
+
+	* ircd/m_fingerprint.c: Added FINGERPRINT command.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/numeric.h: Added RPL_WHOISSSLFP.
 
 	* ircd/m_whois.c: Added RPL_WHOISSSLFP.
