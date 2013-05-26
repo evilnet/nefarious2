@@ -542,6 +542,7 @@ static struct FeatureDesc {
   F_B(EXTENDED_ACCOUNTS, 0, 1, 0),
   F_B(LOGIN_ON_CONNECT, 0, 0, 0),
   F_B(LOC_SENDHOST, 0, 0, 0),
+  F_B(LOC_SENDSSLFP, 0, 0, 0),
   F_S(LOC_DEFAULT_SERVICE, 0, "AuthServ", 0),
   F_B(STRICTUSERNAME, 0, 0, 0),
   F_B(APASS_CANSEND, 0, 0, 0),

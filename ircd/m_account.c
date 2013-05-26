@@ -210,9 +210,10 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           IsHiddenHost(acptr))
         hide_hostmask(acptr);
       return 0;
-    } else if (type == 'C' || type == 'H') {
+    } else if (type == 'C' || type == 'H' || type == 'S') {
       /* LOC requests, forward them and ignore them */
-      if (((type == 'C') && (parc < 6)) || ((type == 'H') && (parc < 7)))
+      if (((type == 'C') && (parc < 6)) || ((type == 'H') && (parc < 7)) ||
+          ((type == 'S') && (parc < 8)))
         return need_more_params(sptr, "ACCOUNT");
 
       if (!(acptr = FindNServer(parv[1])) && !(acptr = findNUser(parv[1])))
@@ -222,7 +223,10 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         return protocol_violation(cptr, "ACCOUNT check (%s %s %s%s%s)", parv[3],
                                   parv[4], parv[5], (parc>6 ? " ": ""),
                                   (parc>6 ? parv[6]: ""));
-      if (parc>6)
+      if (parc>7)
+        sendcmdto_one(sptr, CMD_ACCOUNT, acptr, "%s %s %s %s %s %s :%s",
+                      parv[1], parv[2], parv[3], parv[4], parv[5], parv[6], parv[7]);
+      else if (parc>6)
         sendcmdto_one(sptr, CMD_ACCOUNT, acptr, "%s %s %s %s %s :%s",
                       parv[1], parv[2], parv[3], parv[4], parv[5], parv[6]);
       else

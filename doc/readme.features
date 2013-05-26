@@ -1065,6 +1065,13 @@ LOC_SENDHOST
 
 If enabled hostnames will be sent in Login on connect messages to servers.
 
+LOC_SENDSSLFP
+ * Type: boolean
+ * Default: FALSE
+
+If enabled, and LOC_SENDHOST is enabled, SSL client certificate fingerprints
+will be included in Login on connect messages to servers.
+
 LOC_DEFAULT_SERVICE
   * type: string
   * Default: authserv

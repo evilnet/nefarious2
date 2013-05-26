@@ -3,6 +3,23 @@
 
 2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_SENDSSLFP.
+
+	* doc/readme.features: Added FEAT_SENDSSLFP.
+
+	* include/ircd_features.h: Added SSL client certificate fingerprint support
+	to login on connect.
+
+	* ircd/ircd_features.c: Added FEAT_SENDSSLFP.
+
+	* ircd/m_account.c: Added SSL client certificate fingerprint support
+	to login on connect.
+
+	* ircd/s_user.c: Added SSL client certificate fingerprint support
+	to login on connect.
+
+2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/capab.h: Added tls CAP.
 
 	* include/client.h: Added STARTTLS support.
