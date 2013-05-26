@@ -1,7 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/ircd_features.c: Missed a channel mode string for channel
+	mode +Z.
+
+2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_webirc.c: Fixed -Wall -pedantic compiler warnings.
 
