@@ -40,6 +40,9 @@ enum Capab {
 #define _CAP(cap, flags, name)	CAP_ ## cap
   _CAP(NAMESX, 0, "multi-prefix"),
   _CAP(UHNAMES, 0, "userhost-in-names"),
+#ifdef USE_SSL
+  _CAP(TLS, 0, "tls"),
+#endif
 /*  CAPLIST, */
 #undef _CAP
   _CAP_LAST_CAP

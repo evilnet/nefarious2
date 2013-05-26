@@ -1372,9 +1372,49 @@ static Numeric replyTable[] = {
 /* 669 */
   { 0 },
 /* 670 */
-  { 0 },
+  { RPL_STARTTLS, ":STARTTLS successful, go ahead with TLS handshake", "670" },
 /* 671 */
-  { RPL_WHOISSSL, "%s :is connected via SSL", "671" }
+  { RPL_WHOISSSL, "%s :is connected via SSL", "671" },
+/* 672 */
+  { 0 },
+/* 673 */
+  { 0 },
+/* 674 */
+  { 0 },
+/* 675 */
+  { 0 },
+/* 676 */
+  { 0 },
+/* 677 */
+  { 0 },
+/* 678 */
+  { 0 },
+/* 679 */
+  { 0 },
+/* 680 */
+  { 0 },
+/* 681 */
+  { 0 },
+/* 682 */
+  { 0 },
+/* 683 */
+  { 0 },
+/* 684 */
+  { 0 },
+/* 685 */
+  { 0 },
+/* 686 */
+  { 0 },
+/* 687 */
+  { 0 },
+/* 688 */
+  { 0 },
+/* 689 */
+  { 0 },
+/* 690 */
+  { 0 },
+/* 691 */
+  { ERR_STARTTLS, ":%s", "691" }
 };
 
 /** Return a pointer to the Numeric for a particular code.

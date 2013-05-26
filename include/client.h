@@ -209,6 +209,7 @@ enum Flag
     FLAG_FAKEHOST,                  /**< User has a fake host (+f) */
     FLAG_SETHOST,                   /**< User has a set host (+h) */
     FLAG_SSL,                       /**< User is connected via SSL (+z) */
+    FLAG_STARTTLS,                  /**< User is connecting with StartTLS */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -708,6 +709,8 @@ struct Client {
 #define IsSetHost(x)            HasFlag(x, FLAG_SETHOST)
 /** Return non-zero if the client is connected via SSL. */
 #define IsSSL(x)                HasFlag(x, FLAG_SSL)
+/** Return non-zero if the client is connecting using STARTTLS. */
+#define IsStartTLS(x)           HasFlag(x, FLAG_STARTTLS)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -796,6 +799,8 @@ struct Client {
 #define SetSetHost(x)           SetFlag(x, FLAG_SETHOST)
 /** Mark a client as having connected via SSL. */
 #define SetSSL(x)               SetFlag(x, FLAG_SSL)
+/** Mark a client as using STARTTLS. */
+#define SetStartTLS(x)          SetFlag(x, FLAG_STARTTLS)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -869,6 +874,8 @@ struct Client {
 #define ClearSetHost(x)         ClrFlag(x, FLAG_SETHOST)
 /** Client is no longer connected via SSL (this cannot be possible). */
 #define ClearSSL(x)             ClrFlag(x, FLAG_SSL)
+/** Client is no longer using STARTTLS. */
+#define ClearStartTLS(x)        ClrFlag(x, FLAG_STARTTLS)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

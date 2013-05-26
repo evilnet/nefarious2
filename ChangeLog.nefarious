@@ -3,6 +3,34 @@
 
 2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/capab.h: Added tls CAP.
+
+	* include/client.h: Added STARTTLS support.
+
+	* include/handlers.h: Added STARTTLS support.
+
+	* include/msg.h: Added STARTTLS support.
+
+	* include/numeric.h: Added STARTTLS support.
+
+	* include/ssl.h: Added STARTTLS support.
+
+	* ircd/Makefile.in: Added STARTTLS support.
+
+	* ircd/m_cap.c: Added tls CAP.
+
+	* ircd/parse.c: Added STARTTLS support.
+
+	* ircd/s_bsd.c: Added STARTTLS support.
+
+	* ircd/s_err.c: Added STARTTLS support.
+
+	* ircd/ssl.c: Added STARTTLS support.
+
+	* ircd/m_starttls.c: Added STARTTLS support.
+
+2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ircd_features.c: Missed a channel mode string for channel
 	mode +Z.
 

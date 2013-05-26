@@ -526,7 +526,11 @@ extern const struct Numeric* get_error_numeric(int err);
 
 #define RPL_WHOISSSLFP       616	/* Nefarious extension */
 
+#define RPL_STARTTLS         670        /* Nefarious extension */
 #define RPL_WHOISSSL         671        /* Nefarious extension (SSL WHOIS) */
-#define ERR_LASTERROR        672
+
+#define ERR_STARTTLS         691	/* Nefarious extension */
+
+#define ERR_LASTERROR        692
 
 #endif /* INCLUDED_numeric_h */

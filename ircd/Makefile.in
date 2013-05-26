@@ -186,6 +186,7 @@ IRCD_SRC = \
 	m_smo.c \
 	m_sno.c \
 	m_squit.c \
+	m_starttls.c \
 	m_stats.c \
 	m_svsident.c \
 	m_svsinfo.c \

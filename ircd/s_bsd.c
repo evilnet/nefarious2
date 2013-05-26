@@ -365,8 +365,8 @@ static int completed_connection(struct Client* cptr)
     sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
     if (sslfp)
       ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
-#endif
     SetSSL(cptr);
+#endif
   }
 
   if (s_state(&(cli_socket(cptr))) == SS_CONNECTING)
@@ -980,9 +980,17 @@ static void client_sock_callback(struct Event* ev)
 
   case ET_READ: /* socket is readable */
     if (!IsDead(cptr)) {
-      Debug((DEBUG_DEBUG, "Reading data from %C", cptr));
-      if (read_packet(cptr, 1) == 0) /* error while reading packet */
-	fallback = "EOF from client";
+      if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl) && IsStartTLS(cptr)) {
+        if (!ssl_starttls(cptr)) {
+          ClearSSL(cptr);
+          ClearStartTLS(cptr);
+          send_reply(cptr, ERR_STARTTLS, "STARTTLS failed.");
+        }
+      } else {
+        Debug((DEBUG_DEBUG, "Reading data from %C", cptr));
+        if (read_packet(cptr, 1) == 0) /* error while reading packet */
+	  fallback = "EOF from client";
+      }
     }
     break;
 

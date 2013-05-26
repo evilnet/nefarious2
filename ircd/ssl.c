@@ -65,6 +65,8 @@ SSL_CTX *ssl_init_server_ctx();
 SSL_CTX *ssl_init_client_ctx();
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert);
 void ssl_set_nonblocking(SSL *s);
+int ssl_smart_shutdown(SSL *ssl);
+char *ssl_error_str(int err, int my_errno);
 void sslfail(char *txt);
 void binary_to_hex(unsigned char *bin, char *hex, int length);
 
@@ -472,6 +474,44 @@ int ssl_connect(struct Socket* sock)
   return 1; /* Connection complete */
 }
 
+int ssl_starttls(struct Client *cptr)
+{
+  int r = 0;
+
+  if (!cli_socket(cptr).ssl) {
+    cli_socket(cptr).ssl = SSL_new(ssl_server_ctx);
+    SSL_set_fd(cli_socket(cptr).ssl, cli_socket(cptr).s_fd);
+    ssl_set_nonblocking(cli_socket(cptr).ssl);
+  }
+
+  if ((r = SSL_accept(cli_socket(cptr).ssl)) <= 0) {
+    unsigned long err = SSL_get_error(cli_socket(cptr).ssl, r);
+
+    if (err) {
+      switch (err) {
+        case SSL_ERROR_SYSCALL:
+          if (errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
+        case SSL_ERROR_WANT_READ:
+        case SSL_ERROR_WANT_WRITE:
+            return 1;
+        default:
+          Debug((DEBUG_ERROR, "SSL_accept: %s", ssl_error_str(err, errno)));
+
+          SSL_set_shutdown(cli_socket(cptr).ssl, SSL_RECEIVED_SHUTDOWN);
+          ssl_smart_shutdown(cli_socket(cptr).ssl);
+          SSL_free(cli_socket(cptr).ssl);
+          cli_socket(cptr).ssl = NULL;
+
+          return 0;
+      }
+      return 0;
+    }
+    return 1;
+  }
+
+  return 1;
+}
+
 char* ssl_get_fingerprint(SSL *ssl)
 {
   X509* cert;
@@ -501,6 +541,67 @@ void ssl_set_nonblocking(SSL *s)
 {
   BIO_set_nbio(SSL_get_rbio(s),1);
   BIO_set_nbio(SSL_get_wbio(s),1);
+}
+
+int ssl_is_init_finished(SSL *s)
+{
+  return SSL_is_init_finished(s);
+}
+
+int ssl_smart_shutdown(SSL *ssl)
+{
+    char i;
+    int rc;
+    rc = 0;
+    for(i = 0; i < 4; i++) {
+        if((rc = SSL_shutdown(ssl)))
+            break;
+    }
+
+    return rc;
+}
+
+/**
+ * Retrieve a static string for the given SSL error.
+ *
+ * \param err The error to look up.
+ * \param my_errno The value of errno to use in case we want to call strerror().
+ */
+char *ssl_error_str(int err, int my_errno)
+{
+  static char ssl_errbuf[256];
+  char *ssl_errstr = NULL;
+
+  switch(err) {
+    case SSL_ERROR_NONE:
+      ssl_errstr = "SSL: No error";
+      break;
+    case SSL_ERROR_SSL:
+      ssl_errstr = "Internal OpenSSL error or protocol error";
+      break;
+    case SSL_ERROR_WANT_READ:
+      ssl_errstr = "OpenSSL functions requested a read()";
+      break;
+    case SSL_ERROR_WANT_WRITE:
+      ssl_errstr = "OpenSSL functions requested a write()";
+      break;
+    case SSL_ERROR_WANT_X509_LOOKUP:
+      ssl_errstr = "OpenSSL requested a X509 lookup which didn't arrive";
+      break;
+    case SSL_ERROR_SYSCALL:
+      snprintf(ssl_errbuf, sizeof(ssl_errbuf), "%s", strerror(my_errno));
+      ssl_errstr = ssl_errbuf;
+      break;
+    case SSL_ERROR_ZERO_RETURN:
+      ssl_errstr = "Underlying socket operation returned zero";
+      break;
+    case SSL_ERROR_WANT_CONNECT:
+      ssl_errstr = "OpenSSL functions wanted a connect()";
+      break;
+    default:
+      ssl_errstr = "Unknown OpenSSL error (huh?)";
+  }
+  return ssl_errstr;
 }
 
 void sslfail(char *txt)
