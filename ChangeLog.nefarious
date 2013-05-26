@@ -3,6 +3,12 @@
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_webirc.c: Fixed -Wall -pedantic compiler warnings.
+
+	* ircd/ssl.c: Fixed -Wall -pedantic compiler warnings.
+
+2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ssl.c: Set SSL connections to non-blocking.
 
 2013-05-25  Matthew Beeching  <jobe@mdbnet.co.uk>

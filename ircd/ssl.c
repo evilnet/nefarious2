@@ -29,9 +29,12 @@
 #include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "listener.h"
+#include "s_bsd.h"
 #include "s_debug.h"
+#include "send.h"
 #include "ssl.h"
 
 #ifdef USE_SSL
@@ -45,6 +48,7 @@
 #include <unistd.h>
 
 #include <openssl/bio.h>
+#include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 
@@ -119,7 +123,7 @@ SSL_CTX *ssl_init_server_ctx(void)
     return NULL;
   }
 
-  //SSL_CTX_set_options(server_ctx, SSL_OP_NO_SSLv2);
+  /* SSL_CTX_set_options(server_ctx, SSL_OP_NO_SSLv2); */
   SSL_CTX_set_verify(server_ctx, SSL_VERIFY_PEER|SSL_VERIFY_CLIENT_ONCE, ssl_verify_callback);
   SSL_CTX_set_session_cache_mode(server_ctx, SSL_SESS_CACHE_OFF);
 

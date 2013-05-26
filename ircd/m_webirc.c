@@ -92,6 +92,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "s_auth.h"
 #include "s_conf.h"
 #include "s_misc.h"
 #include "IPcheck.h"
