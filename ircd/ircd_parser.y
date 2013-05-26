@@ -77,7 +77,7 @@
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
-  char *spoofhost;
+  char *spoofhost, *sslfp;
   char *country, *continent;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
@@ -194,6 +194,7 @@ static void free_slist(struct SLink **link) {
 %token VERSION
 %token SPOOFHOST
 %token AUTOAPPLY
+%token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
@@ -519,6 +520,7 @@ connectblock: CONNECT
    aconf->name = name;
    aconf->origin_name = origin;
    aconf->passwd = pass;
+   aconf->sslfp = sslfp;
    aconf->conn_class = c_class;
    aconf->address.port = port;
    aconf->host = host;
@@ -533,18 +535,21 @@ connectblock: CONNECT
  if (!aconf) {
    MyFree(name);
    MyFree(pass);
+   MyFree(sslfp);
    MyFree(host);
    MyFree(origin);
    MyFree(hub_limit);
  }
  name = pass = host = origin = hub_limit = NULL;
  c_class = NULL;
+ sslfp = NULL;
  port = flags = maxlinks = 0;
 };
 connectitems: connectitem connectitems | connectitem;
 connectitem: connectname | connectpass | connectclass | connecthost
               | connectport | connectvhost | connectleaf | connecthub
-              | connecthublimit | connectmaxhops | connectauto | connectssl;
+              | connecthublimit | connectmaxhops | connectauto | connectssl
+              | connectsslfp;
 connectname: NAME '=' QSTRING ';'
 {
  MyFree(name);
@@ -598,6 +603,11 @@ connectauto: AUTOCONNECT '=' YES ';' { flags |= CONF_AUTOCONNECT; }
  | AUTOCONNECT '=' NO ';' { flags &= ~CONF_AUTOCONNECT; };
 connectssl: SSLTOK '=' YES ';' { flags |= CONF_SSL; }
  | SSLTOK '=' NO ';' { flags &= ~CONF_SSL; };
+connectsslfp: SSLFP '=' QSTRING ';'
+{
+  MyFree(sslfp);
+  sslfp = $3;
+};
 
 uworldblock: UWORLD '{' uworlditems '}' ';';
 uworlditems: uworlditem uworlditems | uworlditem;
@@ -628,6 +638,8 @@ operblock: OPER '{' operitems '}' ';'
     aconf = make_conf(CONF_OPERATOR);
     DupString(aconf->name, name);
     DupString(aconf->passwd, pass);
+    if (sslfp)
+      DupString(aconf->sslfp, sslfp);
     conf_parse_userhost(aconf, link->value.cp);
     aconf->conn_class = c_class;
     memcpy(&aconf->privs, &privs, sizeof(aconf->privs));
@@ -635,6 +647,7 @@ operblock: OPER '{' operitems '}' ';'
   }
   MyFree(name);
   MyFree(pass);
+  MyFree(sslfp);
   free_slist(&hosts);
   name = pass = NULL;
   c_class = NULL;
@@ -642,7 +655,7 @@ operblock: OPER '{' operitems '}' ';'
   memset(&privs_dirty, 0, sizeof(privs_dirty));
 };
 operitems: operitem | operitems operitem;
-operitem: opername | operpass | operhost | operclass | priv;
+operitem: opername | operpass | operhost | operclass | opersslfp |priv;
 opername: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -675,6 +688,11 @@ operclass: CLASS '=' QSTRING ';'
  if (!c_class)
   parse_error("No such connection class '%s' for Operator block", $3);
  MyFree($3);
+};
+opersslfp: SSLFP '=' QSTRING ';'
+{
+  MyFree(sslfp);
+  sslfp = $3;
 };
 
 priv: privtype '=' yesorno ';'
@@ -880,6 +898,7 @@ clientblock: CLIENT
     aconf->conn_class = c_class;
     aconf->maximum = maxlinks;
     aconf->passwd = pass;
+    aconf->sslfp = sslfp;
     aconf->countrymask = country;
     aconf->continentmask = continent;
   }
@@ -890,6 +909,7 @@ clientblock: CLIENT
     MyFree(pass);
     MyFree(country);
     MyFree(continent);
+    MyFree(sslfp);
   }
   host = NULL;
   username = NULL;
@@ -897,12 +917,15 @@ clientblock: CLIENT
   maxlinks = 0;
   ip = NULL;
   pass = NULL;
+  sslfp = NULL;
   port = 0;
   country = NULL;
   continent = NULL;
 };
 clientitems: clientitem clientitems | clientitem;
-clientitem: clienthost | clientip | clientusername | clientclass | clientpass | clientmaxlinks | clientport | clientcountry | clientcontinent;
+clientitem: clienthost | clientip | clientusername | clientclass | clientpass
+            | clientmaxlinks | clientport | clientcountry | clientcontinent
+            | clientsslfp;
 clienthost: HOST '=' QSTRING ';'
 {
   char *sep = strchr($3, '@');
@@ -964,6 +987,11 @@ clientcontinent: CONTINENT '=' QSTRING ';'
 {
   MyFree(continent);
   continent = $3;
+};
+clientsslfp: SSLFP '=' QSTRING ';'
+{
+  MyFree(sslfp);
+  sslfp = $3;
 };
 
 killblock: KILL

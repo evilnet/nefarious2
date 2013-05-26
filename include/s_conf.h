@@ -72,6 +72,7 @@ struct ConfItem
   char *host;         /**< Peer hostname */
   char *origin_name;  /**< Text form of origin address */
   char *passwd;       /**< Password field */
+  char *sslfp;        /**< SSL certificate fingerprint */
   char *name;         /**< Name of peer */
   char *hub_limit;    /**< Mask that limits servers allowed behind
                          this one. */
@@ -239,5 +240,7 @@ extern struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, in
 extern struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *passwd, int *status);
 
 extern void yyerror(const char *msg);
+
+extern int verify_sslclifp(struct Client* cptr, struct ConfItem* aconf);
 
 #endif /* INCLUDED_s_conf_h */

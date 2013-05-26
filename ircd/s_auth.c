@@ -402,6 +402,14 @@ static int check_auth_finished(struct AuthRequest *auth)
     struct ConfItem *aconf;
 
     aconf = cli_confs(auth->client)->value.aconf;
+
+    if (!verify_sslclifp(auth->client, aconf))
+    {
+      ServerStats->is_ref++;
+      send_reply(auth->client, ERR_SSLCLIFP);
+      return exit_client(auth->client, auth->client, &me, "SSL fingerprint mismatch");
+    }
+
     if (aconf
         && !EmptyString(aconf->passwd)
         && strcmp(cli_passwd(auth->client), aconf->passwd))

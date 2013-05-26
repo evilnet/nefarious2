@@ -1096,7 +1096,7 @@ static Numeric replyTable[] = {
 /* 531 */
   { ERR_HOSTUNAVAIL, "%s :Sethost not found or unavailable", "531" },
 /* 532 */
-  { 0 },
+  { ERR_SSLCLIFP, ":SSL certificate fingerprint did not match", "532" },
 /* 533 */
   { 0 },
 /* 534 */

@@ -211,6 +211,16 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     }
   }
 
+  if (!verify_sslclifp(sptr, aconf))
+  {
+    send_reply(sptr, ERR_SSLCLIFP);
+    sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s "
+                                "(%s@%s) (SSL fingerprint mismatch)",
+                                (!MyUser(sptr) ? "remote " : ""), cli_name(sptr),
+                                cli_user(sptr)->username, cli_sockhost(sptr));
+    return 0;
+  }
+
   if (oper_password_match(password, aconf->passwd))
   {
     int attach_result = attach_conf(sptr, aconf);

@@ -3,6 +3,38 @@
 
 2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* include/numeric.h: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* include/s_conf.h: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* ircd/ircd_lexer.l: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* ircd/ircd_parser.y: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* ircd/m_oper.c: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* ircd/m_server.c: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* ircd/s_auth.c: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* ircd/s_conf.c: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+	* ircd/s_err.c: Added SSL client certificate support to
+	Client, Connect and Operator blocks.
+
+2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_SENDSSLFP.
 
 	* doc/readme.features: Added FEAT_SENDSSLFP.
