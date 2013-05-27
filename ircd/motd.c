@@ -324,7 +324,7 @@ static int
 motd_forward_type(struct Client *cptr, int type)
 {
   int i;
-  struct MotdCache *cache;
+  struct MotdCache *cache = NULL;
 
   assert(0 != cptr);
 

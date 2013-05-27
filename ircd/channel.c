@@ -1935,6 +1935,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       } else {
 	strptr = remstr;
 	strptr_i = &remstr_i;
+        strptro = NULL;
+        strptro_i = NULL;
       }
 
       /* if we're changing oplevels and we know the oplevel, pass it on */
@@ -1950,12 +1952,14 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       /* deal with other modes that take clients */
       } else if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_VOICE)) {
 	build_string(strptr, strptr_i, NumNick(MB_CLIENT(mbuf, i)), ' ');
-        build_string(strptro, strptro_i, NumNick(MB_CLIENT(mbuf, i)), ' ');
+        if (MB_TYPE(mbuf, i) & MODE_ADD)
+          build_string(strptro, strptro_i, NumNick(MB_CLIENT(mbuf, i)), ' ');
 
       /* deal with modes that take strings */
       } else if (MB_TYPE(mbuf, i) & (MODE_KEY | MODE_BAN | MODE_APASS | MODE_UPASS)) {
 	build_string(strptr, strptr_i, MB_STRING(mbuf, i), 0, ' ');
-        build_string(strptro, strptro_i, MB_STRING(mbuf, i), 0, ' ');
+        if (MB_TYPE(mbuf, i) & MODE_ADD)
+          build_string(strptro, strptro_i, MB_STRING(mbuf, i), 0, ' ');
 
       /*
        * deal with the limit.  Logic here is complicated; if HACK2 is set,
@@ -1964,7 +1968,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
        */
       } else if ((MB_TYPE(mbuf, i) & limitdel) == limitdel) {
 	build_string(strptr, strptr_i, limitbuf, 0, ' ');
-        build_string(strptro, strptro_i, limitbuf, 0, ' ');
+        if (MB_TYPE(mbuf, i) & MODE_ADD)
+          build_string(strptro, strptro_i, limitbuf, 0, ' ');
       }
     }
 

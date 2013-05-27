@@ -3,6 +3,13 @@
 
 2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/channel.c: Fixed a crash bug that was getting optimized
+	out at compile time by -O2.
+
+	* ircd/motd.c: Fixed a compile warning.
+
+2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/channel.h: Added channel mode +Q (strip PART/QUIT messages).
 
 	* include/ircd_features.h: Added channel mode +Q (strip PART/QUIT
