@@ -51,6 +51,7 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "list.h"
+#include "mark.h"
 #include "msg.h"	/* for MAXPARA */
 #include "numeric.h"
 #include "numnicks.h"
@@ -2065,6 +2066,39 @@ static int iauth_cmd_kill(struct IAuth *iauth, struct Client *cli,
  * @param[in] iauth Active IAuth session.
  * @param[in] cli Client referenced by command.
  * @param[in] parc Number of parameters (at least one).
+ * @param[in] params Usermode arguments for client.
+ * @return Zero.
+ */
+static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
+                              int parc, char **params)
+{
+  if ((parc < 2) || EmptyString(params[0])) {
+    sendto_iauth(cli, "E Missing :Missing mark parameter");
+    return 0;
+  }
+  /* params[0] == type, params[1] == data */
+  if (!ircd_strcmp(params[0], MARK_WEBIRC)) {
+    ircd_strncpy(cli_webirc(cli), params[1], BUFSIZE);
+  } else if (!ircd_strcmp(params[0], MARK_GEOIP)) {
+    if ((parc < 3) || EmptyString(params[1]) || EmptyString(params[2])) {
+      sendto_iauth(cli, "E Missing :Missing mark geoip parameter");
+      return 0;
+    }
+    geoip_apply_mark(cli, params[1], params[2]);
+  } else if (!ircd_strcmp(params[0], MARK_CVERSION)) {
+    ircd_strncpy(cli_version(cli), params[1], VERSIONLEN);
+  } else if (!ircd_strcmp(params[0], MARK_SSLCLIFP)) {
+    ircd_strncpy(cli_sslclifp(cli), params[1], BUFSIZE);
+  } else {
+    sendto_iauth(cli, "E Invalid :Invalid mark type");
+  }
+  return 0;
+}
+
+/** Change a client's usermode.
+ * @param[in] iauth Active IAuth session.
+ * @param[in] cli Client referenced by command.
+ * @param[in] parc Number of parameters (at least one).
  * @param[in] params Usermode arguments for client (with the first
  *   starting with '+').
  * @return Zero.
@@ -2078,7 +2112,6 @@ static int iauth_cmd_usermode(struct IAuth *iauth, struct Client *cli,
   }
   return 0;
 }
-
 
 /** Send a challenge string to the client.
  * @param[in] iauth Active IAuth session.
@@ -2174,6 +2207,7 @@ static void iauth_parse(struct IAuth *iauth, char *message)
   case 'u': handler = iauth_cmd_username_bad; has_cli = 1; break;
   case 'N': handler = iauth_cmd_hostname; has_cli = 1; break;
   case 'I': handler = iauth_cmd_ip_address; has_cli = 1; break;
+  case 'm': handler = iauth_cmd_mark; has_cli = 1; break;
   case 'M': handler = iauth_cmd_usermode; has_cli = 1; break;
   case 'C': handler = iauth_cmd_challenge; has_cli = 1; break;
   case 'd': handler = iauth_cmd_soft_done; has_cli = 1; break;

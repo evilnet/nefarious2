@@ -440,6 +440,18 @@ Comments: Indicates a set of user mode changes to be applied to the
 Compatibility: This is an Undernet extension and ircd does not support
   this message.
 
+m - Mark a user
+Syntax: m <id> <remoteip> <remoteport> <marktype> <markdata>
+Example: m 5 192.168.1.10 23367 WEBIRC :Some WEBIRC
+States: REGISTER, HURRY, NORMAL
+Next State: -
+Comments: Sets the specified markdata for the specified marktype on
+  the specified client. Currently available mark types are WEBIRC,
+  GEOIP, CVERSION and SSLCLIFP. GEOIP requires both a 2 letter country
+  code and a 2 letter continent code both without the : prefix.
+Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
+  not support this message.
+
 C - Challenge User
 Syntax: C <id> <remoteip> <remoteport> :<challenge string>
 Example: C 5 192.168.1.10 23367 :In which year did Columbus sail the ocean blue?

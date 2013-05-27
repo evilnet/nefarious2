@@ -1,6 +1,15 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/readme.iauth: Added MARK support to iauth.
+
+	* ircd/s_auth.c: Added MARK support to iauth.
+
+	* ircd/s_user.c: Ensured MARK_CVERSION is properly propagated
+	in register_user();
+
 2013-05-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added SSL client certificate support to
