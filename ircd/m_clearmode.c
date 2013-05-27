@@ -112,6 +112,7 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
 {
   static int flags[] = {
     MODE_CHANOP,	'o',
+    MODE_HALFOP,	'h',
     MODE_VOICE,		'v',
     MODE_PRIVATE,	'p',
     MODE_SECRET,	's',
@@ -207,7 +208,7 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
   }
 
   /* Deal with users on the channel */
-  if (del_mode & (MODE_BAN | MODE_CHANOP | MODE_VOICE))
+  if (del_mode & (MODE_BAN | MODE_CHANOP | MODE_HALFOP | MODE_VOICE))
     for (member = chptr->members; member; member = member->next_member) {
       if (IsZombie(member)) /* we ignore zombies */
 	continue;
@@ -219,6 +220,12 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
       if (IsChanOp(member) && del_mode & MODE_CHANOP) {
 	modebuf_mode_client(&mbuf, MODE_DEL | MODE_CHANOP, member->user, MAXOPLEVEL + 1);
 	member->status &= ~CHFL_CHANOP;
+      }
+
+      /* Drop channel halfop status */
+      if (IsHalfOp(member) && del_mode & MODE_HALFOP) {
+        modebuf_mode_client(&mbuf, MODE_DEL | MODE_HALFOP, member->user, MAXOPLEVEL + 1);
+        member->status &= ~CHFL_HALFOP;
       }
 
       /* Drop voice */

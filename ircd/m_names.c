@@ -182,6 +182,12 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
         done_prefix = 1;
       }
     }
+    if (IsHalfOp(member)) {
+      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
+        buf[idx++] = '%';
+        done_prefix = 1;
+      }
+    }
     if (HasVoice(member)) {
       if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '+';

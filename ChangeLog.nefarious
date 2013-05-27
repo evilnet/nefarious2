@@ -3,6 +3,18 @@
 
 2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* Multiple files: Added halfop support.
+
+	* Files: Makefile.in, doc/example.conf, doc/readme.features,
+	include/channel.h, include/ircd_features.h, include/numeric.h,
+	include/send.h, include/supported.h, ircd/channel.c,
+	ircd/ircd_features.c, ircd/m_burst.c, ircd/m_check.c, ircd/m_clearmode.c,
+	ircd/m_invite.c, ircd/m_kick.c, ircd/m_mode.c, ircd/m_names.c,
+	ircd/m_topic.c, ircd/m_whois.c, ircd/s_err.c, ircd/s_user.c, ircd/send.c,
+	ircd/whocmds.c
+
+2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/channel.c: Fixed a crash bug that was getting optimized
 	out at compile time by -O2.
 

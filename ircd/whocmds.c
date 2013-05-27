@@ -179,6 +179,8 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
        */
       if (IsChanOp(chan))
         *(p1++) = '@';
+      if (IsHalfOp(chan))
+        *(p1++) = '%';
       if (HasVoice(chan))
         *(p1++) = '+';
       if (IsZombie(chan))
@@ -189,6 +191,8 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
     else {
       if (IsChanOp(chan))
         *(p1++) = '@';
+      else if (IsHalfOp(chan))
+        *(p1++) = '%';
       else if (HasVoice(chan))
         *(p1++) = '+';
       else if (IsZombie(chan))

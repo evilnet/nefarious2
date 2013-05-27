@@ -651,6 +651,24 @@ int is_zombie(struct Client *cptr, struct Channel *chptr)
   return 0;
 }
 
+/** Check if this user is a legitimate halfop
+ *
+ * @param cptr  Client to check
+ * @param chptr Channel to check
+ *
+ * @returns True if the user is a halfop (And not a zombie), False otherwise.
+ * @see \ref zombie
+ */
+int is_half_op(struct Client *cptr, struct Channel *chptr)
+{
+  struct Membership* member;
+  assert(chptr);
+  if ((member = find_member_link(chptr, cptr)))
+    return (!IsZombie(member) && IsHalfOp(member));
+
+  return 0;
+}
+
 /** Returns if a user has voice on a channel.
  *
  * @param cptr 	The client
@@ -948,8 +966,17 @@ int compare_member_oplevel(const void *mp1, const void *mp2)
 void send_channel_modes(struct Client *cptr, struct Channel *chptr)
 {
   /* The order in which modes are generated is now mandatory */
-  static unsigned int current_flags[4] =
-      { 0, CHFL_VOICE, CHFL_CHANOP, CHFL_CHANOP | CHFL_VOICE };
+  static unsigned int current_flags[8] =
+      {
+        0,
+        CHFL_VOICE,
+        CHFL_HALFOP,
+	CHFL_VOICE  | CHFL_HALFOP,
+        CHFL_CHANOP,
+        CHFL_CHANOP | CHFL_VOICE,
+        CHFL_CHANOP | CHFL_HALFOP,
+        CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE
+      };
   int                first = 1;
   int                full  = 1;
   int                flag_cnt = 0;
@@ -1007,15 +1034,15 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
      * Then run 2 times over all opped members (which are ordered
      * by op-level) to also group voice and non-voice together.
      */
-    for (first = 1; flag_cnt < 4; new_mode = 1, ++flag_cnt)
+    for (first = 1; flag_cnt < 8; new_mode = 1, ++flag_cnt)
     {
       while (member)
       {
 	if (flag_cnt < 2 && IsChanOp(member))
 	{
 	  /*
-	   * The first loop (to find all non-voice/op), we count the ops.
-	   * The second loop (to find all voiced non-ops), store the ops
+	   * The first loop (to find all non-voice/halfop/op), we count the ops.
+	   * The second loop (to find all non-ops), store the ops
 	   * in a dynamic array.
 	   */
 	  if (flag_cnt == 0)
@@ -1029,8 +1056,8 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
 	/* Only handle the members with the flags that we are interested in. */
         if ((member->status & CHFL_VOICED_OR_OPPED) == current_flags[flag_cnt])
 	{
-	  if (msgq_bufleft(mb) < NUMNICKLEN + 3 + MAXOPLEVELDIGITS)
-	    /* The 3 + MAXOPLEVELDIGITS is a possible ",:v999". */
+	  if (msgq_bufleft(mb) < NUMNICKLEN + 4 + MAXOPLEVELDIGITS)
+	    /* The 4 + MAXOPLEVELDIGITS is a possible ",:vh999". */
 	  {
 	    full = 1;           /* Make sure we continue after
 				   sending it so far */
@@ -1057,12 +1084,14 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
 	     * In the two cases where the current mode includes ops,
 	     * we need to add the _absolute_ value of the oplevel to the mode.
 	     */
-	    char tbuf[3 + MAXOPLEVELDIGITS] = ":";
+	    char tbuf[4 + MAXOPLEVELDIGITS] = ":";
 	    int loc = 1;
 
-	    if (HasVoice(member))	/* flag_cnt == 1 or 3 */
+	    if (HasVoice(member))	/* flag_cnt == 1, 3, 5 and 7 */
 	      tbuf[loc++] = 'v';
-	    if (IsChanOp(member))	/* flag_cnt == 2 or 3 */
+            if (IsHalfOp(member))	/* flag_cnt == 2, 3, 6 and 7 */
+              tbuf[loc++] = 'h';
+	    if (IsChanOp(member))	/* flag_cnt == 4, 5, 6 and 7 */
 	    {
               /* append the absolute value of the oplevel */
               if (send_oplevels)
@@ -1074,7 +1103,7 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
 	    msgq_append(&me, mb, tbuf);
 	    new_mode = 0;
 	  }
-	  else if (send_oplevels && flag_cnt > 1 && last_oplevel != member->oplevel)
+	  else if (send_oplevels && flag_cnt > 3 && last_oplevel != member->oplevel)
 	  {
 	    /*
 	     * This can't be the first member of a (continued) BURST
@@ -1088,7 +1117,7 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
 	  }
 	}
 	/* Go to the next `member'. */
-	if (flag_cnt < 2)
+	if (flag_cnt < 4)
 	  member = member->next_member;
 	else
 	  member = opped_members[++opped_members_index];
@@ -1099,26 +1128,30 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
       /* Point `member' at the start of the list again. */
       if (flag_cnt == 0)
       {
-	member = chptr->members;
-	/* Now, after one loop, we know the number of ops and can
-	 * allocate the dynamic array with pointer to the ops. */
-	opped_members = (struct Membership**)
-	  MyMalloc((number_of_ops + 1) * sizeof(struct Membership*));
-	opped_members[number_of_ops] = NULL;	/* Needed for loop termination */
+        member = chptr->members;
+        /* Now, after one loop, we know the number of ops and can
+         * allocate the dynamic array with pointer to the ops. */
+        opped_members = (struct Membership**)
+          MyMalloc((number_of_ops + 1) * sizeof(struct Membership*));
+        opped_members[number_of_ops] = NULL;    /* Needed for loop termination */
+      }
+      else if (flag_cnt < 3)
+      {
+        member = chptr->members;
+        /* At the end of the second loop, sort the opped members with
+         * increasing op-level, so that we will output them in the
+         * correct order (and all op-level increments stay positive) */
+        if (flag_cnt == 1)
+          qsort(opped_members, number_of_ops,
+                sizeof(struct Membership*), compare_member_oplevel);
       }
       else
       {
-	/* At the end of the second loop, sort the opped members with
-	 * increasing op-level, so that we will output them in the
-	 * correct order (and all op-level increments stay positive) */
-	if (flag_cnt == 1)
-	  qsort(opped_members, number_of_ops,
-	        sizeof(struct Membership*), compare_member_oplevel);
-	/* The third and fourth loop run only over the opped members. */
-	member = opped_members[(opped_members_index = 0)];
+        /* The third and fourth loop run only over the opped members. */
+        member = opped_members[(opped_members_index = 0)];
       }
 
-    } /* loop over 0,+v,+o,+ov */
+    } /* loop over 0,+v,+h,+o,+ov,+oh,+hv,+ohv */
 
     if (!full)
     {
@@ -1618,6 +1651,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   /* we only need the flags that don't take args right now */
   static int flags[] = {
 /*  MODE_CHANOP,	'o', */
+/*  MODE_HALFOP,	'h', */
 /*  MODE_VOICE,		'v', */
     MODE_PRIVATE,	'p',
     MODE_SECRET,	's',
@@ -1751,13 +1785,14 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       bufptr_i = &rembuf_i;
     }
 
-    if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_VOICE)) {
+    if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_HALFOP | MODE_VOICE)) {
       tmp = strlen(cli_name(MB_CLIENT(mbuf, i)));
 
       if ((totalbuflen - IRCD_MAX(9, tmp)) <= 0) /* don't overflow buffer */
 	MB_TYPE(mbuf, i) |= MODE_SAVE; /* save for later */
       else {
-	bufptr[(*bufptr_i)++] = MB_TYPE(mbuf, i) & MODE_CHANOP ? 'o' : 'v';
+	bufptr[(*bufptr_i)++] = MB_TYPE(mbuf, i) & MODE_CHANOP ? 'o' :
+                                (MB_TYPE(mbuf, i) & MODE_HALFOP ? 'h' : 'v');
 	totalbuflen -= IRCD_MAX(9, tmp) + 1;
       }
     } else if (MB_TYPE(mbuf, i) & (MODE_BAN | MODE_APASS | MODE_UPASS)) {
@@ -1836,7 +1871,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       }
 
       /* deal with clients... */
-      if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_VOICE))
+      if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_HALFOP | MODE_VOICE))
 	build_string(strptr, strptr_i, cli_name(MB_CLIENT(mbuf, i)), 0, ' ');
 
       /* deal with bans... */
@@ -1950,7 +1985,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                      " %s%s", NumNick(MB_CLIENT(mbuf, i)));
 
       /* deal with other modes that take clients */
-      } else if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_VOICE)) {
+      } else if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_HALFOP | MODE_VOICE)) {
 	build_string(strptr, strptr_i, NumNick(MB_CLIENT(mbuf, i)), ' ');
         if (MB_TYPE(mbuf, i) & MODE_ADD)
           build_string(strptro, strptro_i, NumNick(MB_CLIENT(mbuf, i)), ' ');
@@ -2255,6 +2290,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
 {
   static int flags[] = {
 /*  MODE_CHANOP,	'o', */
+/*  MODE_HALFOP,	'h', */
 /*  MODE_VOICE,		'v', */
     MODE_PRIVATE,	'p',
     MODE_SECRET,	's',
@@ -3156,6 +3192,22 @@ mode_process_bans(struct ParseState *state)
     mode_ban_invalidate(state->chptr);
 }
 
+static void
+mode_parse_dummy(struct ParseState *state, int *flag_p)
+{
+  if (MyUser(state->sptr) && state->max_args <= 0) /* drop if too many args */
+    return;
+
+  if (state->parc <= 0) /* return if not enough args */
+    return;
+
+  state->args_used++;
+  state->parc--;
+  state->max_args--;
+
+  return;
+}
+
 /*
  * Helper function to process client changes
  */
@@ -3181,7 +3233,8 @@ mode_parse_client(struct ParseState *state, int *flag_p)
   state->max_args--;
 
   /* If they're not an oper, they can't change modes */
-  if (state->flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER)) {
+  if ((state->flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER)) &&
+      !((*flag_p == MODE_VOICE) && (state->flags & MODE_PARSE_ISHALFOP))) {
     send_notoper(state);
     return;
   }
@@ -3192,6 +3245,8 @@ mode_parse_client(struct ParseState *state, int *flag_p)
       *colon++ = '\0';
       req_oplevel = atoi(colon);
       if (*flag_p == CHFL_VOICE || state->dir == MODE_DEL) {
+        /* Ignore the colon and its argument. */
+      } else if (*flag_p == CHFL_HALFOP || state->dir == MODE_DEL) {
         /* Ignore the colon and its argument. */
       } else if (!(state->flags & MODE_PARSE_FORCE)
           && state->member
@@ -3349,12 +3404,12 @@ mode_process_clients(struct ParseState *state)
         if (IsDelayedJoin(member) && !IsZombie(member))
           RevealDelayedJoin(member);
 	member->status |= (state->cli_change[i].flag &
-			   (MODE_CHANOP | MODE_VOICE));
+			   (MODE_CHANOP | MODE_HALFOP | MODE_VOICE));
 	if (state->cli_change[i].flag & MODE_CHANOP)
 	  ClearDeopped(member);
       } else
 	member->status &= ~(state->cli_change[i].flag &
-			    (MODE_CHANOP | MODE_VOICE));
+			    (MODE_CHANOP | MODE_HALFOP | MODE_VOICE));
     }
 
     /* accumulate the change */
@@ -3448,6 +3503,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 {
   static int chan_flags[] = {
     MODE_CHANOP,	'o',
+    MODE_HALFOP,	'h',
     MODE_VOICE,		'v',
     MODE_PRIVATE,	'p',
     MODE_SECRET,	's',
@@ -3573,7 +3629,12 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 	mode_parse_ban(&state, flag_p);
 	break;
 
-      case 'o': /* deal with ops/voice */
+      case 'h': /* deal with ops/halfops/voice */
+        if (!(feature_bool(FEAT_HALFOPS) || IsServer(sptr))) {
+          mode_parse_dummy(&state, flag_p);
+          break;
+        }
+      case 'o':
       case 'v':
         mode_parse_client(&state, flag_p);
         break;
@@ -3711,7 +3772,9 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
    * the rest of the function finishes building resultant MODEs; if the
    * origin isn't a member or an oper, skip it.
    */
-  if (!state.mbuf || state.flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER))
+  if (!state.mbuf ||
+      ((state.flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER))
+       && !(state.flags & MODE_PARSE_ISHALFOP)))
     return state.args_used; /* tell our parent how many args we gobbled */
 
   t_mode = state.chptr->mode.mode;

@@ -233,6 +233,15 @@ feature_notify_oplevels(void)
   add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aDdiMmNnOpQRrstZz" : "b,k,l,aDdiMmNnOpQRrstZz");
 }
 
+/** Update whether #me has halfops support or not.
+*/
+static void
+feature_notify_halfops(void)
+{
+  add_isupport_s("PREFIX", feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+");
+  add_isupport_s("STATUSMSG", feature_bool(FEAT_HALFOPS) ? "@%+" : "@+");
+}
+
 /** Handle update to FEAT_GEOIP_ENABLE. */
 static void feature_notify_geoip_enable(void)
 {
@@ -558,6 +567,7 @@ static struct FeatureDesc {
   F_B(CHMODE_O, 0, 1, 0),
   F_B(CHMODE_Q, 0, 1, 0),
   F_B(CHMODE_Z, 0, 1, 0),
+  F_B(HALFOPS, 0, 0, feature_notify_halfops),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

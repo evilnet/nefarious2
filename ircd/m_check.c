@@ -182,10 +182,13 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
   struct Client *acptr;
 
    char outbuf[BUFSIZE], ustat[64], oplvl[4];
-   int cntr = 0, opcntr = 0, vcntr = 0, clones = 0, bans = 0, c = 0, authed = 0, delayed = 0;
+   int cntr = 0, opcntr = 0, hopcntr = 0, vcntr = 0, clones = 0, bans = 0, c = 0, authed = 0, delayed = 0;
 
    if (flags & CHECK_SHOWUSERS) {
-     send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, < = delayed)");
+     if (feature_bool(FEAT_HALFOPS))
+       send_reply(sptr, RPL_DATASTR, "Users (@ = op, % = halfop, + = voice, < = delayed)");
+     else
+       send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, < = delayed)");
    }
 
    for (lp = chptr->members; lp; lp = lp->next_member)
@@ -222,6 +225,12 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
          opped = 1;
       }
 
+      else if (chptr && IsHalfOp(lp))
+      {
+         strcat(ustat, "%");
+         hopcntr++;
+      }
+
       else if (chptr && HasVoice(lp))
       {
          strcat(ustat, "+");
@@ -249,9 +258,14 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
 
    send_reply(sptr, RPL_DATASTR, " ");
 
-   ircd_snprintf(0, outbuf, sizeof(outbuf),
-      "Total users:: %d (%d ops, %d voiced, %d clones, %d authed, %d delayed)",
-      cntr, opcntr, vcntr, clones, authed, delayed);
+   if (feature_bool(FEAT_HALFOPS))
+     ircd_snprintf(0, outbuf, sizeof(outbuf),
+        "Total users:: %d (%d ops, %d halfops, %d voiced, %d clones, %d authed, %d delayed)",
+        cntr, opcntr, hopcntr, vcntr, clones, authed, delayed);
+   else
+     ircd_snprintf(0, outbuf, sizeof(outbuf),
+        "Total users:: %d (%d ops, %d voiced, %d clones, %d authed, %d delayed)",
+        cntr, opcntr, vcntr, clones, authed, delayed);
 
    send_reply(sptr, RPL_DATASTR, outbuf);
 
@@ -761,6 +775,8 @@ signed int checkHostmask(struct Client *sptr, char *hoststr, int flags) {
               *(chntext + len++) = '-';
             if (is_chan_op(acptr, chptr))
               *(chntext + len++) = '@';
+            if (is_half_op(acptr, chptr))
+              *(chntext + len++) = '%';
             if (IsOper(sptr) && !ShowChannel(sptr,chptr))
               *(chntext + len++) = '*';
             else if (has_voice(acptr, chptr))

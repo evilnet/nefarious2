@@ -90,6 +90,8 @@ extern void sendcmdto_channel_butone(struct Client *from, const char *cmd,
 #define SKIP_BURST	0x02	/**< skip users that are bursting */
 #define SKIP_NONOPS	0x04	/**< skip users that aren't chanops */
 #define SKIP_NONVOICES  0x08    /**< skip users that aren't voiced (includes
+                                   chanops and halfops) */
+#define SKIP_NONHOPS	0x10	/**< skip users that aren't halfopped (includes
                                    chanops) */
 
 /* Send command to all users having a particular flag set */

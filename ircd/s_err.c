@@ -1110,7 +1110,7 @@ static Numeric replyTable[] = {
 /* 538 */
   { 0 },
 /* 539 */
-  { 0 },
+  { ERR_HALFCANTKICKOP, "%s :Halfops cannot kick channel operators", "539" },
 /* 540 */
   { 0 },
 /* 541 */

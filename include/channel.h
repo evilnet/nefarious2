@@ -82,9 +82,15 @@ struct Client;
 					 */
 #define CHFL_DELAYED            0x40000 /**< User's join message is delayed */
 
-#define CHFL_OVERLAP         (CHFL_CHANOP | CHFL_VOICE)
+#define CHFL_BURST_ALREADY_HALFOPPED	0x400000
+					/**< In oob BURST, but was already
+					 * joined and halfopped
+					 */
+#define CHFL_HALFOP             0x800000 /**< Channel half operator */
+
+#define CHFL_OVERLAP         (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
 #define CHFL_BANVALIDMASK    (CHFL_BANVALID | CHFL_BANNED)
-#define CHFL_VOICED_OR_OPPED (CHFL_CHANOP | CHFL_VOICE)
+#define CHFL_VOICED_OR_OPPED (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
 
 /* Channel Visibility macros */
 
@@ -113,6 +119,8 @@ struct Client;
 #define MODE_WASDELJOINS 0x400000 	/**< Not DELJOINS, but some joins 
 					 * pending */
 
+#define MODE_HALFOP     CHFL_HALFOP     /**< +h Halfop */
+
 #define EXMODE_ADMINONLY    0x00000001	/**< +a User mode +a only may join */
 #define EXMODE_OPERONLY     0x00000002	/**< +O User mode +o only may join */
 #define EXMODE_REGMODERATED 0x00000004	/**< +M Like +m but allows registered users too */
@@ -123,12 +131,14 @@ struct Client;
 
 /** mode flags which take another parameter (With PARAmeterS)
  */
-#define MODE_WPARAS     (MODE_CHANOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
+#define MODE_WPARAS     (MODE_CHANOP|MODE_HALFOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
 
 /** Available Channel modes */
-#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabDdiklMmNnOopQRrstUvZz" : "abDdiklMmNnOopQRrstvZz"
+#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabDdhiklMmNnOopQRrstUvZz" : "abDdhiklMmNnOopQRrstvZz"
 /** Available Channel modes that take parameters */
-#define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? "AbkloUv" : "bklov"
+#define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? \
+                                (feature_bool(FEAT_HALFOPS) ? "AbhkloUv" : "AbkloUv") : \
+                                (feature_bool(FEAT_HALFOPS) ? "bhklov" : "bklov")
 
 #define HoldChannel(x)          (!(x))
 /** name invisible */
@@ -214,6 +224,7 @@ struct Membership {
 #define IsBanned(x)         ((x)->status & CHFL_BANNED)
 #define IsBanValid(x)       ((x)->status & CHFL_BANVALID)
 #define IsChanOp(x)         ((x)->status & CHFL_CHANOP)
+#define IsHalfOp(x)         ((x)->status & CHFL_HALFOP)
 #define OpLevel(x)          ((x)->oplevel)
 #define HasVoice(x)         ((x)->status & CHFL_VOICE)
 #define IsServOpOk(x)       ((x)->status & CHFL_SERVOPOK)
@@ -405,6 +416,7 @@ extern void remove_user_from_all_channels(struct Client* cptr);
 
 extern int is_chan_op(struct Client *cptr, struct Channel *chptr);
 extern int is_zombie(struct Client *cptr, struct Channel *chptr);
+extern int is_half_op(struct Client *cptr, struct Channel *chptr);
 extern int has_voice(struct Client *cptr, struct Channel *chptr);
 /*
    NOTE: pointer is compared, and not dereferenced, called by
@@ -450,6 +462,7 @@ extern int mode_parse(struct ModeBuf *mbuf, struct Client *cptr,
 #define MODE_PARSE_NOTMEMBER	0x20	/**< send "not member" to user */
 #define MODE_PARSE_WIPEOUT	0x40	/**< wipe out +k and +l during burst */
 #define MODE_PARSE_BURST	0x80	/**< be even more strict w/extra args */
+#define MODE_PARSE_ISHALFOP	0x100	/**< op and halfop differentiation */
 
 extern void joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
 			 struct Client *connect, unsigned int type,

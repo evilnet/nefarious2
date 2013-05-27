@@ -1149,13 +1149,21 @@ hide_hostmask(struct Client *cptr)
     if (!IsDelayedJoin(chan))
       sendcmdto_channel_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
                                          "%H", chan->channel);
-    if (IsChanOp(chan) && HasVoice(chan))
+    if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+                                       "%H +ohv %C %C %C", chan->channel, cptr,
+                                       cptr, cptr);
+    else if (IsChanOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ov %C %C", chan->channel, cptr,
                                        cptr);
-    else if (IsChanOp(chan) || HasVoice(chan))
+    else if (IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
-        "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : 'v', cptr);
+                                       "%H +hv %C %C", chan->channel, cptr,
+                                       cptr);
+    else if (IsChanOp(chan) || IsHalfOp(chan) || HasVoice(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+        "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : (IsHalfOp(chan) ? 'h' : 'v'), cptr);
   }
   return 0;
 }
@@ -1205,13 +1213,21 @@ unhide_hostmask(struct Client *cptr)
     if (!IsDelayedJoin(chan))
       sendcmdto_channel_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
                                          "%H", chan->channel);
-    if (IsChanOp(chan) && HasVoice(chan))
+    if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+                                       "%H +ohv %C %C", chan->channel, cptr,
+                                       cptr, cptr);
+    else if (IsChanOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ov %C %C", chan->channel, cptr,
                                        cptr);
-    else if (IsChanOp(chan) || HasVoice(chan))
+    else if (IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
-        "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : 'v', cptr);
+                                       "%H +hv %C %C", chan->channel, cptr,
+                                       cptr);
+    else if (IsChanOp(chan) || IsHalfOp(chan) || HasVoice(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+        "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : (IsHalfOp(chan) ? 'h' : 'v'), cptr);
   }
   return 0;
 }
@@ -2329,8 +2345,8 @@ void init_isupport(void)
   add_isupport_i("CHANNELLEN", feature_int(FEAT_CHANNELLEN));
   add_isupport_i("MAXCHANNELLEN", CHANNELLEN);
   add_isupport_s("CHANTYPES", feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#");
-  add_isupport_s("PREFIX", "(ov)@+");
-  add_isupport_s("STATUSMSG", "@+");
+  add_isupport_s("PREFIX", feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+");
+  add_isupport_s("STATUSMSG", feature_bool(FEAT_HALFOPS) ? "@%+" : "@+");
   add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aDdiMmNnOpQRrstZz" : "b,k,l,aDdiMmNnOpQRrstZz");
   add_isupport_s("CASEMAPPING", "rfc1459");
   add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));

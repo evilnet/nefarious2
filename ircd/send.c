@@ -546,7 +546,8 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
         || IsZombie(member)
         || (skip & SKIP_DEAF && IsDeaf(member->user))
         || (skip & SKIP_NONOPS && !IsChanOp(member))
-        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !HasVoice(member)))
+        || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
+        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
         continue;
       send_buffer(member->user, mb, 0);
   }
@@ -588,7 +589,8 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
         || cli_fd(cli_from(member->user)) < 0
         || cli_sentalong(member->user) == sentalong_marker
         || (skip & SKIP_NONOPS && !IsChanOp(member))
-        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !HasVoice(member)))
+        || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
+        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
       continue;
     cli_sentalong(member->user) = sentalong_marker;
     send_buffer(member->user, serv_mb, 0);
@@ -623,8 +625,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
 
   /* Build buffer to send to users */
   va_start(vd.vd_args, pattern);
-  user_mb = msgq_make(0, skip & (SKIP_NONOPS | SKIP_NONVOICES) ? "%:#C %s @%v" : "%:#C %s %v",
-                      from, skip & (SKIP_NONOPS | SKIP_NONVOICES) ? MSG_NOTICE : cmd, &vd);
+  user_mb = msgq_make(0, skip & (SKIP_NONOPS | SKIP_NONHOPS | SKIP_NONVOICES) ? "%:#C %s @%v" : "%:#C %s %v",
+                      from, skip & (SKIP_NONOPS | SKIP_NONHOPS | SKIP_NONVOICES) ? MSG_NOTICE : cmd, &vd);
   va_end(vd.vd_args);
 
   /* Build buffer to send to servers */
@@ -639,7 +641,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     if (IsZombie(member) ||
         (skip & SKIP_DEAF && IsDeaf(member->user)) ||
         (skip & SKIP_NONOPS && !IsChanOp(member)) ||
-        (skip & SKIP_NONVOICES && !IsChanOp(member) && !HasVoice(member)) ||
+        (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member)) ||
+        (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
         (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
         cli_fd(cli_from(member->user)) < 0 ||
         cli_sentalong(member->user) == sentalong_marker)

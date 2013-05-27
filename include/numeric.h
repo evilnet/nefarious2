@@ -485,6 +485,8 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_OMOTD            536
 #define RPL_ENDOFOMOTD       537
 
+#define ERR_HALFCANTKICKOP   539	/* Nefarious extension */
+
 #define RPL_STATSSHUN        542
 #define ERR_NOSUCHSHUN       543
 #define RPL_ENDOFSLIST       545

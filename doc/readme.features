@@ -1150,6 +1150,14 @@ CHMODE_Z
 
 Allows channel mode Z (ssl users only) to be used.
 
+HALFOPS
+ * Type: boolean
+ * Default: FALSE
+
+This controls the use of half ops (+h). The server will still accept
+half ops from other servers if its set to FALSE (to prevent desyncs)
+just not from users.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

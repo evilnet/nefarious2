@@ -57,7 +57,7 @@ config:
 	@echo "*************************************************************"
 
 root-clean:
-	@for i in '*.orig' '.*.orig' '\#*' '*~' '.*~' '*.bak' '.*.bak' core; do\
+	@for i in '*.orig' '.*.orig' '*.rej' '.*.rej' '\#*' '*~' '.*~' '*.bak' '.*.bak' core; do\
 		echo "Removing $$i"; \
 		REMOVE_FILES="`find . -name "$$i" -print`"; \
 		test -n "$$REMOVE_FILES" && ${RM} -f $$REMOVE_FILES; \
