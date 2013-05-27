@@ -3,6 +3,10 @@
 
 2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* .hgignore: Added include/patchlist.h to be ignored.
+
+2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/readme.iauth: Added MARK support to iauth.
 
 	* ircd/s_auth.c: Added MARK support to iauth.
