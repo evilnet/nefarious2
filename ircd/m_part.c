@@ -147,6 +147,10 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       parts.jb_comment = 0;
     }
 
+    /* Strip PART message if required */
+    if (chptr->mode.exmode & EXMODE_NOQUITPARTS)
+      parts.jb_comment = 0;
+
     if (IsDelayedJoin(member))
       flags |= CHFL_DELAYED;
 

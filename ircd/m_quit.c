@@ -101,6 +101,8 @@
  */
 int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int stripquit = 0;
+
   assert(0 != cptr);
   assert(0 != sptr);
   assert(cptr == sptr);
@@ -108,11 +110,13 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (cli_user(sptr)) {
     struct Membership* chan;
     for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
+        if (chan->channel->mode.exmode & EXMODE_NOQUITPARTS)
+          stripquit = 1;
         if (!IsZombie(chan) && !IsDelayedJoin(chan) && !member_can_send_to_channel(chan, 0))
         return exit_client(cptr, sptr, sptr, "Signed off");
     }
   }
-  if (parc > 1 && !BadPtr(parv[parc - 1]))
+  if (parc > 1 && !BadPtr(parv[parc - 1]) && !stripquit)
     return exit_client_msg(cptr, sptr, sptr, "Quit: %s", parv[parc - 1]);
   else
     return exit_client(cptr, sptr, sptr, "Quit");

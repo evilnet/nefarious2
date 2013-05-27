@@ -200,6 +200,7 @@ enum Feature {
   FEAT_CHMODE_M,
   FEAT_CHMODE_N,
   FEAT_CHMODE_O,
+  FEAT_CHMODE_Q,
   FEAT_CHMODE_Z,
 
   /* Some misc. Nefarious default paths */

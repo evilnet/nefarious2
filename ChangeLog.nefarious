@@ -3,6 +3,27 @@
 
 2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/channel.h: Added channel mode +Q (strip PART/QUIT messages).
+
+	* include/ircd_features.h: Added channel mode +Q (strip PART/QUIT
+	messages).
+
+	* include/supported.h: Added channel mode +Q (strip PART/QUIT messages).
+
+	* ircd/channel.c: Added channel mode +Q (strip PART/QUIT messages).
+
+	* ircd/ircd_features.c: Added channel mode +Q (strip PART/QUIT messages).
+
+	* ircd/m_clearmode.c: Added channel mode +Q (strip PART/QUIT messages).
+
+	* ircd/m_part.c: Added channel mode +Q (strip PART/QUIT messages).
+
+	* ircd/m_quit.c: Added channel mode +Q (strip PART/QUIT messages).
+
+	* ircd/s_user.c: Added channel mode +Q (strip PART/QUIT messages).
+
+2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* .hgignore: Added include/patchlist.h to be ignored.
 
 2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
