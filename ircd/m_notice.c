@@ -134,6 +134,9 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parv[1][0] == '@' && IsChannelPrefix(parv[1][1])) {
     parv[1]++;                        /* Get rid of '@' */
     return m_wallchops(cptr, sptr, parc, parv);
+  } else if (parv[1][0] == '%' && IsChannelPrefix(parv[1][1])) {
+    parv[1]++;                        /* Get rid of '%' */
+    return m_wallhops(cptr, sptr, parc, parv);
   } else if (parv[1][0] == '+' && IsChannelPrefix(parv[1][1])) {
     parv[1]++;                        /* Get rid of '+' */
     return m_wallvoices(cptr, sptr, parc, parv);
@@ -267,6 +270,12 @@ int mo_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parv[1][0] == '@' && IsChannelPrefix(parv[1][1])) {
     parv[1]++;                        /* Get rid of '@' */
     return m_wallchops(cptr, sptr, parc, parv);
+  } else if (parv[1][0] == '%' && IsChannelPrefix(parv[1][1])) {
+    parv[1]++;                        /* Get rid of '%' */
+    return m_wallhops(cptr, sptr, parc, parv);
+  } else if (parv[1][0] == '+' && IsChannelPrefix(parv[1][1])) {
+    parv[1]++;                        /* Get rid of '+' */
+    return m_wallvoices(cptr, sptr, parc, parv);
   }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);

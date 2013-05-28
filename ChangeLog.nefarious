@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-28  Matthew Beechign  <jobe@mdbnet.co.uk>
+
+	* ircd/m_notice.c: Missed a call to m_wallhops in m_notice and mo_notice.
+
 2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added FEAT_CHMODE_C for channel mode +C.
