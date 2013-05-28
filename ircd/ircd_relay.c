@@ -105,6 +105,12 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
       check_target_limit(sptr, chptr, chptr->chname, 0))
     return;
 
+  if ((chptr->mode.exmode & EXMODE_NOCTCPS) && (*text == '\x01') &&
+      ircd_strncmp(text+1, "ACTION", 6)) {
+    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    return;
+  }
+
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
 			   SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
@@ -138,6 +144,9 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   if (chptr->mode.exmode & EXMODE_NONOTICES)
     return;
 
+  if ((chptr->mode.exmode & EXMODE_NOCTCPS) && (*text == '\x01'))
+    return;
+
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
 			   SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
@@ -167,7 +176,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
    */
   if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
     sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
-			     SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
+                            SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
   }
   else
     send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);

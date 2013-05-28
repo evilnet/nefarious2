@@ -1126,6 +1126,12 @@ CHMODE_a
 
 Allows channel mode a (admin only) to be used.
 
+CHMODE_C
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode C (no CTCP messages) to be used.
+
 CHMODE_M
  * Type: boolean
  * Default: TRUE

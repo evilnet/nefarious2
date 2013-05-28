@@ -230,7 +230,7 @@ feature_notify_oplevels(void)
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
-  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aDdiMmNnOpQRrstZz" : "b,k,l,aDdiMmNnOpQRrstZz");
+  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCDdiMmNnOpQRrstZz" : "b,k,l,aCDdiMmNnOpQRrstZz");
 }
 
 /** Update whether #me has halfops support or not.
@@ -562,6 +562,7 @@ static struct FeatureDesc {
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),
+  F_B(CHMODE_C, 0, 1, 0),
   F_B(CHMODE_M, 0, 1, 0),
   F_B(CHMODE_N, 0, 1, 0),
   F_B(CHMODE_O, 0, 1, 0),

@@ -3,6 +3,28 @@
 
 2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_CHMODE_C for channel mode +C.
+
+	* doc/readme.features: Added FEAT_CHMODE_C for channel mode +C.
+
+	* include/channel.h: Added channel mode +C (No CTCP messages).
+
+	* include/ircd_features.h: Added FEAT_CHMODE_C for channel mode +C.
+
+	* include/supported.h: Added channel mode +C (No CTCP messages).
+
+	* ircd/channel.c: Added channel mode +C (No CTCP messages).
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_C for channel mode +C.
+
+	* ircd/ircd_relay.c: Added channel mode +C (No CTCP messages).
+
+	* ircd/m_clearmode.c: Added channel mode +C (No CTCP messages).
+
+	* ircd/s_user.c: Added channel mode +C (No CTCP messages).
+
+2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/handlers.h: Added WALLHOPS command.
 
 	* include/msg.h: Added WALLHOPS command.

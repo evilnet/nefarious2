@@ -900,6 +900,8 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'Z';
   if (chptr->mode.exmode & EXMODE_NOQUITPARTS)
     *mbuf++ = 'Q';
+  if (chptr->mode.exmode & EXMODE_NOCTCPS)
+    *mbuf++ = 'C';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1677,6 +1679,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     EXMODE_PERSIST,	'z',
     EXMODE_SSLONLY,	'Z',
     EXMODE_NOQUITPARTS, 'Q',
+    EXMODE_NOCTCPS,	'C',
     0x0, 0x0
   };
   static int local_flags[] = {
@@ -2171,7 +2174,7 @@ modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
 
   mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY |
            EXMODE_REGMODERATED | EXMODE_NONOTICES | EXMODE_PERSIST |
-           EXMODE_SSLONLY | EXMODE_NOQUITPARTS);
+           EXMODE_SSLONLY | EXMODE_NOQUITPARTS | EXMODE_NOCTCPS);
 
   if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
     return;
@@ -2316,6 +2319,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     EXMODE_PERSIST,	'z',
     EXMODE_SSLONLY,	'Z',
     EXMODE_NOQUITPARTS, 'Q',
+    EXMODE_NOCTCPS,	'C',
     0x0, 0x0
   };
   unsigned int add;
@@ -3532,6 +3536,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     EXMODE_PERSIST,	'z',
     EXMODE_SSLONLY,	'Z',
     EXMODE_NOQUITPARTS, 'Q',
+    EXMODE_NOCTCPS,	'C',
     0x0, 0x0
   };
 
@@ -3691,6 +3696,14 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
       case 'Q': /* deal with strip QUIT/PART messages */
         if (feature_bool(FEAT_CHMODE_Q) || IsServer(sptr) ||
+            IsOper(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
+        break;
+
+      case 'C': /* deal with block CTCP messages */
+        if (feature_bool(FEAT_CHMODE_C) || IsServer(sptr) ||
             IsOper(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);
         else
