@@ -3,6 +3,10 @@
 
 2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_mark.c: Fixed crash bug caused by parc being too low.
+
+2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_CHMODE_T for channel mode +T.
 
 	* doc/readme.features: Added FEAT_CHMODE_T for channel mode +T.
