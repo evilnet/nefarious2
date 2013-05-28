@@ -1,6 +1,26 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/handlers.h: Added WALLHOPS command.
+
+	* include/msg.h: Added WALLHOPS command.
+
+	* include/supported.h: Added WALLHOPS to RPL_ISUPPORT.
+
+	* ircd/Makefile.in: Added WALLHOPS command.
+
+	* ircd/m_notice.c: Added missing support for % STATUSMSG feature.
+
+	* ircd/parse.c: Added WALLHOPS command.
+
+	* ircd/s_user.c: Added WALLHOPS to RPL_ISUPPORT.
+
+	* ircd/send.c: Added support for WALLHOPS command.
+
+	* ircd/m_wallhops.c: Added WALLHOPS command.
+
 2013-05-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* Multiple files: Added halfop support.

@@ -464,6 +464,10 @@ struct Client;
 #define TOK_STARTTLS		"STARTTLS"
 #define CMD_STARTTLS		MSG_STARTTLS, TOK_STARTTLS
 
+#define MSG_WALLHOPS		"WALLHOPS"
+#define TOK_WALLHOPS		"WH"
+#define CMD_WALLHOPS		MSG_WALLHOPS, TOK_WALLHOPS
+
 /*
  * Constants
  */

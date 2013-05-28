@@ -206,6 +206,7 @@ IRCD_SRC = \
 	m_userip.c \
 	m_version.c \
 	m_wallchops.c \
+	m_wallhops.c \
 	m_wallops.c \
 	m_wallusers.c \
 	m_wallvoices.c \

@@ -2326,6 +2326,7 @@ void init_isupport(void)
 
   add_isupport("WHOX");
   add_isupport("WALLCHOPS");
+  add_isupport("WALLHOPS");
   add_isupport("WALLVOICES");
   add_isupport("USERIP");
   add_isupport("CPRIVMSG");

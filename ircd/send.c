@@ -620,13 +620,26 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct MsgBuf *user_mb;
   struct MsgBuf *serv_mb;
   struct Client *service;
+  const char *userfmt;
+  const char *usercmd;
 
   vd.vd_format = pattern;
 
   /* Build buffer to send to users */
+  usercmd = cmd;
+  userfmt = "%:#C %s %v";
+  if (skip & (SKIP_NONOPS | SKIP_NONHOPS | SKIP_NONVOICES)) {
+    usercmd = MSG_NOTICE;
+    if (skip & SKIP_NONVOICES)
+      userfmt = "%:#C %s +%v";
+    else if (skip & SKIP_NONHOPS)
+      userfmt = "%:#C %s %%%v";
+    else
+      userfmt = "%:#C %s @%v";
+  }
+
   va_start(vd.vd_args, pattern);
-  user_mb = msgq_make(0, skip & (SKIP_NONOPS | SKIP_NONHOPS | SKIP_NONVOICES) ? "%:#C %s @%v" : "%:#C %s %v",
-                      from, skip & (SKIP_NONOPS | SKIP_NONHOPS | SKIP_NONVOICES) ? MSG_NOTICE : cmd, &vd);
+  user_mb = msgq_make(0, userfmt, from, usercmd, &vd);
   va_end(vd.vd_args);
 
   /* Build buffer to send to servers */

@@ -34,6 +34,7 @@
 #define FEATURES1 \
                 "WHOX"\
                 " WALLCHOPS"\
+		" WALLHOPS"\
                 " WALLVOICES"\
                 " USERIP"\
                 " CPRIVMSG"\
