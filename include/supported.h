@@ -70,7 +70,7 @@
                         (feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#"), \
 			(feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+"), \
 			(feature_bool(FEAT_HALFOPS) ? "@%+" : "@+"), \
-                        (feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCDdiMmNnOpQRrstZz" : "b,k,l,aCDdiMmNnOpQRrstZz"), \
+                        (feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCDdiMmNnOpQRrsTtZz" : "b,k,l,aCDdiMmNnOpQRrsTtZz"), \
                         "rfc1459", feature_str(FEAT_NETWORK)
 
 #endif /* INCLUDED_supported_h */

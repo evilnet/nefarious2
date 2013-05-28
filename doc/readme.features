@@ -1150,6 +1150,13 @@ CHMODE_O
 
 Allows channel mode O (oper only) to be used.
 
+CHMODE_T
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode T (blocks PRIVMSG/NOTICE when the channel
+is part of a comma seperated list of targets) to be used.
+
 CHMODE_Z
  * Type: boolean
  * Default: TRUE

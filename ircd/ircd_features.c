@@ -230,7 +230,7 @@ feature_notify_oplevels(void)
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
-  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCDdiMmNnOpQRrstZz" : "b,k,l,aCDdiMmNnOpQRrstZz");
+  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCDdiMmNnOpQRrsTtZz" : "b,k,l,aCDdiMmNnOpQRrsTtZz");
 }
 
 /** Update whether #me has halfops support or not.
@@ -567,6 +567,7 @@ static struct FeatureDesc {
   F_B(CHMODE_N, 0, 1, 0),
   F_B(CHMODE_O, 0, 1, 0),
   F_B(CHMODE_Q, 0, 1, 0),
+  F_B(CHMODE_T, 0, 1, 0),
   F_B(CHMODE_Z, 0, 1, 0),
   F_B(HALFOPS, 0, 0, feature_notify_halfops),
 

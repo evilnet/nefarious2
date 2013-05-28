@@ -131,7 +131,7 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * channel msg?
      */
     if (IsChannelPrefix(*name)) {
-      relay_channel_message(sptr, name, parv[parc - 1]);
+      relay_channel_message(sptr, name, parv[parc - 1], count);
     }
     /*
      * we have to check for the '@' at least once no matter what we do
@@ -221,7 +221,7 @@ int mo_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * channel msg?
      */
     if (IsChannelPrefix(*name))
-      relay_channel_message(sptr, name, parv[parc - 1]);
+      relay_channel_message(sptr, name, parv[parc - 1], count);
 
     else if (*name == '$')
       relay_masked_message(sptr, name, parv[parc - 1]);

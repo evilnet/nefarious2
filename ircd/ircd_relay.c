@@ -82,8 +82,9 @@
  * @param[in] sptr Client that originated the message.
  * @param[in] name Name of target channel.
  * @param[in] text %Message to relay.
+ * @param[in] targets Number of targets for the initial PRIVMSG.
  */
-void relay_channel_message(struct Client* sptr, const char* name, const char* text)
+void relay_channel_message(struct Client* sptr, const char* name, const char* text, int targets)
 {
   struct Channel* chptr;
   assert(0 != sptr);
@@ -111,6 +112,11 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     return;
   }
 
+  if ((chptr->mode.exmode & EXMODE_NOMULTITARG) && (targets > 1)) {
+    send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    return;
+  }
+
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
 			   SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
@@ -121,8 +127,9 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
  * @param[in] sptr Client that originated the message.
  * @param[in] name Name of target channel.
  * @param[in] text %Message to relay.
+ * @param[in] targets Number of targets for the initial NOTICE
  */
-void relay_channel_notice(struct Client* sptr, const char* name, const char* text)
+void relay_channel_notice(struct Client* sptr, const char* name, const char* text, int targets)
 {
   struct Channel* chptr;
   assert(0 != sptr);
@@ -145,6 +152,9 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
     return;
 
   if ((chptr->mode.exmode & EXMODE_NOCTCPS) && (*text == '\x01'))
+    return;
+
+  if ((chptr->mode.exmode & EXMODE_NOMULTITARG) && (targets > 1))
     return;
 
   RevealDelayedJoinIfNeeded(sptr, chptr);

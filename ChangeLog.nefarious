@@ -1,7 +1,44 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2013-05-28  Matthew Beechign  <jobe@mdbnet.co.uk>
+2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_CHMODE_T for channel mode +T.
+
+	* doc/readme.features: Added FEAT_CHMODE_T for channel mode +T.
+
+	* include/channel.h: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* include/ircd_features.h: Added FEAT_CHMODE_T for channel mode +T.
+
+	* include/ircd_relay.h: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* include/supported.h: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* ircd/channel.c: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_T for channel mode +T.
+
+	* ircd/ircd_relay.c: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* ircd/m_clearmode.c: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* ircd/m_notice.c: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* ircd/m_privmsg.c: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+	* ircd/s_user.c: Added channel mode +T to block messages to
+	channels when that channel is part of a multiple target list.
+
+2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_notice.c: Missed a call to m_wallhops in m_notice and mo_notice.
 

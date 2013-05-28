@@ -29,8 +29,8 @@
 
 struct Client;
 
-extern void relay_channel_message(struct Client* sptr, const char* name, const char* text);
-extern void relay_channel_notice(struct Client* sptr, const char* name, const char* text);
+extern void relay_channel_message(struct Client* sptr, const char* name, const char* text, int targets);
+extern void relay_channel_notice(struct Client* sptr, const char* name, const char* text, int targets);
 extern void relay_directed_message(struct Client* sptr, char* name, char* server, const char* text);
 extern void relay_directed_notice(struct Client* sptr, char* name, char* server, const char* text);
 extern void relay_masked_message(struct Client* sptr, const char* mask, const char* text);
