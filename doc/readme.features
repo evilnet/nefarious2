@@ -1150,6 +1150,12 @@ CHMODE_O
 
 Allows channel mode O (oper only) to be used.
 
+CHMODE_Q
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode Q (block PART/QUIT messages) to be used.
+
 CHMODE_T
  * Type: boolean
  * Default: TRUE

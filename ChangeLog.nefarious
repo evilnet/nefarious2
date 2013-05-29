@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Forgot to add FEAT_CHMODE_Q documentation.
+
+	* doc/readme.features: Forgot to add FEAT_CHMODE_Q documentation.
+
 2013-05-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_mark.c: Fixed crash bug caused by parc being too low.
