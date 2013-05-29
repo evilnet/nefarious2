@@ -3,6 +3,10 @@
 
 2013-05-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/msg.h: Changed TOK_PRIVS to "PRIVS" to match Nefarious 1.
+
+2013-05-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Forgot to add FEAT_CHMODE_Q documentation.
 
 	* doc/readme.features: Forgot to add FEAT_CHMODE_Q documentation.

@@ -353,7 +353,7 @@ struct Client;
 #define TOK_GET			"GET"
 
 #define MSG_PRIVS		"PRIVS"		/* PRIV */
-#define TOK_PRIVS		"PR"
+#define TOK_PRIVS		"PRIVS"
 #define CMD_PRIVS               MSG_PRIVS, TOK_PRIVS
 
 #define MSG_CAP			"CAP"
