@@ -3,6 +3,20 @@
 
 2013-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Changed cli_webircip/cli_webirchost to
+	cli_connectip/cli_connecthost.
+
+	* ircd/m_check.c: Changed cli_webircip/cli_webirchost to
+	cli_connectip/cli_connecthost.
+
+	* ircd/m_webirc.c: Changed cli_webircip/cli_webirchost to
+	cli_connectip/cli_connecthost.
+
+	* ircd/s_auth.c: Changed cli_webircip/cli_webirchost to
+	cli_connectip/cli_connecthost.
+
+2013-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/numnicks.c: Added support for converting teredo tunneled
 	IPv6 addresses to their IPv4 NAT IP address for linking to servers
 	without IPv6.

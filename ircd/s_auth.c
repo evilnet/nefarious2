@@ -1839,6 +1839,14 @@ static int iauth_cmd_hostname(struct IAuth *iauth, struct Client *cli,
     if (IsUserPort(cli))
       sendheader(cli, REPORT_FIN_DNS);
   }
+
+  /* Copy old details to cli_connectip and cli_connecthost. */
+  if (!IsIPSpoofed(cli)) {
+    memcpy(&cli_connectip(cli), &cli_ip(cli), sizeof(cli_ip(cli)));
+    ircd_strncpy(cli_connecthost(cli), cli_sockhost(cli), HOSTLEN);
+    SetIPSpoofed(cli);
+  }
+
   /* Set hostname from params. */
   ircd_strncpy(cli_sockhost(cli), params[0], HOSTLEN);
   /* If we have gotten here, the user is in a "hurry" state and has
@@ -1879,6 +1887,13 @@ static int iauth_cmd_ip_address(struct IAuth *iauth, struct Client *cli,
   if (!ircd_aton(&addr, params[0])) {
     sendto_iauth(cli, "E Invalid :Unable to parse IP address [%s]", params[0]);
     return 0;
+  }
+
+  /* Copy old details to cli_connectip and cli_connecthost. */
+  if (!IsIPSpoofed(cli)) {
+    memcpy(&cli_connectip(cli), &cli_ip(cli), sizeof(cli_ip(cli)));
+    ircd_strncpy(cli_connecthost(cli), cli_sockhost(cli), HOSTLEN);
+    SetIPSpoofed(cli);
   }
 
   /* If this is the first IP override, save the client's original
@@ -2274,7 +2289,7 @@ static void iauth_parse(struct IAuth *iauth, char *message)
       /* Check IP address and port number against expected. */
       if (0 == res ||
 	  (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
-           irc_in_addr_cmp(&addr.addr, &cli_webircip(cli))) ||
+           irc_in_addr_cmp(&addr.addr, &cli_connectip(cli))) ||
 	  (auth && addr.port != auth->port))
 	/* Report mismatch to iauth. */
 	sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],

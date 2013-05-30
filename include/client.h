@@ -194,6 +194,7 @@ enum Flag
     FLAG_UHNAMES,                   /**< Client supports user-host NAMES replies */
     FLAG_WEBIRC,                    /**< Client is a WEBIRC client */
     FLAG_WEBIRC_USERIDENT,          /**< Client should use USER username param as ident */
+    FLAG_IPSPOOFED,                 /**< Client has had his IP/host changed */
     FLAG_ACCOUNTONLY,               /**< hide privmsgs/notices if user is
                                        not authed or opered */
     FLAG_PRIVDEAF,                  /**< Client is deaf to all private messages */
@@ -307,8 +308,8 @@ struct Client {
   char cli_username[USERLEN + 1]; /**< Username determined by ident lookup */
   char cli_info[REALLEN + 1];     /**< Free form additional client information */
 
-  struct irc_in_addr cli_webircip;  /**< WEBIRC Client IP address. */
-  char cli_webirchost[HOSTLEN + 1]; /**< WEBIRC Client host name. */
+  struct irc_in_addr cli_connectip;  /**< Client connection IP address. */
+  char cli_connecthost[HOSTLEN + 1]; /**< Client connection host name. */
 
   /* GeoIP data */
   char cli_countrycode[3];          /**< GeoIP 2 letter country code. */
@@ -381,10 +382,10 @@ struct Client {
 #define cli_info(cli)		((cli)->cli_info)
 /** Get client account string. */
 #define cli_account(cli)       (cli_user(cli) ? cli_user(cli)->account : "0")
-/** Get client WEBIRC IP address. */
-#define cli_webircip(cli)       ((cli)->cli_webircip)
-/** Get client WEBIRC host name. */
-#define cli_webirchost(cli)     ((cli)->cli_webirchost)
+/** Get client connection IP address. */
+#define cli_connectip(cli)      ((cli)->cli_connectip)
+/** Get client connection host name. */
+#define cli_connecthost(cli)     ((cli)->cli_connecthost)
 /** Get client WEBIRC info line. */
 #define cli_webirc(cli)         ((cli)->cli_webirc)
 /** Get a clients CTCP version string. */
@@ -685,6 +686,8 @@ struct Client {
 #define IsWebIRC(x)             HasFlag(x, FLAG_WEBIRC)
 /** Return non-zero if the client should use USER username as ident. */
 #define IsWebIRCUserIdent(x)    HasFlag(x, FLAG_WEBIRC_USERIDENT)
+/** Return non-zero if the client has had its IP address or host name changed. */
+#define IsIPSpoofed(x)          HasFlag(x, FLAG_IPSPOOFED)
 /** Return non-zero if the client only accepts messages from clients with an account. */
 #define IsAccountOnly(x)	HasFlag(x, FLAG_ACCOUNTONLY)
 /** Return non-zero if the client is private deaf */
@@ -775,6 +778,8 @@ struct Client {
 #define SetWebIRC(x)            SetFlag(x, FLAG_WEBIRC)
 /** Mark a client as having to use USER username as ident. */
 #define SetWebIRCUserIdent(x)   SetFlag(x, FLAG_WEBIRC_USERIDENT)
+/** Mark a client as having a spoofed IP or host name. */
+#define SetIPSpoofed(x)         SetFlag(x, FLAG_IPSPOOFED)
 /** Mark a client as only accepting messages from users with accounts. */
 #define SetAccountOnly(x)	SetFlag(x, FLAG_ACCOUNTONLY)
 /** Mark a client as being private deaf. */
@@ -850,6 +855,8 @@ struct Client {
 #define ClearWebIRC(x)          ClrFlag(x, FLAG_WEBIRC)
 /** Client no longer has to use USER username as ident. */
 #define ClearWebIRCUserIdent(x) ClrFlag(x, FLAG_WEBIRC_USERIDENT)
+/** Client no longer has a spoofed IP or host name. */
+#define ClearIPSpoofed(x)       ClrFlag(x, FLAG_IPSPOOFED)
 /** Remove mode +R (only accept pms from users with an account) from the client. */
 #define ClearAccountOnly(x)	ClrFlag(x, FLAG_ACCOUNTONLY)
 /** Client is no longer private deaf. */

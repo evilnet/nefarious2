@@ -179,9 +179,12 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                          "WEBIRC Client host: from %s [%s] to %s [%s]",
                          cli_sockhost(sptr), cli_sock_ip(sptr), hostname, ipaddr);
 
-  /* Copy old details to cli_webircip and cli_webirchost. */
-  memcpy(&cli_webircip(sptr), &cli_ip(sptr), sizeof(cli_ip(sptr)));
-  ircd_strncpy(cli_webirchost(sptr), cli_sockhost(sptr), HOSTLEN);
+  /* Copy old details to cli_connectip and cli_connecthost. */
+  if (!IsIPSpoofed(sptr)) {
+    memcpy(&cli_connectip(sptr), &cli_ip(sptr), sizeof(cli_ip(sptr)));
+    ircd_strncpy(cli_connecthost(sptr), cli_sockhost(sptr), HOSTLEN);
+    SetIPSpoofed(sptr);
+  }
 
   /* Undo original IP connection in IPcheck. */
   IPcheck_connect_fail(sptr, 1);
