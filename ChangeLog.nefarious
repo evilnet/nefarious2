@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/numnicks.c: Added support for converting teredo tunneled
+	IPv6 addresses to their IPv4 NAT IP address for linking to servers
+	without IPv6.
+
 2013-05-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_debug.c: Forgot to add flag Z to debug_serveropts().

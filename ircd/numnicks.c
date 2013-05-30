@@ -450,6 +450,8 @@ const char* iptobase64(char* buf, const struct irc_in_addr* addr, unsigned int c
     assert(count >= 6);
     if (addr->in6_16[0] == htons(0x2002))
         inttobase64(buf, (ntohs(addr->in6_16[1]) << 16) | ntohs(addr->in6_16[2]), 6);
+    else if ((addr->in6_16[0] == htons(0x2001)) && (addr->in6_16[1] == 0))
+        inttobase64(buf, (ntohs(addr->in6_16[6] ^ 0xFFFF) << 16) | ntohs(addr->in6_16[7] ^ 0xFFFF), 6);
     else
         strcpy(buf, "AAAAAA");
   } else {
