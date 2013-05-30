@@ -1,0 +1,84 @@
+SNOMASK - Server Notice Masks
+=============================
+
+Written by Ghostwolf 18th June 1997
+Modified with permission by loki 12th November 1997
+Converted to TXT by Jobe 30th May 2013
+
+-----------------------------
+
+This document (hopefully) gives a brief explanation of the use of server notice
+masks new to ircu2.10.00. This mask allows clients to specify which types of
+server notices they will receive when usermode +s. The mask may optionally be
+omitted, and reasonable defaults will be used by the server. 
+
+Note: the descriptions here will be best understood by those with knowledge of
+C syntax. We do not attempt to explain either this or hexadecimal values in
+this document, and familiarity with these is assumed of the reader.
+
+-----------------------------
+
+Usage: /mode <nick> +s [+/-][mask]
+
+Mask                    Hex Value  Description
+1       SNO_OLDSNO            0x1  /* unsorted old messages */
+2       SNO_SERVKILL          0x2  /* server kills (nick collisions) */
+4       SNO_OPERKILL          0x4  /* oper kills */
+8       SNO_HACK2             0x8  /* desyncs */
+16      SNO_HACK3            0x10  /* temporary desyncs */
+32      SNO_UNAUTH           0x20  /* unauthorized connections */
+64      SNO_TCPCOMMON        0x40  /* common TCP or socket errors */
+128     SNO_TOOMANY          0x80  /* too many connections */
+256     SNO_HACK4           0x100  /* Uworld actions on channels */
+512     SNO_GLINE           0x200  /* glines */
+1024    SNO_NETWORK         0x400  /* net join/break, etc */
+2048    SNO_IPMISMATCH      0x800  /* IP mismatches */
+4096    SNO_THROTTLE       0x1000  /* host throttle add/remove notices */
+8192    SNO_OLDREALOP      0x2000  /* old oper-only messages */
+16384   SNO_CONNEXIT       0x4000  /* client connect/exit (ugh) */
+32768   SNO_AUTO           0x8000  /* AUTO G-Lines */
+65536   SNO_DEBUG         0x10000  /* debugging messages (DEBUGMODE only) */
+131072  SNO_NICKCHG       0x20000  /* nick change messages */
+262144  SNO_AUTH          0x40000  /* iauth status messages */
+
+standard +s             SNO_DEFAULT (SNO_NETWORK | SNO_OPERKILL | SNO_GLINE
+standard +s when +o/O   SNO_DEFAULT | SNO_HACK2 | SNO_HACK4 | SNO_THROTTLE | SNO_OLDSNO
+only opers may set      SNO_OPER (SNO_CONNEXIT | SNO_OLDREALOP | SNO_AUTH
+
+-----------------------------
+
+Examples of Usage:
+=============================
+
+To receive only operkills, use /mode  +s 4
+To receive operkills and glines, add the values: 
+ /mode <nick> +s 516
+
+ (512+4=516)
+
+If you are already receiving some notices and you wish to add notices of
+netjoins/breaks use: 
+ /mode Ghostwolf +s +1024
+
+If you wish to stop receiving netjoin/break notices, but continue to receive
+other notices, use: 
+ /mode Ghostwolf +s -1024
+OR
+ /mode Ghostwolf -s +1024 
+
+A user typing /mode Ghostwolf +s will receive netsplits/joins, operkills, and
+g-lines.
+
+Opers who are +s will additionally receive HACK notices and anything that was
+originally in sendto_ops() and wasn't changed. Only opers can choose to receive
+connect/exit notices and anything that originally was in sendtoreal_ops() and
+hasn't been changed (connect/exit notices also require a #define in config.h).
+
+-----------------------------
+
+If you have further questions about server notices (implementation, etc.),
+please consult the ircu source code and/or e-mail coder-com@undernet.org.
+Please do not contact coder-com@undernet.org regarding Nefarious extensions.
+
+-----------------------------
+

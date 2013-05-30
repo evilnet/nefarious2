@@ -3,6 +3,10 @@
 
 2013-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/snomask.txt: Added a text only version of snomask.html.
+
+2013-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Changed cli_webircip/cli_webirchost to
 	cli_connectip/cli_connecthost.
 
