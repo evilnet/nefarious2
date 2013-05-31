@@ -118,6 +118,7 @@ static struct lexer_token {
   TOKEN(VERSION),
   TOKEN(SPOOFHOST),
   TOKEN(AUTOAPPLY),
+  TOKEN(SNOMASK),
   TOKEN(SSLFP),
 #undef TOKEN
   { "ssl", SSLTOK },

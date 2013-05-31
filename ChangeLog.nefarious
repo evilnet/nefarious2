@@ -1,6 +1,20 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added snomask Class block option.
+
+	* doc/snomask.txt: Fixed default server notice mask lists.
+
+	* include/class.h: Added snomask Class block option.
+
+	* ircd/ircd_lexer.l: Added snomask Class block option.
+
+	* ircd/ircd_parser.y: Added snomask Class block option.
+
+	* ircd/m_oper.c: Added snomask Class block option.
+
 2013-05-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/snomask.txt: Added a text only version of snomask.html.

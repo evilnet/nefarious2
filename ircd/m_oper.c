@@ -111,6 +111,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   struct Flags old_mode = cli_flags(sptr);
   char*        modes;
   char*        parv[2];
+  unsigned int snomask = 0;
 
   parv[0] = cli_name(sptr);
   parv[1] = NULL;
@@ -118,6 +119,8 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   SetOper(sptr);
   client_set_privs(sptr, aconf);
   ClearOper(sptr);
+
+  snomask = ConfSnoMask(aconf) & SNO_ALL;
 
   if (MyUser(sptr)) {
     SetLocOp(sptr);
@@ -136,7 +139,10 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     SetFlag(sptr, FLAG_SERVNOTICE);
     SetFlag(sptr, FLAG_DEBUG);
 
-    set_snomask(sptr, SNO_OPERDEFAULT, SNO_ADD);
+    if (snomask)
+      set_snomask(sptr, snomask, SNO_ADD);
+    else
+      set_snomask(sptr, SNO_OPERDEFAULT, SNO_ADD);
     cli_max_sendq(sptr) = 0; /* Get the sendq from the oper's class */
     cli_max_recvq(sptr) = 0; /* Get the recvq from the oper's class */
     send_umode_out(sptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
@@ -161,8 +167,13 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
       old_mode = cli_flags(sptr);
       set_user_mode(sptr, sptr, 3, umodev, ALLOWMODES_ANY);
       send_umode(NULL, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
+      if ((cli_snomask(sptr) != SNO_OPERDEFAULT) && HasFlag(sptr, FLAG_SERVNOTICE))
+        send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
     } else {
-      sendcmdto_one(&me, CMD_MODE, sptr, "%s %s", cli_name(sptr), modes);
+      if (snomask)
+        sendcmdto_one(&me, CMD_MODE, sptr, "%s %s+s +%d", cli_name(sptr), modes, snomask);
+      else
+        sendcmdto_one(&me, CMD_MODE, sptr, "%s %s", cli_name(sptr), modes);
     }
   }
 

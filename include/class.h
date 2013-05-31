@@ -42,6 +42,7 @@ struct ConnectionClass {
   char                    *cc_name;       /**< Name of connection class. */
   char                    *default_umode; /**< Default usermode for users
                                              in this class. */
+  unsigned int            snomask;        /**< Default server notice mask. */
   struct Privs            privs;          /**< Privilege bits that are set on
                                              or off. */
   struct Privs            privs_dirty;    /**< Indication of which bits in
@@ -94,6 +95,8 @@ struct ConnectionClass {
 #define ConfLinks(x)    ((x)->conn_class->ref_count)
 /** Get default usermode for ConfItem \a x. */
 #define ConfUmode(x)    ((x)->conn_class->default_umode)
+/** Get default snomask for ConfItem \a x. */
+#define ConfSnoMask(x)  ((x)->conn_class->snomask)
 /** Find a valid configuration class by name. */
 #define find_class(name) do_find_class((name), 0)
 

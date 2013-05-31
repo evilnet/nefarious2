@@ -74,6 +74,7 @@
 
   int yylex(void);
   /* Now all the globals we need :/... */
+  unsigned int snomask;
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
@@ -194,6 +195,7 @@ static void free_slist(struct SLink **link) {
 %token VERSION
 %token SPOOFHOST
 %token AUTOAPPLY
+%token SNOMASK
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -442,6 +444,7 @@ classblock: CLASS {
     c_class = find_class(name);
     MyFree(c_class->default_umode);
     c_class->default_umode = pass;
+    c_class->snomask = snomask;
     c_class->max_chans = maxchans;
     memcpy(&c_class->privs, &privs, sizeof(c_class->privs));
     memcpy(&c_class->privs_dirty, &privs_dirty, sizeof(c_class->privs_dirty));
@@ -456,12 +459,14 @@ classblock: CLASS {
   sendq = 0;
   recvq = 0;
   maxchans = 0;
+  snomask = 0;
   memset(&privs, 0, sizeof(privs));
   memset(&privs_dirty, 0, sizeof(privs_dirty));
 };
 classitems: classitem classitems | classitem;
 classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
-           classsendq | classrecvq | classusermode | classmaxchans | priv;
+           classsendq | classrecvq | classusermode | classmaxchans | priv |
+           classsnomask;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -495,6 +500,10 @@ classusermode: USERMODE '=' QSTRING ';'
 classmaxchans: MAXCHANS '=' expr ';'
 {
   maxchans = $3;
+};
+classsnomask: SNOMASK '=' expr ';'
+{
+  snomask = $3;
 };
 
 connectblock: CONNECT
