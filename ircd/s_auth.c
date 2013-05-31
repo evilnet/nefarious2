@@ -349,8 +349,10 @@ static int auth_set_username(struct AuthRequest *auth)
 badid:
   /* If we confirmed their username, and it is what they claimed,
    * accept it. */
-  if (IsIdented(sptr) && !strcmp(cli_username(sptr), user->username) &&
-      !feature_bool(FEAT_STRICTUSERNAME))
+  if (IsIdented(sptr) && !strcmp(cli_username(sptr), user->username))
+    return 0;
+
+  if (!feature_bool(FEAT_STRICTUSERNAME))
     return 0;
 
   ServerStats->is_ref++;

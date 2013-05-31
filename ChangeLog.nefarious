@@ -3,6 +3,10 @@
 
 2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_auth.c: Fixed FEAT_STRICTUSERNAME to always work.
+
+2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added CHMODE_c and CHMODE_S features.
 
 	* doc/readme.features: Added CHMODE_c and CHMODE_S features.
