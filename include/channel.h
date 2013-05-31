@@ -130,13 +130,15 @@ struct Client;
 #define EXMODE_NOQUITPARTS  0x00000040  /**< +Q Strip QUIT/PART messages */
 #define EXMODE_NOCTCPS      0x00000080  /**< +C Block CTCP messages */
 #define EXMODE_NOMULTITARG  0x00000100  /**< +T Block messages with a list of targets */
+#define EXMODE_NOCOLOR      0x00000200  /**< +c Block messages containing color */
+#define EXMODE_STRIPCOLOR   0x00000400  /**< +S Strip color from messages */
 
 /** mode flags which take another parameter (With PARAmeterS)
  */
 #define MODE_WPARAS     (MODE_CHANOP|MODE_HALFOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
 
 /** Available Channel modes */
-#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabCDdhiklMmNnOopQRrsTtUvZz" : "abCDdhiklMmNnOopQRrsTtvZz"
+#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabCcDdhiklMmNnOopQRrSsTtUvZz" : "abCcDdhiklMmNnOopQRrSsTtvZz"
 /** Available Channel modes that take parameters */
 #define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? \
                                 (feature_bool(FEAT_HALFOPS) ? "AbhkloUv" : "AbkloUv") : \

@@ -128,12 +128,18 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Channel *chptr;
   char *topic = 0, *name, *p = 0;
+  const char *topicnocolor = 0;
+  int hascolor = 0;
 
   if (parc < 2)
     return need_more_params(sptr, "TOPIC");
 
   if (parc > 2)
     topic = parv[parc - 1];
+
+  hascolor = HasColor(topic);
+  if (hascolor)
+    topicnocolor = StripColor(topic);
 
   for (; (name = ircd_strtok(&p, parv[1], ",")); parv[1] = 0)
   {
@@ -162,14 +168,33 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 	send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
 		   chptr->topic_time);
       }
+      continue;
     }
     else if ((chptr->mode.mode & MODE_TOPICLIMIT) &&
              !is_chan_op(sptr, chptr) && !is_half_op(sptr, chptr))
+    {
       send_reply(sptr, ERR_CHANOPRIVSNEEDED, chptr->chname);
+      continue;
+    }
     else if (!client_can_send_to_channel(sptr, chptr, 1))
+    {
       send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
-    else
-      do_settopic(sptr,cptr,chptr,topic,0,NULL);
+      continue;
+    }
+
+    if (hascolor && (chptr->mode.exmode & EXMODE_NOCOLOR))
+    {
+      send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+      continue;
+    }
+
+    if (hascolor && (chptr->mode.exmode & EXMODE_STRIPCOLOR))
+    {
+      do_settopic(sptr,cptr,chptr,(char*)topicnocolor,0,NULL);
+      continue;
+    }
+
+    do_settopic(sptr,cptr,chptr,topic,0,NULL);
   }
   return 0;
 }

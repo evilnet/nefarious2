@@ -102,6 +102,9 @@
 int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   int stripquit = 0;
+  int blockcolor = 0;
+  int stripcolor = 0;
+  const char* text;
 
   assert(0 != cptr);
   assert(0 != sptr);
@@ -112,12 +115,25 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
         if (chan->channel->mode.exmode & EXMODE_NOQUITPARTS)
           stripquit = 1;
+        if (chan->channel->mode.exmode & EXMODE_NOCOLOR)
+          blockcolor = 1;
+        if (chan->channel->mode.exmode & EXMODE_STRIPCOLOR)
+          stripcolor = 1;
         if (!IsZombie(chan) && !IsDelayedJoin(chan) && !member_can_send_to_channel(chan, 0))
         return exit_client(cptr, sptr, sptr, "Signed off");
     }
   }
   if (parc > 1 && !BadPtr(parv[parc - 1]) && !stripquit)
-    return exit_client_msg(cptr, sptr, sptr, "Quit: %s", parv[parc - 1]);
+    if (blockcolor && HasColor(parv[parc - 1]))
+      return exit_client(cptr, sptr, sptr, "Quit");
+    else if (stripcolor) {
+      text = StripColor(parv[parc - 1]);
+      if (EmptyString(text))
+        return exit_client(cptr, sptr, sptr, "Quit");
+      else
+        return exit_client_msg(cptr, sptr, sptr, "Quit: %s", text);
+    } else
+      return exit_client_msg(cptr, sptr, sptr, "Quit: %s", parv[parc - 1]);
   else
     return exit_client(cptr, sptr, sptr, "Quit");
 }

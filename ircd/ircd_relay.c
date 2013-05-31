@@ -87,6 +87,8 @@
 void relay_channel_message(struct Client* sptr, const char* name, const char* text, int targets)
 {
   struct Channel* chptr;
+  const char* mytext = text;
+  const char* ch;
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
@@ -117,9 +119,24 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     return;
   }
 
+  if (chptr->mode.exmode & EXMODE_NOCOLOR)
+    for (ch=text;*ch;ch++)
+      if (*ch==COLOR_COLOR || *ch==27 || *ch==COLOR_REVERSE) {
+        send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+        return;
+      }
+
+  if (chptr->mode.exmode & EXMODE_STRIPCOLOR) {
+    mytext = StripColor(text);
+    if (EmptyString(mytext)) {
+      send_reply(sptr, ERR_NOTEXTTOSEND);
+      return;
+    }
+  }
+
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
-			   SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
+			   SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, mytext);
 }
 
 /** Relay a local user's notice to a channel.
@@ -132,6 +149,8 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 void relay_channel_notice(struct Client* sptr, const char* name, const char* text, int targets)
 {
   struct Channel* chptr;
+  const char* mytext = text;
+  const char* ch;
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
@@ -157,9 +176,20 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   if ((chptr->mode.exmode & EXMODE_NOMULTITARG) && (targets > 1))
     return;
 
+  if (chptr->mode.exmode & EXMODE_NOCOLOR)
+    for (ch=text;*ch;ch++)
+      if (*ch==COLOR_COLOR || *ch==27 || *ch==COLOR_REVERSE)
+        return;
+
+  if (chptr->mode.exmode & EXMODE_STRIPCOLOR) {
+    mytext = StripColor(text);
+    if (EmptyString(mytext))
+      return;
+  }
+
   RevealDelayedJoinIfNeeded(sptr, chptr);
   sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
-			   SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
+			   SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, mytext);
 }
 
 /** Relay a message to a channel.

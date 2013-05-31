@@ -3,6 +3,38 @@
 
 2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added CHMODE_c and CHMODE_S features.
+
+	* doc/readme.features: Added CHMODE_c and CHMODE_S features.
+
+	* include/channel.h: Added channel modes +c and +S.
+
+	* include/ircd_features.h: Added FEAT_CHMODE_c and FEAT_CHMODE_S.
+
+	* include/ircd_string.h: Added StripColor() and HasColor() functions.
+
+	* include/supported.h: Added channel modes +c and +S.
+
+	* ircd/channel.c: Added channel modes +c and +S.
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_c and FEAT_CHMODE_S.
+
+	* ircd/ircd_relay.c: Added channel modes +c and +S.
+
+	* ircd/ircd_string.c: Added StripColor() function.
+
+	* ircd/m_clearmode.c: Added channel modes +c and +S.
+
+	* ircd/m_part.c: Added channel modes +c and +S.
+
+	* ircd/m_quit.c: Added channel modes +c and +S.
+
+	* ircd/m_topic.c: Added channel modes +c and +S.
+
+	* ircd/s_user.c: Added channel modes +c and +S.
+
+2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added snomask Class block option.
 
 	* doc/snomask.txt: Fixed default server notice mask lists.

@@ -904,6 +904,10 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'C';
   if (chptr->mode.exmode & EXMODE_NOMULTITARG)
     *mbuf++ = 'T';
+  if (chptr->mode.exmode & EXMODE_NOCOLOR)
+    *mbuf++ = 'c';
+  if (chptr->mode.exmode & EXMODE_STRIPCOLOR)
+    *mbuf++ = 'S';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1683,6 +1687,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     EXMODE_NOQUITPARTS, 'Q',
     EXMODE_NOCTCPS,	'C',
     EXMODE_NOMULTITARG,	'T',
+    EXMODE_NOCOLOR,	'c',
+    EXMODE_STRIPCOLOR,	'S',
     0x0, 0x0
   };
   static int local_flags[] = {
@@ -2178,7 +2184,7 @@ modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
   mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY |
            EXMODE_REGMODERATED | EXMODE_NONOTICES | EXMODE_PERSIST |
            EXMODE_SSLONLY | EXMODE_NOQUITPARTS | EXMODE_NOCTCPS |
-           EXMODE_NOMULTITARG);
+           EXMODE_NOMULTITARG | EXMODE_NOCOLOR | EXMODE_STRIPCOLOR);
 
   if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
     return;
@@ -2325,6 +2331,8 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     EXMODE_NOQUITPARTS, 'Q',
     EXMODE_NOCTCPS,	'C',
     EXMODE_NOMULTITARG,	'T',
+    EXMODE_NOCOLOR,	'c',
+    EXMODE_STRIPCOLOR,	'S',
     0x0, 0x0
   };
   unsigned int add;
@@ -3543,6 +3551,8 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     EXMODE_NOQUITPARTS, 'Q',
     EXMODE_NOCTCPS,	'C',
     EXMODE_NOMULTITARG,	'T',
+    EXMODE_NOCOLOR,	'c',
+    EXMODE_STRIPCOLOR,	'S',
     0x0, 0x0
   };
 
@@ -3718,6 +3728,22 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
       case 'T': /* deal with block multi-target messages */
         if (feature_bool(FEAT_CHMODE_T) || IsServer(sptr) ||
+            IsOper(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
+        break;
+
+      case 'c': /* deal with block color */
+        if (feature_bool(FEAT_CHMODE_c) || IsServer(sptr) ||
+            IsOper(sptr) || IsChannelService(sptr))
+          mode_parse_exmode(&state, flag_p);
+        else
+          send_reply(sptr, ERR_NOPRIVILEGES);
+        break;
+
+      case 'S': /* deal with strip color */
+        if (feature_bool(FEAT_CHMODE_S) || IsServer(sptr) ||
             IsOper(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);
         else

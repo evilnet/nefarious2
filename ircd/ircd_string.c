@@ -718,3 +718,54 @@ int is_timestamp(char *str)
   return *str == '\0';
 }
 
+const char* StripColor(const char* text)
+{
+  static char stripped[BUFSIZE];
+  const char *src;
+  char *dest;
+
+  dest = stripped;
+  for (src = text; (*src); src++) {
+    switch (*src) {
+      case COLOR_BOLD:
+      case COLOR_REVERSE:
+      case COLOR_UNDERLINE:
+      case COLOR_ITALIC:
+      case COLOR_NORMAL:
+        break;
+      case COLOR_COLOR:
+        if (!IsDigit(src[1])) break;
+        src++;
+        if (IsDigit(src[1])) src++;
+        if (src[1]==',' && IsDigit(src[2])) src+=2;
+        else break;
+        if (IsDigit(src[1])) src++;
+        break;
+      default:
+        *dest++ = *src;
+    }
+  }
+
+  *dest = '\0';
+  return (const char*) stripped;
+}
+
+int HasColor(const char* text)
+{
+  const char *tmp;
+  for (tmp = text; (*tmp); tmp++) {
+    if (*tmp & 224) continue;
+    switch (*tmp) {
+      case COLOR_BOLD:
+      case COLOR_REVERSE:
+      case COLOR_UNDERLINE:
+      case COLOR_ITALIC:
+      case COLOR_NORMAL:
+      case COLOR_COLOR:
+        return 1;
+      default:;
+    }
+  }
+  return 0;
+}
+

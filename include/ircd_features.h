@@ -197,11 +197,13 @@ enum Feature {
 
   /* Extended channel modes */
   FEAT_CHMODE_a,
+  FEAT_CHMODE_c,
   FEAT_CHMODE_C,
   FEAT_CHMODE_M,
   FEAT_CHMODE_N,
   FEAT_CHMODE_O,
   FEAT_CHMODE_Q,
+  FEAT_CHMODE_S,
   FEAT_CHMODE_T,
   FEAT_CHMODE_Z,
   FEAT_HALFOPS,

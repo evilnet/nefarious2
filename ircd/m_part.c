@@ -151,6 +151,17 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (chptr->mode.exmode & EXMODE_NOQUITPARTS)
       parts.jb_comment = 0;
 
+    /* Strip PART message if color blocked and has color */
+    if ((chptr->mode.exmode & EXMODE_NOCOLOR) && HasColor(parts.jb_comment))
+      parts.jb_comment = 0;
+
+    /* Strip color from PART message */
+    if ((chptr->mode.exmode & EXMODE_STRIPCOLOR) && (parts.jb_comment != 0)) {
+      parts.jb_comment = (char*)StripColor(parts.jb_comment);
+      if (EmptyString(parts.jb_comment))
+        parts.jb_comment = 0;
+    }
+
     if (IsDelayedJoin(member))
       flags |= CHFL_DELAYED;
 

@@ -41,6 +41,16 @@ extern char*       itoa(int n);
 extern unsigned long ParseInterval(const char *interval);
 extern int         is_timestamp(char *str);
 
+extern const char* StripColor(const char* text);
+extern int HasColor(const char* text);
+
+#define COLOR_BOLD            2   /**< Bold text */
+#define COLOR_COLOR           3   /**< Color text */
+#define COLOR_ITALIC          29  /**< Italic text */
+#define COLOR_NORMAL          15  /**< Normal text */
+#define COLOR_REVERSE         22  /**< Reverse text */
+#define COLOR_UNDERLINE       31  /**< Underlined text */
+
 /** Make \a y a duplicate \a x, a la strdup(). */
 #define DupString(x, y)  (strcpy((x = (char*) MyMalloc(strlen(y) + 1)), y))
 
