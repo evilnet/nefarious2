@@ -3,6 +3,39 @@
 
 2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added channel mode +e FEAT_*s.
+
+	* doc/readme.features: Added channel mode +e FEAT_*s.
+
+	* include/channel.h: Added channel mode +e (ban exceptions).
+
+	* include/ircd_features.h: Added channel mode +e FEAT_*s.
+
+	* include/numeric.h: Added channel mode +e (ban exceptions).
+
+	* include/supported.h: Cleaned out this file, we don't use the
+	#defines within it.
+
+	* ircd/channel.c: Added channel mode +e (ban exceptions).
+
+	* ircd/ircd_features.c: Added channel mode +e FEAT_*s.
+
+	* ircd/m_burst.c: Added channel mode +e (ban exceptions).
+
+	* ircd/m_check.c: Added channel mode +e (ban exceptions).
+
+	* ircd/m_clearmode.c: Added channel mode +e (ban exceptions).
+
+	* ircd/m_destruct.c: Added channel mode +e (ban exceptions).
+
+	* ircd/m_join.c: Added channel mode +e (ban exceptions).
+
+	* ircd/s_err.c: Added channel mode +e (ban exceptions).
+
+	* ircd/s_user.c: Added channel mode +e (ban exceptions).
+
+2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_auth.c: Fixed FEAT_STRICTUSERNAME to always work.
 
 2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>

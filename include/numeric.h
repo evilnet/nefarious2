@@ -276,8 +276,8 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_ISSUEDINVITE     345        /* Undernet extension */
 #define RPL_INVITELIST       346        /* IRCnet, Undernet extension */
 #define RPL_ENDOFINVITELIST  347        /* IRCnet, Undernet extension */
-/*      RPL_EXCEPTLIST       348           IRCnet extension */
-/*      RPL_ENDOFEXCEPTLIST  349           IRCnet extension */
+#define RPL_EXCEPTLIST       348        /* IRCnet/Nefarious extension */
+#define RPL_ENDOFEXCEPTLIST  349        /* IRCnet/Nefarious extension */
 
 #define RPL_VERSION          351
 #define RPL_WHOREPLY         352        /* See also RPL_ENDOFWHO */
@@ -434,6 +434,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*      ERR_CHANTOORECENT    487           IRCnet extension (?) */
 #define ERR_PRIVDEAF         487	/* Nefarious extension */
 /*      ERR_TSLESSCHAN       488           IRCnet extension (?) */
+#define ERR_EXCEPTLISTFULL   488        /* Nefarious extention */
 #define ERR_VOICENEEDED      489        /* Undernet extension */
 
 #define ERR_NOOPERHOST       491

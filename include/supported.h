@@ -28,50 +28,5 @@
 #include "channel.h"
 #include "ircd_defs.h"
 
-/* 
- * 'Features' supported by this ircd
- */
-#define FEATURES1 \
-                "WHOX"\
-                " WALLCHOPS"\
-		" WALLHOPS"\
-                " WALLVOICES"\
-                " USERIP"\
-                " CPRIVMSG"\
-                " CNOTICE"\
-                " NAMESX"\
-                " UHNAMES"\
-                " SILENCE=%i" \
-                " MODES=%i" \
-                " MAXCHANNELS=%i" \
-                " MAXBANS=%i" \
-                " NICKLEN=%i"
-                
-
-#define FEATURES2 "MAXNICKLEN=%i" \
-                " TOPICLEN=%i" \
-                " AWAYLEN=%i" \
-                " KICKLEN=%i" \
-                " CHANNELLEN=%i" \
-                " MAXCHANNELLEN=%i" \
-                " CHANTYPES=%s" \
-                " PREFIX=%s" \
-                " STATUSMSG=%s" \
-                " CHANMODES=%s" \
-                " CASEMAPPING=%s" \
-                " NETWORK=%s"
-
-#define FEATURESVALUES1 feature_int(FEAT_MAXSILES), MAXMODEPARAMS, \
-			feature_int(FEAT_MAXCHANNELSPERUSER), \
-                        feature_int(FEAT_MAXBANS), feature_int(FEAT_NICKLEN)
-
-#define FEATURESVALUES2 NICKLEN, TOPICLEN, AWAYLEN, TOPICLEN, \
-                        feature_int(FEAT_CHANNELLEN), CHANNELLEN, \
-                        (feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#"), \
-			(feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+"), \
-			(feature_bool(FEAT_HALFOPS) ? "@%+" : "@+"), \
-                        (feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCcDdiMmNnOpQRrSsTtZz" : "b,k,l,aCcDdiMmNnOpQRrSsTtZz"), \
-                        "rfc1459", feature_str(FEAT_NETWORK)
-
 #endif /* INCLUDED_supported_h */
 

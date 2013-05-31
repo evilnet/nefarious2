@@ -122,6 +122,7 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
     MODE_NOPRIVMSGS,	'n',
     MODE_KEY,		'k',
     MODE_BAN,		'b',
+    MODE_EXCEPT,	'e',
     MODE_LIMIT,		'l',
     MODE_REGONLY,	'r',
     MODE_DELJOINS,      'D',
@@ -211,14 +212,31 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
     chptr->banlist = 0;
   }
 
+  if (del_mode & MODE_EXCEPT) {
+    for (link = chptr->exceptlist; link; link = next) {
+      char *exdup;
+      next = link->next;
+
+      DupString(exdup, link->banstr);
+      modebuf_mode_string(&mbuf, MODE_DEL | MODE_EXCEPT, /* delete ban */
+                          exdup, 1);
+      free_ban(link);
+    }
+
+    chptr->exceptlist = 0;
+  }
+
   /* Deal with users on the channel */
-  if (del_mode & (MODE_BAN | MODE_CHANOP | MODE_HALFOP | MODE_VOICE))
+  if (del_mode & (MODE_BAN | MODE_EXCEPT | MODE_CHANOP | MODE_HALFOP | MODE_VOICE))
     for (member = chptr->members; member; member = member->next_member) {
       if (IsZombie(member)) /* we ignore zombies */
 	continue;
 
       if (del_mode & MODE_BAN) /* If we cleared bans, clear the valid flags */
 	ClearBanValid(member);
+
+      if (del_mode & MODE_EXCEPT) /* If we cleared excepts, clear the valid flags */
+        ClearExceptValid(member);
 
       /* Drop channel operator status */
       if (IsChanOp(member) && del_mode & MODE_CHANOP) {

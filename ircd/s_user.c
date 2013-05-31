@@ -767,6 +767,10 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       for (member = (cli_user(cptr))->channel; member;
 	   member = member->next_channel)
 	ClearBanValid(member);
+      /* Invalidate all ban exceptions against the user so we check them again */
+      for (member = (cli_user(cptr))->channel; member;
+           member = member->next_channel)
+        ClearExceptValid(member);
     }
     /*
      * Also set 'lastnick' to current time, if changed.
@@ -1090,6 +1094,9 @@ hide_hostmask(struct Client *cptr)
   /* Invalidate all bans against the user so we check them again */
   for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
     ClearBanValid(chan);
+  /* Invalidate all ban exceptions against the user so we check them again */
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+    ClearExceptValid(chan);
 
   /* Select the new host to change to. */
   if (IsSetHost(cptr)) {
@@ -1188,6 +1195,9 @@ unhide_hostmask(struct Client *cptr)
   /* Invalidate all bans against the user so we check them again */
   for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
     ClearBanValid(chan);
+  /* Invalidate all ban exceptions against the user so we check them again */
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+    ClearExceptValid(chan);
 
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
     sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
@@ -2323,6 +2333,10 @@ void init_isupport(void)
 
   strcat(imaxlist, "b:");
   strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
+  if (feature_bool(FEAT_EXCEPTS)) {
+    strcat(imaxlist, ",e:");
+    strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
+  }
 
   add_isupport("WHOX");
   add_isupport("WALLCHOPS");
@@ -2348,7 +2362,14 @@ void init_isupport(void)
   add_isupport_s("CHANTYPES", feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#");
   add_isupport_s("PREFIX", feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+");
   add_isupport_s("STATUSMSG", feature_bool(FEAT_HALFOPS) ? "@%+" : "@+");
-  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCcDdiMmNnOpQRrSsTtZz" : "b,k,l,aCcDdiMmNnOpQRrSsTtZz");
+  if (feature_bool(FEAT_EXCEPTS)) {
+    add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "be,AkU,l,aCcDdiMmNnOpQRrSsTtZz" : "be,k,l,aCcDdiMmNnOpQRrSsTtZz");
+    add_isupport_s("EXCEPTS", "e");
+    add_isupport_i("MAXEXCEPTS", feature_int(FEAT_MAXEXCEPTS));
+  } else {
+    add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCcDdiMmNnOpQRrSsTtZz" : "b,k,l,aCcDdiMmNnOpQRrSsTtZz");
+  }
+
   add_isupport_s("CASEMAPPING", "rfc1459");
   add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
   add_isupport_s("MAXLIST", imaxlist);

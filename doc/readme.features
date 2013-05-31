@@ -1189,6 +1189,25 @@ This controls the use of half ops (+h). The server will still accept
 half ops from other servers if its set to FALSE (to prevent desyncs)
 just not from users.
 
+EXCEPTS
+ * Type: boolean
+ * Default: FALSE
+
+Allows the use of channel ban exemptions. THIS WILL BREAK SERVICES THAT ARE
+UNPATCHED TO HANDLE THE NEW BURST LINE WE USE!
+
+MAXEXCEPTS
+ * Type: integer
+ * Default: 30
+
+This is the maximum number of excepts a user may set on a given channel.
+
+AVEXCEPTLEN
+ * Type: integer
+ * Default: 40
+
+This is the expected average except mask length.  Leave it at 40.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

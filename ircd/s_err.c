@@ -728,9 +728,9 @@ static Numeric replyTable[] = {
 /* 347 */
   { RPL_ENDOFINVITELIST, ":End of Invite List", "347" },
 /* 348 */
-  { 0 },
+  { RPL_EXCEPTLIST, "%s %s %s %Tu", "348" },
 /* 349 */
-  { 0 },
+  { RPL_ENDOFEXCEPTLIST, "%s :End of channel exception list", "349" },
 /* 350 */
   { 0 },
 /* 351 */
@@ -1008,7 +1008,7 @@ static Numeric replyTable[] = {
 /* 487 */
   { ERR_PRIVDEAF, "%s :%s to '%s' not delivered: User does not accept private messages", "487" },
 /* 488 */
-  { 0 },
+  { ERR_EXCEPTLISTFULL, "%s :Channel exception list is full", "488" },
 /* 489 */
   { ERR_VOICENEEDED, "%s :You're neither voiced nor channel operator", "489" },
 /* 490 */

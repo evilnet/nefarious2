@@ -234,9 +234,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct Membership *member, *nmember;
   struct Ban *lp, **lp_p;
   unsigned int parse_flags = (MODE_PARSE_FORCE | MODE_PARSE_BURST);
-  int param, nickpos = 0, nickposo = 0, banpos = 0;
+  int param, nickpos = 0, nickposo = 0, banpos = 0, expos = 0;
   char modestr[BUFSIZE], modestro[BUFSIZE], nickstr[BUFSIZE];
-  char nickstro[BUFSIZE], banstr[BUFSIZE];
+  char nickstro[BUFSIZE], banstr[BUFSIZE], exstr[BUFSIZE];
 
   if (parc < 3)
     return protocol_violation(sptr,"Too few parameters for BURST");
@@ -372,6 +372,10 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     for (lp = chptr->banlist; lp; lp = lp->next)
       lp->flags |= BAN_BURST_WIPEOUT;
 
+    /* mark ban exceptions for wipeout */
+    for (lp = chptr->exceptlist; lp; lp = lp->next)
+      lp->flags |= BAN_BURST_WIPEOUT;
+
     /* clear topic set by netrider (if set) */
     if (*chptr->topic) {
       *chptr->topic = '\0';
@@ -399,10 +403,16 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       if (parse_flags & MODE_PARSE_SET) {
 	char *banlist = parv[param] + 1, *p = 0, *ban, *ptr;
 	struct Ban *newban;
+        int excepts = 0;
 
 	for (ban = ircd_strtok(&p, banlist, " "); ban;
 	     ban = ircd_strtok(&p, 0, " ")) {
-	  ban = collapse(pretty_mask(ban));
+          if ((*ban == '~') && (ban[1] == '\0')) {
+            excepts = 1;
+            continue;
+          }
+
+          ban = collapse(pretty_mask(ban));
 
 	    /*
 	     * Yeah, we should probably do this elsewhere, and make it better
@@ -412,7 +422,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	     * I wish there were a better algo. for this than the n^2 one
 	     * shown below *sigh*
 	     */
-	  for (lp = chptr->banlist; lp; lp = lp->next) {
+	  for (lp = (excepts ? chptr->exceptlist : chptr->banlist); lp; lp = lp->next) {
 	    if (!ircd_strcmp(lp->banstr, ban)) {
 	      ban = 0; /* don't add ban */
 	      lp->flags &= ~BAN_BURST_WIPEOUT; /* not wiping out */
@@ -436,8 +446,20 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	      banstr[banpos++] = '%';
 	    } else
 	      banstr[banpos++] = ' ';
-	    for (ptr = ban; *ptr; ptr++) /* add ban to buffer */
-	      banstr[banpos++] = *ptr;
+
+            if (excepts) {
+              if (!expos) {
+                exstr[expos++] = '~';
+                exstr[expos++] = ' ';
+              } else
+                exstr[expos++] = ' ';
+
+              for (ptr = ban; *ptr; ptr++) /* add ban exception to buffer */
+                exstr[expos++] = *ptr;
+            } else {
+              for (ptr = ban; *ptr; ptr++) /* add ban to buffer */
+                banstr[banpos++] = *ptr;
+            }
 
 	    newban = make_ban(ban); /* create new ban */
             strcpy(newban->who, "*");
@@ -447,7 +469,10 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	    if (lp)
 	      lp->next = newban; /* link it in */
 	    else
-	      chptr->banlist = newban;
+              if (excepts)
+                chptr->exceptlist = newban;
+              else
+                chptr->banlist = newban;
 	  }
 	}
       } 
@@ -626,6 +651,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   nickstr[nickpos] = '\0';
   nickstro[nickposo] = '\0';
   banstr[banpos] = '\0';
+  exstr[expos] = '\0';
 
   if (parse_flags & MODE_PARSE_SET) {
     modebuf_extract(mbuf, modestr + 1, 1); /* for sending BURST onward */
@@ -639,15 +665,17 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* Send oplevels to servers with oplevels support. */
   sendcmdto_flag_serv_butone(sptr, CMD_BURST, cptr, FLAG_OPLEVELS, FLAG_LAST_FLAG,
-                             "%H %Tu%s%s%s", chptr, chptr->creationtime, modestr,
-                             nickstr, banstr);
+                             "%H %Tu%s%s%s%s", chptr, chptr->creationtime, modestr,
+                             nickstr, banstr, feature_bool(FEAT_EXCEPTS) ? exstr : "");
   /* Send mode o to servers without oplevels support. */
   sendcmdto_flag_serv_butone(sptr, CMD_BURST, cptr, FLAG_LAST_FLAG, FLAG_OPLEVELS,
-                             "%H %Tu%s%s%s", chptr, chptr->creationtime, modestro,
-                             nickstro, banstr);
+                             "%H %Tu%s%s%s%s", chptr, chptr->creationtime, modestro,
+                             nickstro, banstr, feature_bool(FEAT_EXCEPTS) ? exstr : "");
 
   if (parse_flags & MODE_PARSE_WIPEOUT || banpos)
     mode_ban_invalidate(chptr);
+  if (parse_flags & MODE_PARSE_WIPEOUT || expos)
+    mode_except_invalidate(chptr);
 
   if (parse_flags & MODE_PARSE_SET) { /* any modes changed? */
     /* first deal with channel members */
@@ -689,6 +717,28 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       } else if (lp->flags & BAN_BURSTED) /* add ban to channel */
 	modebuf_mode_string(mbuf, MODE_ADD | MODE_BAN,
 			    lp->banstr, 0); /* don't free banstr */
+
+      lp->flags &= BAN_IPMASK; /* reset the flag */
+      lp_p = &(*lp_p)->next;
+    }
+
+    /* Now deal with channel ban exceptions */
+    lp_p = &chptr->exceptlist;
+    while (*lp_p) {
+      lp = *lp_p;
+
+      /* remove ban exceptionfrom channel */
+      if (lp->flags & (BAN_OVERLAPPED | BAN_BURST_WIPEOUT)) {
+        char *bandup;
+        DupString(bandup, lp->banstr);
+        modebuf_mode_string(mbuf, MODE_DEL | MODE_EXCEPT,
+                            bandup, 1);
+        *lp_p = lp->next; /* clip out of list */
+        free_ban(lp);
+        continue;
+      } else if (lp->flags & BAN_BURSTED) /* add ban to channel */
+        modebuf_mode_string(mbuf, MODE_ADD | MODE_EXCEPT,
+                            lp->banstr, 0); /* don't free banstr */
 
       lp->flags &= BAN_IPMASK; /* reset the flag */
       lp_p = &(*lp_p)->next;

@@ -230,7 +230,11 @@ feature_notify_oplevels(void)
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
-  add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCcDdiMmNnOpQRrSsTtZz" : "b,k,l,aCcDdiMmNnOpQRrSsTtZz");
+
+  if (feature_bool(FEAT_OPLEVELS))
+    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,AkU,lL,acimnprstzCMNOQSTZ" : "b,AkU,lL,acimnprstzCMNOQSTZ");
+  else
+    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,k,lL,acimnprstzCMNOQSTZ" : "b,k,lL,acimnprstzCMNOQSTZ");
 }
 
 /** Update whether #me has halfops support or not.
@@ -240,6 +244,34 @@ feature_notify_halfops(void)
 {
   add_isupport_s("PREFIX", feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+");
   add_isupport_s("STATUSMSG", feature_bool(FEAT_HALFOPS) ? "@%+" : "@+");
+}
+
+static void
+feature_notify_excepts(void)
+{
+  char imaxlist[BUFSIZE] = "";
+
+  if (feature_bool(FEAT_EXCEPTS)) {
+    add_isupport_s("EXCEPTS", "e");
+    add_isupport_i("MAXEXCEPTS", feature_int(FEAT_MAXEXCEPTS));
+  } else {
+    del_isupport("EXCEPTS");
+    del_isupport("MAXEXCEPTS");
+  }
+
+  if (feature_bool(FEAT_OPLEVELS))
+    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,AkU,lL,acimnprstzCMNOQSTZ" : "b,AkU,lL,acimnprstzCMNOQSTZ");
+  else
+    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,k,lL,acimnprstzCMNOQSTZ" : "b,k,lL,acimnprstzCMNOQSTZ");
+
+  strcat(imaxlist, "b:");
+  strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
+  if (feature_bool(FEAT_EXCEPTS)) {
+    strcat(imaxlist, ",e:");
+    strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
+  }
+
+  add_isupport_s("MAXLIST", imaxlist);
 }
 
 /** Handle update to FEAT_GEOIP_ENABLE. */
@@ -285,6 +317,10 @@ set_isupport_maxbans(void)
 
     strcat(imaxlist, "b:");
     strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
+    if (feature_bool(FEAT_EXCEPTS)) {
+      strcat(imaxlist, ",e:");
+      strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
+    }
 
     add_isupport_s("MAXLIST", imaxlist);    
 }
@@ -571,7 +607,10 @@ static struct FeatureDesc {
   F_B(CHMODE_S, 0, 1, 0),
   F_B(CHMODE_T, 0, 1, 0),
   F_B(CHMODE_Z, 0, 1, 0),
-  F_B(HALFOPS, 0, 0, feature_notify_halfops),
+  F_B(HALFOPS, FEAT_READ, 0, feature_notify_halfops),
+  F_B(EXCEPTS, FEAT_READ, 0, feature_notify_excepts),
+  F_I(MAXEXCEPTS, 0, 45, 0),
+  F_I(AVEXCEPTLEN, 0, 40, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

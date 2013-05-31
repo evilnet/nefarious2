@@ -88,8 +88,12 @@ struct Client;
 					 */
 #define CHFL_HALFOP             0x800000 /**< Channel half operator */
 
+#define CHFL_EXCEPTVALID        0x1000000 /**< CHFL_EXCEPTED is valid */
+#define CHFL_EXCEPTED           0x2000000 /**< Channel member is ban excepted */
+
 #define CHFL_OVERLAP         (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
 #define CHFL_BANVALIDMASK    (CHFL_BANVALID | CHFL_BANNED)
+#define CHFL_EXCEPTVALIDMASK (CHFL_EXCEPTVALID | CHFL_EXCEPTED)
 #define CHFL_VOICED_OR_OPPED (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
 
 /* Channel Visibility macros */
@@ -120,6 +124,7 @@ struct Client;
 					 * pending */
 
 #define MODE_HALFOP     CHFL_HALFOP     /**< +h Halfop */
+#define MODE_EXCEPT     0x1000000       /**< +e Ban exception */
 
 #define EXMODE_ADMINONLY    0x00000001	/**< +a User mode +a only may join */
 #define EXMODE_OPERONLY     0x00000002	/**< +O User mode +o only may join */
@@ -237,6 +242,8 @@ struct Membership {
 #define IsChannelManager(x) ((x)->status & CHFL_CHANNEL_MANAGER)
 #define IsUserParting(x)    ((x)->status & CHFL_USER_PARTING)
 #define IsDelayedJoin(x)    ((x)->status & CHFL_DELAYED)
+#define IsExcepted(x)       ((x)->status & CHFL_EXCEPTED)
+#define IsExceptValid(x)    ((x)->status & CHFL_EXCEPTVALID)
 
 #define SetBanned(x)        ((x)->status |= CHFL_BANNED)
 #define SetBanValid(x)      ((x)->status |= CHFL_BANVALID)
@@ -248,6 +255,8 @@ struct Membership {
 #define SetOpLevel(x, v)    (void)((x)->oplevel = (v))
 #define SetUserParting(x)   ((x)->status |= CHFL_USER_PARTING)
 #define SetDelayedJoin(x)   ((x)->status |= CHFL_DELAYED)
+#define SetExcepted(x)      ((x)->status |= CHFL_EXCEPTED)
+#define SetExceptValid(x)   ((x)->status |= CHFL_EXCEPTVALID)
 
 #define ClearBanned(x)      ((x)->status &= ~CHFL_BANNED)
 #define ClearBanValid(x)    ((x)->status &= ~CHFL_BANVALID)
@@ -255,6 +264,8 @@ struct Membership {
 #define ClearServOpOk(x)    ((x)->status &= ~CHFL_SERVOPOK)
 #define ClearBurstJoined(x) ((x)->status &= ~CHFL_BURST_JOINED)
 #define ClearDelayedJoin(x) ((x)->status &= ~CHFL_DELAYED)
+#define ClearExcepted(x)    ((x)->status &= ~CHFL_EXCEPTED)
+#define ClearExceptValid(x) ((x)->status &= ~CHFL_EXCEPTVALID)
 
 /** Mode information for a channel */
 struct Mode {
@@ -298,6 +309,7 @@ struct Channel {
   struct Membership* members;	   /**< Pointer to the clients on this channel*/
   struct SLink*      invites;	   /**< List of invites on this channel */
   struct Ban*        banlist;      /**< List of bans on this channel */
+  struct Ban*        exceptlist;   /**< List of excepts on this channel */
   struct Mode        mode;	   /**< This channels mode */
   char               topic[TOPICLEN + 1]; /**< Channels topic */
   char               topic_nick[NICKLEN + USERLEN + HOSTLEN + 3]; /**< Nick of the person who set
@@ -451,6 +463,7 @@ extern int modebuf_flush(struct ModeBuf *mbuf);
 extern void modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels);
 
 extern void mode_ban_invalidate(struct Channel *chan);
+extern void mode_except_invalidate(struct Channel *chan);
 extern void mode_invite_clear(struct Channel *chan);
 
 extern int mode_parse(struct ModeBuf *mbuf, struct Client *cptr,
@@ -477,6 +490,7 @@ extern int joinbuf_flush(struct JoinBuf *jbuf);
 extern struct Ban *make_ban(const char *banstr);
 extern struct Ban *find_ban(struct Client *cptr, struct Ban *banlist);
 extern int apply_ban(struct Ban **banlist, struct Ban *newban, int free);
+extern int apply_except(struct Ban **banlist, struct Ban *newban, int do_free);
 extern void free_ban(struct Ban *ban);
 
 extern int SetAutoChanModes(struct Channel *chptr);

@@ -214,7 +214,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         err = ERR_OPERONLYCHAN;
       else if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
         err = ERR_SSLONLYCHAN;
-      else if (find_ban(sptr, chptr->banlist))
+      else if (find_ban(sptr, chptr->banlist) && !find_ban(sptr, chptr->exceptlist))
         err = ERR_BANNEDFROMCHAN;
 
       /* An oper with WALK_LCHAN privilege can join a local channel

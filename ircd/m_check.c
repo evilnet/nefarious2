@@ -290,6 +290,24 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
    if (bans == 0)
      send_reply(sptr, RPL_DATASTR, "<none>");
 
+   /* Ban Exceptions */
+   if (feature_bool(FEAT_EXCEPTS)) {
+     send_reply(sptr, RPL_DATASTR, " ");
+
+     send_reply(sptr, RPL_DATASTR, "Excepts on channel::");
+     bans = 0;
+
+     for (slp = chptr->exceptlist; slp; slp = slp->next)
+     {
+        ircd_snprintf(0, outbuf, sizeof(outbuf),  "[%d] - %s - Set by %s, on %s",
+                      ++bans, slp->banstr, slp->who, myctime(slp->when));
+        send_reply(sptr, RPL_DATASTR, outbuf);
+     }
+
+     if (bans == 0)
+       send_reply(sptr, RPL_DATASTR, "<none>");
+   }
+
    send_reply(sptr, RPL_ENDOFCHECK, " ");
 }
 
