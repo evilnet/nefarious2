@@ -2330,6 +2330,7 @@ build_isupport_lines()
 void init_isupport(void)
 {
   char imaxlist[BUFSIZE] = "";
+  char cmodebuf[BUFSIZE] = "";
 
   strcat(imaxlist, "b:");
   strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
@@ -2337,6 +2338,11 @@ void init_isupport(void)
     strcat(imaxlist, ",e:");
     strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
   }
+
+  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,l,aCcDdiMmNnOpQRrSsTtZz",
+                feature_bool(FEAT_EXCEPTS) ? "e" : "",
+                feature_bool(FEAT_OPLEVELS) ? "A" : "",
+                feature_bool(FEAT_OPLEVELS) ? "U" : "");
 
   add_isupport("WHOX");
   add_isupport("WALLCHOPS");
@@ -2362,12 +2368,12 @@ void init_isupport(void)
   add_isupport_s("CHANTYPES", feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#");
   add_isupport_s("PREFIX", feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+");
   add_isupport_s("STATUSMSG", feature_bool(FEAT_HALFOPS) ? "@%+" : "@+");
+
+  add_isupport_s("CHANMODES", cmodebuf);
+
   if (feature_bool(FEAT_EXCEPTS)) {
-    add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "be,AkU,l,aCcDdiMmNnOpQRrSsTtZz" : "be,k,l,aCcDdiMmNnOpQRrSsTtZz");
     add_isupport_s("EXCEPTS", "e");
     add_isupport_i("MAXEXCEPTS", feature_int(FEAT_MAXEXCEPTS));
-  } else {
-    add_isupport_s("CHANMODES", feature_bool(FEAT_OPLEVELS) ? "b,AkU,l,aCcDdiMmNnOpQRrSsTtZz" : "b,k,l,aCcDdiMmNnOpQRrSsTtZz");
   }
 
   add_isupport_s("CASEMAPPING", "rfc1459");

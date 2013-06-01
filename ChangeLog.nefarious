@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-01  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/ircd_features.c: Changed the way CHANMODES is generated.
+
+	* ircd/s_user.c: Changed the way CHANMODES is generated.
+
 2013-05-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added channel mode +e FEAT_*s.

@@ -32,6 +32,7 @@
 #include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "match.h"
 #include "motd.h"
@@ -226,15 +227,21 @@ feature_notify_hub(void)
 static void
 feature_notify_oplevels(void)
 {
+  char cmodebuf[BUFSIZE] = "";
+
   if (feature_bool(FEAT_OPLEVELS))
     SetOpLevels(&me);
   else
     ClearOpLevels(&me);
 
-  if (feature_bool(FEAT_OPLEVELS))
-    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,AkU,lL,acimnprstzCMNOQSTZ" : "b,AkU,lL,acimnprstzCMNOQSTZ");
-  else
-    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,k,lL,acimnprstzCMNOQSTZ" : "b,k,lL,acimnprstzCMNOQSTZ");
+  /* "be,AkU,l,aCcDdiMmNnOpQRrSsTtZz" */
+
+  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,l,aCcDdiMmNnOpQRrSsTtZz",
+                feature_bool(FEAT_EXCEPTS) ? "e" : "",
+                feature_bool(FEAT_OPLEVELS) ? "A" : "",
+                feature_bool(FEAT_OPLEVELS) ? "U" : "");
+
+  add_isupport_s("CHANMODES", cmodebuf);
 }
 
 /** Update whether #me has halfops support or not.
@@ -250,6 +257,7 @@ static void
 feature_notify_excepts(void)
 {
   char imaxlist[BUFSIZE] = "";
+  char cmodebuf[BUFSIZE] = "";
 
   if (feature_bool(FEAT_EXCEPTS)) {
     add_isupport_s("EXCEPTS", "e");
@@ -259,10 +267,14 @@ feature_notify_excepts(void)
     del_isupport("MAXEXCEPTS");
   }
 
-  if (feature_bool(FEAT_OPLEVELS))
-    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,AkU,lL,acimnprstzCMNOQSTZ" : "b,AkU,lL,acimnprstzCMNOQSTZ");
-  else
-    add_isupport_s("CHANMODES", feature_bool(FEAT_EXCEPTS) ? "be,k,lL,acimnprstzCMNOQSTZ" : "b,k,lL,acimnprstzCMNOQSTZ");
+  /* "be,AkU,l,aCcDdiMmNnOpQRrSsTtZz" */
+
+  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,l,aCcDdiMmNnOpQRrSsTtZz",
+                feature_bool(FEAT_EXCEPTS) ? "e" : "",
+                feature_bool(FEAT_OPLEVELS) ? "A" : "",
+                feature_bool(FEAT_OPLEVELS) ? "U" : "");
+
+  add_isupport_s("CHANMODES", cmodebuf);
 
   strcat(imaxlist, "b:");
   strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
@@ -272,6 +284,24 @@ feature_notify_excepts(void)
   }
 
   add_isupport_s("MAXLIST", imaxlist);
+}
+
+/** Set MAXEXCEPTS, self explanatory */
+static void
+set_isupport_maxexcepts(void)
+{
+    char imaxlist[BUFSIZE] = "";
+
+    add_isupport_i("MAXBANS", feature_int(FEAT_MAXBANS));
+
+    strcat(imaxlist, "b:");
+    strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
+    if (feature_bool(FEAT_EXCEPTS)) {
+      strcat(imaxlist, ",e:");
+      strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
+    }
+
+    add_isupport_s("MAXLIST", imaxlist);
 }
 
 /** Handle update to FEAT_GEOIP_ENABLE. */
@@ -609,7 +639,7 @@ static struct FeatureDesc {
   F_B(CHMODE_Z, 0, 1, 0),
   F_B(HALFOPS, FEAT_READ, 0, feature_notify_halfops),
   F_B(EXCEPTS, FEAT_READ, 0, feature_notify_excepts),
-  F_I(MAXEXCEPTS, 0, 45, 0),
+  F_I(MAXEXCEPTS, 0, 45, set_isupport_maxexcepts),
   F_I(AVEXCEPTLEN, 0, 40, 0),
 
   /* Some misc. Nefarious default paths */
