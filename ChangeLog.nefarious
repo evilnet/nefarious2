@@ -3,6 +3,14 @@
 
 2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/capab.h: Added client_check_caps() function.
+
+	* ircd/m_cap.c: Added client_check_caps() function.
+
+	* ircd/m_check.c: Added client capabilities to CHECK output.
+
+2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/Makefile.in: Run tools/makepem/makepem after make install.
 
 	* ircd/m_starttls.c: Fixed warnign only shown without SSL.

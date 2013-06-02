@@ -58,4 +58,6 @@ DECLARE_FLAGSET(CapSet, _CAP_LAST_CAP);
 #define CapSet(cs, cap)	FlagSet(cs, cap)
 #define CapClr(cs, cap)	FlagClr(cs, cap)
 
+extern void client_check_caps(struct Client *client, struct Client *replyto);
+
 #endif /* INCLUDED_capab_h */
