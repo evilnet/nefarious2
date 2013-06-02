@@ -3,6 +3,12 @@
 
 2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/channel.c: Fixed a bug caused by wrong parameter order.
+
+	* ircd/s_user.c: Fixed a bug caused by wrong parameter order.
+
+2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/capab.h: Added away-notify client capability.
 
 	* include/send.h: Added sendcmdto_common_channels_capab_butone().
