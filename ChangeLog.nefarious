@@ -3,6 +3,22 @@
 
 2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/capab.h: Added extended-join client capability.
+
+	* include/send.h: Added sendcmdto_channel_capab_butserv_butone().
+
+	* ircd/channel.c: Added extended-join client capability.
+
+	* ircd/m_burst.c: Added extended-join client capability.
+
+	* ircd/m_cap.c: Added extended-join client capability.
+
+	* ircd/s_user.c: Added extended-join client capability.
+
+	* ircd/send.c: Added sendcmdto_channel_capab_butserv_butone().
+
+2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/parse.c: Changed user and oper handlers from m_ignore to
 	m_registered for STARTTLS.
 

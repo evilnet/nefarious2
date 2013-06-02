@@ -1153,9 +1153,14 @@ hide_hostmask(struct Client *cptr)
     if (IsZombie(chan))
       continue;
     /* Send a JOIN unless the user's join has been delayed. */
-    if (!IsDelayedJoin(chan))
-      sendcmdto_channel_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
-                                         "%H", chan->channel);
+    if (!IsDelayedJoin(chan)) {
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+                                         CAP_NONE, CAP_EXTJOIN, "%H", chan->channel);
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+                                         CAP_NONE, CAP_EXTJOIN, "%H %s :%s",
+                                         IsAccount(cptr) ? cli_account(cptr) : "*",
+                                         cli_info(cptr), chan->channel);
+    }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ohv %C %C %C", chan->channel, cptr,
@@ -1220,9 +1225,14 @@ unhide_hostmask(struct Client *cptr)
     if (IsZombie(chan))
       continue;
     /* Send a JOIN unless the user's join has been delayed. */
-    if (!IsDelayedJoin(chan))
-      sendcmdto_channel_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
-                                         "%H", chan->channel);
+    if (!IsDelayedJoin(chan)) {
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+                                         CAP_NONE, CAP_EXTJOIN, "%H", chan->channel);
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+                                         CAP_NONE, CAP_EXTJOIN, "%H %s :%s",
+                                         IsAccount(cptr) ? cli_account(cptr) : "*",
+                                         cli_info(cptr), chan->channel);
+    }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ohv %C %C", chan->channel, cptr,

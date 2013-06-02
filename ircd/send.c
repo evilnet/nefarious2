@@ -555,6 +555,53 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   msgq_clean(mb);
 }
 
+/** Send a (prefixed) command to all local users on a channel with or without
+ *  a client capability specified.
+ * @param[in] from Client originating the command.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command (ignored).
+ * @param[in] to Destination channel.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] skip Bitmask of SKIP_DEAF, SKIP_NONOPS, SKIP_NONVOICES indicating which clients to skip.
+ * @param[in] withcap CAP_* that the user must have active to receive the message.
+ * @param[in] skipcap CAP_* that the user must not have active to receive the message.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd,
+                                      const char *tok, struct Channel *to,
+                                      struct Client *one, unsigned int skip,
+                                      int withcap, int skipcap,
+                                      const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  struct Membership *member;
+
+  vd.vd_format = pattern; /* set up the struct VarData for %v */
+  va_start(vd.vd_args, pattern);
+
+  /* build the buffer */
+  mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
+  va_end(vd.vd_args);
+
+  /* send the buffer to each local channel member */
+  for (member = to->members; member; member = member->next_member) {
+    if (!MyConnect(member->user)
+        || member->user == one
+        || IsZombie(member)
+        || (skip & SKIP_DEAF && IsDeaf(member->user))
+        || (skip & SKIP_NONOPS && !IsChanOp(member))
+        || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
+        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
+        || ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
+        || ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
+        continue;
+      send_buffer(member->user, mb, 0);
+  }
+
+  msgq_clean(mb);
+}
+
 /** Send a (prefixed) command to all servers with users on \a to.
  * Skip \a from and \a one plus those indicated in \a skip.
  * @param[in] from Client originating the command.
