@@ -58,6 +58,7 @@ static struct capabilities {
   _CAP(UHNAMES, 0, "userhost-in-names"),
   _CAP(EXTJOIN, 0, "extended-join"),
   _CAP(AWAYNOTIFY, 0, "away-notify"),
+  _CAP(ACCNOTIFY, 0, "account-notify"),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls"),
 #endif

@@ -165,6 +165,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         ClearAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN);
 
+        sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
+                                               "*");
+
         sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C U", acptr);
       } else if (type == 'R' || type == 'M') {
         if (parc < 4)
@@ -195,6 +198,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
                  "timestamp %Tu", parv[3], cli_user(acptr)->acc_create));
         }
+
+        sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
+                                               "%s", cli_user(acptr)->account);
 
         if (parc > 4) {
           sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s %s",
@@ -309,6 +315,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN);
     SetAccount(acptr);
+
+    sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
+                                           "%s", cli_user(acptr)->account);
 
     if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
          (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&

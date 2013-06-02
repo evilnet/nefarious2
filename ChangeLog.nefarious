@@ -3,6 +3,14 @@
 
 2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/capab.h: Added account-notify client capability.
+
+	* ircd/m_account.c: Added account-notify client capability.
+
+	* ircd/m_cap.c: Added account-notify client capability.
+
+2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/channel.c: Fixed a bug caused by wrong parameter order.
 
 	* ircd/s_user.c: Fixed a bug caused by wrong parameter order.
