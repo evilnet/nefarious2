@@ -62,6 +62,15 @@ extern void sendcmdto_common_channels_butone(struct Client *from,
 					     struct Client *one,
 					     const char *pattern, ...);
 
+/* Send command to all channels user is on with or without a specified capability */
+extern void sendcmdto_common_channels_capab_butone(struct Client *from,
+                                             const char *cmd,
+                                             const char *tok,
+                                             struct Client *one,
+                                             int withcap,
+                                             int skipcap,
+                                             const char *pattern, ...);
+
 /* Send command to all channel users on this server */
 extern void sendcmdto_channel_butserv_butone(struct Client *from,
 					     const char *cmd,

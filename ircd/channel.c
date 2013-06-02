@@ -4324,6 +4324,11 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                                              IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
                                              cli_info(jbuf->jb_source));
 
+      if (cli_user(jbuf->jb_source)->away)
+        sendcmdto_channel_capab_butserv_butone(jbuf->jb_source, CMD_AWAY, chan, NULL, 0,
+                                               CAP_AWAYNOTIFY, CAP_NONE, ":%s",
+                                               cli_user(jbuf->jb_source)->away);
+
       /* send an op, too, if needed */
       if (flags & CHFL_CHANOP && (oplevel < MAXOPLEVEL || !MyUser(jbuf->jb_source)))
 	sendcmdto_channel_butserv_butone((chan->mode.apass[0] ? &his : jbuf->jb_source),
@@ -4437,6 +4442,11 @@ void RevealDelayedJoin(struct Membership *member)
                                    member->user, 0, CAP_EXTJOIN, CAP_NONE, "%H %s :%s",
                                    IsAccount(member->user) ? cli_account(member->user) : "*",
                                    cli_info(member->user), member->channel);
+  if (cli_user(member->user)->away)
+    sendcmdto_channel_capab_butserv_butone(member->user, CMD_AWAY, member->channel, NULL, 0,
+                                           CAP_AWAYNOTIFY, CAP_NONE, ":%s",
+                                           cli_user(member->user)->away);
+
   CheckDelayedJoins(member->channel);
 }
 

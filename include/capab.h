@@ -42,6 +42,7 @@ enum Capab {
   _CAP(NAMESX, 0, "multi-prefix"),
   _CAP(UHNAMES, 0, "userhost-in-names"),
   _CAP(EXTJOIN, 0, "extended-join"),
+  _CAP(AWAYNOTIFY, 0, "away-notify"),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls"),
 #endif

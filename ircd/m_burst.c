@@ -631,6 +631,10 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                                                      CAP_EXTJOIN, CAP_NONE, "%H %s :%s",
                                                      chptr, IsAccount(acptr) ? cli_account(acptr) : "",
                                                      cli_info(acptr));
+              if (cli_user(acptr)->away)
+                sendcmdto_channel_capab_butserv_butone(acptr, CMD_AWAY, chptr, NULL, 0,
+                                                       CAP_AWAYNOTIFY, CAP_NONE, ":%s",
+                                                       cli_user(acptr)->away);
             }
 	  }
 	  else

@@ -3,6 +3,24 @@
 
 2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/capab.h: Added away-notify client capability.
+
+	* include/send.h: Added sendcmdto_common_channels_capab_butone().
+
+	* ircd/channel.c: Added away-notify client capability.
+
+	* ircd/m_away.c: Added away-notify client capability.
+
+	* ircd/m_burst.c: Added away-notify client capability.
+
+	* ircd/m_cap.c: Added away-notify client capability.
+
+	* ircd/s_user.c: Added away-notify client capability.
+
+	* ircd/send.c: Added sendcmdto_common_channels_capab_butone().
+
+2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/capab.h: Added extended-join client capability.
 
 	* include/send.h: Added sendcmdto_channel_capab_butserv_butone().

@@ -1160,6 +1160,10 @@ hide_hostmask(struct Client *cptr)
                                          CAP_NONE, CAP_EXTJOIN, "%H %s :%s",
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr), chan->channel);
+      if (cli_user(cptr)->away)
+        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, 0,
+                                               CAP_AWAYNOTIFY, CAP_NONE, ":%s",
+                                               cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
@@ -1232,6 +1236,10 @@ unhide_hostmask(struct Client *cptr)
                                          CAP_NONE, CAP_EXTJOIN, "%H %s :%s",
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr), chan->channel);
+      if (cli_user(cptr)->away)
+        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, 0,
+                                               CAP_AWAYNOTIFY, CAP_NONE, ":%s",
+                                               cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
