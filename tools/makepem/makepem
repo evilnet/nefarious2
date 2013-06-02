@@ -1,0 +1,54 @@
+#! /bin/sh
+#* $Id$
+
+
+case $# in
+0|1)      echo 'Usage: makepem /dpath /top_srcdir' 1>&2; exit 2
+esac
+
+
+if test -f $2/config.h
+then
+  grep USE_SSL $2/config.h | awk '{
+    if ($1 != "#define") {
+      printf "SSL Disabled, Skipping makepem Generation\n"
+      system("touch /tmp/ssltempdata")
+    }
+  }'
+fi
+
+
+if test -f /tmp/ssltempdata
+then
+  rm -f /tmp/ssltempdata
+else
+  echo 'Generating ircd.pem...'
+
+  if test -f $1/ircd.pem
+  then
+    echo 'ircd.pem already exists, exiting. Remove ircd.pem and run make install again to create a new one'
+    exit 0;
+  fi
+
+  echo Press Y if you want to use an SSL certificate that already exists; read sslans
+
+  if [ "$sslans" != "Y" ]; then
+    openssl req -new -x509 -days 365 -nodes -out $1/ircd.pem -keyout $1/ircd.pem
+    test 1 -eq 1 || test ! -f /dev/urandom || openssl gendh -rand $1/ircd.rand 512 >> $1/ircd.pem
+    test 1 -eq 1 || test -f /dev/urandom || openssl gendh 512 >> $1/ircd.pem
+    openssl x509 -subject -dates -fingerprint -noout -in $1/ircd.pem
+  else
+    FileExist=FALSE
+    while [ "$FileExist" == "FALSE" ];
+    do
+      echo Please enter in the filname of the SSL certificate including the full path; read sslpath
+      if test -f $sslpath
+      then
+        FileExist=TRUE
+      else
+        echo File Does Not Exist
+      fi
+    done
+    cp $sslpath $1/ircd.pem
+  fi
+fi

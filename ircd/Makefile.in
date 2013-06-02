@@ -323,6 +323,7 @@ install-with-symlink: build mkbindir
 	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} ${top_srcdir}/doc/example.conf ${DPATH}
 	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIP.dat ${DPATH}
 	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIPv6.dat ${DPATH}
+	${top_srcdir}/tools/makepem/makepem ${DPATH} ${top_srcdir}
 
 install-no-symlink: build mkbindir
 	@if [ ! -d ${DPATH} -a ! -f ${DPATH} ]; then \
@@ -337,6 +338,9 @@ install-no-symlink: build mkbindir
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} umkpasswd ${BINDIR}
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} convert-conf ${BINDIR}
 	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} ${top_srcdir}/doc/example.conf ${DPATH}
+	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIP.dat ${DPATH}
+	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIPv6.dat ${DPATH}
+	${top_srcdir}/tools/makepem/makepem ${DPATH} ${top_srcdir}
 
 uninstall:
 	@if [ "${BINDIR}" != "${DPATH}" ]; then \

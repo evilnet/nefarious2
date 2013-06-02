@@ -3,6 +3,17 @@
 
 2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/Makefile.in: Run tools/makepem/makepem after make install.
+
+	* ircd/m_starttls.c: Fixed warnign only shown without SSL.
+
+	* ircd/s_bsd.c: Fixed bugs caused by compiling withous SSL.
+
+	* tools/makepem/makepem: Added a tool to generate SSL server
+	certificates.
+
+2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/readme.iauth: Added SSL client certificate notifcation
 	extension to the iauth protocol.
 

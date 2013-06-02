@@ -331,8 +331,11 @@ static int completed_connection(struct Client* cptr)
   struct ConfItem *aconf;
   time_t newts;
   struct Client *acptr;
-  int i, r;
+  int i;
+#ifdef USE_SSL
+  int r;
   char *sslfp;
+#endif
 
   assert(0 != cptr);
 
@@ -511,7 +514,9 @@ void add_connection(struct Listener* listener, int fd) {
   struct irc_sockaddr addr;
   struct Client      *new_client;
   time_t              next_target = 0;
+#ifdef USE_SSL
   char               *sslfp;
+#endif
 
   const char* const throttle_message =
          "ERROR :Your host is trying to (re)connect too fast -- throttled\r\n";
@@ -980,6 +985,7 @@ static void client_sock_callback(struct Event* ev)
 
   case ET_READ: /* socket is readable */
     if (!IsDead(cptr)) {
+#ifdef USE_SSL
       if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl) && IsStartTLS(cptr)) {
         if (!ssl_starttls(cptr)) {
           ClearSSL(cptr);
@@ -987,10 +993,13 @@ static void client_sock_callback(struct Event* ev)
           send_reply(cptr, ERR_STARTTLS, "STARTTLS failed.");
         }
       } else {
+#endif
         Debug((DEBUG_DEBUG, "Reading data from %C", cptr));
         if (read_packet(cptr, 1) == 0) /* error while reading packet */
 	  fallback = "EOF from client";
+#ifdef USE_SSL
       }
+#endif
     }
     break;
 

@@ -84,6 +84,7 @@
 
 #include "client.h"
 #include "dbuf.h"
+#include "handlers.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_log.h"
