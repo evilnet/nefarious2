@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/parse.c: Changed user and oper handlers from m_ignore to
+	m_registered for STARTTLS.
+
 2013-06-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/ircd_features.c: Changed the way CHANMODES is generated.

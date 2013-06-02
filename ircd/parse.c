@@ -805,7 +805,7 @@ struct Message msgtab[] = {
     TOK_STARTTLS,
     0, MAXPARA,         0, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_starttls, m_ignore, m_ignore, m_ignore, m_ignore }
+    { m_starttls, m_registered, m_ignore, m_registered, m_ignore }
   },
   {
     MSG_WALLHOPS,
