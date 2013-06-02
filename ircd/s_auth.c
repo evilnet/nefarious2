@@ -165,6 +165,7 @@ enum IAuthFlag
   IAUTH_EXTRAWAIT,                      /**< Give IAuth extra time to answer. */
   IAUTH_UNDERNET,                       /**< Enable Undernet extensions. */
   IAUTH_WEBIRC,                         /**< Enable Nefarious WEBIRC extensions. */
+  IAUTH_SSLFP,                          /**< Enable Nefarious SSL client certificate fingerprint notifcation. */
   IAUTH_LAST_FLAG                       /**< total number of flags */
 };
 /** Declare a bitset structure indexed by IAuthFlag. */
@@ -1000,8 +1001,13 @@ static void start_iauth_query(struct AuthRequest *auth)
   FlagSet(&auth->flags, AR_IAUTH_PENDING);
   if (!sendto_iauth(auth->client, "C %s %hu %s %hu",
                     cli_sock_ip(auth->client), auth->port,
-                    ircd_ntoa(&auth->local.addr), auth->local.port))
+                    ircd_ntoa(&auth->local.addr), auth->local.port)) {
     FlagClr(&auth->flags, AR_IAUTH_PENDING);
+    return;
+  }
+
+  if (IAuthHas(iauth, IAUTH_SSLFP) && cli_sslclifp(auth->client) && !EmptyString(cli_sslclifp(auth->client)))
+    sendto_iauth(auth->client, "F %s", cli_sslclifp(auth->client));
 }
 
 /** Starts auth (identd) and dns queries for a client.
@@ -1601,6 +1607,7 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
     case 'W': IAuthSet(iauth, IAUTH_EXTRAWAIT); break;
     case 'U': IAuthSet(iauth, IAUTH_UNDERNET); break;
     case 'w': IAuthSet(iauth, IAUTH_WEBIRC); break;
+    case 'F': IAuthSet(iauth, IAUTH_SSLFP); break;
     }
 
   /* Optionally notify operators. */

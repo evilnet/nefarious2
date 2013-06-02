@@ -134,6 +134,17 @@ States: REGISTER, HURRY, NORMAL
 Next State: GONE
 Comments: Indicates that a client is disconnecting from the server.
 
+F - Client Has An SSL Certificate
+Syntax: <id> F <fingerprint>
+Example 5 F 61d0720b27d8aed9c0a7cb788091b0d8d9a94e119d5118e574b70eecd41b3c26
+States: REGISTER
+Next State: -
+Comments: Indicates that a client has connected using an SSL client
+  certificate and what that certificates fingerprint is. This message
+  is enabled by requesting the 'F' policy.
+Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
+  not send it.
+
 N - Hostname Received
 Syntax: <id> N <hostname>
 Example: 5 N host-1-10.example.org
@@ -346,9 +357,10 @@ Comments: Sets policy options for the iauth conversation.  Old policy
        extended or reset.
    w - Send WEBIRC requests whether or not they have been validated by
        Nefarious.
+   F - Send SSL client certificate fingerprints where available.
 Compatibility: The U policy is an Undernet extension and is not
-  recognized by ircd. The w policy is a Nefarious extension that is
-  not recognized by Undernet ircu or ircd.
+  recognized by ircd. The w and F policies is a Nefarious extension that
+  is not recognized by Undernet ircu or ircd.
 
 V - iauth Program Version
 Syntax: V :<version string>
