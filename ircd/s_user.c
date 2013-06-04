@@ -497,7 +497,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
                            cli_sock_ip(sptr), get_client_class(sptr),
                            cli_info(sptr), NumNick(cptr) /* two %s's */);
 
-    IPcheck_connect_succeeded(sptr);
+    if (!find_except_conf(sptr, EFLAG_IPCHECK))
+      IPcheck_connect_succeeded(sptr);
   }
   else {
     struct Client *acptr = user->server;
@@ -524,7 +525,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (IsBurst(acptr) || Protocol(acptr) < 10)
         break;
     }
-    if (!IPcheck_remote_connect(sptr, (acptr != &me)))
+    if (!find_except_conf(sptr, EFLAG_IPCHECK) && !IPcheck_remote_connect(sptr, (acptr != &me)))
     {
       /*
        * We ran out of bits to count this
@@ -880,6 +881,10 @@ int check_target_limit(struct Client *sptr, void *target, const char *name,
 
   /* Is target limiting even enabled? */
   if (!feature_bool(FEAT_TARGET_LIMITING))
+    return 0;
+
+  /* Is the client exempt from target limiting */
+  if (find_except_conf(sptr, EFLAG_TARGLIMIT))
     return 0;
 
   /*

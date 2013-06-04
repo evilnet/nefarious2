@@ -212,6 +212,9 @@ enum Flag
     FLAG_SSL,                       /**< User is connected via SSL (+z) */
     FLAG_STARTTLS,                  /**< User is connecting with StartTLS */
 
+    FLAG_IPCEXEMPT,                 /**< User is IPcheck exempt */
+    FLAG_IPCNOTEXEMPT,              /**< User is not IPcheck exempt */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -714,6 +717,10 @@ struct Client {
 #define IsSSL(x)                HasFlag(x, FLAG_SSL)
 /** Return non-zero if the client is connecting using STARTTLS. */
 #define IsStartTLS(x)           HasFlag(x, FLAG_STARTTLS)
+/** Return non-zero if the client is IPcheck exempt. */
+#define IsIPCheckExempt(x)      HasFlag(x, FLAG_IPCEXEMPT)
+/** Return non-zero if the client is not IPcheck exempt. */
+#define IsNotIPCheckExempt(x)   HasFlag(x, FLAG_IPCNOTEXEMPT)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -806,6 +813,10 @@ struct Client {
 #define SetSSL(x)               SetFlag(x, FLAG_SSL)
 /** Mark a client as using STARTTLS. */
 #define SetStartTLS(x)          SetFlag(x, FLAG_STARTTLS)
+/** Mark a client as IPcheck exempt. */
+#define SetIPCheckExempt(x)     SetFlag(x, FLAG_IPCEXEMPT)
+/** Mark a client as not IPcheck exempt. */
+#define SetNotIPCheckExempt(x)  SetFlag(x, FLAG_IPCNOTEXEMPT)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 

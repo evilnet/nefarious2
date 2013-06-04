@@ -37,6 +37,7 @@
 #include "numeric.h"
 #include "res.h"
 #include "s_bsd.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_stats.h"
@@ -216,6 +217,9 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
     if ((acptr = LocalClientArray[fd])) {
       if (!cli_user(acptr))
 	continue;
+
+      if (find_except_conf(acptr, EFLAG_GLINE))
+        continue;
 
       if (GlineIsRealName(gline)) { /* Realname Gline */
 	Debug((DEBUG_DEBUG,"Realname Gline: %s %s",(cli_info(acptr)),
@@ -1040,6 +1044,9 @@ gline_lookup(struct Client *cptr, unsigned int flags)
 {
   struct Gline *gline;
   struct Gline *sgline;
+
+  if (find_except_conf(cptr, EFLAG_GLINE))
+    return 0;
 
   gliter(GlobalGlineList, gline, sgline) {
     if ((flags & GLINE_GLOBAL && gline->gl_flags & GLINE_LOCAL) ||

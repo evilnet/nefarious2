@@ -105,6 +105,7 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_UMODEIS          221
 /*	RPL_SQLINE_NICK	     222	   Numerics List: Dalnet */
 #define RPL_STATSJLINE       222	/* Undernet extension */
+#define RPL_STATSELINE       223        /* Nefarious extension */
 /*	RPL_STATSELINE       223	   dalnet */
 /*	RPL_STATSGLINE	     223	   unreal */
 /*      RPL_STATSFLINE       224           Hybrid extension,Dalnet */

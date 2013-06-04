@@ -1,6 +1,55 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added the Except block and FEAT_HIS_STATS_E.
+
+	* doc/readme.features: Added FEAT_HIS_STATS_E.
+
+	* include/client.h: Added client flags as part of IPCheck
+	exemption.
+
+	* include/ircd_features.h: Added FEAT_HIS_STATS_E.
+
+	* include/numeric.h: Added the RPL_STATSELINE numeric reply.
+
+	* include/s_conf.h: Added the Except block.
+
+	* ircd/gline.c: Added exception lookups for glines.
+
+	* ircd/ircd_features.c: Added FEAT_HIS_STATS_E.
+
+	* ircd/ircd_lexer.l: Added the Except block.
+
+	* ircd/ircd_parser.y: Added the Except block.
+
+	* ircd/m_check.c: Added list of exemptions applied to the user.
+
+	* ircd/m_nick.c: Added exception lookups for IPchecks.
+
+	* ircd/m_webirc.c: Added exception lookups for IPchecks.
+
+	* ircd/s_auth.c: Added exception lookups for IPchecks, ident
+	and rdns lookups.
+
+	* ircd/s_bsd.c: Added exception lookups for IPchecks.
+
+	* ircd/s_conf.c: Added the Except block.
+
+	* ircd/s_err.c: Added the RPL_STATSELINE numeric reply.
+
+	* ircd/s_misc.c: Added exception lookups for IPchecks.
+
+	* ircd/s_stats.c: Added STATS E for listing Except blocks.
+
+	* ircd/s_user.c: Added exception lookups for IPchecks and
+	target limiting.
+
+	* ircd/shun.c: Added exception lookups for shuns.
+
+	* ircd/ssl.c: Fixed a commont.
+
 2013-06-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/capab.h: Added client_check_caps() function.

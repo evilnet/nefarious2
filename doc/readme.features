@@ -1120,6 +1120,12 @@ FLEXIBLEKEYS
 Channel key rules over all modes. Eg a user can join a channel with the correct
 key and be able to get around modes like limit and invite.
 
+HIS_STATS_E
+ * Type: boolean
+ * Default: TRUE
+
+As per UnderNet CFV-165, this removes /STATS E from users.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

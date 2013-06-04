@@ -89,8 +89,10 @@ struct CRuleConf*  cruleConfList;
 struct DenyConf*   denyConfList;
 /** Global list of WebIRC blocks. */
 struct WebIRCConf* webircConfList;
-/** GLobal list of SpoofHost blocks. */
+/** Global list of SpoofHost blocks. */
 struct SHostConf*  shostConfList;
+/** Global list of Except blocks. */
+struct ExceptConf* exceptConfList;
 
 /** Tell a user that they are banned, dumping the message from a file.
  * @param sptr Client being rejected
@@ -955,6 +957,125 @@ const struct SHostConf* conf_get_shost_list(void)
   return shostConfList;
 }
 
+/** Get all the exception flags that apply to the client \a cptr
+ * @param[in] cptr Client to find the exception flags for.
+ * @return Bitmask of all the exception flags found to apply to \a cptr
+ */
+int get_except_flags(struct Client *cptr)
+{
+  int flags = 0;
+  struct ExceptConf *econf;
+
+  for(econf = exceptConfList; econf; econf = econf->next) {
+    if (econf->usermask && match(econf->usermask, cli_username(cptr)))
+      continue;
+    if (econf->bits > 0) {
+      if (!ipmask_check(&cli_ip(cptr), &econf->address, econf->bits))
+        continue;
+    } else if (econf->hostmask && match(econf->hostmask, cli_sockhost(cptr)))
+      continue;
+
+    flags |= econf->flags;
+  }
+
+  return flags;
+}
+
+/** Find Except configuration for \a cptr with flags matching \a flags
+ * @param[in] cptr Client to match an Except configuration against.
+ * @param[in] mask Bitmask of EFLAG_* flags to test for exemption.
+ * @return -1 if an exception was found, 0 otherwise.
+ */
+int find_except_conf(struct Client *cptr, int flags)
+{
+  struct ExceptConf *econf;
+
+  if (flags & EFLAG_IPCHECK) {
+    if (IsIPCheckExempt(cptr))
+      return -1;
+    if (IsNotIPCheckExempt(cptr))
+      return 0;
+  }
+
+  for(econf = exceptConfList; econf; econf = econf->next) {
+    if (!(econf->flags & flags))
+      continue;
+
+    if (econf->usermask && match(econf->usermask, cli_username(cptr)))
+      continue;
+    if (econf->bits > 0) {
+      if (!ipmask_check(&cli_ip(cptr), &econf->address, econf->bits))
+        continue;
+    } else if (econf->hostmask && match(econf->hostmask, cli_sockhost(cptr)))
+      continue;
+
+    if (econf->flags & EFLAG_IPCHECK)
+      SetIPCheckExempt(cptr);
+
+    return -1;
+  }
+
+  if (flags & EFLAG_IPCHECK)
+    SetNotIPCheckExempt(cptr);
+
+  return 0;
+}
+
+/** Find Except configuration for \a addr with flags matching \a flags
+ * @param[in] addr IP Address to match an Except configuration against.
+ * @param[in] mask Bitmask of EFLAG_* flags to test for exemption.
+ * @return -1 if an exception was found, 0 otherwise.
+ */
+int find_except_conf_by_ip(const struct irc_in_addr *addr, int flags)
+{
+  struct ExceptConf *econf;
+  char ipbuf[SOCKIPLEN];
+
+  ircd_ntoa_r(ipbuf, addr);
+
+  for(econf = exceptConfList; econf; econf = econf->next) {
+    if (!(econf->flags & flags))
+      continue;
+
+    /* Attempt to match usermask against "%nobody" to ensure this isn't
+     * an Except that requires a user name to match.
+     */
+    if (econf->usermask && match(econf->usermask, "%nobody"))
+      continue;
+    if (econf->bits > 0) {
+      if (!ipmask_check(addr, &econf->address, econf->bits))
+        continue;
+    } else if (econf->hostmask && match(econf->hostmask, ipbuf))
+      continue;
+
+    return -1;
+  }
+
+  return 0;
+}
+
+/** Free all Except configurations from #exceptConfList. */
+void conf_erase_except_list(void)
+{
+  struct ExceptConf* next;
+  struct ExceptConf* p = exceptConfList;
+  for ( ; p; p = next) {
+    next = p->next;
+    MyFree(p->hostmask);
+    MyFree(p->usermask);
+    MyFree(p);
+  }
+  exceptConfList = 0;
+}
+
+/** Return #exceptConfList.
+ * @return #exceptConfList
+ */
+const struct ExceptConf* conf_get_except_list(void)
+{
+  return exceptConfList;
+}
+
 /** Find any existing quarantine for the named channel.
  * @param chname Channel name to search for.
  * @return Reason for channel's quarantine, or NULL if none exists.
@@ -1108,6 +1229,7 @@ int rehash(struct Client *cptr, int sig)
   conf_erase_deny_list();
   conf_erase_webirc_list();
   conf_erase_shost_list();
+  conf_erase_except_list();
   motd_clear();
 
   /*
@@ -1245,37 +1367,40 @@ int find_kill(struct Client *cptr)
   /* 2000-07-14: Rewrote this loop for massive speed increases.
    *             -- Isomer
    */
-  for (deny = denyConfList; deny; deny = deny->next) {
-    if (deny->usermask && match(deny->usermask, name))
-      continue;
-    if (deny->realmask && match(deny->realmask, realname))
-      continue;
-    if (deny->countrymask && country && match(deny->countrymask, country))
-      continue;
-    if (deny->continentmask && continent && match(deny->continentmask, continent))
-      continue;
-    if (feature_bool(FEAT_CTCP_VERSIONING) && feature_bool(FEAT_CTCP_VERSIONING_KILL)) {
-      if (deny->version && version && match(deny->version, version))
+  if (!find_except_conf(cptr, EFLAG_KLINE)) {
+    for (deny = denyConfList; deny; deny = deny->next) {
+      if (deny->usermask && match(deny->usermask, name))
         continue;
-    }
-    if (deny->bits > 0) {
-      if (!ipmask_check(&cli_ip(cptr), &deny->address, deny->bits))
+      if (deny->realmask && match(deny->realmask, realname))
         continue;
-    } else if (deny->hostmask && match(deny->hostmask, host))
-      continue;
+      if (deny->countrymask && country && match(deny->countrymask, country))
+        continue;
+      if (deny->continentmask && continent && match(deny->continentmask, continent))
+        continue;
+      if (feature_bool(FEAT_CTCP_VERSIONING) && feature_bool(FEAT_CTCP_VERSIONING_KILL)) {
+        if (deny->version && version && match(deny->version, version))
+          continue;
+      }
+      if (deny->bits > 0) {
+        if (!ipmask_check(&cli_ip(cptr), &deny->address, deny->bits))
+          continue;
+      } else if (deny->hostmask && match(deny->hostmask, host))
+        continue;
 
-    if (EmptyString(deny->message))
-      send_reply(cptr, SND_EXPLICIT | ERR_YOUREBANNEDCREEP,
-                 ":Connection from your host is refused on this server.");
-    else {
-      if (deny->flags & DENY_FLAGS_FILE)
-        killcomment(cptr, deny->message);
-      else
-        send_reply(cptr, SND_EXPLICIT | ERR_YOUREBANNEDCREEP, ":%s.", deny->message);
+      if (EmptyString(deny->message))
+        send_reply(cptr, SND_EXPLICIT | ERR_YOUREBANNEDCREEP,
+                   ":Connection from your host is refused on this server.");
+      else {
+        if (deny->flags & DENY_FLAGS_FILE)
+          killcomment(cptr, deny->message);
+        else
+          send_reply(cptr, SND_EXPLICIT | ERR_YOUREBANNEDCREEP, ":%s.", deny->message);
+      }
+      return -1;
     }
-    return -1;
   }
 
+  /* Don't need to do an except lookup here as it's done in gline_lookup() */
   if (!feature_bool(FEAT_DISABLE_GLINES) && (agline = gline_lookup(cptr, 0))) {
     /*
      * find active glines

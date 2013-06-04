@@ -71,6 +71,7 @@
   extern struct qline*      GlobalQuarantineList;
   extern struct WebIRCConf* webircConfList;
   extern struct SHostConf*  shostConfList;
+  extern struct ExceptConf* exceptConfList;
 
   int yylex(void);
   /* Now all the globals we need :/... */
@@ -87,6 +88,7 @@
   struct DenyConf *dconf;
   struct ServerConf *sconf;
   struct WebIRCConf *wconf;
+  struct ExceptConf *econf;
   struct s_map *smap;
   struct Privs privs;
   struct Privs privs_dirty;
@@ -196,19 +198,26 @@ static void free_slist(struct SLink **link) {
 %token SPOOFHOST
 %token AUTOAPPLY
 %token SNOMASK
+%token EXCEPT
+%token SHUN
+%token KLINE
+%token GLINE
+%token RDNS
+%token IPCHECK
+%token TARGETLIMIT
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
-%token TPRIV_GLINE TPRIV_LOCAL_GLINE TPRIV_LOCAL_JUPE TPRIV_LOCAL_BADCHAN
+%token TPRIV_LOCAL_GLINE TPRIV_LOCAL_JUPE TPRIV_LOCAL_BADCHAN
 %token TPRIV_LOCAL_OPMODE TPRIV_OPMODE TPRIV_SET TPRIV_WHOX TPRIV_BADCHAN
 %token TPRIV_SEE_CHAN TPRIV_SHOW_INVIS TPRIV_SHOW_ALL_INVIS TPRIV_PROPAGATE
 %token TPRIV_UNLIMIT_QUERY TPRIV_DISPLAY TPRIV_SEE_OPERS TPRIV_WIDE_GLINE
 %token TPRIV_FORCE_OPMODE TPRIV_FORCE_LOCAL_OPMODE TPRIV_APASS_OPMODE
 %token TPRIV_LIST_CHAN TPRIV_CHECK TPRIV_WHOIS_NOTICE TPRIV_HIDE_OPER
 %token TPRIV_HIDE_CHANNELS TPRIV_HIDE_IDLE TPRIV_XTRAOP TPRIV_SERVICE
-%token TPRIV_REMOTE TPRIV_SHUN TPRIV_LOCAL_SHUN TPRIV_WIDE_SHUN
+%token TPRIV_REMOTE TPRIV_LOCAL_SHUN TPRIV_WIDE_SHUN
 %token TPRIV_FREEFORM
 /* and some types... */
 %type <num> sizespec
@@ -229,7 +238,7 @@ block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
        pseudoblock | iauthblock | forwardsblock | webircblock | spoofhostblock |
-       error ';';
+       exceptblock | error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -723,7 +732,7 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           TPRIV_REHASH { $$ = PRIV_REHASH; } |
           TPRIV_RESTART { $$ = PRIV_RESTART; } |
           TPRIV_DIE { $$ = PRIV_DIE; } |
-          TPRIV_GLINE { $$ = PRIV_GLINE; } |
+          GLINE { $$ = PRIV_GLINE; } |
           TPRIV_LOCAL_GLINE { $$ = PRIV_LOCAL_GLINE; } |
           JUPE { $$ = PRIV_JUPE; } |
           TPRIV_LOCAL_JUPE { $$ = PRIV_LOCAL_JUPE; } |
@@ -755,7 +764,7 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           TPRIV_XTRAOP { $$ = PRIV_XTRAOP; } |
           TPRIV_SERVICE { $$ = PRIV_SERVICE; } |
           TPRIV_REMOTE { $$ = PRIV_REMOTE; } |
-          TPRIV_SHUN { $$ = PRIV_SHUN; } |
+          SHUN { $$ = PRIV_SHUN; } |
           TPRIV_LOCAL_SHUN { $$ = PRIV_LOCAL_SHUN; } |
           TPRIV_WIDE_SHUN { $$ = PRIV_WIDE_SHUN; } |
           TPRIV_FREEFORM { $$ = PRIV_FREEFORM; } ;
@@ -1492,5 +1501,102 @@ spoofhostautoapply: AUTOAPPLY '=' YES ';'
 } | AUTOAPPLY '=' NO ';'
 {
   flags &= ~SHFLAG_AUTOAPPLY;
+};
+
+exceptblock: EXCEPT
+{
+} '{' exceptitems '}' ';'
+{
+  struct SLink *link;
+  char *h;
+
+  if (flags == 0)
+    parse_error("Missing exemption type(s)");
+  else for (link = hosts; link != NULL; link = link->next) {
+    econf = (struct ExceptConf*) MyCalloc(1, sizeof(*econf));
+    econf->flags = flags;
+
+    if ((h = strchr(link->value.cp, '@')) == NULL) {
+      econf->usermask = NULL;
+      DupString(econf->hostmask, link->value.cp);
+    } else {
+      *h++ = '\0';
+      DupString(econf->hostmask, h);
+      DupString(econf->usermask, link->value.cp);
+    }
+    ipmask_parse(econf->hostmask, &econf->address, &econf->bits);
+
+    econf->next = exceptConfList;
+    exceptConfList = econf;
+  }
+  free_slist(&hosts);
+};
+exceptitems: exceptitem exceptitems | exceptitem;
+exceptitem: exceptuhost | exceptshun | exceptkline | exceptgline
+          | exceptident | exceptrdns | exceptipcheck | excepttarglimit;
+exceptuhost: HOST '=' QSTRING ';'
+{
+ struct SLink *link;
+ link = make_link();
+ if (!strchr($3, '@'))
+ {
+   int uh_len;
+   link->value.cp = (char*) MyMalloc((uh_len = strlen($3)+3));
+   ircd_snprintf(0, link->value.cp, uh_len, "*@%s", $3);
+ }
+ else
+   DupString(link->value.cp, $3);
+ MyFree($3);
+ link->next = hosts;
+ hosts = link;
+};
+exceptshun: SHUN '=' YES ';'
+{
+  flags |= EFLAG_SHUN;
+} | SHUN '=' NO ';'
+{
+  flags &= ~EFLAG_SHUN;
+};
+exceptkline: KLINE '=' YES ';'
+{
+  flags |= EFLAG_KLINE;
+} | KLINE '=' NO ';'
+{
+  flags &= ~EFLAG_KLINE;
+};
+exceptgline: GLINE '=' YES ';'
+{
+  flags |= EFLAG_GLINE;
+} | GLINE '=' NO ';'
+{
+  flags &= ~EFLAG_GLINE;
+};
+exceptident: IDENT '=' YES ';'
+{
+  flags |= EFLAG_IDENT;
+} | IDENT '=' NO ';'
+{
+  flags &= ~EFLAG_IDENT;
+};
+exceptrdns: RDNS '=' YES ';'
+{
+  flags |= EFLAG_RDNS;
+} | RDNS '=' NO ';'
+{
+  flags &= ~EFLAG_RDNS;
+};
+exceptipcheck: IPCHECK '=' YES ';'
+{
+  flags |= EFLAG_IPCHECK;
+} | IPCHECK '=' NO ';'
+{
+  flags &= ~EFLAG_IPCHECK;
+};
+excepttarglimit: TARGETLIMIT '=' YES ';'
+{
+  flags |= EFLAG_TARGLIMIT;
+} | TARGETLIMIT '=' NO ';'
+{
+  flags &= ~EFLAG_TARGLIMIT;
 };
 

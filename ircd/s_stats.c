@@ -513,6 +513,22 @@ stats_webirc(struct Client* to, const struct StatDesc *sd, char* param)
 }
 
 static void
+stats_excepts(struct Client* to, const struct StatDesc *sd, char* param)
+{
+  const struct ExceptConf *eline = conf_get_except_list();
+
+  for (; eline; eline = eline->next)
+    send_reply(to, RPL_STATSELINE, eline->usermask, eline->hostmask,
+               (eline->flags & EFLAG_SHUN ? "s" : ""),
+               (eline->flags & EFLAG_KLINE ? "k" : ""),
+               (eline->flags & EFLAG_GLINE ? "g" : ""),
+               (eline->flags & EFLAG_IDENT ? "i" : ""),
+               (eline->flags & EFLAG_RDNS ? "r" : ""),
+               (eline->flags & EFLAG_IPCHECK ? "I" : ""),
+               (eline->flags & EFLAG_TARGLIMIT ? "t" : ""));
+}
+
+static void
 stats_spoofhost(struct Client* to, const struct StatDesc *sd, char* param)
 {
   int y = 1, i = 1;
@@ -592,9 +608,12 @@ struct StatDesc statsinfo[] = {
   { 'D', "crules", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_d,
     stats_crule_list, CRULE_ALL,
     "Dynamic routing configuration." },
-  { 'e', "engine", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_e,
+  { 'e', "engine", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_e,
     stats_engine, 0,
     "Report server event loop engine." },
+  { 'E', "excepts", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_E,
+    stats_excepts, 0,
+    "Exception list." },
   { 'f', "features", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_f,
     feature_report, 0,
     "Feature settings." },

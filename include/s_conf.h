@@ -42,7 +42,6 @@ struct Message;
 #define IsIllegal(x)    ((x)->status & CONF_ILLEGAL)
 
 /* WEBIRC FlagSet */
-
 enum WebIRCFlag {
   WFLAG_USERIDENT,	/**< use USER username as ident */
   WFLAG_NOIDENT,	/**< ignore ident reply */
@@ -196,6 +195,24 @@ struct SHostConf {
 #define SHFLAG_AUTOAPPLY 0x1  /* SpoofHost is automatically applied on connect. */
 #define SHFLAG_NOPASS    0x2  /* SpoofHost has no password. */
 
+/* Except configuration. */
+struct ExceptConf {
+  struct ExceptConf*  next;
+  char*               hostmask;
+  char*               usermask;
+  struct irc_in_addr  address;
+  unsigned char       bits;
+  int                 flags;
+};
+
+#define EFLAG_SHUN	0x01	/**< Matching users are exempt from SHUN */
+#define EFLAG_KLINE	0x02	/**< Matching users are exempt from Kill blocks */
+#define EFLAG_GLINE	0x04	/**< Matching users are exempt from GLINE */
+#define EFLAG_IDENT	0x08	/**< Matching users are exempt from ident lookups */
+#define EFLAG_RDNS	0x10	/**< Matching users are exempt from rDNS lookups */
+#define EFLAG_IPCHECK   0x20    /**< Matching users are exempt from IPcheck checks */
+#define EFLAG_TARGLIMIT 0x40    /**< Matching users are exempt from target limiting */
+
 /*
  * GLOBALS
  */
@@ -216,6 +233,7 @@ extern const struct CRuleConf* conf_get_crule_list(void);
 extern const struct DenyConf*  conf_get_deny_list(void);
 extern const struct WebIRCConf* conf_get_webirc_list(void);
 extern const struct SHostConf* conf_get_shost_list(void);
+extern const struct ExceptConf* conf_get_except_list(void);
 
 extern const char* conf_eval_crule(const char* name, int mask);
 
@@ -238,6 +256,9 @@ extern struct ConfItem *conf_debug_iline(const char *client);
 extern void free_mapping(struct s_map *smap);
 extern struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, int* status);
 extern struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *passwd, int *status);
+extern int get_except_flags(struct Client *cptr);
+extern int find_except_conf(struct Client *cptr, int flags);
+extern int find_except_conf_by_ip(const struct irc_in_addr *addr, int flags);
 
 extern void yyerror(const char *msg);
 

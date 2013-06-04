@@ -409,7 +409,9 @@ int ssl_send(struct Client *cptr, const char *buf, unsigned int len)
    * at this point SSL_write usually fails, so the data must be queued.
    * We're abusing the normal send queue for this.
    * Also strip \r\n from message, as sendrawto_one adds it later
-    this hack sucks. it conflicted with prority queues - caused random ssl disconnections for YEARS. In summery, this hack ==
+   * this hack sucks. it conflicted with prority queues - caused random
+   * ssl disconnections for YEARS. In summery, this hack == bad. I may
+   * have solved that, but this still makes me nervous.
    */
   ircd_snprintf(0, fmt, sizeof(fmt), "%%.%us", len - 2);
   sendrawto_one(cptr, fmt, buf);

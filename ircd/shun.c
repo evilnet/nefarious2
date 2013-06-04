@@ -36,6 +36,7 @@
 #include "numeric.h"
 #include "res.h"
 #include "s_bsd.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_stats.h"
@@ -200,6 +201,9 @@ do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
     if ((acptr = LocalClientArray[fd])) {
       if (!cli_user(acptr))
 	continue;
+
+      if (find_except_conf(acptr, EFLAG_SHUN))
+        continue;
 
       if (ShunIsRealName(shun)) { /* Realname Shun */
 	Debug((DEBUG_DEBUG,"Realname Shun: %s %s",(cli_info(acptr)),
@@ -977,6 +981,9 @@ shun_lookup(struct Client *cptr, unsigned int flags)
 {
   struct Shun *shun;
   struct Shun *sshun;
+
+  if (find_except_conf(cptr, EFLAG_SHUN))
+    return 0;
 
   shiter(GlobalShunList, shun, sshun) {
     if ((flags & SHUN_GLOBAL && shun->sh_flags & SHUN_LOCAL) ||

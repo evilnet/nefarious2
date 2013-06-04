@@ -553,7 +553,8 @@ static int preregister_user(struct Client *cptr)
     /* Can this ever happen? */
   case ACR_BAD_SOCKET:
     ++ServerStats->is_ref;
-    IPcheck_connect_fail(cptr, 0);
+    if (!find_except_conf(cptr, EFLAG_IPCHECK))
+      IPcheck_connect_fail(cptr, 0);
     return exit_client(cptr, cptr, &me, "Unknown error -- Try again");
   }
   return 0;
@@ -930,7 +931,7 @@ static void start_auth_query(struct AuthRequest* auth)
   assert(0 != auth);
   assert(0 != auth->client);
 
-  if (feature_bool(FEAT_NOIDENT))
+  if (feature_bool(FEAT_NOIDENT) || find_except_conf(auth->client, EFLAG_IDENT))
     return;
 
   /*
@@ -975,7 +976,7 @@ static void start_auth_query(struct AuthRequest* auth)
  */
 static void start_dns_query(struct AuthRequest *auth)
 {
-  if (feature_bool(FEAT_NODNS)) {
+  if (feature_bool(FEAT_NODNS) || find_except_conf(auth->client, EFLAG_RDNS)) {
     sendto_iauth(auth->client, "d");
     return;
   }
@@ -1912,12 +1913,15 @@ static int iauth_cmd_ip_address(struct IAuth *iauth, struct Client *cli,
     memcpy(&auth->original, &cli_ip(cli), sizeof(auth->original));
 
   /* Undo original IP connection in IPcheck. */
-  IPcheck_connect_fail(cli, 1);
-  ClearIPChecked(cli);
+  if (!find_except_conf(cli, EFLAG_IPCHECK)) {
+    IPcheck_connect_fail(cli, 1);
+    ClearIPChecked(cli);
+  }
 
   /* Update the IP and charge them as a remote connect. */
   memcpy(&cli_ip(cli), &addr, sizeof(cli_ip(cli)));
-  IPcheck_remote_connect(cli, 0);
+  if (!find_except_conf(cli, EFLAG_IPCHECK))
+    IPcheck_remote_connect(cli, 0);
 
   return 0;
 }

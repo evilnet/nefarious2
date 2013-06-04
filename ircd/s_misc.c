@@ -260,7 +260,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
    * Update IPregistry
    */
   if (IsIPChecked(bcptr))
-    IPcheck_disconnect(bcptr);
+    if (!find_except_conf(bcptr, EFLAG_IPCHECK))
+      IPcheck_disconnect(bcptr);
 
   /* 
    * Remove from serv->client_list

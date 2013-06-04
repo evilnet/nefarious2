@@ -371,6 +371,8 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    struct Membership *lp;
    char outbuf[BUFSIZE];
    time_t nowr;
+   int eflags = 0;
+   char ebuf[BUFSIZE] = "";
 
    /* Header */
    send_reply(sptr, RPL_DATASTR, " ");
@@ -466,6 +468,19 @@ void checkClient(struct Client *sptr, struct Client *acptr)
 
    if (cli_sslclifp(acptr) && (strlen(cli_sslclifp(acptr)) > 0)) {
      ircd_snprintf(0, outbuf, sizeof(outbuf), "SSL Fingerprint:: %s", cli_sslclifp(acptr));
+     send_reply(sptr, RPL_DATASTR, outbuf);
+   }
+
+   if ((eflags = get_except_flags(acptr)) != 0) {
+     if (eflags & EFLAG_SHUN) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "Shuns"); }
+     if (eflags & EFLAG_KLINE) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "K:Lines"); }
+     if (eflags & EFLAG_GLINE) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "G:Lines"); }
+     if (eflags & EFLAG_IDENT) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "Ident Lookups"); }
+     if (eflags & EFLAG_RDNS) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "rDNS Lookups"); }
+     if (eflags & EFLAG_IPCHECK) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "IPCheck"); }
+     if (eflags & EFLAG_TARGLIMIT) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "Target Limiting"); }
+
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "     Exemptions:: %s", ebuf);
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
 

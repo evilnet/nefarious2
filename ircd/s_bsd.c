@@ -562,7 +562,8 @@ void add_connection(struct Listener* listener, int fd) {
      *
      * If they're throttled, murder them, but tell them why first.
      */
-    if (!IPcheck_local_connect(&addr.addr, &next_target))
+    if (!find_except_conf_by_ip(&addr.addr, EFLAG_IPCHECK) &&
+        !IPcheck_local_connect(&addr.addr, &next_target))
     {
       ++ServerStats->is_ref;
 #ifdef USE_SSL

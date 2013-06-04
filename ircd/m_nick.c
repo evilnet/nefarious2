@@ -93,6 +93,7 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_user.h"
@@ -251,7 +252,8 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    */
   if (IsUnknown(acptr) && MyConnect(acptr)) {
     ServerStats->is_ref++;
-    IPcheck_connect_fail(acptr, 0);
+    if (!find_except_conf(acptr, EFLAG_IPCHECK))
+      IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
   }
@@ -381,7 +383,8 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsUnknown(acptr) && MyConnect(acptr))
   {
     ServerStats->is_ref++;
-    IPcheck_connect_fail(acptr, 0);
+    if (!find_except_conf(acptr, EFLAG_IPCHECK))
+      IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
   }
