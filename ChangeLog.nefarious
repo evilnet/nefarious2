@@ -3,6 +3,11 @@
 
 2013-06-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_cap.c: Fixed a bug where a trailing space would cause
+	a CAP NAK response when it should be a CAP ACK.
+
+2013-06-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_cap.c: Fixed CAP support to use the correct syntax in
 	CAP replies.
 

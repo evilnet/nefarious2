@@ -131,6 +131,10 @@ find_cap(const char **caplist_p, int *neg_p)
 
   assert(caplist != *caplist_p || !*caplist); /* we *must* advance */
 
+  /* skip past any trailing whitespace... */
+  while (*caplist && IsSpace(*caplist))
+    caplist++;
+
   /* move ahead in capability list string--or zero pointer if we hit end */
   *caplist_p = *caplist ? caplist : 0;
 
