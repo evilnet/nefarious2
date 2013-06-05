@@ -154,7 +154,8 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
   int i, loc, len, flags, pfx_len;
 
   /* set up the buffer for the final LS message... */
-  mb = msgq_make(sptr, "%:#C " MSG_CAP " %s :", &me, subcmd);
+  mb = msgq_make(sptr, "%:#C " MSG_CAP " %s %s :", &me,
+                 BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd);
 
   for (i = 0, loc = 0; i < CAPAB_LIST_LEN; i++) {
     flags = capab_list[i].flags;
@@ -184,7 +185,8 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
 
     len = capab_list[i].namelen + pfx_len; /* how much we'd add... */
     if (msgq_bufleft(mb) < loc + len + 2) { /* would add too much; must flush */
-      sendcmdto_one(&me, CMD_CAP, sptr, "%s * :%s", subcmd, capbuf);
+      sendcmdto_one(&me, CMD_CAP, sptr, "%s %s :%s",
+                    BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr),  subcmd, capbuf);
       capbuf[(loc = 0)] = '\0'; /* re-terminate the buffer... */
     }
 
@@ -226,7 +228,8 @@ cap_req(struct Client *sptr, const char *caplist)
     if (!(cap = find_cap(&cl, &neg)) /* look up capability... */
 	|| (!neg && (cap->flags & CAPFL_PROHIBIT)) /* is it prohibited? */
         || (neg && (cap->flags & CAPFL_STICKY))) { /* is it sticky? */
-      sendcmdto_one(&me, CMD_CAP, sptr, "NAK :%s", caplist);
+      sendcmdto_one(&me, CMD_CAP, sptr, "%s NAK :%s",
+                    BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), caplist);
       return 0; /* can't complete requested op... */
     }
 

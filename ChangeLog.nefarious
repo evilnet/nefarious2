@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_cap.c: Fixed CAP support to use the correct syntax in
+	CAP replies.
+
 2013-06-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added the Except block and FEAT_HIS_STATS_E.
