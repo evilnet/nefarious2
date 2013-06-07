@@ -626,6 +626,7 @@ static struct FeatureDesc {
   F_B(SETHOST, 0, 1, 0),
   F_B(FLEXIBLEKEYS, 0, 0, 0),
   F_B(HIS_STATS_E, 0, 1, 0),
+  F_S(SASL_SERVER, 0, "X3.AfterNET.Services", 0),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),

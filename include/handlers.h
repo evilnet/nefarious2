@@ -87,6 +87,7 @@
 struct Client;
 
 extern int m_admin(struct Client*, struct Client*, int, char*[]);
+extern int m_authenticate(struct Client*, struct Client*, int, char*[]);
 extern int m_away(struct Client*, struct Client*, int, char*[]);
 extern int m_cap(struct Client*, struct Client*, int, char*[]);
 extern int m_cnotice(struct Client*, struct Client*, int, char*[]);
@@ -230,6 +231,7 @@ extern int ms_quit(struct Client*, struct Client*, int, char*[]);
 extern int ms_rping(struct Client*, struct Client*, int, char*[]);
 extern int ms_rpong(struct Client*, struct Client*, int, char*[]);
 extern int ms_rules(struct Client*, struct Client*, int, char*[]);
+extern int ms_sasl(struct Client*, struct Client*, int, char*[]);
 extern int ms_server(struct Client*, struct Client*, int, char*[]);
 extern int ms_settime(struct Client*, struct Client*, int, char*[]);
 extern int ms_shun(struct Client*, struct Client*, int, char*[]);

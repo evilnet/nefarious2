@@ -119,6 +119,7 @@ IRCD_SRC = \
 	m_account.c \
 	m_admin.c \
 	m_asll.c \
+	m_authenticate.c \
 	m_away.c \
 	m_burst.c \
 	m_cap.c \
@@ -177,6 +178,7 @@ IRCD_SRC = \
 	m_rping.c \
 	m_rpong.c \
 	m_rules.c \
+	m_sasl.c \
 	m_server.c \
 	m_set.c \
 	m_sethost.c \

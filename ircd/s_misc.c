@@ -382,8 +382,10 @@ int exit_client(struct Client *cptr,
 
     on_for = CurrentTime - cli_firsttime(victim);
 
-    if (IsUser(victim) || IsUserPort(victim))
+    if (IsUser(victim) || IsUserPort(victim)) {
+      abort_sasl(victim);
       auth_send_exit(victim);
+    }
 
     if (IsUser(victim))
       log_write(LS_USER, L_TRACE, 0, "%Tu %i %s@%s %s %s %s%s %s :%s",

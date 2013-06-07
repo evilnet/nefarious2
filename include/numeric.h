@@ -536,6 +536,16 @@ extern const struct Numeric* get_error_numeric(int err);
 
 #define ERR_STARTTLS         691	/* Nefarious extension */
 
-#define ERR_LASTERROR        692
+#define RPL_LOGGEDIN         900	/* IRCv3 - SASL extension */
+#define RPL_LOGGEDOUT        901	/* IRCv3 - SASL extension */
+
+#define RPL_SASLSUCCESS      903	/* IRCv3 - SASL extension */
+#define ERR_SASLFAIL         904	/* IRCv3 - SASL extension */
+#define ERR_SASLTOOLONG      905	/* IRCv3 - SASL extension */
+#define ERR_SASLABORTED      906	/* IRCv3 - SASL extension */
+#define ERR_SASLALREADY      907	/* IRCv3 - SASL extension */
+#define ERR_SASLMECHS        908	/* IRCv3 - SASL extension */
+
+#define ERR_LASTERROR        909
 
 #endif /* INCLUDED_numeric_h */

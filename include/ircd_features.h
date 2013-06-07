@@ -195,6 +195,7 @@ enum Feature {
   FEAT_SETHOST,
   FEAT_FLEXIBLEKEYS,
   FEAT_HIS_STATS_E,
+  FEAT_SASL_SERVER,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,

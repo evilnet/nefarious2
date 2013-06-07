@@ -1,6 +1,44 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-07  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_SASL_SERVER feature.
+
+	* doc/readme.features: Added FEAT_SASL_SERVER feature.
+
+	* include/capab.h: Added sasl client capability.
+
+	* include/client.h: Added SASL state storage.
+
+	* include/handlers.h: Added SASL and AUTHENTICATE commands.
+
+	* include/ircd_features.h: Added FEAT_SASL_SERVER feature.
+
+	* include/msg.h: Added SASL and AUTHENTICATE commands.
+
+	* include/numeric.h: Added SASL numeric replies.
+
+	* include/s_user.h: Added SASL support.
+
+	* ircd/Makefile.in: Added SASL and AUTHENTICATE commands.
+
+	* ircd/ircd_features.c: Added FEAT_SASL_SERVER feature.
+
+	* ircd/m_cap.c: Added sasl client capability.
+
+	* ircd/parse.c: Added SASL and AUTHENTICATE commands.
+
+	* ircd/s_err.c: Added SASL numeric replies.
+
+	* ircd/s_misc.c: Added SASL support.
+
+	* ircd/s_user.c: Added SASL support.
+
+	* ircd/m_authenticate.c: Added SASL and AUTHENTICATE commands.
+
+	* ircd/m_sasl.c: Added SASL and AUTHENTICATE commands.
+
 2013-06-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_cap.c: Fixed a bug where a trailing space would cause

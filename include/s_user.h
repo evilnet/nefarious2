@@ -122,4 +122,6 @@ extern void add_isupport_i(const char *name, int value);
 
 void do_names(struct Client* sptr, struct Channel* chptr, int filter);
 
+extern int abort_sasl(struct Client* cptr);
+
 #endif /* INCLUDED_s_user_h */

@@ -215,6 +215,8 @@ enum Flag
     FLAG_IPCEXEMPT,                 /**< User is IPcheck exempt */
     FLAG_IPCNOTEXEMPT,              /**< User is not IPcheck exempt */
 
+    FLAG_SASLCOMPLETE,              /**< SASL Complete */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -324,6 +326,12 @@ struct Client {
   char cli_webirc[BUFSIZE + 1];     /**< webirc description */
   char cli_version[VERSIONLEN + 1]; /**< Free form client version information */
   char cli_sslclifp[BUFSIZE + 1];   /**< SSL client certificate fingerprint if available */
+
+  /* SASL */
+  char cli_saslagent[HOSTLEN + 1];  /**< SASL agent name handling SASL exchange */
+  char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
+  time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
+  unsigned int cli_saslcookie;      /**< SASL session cookie */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -403,6 +411,14 @@ struct Client {
 #define cli_continentcode(cli)  ((cli)->cli_continentcode)
 /** Get client GeoIP continent name. */
 #define cli_continentname(cli)  ((cli)->cli_continentname)
+/** Get SASL agent name. */
+#define cli_saslagent(cli)      ((cli)->cli_saslagent)
+/** Get SASL authenticated account name. */
+#define cli_saslaccount(cli)    ((cli)->cli_saslaccount)
+/** Get SASL authenticated account timestamp. */
+#define cli_saslacccreate(cli)  ((cli)->cli_saslacccreate)
+/** Get SASL session cookie. */
+#define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))
@@ -721,6 +737,8 @@ struct Client {
 #define IsIPCheckExempt(x)      HasFlag(x, FLAG_IPCEXEMPT)
 /** Return non-zero if the client is not IPcheck exempt. */
 #define IsNotIPCheckExempt(x)   HasFlag(x, FLAG_IPCNOTEXEMPT)
+/** Return non-zero if the client has completed SASL authentication. */
+#define IsSASLComplete(x)       HasFlag(x, FLAG_SASLCOMPLETE)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -817,6 +835,8 @@ struct Client {
 #define SetIPCheckExempt(x)     SetFlag(x, FLAG_IPCEXEMPT)
 /** Mark a client as not IPcheck exempt. */
 #define SetNotIPCheckExempt(x)  SetFlag(x, FLAG_IPCNOTEXEMPT)
+/** Mark a client as having completed SASL authentication. */
+#define SetSASLComplete(x)      SetFlag(x, FLAG_SASLCOMPLETE)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 

@@ -1126,6 +1126,13 @@ HIS_STATS_E
 
 As per UnderNet CFV-165, this removes /STATS E from users.
 
+SASL_SERVER
+ * Type: string
+ * Default: "X3.AfterNET.Services"
+
+When set, SASL_SERVER specifies the name of the services server on the network
+that is setup to handle SASL client authentication.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE
