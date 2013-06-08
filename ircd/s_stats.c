@@ -525,7 +525,8 @@ stats_excepts(struct Client* to, const struct StatDesc *sd, char* param)
                (eline->flags & EFLAG_IDENT ? "i" : ""),
                (eline->flags & EFLAG_RDNS ? "r" : ""),
                (eline->flags & EFLAG_IPCHECK ? "I" : ""),
-               (eline->flags & EFLAG_TARGLIMIT ? "t" : ""));
+               (eline->flags & EFLAG_TARGLIMIT ? "t" : ""),
+               (eline->flags & EFLAG_LISTDELAY ? "l" : ""));
 }
 
 static void

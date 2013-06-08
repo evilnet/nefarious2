@@ -205,6 +205,7 @@ static void free_slist(struct SLink **link) {
 %token RDNS
 %token IPCHECK
 %token TARGETLIMIT
+%token LISTDELAY
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -1533,7 +1534,8 @@ exceptblock: EXCEPT
 };
 exceptitems: exceptitem exceptitems | exceptitem;
 exceptitem: exceptuhost | exceptshun | exceptkline | exceptgline
-          | exceptident | exceptrdns | exceptipcheck | excepttarglimit;
+          | exceptident | exceptrdns | exceptipcheck | excepttarglimit
+          | exceptlistdelay;
 exceptuhost: HOST '=' QSTRING ';'
 {
  struct SLink *link;
@@ -1598,5 +1600,12 @@ excepttarglimit: TARGETLIMIT '=' YES ';'
 } | TARGETLIMIT '=' NO ';'
 {
   flags &= ~EFLAG_TARGLIMIT;
+};
+exceptlistdelay: LISTDELAY '=' YES ';'
+{
+  flags |= EFLAG_LISTDELAY;
+} | LISTDELAY '=' NO ';'
+{
+  flags &= ~EFLAG_LISTDELAY;
 };
 

@@ -1133,6 +1133,13 @@ SASL_SERVER
 When set, SASL_SERVER specifies the name of the services server on the network
 that is setup to handle SASL client authentication.
 
+LISTDELAY
+ * Type: integer
+ * Default: 0
+
+Length (in seconds) users will need to wait before /LIST will give results. A
+value of 0 effectively disables this option.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

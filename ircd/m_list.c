@@ -95,6 +95,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "s_bsd.h"
+#include "s_conf.h"
 #include "send.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -356,6 +357,16 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char *name, *p = 0;
   int show_channels = 0, param;
   struct ListingArgs args;
+
+  if ((cli_firsttime(sptr) + feature_int(FEAT_LISTDELAY) > CurrentTime) && !IsOper(sptr)) {
+    if (!find_except_conf(sptr, EFLAG_LISTDELAY)) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :*** You have not been connected long enough to use /list. You must wait %d seconds after connecting",
+                    sptr, (cli_firsttime(sptr) + feature_int(FEAT_LISTDELAY)) - CurrentTime);
+      send_reply(sptr, RPL_LISTSTART);
+      send_reply(sptr, RPL_LISTEND);
+      return 0;
+    }
+  }
 
   if (cli_listing(sptr))            /* Already listing ? */
   {

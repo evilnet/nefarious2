@@ -212,6 +212,7 @@ struct ExceptConf {
 #define EFLAG_RDNS	0x10	/**< Matching users are exempt from rDNS lookups */
 #define EFLAG_IPCHECK   0x20    /**< Matching users are exempt from IPcheck checks */
 #define EFLAG_TARGLIMIT 0x40    /**< Matching users are exempt from target limiting */
+#define EFLAG_LISTDELAY 0x80    /**< Matching users are exempt from LISTDELAY */
 
 /*
  * GLOBALS

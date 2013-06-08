@@ -1,6 +1,28 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-08  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_LISTDELAY.
+
+	* doc/readme.features: Added FEAT_LISTDELAY.
+
+	* include/ircd_features.h: Added FEAT_LISTDELAY.
+
+	* include/s_conf.h: Added listdelay to the Except block.
+
+	* ircd/ircd_features.c: Added FEAT_LISTDELAY.
+
+	* ircd/ircd_lexer.l: Added listdelay to the Except block.
+
+	* ircd/ircd_parser.y: Added listdelay to the Except block.
+
+	* ircd/m_list.c: Added list delay and associated exception.
+
+	* ircd/s_err.c: Added listdelay to the Except block.
+
+	* ircd/s_stats.c: Added listdelay to the Except block.
+
 2013-06-07  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added FEAT_SASL_SERVER feature.
