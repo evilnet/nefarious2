@@ -197,6 +197,7 @@ enum Feature {
   FEAT_HIS_STATS_E,
   FEAT_SASL_SERVER,
   FEAT_LISTDELAY,
+  FEAT_ALLOW_OPLEVEL_CHANGE,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,

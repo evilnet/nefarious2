@@ -1,6 +1,19 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-10  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_ALLOW_OPLEVEL_CHANGE feature.
+
+	* doc/readme.features: Added FEAT_ALLOW_OPLEVEL_CHANGE feature.
+
+	* include/ircd_features.h: Added FEAT_ALLOW_OPLEVEL_CHANGE feature.
+
+	* ircd/channel.c: Added an option to allow +o to change a users
+	oplevel even if they are already opped.
+
+	* ircd/ircd_features.c: Added FEAT_ALLOW_OPLEVEL_CHANGE feature.
+
 2013-06-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added FEAT_LISTDELAY.

@@ -1140,6 +1140,13 @@ LISTDELAY
 Length (in seconds) users will need to wait before /LIST will give results. A
 value of 0 effectively disables this option.
 
+ALLOW_OPLEVEL_CHANGE
+ * Type: boolean
+ * Default: FALSE
+
+When enabled, MODE #channel +o Nick:level will change a users op level if they
+already already have channel mode +o, instead of being discarded.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

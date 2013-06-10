@@ -3656,9 +3656,11 @@ mode_process_clients(struct ParseState *state)
     }
 
     if ((state->cli_change[i].flag & MODE_ADD &&
-	 (state->cli_change[i].flag & member->status)) ||
+	(state->cli_change[i].flag & member->status) &&
+	(!feature_bool(FEAT_ALLOW_OPLEVEL_CHANGE) ||
+	(state->cli_change[i].oplevel == member->oplevel))) ||
 	(state->cli_change[i].flag & MODE_DEL &&
-	 !(state->cli_change[i].flag & member->status)))
+	!(state->cli_change[i].flag & member->status)))
       continue; /* no change made, don't do anything */
 
     /* see if the deop is allowed */
