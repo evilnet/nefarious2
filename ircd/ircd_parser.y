@@ -79,19 +79,17 @@
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
-  char *spoofhost, *sslfp;
+  char *spoofhost, *sslfp, *description;
   char *country, *continent;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
   struct ListenerFlags listen_flags;
   struct ConnectionClass *c_class;
   struct DenyConf *dconf;
-  struct ServerConf *sconf;
-  struct WebIRCConf *wconf;
-  struct ExceptConf *econf;
   struct s_map *smap;
   struct Privs privs;
   struct Privs privs_dirty;
+  struct WebIRCFlags wflags;
 
 static void parse_error(char *pattern,...) {
   static char error_buffer[1024];
@@ -1343,92 +1341,100 @@ forwarditem: QSTRING '=' QSTRING ';'
 
 webircblock: WEBIRC
 {
-  wconf = (struct WebIRCConf*) MyCalloc(1, sizeof(*wconf));
+  memset(&wflags, 0, sizeof(struct WebIRCFlags));
 } '{' webircitems '}' ';'
 {
-  if (wconf->usermask || wconf->hostmask) {
+  struct WebIRCConf *wconf;
+  struct SLink *link;
+  char *h;
+
+  if (pass == NULL)
+    parse_error("Missing password in webirc block");
+  else for (link = hosts; link != NULL; link = link->next) {
+    wconf = (struct WebIRCConf*) MyCalloc(1, sizeof(*wconf));
+    if ((h = strchr(link->value.cp, '@')) == NULL) {
+      DupString(wconf->usermask, "*");
+      DupString(wconf->hostmask, link->value.cp);
+    } else {
+      *h++ = '\0';
+      DupString(wconf->hostmask, h);
+      DupString(wconf->usermask, link->value.cp);
+    }
+    ipmask_parse(wconf->hostmask, &wconf->address, &wconf->bits);
+
+    memcpy(&wconf->flags, &wflags, sizeof(struct WebIRCFlags));
+    DupString(wconf->passwd, pass);
+    if (username != NULL)
+      DupString(wconf->ident, username);
+    if (description != NULL)
+      DupString(wconf->description, description);
+
     wconf->next = webircConfList;
     webircConfList = wconf;
   }
-  else
-  {
-    MyFree(wconf->usermask);
-    MyFree(wconf->hostmask);
-    MyFree(wconf->passwd);
-    MyFree(wconf->ident);
-    MyFree(wconf);
-    parse_error("WebIRC block must match on at least one of username, host");
-  }
-  dconf = NULL;
+
+  free_slist(&hosts);
+  MyFree(pass);
+  MyFree(username);
+  MyFree(description);
+  pass = username = description = NULL;
+  memset(&wflags, 0, sizeof(struct WebIRCFlags));
+  wconf = NULL;
 };
 webircitems: webircitem webircitems | webircitem;
-webircitem: webircuhost | webircusername | webircpass | webircident | webircuserident
+webircitem: webircuhost | webircpass | webircident | webircuserident
           | webircignoreident | webircdescription | webircstripsslfp;
 webircuhost: HOST '=' QSTRING ';'
 {
-  char *h;
-  MyFree(wconf->hostmask);
-  MyFree(wconf->usermask);
-  if ((h = strchr($3, '@')) == NULL)
-  {
-    DupString(wconf->usermask, "*");
-    wconf->hostmask = $3;
-  }
-  else
-  {
-    *h++ = '\0';
-    DupString(wconf->hostmask, h);
-    wconf->usermask = $3;
-  }
-  ipmask_parse(wconf->hostmask, &wconf->address, &wconf->bits);
+ struct SLink *link;
+ link = make_link();
+ if (!strchr($3, '@'))
+ {
+   int uh_len;
+   link->value.cp = (char*) MyMalloc((uh_len = strlen($3)+3));
+   ircd_snprintf(0, link->value.cp, uh_len, "*@%s", $3);
+ }
+ else
+   DupString(link->value.cp, $3);
+ MyFree($3);
+ link->next = hosts;
+ hosts = link;
 };
-
-webircusername: USERNAME '=' QSTRING ';'
-{
-  MyFree(wconf->usermask);
-  wconf->usermask = $3;
-};
-
 webircpass: PASS '=' QSTRING ';'
 {
-  MyFree(wconf->passwd);
-  wconf->passwd = $3;
+  MyFree(pass);
+  pass = $3;
 };
-
 webircident: IDENT '=' QSTRING ';'
 {
-  MyFree(wconf->ident);
-  wconf->ident = $3;
+  MyFree(username);
+  username = $3;
 };
-
 webircuserident: USERIDENT '=' YES ';'
 {
-  FlagSet(&wconf->flags, WFLAG_USERIDENT);
+  FlagSet(&wflags, WFLAG_USERIDENT);
 } | USERIDENT '=' NO ';'
 {
-  FlagClr(&wconf->flags, WFLAG_USERIDENT);
+  FlagClr(&wflags, WFLAG_USERIDENT);
 };
-
 webircignoreident: IGNOREIDENT '=' YES ';'
 {
-  FlagSet(&wconf->flags, WFLAG_NOIDENT);
+  FlagSet(&wflags, WFLAG_NOIDENT);
 } | IGNOREIDENT '=' NO ';'
 {
-  FlagClr(&wconf->flags, WFLAG_NOIDENT);
+  FlagClr(&wflags, WFLAG_NOIDENT);
 };
-
 webircstripsslfp: STRIPSSLFP '=' YES ';'
 {
-  FlagSet(&wconf->flags, WFLAG_STRIPSSLFP);
+  FlagSet(&wflags, WFLAG_STRIPSSLFP);
 } | STRIPSSLFP '=' NO ';'
 {
-  FlagClr(&wconf->flags, WFLAG_STRIPSSLFP);
+  FlagClr(&wflags, WFLAG_STRIPSSLFP);
 };
-
 webircdescription: DESCRIPTION '=' QSTRING ';'
 {
-  MyFree(wconf->description);
-  wconf->description = $3;
+  MyFree(description);
+  description = $3;
 };
 
 spoofhostblock : SPOOFHOST QSTRING
@@ -1506,8 +1512,10 @@ spoofhostautoapply: AUTOAPPLY '=' YES ';'
 
 exceptblock: EXCEPT
 {
+  flags = 0;
 } '{' exceptitems '}' ';'
 {
+  struct ExceptConf *econf;
   struct SLink *link;
   char *h;
 
@@ -1531,6 +1539,7 @@ exceptblock: EXCEPT
     exceptConfList = econf;
   }
   free_slist(&hosts);
+  flags = 0;
 };
 exceptitems: exceptitem exceptitems | exceptitem;
 exceptitem: exceptuhost | exceptshun | exceptkline | exceptgline

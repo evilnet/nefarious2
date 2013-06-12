@@ -3,6 +3,11 @@
 
 2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/ircd_parser.y: Changed WebIRC block to allow more then one
+	host mask per WebIRC block.
+
+2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/readme.iauth: Added iauth account notification.
 
 	* include/s_auth.h: Added iauth account notification.
