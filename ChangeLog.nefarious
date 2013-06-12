@@ -3,6 +3,20 @@
 
 2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_CHMODE_e_CHMODEEXCEPTION option.
+
+	* doc/readme.features: Added FEAT_CHMODE_e_CHMODEEXCEPTION option.
+
+	* include/ircd_features.h: Added FEAT_CHMODE_e_CHMODEEXCEPTION option.
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_e_CHMODEEXCEPTION option.
+
+	* ircd/m_join.c: Added FEAT_CHMODE_e_CHMODEEXCEPTION option and
+	rearranged join restricton checks to ensure +z (SSL only) always
+	applies.
+
+2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ircd_parser.y: Changed WebIRC block to allow more then one
 	host mask per WebIRC block.
 

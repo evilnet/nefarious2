@@ -1235,6 +1235,14 @@ AVEXCEPTLEN
 
 This is the expected average except mask length.  Leave it at 40.
 
+CHMODE_e_CHMODEEXCEPTION
+
+ * Type: boolean
+ * Default: FALSE
+
+If enabled anyone on the +e exemption list will be able to bypass
+modes +i/+k/+l.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

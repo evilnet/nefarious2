@@ -214,6 +214,7 @@ enum Feature {
   FEAT_EXCEPTS,
   FEAT_MAXEXCEPTS,
   FEAT_AVEXCEPTLEN,
+  FEAT_CHMODE_e_CHMODEEXCEPTION,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

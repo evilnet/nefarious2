@@ -182,6 +182,14 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     } else {
       int flags = CHFL_DEOPPED;
       int err = 0;
+      int excepted = 0;
+      int exceptkli = 0;
+
+      if (find_ban(sptr, chptr->exceptlist)) {
+        if (feature_bool(FEAT_CHMODE_e_CHMODEEXCEPTION))
+          exceptkli = 1;
+        excepted = 1;
+      }
 
       /* Check Apass/Upass -- since we only ever look at a single
        * "key" per channel now, this hampers brute force attacks. */
@@ -193,18 +201,20 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         /* Joining a zombie channel (zannel): give ops and increment TS. */
         flags = CHFL_CHANOP;
         chptr->creationtime++;
-      } else if (IsInvited(sptr, chptr)) {
-        /* Invites bypass these other checks. */
       } else if (IsXtraOp(sptr)) {
         /* XtraOp bypasses all other checks. */
-      } else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)))
+      } else if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
+        err = ERR_SSLONLYCHAN;
+      else if (IsInvited(sptr, chptr)) {
+        /* Invites bypass these other checks. */
+      } else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)) && !exceptkli)
         err = ERR_BADCHANNELKEY;
-      else if (*chptr->mode.key && feature_bool(FEAT_FLEXIBLEKEYS)) {
+      else if (*chptr->mode.key && feature_bool(FEAT_FLEXIBLEKEYS) && (key && !strcmp(key, chptr->mode.key))) {
         /* Assume key checked by previous condition was found to be correct
            and allow join because FEAT_FLEXIBLEKEYS was enabled */
-      } else if (chptr->mode.mode & MODE_INVITEONLY)
+      } else if ((chptr->mode.mode & MODE_INVITEONLY) && !exceptkli)
         err = ERR_INVITEONLYCHAN;
-      else if (chptr->mode.limit && (chptr->users >= chptr->mode.limit))
+      else if (chptr->mode.limit && (chptr->users >= chptr->mode.limit) && !exceptkli)
         err = ERR_CHANNELISFULL;
       else if ((chptr->mode.mode & MODE_REGONLY) && !IsAccount(sptr))
         err = ERR_NEEDREGGEDNICK;
@@ -212,9 +222,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         err = ERR_ADMINONLYCHAN;
       else if ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(sptr))
         err = ERR_OPERONLYCHAN;
-      else if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
-        err = ERR_SSLONLYCHAN;
-      else if (find_ban(sptr, chptr->banlist) && !find_ban(sptr, chptr->exceptlist))
+      else if (find_ban(sptr, chptr->banlist) && !excepted)
         err = ERR_BANNEDFROMCHAN;
 
       /* An oper with WALK_LCHAN privilege can join a local channel

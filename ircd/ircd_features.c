@@ -645,6 +645,7 @@ static struct FeatureDesc {
   F_B(EXCEPTS, FEAT_READ, 0, feature_notify_excepts),
   F_I(MAXEXCEPTS, 0, 45, set_isupport_maxexcepts),
   F_I(AVEXCEPTLEN, 0, 40, 0),
+  F_B(CHMODE_e_CHMODEEXCEPTION, 0, 0, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),
