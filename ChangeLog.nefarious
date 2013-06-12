@@ -3,6 +3,11 @@
 
 2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/whocmds.c: Added 'z' flag to the flags field in the WHO
+	command output to indicate SSL users.
+
+2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_CHMODE_e_CHMODEEXCEPTION option.
 
 	* doc/readme.features: Added FEAT_CHMODE_e_CHMODEEXCEPTION option.
