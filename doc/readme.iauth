@@ -145,6 +145,17 @@ Comments: Indicates that a client has connected using an SSL client
 Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
   not send it.
 
+R - Client Has Authenticated Using SASL
+Syntax: <id> R <account>
+Example 5 F dave
+States: REGISTER
+Next State: -
+Comments: Indicates that a client has authenticated using SASL and has had
+  an account name applied. This message is enabled by requesting the 'r'
+  policy.
+Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
+  not send it.
+
 N - Hostname Received
 Syntax: <id> N <hostname>
 Example: 5 N host-1-10.example.org
@@ -358,8 +369,9 @@ Comments: Sets policy options for the iauth conversation.  Old policy
    w - Send WEBIRC requests whether or not they have been validated by
        Nefarious.
    F - Send SSL client certificate fingerprints where available.
+   r - Send account name when a client authenticates using SASL.
 Compatibility: The U policy is an Undernet extension and is not
-  recognized by ircd. The w and F policies is a Nefarious extension that
+  recognized by ircd. The w, F and r policies are a Nefarious extension that
   is not recognized by Undernet ircu or ircd.
 
 V - iauth Program Version

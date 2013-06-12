@@ -166,6 +166,7 @@ enum IAuthFlag
   IAUTH_UNDERNET,                       /**< Enable Undernet extensions. */
   IAUTH_WEBIRC,                         /**< Enable Nefarious WEBIRC extensions. */
   IAUTH_SSLFP,                          /**< Enable Nefarious SSL client certificate fingerprint notifcation. */
+  IAUTH_ACCOUNT,                        /**< Enable Nefarious SASL account notification. */
   IAUTH_LAST_FLAG                       /**< total number of flags */
 };
 /** Declare a bitset structure indexed by IAuthFlag. */
@@ -1187,6 +1188,19 @@ int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *
   return -1;
 }
 
+/** Forward a clients SASL account name.
+ * @param[in] auth Authorization request for client.
+ * @param[in] account Account name applied to the client.
+ * @return Zero if client should be kept, -1 if not forwarded.
+ */
+int auth_set_account(struct AuthRequest *auth, const char *account)
+{
+  assert(auth != NULL);
+  if (IAuthHas(iauth, IAUTH_ACCOUNT))
+    sendto_iauth(auth->client, "r %s", account);
+  return 0;
+}
+
 /** Forward a clients WEBIRC request.
  * @param[in] auth Authorization request for client.
  * @param[in] password Password supplied in the WEBIRC message.
@@ -1609,6 +1623,7 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
     case 'U': IAuthSet(iauth, IAUTH_UNDERNET); break;
     case 'w': IAuthSet(iauth, IAUTH_WEBIRC); break;
     case 'F': IAuthSet(iauth, IAUTH_SSLFP); break;
+    case 'r': IAuthSet(iauth, IAUTH_ACCOUNT); break;
     }
 
   /* Optionally notify operators. */

@@ -1,6 +1,16 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/readme.iauth: Added iauth account notification.
+
+	* include/s_auth.h: Added iauth account notification.
+
+	* ircd/m_sasl.c: Added iauth account notification.
+
+	* ircd/s_auth.c: Added iauth account notification.
+
 2013-06-10  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added FEAT_ALLOW_OPLEVEL_CHANGE feature.

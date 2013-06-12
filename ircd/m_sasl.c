@@ -93,6 +93,7 @@
 #include "numnicks.h"
 #include "random.h"
 #include "send.h"
+#include "s_auth.h"
 #include "s_bsd.h"
 #include "s_misc.h"
 
@@ -168,6 +169,8 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                (!cli_user(acptr) || BadPtr(cli_user(acptr)->username)) ? "*" : cli_user(acptr)->username,
                (!cli_user(acptr) || BadPtr(cli_user(acptr)->host)) ? "*" : cli_user(acptr)->host,
                cli_saslaccount(acptr), cli_saslaccount(acptr));
+    if (cli_auth(acptr))
+      auth_set_account(cli_auth(acptr), cli_saslaccount(acptr));
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
       SetSASLComplete(acptr);
