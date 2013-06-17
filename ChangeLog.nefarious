@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-17  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Added check to ensure halfops can set channel bans.
+
 2013-06-12  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/whocmds.c: Added 'z' flag to the flags field in the WHO

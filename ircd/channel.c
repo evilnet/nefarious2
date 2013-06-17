@@ -3247,7 +3247,8 @@ mode_parse_ban(struct ParseState *state, int *flag_p)
   state->max_args--;
 
   /* If they're not an oper, they can't change modes */
-  if (state->flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER)) {
+  if ((state->flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER)) &&
+      !(state->flags & MODE_PARSE_ISHALFOP)) {
     send_notoper(state);
     return;
   }
