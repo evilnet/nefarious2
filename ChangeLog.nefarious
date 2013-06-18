@@ -1,6 +1,26 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_LOC_TIMEOUT feature.
+
+	* doc/readme.features: Added FEAT_LOC_TIMEOUT feature.
+
+	* include/ircd_features.h: Added FEAT_LOC_TIMEOUT feature.
+
+	* include/s_auth.h: Added a an extra function to cancel LOC timeout.
+
+	* ircd/ircd_features.c: Added FEAT_LOC_TIMEOUT feature.
+
+	* ircd/m_account.c: Moved LOC code from register_user() to s_auth.c
+
+	* ircd/m_pass.c: Moved LOC code from register_user() to s_auth.c
+
+	* ircd/s_auth.c: Moved LOC code from register_user() to s_auth.c
+
+	* ircd/s_user.c: Moved LOC code from register_user() to s_auth.c
+
 2013-06-17  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Added check to ensure halfops can set channel bans.

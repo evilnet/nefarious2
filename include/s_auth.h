@@ -44,6 +44,7 @@ extern int auth_set_webirc_trusted(struct AuthRequest *auth, const char *passwor
 extern int auth_set_account(struct AuthRequest *auth, const char *account);
 extern int auth_cap_start(struct AuthRequest *auth);
 extern int auth_cap_done(struct AuthRequest *auth);
+extern void auth_end_loc(struct AuthRequest *auth);
 extern void destroy_auth_request(struct AuthRequest *req);
 
 extern int auth_spawn(int argc, char *argv[]);

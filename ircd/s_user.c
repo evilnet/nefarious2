@@ -369,57 +369,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
   {
     assert(cptr == sptr);
 
-    if (cli_loc(sptr)) {
-      /* Do the login-on-connect thing.
-       * This happens after the checks above, but before incrementing any
-       * counters as it may be called more than once
-       */
-      struct Client *acptr;
-
-      if (cli_loc(sptr)->cookie)
-        /* if already doing auth, ignore;
-         * broken and/or evil clients might trigger this
-         */
-        return 0;
-      if (!(acptr = FindUser(cli_loc(sptr)->service)) || !IsChannelService(acptr)) {
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Service '%s' is not available",
-                      sptr, cli_loc(sptr)->service);
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Type \002/QUOTE PASS\002 to "
-                      "connect anyway", sptr);
-        MyFree(cli_loc(sptr));
-      } else {
-        /* the cookie is used to verify replies from the service, in case the
-         * client disconnects and the fd is reused
-         */
-        do {
-          cli_loc(sptr)->cookie = ircrandom() & 0x7fffffff;
-        } while (!cli_loc(sptr)->cookie);
-
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Attempting service login to %s",
-                      sptr, cli_loc(sptr)->service);
-
-        if ( feature_bool(FEAT_LOC_SENDHOST) ) {
-          if (cli_sslclifp(sptr) && !EmptyString(cli_sslclifp(sptr)) && feature_bool(FEAT_LOC_SENDSSLFP)) {
-            sendcmdto_one(&me, CMD_ACCOUNT, acptr, "%C S .%u.%u %s@%s:%s %s %s :%s", acptr,
-                        cli_fd(sptr), cli_loc(sptr)->cookie, cli_user(sptr)->username,
-                        (cli_user(sptr)->host ? cli_user(sptr)->host : cli_sock_ip(sptr)),
-                        cli_sock_ip(sptr), cli_sslclifp(sptr), cli_loc(sptr)->account,
-                        cli_loc(sptr)->password);
-          } else {
-            sendcmdto_one(&me, CMD_ACCOUNT, acptr, "%C H .%u.%u %s@%s:%s %s :%s", acptr,
-                          cli_fd(sptr), cli_loc(sptr)->cookie, cli_user(sptr)->username,
-                          (cli_user(sptr)->host ? cli_user(sptr)->host : cli_sock_ip(sptr)),
-                          cli_sock_ip(sptr), cli_loc(sptr)->account, cli_loc(sptr)->password);
-          }
-        } else {
-          sendcmdto_one(&me, CMD_ACCOUNT, acptr, "%C C .%u.%u %s :%s", acptr,
-                        cli_fd(sptr), cli_loc(sptr)->cookie,
-                        cli_loc(sptr)->account, cli_loc(sptr)->password);
-        }
-      }
-      return 0;
-    }
-
     Count_unknownbecomesclient(sptr, UserStats);
 
     /*

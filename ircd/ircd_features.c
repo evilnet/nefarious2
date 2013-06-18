@@ -619,6 +619,7 @@ static struct FeatureDesc {
   F_B(LOC_SENDHOST, 0, 0, 0),
   F_B(LOC_SENDSSLFP, 0, 0, 0),
   F_S(LOC_DEFAULT_SERVICE, 0, "AuthServ", 0),
+  F_I(LOC_TIMEOUT, 0, 3, 0),
   F_B(STRICTUSERNAME, 0, 0, 0),
   F_B(APASS_CANSEND, 0, 0, 0),
   F_B(HOST_IN_TOPIC, 0, 1, 0),

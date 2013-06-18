@@ -165,11 +165,14 @@ int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
-  if (!(cli_auth(cptr)) && (cli_loc(cptr) || (password[0] == '\0')))
-    return register_user(cptr, cptr);
-
   if ((password[0] == '\0') && !(cli_loc(cptr)) && !emptypass)
     return need_more_params(cptr, "PASS");
+
+  if (cli_loc(cptr) && (password[0] == '\0') && !emptypass) {
+    if (cli_auth(cptr))
+      auth_end_loc(cli_auth(cptr));
+    MyFree(cli_loc(cptr));
+  }
 
   ircd_strncpy(cli_passwd(cptr), password, PASSWDLEN);
   return cli_auth(cptr) ? auth_set_password(cli_auth(cptr), password) : 0;

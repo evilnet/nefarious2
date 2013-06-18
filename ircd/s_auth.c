@@ -38,6 +38,7 @@
 #include "s_auth.h"
 #include "class.h"
 #include "client.h"
+#include "hash.h"
 #include "IPcheck.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -89,6 +90,7 @@ enum AuthRequestFlag {
     AR_IAUTH_FUSERNAME, /**< iauth sent a forced username */
     AR_IAUTH_SOFT_DONE, /**< iauth has no objection to client */
     AR_PASSWORD_CHECKED, /**< client password already checked */
+    AR_LOC_DONE,        /**< loc messages have been sent */
     AR_NUM_FLAGS
 };
 
@@ -103,6 +105,7 @@ struct AuthRequest {
   struct irc_in_addr  original;   /**< original client IP address */
   struct Socket       socket;     /**< socket descriptor for auth queries */
   struct Timer        timeout;    /**< timeout timer for ident and dns queries */
+  struct Timer        loctimeout; /**< timeout timer for Login On Connect */
   struct AuthRequestFlags flags;  /**< current state of request */
   unsigned int        cookie;     /**< cookie the user must PONG */
   unsigned short      port;       /**< client's remote port number */
@@ -368,6 +371,77 @@ badid:
   return exit_client(sptr, sptr, &me, "USER: Bad username");
 }
 
+void auth_end_loc(struct AuthRequest *auth)
+{
+  if (!auth)
+    return;
+
+  if (t_active(&auth->loctimeout))
+    timer_del(&auth->loctimeout);
+}
+
+/** Timeout a given auth request.
+ * @param[in] ev A timer event whose associated data is the expired
+ *   struct AuthRequest.
+ */
+static void auth_loc_timeout_callback(struct Event* ev)
+{
+  struct AuthRequest *auth;
+  struct Client *cptr;
+
+  assert(0 != ev_timer(ev));
+  assert(0 != t_data(ev_timer(ev)));
+
+  if (ev_type(ev) == ET_EXPIRE) {
+    auth = (struct AuthRequest*) t_data(ev_timer(ev));
+    cptr = auth->client;
+
+    if (!cli_loc(cptr))
+      return;
+
+    sendcmdto_one(&me, CMD_NOTICE, cptr, "%s :Service '%s' is not available (timeout)",
+                  (cli_name(cptr) ? cli_name(cptr) : "*"), cli_loc(cptr)->service);
+    sendcmdto_one(&me, CMD_NOTICE, cptr, "%s :Type \002/QUOTE PASS\002 to "
+                  "connect anyway", (cli_name(cptr) ? cli_name(cptr) : "*"));
+  }
+}
+
+static void auth_do_loc(struct Client *client, struct Client *service)
+{
+  /* If a cookie already exists, we're already doing LOC */
+  if (cli_loc(client)->cookie)
+    return;
+
+  /* the cookie is used to verify replies from the service, in case the
+   * client disconnects and the fd is reused
+   */
+  do {
+    cli_loc(client)->cookie = ircrandom() & 0x7fffffff;
+  } while (!cli_loc(client)->cookie);
+
+  sendcmdto_one(&me, CMD_NOTICE, client, "%s :Attempting service login to %s",
+                (cli_name(client) ? cli_name(client) : "*"), cli_loc(client)->service);
+
+  if ( feature_bool(FEAT_LOC_SENDHOST) ) {
+    if (cli_sslclifp(client) && !EmptyString(cli_sslclifp(client)) && feature_bool(FEAT_LOC_SENDSSLFP)) {
+      sendcmdto_one(&me, CMD_ACCOUNT, service, "%C S .%u.%u %s@%s:%s %s %s :%s", service,
+                    cli_fd(client), cli_loc(client)->cookie, cli_username(client),
+                    (cli_sockhost(client) ? cli_sockhost(client) : cli_sock_ip(client)),
+                    cli_sock_ip(client), cli_sslclifp(client), cli_loc(client)->account,
+                    cli_loc(client)->password);
+    } else {
+      sendcmdto_one(&me, CMD_ACCOUNT, service, "%C H .%u.%u %s@%s:%s %s :%s", service,
+                    cli_fd(client), cli_loc(client)->cookie, cli_username(client),
+                    (cli_sockhost(client) ? cli_sockhost(client) : cli_sock_ip(client)),
+                    cli_sock_ip(client), cli_loc(client)->account, cli_loc(client)->password);
+    }
+  } else {
+    sendcmdto_one(&me, CMD_ACCOUNT, service, "%C C .%u.%u %s :%s", service,
+                  cli_fd(client), cli_loc(client)->cookie,
+                  cli_loc(client)->account, cli_loc(client)->password);
+  }
+}
+
 /** Check whether an authorization request is complete.
  * This means that no flags from 0 to #AR_LAST_SCAN are set on \a auth.
  * If #AR_IAUTH_PENDING is set, optionally go into "hurry" state.  If
@@ -381,6 +455,8 @@ static int check_auth_finished(struct AuthRequest *auth)
 {
   enum AuthRequestFlag flag;
   int res;
+  struct Client *acptr;
+  struct Client *cptr = auth->client;
 
   /* Check non-iauth registration blocking flags. */
   for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
@@ -390,6 +466,25 @@ static int check_auth_finished(struct AuthRequest *auth)
              cli_fd(auth->client), flag));
       return 0;
     }
+
+  if (IsUserPort(cptr) && cli_loc(cptr)) {
+    if (FlagHas(&auth->flags, AR_LOC_DONE))
+      return 0;
+    FlagSet(&auth->flags, AR_LOC_DONE);
+    if ((acptr = FindUser(cli_loc(cptr)->service)) && IsChannelService(acptr)) {
+      timer_add(timer_init(&auth->loctimeout), auth_loc_timeout_callback, (void*) auth,
+                TT_RELATIVE, feature_int(FEAT_LOC_TIMEOUT));
+      auth_do_loc(cptr, acptr);
+      return 0;
+    } else {
+      sendcmdto_one(&me, CMD_NOTICE, cptr, "%s :Service '%s' is not available (%s)",
+                    (cli_name(cptr) ? cli_name(cptr) : "*"), cli_loc(cptr)->service,
+                    (acptr ? "not a service" : "no such service"));
+      sendcmdto_one(&me, CMD_NOTICE, cptr, "%s :Type \002/QUOTE PASS\002 to "
+                    "connect anyway", (cli_name(cptr) ? cli_name(cptr) : "*"));
+      return 0;
+    }
+  }
 
   /* If appropriate, do preliminary assignment to connection class. */
   if (IsUserPort(auth->client)
@@ -778,6 +873,9 @@ void destroy_auth_request(struct AuthRequest* auth)
   if (t_active(&auth->timeout))
     timer_del(&auth->timeout);
 
+  if (t_active(&auth->loctimeout))
+    timer_del(&auth->loctimeout);
+
   cli_auth(auth->client) = NULL;
   auth->next = auth_freelist;
   auth_freelist = auth;
@@ -796,7 +894,7 @@ int auth_ping_timeout(struct Client *cptr)
 
   /* Check whether the auth request is gone (more likely, it never
    * existed, as in an outbound server connection). */
-  if (!auth)
+  if (!auth || cli_loc(cptr))
       return exit_client_msg(cptr, cptr, &me, "Registration Timeout");
 
   /* Check for a user-controlled timeout. */
@@ -1166,7 +1264,7 @@ int auth_set_password(struct AuthRequest *auth, const char *password)
   assert(auth != NULL);
   if (IAuthHas(iauth, IAUTH_ADDLINFO))
     sendto_iauth(auth->client, "P :%s", password);
-  return 0;
+  return check_auth_finished(auth);
 }
 
 /** Forward a clients WEBIRC request.
@@ -1198,7 +1296,7 @@ int auth_set_account(struct AuthRequest *auth, const char *account)
   assert(auth != NULL);
   if (IAuthHas(iauth, IAUTH_ACCOUNT))
     sendto_iauth(auth->client, "r %s", account);
-  return 0;
+  return check_auth_finished(auth);
 }
 
 /** Forward a clients WEBIRC request.

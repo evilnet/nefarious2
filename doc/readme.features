@@ -1073,11 +1073,18 @@ If enabled, and LOC_SENDHOST is enabled, SSL client certificate fingerprints
 will be included in Login on connect messages to servers.
 
 LOC_DEFAULT_SERVICE
-  * type: string
+  * Type: string
   * Default: authserv
 
 This is what nick on irc the login-on-connect account verification is sent
 to. User can override it (to any service that supports it) using 3 param LOC.
+
+LOC_TIMEOUT
+  * Type: integer
+  * Default: 3
+
+Specifies the number of seconds before a Login On Connect request should
+timeout.
 
 STRICTUSERNAME
  * Type: boolean

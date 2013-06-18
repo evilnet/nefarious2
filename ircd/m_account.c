@@ -89,6 +89,7 @@
 #include "ircd_string.h"
 #include "msg.h"
 #include "numnicks.h"
+#include "s_auth.h"
 #include "s_bsd.h"
 #include "s_debug.h"
 #include "s_user.h"
@@ -275,7 +276,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
       sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :AUTHENTICATION %s as %s", acptr,
                     type == 'A' ? "SUCCESSFUL" : "FAILED", cli_loc(acptr)->account);
-      MyFree(cli_loc(acptr));
+
+      if (cli_auth(acptr))
+        auth_end_loc(cli_auth(acptr));
 
       if (type == 'D') {
         sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :Type \002/QUOTE PASS\002 "
@@ -283,7 +286,12 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         return 0;
       }
 
-      return register_user(acptr, acptr);
+      MyFree(cli_loc(acptr));
+
+      if (cli_auth(acptr))
+        return auth_set_account(cli_auth(acptr), cli_user(acptr)->account);
+      else
+        return 0;
     } else {
       return protocol_violation(cptr, "ACCOUNT sub-type '%s' not implemented",
                                 parv[2]);
