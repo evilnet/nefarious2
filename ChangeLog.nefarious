@@ -3,6 +3,11 @@
 
 2013-06-18  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_pass.c: Updated mr_pass to not overwrite the password
+	if one has already been set.
+
+2013-06-18  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_LOC_TIMEOUT feature.
 
 	* doc/readme.features: Added FEAT_LOC_TIMEOUT feature.
