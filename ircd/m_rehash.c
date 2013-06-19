@@ -83,13 +83,16 @@
 
 #include "client.h"
 #include "ircd.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "motd.h"
+#include "msg.h"
 #include "numeric.h"
 #include "s_auth.h"
 #include "s_conf.h"
+#include "s_user.h"
 #include "send.h"
 #include "ssl.h"
 
@@ -101,35 +104,53 @@
  * parv[1] = 'm' flushes the MOTD cache and returns
  * parv[1] = 'l' reopens the log files and returns
  * parv[1] = 'q' to not rehash the resolver (optional)
+ * parv[1] = 's' to reload SSL certificates
+ * parv[1] = 'a' to restart the IAuth program
  */
 int mo_rehash(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   int flag = 0;
 
-  if (!HasPriv(sptr, PRIV_REHASH))
+  if (!HasPriv(sptr, PRIV_REHASH) || ((parc == 3) && !HasPriv(sptr, PRIV_REMOTEREHASH)))
     return send_reply(sptr, ERR_NOPRIVILEGES);
 
-  if (parc > 1) { /* special processing */
-    if (*parv[1] == 'm') {
-      send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Flushing MOTD cache");
-      motd_recache(); /* flush MOTD cache */
-      return 0;
-    } else if (*parv[1] == 'l') {
-      send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reopening log files");
-      log_reopen(); /* reopen log files */
-      return 0;
-    } else if (*parv[1] == 'a') {
-      send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Restarting IAuth");
-      auth_restart(); /* Restart IAuth program */
-      return 0;
+  if ((parc == 3) && (hunt_server_cmd(sptr, CMD_REHASH, cptr, 1, "%s %C", 2, parc, parv) != HUNTED_ISME))
+    return 0;
+
+  if (parc == 2) { /* special processing */
+    if (parv[1][1] == '\0') { /* one character server name */
+      if (*parv[1] == 'm') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Flushing MOTD cache");
+        motd_recache(); /* flush MOTD cache */
+        return 0;
+      } else if (*parv[1] == 'l') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reopening log files");
+        log_reopen(); /* reopen log files */
+        return 0;
+      } else if (*parv[1] == 'a') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Restarting IAuth");
+        auth_restart(); /* Restart IAuth program */
+        return 0;
 #ifdef USE_SSL
-    } else if (*parv[1] == 's') {
-      send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reloading SSL certificates");
-      ssl_reinit();
-      return 0;
+      } else if (*parv[1] == 's') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reloading SSL certificates");
+        ssl_reinit();
+        return 0;
 #endif
-    } else if (*parv[1] == 'q')
-      flag = 2;
+      } else if (*parv[1] == 'q')
+        flag = 2;
+    }
+    /*
+     * Maybe the user wants to rehash another server with no parameters.
+     * NOTE: Here we assume that there are no servers named
+     * 'm', 'l', 's', or 'q'.
+     */
+    else
+      if (HasPriv(sptr, PRIV_REMOTEREHASH)) {
+        if (hunt_server_cmd(sptr, CMD_REHASH, cptr, 1, "%C", 1, parc, parv) != HUNTED_ISME)
+          return 0;
+      } else
+        return send_reply(sptr, ERR_NOPRIVILEGES);
   }
 
   send_reply(sptr, RPL_REHASHING, configfile);
@@ -141,3 +162,54 @@ int mo_rehash(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   return rehash(cptr, flag);
 }
 
+int ms_rehash(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+{
+  int flag = 0;
+
+  if ((parc > 2) && (hunt_server_cmd(sptr, CMD_REHASH, cptr, 1, "%s %C", 2, parc, parv) != HUNTED_ISME))
+    return 0;
+
+  /* OK, the message has been forwarded, but before we can act... */
+  if (!feature_bool(FEAT_NETWORK_REHASH))
+    return 0;
+
+  if (parc > 1) { /* special processing */
+    if (parv[1][1] == '\0') { /* one character server name */
+      if (*parv[1] == 'm') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Flushing MOTD cache");
+        motd_recache(); /* flush MOTD cache */
+        return 0;
+      } else if (*parv[1] == 'l') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reopening log files");
+        log_reopen(); /* reopen log files */
+        return 0;
+      } else if (*parv[1] == 'a') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Restarting IAuth");
+        auth_restart(); /* Restart IAuth program */
+        return 0;
+#ifdef USE_SSL
+      } else if (*parv[1] == 's') {
+        send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reloading SSL certificates");
+        ssl_reinit();
+        return 0;
+#endif
+      } else if (*parv[1] == 'q')
+        flag = 2;
+    }
+    /*
+     * Maybe the user wants to rehash another server with no parameters.
+     * NOTE: Here we assume that there are no servers named
+     * 'm', 'l', 's', or 'q'.
+     */
+    else if ((parc == 2) && (hunt_server_cmd(sptr, CMD_REHASH, cptr, 1, "%C", 1, parc, parv) != HUNTED_ISME))
+      return 0;
+  }
+
+  send_reply(sptr, RPL_REHASHING, configfile);
+  sendto_opmask_butone(0, SNO_OLDSNO, "%C [%s] is remotely rehashing Server config file",
+                       sptr, cli_name(cli_user(sptr)->server));
+
+  log_write(LS_SYSTEM, L_INFO, 0, "Remote REHASH From %#C [%s]", sptr, cli_name(cli_user(sptr)->server));
+
+  return rehash(cptr, flag);
+}

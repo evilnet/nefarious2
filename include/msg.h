@@ -261,7 +261,7 @@ struct Client;
 #define CMD_SERVSET		MSG_SERVSET, TOK_SERVSET
 
 #define MSG_REHASH              "REHASH"        /* REHA */
-#define TOK_REHASH              "REHASH"
+#define TOK_REHASH              "RH"
 #define CMD_REHASH		MSG_REHASH, TOK_REHASH
 
 #define MSG_RESTART             "RESTART"       /* REST */

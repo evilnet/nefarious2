@@ -254,6 +254,7 @@ static struct {
   P(WHOIS_NOTICE),   P(HIDE_OPER),      P(HIDE_CHANNELS), P(HIDE_IDLE),
   P(ADMIN),          P(XTRAOP),         P(SERVICE),       P(REMOTE),
   P(SHUN),           P(LOCAL_SHUN),     P(WIDE_SHUN),     P(FREEFORM),
+  P(REMOTEREHASH),
 #undef P
   { 0, 0 }
 };

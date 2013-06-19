@@ -144,6 +144,7 @@ enum Priv
     PRIV_LOCAL_SHUN, /**< oper can local SHUN */
     PRIV_WIDE_SHUN, /**< oper can set wider Shuns */
     PRIV_FREEFORM, /**< oper can use SETHOST with custom host names */
+    PRIV_REMOTEREHASH, /**< oper can REHASH remote servers */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 

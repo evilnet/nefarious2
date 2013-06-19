@@ -3,6 +3,32 @@
 
 2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_NETWORK_REHASH and PRIV_REMOTEREHASH.
+
+	* doc/readme.features: Added FEAT_NETWORK_REHASH feature.
+
+	* include/client.h: Added PRIV_REMOTEREHASH privilege.
+
+	* include/handlers.h: Added REHASH server handler.
+
+	* include/ircd_features.h: Added FEAT_NETWORK_REHASH feature.
+
+	* include/msg.h: Added REHASH server handler.
+
+	* ircd/client.c: Added PRIV_REMOTEREHASH privilege.
+
+	* ircd/ircd_features.c: Added FEAT_NETWORK_REHASH feature.
+
+	* ircd/ircd_lexer.l: Added PRIV_REMOTEREHASH privilege.
+
+	* ircd/ircd_parser.y: Added PRIV_REMOTEREHASH privilege.
+
+	* ircd/m_rehash.c: Added remote REHASH support.
+
+	* ircd/parse.c: Added REHASH server handler.
+
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/s_auth.h: Added auth_restart() function.
 
 	* ircd/m_rehash.c: Added REHASH type 'a' to restart IAuth.

@@ -630,6 +630,7 @@ static struct FeatureDesc {
   F_S(SASL_SERVER, 0, "X3.AfterNET.Services", 0),
   F_I(LISTDELAY, 0, 0, 0),
   F_B(ALLOW_OPLEVEL_CHANGE, 0, 0, 0),
+  F_B(NETWORK_REHASH, 0, 1, 0),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),

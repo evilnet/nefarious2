@@ -1154,6 +1154,12 @@ ALLOW_OPLEVEL_CHANGE
 When enabled, MODE #channel +o Nick:level will change a users op level if they
 already already have channel mode +o, instead of being discarded.
 
+NETWORK_REHASH
+ * Type: boolean
+ * Default: TRUE
+
+Allow this server to act upon a network-issued /rehash.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE
