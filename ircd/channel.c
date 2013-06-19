@@ -3585,9 +3585,7 @@ mode_parse_client(struct ParseState *state, int *flag_p)
     if (colon != NULL) {
       *colon++ = '\0';
       req_oplevel = atoi(colon);
-      if (*flag_p == CHFL_VOICE || state->dir == MODE_DEL) {
-        /* Ignore the colon and its argument. */
-      } else if (*flag_p == CHFL_HALFOP || state->dir == MODE_DEL) {
+      if (*flag_p == CHFL_VOICE || *flag_p == CHFL_HALFOP || state->dir == MODE_DEL) {
         /* Ignore the colon and its argument. */
       } else if (!(state->flags & MODE_PARSE_FORCE)
           && state->member
