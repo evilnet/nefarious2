@@ -3561,6 +3561,7 @@ mode_parse_client(struct ParseState *state, int *flag_p)
   struct Membership *member;
   int oplevel = MAXOPLEVEL + 1;
   int req_oplevel;
+  int notoper = 0;
   int i;
 
   if (MyUser(state->sptr) && state->max_args <= 0) /* drop if too many args */
@@ -3575,7 +3576,10 @@ mode_parse_client(struct ParseState *state, int *flag_p)
 
   /* If they're not an oper, they can't change modes */
   if ((state->flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER)) &&
-      !((*flag_p == MODE_VOICE) && (state->flags & MODE_PARSE_ISHALFOP))) {
+      !((*flag_p == MODE_VOICE) && (state->flags & MODE_PARSE_ISHALFOP)))
+    notoper = 1;
+
+  if (notoper && (state->dir != MODE_DEL)) {
     send_notoper(state);
     return;
   }
@@ -3612,6 +3616,12 @@ mode_parse_client(struct ParseState *state, int *flag_p)
 
   if (!acptr)
     return; /* find_chasing() already reported an error to the user */
+
+  if (notoper && (state->dir == MODE_DEL) &&
+      !((state->sptr == acptr) && (*flag_p == CHFL_HALFOP) && feature_bool(FEAT_HALFOP_DEHALFOP_SELF))) {
+    send_notoper(state);
+    return;
+  }
 
   for (i = 0; i < MAXPARA; i++) /* find an element to stick them in */
     if (!state->cli_change[i].flag || (state->cli_change[i].client == acptr &&

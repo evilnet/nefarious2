@@ -3,6 +3,18 @@
 
 2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_HALFOP_DEHALFOP_SELF feature.
+
+	* doc/readme.features: Added FEAT_HALFOP_DEHALFOP_SELF feature.
+
+	* include/ircd_features.h: Added FEAT_HALFOP_DEHALFOP_SELF feature.
+
+	* ircd/channel.c: Added FEAT_HALFOP_DEHALFOP_SELF feature.
+
+	* ircd/ircd_features.c: Added FEAT_HALFOP_DEHALFOP_SELF feature.
+
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/channel.c: Minor change to : handling in mode_parse_client().
 
 2013-06-18  Matthew Beeching  <jobe@mdbnet.co.uk>
