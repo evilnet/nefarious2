@@ -1,7 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2013-06-19  Matthew Beeching  <jobe@mdbnetco.uk>
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_authenticate.c: Added SSL client certificate fingerprint
+	to initial SASL message sent to services regardless of method.
+
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added 'noidenttilde' Client block option.
 

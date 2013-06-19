@@ -100,6 +100,7 @@
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
+  int first = 0;
 
   if (!CapActive(cptr, CAP_SASL))
     return 0;
@@ -126,16 +127,17 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     do {
       cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
     } while (!cli_saslcookie(cptr));
+    first = 1;
   }
 
-  if (!cli_saslagent(cptr)[0] && !strcmp(parv[1], "EXTERNAL") && !EmptyString(cli_sslclifp(cptr)))
+  if (!EmptyString(cli_sslclifp(cptr)) && first)
     sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s %s", acptr, &me,
                   cli_fd(cptr), cli_saslcookie(cptr),
                   parv[1], cli_sslclifp(cptr));
   else
     sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u %c :%s", acptr, &me,
                   cli_fd(cptr), cli_saslcookie(cptr),
-                  (cli_saslagent(cptr)[0] ? 'C' : 'S'), parv[1]);
+                  (first ? 'S' : 'C'), parv[1]);
 
   return 0;
 }
