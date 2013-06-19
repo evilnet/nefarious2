@@ -131,7 +131,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   }
 
   if (!EmptyString(cli_sslclifp(cptr)) && first)
-    sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s %s", acptr, &me,
+    sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s :%s", acptr, &me,
                   cli_fd(cptr), cli_saslcookie(cptr),
                   parv[1], cli_sslclifp(cptr));
   else

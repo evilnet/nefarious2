@@ -1,6 +1,13 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk<
+
+	* ircd/m_authenticate.c: Added ':' prefix to SSL fingerprint.
+
+	* ircd/m_sasl.c: Forgot to account for SSL fingerprint in SASL
+	message.
+
 2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_authenticate.c: Added SSL client certificate fingerprint

@@ -105,6 +105,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   const char* token;
   const char* reply;
   const char* data;
+  const char* ext = NULL;
   char* fdstr;
   char* cookiestr;
   unsigned int fd, cookie;
@@ -115,6 +116,8 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   token = parv[2];
   reply = parv[3];
   data = parv[4];
+  if (parc > 5)
+    ext = parv[5];
 
   /* Look up the target */
   if (!(acptr = findNUser(parv[1])) && !(acptr = FindNServer(parv[1])))
@@ -123,8 +126,12 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* If it's not to us, forward the reply */
   if (!IsMe(acptr)) {
-    sendcmdto_one(sptr, CMD_SASL, acptr, "%C %s %s :%s", acptr, token,
-                  reply, data);
+    if (ext != NULL)
+      sendcmdto_one(sptr, CMD_SASL, acptr, "%C %s %s %s :%s", acptr, token,
+                    reply, data, ext);
+    else
+      sendcmdto_one(sptr, CMD_SASL, acptr, "%C %s %s :%s", acptr, token,
+                    reply, data);
     return 0;
   }
 
