@@ -195,6 +195,7 @@ struct IAuth {
   struct SLink *i_config;               /**< configuration string list */
   struct SLink *i_stats;                /**< statistics string list */
   char **i_argv;                        /**< argument list */
+  int i_argc;                           /**< number of arguments in argument list */
 };
 
 /** Return whether flag \a flag is set on \a iauth. */
@@ -1491,6 +1492,36 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
   exit(EXIT_FAILURE);
 }
 
+/** Restart an %IAuth program.
+ * @return 0 on failure, 1 on success, 2 on no IAuth program.
+ */
+int auth_restart()
+{
+  static struct IAuth *iauthnew;
+  int ii;
+
+  if (!iauth)
+    return 2;
+
+  /* Need to initialize a new connection. */
+  iauthnew = MyCalloc(1, sizeof(*iauthnew));
+  msgq_init(i_sendQ(iauthnew));
+  /* Populate iauth's argv array. */
+  iauthnew->i_argv = MyCalloc(iauth->i_argc + 1, sizeof(iauthnew->i_argv[0]));
+  for (ii = 0; ii < iauth->i_argc; ++ii)
+    DupString(iauthnew->i_argv[ii], iauth->i_argv[ii]);
+  iauthnew->i_argv[ii] = NULL;
+
+  auth_close_unused();
+  iauth = iauthnew;
+
+  /* Try to spawn it, and handle the results. */
+  if (iauth_do_spawn(iauth, 0))
+    return 0;
+  IAuthClr(iauth, IAUTH_CLOSING);
+  return 1;
+}
+
 /** See if an %IAuth program must be spawned.
  * If a process is already running with the specified options, keep it.
  * Otherwise spawn a new child process to perform the %IAuth function.
@@ -1531,6 +1562,7 @@ int auth_spawn(int argc, char *argv[])
   for (ii = 0; ii < argc; ++ii)
     DupString(iauth->i_argv[ii], argv[ii]);
   iauth->i_argv[ii] = NULL;
+  iauth->i_argc = argc;
   /* Try to spawn it, and handle the results. */
   if (iauth_do_spawn(iauth, 0))
     return 0;

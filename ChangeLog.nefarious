@@ -3,6 +3,14 @@
 
 2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/s_auth.h: Added auth_restart() function.
+
+	* ircd/m_rehash.c: Added REHASH type 'a' to restart IAuth.
+
+	* ircd/s_auth.c: Added auth_restart() function.
+
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_HALFOP_DEHALFOP_SELF feature.
 
 	* doc/readme.features: Added FEAT_HALFOP_DEHALFOP_SELF feature.

@@ -88,6 +88,7 @@
 #include "ircd_string.h"
 #include "motd.h"
 #include "numeric.h"
+#include "s_auth.h"
 #include "s_conf.h"
 #include "send.h"
 #include "ssl.h"
@@ -116,6 +117,10 @@ int mo_rehash(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     } else if (*parv[1] == 'l') {
       send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reopening log files");
       log_reopen(); /* reopen log files */
+      return 0;
+    } else if (*parv[1] == 'a') {
+      send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Restarting IAuth");
+      auth_restart(); /* Restart IAuth program */
       return 0;
 #ifdef USE_SSL
     } else if (*parv[1] == 's') {
