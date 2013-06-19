@@ -383,7 +383,7 @@ enum AuthorizationCheckResult attach_iline(struct Client* cptr)
       continue;
     if (IPcheck_nr(cptr) > aconf->maximum)
       return ACR_TOO_MANY_FROM_IP;
-    if (aconf->username && !IsWebIRCUserIdent(cptr))
+    if (aconf->username && !IsWebIRCUserIdent(cptr) && (aconf->flags & CONF_NOIDENTTILDE))
       SetFlag(cptr, FLAG_DOID);
     return attach_conf(cptr, aconf);
   }

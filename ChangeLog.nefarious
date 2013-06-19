@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-19  Matthew Beeching  <jobe@mdbnetco.uk>
+
+	* doc/example.conf: Added 'noidenttilde' Client block option.
+
+	* include/s_conf.h: Added 'noidenttilde' Client block option.
+
+	* ircd/ircd_lexer.l: Added 'noidenttilde' Client block option.
+
+	* ircd/ircd_parser.y: Added 'noidenttilde' Client block option.
+
+	* ircd/s_conf.c: Added 'noidenttilde' Client block option.
+
 2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added FEAT_NETWORK_REHASH and PRIV_REMOTEREHASH.

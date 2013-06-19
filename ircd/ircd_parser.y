@@ -204,6 +204,7 @@ static void free_slist(struct SLink **link) {
 %token IPCHECK
 %token TARGETLIMIT
 %token LISTDELAY
+%token NOIDENTTILDE
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -889,6 +890,7 @@ clientblock: CLIENT
 {
   maxlinks = 65535;
   port = 0;
+  flags = CONF_NOIDENTTILDE;
 }
 '{' clientitems '}' ';'
 {
@@ -919,6 +921,7 @@ clientblock: CLIENT
     aconf->sslfp = sslfp;
     aconf->countrymask = country;
     aconf->continentmask = continent;
+    aconf->flags = flags;
   }
   if (!aconf) {
     MyFree(username);
@@ -943,7 +946,7 @@ clientblock: CLIENT
 clientitems: clientitem clientitems | clientitem;
 clientitem: clienthost | clientip | clientusername | clientclass | clientpass
             | clientmaxlinks | clientport | clientcountry | clientcontinent
-            | clientsslfp;
+            | clientsslfp | clientnoidenttilde;
 clienthost: HOST '=' QSTRING ';'
 {
   char *sep = strchr($3, '@');
@@ -1010,6 +1013,13 @@ clientsslfp: SSLFP '=' QSTRING ';'
 {
   MyFree(sslfp);
   sslfp = $3;
+};
+clientnoidenttilde: NOIDENTTILDE '=' YES ';'
+{
+  flags |= CONF_NOIDENTTILDE;
+} | NOIDENTTILDE '=' NO ';'
+{
+  flags &= ~CONF_NOIDENTTILDE;
 };
 
 killblock: KILL
