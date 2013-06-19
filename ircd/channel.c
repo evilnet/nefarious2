@@ -4045,6 +4045,8 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
            (!IsServer(sptr) && !IsService(cli_user(sptr)->server))))
           break;
         mode_parse_exmode(&state, flag_p);
+        if ((state.dir == MODE_DEL) && (chptr->users == 0))
+          schedule_destruct_event_1m(state.chptr);
         break;
 
       case 'Z': /* deal with oper only */

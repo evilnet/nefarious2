@@ -1,7 +1,14 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk<
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Added a call to schedule_destruct_event_1m()
+	when an empty channel is set -z.
+
+	* ircd/m_check.c: Fixed allignment of channel info.
+
+2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_authenticate.c: Added ':' prefix to SSL fingerprint.
 

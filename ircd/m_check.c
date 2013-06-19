@@ -332,7 +332,7 @@ void checkChannel(struct Client *sptr, struct Channel *chptr)
 
    /* Topic */
    if (strlen(chptr->topic) <= 0)
-      send_reply(sptr, RPL_DATASTR, "          Topic:: <none>");
+      send_reply(sptr, RPL_DATASTR, "           Topic:: <none>");
    else {
       ircd_snprintf(sptr, outbuf, sizeof(outbuf), "           Topic:: %s", chptr->topic);
       send_reply(sptr, RPL_DATASTR, outbuf);
@@ -344,7 +344,7 @@ void checkChannel(struct Client *sptr, struct Channel *chptr)
 
    /* Channel Modes */
 
-   strcpy(outbuf, "Channel mode(s):: ");
+   strcpy(outbuf, " Channel mode(s):: ");
 
    modebuf[0] = '\0';
    parabuf[0] = '\0';
