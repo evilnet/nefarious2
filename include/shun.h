@@ -143,6 +143,7 @@ extern int shun_list(struct Client *sptr, char *userhost);
 extern void shun_stats(struct Client *sptr, const struct StatDesc *sd,
                         char *param);
 extern int shun_memory_count(size_t *sh_size);
+extern int shun_remove(struct Client* sptr, char *userhost, char *reason);
 
 extern void expire_shuns();
 

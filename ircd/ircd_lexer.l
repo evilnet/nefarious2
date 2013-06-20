@@ -172,6 +172,7 @@ static struct lexer_token {
   { "rehash", TPRIV_REHASH },
   { "remote", TPRIV_REMOTE },
   { "remoterehash", TPRIV_REMOTEREHASH },
+  { "remove", TPRIV_REMOVE },
   { "restart", TPRIV_RESTART },
   { "see_chan", TPRIV_SEE_CHAN },
   { "see_opers", TPRIV_SEE_OPERS },

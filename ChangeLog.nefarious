@@ -1,6 +1,40 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-20  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added PRIV_REMOVE for the REMOVE command.
+
+	* include/client.h: Added PRIV_REMOVE for the REMOVE command.
+
+	* include/gline.h: Added gline_remove() used by the REMOVE
+	command.
+
+	* include/handlers.h: Added the REMOVE command.
+
+	* include/msg.h: Added the REMOVE command.
+
+	* include/shun.h: Added shun_remove() used by the REMOVE
+	command.
+
+	* ircd/Makefile.in: Added the REMOVE command.
+
+	* ircd/client.c: Added PRIV_REMOVE for the REMOVE command.
+
+	* ircd/gline.c: Added gline_remove() used by the REMOVE command.
+
+	* ircd/ircd_lexer.l: Added PRIV_REMOVE for the REMOVE command.
+
+	* ircd/ircd_parser.y: Added PRIV_REMOVE for the REMOVE command.
+
+	* ircd/parse.c: Added the REMOVE command.
+
+	* ircd/s_err.c: Minor fix for STATS S.
+
+	* ircd/shun.c: Added shun_remove() used by the REMOVE command.
+
+	* ircd/m_remove.c: Added the REMOVE command.
+
 2013-06-19  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Added a call to schedule_destruct_event_1m()

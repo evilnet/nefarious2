@@ -1116,7 +1116,7 @@ static Numeric replyTable[] = {
 /* 541 */
   { 0 },
 /* 542 */
-  { RPL_STATSSHUN, "%c %s%s%s %Tu %Tu %c :%s", "542" },
+  { RPL_STATSSHUN, "%c %s%s%s %Tu %Tu %Tu %s%c :%s", "542" },
 /* 543 */
   { ERR_NOSUCHSHUN, "%s :No such shun", "543" },
 /* 544 */

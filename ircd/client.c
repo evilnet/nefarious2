@@ -167,6 +167,7 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     FlagClr(&privs_global, PRIV_SERVICE);
     FlagClr(&privs_global, PRIV_REMOTE);
     FlagClr(&privs_global, PRIV_FREEFORM);
+    FlagClr(&privs_global, PRIV_REMOVE);
 
     memset(&privs_local, 0, sizeof(privs_local));
     FlagSet(&privs_local, PRIV_CHAN_LIMIT);
@@ -254,7 +255,7 @@ static struct {
   P(WHOIS_NOTICE),   P(HIDE_OPER),      P(HIDE_CHANNELS), P(HIDE_IDLE),
   P(ADMIN),          P(XTRAOP),         P(SERVICE),       P(REMOTE),
   P(SHUN),           P(LOCAL_SHUN),     P(WIDE_SHUN),     P(FREEFORM),
-  P(REMOTEREHASH),
+  P(REMOTEREHASH),   P(REMOVE),
 #undef P
   { 0, 0 }
 };

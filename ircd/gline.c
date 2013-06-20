@@ -1263,3 +1263,52 @@ gline_memory_count(size_t *gl_size)
 
   return gl;
 }
+
+/** Remove a gline with a specified mask.
+ * @param[in] sptr Client issuing the removal request.
+ * @param[in] userhost GLine to be removed.
+ * @param[in] reason Reason for the removal.
+ */
+int
+gline_remove(struct Client* sptr, char *userhost, char *reason)
+{
+  char uhmask[USERLEN + HOSTLEN + 2];
+  struct Gline *gline, *sgline;
+  char *user, *host, *t_uh;
+
+  DupString(t_uh, userhost);
+  canon_userhost(t_uh, &user, &host, 0);
+
+  if(BadPtr(user))
+    return 0;
+
+  if (sizeof(uhmask) <
+      ircd_snprintf(0, uhmask, sizeof(uhmask), "%s@%s", user, host))
+    return send_reply(sptr, ERR_LONGMASK);
+
+  for (gline = GlobalGlineList; gline; gline = sgline) {
+    sgline = gline->gl_next;
+
+    if (gline->gl_expire <= CurrentTime)
+      gline_free(gline);
+    else if (((gline->gl_host && host && ircd_strcmp(gline->gl_host,host) == 0)
+            ||(!gline->gl_host && !host)) && ((!user && ircd_strcmp(gline->gl_user, "*") == 0) ||
+               ircd_strcmp(gline->gl_user, user) == 0)) {
+      sendto_opmask_butone(0, SNO_GLINE, "%s force removing GLINE for %s (%s)",
+                           feature_bool(FEAT_HIS_SNOTICES) || IsServer(sptr) ?
+                           cli_name(sptr) : cli_name((cli_user(sptr))->server),
+                           uhmask, reason);
+
+      log_write(LS_GLINE, L_INFO, LOG_NOSNOTICE,
+                "%#C force removing GLINE for %s (%s)", sptr, uhmask, reason);
+
+      gline_free(gline);
+    }
+  }
+
+  if (!BadPtr(t_uh))
+    MyFree(t_uh);
+
+  return 0;
+}
+

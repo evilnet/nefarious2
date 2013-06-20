@@ -476,6 +476,10 @@ struct Client;
 #define TOK_SASL		"SASL"
 #define CMD_SASL		MSG_SASL, TOK_SASL
 
+#define MSG_REMOVE		"REMOVE"
+#define TOK_REMOVE		"RM"
+#define CMD_REMOVE		MSG_REMOVE, TOK_REMOVE
+
 /*
  * Constants
  */
