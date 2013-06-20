@@ -3,6 +3,20 @@
 
 2013-06-20  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/ircd_osdep.h: Fix for error setting IP_TOS on AF_INET6
+	sockets.
+
+	* ircd/listener.c: Fix for error setting IP_TOS on AF_INET6
+	sockets.
+
+	* ircd/os_generic.c: Fix for error setting IP_TOS on AF_INET6
+	sockets.
+
+	* ircd/s_bsd.c: Fix for error setting IP_TOS on AF_INET6
+	sockets.
+
+2013-06-20  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added PRIV_REMOVE for the REMOVE command.
 
 	* include/client.h: Added PRIV_REMOVE for the REMOVE command.

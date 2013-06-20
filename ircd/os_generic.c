@@ -371,14 +371,18 @@ int os_set_sockbufs(int fd, unsigned int ssize, unsigned int rsize)
  * @param[in] tos New type of service value to use.
  * @return Non-zero on success, or zero on failure.
  */
-int os_set_tos(int fd,int tos)
+int os_set_tos(int fd,int tos, int family)
 {
-#if defined(IP_TOS) && defined(IPPROTO_IP)
   unsigned int opt = tos;
-  return (0 == setsockopt(fd, IPPROTO_IP, IP_TOS, &opt, sizeof(opt)));
-#else
-  return 1;
+#if defined(IP_TOS) && defined(IPPROTO_IP)
+  if (family == AF_INET)
+    return (0 == setsockopt(fd, IPPROTO_IP, IP_TOS, &opt, sizeof(opt)));
 #endif
+#if defined(IPV6_TCLASS) && defined(IPPROTO_IPV6)
+  if (family == AF_INET6)
+    return (0 == setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &opt, sizeof(opt)));
+#endif
+  return 1;
 }
 
 /** Disable IP options on a socket.
