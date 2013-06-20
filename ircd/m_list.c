@@ -187,6 +187,7 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
 	    int permit_chan)
 {
   int is_time = 0;
+  int is_equals = 0;
   char dir;
   unsigned int val;
   char *tmp1, *tmp2;
@@ -197,6 +198,7 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
     return LPARAM_SUCCESS;
 
   while (1) {
+    is_equals = 0;
     switch (*param) {
     case 'T':
     case 't':
@@ -215,6 +217,10 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
     case '<':
     case '>':
       dir = *(param++);
+      if (*param == '=') {
+        param++;
+        is_equals = 1;
+      }
 
       if (!IsDigit(*param)) /* must start with a digit */
 	return show_usage(sptr);
@@ -229,7 +235,12 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
         val = TStime() - val * 60;
         dir = (dir == '>') ? '<' : '>';
       }
-      
+
+      if (dir == '<')
+        val = val - (is_equals ? 0 : 1);
+      else
+        val = val + (is_equals ? 0 : 1);
+
       switch (is_time) {
       case 0: /* number of users on channel */
 	if (dir == '<')
@@ -404,8 +415,8 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (!show_channels)
   {
-    if (args.max_users > args.min_users + 1 && args.max_time > args.min_time &&
-        args.max_topic_time > args.min_topic_time)      /* Sanity check */
+    if (args.max_users >= args.min_users && args.max_time >= args.min_time &&
+        args.max_topic_time >= args.min_topic_time)      /* Sanity check */
     {
       cli_listing(sptr) = (struct ListingArgs*) MyMalloc(sizeof(struct ListingArgs));
       assert(0 != cli_listing(sptr));

@@ -3,6 +3,12 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/hash.c: Added support to LIST for >= and <= operators.
+
+	* ircd/m_list.c: Added support to LIST for >= and <= operators.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_LIST_SHOWMODES_OPERONLY feature.
 
 	* doc/readme.features: Added FEAT_LIST_SHOWMODES_OPERONLY feature.

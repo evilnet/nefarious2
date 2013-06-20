@@ -437,18 +437,18 @@ void list_next_channels(struct Client *cptr)
     /* Send all the matching channels in the bucket. */
     for (chptr = channelTable[args->bucket]; chptr; chptr = chptr->hnext)
     {
-      if (chptr->users > args->min_users
-          && chptr->users < args->max_users
-          && chptr->creationtime > args->min_time
-          && chptr->creationtime < args->max_time
+      if (chptr->users >= args->min_users
+          && chptr->users <= args->max_users
+          && chptr->creationtime >= args->min_time
+          && chptr->creationtime <= args->max_time
           && (!args->wildcard[0] || (args->flags & LISTARG_NEGATEWILDCARD) ||
               (!match(args->wildcard, chptr->chname)))
           && (!(args->flags & LISTARG_NEGATEWILDCARD) ||
               match(args->wildcard, chptr->chname))
           && (!(args->flags & LISTARG_TOPICLIMITS)
               || (chptr->topic[0]
-                  && chptr->topic_time > args->min_topic_time
-                  && chptr->topic_time < args->max_topic_time))
+                  && chptr->topic_time >= args->min_topic_time
+                  && chptr->topic_time <= args->max_topic_time))
           && ((args->flags & LISTARG_SHOWSECRET)
               || ShowChannel(cptr, chptr)))
       {
