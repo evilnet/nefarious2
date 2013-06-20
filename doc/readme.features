@@ -1160,6 +1160,12 @@ NETWORK_REHASH
 
 Allow this server to act upon a network-issued /rehash.
 
+LIST_SHOWMODES_OPERONLY
+ * Type: boolean
+ * Default: FALSE
+
+When enabled the LIST flag 'M' can only be used by IRCops.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

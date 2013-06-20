@@ -1,6 +1,21 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_LIST_SHOWMODES_OPERONLY feature.
+
+	* doc/readme.features: Added FEAT_LIST_SHOWMODES_OPERONLY feature.
+
+	* include/ircd_features.h: Added FEAT_LIST_SHOWMODES_OPERONLY
+	feature.
+
+	* ircd/ircd_features.c: Added FEAT_LIST_SHOWMODES_OPERONLY feature.
+
+	* ircd/m_list.c: Added FEAT_LIST_SHOWMODES_OPERONLY feature and
+	fixed crash on startup/rehash if DEFAULT_LIST_PARAM contained oper
+	only flags.
+
 2013-06-20  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/ssl.c: Added a #define for IOV_MAX for systems that do not

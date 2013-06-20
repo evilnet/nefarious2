@@ -169,12 +169,12 @@ show_usage(struct Client *sptr)
              "matching \037pattern\037. ");
   send_reply(sptr, RPL_LISTUSAGE, "Note: Patterns may contain * and ?. "
              "You may only give one pattern match constraint.");
-  if (IsAnOper(sptr)) {
+  if (IsAnOper(sptr))
     send_reply(sptr, RPL_LISTUSAGE,
                " \002S\002             ; Show secret channels.");
+  if (!feature_bool(FEAT_LIST_SHOWMODES_OPERONLY) || IsAnOper(sptr))
     send_reply(sptr, RPL_LISTUSAGE,
                " \002M\002             ; Show channel modes.");
-  }
   send_reply(sptr, RPL_LISTUSAGE,
 	     "Example: LIST <3,>1,C<10,T>0,#a*  ; 2 users, younger than 10 "
 	     "min., topic set., starts with #a");
@@ -256,7 +256,7 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
 
     case 'S':
     case 's':
-      if (!IsAnOper(sptr) || !HasPriv(sptr, PRIV_LIST_CHAN))
+      if (sptr || !IsAnOper(sptr) || !HasPriv(sptr, PRIV_LIST_CHAN))
         return show_usage(sptr);
 
       args->flags |= LISTARG_SHOWSECRET;
@@ -268,7 +268,8 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
 
     case 'M':
     case 'm':
-      if (!IsAnOper(sptr) || !HasPriv(sptr, PRIV_LIST_CHAN))
+      if (feature_bool(FEAT_LIST_SHOWMODES_OPERONLY) &&
+          (!sptr || !IsAnOper(sptr) || !HasPriv(sptr, PRIV_LIST_CHAN)))
         return show_usage(sptr);
 
       args->flags |= LISTARG_SHOWMODES;
