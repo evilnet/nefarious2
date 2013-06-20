@@ -52,6 +52,10 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 
+#ifndef IOV_MAX
+#define IOV_MAX 1024
+#endif /* IOV_MAX */
+
 struct ssl_data {
   struct Socket socket;
   struct Listener *listener;

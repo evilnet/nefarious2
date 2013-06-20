@@ -3,6 +3,11 @@
 
 2013-06-20  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/ssl.c: Added a #define for IOV_MAX for systems that do not
+	have IOV_MAX defined already.
+
+2013-06-20  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ircd_osdep.h: Fix for error setting IP_TOS on AF_INET6
 	sockets.
 
