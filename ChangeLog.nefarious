@@ -3,6 +3,10 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/Makefile.in: Updated object file dependancy lists.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added WATCH support.
 
 	* doc/readme.features: Added WATCH support.
