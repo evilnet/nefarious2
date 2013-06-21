@@ -450,7 +450,7 @@ void list_next_channels(struct Client *cptr)
                   && chptr->topic_time >= args->min_topic_time
                   && chptr->topic_time <= args->max_topic_time))
           && ((args->flags & LISTARG_SHOWSECRET)
-              || ShowChannel(cptr, chptr)))
+              || (ShowChannel(cptr, chptr) || IsInvited(cptr, chptr))))
       {
         if (args->flags & LISTARG_SHOWMODES) {
           char modebuf[MODEBUFLEN];
@@ -458,8 +458,9 @@ void list_next_channels(struct Client *cptr)
 
           modebuf[0] = modebuf[1] = parabuf[0] = '\0';
           channel_modes(cptr, modebuf, parabuf, sizeof(parabuf), chptr, NULL);
-          send_reply(cptr, RPL_LIST | SND_EXPLICIT, "%s %u %s %s :%s",
-                     chptr->chname, chptr->users, modebuf, parabuf, chptr->topic);
+          send_reply(cptr, RPL_LIST | SND_EXPLICIT, "%s %u %s%s%s :%s",
+                     chptr->chname, chptr->users, modebuf, (parabuf[0] ? " " : ""),
+                     parabuf, chptr->topic);
         } else {
           send_reply(cptr, RPL_LIST, chptr->chname, chptr->users, chptr->topic);
         }

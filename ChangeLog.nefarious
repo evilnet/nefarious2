@@ -3,6 +3,14 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/hash.c: Added check to list channels you're invited to
+	even if +p/+s.
+
+	* ircd/m_list.c: Fixed bug in syntax for oper only check for
+	LIST flag S.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/hash.c: Added support to LIST for >= and <= operators.
 
 	* ircd/m_list.c: Added support to LIST for >= and <= operators.

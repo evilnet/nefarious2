@@ -267,7 +267,7 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
 
     case 'S':
     case 's':
-      if (sptr || !IsAnOper(sptr) || !HasPriv(sptr, PRIV_LIST_CHAN))
+      if (!sptr || !IsAnOper(sptr) || !HasPriv(sptr, PRIV_LIST_CHAN))
         return show_usage(sptr);
 
       args->flags |= LISTARG_SHOWSECRET;
