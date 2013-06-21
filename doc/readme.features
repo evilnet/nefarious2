@@ -1166,6 +1166,15 @@ LIST_SHOWMODES_OPERONLY
 
 When enabled the LIST flag 'M' can only be used by IRCops.
 
+LIST_PRIVATE_CHANNELS
+ * Type: string
+ * Default: none
+
+When set, includes +p channels in LIST output with their topic and modes not
+shown and their name replaced by the value of LIST_PRIVATE_CHANNELS as per
+RFC 1459. The reccomended value for LIST_PRIVATE_CHANNELS is '*' however
+RFC 1459 states that +p channels should be shown in LIST as 'Prv'.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

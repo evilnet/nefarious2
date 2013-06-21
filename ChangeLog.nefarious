@@ -3,6 +3,19 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_LIST_PRIVATE_CHANNELS feature.
+
+	* doc/readme.features: Added FEAT_LIST_PRIVATE_CHANNELS feature.
+
+	* include/ircd_features.h: Added FEAT_LIST_PRIVATE_CHANNELS feature.
+
+	* ircd/hash.c: Added an option to include +p channels in LIST
+	replies as per RFC 1459.
+
+	* ircd/ircd_features.c: Added FEAT_LIST_PRIVATE_CHANNELS feature.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_account.c: Fix for bug where LOC causes incorrect host
 	hiding style 2 cloaked host to be stored for the user.
 

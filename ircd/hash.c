@@ -26,6 +26,7 @@
 #include "channel.h"
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -450,9 +451,15 @@ void list_next_channels(struct Client *cptr)
                   && chptr->topic_time >= args->min_topic_time
                   && chptr->topic_time <= args->max_topic_time))
           && ((args->flags & LISTARG_SHOWSECRET)
-              || (ShowChannel(cptr, chptr) || IsInvited(cptr, chptr))))
+              || (ShowChannel(cptr, chptr) || IsInvited(cptr, chptr) ||
+                  (!EmptyString(feature_str(FEAT_LIST_PRIVATE_CHANNELS))
+                   && HiddenChannel(chptr)))))
       {
-        if (args->flags & LISTARG_SHOWMODES) {
+        if (!ShowChannel(cptr, chptr) && !IsInvited(cptr, chptr) &&
+            !(args->flags & LISTARG_SHOWSECRET)) {
+          send_reply(cptr, RPL_LIST, feature_str(FEAT_LIST_PRIVATE_CHANNELS),
+                     chptr->users, "");
+        } else if (args->flags & LISTARG_SHOWMODES) {
           char modebuf[MODEBUFLEN];
           char parabuf[MODEBUFLEN];
 
