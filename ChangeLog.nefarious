@@ -3,6 +3,10 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* patches/diffs/sline.diff: Removed.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added Spoofhost block option 'ismask'.
 
 	* include/s_conf.h: Added Spoofhost block option 'ismask'.
