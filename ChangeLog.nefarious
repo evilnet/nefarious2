@@ -3,6 +3,50 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added WATCH support.
+
+	* doc/readme.features: Added WATCH support.
+
+	* include/handlers.h: Added WATCH support.
+
+	* include/hash.h: Added WATCH support.
+
+	* include/ircd_features.h: Added WATCH support.
+
+	* include/list.h: Added WATCH support.
+
+	* include/msg.h: Added WATCH support.
+
+	* include/numeric.h: Added WATCH support.
+
+	* include/struct.h: Added WATCH support.
+
+	* ircd/Makefile.in: Added WATCH support.
+
+	* ircd/hash.c: Added WATCH support.
+
+	* ircd/ircd_features.c: Added WATCH support.
+
+	* ircd/ircd_parser.y: Added WATCH support.
+
+	* ircd/parse.c: Added WATCH support.
+
+	* ircd/s_debug.c: Added WATCH support.
+
+	* ircd/s_err.c: Added WATCH support.
+
+	* ircd/s_misc.c: Added WATCH support.
+
+	* ircd/s_user.c: Added WATCH support.
+
+	* include/watch.h: Added WATCH support.
+
+	* ircd/m_watch.c: Added WATCH support.
+
+	* ircd/watch.c: Added WATCH support.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* patches/diffs/sline.diff: Removed.
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>

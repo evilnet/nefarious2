@@ -457,7 +457,8 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_SILELISTFULL     511        /* Undernet extension */
 /*      ERR_NOTIFYFULL       512           aircd */
 /*	ERR_TOOMANYWATCH     512           Numeric List: Dalnet */
-#define ERR_NOSUCHGLINE      512        /* Undernet extension */
+#define ERR_TOOMANYWATCH     512        /* Dalnet extension */
+/* #define ERR_NOSUCHGLINE      512        *//* Undernet extension (old) */ 
 #define ERR_BADPING          513        /* Undernet extension */
 /*      ERR_NEEDPONG	     512           Numeric List: Dalnet */
 #define ERR_NOSUCHJUPE       514        /* Undernet extension - jupe -Kev */
@@ -472,6 +473,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*	ERR_OPERONLY	     520	unreal */
 #define ERR_MASKTOOWIDE	     520	/* Undernet extension -Kev */
 /*      ERR_WHOTRUNC         520        austnet */
+#define ERR_NOSUCHGLINE      512        /* Undernet extension (new) */
 /*      ERR_LISTSYNTAX       521        dalnet
 	ERR_LISTSYNTAX       521	dalnet
 	ERR_WHOSYNTAX	     522        dalnet
@@ -502,6 +504,15 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_NOMANAGER        566	/* Undernet extension */
 #define ERR_UPASS_SAME_APASS 567        /* Undernet extension */
 #define ERR_NOOMOTD          568
+
+#define RPL_LOGON            600        /* Dalnet extension */
+#define RPL_LOGOFF           601        /* Dalnet extension */
+#define RPL_WATCHOFF         602        /* Dalnet extension */
+#define RPL_WATCHSTAT        603        /* Dalnet extension */
+#define RPL_NOWON            604        /* Dalnet extension */
+#define RPL_NOWOFF           605        /* Dalnet extension */
+#define RPL_WATCHLIST        606        /* Dalnet extension */
+#define RPL_ENDOFWATCHLIST   607        /* Dalnet extension */
 
 /*	RPL_LOGON	     600	dalnet,unreal
 	RPL_LOGOFF           601	dalnet,unreal

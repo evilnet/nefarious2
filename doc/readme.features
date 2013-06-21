@@ -1175,6 +1175,16 @@ shown and their name replaced by the value of LIST_PRIVATE_CHANNELS as per
 RFC 1459. The reccomended value for LIST_PRIVATE_CHANNELS is '*' however
 RFC 1459 states that +p channels should be shown in LIST as 'Prv'.
 
+MAXWATCHS
+ * Type: integer
+ * Default: 128
+
+This is the maximum number of nicks a user can watch at a time.  The
+watch command allows users to request a notification when another user with
+a nick specified connects or disconnects from the server.  Increasing this
+number allows users to use up more memory with inefficient use of the
+command.  If you're not sure, don't change this.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

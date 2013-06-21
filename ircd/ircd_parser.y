@@ -1526,10 +1526,10 @@ spoofhostautoapply: AUTOAPPLY '=' YES ';'
 spoofhostismask: ISMASK '=' YES ';'
 {
   flags |= SHFLAG_ISMASK;
-} | ISMASK '=' YES ';'
+} | ISMASK '=' NO ';'
 {
   flags &= ~SHFLAG_ISMASK;
-}
+};
 
 exceptblock: EXCEPT
 {

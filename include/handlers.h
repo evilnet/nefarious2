@@ -148,6 +148,7 @@ extern int m_version(struct Client*, struct Client*, int, char*[]);
 extern int m_wallchops(struct Client*, struct Client*, int, char*[]);
 extern int m_wallhops(struct Client*, struct Client*, int, char*[]);
 extern int m_wallvoices(struct Client*, struct Client*, int, char*[]);
+extern int m_watch(struct Client*, struct Client*, int, char*[]);
 extern int m_webirc(struct Client*, struct Client*, int, char*[]);
 extern int m_who(struct Client*, struct Client*, int, char*[]);
 extern int m_whois(struct Client*, struct Client*, int, char*[]);

@@ -27,6 +27,7 @@
 struct Client;
 struct Channel;
 struct StatDesc;
+struct Watch;
 
 /*
  * general defines
@@ -58,6 +59,8 @@ struct StatDesc;
 #define SeekUser(name)          hSeekClient((name), (STAT_USER))
 /** Search for a server by name. */
 #define SeekServer(name)        hSeekClient((name), (STAT_ME | STAT_SERVER))
+/** Search for a watch by name. */
+#define SeekWatch(name)         hSeekWatch((name))
 
 /* Safer macros with sanity check on name, WARNING: these are _macros_,
    no side effects allowed on <name> ! */
@@ -69,6 +72,8 @@ struct StatDesc;
 #define FindUser(name)          (BadPtr((name)) ? 0 : SeekUser(name))
 /** Search for a server by name. */
 #define FindServer(name)        (BadPtr((name)) ? 0 : SeekServer(name))
+/** Search for a watch by name. */
+#define FindWatch(name)         (BadPtr((name)) ? 0 : SeekWatch(name))
 
 /*
  * Proto types
@@ -77,11 +82,14 @@ struct StatDesc;
 extern void init_hash(void);    /* Call me on startup */
 extern int hAddClient(struct Client *cptr);
 extern int hAddChannel(struct Channel *chptr);
+extern int hAddWatch(struct Watch *wptr);
 extern int hRemClient(struct Client *cptr);
 extern int hChangeClient(struct Client *cptr, const char *newname);
 extern int hRemChannel(struct Channel *chptr);
+extern int hRemWatch(struct Watch *wptr);
 extern struct Client *hSeekClient(const char *name, int TMask);
 extern struct Channel *hSeekChannel(const char *name);
+extern struct Watch *hSeekWatch(const char *name);
 
 extern int m_hash(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 

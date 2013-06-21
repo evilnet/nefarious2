@@ -57,6 +57,7 @@
 #include "sys.h"
 #include "uping.h"
 #include "userload.h"
+#include "watch.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <fcntl.h>
@@ -218,6 +219,12 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       cli_user(bcptr)->silence = bp->next;
       free_ban(bp);
     }
+
+    /* Clean up watch lists */
+    if (MyUser(bcptr))
+      del_list_watch(bcptr);
+    /* Notify Logout */
+    check_status_watch(bcptr, RPL_LOGOFF);
 
     /* Clean up snotice lists */
     if (MyUser(bcptr))

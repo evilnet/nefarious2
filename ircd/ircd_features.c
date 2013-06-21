@@ -322,6 +322,13 @@ static void feature_notify_geoip_ipv6_file(void)
   geoip_handle_ipv6_file();
 }
 
+/** Set WATCH if they are enabled. */
+static void
+set_isupport_watchs(void)
+{
+    add_isupport_i("WATCH", feature_int(FEAT_MAXWATCHS));
+}
+
 /** Set MAXSILES (maximum silences). */
 static void
 set_isupport_maxsiles(void)
@@ -633,6 +640,7 @@ static struct FeatureDesc {
   F_B(NETWORK_REHASH, 0, 1, 0),
   F_B(LIST_SHOWMODES_OPERONLY, 0, 0, 0),
   F_S(LIST_PRIVATE_CHANNELS, FEAT_NULL, 0, 0),
+  F_I(MAXWATCHS, 0, 128, set_isupport_watchs),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),

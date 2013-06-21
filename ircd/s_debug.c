@@ -51,6 +51,7 @@
 #include "shun.h"
 #include "struct.h"
 #include "sys.h"
+#include "watch.h"
 #include "whowas.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -249,6 +250,8 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
       awm = 0,                  /* memory used by aways */
       wwam = 0,                 /* whowas away memory used */
       wwm = 0,                  /* whowas array memory used */
+      wt = 0,                   /* watch entrys */
+      wtm = 0,                  /* memory used by watchs */
       glm = 0,                  /* memory used by glines */
       shm = 0,                  /* memory used by shuns */
       jum = 0,                  /* memory used by jupes */
@@ -351,6 +354,10 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
              feature_int(FEAT_NICKNAMEHISTORYLENGTH), wwm);
 
   totww = wwu * sizeof(struct User) + wwam + wwm;
+
+  watch_count_memory(&wt, &wtm);
+  send_reply(cptr, SND_EXPLICIT | RPL_STATSDEBUG,
+             ":Watchs %d(%zu)", wt, wtm);
 
   motd_memory_count(cptr);
 

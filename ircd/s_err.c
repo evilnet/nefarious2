@@ -1056,7 +1056,7 @@ static Numeric replyTable[] = {
 /* 511 */
   { ERR_SILELISTFULL, "%s :Your silence list is full", "511" },
 /* 512 */
-  { ERR_NOSUCHGLINE, "%s :No such gline", "512" },
+  { ERR_TOOMANYWATCH, "%s :Maximum size for WATCH-list is %d entries", "512" },
 /* 513 */
   { ERR_BADPING, 0, "513" },
 /* 514 */
@@ -1074,7 +1074,7 @@ static Numeric replyTable[] = {
 /* 520 */
   { ERR_MASKTOOWIDE, "%s :Mask is too wide", "520" },
 /* 521 */
-  { 0 },
+  { ERR_NOSUCHGLINE, "%s :No such gline", "521" },
 /* 522 */
   { 0 },
 /* 523 */
@@ -1232,21 +1232,21 @@ static Numeric replyTable[] = {
 /* 599 */
   { 0 },
 /* 600 */
-  { 0 },
+  { RPL_LOGON, "%s %s %s %ld :logged online", "600" },
 /* 601 */
-  { 0 },
+  { RPL_LOGOFF, "%s %s %s %ld :logged offline", "601" },
 /* 602 */
-  { 0 },
+  { RPL_WATCHOFF, "%s %s %s %ld :stopped watching", "602" },
 /* 603 */
-  { 0 },
+  { RPL_WATCHSTAT, ":You have %d and are on %d WATCH entries", "603" },
 /* 604 */
-  { 0 },
+  { RPL_NOWON, "%s %s %s %ld :is online", "604" },
 /* 605 */
-  { 0 },
+  { RPL_NOWOFF, "%s %s %s %ld :is offline", "605" },
 /* 606 */
-  { 0 },
+  { RPL_WATCHLIST, ":%s", "606" },
 /* 607 */
-  { 0 },
+  { RPL_ENDOFWATCHLIST, ":End of WATCH %c", "607" },
 /* 608 */
   { 0 },
 /* 609 */

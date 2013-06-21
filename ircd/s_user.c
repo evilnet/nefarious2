@@ -66,6 +66,7 @@
 #include "sys.h"
 #include "userload.h"
 #include "version.h"
+#include "watch.h"
 #include "whowas.h"
 
 #include "handlers.h" /* m_motd and m_lusers */
@@ -583,6 +584,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if ((cli_snomask(sptr) != SNO_DEFAULT) && HasFlag(sptr, FLAG_SERVNOTICE))
       send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
   }
+
+  /* Notify new local/remote user */
+  check_status_watch(sptr, RPL_LOGON);
+
   return 0;
 }
 
@@ -743,6 +748,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
      * on that channel. Propagate notice to other servers.
      */
     if (IsUser(sptr)) {
+      /* Notify exit user */
+      check_status_watch(sptr, RPL_LOGOFF);
+
       sendcmdto_common_channels_butone(sptr, CMD_NICK, NULL, ":%s", nick);
       add_history(sptr, 1);
       sendcmdto_serv_butone(sptr, CMD_NICK, cptr, "%s %Tu", nick,
@@ -768,6 +776,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       hRemClient(sptr);
     strcpy(cli_name(sptr), nick);
     hAddClient(sptr);
+
+    /* Notify change nick local/remote user */
+    check_status_watch(sptr, RPL_LOGON);
   }
   else {
     /* Local client setting NICK the first time */
@@ -2336,6 +2347,7 @@ void init_isupport(void)
   add_isupport("UHNAMES");
 
   add_isupport_i("SILENCE", feature_int(FEAT_MAXSILES));
+  add_isupport_i("WATCH", feature_int(FEAT_MAXWATCHS));
   add_isupport_i("MODES", MAXMODEPARAMS);
   add_isupport_i("MAXCHANNELS", feature_int(FEAT_MAXCHANNELSPERUSER));
   add_isupport_i("MAXBANS", feature_int(FEAT_MAXBANS));

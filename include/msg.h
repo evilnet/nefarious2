@@ -480,6 +480,10 @@ struct Client;
 #define TOK_REMOVE		"RM"
 #define CMD_REMOVE		MSG_REMOVE, TOK_REMOVE
 
+#define MSG_WATCH		"WATCH"
+#define TOK_WATCH		"WATCH"
+#define CMD_WATCH		MSG_WATCH, TOK_WATCH
+
 /*
  * Constants
  */

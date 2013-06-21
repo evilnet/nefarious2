@@ -38,6 +38,7 @@
 #include "send.h"
 #include "struct.h"
 #include "sys.h"
+#include "watch.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <limits.h>
@@ -58,6 +59,8 @@
 static struct Client *clientTable[HASHSIZE];
 /** Hash table for channels. */
 static struct Channel *channelTable[HASHSIZE];
+/** Hash table for watches. */
+static struct Watch *watchTable[HASHSIZE];
 /** CRC-32 update table. */
 static uint32_t crc32hash[256];
 
@@ -487,3 +490,71 @@ void list_next_channels(struct Client *cptr)
     send_reply(cptr, RPL_LISTEND);
   }
 }
+
+/** Prepend a watch's nick  to the appropriate hash bucket.
+ * @param[in] wptr Watch to add to hash table.
+ * @return Zero.
+ */
+int hAddWatch(struct Watch *wptr)
+{
+  register HASHREGS hashv = strhash(wt_nick(wptr));
+
+  wt_next(wptr) = watchTable[hashv];
+  watchTable[hashv] = wptr;
+
+  return 0;
+
+}
+
+/** Remove a watch from its hash bucket.
+ * @param[in] wptr Watch to remove from hash table.
+ * @return Zero if the watch is found and removed, -1 if not found.
+ */
+int hRemWatch(struct Watch *wptr)
+{
+  HASHREGS hashv = strhash(wt_nick(wptr));
+  struct Watch *tmp = watchTable[hashv];
+
+  if (tmp == wptr) {
+    watchTable[hashv] = wt_next(wptr);
+    wt_next(wptr) = wptr;
+    return 0;
+  }
+
+  while (tmp) {
+    if (wt_next(tmp) == wptr) {
+      wt_next(tmp) = wt_next(wt_next(tmp));
+      wt_next(wptr) = wptr;
+      return 0;
+    }
+    tmp = wt_next(tmp);
+  }
+  return -1;
+}
+
+/** Find a watch by nick.
+ * If a watch's nick is found, it is moved to the top of its hash bucket.
+ * @param[in] nick Watch nick to search for.
+ * @return Matching watch, or NULL if none.
+ */
+struct Watch *hSeekWatch(const char *nick)
+{
+  HASHREGS hashv = strhash(nick);
+  struct Watch *wptr = watchTable[hashv];
+
+  if (wptr) {
+    if (0 != ircd_strcmp(nick, wt_nick(wptr))) {
+      struct Watch* prev;
+      while (prev = wptr, wptr = wt_next(wptr)) {
+        if (0 == ircd_strcmp(nick, wt_nick(wptr))) {
+          wt_next(prev) = wt_next(wptr);
+          wt_next(wptr) = watchTable[hashv];
+          watchTable[hashv] = wptr;
+          break;
+        }
+      }
+    }
+  }
+  return wptr;
+}
+
