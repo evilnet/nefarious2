@@ -128,6 +128,7 @@ static struct lexer_token {
   TOKEN(TARGETLIMIT),
   TOKEN(LISTDELAY),
   TOKEN(NOIDENTTILDE),
+  TOKEN(ISMASK),
   TOKEN(SSLFP),
 #undef TOKEN
   { "ssl", SSLTOK },

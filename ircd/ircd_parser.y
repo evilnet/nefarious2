@@ -205,6 +205,7 @@ static void free_slist(struct SLink **link) {
 %token TARGETLIMIT
 %token LISTDELAY
 %token NOIDENTTILDE
+%token ISMASK
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -1459,6 +1460,9 @@ spoofhostblock : SPOOFHOST QSTRING
   struct SHostConf* sconf;
   char *h;
 
+  if (flags & SHFLAG_ISMASK)
+    flags &= ~SHFLAG_AUTOAPPLY;
+
   if (hosts == NULL)
     parse_error("Missing host(s) in spoofhost block");
   else if (spoofhost == NULL)
@@ -1488,7 +1492,7 @@ spoofhostblock : SPOOFHOST QSTRING
   flags = 0;
 }
 spoofhostitems: spoofhostitem | spoofhostitems spoofhostitem;
-spoofhostitem: spoofhosthost | spoofhostpass | spoofhostautoapply;
+spoofhostitem: spoofhosthost | spoofhostpass | spoofhostautoapply | spoofhostismask;
 
 spoofhosthost: HOST '=' QSTRING ';'
 {
@@ -1506,14 +1510,12 @@ spoofhosthost: HOST '=' QSTRING ';'
   link->next = hosts;
   hosts = link;
 };
-
 spoofhostpass: PASS '=' QSTRING ';'
 {
   MyFree(pass);
   pass = $3;
   flags &= ~SHFLAG_NOPASS;
 };
-
 spoofhostautoapply: AUTOAPPLY '=' YES ';'
 {
   flags |= SHFLAG_AUTOAPPLY;
@@ -1521,6 +1523,13 @@ spoofhostautoapply: AUTOAPPLY '=' YES ';'
 {
   flags &= ~SHFLAG_AUTOAPPLY;
 };
+spoofhostismask: ISMASK '=' YES ';'
+{
+  flags |= SHFLAG_ISMASK;
+} | ISMASK '=' YES ';'
+{
+  flags &= ~SHFLAG_ISMASK;
+}
 
 exceptblock: EXCEPT
 {

@@ -162,7 +162,7 @@ int m_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     } else {
       sconf = find_shost_conf(sptr, parv[1], parv[2], &res);
       if ((res == 0) && (sconf != 0)) {
-        ircd_strncpy(cli_user(sptr)->sethost, sconf->spoofhost, USERLEN + HOSTLEN + 1);
+        ircd_strncpy(cli_user(sptr)->sethost, parv[1], HOSTLEN + 1);
         SetSetHost(sptr);
         SetHiddenHost(sptr);
       } else {
@@ -217,7 +217,7 @@ int mo_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     } else {
       sconf = find_shost_conf(sptr, hostmask, NULL, &res);
       if ((res == 0) && (sconf != 0)) {
-        ircd_strncpy(cli_user(sptr)->sethost, sconf->spoofhost, USERLEN + HOSTLEN + 1);
+        ircd_strncpy(cli_user(sptr)->sethost, hostmask, USERLEN + HOSTLEN + 1);
         SetSetHost(sptr);
         SetHiddenHost(sptr);
       } else {

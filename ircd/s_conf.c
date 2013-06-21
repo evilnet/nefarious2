@@ -892,8 +892,12 @@ struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *passwd,
   for(sconf = shostConfList; sconf; sconf = sconf->next) {
     if ((host == NULL) && !(sconf->flags & SHFLAG_AUTOAPPLY))
       continue;
-    if ((host != NULL) && strcmp(sconf->spoofhost, host))
-      continue;
+    if (host != NULL) {
+      if (!(sconf->flags & SHFLAG_ISMASK) && strcmp(sconf->spoofhost, host))
+        continue;
+      if ((sconf->flags & SHFLAG_ISMASK) && match(sconf->spoofhost, host))
+        continue;
+    }
 
     if (sconf->usermask && match(sconf->usermask, cli_username(cptr)))
       continue;

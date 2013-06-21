@@ -3,6 +3,20 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added Spoofhost block option 'ismask'.
+
+	* include/s_conf.h: Added Spoofhost block option 'ismask'.
+
+	* ircd/ircd_lexer.l: Added Spoofhost block option 'ismask'.
+
+	* ircd/ircd_parser.y: Added Spoofhost block option 'ismask'.
+
+	* ircd/m_sethost.c: Added Spoofhost block option 'ismask'.
+
+	* ircd/s_conf.c: Added Spoofhost block option 'ismask'.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_LIST_PRIVATE_CHANNELS feature.
 
 	* doc/readme.features: Added FEAT_LIST_PRIVATE_CHANNELS feature.
