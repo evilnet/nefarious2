@@ -3,6 +3,11 @@
 
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_account.c: Fix for bug where LOC causes incorrect host
+	hiding style 2 cloaked host to be stored for the user.
+
+2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/hash.c: Added check to list channels you're invited to
 	even if +p/+s.
 

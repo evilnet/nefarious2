@@ -270,7 +270,6 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
             (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) {
           SetHiddenHost(acptr);
-          hide_hostmask(acptr);
         }
       }
 
