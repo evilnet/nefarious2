@@ -93,13 +93,14 @@
 #include "numnicks.h"
 #include "send.h"
 #include "shun.h"
+#include "zline.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
 /** Handle a REMOVE message from an operator.
  *
  * \a parv has the following elements:
- * \li \a parv[1] is the type- gline or shun.
+ * \li \a parv[1] is the type- gline, zline or shun.
  * \li \a parv[2] is mask that needs to be cancelled.
  * \li \a parv[\a parc - 1] is the reason
  *
@@ -134,6 +135,8 @@ int mo_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (!ircd_strcmp(type, "gline"))
     r = gline_remove(sptr, mask, reason);
+  else if (!ircd_strcmp(type, "zline"))
+    r = zline_remove(sptr, mask, reason);
   else if (!ircd_strcmp(type, "shun"))
     r = shun_remove(sptr, mask, reason);
 
@@ -144,7 +147,7 @@ int mo_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 /** Handle a REMOVE message from a server connection.
  *
  * \a parv has the following elements:
- * \li \a parv[1] is the type- gline or shun.
+ * \li \a parv[1] is the type- gline, zline or shun.
  * \li \a parv[2] is mask that needs to be cancelled.
  * \li \a parv[\a parc - 1] is the reason
  *
@@ -174,6 +177,8 @@ int ms_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (!ircd_strcmp(type, "gline"))
     r = gline_remove(sptr, mask, reason);
+  else if (!ircd_strcmp(type, "zline"))
+    r = zline_remove(sptr, mask, reason);
   else if (!ircd_strcmp(type, "shun"))
     r = shun_remove(sptr, mask, reason);
 

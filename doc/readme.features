@@ -1185,6 +1185,12 @@ a nick specified connects or disconnects from the server.  Increasing this
 number allows users to use up more memory with inefficient use of the
 command.  If you're not sure, don't change this.
 
+HIS_STATS_Z
+ * Type: boolean
+ * Default: TRUE
+
+As per UnderNet CFV-165, this removes /STATS Z from users.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE
@@ -1447,4 +1453,24 @@ SSL_KEYFILE
 
 Path to the private key associated with the certificate specified
 by SSL_CERTFILE.
+
+DISABLE_ZLINES
+ * Type: boolean
+ * Default: FALSE
+
+When set to TRUE any zlines added will not affect users.
+
+HIS_ZLINE_REASON
+ * Type: boolean
+ * Default: FALSE
+
+This will hide the zline reason from quit messages. The affected user(s) will
+still see the reason via the YOURBANNEDCREEP numeric.
+
+ZLINEMAXUSERCOUNT
+ * Type: integer
+ * Default: 20
+
+Maximum amount of users a zline can affect when a zline is set via /ZLINE.
+zlines set via services or servers will not be affected by this rule.
 

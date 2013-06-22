@@ -641,6 +641,7 @@ static struct FeatureDesc {
   F_B(LIST_SHOWMODES_OPERONLY, 0, 0, 0),
   F_S(LIST_PRIVATE_CHANNELS, FEAT_NULL, 0, 0),
   F_I(MAXWATCHS, 0, 128, set_isupport_watchs),
+  F_B(HIS_STATS_Z, 0, 1, 0),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),
@@ -693,6 +694,11 @@ static struct FeatureDesc {
   /* SSL FEAT_'s */
   F_S(SSL_CERTFILE, 0, "ircd.pem", 0),
   F_S(SSL_KEYFILE, 0, "ircd.pem", 0),
+
+  /* ZLINE FEAT_'s */
+  F_B(DISABLE_ZLINES, 0, 0, 0),
+  F_B(HIS_ZLINE_REASON, 0, 0, 0),
+  F_I(ZLINEMAXUSERCOUNT, 0, 20, 0),
 
 #undef F_S
 #undef F_B

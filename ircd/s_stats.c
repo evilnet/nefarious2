@@ -55,6 +55,7 @@
 #include "shun.h"
 #include "struct.h"
 #include "userload.h"
+#include "zline.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -522,6 +523,7 @@ stats_excepts(struct Client* to, const struct StatDesc *sd, char* param)
                (eline->flags & EFLAG_SHUN ? "s" : ""),
                (eline->flags & EFLAG_KLINE ? "k" : ""),
                (eline->flags & EFLAG_GLINE ? "g" : ""),
+               (eline->flags & EFLAG_ZLINE ? "z" : ""),
                (eline->flags & EFLAG_IDENT ? "i" : ""),
                (eline->flags & EFLAG_RDNS ? "r" : ""),
                (eline->flags & EFLAG_IPCHECK ? "I" : ""),
@@ -700,9 +702,12 @@ struct StatDesc statsinfo[] = {
   { 'y', "classes", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_y,
     report_classes, 0,
     "Connection classes." },
-  { 'z', "memory", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_z,
+  { 'z', "memory", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_z,
     count_memory, 0,
     "Memory/Structure allocation information." },
+  { 'Z', "zlines", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_HIS_STATS_Z,
+    zline_stats, 0,
+    "Global IP bans (Z-lines)." },
   { ' ', "iauth", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_IAUTH,
     report_iauth_stats, 0,
     "IAuth statistics." },

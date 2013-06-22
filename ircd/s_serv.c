@@ -59,6 +59,7 @@
 #include "struct.h"
 #include "sys.h"
 #include "userload.h"
+#include "zline.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -194,13 +195,14 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
                   cli_info(cptr));
   }
 
-  /* Send these as early as possible so that glined users/juped servers can
+  /* Send these as early as possible so that glined users/zlined users/juped servers can
    * be removed from the network while the remote server is still chewing
    * our burst.
    */
   gline_burst(cptr);
   shun_burst(cptr);
   jupe_burst(cptr);
+  zline_burst(cptr);
 
   /*
    * Pass on my client information to the new server

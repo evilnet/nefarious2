@@ -484,6 +484,10 @@ struct Client;
 #define TOK_WATCH		"WATCH"
 #define CMD_WATCH		MSG_WATCH, TOK_WATCH
 
+#define MSG_ZLINE		"ZLINE"
+#define TOK_ZLINE		"ZL"
+#define CMD_ZLINE		MSG_ZLINE, TOK_ZLINE
+
 /*
  * Constants
  */

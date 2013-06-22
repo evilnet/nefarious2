@@ -53,6 +53,7 @@
 #include "sys.h"
 #include "watch.h"
 #include "whowas.h"
+#include "zline.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -239,7 +240,8 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
       wwa = 0,                  /* whowas aways */
       gl = 0,                   /* glines */
       sh = 0,                   /* shuns */
-      ju = 0;                   /* jupes */
+      ju = 0,                   /* jupes */
+      zl = 0;                   /* zlines */
 
   size_t chm = 0,               /* memory used by channels */
       chbm = 0,                 /* memory used by channel bans */
@@ -255,6 +257,7 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
       glm = 0,                  /* memory used by glines */
       shm = 0,                  /* memory used by shuns */
       jum = 0,                  /* memory used by jupes */
+      zlm = 0,                  /* memory used by zlines */
       com = 0,                  /* memory used by conf lines */
       dbufs_allocated = 0,      /* memory used by dbufs */
       dbufs_used = 0,           /* memory used by dbufs */
@@ -364,8 +367,9 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
   gl = gline_memory_count(&glm);
   sh = shun_memory_count(&shm);
   ju = jupe_memory_count(&jum);
+  zl = zline_memory_count(&zlm);
   send_reply(cptr, SND_EXPLICIT | RPL_STATSDEBUG,
-	     ":Glines %d(%zu) Shuns %d(%zu) Jupes %d(%zu)", gl, glm, sh, shm, ju, jum);
+	     ":Glines %d(%zu) Zlines %d(%zu) Shuns %d(%zu) Jupes %d(%zu)", gl, glm, zl, zlm, sh, shm, ju, jum);
 
   send_reply(cptr, SND_EXPLICIT | RPL_STATSDEBUG,
 	     ":Hash: client %d(%zu), chan is the same", HASHSIZE,

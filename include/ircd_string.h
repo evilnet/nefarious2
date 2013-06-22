@@ -44,6 +44,8 @@ extern int         is_timestamp(char *str);
 extern const char* StripColor(const char* text);
 extern int HasColor(const char* text);
 
+extern int check_if_ipmask(const char *mask);
+
 #define COLOR_BOLD            2   /**< Bold text */
 #define COLOR_COLOR           3   /**< Color text */
 #define COLOR_ITALIC          29  /**< Italic text */

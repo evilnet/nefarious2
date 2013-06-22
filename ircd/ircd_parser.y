@@ -200,6 +200,7 @@ static void free_slist(struct SLink **link) {
 %token SHUN
 %token KLINE
 %token GLINE
+%token ZLINE
 %token RDNS
 %token IPCHECK
 %token TARGETLIMIT
@@ -219,7 +220,8 @@ static void free_slist(struct SLink **link) {
 %token TPRIV_LIST_CHAN TPRIV_CHECK TPRIV_WHOIS_NOTICE TPRIV_HIDE_OPER
 %token TPRIV_HIDE_CHANNELS TPRIV_HIDE_IDLE TPRIV_XTRAOP TPRIV_SERVICE
 %token TPRIV_REMOTE TPRIV_LOCAL_SHUN TPRIV_WIDE_SHUN
-%token TPRIV_FREEFORM TPRIV_REMOTEREHASH TPRIV_REMOVE
+%token TPRIV_FREEFORM TPRIV_REMOTEREHASH TPRIV_REMOVE TPRIV_LOCAL_ZLINE
+%token TPRIV_WIDE_ZLINE
 /* and some types... */
 %type <num> sizespec
 %type <num> timespec timefactor factoredtimes factoredtime
@@ -770,7 +772,10 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           TPRIV_WIDE_SHUN { $$ = PRIV_WIDE_SHUN; } |
           TPRIV_FREEFORM { $$ = PRIV_FREEFORM; } |
           TPRIV_REMOTEREHASH { $$ = PRIV_REMOTEREHASH; } |
-          TPRIV_REMOVE { $$ = PRIV_REMOVE; };
+          TPRIV_REMOVE { $$ = PRIV_REMOVE; } |
+          ZLINE { $$ = PRIV_ZLINE; } |
+          TPRIV_LOCAL_ZLINE { $$ = PRIV_LOCAL_ZLINE; } |
+          TPRIV_WIDE_ZLINE { $$ = PRIV_WIDE_ZLINE; };
 
 yesorno: YES { $$ = 1; } | NO { $$ = 0; };
 
@@ -1564,8 +1569,8 @@ exceptblock: EXCEPT
 };
 exceptitems: exceptitem exceptitems | exceptitem;
 exceptitem: exceptuhost | exceptshun | exceptkline | exceptgline
-          | exceptident | exceptrdns | exceptipcheck | excepttarglimit
-          | exceptlistdelay;
+          | exceptzline | exceptident | exceptrdns | exceptipcheck
+          | excepttarglimit | exceptlistdelay;
 exceptuhost: HOST '=' QSTRING ';'
 {
  struct SLink *link;
@@ -1602,6 +1607,13 @@ exceptgline: GLINE '=' YES ';'
 } | GLINE '=' NO ';'
 {
   flags &= ~EFLAG_GLINE;
+};
+exceptzline: ZLINE '=' YES ';'
+{
+  flags |= EFLAG_ZLINE;
+} | ZLINE '=' NO ';'
+{
+  flags &= ~EFLAG_ZLINE;
 };
 exceptident: IDENT '=' YES ';'
 {

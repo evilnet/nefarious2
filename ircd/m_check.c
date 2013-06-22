@@ -475,6 +475,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      if (eflags & EFLAG_SHUN) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "Shuns"); }
      if (eflags & EFLAG_KLINE) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "K:Lines"); }
      if (eflags & EFLAG_GLINE) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "G:Lines"); }
+     if (eflags & EFLAG_ZLINE) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "Z:Lines"); }
      if (eflags & EFLAG_IDENT) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "Ident Lookups"); }
      if (eflags & EFLAG_RDNS) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "rDNS Lookups"); }
      if (eflags & EFLAG_IPCHECK) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "IPCheck"); }

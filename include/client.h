@@ -145,7 +145,10 @@ enum Priv
     PRIV_WIDE_SHUN, /**< oper can set wider Shuns */
     PRIV_FREEFORM, /**< oper can use SETHOST with custom host names */
     PRIV_REMOTEREHASH, /**< oper can REHASH remote servers */
-    PRIV_REMOVE, /**< oper can REMOVE glines and shuns */
+    PRIV_REMOVE, /**< oper can REMOVE glines, zlines and shuns */
+    PRIV_LOCAL_ZLINE, /**< oper can local ZLINE */
+    PRIV_ZLINE, /**< oper can ZLINE */
+    PRIV_WIDE_ZLINE, /**< oper can set wider Z-lines */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 

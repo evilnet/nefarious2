@@ -183,6 +183,7 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     FlagSet(&privs_local, PRIV_DISPLAY);
     FlagSet(&privs_local, PRIV_FORCE_LOCAL_OPMODE);
     FlagSet(&privs_local, PRIV_LOCAL_SHUN);
+    FlagSet(&privs_local, PRIV_LOCAL_ZLINE);
 
     privs_defaults_set = 1;
   }
@@ -227,6 +228,8 @@ client_set_privs(struct Client *client, struct ConfItem *oper)
     ClrPriv(client, PRIV_KILL);
     ClrPriv(client, PRIV_GLINE);
     ClrPriv(client, PRIV_JUPE);
+    ClrPriv(client, PRIV_SHUN);
+    ClrPriv(client, PRIV_ZLINE);
     ClrPriv(client, PRIV_OPMODE);
     ClrPriv(client, PRIV_BADCHAN);
   }
@@ -255,7 +258,8 @@ static struct {
   P(WHOIS_NOTICE),   P(HIDE_OPER),      P(HIDE_CHANNELS), P(HIDE_IDLE),
   P(ADMIN),          P(XTRAOP),         P(SERVICE),       P(REMOTE),
   P(SHUN),           P(LOCAL_SHUN),     P(WIDE_SHUN),     P(FREEFORM),
-  P(REMOTEREHASH),   P(REMOVE),
+  P(REMOTEREHASH),   P(REMOVE),         P(LOCAL_ZLINE),   P(ZLINE),
+  P(WIDE_ZLINE),
 #undef P
   { 0, 0 }
 };

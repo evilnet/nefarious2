@@ -495,6 +495,12 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_NOSUCHSHUN       543
 #define RPL_ENDOFSLIST       545
 
+#define RPL_STATSZLINE       546	/* Nefarious extension */
+#define ERR_NOSUCHZLINE      547	/* Nefarious extension */
+#define RPL_ZLIST            548	/* Nefarious extension */
+#define RPL_ENDOFZLIST       549	/* Nefarious extension */
+#define ERR_INVALIDMASK      550	/* Nefarious extension */
+
 #define ERR_NOTLOWEROPLEVEL  560	/* Undernet extension */
 #define ERR_NOTMANAGER       561	/* Undernet extension */
 #define ERR_CHANSECURED      562	/* Undernet extension */

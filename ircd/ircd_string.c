@@ -769,3 +769,21 @@ int HasColor(const char* text)
   return 0;
 }
 
+int check_if_ipmask(const char *mask)
+{
+  int has_digit = 0;
+  const char *p;
+
+  if (*mask == '.' || *mask == '/')
+    return 0;
+  for (p = mask; *p; ++p)
+    if (*p != '*' && *p != '?' && *p != '/')
+    {
+      if (!IsIP6Char(*p))
+        return 0;
+      has_digit = -1;
+    }
+
+  return has_digit;
+}
+

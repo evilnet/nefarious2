@@ -207,14 +207,15 @@ struct ExceptConf {
   int                 flags;
 };
 
-#define EFLAG_SHUN	0x01	/**< Matching users are exempt from SHUN */
-#define EFLAG_KLINE	0x02	/**< Matching users are exempt from Kill blocks */
-#define EFLAG_GLINE	0x04	/**< Matching users are exempt from GLINE */
-#define EFLAG_IDENT	0x08	/**< Matching users are exempt from ident lookups */
-#define EFLAG_RDNS	0x10	/**< Matching users are exempt from rDNS lookups */
-#define EFLAG_IPCHECK   0x20    /**< Matching users are exempt from IPcheck checks */
-#define EFLAG_TARGLIMIT 0x40    /**< Matching users are exempt from target limiting */
-#define EFLAG_LISTDELAY 0x80    /**< Matching users are exempt from LISTDELAY */
+#define EFLAG_SHUN	0x001	/**< Matching users are exempt from SHUN */
+#define EFLAG_KLINE	0x002	/**< Matching users are exempt from Kill blocks */
+#define EFLAG_GLINE	0x004	/**< Matching users are exempt from GLINE */
+#define EFLAG_ZLINE     0x008   /**< Matching users are exempt from ZLINE */
+#define EFLAG_IDENT	0x010	/**< Matching users are exempt from ident lookups */
+#define EFLAG_RDNS	0x020	/**< Matching users are exempt from rDNS lookups */
+#define EFLAG_IPCHECK   0x040   /**< Matching users are exempt from IPcheck checks */
+#define EFLAG_TARGLIMIT 0x080   /**< Matching users are exempt from target limiting */
+#define EFLAG_LISTDELAY 0x100   /**< Matching users are exempt from LISTDELAY */
 
 /*
  * GLOBALS

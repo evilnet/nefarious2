@@ -220,6 +220,7 @@ IRCD_SRC = \
 	m_whowas.c \
 	m_xquery.c \
 	m_xreply.c \
+	m_zline.c \
 	match.c \
 	memdebug.c \
 	motd.c \
@@ -249,7 +250,8 @@ IRCD_SRC = \
 	watch.c \
 	whocmds.c \
 	whowas.c \
-	y.tab.c
+	y.tab.c \
+	zline.c
 
 SRC = ${IRCD_SRC} ${ENGINE_C} ${CRYPTO_SRC}
 
@@ -872,7 +874,7 @@ m_remove.o: m_remove.c ../config.h ../include/client.h ../include/gline.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \
   ../include/numeric.h ../include/numnicks.h ../include/send.h \
-  ../include/shun.h
+  ../include/shun.h ../include/zline.h
 m_reset.o: m_reset.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/numeric.h \
@@ -1107,6 +1109,12 @@ m_xreply.o: m_xreply.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_string.h \
   ../include/msg.h ../include/numeric.h ../include/numnicks.h \
   ../include/s_auth.h ../include/send.h
+m_zline.o: m_zline.c ../config.h ../include/client.h ../include/zline.h \
+  ../include/hash.h ../include/ircd.h ../include/ircd_features.h \
+  ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_string.h \
+  ../include/match.h ../include/msg.h ../include/numeric.h \
+  ../include/numnicks.h ../include/s_conf.h ../include/s_debug.h \
+  ../include/s_misc.h ../include/send.h
 match.o: match.c ../config.h ../include/match.h ../include/ircd_chattr.h \
   ../include/ircd_string.h ../include/ircd_snprintf.h
 memdebug.o: memdebug.c ../include/ircd.h ../include/ircd_alloc.h \
@@ -1181,7 +1189,7 @@ s_bsd.o: s_bsd.c ../config.h ../include/s_bsd.h ../include/client.h \
   ../include/s_auth.h ../include/s_conf.h ../include/s_debug.h \
   ../include/s_misc.h ../include/s_user.h ../include/send.h \
   ../include/struct.h ../include/sys.h ../include/uping.h \
-  ../include/version.h
+  ../include/version.h ../include/zline.h
 s_conf.o: s_conf.c ../config.h ../include/s_conf.h ../include/IPcheck.h \
   ../include/class.h ../include/client.h ../include/crule.h \
   ../include/ircd_crypt.h ../include/ircd_features.h \
@@ -1194,7 +1202,7 @@ s_conf.o: s_conf.c ../config.h ../include/s_conf.h ../include/IPcheck.h \
   ../include/numnicks.h ../include/opercmds.h ../include/parse.h \
   ../include/res.h ../include/s_auth.h ../include/s_bsd.h \
   ../include/s_debug.h ../include/s_misc.h ../include/send.h \
-  ../include/struct.h ../include/sys.h
+  ../include/struct.h ../include/sys.h ../include/zline.h
 s_debug.o: s_debug.c ../config.h ../include/s_debug.h ../include/channel.h \
   ../include/class.h ../include/client.h ../include/gline.h \
   ../include/hash.h ../include/ircd_alloc.h ../include/ircd_features.h \
@@ -1205,7 +1213,7 @@ s_debug.o: s_debug.c ../config.h ../include/s_debug.h ../include/channel.h \
   ../include/s_bsd.h ../include/s_conf.h ../include/s_user.h \
   ../include/s_stats.h ../include/send.h ../include/shun.h \
   ../include/struct.h ../include/sys.h ../include/watch.h \
-  ../include/whowas.h
+  ../include/whowas.h ../include/zline.h
 s_err.o: s_err.c ../config.h ../include/numeric.h ../include/ircd_log.h \
   ../include/s_debug.h
 s_misc.o: s_misc.c ../config.h ../include/s_misc.h ../include/IPcheck.h \
@@ -1233,7 +1241,8 @@ s_serv.o: s_serv.c ../config.h ../include/s_serv.h ../include/IPcheck.h \
   ../include/parse.h ../include/querycmds.h ../include/s_bsd.h \
   ../include/s_conf.h ../include/s_debug.h ../include/s_misc.h \
   ../include/s_user.h ../include/send.h ../include/shun.h \
-  ../include/struct.h ../include/sys.h ../include/userload.h
+  ../include/struct.h ../include/sys.h ../include/userload.h \
+  ../include/zline.h
 s_stats.o: s_stats.c ../config.h ../include/class.h ../include/client.h \
   ../include/gline.h ../include/hash.h ../include/ircd.h \
   ../include/ircd_chattr.h ../include/ircd_events.h \
@@ -1245,7 +1254,7 @@ s_stats.o: s_stats.c ../config.h ../include/class.h ../include/client.h \
   ../include/s_bsd.h ../include/s_conf.h ../include/s_debug.h \
   ../include/s_misc.h ../include/s_serv.h ../include/s_stats.h \
   ../include/s_user.h ../include/send.h ../include/shun.h \
-  ../include/struct.h ../include/userload.h
+  ../include/struct.h ../include/userload.h ../include/zline.h
 s_user.o: s_user.c ../config.h ../include/s_user.h ../include/IPcheck.h \
   ../include/channel.h ../include/class.h ../include/client.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
@@ -1321,4 +1330,13 @@ whowas.o: whowas.c ../config.h ../include/whowas.h ../include/client.h \
   ../include/list.h ../include/numeric.h ../include/s_debug.h \
   ../include/s_misc.h ../include/s_user.h ../include/send.h \
   ../include/struct.h ../include/sys.h ../include/msg.h
+zline.o: zline.c ../config.h ../include/zline.h ../include/channel.h \
+  ../include/client.h ../include/ircd.h ../include/ircd_alloc.h \
+  ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
+  ../include/ircd_snprintf.h ../include/ircd_string.h ../include/match.h \
+  ../include/numeric.h ../include/res.h ../include/s_bsd.h \
+  ../include/s_conf.h ../include/s_debug.h ../include/s_misc.h \
+  ../include/s_stats.h ../include/send.h ../include/struct.h \
+  ../include/sys.h ../include/msg.h ../include/numnicks.h \
+  ../include/numeric.h
 

@@ -842,6 +842,13 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_unregistered, m_watch, m_ignore, m_watch, m_ignore }
   },
+  {
+    MSG_ZLINE,
+    TOK_ZLINE,
+    0, MAXPARA,         0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_zline, ms_zline, mo_zline, m_ignore }
+  },
 
   /* This command is an alias for QUIT during the unregistered part of
    * of the server.  This is because someone jumping via a broken web

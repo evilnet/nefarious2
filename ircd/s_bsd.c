@@ -57,6 +57,7 @@
 #include "sys.h"
 #include "uping.h"
 #include "version.h"
+#include "zline.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -514,6 +515,8 @@ void add_connection(struct Listener* listener, int fd) {
   struct irc_sockaddr addr;
   struct Client      *new_client;
   time_t              next_target = 0;
+  struct Zline*       azline = NULL;
+  char                zreason[256];
 #ifdef USE_SSL
   char               *sslfp;
 #endif
@@ -589,6 +592,20 @@ void add_connection(struct Listener* listener, int fd) {
 
   if (next_target)
     cli_nexttarget(new_client) = next_target;
+
+/* Begin Zline */
+  if (!feature_bool(FEAT_DISABLE_ZLINES) && (azline = zline_lookup(new_client, 0))) {
+    ircd_snprintf(0, zreason, sizeof(zreason), "ERROR :Z-lined (%s)", azline->zl_reason);
+#ifdef USE_SSL
+    ssl_murder(ssl, fd, zreason);
+#else
+    write(fd, zreason, strlen(zreason));
+    close(fd);
+#endif
+    cli_fd(new_client) = -1;
+    return;
+  }
+/* End Zline */
 
   cli_fd(new_client) = fd;
   if (!socket_add(&(cli_socket(new_client)), client_sock_callback,

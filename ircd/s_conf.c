@@ -58,6 +58,7 @@
 #include "send.h"
 #include "struct.h"
 #include "sys.h"
+#include "zline.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -1348,6 +1349,7 @@ int find_kill(struct Client *cptr)
   const char*      version;
   struct DenyConf* deny;
   struct Gline*    agline = NULL;
+  struct Zline*    azline = NULL;
 
   assert(0 != cptr);
 
@@ -1402,6 +1404,16 @@ int find_kill(struct Client *cptr)
       }
       return -1;
     }
+  }
+
+  /* Check Zlines here just in case a spoofed IP matches */
+  if (!feature_bool(FEAT_DISABLE_ZLINES) && (azline = zline_lookup(cptr, 0))) {
+    /*
+     * find active zlines
+     * added a check against the user's IP address to find_zline()
+     */
+    send_reply(cptr, SND_EXPLICIT | ERR_YOUREBANNEDCREEP, ":%s.", ZlineReason(azline));
+    return -2;
   }
 
   /* Don't need to do an except lookup here as it's done in gline_lookup() */

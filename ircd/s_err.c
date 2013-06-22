@@ -478,7 +478,7 @@ static Numeric replyTable[] = {
 /* 222 */
   { RPL_STATSJLINE, "J %s", "222" },
 /* 223 */
-  { RPL_STATSELINE, "E %s@%s * %s%s%s%s%s%s%s%s", "223" },
+  { RPL_STATSELINE, "E %s@%s * %s%s%s%s%s%s%s%s%s", "223" },
 /* 224 */
   { 0 },
 /* 225 */
@@ -1124,15 +1124,15 @@ static Numeric replyTable[] = {
 /* 545 */
   { RPL_ENDOFSLIST, ":End of Shun List", "545" },
 /* 546 */
-  { 0 },
+  { RPL_STATSZLINE, "%c %s %Tu %Tu %Tu %s%c :%s", "546" },
 /* 547 */
-  { 0 },
+  { ERR_NOSUCHZLINE, "%s :No such ZLine", "547" },
 /* 548 */
-  { 0 },
+  { RPL_ZLIST, "%s %Tu %Tu %Tu %s %s%c :%s", "548" },
 /* 549 */
-  { 0 },
+  { RPL_ENDOFZLIST, ":End of Z-line List", "549" },
 /* 550 */
-  { 0 },
+  { ERR_INVALIDMASK, ":zline masks must contain an IP address.", "550" },
 /* 551 */
   { 0 },
 /* 552 */

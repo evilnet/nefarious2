@@ -1,0 +1,124 @@
+ZLINE documentation, last updated on 22 Jun 2013
+
+For an ordinary user, the syntax is:
+
+  ZLINE [<mask>]
+
+If <mask> is given, and if a Z-line for that server exists, all the
+information about that Z-line is displayed.  If <mask> is not given,
+an error is returned.
+
+For an operator, the syntax is:
+
+  ZLINE [[!][+|-|>|<]<mask> [<target>] [<expiration> [:<reason>]]]
+
+There are a total of 10 basic forms of the ZLINE command.  If no
+arguments are given, all existing Z-lines will be listed; if only
+<mask> is given, the behavior is the same as for an ordinary user.
+The remaining forms allow Z-lines to be set, manipulated, or possibly
+destroyed.
+
+* Local Z-lines.
+
+Opers may set or remove Z-lines that only apply to a specific server.
+When the <target> parameter is not given, the specific server will be
+the local server; otherwise, it will be taken to be a remote server,
+and the Z-line operations will take place there, if the oper has the
+ZLINE privilege.  When <mask> is preceded with the '+' character, the
+Z-line will be added, and <expiration> and <reason> are required; when
+<mask> is preceded with the '-' character, the Z-line will be removed,
+and <expiration> and <reason> are not required.  The '<' and '>'
+character prefixes are not valid for local Z-lines.
+
+* Local modifications to global Z-lines.
+
+Opers may locally activate or deactivate global Z-lines.  In this
+mode, <mask> is interpreted as referencing an existing Z-line, and
+will be preceded by either '<' (to locally deactivate the Z-line) or
+'>' (to locally activate the Z-line).  This local state overrides the
+global state of the Z-line, and persists until there is a global state
+change to the Z-line, or until the Z-line expires.  The <expiration>
+and <reason> arguments are not required, but <target> may be given if
+the oper desires to make the appropriate change on a remote
+server--note that the oper will need the ZLINE privilege for this.
+
+* Global Z-lines.
+
+Opers may, if they have the ZLINE privilege, set and manipulate global
+Z-lines on the network.  To create a new Z-line, the oper must prefix
+the <mask> with either '+' (for globally activated Z-lines) or '-'
+(for globally deactivated Z-lines).  Additionally, <target> must be
+given as "*", and the <expiration> and <reason> parameters are
+required.  If the Z-line already exists, it will be modified to match
+the new global status, <expiration>, and <reason>.
+
+When the Z-line already exists, an oper may activate or deactivate it
+simply by setting <target> to "*" and prefixing the <mask> with either
+"+" (to activate the Z-line) or "-" (to deactivate it).  If it is
+desired to simply modify the expiration time or reason, without
+changing the activation status, specify <mask> without any prefix, set
+<target> to "*", and provide the updated <expire> and optionally an
+updated <reason>.
+
+* Privilege notes.
+
+Note that, for all locally-restricted Z-line changes, such as locally
+activating a Z-line or creating a local Z-line, the oper must have the
+LOCAL_ZLINE privilege.  For any other Z-line change, including
+locally-restricted changes on remote servers, the server's
+CONFIG_OPERCMDS privilege must be enabled and the oper must have the
+ZLINE privilege.  There are also restrictions to prevent an oper from
+setting a Z-line that is too wide; in some cases, those restrictions
+may be overridden by prefixing the <mask> parameter with the "!"
+character, IF the operator has the WIDE_ZLINE privilege.
+
+For a server, the syntax is:
+
+  <prefix> ZL <target> [!][+|-|>|<]<mask> [<expiration>] [<lastmod>]
+	[<lifetime>] [:<reason>]
+
+There are a total of 8 basic forms of the ZL command.  The primary
+innovation is the addition of the <lifetime> parameter, which
+specifies a lifetime for the Z-line record which may be longer than
+the expiration time.  <lifetime> will be monotonically increasing,
+enabling <expiration> to be modified in any way desirable.
+
+* Local Z-lines.
+
+Remote servers, or opers on them, may remotely set local Z-lines on
+the local server.  To create a local Z-line, <target> will be set to
+the numeric of the local server, and <mask> must be preceded by '+'
+(optionally preceded by '!' if the origin desires to override some
+safety settings).  The <expiration> and <reason> parameters are
+required.  The <lastmod> and <lifetime> parameters will be ignored if
+present, allowing backwards compatibility with ircu2.10.12.10 and
+prior versions.  Removing local Z-lines is similar--<mask> must be
+preceded by '-', and all other parameters are ignored to allow
+backwards compatibility.
+
+* Local modifications to global Z-lines.
+
+Remote servers, or opers on them, may also locally activate or
+deactivate a global Z-line on the local server.  The <target> must be
+set to the numeric of the local server, and <mask> must be preceded by
+either '<' (to locally deactivate the Z-line) or '>' (to locally
+activate the Z-line).  This local state overrides the global state of
+the Z-line, and persists until there is a global state change to the
+Z-line, or until the Z-line expires.  No other parameters are
+necessary in this mode, and will be ignored if present.
+
+* Global Z-lines.
+
+For creation and manipulation of global Z-lines, the <target>
+parameter must be set to "*".  If the Z-line does not exist, and if
+<expiration> is given, the Z-line will be created with the specified
+expiration and <reason> (the latter defaulting to "No reason" if not
+present).  Otherwise, the Z-line will be updated according to the
+available parameters.  The rules are similar to those for oper-issued
+global Z-lines, with the addition of a <lastmod> parameter, which is a
+monotonically increasing serial number for the Z-line, and an optional
+<lifetime> parameter that specifies a monotonically increasing
+lifetime for the Z-line record.  Note that, for existing Z-lines where
+only state changes (global activation or deactivation) are necessary,
+only <lastmod> is required; <expiration> must be specified for all
+other forms of the ZL command.

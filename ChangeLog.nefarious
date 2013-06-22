@@ -3,6 +3,64 @@
 
 2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added ZLINE support.
+
+	* doc/readme.features: Added ZLINE support.
+
+	* include/client.h: Added ZLINE support.
+
+	* include/handlers.h: Added ZLINE support.
+
+	* include/ircd_features.h: Added ZLINE support.
+
+	* include/ircd_string.h: Added ZLINE support.
+
+	* include/msg.h: Added ZLINE support.
+
+	* include/numeric.h: Added ZLINE support.
+
+	* include/s_conf.h: Added ZLINE support.
+
+	* ircd/Makefile.in: Added ZLINE support.
+
+	* ircd/client.c: Added ZLINE support.
+
+	* ircd/ircd_features.c: Added ZLINE support.
+
+	* ircd/ircd_lexer.l: Added ZLINE support.
+
+	* ircd/ircd_parser.y: Added ZLINE support.
+
+	* ircd/ircd_string.c: Added ZLINE support.
+
+	* ircd/m_check.c: Added ZLINE support.
+
+	* ircd/m_remove.c: Added ZLINE support.
+
+	* ircd/parse.c: Added ZLINE support.
+
+	* ircd/s_bsd.c: Added ZLINE support.
+
+	* ircd/s_conf.c: Added ZLINE support.
+
+	* ircd/s_debug.c: Added ZLINE support.
+
+	* ircd/s_err.c: Added ZLINE support.
+
+	* ircd/s_serv.c: Added ZLINE support.
+
+	* ircd/s_stats.c: Added ZLINE support.
+
+	* doc/readme.zline: Added ZLINE support.
+
+	* include/zline.h: Added ZLINE support.
+
+	* ircd/m_zline.c: Added ZLINE support.
+
+	* ircd/zline.c: Added ZLINE support.
+
+2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Minor changes to the Class block privileges
 	listing.
 

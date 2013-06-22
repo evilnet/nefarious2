@@ -153,6 +153,7 @@ extern int m_webirc(struct Client*, struct Client*, int, char*[]);
 extern int m_who(struct Client*, struct Client*, int, char*[]);
 extern int m_whois(struct Client*, struct Client*, int, char*[]);
 extern int m_whowas(struct Client*, struct Client*, int, char*[]);
+extern int m_zline(struct Client*, struct Client*, int, char*[]);
 extern int mo_admin(struct Client*, struct Client*, int, char*[]);
 extern int mo_asll(struct Client*, struct Client*, int, char*[]);
 extern int mo_check(struct Client*, struct Client*, int, char*[]);
@@ -188,6 +189,7 @@ extern int mo_version(struct Client*, struct Client*, int, char*[]);
 extern int mo_wallops(struct Client*, struct Client*, int, char*[]);
 extern int mo_wallusers(struct Client*, struct Client*, int, char*[]);
 extern int mo_xquery(struct Client*, struct Client*, int, char*[]);
+extern int mo_zline(struct Client*, struct Client*, int, char*[]);
 extern int mr_error(struct Client*, struct Client*, int, char*[]);
 extern int mr_error(struct Client*, struct Client*, int, char*[]);
 extern int mr_pong(struct Client*, struct Client*, int, char*[]);
@@ -265,6 +267,7 @@ extern int ms_wallvoices(struct Client*, struct Client*, int, char*[]);
 extern int ms_whois(struct Client*, struct Client*, int, char*[]);
 extern int ms_xquery(struct Client*, struct Client*, int, char*[]);
 extern int ms_xreply(struct Client*, struct Client*, int, char*[]);
+extern int ms_zline(struct Client*, struct Client*, int, char*[]);
 
 #endif /* INCLUDED_handlers_h */
 
