@@ -447,6 +447,7 @@ admincontact: CONTACT '=' QSTRING ';'
 
 classblock: CLASS {
   tping = 90;
+  snomask = 0;
 } '{' classitems '}' ';'
 {
   if (name != NULL)
@@ -638,7 +639,10 @@ uworldname: NAME '=' QSTRING ';'
   make_conf(CONF_UWORLD)->host = $3;
 };
 
-operblock: OPER '{' operitems '}' ';'
+operblock: OPER
+{
+  snomask = 0;
+} '{' operitems '}' ';'
 {
   struct ConfItem *aconf = NULL;
   struct SLink *link;
@@ -663,6 +667,7 @@ operblock: OPER '{' operitems '}' ';'
       DupString(aconf->sslfp, sslfp);
     conf_parse_userhost(aconf, link->value.cp);
     aconf->conn_class = c_class;
+    aconf->snomask = snomask;
     memcpy(&aconf->privs, &privs, sizeof(aconf->privs));
     memcpy(&aconf->privs_dirty, &privs_dirty, sizeof(aconf->privs_dirty));
   }
@@ -676,7 +681,7 @@ operblock: OPER '{' operitems '}' ';'
   memset(&privs_dirty, 0, sizeof(privs_dirty));
 };
 operitems: operitem | operitems operitem;
-operitem: opername | operpass | operhost | operclass | opersslfp |priv;
+operitem: opername | operpass | operhost | operclass | opersslfp | opersnomask | priv;
 opername: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -714,6 +719,10 @@ opersslfp: SSLFP '=' QSTRING ';'
 {
   MyFree(sslfp);
   sslfp = $3;
+};
+opersnomask: SNOMASK '=' expr ';'
+{
+  snomask = $3;
 };
 
 priv: privtype '=' yesorno ';'

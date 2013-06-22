@@ -121,6 +121,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   ClearOper(sptr);
 
   snomask = ConfSnoMask(aconf) & SNO_ALL;
+  snomask |= aconf->snomask & SNO_ALL;
 
   if (MyUser(sptr)) {
     SetLocOp(sptr);

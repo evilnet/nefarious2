@@ -3,6 +3,16 @@
 
 2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added a 'snomask' option to Operator blocks.
+
+	* include/s_conf.h: Added a 'snomask' option to Operator blocks.
+
+	* ircd/ircd_parser.y: Added a 'snomask' option to Operator blocks.
+
+	* ircd/m_oper.c: Added a 'snomask' option to Operator blocks.
+
+2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/readme.shun: Added SHUN documentation.
 
 2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>

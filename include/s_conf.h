@@ -83,6 +83,7 @@ struct ConfItem
   int dns_pending;    /**< A dns request is pending. */
   int flags;          /**< Additional modifiers for item. */
   int addrbits;       /**< Number of bits valid in ConfItem::address. */
+  unsigned int snomask; /**< Default server notice mask. */
   struct Privs privs; /**< Privileges for opers. */
   /** Used to detect if a privilege has been set by this ConfItem. */
   struct Privs privs_dirty;
