@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Minor changes to the Class block privileges
+	listing.
+
 2013-06-21  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/Makefile.in: Updated object file dependancy lists.
