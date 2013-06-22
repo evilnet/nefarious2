@@ -3,6 +3,10 @@
 
 2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/readme.shun: Added SHUN documentation.
+
+2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added ZLINE support.
 
 	* doc/readme.features: Added ZLINE support.
