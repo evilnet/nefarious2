@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-23  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/channel.c: Changed the behaviour of setting channel modes
+	+c or +S to remove the oposite in the same way as +p and +s.
+
 2013-06-22  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added a 'snomask' option to Operator blocks.

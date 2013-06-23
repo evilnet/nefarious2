@@ -3825,6 +3825,14 @@ mode_parse_exmode(struct ParseState *state, int *flag_p)
   if (state->dir == MODE_ADD) {
     state->exadd |= flag_p[0];
     state->exdel &= ~flag_p[0];
+
+    if (flag_p[0] & EXMODE_STRIPCOLOR) {
+      state->exadd &= ~EXMODE_NOCOLOR;
+      state->exdel |= EXMODE_NOCOLOR;
+    } else if (flag_p[0] & EXMODE_NOCOLOR) {
+      state->exadd &= ~EXMODE_STRIPCOLOR;
+      state->exdel |= EXMODE_STRIPCOLOR;
+    }
   } else {
     state->exadd &= ~flag_p[0];
     state->exdel |= flag_p[0];
