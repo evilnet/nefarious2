@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/shun.c: Missed a few instances of gl that should have been
+	changed to sh.
+
 2013-06-23  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Changed the behaviour of setting channel modes

@@ -69,30 +69,30 @@
 struct Shun* GlobalShunList  = 0;
 
 /** Iterate through \a list of Shuns.  Use this like a for loop,
- * i.e., follow it with braces and use whatever you passed as \a gl
+ * i.e., follow it with braces and use whatever you passed as \a sh
  * as a single Shun to be acted upon.
  *
  * @param[in] list List of Shuns to iterate over.
- * @param[in] gl Name of a struct Shun pointer variable that will be made to point to the Shuns in sequence.
+ * @param[in] sh Name of a struct Shun pointer variable that will be made to point to the Shuns in sequence.
  * @param[in] next Name of a scratch struct Shun pointer variable.
  */
 /* There is some subtlety here with the boolean operators:
  * (x || 1) is used to continue in a logical-and series even when !x.
  * (x && 0) is used to continue in a logical-or series even when x.
  */
-#define shiter(list, gl, next)				\
+#define shiter(list, sh, next)				\
   /* Iterate through the Shuns in the list */		\
-  for ((gl) = (list); (gl); (gl) = (next))		\
+  for ((sh) = (list); (sh); (sh) = (next))		\
     /* Figure out the next pointer in list... */	\
-    if ((((next) = (gl)->sh_next) || 1) &&		\
+    if ((((next) = (sh)->sh_next) || 1) &&		\
 	/* Then see if it's expired */			\
-	(gl)->sh_lifetime <= TStime())                  \
+	(sh)->sh_lifetime <= TStime())                  \
       /* Record has expired, so free the Shun */	\
-      shun_free((gl));					\
+      shun_free((sh));					\
     /* See if we need to expire the Shun */		\
-    else if ((((gl)->sh_expire > TStime()) ||		\
-	      (((gl)->sh_flags &= ~SHUN_ACTIVE) && 0) ||	\
-	      ((gl)->sh_state = SLOCAL_GLOBAL)) && 0)	\
+    else if ((((sh)->sh_expire > TStime()) ||		\
+	      (((sh)->sh_flags &= ~SHUN_ACTIVE) && 0) ||	\
+	      ((sh)->sh_state = SLOCAL_GLOBAL)) && 0)	\
       ; /* empty statement */				\
     else
 
@@ -1162,17 +1162,17 @@ int
 shun_memory_count(size_t *sh_size)
 {
   struct Shun *shun;
-  unsigned int gl = 0;
+  unsigned int sh = 0;
 
   for (shun = GlobalShunList; shun; shun = shun->sh_next) {
-    gl++;
+    sh++;
     *sh_size += sizeof(struct Shun);
     *sh_size += shun->sh_user ? (strlen(shun->sh_user) + 1) : 0;
     *sh_size += shun->sh_host ? (strlen(shun->sh_host) + 1) : 0;
     *sh_size += shun->sh_reason ? (strlen(shun->sh_reason) + 1) : 0;
   }
 
-  return gl;
+  return sh;
 }
 
 /** Check for and remove any expired shuns.
