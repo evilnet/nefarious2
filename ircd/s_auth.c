@@ -282,12 +282,13 @@ static int auth_set_username(struct AuthRequest *auth)
       || ((user->username[0] == '~') && (user->username[1] == '\0')))
     return exit_client(sptr, sptr, &me, "USER: Bogus userid.");
 
-  /* Check for K- or G-line. */
+  /* Check for K-, G- or Z-line. */
   killreason = find_kill(sptr);
   if (killreason) {
     ServerStats->is_ref++;
     return exit_client(sptr, sptr, &me,
-                       (killreason == -1 ? "K-lined" : "G-lined"));
+                       (killreason == -1 ? "K-lined" :
+                        (killreason == -2 ? "G-lined" : "Z-lined")));
   }
 
   if (!FlagHas(&auth->flags, AR_IAUTH_FUSERNAME))

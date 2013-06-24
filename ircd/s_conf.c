@@ -1284,13 +1284,14 @@ int rehash(struct Client *cptr, int sig)
        * whats going on.
        */
       if ((found_g = find_kill(acptr))) {
-        sendto_opmask_butone(0, found_g == -2 ? SNO_GLINE : SNO_OPERKILL,
+        sendto_opmask_butone(0, found_g > -1 ? SNO_GLINE : SNO_OPERKILL,
                              found_g == -2 ? "G-line active for %s%s" :
-                             "K-line active for %s%s",
+                             (found_g == -3 ? "Z-line active for %s%s" :
+                             "K-line active for %s%s"),
                              IsUnknown(acptr) ? "Unregistered Client ":"",
                              get_client_name(acptr, SHOW_IP));
         if (exit_client(cptr, acptr, &me, found_g == -2 ? "G-lined" :
-            "K-lined") == CPTR_KILLED)
+            (found_g == -3 ? "Z-lined" : "K-lined")) == CPTR_KILLED)
           ret = CPTR_KILLED;
       }
     }
@@ -1337,7 +1338,8 @@ int init_conf(void)
  * user and disconnect them.
  * @param cptr Client to search for.
  * @return 0 if client is accepted; -1 if client was locally denied
- * (K-line); -2 if client was globally denied (G-line).
+ * (K-line); -2 if client was globally denied (G-line); -3 if client
+ * was globally IP denied (Z-line).
  */
 int find_kill(struct Client *cptr)
 {
@@ -1413,7 +1415,7 @@ int find_kill(struct Client *cptr)
      * added a check against the user's IP address to find_zline()
      */
     send_reply(cptr, SND_EXPLICIT | ERR_YOUREBANNEDCREEP, ":%s.", ZlineReason(azline));
-    return -2;
+    return -3;
   }
 
   /* Don't need to do an except lookup here as it's done in gline_lookup() */
