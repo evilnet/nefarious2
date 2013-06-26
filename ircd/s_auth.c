@@ -408,6 +408,18 @@ static void auth_loc_timeout_callback(struct Event* ev)
   }
 }
 
+static void auth_complete_sasl(struct Client *client)
+{
+  if (IsSASLComplete(client) && cli_saslaccount(client)[0]) {
+    if (cli_saslacccreate(client))
+      cli_user(client)->acc_create = cli_saslacccreate(client);
+    ircd_strncpy(cli_user(client)->account, cli_saslaccount(client), ACCOUNTLEN);
+    SetAccount(client);
+  }
+
+  abort_sasl(client);
+}
+
 static void auth_do_loc(struct Client *client, struct Client *service)
 {
   /* If a cookie already exists, we're already doing LOC */
@@ -487,6 +499,10 @@ static int check_auth_finished(struct AuthRequest *auth)
       return 0;
     }
   }
+
+  /* Finish off SASL. */
+  if (IsUserPort(auth->client))
+    auth_complete_sasl(auth->client);
 
   /* If appropriate, do preliminary assignment to connection class. */
   if (IsUserPort(auth->client)

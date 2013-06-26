@@ -382,15 +382,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
       set_user_mode(cptr, sptr, 3, umodev, ALLOWMODES_ANY);
     }
 
-    if (IsSASLComplete(sptr) && cli_saslaccount(sptr)[0]) {
-      if (cli_saslacccreate(sptr))
-        cli_user(sptr)->acc_create = cli_saslacccreate(sptr);
-      ircd_strncpy(cli_user(sptr)->account, cli_saslaccount(sptr), ACCOUNTLEN);
-      SetAccount(sptr);
-    }
-
-    abort_sasl(sptr);
-
     SetUser(sptr);
     cli_handler(sptr) = CLIENT_HANDLER;
     SetLocalNumNick(sptr);
