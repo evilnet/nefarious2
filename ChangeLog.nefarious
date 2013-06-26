@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-26  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_conf.c: Fixed memory leak when clearing denyConfList.
+
 2013-06-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_auth.c: A couple of minor changes missed when adding

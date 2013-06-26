@@ -786,6 +786,7 @@ void conf_erase_deny_list(void)
     MyFree(p->realmask);
     MyFree(p->countrymask);
     MyFree(p->continentmask);
+    MyFree(p->version);
     MyFree(p);
   }
   denyConfList = 0;
