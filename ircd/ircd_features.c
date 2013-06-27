@@ -677,6 +677,7 @@ static struct FeatureDesc {
   F_S(HOST_HIDING_KEY1, 0, "aoAr1HnR6gl3sJ7hVz4Zb7x4YwpW", 0),
   F_S(HOST_HIDING_KEY2, 0, "sdfjkLJKHlkjdkfjsdklfjlkjKLJ", 0),
   F_S(HOST_HIDING_KEY3, 0, "KJklJSDFLkjLKDFJSLKjlKJFlkjS", 0),
+  F_I(HOST_HIDING_COMPONANTS, 0, 1, 0),
 
   /* CTCP VERSION FEAT_'s */
   F_B(CTCP_VERSIONING, 0, 0, 0),

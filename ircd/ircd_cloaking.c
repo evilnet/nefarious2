@@ -179,6 +179,7 @@ char *hidehost_normalhost(char *host)
 char *p;
 static char buf[512], res[512], res2[512], result[HOSTLEN+1];
 unsigned int alpha, n;
+int componants = 0;
 
         ircd_snprintf(0, buf, 512, "%s:%s:%s", KEY1, host, KEY2);
         DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
@@ -187,10 +188,13 @@ unsigned int alpha, n;
         DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
         alpha = downsample((unsigned char *)&res2);
 
-        for (p = host; *p; p++)
-                if (*p == '.')
-                        if (IsAlpha(*(p + 1)))
+        for (p = host; *p; p++) {
+                if (*p == '.') {
+                        componants++;
+                        if ((componants >= feature_int(FEAT_HOST_HIDING_COMPONANTS)) && IsAlpha(*(p + 1)))
                                 break;
+                }
+        }
 
         if (*p)
         {

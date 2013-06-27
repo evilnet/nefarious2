@@ -3,6 +3,18 @@
 
 2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_HOST_HIDING_COMPONANTS feature.
+
+	* doc/readme.features: Added FEAT_HOST_HIDING_COMPONANTS feature.
+
+	* include/ircd_features.h: Added FEAT_HOST_HIDING_COMPONANTS feature.
+
+	* ircd/ircd_cloaking.c: Added FEAT_HOST_HIDING_COMPONANTS feature.
+
+	* ircd/ircd_features.c: Added FEAT_HOST_HIDING_COMPONANTS feature.
+
+2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added DNSBL_DATA mark.
 
 	* include/mark.h: Added DNSBL_DATA mark.

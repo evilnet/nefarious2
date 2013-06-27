@@ -1384,6 +1384,13 @@ HOST_HIDING_KEY3
 One of the 3 unique host hiding keys used to encrypt style 2 hidden
 hosts. These must all be different.
 
+HOST_HIDING_COMPONANTS
+ * Type: integer
+ * Default: 1
+
+Specifies the maximum number of host name componants to be replaced when
+using HOST_HIDING_STYLE 2 and 3.
+
 CTCP_VERSIONING
  * Type: boolean
  * Default: FALSE
