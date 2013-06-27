@@ -29,6 +29,7 @@
 #define MARK_GEOIP              "GEOIP"                 /**< GEOIP mark. */
 #define MARK_CVERSION           "CVERSION"              /**< Client Version mark */
 #define MARK_SSLCLIFP           "SSLCLIFP"              /**< SSL client certificate fingerprint */
+#define MARK_DNSBL_DATA         "DNSBL_DATA"            /**< DNSBL data mark */
 
 #endif /* INCLUDED_mark_h */
 

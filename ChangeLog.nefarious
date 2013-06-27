@@ -1,6 +1,34 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/client.h: Added DNSBL_DATA mark.
+
+	* include/mark.h: Added DNSBL_DATA mark.
+
+	* include/numeric.h: Added DNSBL_DATA mark.
+
+	* include/s_conf.h: Added DNSBL_DATA mark.
+
+	* ircd/Makefile.in: Added DNSBL_DATA mark.
+
+	* ircd/m_mark.c: Added DNSBL_DATA mark.
+
+	* ircd/m_whois.c: Added DNSBL_DATA mark.
+
+	* ircd/s_auth.c: Added DNSBL_DATA mark.
+
+	* ircd/s_conf.c: Added DNSBL_DATA mark.
+
+	* ircd/s_err.c: Added DNSBL_DATA mark.
+
+	* ircd/s_misc.c: Added DNSBL_DATA mark.
+
+	* ircd/s_serv.c: Added DNSBL_DATA mark.
+
+	* ircd/s_user.c: Added DNSBL_DATA mark.
+
 2013-06-26  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_auth.c: Moved SASL completion code to s_auth.c

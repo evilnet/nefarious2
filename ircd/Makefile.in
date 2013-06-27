@@ -764,7 +764,7 @@ m_mark.o: m_mark.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_geoip.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/mark.h \
   ../include/msg.h ../include/numeric.h ../include/numnicks.h \
-  ../include/send.h
+  ../include/send.h ../include/s_conf.h
 m_mkpasswd.o: m_mkpasswd.c ../config.h ../include/client.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_crypt.h \
   ../include/ircd_crypt_native.h ../include/ircd_crypt_plain.h \
@@ -1095,7 +1095,7 @@ m_whois.o: m_whois.c ../config.h ../include/channel.h ../include/client.h \
   ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_string.h \
   ../include/match.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/s_user.h ../include/send.h \
-  ../include/whocmds.h
+  ../include/whocmds.h ../include/list.h
 m_whowas.o: m_whowas.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \

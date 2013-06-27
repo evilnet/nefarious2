@@ -1536,3 +1536,49 @@ int verify_sslclifp(struct Client* cptr, struct ConfItem* aconf)
   return 1;
 }
 
+int find_dnsbl(struct Client* sptr, const char* dnsbl)
+{
+  struct SLink *lp;
+
+  for (lp = cli_sdnsbls(sptr); lp; lp = lp->next) {
+    if (!ircd_strcmp(lp->value.cp, dnsbl))
+      return 1;
+  }
+
+  return 0;
+}
+
+int add_dnsbl(struct Client* sptr, const char* dnsbl)
+{
+  struct SLink *lp;
+
+  if (!find_dnsbl(sptr, dnsbl)) {
+    lp = make_link();
+    memset(lp, 0, sizeof(struct SLink));
+    lp->next = cli_sdnsbls(sptr);
+    lp->value.cp = (char*) MyMalloc(strlen(dnsbl) + 1);
+    assert(0 != lp->value.cp);
+    strcpy(lp->value.cp, dnsbl);
+    cli_sdnsbls(sptr) = lp;
+  }
+  return 0;
+}
+
+int del_dnsbls(struct Client* sptr)
+{
+  int count = 0;
+  struct SLink **lp;
+  struct SLink *tmp;
+
+  for (lp = &(cli_sdnsbls(sptr)); *lp;) {
+    tmp = *lp;
+    *lp = tmp->next;
+
+    MyFree(tmp->value.cp);
+    free_link(tmp);
+    count++;
+  }
+
+  return count;
+}
+

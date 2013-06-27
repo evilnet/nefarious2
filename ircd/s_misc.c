@@ -220,6 +220,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       free_ban(bp);
     }
 
+    /* Clean up sdnsblsfield */
+    del_dnsbls(bcptr);
+
     /* Clean up watch lists */
     if (MyUser(bcptr))
       del_list_watch(bcptr);

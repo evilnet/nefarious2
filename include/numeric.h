@@ -270,6 +270,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*      RPL_CHANPASSOK       338           IRCnet extension (?)*/
 #define	RPL_WHOISACTUALLY    338	/* Undernet extension, dalnet */
 /*	RPL_BADCHANPASS	     339           IRCnet extension (?) */
+#define RPL_WHOISDNSBL       339        /* Nefarious extension */
 #define RPL_USERIP           340        /* Undernet extension */
 #define RPL_INVITING         341
 /*      RPL_SUMMONING        342           removed from RFC1459 */

@@ -269,4 +269,8 @@ extern void yyerror(const char *msg);
 
 extern int verify_sslclifp(struct Client* cptr, struct ConfItem* aconf);
 
+extern int find_dnsbl(struct Client* sptr, const char* dnsbl);
+extern int add_dnsbl(struct Client* sptr, const char* dnsbl);
+extern int del_dnsbls(struct Client* sptr);
+
 #endif /* INCLUDED_s_conf_h */

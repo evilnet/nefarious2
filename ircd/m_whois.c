@@ -89,6 +89,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "match.h"
 #include "msg.h"
 #include "numeric.h"
@@ -236,6 +237,22 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
 
     if (IsBot(acptr))
       send_reply(sptr, RPL_WHOISBOT, name);
+
+    if (IsDNSBL(acptr)) {
+      struct SLink*  dp;
+      if (EmptyString(cli_dnsbls(acptr))) {
+        for (dp = cli_sdnsbls(acptr); dp; dp = dp->next) {
+          if (EmptyString(cli_dnsbls(acptr)))
+            strcat(cli_dnsbls(acptr), dp->value.cp);
+          else {
+            strcat(cli_dnsbls(acptr), ", ");
+            strcat(cli_dnsbls(acptr), dp->value.cp);
+          }
+        }
+      }
+
+      send_reply(sptr, RPL_WHOISDNSBL, name, cli_dnsbls(acptr));
+    }
 
     if (IsSSL(acptr)) {
       send_reply(sptr, RPL_WHOISSSL, name);

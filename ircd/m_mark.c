@@ -93,6 +93,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "s_conf.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -136,6 +137,15 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if ((acptr = FindUser(parv[1]))) {
        ircd_strncpy(cli_sslclifp(acptr), parv[3], BUFSIZE);
        sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_SSLCLIFP, parv[3]);
+    }
+  } else if (!strcmp(parv[2], MARK_DNSBL_DATA)) {
+    if(parc < 4)
+      return protocol_violation(sptr, "MARK client version received too few parameters (%u)", parc);
+
+    if ((acptr = FindUser(parv[1]))) {
+      add_dnsbl(acptr, parv[3]);
+      SetDNSBL(acptr);
+      sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_DNSBL_DATA, parv[3]);
     }
   }
 

@@ -2279,6 +2279,9 @@ static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
     ircd_strncpy(cli_version(cli), params[1], VERSIONLEN);
   } else if (!ircd_strcmp(params[0], MARK_SSLCLIFP)) {
     ircd_strncpy(cli_sslclifp(cli), params[1], BUFSIZE);
+  } else if (!ircd_strcmp(params[0], MARK_DNSBL_DATA)) {
+    add_dnsbl(cli, params[1]);
+    SetDNSBL(cli);
   } else {
     sendto_iauth(cli, "E Invalid :Invalid mark type");
   }

@@ -116,6 +116,7 @@ int a_kills_b_too(struct Client *a, struct Client *b)
  */
 int server_estab(struct Client *cptr, struct ConfItem *aconf)
 {
+  struct SLink*  lp = NULL;
   struct Client* acptr = 0;
   const char*    inpath;
   int            i;
@@ -271,6 +272,11 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_WEBIRC, cli_webirc(acptr));
+
+      for (lp = cli_sdnsbls(acptr); lp; lp = lp->next) {
+        sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
+                      cli_name(acptr), MARK_DNSBL_DATA, lp->value.cp);
+      }
 
       if (cli_sslclifp(acptr) && !EmptyString(cli_sslclifp(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
