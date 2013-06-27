@@ -78,6 +78,8 @@ struct ConfItem
                          this one. */
   char *countrymask;  /**< Mask for country code. */
   char *continentmask; /**< Mask for continent code. */
+  char *redirserver;  /**< Redirect to this server. */
+  int redirport;      /**< Redirect to this port. */
   time_t hold;        /**< Earliest time to attempt an outbound
                          connect on this ConfItem. */
   int dns_pending;    /**< A dns request is pending. */

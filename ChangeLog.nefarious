@@ -3,6 +3,22 @@
 
 2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added Client block redirect option.
+
+	* include/numeric.h: Added RPL_BOUNCE numeric.
+
+	* include/s_conf.h: Added Client block redirect option.
+
+	* ircd/ircd_lexer.l: Added Client block redirect option.
+
+	* ircd/ircd_parser.y: Added Client block redirect option.
+
+	* ircd/s_conf.c: Added Client block redirect option.
+
+	* ircd/s_err.c: Added RPL_BOUNCE numeric.
+
+2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_CAP_* features.
 
 	* doc/readme.features: Added FEAT_CAP_* features.

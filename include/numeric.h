@@ -57,6 +57,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*	RPL_MAP		       6	unreal */
 /*	RPL_MAPEND	       7	unreal */
 #define RPL_SNOMASK            8        /* Undernet extension */
+#define RPL_BOUNCE            10        /* Nefarious extension */
 /*       RPL_BOUNCE           10        efnet, IRCnet extension
                                         (server redirect) */
 /*      RPL_YOURCOOKIE        14           IRCnet extension */

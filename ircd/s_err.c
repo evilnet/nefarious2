@@ -52,7 +52,7 @@ static Numeric replyTable[] = {
 /* 009 */
   { 0 },
 /* 010 */
-  { 0 },
+  { RPL_BOUNCE, "%s %u :Please use this Server/Port instead", "010" },
 /* 011 */
   { 0 },
 /* 012 */

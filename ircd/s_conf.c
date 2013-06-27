@@ -384,6 +384,10 @@ enum AuthorizationCheckResult attach_iline(struct Client* cptr)
       continue;
     if (IPcheck_nr(cptr) > aconf->maximum)
       return ACR_TOO_MANY_FROM_IP;
+    if (aconf->redirserver && !EmptyString(aconf->redirserver)) {
+      send_reply(cptr, RPL_BOUNCE, aconf->redirserver, aconf->redirport);
+      return ACR_NO_AUTHORIZATION;
+    }
     if (aconf->username && !IsWebIRCUserIdent(cptr) && (aconf->flags & CONF_NOIDENTTILDE))
       SetFlag(cptr, FLAG_DOID);
     return attach_conf(cptr, aconf);
