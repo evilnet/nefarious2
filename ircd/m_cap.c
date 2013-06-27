@@ -29,6 +29,7 @@
 #include "client.h"
 #include "ircd.h"
 #include "ircd_chattr.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
@@ -50,18 +51,19 @@ static struct capabilities {
   unsigned long flags;
   char *name;
   int namelen;
+  int feat;
 } capab_list[] = {
-#define _CAP(cap, flags, name)						      \
-	{ CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1 }
-  _CAP(NONE, CAPFL_HIDDEN|CAPFL_PROHIBIT, "none"),
-  _CAP(NAMESX, 0, "multi-prefix"),
-  _CAP(UHNAMES, 0, "userhost-in-names"),
-  _CAP(EXTJOIN, 0, "extended-join"),
-  _CAP(AWAYNOTIFY, 0, "away-notify"),
-  _CAP(ACCNOTIFY, 0, "account-notify"),
-  _CAP(SASL, 0, "sasl"),
+#define _CAP(cap, flags, name, feat) \
+	{ CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1, feat }
+  _CAP(NONE, CAPFL_HIDDEN|CAPFL_PROHIBIT, "none", 0),
+  _CAP(NAMESX, 0, "multi-prefix", FEAT_CAP_multi_prefix),
+  _CAP(UHNAMES, 0, "userhost-in-names", FEAT_CAP_userhost_in_names),
+  _CAP(EXTJOIN, 0, "extended-join", FEAT_CAP_extended_join),
+  _CAP(AWAYNOTIFY, 0, "away-notify", FEAT_CAP_away_notify),
+  _CAP(ACCNOTIFY, 0, "account-notify", FEAT_CAP_account_notify),
+  _CAP(SASL, 0, "sasl", FEAT_CAP_sasl),
 #ifdef USE_SSL
-  _CAP(TLS, 0, "tls"),
+  _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
 /*  CAPLIST */
 #undef _CAP
@@ -171,7 +173,8 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
      */
     if (!(rem && CapHas(rem, capab_list[i].cap))
         && !(set && CapHas(set, capab_list[i].cap))
-        && (rem || set || (flags & CAPFL_HIDDEN)))
+        && (rem || set || (flags & CAPFL_HIDDEN)
+            || (capab_list[i].feat && (!feature_bool(capab_list[i].feat)))))
       continue;
 
     /* Build the prefix (space separator and any modifiers needed). */

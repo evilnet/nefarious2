@@ -1481,3 +1481,45 @@ ZLINEMAXUSERCOUNT
 Maximum amount of users a zline can affect when a zline is set via /ZLINE.
 zlines set via services or servers will not be affected by this rule.
 
+CAP_multi_prefix
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'multi-prefix' client capability.
+
+CAP_userhost_in_names
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'userhost-in-names' client capability.
+
+CAP_extended_join
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'extended-join' client capability.
+
+CAP_away_notify
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'away-notify' client capability.
+
+CAP_account_notify
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'account-notify' client capability.
+
+CAP_sasl
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'sasl' client capability.
+
+CAP_tls
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'tls' (STARTTLS) client capability.
+

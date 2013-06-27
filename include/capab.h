@@ -37,16 +37,16 @@
 
 /** Client capabilities */
 enum Capab {
-#define _CAP(cap, flags, name)	CAP_ ## cap
-  _CAP(NONE, CAPFL_HIDDEN|CAPFL_PROHIBIT, "none"),
-  _CAP(NAMESX, 0, "multi-prefix"),
-  _CAP(UHNAMES, 0, "userhost-in-names"),
-  _CAP(EXTJOIN, 0, "extended-join"),
-  _CAP(AWAYNOTIFY, 0, "away-notify"),
-  _CAP(ACCNOTIFY, 0, "account-notify"),
-  _CAP(SASL, 0, "sasl"),
+#define _CAP(cap, flags, name, feat)	CAP_ ## cap
+  _CAP(NONE, CAPFL_HIDDEN|CAPFL_PROHIBIT, "none", 0),
+  _CAP(NAMESX, 0, "multi-prefix", 0),
+  _CAP(UHNAMES, 0, "userhost-in-names", 0),
+  _CAP(EXTJOIN, 0, "extended-join", 0),
+  _CAP(AWAYNOTIFY, 0, "away-notify", 0),
+  _CAP(ACCNOTIFY, 0, "account-notify", 0),
+  _CAP(SASL, 0, "sasl", 0),
 #ifdef USE_SSL
-  _CAP(TLS, 0, "tls"),
+  _CAP(TLS, 0, "tls", 0),
 #endif
 /*  CAPLIST, */
 #undef _CAP

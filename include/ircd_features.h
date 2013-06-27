@@ -263,6 +263,17 @@ enum Feature {
   FEAT_HIS_ZLINE_REASON,
   FEAT_ZLINEMAXUSERCOUNT,
 
+  /* CAP FEAT_'s */
+  FEAT_CAP_multi_prefix,
+  FEAT_CAP_userhost_in_names,
+  FEAT_CAP_extended_join,
+  FEAT_CAP_away_notify,
+  FEAT_CAP_account_notify,
+  FEAT_CAP_sasl,
+#ifdef USE_SSL
+  FEAT_CAP_tls,
+#endif
+
   FEAT_LAST_F
 };
 

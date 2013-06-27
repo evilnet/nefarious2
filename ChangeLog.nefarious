@@ -3,6 +3,22 @@
 
 2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added FEAT_CAP_* features.
+
+	* doc/readme.features: Added FEAT_CAP_* features.
+
+	* include/capab.h: Added FEAT_CAP_* features.
+
+	* include/ircd_features.h: Added FEAT_CAP_* features.
+
+	* ircd/Makefile.in: Added FEAT_CAP_* features.
+
+	* ircd/ircd_features.c: Added FEAT_CAP_* features.
+
+	* ircd/m_cap.c: Added FEAT_CAP_* features.
+
+2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_HOST_HIDING_COMPONANTS feature.
 
 	* doc/readme.features: Added FEAT_HOST_HIDING_COMPONANTS feature.
