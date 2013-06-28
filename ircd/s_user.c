@@ -1139,6 +1139,10 @@ hide_hostmask(struct Client *cptr)
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ohv %C %C %C", chan->channel, cptr,
                                        cptr, cptr);
+    else if (IsChanOp(chan) && IsHalfOp(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+                                       "%H +oh %C %C", chan->channel, cptr,
+                                       cptr);
     else if (IsChanOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ov %C %C", chan->channel, cptr,
@@ -1215,6 +1219,10 @@ unhide_hostmask(struct Client *cptr)
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ohv %C %C", chan->channel, cptr,
                                        cptr, cptr);
+    else if (IsChanOp(chan) && IsHalfOp(chan))
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+                                       "%H +oh %C %C", chan->channel, cptr,
+                                       cptr);
     else if (IsChanOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
                                        "%H +ov %C %C", chan->channel, cptr,

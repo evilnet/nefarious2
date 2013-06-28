@@ -204,6 +204,7 @@ enum Feature {
   FEAT_LIST_PRIVATE_CHANNELS,
   FEAT_MAXWATCHS,
   FEAT_HIS_STATS_Z,
+  FEAT_SASL_TIMEOUT,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,

@@ -1,6 +1,34 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_SASL_TIMEOUT feature.
+
+	* doc/readme.features: Added FEAT_SASL_TIMEOUT feature.
+
+	* include/client.h: Added an SASL authentication timeout.
+
+	* include/ircd_features.h: Added FEAT_SASL_TIMEOUT feature.
+
+	* include/s_user.h: Added an SASL authentication timeout.
+
+	* ircd/Makefile.in: Added an SASL authentication timeout.
+
+	* ircd/ircd_features.c: Added FEAT_SASL_TIMEOUT feature.
+
+	* ircd/m_authenticate.c: Added an SASL authentication timeout
+	and support for initial SASL request broadcast to all servers.
+
+	* ircd/m_sasl.c: Added an SASL authentication timeout and
+	support for initial SASL request broadcast to all servers.
+
+	* ircd/s_auth.c: Added an SASL authentication timeout.
+
+	* ircd/s_misc.c: Added an SASL authentication timeout.
+
+	* ircd/s_user.c: Fixed a bug in (un)hide_hostmask().
+
 2013-06-27  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added Client block redirect option.

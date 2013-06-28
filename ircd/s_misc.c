@@ -393,7 +393,7 @@ int exit_client(struct Client *cptr,
     on_for = CurrentTime - cli_firsttime(victim);
 
     if (IsUser(victim) || IsUserPort(victim)) {
-      abort_sasl(victim);
+      abort_sasl(victim, 0);
       auth_send_exit(victim);
     }
 

@@ -119,20 +119,30 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc > 5)
     ext = parv[5];
 
-  /* Look up the target */
-  if (!(acptr = findNUser(parv[1])) && !(acptr = FindNServer(parv[1])))
-    return send_reply(sptr, SND_EXPLICIT | ERR_NOSUCHSERVER,
-                      "* :Server has disconnected");
-
-  /* If it's not to us, forward the reply */
-  if (!IsMe(acptr)) {
+  if (!strcmp(parv[1], "*")) {
     if (ext != NULL)
-      sendcmdto_one(sptr, CMD_SASL, acptr, "%C %s %s %s :%s", acptr, token,
-                    reply, data, ext);
+      sendcmdto_serv_butone(sptr, CMD_SASL, cptr, "* %s %s %s :%s",
+                                   token, reply, data, ext);
     else
-      sendcmdto_one(sptr, CMD_SASL, acptr, "%C %s %s :%s", acptr, token,
-                    reply, data);
+      sendcmdto_serv_butone(sptr, CMD_SASL, cptr, "* %s %s :%s",
+                                   token, reply, data);
     return 0;
+  } else {
+    /* Look up the target */
+    if (!(acptr = findNUser(parv[1])) && !(acptr = FindNServer(parv[1])))
+      return send_reply(sptr, SND_EXPLICIT | ERR_NOSUCHSERVER,
+                        "* :Server has disconnected");
+
+    /* If it's not to us, forward the reply */
+    if (!IsMe(acptr)) {
+      if (ext != NULL)
+        sendcmdto_one(sptr, CMD_SASL, acptr, "%C %s %s %s :%s", acptr, token,
+                      reply, data, ext);
+      else
+        sendcmdto_one(sptr, CMD_SASL, acptr, "%C %s %s :%s", acptr, token,
+                      reply, data);
+      return 0;
+    }
   }
 
   /* If token is not prefixed with my numnick then ignore */
@@ -159,9 +169,9 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* OK we now know who the message is for, let's deal with it! */
 
   /* If we don't know who the agent is we do now, else check its the same agent */
-  if (!cli_saslagent(acptr)[0])
-    ircd_strncpy(cli_saslagent(acptr), cli_name(sptr), HOSTLEN);
-  else if (ircd_strncmp(cli_saslagent(acptr), cli_name(sptr), HOSTLEN))
+  if (!cli_saslagent(acptr))
+    cli_saslagent(acptr) = sptr;
+  else if (cli_saslagent(acptr) != sptr)
     return 0;
 
   if (reply[0] == 'C') {
@@ -187,7 +197,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     } else if (data[0] == 'A') {
       send_reply(acptr, ERR_SASLABORTED);
     }
-    cli_saslagent(acptr)[0] = '\0';
+    cli_saslagent(acptr) = NULL;
     cli_saslcookie(acptr) = 0;
   } else if (reply[0] == 'M')
     return send_reply(acptr, ERR_SASLMECHS, data);
@@ -195,22 +205,37 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   return 0;
 }
 
-int abort_sasl(struct Client* cptr) {
+int abort_sasl(struct Client* cptr, int timeout) {
   struct Client* acptr;
+
+  if (t_active(&cli_sasltimeout(cptr)))
+    timer_del(&cli_sasltimeout(cptr));
 
   if (!cli_saslcookie(cptr) || IsSASLComplete(cptr))
     return 0;
 
   /* Look up the target server */
-  if (!(acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER))))
-    return 0;
-
-  send_reply(cptr, ERR_SASLABORTED);
-
-  if (cli_saslagent(cptr)[0]) {
-      sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u D A", acptr, &me,
-                    cli_fd(cptr), cli_saslcookie(cptr));
+  if (!(acptr = cli_saslagent(cptr))) {
+    if (strcmp(feature_str(FEAT_SASL_SERVER), "*"))
+      acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER));
+    else
+      acptr = NULL;
   }
+
+  if (timeout)
+    send_reply(cptr, ERR_SASLFAIL, ": request timed out");
+  else
+    send_reply(cptr, ERR_SASLABORTED);
+
+  if (acptr)
+    sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u D A", acptr,
+                  &me, cli_fd(cptr), cli_saslcookie(cptr));
+  else
+    sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u D A",
+                          &me, cli_fd(cptr), cli_saslcookie(cptr));
+
+  cli_saslagent(cptr) = NULL;
+  cli_saslcookie(cptr) = 0;
 
   return 0;
 }

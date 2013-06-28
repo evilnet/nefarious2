@@ -634,7 +634,7 @@ static struct FeatureDesc {
   F_B(SETHOST, 0, 1, 0),
   F_B(FLEXIBLEKEYS, 0, 0, 0),
   F_B(HIS_STATS_E, 0, 1, 0),
-  F_S(SASL_SERVER, 0, "X3.AfterNET.Services", 0),
+  F_S(SASL_SERVER, 0, "*", 0),
   F_I(LISTDELAY, 0, 0, 0),
   F_B(ALLOW_OPLEVEL_CHANGE, 0, 0, 0),
   F_B(NETWORK_REHASH, 0, 1, 0),
@@ -642,6 +642,7 @@ static struct FeatureDesc {
   F_S(LIST_PRIVATE_CHANNELS, FEAT_NULL, 0, 0),
   F_I(MAXWATCHS, 0, 128, set_isupport_watchs),
   F_B(HIS_STATS_Z, 0, 1, 0),
+  F_I(SASL_TIMEOUT, 0, 5, 0),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),

@@ -1135,10 +1135,12 @@ As per UnderNet CFV-165, this removes /STATS E from users.
 
 SASL_SERVER
  * Type: string
- * Default: "X3.AfterNET.Services"
+ * Default: "*"
 
 When set, SASL_SERVER specifies the name of the services server on the network
-that is setup to handle SASL client authentication.
+that is setup to handle SASL client authentication. When set to '*' the initial
+SASL request is broadcast to all servers and the first SASL provider to respond
+is used.
 
 LISTDELAY
  * Type: integer
@@ -1190,6 +1192,12 @@ HIS_STATS_Z
  * Default: TRUE
 
 As per UnderNet CFV-165, this removes /STATS Z from users.
+
+SASL_TIMEOUT
+  * Type: integer
+  * Default: 5
+
+Specifies the number of seconds before an SASL request should timeout.
 
 CHMODE_a
  * Type: boolean

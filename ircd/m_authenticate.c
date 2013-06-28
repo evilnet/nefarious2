@@ -94,8 +94,11 @@
 #include "random.h"
 #include "send.h"
 #include "s_misc.h"
+#include "s_user.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+
+static void sasl_timeout_callback(struct Event* ev);
 
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
@@ -115,11 +118,18 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     return send_reply(cptr, ERR_SASLALREADY);
 
   /* Look up the target server */
-  if (!(acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER))))
+  if (!(acptr = cli_saslagent(cptr))) {
+    if (strcmp(feature_str(FEAT_SASL_SERVER), "*"))
+      acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER));
+    else
+      acptr = NULL;
+  }
+
+  if (!acptr && strcmp(feature_str(FEAT_SASL_SERVER), "*"))
     return send_reply(cptr, ERR_SASLFAIL, ": service unavailable");
 
   /* If it's to us, do nothing; otherwise, forward the query */
-  if (IsMe(acptr))
+  if (acptr && IsMe(acptr))
     return 0;
 
   /* Generate an SASL session cookie if not already generated */
@@ -130,15 +140,48 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     first = 1;
   }
 
-  if (!EmptyString(cli_sslclifp(cptr)) && first)
-    sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s :%s", acptr, &me,
-                  cli_fd(cptr), cli_saslcookie(cptr),
-                  parv[1], cli_sslclifp(cptr));
-  else
-    sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u %c :%s", acptr, &me,
-                  cli_fd(cptr), cli_saslcookie(cptr),
-                  (first ? 'S' : 'C'), parv[1]);
+  if (acptr) {
+    if (!EmptyString(cli_sslclifp(cptr)) && first)
+      sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s :%s", acptr, &me,
+                    cli_fd(cptr), cli_saslcookie(cptr),
+                    parv[1], cli_sslclifp(cptr));
+    else
+      sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u %c :%s", acptr, &me,
+                    cli_fd(cptr), cli_saslcookie(cptr),
+                    (first ? 'S' : 'C'), parv[1]);
+  } else {
+    if (!EmptyString(cli_sslclifp(cptr)) && first)
+      sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u S %s :%s", &me,
+                    cli_fd(cptr), cli_saslcookie(cptr),
+                    parv[1], cli_sslclifp(cptr));
+    else
+      sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u %c :%s", &me,
+                    cli_fd(cptr), cli_saslcookie(cptr),
+                    (first ? 'S' : 'C'), parv[1]);
+  }
+
+  if (!t_active(&cli_sasltimeout(cptr)))
+    timer_add(timer_init(&cli_sasltimeout(cptr)), sasl_timeout_callback, (void*) cptr,
+              TT_RELATIVE, feature_int(FEAT_SASL_TIMEOUT));
 
   return 0;
+}
+
+/** Timeout a given SASL auth request.
+ * @param[in] ev A timer event whose associated data is the expired
+ *   struct AuthRequest.
+ */
+static void sasl_timeout_callback(struct Event* ev)
+{
+  struct Client *cptr;
+
+  assert(0 != ev_timer(ev));
+  assert(0 != t_data(ev_timer(ev)));
+
+  if (ev_type(ev) == ET_EXPIRE) {
+    cptr = (struct Client*) t_data(ev_timer(ev));
+
+   abort_sasl(cptr, 1);
+  }
 }
 

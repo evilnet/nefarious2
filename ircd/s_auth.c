@@ -417,7 +417,7 @@ static void auth_complete_sasl(struct Client *client)
     SetAccount(client);
   }
 
-  abort_sasl(client);
+  abort_sasl(client, 0);
 }
 
 static void auth_do_loc(struct Client *client, struct Client *service)
