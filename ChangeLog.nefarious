@@ -3,6 +3,10 @@
 
 2013-06-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_conf.c: Forgot to free() a few ConfItem members.
+
+2013-06-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added a hidehostcomponants Client block option.
 
 	* include/client.h: Added a hidehostcomponants Client block option.

@@ -165,6 +165,9 @@ void free_conf(struct ConfItem *aconf)
   MyFree(aconf->sslfp);
   MyFree(aconf->name);
   MyFree(aconf->hub_limit);
+  MyFree(aconf->countrymask);
+  MyFree(aconf->continentmask);
+  MyFree(aconf->redirserver);
   MyFree(aconf);
   --GlobalConfCount;
 }
