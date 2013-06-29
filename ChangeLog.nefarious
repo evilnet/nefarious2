@@ -3,6 +3,27 @@
 
 2013-06-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added a hidehostcomponants Client block option.
+
+	* include/client.h: Added a hidehostcomponants Client block option.
+
+	* include/ircd_cloaking.h: Added a hidehostcomponants Client block
+	option.
+
+	* include/s_conf.h: Added a hidehostcomponants Client block option.
+
+	* ircd/client.c: Added a hidehostcomponants Client block option.
+
+	* ircd/ircd_cloaking.c: Added a hidehostcomponants Client block option.
+
+	* ircd/ircd_lexer.l: Added a hidehostcomponants Client block option.
+
+	* ircd/ircd_parser.y: Added a hidehostcomponants Client block option.
+
+	* ircd/s_user.c: Added a hidehostcomponants Client block option.
+
+2013-06-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ircd_cloaking.c: Changed the way IP addresses are cloaked.
 
 2013-06-28  Matthew Beeching  <jobe@mdbnet.co.uk>

@@ -86,6 +86,7 @@ struct ConfItem
   int flags;          /**< Additional modifiers for item. */
   int addrbits;       /**< Number of bits valid in ConfItem::address. */
   unsigned int snomask; /**< Default server notice mask. */
+  int hidehostcomps;  /**< Host name componants to hide. */
   struct Privs privs; /**< Privileges for opers. */
   /** Used to detect if a privilege has been set by this ConfItem. */
   struct Privs privs_dirty;

@@ -131,6 +131,7 @@ static struct lexer_token {
   TOKEN(NOIDENTTILDE),
   TOKEN(ISMASK),
   TOKEN(REDIRECT),
+  TOKEN(HIDEHOSTCOMPONANTS),
   TOKEN(SSLFP),
 #undef TOKEN
   { "ssl", SSLTOK },

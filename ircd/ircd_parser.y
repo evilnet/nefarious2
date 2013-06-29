@@ -77,7 +77,7 @@
   /* Now all the globals we need :/... */
   unsigned int snomask;
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
-  int maxchans, redirport;
+  int maxchans, redirport, hidehostcomps;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
   char *spoofhost, *sslfp, *description, *redirserver;
   char *country, *continent;
@@ -208,6 +208,7 @@ static void free_slist(struct SLink **link) {
 %token NOIDENTTILDE
 %token ISMASK
 %token REDIRECT
+%token HIDEHOSTCOMPONANTS
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -908,6 +909,8 @@ clientblock: CLIENT
   maxlinks = 65535;
   port = 0;
   flags = CONF_NOIDENTTILDE;
+  redirport = 0;
+  hidehostcomps = -1;
 }
 '{' clientitems '}' ';'
 {
@@ -941,6 +944,7 @@ clientblock: CLIENT
     aconf->redirserver = redirserver;
     aconf->redirport = redirport;
     aconf->flags = flags;
+    aconf->hidehostcomps = hidehostcomps;
   }
   if (!aconf) {
     MyFree(username);
@@ -964,11 +968,12 @@ clientblock: CLIENT
   continent = NULL;
   redirport = 0;
   redirserver = NULL;
+  hidehostcomps = 0;
 };
 clientitems: clientitem clientitems | clientitem;
 clientitem: clienthost | clientip | clientusername | clientclass | clientpass
             | clientmaxlinks | clientport | clientcountry | clientcontinent
-            | clientsslfp | clientnoidenttilde | clientredir;
+            | clientsslfp | clientnoidenttilde | clientredir | clienthidehostcomps;
 clienthost: HOST '=' QSTRING ';'
 {
   char *sep = strchr($3, '@');
@@ -1053,7 +1058,11 @@ clientredir: REDIRECT '=' QSTRING expr ';'
   redirport = 6667;
   MyFree(redirserver);
   redirserver = $3;
-}
+};
+clienthidehostcomps: HIDEHOSTCOMPONANTS '=' expr ';'
+{
+  hidehostcomps = $3;
+};
 
 killblock: KILL
 {
