@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-06-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/ircd_cloaking.c: Changed the way IP addresses are cloaked.
+
 2013-06-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added FEAT_SASL_TIMEOUT feature.

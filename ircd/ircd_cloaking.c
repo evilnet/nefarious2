@@ -60,23 +60,39 @@ unsigned char r[4];
                  (unsigned int)r[3]);
 }
 
+/** Downsamples a 128bit result to 24bits (md5 -> unsigned int) */
+static inline unsigned int downsample24(unsigned char *i)
+{
+unsigned char r[4];
+
+  r[0] = i[0] ^ i[1] ^ i[2] ^ i[3] ^ i[4];
+  r[1] = i[5] ^ i[6] ^ i[7] ^ i[8] ^ i[9] ^ i[10];
+  r[2] = i[11] ^ i[12] ^ i[13] ^ i[14] ^ i[15];
+
+  return ( ((unsigned int)r[0] << 16) +
+           ((unsigned int)r[1] << 8) +
+           (unsigned int)r[2]);
+}
+
+
 char *hidehost_ipv4(struct irc_in_addr *ip)
 {
 unsigned int a, b, c, d;
 static char buf[512], res[512], res2[512], result[128];
 unsigned long n;
-unsigned int alpha, beta, gamma;
+unsigned int alpha, beta, gamma, delta;
 unsigned char *pch;
 
         /*
-         * Output: ALPHA.BETA.GAMMA.IP
+         * Output: ALPHA.BETA.GAMMA.DELTA.IP
          * ALPHA is unique for a.b.c.d
          * BETA  is unique for a.b.c.*
          * GAMMA is unique for a.b.*
          * We cloak like this:
-         * ALPHA = downsample(md5(md5("KEY2:A.B.C.D:KEY3")+"KEY1"));
-         * BETA  = downsample(md5(md5("KEY3:A.B.C:KEY1")+"KEY2"));
-         * GAMMA = downsample(md5(md5("KEY1:A.B:KEY2")+"KEY3"));
+         * ALPHA = downsample24(md5(md5("KEY2:A.B.C.D:KEY3")+"KEY1"));
+         * BETA  = downsample24(md5(md5("KEY3:A.B.C:KEY1")+"KEY2"));
+         * GAMMA = downsample24(md5(md5("KEY1:A.B:KEY2")+"KEY3"));
+         * DELTA = downsample24(md5(md5("KEY2:A:KEY1:KEY3")+"KEY1"));
          */
         if (!irc_in_addr_is_ipv4(ip))
           return hidehost_ipv6(ip);
@@ -94,7 +110,7 @@ unsigned char *pch;
         strcpy(res+16, KEY1); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
         DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
-        alpha = downsample((unsigned char *)&res2);
+        alpha = downsample24((unsigned char *)&res2);
 
         /* BETA... */
         ircd_snprintf(0, buf, 512, "%s:%d.%d.%d:%s", KEY3, a, b, c, KEY1);
@@ -102,7 +118,7 @@ unsigned char *pch;
         strcpy(res+16, KEY2); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
         DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
-        beta = downsample((unsigned char *)&res2);
+        beta = downsample24((unsigned char *)&res2);
 
         /* GAMMA... */
         ircd_snprintf(0, buf, 512, "%s:%d.%d:%s", KEY1, a, b, KEY2);
@@ -110,9 +126,17 @@ unsigned char *pch;
         strcpy(res+16, KEY3); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
         DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
-        gamma = downsample((unsigned char *)&res2);
+        gamma = downsample24((unsigned char *)&res2);
 
-        ircd_snprintf(0, result, HOSTLEN, "%X.%X.%X.IP", alpha, beta, gamma);
+        /* DELTA... */
+        ircd_snprintf(0, buf, 512, "%s:%d:%s:%s", KEY2, a, KEY1, KEY3);
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
+        strcpy(res+16, KEY1); /* first 16 bytes are filled, append our key.. */
+        n = strlen(res+16) + 16;
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        delta = downsample24((unsigned char *)&res2);
+
+        ircd_snprintf(0, result, HOSTLEN, "%X.%X.%X.%X.IP", alpha, beta, gamma, delta);
         return result;
 }
 
@@ -121,7 +145,7 @@ char *hidehost_ipv6(struct irc_in_addr *ip)
 unsigned int a, b, c, d, e, f, g, h;
 static char buf[512], res[512], res2[512], result[128];
 unsigned long n;
-unsigned int alpha, beta, gamma;
+unsigned int alpha, beta, gamma, delta;
 
         /*
          * Output: ALPHA:BETA:GAMMA:IP
@@ -129,9 +153,10 @@ unsigned int alpha, beta, gamma;
          * BETA  is unique for a:b:c:d:e:f:g
          * GAMMA is unique for a:b:c:d
          * We cloak like this:
-         * ALPHA = downsample(md5(md5("KEY2:a:b:c:d:e:f:g:h:KEY3")+"KEY1"));
-         * BETA  = downsample(md5(md5("KEY3:a:b:c:d:e:f:g:KEY1")+"KEY2"));
-         * GAMMA = downsample(md5(md5("KEY1:a:b:c:d:KEY2")+"KEY3"));
+         * ALPHA = downsample24(md5(md5("KEY2:a:b:c:d:e:f:g:h:KEY3")+"KEY1"));
+         * BETA  = downsample24(md5(md5("KEY3:a:b:c:d:e:f:g:KEY1")+"KEY2"));
+         * GAMMA = downsample24(md5(md5("KEY1:a:b:c:d:KEY2")+"KEY3"));
+         * DELTA = downsample24(md5(md5("KEY2:a:b:KEY1:KEY3")+"KEY1"));
          */
 
         if (irc_in_addr_is_ipv4(ip))
@@ -152,7 +177,7 @@ unsigned int alpha, beta, gamma;
         strcpy(res+16, KEY1); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
         DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
-        alpha = downsample((unsigned char *)&res2);
+        alpha = downsample24((unsigned char *)&res2);
 
         /* BETA... */
         ircd_snprintf(0, buf, 512, "%s:%x:%x:%x:%x:%x:%x:%x:%s", KEY3, a, b, c, d, e, f, g, KEY1);
@@ -160,7 +185,7 @@ unsigned int alpha, beta, gamma;
         strcpy(res+16, KEY2); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
         DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
-        beta = downsample((unsigned char *)&res2);
+        beta = downsample24((unsigned char *)&res2);
 
         /* GAMMA... */
         ircd_snprintf(0, buf, 512, "%s:%x:%x:%x:%x:%s", KEY1, a, b, c, d, KEY2);
@@ -168,9 +193,17 @@ unsigned int alpha, beta, gamma;
         strcpy(res+16, KEY3); /* first 16 bytes are filled, append our key.. */
         n = strlen(res+16) + 16;
         DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
-        gamma = downsample((unsigned char *)&res2);
+        gamma = downsample24((unsigned char *)&res2);
 
-        ircd_snprintf(0, result, HOSTLEN, "%X:%X:%X:IP", alpha, beta, gamma);
+        /* DELTA... */
+        ircd_snprintf(0, buf, 512, "%s:%x:%x:%s:%s", KEY2, a, b, KEY1, KEY3);
+        DoMD5((unsigned char *)&res, (unsigned char *)&buf, strlen(buf));
+        strcpy(res+16, KEY1); /* first 16 bytes are filled, append our key.. */
+        n = strlen(res+16) + 16;
+        DoMD5((unsigned char *)&res2, (unsigned char *)&res, n);
+        delta = downsample24((unsigned char *)&res2);
+
+        ircd_snprintf(0, result, HOSTLEN, "%X:%X:%X:%X:IP", alpha, beta, gamma, delta);
         return result;
 }
 
