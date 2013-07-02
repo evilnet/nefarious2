@@ -1469,6 +1469,33 @@ SSL_KEYFILE
 Path to the private key associated with the certificate specified
 by SSL_CERTFILE.
 
+SSL_CACERTFILE
+ * Type: string
+ * Default: NULL
+
+When set specifies the name and path of a file containing trusted CA
+certificates for client certificate verification.
+
+SSL_VERIFYCERT
+ * Type: boolean
+ * Default: FALSE
+
+When enabled client certificates must pass validation to connect.
+
+SSL_NOSELFSIGNED
+ * Type: boolean
+ * Default: FALSE
+
+When disabled self signed client certificates will be allowed to connect.
+Requires SSL_VERIFYCERT be enabled too.
+
+SSL_REQUIRECLIENTCERT
+ * Type: boolean
+ * Default: FALSE
+
+When enabled clients connecting via SSL will be required to provide a
+client certificate.
+
 DISABLE_ZLINES
  * Type: boolean
  * Default: FALSE

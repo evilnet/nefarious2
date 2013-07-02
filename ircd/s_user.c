@@ -431,8 +431,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
 #ifdef USE_SSL
     if (IsSSL(sptr))
+    {
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :You are connected to %s with %s", sptr,
                     cli_name(&me), ssl_get_cipher(cli_socket(sptr).ssl));
+      if (!EmptyString(cli_sslclifp(sptr)))
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Client certificate status: %s",
+                      sptr, ssl_get_verify_result(cli_socket(sptr).ssl));
+    }
 #endif
 
     m_lusers(sptr, sptr, 1, parv);

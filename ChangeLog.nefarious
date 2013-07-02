@@ -1,6 +1,29 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-07-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added some SSL client certificate verification
+	options.
+
+	* doc/readme.features: Added some SSL client certificate verification
+	options.
+
+	* include/ircd_features.h: Added some SSL client certificate verification
+	options.
+
+	* include/ssl.h: Added some SSL client certificate verification
+	options.
+
+	* ircd/ircd_features.c: Added some SSL client certificate verification
+	options.
+
+	* ircd/s_user.c: Added some SSL client certificate verification
+	options.
+
+	* ircd/ssl.c: Added some SSL client certificate verification
+	options.
+
 2013-06-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_conf.c: Forgot to free() a few ConfItem members.

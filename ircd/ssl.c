@@ -121,6 +121,7 @@ int ssl_reinit(void)
 SSL_CTX *ssl_init_server_ctx(void)
 {
   SSL_CTX *server_ctx = NULL;
+  int vrfyopts = SSL_VERIFY_PEER|SSL_VERIFY_CLIENT_ONCE;
 
   server_ctx = SSL_CTX_new(SSLv23_server_method());
   if (!server_ctx)
@@ -129,8 +130,11 @@ SSL_CTX *ssl_init_server_ctx(void)
     return NULL;
   }
 
+  if (feature_bool(FEAT_SSL_REQUIRECLIENTCERT))
+    vrfyopts |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+
   /* SSL_CTX_set_options(server_ctx, SSL_OP_NO_SSLv2); */
-  SSL_CTX_set_verify(server_ctx, SSL_VERIFY_PEER|SSL_VERIFY_CLIENT_ONCE, ssl_verify_callback);
+  SSL_CTX_set_verify(server_ctx, vrfyopts, ssl_verify_callback);
   SSL_CTX_set_session_cache_mode(server_ctx, SSL_SESS_CACHE_OFF);
 
   if (SSL_CTX_use_certificate_chain_file(server_ctx, feature_str(FEAT_SSL_CERTFILE)) <= 0)
@@ -144,6 +148,23 @@ SSL_CTX *ssl_init_server_ctx(void)
     sslfail("Error loading SSL key for server context");
     SSL_CTX_free(server_ctx);
     return NULL;
+  }
+
+  if (!SSL_CTX_check_private_key(server_ctx))
+  {
+    sslfail("Error checking SSL private key for server context");
+    SSL_CTX_free(server_ctx);
+    return NULL;
+  }
+
+  if (!EmptyString(feature_str(FEAT_SSL_CACERTFILE)))
+  {
+    if (!SSL_CTX_load_verify_locations(server_ctx, feature_str(FEAT_SSL_CACERTFILE), NULL))
+    {
+      sslfail("Error loading trusted CA certificates file for server context");
+      SSL_CTX_free(server_ctx);
+      return NULL;
+    }
   }
 
   return server_ctx;
@@ -175,11 +196,34 @@ SSL_CTX *ssl_init_client_ctx(void)
     return NULL;
   }
 
+  if (!SSL_CTX_check_private_key(client_ctx))
+  {
+    sslfail("Error checking SSL private key for client context");
+    SSL_CTX_free(client_ctx);
+    return NULL;
+  }
+
   return client_ctx;
 }
 
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
 {
+  int err = 0;
+
+  err = X509_STORE_CTX_get_error(cert);
+
+  if (feature_bool(FEAT_SSL_NOSELFSIGNED) &&
+      (err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT))
+    return 0;
+
+  if (feature_bool(FEAT_SSL_VERIFYCERT))
+  {
+    if (!feature_bool(FEAT_SSL_NOSELFSIGNED) &&
+        (err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT))
+      return 1;
+    return preverify_ok;
+  }
+
   return 1;
 }
 
@@ -608,6 +652,46 @@ char *ssl_error_str(int err, int my_errno)
       ssl_errstr = "Unknown OpenSSL error (huh?)";
   }
   return ssl_errstr;
+}
+
+const char* ssl_get_verify_result(SSL *ssl)
+{
+  switch (SSL_get_verify_result(ssl)) {
+    case X509_V_OK: return "ok"; break;
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT: return "unable to get issuer"; break;
+    case X509_V_ERR_UNABLE_TO_GET_CRL: return "unable to get certificate CRL"; break;
+    case X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE: return "unable to decrypt certificate's signature"; break;
+    case X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE: return "unable to decrypt CRL's signature"; break;
+    case X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY: return "unable to decode issuer public key"; break;
+    case X509_V_ERR_CERT_SIGNATURE_FAILURE: return "certificate signature failure"; break;
+    case X509_V_ERR_CRL_SIGNATURE_FAILURE: return "CRL signature failure"; break;
+    case X509_V_ERR_CERT_NOT_YET_VALID: return "certificate is not yet valid"; break;
+    case X509_V_ERR_CERT_HAS_EXPIRED: return "certificate has expired"; break;
+    case X509_V_ERR_CRL_NOT_YET_VALID: return "CRL is not yet valid"; break;
+    case X509_V_ERR_CRL_HAS_EXPIRED: return "CRL has expired"; break;
+    case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD: return "format error in certificate's notBefore field"; break;
+    case X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD: return "format error in certificate's notAfter field"; break;
+    case X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD: return "format error in CRL's lastUpdate field"; break;
+    case X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD: return "format error in CRL's nextUpdate field"; break;
+    case X509_V_ERR_OUT_OF_MEM: return "out of memory"; break;
+    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT: return "self signed certificate"; break;
+    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN: return "self signed certificate in certificate chain"; break;
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: return "unable to get local issuer certificate"; break;
+    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE: return "unable to verify the first certificate"; break;
+    case X509_V_ERR_CERT_CHAIN_TOO_LONG: return "certificate chain too long"; break;
+    case X509_V_ERR_CERT_REVOKED: return "certificate revoked"; break;
+    case X509_V_ERR_INVALID_CA: return "invalid CA certificate"; break;
+    case X509_V_ERR_PATH_LENGTH_EXCEEDED: return "path length constraint exceeded"; break;
+    case X509_V_ERR_INVALID_PURPOSE: return "unsupported certificate purpose"; break;
+    case X509_V_ERR_CERT_UNTRUSTED: return "certificate not trusted"; break;
+    case X509_V_ERR_CERT_REJECTED: return "certificate rejected"; break;
+    case X509_V_ERR_SUBJECT_ISSUER_MISMATCH: return "subject issuer mismatch"; break;
+    case X509_V_ERR_AKID_SKID_MISMATCH: return "authority and subject key identifier mismatch"; break;
+    case X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH: return "authority and issuer serial number mismatch"; break;
+    case X509_V_ERR_KEYUSAGE_NO_CERTSIGN: return "key usage does not include certificate signing"; break;
+    case X509_V_ERR_APPLICATION_VERIFICATION: return "application verification failure"; break;
+    default: return "unknown"; break;
+  }
 }
 
 void sslfail(char *txt)
