@@ -656,42 +656,9 @@ char *ssl_error_str(int err, int my_errno)
 
 const char* ssl_get_verify_result(SSL *ssl)
 {
-  switch (SSL_get_verify_result(ssl)) {
-    case X509_V_OK: return "ok"; break;
-    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT: return "unable to get issuer"; break;
-    case X509_V_ERR_UNABLE_TO_GET_CRL: return "unable to get certificate CRL"; break;
-    case X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE: return "unable to decrypt certificate's signature"; break;
-    case X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE: return "unable to decrypt CRL's signature"; break;
-    case X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY: return "unable to decode issuer public key"; break;
-    case X509_V_ERR_CERT_SIGNATURE_FAILURE: return "certificate signature failure"; break;
-    case X509_V_ERR_CRL_SIGNATURE_FAILURE: return "CRL signature failure"; break;
-    case X509_V_ERR_CERT_NOT_YET_VALID: return "certificate is not yet valid"; break;
-    case X509_V_ERR_CERT_HAS_EXPIRED: return "certificate has expired"; break;
-    case X509_V_ERR_CRL_NOT_YET_VALID: return "CRL is not yet valid"; break;
-    case X509_V_ERR_CRL_HAS_EXPIRED: return "CRL has expired"; break;
-    case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD: return "format error in certificate's notBefore field"; break;
-    case X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD: return "format error in certificate's notAfter field"; break;
-    case X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD: return "format error in CRL's lastUpdate field"; break;
-    case X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD: return "format error in CRL's nextUpdate field"; break;
-    case X509_V_ERR_OUT_OF_MEM: return "out of memory"; break;
-    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT: return "self signed certificate"; break;
-    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN: return "self signed certificate in certificate chain"; break;
-    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: return "unable to get local issuer certificate"; break;
-    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE: return "unable to verify the first certificate"; break;
-    case X509_V_ERR_CERT_CHAIN_TOO_LONG: return "certificate chain too long"; break;
-    case X509_V_ERR_CERT_REVOKED: return "certificate revoked"; break;
-    case X509_V_ERR_INVALID_CA: return "invalid CA certificate"; break;
-    case X509_V_ERR_PATH_LENGTH_EXCEEDED: return "path length constraint exceeded"; break;
-    case X509_V_ERR_INVALID_PURPOSE: return "unsupported certificate purpose"; break;
-    case X509_V_ERR_CERT_UNTRUSTED: return "certificate not trusted"; break;
-    case X509_V_ERR_CERT_REJECTED: return "certificate rejected"; break;
-    case X509_V_ERR_SUBJECT_ISSUER_MISMATCH: return "subject issuer mismatch"; break;
-    case X509_V_ERR_AKID_SKID_MISMATCH: return "authority and subject key identifier mismatch"; break;
-    case X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH: return "authority and issuer serial number mismatch"; break;
-    case X509_V_ERR_KEYUSAGE_NO_CERTSIGN: return "key usage does not include certificate signing"; break;
-    case X509_V_ERR_APPLICATION_VERIFICATION: return "application verification failure"; break;
-    default: return "unknown"; break;
-  }
+  int vrfyresult = SSL_get_verify_result(ssl);
+
+  return X509_verify_cert_error_string(vrfyresult);
 }
 
 void sslfail(char *txt)

@@ -3,6 +3,10 @@
 
 2013-07-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/ssl.c: Updated ssl_get_verify_result() to be more portable.
+
+2013-07-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_starttls.c: Forgot to make sure STARTTLS clients got
 	their client certificate fingerprint.
 
