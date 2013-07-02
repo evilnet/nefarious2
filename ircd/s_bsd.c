@@ -1010,6 +1010,12 @@ static void client_sock_callback(struct Event* ev)
           ClearStartTLS(cptr);
           send_reply(cptr, ERR_STARTTLS, "STARTTLS failed.");
         }
+        if (ssl_is_init_finished(cli_socket(cptr).ssl))
+        {
+          char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
+          if (sslfp)
+            ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
+        }
       } else {
 #endif
         Debug((DEBUG_DEBUG, "Reading data from %C", cptr));

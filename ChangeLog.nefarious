@@ -3,6 +3,14 @@
 
 2013-07-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_starttls.c: Forgot to make sure STARTTLS clients got
+	their client certificate fingerprint.
+
+	* ircd/s_bsd.c: Forgot to make sure STARTTLS clients got their
+	client certificate fingerprint.
+
+2013-07-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added some SSL client certificate verification
 	options.
 

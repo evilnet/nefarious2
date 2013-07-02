@@ -117,6 +117,13 @@ int m_starttls(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   SetSSL(sptr);
+
+  if (ssl_is_init_finished(cli_socket(cptr).ssl))
+  {
+    char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
+    if (sslfp)
+      ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
+  }
 #endif
   return 0;
 }
