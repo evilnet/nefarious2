@@ -80,6 +80,8 @@ struct ConfItem
   char *continentmask; /**< Mask for continent code. */
   char *redirserver;  /**< Redirect to this server. */
   int redirport;      /**< Redirect to this port. */
+  char *autojoinchan; /**< Auto join channel list. */
+  char *autojoinnotice; /**< Auto join notice. */
   time_t hold;        /**< Earliest time to attempt an outbound
                          connect on this ConfItem. */
   int dns_pending;    /**< A dns request is pending. */
@@ -267,6 +269,7 @@ extern struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *
 extern int get_except_flags(struct Client *cptr);
 extern int find_except_conf(struct Client *cptr, int flags);
 extern int find_except_conf_by_ip(const struct irc_in_addr *addr, int flags);
+extern struct ConfItem* get_client_conf(struct Client *acptr);
 
 extern void yyerror(const char *msg);
 

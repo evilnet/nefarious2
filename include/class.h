@@ -42,6 +42,8 @@ struct ConnectionClass {
   char                    *cc_name;       /**< Name of connection class. */
   char                    *default_umode; /**< Default usermode for users
                                              in this class. */
+  char                    *autojoinchan;  /**< Auto join channel list. */
+  char                    *autojoinnotice; /**< Auto join notice. */
   unsigned int            snomask;        /**< Default server notice mask. */
   struct Privs            privs;          /**< Privilege bits that are set on
                                              or off. */
@@ -97,6 +99,10 @@ struct ConnectionClass {
 #define ConfUmode(x)    ((x)->conn_class->default_umode)
 /** Get default snomask for ConfItem \a x. */
 #define ConfSnoMask(x)  ((x)->conn_class->snomask)
+/** Get autojoin channel list for ConfItem \a x. */
+#define ConfAjoinChan(x) ((x)->conn_class->autojoinchan)
+/** Get autojoin channel notice for ConfItem \a x. */
+#define ConfAjoinNotice(x) ((x)->conn_class->autojoinnotice)
 /** Find a valid configuration class by name. */
 #define find_class(name) do_find_class((name), 0)
 
@@ -116,6 +122,7 @@ extern void free_class(struct ConnectionClass * tmp);
 extern char *get_conf_class(const struct ConfItem *aconf);
 extern int get_conf_ping(const struct ConfItem *aconf);
 extern char *get_client_class(struct Client *acptr);
+extern struct ConnectionClass *get_client_class_conf(struct Client *acptr);
 extern void add_class(char *name, unsigned int ping,
                       unsigned int confreq, unsigned int maxli,
                       unsigned int sendq, unsigned int recvq);

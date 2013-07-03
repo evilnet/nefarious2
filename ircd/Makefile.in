@@ -807,7 +807,8 @@ m_oper.o: m_oper.c ../config.h ../include/class.h ../include/client.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/ircd_crypt.h \
   ../include/msg.h ../include/numeric.h ../include/numnicks.h \
   ../include/querycmds.h ../include/s_conf.h ../include/s_debug.h \
-  ../include/s_user.h ../include/s_misc.h ../include/send.h
+  ../include/s_user.h ../include/s_misc.h ../include/send.h \
+  ../include/channel.h
 m_opermotd.o: m_opermotd.c ../config.h ../include/client.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/match.h \

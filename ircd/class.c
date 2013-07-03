@@ -79,6 +79,8 @@ void free_class(struct ConnectionClass* p)
     assert(0 == p->valid);
     MyFree(p->cc_name);
     MyFree(p->default_umode);
+    MyFree(p->autojoinchan);
+    MyFree(p->autojoinnotice);
     MyFree(p);
     --connClassAllocCount;
   }
@@ -195,6 +197,26 @@ get_client_class(struct Client *acptr)
         return ConClass(cl);
     }
   return "(null-class)";
+}
+
+/** Get connection class structure for a particular client.
+ * @param[in] acptr Client to check.
+ * @return Pointer to the connection class to which \a acptr belongs.
+ */
+struct ConnectionClass*
+get_client_class_conf(struct Client *acptr)
+{
+  struct SLink *tmp;
+  struct ConnectionClass *cl;
+
+  /* Return the most recent(first on LL) client class... */
+  if (acptr && !IsMe(acptr) && (cli_confs(acptr)))
+    for (tmp = cli_confs(acptr); tmp; tmp = tmp->next)
+    {
+      if (tmp->value.aconf && (cl = tmp->value.aconf->conn_class))
+        return cl;
+    }
+  return NULL;
 }
 
 /** Make sure we have a connection class named \a name.

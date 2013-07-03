@@ -168,6 +168,8 @@ void free_conf(struct ConfItem *aconf)
   MyFree(aconf->countrymask);
   MyFree(aconf->continentmask);
   MyFree(aconf->redirserver);
+  MyFree(aconf->autojoinchan);
+  MyFree(aconf->autojoinnotice);
   MyFree(aconf);
   --GlobalConfCount;
 }
@@ -1587,5 +1589,24 @@ int del_dnsbls(struct Client* sptr)
   }
 
   return count;
+}
+
+/** Get client config structure for a particular client.
+ * @param[in] acptr Client to check.
+ * @return Pointer to the ConfItem to which \a acptr belongs.
+ */
+struct ConfItem*
+get_client_conf(struct Client *acptr)
+{
+  struct SLink *tmp;
+
+  /* Return the most recent(first on LL) client class... */
+  if (acptr && !IsMe(acptr) && (cli_confs(acptr)))
+    for (tmp = cli_confs(acptr); tmp; tmp = tmp->next)
+    {
+      if (tmp->value.aconf && (tmp->value.aconf->status & CONF_CLIENT))
+        return tmp->value.aconf;
+    }
+  return NULL;
 }
 

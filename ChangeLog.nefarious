@@ -1,6 +1,38 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-07-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* include/class.h: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* include/s_conf.h: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* ircd/Makefile.in: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* ircd/class.c: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* ircd/ircd_lexer.l: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* ircd/ircd_parser.y: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* ircd/m_oper.c: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* ircd/s_conf.c: Added auto join options to Class, Client and
+	Operator blocks.
+
+	* ircd/s_user.c: Added auto join options to Class, Client and
+	Operator blocks.
+
 2013-07-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/ssl.c: Updated ssl_get_verify_result() to be more portable.

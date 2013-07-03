@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "channel.h"
 #include "class.h"
 #include "client.h"
 #include "handlers.h"
@@ -111,6 +112,10 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   struct Flags old_mode = cli_flags(sptr);
   char*        modes;
   char*        parv[2];
+  char*        join[3];
+  char         chan[CHANNELLEN-1];
+  char*        ajoinchan;
+  char*        ajoinnotice;
   unsigned int snomask = 0;
 
   parv[0] = cli_name(sptr);
@@ -122,6 +127,9 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
 
   snomask = ConfSnoMask(aconf) & SNO_ALL;
   snomask |= aconf->snomask & SNO_ALL;
+
+  ajoinchan = ConfAjoinChan(aconf);
+  ajoinnotice = ConfAjoinNotice(aconf);
 
   if (MyUser(sptr)) {
     SetLocOp(sptr);
@@ -183,6 +191,30 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
       (feature_int(FEAT_HOST_HIDING_STYLE) == 3))
     hide_hostmask(sptr);
+
+  if (!EmptyString(ajoinchan))
+  {
+    if (!EmptyString(ajoinnotice))
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, ajoinnotice);
+
+    ircd_strncpy(chan, ajoinchan, CHANNELLEN-1);
+    join[0] = cli_name(sptr);
+    join[1] = chan;
+    join[2] = NULL;
+    m_join(sptr, sptr, 2, join);
+  }
+
+  if (!EmptyString(aconf->autojoinchan))
+  {
+    if (!EmptyString(aconf->autojoinnotice))
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, aconf->autojoinnotice);
+
+    ircd_strncpy(chan, aconf->autojoinchan, CHANNELLEN-1);
+    join[0] = cli_name(sptr);
+    join[1] = chan;
+    join[2] = NULL;
+    m_join(sptr, sptr, 2, join);
+  }
 
   sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
      "%s (%s@%s) is now operator (%c)",

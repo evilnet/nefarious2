@@ -356,6 +356,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
 {
   char*            parv[4];
   char*            tmpstr;
+  char*            join[3];
+  char             chan[CHANNELLEN-1];
+  struct ConnectionClass* connclass = NULL;
+  struct ConfItem* cliconf = NULL;
   struct User*     user = cli_user(sptr);
   char             ip_base64[25];
   struct Shun*     ashun = NULL;
@@ -584,6 +588,37 @@ int register_user(struct Client *cptr, struct Client *sptr)
     send_umode(cptr, sptr, &flags, ALL_UMODES);
     if ((cli_snomask(sptr) != SNO_DEFAULT) && HasFlag(sptr, FLAG_SERVNOTICE))
       send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
+
+    if ((connclass = get_client_class_conf(sptr)) != NULL)
+    {
+      if (!EmptyString(connclass->autojoinchan))
+      {
+        if (!EmptyString(connclass->autojoinnotice))
+          sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, connclass->autojoinnotice);
+
+        ircd_strncpy(chan, connclass->autojoinchan, CHANNELLEN-1);
+        join[0] = cli_name(sptr);
+        join[1] = chan;
+        join[2] = NULL;
+        m_join(sptr, sptr, 2, join);
+      }
+    }
+
+    if ((cliconf = get_client_conf(sptr)) != NULL)
+    {
+      if (!EmptyString(cliconf->autojoinchan))
+      {
+        if (!EmptyString(cliconf->autojoinnotice))
+          sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, cliconf->autojoinnotice);
+
+        ircd_strncpy(chan, cliconf->autojoinchan, CHANNELLEN-1);
+        join[0] = cli_name(sptr);
+        join[1] = chan;
+        join[2] = NULL;
+        m_join(sptr, sptr, 2, join);
+      }
+    }
+
   }
 
   /* Notify new local/remote user */

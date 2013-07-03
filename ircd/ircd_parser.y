@@ -80,7 +80,7 @@
   int maxchans, redirport, hidehostcomps;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
   char *spoofhost, *sslfp, *description, *redirserver;
-  char *country, *continent;
+  char *country, *continent, *ajoinchan, *ajoinnotice;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
   struct ListenerFlags listen_flags;
@@ -209,6 +209,8 @@ static void free_slist(struct SLink **link) {
 %token ISMASK
 %token REDIRECT
 %token HIDEHOSTCOMPONANTS
+%token AUTOJOINCHANNEL
+%token AUTOJOINNOTICE
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -459,6 +461,10 @@ classblock: CLASS {
     c_class = find_class(name);
     MyFree(c_class->default_umode);
     c_class->default_umode = pass;
+    MyFree(c_class->autojoinchan);
+    c_class->autojoinchan = ajoinchan;
+    MyFree(c_class->autojoinnotice);
+    c_class->autojoinnotice = ajoinnotice;
     c_class->snomask = snomask;
     c_class->max_chans = maxchans;
     memcpy(&c_class->privs, &privs, sizeof(c_class->privs));
@@ -469,6 +475,8 @@ classblock: CLASS {
   }
   name = NULL;
   pass = NULL;
+  ajoinchan = NULL;
+  ajoinnotice = NULL;
   tconn = 0;
   maxlinks = 0;
   sendq = 0;
@@ -481,7 +489,7 @@ classblock: CLASS {
 classitems: classitem classitems | classitem;
 classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
            classsendq | classrecvq | classusermode | classmaxchans | priv |
-           classsnomask;
+           classsnomask | classajoinchan | classajoinnotice;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -519,6 +527,16 @@ classmaxchans: MAXCHANS '=' expr ';'
 classsnomask: SNOMASK '=' expr ';'
 {
   snomask = $3;
+};
+classajoinchan: AUTOJOINCHANNEL '=' QSTRING ';'
+{
+  MyFree(ajoinchan);
+  ajoinchan = $3;
+};
+classajoinnotice: AUTOJOINNOTICE '=' QSTRING ';'
+{
+  MyFree(ajoinnotice);
+  ajoinnotice = $3;
 };
 
 connectblock: CONNECT
@@ -667,6 +685,10 @@ operblock: OPER
     DupString(aconf->passwd, pass);
     if (sslfp)
       DupString(aconf->sslfp, sslfp);
+    if (ajoinchan)
+      DupString(aconf->autojoinchan, ajoinchan);
+    if (ajoinnotice)
+      DupString(aconf->autojoinnotice, ajoinnotice);
     conf_parse_userhost(aconf, link->value.cp);
     aconf->conn_class = c_class;
     aconf->snomask = snomask;
@@ -676,6 +698,8 @@ operblock: OPER
   MyFree(name);
   MyFree(pass);
   MyFree(sslfp);
+  MyFree(ajoinchan);
+  MyFree(ajoinnotice);
   free_slist(&hosts);
   name = pass = NULL;
   c_class = NULL;
@@ -683,7 +707,8 @@ operblock: OPER
   memset(&privs_dirty, 0, sizeof(privs_dirty));
 };
 operitems: operitem | operitems operitem;
-operitem: opername | operpass | operhost | operclass | opersslfp | opersnomask | priv;
+operitem: opername | operpass | operhost | operclass | opersslfp | opersnomask
+           | operajoinchan | operajoinnotice | priv;
 opername: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -725,6 +750,16 @@ opersslfp: SSLFP '=' QSTRING ';'
 opersnomask: SNOMASK '=' expr ';'
 {
   snomask = $3;
+};
+operajoinchan: AUTOJOINCHANNEL '=' QSTRING ';'
+{
+  MyFree(ajoinchan);
+  ajoinchan = $3;
+};
+operajoinnotice: AUTOJOINNOTICE '=' QSTRING ';'
+{
+  MyFree(ajoinnotice);
+  ajoinnotice = $3;
 };
 
 priv: privtype '=' yesorno ';'
@@ -945,6 +980,8 @@ clientblock: CLIENT
     aconf->redirport = redirport;
     aconf->flags = flags;
     aconf->hidehostcomps = hidehostcomps;
+    aconf->autojoinchan = ajoinchan;
+    aconf->autojoinnotice = ajoinnotice;
   }
   if (!aconf) {
     MyFree(username);
@@ -955,6 +992,8 @@ clientblock: CLIENT
     MyFree(continent);
     MyFree(sslfp);
     MyFree(redirserver);
+    MyFree(ajoinchan);
+    MyFree(ajoinnotice);
   }
   host = NULL;
   username = NULL;
@@ -969,11 +1008,14 @@ clientblock: CLIENT
   redirport = 0;
   redirserver = NULL;
   hidehostcomps = 0;
+  ajoinchan = NULL;
+  ajoinnotice = NULL;
 };
 clientitems: clientitem clientitems | clientitem;
 clientitem: clienthost | clientip | clientusername | clientclass | clientpass
             | clientmaxlinks | clientport | clientcountry | clientcontinent
-            | clientsslfp | clientnoidenttilde | clientredir | clienthidehostcomps;
+            | clientsslfp | clientnoidenttilde | clientredir | clienthidehostcomps
+            | clientajoinchan | clientajoinnotice;
 clienthost: HOST '=' QSTRING ';'
 {
   char *sep = strchr($3, '@');
@@ -1062,6 +1104,16 @@ clientredir: REDIRECT '=' QSTRING expr ';'
 clienthidehostcomps: HIDEHOSTCOMPONANTS '=' expr ';'
 {
   hidehostcomps = $3;
+};
+clientajoinchan: AUTOJOINCHANNEL '=' QSTRING ';'
+{
+  MyFree(ajoinchan);
+  ajoinchan = $3;
+};
+clientajoinnotice: AUTOJOINNOTICE '=' QSTRING ';'
+{
+  MyFree(ajoinnotice);
+  ajoinnotice = $3;
 };
 
 killblock: KILL
