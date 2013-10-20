@@ -1199,6 +1199,13 @@ SASL_TIMEOUT
 
 Specifies the number of seconds before an SASL request should timeout.
 
+NOMULTITARGETS
+  * Type: boolean
+  * Default: FALSE
+
+When enabled has the same effect as setting channel mode +T on every
+channel.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

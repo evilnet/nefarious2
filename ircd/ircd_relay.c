@@ -114,7 +114,8 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     return;
   }
 
-  if ((chptr->mode.exmode & EXMODE_NOMULTITARG) && (targets > 1)) {
+  if (((chptr->mode.exmode & EXMODE_NOMULTITARG) ||
+       feature_bool(FEAT_NOMULTITARGETS)) && (targets > 1)) {
     send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
     return;
   }
@@ -173,7 +174,8 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   if ((chptr->mode.exmode & EXMODE_NOCTCPS) && (*text == '\x01'))
     return;
 
-  if ((chptr->mode.exmode & EXMODE_NOMULTITARG) && (targets > 1))
+  if (((chptr->mode.exmode & EXMODE_NOMULTITARG) ||
+       feature_bool(FEAT_NOMULTITARGETS)) && (targets > 1))
     return;
 
   if (chptr->mode.exmode & EXMODE_NOCOLOR)

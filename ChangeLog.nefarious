@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-10-20  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_NOMULTITARGETS feature.
+
+	* doc/readme.features: Added FEAT_NOMULTITARGETS feature.
+
+	* include/ircd_features.h: Added FEAT_NOMULTITARGETS feature.
+
+	* ircd/ircd_features.c: Added FEAT_NOMULTITARGETS feature.
+
+	* ircd/ircd_relay.c: Added FEAT_NOMULTITARGETS feature.
+
 2013-07-03  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added auto join options to Class, Client and

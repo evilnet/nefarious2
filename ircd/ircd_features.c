@@ -643,6 +643,7 @@ static struct FeatureDesc {
   F_I(MAXWATCHS, 0, 128, set_isupport_watchs),
   F_B(HIS_STATS_Z, 0, 1, 0),
   F_I(SASL_TIMEOUT, 0, 5, 0),
+  F_B(NOMULTITARGETS, 0, 0, 0),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),
