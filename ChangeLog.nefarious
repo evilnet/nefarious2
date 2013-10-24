@@ -3,6 +3,13 @@
 
 2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* Ported ircu changes up to revision ac43a9ca643546041560c7386b7c34d28d57ee4e
+
+	* Files Modified: .hgignore ircd/.hgignore ircd/engine_devpoll.c
+	ircd/engine_epoll.c ircd/engine_kqueue.c ircd/ircd.c ircd/s_auth.c
+
+2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ssl.c: Removed struct definition for an unused structure.
 
 2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>

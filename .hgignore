@@ -5,7 +5,10 @@ config.h
 stamp-h
 config.status
 config.cache
+.deps/
 .project
 ircu.tags
 autom4te.cache
+stamp-h1
 include/patchlist.h
+
