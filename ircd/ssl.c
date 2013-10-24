@@ -56,12 +56,6 @@
 #define IOV_MAX 1024
 #endif /* IOV_MAX */
 
-struct ssl_data {
-  struct Socket socket;
-  struct Listener *listener;
-  int fd;
-};
-
 SSL_CTX *ssl_server_ctx;
 SSL_CTX *ssl_client_ctx;
 

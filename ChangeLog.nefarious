@@ -3,6 +3,10 @@
 
 2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/ssl.c: Removed struct definition for an unused structure.
+
+2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ssl.h: Added prototypes for ssl_accept() and ssl_abort().
 
 	* ircd/s_bsd.c: Moved SSL callback operations to
