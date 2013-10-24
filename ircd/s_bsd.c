@@ -620,6 +620,14 @@ void add_connection(struct Listener* listener, int fd) {
     cli_fd(new_client) = -1;
     return;
   }
+
+#ifdef USE_SSL
+  if (ssl) {
+    cli_socket(new_client).ssl = ssl;
+    ssl_accept(new_client);
+  }
+#endif
+
   cli_freeflag(new_client) |= FREEFLAG_SOCKET;
   cli_listener(new_client) = listener;
   ++listener->ref_count;
@@ -986,35 +994,45 @@ static void client_sock_callback(struct Event* ev)
     if ((IsServer(cptr) || IsHandshake(cptr)) && cli_error(cptr) == 0) {
       exit_client_msg(cptr, cptr, &me, "Server %s closed the connection (%s)",
 		      cli_name(cptr), cli_serv(cptr)->last_error_msg);
+#ifdef USE_SSL
+      ssl_abort(cptr);
+#endif
       return;
     } else {
       fmt = "Read error: %s";
       fallback = "EOF from client";
     }
+#ifdef USE_SSL
+    ssl_abort(cptr);
+#endif
     break;
 
   case ET_WRITE: /* socket is writable */
-    ClrFlag(cptr, FLAG_BLOCKED);
-    if (cli_listing(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
-      list_next_channels(cptr);
-    Debug((DEBUG_SEND, "Sending queued data to %C", cptr));
-    send_queued(cptr);
+#ifdef USE_SSL
+    if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl)) {
+      ssl_accept(cptr);
+    } else {
+#endif
+      ClrFlag(cptr, FLAG_BLOCKED);
+      if (cli_listing(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
+        list_next_channels(cptr);
+      Debug((DEBUG_SEND, "Sending queued data to %C", cptr));
+      send_queued(cptr);
+#ifdef USE_SSL
+    }
+#endif
     break;
 
   case ET_READ: /* socket is readable */
     if (!IsDead(cptr)) {
 #ifdef USE_SSL
-      if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl) && IsStartTLS(cptr)) {
-        if (!ssl_starttls(cptr)) {
+      if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl)) {
+        if (IsStartTLS(cptr) && !ssl_starttls(cptr)) {
           ClearSSL(cptr);
           ClearStartTLS(cptr);
           send_reply(cptr, ERR_STARTTLS, "STARTTLS failed.");
-        }
-        if (ssl_is_init_finished(cli_socket(cptr).ssl))
-        {
-          char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
-          if (sslfp)
-            ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
+        } else {
+          ssl_accept(cptr);
         }
       } else {
 #endif

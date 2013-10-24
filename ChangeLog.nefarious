@@ -3,6 +3,15 @@
 
 2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/ssl.h: Added prototypes for ssl_accept() and ssl_abort().
+
+	* ircd/s_bsd.c: Moved SSL callback operations to
+	client_sock_callback().
+
+	* ircd/ssl.c: Rewrote incoming SSL connection handling.
+
+2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/m_cap.c: Fixed a few compiler warnings.
 
 	* ircd/m_remove.c: Fixed a few compiler warnings.

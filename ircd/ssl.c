@@ -227,19 +227,17 @@ int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
   return 1;
 }
 
-static void ssl_abort(struct ssl_data *data)
+void ssl_abort(struct Client *cptr)
 {
   Debug((DEBUG_DEBUG, "SSL: aborted"));
-  SSL_free(data->socket.ssl);
-  close(data->fd);
-  socket_del(&data->socket);
+  SSL_free(cli_socket(cptr).ssl);
 }
 
-static void ssl_accept(struct ssl_data *data)
+void ssl_accept(struct Client *cptr)
 {
   const char* const error_ssl = "ERROR :SSL connection error\r\n";
 
-  if (SSL_accept(data->socket.ssl) <= 0) {
+  if (SSL_accept(cli_socket(cptr).ssl) <= 0) {
     unsigned long err = ERR_get_error();
     char string[120];
 
@@ -247,73 +245,36 @@ static void ssl_accept(struct ssl_data *data)
       ERR_error_string(err, string);
       Debug((DEBUG_ERROR, "SSL_accept: %s", string));
 
-      write(data->fd, error_ssl, strlen(error_ssl));
+      write(cli_fd(cptr), error_ssl, strlen(error_ssl));
 
-      ssl_abort(data);
+      ssl_abort(cptr);
     }
     return;
   }
-  if (SSL_is_init_finished(data->socket.ssl)) {
-    socket_del(&data->socket);
-    add_connection(data->listener, data->fd, data->socket.ssl);
-  }
-}
 
-static void ssl_sock_callback(struct Event* ev)
-{
-  struct ssl_data *data;
-
-  assert(0 != ev_socket(ev));
-  assert(0 != s_data(ev_socket(ev)));
-
-  data = s_data(ev_socket(ev));
-  assert(0 != data);
-
-  switch (ev_type(ev)) {
-  case ET_DESTROY:
-    --data->listener->ref_count;
-    MyFree(data);
-    return;
-  case ET_ERROR:
-  case ET_EOF:
-    ssl_abort(data);
-    break;
-  case ET_READ:
-  case ET_WRITE:
-    ssl_accept(data);
-    break;
-  default:
-    break;
+  if (SSL_is_init_finished(cli_socket(cptr).ssl))
+  {
+    char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
+    if (sslfp)
+      ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
   }
 }
 
 void ssl_add_connection(struct Listener *listener, int fd)
 {
-  struct ssl_data *data;
+  SSL* ssl;
 
   assert(0 != listener);
 
-  if (!os_set_nonblocking(fd)) {
-    close(fd);
-    return;
-  }
-  os_disable_options(fd);
-
-  data = (struct ssl_data *)MyMalloc(sizeof(struct ssl_data));
-  data->listener = listener;
-  data->fd = fd;
-  if (!socket_add(&data->socket, ssl_sock_callback, (void *) data, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
-    close(fd);
-    return;
-  }
-  if (!(data->socket.ssl = SSL_new(ssl_server_ctx))) {
+  if (!(ssl = SSL_new(ssl_server_ctx))) {
     Debug((DEBUG_DEBUG, "SSL_new failed"));
     close(fd);
     return;
   }
-  SSL_set_fd(data->socket.ssl, fd);
-  ssl_set_nonblocking(data->socket.ssl);
-  ++listener->ref_count;
+  SSL_set_fd(ssl, fd);
+  ssl_set_nonblocking(ssl);
+
+  add_connection(listener, fd, ssl);
 }
 
 /*
@@ -557,6 +518,13 @@ int ssl_starttls(struct Client *cptr)
       return 0;
     }
     return 1;
+  }
+
+  if (SSL_is_init_finished(cli_socket(cptr).ssl))
+  {
+    char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
+    if (sslfp)
+      ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
   }
 
   return 1;
