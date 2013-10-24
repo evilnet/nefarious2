@@ -688,7 +688,6 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int              hop;
   int              ret;
   unsigned short   prot;
-  time_t           start_timestamp;
   time_t           timestamp;
 
   if (parc < 8)
@@ -708,7 +707,6 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * Detect protocol
    */
   hop = atoi(parv[2]);
-  start_timestamp = atoi(parv[3]);
   timestamp = atoi(parv[4]);
   prot = parse_protocol(parv[5]);
   if (!prot)
@@ -718,7 +716,7 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                            "Incompatible protocol: %s", parv[5]);
 
   Debug((DEBUG_INFO, "Got SERVER %s with timestamp [%s] age %Tu (%Tu)",
-	 host, parv[4], start_timestamp, cli_serv(&me)->timestamp));
+	 host, parv[4], (time_t)atoi(parv[3]), cli_serv(&me)->timestamp));
 
   if (timestamp < OLDEST_TS)
     return exit_client_msg(cptr, sptr, &me,

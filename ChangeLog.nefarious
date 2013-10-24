@@ -1,6 +1,14 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_cap.c: Fixed a few compiler warnings.
+
+	* ircd/m_remove.c: Fixed a few compiler warnings.
+
+	* ircd/m_server.c: Fixed a few compiler warnings.
+
 2013-10-20  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added FEAT_NOMULTITARGETS feature.

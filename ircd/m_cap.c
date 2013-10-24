@@ -383,14 +383,11 @@ void client_check_caps(struct Client *client, struct Client *replyto)
 {
   char outbuf[BUFSIZE];
   int i = 0;
-  int flags = 0;
   static char capbufp[BUFSIZE] = "";
 
   memset(&capbufp, 0, BUFSIZE);
   
   for (i = 0; i < CAPAB_LIST_LEN; i++) {
-    flags = capab_list[i].flags;
-
     if (CapActive(client, capab_list[i].cap)) {
       if (strlen(capbufp) + capab_list[i].namelen + 4 > 70) {
         ircd_snprintf(0, outbuf, sizeof(outbuf), "   Capabilities:: %s", capbufp);

@@ -117,7 +117,6 @@
 int mo_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char *type, *mask, *reason;
-  int r;
 
   if (!HasPriv(sptr, PRIV_REMOVE))
     return send_reply(sptr, ERR_NOPRIVILEGES);
@@ -134,11 +133,11 @@ int mo_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return need_more_params(sptr, "REMOVE");
 
   if (!ircd_strcmp(type, "gline"))
-    r = gline_remove(sptr, mask, reason);
+    gline_remove(sptr, mask, reason);
   else if (!ircd_strcmp(type, "zline"))
-    r = zline_remove(sptr, mask, reason);
+    zline_remove(sptr, mask, reason);
   else if (!ircd_strcmp(type, "shun"))
-    r = shun_remove(sptr, mask, reason);
+    shun_remove(sptr, mask, reason);
 
   sendcmdto_serv_butone(sptr, CMD_REMOVE, cptr, "%C %s %s :%s", sptr, type, mask, reason);
   return 0;
@@ -164,7 +163,6 @@ int mo_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 int ms_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char *type, *mask, *reason;
-  int r;
 
   type = parc > 2 ? parv[2] : 0;
 
@@ -176,11 +174,11 @@ int ms_remove(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return protocol_violation(cptr, "REMOVE recieved with missing arguements.");
 
   if (!ircd_strcmp(type, "gline"))
-    r = gline_remove(sptr, mask, reason);
+    gline_remove(sptr, mask, reason);
   else if (!ircd_strcmp(type, "zline"))
-    r = zline_remove(sptr, mask, reason);
+    zline_remove(sptr, mask, reason);
   else if (!ircd_strcmp(type, "shun"))
-    r = shun_remove(sptr, mask, reason);
+    shun_remove(sptr, mask, reason);
 
   sendcmdto_serv_butone(sptr, CMD_REMOVE, cptr, "%C %s %s :%s", sptr, type, mask, reason);
   return 0;
