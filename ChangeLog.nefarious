@@ -1,6 +1,26 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-10-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_CHMODE_Z_STRICT feature.
+
+	* doc/readme.features: Added FEAT_CHMODE_Z_STRICT feature.
+
+	* include/channel.h: Added counter to count non-SSL users.
+
+	* include/ircd_features.h: Added FEAT_CHMODE_Z_STRICT feature.
+
+	* include/numeric.h: Added ERR_CANNOTCHANGECHANMODE numeric reply.
+
+	* ircd/channel.c: Added stricter +Z set handling when feature enabled.
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_Z_STRICT feature.
+
+	* ircd/m_join.c: Added stricter +Z handling when feature enabled.
+
+	* ircd/s_err.c: Added ERR_CANNOTCHANGECHANMODE numeric reply.
+
 2013-10-24  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* Ported ircu changes up to revision ac43a9ca643546041560c7386b7c34d28d57ee4e

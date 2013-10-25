@@ -224,6 +224,7 @@ enum Feature {
   FEAT_AVEXCEPTLEN,
   FEAT_CHMODE_e_CHMODEEXCEPTION,
   FEAT_HALFOP_DEHALFOP_SELF,
+  FEAT_CHMODE_Z_STRICT,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,

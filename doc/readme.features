@@ -1307,6 +1307,16 @@ HALFOP_DEHALFOP_SELF
 
 If enabled allows halfops to remove their own halfop status.
 
+CHMODE_Z_STRICT
+ * Type: boolean
+ * Default: TRUE
+
+When disabled channel mode +Z is less restrictive in that it allows
+the +A and +U keys to bypass it and can be set whilst non-SSL users
+are present on the channel. When enabled only services can join a
+channel with channel mode +Z and channel mode +Z cannot be set on a
+channel while non-SSL users are present.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

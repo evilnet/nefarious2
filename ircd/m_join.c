@@ -193,7 +193,9 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
       /* Check Apass/Upass -- since we only ever look at a single
        * "key" per channel now, this hampers brute force attacks. */
-      if (key && !strcmp(key, chptr->mode.apass))
+      if (feature_bool(FEAT_CHMODE_Z_STRICT) && (chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
+        err = ERR_SSLONLYCHAN;
+      else if (key && !strcmp(key, chptr->mode.apass))
         flags = CHFL_CHANOP | CHFL_CHANNEL_MANAGER;
       else if (key && !strcmp(key, chptr->mode.upass))
         flags = CHFL_CHANOP;

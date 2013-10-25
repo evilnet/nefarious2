@@ -535,6 +535,8 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
     if (chptr->destruct_event)
       remove_destruct_event(chptr);
     ++chptr->users;
+    if (!IsSSL(who) && !IsChannelService(who))
+      ++chptr->nonsslusers;
     ++((cli_user(who))->joined);
   }
 }
@@ -580,6 +582,9 @@ static int remove_member_from_channel(struct Membership* member)
 
   member->next_member = membershipFreeList;
   membershipFreeList = member;
+
+  if (!IsSSL(member->user) && !IsChannelService(member->user))
+    --chptr->nonsslusers;
 
   return sub1_from_channel(chptr);
 }
@@ -4059,7 +4064,10 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 
       case 'Z': /* deal with oper only */
         /* If they're not an SSL user, they can't +/- EXMODE_SSLONLY. */
-        if ((feature_bool(FEAT_CHMODE_Z) && IsSSL(sptr)) ||
+        if (feature_bool(FEAT_CHMODE_Z_STRICT) && (state.dir == MODE_ADD) &&
+            (chptr->nonsslusers > 0))
+          send_reply(sptr, ERR_CANNOTCHANGECHANMODE, "Z", "Mode cannot be set while non-SSL members are present");
+        else if ((feature_bool(FEAT_CHMODE_Z) && IsSSL(sptr)) ||
             IsOper(sptr) || IsServer(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);
         else
