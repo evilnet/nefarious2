@@ -3,6 +3,11 @@
 
 2013-10-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/channel.c: Only apply FEAT_CHMODE_Z_STRICT to mode changes
+	sent by local clients.
+
+2013-10-25  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_CHMODE_Z_STRICT feature.
 
 	* doc/readme.features: Added FEAT_CHMODE_Z_STRICT feature.
