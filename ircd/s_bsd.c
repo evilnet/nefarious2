@@ -994,9 +994,6 @@ static void client_sock_callback(struct Event* ev)
     if ((IsServer(cptr) || IsHandshake(cptr)) && cli_error(cptr) == 0) {
       exit_client_msg(cptr, cptr, &me, "Server %s closed the connection (%s)",
 		      cli_name(cptr), cli_serv(cptr)->last_error_msg);
-#ifdef USE_SSL
-      ssl_abort(cptr);
-#endif
       return;
     } else {
       fmt = "Read error: %s";
@@ -1010,17 +1007,18 @@ static void client_sock_callback(struct Event* ev)
   case ET_WRITE: /* socket is writable */
 #ifdef USE_SSL
     if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl)) {
-      ssl_accept(cptr);
-    } else {
-#endif
-      ClrFlag(cptr, FLAG_BLOCKED);
-      if (cli_listing(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
-        list_next_channels(cptr);
-      Debug((DEBUG_SEND, "Sending queued data to %C", cptr));
-      send_queued(cptr);
-#ifdef USE_SSL
+      if (s_state(&(con_socket(con))) == SS_CONNECTING) {
+        completed_connection(cptr);
+      } else
+        ssl_accept(cptr);
+      break;
     }
 #endif
+    ClrFlag(cptr, FLAG_BLOCKED);
+    if (cli_listing(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
+      list_next_channels(cptr);
+    Debug((DEBUG_SEND, "Sending queued data to %C", cptr));
+    send_queued(cptr);
     break;
 
   case ET_READ: /* socket is readable */
@@ -1031,17 +1029,17 @@ static void client_sock_callback(struct Event* ev)
           ClearSSL(cptr);
           ClearStartTLS(cptr);
           send_reply(cptr, ERR_STARTTLS, "STARTTLS failed.");
+        } else if (s_state(&(con_socket(con))) == SS_CONNECTING) {
+          completed_connection(cptr);
         } else {
           ssl_accept(cptr);
         }
-      } else {
-#endif
-        Debug((DEBUG_DEBUG, "Reading data from %C", cptr));
-        if (read_packet(cptr, 1) == 0) /* error while reading packet */
-	  fallback = "EOF from client";
-#ifdef USE_SSL
+        break;
       }
 #endif
+      Debug((DEBUG_DEBUG, "Reading data from %C", cptr));
+      if (read_packet(cptr, 1) == 0) /* error while reading packet */
+        fallback = "EOF from client";
     }
     break;
 

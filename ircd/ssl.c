@@ -224,7 +224,9 @@ int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
 void ssl_abort(struct Client *cptr)
 {
   Debug((DEBUG_DEBUG, "SSL: aborted"));
-  SSL_free(cli_socket(cptr).ssl);
+  if (cli_socket(cptr).ssl)
+    SSL_free(cli_socket(cptr).ssl);
+  cli_socket(cptr).ssl = NULL;
 }
 
 void ssl_accept(struct Client *cptr)

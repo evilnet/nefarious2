@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-10-28  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/s_bsd.c: A few minor changes to SSL connection handling.
+
+	* ircd/ssl.c: Fix for a crash when ssl_abort() is called again.
+
 2013-10-25  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Only apply FEAT_CHMODE_Z_STRICT to mode changes
