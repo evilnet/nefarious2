@@ -30,6 +30,7 @@
 #define MARK_CVERSION           "CVERSION"              /**< Client Version mark */
 #define MARK_SSLCLIFP           "SSLCLIFP"              /**< SSL client certificate fingerprint */
 #define MARK_DNSBL_DATA         "DNSBL_DATA"            /**< DNSBL data mark */
+#define MARK_KILL               "KILL"                  /**< KILL block exemption mark */
 
 #endif /* INCLUDED_mark_h */
 

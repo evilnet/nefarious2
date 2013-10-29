@@ -466,6 +466,13 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      }
    }
 
+   if (cli_killmark(acptr)) {
+     if (strlen(cli_killmark(acptr)) > 0) {
+       ircd_snprintf(0, outbuf, sizeof(outbuf), "           Kill:: %s", cli_killmark(acptr));
+       send_reply(sptr, RPL_DATASTR, outbuf);
+     }
+   }
+
    if (cli_sslclifp(acptr) && (strlen(cli_sslclifp(acptr)) > 0)) {
      ircd_snprintf(0, outbuf, sizeof(outbuf), "SSL Fingerprint:: %s", cli_sslclifp(acptr));
      send_reply(sptr, RPL_DATASTR, outbuf);

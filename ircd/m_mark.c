@@ -132,11 +132,19 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   } else if (!strcmp(parv[2], MARK_SSLCLIFP)) {
     if(parc < 4)
-      return protocol_violation(sptr, "MARK client version received too few parameters (%u)", parc);
+      return protocol_violation(sptr, "MARK SSL client certificate fingerprint received too few parameters (%u)", parc);
 
     if ((acptr = FindUser(parv[1]))) {
        ircd_strncpy(cli_sslclifp(acptr), parv[3], BUFSIZE);
        sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_SSLCLIFP, parv[3]);
+    }
+  } else if (!strcmp(parv[2], MARK_KILL)) {
+    if(parc < 4)
+      return protocol_violation(sptr, "MARK kill received too few parameters (%u)", parc);
+
+    if ((acptr = FindUser(parv[1]))) {
+      ircd_strncpy(cli_killmark(acptr), parv[3], BUFSIZE);
+      sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_KILL, parv[3]);
     }
   } else if (!strcmp(parv[2], MARK_DNSBL_DATA)) {
     if(parc < 4)

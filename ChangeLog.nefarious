@@ -3,6 +3,24 @@
 
 2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added Kill block mark and authexempt options.
+	* include/client.h: Added MARK_KILL.
+	* include/mark.h: Added MARK_KILL.
+	* include/numeric.h: Added RPL_WHOISKILL numeric reply.
+	* include/s_conf.h: Added Kill block mark and authexempt options.
+	* ircd/ircd_lexer.l: Added Kill block mark and authexempt options.
+	* ircd/ircd_parser.y: Added Kill block mark and authexempt options.
+	* ircd/m_check.c: Added MARK_KILL.
+	* ircd/m_mark.c: Added MARK_KILL.
+	* ircd/m_whois.c: Added MARK_KILL.
+	* ircd/s_auth.c: Added MARK_KILL.
+	* ircd/s_conf.c: Added Kill block mark and authexempt options.
+	* ircd/s_err.c: Added RPL_WHOISKILL numeric reply.
+	* ircd/s_serv.c: Added MARK_KILL.
+	* ircd/s_user.c: Added MARK_KILL.
+
+2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/client.h: Added user mode +L (no channel redirection).
 
 	* ircd/m_join.c: Added user mode +L (no channel redirection).

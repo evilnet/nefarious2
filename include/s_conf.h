@@ -112,12 +112,14 @@ struct DenyConf {
   char*               countrymask; /**< Mask for country code. */
   char*               continentmask; /**< Mask for continent code. */
   char*               version;  /**< Mask for CTCP version. */
+  char*               mark;     /**< Mark to be applied to auth exempt users. */
   struct irc_in_addr  address;  /**< Address for IP-based denies. */
   unsigned int        flags;    /**< Interpretation flags for the above.  */
   unsigned char       bits;     /**< Number of bits for ipkills */
 };
 
 #define DENY_FLAGS_FILE     0x0001 /**< Comment is a filename */
+#define DENY_FLAGS_AUTHEX   0x0002 /**< K-line does not match authed users */
 
 /** Local server configuration. */
 struct LocalConf {

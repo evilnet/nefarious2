@@ -211,6 +211,8 @@ static void free_slist(struct SLink **link) {
 %token HIDEHOSTCOMPONANTS
 %token AUTOJOINCHANNEL
 %token AUTOJOINNOTICE
+%token AUTHEXEMPT
+%token MARK
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -1135,6 +1137,7 @@ killblock: KILL
     MyFree(dconf->countrymask);
     MyFree(dconf->continentmask);
     MyFree(dconf->version);
+    MyFree(dconf->mark);
     MyFree(dconf);
     parse_error("Kill block must match on at least one of username, host, country, continent or realname");
   }
@@ -1142,7 +1145,7 @@ killblock: KILL
 };
 killitems: killitem killitems | killitem;
 killitem: killuhost | killreal | killusername | killcountry | killcontinent | killreasonfile | killreason
-                    | killversion;
+                    | killversion | killauthexempt | killmark;
 killuhost: HOST '=' QSTRING ';'
 {
   char *h;
@@ -1205,6 +1208,21 @@ killreasonfile: TFILE '=' QSTRING ';'
  MyFree(dconf->message);
  dconf->message = $3;
 };
+
+killauthexempt: AUTHEXEMPT '=' YES ';'
+{
+  dconf->flags |= DENY_FLAGS_AUTHEX;
+} | AUTHEXEMPT '=' NO ';'
+{
+  dconf->flags &= ~DENY_FLAGS_AUTHEX;
+};
+
+killmark: MARK '=' QSTRING ';'
+{
+ MyFree(dconf->mark);
+ dconf->mark = $3;
+};
+
 
 cruleblock: CRULE
 {

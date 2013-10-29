@@ -553,6 +553,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (cli_version(sptr) && !EmptyString(cli_version(sptr)))
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_CVERSION, cli_version(sptr));
 
+    if (cli_killmark(sptr) && !EmptyString(cli_killmark(sptr)))
+      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_KILL, cli_killmark(sptr));
+
     if (IsGeoIP(sptr)) {
       if (cli_countrycode(sptr) && !EmptyString(cli_countrycode(sptr)) &&
           cli_continentcode(sptr) && !EmptyString(cli_continentcode(sptr)))

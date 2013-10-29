@@ -275,6 +275,7 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_USERIP           340        /* Undernet extension */
 #define RPL_INVITING         341
 /*      RPL_SUMMONING        342           removed from RFC1459 */
+#define RPL_WHOISKILL        343        /* Nefarious extension */
 
 #define RPL_ISSUEDINVITE     345        /* Undernet extension */
 #define RPL_INVITELIST       346        /* IRCnet, Undernet extension */

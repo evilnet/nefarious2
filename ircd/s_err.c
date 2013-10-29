@@ -718,7 +718,7 @@ static Numeric replyTable[] = {
 /* 342 */
   { 0 },
 /* 343 */
-  { 0 },
+  { RPL_WHOISKILL, "%s :is Kill listed on %s", "343" },
 /* 344 */
   { 0 },
 /* 345 */
