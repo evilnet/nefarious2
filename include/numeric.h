@@ -440,6 +440,8 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_EXCEPTLISTFULL   488        /* Nefarious extention */
 #define ERR_VOICENEEDED      489        /* Undernet extension */
 
+#define ERR_LINKSET          490        /* Nefarious extension */
+
 #define ERR_NOOPERHOST       491
 /*      ERR_NOSERVICEHOST    492 	   IRCnet extension */
 
@@ -502,6 +504,9 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_ZLIST            548	/* Nefarious extension */
 #define RPL_ENDOFZLIST       549	/* Nefarious extension */
 #define ERR_INVALIDMASK      550	/* Nefarious extension */
+
+#define ERR_LINKCHAN         551	/* Nefarious extension */
+#define ERR_LINKSELF         552	/* Nefarious extension */
 
 #define ERR_NOTLOWEROPLEVEL  560	/* Undernet extension */
 #define ERR_NOTMANAGER       561	/* Undernet extension */

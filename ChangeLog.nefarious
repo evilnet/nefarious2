@@ -1,6 +1,28 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_CHMODE_L and FEAT_MAX_BOUNCE.
+
+	* doc/readme.features: Added FEAT_CHMODE_L and FEAT_MAX_BOUNCE.
+
+	* include/channel.h: Added channel mode +L (channel redirection).
+
+	* include/ircd_features.h: Added FEAT_CHMODE_L and FEAT_MAX_BOUNCE.
+
+	* include/numeric.h: Added ERR_LINKSET, ERR_LINKCHAN and ERR_LINKSELF.
+
+	* ircd/channel.c: Added channel mode +L (channel redirection).
+
+	* ircd/ircd_features.c: Added FEAT_CHMODE_L and FEAT_MAX_BOUNCE.
+
+	* ircd/m_join.c: Added channel mode +L (channel redirection).
+
+	* ircd/s_err.c: Added ERR_LINKSET, ERR_LINKCHAN and ERR_LINKSELF.
+
+	* ircd/s_user.c: Added channel mode +L (channel redirection).
+
 2013-10-28  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/s_bsd.c: A few minor changes to SSL connection handling.

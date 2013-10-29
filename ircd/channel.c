@@ -946,8 +946,15 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'c';
   if (chptr->mode.exmode & EXMODE_STRIPCOLOR)
     *mbuf++ = 'S';
+  if (*chptr->mode.redir) {
+    *mbuf++ = 'L';
+    strcat(pbuf, chptr->mode.redir);
+    previous_parameter = 1;
+  }
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
+    if (previous_parameter)
+      strcat(pbuf, " ");
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
     previous_parameter = 1;
   }
@@ -1761,6 +1768,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 /*  MODE_BAN,		'b', */
 /*  MODE_EXCEPT,	'e', */
     MODE_LIMIT,		'l',
+    MODE_REDIRECT,	'L', 
 /*  MODE_APASS,		'A', */
 /*  MODE_UPASS,		'U', */
     0x0, 0x0
@@ -1810,6 +1818,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   char limitbuf[20]; /* convert limits to strings */
 
   unsigned int limitdel = MODE_LIMIT;
+  unsigned int redirdel = MODE_REDIRECT;
 
   assert(0 != mbuf);
 
@@ -1895,14 +1904,14 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                 (MB_TYPE(mbuf, i) & MODE_HALFOP ? 'h' : 'v');
 	totalbuflen -= IRCD_MAX(9, tmp) + 1;
       }
-    } else if (MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS)) {
+    } else if (MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS | MODE_REDIRECT)) {
       tmp = strlen(MB_STRING(mbuf, i));
 
       if ((totalbuflen - tmp) <= 0) /* don't overflow buffer */
 	MB_TYPE(mbuf, i) |= MODE_SAVE; /* save for later */
       else {
 	char mode_char;
-	switch(MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS))
+	switch(MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS | MODE_REDIRECT))
 	{
 	  case MODE_APASS:
 	    mode_char = 'A';
@@ -1910,6 +1919,9 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 	  case MODE_UPASS:
 	    mode_char = 'U';
 	    break;
+          case MODE_REDIRECT:
+            mode_char = 'L';
+            break;
           case MODE_EXCEPT:
             mode_char = 'e';
             break;
@@ -1983,6 +1995,11 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
       /* deal with ban exceptions... */
       else if (MB_TYPE(mbuf, i) & MODE_EXCEPT)
+        build_string(strptr, strptr_i, MB_STRING(mbuf, i), 0, ' ');
+
+      /* deal with redirect... */
+      else if ((MB_TYPE(mbuf, i) & (MODE_ADD | MODE_REDIRECT)) ==
+               (MODE_ADD | MODE_REDIRECT))
         build_string(strptr, strptr_i, MB_STRING(mbuf, i), 0, ' ');
 
       /* deal with keys... */
@@ -2064,6 +2081,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
      * direction is the direction for it to be removed, though...
      */
     limitdel |= (mbuf->mb_dest & MODEBUF_DEST_BOUNCE) ? MODE_DEL : MODE_ADD;
+    redirdel |= (mbuf->mb_dest & MODEBUF_DEST_BOUNCE) ? MODE_DEL : MODE_ADD;
 
     for (i = 0; i < mbuf->mb_count; i++) {
       if (MB_TYPE(mbuf, i) & MODE_SAVE)
@@ -2100,6 +2118,12 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       /* deal with modes that take strings */
       } else if (MB_TYPE(mbuf, i) & (MODE_KEY | MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS)) {
 	build_string(strptr, strptr_i, MB_STRING(mbuf, i), 0, ' ');
+        if (MB_TYPE(mbuf, i) & MODE_ADD)
+          build_string(strptro, strptro_i, MB_STRING(mbuf, i), 0, ' ');
+
+      /* deal with redirect */
+      } else if ((MB_TYPE(mbuf, i) & redirdel) == redirdel) {
+        build_string(strptr, strptr_i, MB_STRING(mbuf, i), 0, ' ');
         if (MB_TYPE(mbuf, i) & MODE_ADD)
           build_string(strptro, strptro_i, MB_STRING(mbuf, i), 0, ' ');
 
@@ -2413,6 +2437,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
 /*  MODE_BAN,		'b', */
 /*  MODE_EXCEPT,	'e', */
     MODE_LIMIT,		'l',
+    MODE_REDIRECT,	'L',
     MODE_REGONLY,	'r',
     MODE_DELJOINS,      'D',
     0x0, 0x0
@@ -2437,6 +2462,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
   int *flag_p;
   char *key = 0, limitbuf[20];
   char *apass = 0, *upass = 0;
+  char *redir = 0;
 
   assert(0 != mbuf);
   assert(0 != buf);
@@ -2448,10 +2474,12 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
 
   for (i = 0; i < mbuf->mb_count; i++) { /* find keys and limits */
     if (MB_TYPE(mbuf, i) & MODE_ADD) {
-      add |= MB_TYPE(mbuf, i) & (MODE_KEY | MODE_LIMIT | MODE_APASS | MODE_UPASS);
+      add |= MB_TYPE(mbuf, i) & (MODE_KEY | MODE_LIMIT | MODE_APASS | MODE_UPASS | MODE_REDIRECT);
 
       if (MB_TYPE(mbuf, i) & MODE_KEY) /* keep strings */
 	key = MB_STRING(mbuf, i);
+      else if (MB_TYPE(mbuf, i) & MODE_REDIRECT)
+        redir = MB_STRING(mbuf, i);
       else if (MB_TYPE(mbuf, i) & MODE_LIMIT)
 	ircd_snprintf(0, limitbuf, sizeof(limitbuf), "%u", MB_UINT(mbuf, i));
       else if (MB_TYPE(mbuf, i) & MODE_UPASS)
@@ -2483,6 +2511,8 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
   for (i = 0, len = bufpos; i < len; i++) {
     if (buf[i] == 'k')
       build_string(buf, &bufpos, key, 0, ' ');
+    else if (buf[i] == 'L')
+      build_string(buf, &bufpos, redir, 0, ' ');
     else if (buf[i] == 'l')
       build_string(buf, &bufpos, limitbuf, 0, ' ');
     else if ((buf[i] == 'U') && oplevels)
@@ -2555,6 +2585,7 @@ mode_invite_clear(struct Channel *chan)
 #define DONE_APASS_DEL  0x200   /**< We've removed the admin pass */
 #define DONE_EXCEPTLIST 0x400   /**< We've sent the ban exceptions list */
 #define DONE_EXCEPTCLEAN 0x800  /**< We've cleaned ban exceptions... */
+#define DONE_REDIR      0x1000  /**< We've set a redirection */
 
 struct ParseState {
   struct ModeBuf *mbuf;
@@ -2599,6 +2630,89 @@ send_notoper(struct ParseState *state)
 	     ERR_CHANOPRIVSNEEDED : ERR_NOTONCHANNEL, state->chptr->chname);
 
   state->done |= DONE_NOTOPER;
+}
+
+/** Parse a redirect
+ * Helper function to convert redirects
+ *
+ * @param state		Parsing state object.
+ * @param flag_p	?
+ */
+static void
+mode_parse_redir(struct ParseState *state, int *flag_p)
+{
+  char *t_str;
+
+  if (state->dir == MODE_ADD) { /* convert arg only if adding redirect */
+    if (MyUser(state->sptr) && state->max_args <= 0) /* too many args? */
+      return;
+
+    if (state->parc <= 0) { /* warn if not enough args */
+      if (MyUser(state->sptr))
+        need_more_params(state->sptr, "MODE +L");
+      return;
+    }
+
+    t_str = state->parv[state->args_used++]; /* grab arg */
+    state->parc--;
+    state->max_args--;
+
+    if (!(state->flags & MODE_PARSE_WIPEOUT) && state->dir == MODE_ADD &&
+        !ircd_strcmp(state->chptr->mode.redir, t_str))
+      return;
+
+    if (!ircd_strcmp(t_str, state->chptr->chname)) {
+      send_reply(state->sptr, ERR_LINKSELF, t_str);
+      return;
+    }
+
+    if (!(feature_bool(FEAT_CHMODE_L) || IsServer(state->sptr) ||
+          IsChannelService(state->sptr) || IsOper(state->sptr))) {
+      send_reply(state->sptr, ERR_NOPRIVILEGES);
+      return;
+    }
+  } else
+    t_str = state->chptr->mode.redir;
+
+  /* If they're not an oper, they can't change modes */
+  if (state->flags & (MODE_PARSE_NOTOPER | MODE_PARSE_NOTMEMBER)) {
+    send_notoper(state);
+    return;
+  }
+
+  /* Can't remove a redirect that's not there */
+  if (state->dir == MODE_DEL && !(*state->chptr->mode.redir))
+    return;
+
+  /* Skip if this is a burst, we have a redirect already and the new redirect
+   * is after the old one alphabetically */
+  if ((state->flags & MODE_PARSE_BURST) &&
+      *(state->chptr->mode.redir) &&
+      ircd_strcmp(state->chptr->mode.redir, t_str) <= 0)
+    return;
+
+  if (state->done & DONE_REDIR) /* allow redirect to be set only once */
+    return;
+  state->done |= DONE_REDIR;
+
+  if (!state->mbuf)
+    return;
+
+  if (state->flags & MODE_PARSE_BOUNCE) {
+    if (*state->chptr->mode.redir) /* reset old redir */
+      modebuf_mode_string(state->mbuf, MODE_DEL | flag_p[0],
+			  state->chptr->mode.redir, 0);
+    else /* remove new bogus redir */
+      modebuf_mode_string(state->mbuf, MODE_ADD | flag_p[0], t_str, 0);
+  } else /* send new redir */
+    modebuf_mode_string(state->mbuf, state->dir | flag_p[0], t_str, 0);
+
+  if (state->flags & MODE_PARSE_SET) {
+    if (state->dir == MODE_DEL) /* remove the old redirect */
+      *state->chptr->mode.redir = '\0';
+    else
+      ircd_strncpy(state->chptr->mode.redir, t_str, CHANNELLEN);
+  }
 }
 
 /** Parse a limit
@@ -3882,6 +3996,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     MODE_BAN,		'b',
     MODE_EXCEPT,	'e',
     MODE_LIMIT,		'l',
+    MODE_REDIRECT,	'L',
     MODE_REGONLY,	'r',
     MODE_DELJOINS,      'D',
     MODE_ADD,		'+',
@@ -3983,6 +4098,10 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
       case 'l': /* deal with limits */
 	mode_parse_limit(&state, flag_p);
 	break;
+
+      case 'L': /* deal with redirect */
+        mode_parse_redir(&state, flag_p);
+        break;
 
       case 'k': /* deal with keys */
 	mode_parse_key(&state, flag_p);
@@ -4231,6 +4350,9 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     if (state.chptr->mode.limit && !(state.done & DONE_LIMIT))
       modebuf_mode_uint(state.mbuf, MODE_DEL | MODE_LIMIT,
 			state.chptr->mode.limit);
+    if (state.chptr->mode.redir && !(state.done & DONE_REDIR))
+      modebuf_mode_string(state.mbuf, MODE_DEL | MODE_REDIRECT,
+                        state.chptr->mode.redir, 0);
     if (*state.chptr->mode.key && !(state.done & DONE_KEY_DEL))
       modebuf_mode_string(state.mbuf, MODE_DEL | MODE_KEY,
 			  state.chptr->mode.key, 0);

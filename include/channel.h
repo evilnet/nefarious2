@@ -125,6 +125,7 @@ struct Client;
 
 #define MODE_HALFOP     CHFL_HALFOP     /**< +h Halfop */
 #define MODE_EXCEPT     0x1000000       /**< +e Ban exception */
+#define MODE_REDIRECT   0x2000000       /**< +L Channel redirect */
 
 #define EXMODE_ADMINONLY    0x00000001	/**< +a User mode +a only may join */
 #define EXMODE_OPERONLY     0x00000002	/**< +O User mode +o only may join */
@@ -143,11 +144,11 @@ struct Client;
 #define MODE_WPARAS     (MODE_CHANOP|MODE_HALFOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
 
 /** Available Channel modes */
-#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabCcDdhiklMmNnOopQRrSsTtUvZz" : "abCcDdhiklMmNnOopQRrSsTtvZz"
+#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabCcDdhikLlMmNnOopQRrSsTtUvZz" : "abCcDdhikLlMmNnOopQRrSsTtvZz"
 /** Available Channel modes that take parameters */
 #define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? \
-                                (feature_bool(FEAT_HALFOPS) ? "AbhkloUv" : "AbkloUv") : \
-                                (feature_bool(FEAT_HALFOPS) ? "bhklov" : "bklov")
+                                (feature_bool(FEAT_HALFOPS) ? "AbhkLloUv" : "AbkLloUv") : \
+                                (feature_bool(FEAT_HALFOPS) ? "bhkLlov" : "bkLlov")
 
 #define HoldChannel(x)          (!(x))
 /** name invisible */
@@ -275,6 +276,7 @@ struct Mode {
   char key[KEYLEN + 1];
   char upass[KEYLEN + 1];
   char apass[KEYLEN + 1];
+  char redir[CHANNELLEN + 1];
 };
 
 #define BAN_IPMASK         0x0001  /**< ban mask is an IP-number mask */

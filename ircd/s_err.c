@@ -1012,7 +1012,7 @@ static Numeric replyTable[] = {
 /* 489 */
   { ERR_VOICENEEDED, "%s :You're neither voiced nor channel operator", "489" },
 /* 490 */
-  { 0 },
+  { ERR_LINKSET, "%s :[Redirect] %s has channel redirection (+L) enabled, so you are automatically being transferred to the channel %s", "490" },
 /* 491 */
   { ERR_NOOPERHOST, ":No Operator block for your host", "491" },
 /* 492 */
@@ -1134,9 +1134,9 @@ static Numeric replyTable[] = {
 /* 550 */
   { ERR_INVALIDMASK, ":zline masks must contain an IP address.", "550" },
 /* 551 */
-  { 0 },
+  { ERR_LINKCHAN, ":%s is redirecting you to %s. As you have +L set you will need to /join this manually", "551" },
 /* 552 */
-  { 0 },
+  { ERR_LINKSELF, ":%s cannot be redirected to itself", "552" },
 /* 553 */
   { 0 },
 /* 554 */

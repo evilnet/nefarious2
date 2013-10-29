@@ -96,6 +96,181 @@ last0(struct Client *cptr, struct Client *sptr, char *chanlist)
   return chanlist;
 }
 
+void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
+             struct JoinBuf *create, char *chan, char *key, int level)
+{
+  struct Channel *chptr;
+  struct Gline *gline;
+
+  /* BADCHANed channel */
+  if ((gline = gline_find(chan, GLINE_BADCHAN | GLINE_EXACT)) &&
+      GlineIsActive(gline) && !IsAnOper(sptr)) {
+    send_reply(sptr, ERR_BANNEDFROMCHAN, chan);
+    return;
+  }
+
+  /* Bouncy +L joins */
+  if (level > feature_int(FEAT_MAX_BOUNCE)) {
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :*** Couldn't join %s ! - Redirection (+L) setting was too bouncy", sptr, chan);
+    return;
+  }
+
+  if (!(chptr = FindChannel(chan))) {
+    if (((chan[0] == '&') && !feature_bool(FEAT_LOCAL_CHANNELS))
+        || strlen(chan) > IRCD_MIN(CHANNELLEN, feature_int(FEAT_CHANNELLEN))) {
+      send_reply(sptr, ERR_NOSUCHCHANNEL, chan);
+      return;
+    }
+
+    if (!(chptr = get_channel(sptr, chan, CGT_CREATE)))
+      return;
+
+    /* Try to add the new channel as a recent target for the user. */
+    if (check_target_limit(sptr, chptr, chptr->chname, 0)) {
+      chptr->members = 0;
+      destruct_channel(chptr);
+      return;
+    }
+
+    joinbuf_join(create, chptr, CHFL_CHANOP | CHFL_CHANNEL_MANAGER);
+  } else if (find_member_link(chptr, sptr)) {
+    return; /* already on channel */
+  } else if (check_target_limit(sptr, chptr, chptr->chname, 0)) {
+    return;
+  } else {
+    int flags = CHFL_DEOPPED;
+    int err = 0;
+    int excepted = 0;
+    int exceptkli = 0;
+
+    if (chptr->mode.redir && (*chptr->mode.redir != '\0')) {
+      if (chptr->users >= chptr->mode.limit) {
+        send_reply(sptr, ERR_LINKSET, chptr->chname, chptr->chname, chptr->mode.redir);
+        do_join(cptr, sptr, join, create, chptr->mode.redir, key, level+1);
+        return;
+      }
+    }
+
+    if (find_ban(sptr, chptr->exceptlist)) {
+      if (feature_bool(FEAT_CHMODE_e_CHMODEEXCEPTION))
+        exceptkli = 1;
+      excepted = 1;
+    }
+
+    /* Check Apass/Upass -- since we only ever look at a single
+     * "key" per channel now, this hampers brute force attacks. */
+    if (feature_bool(FEAT_CHMODE_Z_STRICT) && (chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
+      err = ERR_SSLONLYCHAN;
+    else if (key && !strcmp(key, chptr->mode.apass))
+      flags = CHFL_CHANOP | CHFL_CHANNEL_MANAGER;
+    else if (key && !strcmp(key, chptr->mode.upass))
+      flags = CHFL_CHANOP;
+    else if (chptr->users == 0 && !chptr->mode.apass[0] && !(chptr->mode.exmode & EXMODE_PERSIST)) {
+      /* Joining a zombie channel (zannel): give ops and increment TS. */
+      flags = CHFL_CHANOP;
+      chptr->creationtime++;
+    } else if (IsXtraOp(sptr)) {
+      /* XtraOp bypasses all other checks. */
+    } else if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
+      err = ERR_SSLONLYCHAN;
+    else if (IsInvited(sptr, chptr)) {
+      /* Invites bypass these other checks. */
+    } else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)) && !exceptkli)
+      err = ERR_BADCHANNELKEY;
+    else if (*chptr->mode.key && feature_bool(FEAT_FLEXIBLEKEYS) && (key && !strcmp(key, chptr->mode.key))) {
+      /* Assume key checked by previous condition was found to be correct
+         and allow join because FEAT_FLEXIBLEKEYS was enabled */
+    } else if ((chptr->mode.mode & MODE_INVITEONLY) && !exceptkli)
+      err = ERR_INVITEONLYCHAN;
+    else if (chptr->mode.limit && (chptr->users >= chptr->mode.limit) && !exceptkli)
+      err = ERR_CHANNELISFULL;
+    else if ((chptr->mode.mode & MODE_REGONLY) && !IsAccount(sptr))
+      err = ERR_NEEDREGGEDNICK;
+    else if ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(sptr))
+      err = ERR_ADMINONLYCHAN;
+    else if ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(sptr))
+      err = ERR_OPERONLYCHAN;
+    else if (find_ban(sptr, chptr->banlist) && !excepted)
+      err = ERR_BANNEDFROMCHAN;
+
+    /* An oper with WALK_LCHAN privilege can join a local channel
+     * he otherwise could not join by using "OVERRIDE" as the key.
+     * This will generate a HACK(4) notice, but fails if the oper
+     * could normally join the channel. */
+    if (IsLocalChannel(chptr->chname)
+        && HasPriv(sptr, PRIV_WALK_LCHAN)
+        && !(flags & CHFL_CHANOP)
+        && key && !strcmp(key, "OVERRIDE"))
+    {
+      switch (err) {
+      case 0:
+        if (strcmp(chptr->mode.key, "OVERRIDE")
+            && strcmp(chptr->mode.apass, "OVERRIDE")
+            && strcmp(chptr->mode.upass, "OVERRIDE")) {
+          send_reply(sptr, ERR_DONTCHEAT, chptr->chname);
+          return;
+        }
+        break;
+      case ERR_INVITEONLYCHAN: err = 'i'; break;
+      case ERR_CHANNELISFULL:  err = 'l'; break;
+      case ERR_BANNEDFROMCHAN: err = 'b'; break;
+      case ERR_BADCHANNELKEY:  err = 'k'; break;
+      case ERR_NEEDREGGEDNICK: err = 'r'; break;
+      case ERR_ADMINONLYCHAN:  err = 'a'; break;
+      case ERR_OPERONLYCHAN:   err = 'O'; break;
+      case ERR_SSLONLYCHAN:    err = 'Z'; break;
+      default: err = '?'; break;
+      }
+      /* send accountability notice */
+      if (err)
+        sendto_opmask_butone(0, SNO_HACK4, "OPER JOIN: %C JOIN %H "
+                             "(overriding +%c)", sptr, chptr, err);
+      err = 0;
+    }
+
+    /* Is there some reason the user may not join? */
+    if (err) {
+      switch(err) {
+        case ERR_NEEDREGGEDNICK:
+          send_reply(sptr,
+                     ERR_NEEDREGGEDNICK,
+                     chptr->chname,
+                     feature_str(FEAT_URLREG));
+          break;
+        default:
+          send_reply(sptr, err, chptr->chname);
+          break;
+      }
+      return;
+    }
+
+    joinbuf_join(join, chptr, flags);
+    if (flags & CHFL_CHANOP) {
+      struct ModeBuf mbuf;
+      /* Always let the server op him: this is needed on a net with older servers
+         because they 'destruct' channels immediately when they become empty without
+         sending out a DESTRUCT message. As a result, they would always bounce a mode
+         (as HACK(2)) when the user ops himself.
+         (There is also no particularly good reason to have the user op himself.)
+      */
+      modebuf_init(&mbuf, &me, cptr, chptr, MODEBUF_DEST_SERVER);
+      modebuf_mode_client(&mbuf, MODE_ADD | MODE_CHANOP, sptr,
+                          chptr->mode.apass[0] ? ((flags & CHFL_CHANNEL_MANAGER) ? 0 : 1) : MAXOPLEVEL);
+      modebuf_flush(&mbuf);
+    }
+  }
+
+  del_invite(sptr, chptr);
+
+  if (chptr->topic[0]) {
+    send_reply(sptr, RPL_TOPIC, chptr->chname, chptr->topic);
+    send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
+               chptr->topic_time);
+  }
+
+  do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
+}
+
 /** Handle a JOIN message from a client connection.
  * See @ref m_functions for discussion of the arguments.
  * @param[in] cptr Client that sent us the message.
@@ -105,10 +280,8 @@ last0(struct Client *cptr, struct Client *sptr, char *chanlist)
  */
 int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
-  struct Channel *chptr;
   struct JoinBuf join;
   struct JoinBuf create;
-  struct Gline *gline;
   char *p = 0;
   char *chanlist;
   char *name;
@@ -150,159 +323,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       break; /* no point processing the other channels */
     }
 
-    /* BADCHANed channel */
-    if ((gline = gline_find(name, GLINE_BADCHAN | GLINE_EXACT)) &&
-	GlineIsActive(gline) && !IsAnOper(sptr)) {
-      send_reply(sptr, ERR_BANNEDFROMCHAN, name);
-      continue;
-    }
-
-    if (!(chptr = FindChannel(name))) {
-      if (((name[0] == '&') && !feature_bool(FEAT_LOCAL_CHANNELS))
-          || strlen(name) > IRCD_MIN(CHANNELLEN, feature_int(FEAT_CHANNELLEN))) {
-        send_reply(sptr, ERR_NOSUCHCHANNEL, name);
-        continue;
-      }
-
-      if (!(chptr = get_channel(sptr, name, CGT_CREATE)))
-        continue;
-
-      /* Try to add the new channel as a recent target for the user. */
-      if (check_target_limit(sptr, chptr, chptr->chname, 0)) {
-        chptr->members = 0;
-        destruct_channel(chptr);
-        continue;
-      }
-
-      joinbuf_join(&create, chptr, CHFL_CHANOP | CHFL_CHANNEL_MANAGER);
-    } else if (find_member_link(chptr, sptr)) {
-      continue; /* already on channel */
-    } else if (check_target_limit(sptr, chptr, chptr->chname, 0)) {
-      continue;
-    } else {
-      int flags = CHFL_DEOPPED;
-      int err = 0;
-      int excepted = 0;
-      int exceptkli = 0;
-
-      if (find_ban(sptr, chptr->exceptlist)) {
-        if (feature_bool(FEAT_CHMODE_e_CHMODEEXCEPTION))
-          exceptkli = 1;
-        excepted = 1;
-      }
-
-      /* Check Apass/Upass -- since we only ever look at a single
-       * "key" per channel now, this hampers brute force attacks. */
-      if (feature_bool(FEAT_CHMODE_Z_STRICT) && (chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
-        err = ERR_SSLONLYCHAN;
-      else if (key && !strcmp(key, chptr->mode.apass))
-        flags = CHFL_CHANOP | CHFL_CHANNEL_MANAGER;
-      else if (key && !strcmp(key, chptr->mode.upass))
-        flags = CHFL_CHANOP;
-      else if (chptr->users == 0 && !chptr->mode.apass[0] && !(chptr->mode.exmode & EXMODE_PERSIST)) {
-        /* Joining a zombie channel (zannel): give ops and increment TS. */
-        flags = CHFL_CHANOP;
-        chptr->creationtime++;
-      } else if (IsXtraOp(sptr)) {
-        /* XtraOp bypasses all other checks. */
-      } else if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
-        err = ERR_SSLONLYCHAN;
-      else if (IsInvited(sptr, chptr)) {
-        /* Invites bypass these other checks. */
-      } else if (*chptr->mode.key && (!key || strcmp(key, chptr->mode.key)) && !exceptkli)
-        err = ERR_BADCHANNELKEY;
-      else if (*chptr->mode.key && feature_bool(FEAT_FLEXIBLEKEYS) && (key && !strcmp(key, chptr->mode.key))) {
-        /* Assume key checked by previous condition was found to be correct
-           and allow join because FEAT_FLEXIBLEKEYS was enabled */
-      } else if ((chptr->mode.mode & MODE_INVITEONLY) && !exceptkli)
-        err = ERR_INVITEONLYCHAN;
-      else if (chptr->mode.limit && (chptr->users >= chptr->mode.limit) && !exceptkli)
-        err = ERR_CHANNELISFULL;
-      else if ((chptr->mode.mode & MODE_REGONLY) && !IsAccount(sptr))
-        err = ERR_NEEDREGGEDNICK;
-      else if ((chptr->mode.exmode & EXMODE_ADMINONLY) && !IsAdmin(sptr))
-        err = ERR_ADMINONLYCHAN;
-      else if ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(sptr))
-        err = ERR_OPERONLYCHAN;
-      else if (find_ban(sptr, chptr->banlist) && !excepted)
-        err = ERR_BANNEDFROMCHAN;
-
-      /* An oper with WALK_LCHAN privilege can join a local channel
-       * he otherwise could not join by using "OVERRIDE" as the key.
-       * This will generate a HACK(4) notice, but fails if the oper
-       * could normally join the channel. */
-      if (IsLocalChannel(chptr->chname)
-          && HasPriv(sptr, PRIV_WALK_LCHAN)
-          && !(flags & CHFL_CHANOP)
-          && key && !strcmp(key, "OVERRIDE"))
-      {
-        switch (err) {
-        case 0:
-          if (strcmp(chptr->mode.key, "OVERRIDE")
-              && strcmp(chptr->mode.apass, "OVERRIDE")
-              && strcmp(chptr->mode.upass, "OVERRIDE")) {
-            send_reply(sptr, ERR_DONTCHEAT, chptr->chname);
-            continue;
-          }
-          break;
-        case ERR_INVITEONLYCHAN: err = 'i'; break;
-        case ERR_CHANNELISFULL:  err = 'l'; break;
-        case ERR_BANNEDFROMCHAN: err = 'b'; break;
-        case ERR_BADCHANNELKEY:  err = 'k'; break;
-        case ERR_NEEDREGGEDNICK: err = 'r'; break;
-        case ERR_ADMINONLYCHAN:  err = 'a'; break;
-        case ERR_OPERONLYCHAN:   err = 'O'; break;
-        case ERR_SSLONLYCHAN:    err = 'Z'; break;
-        default: err = '?'; break;
-        }
-        /* send accountability notice */
-        if (err)
-          sendto_opmask_butone(0, SNO_HACK4, "OPER JOIN: %C JOIN %H "
-                               "(overriding +%c)", sptr, chptr, err);
-        err = 0;
-      }
-
-      /* Is there some reason the user may not join? */
-      if (err) {
-        switch(err) {
-          case ERR_NEEDREGGEDNICK:
-            send_reply(sptr, 
-                       ERR_NEEDREGGEDNICK, 
-                       chptr->chname, 
-                       feature_str(FEAT_URLREG));            
-            break;
-          default:
-            send_reply(sptr, err, chptr->chname);
-            break;
-        }
-        continue;
-      }
-
-      joinbuf_join(&join, chptr, flags);
-      if (flags & CHFL_CHANOP) {
-        struct ModeBuf mbuf;
-	/* Always let the server op him: this is needed on a net with older servers
-	   because they 'destruct' channels immediately when they become empty without
-	   sending out a DESTRUCT message. As a result, they would always bounce a mode
-	   (as HACK(2)) when the user ops himself.
-           (There is also no particularly good reason to have the user op himself.)
-        */
-	modebuf_init(&mbuf, &me, cptr, chptr, MODEBUF_DEST_SERVER);
-	modebuf_mode_client(&mbuf, MODE_ADD | MODE_CHANOP, sptr,
-                            chptr->mode.apass[0] ? ((flags & CHFL_CHANNEL_MANAGER) ? 0 : 1) : MAXOPLEVEL);
-	modebuf_flush(&mbuf);
-      }
-    }
-
-    del_invite(sptr, chptr);
-
-    if (chptr->topic[0]) {
-      send_reply(sptr, RPL_TOPIC, chptr->chname, chptr->topic);
-      send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
-		 chptr->topic_time);
-    }
-
-    do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
+    do_join(cptr, sptr, &join, &create, name, key, 0);
   }
 
   joinbuf_flush(&join); /* must be first, if there's a JOIN 0 */

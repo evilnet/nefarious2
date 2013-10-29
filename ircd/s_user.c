@@ -2380,7 +2380,7 @@ void init_isupport(void)
     strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
   }
 
-  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,l,aCcDdiMmNnOpQRrSsTtZz",
+  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,Ll,aCcDdiMmNnOpQRrSsTtZz",
                 feature_bool(FEAT_EXCEPTS) ? "e" : "",
                 feature_bool(FEAT_OPLEVELS) ? "A" : "",
                 feature_bool(FEAT_OPLEVELS) ? "U" : "");

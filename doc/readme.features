@@ -1224,6 +1224,12 @@ CHMODE_C
 
 Allows channel mode C (no CTCP messages) to be used.
 
+CHMODE_L
+ * Type: boolean
+ * Default: TRUE
+
+Allows channel mode L (channel redirection) to be used.
+
 CHMODE_M
  * Type: boolean
  * Default: TRUE
@@ -1316,6 +1322,12 @@ the +A and +U keys to bypass it and can be set whilst non-SSL users
 are present on the channel. When enabled only services can join a
 channel with channel mode +Z and channel mode +Z cannot be set on a
 channel while non-SSL users are present.
+
+MAX_BOUNCE
+ * Type: integer
+ * Default: 5
+
+Maximum amount of links (+L) in a row a client will follow before error'ing.
 
 OMPATH
  * Type: string

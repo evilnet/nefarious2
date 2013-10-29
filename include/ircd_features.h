@@ -211,6 +211,7 @@ enum Feature {
   FEAT_CHMODE_a,
   FEAT_CHMODE_c,
   FEAT_CHMODE_C,
+  FEAT_CHMODE_L,
   FEAT_CHMODE_M,
   FEAT_CHMODE_N,
   FEAT_CHMODE_O,
@@ -225,6 +226,7 @@ enum Feature {
   FEAT_CHMODE_e_CHMODEEXCEPTION,
   FEAT_HALFOP_DEHALFOP_SELF,
   FEAT_CHMODE_Z_STRICT,
+  FEAT_MAX_BOUNCE,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,
