@@ -651,6 +651,7 @@ static const struct UserMode {
   { FLAG_WHOIS_NOTICE, 'W' },
   { FLAG_ADMIN,        'a' },
   { FLAG_XTRAOP,       'X' },
+  { FLAG_NOLINK,       'L' },
   { FLAG_SSL,          'z' },
   { FLAG_ACCOUNT,      'r' },
   { FLAG_SETHOST,      'h' },
@@ -1536,6 +1537,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetXtraOp(acptr);
         else
           ClearXtraOp(acptr);
+        break;
+      case 'L':
+        if (what == MODE_ADD)
+          SetNoLink(acptr);
+        else
+          ClearNoLink(acptr);
         break;
       case 'x':
         if (what == MODE_ADD) {

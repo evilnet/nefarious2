@@ -3,6 +3,14 @@
 
 2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added user mode +L (no channel redirection).
+
+	* ircd/m_join.c: Added user mode +L (no channel redirection).
+
+	* ircd/s_user.c: Added user mode +L (no channel redirection).
+
+2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/ircd_features.c: Once again missed adding channel mode
 	+L to a channel modes list.
 

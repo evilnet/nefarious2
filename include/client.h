@@ -95,7 +95,7 @@ typedef unsigned long flagpage_t;
 #define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "adgiknoqswxzBDHNORWX"
+#define infousermodes "adgiknoqswxzBDHLNORWX"
 
 /** Operator privileges. */
 enum Priv
@@ -209,6 +209,7 @@ enum Flag
     FLAG_GEOIP,                     /**< User has had GeoIP data applied */
     FLAG_ADMIN,                     /**< User is an admin (user mode +a) */
     FLAG_XTRAOP,                    /**< User has user mode +X (XtraOp) */
+    FLAG_NOLINK,                    /**< Client will not automatically get redirected if +L is set on a chan */
 
     FLAG_CLOAKIP,                   /**< User has a cloaked IP (+c) */
     FLAG_CLOAKHOST,                 /**< User has a cloaked host (+C) */
@@ -738,6 +739,8 @@ struct Client {
 #define IsAdmin(x)              HasFlag(x, FLAG_ADMIN)
 /** Return non-zero if the client has set +X. */
 #define IsXtraOp(x)             HasFlag(x, FLAG_XTRAOP)
+/** Return non-zero if the client has set +L. */
+#define IsNoLink(x)              HasFlag(x, FLAG_NOLINK)
 /** Return non-zero if the client has a cloaked IP. */
 #define IsCloakIP(x)            HasFlag(x, FLAG_CLOAKIP)
 /** Return non-zero if the client has a cloaked host. */
@@ -838,6 +841,8 @@ struct Client {
 #define SetAdmin(x)             SetFlag(x, FLAG_ADMIN)
 /** Mark a client as having mode +X (XtraOp). */
 #define SetXtraOp(x)            SetFlag(x, FLAG_XTRAOP)
+/** Mark a client as having mode +L (No Redirect). */
+#define SetNoLink(x)            SetFlag(x, FLAG_NOLINK)
 /** Mark a client as having a cloaked IP. */
 #define SetCloakIP(x)           SetFlag(x, FLAG_CLOAKIP)
 /** Mark a client as having a cloaked host. */
@@ -923,6 +928,8 @@ struct Client {
 #define ClearAdmin(x)           ClrFlag(x, FLAG_ADMIN)
 /** Remove mode +X (XtraOp) flag from client */
 #define ClearXtraOp(x)          ClrFlag(x, FLAG_XTRAOP)
+/** Remove mode +L (No Redirect) flag from client */
+#define ClearNoLink(x)          ClrFlag(x, FLAG_NOLINK)
 /** Client no longer has a cloaked IP. */
 #define ClearCloakIP(x)         ClrFlag(x, FLAG_CLOAKIP)
 /** Client no longer has a cloaked host. */

@@ -145,8 +145,12 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
 
     if (chptr->mode.redir && (*chptr->mode.redir != '\0')) {
       if (chptr->users >= chptr->mode.limit) {
-        send_reply(sptr, ERR_LINKSET, chptr->chname, chptr->chname, chptr->mode.redir);
-        do_join(cptr, sptr, join, create, chptr->mode.redir, key, level+1);
+        if (IsNoLink(sptr))
+          send_reply(sptr, ERR_LINKCHAN, chptr->chname, chptr->mode.redir);
+        else {
+          send_reply(sptr, ERR_LINKSET, chptr->chname, chptr->chname, chptr->mode.redir);
+          do_join(cptr, sptr, join, create, chptr->mode.redir, key, level+1);
+        }
         return;
       }
     }
