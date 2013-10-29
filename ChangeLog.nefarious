@@ -3,6 +3,11 @@
 
 2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/ircd_features.c: Once again missed adding channel mode
+	+L to a channel modes list.
+
+2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added FEAT_CHMODE_L and FEAT_MAX_BOUNCE.
 
 	* doc/readme.features: Added FEAT_CHMODE_L and FEAT_MAX_BOUNCE.
