@@ -73,6 +73,8 @@ static size_t bans_alloc;
 /** Number of ban structures in use. */
 static size_t bans_inuse;
 
+int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int level);
+
 #if !defined(NDEBUG)
 /** return the length (>=0) of a chain of links.
  * @param lp	pointer to the start of the linked list
@@ -95,12 +97,22 @@ static int list_length(struct SLink *lp)
 static void
 set_ban_mask(struct Ban *ban, const char *banstr)
 {
-  char *sep;
+  char *sep = NULL;
+  char *b = (char *)banstr;
   assert(banstr != NULL);
+  memset(&ban->extban, 0, sizeof(struct ExtBan));
+  if (parse_extban(NULL, (char *)banstr, &ban->extban, 0) > 0) {
+    b = (char *)&ban->extban.mask;
+    ban->flags |= BAN_EXTENDED;
+    if (!(ban->extban.flags & EBAN_MASKTYPE))
+      sep = strrchr(b, '@');
+  } else
+    sep = strrchr(b, '@');
   ircd_strncpy(ban->banstr, banstr, sizeof(ban->banstr) - 1);
-  sep = strrchr(banstr, '@');
   if (sep) {
-    ban->nu_len = sep - banstr;
+    ban->nu_len = sep - b;
+    if (ban->flags & BAN_EXTENDED)
+      ban->nu_len += ban->extban.prefixlen;
     if (ipmask_parse(sep + 1, &ban->address, &ban->addrbits))
       ban->flags |= BAN_IPMASK;
   }
@@ -385,16 +397,24 @@ struct Membership* find_channel_member(struct Client* cptr, struct Channel* chpt
 /** Searches for a ban from a ban list that matches a user.
  * @param[in] cptr The client to test.
  * @param[in] banlist The list of bans to test.
+ * @param[in] extbantype The extended ban type to find.
+ * @param[in] level Used to track how deep through a chain of ~j extended bans we are.
  * @return Pointer to a matching ban, or NULL if none exit.
  */
-struct Ban *find_ban(struct Client *cptr, struct Ban *banlist)
+struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, int level)
 {
   char        nu[NICKLEN + USERLEN + 2];
   char        tmphost[HOSTLEN + 1];
   char        iphost[SOCKIPLEN + 1];
   char       *hostmask;
   char       *sr;
+  int         isexcepts = 0;
   struct Ban *found;
+
+  if (extbantype & EBAN_EXCEPTLIST) {
+    isexcepts = 1;
+    extbantype &= ~EBAN_EXCEPTLIST;
+  }
 
   /* Build nick!user and alternate host names. */
   ircd_snprintf(0, nu, sizeof(nu), "%s!%s",
@@ -418,27 +438,89 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist)
     /* If we have found a positive ban already, only consider exceptions. */
     if (found && !(banlist->flags & BAN_EXCEPTION))
       continue;
-    /* Compare nick!user portion of ban. */
-    banlist->banstr[banlist->nu_len] = '\0';
-    res = match(banlist->banstr, nu);
-    banlist->banstr[banlist->nu_len] = '@';
-    if (res)
-      continue;
-    /* Compare host portion of ban. */
-    hostmask = banlist->banstr + banlist->nu_len + 1;
-    if (!((banlist->flags & BAN_IPMASK)
-         && ipmask_check(&cli_ip(cptr), &banlist->address, banlist->addrbits))
-        && match(hostmask, cli_user(cptr)->host)
-        && match(hostmask, cli_user(cptr)->realhost)
-        && !(IsCloakIP(cptr) && !match(hostmask, cli_user(cptr)->cloakip))
-        && !(IsCloakHost(cptr) && !match(hostmask, cli_user(cptr)->cloakhost))
-        && !(sr && !match(hostmask, sr)))
+
+    if (banlist->flags & BAN_EXTENDED) {
+      int ismatch = 0;
+      if (banlist->extban.flags & EBAN_ACCOUNT) {
+        if (IsAccount(cptr) && !match(banlist->extban.mask, cli_account(cptr)))
+          ismatch = 1;
+      } else if (banlist->extban.flags & EBAN_REALNAME) {
+        if (!match(banlist->extban.mask, cli_info(cptr)))
+          ismatch = 1;
+      } else if (banlist->extban.flags & EBAN_CHANNEL) {
+        struct Membership *lp;
+        for (lp = cptr->cli_user->channel; lp; lp = lp->next_channel) {
+          if (IsChannelName(banlist->extban.mask) &&
+              !match(banlist->extban.mask, lp->channel->chname))
+            ismatch = 1;
+          else if (!match(banlist->extban.mask + 1, lp->channel->chname)) {
+            if ((*banlist->extban.mask = '@') && IsChanOp(lp))
+              ismatch = 1;
+            else if ((*banlist->extban.mask = '%') && IsHalfOp(lp))
+              ismatch = 1;
+            else if ((*banlist->extban.mask = '+') && HasVoice(lp))
+              ismatch = 1;
+          }
+        }
+      } else if (banlist->extban.flags & EBAN_JOIN) {
+        struct Channel *chptr;
+
+        if (level >= feature_int(FEAT_EXTBAN_j_MAXDEPTH))
+          continue;
+
+        if ((chptr = FindChannel(banlist->extban.mask))) {
+          if (isexcepts)
+            found = find_ban(cptr, chptr->exceptlist, extbantype | EBAN_EXCEPTLIST, level + 1);
+          else
+            found = find_ban(cptr, chptr->banlist, extbantype, level + 1);
+        }
+      } else if (banlist->extban.nu_len) {
+        /* Compare nick!user portion of ban. */
+        banlist->extban.mask[banlist->extban.nu_len] = '\0';
+        res = match(banlist->extban.mask, nu);
+        banlist->extban.mask[banlist->extban.nu_len] = '@';
+        if (!res)
+          ismatch = 1;
+        /* Compare host portion of ban. */
+        hostmask = banlist->extban.mask + banlist->extban.nu_len + 1;
+        if (((banlist->flags & BAN_IPMASK)
+             && ipmask_check(&cli_ip(cptr), &banlist->address, banlist->addrbits))
+            && !match(hostmask, cli_user(cptr)->host)
+            && !match(hostmask, cli_user(cptr)->realhost)
+            && (IsCloakIP(cptr) && !match(hostmask, cli_user(cptr)->cloakip))
+            && (IsCloakHost(cptr) && !match(hostmask, cli_user(cptr)->cloakhost))
+            && (sr && !match(hostmask, sr)))
+            ismatch = 1;
+      }
+      if ((banlist->extban.flags & extbantype) || !(banlist->extban.flags & EBAN_ACTIVITY)) {
+        if ((banlist->extban.flags & EBAN_NEGATEMASK) && !ismatch)
+          found = banlist;
+        else if (!(banlist->extban.flags & EBAN_NEGATEMASK) && ismatch)
+          found = banlist;
+      }
+    } else {
+      /* Compare nick!user portion of ban. */
+      banlist->banstr[banlist->nu_len] = '\0';
+      res = match(banlist->banstr, nu);
+      banlist->banstr[banlist->nu_len] = '@';
+      if (res)
         continue;
-    /* If an exception matches, no ban can match. */
-    if (banlist->flags & BAN_EXCEPTION)
-      return NULL;
-    /* Otherwise, remember this ban but keep searching for an exception. */
-    found = banlist;
+      /* Compare host portion of ban. */
+      hostmask = banlist->banstr + banlist->nu_len + 1;
+      if (!((banlist->flags & BAN_IPMASK)
+           && ipmask_check(&cli_ip(cptr), &banlist->address, banlist->addrbits))
+          && match(hostmask, cli_user(cptr)->host)
+          && match(hostmask, cli_user(cptr)->realhost)
+          && !(IsCloakIP(cptr) && !match(hostmask, cli_user(cptr)->cloakip))
+          && !(IsCloakHost(cptr) && !match(hostmask, cli_user(cptr)->cloakhost))
+          && !(sr && !match(hostmask, sr)))
+          continue;
+      /* If an exception matches, no ban can match. */
+      if (banlist->flags & BAN_EXCEPTION)
+        return NULL;
+      /* Otherwise, remember this ban but keep searching for an exception. */
+      found = banlist;
+    }
   }
   return found;
 }
@@ -449,20 +531,49 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist)
  * do the comparisons and cache the result.
  *
  * @param[in] member The Membership to test for banned-ness.
+ * @param[in] extbantype The extended ban type to check for.
  * @return Non-zero if the member is banned, zero if not.
  */
-static int is_banned(struct Membership* member)
+static int is_banned(struct Membership* member, int extbantype)
 {
-  if (IsBanValid(member))
-    return IsBanned(member);
+  if (extbantype) {
+    if (extbantype == EBAN_NICK) {
+      if (IsBanValidNick(member))
+        return IsBannedNick(member);
 
-  SetBanValid(member);
-  if (find_ban(member->user, member->channel->banlist)) {
-    SetBanned(member);
-    return 1;
+      SetBanValidNick(member);
+    } else if (extbantype == EBAN_QUIET) {
+      if (IsBanValidQuiet(member))
+        return IsBannedQuiet(member);
+
+      SetBanValidQuiet(member);
+    }
+
+    if (find_ban(member->user, member->channel->banlist, extbantype, 0)) {
+      if (extbantype == EBAN_NICK)
+        SetBannedNick(member);
+      else if (extbantype == EBAN_QUIET)
+        SetBannedQuiet(member);
+      return 1;
+    } else {
+      if (extbantype == EBAN_NICK)
+        ClearBannedNick(member);
+      else if (extbantype == EBAN_QUIET)
+        ClearBannedQuiet(member);
+      return 0;
+    }
   } else {
-    ClearBanned(member);
-    return 0;
+    if (IsBanValid(member))
+      return IsBanned(member);
+
+    SetBanValid(member);
+    if (find_ban(member->user, member->channel->banlist, EBAN_NONE, 0)) {
+      SetBanned(member);
+      return 1;
+    } else {
+      ClearBanned(member);
+      return 0;
+    }
   }
 }
 
@@ -472,20 +583,49 @@ static int is_banned(struct Membership* member)
  * otherwise will do the comparisons and cache the result.
  *
  * @param[in] member The Membership to test for excepted-ness.
+ * @param[in] extbantype The extended ban type to check for.
  * @return Non-zero if the member is excepted, zero if not.
  */
-static int is_excepted(struct Membership* member)
+static int is_excepted(struct Membership* member, int extbantype)
 {
-  if (IsExceptValid(member))
-    return IsExcepted(member);
+  if (extbantype) {
+    if (extbantype == EBAN_NICK) {
+      if (IsExceptValidNick(member))
+        return IsExceptedNick(member);
 
-  SetExceptValid(member);
-  if (find_ban(member->user, member->channel->exceptlist)) {
-    SetExcepted(member);
-    return 1;
+      SetExceptValidNick(member);
+    } else if (extbantype == EBAN_QUIET) {
+      if (IsExceptValidQuiet(member))
+        return IsExceptedQuiet(member);
+
+      SetExceptValidQuiet(member);
+    }
+
+    if (find_ban(member->user, member->channel->exceptlist, extbantype | EBAN_EXCEPTLIST, 0)) {
+      if (extbantype == EBAN_NICK)
+        SetExceptedNick(member);
+      else if (extbantype == EBAN_QUIET)
+        SetExceptedQuiet(member);
+      return 1;
+    } else {
+      if (extbantype == EBAN_NICK)
+        ClearExceptedNick(member);
+      else if (extbantype == EBAN_QUIET)
+        ClearExceptedQuiet(member);
+      return 0;
+    }
   } else {
-    ClearExcepted(member);
-    return 0;
+    if (IsExceptValid(member))
+      return IsExcepted(member);
+
+    SetExceptValid(member);
+    if (find_ban(member->user, member->channel->exceptlist, EBAN_EXCEPTLIST, 0)) {
+      SetExcepted(member);
+      return 1;
+    } else {
+      ClearExcepted(member);
+      return 0;
+    }
   }
 }
 
@@ -798,7 +938,7 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
     return 0;
 
   /* If you're banned then you can't speak either. */
-  if (is_banned(member) && !is_excepted(member))
+  if (is_banned(member, EBAN_QUIET) && !is_excepted(member, EBAN_QUIET))
     return 0;
 
   if (IsDelayedJoin(member) && reveal)
@@ -846,8 +986,18 @@ int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr, int r
         ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(cptr)) ||
 	((chptr->mode.mode & MODE_REGONLY) && !IsAccount(cptr)))
       return 0;
-    else
-      return !(find_ban(cptr, chptr->banlist) && !find_ban(cptr, chptr->exceptlist));
+    else {
+      struct Ban *ban = NULL;
+      int isbanned = 0;
+      if ((ban = find_ban(cptr, chptr->banlist, EBAN_QUIET, 0))) {
+        if (ban->flags & BAN_EXTENDED) {
+          if ((ban->extban.flags & EBAN_QUIET) || !(ban->extban.flags & EBAN_ACTIVITY))
+            isbanned = 1;
+        } else
+          isbanned = 1;
+      }
+      return !(isbanned && !find_ban(cptr, chptr->exceptlist, EBAN_QUIET | EBAN_EXCEPTLIST, 0));
+    }
   }
   return member_can_send_to_channel(member, reveal);
 }
@@ -871,7 +1021,7 @@ const char* find_no_nickchange_channel(struct Client* cptr)
         continue;
       if ((member->channel->mode.mode & MODE_MODERATED)
           || (member->channel->mode.mode & MODE_REGONLY && !IsAccount(cptr))
-          || (is_banned(member) && !is_excepted(member)))
+          || (is_banned(member, EBAN_NICK) && !is_excepted(member, EBAN_NICK)))
         return member->channel->chname;
     }
   }
@@ -1367,6 +1517,120 @@ char *pretty_mask(char *mask)
     *host = '*';
   }
   ircd_snprintf(0, retmask, sizeof(retmask), "%s!%s@%s", nick, user, host);
+  return retmask;
+}
+
+static struct ExtBanInfo extban_list[] = {
+  {'q', EBAN_QUIET, FEAT_EXTBAN_q},
+  {'n', EBAN_NICK, FEAT_EXTBAN_n},
+  {'j', EBAN_NOCHILD | EBAN_JOIN, FEAT_EXTBAN_j},
+  {'a', EBAN_NOCHILD | EBAN_ACCOUNT, FEAT_EXTBAN_a},
+  {'c', EBAN_NOCHILD | EBAN_CHANNEL, FEAT_EXTBAN_c},
+  {'r', EBAN_NOCHILD | EBAN_REALNAME, FEAT_EXTBAN_r},
+  {'!', EBAN_NEGATEMASK, 0}
+};
+
+#define EXTBANS_COUNT (sizeof(extban_list) / sizeof(struct ExtBanInfo))
+
+int get_extban_flags(struct Client *cptr, char extban) {
+  int i;
+
+  if (cptr && MyUser(cptr) && !feature_bool(FEAT_EXTBANS))
+    return 0;
+
+  for (i = 0; i <= EXTBANS_COUNT; i++)
+  {
+    if (cptr && MyUser(cptr) && extban_list[i].feat && !feature_bool(extban_list[i].feat))
+      continue;
+    if (extban_list[i].banchar == extban)
+      return extban_list[i].flags;
+  }
+
+  return 0;
+}
+
+int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int level) {
+  char *b = ban;
+  int flags = 0;
+  int r = 0;
+
+  if (level >= 5)
+    return -1;
+
+  if (!*b)
+    return -1;
+
+  if (*b != '~')
+    return 0;
+
+  extban->prefix[extban->prefixlen++] = *b++;
+
+  if (!*b)
+    return -1;
+
+  flags = get_extban_flags(cptr, *b);
+  extban->flags |= flags;
+  extban->prefix[extban->prefixlen++] = *b++;
+
+  if (flags == 0)
+    return -1;
+
+  if (!*b)
+    return 0;
+
+  if (flags & EBAN_NEGATEMASK) {
+    flags = get_extban_flags(cptr, *b);
+    if (flags != 0) {
+      extban->flags |= flags;
+      extban->prefix[extban->prefixlen++] = *b++;
+    }
+  }
+
+  extban->delimiter = *b;
+  extban->prefix[extban->prefixlen++] = *b++;
+
+  if (!*b)
+    return 0;
+
+  if (extban->flags & EBAN_NOCHILD)
+    ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
+  else {
+    r = parse_extban(cptr, b, extban, level + 1);
+    if (r == 0)
+      ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
+    else
+      return r;
+  }
+
+  if (!(extban->flags & EBAN_MASKTYPE)) {
+    char *sep;
+    ircd_strncpy(extban->mask, collapse(pretty_mask(extban->mask)), NICKLEN+USERLEN+HOSTLEN+3);
+    sep = strrchr(extban->mask, '@');
+    extban->nu_len = sep - extban->mask;
+  }
+
+  extban->prefix[extban->prefixlen] = '\0';
+  extban->flags &= ~EBAN_NOCHILD;
+
+  return 1;
+}
+
+char *pretty_extmask(struct Client *cptr, char *mask)
+{
+  static char retmask[NICKLEN + USERLEN + HOSTLEN + 3];
+  struct ExtBan extban;
+  int r = 0;
+
+  memset(&extban, 0, sizeof(struct ExtBan));
+
+  r = parse_extban(cptr, mask, &extban, 0);
+  if (r == 0)
+    return collapse(pretty_mask(mask));
+  else if (r < 0)
+    return NULL;
+
+  ircd_snprintf(0, retmask, NICKLEN+USERLEN+HOSTLEN+3, "%s%s", extban.prefix, extban.mask);
+
   return retmask;
 }
 
@@ -2538,8 +2802,11 @@ mode_ban_invalidate(struct Channel *chan)
 {
   struct Membership *member;
 
-  for (member = chan->members; member; member = member->next_member)
+  for (member = chan->members; member; member = member->next_member) {
     ClearBanValid(member);
+    ClearBanValidQuiet(member);
+    ClearBanValidNick(member);
+  }
 }
 
 /** Simple function to invalidate a channel's ban exception cache.
@@ -2554,8 +2821,11 @@ mode_except_invalidate(struct Channel *chan)
 {
   struct Membership *member;
 
-  for (member = chan->members; member; member = member->next_member)
+  for (member = chan->members; member; member = member->next_member) {
     ClearExceptValid(member);
+    ClearExceptValidQuiet(member);
+    ClearExceptValidNick(member);
+  }
 }
 
 /** Simple function to drop invite structures
@@ -3346,7 +3616,7 @@ int apply_except(struct Ban **exceptlist, struct Ban *newban, int do_free)
 static void
 mode_parse_ban(struct ParseState *state, int *flag_p)
 {
-  char *t_str, *s;
+  char *t_str, *s, *pmask;
   struct Ban *ban, *newban;
 
   if (state->parc <= 0) { /* Not enough args, send ban list */
@@ -3382,6 +3652,9 @@ mode_parse_ban(struct ParseState *state, int *flag_p)
     return;
   }
 
+  if (!(pmask = pretty_extmask((state->dir == MODE_ADD ? state->sptr : NULL), t_str)))
+    return;
+
   /* Clear all ADD/DEL/OVERLAPPED flags from ban list. */
   if (!(state->done & DONE_BANCLEAN)) {
     for (ban = state->chptr->banlist; ban; ban = ban->next)
@@ -3394,7 +3667,7 @@ mode_parse_ban(struct ParseState *state, int *flag_p)
   newban->next = 0;
   newban->flags = ((state->dir == MODE_ADD) ? BAN_ADD : BAN_DEL)
       | (*flag_p == MODE_BAN ? 0 : BAN_EXCEPTION);
-  set_ban_mask(newban, collapse(pretty_mask(t_str)));
+  set_ban_mask(newban, pmask);
   ircd_strncpy(newban->who, IsUser(state->sptr) ? cli_name(state->sptr) : "*", NICKLEN);
   newban->when = TStime();
   apply_ban(&state->chptr->banlist, newban, 0);
@@ -3479,7 +3752,7 @@ mode_process_bans(struct ParseState *state)
 	    newban = make_ban(ban->banstr);
             strcpy(newban->who, ban->who);
 	    newban->when = ban->when;
-	    newban->flags = ban->flags & BAN_IPMASK;
+	    newban->flags = ban->flags & (BAN_IPMASK | BAN_EXTENDED);
 
 	    newban->next = state->chptr->banlist; /* and link it in */
 	    state->chptr->banlist = newban;
@@ -3503,7 +3776,7 @@ mode_process_bans(struct ParseState *state)
 static void
 mode_parse_except(struct ParseState *state, int *flag_p)
 {
-  char *t_str, *s;
+  char *t_str, *s, *pmask;
   struct Ban *ban, *newban;
 
   if (state->parc <= 0) { /* Not enough args, send ban exception list */
@@ -3537,6 +3810,9 @@ mode_parse_except(struct ParseState *state, int *flag_p)
     return;
   }
 
+  if (!(pmask = pretty_extmask((state->dir == MODE_ADD ? state->sptr : NULL), t_str)))
+    return;
+
   /* Clear all ADD/DEL/OVERLAPPED flags from ban exception list. */
   if (!(state->done & DONE_EXCEPTCLEAN)) {
     for (ban = state->chptr->exceptlist; ban; ban = ban->next)
@@ -3549,7 +3825,7 @@ mode_parse_except(struct ParseState *state, int *flag_p)
   newban->next = 0;
   newban->flags = ((state->dir == MODE_ADD) ? BAN_ADD : BAN_DEL)
       | (*flag_p == MODE_EXCEPT ? 0 : BAN_EXCEPTION);
-  set_ban_mask(newban, collapse(pretty_mask(t_str)));
+  set_ban_mask(newban, pmask);
   ircd_strncpy(newban->who, IsUser(state->sptr) ? cli_name(state->sptr) : "*", NICKLEN);
   newban->when = TStime();
   apply_except(&state->chptr->exceptlist, newban, 0);

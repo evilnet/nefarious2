@@ -1329,6 +1329,56 @@ MAX_BOUNCE
 
 Maximum amount of links (+L) in a row a client will follow before error'ing.
 
+EXTBANS
+ * Type: boolean
+ * Default: FALSE
+
+If enabled extended bans will be allowed. Servers will still be able to set
+them. This only controls /mode +b <extended ban> by clients.
+
+EXTBAN_j_MAXDEPTH
+ * Type: integer
+ * Default: 1
+
+Maximum depth extended ban type j can get to when searching the specified
+channel for matching bans.
+
+EXTBAN_a
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban a (account) to be used.
+
+EXTBAN_c
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban c (channel) to be used.
+
+EXTBAN_j
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban j (shared bans) to be used.
+
+EXTBAN_n
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban n (nick change) to be used.
+
+EXTBAN_q
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban q (quiet) to be used.
+
+EXTBAN_r
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban r (realname) to be used.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

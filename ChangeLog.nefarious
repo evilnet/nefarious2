@@ -1,22 +1,58 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-10-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added extended ban FEAT_*'s.
+
+	* doc/readme.features: Added extended ban FEAT_*'s.
+
+	* include/channel.h: Added extended ban types a, c, j, n, q and r.
+
+	* include/ircd_features.h: Added extended ban FEAT_*'s.
+
+	* ircd/channel.c: Added extended ban types a, c, j, n, q and r.
+
+	* ircd/ircd_features.c: Added extended ban FEAT_*'s.
+
+	* ircd/m_burst.c: Added extended ban types a, c, j, n, q and r.
+
+	* ircd/m_clearmode.c: Added extended ban types a, c, j, n, q and r.
+
+	* ircd/m_join.c: Added extended ban types a, c, j, n, q and r.
+
+	* ircd/s_user.c: Added extended ban types a, c, j, n, q and r.
+
 2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added Kill block mark and authexempt options.
+
 	* include/client.h: Added MARK_KILL.
+
 	* include/mark.h: Added MARK_KILL.
+
 	* include/numeric.h: Added RPL_WHOISKILL numeric reply.
+
 	* include/s_conf.h: Added Kill block mark and authexempt options.
+
 	* ircd/ircd_lexer.l: Added Kill block mark and authexempt options.
+
 	* ircd/ircd_parser.y: Added Kill block mark and authexempt options.
+
 	* ircd/m_check.c: Added MARK_KILL.
+
 	* ircd/m_mark.c: Added MARK_KILL.
+
 	* ircd/m_whois.c: Added MARK_KILL.
+
 	* ircd/s_auth.c: Added MARK_KILL.
+
 	* ircd/s_conf.c: Added Kill block mark and authexempt options.
+
 	* ircd/s_err.c: Added RPL_WHOISKILL numeric reply.
+
 	* ircd/s_serv.c: Added MARK_KILL.
+
 	* ircd/s_user.c: Added MARK_KILL.
 
 2013-10-29  Matthew Beeching  <jobe@mdbnet.co.uk>

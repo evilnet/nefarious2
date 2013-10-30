@@ -142,6 +142,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     int err = 0;
     int excepted = 0;
     int exceptkli = 0;
+    struct Ban *ban = NULL;
 
     if (chptr->mode.redir && (*chptr->mode.redir != '\0')) {
       if (chptr->users >= chptr->mode.limit) {
@@ -155,7 +156,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
       }
     }
 
-    if (find_ban(sptr, chptr->exceptlist)) {
+    if (find_ban(sptr, chptr->exceptlist, EBAN_EXCEPTLIST, 0)) {
       if (feature_bool(FEAT_CHMODE_e_CHMODEEXCEPTION))
         exceptkli = 1;
       excepted = 1;
@@ -194,7 +195,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
       err = ERR_ADMINONLYCHAN;
     else if ((chptr->mode.exmode & EXMODE_OPERONLY) && !IsAnOper(sptr))
       err = ERR_OPERONLYCHAN;
-    else if (find_ban(sptr, chptr->banlist) && !excepted)
+    else if ((ban = find_ban(sptr, chptr->banlist, EBAN_NONE, 0)) && !excepted)
       err = ERR_BANNEDFROMCHAN;
 
     /* An oper with WALK_LCHAN privilege can join a local channel

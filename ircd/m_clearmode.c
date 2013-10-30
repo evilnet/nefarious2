@@ -232,11 +232,17 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
       if (IsZombie(member)) /* we ignore zombies */
 	continue;
 
-      if (del_mode & MODE_BAN) /* If we cleared bans, clear the valid flags */
+      if (del_mode & MODE_BAN) { /* If we cleared bans, clear the valid flags */
 	ClearBanValid(member);
+        ClearBanValidQuiet(member);
+        ClearBanValidNick(member);
+      }
 
-      if (del_mode & MODE_EXCEPT) /* If we cleared excepts, clear the valid flags */
+      if (del_mode & MODE_EXCEPT) { /* If we cleared excepts, clear the valid flags */
         ClearExceptValid(member);
+        ClearExceptValidQuiet(member);
+        ClearExceptValidNick(member);
+      }
 
       /* Drop channel operator status */
       if (IsChanOp(member) && del_mode & MODE_CHANOP) {

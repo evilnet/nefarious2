@@ -96,6 +96,19 @@ struct Client;
 #define CHFL_EXCEPTVALIDMASK (CHFL_EXCEPTVALID | CHFL_EXCEPTED)
 #define CHFL_VOICED_OR_OPPED (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
 
+#define MBFL_BANVALID           0x0001  /**< CHFL_BANNED bit is valid */
+#define MBFL_BANNED             0x0002  /**< Channel member is banned */
+#define MBFL_BANVALID_QUIET     0x0004  /**< CHFL_BANNED_QUIET bit is valid */
+#define MBFL_BANNED_QUIET       0x0008  /**< Channel member is banned from speaking */
+#define MBFL_BANVALID_NICK      0x0010  /**< CHFL_BANNED_NICK bit is valid */
+#define MBFL_BANNED_NICK        0x0020  /**< Channel member is banned from changing nick */
+#define MBFL_EXCEPTVALID        0x0040 /**< CHFL_EXCEPTED is valid */
+#define MBFL_EXCEPTED           0x0080 /**< Channel member is ban excepted */
+#define MBFL_EXCEPTVALID_QUIET  0x0100 /**< CHFL_EXCEPTED_QUIET is valid */
+#define MBFL_EXCEPTED_QUIET     0x0200 /**< Channel member is ban excepted */
+#define MBFL_EXCEPTVALID_NICK   0x0400 /**< CHFL_EXCEPTED_NICK is valid */
+#define MBFL_EXCEPTED_NICK      0x0800 /**< Channel member is ban excepted */
+
 /* Channel Visibility macros */
 
 #define MODE_CHANOP     CHFL_CHANOP	/**< +o Chanop */
@@ -223,6 +236,7 @@ struct Membership {
   struct Membership* next_channel;	/**< Next channel this user is on */
   struct Membership* prev_channel;	/**< Previous channel this user is on*/
   unsigned int       status;		/**< Flags for op'd, voice'd, etc */
+  unsigned int       banflags;          /**< Ban cache flags */
   unsigned short     oplevel;		/**< Op level */
 };
 
@@ -231,10 +245,15 @@ struct Membership {
 
 #define IsZombie(x)         ((x)->status & CHFL_ZOMBIE) /**< see \ref zombie */
 #define IsDeopped(x)        ((x)->status & CHFL_DEOPPED)
-#define IsBanned(x)         ((x)->status & CHFL_BANNED)
-#define IsBanValid(x)       ((x)->status & CHFL_BANVALID)
+#define IsBanned(x)         ((x)->banflags & MBFL_BANNED)
+#define IsBanValid(x)       ((x)->banflags & MBFL_BANVALID)
+#define IsBannedQuiet(x)    ((x)->banflags & MBFL_BANNED_QUIET)
+#define IsBanValidQuiet(x)  ((x)->banflags & MBFL_BANVALID_QUIET)
+#define IsBannedNick(x)     ((x)->banflags & MBFL_BANNED_NICK)
+#define IsBanValidNick(x)   ((x)->banflags & MBFL_BANVALID_NICK)
 #define IsChanOp(x)         ((x)->status & CHFL_CHANOP)
 #define IsHalfOp(x)         ((x)->status & CHFL_HALFOP)
+#define ExtBanTypes(x)      ((x)->extbantype)
 #define OpLevel(x)          ((x)->oplevel)
 #define HasVoice(x)         ((x)->status & CHFL_VOICE)
 #define IsServOpOk(x)       ((x)->status & CHFL_SERVOPOK)
@@ -243,11 +262,19 @@ struct Membership {
 #define IsChannelManager(x) ((x)->status & CHFL_CHANNEL_MANAGER)
 #define IsUserParting(x)    ((x)->status & CHFL_USER_PARTING)
 #define IsDelayedJoin(x)    ((x)->status & CHFL_DELAYED)
-#define IsExcepted(x)       ((x)->status & CHFL_EXCEPTED)
-#define IsExceptValid(x)    ((x)->status & CHFL_EXCEPTVALID)
+#define IsExcepted(x)       ((x)->banflags & MBFL_EXCEPTED)
+#define IsExceptValid(x)    ((x)->banflags & MBFL_EXCEPTVALID)
+#define IsExceptedQuiet(x)  ((x)->banflags & MBFL_EXCEPTED_QUIET)
+#define IsExceptValidQuiet(x) ((x)->banflags & MBFL_EXCEPTVALID_QUIET)
+#define IsExceptedNick(x)   ((x)->banflags & MBFL_EXCEPTED_NICK)
+#define IsExceptValidNick(x) ((x)->banflags & MBFL_EXCEPTVALID_NICK)
 
-#define SetBanned(x)        ((x)->status |= CHFL_BANNED)
-#define SetBanValid(x)      ((x)->status |= CHFL_BANVALID)
+#define SetBanned(x)        ((x)->banflags |= MBFL_BANNED)
+#define SetBanValid(x)      ((x)->banflags |= MBFL_BANVALID)
+#define SetBannedQuiet(x)   ((x)->banflags |= MBFL_BANNED_QUIET)
+#define SetBanValidQuiet(x) ((x)->banflags |= MBFL_BANVALID_QUIET)
+#define SetBannedNick(x)    ((x)->banflags |= MBFL_BANNED_NICK)
+#define SetBanValidNick(x)  ((x)->banflags |= MBFL_BANVALID_NICK)
 #define SetDeopped(x)       ((x)->status |= CHFL_DEOPPED)
 #define SetServOpOk(x)      ((x)->status |= CHFL_SERVOPOK)
 #define SetBurstJoined(x)   ((x)->status |= CHFL_BURST_JOINED)
@@ -256,17 +283,29 @@ struct Membership {
 #define SetOpLevel(x, v)    (void)((x)->oplevel = (v))
 #define SetUserParting(x)   ((x)->status |= CHFL_USER_PARTING)
 #define SetDelayedJoin(x)   ((x)->status |= CHFL_DELAYED)
-#define SetExcepted(x)      ((x)->status |= CHFL_EXCEPTED)
-#define SetExceptValid(x)   ((x)->status |= CHFL_EXCEPTVALID)
+#define SetExcepted(x)      ((x)->banflags |= MBFL_EXCEPTED)
+#define SetExceptValid(x)   ((x)->banflags |= MBFL_EXCEPTVALID)
+#define SetExceptedQuiet(x) ((x)->banflags |= MBFL_EXCEPTED_QUIET)
+#define SetExceptValidQuiet(x) ((x)->banflags |= MBFL_EXCEPTVALID_QUIET)
+#define SetExceptedNick(x)  ((x)->banflags |= MBFL_EXCEPTED_NICK)
+#define SetExceptValidNick(x) ((x)->banflags |= MBFL_EXCEPTVALID_NICK)
 
-#define ClearBanned(x)      ((x)->status &= ~CHFL_BANNED)
-#define ClearBanValid(x)    ((x)->status &= ~CHFL_BANVALID)
+#define ClearBanned(x)      ((x)->banflags &= ~MBFL_BANNED)
+#define ClearBanValid(x)    ((x)->banflags &= ~MBFL_BANVALID)
+#define ClearBannedQuiet(x) ((x)->banflags &= ~MBFL_BANNED_QUIET)
+#define ClearBanValidQuiet(x) ((x)->banflags &= ~MBFL_BANVALID_QUIET)
+#define ClearBannedNick(x)  ((x)->banflags &= ~MBFL_BANNED_NICK)
+#define ClearBanValidNick(x)((x)->banflags &= ~MBFL_BANVALID_NICK)
 #define ClearDeopped(x)     ((x)->status &= ~CHFL_DEOPPED)
 #define ClearServOpOk(x)    ((x)->status &= ~CHFL_SERVOPOK)
 #define ClearBurstJoined(x) ((x)->status &= ~CHFL_BURST_JOINED)
 #define ClearDelayedJoin(x) ((x)->status &= ~CHFL_DELAYED)
-#define ClearExcepted(x)    ((x)->status &= ~CHFL_EXCEPTED)
-#define ClearExceptValid(x) ((x)->status &= ~CHFL_EXCEPTVALID)
+#define ClearExcepted(x)    ((x)->banflags &= ~MBFL_EXCEPTED)
+#define ClearExceptValid(x) ((x)->banflags &= ~MBFL_EXCEPTVALID)
+#define ClearExceptedQuiet(x) ((x)->banflags &= ~MBFL_EXCEPTED_QUIET)
+#define ClearExceptValidQuiet(x) ((x)->banflags &= ~MBFL_EXCEPTVALID_QUIET)
+#define ClearExceptedNick(x) ((x)->banflags &= ~MBFL_EXCEPTED_NICK)
+#define ClearExceptValidNick(x) ((x)->banflags &= ~MBFL_EXCEPTVALID_NICK)
 
 /** Mode information for a channel */
 struct Mode {
@@ -279,11 +318,45 @@ struct Mode {
   char redir[CHANNELLEN + 1];
 };
 
+#define EBAN_NONE       0x00000000      /* Passed to find_ban() when no extended ban type is specified. */
+#define EBAN_EXCEPTLIST 0x10000000      /* Only ever passed to find_ban() so wont conflic with EBAN_NOCHILD. */
+
+#define EBAN_NOCHILD    0x10000000      /* Extended Ban cannot have a nested extended ban. */
+#define EBAN_NEGATEMASK 0x20000000      /* Mask is negated (extended ban applies to users who do not match). */
+
+#define EBAN_QUIET      0x00000001      /* Extended Ban quiets matching users. */
+#define EBAN_NICK       0x00000002      /* Extended Ban stops matching users changing nick. */
+#define EBAN_JOIN       0x00000010      /* Extended Ban checks the specified channels ban list. */
+#define EBAN_ACCOUNT    0x00000020      /* Extended Ban matches against a users account names. */
+#define EBAN_CHANNEL    0x00000040      /* Extended Ban matches against channels the user is a member of. */
+#define EBAN_REALNAME   0x00000080      /* Extended Ban matches against a users real name. */
+
+#define EBAN_TYPES      0x000000FF      /* Mask of all extended ban types. */
+#define EBAN_CRITERIA   0xF0000000      /* Mask of all extended ban criteria. */
+#define EBAN_MASKTYPE   0x000000F0      /* Mask of all mask types. */
+#define EBAN_ACTIVITY   0x0000000F      /* Mask of all extended bans that block a specific activity. */
+
+struct ExtBanInfo {
+  char banchar;
+  int flags;
+  int feat;
+};
+
+struct ExtBan {
+  int flags;                              /**< Flags describing this extended ban. */
+  unsigned int prefixlen;                 /**< Length of the extended ban prefix. */
+  unsigned int nu_len;                    /**< length of nick!user part of mask. */
+  char delimiter;                         /**< Character used as the delimiter. */
+  char mask[NICKLEN+USERLEN+HOSTLEN+3];   /**< Mask to match the client against. */
+  char prefix[NICKLEN+USERLEN+HOSTLEN+3]; /**< Extended Ban prefix (everything before the mask). */
+};
+
 #define BAN_IPMASK         0x0001  /**< ban mask is an IP-number mask */
 #define BAN_OVERLAPPED     0x0002  /**< ban overlapped, need bounce */
 #define BAN_BURSTED        0x0004  /**< Ban part of last BURST */
 #define BAN_BURST_WIPEOUT  0x0008  /**< Ban will be wiped at EOB */
 #define BAN_EXCEPTION      0x0010  /**< Ban is an exception */
+#define BAN_EXTENDED       0x0020  /**< Ban is an Extended Ban */
 #define BAN_DEL            0x4000  /**< Ban is being removed */
 #define BAN_ADD            0x8000  /**< Ban is being added */
 
@@ -291,6 +364,7 @@ struct Mode {
 struct Ban {
   struct Ban* next;           /**< next ban in the channel */
   struct irc_in_addr address; /**< address for BAN_IPMASK bans */
+  struct ExtBan extban;       /**< extended ban info */
   time_t when;                /**< timestamp when ban was added */
   unsigned short flags;       /**< modifier flags for the ban */
   unsigned char nu_len;       /**< length of nick!user part of banstr */
@@ -445,6 +519,7 @@ extern int has_voice(struct Client *cptr, struct Channel *chptr);
 extern int IsInvited(struct Client* cptr, const void* chptr);
 extern void send_channel_modes(struct Client *cptr, struct Channel *chptr);
 extern char *pretty_mask(char *mask);
+extern char *pretty_extmask(struct Client *cptr, char *mask);
 extern void del_invite(struct Client *cptr, struct Channel *chptr);
 extern void list_set_default(void); /* this belongs elsewhere! */
 
@@ -491,7 +566,7 @@ extern void joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan,
 			 unsigned int flags);
 extern int joinbuf_flush(struct JoinBuf *jbuf);
 extern struct Ban *make_ban(const char *banstr);
-extern struct Ban *find_ban(struct Client *cptr, struct Ban *banlist);
+extern struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, int level);
 extern int apply_ban(struct Ban **banlist, struct Ban *newban, int free);
 extern int apply_except(struct Ban **banlist, struct Ban *newban, int do_free);
 extern void free_ban(struct Ban *ban);

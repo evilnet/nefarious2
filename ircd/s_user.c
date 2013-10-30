@@ -769,12 +769,16 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       }
       /* Invalidate all bans against the user so we check them again */
       for (member = (cli_user(cptr))->channel; member;
-	   member = member->next_channel)
+	   member = member->next_channel) {
 	ClearBanValid(member);
+        ClearBanValidNick(member);
+      }
       /* Invalidate all ban exceptions against the user so we check them again */
       for (member = (cli_user(cptr))->channel; member;
-           member = member->next_channel)
+           member = member->next_channel) {
         ClearExceptValid(member);
+        ClearExceptValidNick(member);
+      }
     }
     /*
      * Also set 'lastnick' to current time, if changed.
@@ -1106,11 +1110,17 @@ hide_hostmask(struct Client *cptr)
     user_setcloaked(cptr);
 
   /* Invalidate all bans against the user so we check them again */
-  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
     ClearBanValid(chan);
+    ClearBanValidNick(chan);
+    ClearBanValidQuiet(chan);
+  }
   /* Invalidate all ban exceptions against the user so we check them again */
-  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
     ClearExceptValid(chan);
+    ClearExceptValidNick(chan);
+    ClearExceptValidQuiet(chan);
+  }
 
   /* Select the new host to change to. */
   if (IsSetHost(cptr)) {
@@ -1220,11 +1230,17 @@ unhide_hostmask(struct Client *cptr)
     return 0;
 
   /* Invalidate all bans against the user so we check them again */
-  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
     ClearBanValid(chan);
+    ClearBanValidQuiet(chan);
+    ClearBanValidNick(chan);
+  }
   /* Invalidate all ban exceptions against the user so we check them again */
-  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel)
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
     ClearExceptValid(chan);
+    ClearExceptValidQuiet(chan);
+    ClearExceptValidNick(chan);
+  }
 
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
     sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
@@ -2129,7 +2145,7 @@ int is_silenced(struct Client *sptr, struct Client *acptr)
   char buf[BUFSIZE];
 
   if (IsServer(sptr) || !(user = cli_user(acptr))
-      || !(found = find_ban(sptr, user->silence)))
+      || !(found = find_ban(sptr, user->silence, EBAN_NONE, 0)))
     return 0;
   assert(!(found->flags & BAN_EXCEPTION));
   if (!MyConnect(sptr)) {
@@ -2382,6 +2398,7 @@ void init_isupport(void)
 {
   char imaxlist[BUFSIZE] = "";
   char cmodebuf[BUFSIZE] = "";
+  char extbanbuf[BUFSIZE] = "";
 
   strcat(imaxlist, "b:");
   strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
@@ -2426,6 +2443,25 @@ void init_isupport(void)
   if (feature_bool(FEAT_EXCEPTS)) {
     add_isupport_s("EXCEPTS", "e");
     add_isupport_i("MAXEXCEPTS", feature_int(FEAT_MAXEXCEPTS));
+  }
+
+  if (feature_bool(FEAT_EXTBANS)) {
+    strcat(extbanbuf, "~,");
+
+    if (feature_bool(FEAT_EXTBAN_a))
+      strcat(extbanbuf, "a");
+    if (feature_bool(FEAT_EXTBAN_c))
+      strcat(extbanbuf, "c");
+    if (feature_bool(FEAT_EXTBAN_j))
+      strcat(extbanbuf, "j");
+    if (feature_bool(FEAT_EXTBAN_n))
+      strcat(extbanbuf, "n");
+    if (feature_bool(FEAT_EXTBAN_q))
+      strcat(extbanbuf, "q");
+    if (feature_bool(FEAT_EXTBAN_r))
+      strcat(extbanbuf, "r");
+
+    add_isupport_s("EXTBANS", extbanbuf);
   }
 
   add_isupport_s("CASEMAPPING", "rfc1459");

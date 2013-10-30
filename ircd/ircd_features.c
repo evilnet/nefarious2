@@ -304,6 +304,32 @@ set_isupport_maxexcepts(void)
     add_isupport_s("MAXLIST", imaxlist);
 }
 
+/** Set EXTBANS if they are enabled. */
+static void
+set_isupport_extbans(void)
+{
+  char imaxlist[BUFSIZE] = "";
+
+  if (feature_bool(FEAT_EXTBANS)) {
+    strcat(imaxlist, "~,");
+
+    if (feature_bool(FEAT_EXTBAN_a))
+      strcat(imaxlist, "a");
+    if (feature_bool(FEAT_EXTBAN_c))
+      strcat(imaxlist, "c");
+    if (feature_bool(FEAT_EXTBAN_j))
+      strcat(imaxlist, "j");
+    if (feature_bool(FEAT_EXTBAN_n))
+      strcat(imaxlist, "n");
+    if (feature_bool(FEAT_EXTBAN_q))
+      strcat(imaxlist, "q");
+    if (feature_bool(FEAT_EXTBAN_r))
+      strcat(imaxlist, "r");
+
+    add_isupport_s("EXTBANS", imaxlist);
+  }
+}
+
 /** Handle update to FEAT_GEOIP_ENABLE. */
 static void feature_notify_geoip_enable(void)
 {
@@ -665,6 +691,16 @@ static struct FeatureDesc {
   F_B(HALFOP_DEHALFOP_SELF, 0, 0, 0),
   F_B(CHMODE_Z_STRICT, 0, 1, 0),
   F_I(MAX_BOUNCE, 0, 5, 0),
+
+  /* Extended bans */
+  F_B(EXTBANS, 0, 0, set_isupport_extbans),
+  F_I(EXTBAN_j_MAXDEPTH, 0, 1, 0),
+  F_B(EXTBAN_a, 0, 1, 0),
+  F_B(EXTBAN_c, 0, 1, 0),
+  F_B(EXTBAN_j, 0, 1, 0),
+  F_B(EXTBAN_n, 0, 1, 0),
+  F_B(EXTBAN_q, 0, 1, 0),
+  F_B(EXTBAN_r, 0, 1, 0),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

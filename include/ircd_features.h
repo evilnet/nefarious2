@@ -228,6 +228,16 @@ enum Feature {
   FEAT_CHMODE_Z_STRICT,
   FEAT_MAX_BOUNCE,
 
+  /* Extended bans */
+  FEAT_EXTBANS,
+  FEAT_EXTBAN_j_MAXDEPTH,
+  FEAT_EXTBAN_a,
+  FEAT_EXTBAN_c,
+  FEAT_EXTBAN_j,
+  FEAT_EXTBAN_n,
+  FEAT_EXTBAN_q,
+  FEAT_EXTBAN_r,
+
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,
   FEAT_EPATH,
