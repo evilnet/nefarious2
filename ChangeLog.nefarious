@@ -3,6 +3,11 @@
 
 2013-10-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/channel.c: Fixed a bug where FEAT_AUTOCHANMODES_LIST
+	ignored extended channel modes.
+
+2013-10-30  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added extended ban FEAT_*'s.
 
 	* doc/readme.features: Added extended ban FEAT_*'s.

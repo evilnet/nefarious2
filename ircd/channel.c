@@ -1683,11 +1683,25 @@ int SetAutoChanModes(struct Channel *chptr)
     MODE_TOPICLIMIT,    't',
     MODE_REGONLY,       'r',
     MODE_DELJOINS,      'D',
-    MODE_WASDELJOINS,   'd'
-    /* MODE_REGISTERED,    'R' */
+    MODE_WASDELJOINS,   'd',
+    /* MODE_REGISTERED,    'R', */
+    0, 0
+  };
+
+  static int chan_exflags[] = {
+    EXMODE_REGMODERATED,	'M',
+    EXMODE_NONOTICES,	'N',
+    EXMODE_SSLONLY,	'Z',
+    EXMODE_NOQUITPARTS,	'Q',
+    EXMODE_NOCTCPS,	'C',
+    EXMODE_NOMULTITARG,	'T',
+    EXMODE_NOCOLOR,	'c',
+    EXMODE_STRIPCOLOR,	'S',
+    0, 0
   };
   unsigned int *flag_p;
   unsigned int t_mode;
+  unsigned int t_exmode;
   const char *modestr;
 
   t_mode = 0;
@@ -1715,6 +1729,25 @@ int SetAutoChanModes(struct Channel *chptr)
 
   if (t_mode != 0)
     chptr->mode.mode = t_mode;
+
+  t_exmode = 0;
+  modestr = feature_str(FEAT_AUTOCHANMODES_LIST);
+
+  for (; *modestr; modestr++) {
+    for (flag_p = (unsigned int*)chan_exflags; flag_p[0];
+         flag_p += 2) /* look up flag */
+      if (flag_p[1] == *modestr)
+        break;
+
+    if (!flag_p[0]) /* didn't find it */
+      continue;
+
+    t_exmode |= flag_p[0];
+
+  } /* for (; *modestr; modestr++) { */
+
+  if (t_exmode != 0)
+    chptr->mode.exmode = t_exmode;
 
   return 0;
 }
