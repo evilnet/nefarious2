@@ -107,4 +107,7 @@
 /** Target number to start assigning new targets. */
 #define RESERVEDTARGETS 12
 
+/** Extended ban prefix character. */
+#define EXTBANPREFIX    '~'
+
 #endif /* INCLUDED_ircd_defs_h */

@@ -3,6 +3,14 @@
 
 2013-10-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/ircd_defs.h: Added #define for extended ban prefix.
+
+	* ircd/channel.c: Added #define for extended ban prefix.
+
+	* ircd/ircd_features.c: Added callback to update EXTBANS in RPL_ISUPPORT.
+
+2013-10-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/channel.h: Changed the way we handle extended ban controls.
 
 	* ircd/channel.c: Changed the way we handle extended ban controls.

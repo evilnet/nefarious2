@@ -696,12 +696,12 @@ static struct FeatureDesc {
   F_B(EXTBANS, 0, 0, set_isupport_extbans),
   F_I(EXTBAN_j_MAXDEPTH, 0, 1, 0),
   F_I(EXTBAN_j_MAXPERCHAN, 0, 2, 0),
-  F_B(EXTBAN_a, 0, 1, 0),
-  F_B(EXTBAN_c, 0, 1, 0),
-  F_B(EXTBAN_j, 0, 1, 0),
-  F_B(EXTBAN_n, 0, 1, 0),
-  F_B(EXTBAN_q, 0, 1, 0),
-  F_B(EXTBAN_r, 0, 1, 0),
+  F_B(EXTBAN_a, 0, 1, set_isupport_extbans),
+  F_B(EXTBAN_c, 0, 1, set_isupport_extbans),
+  F_B(EXTBAN_j, 0, 1, set_isupport_extbans),
+  F_B(EXTBAN_n, 0, 1, set_isupport_extbans),
+  F_B(EXTBAN_q, 0, 1, set_isupport_extbans),
+  F_B(EXTBAN_r, 0, 1, set_isupport_extbans),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

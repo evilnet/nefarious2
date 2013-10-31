@@ -1574,7 +1574,7 @@ int parse_extban(char *ban, struct ExtBan *extban, int level) {
   if (!*b)
     return -1;
 
-  if (*b != '~')
+  if (*b != EXTBANPREFIX)
     return 0;
 
   extban->prefix[extban->prefixlen++] = *b++;
