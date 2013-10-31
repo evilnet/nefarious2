@@ -519,7 +519,7 @@ extern int has_voice(struct Client *cptr, struct Channel *chptr);
 extern int IsInvited(struct Client* cptr, const void* chptr);
 extern void send_channel_modes(struct Client *cptr, struct Channel *chptr);
 extern char *pretty_mask(char *mask);
-extern char *pretty_extmask(struct Client *cptr, char *mask);
+extern char *pretty_extmask(char *mask);
 extern void del_invite(struct Client *cptr, struct Channel *chptr);
 extern void list_set_default(void); /* this belongs elsewhere! */
 

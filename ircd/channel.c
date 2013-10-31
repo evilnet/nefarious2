@@ -73,7 +73,7 @@ static size_t bans_alloc;
 /** Number of ban structures in use. */
 static size_t bans_inuse;
 
-int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int level);
+int parse_extban(char *ban, struct ExtBan *extban, int level);
 
 #if !defined(NDEBUG)
 /** return the length (>=0) of a chain of links.
@@ -101,7 +101,7 @@ set_ban_mask(struct Ban *ban, const char *banstr)
   char *b = (char *)banstr;
   assert(banstr != NULL);
   memset(&ban->extban, 0, sizeof(struct ExtBan));
-  if (parse_extban(NULL, (char *)banstr, &ban->extban, 0) > 0) {
+  if (parse_extban((char *)banstr, &ban->extban, 0) > 0) {
     b = (char *)&ban->extban.mask;
     ban->flags |= BAN_EXTENDED;
     if (!(ban->extban.flags & EBAN_MASKTYPE))
@@ -1527,21 +1527,35 @@ static struct ExtBanInfo extban_list[] = {
   {'a', EBAN_NOCHILD | EBAN_ACCOUNT, FEAT_EXTBAN_a},
   {'c', EBAN_NOCHILD | EBAN_CHANNEL, FEAT_EXTBAN_c},
   {'r', EBAN_NOCHILD | EBAN_REALNAME, FEAT_EXTBAN_r},
-  {'!', EBAN_NEGATEMASK, 0}
+  {'!', EBAN_NEGATEMASK, 0},
+  {0, 0, 0}
 };
 
-#define EXTBANS_COUNT (sizeof(extban_list) / sizeof(struct ExtBanInfo))
-
-int get_extban_flags(struct Client *cptr, char extban) {
+int check_extban_feats(struct ExtBan *extban) {
   int i;
 
-  if (cptr && MyUser(cptr) && !feature_bool(FEAT_EXTBANS))
+  if (!extban || !extban->flags)
+    return -1;
+
+  if (!feature_bool(FEAT_EXTBANS))
     return 0;
 
-  for (i = 0; i <= EXTBANS_COUNT; i++)
+  for (i = 0; extban_list[i].banchar; i++)
   {
-    if (cptr && MyUser(cptr) && extban_list[i].feat && !feature_bool(extban_list[i].feat))
-      continue;
+    if (((extban->flags & EBAN_TYPES) & (extban_list[i].flags & EBAN_TYPES)) &&
+        !feature_bool(extban_list[i].feat)) {
+      return 0;
+    }
+  }
+
+  return -1;
+}
+
+int get_extban_flags(char extban) {
+  int i;
+
+  for (i = 0; extban_list[i].banchar; i++)
+  {
     if (extban_list[i].banchar == extban)
       return extban_list[i].flags;
   }
@@ -1549,7 +1563,7 @@ int get_extban_flags(struct Client *cptr, char extban) {
   return 0;
 }
 
-int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int level) {
+int parse_extban(char *ban, struct ExtBan *extban, int level) {
   char *b = ban;
   int flags = 0;
   int r = 0;
@@ -1568,7 +1582,7 @@ int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int leve
   if (!*b)
     return -1;
 
-  flags = get_extban_flags(cptr, *b);
+  flags = get_extban_flags(*b);
   extban->flags |= flags;
   extban->prefix[extban->prefixlen++] = *b++;
 
@@ -1579,7 +1593,7 @@ int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int leve
     return 0;
 
   if (flags & EBAN_NEGATEMASK) {
-    flags = get_extban_flags(cptr, *b);
+    flags = get_extban_flags(*b);
     if (flags != 0) {
       extban->flags |= flags;
       extban->prefix[extban->prefixlen++] = *b++;
@@ -1595,7 +1609,7 @@ int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int leve
   if (extban->flags & EBAN_NOCHILD)
     ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
   else {
-    r = parse_extban(cptr, b, extban, level + 1);
+    r = parse_extban(b, extban, level + 1);
     if (r == 0)
       ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
     else
@@ -1615,7 +1629,7 @@ int parse_extban(struct Client *cptr, char *ban, struct ExtBan *extban, int leve
   return 1;
 }
 
-char *pretty_extmask(struct Client *cptr, char *mask)
+char *pretty_extmask(char *mask)
 {
   static char retmask[NICKLEN + USERLEN + HOSTLEN + 3];
   struct ExtBan extban;
@@ -1623,7 +1637,7 @@ char *pretty_extmask(struct Client *cptr, char *mask)
 
   memset(&extban, 0, sizeof(struct ExtBan));
 
-  r = parse_extban(cptr, mask, &extban, 0);
+  r = parse_extban(mask, &extban, 0);
   if (r == 0)
     return collapse(pretty_mask(mask));
   else if (r < 0)
@@ -3685,7 +3699,7 @@ mode_parse_ban(struct ParseState *state, int *flag_p)
     return;
   }
 
-  if (!(pmask = pretty_extmask((state->dir == MODE_ADD ? state->sptr : NULL), t_str)))
+  if (!(pmask = pretty_extmask(t_str)))
     return;
 
   /* Clear all ADD/DEL/OVERLAPPED flags from ban list. */
@@ -3789,7 +3803,15 @@ mode_process_bans(struct ParseState *state)
             extjbans--;
 	  count--;
 	  len -= banlen;
-        } else if (isjban && (extjbans > feature_int(FEAT_EXTBAN_j_MAXPERCHAN))) {
+        } else if ((state->flags & MODE_PARSE_SET) && MyUser(state->sptr) &&
+                    (ban->flags & BAN_EXTENDED) && !check_extban_feats(&ban->extban)) {
+          if (isjban)
+            extjbans--;
+          count--;
+          len -= banlen;
+        } else if ((state->flags & MODE_PARSE_SET) && MyUser(state->sptr) && isjban &&
+                   ((extjbans > feature_int(FEAT_EXTBAN_j_MAXPERCHAN)) ||
+                   !ircd_strcmp(ban->extban.mask, state->chptr->chname))) {
           extjbans--;
           count--;
           len -= banlen;
@@ -3862,7 +3884,7 @@ mode_parse_except(struct ParseState *state, int *flag_p)
     return;
   }
 
-  if (!(pmask = pretty_extmask((state->dir == MODE_ADD ? state->sptr : NULL), t_str)))
+  if (!(pmask = pretty_extmask(t_str)))
     return;
 
   /* Clear all ADD/DEL/OVERLAPPED flags from ban exception list. */
@@ -3966,7 +3988,15 @@ mode_process_excepts(struct ParseState *state)
             extjbans--;
           count--;
           len -= banlen;
-        } else if (isjban && (extjbans > feature_int(FEAT_EXTBAN_j_MAXPERCHAN))) {
+        } else if ((state->flags & MODE_PARSE_SET) && MyUser(state->sptr) &&
+                    (ban->flags & BAN_EXTENDED) && !check_extban_feats(&ban->extban)) {
+          if (isjban)
+            extjbans--;
+          count--;
+          len -= banlen;
+        } else if ((state->flags & MODE_PARSE_SET) && MyUser(state->sptr) && isjban &&
+                   ((extjbans > feature_int(FEAT_EXTBAN_j_MAXPERCHAN)) ||
+                   !ircd_strcmp(ban->extban.mask, state->chptr->chname))) {
           extjbans--;
           count--;
           len -= banlen;

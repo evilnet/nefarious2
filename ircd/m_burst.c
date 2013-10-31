@@ -412,7 +412,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
             continue;
           }
 
-          ban = collapse(pretty_extmask(NULL, ban));
+          ban = collapse(pretty_extmask(ban));
 
 	    /*
 	     * Yeah, we should probably do this elsewhere, and make it better
