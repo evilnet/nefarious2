@@ -3717,6 +3717,8 @@ mode_process_bans(struct ParseState *state)
   int len = 0;
   int banlen;
   int changed = 0;
+  int isjban = 0;
+  int extjbans = 0;
 
   for (prevban = 0, ban = state->chptr->banlist; ban; ban = nextban) {
     count++;
@@ -3724,12 +3726,19 @@ mode_process_bans(struct ParseState *state)
     len += banlen;
     nextban = ban->next;
 
+    isjban = ((ban->flags & BAN_EXTENDED) && (ban->extban.flags & EBAN_JOIN) ? 1 : 0);
+
+    if (isjban)
+      extjbans++;
+
     if ((ban->flags & (BAN_DEL | BAN_ADD)) == (BAN_DEL | BAN_ADD)) {
       if (prevban)
 	prevban->next = 0; /* Break the list; ban isn't a real ban */
       else
 	state->chptr->banlist = 0;
 
+      if (isjban)
+        extjbans--;
       count--;
       len -= banlen;
 
@@ -3746,6 +3755,8 @@ mode_process_bans(struct ParseState *state)
 	else
 	  state->chptr->banlist = ban->next;
 
+        if (isjban)
+          extjbans--;
 	count--;
 	len -= banlen;
         free_ban(ban);
@@ -3753,7 +3764,7 @@ mode_process_bans(struct ParseState *state)
 	changed++;
 	continue; /* next ban; keep prevban like it is */
       } else
-	ban->flags &= BAN_IPMASK; /* unset other flags */
+	ban->flags &= BAN_IPMASK | BAN_EXTENDED; /* unset other flags */
     } else if (ban->flags & BAN_ADD) { /* adding a ban? */
       if (prevban)
 	prevban->next = 0; /* Break the list; ban isn't a real ban */
@@ -3763,6 +3774,8 @@ mode_process_bans(struct ParseState *state)
       /* If we're supposed to ignore it, do so. */
       if (ban->flags & BAN_OVERLAPPED &&
 	  !(state->flags & MODE_PARSE_BOUNCE)) {
+        if (isjban)
+          extjbans--;
 	count--;
 	len -= banlen;
       } else {
@@ -3772,8 +3785,14 @@ mode_process_bans(struct ParseState *state)
 	     count > feature_int(FEAT_MAXBANS))) {
 	  send_reply(state->sptr, ERR_BANLISTFULL, state->chptr->chname,
 		     ban->banstr);
+          if (isjban)
+            extjbans--;
 	  count--;
 	  len -= banlen;
+        } else if (isjban && (extjbans > feature_int(FEAT_EXTBAN_j_MAXPERCHAN))) {
+          extjbans--;
+          count--;
+          len -= banlen;
 	} else {
           char *bandup;
 	  /* add the ban to the buffer */
@@ -3875,6 +3894,8 @@ mode_process_excepts(struct ParseState *state)
   int len = 0;
   int banlen;
   int changed = 0;
+  int isjban = 0;
+  int extjbans = 0;
 
   for (prevban = 0, ban = state->chptr->exceptlist; ban; ban = nextban) {
     count++;
@@ -3882,12 +3903,19 @@ mode_process_excepts(struct ParseState *state)
     len += banlen;
     nextban = ban->next;
 
+    isjban = ((ban->flags & BAN_EXTENDED) && (ban->extban.flags & EBAN_JOIN) ? 1 : 0);
+
+    if (isjban)
+      extjbans++;
+
     if ((ban->flags & (BAN_DEL | BAN_ADD)) == (BAN_DEL | BAN_ADD)) {
       if (prevban)
         prevban->next = 0; /* Break the list; ban isn't a real ban exception */
       else
         state->chptr->exceptlist = 0;
 
+      if (isjban)
+        extjbans--;
       count--;
       len -= banlen;
 
@@ -3904,6 +3932,8 @@ mode_process_excepts(struct ParseState *state)
         else
           state->chptr->exceptlist = ban->next;
 
+        if (isjban)
+          extjbans--;
         count--;
         len -= banlen;
         free_ban(ban);
@@ -3921,6 +3951,8 @@ mode_process_excepts(struct ParseState *state)
       /* If we're supposed to ignore it, do so. */
       if (ban->flags & BAN_OVERLAPPED &&
           !(state->flags & MODE_PARSE_BOUNCE)) {
+        if (isjban)
+          extjbans--;
         count--;
         len -= banlen;
       } else {
@@ -3930,6 +3962,12 @@ mode_process_excepts(struct ParseState *state)
              count > feature_int(FEAT_MAXEXCEPTS))) {
           send_reply(state->sptr, ERR_EXCEPTLISTFULL, state->chptr->chname,
                      ban->banstr);
+          if (isjban)
+            extjbans--;
+          count--;
+          len -= banlen;
+        } else if (isjban && (extjbans > feature_int(FEAT_EXTBAN_j_MAXPERCHAN))) {
+          extjbans--;
           count--;
           len -= banlen;
         } else {

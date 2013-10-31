@@ -1,6 +1,18 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-10-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added FEAT_EXTBAN_j_MAXPERCHAN feature.
+
+	* doc/readme.features: Added FEAT_EXTBAN_j_MAXPERCHAN feature.
+
+	* include/ircd_features.h: Added FEAT_EXTBAN_j_MAXPERCHAN feature.
+
+	* ircd/channel.c: Added FEAT_EXTBAN_j_MAXPERCHAN feature.
+
+	* ircd/ircd_features.c: Added FEAT_EXTBAN_j_MAXPERCHAN feature.
+
 2013-10-30  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/channel.c: Fixed a bug where FEAT_AUTOCHANMODES_LIST

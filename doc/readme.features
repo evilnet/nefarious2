@@ -1343,6 +1343,12 @@ EXTBAN_j_MAXDEPTH
 Maximum depth extended ban type j can get to when searching the specified
 channel for matching bans.
 
+EXTBAN_j_MAXPERCHAN
+ * Type: integer
+ * Default: 1
+
+Maximum number of extended bans of type j that can be set per channel.
+
 EXTBAN_a
  * Type: boolean
  * Default: TRUE

@@ -231,6 +231,7 @@ enum Feature {
   /* Extended bans */
   FEAT_EXTBANS,
   FEAT_EXTBAN_j_MAXDEPTH,
+  FEAT_EXTBAN_j_MAXPERCHAN,
   FEAT_EXTBAN_a,
   FEAT_EXTBAN_c,
   FEAT_EXTBAN_j,

@@ -695,6 +695,7 @@ static struct FeatureDesc {
   /* Extended bans */
   F_B(EXTBANS, 0, 0, set_isupport_extbans),
   F_I(EXTBAN_j_MAXDEPTH, 0, 1, 0),
+  F_I(EXTBAN_j_MAXPERCHAN, 0, 2, 0),
   F_B(EXTBAN_a, 0, 1, 0),
   F_B(EXTBAN_c, 0, 1, 0),
   F_B(EXTBAN_j, 0, 1, 0),
