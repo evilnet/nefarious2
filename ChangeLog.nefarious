@@ -3,6 +3,14 @@
 
 2013-10-31  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Changed SASL_TIMEOUT default value.
+
+	* doc/readme.features: Changed SASL_TIMEOUT default value.
+
+	* ircd/ircd_features.c: Changed SASL_TIMEOUT default value.
+
+2013-10-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* include/ircd_defs.h: Added #define for extended ban prefix.
 
 	* ircd/channel.c: Added #define for extended ban prefix.

@@ -1195,7 +1195,7 @@ As per UnderNet CFV-165, this removes /STATS Z from users.
 
 SASL_TIMEOUT
   * Type: integer
-  * Default: 5
+  * Default: 8
 
 Specifies the number of seconds before an SASL request should timeout.
 
