@@ -348,7 +348,6 @@ struct ExtBan {
   unsigned int nu_len;                    /**< length of nick!user part of mask. */
   char delimiter;                         /**< Character used as the delimiter. */
   char mask[NICKLEN+USERLEN+HOSTLEN+3];   /**< Mask to match the client against. */
-  char prefix[NICKLEN+USERLEN+HOSTLEN+3]; /**< Extended Ban prefix (everything before the mask). */
 };
 
 #define BAN_IPMASK         0x0001  /**< ban mask is an IP-number mask */

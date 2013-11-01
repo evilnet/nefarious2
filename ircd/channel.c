@@ -73,7 +73,7 @@ static size_t bans_alloc;
 /** Number of ban structures in use. */
 static size_t bans_inuse;
 
-int parse_extban(char *ban, struct ExtBan *extban, int level);
+int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix);
 
 #if !defined(NDEBUG)
 /** return the length (>=0) of a chain of links.
@@ -99,9 +99,10 @@ set_ban_mask(struct Ban *ban, const char *banstr)
 {
   char *sep = NULL;
   char *b = (char *)banstr;
+  char prefix[BUFSIZE+1];
   assert(banstr != NULL);
   memset(&ban->extban, 0, sizeof(struct ExtBan));
-  if (parse_extban((char *)banstr, &ban->extban, 0) > 0) {
+  if (parse_extban((char *)banstr, &ban->extban, 0, (char *)&prefix) > 0) {
     b = (char *)&ban->extban.mask;
     ban->flags |= BAN_EXTENDED;
     if (!(ban->extban.flags & EBAN_MASKTYPE))
@@ -1563,7 +1564,7 @@ int get_extban_flags(char extban) {
   return 0;
 }
 
-int parse_extban(char *ban, struct ExtBan *extban, int level) {
+int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix) {
   char *b = ban;
   int flags = 0;
   int r = 0;
@@ -1577,14 +1578,14 @@ int parse_extban(char *ban, struct ExtBan *extban, int level) {
   if (*b != EXTBANPREFIX)
     return 0;
 
-  extban->prefix[extban->prefixlen++] = *b++;
+  prefix[extban->prefixlen++] = *b++;
 
   if (!*b)
     return -1;
 
   flags = get_extban_flags(*b);
   extban->flags |= flags;
-  extban->prefix[extban->prefixlen++] = *b++;
+  prefix[extban->prefixlen++] = *b++;
 
   if (flags == 0)
     return -1;
@@ -1596,12 +1597,12 @@ int parse_extban(char *ban, struct ExtBan *extban, int level) {
     flags = get_extban_flags(*b);
     if (flags != 0) {
       extban->flags |= flags;
-      extban->prefix[extban->prefixlen++] = *b++;
+      prefix[extban->prefixlen++] = *b++;
     }
   }
 
   extban->delimiter = *b;
-  extban->prefix[extban->prefixlen++] = *b++;
+  prefix[extban->prefixlen++] = *b++;
 
   if (!*b)
     return 0;
@@ -1609,7 +1610,7 @@ int parse_extban(char *ban, struct ExtBan *extban, int level) {
   if (extban->flags & EBAN_NOCHILD)
     ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
   else {
-    r = parse_extban(b, extban, level + 1);
+    r = parse_extban(b, extban, level + 1, prefix);
     if (r == 0)
       ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
     else
@@ -1623,7 +1624,7 @@ int parse_extban(char *ban, struct ExtBan *extban, int level) {
     extban->nu_len = sep - extban->mask;
   }
 
-  extban->prefix[extban->prefixlen] = '\0';
+  prefix[extban->prefixlen] = '\0';
   extban->flags &= ~EBAN_NOCHILD;
 
   return 1;
@@ -1632,18 +1633,19 @@ int parse_extban(char *ban, struct ExtBan *extban, int level) {
 char *pretty_extmask(char *mask)
 {
   static char retmask[NICKLEN + USERLEN + HOSTLEN + 3];
+  char prefix[BUFSIZE+1];
   struct ExtBan extban;
   int r = 0;
 
   memset(&extban, 0, sizeof(struct ExtBan));
 
-  r = parse_extban(mask, &extban, 0);
+  r = parse_extban(mask, &extban, 0, (char *)&prefix);
   if (r == 0)
     return collapse(pretty_mask(mask));
   else if (r < 0)
     return NULL;
 
-  ircd_snprintf(0, retmask, NICKLEN+USERLEN+HOSTLEN+3, "%s%s", extban.prefix, extban.mask);
+  ircd_snprintf(0, retmask, NICKLEN+USERLEN+HOSTLEN+3, "%s%s", prefix, extban.mask);
 
   return retmask;
 }

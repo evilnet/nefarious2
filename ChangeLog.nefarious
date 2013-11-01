@@ -1,7 +1,17 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
-2013-10-31  Matthew Beeching  <jobe@mdbnet.co.uk>
+2013-11-01  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/channel.h: Removed the unnecesary prefix member of the
+	ExtBan struct.
+
+	* ircd/channel.c: Removed the unnecesary prefix member of the
+	ExtBan struct.
+
+	* ChangeLog.nefarious: Fixed incorrect date in previous commit.
+
+2013-11-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Changed SASL_TIMEOUT default value.
 
