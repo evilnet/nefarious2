@@ -3,6 +3,11 @@
 
 2013-11-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/m_burst.c: Fixed crash bug when linking with Nefarious 1
+	when an invalid extended ban is present on a channel.
+
+2013-11-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Added extended bans ~m and ~M for marks.
 
 	* doc/readme.features: Added extended bans ~m and ~M for marks.

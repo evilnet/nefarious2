@@ -414,6 +414,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
           ban = collapse(pretty_extmask(ban));
 
+          if (!ban)
+            continue;
+
 	    /*
 	     * Yeah, we should probably do this elsewhere, and make it better
 	     * and more general; this will hold until we get there, though.
