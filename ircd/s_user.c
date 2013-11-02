@@ -543,8 +543,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (cli_webirc(sptr) && !EmptyString(cli_webirc(sptr)))
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_WEBIRC, cli_webirc(sptr));
 
-    for (lp = cli_sdnsbls(cptr); lp; lp = lp->next) {
-      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_DNSBL_DATA, lp->value.cp);
+    for (lp = cli_smarks(cptr); lp; lp = lp->next) {
+      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_MARK, lp->value.cp);
     }
 
     if (cli_sslclifp(sptr) && !EmptyString(cli_sslclifp(sptr)))

@@ -238,20 +238,20 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
     if (IsBot(acptr))
       send_reply(sptr, RPL_WHOISBOT, name);
 
-    if (IsDNSBL(acptr)) {
+    if (IsMarked(acptr)) {
       struct SLink*  dp;
-      if (EmptyString(cli_dnsbls(acptr))) {
-        for (dp = cli_sdnsbls(acptr); dp; dp = dp->next) {
-          if (EmptyString(cli_dnsbls(acptr)))
-            strcat(cli_dnsbls(acptr), dp->value.cp);
+      if (EmptyString(cli_marks(acptr))) {
+        for (dp = cli_smarks(acptr); dp; dp = dp->next) {
+          if (EmptyString(cli_marks(acptr)))
+            strcat(cli_marks(acptr), dp->value.cp);
           else {
-            strcat(cli_dnsbls(acptr), ", ");
-            strcat(cli_dnsbls(acptr), dp->value.cp);
+            strcat(cli_marks(acptr), ", ");
+            strcat(cli_marks(acptr), dp->value.cp);
           }
         }
       }
 
-      send_reply(sptr, RPL_WHOISDNSBL, name, cli_dnsbls(acptr));
+      send_reply(sptr, RPL_WHOISMARKS, name, cli_marks(acptr));
     }
 
     if (cli_killmark(acptr) && !EmptyString(cli_killmark(acptr)))

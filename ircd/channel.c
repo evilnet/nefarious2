@@ -448,6 +448,12 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, i
       } else if (banlist->extban.flags & EBAN_REALNAME) {
         if (!match(banlist->extban.mask, cli_info(cptr)))
           ismatch = 1;
+      } else if (banlist->extban.flags & EBAN_MARK) {
+        if (find_mark_match(cptr, banlist->extban.mask))
+          ismatch = 1;
+      } else if (banlist->extban.flags & EBAN_MARKUA) {
+        if (!IsAccount(cptr) && find_mark_match(cptr, banlist->extban.mask))
+          ismatch = 1;
       } else if (banlist->extban.flags & EBAN_CHANNEL) {
         struct Membership *lp;
         for (lp = cptr->cli_user->channel; lp; lp = lp->next_channel) {
@@ -1528,6 +1534,8 @@ static struct ExtBanInfo extban_list[] = {
   {'a', EBAN_NOCHILD | EBAN_ACCOUNT, FEAT_EXTBAN_a},
   {'c', EBAN_NOCHILD | EBAN_CHANNEL, FEAT_EXTBAN_c},
   {'r', EBAN_NOCHILD | EBAN_REALNAME, FEAT_EXTBAN_r},
+  {'m', EBAN_NOCHILD | EBAN_MARK, FEAT_EXTBAN_m},
+  {'M', EBAN_NOCHILD | EBAN_MARKUA, FEAT_EXTBAN_M},
   {'!', EBAN_NEGATEMASK, 0},
   {0, 0, 0}
 };

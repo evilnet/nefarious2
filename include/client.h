@@ -223,7 +223,7 @@ enum Flag
 
     FLAG_SASLCOMPLETE,              /**< SASL Complete */
 
-    FLAG_DNSBL,                     /**< Client in DNSBL */
+    FLAG_MARKED,                    /**< Client is marked */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -324,8 +324,8 @@ struct Client {
   struct irc_in_addr cli_connectip;  /**< Client connection IP address. */
   char cli_connecthost[HOSTLEN + 1]; /**< Client connection host name. */
 
-  struct SLink* cli_sdnsbls;      /**< chain of dnsbl pointer blocks */
-  char cli_dnsbls[BUFSIZE + 1];   /**< all dnsbls matched identifier */
+  struct SLink* cli_smarks;       /**< chain of mark pointer blocks */
+  char cli_marks[BUFSIZE + 1];    /**< all marks applied identifier */
 
   /* GeoIP data */
   char cli_countrycode[3];          /**< GeoIP 2 letter country code. */
@@ -418,10 +418,10 @@ struct Client {
 #define cli_sslclifp(cli)       ((cli)->cli_sslclifp)
 /** Get a clients Kill block exemption mark. */
 #define cli_killmark(cli)       ((cli)->cli_killmark)
-/** Get formatted string of all set dnsbls for client. */
-#define cli_dnsbls(cli)         ((cli)->cli_dnsbls)
-/** Get all dnsbls set for client. */
-#define cli_sdnsbls(cli)        ((cli)->cli_sdnsbls)
+/** Get formatted string of all set marks for client. */
+#define cli_marks(cli)          ((cli)->cli_marks)
+/** Get all marks set for client. */
+#define cli_smarks(cli)        ((cli)->cli_smarks)
 /** Get client GeoIP country code. */
 #define cli_countrycode(cli)    ((cli)->cli_countrycode)
 /** Get client GeoIP country name. */
@@ -762,8 +762,8 @@ struct Client {
 #define IsNotIPCheckExempt(x)   HasFlag(x, FLAG_IPCNOTEXEMPT)
 /** Return non-zero if the client has completed SASL authentication. */
 #define IsSASLComplete(x)       HasFlag(x, FLAG_SASLCOMPLETE)
-/** Return non-zero if the client has been found on a dnsbl. */
-#define IsDNSBL(x)              HasFlag(x, FLAG_DNSBL)
+/** Return non-zero if the client has been marked. */
+#define IsMarked(x)             HasFlag(x, FLAG_MARKED)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -864,8 +864,8 @@ struct Client {
 #define SetNotIPCheckExempt(x)  SetFlag(x, FLAG_IPCNOTEXEMPT)
 /** Mark a client as having completed SASL authentication. */
 #define SetSASLComplete(x)      SetFlag(x, FLAG_SASLCOMPLETE)
-/** Mark a client as being matched on an DNSBL. */
-#define SetDNSBL(x)             SetFlag(x, FLAG_DNSBL)
+/** Mark a client as having been marked.. */
+#define SetMarked(x)            SetFlag(x, FLAG_MARKED)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 

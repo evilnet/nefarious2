@@ -325,6 +325,10 @@ set_isupport_extbans(void)
       strcat(imaxlist, "q");
     if (feature_bool(FEAT_EXTBAN_r))
       strcat(imaxlist, "r");
+    if (feature_bool(FEAT_EXTBAN_m))
+      strcat(imaxlist, "m");
+    if (feature_bool(FEAT_EXTBAN_M))
+      strcat(imaxlist, "M");
 
     add_isupport_s("EXTBANS", imaxlist);
   }
@@ -702,6 +706,8 @@ static struct FeatureDesc {
   F_B(EXTBAN_n, 0, 1, set_isupport_extbans),
   F_B(EXTBAN_q, 0, 1, set_isupport_extbans),
   F_B(EXTBAN_r, 0, 1, set_isupport_extbans),
+  F_B(EXTBAN_m, 0, 1, set_isupport_extbans),
+  F_B(EXTBAN_M, 0, 1, set_isupport_extbans),
 
   /* Some misc. Nefarious default paths */
   F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),

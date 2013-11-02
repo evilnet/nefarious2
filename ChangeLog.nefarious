@@ -1,6 +1,44 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-11-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added extended bans ~m and ~M for marks.
+
+	* doc/readme.features: Added extended bans ~m and ~M for marks.
+
+	* include/channel.h: Added extended bans ~m and ~M for marks.
+
+	* include/client.h: Renamed DNSBL_DATA to MARK.
+
+	* include/ircd_features.h: Added extended bans ~m and ~M for marks.
+
+	* include/mark.h: Renamed DNSBL_DATA to MARK.
+
+	* include/numeric.h: Renamed DNSBL_DATA to MARK.
+
+	* include/s_conf.h: Renamed DNSBL_DATA to MARK.
+
+	* ircd/channel.c: Added extended bans ~m and ~M for marks.
+
+	* ircd/ircd_features.c: Added extended bans ~m and ~M for marks.
+
+	* ircd/m_mark.c: Renamed DNSBL_DATA to MARK.
+
+	* ircd/m_whois.c: Renamed DNSBL_DATA to MARK.
+
+	* ircd/s_auth.c: Renamed DNSBL_DATA to MARK.
+
+	* ircd/s_conf.c: Renamed DNSBL_DATA to MARK.
+
+	* ircd/s_err.c: Renamed DNSBL_DATA to MARK.
+
+	* ircd/s_misc.c: Renamed DNSBL_DATA to MARK.
+
+	* ircd/s_serv.c: Renamed DNSBL_DATA to MARK.
+
+	* ircd/s_user.c: Renamed DNSBL_DATA to MARK.
+
 2013-11-01  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* include/channel.h: Removed the unnecesary prefix member of the

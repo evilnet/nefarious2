@@ -277,8 +277,9 @@ extern void yyerror(const char *msg);
 
 extern int verify_sslclifp(struct Client* cptr, struct ConfItem* aconf);
 
-extern int find_dnsbl(struct Client* sptr, const char* dnsbl);
-extern int add_dnsbl(struct Client* sptr, const char* dnsbl);
-extern int del_dnsbls(struct Client* sptr);
+extern int find_mark(struct Client* sptr, const char* dnsbl);
+extern int find_mark_match(struct Client* sptr, const char* mask);
+extern int add_mark(struct Client* sptr, const char* dnsbl);
+extern int del_marks(struct Client* sptr);
 
 #endif /* INCLUDED_s_conf_h */

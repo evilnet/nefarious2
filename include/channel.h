@@ -330,10 +330,12 @@ struct Mode {
 #define EBAN_ACCOUNT    0x00000020      /* Extended Ban matches against a users account names. */
 #define EBAN_CHANNEL    0x00000040      /* Extended Ban matches against channels the user is a member of. */
 #define EBAN_REALNAME   0x00000080      /* Extended Ban matches against a users real name. */
+#define EBAN_MARK       0x00000100	/* Extended Ban matches marks on all users. */
+#define EBAN_MARKUA     0x00000200	/* Extended Ban matches marks on unauthenticated users. */
 
-#define EBAN_TYPES      0x000000FF      /* Mask of all extended ban types. */
+#define EBAN_TYPES      0x000003FF      /* Mask of all extended ban types. */
 #define EBAN_CRITERIA   0xF0000000      /* Mask of all extended ban criteria. */
-#define EBAN_MASKTYPE   0x000000F0      /* Mask of all mask types. */
+#define EBAN_MASKTYPE   0x000003F0      /* Mask of all mask types. */
 #define EBAN_ACTIVITY   0x0000000F      /* Mask of all extended bans that block a specific activity. */
 
 struct ExtBanInfo {

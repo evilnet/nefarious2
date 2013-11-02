@@ -1385,6 +1385,18 @@ EXTBAN_r
 
 Allows extended ban r (realname) to be used.
 
+EXTBAN_m
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban m (mark on any user) to be used.
+
+EXTBAN_M
+ * Type: boolean
+ * Default: TRUE
+
+Allows extended ban M (mark on unauthenticated user) to be used.
+
 OMPATH
  * Type: string
  * Default: "operircd.motd"

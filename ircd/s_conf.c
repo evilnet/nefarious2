@@ -1551,41 +1551,53 @@ int verify_sslclifp(struct Client* cptr, struct ConfItem* aconf)
   return 1;
 }
 
-int find_dnsbl(struct Client* sptr, const char* dnsbl)
+int find_mark(struct Client* sptr, const char* mark)
 {
   struct SLink *lp;
 
-  for (lp = cli_sdnsbls(sptr); lp; lp = lp->next) {
-    if (!ircd_strcmp(lp->value.cp, dnsbl))
+  for (lp = cli_smarks(sptr); lp; lp = lp->next) {
+    if (!ircd_strcmp(lp->value.cp, mark))
       return 1;
   }
 
   return 0;
 }
 
-int add_dnsbl(struct Client* sptr, const char* dnsbl)
+int find_mark_match(struct Client* sptr, const char* mask)
 {
   struct SLink *lp;
 
-  if (!find_dnsbl(sptr, dnsbl)) {
+  for (lp = cli_smarks(sptr); lp; lp = lp->next) {
+    if (!match(mask, lp->value.cp))
+      return 1;
+  }
+
+  return 0;
+}
+
+int add_mark(struct Client* sptr, const char* mark)
+{
+  struct SLink *lp;
+
+  if (!find_mark(sptr, mark)) {
     lp = make_link();
     memset(lp, 0, sizeof(struct SLink));
-    lp->next = cli_sdnsbls(sptr);
-    lp->value.cp = (char*) MyMalloc(strlen(dnsbl) + 1);
+    lp->next = cli_smarks(sptr);
+    lp->value.cp = (char*) MyMalloc(strlen(mark) + 1);
     assert(0 != lp->value.cp);
-    strcpy(lp->value.cp, dnsbl);
-    cli_sdnsbls(sptr) = lp;
+    strcpy(lp->value.cp, mark);
+    cli_smarks(sptr) = lp;
   }
   return 0;
 }
 
-int del_dnsbls(struct Client* sptr)
+int del_marks(struct Client* sptr)
 {
   int count = 0;
   struct SLink **lp;
   struct SLink *tmp;
 
-  for (lp = &(cli_sdnsbls(sptr)); *lp;) {
+  for (lp = &(cli_smarks(sptr)); *lp;) {
     tmp = *lp;
     *lp = tmp->next;
 

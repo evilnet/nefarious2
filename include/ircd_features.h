@@ -238,6 +238,8 @@ enum Feature {
   FEAT_EXTBAN_n,
   FEAT_EXTBAN_q,
   FEAT_EXTBAN_r,
+  FEAT_EXTBAN_m,
+  FEAT_EXTBAN_M,
 
   /* Some misc. Nefarious default paths */
   FEAT_OMPATH,
