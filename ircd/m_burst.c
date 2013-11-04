@@ -731,7 +731,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	modebuf_mode_string(mbuf, MODE_ADD | MODE_BAN,
 			    lp->banstr, 0); /* don't free banstr */
 
-      lp->flags &= BAN_IPMASK; /* reset the flag */
+      lp->flags &= BAN_IPMASK | BAN_EXTENDED; /* reset the flag */
       lp_p = &(*lp_p)->next;
     }
 
@@ -753,7 +753,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         modebuf_mode_string(mbuf, MODE_ADD | MODE_EXCEPT,
                             lp->banstr, 0); /* don't free banstr */
 
-      lp->flags &= BAN_IPMASK; /* reset the flag */
+      lp->flags &= BAN_IPMASK | BAN_EXTENDED; /* reset the flag */
       lp_p = &(*lp_p)->next;
     }
   }

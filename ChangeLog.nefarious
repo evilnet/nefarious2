@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-11-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* ircd/m_burst.c: Fix for bug where extended bans were not working
+	when added via BURST.
+
 2013-11-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_burst.c: Fixed crash bug when linking with Nefarious 1
