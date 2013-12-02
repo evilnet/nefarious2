@@ -225,6 +225,10 @@ enum Flag
 
     FLAG_MARKED,                    /**< Client is marked */
 
+    FLAG_RESTRICT_JOIN,             /**< Client is in a client class that has the restrict_join option */
+    FLAG_RESTRICT_PRIVMSG,          /**< Client is in a client class that has the restrict_privmsg option */
+    FLAG_RESTRICT_UMODE,            /**< Client is in a client class that has the restrict_umode option */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -764,6 +768,12 @@ struct Client {
 #define IsSASLComplete(x)       HasFlag(x, FLAG_SASLCOMPLETE)
 /** Return non-zero if the client has been marked. */
 #define IsMarked(x)             HasFlag(x, FLAG_MARKED)
+/** Return non-zero if the client cannot join channels. */
+#define IsRestrictJoin(x)       HasFlag(x, FLAG_RESTRICT_JOIN)
+/** Return non-zero if the client cannot send private PRIVMSG or NOTICE. */
+#define IsRestrictPrivMsg(x)    HasFlag(x, FLAG_RESTRICT_PRIVMSG)
+/** Return non-zero if the client cannot change his/her user modes. */
+#define IsRestrictUMode(x)      HasFlag(x, FLAG_RESTRICT_UMODE)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -866,6 +876,12 @@ struct Client {
 #define SetSASLComplete(x)      SetFlag(x, FLAG_SASLCOMPLETE)
 /** Mark a client as having been marked.. */
 #define SetMarked(x)            SetFlag(x, FLAG_MARKED)
+/** Mark a client as not being allowed to join channels. */
+#define SetRestrictJoin(x)      SetFlag(x, FLAG_RESTRICT_JOIN)
+/** Mark a client as not being allowed to send private PRIVMSG and NOTICE. */
+#define SetRestrictPrivMsg(x)   SetFlag(x, FLAG_RESTRICT_PRIVMSG)
+/** Mark a client as not being allowed to change user modes. */
+#define SetRestrictUMode(x)     SetFlag(x, FLAG_RESTRICT_UMODE)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -945,6 +961,12 @@ struct Client {
 #define ClearSSL(x)             ClrFlag(x, FLAG_SSL)
 /** Client is no longer using STARTTLS. */
 #define ClearStartTLS(x)        ClrFlag(x, FLAG_STARTTLS)
+/** Clear the client's join restriction. */
+#define ClearRestrictJoin(x)    ClrFlag(x, FLAG_RESTRICT_JOIN)
+/** Clear the client's PRIVMSG/NOTICE restriction. */
+#define ClearRestrictPrivMsg(x) ClrFlag(x, FLAG_RESTRICT_PRIVMSG)
+/** Clear the client's user mode restriction. */
+#define ClearRestrictUMode(x)   ClrFlag(x, FLAG_RESTRICT_UMODE)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

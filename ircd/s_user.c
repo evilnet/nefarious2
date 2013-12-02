@@ -622,6 +622,15 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
     }
 
+    if (connclass != NULL) {
+      if (FlagHas(&connclass->restrict, CRFLAG_JOIN))
+        SetRestrictJoin(sptr);
+      if (FlagHas(&connclass->restrict, CRFLAG_PRIVMSG))
+        SetRestrictPrivMsg(sptr);
+      if (FlagHas(&connclass->restrict, CRFLAG_UMODE))
+        SetRestrictUMode(sptr);
+    }
+
   }
 
   /* Notify new local/remote user */

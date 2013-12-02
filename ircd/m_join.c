@@ -295,6 +295,11 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (parc < 2 || *parv[1] == '\0')
     return need_more_params(sptr, "JOIN");
 
+  if (!IsAnOper(sptr) && IsRestrictJoin(sptr)) {
+    send_reply(sptr, ERR_BANNEDFROMCHAN, parv[1]);
+    return 0;
+  }
+
   joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
   joinbuf_init(&create, sptr, cptr, JOINBUF_TYPE_CREATE, 0, TStime());
 

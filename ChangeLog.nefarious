@@ -1,6 +1,26 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-12-02  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Added class block restrict_* options.
+
+	* include/class.h: Added class block restrict_* options.
+
+	* include/client.h: Added class block restrict_* options.
+
+	* ircd/ircd_lexer.l: Added class block restrict_* options.
+
+	* ircd/ircd_parser.y: Added class block restrict_* options.
+
+	* ircd/ircd_relay.c: Added class block restrict_privmsg option.
+
+	* ircd/m_join.c: Added class block restrict_join option.
+
+	* ircd/m_mode.c: Added class block restrict_umode option.
+
+	* ircd/s_user.c: Added class block restrict_* options.
+
 2013-11-04  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_burst.c: Fix for bug where extended bans were not working

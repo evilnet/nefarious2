@@ -33,6 +33,17 @@
 struct ConfItem;
 struct StatDesc;
 
+/* Class restriction FlagSet */
+enum ClassRestrictFlag {
+  CRFLAG_JOIN,          /**< User cannot join channerls. */
+  CRFLAG_PRIVMSG,       /**< User cannot send PRIVMSG/NOTICE to users not on common channels. */
+  CRFLAG_UMODE,         /**< User cannot change his/her own user modes. */
+  CRFLAG_LAST_FLAG
+};
+
+/** Declare flagset type for Class restriction flags. */
+DECLARE_FLAGSET(ClassRestrictFlags, CRFLAG_LAST_FLAG);
+
 /*
  * Structures
  */
@@ -49,6 +60,7 @@ struct ConnectionClass {
                                              or off. */
   struct Privs            privs_dirty;    /**< Indication of which bits in
                                              ConnectionClass::privs are valid. */
+  struct ClassRestrictFlags restrict;     /**< Class restrictions applied to users. */
   unsigned int            max_sendq;      /**< Maximum client SendQ in bytes. */
   unsigned int            max_recvq;      /**< Maximum client RecvQ in bytes. */
   unsigned int            max_links;      /**< Maximum connections allowed. */

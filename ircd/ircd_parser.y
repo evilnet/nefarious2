@@ -90,6 +90,7 @@
   struct Privs privs;
   struct Privs privs_dirty;
   struct WebIRCFlags wflags;
+  struct ClassRestrictFlags crestrict;
 
 static void parse_error(char *pattern,...) {
   static char error_buffer[1024];
@@ -213,6 +214,9 @@ static void free_slist(struct SLink **link) {
 %token AUTOJOINNOTICE
 %token AUTHEXEMPT
 %token MARK
+%token RESTRICT_JOIN
+%token RESTRICT_PRIVMSG
+%token RESTRICT_UMODE
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -454,6 +458,7 @@ admincontact: CONTACT '=' QSTRING ';'
 classblock: CLASS {
   tping = 90;
   snomask = 0;
+  memset(&crestrict, 0, sizeof(crestrict));
 } '{' classitems '}' ';'
 {
   if (name != NULL)
@@ -471,6 +476,7 @@ classblock: CLASS {
     c_class->max_chans = maxchans;
     memcpy(&c_class->privs, &privs, sizeof(c_class->privs));
     memcpy(&c_class->privs_dirty, &privs_dirty, sizeof(c_class->privs_dirty));
+    memcpy(&c_class->restrict, &crestrict, sizeof(c_class->restrict));
   }
   else {
    parse_error("Missing name in class block");
@@ -487,11 +493,13 @@ classblock: CLASS {
   snomask = 0;
   memset(&privs, 0, sizeof(privs));
   memset(&privs_dirty, 0, sizeof(privs_dirty));
+  memset(&crestrict, 0, sizeof(crestrict));
 };
 classitems: classitem classitems | classitem;
 classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
            classsendq | classrecvq | classusermode | classmaxchans | priv |
-           classsnomask | classajoinchan | classajoinnotice;
+           classsnomask | classajoinchan | classajoinnotice | classrestrictjoin |
+           classrestrictpm | classrestrictumode;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -539,6 +547,27 @@ classajoinnotice: AUTOJOINNOTICE '=' QSTRING ';'
 {
   MyFree(ajoinnotice);
   ajoinnotice = $3;
+};
+classrestrictjoin: RESTRICT_JOIN '=' YES ';'
+{
+  FlagSet(&crestrict, CRFLAG_JOIN);
+} | RESTRICT_JOIN '=' NO ';'
+{
+  FlagClr(&crestrict, CRFLAG_JOIN);
+};
+classrestrictpm: RESTRICT_PRIVMSG '=' YES ';'
+{
+  FlagSet(&crestrict, CRFLAG_PRIVMSG);
+} | RESTRICT_PRIVMSG '=' NO ';'
+{
+  FlagClr(&crestrict, CRFLAG_PRIVMSG);
+};
+classrestrictumode: RESTRICT_UMODE '=' YES ';'
+{
+  FlagSet(&crestrict, CRFLAG_UMODE);
+} | RESTRICT_UMODE '=' NO ';'
+{
+  FlagClr(&crestrict, CRFLAG_UMODE);
 };
 
 connectblock: CONNECT
