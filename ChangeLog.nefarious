@@ -1,6 +1,12 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-12-03  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* configure: Re-ran autoconf.
+
+	* configure.in: Added a couple extra lines to fix OpenSSL detection.
+
 2013-12-02  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added class block restrict_* options.

@@ -7067,6 +7067,12 @@ cat >>confdefs.h <<_ACEOF
 _ACEOF
 
 
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_openssl_inc_prefix -lcrypto"
+  LIBS="-L$unet_cv_with_openssl_prefix -lssl -lcrypto"
+
   { $as_echo "$as_me:${as_lineno-$LINENO}: checking for SSL_read in -lssl" >&5
 $as_echo_n "checking for SSL_read in -lssl... " >&6; }
 if ${ac_cv_lib_ssl_SSL_read+:} false; then :
@@ -7143,7 +7149,7 @@ fi
 $as_echo "$ac_cv_lib_crypto_X509_new" >&6; }
 if test "x$ac_cv_lib_crypto_X509_new" = xyes; then :
 
-      { $as_echo "$as_me:${as_lineno-$LINENO}: checking for EVP_sha256 in -lcrypto" >&5
+     { $as_echo "$as_me:${as_lineno-$LINENO}: checking for EVP_sha256 in -lcrypto" >&5
 $as_echo_n "checking for EVP_sha256 in -lcrypto... " >&6; }
 if ${ac_cv_lib_crypto_EVP_sha256+:} false; then :
   $as_echo_n "(cached) " >&6
@@ -7206,6 +7212,9 @@ fi
 
 fi
 
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
 
   if test "x$enable_ssl" = xyes; then
 

@@ -727,9 +727,15 @@ if test x"$unet_cv_enable_ssl" = xyes; then
   AC_MSG_RESULT([$unet_cv_with_openssl_prefix])
   AC_DEFINE_UNQUOTED(SSL_LIBS_PATH, "$unet_cv_with_openssl_prefix", [Path name used as a base for the ssl lib files.])
 
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_openssl_inc_prefix -lcrypto"
+  LIBS="-L$unet_cv_with_openssl_prefix -lssl -lcrypto"
+
   AC_CHECK_LIB(ssl, SSL_read, [
     AC_CHECK_LIB(crypto, X509_new, [
-      AC_CHECK_LIB(crypto, EVP_sha256, [
+     AC_CHECK_LIB(crypto, EVP_sha256, [
         AC_CHECK_HEADERS($base_ssl_inc/openssl/ssl.h $base_ssl_inc/openssl/err.h, [
           enable_ssl="yes";
           OPENSSL_LDFLAGS="-lssl -lcrypto"
@@ -737,6 +743,9 @@ if test x"$unet_cv_enable_ssl" = xyes; then
       ])
     ])
   ])
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
 
   if test "x$enable_ssl" = xyes; then
     AC_DEFINE([USE_SSL], , [Define if you are using OpenSSL])
