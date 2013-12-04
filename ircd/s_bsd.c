@@ -526,6 +526,10 @@ void add_connection(struct Listener* listener, int fd) {
        /* 12345678901234567890123456789012345679012345678901234567890123456 */
   const char* const register_message =
          "ERROR :Unable to complete your registration\r\n";
+#ifdef USE_SSL
+  const char* const sslerr_message =
+         "ERROR :SSL connection error\r\n";
+#endif
 
   assert(0 != listener);
 
@@ -624,7 +628,10 @@ void add_connection(struct Listener* listener, int fd) {
 #ifdef USE_SSL
   if (ssl) {
     cli_socket(new_client).ssl = ssl;
-    ssl_accept(new_client);
+    if (!ssl_accept(new_client)) {
+      cli_socket(new_client).ssl = NULL;
+      ssl_murder(ssl, fd, sslerr_message);
+    }
   }
 #endif
 
@@ -1009,8 +1016,12 @@ static void client_sock_callback(struct Event* ev)
     if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl)) {
       if (s_state(&(con_socket(con))) == SS_CONNECTING) {
         completed_connection(cptr);
-      } else
-        ssl_accept(cptr);
+      } else {
+        if (!ssl_accept(cptr)) {
+          fmt = "Write error: %s";
+          fallback = "SSL connection error";
+        }
+      }
       break;
     }
 #endif
@@ -1032,7 +1043,10 @@ static void client_sock_callback(struct Event* ev)
         } else if (s_state(&(con_socket(con))) == SS_CONNECTING) {
           completed_connection(cptr);
         } else {
-          ssl_accept(cptr);
+          if (!ssl_accept(cptr)) {
+            fmt = "Read error: %s";
+            fallback = "SSL connection error";
+          }
         }
         break;
       }

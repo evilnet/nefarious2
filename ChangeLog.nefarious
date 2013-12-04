@@ -1,6 +1,14 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-12-04  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* include/ssl.h: Added better handling for SSL_accept() errors.
+
+	* ircd/s_bsd.c: Added better handling for SSL_accept() errors.
+
+	* ircd/ssl.c: Added better handling for SSL_accept() errors.
+
 2013-12-03  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* configure: Re-ran autoconf.

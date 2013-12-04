@@ -229,10 +229,8 @@ void ssl_abort(struct Client *cptr)
   cli_socket(cptr).ssl = NULL;
 }
 
-void ssl_accept(struct Client *cptr)
+int ssl_accept(struct Client *cptr)
 {
-  const char* const error_ssl = "ERROR :SSL connection error\r\n";
-
   if (SSL_accept(cli_socket(cptr).ssl) <= 0) {
     unsigned long err = ERR_get_error();
     char string[120];
@@ -241,11 +239,11 @@ void ssl_accept(struct Client *cptr)
       ERR_error_string(err, string);
       Debug((DEBUG_ERROR, "SSL_accept: %s", string));
 
-      write(cli_fd(cptr), error_ssl, strlen(error_ssl));
-
       ssl_abort(cptr);
+
+      return 0;
     }
-    return;
+    return -1;
   }
 
   if (SSL_is_init_finished(cli_socket(cptr).ssl))
@@ -254,6 +252,8 @@ void ssl_accept(struct Client *cptr)
     if (sslfp)
       ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
   }
+
+  return -1;
 }
 
 void ssl_add_connection(struct Listener *listener, int fd)
@@ -427,9 +427,11 @@ int ssl_send(struct Client *cptr, const char *buf, unsigned int len)
 int ssl_murder(void *ssl, int fd, const char *buf)
 {
   if (!ssl) {
-    write(fd, buf, strlen(buf));
+    if (buf)
+      write(fd, buf, strlen(buf));
   } else {
-    SSL_write((SSL *) ssl, buf, strlen(buf));
+    if (buf)
+      SSL_write((SSL *) ssl, buf, strlen(buf));
     SSL_free((SSL *) ssl);
   }
   close(fd);
