@@ -628,6 +628,7 @@ void add_connection(struct Listener* listener, int fd) {
 #ifdef USE_SSL
   if (ssl) {
     cli_socket(new_client).ssl = ssl;
+    SetSSLNeedAccept(new_client);
     if (!ssl_accept(new_client)) {
       cli_socket(new_client).ssl = NULL;
       ssl_murder(NULL, fd, sslerr_message);
@@ -1015,8 +1016,21 @@ static void client_sock_callback(struct Event* ev)
 
   case ET_WRITE: /* socket is writable */
 #ifdef USE_SSL
-    if (s_state(&(con_socket(con))) == SS_CONNECTING)
+    if (IsSSLNeedAccept(cptr)) {
+      int r = ssl_accept(cptr);
+      if (r == 1) {
+        break;
+      } else if (r == 0) {
+        SetFlag(cptr, FLAG_DEADSOCKET);
+        fmt = "SSL Write error: %s";
+        fallback = "SSL_accept failed";
+        ssl_abort(cptr);
+        break;
+      }
+    }
+    if (s_state(&(con_socket(con))) == SS_CONNECTING) {
       completed_connection(cptr);
+    }
 #endif
     ClrFlag(cptr, FLAG_BLOCKED);
     if (cli_listing(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
@@ -1028,6 +1042,18 @@ static void client_sock_callback(struct Event* ev)
   case ET_READ: /* socket is readable */
     if (!IsDead(cptr)) {
 #ifdef USE_SSL
+      if (IsSSLNeedAccept(cptr)) {
+        int r = ssl_accept(cptr);
+        if (r == 1) {
+          break;
+        } else if (r == 0) {
+          SetFlag(cptr, FLAG_DEADSOCKET);
+          fmt = "SSL Read error: %s";
+          fallback = "SSL_accept failed";
+          ssl_abort(cptr);
+          break;
+        }
+      }
       if (s_state(&(con_socket(con))) == SS_CONNECTING)
         completed_connection(cptr);
 #endif

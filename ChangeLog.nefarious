@@ -3,6 +3,16 @@
 
 2013-12-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* include/client.h: Added a client flag to indicate a need to
+	call SSL_accept again.
+
+	* ircd/s_bsd.c: Added checks for the need SSL_accept client flag
+	to call SSL_accept.
+
+	* ircd/ssl.c: Rewrote and merged ssl_accept() and ssl_starttls().
+
+2013-12-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_bsd.c: Hopefully that'll fix Rubin's crash.
 
 2013-12-05  Matthew Beeching  <jobe@mdbnet.co.uk>

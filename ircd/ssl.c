@@ -231,20 +231,39 @@ void ssl_abort(struct Client *cptr)
 
 int ssl_accept(struct Client *cptr)
 {
-  if (SSL_accept(cli_socket(cptr).ssl) <= 0) {
-    unsigned long err = ERR_get_error();
-    char string[120];
+  int r = 0;
+
+  if (!IsSSLNeedAccept(cptr))
+    return -1;
+
+  if ((r = SSL_accept(cli_socket(cptr).ssl)) <= 0) {
+    unsigned long err = SSL_get_error(cli_socket(cptr).ssl, r);
 
     if (err) {
-      ERR_error_string(err, string);
-      Debug((DEBUG_ERROR, "SSL_accept: %s", string));
+      switch (err) {
+        case SSL_ERROR_SYSCALL:
+          if (errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
+        case SSL_ERROR_WANT_READ:
+        case SSL_ERROR_WANT_WRITE:
+            return 1;
+        default:
+          Debug((DEBUG_ERROR, "SSL_accept: %s", ssl_error_str(err, errno)));
 
-      ssl_abort(cptr);
+          SSL_set_shutdown(cli_socket(cptr).ssl, SSL_RECEIVED_SHUTDOWN);
+          ssl_smart_shutdown(cli_socket(cptr).ssl);
+          SSL_free(cli_socket(cptr).ssl);
+          cli_socket(cptr).ssl = NULL;
 
+          cli_error(cptr) = errno;
+
+          return 0;
+      }
       return 0;
     }
-    return -1;
+    return 0;
   }
+
+  ClearSSLNeedAccept(cptr);
 
   if (SSL_is_init_finished(cli_socket(cptr).ssl))
   {
@@ -254,6 +273,18 @@ int ssl_accept(struct Client *cptr)
   }
 
   return -1;
+}
+
+int ssl_starttls(struct Client *cptr)
+{
+  if (!cli_socket(cptr).ssl) {
+    cli_socket(cptr).ssl = SSL_new(ssl_server_ctx);
+    SSL_set_fd(cli_socket(cptr).ssl, cli_socket(cptr).s_fd);
+    ssl_set_nonblocking(cli_socket(cptr).ssl);
+    SetSSLNeedAccept(cptr);
+  }
+
+  return ssl_accept(cptr);
 }
 
 void ssl_add_connection(struct Listener *listener, int fd)
@@ -481,51 +512,6 @@ int ssl_connect(struct Socket* sock)
       return -1; /* Fatal error */
   }
   return 1; /* Connection complete */
-}
-
-int ssl_starttls(struct Client *cptr)
-{
-  int r = 0;
-
-  if (!cli_socket(cptr).ssl) {
-    cli_socket(cptr).ssl = SSL_new(ssl_server_ctx);
-    SSL_set_fd(cli_socket(cptr).ssl, cli_socket(cptr).s_fd);
-    ssl_set_nonblocking(cli_socket(cptr).ssl);
-  }
-
-  if ((r = SSL_accept(cli_socket(cptr).ssl)) <= 0) {
-    unsigned long err = SSL_get_error(cli_socket(cptr).ssl, r);
-
-    if (err) {
-      switch (err) {
-        case SSL_ERROR_SYSCALL:
-          if (errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
-        case SSL_ERROR_WANT_READ:
-        case SSL_ERROR_WANT_WRITE:
-            return 1;
-        default:
-          Debug((DEBUG_ERROR, "SSL_accept: %s", ssl_error_str(err, errno)));
-
-          SSL_set_shutdown(cli_socket(cptr).ssl, SSL_RECEIVED_SHUTDOWN);
-          ssl_smart_shutdown(cli_socket(cptr).ssl);
-          SSL_free(cli_socket(cptr).ssl);
-          cli_socket(cptr).ssl = NULL;
-
-          return 0;
-      }
-      return 0;
-    }
-    return 1;
-  }
-
-  if (SSL_is_init_finished(cli_socket(cptr).ssl))
-  {
-    char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
-    if (sslfp)
-      ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
-  }
-
-  return 1;
 }
 
 char* ssl_get_fingerprint(SSL *ssl)

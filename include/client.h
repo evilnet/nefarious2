@@ -217,6 +217,7 @@ enum Flag
     FLAG_SETHOST,                   /**< User has a set host (+h) */
     FLAG_SSL,                       /**< User is connected via SSL (+z) */
     FLAG_STARTTLS,                  /**< User is connecting with StartTLS */
+    FLAG_SSLNEEDACCEPT,             /**< Client needs SSL_accept() to be called again */
 
     FLAG_IPCEXEMPT,                 /**< User is IPcheck exempt */
     FLAG_IPCNOTEXEMPT,              /**< User is not IPcheck exempt */
@@ -760,6 +761,8 @@ struct Client {
 #define IsSSL(x)                HasFlag(x, FLAG_SSL)
 /** Return non-zero if the client is connecting using STARTTLS. */
 #define IsStartTLS(x)           HasFlag(x, FLAG_STARTTLS)
+/** Return non-zero if the client still needs SSL_accept(). */
+#define IsSSLNeedAccept(x)      HasFlag(x, FLAG_SSLNEEDACCEPT)
 /** Return non-zero if the client is IPcheck exempt. */
 #define IsIPCheckExempt(x)      HasFlag(x, FLAG_IPCEXEMPT)
 /** Return non-zero if the client is not IPcheck exempt. */
@@ -868,6 +871,8 @@ struct Client {
 #define SetSSL(x)               SetFlag(x, FLAG_SSL)
 /** Mark a client as using STARTTLS. */
 #define SetStartTLS(x)          SetFlag(x, FLAG_STARTTLS)
+/** Mark a client as needing SSL_accept(). */
+#define SetSSLNeedAccept(x)     SetFlag(x, FLAG_SSLNEEDACCEPT)
 /** Mark a client as IPcheck exempt. */
 #define SetIPCheckExempt(x)     SetFlag(x, FLAG_IPCEXEMPT)
 /** Mark a client as not IPcheck exempt. */
@@ -961,6 +966,8 @@ struct Client {
 #define ClearSSL(x)             ClrFlag(x, FLAG_SSL)
 /** Client is no longer using STARTTLS. */
 #define ClearStartTLS(x)        ClrFlag(x, FLAG_STARTTLS)
+/** Client no longer needs SSL_accept(). */
+#define ClearSSLNeedAccept(x)   ClrFlag(x, FLAG_SSLNEEDACCEPT)
 /** Clear the client's join restriction. */
 #define ClearRestrictJoin(x)    ClrFlag(x, FLAG_RESTRICT_JOIN)
 /** Clear the client's PRIVMSG/NOTICE restriction. */
