@@ -3,6 +3,10 @@
 
 2013-12-05  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* ircd/s_bsd.c: Hopefully that'll fix Rubin's crash.
+
+2013-12-05  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* ircd/s_bsd.c: Attempt to fix STARTTLS connection issues.
 
 2013-12-04  Matthew Beeching  <jobe@mdbnet.co.uk>

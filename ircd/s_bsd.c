@@ -541,7 +541,7 @@ void add_connection(struct Listener* listener, int fd) {
   if (!os_get_peername(fd, &addr) || !os_set_nonblocking(fd)) {
     ++ServerStats->is_ref;
 #ifdef USE_SSL
-    ssl_murder(ssl, fd, "");
+    ssl_murder(ssl, fd, NULL);
 #else
     close(fd);
 #endif /* USE_SSL */
@@ -630,7 +630,9 @@ void add_connection(struct Listener* listener, int fd) {
     cli_socket(new_client).ssl = ssl;
     if (!ssl_accept(new_client)) {
       cli_socket(new_client).ssl = NULL;
-      ssl_murder(ssl, fd, sslerr_message);
+      ssl_murder(NULL, fd, sslerr_message);
+      cli_fd(new_client) = -1;
+      return;
     }
   }
 #endif
