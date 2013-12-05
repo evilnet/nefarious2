@@ -1013,17 +1013,8 @@ static void client_sock_callback(struct Event* ev)
 
   case ET_WRITE: /* socket is writable */
 #ifdef USE_SSL
-    if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl)) {
-      if (s_state(&(con_socket(con))) == SS_CONNECTING) {
-        completed_connection(cptr);
-      } else {
-        if (!ssl_accept(cptr)) {
-          fmt = "Write error: %s";
-          fallback = "SSL connection error";
-        }
-      }
-      break;
-    }
+    if (s_state(&(con_socket(con))) == SS_CONNECTING)
+      completed_connection(cptr);
 #endif
     ClrFlag(cptr, FLAG_BLOCKED);
     if (cli_listing(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
@@ -1035,21 +1026,8 @@ static void client_sock_callback(struct Event* ev)
   case ET_READ: /* socket is readable */
     if (!IsDead(cptr)) {
 #ifdef USE_SSL
-      if (cli_socket(cptr).ssl && !ssl_is_init_finished(cli_socket(cptr).ssl)) {
-        if (IsStartTLS(cptr) && !ssl_starttls(cptr)) {
-          ClearSSL(cptr);
-          ClearStartTLS(cptr);
-          send_reply(cptr, ERR_STARTTLS, "STARTTLS failed.");
-        } else if (s_state(&(con_socket(con))) == SS_CONNECTING) {
-          completed_connection(cptr);
-        } else {
-          if (!ssl_accept(cptr)) {
-            fmt = "Read error: %s";
-            fallback = "SSL connection error";
-          }
-        }
-        break;
-      }
+      if (s_state(&(con_socket(con))) == SS_CONNECTING)
+        completed_connection(cptr);
 #endif
       Debug((DEBUG_DEBUG, "Reading data from %C", cptr));
       if (read_packet(cptr, 1) == 0) /* error while reading packet */
