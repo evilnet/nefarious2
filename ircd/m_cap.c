@@ -212,7 +212,7 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
 static int
 cap_ls(struct Client *sptr, const char *caplist)
 {
-  if (IsUnknown(sptr)) /* registration hasn't completed; suspend it... */
+  if (IsUnknown(sptr) && cli_auth(sptr)) /* registration hasn't completed; suspend it... */
     auth_cap_start(cli_auth(sptr));
   return send_caplist(sptr, 0, 0, "LS"); /* send list of capabilities */
 }
@@ -227,7 +227,7 @@ cap_req(struct Client *sptr, const char *caplist)
   struct CapSet as = *cli_active(sptr); /* active set */
   int neg;
 
-  if (IsUnknown(sptr)) /* registration hasn't completed; suspend it... */
+  if (IsUnknown(sptr) && cli_auth(sptr)) /* registration hasn't completed; suspend it... */
     auth_cap_start(cli_auth(sptr));
 
   memset(&set, 0, sizeof(set));
@@ -317,7 +317,7 @@ cap_clear(struct Client *sptr, const char *caplist)
 static int
 cap_end(struct Client *sptr, const char *caplist)
 {
-  if (!IsUnknown(sptr)) /* registration has completed... */
+  if (!IsUnknown(sptr) || !cli_auth(sptr)) /* registration has completed... */
     return 0; /* so just ignore the message... */
 
   return auth_cap_done(cli_auth(sptr));
