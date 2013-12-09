@@ -1,6 +1,11 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-12-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Updated example.conf with the correct default
+	value for MAXBANS.
+
 2013-12-08  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* ircd/m_cap.c: Added a few changes to ensure cli_auth is set
