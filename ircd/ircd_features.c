@@ -674,6 +674,8 @@ static struct FeatureDesc {
   F_B(HIS_STATS_Z, 0, 1, 0),
   F_I(SASL_TIMEOUT, 0, 8, 0),
   F_B(NOMULTITARGETS, 0, 0, 0),
+  F_B(HIS_IRCOPS, 0, 1, 0),
+  F_B(HIS_IRCOPS_SERVERS, 0, 1, 0),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),

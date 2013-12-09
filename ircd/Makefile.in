@@ -142,6 +142,7 @@ IRCD_SRC = \
 	m_help.c \
 	m_info.c \
 	m_invite.c \
+	m_ircops.c \
 	m_isnef.c \
 	m_ison.c \
 	m_join.c \
@@ -706,6 +707,11 @@ m_invite.o: m_invite.c ../config.h ../include/channel.h ../include/client.h \
   ../include/list.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/s_user.h ../include/send.h \
   ../include/struct.h
+m_ircops.o: m_ircops.c ../config.h ../include/client.h ../include/hash.h \
+  ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/ircd_snprintf.h \
+  ../include/ircd_string.h ../include/numeric.h ../include/numnicks.h \
+  ../include/send.h
 m_isnef.o: m_isnef.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/numeric.h ../include/numnicks.h \

@@ -206,6 +206,8 @@ enum Feature {
   FEAT_HIS_STATS_Z,
   FEAT_SASL_TIMEOUT,
   FEAT_NOMULTITARGETS,
+  FEAT_HIS_IRCOPS,
+  FEAT_HIS_IRCOPS_SERVERS,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,

@@ -98,6 +98,7 @@ extern int m_help(struct Client*, struct Client*, int, char*[]);
 extern int m_ignore(struct Client*, struct Client*, int, char*[]);
 extern int m_info(struct Client*, struct Client*, int, char*[]);
 extern int m_invite(struct Client*, struct Client*, int, char*[]);
+extern int m_ircops(struct Client*, struct Client*, int, char*[]);
 extern int m_isnef(struct Client*, struct Client*, int, char*[]);
 extern int m_ison(struct Client*, struct Client*, int, char*[]);
 extern int m_join(struct Client*, struct Client*, int, char*[]);

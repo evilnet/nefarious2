@@ -488,6 +488,10 @@ struct Client;
 #define TOK_ZLINE		"ZL"
 #define CMD_ZLINE		MSG_ZLINE, TOK_ZLINE
 
+#define MSG_IRCOPS		"IRCOPS"
+#define TOK_IRCOPS		"IR"
+#define CMD_IRCOPS		MSG_IRCOPS, TOK_IRCOPS
+
 /*
  * Constants
  */

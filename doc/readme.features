@@ -1206,6 +1206,18 @@ NOMULTITARGETS
 When enabled has the same effect as setting channel mode +T on every
 channel.
 
+HIS_IRCOPS
+ * Type: boolean
+ * Default: TRUE
+
+This removes IRCOPS from users.
+
+HIS_IRCOPS_SERVERS
+ * Type: boolean
+ * Default: TRUE
+
+This removes server names in the IRCOPS output from users.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

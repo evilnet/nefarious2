@@ -3,6 +3,30 @@
 
 2013-12-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
+	* doc/example.conf: Added Features for IRCOPS command.
+
+	* doc/readme.features: Added Features for IRCOPS command.
+
+	* include/handlers.h: Added IRCOPS command.
+
+	* include/ircd_features.h: Added Features for IRCOPS command.
+
+	* include/msg.h: Added IRCOPS command.
+
+	* include/numeric.h: Added numeric replies for IRCOPS command.
+
+	* ircd/Makefile.in: Added IRCOPS command.
+
+	* ircd/ircd_features.c: Added Features for IRCOPS command.
+
+	* ircd/parse.c: Added IRCOPS command.
+
+	* ircd/s_err.c: Added numeric replies for IRCOPS command.
+
+	* ircd/m_ircops.c: Added IRCOPS command.
+
+2013-12-09  Matthew Beeching  <jobe@mdbnet.co.uk>
+
 	* doc/example.conf: Updated example.conf with the correct default
 	value for MAXBANS.
 

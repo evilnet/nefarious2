@@ -804,11 +804,11 @@ static Numeric replyTable[] = {
 /* 385 */
   { 0 },
 /* 386 */
-  { 0 },
+  { RPL_IRCOPSHEADER, ":%s IRC Operators:", "386" },
 /* 387 */
-  { 0 },
+  { RPL_IRCOPS, ":%s", "387" },
 /* 388 */
-  { 0 },
+  { RPL_ENDOFIRCOPS, ":%s", "388" },
 /* 389 */
   { 0 },
 /* 390 */
