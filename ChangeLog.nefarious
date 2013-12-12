@@ -1,6 +1,10 @@
 /***********************************************************************
  Nefarious IRCu ChangeLog
 
+2013-12-12  Matthew Beeching  <jobe@mdbnet.co.uk>
+
+	* doc/example.conf: Typo in features block list.
+
 2013-12-09  Matthew Beeching  <jobe@mdbnet.co.uk>
 
 	* doc/example.conf: Added Features for IRCOPS command.
