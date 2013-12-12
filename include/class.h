@@ -60,7 +60,7 @@ struct ConnectionClass {
                                              or off. */
   struct Privs            privs_dirty;    /**< Indication of which bits in
                                              ConnectionClass::privs are valid. */
-  struct ClassRestrictFlags restrict;     /**< Class restrictions applied to users. */
+  struct ClassRestrictFlags restrictflags; /**< Class restrictions applied to users. */
   unsigned int            max_sendq;      /**< Maximum client SendQ in bytes. */
   unsigned int            max_recvq;      /**< Maximum client RecvQ in bytes. */
   unsigned int            max_links;      /**< Maximum connections allowed. */

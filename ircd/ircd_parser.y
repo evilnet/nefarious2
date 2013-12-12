@@ -476,7 +476,7 @@ classblock: CLASS {
     c_class->max_chans = maxchans;
     memcpy(&c_class->privs, &privs, sizeof(c_class->privs));
     memcpy(&c_class->privs_dirty, &privs_dirty, sizeof(c_class->privs_dirty));
-    memcpy(&c_class->restrict, &crestrict, sizeof(c_class->restrict));
+    memcpy(&c_class->restrictflags, &crestrict, sizeof(c_class->restrictflags));
   }
   else {
    parse_error("Missing name in class block");
