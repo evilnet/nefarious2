@@ -44,6 +44,7 @@ extern "C" {
 #include<string.h>
 #include <sys/types.h> /* for fstat */
 #include <sys/stat.h>	/* for fstat */
+#include <sys/time.h>
 
 #include "config.h"
 

@@ -373,14 +373,15 @@ int os_set_sockbufs(int fd, unsigned int ssize, unsigned int rsize)
  */
 int os_set_tos(int fd,int tos, int family)
 {
-  unsigned int opt = tos;
 #if defined(IP_TOS) && defined(IPPROTO_IP)
+  unsigned int opt4 = tos;
   if (family == AF_INET)
-    return (0 == setsockopt(fd, IPPROTO_IP, IP_TOS, &opt, sizeof(opt)));
+    return (0 == setsockopt(fd, IPPROTO_IP, IP_TOS, &opt4, sizeof(opt4)));
 #endif
 #if defined(IPV6_TCLASS) && defined(IPPROTO_IPV6)
+  unsigned int opt6 = tos;
   if (family == AF_INET6)
-    return (0 == setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &opt, sizeof(opt)));
+    return (0 == setsockopt(fd, IPPROTO_IPV6, IPV6_TCLASS, &opt6, sizeof(opt6)));
 #endif
   return 1;
 }
