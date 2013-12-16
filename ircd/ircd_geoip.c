@@ -95,6 +95,7 @@ void geoip_init(void)
 void geoip_apply(struct Client* cptr)
 {
   int gcid = 0;
+  GeoIPLookup gl;
 
   if (!feature_bool(FEAT_GEOIP_ENABLE))
     return;
@@ -105,11 +106,11 @@ void geoip_apply(struct Client* cptr)
   if (irc_in_addr_is_ipv4(&cli_ip(cptr))) {
     /* User is IPv4 so use gi4. */
     if (gi4 != NULL)
-      gcid = GeoIP_id_by_addr(gi4, cli_sock_ip(cptr));
+      gcid = GeoIP_id_by_addr_gl(gi4, cli_sock_ip(cptr), &gl);
   } else {
     /* User is IPv6 so use gi6. */
     if (gi6 != NULL)
-      gcid = GeoIP_id_by_addr_v6(gi6, cli_sock_ip(cptr));
+      gcid = GeoIP_id_by_addr_v6_gl(gi6, cli_sock_ip(cptr), &gl);
   }
 
   if (gcid == 0) {
