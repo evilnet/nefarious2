@@ -134,12 +134,13 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2)
     return need_more_params(sptr, "TOPIC");
 
-  if (parc > 2)
+  if (parc > 2) {
     topic = parv[parc - 1];
 
-  hascolor = HasColor(topic);
-  if (hascolor)
-    topicnocolor = StripColor(topic);
+    hascolor = HasColor(topic);
+    if (hascolor)
+      topicnocolor = StripColor(topic);
+  }
 
   for (; (name = ircd_strtok(&p, parv[1], ",")); parv[1] = 0)
   {
