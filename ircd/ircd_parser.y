@@ -674,8 +674,15 @@ connectmaxhops: MAXHOPS '=' expr ';'
 };
 connectauto: AUTOCONNECT '=' YES ';' { flags |= CONF_AUTOCONNECT; }
  | AUTOCONNECT '=' NO ';' { flags &= ~CONF_AUTOCONNECT; };
-connectssl: SSLTOK '=' YES ';' { flags |= CONF_SSL; }
- | SSLTOK '=' NO ';' { flags &= ~CONF_SSL; };
+connectssl: SSLTOK '=' YES ';'
+{
+#ifdef USE_SSL
+  flags |= CONF_SSL;
+#else
+  parse_error("Connect block has SSL enabled but I'm not built with SSL.  Check ./configure syntax/output.");
+  flags &= ~CONF_SSL;
+#endif /* USE_SSL */
+} | SSLTOK '=' NO ';' { flags &= ~CONF_SSL; };
 connectsslfp: SSLFP '=' QSTRING ';'
 {
   MyFree(sslfp);
@@ -964,7 +971,12 @@ porthidden: HIDDEN '=' YES ';'
 
 portssl: SSLTOK '=' YES ';'
 {
+#ifdef USE_SSL
   FlagSet(&listen_flags, LISTEN_SSL);
+#else
+  parse_error("Port block has SSL enabled but I'm not built with SSL.  Check ./configure syntax/output.");
+  FlagClr(&listen_flags, LISTEN_SSL);
+#endif /* USE_SSL */
 } | SSLTOK '=' NO ';'
 {
   FlagClr(&listen_flags, LISTEN_SSL);
