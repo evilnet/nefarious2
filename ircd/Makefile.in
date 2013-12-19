@@ -86,7 +86,6 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	umkpasswd.c
 
 IRCD_SRC = \
-	GeoIP.c \
 	IPcheck.c \
 	channel.c \
 	class.c \
@@ -329,8 +328,6 @@ install-with-symlink: build mkbindir
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} umkpasswd ${BINDIR}
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} convert-conf ${BINDIR}
 	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} ${top_srcdir}/doc/example.conf ${DPATH}
-	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIP.dat ${DPATH}
-	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIPv6.dat ${DPATH}
 	${top_srcdir}/tools/makepem/makepem ${DPATH} ${top_srcdir}
 
 install-no-symlink: build mkbindir
@@ -346,8 +343,6 @@ install-no-symlink: build mkbindir
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} umkpasswd ${BINDIR}
 	${INSTALL} -s -m 700 -o ${IRCDOWN} -g ${IRCDGRP} convert-conf ${BINDIR}
 	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} ${top_srcdir}/doc/example.conf ${DPATH}
-	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIP.dat ${DPATH}
-	${INSTALL} -m 600 -o ${IRCDOWN} -g ${IRCDGRP} GeoIPv6.dat ${DPATH}
 	${top_srcdir}/tools/makepem/makepem ${DPATH} ${top_srcdir}
 
 uninstall:
@@ -397,7 +392,6 @@ depend: ${DEP_SRC} chattr.tab.c
 
 # DO NOT DELETE THIS LINE (or the blank line after it) -- make depend depends on them.
 
-GeoIP.o: GeoIP.c ../include/ircd_log.h ../include/GeoIP.h
 IPcheck.o: IPcheck.c ../config.h ../include/IPcheck.h ../include/client.h \
   ../include/ircd.h ../include/match.h ../include/msg.h \
   ../include/ircd_alloc.h ../include/ircd_events.h \
@@ -514,9 +508,9 @@ ircd_features.o: ircd_features.c ../config.h ../include/ircd_features.h \
   ../include/s_debug.h ../include/s_misc.h ../include/s_stats.h \
   ../include/s_user.h ../include/send.h ../include/struct.h \
   ../include/sys.h ../include/whowas.h
-ircd_geoip.o: ircd_geoip.c ../include/client.h ../include/GeoIP.h \
-  ../include/ircd_geoip.h ../include/ircd_features.h \
-  ../include/ircd_string.h ../include/res.h
+ircd_geoip.o: ircd_geoip.c ../include/client.h ../include/ircd_geoip.h \
+  ../include/ircd_features.h ../include/ircd_string.h ../include/res.h \
+  ../config.h
 ircd_log.o: ircd_log.c ../config.h ../include/ircd_log.h \
   ../include/client.h ../include/ircd_alloc.h ../include/ircd_reply.h \
   ../include/ircd_snprintf.h ../include/ircd_string.h ../include/ircd.h \

@@ -705,6 +705,10 @@ with_lpath
 enable_ssl
 with_openssl_includes
 with_openssl_libs
+enable_geoip
+with_geoip
+with_geoip_includes
+with_geoip_libs
 with_maxcon
 '
       ac_precious_vars='build_alias
@@ -1343,6 +1347,7 @@ Optional Features:
   --disable-kqueue        Disable the kqueue-based engine
   --disable-epoll         Disable the epoll-based engine
   --disable-ssl           Disable Secure Sockets Layer support
+  --disable-geoip         Disable GeoIP support
 
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
@@ -1365,6 +1370,13 @@ Optional Packages:
                           Specify location of OpenSSL header files (default:
                           /usr/include)
   --with-openssl-libs=dir Specify location of OpenSSL libs (default: /usr/lib)
+  --with-geoip=dir        Specify the installation prefix of GeoIP (default:
+                          /usr/local)
+  --with-geoip-includes=dir
+                          Specify location of GeoIP header files (default:
+                          /usr/local/include)
+  --with-geoip-libs=dir   Specify location of GeoIP libs (default:
+                          /usr/local/lib)
   --with-maxcon=maxcon    Maximum number of connections server will accept
 
 Some influential environment variables:
@@ -7224,6 +7236,285 @@ $as_echo "#define USE_SSL /**/" >>confdefs.h
     CFLAGS="$CFLAGS -I$unet_cv_with_openssl_inc_prefix"
   else
     as_fn_error $? "Unable to find OpenSSL, Maybe you need to install the openssl and libssl-dev package, or use --with-openssl-includes and --with-openssl-libs if you have openssl installed in an odd location" "$LINENO" 5
+  fi
+fi
+
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking whether to enable GeoIP support" >&5
+$as_echo_n "checking whether to enable GeoIP support... " >&6; }
+# Check whether --enable-geoip was given.
+if test "${enable_geoip+set}" = set; then :
+  enableval=$enable_geoip; unet_cv_enable_geoip=$enable_geoip
+else
+  if ${unet_cv_enable_geoip+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  unet_cv_enable_geoip=yes
+fi
+
+fi
+
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_geoip" >&5
+$as_echo "$unet_cv_enable_geoip" >&6; }
+
+if test x"$unet_cv_enable_geoip" = xyes; then
+
+# Check whether --with-geoip was given.
+if test "${with_geoip+set}" = set; then :
+  withval=$with_geoip; base_geoip_prefix=$withval
+else
+  base_geoip_prefix=/usr/local
+fi
+
+
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP includes" >&5
+$as_echo_n "checking for GeoIP includes... " >&6; }
+
+# Check whether --with-geoip-includes was given.
+if test "${with_geoip_includes+set}" = set; then :
+  withval=$with_geoip_includes; base_geoip_inc=$withval
+else
+  base_geoip_inc=$base_geoip_prefix/include
+fi
+
+  unet_cv_with_geoip_inc_prefix=$base_geoip_inc
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_geoip_inc_prefix" >&5
+$as_echo "$unet_cv_with_geoip_inc_prefix" >&6; }
+
+cat >>confdefs.h <<_ACEOF
+#define GEOIP_INCLUDES_PATH "$base_geoip_inc"
+_ACEOF
+
+
+  { $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP libraries" >&5
+$as_echo_n "checking for GeoIP libraries... " >&6; }
+
+# Check whether --with-geoip-libs was given.
+if test "${with_geoip_libs+set}" = set; then :
+  withval=$with_geoip_libs; base_geoip_lib=$withval
+else
+  base_geoip_lib=$base_geoip_prefix/lib
+fi
+
+  unet_cv_with_geoip_prefix=$base_geoip_lib
+  { $as_echo "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_geoip_prefix" >&5
+$as_echo "$unet_cv_with_geoip_prefix" >&6; }
+
+cat >>confdefs.h <<_ACEOF
+#define GEOIP_LIBS_PATH "$unet_cv_with_geoip_prefix"
+_ACEOF
+
+
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_geoip_inc_prefix"
+  LIBS="-L$unet_cv_with_geoip_prefix"
+
+  for ac_header in $unet_cv_with_geoip_inc_prefix/GeoIP.h
+do :
+  as_ac_Header=`$as_echo "ac_cv_header_$ac_header" | $as_tr_sh`
+ac_fn_c_check_header_mongrel "$LINENO" "$ac_header" "$as_ac_Header" "$ac_includes_default"
+if eval test \"x\$"$as_ac_Header"\" = x"yes"; then :
+  cat >>confdefs.h <<_ACEOF
+#define `$as_echo "HAVE_$ac_header" | $as_tr_cpp` 1
+_ACEOF
+
+    { $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP_id_by_addr_gl in -lGeoIP" >&5
+$as_echo_n "checking for GeoIP_id_by_addr_gl in -lGeoIP... " >&6; }
+if ${ac_cv_lib_GeoIP_GeoIP_id_by_addr_gl+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  ac_check_lib_save_LIBS=$LIBS
+LIBS="-lGeoIP  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char GeoIP_id_by_addr_gl ();
+int
+main ()
+{
+return GeoIP_id_by_addr_gl ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr_gl=yes
+else
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr_gl=no
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_GeoIP_GeoIP_id_by_addr_gl" >&5
+$as_echo "$ac_cv_lib_GeoIP_GeoIP_id_by_addr_gl" >&6; }
+if test "x$ac_cv_lib_GeoIP_GeoIP_id_by_addr_gl" = xyes; then :
+
+      { $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP_id_by_addr_v6_gl in -lGeoIP" >&5
+$as_echo_n "checking for GeoIP_id_by_addr_v6_gl in -lGeoIP... " >&6; }
+if ${ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6_gl+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  ac_check_lib_save_LIBS=$LIBS
+LIBS="-lGeoIP  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char GeoIP_id_by_addr_v6_gl ();
+int
+main ()
+{
+return GeoIP_id_by_addr_v6_gl ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6_gl=yes
+else
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6_gl=no
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6_gl" >&5
+$as_echo "$ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6_gl" >&6; }
+if test "x$ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6_gl" = xyes; then :
+
+        enable_geoip="yes";
+        enable_geoip_gl="yes";
+        GEOIP_LDFLAGS="-lGeoIP"
+
+fi
+
+
+else
+
+      { $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP_id_by_addr in -lGeoIP" >&5
+$as_echo_n "checking for GeoIP_id_by_addr in -lGeoIP... " >&6; }
+if ${ac_cv_lib_GeoIP_GeoIP_id_by_addr+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  ac_check_lib_save_LIBS=$LIBS
+LIBS="-lGeoIP  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char GeoIP_id_by_addr ();
+int
+main ()
+{
+return GeoIP_id_by_addr ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr=yes
+else
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr=no
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_GeoIP_GeoIP_id_by_addr" >&5
+$as_echo "$ac_cv_lib_GeoIP_GeoIP_id_by_addr" >&6; }
+if test "x$ac_cv_lib_GeoIP_GeoIP_id_by_addr" = xyes; then :
+
+        { $as_echo "$as_me:${as_lineno-$LINENO}: checking for GeoIP_id_by_addr_v6 in -lGeoIP" >&5
+$as_echo_n "checking for GeoIP_id_by_addr_v6 in -lGeoIP... " >&6; }
+if ${ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6+:} false; then :
+  $as_echo_n "(cached) " >&6
+else
+  ac_check_lib_save_LIBS=$LIBS
+LIBS="-lGeoIP  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char GeoIP_id_by_addr_v6 ();
+int
+main ()
+{
+return GeoIP_id_by_addr_v6 ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"; then :
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6=yes
+else
+  ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6=no
+fi
+rm -f core conftest.err conftest.$ac_objext \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6" >&5
+$as_echo "$ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6" >&6; }
+if test "x$ac_cv_lib_GeoIP_GeoIP_id_by_addr_v6" = xyes; then :
+
+          enable_geoip="yes";
+          GEOIP_LDFLAGS="-lGeoIP"
+
+fi
+
+
+fi
+
+
+fi
+
+
+fi
+
+done
+
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
+
+  if test "x$enable_geoip" = xyes; then
+
+$as_echo "#define USE_GEOIP /**/" >>confdefs.h
+
+    if test "x$enable_geoip_gl" = xyes; then
+
+$as_echo "#define USE_GEOIP_GL /**/" >>confdefs.h
+
+    fi
+    LIBS="$LIBS -L$unet_cv_with_geoip_prefix $GEOIP_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_geoip_inc_prefix"
+  else
+     { $as_echo "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find GeoIP, GeoIP features will not work without libGeoIP. Disabling GeoIP support." >&5
+$as_echo "$as_me: WARNING: Unable to find GeoIP, GeoIP features will not work without libGeoIP. Disabling GeoIP support." >&2;}
+#    AC_MSG_ERROR([Unable to find GeoIP, Maybe you need to install the geoip and libgeoip-dev package, or use --with-geoip-includes and --with-geoip-libs if you have GeoIP installed in an odd location])
   fi
 fi
 

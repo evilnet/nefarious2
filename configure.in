@@ -756,6 +756,80 @@ if test x"$unet_cv_enable_ssl" = xyes; then
   fi
 fi
 
+dnl **
+dnl **  GeoIP checks (GeoIP)
+dnl **
+AC_MSG_CHECKING([whether to enable GeoIP support])
+AC_ARG_ENABLE([geoip],
+[  --disable-geoip         Disable GeoIP support],
+[unet_cv_enable_geoip=$enable_geoip],
+[AC_CACHE_VAL(unet_cv_enable_geoip,
+[unet_cv_enable_geoip=yes])])
+AC_MSG_RESULT([$unet_cv_enable_geoip])
+
+if test x"$unet_cv_enable_geoip" = xyes; then
+  AC_ARG_WITH([geoip],
+  AS_HELP_STRING([--with-geoip=dir], [Specify the installation prefix of GeoIP (default: /usr/local)]),
+  [base_geoip_prefix=$withval],
+  [base_geoip_prefix=/usr/local])
+
+  AC_MSG_CHECKING([for GeoIP includes])
+  AC_ARG_WITH([geoip-includes],
+  AS_HELP_STRING([--with-geoip-includes=dir], [Specify location of GeoIP header files (default: /usr/local/include)]),
+  [base_geoip_inc=$withval],
+  [base_geoip_inc=$base_geoip_prefix/include])
+  [unet_cv_with_geoip_inc_prefix=$base_geoip_inc]
+  AC_MSG_RESULT([$unet_cv_with_geoip_inc_prefix])
+  AC_DEFINE_UNQUOTED(GEOIP_INCLUDES_PATH, "$base_geoip_inc", [Path name used as a base for the GeoIP include files.])
+
+  AC_MSG_CHECKING([for GeoIP libraries])
+  AC_ARG_WITH([geoip-libs],
+  AS_HELP_STRING([--with-geoip-libs=dir], [Specify location of GeoIP libs (default: /usr/local/lib)]),
+  [base_geoip_lib=$withval],
+  [base_geoip_lib=$base_geoip_prefix/lib])
+  [unet_cv_with_geoip_prefix=$base_geoip_lib]
+  AC_MSG_RESULT([$unet_cv_with_geoip_prefix])
+  AC_DEFINE_UNQUOTED(GEOIP_LIBS_PATH, "$unet_cv_with_geoip_prefix", [Path name used as a base for the GeoIP lib files.])
+
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_geoip_inc_prefix"
+  LIBS="-L$unet_cv_with_geoip_prefix"
+
+  AC_CHECK_HEADERS($unet_cv_with_geoip_inc_prefix/GeoIP.h, [
+    AC_CHECK_LIB(GeoIP, GeoIP_id_by_addr_gl, [
+      AC_CHECK_LIB(GeoIP, GeoIP_id_by_addr_v6_gl, [
+        enable_geoip="yes";
+        enable_geoip_gl="yes";
+        GEOIP_LDFLAGS="-lGeoIP"
+      ])
+    ], [
+      AC_CHECK_LIB(GeoIP, GeoIP_id_by_addr, [
+        AC_CHECK_LIB(GeoIP, GeoIP_id_by_addr_v6, [
+          enable_geoip="yes";
+          GEOIP_LDFLAGS="-lGeoIP"
+        ])
+      ])
+    ])
+  ])
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
+
+  if test "x$enable_geoip" = xyes; then
+    AC_DEFINE([USE_GEOIP], , [Define if you are using GeoIP])
+    if test "x$enable_geoip_gl" = xyes; then
+      AC_DEFINE([USE_GEOIP_GL], , [Define if you are using GeoIP with *_gl() functions])
+    fi
+    LIBS="$LIBS -L$unet_cv_with_geoip_prefix $GEOIP_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_geoip_inc_prefix"
+  else
+     AC_MSG_WARN([Unable to find GeoIP, GeoIP features will not work without libGeoIP. Disabling GeoIP support.])
+#    AC_MSG_ERROR([Unable to find GeoIP, Maybe you need to install the geoip and libgeoip-dev package, or use --with-geoip-includes and --with-geoip-libs if you have GeoIP installed in an odd location])
+  fi
+fi
+
 dnl --with-maxcon allows us to set the maximum connections
 unet_maxcon=`ulimit -Hn`
 if test x"$unet_maxcon" = xunlimited; then

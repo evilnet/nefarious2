@@ -6,7 +6,6 @@
 #define INCLUDED_ircd_geoip_h
 
 #include "client.h"
-#include "GeoIP.h"
 
 extern void geoip_init(void);
 extern void geoip_apply(struct Client* cptr);

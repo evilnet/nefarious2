@@ -24,6 +24,12 @@
 /* Force inlining for a few critical functions */
 #undef FORCEINLINE
 
+/* Path name used as a base for the GeoIP include files. */
+#undef GEOIP_INCLUDES_PATH
+
+/* Path name used as a base for the GeoIP lib files. */
+#undef GEOIP_LIBS_PATH
+
 /* Define to 1 if you have the <crypt.h> header file. */
 #undef HAVE_CRYPT_H
 
@@ -201,6 +207,12 @@
 
 /* Define to enable the epoll engine */
 #undef USE_EPOLL
+
+/* Define if you are using GeoIP */
+#undef USE_GEOIP
+
+/* Define if you are using GeoIP with *_gl() functions */
+#undef USE_GEOIP_GL
 
 /* Define to enable the kqueue engine */
 #undef USE_KQUEUE
