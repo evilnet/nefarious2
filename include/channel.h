@@ -63,7 +63,6 @@ struct Client;
 #define CHFL_SERVOPOK           0x0008  /**< Server op allowed */
 #define CHFL_ZOMBIE             0x0010  /**< Kicked from channel */
 #define CHFL_BURST_JOINED       0x0100  /**< Just joined by net.junction */
-#define CHFL_BANVALID           0x0800  /**< CHFL_BANNED bit is valid */
 #define CHFL_BANNED             0x1000  /**< Channel member is banned */
 #define CHFL_SILENCE_IPMASK     0x2000  /**< silence mask is a CIDR */
 #define CHFL_BURST_ALREADY_OPPED	0x04000  
@@ -88,25 +87,20 @@ struct Client;
 					 */
 #define CHFL_HALFOP             0x800000 /**< Channel half operator */
 
-#define CHFL_EXCEPTVALID        0x1000000 /**< CHFL_EXCEPTED is valid */
-#define CHFL_EXCEPTED           0x2000000 /**< Channel member is ban excepted */
-
 #define CHFL_OVERLAP         (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
-#define CHFL_BANVALIDMASK    (CHFL_BANVALID | CHFL_BANNED)
-#define CHFL_EXCEPTVALIDMASK (CHFL_EXCEPTVALID | CHFL_EXCEPTED)
 #define CHFL_VOICED_OR_OPPED (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE)
 
-#define MBFL_BANVALID           0x0001  /**< CHFL_BANNED bit is valid */
+#define MBFL_BANVALID           0x0001  /**< MBFL_BANNED bit is valid */
 #define MBFL_BANNED             0x0002  /**< Channel member is banned */
-#define MBFL_BANVALID_QUIET     0x0004  /**< CHFL_BANNED_QUIET bit is valid */
+#define MBFL_BANVALID_QUIET     0x0004  /**< MBFL_BANNED_QUIET bit is valid */
 #define MBFL_BANNED_QUIET       0x0008  /**< Channel member is banned from speaking */
-#define MBFL_BANVALID_NICK      0x0010  /**< CHFL_BANNED_NICK bit is valid */
+#define MBFL_BANVALID_NICK      0x0010  /**< MBFL_BANNED_NICK bit is valid */
 #define MBFL_BANNED_NICK        0x0020  /**< Channel member is banned from changing nick */
-#define MBFL_EXCEPTVALID        0x0040 /**< CHFL_EXCEPTED is valid */
+#define MBFL_EXCEPTVALID        0x0040 /**< MBFL_EXCEPTED is valid */
 #define MBFL_EXCEPTED           0x0080 /**< Channel member is ban excepted */
-#define MBFL_EXCEPTVALID_QUIET  0x0100 /**< CHFL_EXCEPTED_QUIET is valid */
+#define MBFL_EXCEPTVALID_QUIET  0x0100 /**< MBFL_EXCEPTED_QUIET is valid */
 #define MBFL_EXCEPTED_QUIET     0x0200 /**< Channel member is ban excepted */
-#define MBFL_EXCEPTVALID_NICK   0x0400 /**< CHFL_EXCEPTED_NICK is valid */
+#define MBFL_EXCEPTVALID_NICK   0x0400 /**< MBFL_EXCEPTED_NICK is valid */
 #define MBFL_EXCEPTED_NICK      0x0800 /**< Channel member is ban excepted */
 
 /* Channel Visibility macros */
