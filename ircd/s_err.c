@@ -1980,7 +1980,7 @@ static Numeric replyTable[] = {
 /* 973 */
   { 0 },
 /* 974 */
-  { ERR_CANNOTCHANGECHANMODE, "%s :%s", "974" },
+  { ERR_CANNOTCHANGECHANMODE, "%s %s :%s", "974" },
 /* 975 */
   { 0 }
 };

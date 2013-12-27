@@ -4572,7 +4572,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
         /* If they're not an SSL user, they can't +/- EXMODE_SSLONLY. */
         if (feature_bool(FEAT_CHMODE_Z_STRICT) && (state.dir == MODE_ADD) &&
             (chptr->nonsslusers > 0) && MyUser(sptr))
-          send_reply(sptr, ERR_CANNOTCHANGECHANMODE, "Z", "Mode cannot be set while non-SSL members are present");
+          send_reply(sptr, ERR_CANNOTCHANGECHANMODE, chptr->chname, "Z", "Mode cannot be set while non-SSL members are present");
         else if ((feature_bool(FEAT_CHMODE_Z) && IsSSL(sptr)) ||
             IsOper(sptr) || IsServer(sptr) || IsChannelService(sptr))
           mode_parse_exmode(&state, flag_p);
