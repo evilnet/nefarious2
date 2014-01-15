@@ -65,7 +65,7 @@ int ms_svsident(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
 {
   struct Client *acptr;
   char *s;
-  char *newident = NULL;
+  char newident[USERLEN+1];
   int legalident=1;
 
   if (parc < 3)
@@ -78,12 +78,12 @@ int ms_svsident(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
   if (IsChannelService(acptr))
     return 0;
 
-  newident = strdup(parv[2]);
-
-  if (strlen(newident) > USERLEN)
+  if (strlen(parv[2]) > USERLEN)
     return protocol_violation(sptr, "Ident too long in SVSIDENT command");
 
-  for (s = newident; *s; s++)
+  ircd_strncpy(newident, parv[2], USERLEN);
+
+  for (s = (char *)&newident; *s; s++)
   {
     if (!IsUserChar(*s))
     {
