@@ -169,9 +169,10 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* OK we now know who the message is for, let's deal with it! */
 
   /* If we don't know who the agent is we do now, else check its the same agent */
-  if (!cli_saslagent(acptr))
+  if (!cli_saslagent(acptr)) {
     cli_saslagent(acptr) = sptr;
-  else if (cli_saslagent(acptr) != sptr)
+    cli_saslagentref(sptr)++;
+  } else if (cli_saslagent(acptr) != sptr)
     return 0;
 
   if (reply[0] == 'C') {
@@ -197,6 +198,8 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     } else if (data[0] == 'A') {
       send_reply(acptr, ERR_SASLABORTED);
     }
+    if ((cli_saslagent(acptr) != NULL) && cli_saslagentref(cli_saslagent(acptr)))
+      cli_saslagentref(cli_saslagent(acptr))--;
     cli_saslagent(acptr) = NULL;
     cli_saslcookie(acptr) = 0;
   } else if (reply[0] == 'M')
@@ -234,6 +237,8 @@ int abort_sasl(struct Client* cptr, int timeout) {
     sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u D A",
                           &me, cli_fd(cptr), cli_saslcookie(cptr));
 
+  if ((cli_saslagent(cptr)!= NULL) && cli_saslagentref(cli_saslagent(cptr)))
+    cli_saslagentref(cli_saslagent(cptr))--;
   cli_saslagent(cptr) = NULL;
   cli_saslcookie(cptr) = 0;
 

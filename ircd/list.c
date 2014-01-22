@@ -278,6 +278,21 @@ void free_client(struct Client* cptr)
   if (cli_connect(cptr))
     MyFree(cli_loc(cptr));
 
+  /* Loop through local clients and clear cli_saslagent if it's cptr. */
+  if (cli_saslagentref(cptr) > 0) {
+    struct Client *acptr;
+    int fd = 0;
+
+    for (fd = HighestFd; fd >= 0; --fd) {
+      if ((acptr = LocalClientArray[fd])) {
+        if (cli_saslagent(acptr) == cptr) {
+          cli_saslagent(acptr) = NULL;
+        }
+      }
+    }
+    cli_saslagentref(cptr) = 0;
+  }
+
   if (cli_from(cptr) == cptr) { /* in other words, we're local */
     cli_from(cptr) = 0;
     /* timer must be marked as not active */

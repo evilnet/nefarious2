@@ -345,6 +345,7 @@ struct Client {
   char cli_killmark[BUFSIZE + 1];   /**< Kill block mark */
 
   /* SASL */
+  int            cli_saslagentref; /**< Number of clients that reference this client as an SASL agent */
   struct Client* cli_saslagent;     /**< SASL agent handling SASL exchange */
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
@@ -435,6 +436,8 @@ struct Client {
 #define cli_continentcode(cli)  ((cli)->cli_continentcode)
 /** Get client GeoIP continent name. */
 #define cli_continentname(cli)  ((cli)->cli_continentname)
+/** Get SASL agent ref count. */
+#define cli_saslagentref(cli)   ((cli)->cli_saslagentref)
 /** Get SASL agent name. */
 #define cli_saslagent(cli)      ((cli)->cli_saslagent)
 /** Get SASL authenticated account name. */
