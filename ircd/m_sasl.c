@@ -202,6 +202,8 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       cli_saslagentref(cli_saslagent(acptr))--;
     cli_saslagent(acptr) = NULL;
     cli_saslcookie(acptr) = 0;
+    if (t_active(&cli_sasltimeout(cptr)))
+      timer_del(&cli_sasltimeout(cptr));
   } else if (reply[0] == 'M')
     return send_reply(acptr, ERR_SASLMECHS, data);
 
