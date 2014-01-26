@@ -426,3 +426,32 @@ int clear_privs(struct Client *who) {
   return 0;
 }
 
+void client_check_marks(struct Client *client, struct Client *replyto)
+{
+  char outbuf[BUFSIZE];
+  static char markbufp[BUFSIZE] = "";
+  struct SLink* dp;
+
+  if (!IsMarked(client))
+    return;
+
+  memset(&markbufp, 0, BUFSIZE);
+
+  for (dp = cli_marks(client); dp; dp = dp->next) {
+    if (strlen(markbufp) + strlen(dp->value.cp) + 4 > 70) {
+      ircd_snprintf(0, outbuf, sizeof(outbuf), "          Marks:: %s", markbufp);
+      send_reply(replyto, RPL_DATASTR, outbuf);
+      memset(&markbufp, 0, BUFSIZE);
+    }
+
+    if (markbufp[0])
+      strcat(markbufp, ", ");
+    strcat(markbufp, dp->value.cp);
+  }
+
+  if (markbufp[0]) {
+    ircd_snprintf(0, outbuf, sizeof(outbuf), "          Marks:: %s", markbufp);
+    send_reply(replyto, RPL_DATASTR, outbuf);
+  }
+}
+

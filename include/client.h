@@ -329,8 +329,7 @@ struct Client {
   struct irc_in_addr cli_connectip;  /**< Client connection IP address. */
   char cli_connecthost[HOSTLEN + 1]; /**< Client connection host name. */
 
-  struct SLink* cli_smarks;       /**< chain of mark pointer blocks */
-  char cli_marks[BUFSIZE + 1];    /**< all marks applied identifier */
+  struct SLink* cli_marks;       /**< chain of mark pointer blocks */
 
   /* GeoIP data */
   char cli_countrycode[3];          /**< GeoIP 2 letter country code. */
@@ -424,10 +423,8 @@ struct Client {
 #define cli_sslclifp(cli)       ((cli)->cli_sslclifp)
 /** Get a clients Kill block exemption mark. */
 #define cli_killmark(cli)       ((cli)->cli_killmark)
-/** Get formatted string of all set marks for client. */
-#define cli_marks(cli)          ((cli)->cli_marks)
 /** Get all marks set for client. */
-#define cli_smarks(cli)        ((cli)->cli_smarks)
+#define cli_marks(cli)        ((cli)->cli_marks)
 /** Get client GeoIP country code. */
 #define cli_countrycode(cli)    ((cli)->cli_countrycode)
 /** Get client GeoIP country name. */
@@ -1067,6 +1064,7 @@ extern void client_set_privs(struct Client *client, struct ConfItem *oper);
 extern int client_report_privs(struct Client* to, struct Client* client);
 extern void client_check_privs(struct Client *client, struct Client *replyto);
 extern void client_send_privs(struct Client *to, struct Client *client);
+extern void client_check_marks(struct Client *client, struct Client *replyto);
 extern void client_sendtoserv_privs(struct Client *client);
 extern char *client_print_privs(struct Client *client);
 

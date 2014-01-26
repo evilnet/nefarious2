@@ -126,6 +126,35 @@
  */
 
 /*
+ * Send whois reply containing the marks for client.
+ */
+void client_whois_marks(struct Client *client, struct Client *replyto, const char *name)
+{
+  static char markbufp[BUFSIZE] = "";
+  struct SLink* dp = NULL;
+
+  if (!IsMarked(client))
+    return;
+
+  memset(&markbufp, 0, BUFSIZE);
+
+  for (dp = cli_marks(client); dp; dp = dp->next) {
+    if (strlen(markbufp) + strlen(dp->value.cp) + 4 > 70) {
+      send_reply(replyto, RPL_WHOISMARKS, name, markbufp);
+      memset(&markbufp, 0, BUFSIZE);
+    }
+
+    if (markbufp[0])
+      strcat(markbufp, ", ");
+    strcat(markbufp, dp->value.cp);
+  }
+
+  if (markbufp[0]) {
+    send_reply(replyto, RPL_WHOISMARKS, name, markbufp);
+  }
+}
+
+/*
  * Send whois information for acptr to sptr
  */
 static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
@@ -238,21 +267,8 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
     if (IsBot(acptr))
       send_reply(sptr, RPL_WHOISBOT, name);
 
-    if (IsMarked(acptr)) {
-      struct SLink*  dp;
-      if (EmptyString(cli_marks(acptr))) {
-        for (dp = cli_smarks(acptr); dp; dp = dp->next) {
-          if (EmptyString(cli_marks(acptr)))
-            strcat(cli_marks(acptr), dp->value.cp);
-          else {
-            strcat(cli_marks(acptr), ", ");
-            strcat(cli_marks(acptr), dp->value.cp);
-          }
-        }
-      }
-
-      send_reply(sptr, RPL_WHOISMARKS, name, cli_marks(acptr));
-    }
+    if (IsMarked(acptr))
+      client_whois_marks(acptr, sptr, name);
 
     if (cli_killmark(acptr) && !EmptyString(cli_killmark(acptr)))
       send_reply(sptr, RPL_WHOISKILL, name, cli_killmark(acptr));

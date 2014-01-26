@@ -444,6 +444,9 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    if (MyUser(acptr))
      client_check_caps(acptr, sptr);
 
+   if (IsMarked(acptr))
+     client_check_marks(acptr, sptr);
+
    ircd_snprintf(0, outbuf, sizeof(outbuf), "   Connected to:: %s", cli_name(acptr->cli_user->server));
    send_reply(sptr, RPL_DATASTR, outbuf);
 

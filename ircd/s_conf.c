@@ -1555,7 +1555,7 @@ int find_mark(struct Client* sptr, const char* mark)
 {
   struct SLink *lp;
 
-  for (lp = cli_smarks(sptr); lp; lp = lp->next) {
+  for (lp = cli_marks(sptr); lp; lp = lp->next) {
     if (!ircd_strcmp(lp->value.cp, mark))
       return 1;
   }
@@ -1567,7 +1567,7 @@ int find_mark_match(struct Client* sptr, const char* mask)
 {
   struct SLink *lp;
 
-  for (lp = cli_smarks(sptr); lp; lp = lp->next) {
+  for (lp = cli_marks(sptr); lp; lp = lp->next) {
     if (!match(mask, lp->value.cp))
       return 1;
   }
@@ -1582,11 +1582,11 @@ int add_mark(struct Client* sptr, const char* mark)
   if (!find_mark(sptr, mark)) {
     lp = make_link();
     memset(lp, 0, sizeof(struct SLink));
-    lp->next = cli_smarks(sptr);
+    lp->next = cli_marks(sptr);
     lp->value.cp = (char*) MyMalloc(strlen(mark) + 1);
     assert(0 != lp->value.cp);
     strcpy(lp->value.cp, mark);
-    cli_smarks(sptr) = lp;
+    cli_marks(sptr) = lp;
   }
   return 0;
 }
@@ -1597,7 +1597,7 @@ int del_marks(struct Client* sptr)
   struct SLink **lp;
   struct SLink *tmp;
 
-  for (lp = &(cli_smarks(sptr)); *lp;) {
+  for (lp = &(cli_marks(sptr)); *lp;) {
     tmp = *lp;
     *lp = tmp->next;
 
