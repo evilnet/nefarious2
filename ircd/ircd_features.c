@@ -672,7 +672,7 @@ static struct FeatureDesc {
   F_S(LIST_PRIVATE_CHANNELS, FEAT_NULL, 0, 0),
   F_I(MAXWATCHS, 0, 128, set_isupport_watchs),
   F_B(HIS_STATS_Z, 0, 1, 0),
-  F_I(SASL_TIMEOUT, 0, 3, 0),
+  F_I(SASL_TIMEOUT, 0, 10, 0),
   F_B(NOMULTITARGETS, 0, 0, 0),
   F_B(HIS_IRCOPS, 0, 1, 0),
   F_B(HIS_IRCOPS_SERVERS, 0, 1, 0),
