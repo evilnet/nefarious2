@@ -1218,6 +1218,13 @@ HIS_IRCOPS_SERVERS
 
 This removes server names in the IRCOPS output from users.
 
+SASL_SENDHOST
+ * Type: boolean
+ * Default: TRUE
+
+When enabled causes Nefarious to send user@host:ip to services during
+SASL communications.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

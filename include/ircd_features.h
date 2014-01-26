@@ -208,6 +208,7 @@ enum Feature {
   FEAT_NOMULTITARGETS,
   FEAT_HIS_IRCOPS,
   FEAT_HIS_IRCOPS_SERVERS,
+  FEAT_SASL_SENDHOST,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,
