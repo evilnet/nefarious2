@@ -88,6 +88,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "ircd_snprintf.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -104,6 +105,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
 {
   struct Client* acptr;
   int first = 0;
+  char realhost[HOSTLEN + 3];
+  char *hoststr = (cli_sockhost(cptr) ? cli_sockhost(cptr) : cli_sock_ip(cptr));
 
   if (!CapActive(cptr, CAP_SASL))
     return 0;
@@ -140,6 +143,11 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     first = 1;
   }
 
+  if (strchr(hoststr, ':') != NULL)
+    ircd_snprintf(0, realhost, sizeof(realhost), "[%s]", hoststr);
+  else
+    ircd_strncpy(realhost, hoststr, sizeof(realhost));
+
   if (acptr) {
     if (!EmptyString(cli_sslclifp(cptr)) && first) {
       sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s :%s", acptr, &me,
@@ -148,8 +156,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       if (feature_bool(FEAT_SASL_SENDHOST))
         sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u H :%s@%s:%s", acptr, &me,
                       cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
-                      (cli_sockhost(cptr) ? cli_sockhost(cptr) : cli_sock_ip(cptr)),
-                      cli_sock_ip(cptr));
+                      realhost, cli_sock_ip(cptr));
     } else
       sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u %c :%s", acptr, &me,
                     cli_fd(cptr), cli_saslcookie(cptr),
@@ -162,8 +169,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       if (feature_bool(FEAT_SASL_SENDHOST))
         sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u H :%s@%s:%s", &me,
                       cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
-                      (cli_sockhost(cptr) ? cli_sockhost(cptr) : cli_sock_ip(cptr)),
-                      cli_sock_ip(cptr));
+                      realhost, cli_sock_ip(cptr));
     } else
       sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u %c :%s", &me,
                     cli_fd(cptr), cli_saslcookie(cptr),

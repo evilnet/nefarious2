@@ -590,7 +590,8 @@ m_authenticate.o: m_authenticate.c ../config.h ../include/client.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \
   ../include/numeric.h ../include/numnicks.h ../include/random.h \
-  ../include/send.h ../include/s_misc.h ../include/s_user.h
+  ../include/send.h ../include/s_misc.h ../include/s_user.h \
+  ../include/ircd_snprintf.h
 m_away.o: m_away.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_alloc.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \

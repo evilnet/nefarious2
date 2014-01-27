@@ -437,17 +437,24 @@ static void auth_do_loc(struct Client *client, struct Client *service)
                 (cli_name(client) ? cli_name(client) : "*"), cli_loc(client)->service);
 
   if ( feature_bool(FEAT_LOC_SENDHOST) ) {
+    char realhost[HOSTLEN + 3];
+    char *hoststr = (cli_sockhost(client) ? cli_sockhost(client) : cli_sock_ip(client));
+
+    if (strchr(hoststr, ':') != NULL)
+      ircd_snprintf(0, realhost, sizeof(realhost), "[%s]", hoststr);
+    else
+      ircd_strncpy(realhost, hoststr, sizeof(realhost));
+
     if (cli_sslclifp(client) && !EmptyString(cli_sslclifp(client)) && feature_bool(FEAT_LOC_SENDSSLFP)) {
       sendcmdto_one(&me, CMD_ACCOUNT, service, "%C S .%u.%u %s@%s:%s %s %s :%s", service,
                     cli_fd(client), cli_loc(client)->cookie, cli_username(client),
-                    (cli_sockhost(client) ? cli_sockhost(client) : cli_sock_ip(client)),
-                    cli_sock_ip(client), cli_sslclifp(client), cli_loc(client)->account,
+                    realhost, cli_sock_ip(client), cli_sslclifp(client), cli_loc(client)->account,
                     cli_loc(client)->password);
     } else {
       sendcmdto_one(&me, CMD_ACCOUNT, service, "%C H .%u.%u %s@%s:%s %s :%s", service,
                     cli_fd(client), cli_loc(client)->cookie, cli_username(client),
-                    (cli_sockhost(client) ? cli_sockhost(client) : cli_sock_ip(client)),
-                    cli_sock_ip(client), cli_loc(client)->account, cli_loc(client)->password);
+                    realhost, cli_sock_ip(client), cli_loc(client)->account,
+                    cli_loc(client)->password);
     }
   } else {
     sendcmdto_one(&me, CMD_ACCOUNT, service, "%C C .%u.%u %s :%s", service,
