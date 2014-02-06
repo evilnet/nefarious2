@@ -391,15 +391,16 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    ircd_snprintf(0, outbuf, sizeof(outbuf), "      Timestamp:: %s (%d)", myctime(acptr->cli_lastnick), acptr->cli_lastnick);
    send_reply(sptr, RPL_DATASTR, outbuf);
 
-   ircd_snprintf(0, outbuf, sizeof(outbuf), "  User/Hostmask:: %s@%s (%s)", acptr->cli_user->username, acptr->cli_user->host,
-   ircd_ntoa(&cli_ip(acptr)));
-   send_reply(sptr, RPL_DATASTR, outbuf);
 
    if (IsHiddenHost(acptr))
    {
-      ircd_snprintf(0, outbuf, sizeof(outbuf), " Real User/Host:: %s@%s", acptr->cli_user->username, acptr->cli_user->realhost);
-      send_reply(sptr, RPL_DATASTR, outbuf);
+     ircd_snprintf(0, outbuf, sizeof(outbuf), "  User/Hostmask:: %s@%s", acptr->cli_user->username, acptr->cli_user->host);
+     send_reply(sptr, RPL_DATASTR, outbuf);
    }
+
+   ircd_snprintf(0, outbuf, sizeof(outbuf), " Real User/Host:: %s@%s (%s)", acptr->cli_user->username,
+                 acptr->cli_user->realhost, ircd_ntoa(&cli_ip(acptr)));
+   send_reply(sptr, RPL_DATASTR, outbuf);
 
    if (IsIPSpoofed(acptr))
    {
