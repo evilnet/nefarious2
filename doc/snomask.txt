@@ -42,7 +42,7 @@ Mask                    Hex Value  Description
 262144  SNO_AUTH          0x40000  /* iauth status messages */
 
 standard +s             SNO_DEFAULT (SNO_NETWORK | SNO_OPERKILL | SNO_GLINE)
-standard +s when +o/O   SNO_OPERDEFAULT (SNO_DEFAULT|SNO_HACK2|SNO_HACK4|SNO_THROTTLE|SNO_OLDSNO)
+standard +s when +o/O   SNO_OPERDEFAULT (SNO_DEFAULT|SNO_HACK2|SNO_THROTTLE|SNO_OLDSNO)
 only opers may set      SNO_OPER (SNO_CONNEXIT | SNO_OLDREALOP | SNO_AUTH)
 
 -----------------------------
