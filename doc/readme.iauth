@@ -145,13 +145,13 @@ Comments: Indicates that a client has connected using an SSL client
 Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
   not send it.
 
-R - Client Has Authenticated Using SASL
+R - Client Has Authenticated Using SASL or LOC
 Syntax: <id> R <account>
 Example 5 F dave
 States: REGISTER
 Next State: -
-Comments: Indicates that a client has authenticated using SASL and has had
-  an account name applied. This message is enabled by requesting the 'r'
+Comments: Indicates that a client has authenticated using SASL or LOC and has
+  had an account name applied. This message is enabled by requesting the 'r'
   policy.
 Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
   not send it.

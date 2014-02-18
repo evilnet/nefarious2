@@ -1311,7 +1311,7 @@ int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *
   return -1;
 }
 
-/** Forward a clients SASL account name.
+/** Forward a clients SASL/LOC account name.
  * @param[in] auth Authorization request for client.
  * @param[in] account Account name applied to the client.
  * @return Zero if client should be kept, -1 if not forwarded.
