@@ -1027,7 +1027,7 @@ struct Client {
 /** Server notice bits enabled by default for normal users. */
 #define SNO_DEFAULT (SNO_NETWORK|SNO_OPERKILL|SNO_GLINE)
 /** Server notice bits enabled by default for IRC operators. */
-#define SNO_OPERDEFAULT (SNO_DEFAULT|SNO_HACK2|SNO_HACK4|SNO_THROTTLE|SNO_OLDSNO)
+#define SNO_OPERDEFAULT (SNO_DEFAULT|SNO_HACK2|SNO_THROTTLE|SNO_OLDSNO)
 /** Server notice bits reserved to IRC operators. */
 #define SNO_OPER (SNO_CONNEXIT|SNO_OLDREALOP|SNO_AUTH)
 /** Noisy server notice bits that cause other bits to be cleared during connect. */
