@@ -152,7 +152,7 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       parts.jb_comment = 0;
 
     /* Strip PART message if color blocked and has color */
-    if ((chptr->mode.exmode & EXMODE_NOCOLOR) && HasColor(parts.jb_comment))
+    if ((chptr->mode.exmode & EXMODE_NOCOLOR) && parts.jb_comment && HasColor(parts.jb_comment))
       parts.jb_comment = 0;
 
     /* Strip color from PART message */
