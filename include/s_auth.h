@@ -28,6 +28,9 @@
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
 #endif
+#ifndef INCLUDED_res_h
+#include "res.h"
+#endif
 
 struct Client;
 struct AuthRequest;
@@ -42,6 +45,7 @@ extern int auth_set_password(struct AuthRequest *auth, const char *password);
 extern int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip);
 extern int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip);
 extern int auth_set_account(struct AuthRequest *auth, const char *account);
+extern void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr);
 extern int auth_cap_start(struct AuthRequest *auth);
 extern int auth_cap_done(struct AuthRequest *auth);
 extern void auth_end_loc(struct AuthRequest *auth);

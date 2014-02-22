@@ -183,6 +183,8 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!IsIPSpoofed(sptr)) {
     memcpy(&cli_connectip(sptr), &cli_ip(sptr), sizeof(cli_ip(sptr)));
     ircd_strncpy(cli_connecthost(sptr), cli_sockhost(sptr), HOSTLEN);
+    if (cli_auth(sptr))
+      auth_set_originalip(cli_auth(sptr), cli_ip(sptr));
     SetIPSpoofed(sptr);
   }
 

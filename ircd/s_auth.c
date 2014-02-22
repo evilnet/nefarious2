@@ -1033,7 +1033,10 @@ static void auth_dns_callback(void* vptr, const struct irc_in_addr *addr, const 
     /* Hostname and mappings checked out. */
     if (IsUserPort(auth->client))
       sendheader(auth->client, REPORT_FIN_DNS);
-    ircd_strncpy(cli_sockhost(auth->client), h_name, HOSTLEN);
+    if (IsIPSpoofed(auth->client))
+      ircd_strncpy(cli_connecthost(auth->client), h_name, HOSTLEN);
+    else
+      ircd_strncpy(cli_sockhost(auth->client), h_name, HOSTLEN);
     sendto_iauth(auth->client, "N %s", h_name);
   }
   check_auth_finished(auth);
@@ -1322,6 +1325,18 @@ int auth_set_account(struct AuthRequest *auth, const char *account)
   if (IAuthHas(iauth, IAUTH_ACCOUNT))
     sendto_iauth(auth->client, "r %s", account);
   return check_auth_finished(auth);
+}
+
+/** Updates a client's original IP.
+ * @param[in] auth Authorization request for client.
+ * @param[in] addr Original address to set.
+ */
+void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr)
+{
+  assert(auth != NULL);
+
+  if (!irc_in_addr_valid(&auth->original))
+    memcpy(&auth->original, &addr, sizeof(auth->original));
 }
 
 /** Forward a clients WEBIRC request.
