@@ -189,6 +189,11 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                cli_saslaccount(acptr), cli_saslaccount(acptr));
     if (cli_auth(acptr))
       auth_set_account(cli_auth(acptr), cli_saslaccount(acptr));
+    if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+         (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
+        feature_bool(FEAT_SASL_AUTOHIDEHOST)) {
+      SetHiddenHost(acptr);
+    }
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
       SetSASLComplete(acptr);

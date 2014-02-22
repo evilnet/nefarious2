@@ -1225,6 +1225,13 @@ SASL_SENDHOST
 When enabled causes Nefarious to send user@host:ip to services during
 SASL communications.
 
+SASL_AUTOHIDEHOST
+ * Type: boolean
+ * Default: TRUE
+
+When enabled, users authenticating using SASL will automatically get
+user mode +x to hide their host name (requires HOST_HIDING_STYLE 1 or 3)
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE
