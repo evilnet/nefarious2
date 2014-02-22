@@ -29,6 +29,7 @@
 #include "ircd_log.h"
 #include "client.h"
 #include "ircd_alloc.h"
+#include "ircd_features.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
@@ -788,7 +789,7 @@ int
 log_set_snomask(const char *subsys, const char *snomask)
 {
   struct LogDesc *desc;
-  unsigned int sno = SNO_DEFAULT;
+  unsigned int sno = feature_int(FEAT_SNOMASK_DEFAULT);
 
   /* find subsystem */
   if (!(desc = log_find(subsys)))

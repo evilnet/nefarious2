@@ -151,7 +151,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     if (snomask)
       set_snomask(sptr, snomask, SNO_ADD);
     else
-      set_snomask(sptr, SNO_OPERDEFAULT, SNO_ADD);
+      set_snomask(sptr, feature_int(FEAT_SNOMASK_OPERDEFAULT), SNO_ADD);
     cli_max_sendq(sptr) = 0; /* Get the sendq from the oper's class */
     cli_max_recvq(sptr) = 0; /* Get the recvq from the oper's class */
     send_umode_out(sptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
@@ -176,7 +176,8 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
       old_mode = cli_flags(sptr);
       set_user_mode(sptr, sptr, 3, umodev, ALLOWMODES_ANY);
       send_umode(NULL, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
-      if ((cli_snomask(sptr) != SNO_OPERDEFAULT) && HasFlag(sptr, FLAG_SERVNOTICE))
+      if ((cli_snomask(sptr) != feature_int(FEAT_SNOMASK_OPERDEFAULT)) &&
+          HasFlag(sptr, FLAG_SERVNOTICE))
         send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
     } else {
       if (snomask)

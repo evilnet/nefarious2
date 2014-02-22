@@ -1232,6 +1232,18 @@ SASL_AUTOHIDEHOST
 When enabled, users authenticating using SASL will automatically get
 user mode +x to hide their host name (requires HOST_HIDING_STYLE 1 or 3)
 
+SNOMASK_DEFAULT
+ * Type: integer
+ * Default: 1540
+
+Server notice bits enabled by default for normal users.
+
+SNOMASK_OPERDEFAULT
+ * Type: integer
+ * Default: 5645
+
+Server notice bits enabled by default for IRC operators.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE
