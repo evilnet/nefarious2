@@ -488,6 +488,11 @@ msgq_add(struct MsgQ *mq, struct MsgBuf *mb, int prio)
   assert(0 < mb->ref);
   assert(0 < mb->length);
 
+  /* Priority queue breaks SSL. Does nothing at all iv ever noticed to make any improvements
+   * to irc. so i'm just flatly breaking it here. -Rubin 
+   */
+  prio = 0;
+
   Debug((DEBUG_SEND, "Adding buffer %p [%.*s] length %u to %s queue", mb,
 	 mb->length - 2, mb->msg, mb->length, prio ? "priority" : "normal"));
 
