@@ -1323,7 +1323,7 @@ int auth_set_account(struct AuthRequest *auth, const char *account)
 {
   assert(auth != NULL);
   if (IAuthHas(iauth, IAUTH_ACCOUNT))
-    sendto_iauth(auth->client, "r %s", account);
+    sendto_iauth(auth->client, "R %s", account);
   return check_auth_finished(auth);
 }
 
