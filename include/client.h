@@ -1013,12 +1013,13 @@ struct Client {
 #define SNO_DEBUG       0x10000 /**< debugging messages (DEBUGMODE only) */
 #define SNO_NICKCHG     0x20000 /**< Nick change notices */
 #define SNO_AUTH        0x40000 /**< IAuth notices */
+#define SNO_WEBIRC      0x80000 /**< WebIRC notices */
 
 /** Bitmask of all valid server notice bits. */
 #ifdef DEBUGMODE
-# define SNO_ALL        0x7ffff
+# define SNO_ALL        0xfffff
 #else
-# define SNO_ALL        0x6ffff
+# define SNO_ALL        0xeffff
 #endif
 
 /** Server notice bits allowed to normal users. */

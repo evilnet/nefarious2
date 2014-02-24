@@ -40,6 +40,7 @@ Mask                    Hex Value  Description
 65536   SNO_DEBUG         0x10000  /* debugging messages (DEBUGMODE only) */
 131072  SNO_NICKCHG       0x20000  /* nick change messages */
 262144  SNO_AUTH          0x40000  /* iauth status messages */
+524288  SNO_WEBIRC        0x80000  /* WebIRC messages */
 
 standard +s             SNO_DEFAULT (SNO_NETWORK | SNO_OPERKILL | SNO_GLINE)
 standard +s when +o/O   SNO_OPERDEFAULT (SNO_DEFAULT|SNO_HACK2|SNO_THROTTLE|SNO_OLDSNO)
