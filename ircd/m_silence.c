@@ -326,6 +326,9 @@ int ms_silence(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsServer(sptr)) {
     struct Client *acptr = findNUser(parv[1]);
 
+    if (!acptr)
+      return protocol_violation(sptr, "Server trying to modify the silence list of a nonexistant user");
+
     if (MyUser(acptr))
       forward_silences(acptr, parv[2], NULL);
     else
