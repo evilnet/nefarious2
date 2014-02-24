@@ -320,10 +320,19 @@ int m_silence(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int ms_silence(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
-  if (IsServer(sptr))
-    return protocol_violation(sptr, "Server trying to silence a user");
   if (parc < 3 || EmptyString(parv[2]))
     return need_more_params(sptr, "SILENCE");
+
+  if (IsServer(sptr)) {
+    struct Client *acptr = findNUser(parv[1]);
+
+    if (MyUser(acptr))
+      forward_silences(acptr, parv[2], NULL);
+    else
+      sendcmdto_one(sptr, CMD_SILENCE, acptr, "%C %s", acptr, parv[2]);
+
+    return 0;
+  }
 
   /* Figure out which silences can be forwarded. */
   forward_silences(sptr, parv[2], findNUser(parv[1]));
