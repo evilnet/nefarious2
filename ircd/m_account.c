@@ -250,8 +250,8 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
       if (!IsMe(acptr)) {
         /* in-transit message, forward it */
-        sendcmdto_one(sptr, CMD_ACCOUNT, acptr, "%s %s %s", parv[1], parv[2],
-                      parv[3]);
+        sendcmdto_one(sptr, CMD_ACCOUNT, acptr, "%s %s %s%s%s", parv[1], parv[2],
+                      parv[3], (parc > 4 ? " " : ""), (parc > 4 ? parv[4] : ""));
         return 0;
       }
 
