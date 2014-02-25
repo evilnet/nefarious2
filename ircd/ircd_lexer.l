@@ -139,6 +139,7 @@ static struct lexer_token {
   TOKEN(RESTRICT_JOIN),
   TOKEN(RESTRICT_PRIVMSG),
   TOKEN(RESTRICT_UMODE),
+  TOKEN(MATCHUSERNAME),
   TOKEN(SSLFP),
 #undef TOKEN
   { "ssl", SSLTOK },

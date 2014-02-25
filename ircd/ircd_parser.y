@@ -217,6 +217,7 @@ static void free_slist(struct SLink **link) {
 %token RESTRICT_JOIN
 %token RESTRICT_PRIVMSG
 %token RESTRICT_UMODE
+%token MATCHUSERNAME
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -1643,7 +1644,8 @@ spoofhostblock : SPOOFHOST QSTRING
   flags = 0;
 }
 spoofhostitems: spoofhostitem | spoofhostitems spoofhostitem;
-spoofhostitem: spoofhosthost | spoofhostpass | spoofhostautoapply | spoofhostismask;
+spoofhostitem: spoofhosthost | spoofhostpass | spoofhostautoapply | spoofhostismask
+             | spoofhostmatchuser;
 
 spoofhosthost: HOST '=' QSTRING ';'
 {
@@ -1680,6 +1682,13 @@ spoofhostismask: ISMASK '=' YES ';'
 } | ISMASK '=' NO ';'
 {
   flags &= ~SHFLAG_ISMASK;
+};
+spoofhostmatchuser: MATCHUSERNAME '=' YES ';'
+{
+  flags |= SHFLAG_MATCHUSER;
+} | MATCHUSERNAME '=' NO ';'
+{
+  flags &= ~SHFLAG_MATCHUSER;
 };
 
 exceptblock: EXCEPT

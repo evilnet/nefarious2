@@ -204,6 +204,7 @@ struct SHostConf {
 #define SHFLAG_AUTOAPPLY 0x1  /* SpoofHost is automatically applied on connect. */
 #define SHFLAG_NOPASS    0x2  /* SpoofHost has no password. */
 #define SHFLAG_ISMASK    0x4  /* SpoofHost is a wild card host. */
+#define SHFLAG_MATCHUSER 0x8  /* SpoofHost automatic application matches against USER user name too. */
 
 /* Except configuration. */
 struct ExceptConf {
