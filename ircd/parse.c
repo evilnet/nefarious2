@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "parse.h"
+#include "class.h"
 #include "client.h"
 #include "channel.h"
 #include "handlers.h"
@@ -1042,6 +1043,8 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   int             i;
   int             paramcount;
   int             isshun = 0;
+  int             lagmin = -1;
+  int             lagfactor = -1;
   struct Message* mptr;
   MessageHandler  handler = 0;
 
@@ -1108,8 +1111,14 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   paramcount = mptr->parameters;
   i = bufend - ((s) ? s : ch);
   mptr->bytes += i;
-  if ((mptr->flags & MFLG_SLOW) || !IsAnOper(cptr))
-    cli_since(cptr) += (2 + i / 120);
+  lagmin = get_lag_min(cptr);
+  lagfactor = get_lag_factor(cptr);
+  if (lagmin < 0)
+    lagmin = 2;
+  if (lagfactor < 0)
+    lagfactor = 120;
+  if (((mptr->flags & MFLG_SLOW) || !IsAnOper(cptr)) && lagfactor > 0)
+    cli_since(cptr) += (lagmin + i / lagfactor);
   /*
    * Allow only 1 msg per 2 seconds
    * (on average) to prevent dumping.

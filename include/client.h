@@ -276,6 +276,8 @@ struct Connection
   unsigned int        con_max_sendq; /**< cached max send queue for client */
   unsigned int        con_max_recvq; /**< cached max recv queue for client */
   unsigned int        con_ping_freq; /**< cached ping freq */
+  int                 con_lag_min;   /**< cached fake lag minimum */
+  int                 con_lag_factor; /**< cached fake lag factor */
   unsigned short      con_lastsq;    /**< # 2k blocks when sendqueued
                                         called last. */
   unsigned short      con_port;       /**< and the remote port# too :-) */
@@ -486,6 +488,10 @@ struct Client {
 #define cli_max_recvq(cli)      con_max_recvq(cli_connect(cli))
 /** Get ping frequency for client. */
 #define cli_ping_freq(cli)	con_ping_freq(cli_connect(cli))
+/** Get cached fake lag minimum for client. */
+#define cli_lag_min(cli)        con_lag_min(cli_connect(cli))
+/** Get cached fake lag factor for client. */
+#define cli_lag_factor(cli)     con_lag_factor(cli_connect(cli))
 /** Get lastsq for client's connection. */
 #define cli_lastsq(cli)		con_lastsq(cli_connect(cli))
 /** Get port that the client is connected to */
@@ -567,6 +573,10 @@ struct Client {
 #define con_max_recvq(con)      ((con)->con_max_recvq)
 /** Get the ping frequency for the connection. */
 #define con_ping_freq(con)	((con)->con_ping_freq)
+/** Get the minimum fake lag for the connection. */
+#define con_lag_min(con)        ((con)->con_lag_min)
+/** Get the fake lag factor for the connection. */
+#define con_lag_factor(con)     ((con)->con_lag_factor)
 /** Get the lastsq for the connection. */
 #define con_lastsq(con)		((con)->con_lastsq)
 /** Get the current targets array for the connection. */

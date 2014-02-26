@@ -346,6 +346,64 @@ get_recvq(struct Client *cptr)
   return feature_int(FEAT_CLIENT_FLOOD);
 }
 
+/** Return minimum fake lag for a client.
+ * @param[in] cptr Local client to check.
+ * @return Minimum number of seconds of fake lag for \a cptr.
+ */
+int
+get_lag_min(struct Client *cptr)
+{
+  assert(0 != cptr);
+  assert(0 != cli_local(cptr));
+
+  if (cli_lag_min(cptr) > -2)
+    return cli_lag_min(cptr);
+
+  else if (cli_confs(cptr)) {
+    struct SLink*     tmp;
+    struct ConnectionClass* cl;
+
+    for (tmp = cli_confs(cptr); tmp; tmp = tmp->next) {
+      if (!tmp->value.aconf || !(cl = tmp->value.aconf->conn_class))
+        continue;
+      if (ConClass(cl) != NULL) {
+        cli_lag_min(cptr) = LagMin(cl);
+        return cli_lag_min(cptr);
+      }
+    }
+  }
+  return -1;
+}
+
+/** Return fake lag factor for a client.
+ * @param[in] cptr Local client to check.
+ * @return Fake lag factor for \a cptr.
+ */
+int
+get_lag_factor(struct Client *cptr)
+{
+  assert(0 != cptr);
+  assert(0 != cli_local(cptr));
+
+  if (cli_lag_factor(cptr) > -2)
+    return cli_lag_factor(cptr);
+
+  else if (cli_confs(cptr)) {
+    struct SLink*     tmp;
+    struct ConnectionClass* cl;
+
+    for (tmp = cli_confs(cptr); tmp; tmp = tmp->next) {
+      if (!tmp->value.aconf || !(cl = tmp->value.aconf->conn_class))
+        continue;
+      if (ConClass(cl) != NULL) {
+        cli_lag_factor(cptr) = LagFactor(cl);
+        return cli_lag_factor(cptr);
+      }
+    }
+  }
+  return -1;
+}
+
 /** Get connection class maximum channels limit for a particular client.
  * @param[in] acptr Client to check.
  * @return Maximum number of channels \a acptr is allowed to join.

@@ -377,6 +377,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
     Count_unknownbecomesclient(sptr, UserStats);
 
     /*
+     * Ensure fake lag minimum and factor are retrived from the users class.
+     */
+    cli_lag_min(sptr) = -2;
+    cli_lag_factor(sptr) = -2;
+
+    /*
      * Set user's initial modes
      */
     tmpstr = (char*)client_get_default_umode(sptr);

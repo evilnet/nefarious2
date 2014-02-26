@@ -76,6 +76,8 @@
   int yylex(void);
   /* Now all the globals we need :/... */
   unsigned int snomask;
+  int fakelagmin;
+  int fakelagfactor;
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans, redirport, hidehostcomps;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
@@ -218,6 +220,8 @@ static void free_slist(struct SLink **link) {
 %token RESTRICT_PRIVMSG
 %token RESTRICT_UMODE
 %token MATCHUSERNAME
+%token FAKELAGMINIMUM
+%token FAKELAGFACTOR
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -459,6 +463,8 @@ admincontact: CONTACT '=' QSTRING ';'
 classblock: CLASS {
   tping = 90;
   snomask = 0;
+  fakelagmin = -1;
+  fakelagfactor = -1;
   memset(&crestrict, 0, sizeof(crestrict));
 } '{' classitems '}' ';'
 {
@@ -474,6 +480,8 @@ classblock: CLASS {
     MyFree(c_class->autojoinnotice);
     c_class->autojoinnotice = ajoinnotice;
     c_class->snomask = snomask;
+    c_class->lag_min = fakelagmin;
+    c_class->lag_factor = fakelagfactor;
     c_class->max_chans = maxchans;
     memcpy(&c_class->privs, &privs, sizeof(c_class->privs));
     memcpy(&c_class->privs_dirty, &privs_dirty, sizeof(c_class->privs_dirty));
@@ -500,7 +508,7 @@ classitems: classitem classitems | classitem;
 classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
            classsendq | classrecvq | classusermode | classmaxchans | priv |
            classsnomask | classajoinchan | classajoinnotice | classrestrictjoin |
-           classrestrictpm | classrestrictumode;
+           classrestrictpm | classrestrictumode | classfakelagmin | classfakelagfactor;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -538,6 +546,14 @@ classmaxchans: MAXCHANS '=' expr ';'
 classsnomask: SNOMASK '=' expr ';'
 {
   snomask = $3;
+};
+classfakelagmin: FAKELAGMINIMUM '=' expr ';'
+{
+  fakelagmin = $3;
+};
+classfakelagfactor: FAKELAGFACTOR '=' expr ';'
+{
+  fakelagfactor = $3;
 };
 classajoinchan: AUTOJOINCHANNEL '=' QSTRING ';'
 {

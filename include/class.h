@@ -66,6 +66,8 @@ struct ConnectionClass {
   unsigned int            max_links;      /**< Maximum connections allowed. */
   unsigned int            max_chans;      /**< Maximum channels allowed to join. */
   unsigned int            ref_count;      /**< Number of references to class. */
+  signed int              lag_min;        /**< Minimum number of seconds for fake lag. */
+  signed int              lag_factor;     /**< Factor by which the message length is divided to add to fake lag. */
   unsigned short          ping_freq;      /**< Ping frequency for clients. */
   unsigned short          conn_freq;      /**< Auto-connect frequency. */
   unsigned char           valid;          /**< Valid flag (cleared after this
@@ -92,6 +94,10 @@ struct ConnectionClass {
 #define MaxChans(x)    ((x)->max_chans)
 /** Get number of references to \a x. */
 #define Links(x)        ((x)->ref_count)
+/** Get fake lag minimum for \a x. */
+#define LagMin(x)       ((x)->lag_min)
+/** Get fake lag factor for \a x. */
+#define LagFactor(x)    ((x)->lag_factor)
 
 /** Get class name for ConfItem \a x. */
 #define ConfClass(x)    ((x)->conn_class->cc_name)
@@ -142,6 +148,8 @@ extern void report_classes(struct Client *sptr, const struct StatDesc *sd,
                            char *param);
 extern unsigned int get_sendq(struct Client* cptr);
 extern unsigned int get_recvq(struct Client *cptr);
+extern int get_lag_min(struct Client *cptr);
+extern int get_lag_factor(struct Client *cptr);
 extern unsigned int get_client_maxchans(struct Client *acptr);
 
 extern void class_send_meminfo(struct Client* cptr);
