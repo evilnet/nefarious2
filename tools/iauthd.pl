@@ -2,14 +2,62 @@
 #
 # iauthd for doing DNSBL lookups, implimented in perl. Can be extended easily to also handle LOC/SASL
 # 
-# requires some CPAN modules to work. See 'use' lines below.
+# Requirements:
 #
+# Debian/ubuntu/mint:
+# apt-get install libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl
+# 
+# fedora/redhat/centos:
+# yum install perl-POE perl-POE-Component-Client-DNS perl-TermReadKey
+#
+# freebsd:
+# ports dns/p5-POE-Component-Client-DNS (use cpan for Term::ReadKey)
+#
+# or via cpan:
+# cpan install Term::ReadKey POE::Component::Client::DNS
+#
+# Installation:
+# Copy somewhere convenient
+#
+# Usage:
+# iauth.pl -f /path/to/config
+#
+# Configuration:
+#
+# Configuration can piggy back in ircd.conf because # lines are part of the config and ignored by ircd
+# 
+# example:
+
+#IAUTH POLICY RTAWUwFr
+#IAUTH DNSBL server=dnsbl.sorbs.net mask=74 class=loosers mark=sorbs
+#IAUTH DNSBL server=dnsbl.ahbl.org index=99,3,14,15,16,17,18,19,20 class=loosers mark=ahbl
+#IAUTH DEBUG 0
+
+# 
+# Description of config values:
+#
+#     POLICY: 
+#        see docs/readme.iauth section on Set Policy Options
+# 
+#     DNSBL:
+#        bitmask  -  matches if response is true after being bitwise-and'ed with mask
+#        index    -  matches if response is exactly index
+#        class    -  assigns the user to the named class
+#        mark     -  marks the user with the given mark
+#        block    -  all - blocks connection if matched
+#                    anonymous - blocks connection unless LOC/SASL
+#        whitelist- listed users wont be blocked by any rbl            
+#
+#     DEBUG:      - values greater than 0 turn iauth debugging on in the ircd
+
+
+
+
 use strict;
 use warnings;
 
 use POE qw ( Wheel::SocketFactory Wheel::ReadWrite Filter::Line  Driver::SysRW );
 use POE::Driver::SysRW;
-#use POE::Filter::Stream;
 use POE::Filter::Line;        
 use POE::Wheel::ReadWrite;
 use POE::Component::Client::DNS;
