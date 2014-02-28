@@ -1,60 +1,87 @@
 #!/usr/bin/perl
-#
+
+##############################################
 # iauthd for doing DNSBL lookups, implimented in perl. Can be extended easily to also handle LOC/SASL
 # 
 # Requirements:
+#   You need to install some perl dependancies for this to run.
 #
-# Debian/ubuntu/mint:
-# apt-get install libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl
-# 
-# fedora/redhat/centos:
-# yum install perl-POE perl-POE-Component-Client-DNS perl-TermReadKey
-#
-# freebsd:
-# ports dns/p5-POE-Component-Client-DNS (use cpan for Term::ReadKey)
-#
-# or via cpan:
-# cpan install Term::ReadKey POE::Component::Client::DNS
+#   Debian/ubuntu/mint:
+#     apt-get install libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl
+#   
+#   fedora/redhat/centos:
+#     yum install perl-POE perl-POE-Component-Client-DNS perl-TermReadKey perl-slurp
+#  
+#   freebsd: TODO: how to add File::Slurp
+#     ports dns/p5-POE-Component-Client-DNS
+#     (use cpan for Term::ReadKey)
+#  
+#   or via cpan:
+#     cpan install Term::ReadKey POE::Component::Client::DNS File::Slurp
 #
 # Installation:
-# Copy somewhere convenient
+#   Copy somewhere convenient
 #
 # Usage:
-# iauth.pl -f /path/to/config
+#   iauth.pl -f /path/to/config
 #
 # Configuration:
 #
-# Configuration can piggy back in ircd.conf because # lines are part of the config and ignored by ircd
+#   * Config directives begin with #IAUTHD and are one per line
+#   * Because configuration begins with a #, it can piggy back on existing 
+#     ircd.conf file. ircd will ignore it. Handy for those using linesync.
+#   * Syntax is: #IAUTHD <directive> <arguments>
 # 
-# example:
-
-#IAUTH POLICY RTAWUwFr
-#IAUTH DNSBL server=dnsbl.sorbs.net mask=74 class=loosers mark=sorbs
-#IAUTH DNSBL server=dnsbl.ahbl.org index=99,3,14,15,16,17,18,19,20 class=loosers mark=ahbl
-#IAUTH DEBUG 0
-
 # 
-# Description of config values:
+# Description of config directives:
 #
 #     POLICY: 
 #        see docs/readme.iauth section on Set Policy Options
 # 
-#     DNSBL:
-#        bitmask  -  matches if response is true after being bitwise-and'ed with mask
-#        index    -  matches if response is exactly index
-#        class    -  assigns the user to the named class
-#        mark     -  marks the user with the given mark
-#        block    -  all - blocks connection if matched
-#                    anonymous - blocks connection unless LOC/SASL
-#        whitelist- listed users wont be blocked by any rbl            
-#
+#     DNSBL <key=value [key=value..]>
+#        where keys are:
+#          server   -  dnsbl server to look up, eg dnsbl.sorbs.net
+#          bitmask  -  matches if response is true after being bitwise-and'ed with mask
+#          index    -  matches if response is exactly index (comma seperated values ok)
+#          class    -  assigns the user to the named class
+#          mark     -  marks the user with the given mark
+#          block    -  all - blocks connection if matched
+#                      anonymous - blocks connection unless LOC/SASL
+#          whitelist- listed users wont be blocked by any rbl            
+#  
 #     DEBUG:      - values greater than 0 turn iauth debugging on in the ircd
+#
+# Example:
 
+  #IAUTH POLICY RTAWUwFr
+  #IAUTH DNSBL server=dnsbl.sorbs.net mask=74 class=loosers mark=sorbs
+  #IAUTH DNSBL server=dnsbl.ahbl.org index=99,3,14,15,16,17,18,19,20 class=loosers mark=ahbl
+  #IAUTH DEBUG 0
 
+#
+########################3
 
+=head1 NAME
+
+iauthd.pl - a perl based iauthd daemon supporting DNSBL lookups
+
+=head1 SYNOPSIS
+
+iauthd.pl [options] --config=configfile.conf
+
+    Options: (short)
+    --help    (-h)    Print this message
+    --config  (-c)    Config file to read
+    --debug   (-d)    Turn on debugging in the ircd
+    --verbose (-v)    Turn on debugging in iauthd
+
+=cut
 
 use strict;
 use warnings;
+
+use Getopt::Long;
+use Pod::Usage;
 
 use POE qw ( Wheel::SocketFactory Wheel::ReadWrite Filter::Line  Driver::SysRW );
 use POE::Driver::SysRW;
@@ -63,13 +90,23 @@ use POE::Wheel::ReadWrite;
 use POE::Component::Client::DNS;
 
 use Term::ReadKey;
-
 use POSIX;
+use File::Slurp;
+use Data::Dumper;
+
+
+my %options;
+GetOptions( \%options, 'help', 'config:s', 'debug', 'verbose') or confess("Error");
+
+pod2usage(1) if ($options{'help'} or !$options{'config'});
+
+my %config = read_configfile($options{'config'});
 
 my $named = POE::Component::Client::DNS->spawn(
     Alias => "named"
 );
 
+# Create the POE object with callbacks
 POE::Session->create (
   inline_states => {
    _start => \&poe_start,
@@ -81,11 +118,22 @@ POE::Session->create (
   }
 );
 
+# Start the event loop
 POE::Kernel->run();
 exit 0;
 
+
+#####
+#
+# Subs
+#
+#####
+
 sub debug {
-    print "DEBUG: ". join(' ', @_). "\n";
+    my $str = join(' ', @_);
+    if($options{'debug'}) {
+        print "> :$str\n";
+    }
 }
 
 sub poe_start {
@@ -119,30 +167,24 @@ sub poe_stop {
 
 sub myinput_event {
     my ( $kernel, $heap, $line ) = @_[ KERNEL, HEAP, ARG0 ];
-    print "read a line...... $line\n";
+    debug("read a line...... '$line'");
+    return unless($line);
+
     my @line = split / /, $line;
 
     my $source = shift @line;
     my $message = shift @line;
     my $args = join(' ', @line);
 
-    print "Parsed source=$source, message=$message\n";
+    return unless(defined $message);
 
+    print "Parsed source=$source, message=$message\n";
     if($message eq 'C') { #client introduction: <remoteip> <remoteport> <localip> <localport>
         my ($ip, $port, $serverip, $serverport) = split( / /, $args);
 
-        # TODO: store info and begin checking
-        handle_client($ip, $port, $serverip, $serverport);
-
-        print "Got a client line. Checking $ip for rbl entries\n";
-        my $response = $named->resolve(
-            event => "myresponse_event",
-            host => $ip,
-            context => { },
-        );
-        if($response) {
-            $kernel->yield(response => $response);
-        }
+        return unless(defined $ip);
+        return unless($ip =~ /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/);
+        handle_client($kernel, $heap, $source, $ip, $port, $serverip, $serverport);
     }
     elsif($message eq 'D') { #Client disconnect
     }
@@ -201,7 +243,7 @@ sub myinput_event {
 
 sub myerror_event {
     my ( $kernel, $heap ) = @_[ KERNEL, HEAP ];
-    print "Everything either went to hell or we got to the end.  Shutting down...\n";
+    debug("Everything either went to hell or we got to the end.  Shutting down...");
     exit 0;
     #delete $heap->{wheels}->{$fileio_uuid};
     $kernel->yield("_stop");
@@ -209,15 +251,126 @@ sub myerror_event {
 
 sub myresponse_event {
     my ( $kernel, $heap, $response ) = @_[ KERNEL, HEAP, ARG0 ];
-    print "Got a response ... \n";
+    debug("Got a response ... ");
+    my @result;
     foreach my $answer ($response->{response}->answer()) {
-        print( 
+        debug( 
            "$response->{host} = ",
            $answer->type(), " ", 
-           $answer->rdatastr(), "\n"
+           $answer->rdatastr(),
         );
+        push @result, $answer->rdatastr();
+    }
+    handle_dnsbl_response($kernel, $heap, $response->{'host'}, \@result);
+}
+
+
+
+sub read_configfile {
+    my $file = shift;
+    my %config;
+    my @dnsbls;
+    $config{'dnsbls'} = \@dnsbls;
+    debug("Reading $file...");
+    foreach my $line (read_file($file)) {
+        chomp $line;
+    	if($line =~ /^\#IAUTH\s(\w+)(\s+(.+))?/) {
+	    my $directive = $1;
+	    my $args = $3;
+            debug("Got a config line: $line");
+	    debug("    directive is $directive");
+	    debug("    arg is $args");
+            if($directive eq 'POLICY') {
+                $config{'policy'} = $args;
+            }
+	    elsif($directive eq 'DNSBL') {
+	    	my %dnsblconfig;
+		foreach my $arg (split /\s+/, $args) {
+		    if($arg =~ /(\w+)\=(.+)/) { #key=val pair
+                        my $k = $1;
+                        my $v = $2;
+                        $dnsblconfig{$k} = $v;
+                    }
+                    else {
+                        $dnsblconfig{$arg} = 1;
+                    }
+		}
+                push @dnsbls, \%dnsblconfig;
+	    }
+	    elsif($directive eq 'DEBUG') {
+	    	$config{'debug'} = 1;
+	    }
+            else {
+                debug("Unknown IAUTH directive '$directive'");
+            }
+        }
+    }
+    print Dumper(\%config);
+    return %config;
+}
+
+my %clients;
+my %dnsbl_cache;
+
+sub handle_client {
+    my ($kernel, $heap, $source, $ip, $port, $serverip, $serverport) = @_;
+    debug("Handling client connect: $source from $ip");
+
+    my $pi = join('.', reverse(split(/\./,$ip)));
+    debug("Converted $ip to $pi");
+
+    if(exists $clients{$source}){
+        debug("Found existing entry for client $source (ip=$ip)");
+        #existing entry. 
+    }
+    else {
+        #add client to list
+        debug("Adding new entry for client $source (ip=$ip)");
+        my $client = { id=>$source, ip=>$ip, port=>$port, serverip=>$serverip, serverport=>$serverport,
+                       whitelisted=>0, blocked=>0, mark=>undef, class=>undef};
+        $clients{$source} = $client;
+    }
+
+    foreach my $dnsbl (@{$config{'dnsbls'}}) {
+        print Dumper(\$dnsbl);
+        my $server = $dnsbl->{'server'};
+        debug("Checking $pi.$server");
+
+        if(exists $dnsbl_cache{"$pi.$server"}) { #Found a cache entry
+            my $cache_entry = $dnsbl_cache{"$pi.$server"};
+            debug("Found dnsbl cache entry for $pi.$server");
+            print Dumper($cache_entry);
+            if(defined $cache_entry) { #got a completed lookup in the cache
+                handle_dnsbl_response($kernel, $heap, "$pi.$server", $cache_entry);
+            }
+            else { #we started looking it up but no reply yet
+                debug("Cache pending... on $pi.$server");
+            }
+        }
+        else { #This lookup is not in the cache yet
+            debug("Adding cache entry for $pi.$server");
+            $dnsbl_cache{"$pi.$server"} = undef;
+        }
+
+        #Begin a POE lookup on the dnsbl
+        my $response = $named->resolve(
+            event => "myresponse_event",
+            host => "$pi.$server",
+            context => { },
+        );
+        if($response) {
+            $kernel->yield(response => $response);
+        }
     }
 }
 
-POE::Kernel->run();
+sub handle_dnsbl_response {
+    my ( $kernel, $heap, $host, $result ) = @_;
+    my $lookup_string;
+    #Save the answer in the cache.
+    debug("Handling dnsbl response for $host");
+    $dnsbl_cache{$host} = $result;
+    print Dumper($result);
+}
+
 
