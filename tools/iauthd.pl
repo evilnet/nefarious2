@@ -38,6 +38,9 @@
 #     POLICY: 
 #        see docs/readme.iauth section on Set Policy Options
 # 
+#     DNSTIMEOUT:
+#          seconds to time out for DNSBL lookups. Default is 5
+#
 #     DNSBL <key=value [key=value..]>
 #        where keys are:
 #          server   -  dnsbl server to look up, eg dnsbl.sorbs.net
@@ -102,8 +105,12 @@ pod2usage(1) if ($options{'help'} or !$options{'config'});
 
 my %config = read_configfile($options{'config'});
 
+#print Dumper(\%config);
+#exit;
+
 my $named = POE::Component::Client::DNS->spawn(
-    Alias => "named"
+    Alias => "named",
+    Timeout => ($config{'dnstimeout'} ? $config{'dnstimeout'} : 5)
 );
 
 # Create the POE object with callbacks
@@ -209,13 +216,7 @@ sub myinput_event {
     elsif($message eq 'n') { #client nickname: <nickname>
     }
     elsif($message eq 'H') { #Hurry up: <class>
-        # TODO
-        # If we have the results, return them
-        # D for everything is ok
-        # K for bad
-        # m for mark
-        # otherwise keep waiting
-        handle_hurry();
+        handle_hurry($source, $args);
     }
     elsif($message eq 'T') { #Client Registered
     }
@@ -300,12 +301,15 @@ sub read_configfile {
 	    elsif($directive eq 'DEBUG') {
 	    	$config{'debug'} = 1;
 	    }
+            elsif($directive eq 'DNSTIMEOUT') {
+                $config{'dnstimeout'} = $args;
+            }
             else {
                 debug("Unknown IAUTH directive '$directive'");
             }
         }
     }
-    print Dumper(\%config);
+    #print Dumper(\%config);
     return %config;
 }
 
@@ -327,19 +331,20 @@ sub handle_client {
         #add client to list
         debug("Adding new entry for client $source (ip=$ip)");
         my $client = { id=>$source, ip=>$ip, port=>$port, serverip=>$serverip, serverport=>$serverport,
-                       whitelisted=>0, blocked=>0, mark=>undef, class=>undef};
+                       whitelist=>0, block=>0, mark=>undef, class=>undef, pending_lookups=>0, hurry=>0};
         $clients{$source} = $client;
     }
 
     foreach my $dnsbl (@{$config{'dnsbls'}}) {
-        print Dumper(\$dnsbl);
+        #print Dumper(\$dnsbl);
         my $server = $dnsbl->{'server'};
         debug("Checking $pi.$server");
+        $clients{$source}->{'pending_lookups'}++;
 
         if(exists $dnsbl_cache{"$pi.$server"}) { #Found a cache entry
             my $cache_entry = $dnsbl_cache{"$pi.$server"};
             debug("Found dnsbl cache entry for $pi.$server");
-            print Dumper($cache_entry);
+            #print Dumper($cache_entry);
             if(defined $cache_entry) { #got a completed lookup in the cache
                 handle_dnsbl_response($kernel, $heap, "$pi.$server", $cache_entry);
             }
@@ -362,15 +367,165 @@ sub handle_client {
             $kernel->yield(response => $response);
         }
     }
+    #debug(Dumper($clients{$source}));
 }
 
 sub handle_dnsbl_response {
-    my ( $kernel, $heap, $host, $result ) = @_;
+    my ( $kernel, $heap, $host, $results ) = @_;
     my $lookup_string;
     #Save the answer in the cache.
-    debug("Handling dnsbl response for $host");
-    $dnsbl_cache{$host} = $result;
-    print Dumper($result);
+    $dnsbl_cache{$host} = $results;
+
+    $host =~ /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.(.+)$/;
+
+    my $host_ip = "$4.$3.$2.$1";
+    my $dnsbl = "$5";
+    debug("Handling dnsbl response for $host ($host_ip / $dnsbl)");
+
+    if(@$results < 1) {
+        #Negative result. Update any affected clients
+        foreach my $client_id (keys %clients) {
+             my $client = $clients{$client_id};
+             if($client->{'ip'} eq $host_ip) {
+                 $client->{'pending_lookups'}--;
+                 handle_client_update($client);
+             }
+        }
+    }
+
+    #print Dumper($result);
+    foreach my $ip (@$results) {
+        if($ip =~ /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$/) {
+            my $value = $4;
+            debug("Looking at response value $value from $host");
+
+            foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
+                foreach my $index (split(/,/, $config_dnsbl->{'index'})) {
+                    debug("Checking if $index = $value..");
+                    if($value eq $index) {
+                        #found a match
+                        debug("Found a match!!!");
+
+                        #Go through all the client records. Check if this positive dnsbl hit affects them
+                        foreach my $client_id (keys %clients) {
+                            my $client = $clients{$client_id};
+                            if($client->{'ip'} eq $host_ip) {
+                                #We found a client in the queue which matches this
+                                #dnsbl. Mark them and flag them etc
+                                debug("THIS CLIENT MATCHES");
+                                foreach my $field (qw( whitelist mark block class )) {
+                                    if($config_dnsbl->{$field}) {
+                                        $client->{$field} = $config_dnsbl->{$field};
+                                    }
+                                }
+                                $client->{'pending_lookups'}--;
+                                #debug(Dumper($client));
+
+                                #Check if the client can be passed or rejected
+                                handle_client_update($client);
+
+                            } #client matches reply
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
+#The client has been updated. Check if its done
+sub handle_client_update {
+    my $client = shift;
+    if($client->{'pending_lookups'} < 1 || $client->{'timed_out'}) {
+        debug("Client is done with dnsbl lookups");
+        if($client->{'hurry'}) {
+            debug("Client also has hurry set");
+            if($client->{'whitelist'}) {
+                client_pass($client);
+            }
+            elsif( ($client->{'block'} eq 'all') 
+                   || ($client->{'block'} eq 'anonymous' && !$client->{'account'})) {
+                client_reject($client, "You match one or more DNSBL lists");
+            }
+            else {
+                client_pass($client);
+            }
+
+        }
+    }
+}
+
+sub handle_hurry {
+    my $source = shift;
+    my $class = shift;
+    my $client = $clients{$source};
+
+    if(!$client) {
+        debug("ERROR: Got a hurry for a client we arent even holding on to!");
+        return;
+    }
+    debug("Handling a hurry");
+
+    $client->{'hurry'} = 1;
+    handle_client_update($client);
+}
+
+sub client_pass {
+    my $client = shift;
+    debug("Passing client");
+    send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'WEBIRC', $client->{'mark'});
+    send_done($client->{'id'}, $client->{'ip'}, $client->{'port'}, $client->{'class'}?$client->{'class'}:undef);
+    client_delete($client);
+}
+
+sub client_reject {
+    my $client = shift;
+    my $reason = shift;
+    debug("Rejecting client");
+    send_kill($client->{'id'}, $client->{'ip'}, $client->{'port'}, $reason);
+    client_delete($client);
+}
+
+sub client_delete {
+    my $client = shift;
+    debug("Deleting client from hash tables");
+    delete($clients{$client->{'id'}});
+    #print Dumper(\%clients);
+}
+
+sub send_mark {
+    my $id = shift;
+    my $remoteip = shift;
+    my $remoteport = shift;
+    my $marktype = shift;
+    my $markdata = shift;
+
+    return unless($markdata);
+
+    print "m $id $remoteip $remoteport $marktype $markdata\n";
+}
+
+sub send_done {
+    my $id = shift;
+    my $remoteip = shift;
+    my $remoteport = shift;
+    my $class = shift;
+
+    if($class) {
+        print "D $id $remoteip $remoteport $class\n";
+    }
+    else {
+        print "D $id $remoteip $remoteport\n";
+    }
+}
+
+sub send_kill {
+    my $id = shift;
+    my $remoteip = shift;
+    my $remoteport = shift;
+    my $reason = shift;
+
+
+    print "k $id $remoteip $remoteport :$reason\n";
+}
 
