@@ -1187,6 +1187,7 @@ void free_mapping(struct s_map *smap)
   MyFree(smap->name);
   MyFree(smap->command);
   MyFree(smap->prepend);
+  MyFree(smap->defaulttext);
   MyFree(smap);
 }
 

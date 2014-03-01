@@ -118,13 +118,17 @@ int m_pseudo(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* By default, relay the message straight through. */
   text = parv[parc - 1];
 
-  if (parc < 3 || EmptyString(text))
-    return send_reply(sptr, ERR_NOTEXTTOSEND);
-
   /* HACK! HACK! HACK! HACK! Yes. It's icky, but
    * it's the only way. */
   map = (struct s_map *)parv[1];
   assert(0 != map);
+
+  if (parc < 3 || EmptyString(text)) {
+    if (map->defaulttext)
+      text = map->defaulttext;
+    else
+      return send_reply(sptr, ERR_NOTEXTTOSEND);
+  }
 
   if (map->prepend) {
     ircd_snprintf(0, buffer, sizeof(buffer) - 1, "%s%s", map->prepend, text);
