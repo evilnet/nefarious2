@@ -254,13 +254,18 @@ sub myresponse_event {
     my ( $kernel, $heap, $response ) = @_[ KERNEL, HEAP, ARG0 ];
     debug("Got a response ... ");
     my @result;
-    foreach my $answer ($response->{response}->answer()) {
-        debug( 
-           "$response->{host} = ",
-           $answer->type(), " ", 
-           $answer->rdatastr(),
-        );
-        push @result, $answer->rdatastr();
+    if(!defined $response->{response}) {
+        debug("got an empty response.. probably a timeout");
+    }
+    else {
+        foreach my $answer ($response->{response}->answer()) {
+            debug( 
+               "$response->{host} = ",
+               $answer->type(), " ", 
+               $answer->rdatastr(),
+            );
+            push @result, $answer->rdatastr();
+        }
     }
     handle_dnsbl_response($kernel, $heap, $response->{'host'}, \@result);
 }
@@ -473,7 +478,7 @@ sub handle_hurry {
 sub client_pass {
     my $client = shift;
     debug("Passing client");
-    send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'WEBIRC', $client->{'mark'});
+    send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'MARK', $client->{'mark'});
     send_done($client->{'id'}, $client->{'ip'}, $client->{'port'}, $client->{'class'}?$client->{'class'}:undef);
     client_delete($client);
 }
