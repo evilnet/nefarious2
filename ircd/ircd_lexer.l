@@ -142,6 +142,7 @@ static struct lexer_token {
   TOKEN(MATCHUSERNAME),
   TOKEN(FAKELAGMINIMUM),
   TOKEN(FAKELAGFACTOR),
+  TOKEN(DEFAULTTEXT),
   TOKEN(SSLFP),
 #undef TOKEN
   { "ssl", SSLTOK },

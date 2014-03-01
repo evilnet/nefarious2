@@ -172,6 +172,7 @@ struct s_map {
   char *name;                 /**< Text name of the mapping. */
   char *command;              /**< Command name to use. */
   char *prepend;              /**< Extra text to prepend to user's text. */
+  char *defaulttext;          /**< Default text to send if none supplied. */
   unsigned int flags;         /**< Bitwise map of SMAP_* flags. */
   struct nick_host *services; /**< Linked list of possible targets. */
 };

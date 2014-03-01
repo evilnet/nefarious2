@@ -222,6 +222,7 @@ static void free_slist(struct SLink **link) {
 %token MATCHUSERNAME
 %token FAKELAGMINIMUM
 %token FAKELAGFACTOR
+%token DEFAULTTEXT
 %token SSLFP
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -1454,7 +1455,8 @@ pseudoitems '}' ';'
 };
 
 pseudoitems: pseudoitem pseudoitems | pseudoitem;
-pseudoitem: pseudoname | pseudoprepend | pseudonick | pseudoflags;
+pseudoitem: pseudoname | pseudoprepend | pseudonick | pseudoflags
+          | pseudodefault;
 pseudoname: NAME '=' QSTRING ';'
 {
   MyFree(smap->name);
@@ -1464,6 +1466,11 @@ pseudoprepend: PREPEND '=' QSTRING ';'
 {
   MyFree(smap->prepend);
   smap->prepend = $3;
+};
+pseudodefault: DEFAULTTEXT '=' QSTRING ';'
+{
+  MyFree(smap->defaulttext);
+  smap->defaulttext = $3;
 };
 pseudonick: NICK '=' QSTRING ';'
 {
