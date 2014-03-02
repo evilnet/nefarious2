@@ -62,6 +62,16 @@
   #IAUTH DEBUG 0
 
 #
+# ircd.conf:
+#
+# IAuth {
+#    program = "/usr/bin/perl" "/home/rubin/afternet/nef2/nefarious2/tools/iauthd.pl" "-v" "-c" "/home/rubin/afternet/nef2/lib/ircd.conf" "-d";
+# };
+#
+# Debugging:
+#  * oper up first
+#  * set snomask /quote mode yournick +s 262144
+#
 ########################3
 
 =head1 NAME
@@ -174,7 +184,7 @@ sub poe_stop {
 
 sub myinput_event {
     my ( $kernel, $heap, $line ) = @_[ KERNEL, HEAP, ARG0 ];
-    debug("read a line...... '$line'");
+    #debug("read a line...... '$line'");
     return unless($line);
 
     my @line = split / /, $line;
