@@ -195,7 +195,7 @@ sub myinput_event {
 
     return unless(defined $message);
 
-    print "Parsed source=$source, message=$message\n";
+    #print "Parsed source=$source, message=$message\n";
     if($message eq 'C') { #client introduction: <remoteip> <remoteport> <localip> <localport>
         my ($ip, $port, $serverip, $serverport) = split( / /, $args);
 
@@ -231,6 +231,7 @@ sub myinput_event {
     elsif($message eq 'T') { #Client Registered
     }
     elsif($message eq 'E') { #Error: :<aditional text>
+        debug("ircd complaining of error: $args");
     }
     elsif($message eq 'M') { #Server name an dcapacity: <servername> <capacity>
     }
