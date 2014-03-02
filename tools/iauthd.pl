@@ -191,7 +191,8 @@ sub myinput_event {
 
     return unless(defined $message);
 
-    debug("<-- $line");
+    # warning, this one can contain passwords...
+    #debug("<-- $line");
 
     #print "Parsed source=$source, message=$message\n";
     if($message eq 'C') { #client introduction: <remoteip> <remoteport> <localip> <localport>
