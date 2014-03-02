@@ -209,9 +209,7 @@ sub myinput_event {
     }
     elsif($message eq 'R') { #Client authed with sasl or loc: <account>
         my $account = $args;
-        print "Client authed to account $account\n";
-        # TODO: trust client, send an m and D
-        handle_auth($account);
+        handle_auth($kernel, $heap, $source, $account);
     }
     elsif($message eq 'N') { #hostname received: <hostname>
     }
@@ -384,6 +382,15 @@ sub handle_client {
         }
     }
     #debug(Dumper($clients{$source}));
+}
+
+sub handle_auth {
+    my ( $kernel, $heap, $source, $account ) = @_;
+    my $client = $clients{$source};
+
+    debug("Client authed as $account");
+    $client->{'account'} = $account;
+    handle_client_update($client);
 }
 
 sub handle_dnsbl_response {
