@@ -202,6 +202,8 @@ sub myinput_event {
         handle_client($kernel, $heap, $source, $ip, $port, $serverip, $serverport);
     }
     elsif($message eq 'D') { #Client disconnect
+        debug("Client $source disconnected before we finished. Dropping them");
+        client_delete($source);
     }
     elsif($message eq 'F') { #Client has ssl cert: <fingerprint>
     }
@@ -345,9 +347,9 @@ sub handle_client {
     my ($kernel, $heap, $source, $ip, $port, $serverip, $serverport) = @_;
     debug("Handling client connect: $source from $ip");
 
-    if(exists $clients{$source}){
-        debug("Found existing entry for client $source (ip=$ip)");
-        #existing entry. 
+    if(exists $clients{$source}){ #existing entry. 
+        debug("ERROR: Found existing entry for client $source (ip=$ip). Something got left hanging? Exiting..");
+        exit 1;
     }
     else {
         #add client to list
@@ -509,7 +511,6 @@ sub handle_client_update {
             else {
                 client_pass($client);
             }
-
         }
     }
 }
@@ -523,7 +524,7 @@ sub handle_hurry {
         debug("ERROR: Got a hurry for a client we arent even holding on to!");
         return;
     }
-    debug("Handling a hurry");
+    debug("Handling a hurry on $source");
 
     $client->{'hurry'} = 1;
     handle_client_update($client);
