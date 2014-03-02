@@ -203,7 +203,7 @@ sub myinput_event {
     }
     elsif($message eq 'D') { #Client disconnect
         debug("Client $source disconnected before we finished. Dropping them");
-        client_delete($source);
+        client_delete($clients{source});
     }
     elsif($message eq 'F') { #Client has ssl cert: <fingerprint>
     }
