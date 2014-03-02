@@ -446,42 +446,49 @@ sub handle_dnsbl_response {
         }
     }
 
+    my %lookups;
     foreach my $ip (@$results) {
         if($ip =~ /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$/) {
             my $value = $4;
-            debug("Looking at response value $value from $host");
+            #debug("Looking at response value $value from $host");
 
             foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
+                next unless($config_dnsbl->{'server'} eq $dnsbl);
                 foreach my $index (split(/,/, $config_dnsbl->{'index'})) {
-                    debug("Checking if $index = $value..");
                     if($value eq $index) {
-                        #found a match
-                        debug("Found a match!!!");
-
                         #Go through all the client records. Check if this positive dnsbl hit affects them
                         foreach my $client_id (keys %clients) {
                             my $client = $clients{$client_id};
                             if($client->{'ip'} eq $host_ip) {
                                 #We found a client in the queue which matches this
                                 #dnsbl. Mark them and flag them etc
-                                debug("THIS CLIENT MATCHES");
+                                debug("client $client->{id} matches $config_dnsbl->{server} result $value");
                                 foreach my $field (qw( whitelist mark block class )) {
                                     if($config_dnsbl->{$field}) {
                                         $client->{$field} = $config_dnsbl->{$field};
                                     }
                                 }
-                                $client->{'pending_lookups'}--;
-                                #debug(Dumper($client));
-
-                                #Check if the client can be passed or rejected
-                                handle_client_update($client);
-
+                                
+                                #Record the hit in a de-duplicated way
+                                #debug("Marking $client->{id} $config_dnsbl->{server}");
+                                $lookups{$client->{'id'}.$config_dnsbl->{'server'}} = $client;
                             } #client matches reply
-                        }
+                        } #each client
                     }
-                }
-            }
+                } #each index
+            } #each dnsbl
+
         }
+        else {
+            debug("Unable to parse dnsbl result: $ip");
+        }
+    } #foreach @results
+
+    #Now go through each client we found and record the hit
+    foreach my $client (values %lookups) {
+        debug("Decrementing pending lookup for client " . $client->{'id'});
+        $client->{'pending_lookups'}--;
+        handle_client_update($client);
     }
 }
 
