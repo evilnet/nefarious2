@@ -149,7 +149,7 @@ exit 0;
 sub debug {
     my $str = join(' ', @_);
     if($options{'debug'}) {
-        print "> :$str\n";
+        print "> :iauthd.pl: $str\n";
     }
 }
 
@@ -261,7 +261,7 @@ sub myerror_event {
 
 sub myresponse_event {
     my ( $kernel, $heap, $response ) = @_[ KERNEL, HEAP, ARG0 ];
-    debug("Got a response ... ");
+    #debug("Got a response ... ");
     my @result;
     if(!defined $response->{response}) {
         debug("got an empty response.. probably a timeout");
@@ -292,9 +292,9 @@ sub read_configfile {
     	if($line =~ /^\#IAUTH\s(\w+)(\s+(.+))?/) {
 	    my $directive = $1;
 	    my $args = $3;
-            debug("Got a config line: $line");
-	    debug("    directive is $directive");
-	    debug("    arg is $args");
+            #debug("Got a config line: $line");
+	    #debug("    directive is $directive");
+	    #debug("    arg is $args");
             if($directive eq 'POLICY') {
                 $config{'policy'} = $args;
             }
@@ -495,7 +495,7 @@ sub handle_hurry {
 
 sub client_pass {
     my $client = shift;
-    debug("Passing client");
+    debug("Passing client". $client->{'id'} . '('. $client->{'ip'} . ')');
     send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'MARK', $client->{'mark'});
     send_done($client->{'id'}, $client->{'ip'}, $client->{'port'}, $client->{'class'}?$client->{'class'}:undef);
     client_delete($client);
@@ -504,7 +504,7 @@ sub client_pass {
 sub client_reject {
     my $client = shift;
     my $reason = shift;
-    debug("Rejecting client");
+    debug("Rejecting client" . $client->{'id'} . '('. $client->{'ip'} . '): $reason');
     send_kill($client->{'id'}, $client->{'ip'}, $client->{'port'}, $reason);
     client_delete($client);
 }
