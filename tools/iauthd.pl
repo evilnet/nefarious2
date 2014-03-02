@@ -535,7 +535,7 @@ sub client_pass {
 sub client_reject {
     my $client = shift;
     my $reason = shift;
-    debug("Rejecting client " . $client->{'id'} . ' ('. $client->{'ip'} . '): $reason');
+    debug("Rejecting client " . $client->{'id'} . ' ('. $client->{'ip'} . "): $reason");
     send_kill($client->{'id'}, $client->{'ip'}, $client->{'port'}, $reason);
     $count_reject++;
     client_delete($client);
