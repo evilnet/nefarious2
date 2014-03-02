@@ -115,9 +115,6 @@ pod2usage(1) if ($options{'help'} or !$options{'config'});
 
 my %config = read_configfile($options{'config'});
 
-#print Dumper(\%config);
-#exit;
-
 my $named = POE::Component::Client::DNS->spawn(
     Alias => "named",
     Timeout => ($config{'dnstimeout'} ? $config{'dnstimeout'} : 5)
@@ -155,15 +152,8 @@ sub debug {
 
 sub poe_start {
     my ( $kernel, $heap ) = @_[ KERNEL, HEAP ];
-    #print "Doing poe_start\n";
-    print "G 1\n";
-    print "V :Rubin\'s iauthd\n";
-    print "O RTAWUwFr\n";
-    print "a\n";
-    print "A * version :Rubin\'s iauthd\n";
-    print "s\n";
-    print "> :Rubin\'s iauthd is now online\n";
-
+    
+    handle_startup();
     
     # Start the terminal reader/writer.
     $heap->{stdio} = POE::Wheel::ReadWrite->new (
@@ -199,8 +189,10 @@ sub myinput_event {
     if($message eq 'C') { #client introduction: <remoteip> <remoteport> <localip> <localport>
         my ($ip, $port, $serverip, $serverport) = split( / /, $args);
 
-        return unless(defined $ip);
-        return unless($ip =~ /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/);
+        if(!defined $ip) {
+            debug("Got a C without a valid IP. Ignoring");
+            return;
+        }
         handle_client($kernel, $heap, $source, $ip, $port, $serverip, $serverport);
     }
     elsif($message eq 'D') { #Client disconnect
@@ -243,7 +235,7 @@ sub myinput_event {
         return if($message eq 'W'); #untrusted ones are ignored TODO: send a kill? (k)
 
         # TODO: abort/ignore previous check, start checking this new IP
-        handle_webirc($pass, $user, $host, $ip);  #pass will not be used by us
+        handle_webirc($kernel, $heap, $source, $pass, $user, $host, $ip);
 
     }
     else {
@@ -330,12 +322,23 @@ sub read_configfile {
 my %clients;
 my %dnsbl_cache;
 
+sub handle_startup {
+    print "G 1\n";
+    print "V :Nefarious2 iauthd.pl\n";
+
+    #TODO: send the config version of this..
+    print "O RTAWUwFr\n";
+
+    #print "a\n";
+    #print "A * version :Nefarious iauthd.pl\n";
+    #print "s\n";
+    debug("Starting up");
+}
+
+
 sub handle_client {
     my ($kernel, $heap, $source, $ip, $port, $serverip, $serverport) = @_;
     debug("Handling client connect: $source from $ip");
-
-    my $pi = join('.', reverse(split(/\./,$ip)));
-    debug("Converted $ip to $pi");
 
     if(exists $clients{$source}){
         debug("Found existing entry for client $source (ip=$ip)");
@@ -349,39 +352,61 @@ sub handle_client {
         $clients{$source} = $client;
     }
 
-    foreach my $dnsbl (@{$config{'dnsbls'}}) {
-        #print Dumper(\$dnsbl);
-        my $server = $dnsbl->{'server'};
-        debug("Checking $pi.$server");
-        $clients{$source}->{'pending_lookups'}++;
+    if($ip =~ /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/) {
+        my $pi = join('.', reverse(split(/\./,$ip)));
+        #debug("Converted $ip to $pi");
 
-        if(exists $dnsbl_cache{"$pi.$server"}) { #Found a cache entry
-            my $cache_entry = $dnsbl_cache{"$pi.$server"};
-            debug("Found dnsbl cache entry for $pi.$server");
-            #print Dumper($cache_entry);
-            if(defined $cache_entry) { #got a completed lookup in the cache
-                handle_dnsbl_response($kernel, $heap, "$pi.$server", $cache_entry);
-            }
-            else { #we started looking it up but no reply yet
-                debug("Cache pending... on $pi.$server");
-            }
-        }
-        else { #This lookup is not in the cache yet
-            debug("Adding cache entry for $pi.$server");
-            $dnsbl_cache{"$pi.$server"} = undef;
-        }
+        foreach my $dnsbl (@{$config{'dnsbls'}}) {
+            my $server = $dnsbl->{'server'};
+            #debug("Checking $pi.$server");
+            $clients{$source}->{'pending_lookups'}++;
 
-        #Begin a POE lookup on the dnsbl
-        my $response = $named->resolve(
-            event => "myresponse_event",
-            host => "$pi.$server",
-            context => { },
-        );
-        if($response) {
-            $kernel->yield(response => $response);
+            if(exists $dnsbl_cache{"$pi.$server"}) { #Found a cache entry
+                my $cache_entry = $dnsbl_cache{"$pi.$server"};
+                debug("Found dnsbl cache entry for $pi.$server");
+                if(defined $cache_entry) { #got a completed lookup in the cache
+                    handle_dnsbl_response($kernel, $heap, "$pi.$server", $cache_entry);
+                }
+                else { #we started looking it up but no reply yet
+                    debug("Cache pending... on $pi.$server");
+                }
+            }
+            else { #This lookup is not in the cache yet
+                #debug("Adding cache entry for $pi.$server");
+                $dnsbl_cache{"$pi.$server"} = undef;
+            }
+
+            #Begin a POE lookup on the dnsbl
+            my $response = $named->resolve(
+                event => "myresponse_event",
+                host => "$pi.$server",
+                context => { },
+            );
+            if($response) {
+                $kernel->yield(response => $response);
+            }
         }
     }
-    #debug(Dumper($clients{$source}));
+    else {
+        debug("Unknown IP format: $ip, probably ipv6 or something... ignoring");
+    }
+}
+
+sub handle_webirc {
+    my ($kernel, $heap, $source, $pass, $user, $newhost, $newip);
+
+    my $client = $clients{$source};
+
+    #Save some values to recreate the client
+    my $port = $client->{'port'};
+    my $serverip = $client->{'serverip'};
+    my $serverport = $client->{'serverport'};
+
+    #Delete the client record, we need to start over
+    delete_client($clients{$source});
+
+    #Create a new client and start fresh
+    handle_client($kernel, $heap, $source, $newip, $port, $serverip, $serverport);
 }
 
 sub handle_auth {
@@ -403,7 +428,7 @@ sub handle_dnsbl_response {
 
     my $host_ip = "$4.$3.$2.$1";
     my $dnsbl = "$5";
-    debug("Handling dnsbl response for $host ($host_ip / $dnsbl)");
+    debug("Got a DNS resply for $host_ip from $dnsbl...");
 
     if(@$results < 1) {
         #Negative result. Update any affected clients
@@ -416,7 +441,6 @@ sub handle_dnsbl_response {
         }
     }
 
-    #print Dumper($result);
     foreach my $ip (@$results) {
         if($ip =~ /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$/) {
             my $value = $4;
@@ -495,7 +519,7 @@ sub handle_hurry {
 
 sub client_pass {
     my $client = shift;
-    debug("Passing client". $client->{'id'} . '('. $client->{'ip'} . ')');
+    debug("Passing client ". $client->{'id'} . ' ('. $client->{'ip'} . ')');
     send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'MARK', $client->{'mark'});
     send_done($client->{'id'}, $client->{'ip'}, $client->{'port'}, $client->{'class'}?$client->{'class'}:undef);
     client_delete($client);
@@ -504,7 +528,7 @@ sub client_pass {
 sub client_reject {
     my $client = shift;
     my $reason = shift;
-    debug("Rejecting client" . $client->{'id'} . '('. $client->{'ip'} . '): $reason');
+    debug("Rejecting client " . $client->{'id'} . ' ('. $client->{'ip'} . '): $reason');
     send_kill($client->{'id'}, $client->{'ip'}, $client->{'port'}, $reason);
     client_delete($client);
 }
@@ -513,7 +537,6 @@ sub client_delete {
     my $client = shift;
     debug("Deleting client from hash tables");
     delete($clients{$client->{'id'}});
-    #print Dumper(\%clients);
 }
 
 sub send_mark {
