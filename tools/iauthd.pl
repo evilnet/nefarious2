@@ -191,6 +191,8 @@ sub myinput_event {
 
     return unless(defined $message);
 
+    debug("<-- $line");
+
     #print "Parsed source=$source, message=$message\n";
     if($message eq 'C') { #client introduction: <remoteip> <remoteport> <localip> <localport>
         my ($ip, $port, $serverip, $serverport) = split( / /, $args);
@@ -202,8 +204,10 @@ sub myinput_event {
         handle_client($kernel, $heap, $source, $ip, $port, $serverip, $serverport);
     }
     elsif($message eq 'D') { #Client disconnect
-        debug("Client $source disconnected before we finished. Dropping them");
-        client_delete($clients{source});
+        debug("Client $source disconnected.");
+        if(exists $clients{$source}) {
+            client_delete($clients{$source});
+        }
     }
     elsif($message eq 'F') { #Client has ssl cert: <fingerprint>
     }
@@ -285,6 +289,7 @@ sub read_configfile {
     my $file = shift;
     my %config;
     my @dnsbls;
+    my $cfgnum = 0;
     $config{'dnsbls'} = \@dnsbls;
     debug("Reading $file...");
     send_newconfig();
@@ -293,7 +298,8 @@ sub read_configfile {
     	if($line =~ /^\#IAUTH\s(\w+)(\s+(.+))?/) {
 	    my $directive = $1;
 	    my $args = $3;
-            send_config("$directive $args");
+            $cfgnum++;
+            send_config("$cfgnum: $directive $args");
             #debug("Got a config line: $line");
 	    #debug("    directive is $directive");
 	    #debug("    arg is $args");
@@ -312,6 +318,7 @@ sub read_configfile {
                         $dnsblconfig{$arg} = 1;
                     }
 		}
+                $dnsblconfig{'cfgnum'} = $cfgnum;
                 push @dnsbls, \%dnsblconfig;
 	    }
 	    elsif($directive eq 'DEBUG') {
@@ -363,16 +370,19 @@ sub handle_client {
         my $pi = join('.', reverse(split(/\./,$ip)));
         #debug("Converted $ip to $pi");
 
+        my %handle_cached_responses;
         foreach my $dnsbl (@{$config{'dnsbls'}}) {
             my $server = $dnsbl->{'server'};
-            #debug("Checking $pi.$server");
             $clients{$source}->{'pending_lookups'}++;
+            debug("Looking up client $source: $pi.$server now ". $clients{$source}->{'pending_lookups'} . " left");
 
             if(exists $dnsbl_cache{"$pi.$server"}) { #Found a cache entry
                 my $cache_entry = $dnsbl_cache{"$pi.$server"};
                 debug("Found dnsbl cache entry for $pi.$server");
                 if(defined $cache_entry) { #got a completed lookup in the cache
-                    handle_dnsbl_response($kernel, $heap, "$pi.$server", $cache_entry);
+                    #Instead of calling handle_dnsbl_response here we
+                    #save and de-duplicate them, to be executed below
+                    $handle_cached_responses{"$pi.$server"} = $cache_entry;
                 }
                 else { #we started looking it up but no reply yet
                     debug("Cache pending... on $pi.$server");
@@ -381,17 +391,22 @@ sub handle_client {
             else { #This lookup is not in the cache yet
                 #debug("Adding cache entry for $pi.$server");
                 $dnsbl_cache{"$pi.$server"} = undef;
-            }
 
-            #Begin a POE lookup on the dnsbl
-            my $response = $named->resolve(
-                event => "myresponse_event",
-                host => "$pi.$server",
-                context => { },
-            );
-            if($response) {
-                $kernel->yield(response => $response);
+                #Begin a POE lookup on the dnsbl
+                my $response = $named->resolve(
+                    event => "myresponse_event",
+                    host => "$pi.$server",
+                    context => { },
+                );
+                if($response) {
+                    $kernel->yield(response => $response);
+                }
             }
+        }
+
+        #handle response for each unique cache result we found
+        foreach my $k (keys %handle_cached_responses) {
+            handle_dnsbl_response($kernel, $heap, $k, $handle_cached_responses{$k});
         }
     }
     else {
@@ -440,11 +455,18 @@ sub handle_dnsbl_response {
     if(@$results < 1) {
         #Negative result. Update any affected clients
         foreach my $client_id (keys %clients) {
-             my $client = $clients{$client_id};
-             if($client->{'ip'} eq $host_ip) {
+            my $client = $clients{$client_id};
+            next unless($client->{'ip'} eq $host_ip);
+
+            #For every dnsbl that uses this replies dnsbl server...
+            foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
+                 next unless($config_dnsbl->{'server'} eq $dnsbl);
+
                  $client->{'pending_lookups'}--;
+                 debug("Decrementing client $client_id lookups due to negative result ($dnsbl:$config_dnsbl->{cfgnum}). Now ". $client->{'pending_lookups'} . " left");
+
                  handle_client_update($client);
-             }
+            }
         }
     }
 
@@ -473,7 +495,7 @@ sub handle_dnsbl_response {
                                 
                                 #Record the hit in a de-duplicated way
                                 #debug("Marking $client->{id} $config_dnsbl->{server}");
-                                $lookups{$client->{'id'}.$config_dnsbl->{'server'}} = $client;
+                                $lookups{$client->{'id'}.$config_dnsbl->{'server'}.':'.$config_dnsbl->{'cfgnum'}} = $client;
                             } #client matches reply
                         } #each client
                     }
@@ -488,8 +510,8 @@ sub handle_dnsbl_response {
 
     #Now go through each client we found and record the hit
     foreach my $client (values %lookups) {
-        debug("Decrementing pending lookup for client " . $client->{'id'});
         $client->{'pending_lookups'}--;
+        debug("Decrementing pending lookup for client " . $client->{'id'}. " now ". $client->{'pending_lookups'} . "lookups left");
         handle_client_update($client);
     }
 }
@@ -497,10 +519,10 @@ sub handle_dnsbl_response {
 #The client has been updated. Check if its done
 sub handle_client_update {
     my $client = shift;
-    if($client->{'pending_lookups'} < 1 || $client->{'timed_out'}) {
-        debug("Client is done with dnsbl lookups");
-        if($client->{'hurry'}) {
-            debug("Client also has hurry set");
+    if($client->{'hurry'}) {
+        debug("Client $client->{id} has Hurry set");
+        if($client->{'pending_lookups'} < 1) {
+            debug("Client has no pending dnsbl lookups");
             if($client->{'whitelist'}) {
                 client_pass($client);
             }
