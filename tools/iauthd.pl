@@ -107,6 +107,12 @@ use POSIX;
 use File::Slurp;
 use Data::Dumper;
 
+my %clients;
+my %dnsbl_cache;
+
+my $count_pass = 0;
+my $count_reject = 0;
+
 
 my %options;
 GetOptions( \%options, 'help', 'config:s', 'debug', 'verbose') or confess("Error");
@@ -279,11 +285,13 @@ sub read_configfile {
     my @dnsbls;
     $config{'dnsbls'} = \@dnsbls;
     debug("Reading $file...");
+    send_newconfig();
     foreach my $line (read_file($file)) {
         chomp $line;
     	if($line =~ /^\#IAUTH\s(\w+)(\s+(.+))?/) {
 	    my $directive = $1;
 	    my $args = $3;
+            send_config("$directive $args");
             #debug("Got a config line: $line");
 	    #debug("    directive is $directive");
 	    #debug("    arg is $args");
@@ -318,9 +326,6 @@ sub read_configfile {
     #print Dumper(\%config);
     return %config;
 }
-
-my %clients;
-my %dnsbl_cache;
 
 sub handle_startup {
     print "G 1\n";
@@ -428,7 +433,7 @@ sub handle_dnsbl_response {
 
     my $host_ip = "$4.$3.$2.$1";
     my $dnsbl = "$5";
-    debug("Got a DNS resply for $host_ip from $dnsbl...");
+    debug("Got a DNS reply for $host_ip from $dnsbl...");
 
     if(@$results < 1) {
         #Negative result. Update any affected clients
@@ -522,7 +527,9 @@ sub client_pass {
     debug("Passing client ". $client->{'id'} . ' ('. $client->{'ip'} . ')');
     send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'MARK', $client->{'mark'});
     send_done($client->{'id'}, $client->{'ip'}, $client->{'port'}, $client->{'class'}?$client->{'class'}:undef);
+    $count_pass++;
     client_delete($client);
+    send_stats();
 }
 
 sub client_reject {
@@ -530,7 +537,9 @@ sub client_reject {
     my $reason = shift;
     debug("Rejecting client " . $client->{'id'} . ' ('. $client->{'ip'} . '): $reason');
     send_kill($client->{'id'}, $client->{'ip'}, $client->{'port'}, $reason);
+    $count_reject++;
     client_delete($client);
+    send_stats();
 }
 
 sub client_delete {
@@ -574,4 +583,19 @@ sub send_kill {
 
     print "k $id $remoteip $remoteport :$reason\n";
 }
+
+sub send_newconfig {
+    print "a\n";
+}
+sub send_config {
+    my $config = shift;
+    print "A * iauthd.pl :$config\n";
+}
+
+sub send_stats {
+    print "s\n";
+    print "S iauthd.pl :Passed $count_pass\n";
+    print "S iauthd.pl :Rejected $count_reject\n";
+}
+
 
