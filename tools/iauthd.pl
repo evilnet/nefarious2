@@ -244,11 +244,13 @@ sub myinput_event {
     }
     elsif($message eq 'W' || $message eq 'w') { #webirc received from client (or W trusted client): <pass> <user> <host> <ip>
         my ($pass, $user, $host, $ip) = split(/ /, $args);
-        print "Got a W line: pass=<notshown>, user=$user, host=$host, ip=$ip\n";
-        return if($message eq 'W'); #untrusted ones are ignored TODO: send a kill? (k)
-
-        # TODO: abort/ignore previous check, start checking this new IP
-        handle_webirc($kernel, $heap, $source, $pass, $user, $host, $ip);
+        debug("Got a W line: $source - pass=<notshown>, user=$user, host=$host, ip=$ip");
+        if($message eq 'W') { #untrusted ones are ignored TODO: send a kill? (k)
+            debug("Got an untrusted WEBIRC attempt. Ignoring.");
+        }
+        else {
+            handle_webirc($kernel, $heap, $source, $pass, $user, $host, $ip);
+        }
 
     }
     else {
@@ -417,20 +419,29 @@ sub handle_client {
 }
 
 sub handle_webirc {
-    my ($kernel, $heap, $source, $pass, $user, $newhost, $newip);
+    my ($kernel, $heap, $source, $pass, $user, $newhost, $newip) = @_;
 
-    my $client = $clients{$source};
+    if(exists $clients{$source}) {
+        my $client = $clients{$source};
 
-    #Save some values to recreate the client
-    my $port = $client->{'port'};
-    my $serverip = $client->{'serverip'};
-    my $serverport = $client->{'serverport'};
+        #Save some values to recreate the client
+        my $port = $client->{'port'};
+        my $serverip = $client->{'serverip'};
+        my $serverport = $client->{'serverport'};
+        my $washurry = $client->{'hurry'};
 
-    #Delete the client record, we need to start over
-    delete_client($clients{$source});
+        #Delete the client record, we need to start over
+        client_delete($clients{$source});
+        #Create a new client and start fresh
+        handle_client($kernel, $heap, $source, $newip, $port, $serverip, $serverport);
+        if($washurry) {
+            $clients{$source}->{'hurry'} = 1;
+        }
+    }
+    else {
+        debug("Got a webirc for a client we don't know about? Ignored.");
+    }
 
-    #Create a new client and start fresh
-    handle_client($kernel, $heap, $source, $newip, $port, $serverip, $serverport);
 }
 
 sub handle_auth {
@@ -605,7 +616,6 @@ sub send_kill {
     my $remoteip = shift;
     my $remoteport = shift;
     my $reason = shift;
-
 
     print "k $id $remoteip $remoteport :$reason\n";
 }
