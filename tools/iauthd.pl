@@ -294,6 +294,7 @@ sub read_configfile {
     my @dnsbls;
     my $cfgnum = 0;
     $config{'dnsbls'} = \@dnsbls;
+    $config{'blockmsg'} = "Your internet address has been rejected due to reputation (DNSBL).";
     debug("Reading $file...");
     send_newconfig();
     foreach my $line (read_file($file)) {
@@ -329,6 +330,9 @@ sub read_configfile {
 	    }
             elsif($directive eq 'DNSTIMEOUT') {
                 $config{'dnstimeout'} = $args;
+            }
+            elsif($directive eq 'BLOCKMSG') {
+                $config{'blockmsg'} = $args;
             }
             else {
                 debug("Unknown IAUTH directive '$directive'");
@@ -370,7 +374,7 @@ sub handle_client {
                    serverport=>$serverport,
                    whitelist=>0, 
                    block=>0, 
-                   mark=>undef, 
+                   marks=>{}, 
                    class=>undef, 
                    hurry=>0,
                    lookups=>{},
@@ -484,10 +488,13 @@ sub handle_dnsbl_response {
                                 #We found a client in the queue which matches this
                                 #dnsbl. Mark them and flag them etc
                                 debug("client $client->{id} matches $config_dnsbl->{server} result $value");
-                                foreach my $field (qw( whitelist mark block class )) {
+                                foreach my $field (qw( whitelist block class )) {
                                     if($config_dnsbl->{$field}) {
                                         $client->{$field} = $config_dnsbl->{$field};
                                     }
+                                }
+                                if($config_dnsbl->{'mark'}) {
+                                    $client->{'marks'}->{$config_dnsbl->{'mark'}} = $config_dnsbl;
                                 }
                             } #client matches reply
                         } #each client
@@ -532,7 +539,7 @@ sub handle_client_update {
             }
             elsif( ($client->{'block'} eq 'all') 
                    || ($client->{'block'} eq 'anonymous' && !$client->{'account'})) {
-                client_reject($client, "You match one or more DNSBL lists");
+                client_reject($client, $config{'blockmsg'});
             }
             else {
                 client_pass($client);
@@ -562,7 +569,10 @@ sub handle_hurry {
 sub client_pass {
     my $client = shift;
     debug("Passing client ". $client->{'id'} . ' ('. $client->{'ip'} . ')');
-    send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'MARK', $client->{'mark'});
+    print Dumper($client);
+    foreach my $mark (keys %{$client->{'marks'}}) {
+        send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'MARK', $mark);
+    }
     send_done($client->{'id'}, $client->{'ip'}, $client->{'port'}, $client->{'class'}?$client->{'class'}:undef);
     $count_pass++;
     client_delete($client);
