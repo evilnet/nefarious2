@@ -461,11 +461,11 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, i
               !match(banlist->extban.mask, lp->channel->chname))
             ismatch = 1;
           else if (!match(banlist->extban.mask + 1, lp->channel->chname)) {
-            if ((*banlist->extban.mask = '@') && IsChanOp(lp))
+            if ((*banlist->extban.mask == '@') && IsChanOp(lp))
               ismatch = 1;
-            else if ((*banlist->extban.mask = '%') && IsHalfOp(lp))
+            else if ((*banlist->extban.mask == '%') && IsHalfOp(lp))
               ismatch = 1;
-            else if ((*banlist->extban.mask = '+') && HasVoice(lp))
+            else if ((*banlist->extban.mask == '+') && HasVoice(lp))
               ismatch = 1;
           }
         }
@@ -3973,7 +3973,7 @@ mode_process_excepts(struct ParseState *state)
         changed++;
         continue; /* next ban exception; keep prevban like it is */
       } else
-        ban->flags &= BAN_IPMASK; /* unset other flags */
+        ban->flags &= (BAN_IPMASK | BAN_EXTENDED); /* unset other flags */
     } else if (ban->flags & BAN_ADD) { /* adding a ban exception? */
       if (prevban)
         prevban->next = 0; /* Break the list; ban isn't a real ban exception */
@@ -4021,7 +4021,7 @@ mode_process_excepts(struct ParseState *state)
             newban = make_ban(ban->banstr);
             strcpy(newban->who, ban->who);
             newban->when = ban->when;
-            newban->flags = ban->flags & BAN_IPMASK;
+            newban->flags = ban->flags & (BAN_IPMASK | BAN_EXTENDED);
 
             newban->next = state->chptr->exceptlist; /* and link it in */
             state->chptr->exceptlist = newban;
