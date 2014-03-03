@@ -569,7 +569,7 @@ sub handle_hurry {
 sub client_pass {
     my $client = shift;
     debug("Passing client ". $client->{'id'} . ' ('. $client->{'ip'} . ')');
-    print Dumper($client);
+    #print Dumper($client);
     foreach my $mark (keys %{$client->{'marks'}}) {
         send_mark($client->{'id'}, $client->{'ip'}, $client->{'port'}, 'MARK', $mark);
     }
