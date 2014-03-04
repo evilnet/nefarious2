@@ -1244,6 +1244,14 @@ SNOMASK_OPERDEFAULT
 
 Server notice bits enabled by default for IRC operators.
 
+TPATH
+ * Type: string
+ * Default: "ircd.tune"
+
+TPATH is the filename (relative to DPATH) or the full path of the tune data file.
+The file contains user count information for LUSERS so that if the server has to
+restart etc for any reason they will not loose their max local/global user counts.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

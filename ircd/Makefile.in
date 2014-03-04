@@ -1163,7 +1163,9 @@ parse.o: parse.c ../config.h ../include/parse.h ../include/client.h \
   ../include/s_user.h ../include/send.h ../include/shun.h \
   ../include/struct.h ../include/sys.h ../include/whocmds.h \
   ../include/whowas.h ../include/class.h
-querycmds.o: querycmds.c ../config.h ../include/querycmds.h
+querycmds.o: querycmds.c ../config.h ../include/querycmds.h \
+  ../include/client.h ../include/ircd_snprintf.h ../include/s_debug.h \
+  ../include/send.h
 random.o: random.c ../config.h ../include/random.h ../include/client.h \
   ../include/ircd_log.h ../include/ircd_md5.h ../include/ircd_reply.h \
   ../include/send.h

@@ -212,6 +212,7 @@ enum Feature {
   FEAT_SASL_AUTOHIDEHOST,
   FEAT_SNOMASK_DEFAULT,
   FEAT_SNOMASK_OPERDEFAULT,
+  FEAT_TPATH,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,

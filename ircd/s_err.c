@@ -562,9 +562,9 @@ static Numeric replyTable[] = {
 /* 264 */
   { 0 },
 /* 265 */
-  { 0 },
+  { RPL_CURRENT_LOCAL, ":Current local users: %d Max: %d", "265" },
 /* 266 */
-  { 0 },
+  { RPL_CURRENT_GLOBAL, ":Current global users: %d Max: %d", "266" },
 /* 267 */
   { 0 },
 /* 268 */

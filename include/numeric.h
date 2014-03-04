@@ -167,8 +167,8 @@ extern const struct Numeric* get_error_numeric(int err);
 /*      RPL_LOAD_THROTTLED   263           efnet/hybrid */
 /*	RPL_TRYAGAIN	     263	   Numerics List: IRCnet */
 /*	RPL_LOAD2HI	     263	   Dalnet */
-/*      RPL_CURRENT_LOCAL    265           aircd/efnet/hybrid/dalnet*/
-/*      RPL_CURRENT_GLOBAL   266           aircd/efnet/hybrid/dalnet */
+#define RPL_CURRENT_LOCAL    265	/* aircd/efnet/hybrid/dalnet */
+#define RPL_CURRENT_GLOBAL   266	/* aircd/efnet/hybrid/dalnet */
 /*      RPL_START_NETSTAT    267           aircd */
 /*      RPL_NETSTAT          268           aircd */
 /*      RPL_END_NETSTAT      269           aircd */

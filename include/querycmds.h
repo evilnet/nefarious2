@@ -21,10 +21,12 @@ struct UserStatistics {
   unsigned int unknowns;  /**< Clients of types: unknown, connecting, handshake */
   unsigned int local_servers;   /**< Directly connected servers. */
   unsigned int local_clients;   /**< Directly connected clients. */
+  unsigned int local_clients_max; /**< Maximum number of Directly connected clients. */
 
   /* Global counts: */
   unsigned int servers;         /**< Known servers, including #me. */
   unsigned int clients;         /**< Registered users. */
+  unsigned int clients_max;     /**< Maximum number of Registered users. */
 
   /* Global user mode changes: */
   unsigned int inv_clients;     /**< Registered invisible users. */
@@ -42,7 +44,15 @@ extern struct UserStatistics UserStats;
 
 /* Macros for remote connections: */
 /** Count \a cptr as a new remote client. */
-#define Count_newremoteclient(UserStats, cptr)  (++UserStats.clients, ++(cli_serv(cptr)->clients))
+#define Count_newremoteclient(UserStats, cptr) \
+  do { \
+    ++UserStats.clients; \
+    ++(cli_serv(cptr)->clients); \
+    if (UserStats.clients > UserStats.clients_max) { \
+      UserStats.clients_max = UserStats.clients; \
+      save_tunefile(); \
+    } \
+  } while (0)
 /** Count a new remote server. */
 #define Count_newremoteserver(UserStats)  (++UserStats.servers)
 
@@ -68,6 +78,14 @@ extern struct UserStatistics UserStats;
       ++current_load.local_count; \
     if (UserStats.local_clients > max_client_count) \
       max_client_count = UserStats.local_clients; \
+    if (UserStats.local_clients > UserStats.local_clients_max) { \
+      UserStats.local_clients_max = UserStats.local_clients; \
+      save_tunefile(); \
+    } \
+    if (UserStats.clients > UserStats.clients_max) { \
+      UserStats.clients_max = UserStats.local_clients_max; \
+      save_tunefile(); \
+    } \
     if (UserStats.local_clients + UserStats.local_servers > max_connection_count) \
     { \
       max_connection_count = UserStats.local_clients + UserStats.local_servers; \
@@ -95,5 +113,7 @@ extern struct UserStatistics UserStats;
  * Prototypes
  */
 
+void load_tunefile(void);
+void save_tunefile(void);
 
 #endif /* INCLUDED_querycmds_h */
