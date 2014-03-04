@@ -769,6 +769,7 @@ int main(int argc, char **argv) {
 
   write_pidfile();
   init_counters();
+  load_tunefile();
   geoip_init();
 
   Debug((DEBUG_NOTICE, "Server ready..."));
