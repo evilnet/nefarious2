@@ -129,7 +129,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   } else {
     /* Look up the target */
-    if (!(acptr = findNUser(parv[1])) && !(acptr = FindNServer(parv[1])))
+    if (!(acptr = FindNServer(parv[1])))
       return send_reply(sptr, SND_EXPLICIT | ERR_NOSUCHSERVER,
                         "* :Server has disconnected");
 
