@@ -474,7 +474,7 @@ ircd.o: ircd.c ../config.h ../include/ircd.h ../include/IPcheck.h \
   ../include/s_debug.h ../include/s_misc.h ../include/s_stats.h \
   ../include/s_user.h ../include/send.h ../include/ssl.h ../include/sys.h \
   ../include/uping.h ../include/userload.h ../include/version.h \
-  ../include/whowas.h
+  ../include/whowas.h ../include/querycmds.h
 ircd_alloc.o: ircd_alloc.c ../config.h ../include/ircd_alloc.h \
   ../include/ircd_log.h ../include/ircd_string.h ../include/s_debug.h
 ircd_cloaking.o: ircd_cloaking.c ../config.h ../include/ircd_chattr.h \

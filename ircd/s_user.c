@@ -1711,6 +1711,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   }
   if (MyConnect(acptr))
   {
+    /* remember propagate privilege setting */
+    if (HasPriv(acptr, PRIV_PROPAGATE)) {
+      prop = 1;
+    }
     if ((FlagHas(&setflags, FLAG_OPER) || FlagHas(&setflags, FLAG_LOCOP)) &&
         !IsAnOper(acptr))
     {

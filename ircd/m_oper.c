@@ -379,6 +379,7 @@ int mo_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(0 != cptr);
   assert(cptr == sptr);
   send_reply(sptr, RPL_YOUREOPER);
+  send_reply(sptr, ERR_NOOPERHOST);
   return 0;
 }
 
