@@ -335,7 +335,7 @@ void client_check_privs(struct Client *client, struct Client *replyto)
   }
 }
 
-void client_send_privs(struct Client *to, struct Client *client)
+void client_send_privs(struct Client *from, struct Client *to, struct Client *client)
 {
   int i;
   int mlen = NICKLEN + 5 + NICKLEN + 7;
@@ -346,7 +346,7 @@ void client_send_privs(struct Client *to, struct Client *client)
   for (i = 0; privtab[i].name; i++) {
     if (HasPriv(client, privtab[i].priv)) {
       if (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen) {
-        sendcmdto_one(cli_user(client)->server, CMD_PRIVS, to, "%C %s", client, privbuf);
+        sendcmdto_one(from, CMD_PRIVS, to, "%C %s", client, privbuf);
         memset(&privbuf, 0, BUFSIZE);
       }
       strcat(privbuf, privtab[i].name);
@@ -355,7 +355,7 @@ void client_send_privs(struct Client *to, struct Client *client)
   }
 
   if (strlen(privbuf) > 0) {
-    sendcmdto_one(cli_user(client)->server, CMD_PRIVS, to, "%C %s", client, privbuf);
+    sendcmdto_one(from, CMD_PRIVS, to, "%C %s", client, privbuf);
   }    
 }
 

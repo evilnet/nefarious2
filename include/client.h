@@ -1074,7 +1074,7 @@ extern void client_add_sendq(struct Connection* con,
 extern void client_set_privs(struct Client *client, struct ConfItem *oper);
 extern int client_report_privs(struct Client* to, struct Client* client);
 extern void client_check_privs(struct Client *client, struct Client *replyto);
-extern void client_send_privs(struct Client *to, struct Client *client);
+extern void client_send_privs(struct Client *from, struct Client *to, struct Client *client);
 extern void client_check_marks(struct Client *client, struct Client *replyto);
 extern void client_sendtoserv_privs(struct Client *client);
 extern char *client_print_privs(struct Client *client);

@@ -294,7 +294,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
                         cli_continentcode(acptr));
       }
 
-      client_send_privs(cptr, acptr);
+      client_send_privs(cli_user(acptr)->server, cptr, acptr);
     }
   }
   /*
