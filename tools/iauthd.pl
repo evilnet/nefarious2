@@ -354,6 +354,7 @@ sub handle_startup {
     #print "A * version :Nefarious iauthd.pl\n";
     #print "s\n";
     debug("Starting up");
+    send_stats();
 }
 
 
