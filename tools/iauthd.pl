@@ -65,7 +65,7 @@
 # ircd.conf:
 #
 # IAuth {
-#    program = "/usr/bin/perl" "/home/rubin/afternet/nef2/nefarious2/tools/iauthd.pl" "-v" "-c" "/home/rubin/afternet/nef2/lib/ircd.conf" "-d";
+#    program = "/usr/bin/perl" "iauthd.pl" "-v" "-d" "-c" "ircd.conf";
 # };
 #
 # Debugging:
