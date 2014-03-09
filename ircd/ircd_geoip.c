@@ -236,3 +236,12 @@ void geoip_handle_ipv6_file(void)
 #endif /* USE_GEOIP */
 }
 
+const char* geoip_version(void)
+{
+#ifdef USE_GEOIP
+  return GeoIP_lib_version();
+#else
+  return NULL;
+#endif /* USE_GEOIP */
+}
+

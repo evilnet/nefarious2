@@ -85,6 +85,7 @@
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_features.h"
+#include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
@@ -151,6 +152,9 @@ int mo_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 	       debug_serveropts());
 #ifdef USE_SSL
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, OPENSSL_VERSION_TEXT);
+#endif
+#ifdef USE_GEOIP
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GeoIP %s", sptr, geoip_version());
 #endif
     send_supported(sptr);
   }

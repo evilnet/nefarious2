@@ -1054,7 +1054,7 @@ m_version.o: m_version.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd_string.h ../include/match.h ../include/msg.h \
   ../include/numeric.h ../include/numnicks.h ../include/s_debug.h \
   ../include/s_user.h ../include/send.h ../include/supported.h \
-  ../include/version.h
+  ../include/version.h ../include/ircd_geoip.h
 m_wallchops.o: m_wallchops.c ../config.h ../include/channel.h \
   ../include/client.h ../include/hash.h ../include/ircd.h \
   ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_string.h \
