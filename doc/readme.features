@@ -707,7 +707,7 @@ As per UnderNet CFV-165, this doesn't show which server set a ban.
 
 HIS_KILLWHO
  * Type: boolean
- * Default: TRUE
+ * Default: FALSE
 
 As per UnderNet CFV-165, this doesn't show which server or oper performed a
 kill.

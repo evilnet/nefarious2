@@ -665,6 +665,7 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
     member->user         = who;
     member->channel      = chptr;
     member->status       = flags;
+    member->banflags     = 0;
     SetOpLevel(member, oplevel);
 
     member->next_member  = chptr->members;
