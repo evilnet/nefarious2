@@ -337,18 +337,21 @@ void client_check_privs(struct Client *client, struct Client *replyto)
 
 void client_send_privs(struct Client *from, struct Client *to, struct Client *client)
 {
-  int i;
+  int i, p;
   int mlen = NICKLEN + 5 + NICKLEN + 7;
   static char privbuf[BUFSIZE] = "";
 
   memset(&privbuf, 0, BUFSIZE);
+  p = 1; /* Count the victim too */
 
   for (i = 0; privtab[i].name; i++) {
     if (HasPriv(client, privtab[i].priv)) {
-      if (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen) {
+      if ((p >= MAXPARA) || (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen)) {
+        p = 1;
         sendcmdto_one(from, CMD_PRIVS, to, "%C %s", client, privbuf);
         memset(&privbuf, 0, BUFSIZE);
       }
+      p++;
       strcat(privbuf, privtab[i].name);
       strcat(privbuf, " ");
     }
@@ -361,18 +364,21 @@ void client_send_privs(struct Client *from, struct Client *to, struct Client *cl
 
 void client_sendtoserv_privs(struct Client *client)
 {
-  int i;
+  int i, p;
   int mlen = NICKLEN + 5 + NICKLEN + 7;
   static char privbuf[BUFSIZE] = "";
 
   memset(&privbuf, 0, BUFSIZE);
+  p = 1;
 
   for (i = 0; privtab[i].name; i++) {
     if (HasPriv(client, privtab[i].priv)) {
-      if (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen) {
+      if ((p >= MAXPARA) || (strlen(privbuf) + strlen(privtab[i].name) + 1 > BUFSIZE - mlen)) {
+        p = 1;
         sendcmdto_serv_butone(&me, CMD_PRIVS, client, "%C %s", client, privbuf);
         memset(&privbuf, 0, BUFSIZE);
       }
+      p++;
       strcat(privbuf, privtab[i].name);
       strcat(privbuf, " ");
     }
