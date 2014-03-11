@@ -257,6 +257,18 @@ Comments: Indicates the server's name and upper bound on client
 Compatibility: ircd does not include the <capacity> information.
   The <id> should be ignored: ircd sends 0 and ircu sends -1.
 
+e - Server Event
+Syntax <id> e <event>[ :<params>]
+Example: -1 e rehash
+States: N/A
+Next State: -
+Comments: Notifies iauthd of an event identified by <event> with
+  further information regarding the event being supplied in <params>.
+  This messages is enabled by requesting the 'e' policy.
+  Currently implimented events: rehash
+Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
+  not send it.
+
 X - Extension Query Reply
 Syntax: <id> X <servername> <routing> :<reply>
 Example: -1 X channels.undernet.org 5/127.0.0.1/6667 :OK kev Logged in
@@ -370,6 +382,7 @@ Comments: Sets policy options for the iauth conversation.  Old policy
        Nefarious.
    F - Send SSL client certificate fingerprints where available.
    r - Send account name when a client authenticates using SASL.
+   e - Send IRCd event notifications.
 Compatibility: The U policy is an Undernet extension and is not
   recognized by ircd. The w, F and r policies are a Nefarious extension that
   is not recognized by Undernet ircu or ircd.
