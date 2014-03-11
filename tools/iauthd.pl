@@ -300,9 +300,9 @@ sub read_configfile {
     $config{'dnsbls'} = \@dnsbls;
     $config{'blockmsg'} = "Your internet address has been rejected due to reputation (DNSBL).";
     $config{'cachetime'} = $DEFAULT_CACHETIME;
-    print "A * version :Nefarious iauthd.pl $VERSION\n";
     debug("Reading $file...");
     send_newconfig();
+    print "A * version :Nefarious iauthd.pl $VERSION\n";
     foreach my $line (read_file($file)) {
         chomp $line;
     	if($line =~ /^\#IAUTH\s(\w+)(\s+(.+))?/) {
