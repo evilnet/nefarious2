@@ -1316,6 +1316,8 @@ int rehash(struct Client *cptr, int sig)
 
   geoip_init();
 
+  auth_send_event("rehash", NULL);
+
   return ret;
 }
 

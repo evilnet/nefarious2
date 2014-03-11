@@ -44,6 +44,7 @@ extern int auth_set_nick(struct AuthRequest *auth, const char *nickname);
 extern int auth_set_password(struct AuthRequest *auth, const char *password);
 extern int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip);
 extern int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip);
+extern void auth_send_event(const char *event, const char *paramstring);
 extern int auth_set_account(struct AuthRequest *auth, const char *account);
 extern void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr);
 extern int auth_cap_start(struct AuthRequest *auth);

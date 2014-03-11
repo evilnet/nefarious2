@@ -170,6 +170,7 @@ enum IAuthFlag
   IAUTH_WEBIRC,                         /**< Enable Nefarious WEBIRC extensions. */
   IAUTH_SSLFP,                          /**< Enable Nefarious SSL client certificate fingerprint notifcation. */
   IAUTH_ACCOUNT,                        /**< Enable Nefarious SASL account notification. */
+  IAUTH_EVENTS,                         /**< Enable Nefarious Event notifications. */
   IAUTH_LAST_FLAG                       /**< total number of flags */
 };
 /** Declare a bitset structure indexed by IAuthFlag. */
@@ -1355,6 +1356,12 @@ int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, cons
   return 0;
 }
 
+void auth_send_event(const char *event, const char *paramstring)
+{
+  if (IAuthHas(iauth, IAUTH_EVENTS))
+    sendto_iauth(NULL, "e %s%s%s", event, (paramstring ? " :" : ""), (paramstring ? paramstring : ""));
+}
+
 /** Send exit notification for \a cptr to iauth.
  * @param[in] cptr Client who is exiting.
  */
@@ -1793,6 +1800,7 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
     case 'w': IAuthSet(iauth, IAUTH_WEBIRC); break;
     case 'F': IAuthSet(iauth, IAUTH_SSLFP); break;
     case 'r': IAuthSet(iauth, IAUTH_ACCOUNT); break;
+    case 'e': IAuthSet(iauth, IAUTH_EVENTS); break;
     }
 
   /* Optionally notify operators. */
