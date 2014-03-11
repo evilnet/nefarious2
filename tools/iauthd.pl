@@ -7,17 +7,16 @@
 #   You need to install some perl dependancies for this to run.
 #
 #   Debian/ubuntu/mint:
-#     apt-get install libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl
+#     apt-get install libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl libtime-duration-perl
 #   
 #   fedora/redhat/centos:
-#     yum install perl-POE perl-POE-Component-Client-DNS perl-TermReadKey perl-slurp
+#     yum install perl-POE perl-POE-Component-Client-DNS perl-TermReadKey perl-slurp perl-Time-Duration
 #  
-#   freebsd: TODO: how to add File::Slurp
-#     ports dns/p5-POE-Component-Client-DNS
-#     (use cpan for Term::ReadKey)
+#   freebsd:
+#     ports dns/p5-POE-Component-Client-DNS devel/p5-Time-Duration devel/p5-File-Slurp devel/p5-Term-ReadKey
 #  
 #   or via cpan:
-#     cpan install Term::ReadKey POE::Component::Client::DNS File::Slurp
+#     cpan install Term::ReadKey POE::Component::Client::DNS File::Slurp Time::Duration
 #
 # Installation:
 #   Copy somewhere convenient
@@ -107,15 +106,21 @@ use POSIX;
 use File::Slurp;
 use Data::Dumper;
 
+use Time::Duration;
+
 my $DEFAULT_CACHETIME = 60 * 60 * 24;
 
-my $VERSION = "2";
+my $STARTTIME = time();
+
+my $VERSION = "3";
 
 my %clients;
 my %dnsbl_cache;
 
 my $count_pass = 0;
 my $count_reject = 0;
+
+my %dnsbl_counters;
 
 
 my %options;
@@ -240,6 +245,12 @@ sub myinput_event {
     elsif($message eq 'E') { #Error: :<aditional text>
         debug("ircd complaining of error: $args");
     }
+    elsif($message eq 'e') { #Error: :<aditional text>
+        if($args eq 'rehash') {
+            debug("Got a rehash. Rereading config file");
+            %config = read_configfile($options{'config'});
+        }
+    }
     elsif($message eq 'M') { #Server name an dcapacity: <servername> <capacity>
     }
     elsif($message eq 'X') { #extension query reply: <servername> <routing> :<reply>
@@ -330,6 +341,7 @@ sub read_configfile {
 		}
                 $dnsblconfig{'cfgnum'} = $cfgnum;
                 push @dnsbls, \%dnsblconfig;
+                $dnsbl_counters{$dnsblconfig{'cfgnum'}} = 0;
 	    }
 	    elsif($directive eq 'DEBUG') {
 	    	$config{'debug'} = 1;
@@ -533,6 +545,7 @@ sub handle_dnsbl_response {
                 if($client->{'ip'} eq $host_ip) {
                     if($client->{'lookups'}->{$dnsbl->{'cfgnum'}}) {
                         $client->{'lookups'}->{$dnsbl->{'cfgnum'}} = 0;
+                        $dnsbl_counters{$dnsbl->{'cfgnum'}}++;
                         handle_client_update($client);
                     }
                 }
@@ -657,9 +670,21 @@ sub send_config {
 }
 
 sub send_stats {
+    my $up = POSIX::strftime "%a %b %e %H:%M:%S %Y", localtime($STARTTIME);
+    my $uptime = duration(time() - $STARTTIME);
     print "s\n";
-    print "S iauthd.pl :Passed $count_pass\n";
-    print "S iauthd.pl :Rejected $count_reject\n";
+    print "S iauthd.pl :Up since $up ($uptime)\n";
+    print "S iauthd.pl :Total Passed $count_pass\n";
+    print "S iauthd.pl :Total Rejected $count_reject\n";
+    foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
+            my $d = $config_dnsbl->{'server'} . " (" . $config_dnsbl->{'index'}. ")";
+            my $c = 0;
+            if( exists $dnsbl_counters{$config_dnsbl->{'cfgnum'}}) {
+                $c = $dnsbl_counters{$config_dnsbl->{'cfgnum'}};
+            }
+            
+            print "S iauthd.pl :$d: $c\n";
+    }
 }
 
 
