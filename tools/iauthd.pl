@@ -674,6 +674,7 @@ sub send_stats {
     my $uptime = duration(time() - $STARTTIME);
     print "s\n";
     print "S iauthd.pl :Up since $up ($uptime)\n";
+    print "S iauthd.pl :Cache size: ". %dnsbl_cache . "\n";
     print "S iauthd.pl :Total Passed $count_pass\n";
     print "S iauthd.pl :Total Rejected $count_reject\n";
     foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
