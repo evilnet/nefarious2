@@ -107,6 +107,10 @@ use POSIX;
 use File::Slurp;
 use Data::Dumper;
 
+my $DEFAULT_CACHETIME = 60 * 60 * 24;
+
+my $VERSION = "2";
+
 my %clients;
 my %dnsbl_cache;
 
@@ -254,7 +258,7 @@ sub myinput_event {
 
     }
     else {
-        print "Got unknown message '$message' from server\n";
+        debug("Got unknown message '$message' from server");
     }
 }
 
@@ -295,8 +299,10 @@ sub read_configfile {
     my $cfgnum = 0;
     $config{'dnsbls'} = \@dnsbls;
     $config{'blockmsg'} = "Your internet address has been rejected due to reputation (DNSBL).";
+    $config{'cachetime'} = $DEFAULT_CACHETIME;
     debug("Reading $file...");
     send_newconfig();
+    print "A * version :Nefarious iauthd.pl $VERSION\n";
     foreach my $line (read_file($file)) {
         chomp $line;
     	if($line =~ /^\#IAUTH\s(\w+)(\s+(.+))?/) {
@@ -334,6 +340,9 @@ sub read_configfile {
             elsif($directive eq 'BLOCKMSG') {
                 $config{'blockmsg'} = $args;
             }
+            elsif($directive eq 'CACHETIME') {
+                $config{'cachetime'} = $args;
+            }
             else {
                 debug("Unknown IAUTH directive '$directive'");
             }
@@ -345,13 +354,12 @@ sub read_configfile {
 
 sub handle_startup {
     print "G 1\n";
-    print "V :Nefarious2 iauthd.pl\n";
+    print "V :Nefarious2 iauthd.pl version $VERSION\n";
 
     #TODO: send the config version of this..
     print "O RTAWUwFr\n";
 
     #print "a\n";
-    #print "A * version :Nefarious iauthd.pl\n";
     #print "s\n";
     debug("Starting up");
     send_stats();
@@ -392,11 +400,19 @@ sub handle_client {
             $client->{'lookups'}->{$dnsbl->{'cfgnum'}} = 1;
             debug("Looking up client $source: $pi.$server");
 
+            #purge from the cache if it matches...
+            if(exists $dnsbl_cache{"$pi.$server"} && exists $dnsbl_cache{"$pi.$server"}->{'ts'} && $dnsbl_cache{"$pi.$server"}->{'ts'} < ( time() - $config{'cachetime'}) ) {
+                
+                debug("Deleting stale cache entry for $pi.$server");
+                delete $dnsbl_cache{"$pi.$server"};
+            }
+
+            #Look up in the cache
             if(exists $dnsbl_cache{"$pi.$server"}) { #Found a cache entry
                 my $cache_entry = $dnsbl_cache{"$pi.$server"};
                 debug("Found dnsbl cache entry for $pi.$server");
-                if(defined $cache_entry) { #got a completed lookup in the cache
-                    handle_dnsbl_response($kernel, $heap, "$pi.$server", $cache_entry, 1);
+                if(defined $cache_entry->{'result'}) { #got a completed lookup in the cache
+                    handle_dnsbl_response($kernel, $heap, "$pi.$server", $cache_entry->{'result'}, 1);
                 }
                 else { #we started looking it up but no reply yet
                     debug("Cache pending... on $pi.$server");
@@ -404,7 +420,8 @@ sub handle_client {
             }
             else { #This lookup is not in the cache yet
                 #Adding pending cache entry
-                $dnsbl_cache{"$pi.$server"} = undef;
+                debug("Adding cache entry for pending lookup $pi.$server");
+                $dnsbl_cache{"$pi.$server"} = { result=>undef, ts=>time()};
 
                 #Begin a POE lookup on the dnsbl
                 my $response = $named->resolve(
@@ -464,7 +481,7 @@ sub handle_dnsbl_response {
     my $lookup_string;
     #Save the answer in the cache.
 
-    $dnsbl_cache{$host} = $results unless($iscached);
+    $dnsbl_cache{$host} = { result=>$results, ts=>time()} unless($iscached);
 
     $host =~ /^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.(.+)$/;
 
