@@ -55,10 +55,14 @@
 #
 # Example:
 
-  #IAUTH POLICY RTAWUwFr
-  #IAUTH DNSBL server=dnsbl.sorbs.net mask=74 class=loosers mark=sorbs
-  #IAUTH DNSBL server=dnsbl.ahbl.org index=99,3,14,15,16,17,18,19,20 class=loosers mark=ahbl
-  #IAUTH DEBUG 0
+#IAUTH POLICY RTAWUwFr
+#IAUTH CACHETIME 86400
+#IAUTH BLOCKMSG Sorry! Your connection has been rejected because of your internet address's poor reputation.
+#IAUTH DNSBL server=dnsbl.sorbs.net index=2,3,4,5,6,7,9 mark=sorbs block=anonymous
+#IAUTH DNSBL server=dnsbl.ahbl.org index=3,14,15,16,17,18,19,20 mark=ahbl block=anonymous
+#IAUTH DNSBL server=dnsbl.dronebl.org index=2,3,5,6,7,8,9,10,13,14,15 mark=dronebl block=anonymous
+#IAUTH DNSBL server=rbl.efnetrbl.org index=4 mark=tor
+#IAUTH DNSBL server=rbl.efnetrbl.org index=1,2,3,5 mark=efnetrbl block=anonymous
 
 #
 # ircd.conf:
@@ -509,27 +513,34 @@ sub handle_dnsbl_response {
 
             foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
                 next unless($config_dnsbl->{'server'} eq $dnsbl_server);
+                my $flag;
                 foreach my $index (split(/,/, $config_dnsbl->{'index'})) {
                     if($value eq $index) {
-                        #Go through all the client records. Check if this positive dnsbl hit affects them
-                        foreach my $client_id (keys %clients) {
-                            my $client = $clients{$client_id};
-                            if($client->{'ip'} eq $host_ip) {
-                                #We found a client in the queue which matches this
-                                #dnsbl. Mark them and flag them etc
-                                debug("client $client->{id} matches $config_dnsbl->{server} result $value");
-                                foreach my $field (qw( whitelist block class )) {
-                                    if($config_dnsbl->{$field}) {
-                                        $client->{$field} = $config_dnsbl->{$field};
-                                    }
-                                }
-                                if($config_dnsbl->{'mark'}) {
-                                    $client->{'marks'}->{$config_dnsbl->{'mark'}} = $config_dnsbl;
-                                }
-                            } #client matches reply
-                        } #each client
+                        $flag++;
                     }
-                } #each index
+                }
+                if($flag) {
+                    #Go through all the client records. Check if this positive dnsbl hit affects them
+                    foreach my $client_id (keys %clients) {
+                        my $client = $clients{$client_id};
+                        if($client->{'ip'} eq $host_ip) {
+                            #We found a client in the queue which matches this
+                            #dnsbl. Mark them and flag them etc
+                            debug("client $client->{id} matches $config_dnsbl->{server} result $value");
+                            #$dnsbl_counters{$config_dnsbl->{'cfgnum'}}++;
+                            foreach my $field (qw( whitelist block class )) {
+                                if($config_dnsbl->{$field}) {
+                                    $client->{$field} = $config_dnsbl->{$field};
+                                }
+                            }
+                            if($config_dnsbl->{'mark'}) {
+                                $client->{'marks'}->{$config_dnsbl->{'mark'}} = $config_dnsbl;
+                            }
+                            $client->{'hits'}->{$config_dnsbl->{'cfgnum'}} = 1;
+                        } #client matches reply
+                    } #each client
+                }
+                # #each index
             } #each dnsbl
 
         }
@@ -537,6 +548,14 @@ sub handle_dnsbl_response {
             debug("Unable to parse dnsbl result: $ip");
         }
     } #foreach @results
+    foreach my $client (values %clients) {
+        if($client->{'hits'}) {
+            foreach my $cfgnum (keys %{$client->{'hits'}}) {
+                $dnsbl_counters{$cfgnum}++;
+                delete $client->{'hits'};
+            }
+        }
+    }
 
     #Clear all pending states on all clients with matching ips waiting on any related dnsbls.
     foreach my $dnsbl (@{$config{'dnsbls'}}) {
@@ -545,7 +564,6 @@ sub handle_dnsbl_response {
                 if($client->{'ip'} eq $host_ip) {
                     if($client->{'lookups'}->{$dnsbl->{'cfgnum'}}) {
                         $client->{'lookups'}->{$dnsbl->{'cfgnum'}} = 0;
-                        $dnsbl_counters{$dnsbl->{'cfgnum'}}++;
                         handle_client_update($client);
                     }
                 }
@@ -675,8 +693,8 @@ sub send_stats {
     print "s\n";
     print "S iauthd.pl :Up since $up ($uptime)\n";
     print "S iauthd.pl :Cache size: ". %dnsbl_cache . "\n";
-    print "S iauthd.pl :Total Passed $count_pass\n";
-    print "S iauthd.pl :Total Rejected $count_reject\n";
+    print "S iauthd.pl :Total Passed: $count_pass\n";
+    print "S iauthd.pl :Total Rejected: $count_reject\n";
     foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
             my $d = $config_dnsbl->{'server'} . " (" . $config_dnsbl->{'index'}. ")";
             my $c = 0;
