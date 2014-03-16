@@ -83,6 +83,9 @@ in which:
        operator is meaningless (it will be ignored), using it while oper'd
        means that the query is almost certainly logged and the admin might
        (rightfully) ask you an explanation on why you did.
+   m   If this is specified the mask will be matched against marks applied
+       to a user. This option is only available to IRC operators. This flag
+       is a Nefarious feature.
 
    The rest, what follows the %, that is [%[fields[,<querytype>]]], is as it
    has always been since the first who.patch, the <fields> part specifies

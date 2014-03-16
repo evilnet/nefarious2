@@ -90,6 +90,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "match.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -217,6 +218,11 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         case 'a':
         case 'A':
           matchsel |= WHO_FIELD_ACC;
+          continue;
+        case 'm':
+        case 'M':
+          if (IsAnOper(sptr))
+            matchsel |= WHO_FIELD_MRK;
           continue;
       }
     if (ch == '%')
@@ -389,6 +395,7 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if ((!(counter < 1)) && matchsel) {
       struct Membership* member;
       struct Membership* chan;
+      int matchmark = 0;
       for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
         chptr = chan->channel;
         for (member = chptr->members; member; member = member->next_member)
@@ -399,6 +406,13 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                    we'll never have to show this acptr in this query */
  	  if ((bitsel & WHOSELECT_OPER) && !SeeOper(sptr,acptr))
 	    continue;
+          if ((mask) && (matchsel & WHO_FIELD_MRK)) {
+            struct SLink* dp = NULL;
+            for (dp = cli_marks(acptr); dp; dp = dp->next) {
+              if (!matchexec(dp->value.cp, mymask, minlen))
+                matchmark = 1;
+            }
+          }
           if ((mask) &&
               ((!(matchsel & WHO_FIELD_NIC))
               || matchexec(cli_name(acptr), mymask, minlen))
@@ -418,7 +432,9 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 	      || (IsHiddenHost(acptr) && !IsAnOper(sptr))
               || !ipmask_check(&cli_ip(acptr), &imask, ibits))
               && ((!(matchsel & WHO_FIELD_ACC))
-              || matchexec(cli_user(acptr)->account, mymask, minlen)))
+              || matchexec(cli_user(acptr)->account, mymask, minlen))
+              && ((!(matchsel & WHO_FIELD_MRK))
+              || !matchmark))
             continue;
           if (!SHOW_MORE(sptr, counter))
             break;
@@ -428,7 +444,8 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
     /* Loop through all clients :-\, if we still have something to match to 
        and we can show more clients */
-    if ((!(counter < 1)) && matchsel)
+    if ((!(counter < 1)) && matchsel) {
+      int matchmark = 0;
       for (acptr = cli_prev(&me); acptr; acptr = cli_prev(acptr))
       {
         if (!(IsUser(acptr) && Process(acptr)))
@@ -437,6 +454,13 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 	  continue;
         if (!(SEE_USER(sptr, acptr, bitsel)))
           continue;
+        if ((mask) && (matchsel & WHO_FIELD_MRK)) {
+          struct SLink* dp = NULL;
+          for (dp = cli_marks(acptr); dp; dp = dp->next) {
+            if (!matchexec(dp->value.cp, mymask, minlen))
+              matchmark = 1;
+          }
+        }
         if ((mask) &&
             ((!(matchsel & WHO_FIELD_NIC))
             || matchexec(cli_name(acptr), mymask, minlen))
@@ -456,12 +480,15 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 	    || (IsHiddenHost(acptr) && !IsAnOper(sptr))
             || !ipmask_check(&cli_ip(acptr), &imask, ibits))
             && ((!(matchsel & WHO_FIELD_ACC))
-            || matchexec(cli_user(acptr)->account, mymask, minlen)))
+            || matchexec(cli_user(acptr)->account, mymask, minlen))
+            && ((!(matchsel & WHO_FIELD_MRK))
+            || !matchmark))
           continue;
         if (!SHOW_MORE(sptr, counter))
           break;
         do_who(sptr, acptr, 0, fields, qrt);
       }
+    }
   }
 
   /* Make a clean mask suitable to be sent in the "end of" */
