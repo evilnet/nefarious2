@@ -268,6 +268,35 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
       }
   }
 
+  if (fields & WHO_FIELD_MRK)
+  {
+    *(p1++) = ' ';
+
+    if (IsMarked(acptr)) {
+      char markbuf[128];
+      char *p2 = (char *)&markbuf;
+      int len = 0;
+      struct SLink* dp = NULL;
+
+      for (dp = cli_marks(acptr); dp; dp = dp->next) {
+        len += strlen(dp->value.cp) + 1;
+        if (len > 128)
+          break;
+        strncpy(p2, dp->value.cp, strlen(dp->value.cp));
+        p2 += strlen(dp->value.cp);
+        *p2++ = ',';
+      }
+      *--p2 = '\0';
+
+      if (len > 128)
+        strncpy((char *)&markbuf, "*ManyMarks*", 12);
+
+      p2 = (char *)&markbuf;
+      while ((*p2) && (*(p1++) = *(p2++)));
+    } else
+      *(p1++) = '0';
+  }
+
   if (!fields || (fields & WHO_FIELD_REN))
   {
     char *p2 = cli_info(acptr);
