@@ -1146,6 +1146,8 @@ clientsslfp: SSLFP '=' QSTRING ';'
 };
 clientnoidenttilde: NOIDENTTILDE '=' YES ';'
 {
+  if (!username)
+    DupString(username, "*");
   flags |= CONF_NOIDENTTILDE;
 } | NOIDENTTILDE '=' NO ';'
 {
