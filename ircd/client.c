@@ -444,7 +444,7 @@ void client_check_marks(struct Client *client, struct Client *replyto)
   memset(&markbufp, 0, BUFSIZE);
 
   for (dp = cli_marks(client); dp; dp = dp->next) {
-    if (strlen(markbufp) + strlen(dp->value.cp) + 4 > 70) {
+    if (markbufp[0] && strlen(markbufp) + strlen(dp->value.cp) + 4 > 70) {
       ircd_snprintf(0, outbuf, sizeof(outbuf), "          Marks:: %s", markbufp);
       send_reply(replyto, RPL_DATASTR, outbuf);
       memset(&markbufp, 0, BUFSIZE);
