@@ -126,6 +126,8 @@ my $count_reject = 0;
 
 my %dnsbl_counters;
 
+my $poe_heap;
+
 
 my %options;
 GetOptions( \%options, 'help', 'config:s', 'debug', 'verbose') or confess("Error");
@@ -162,10 +164,20 @@ exit 0;
 #
 #####
 
+sub poe_print {
+    my $str = join(' ', @_);
+    if($poe_heap) {
+        $poe_heap->{stdio}->put($str);
+    }
+    else {
+        print "$str\n";
+    }
+}
+
 sub debug {
     my $str = join(' ', @_);
     if($options{'debug'}) {
-        print "> :iauthd.pl: $str\n";
+        poe_print($str);
     }
 }
 
@@ -183,11 +195,13 @@ sub poe_start {
         ErrorEvent => "myerror_event",
     );
     $kernel->sig(INT => "myint_event");
+
+    $poe_heap = $heap;
 }
 
 sub poe_stop {
     my ( $kernel, $heap ) = @_[ KERNEL, HEAP ];
-    print "Doing poe_stop\n";
+    poe_print "Doing poe_stop";
     #$kernel->alias_remove($fileio_uuid);
 }
 
@@ -317,7 +331,7 @@ sub read_configfile {
     $config{'cachetime'} = $DEFAULT_CACHETIME;
     debug("Reading $file...");
     send_newconfig();
-    print "A * version :Nefarious iauthd.pl $VERSION\n";
+    poe_print "A * version :Nefarious iauthd.pl $VERSION";
     foreach my $line (read_file($file)) {
         chomp $line;
     	if($line =~ /^\#IAUTH\s(\w+)(\s+(.+))?/) {
@@ -369,11 +383,11 @@ sub read_configfile {
 }
 
 sub handle_startup {
-    print "G 1\n";
-    print "V :Nefarious2 iauthd.pl version $VERSION\n";
+    poe_print "G 1";
+    poe_print "V :Nefarious2 iauthd.pl version $VERSION";
 
     #TODO: send the config version of this..
-    print "O RTAWUwFr\n";
+    poe_print "O RTAWUwFr";
 
     #print "a\n";
     #print "s\n";
@@ -653,7 +667,7 @@ sub send_mark {
 
     return unless($markdata);
 
-    print "m $id $remoteip $remoteport $marktype $markdata\n";
+    poe_print "m $id $remoteip $remoteport $marktype $markdata";
 }
 
 sub send_done {
@@ -663,10 +677,10 @@ sub send_done {
     my $class = shift;
 
     if($class) {
-        print "D $id $remoteip $remoteport $class\n";
+        poe_print "D $id $remoteip $remoteport $class";
     }
     else {
-        print "D $id $remoteip $remoteport\n";
+        poe_print "D $id $remoteip $remoteport";
     }
 }
 
@@ -676,25 +690,25 @@ sub send_kill {
     my $remoteport = shift;
     my $reason = shift;
 
-    print "k $id $remoteip $remoteport :$reason\n";
+    poe_print "k $id $remoteip $remoteport :$reason";
 }
 
 sub send_newconfig {
-    print "a\n";
+    poe_print "a";
 }
 sub send_config {
     my $config = shift;
-    print "A * iauthd.pl :$config\n";
+    poe_print "A * iauthd.pl :$config";
 }
 
 sub send_stats {
     my $up = POSIX::strftime "%a %b %e %H:%M:%S %Y", localtime($STARTTIME);
     my $uptime = duration(time() - $STARTTIME);
-    print "s\n";
-    print "S iauthd.pl :Up since $up ($uptime)\n";
-    print "S iauthd.pl :Cache size: ". %dnsbl_cache . "\n";
-    print "S iauthd.pl :Total Passed: $count_pass\n";
-    print "S iauthd.pl :Total Rejected: $count_reject\n";
+    poe_print "s";
+    poe_print "S iauthd.pl :Up since $up ($uptime)";
+    poe_print "S iauthd.pl :Cache size: ". %dnsbl_cache . "";
+    poe_print "S iauthd.pl :Total Passed: $count_pass";
+    poe_print "S iauthd.pl :Total Rejected: $count_reject";
     foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
             my $d = $config_dnsbl->{'server'} . " (" . $config_dnsbl->{'index'}. ")";
             my $c = 0;
@@ -702,7 +716,7 @@ sub send_stats {
                 $c = $dnsbl_counters{$config_dnsbl->{'cfgnum'}};
             }
             
-            print "S iauthd.pl :$d: $c\n";
+            poe_print "S iauthd.pl :$d: $c";
     }
 }
 
