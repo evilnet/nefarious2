@@ -177,7 +177,7 @@ sub poe_print {
 sub debug {
     my $str = join(' ', @_);
     if($options{'debug'}) {
-        poe_print("> $str");
+        poe_print("> :$str");
     }
 }
 
