@@ -6545,6 +6545,11 @@ if test x"$ac_cv_header_sys_epoll_h" = xno -o x"$ac_cv_func_epoll" = xno; then
     unet_cv_enable_epoll=no
 fi
 
+if test x"$unet_cv_disable_ssl" = xno -a x"$OSDEP_C" = xos_bsd.c; then
+    unet_cv_enable_kqueue=no
+fi
+
+
 { $as_echo "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_epoll" >&5
 $as_echo "$unet_cv_enable_epoll" >&6; }
 

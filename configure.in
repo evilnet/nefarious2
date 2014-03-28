@@ -381,6 +381,14 @@ if test x"$ac_cv_header_sys_epoll_h" = xno -o x"$ac_cv_func_epoll" = xno; then
     unet_cv_enable_epoll=no
 fi
 
+dnl **
+dnl ** FIXME: KQUEUE + OpenSSL does not work with *BSD at present
+dnl **
+if test x"$unet_cv_disable_ssl" = xno -a x"$OSDEP_C" = xos_bsd.c; then
+    unet_cv_enable_kqueue=no
+fi
+
+
 AC_MSG_RESULT([$unet_cv_enable_epoll])
 
 dnl If we have the header and user has not refused epoll, we still need
