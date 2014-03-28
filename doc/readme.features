@@ -1252,6 +1252,20 @@ TPATH is the filename (relative to DPATH) or the full path of the tune data file
 The file contains user count information for LUSERS so that if the server has to
 restart etc for any reason they will not loose their max local/global user counts.
 
+CHMODE_m_NONICKCHANGE
+ * Type: boolean
+ * Default: TRUE
+
+When set to TRUE channel mode +m (moderated channel) is also applied to nick
+changes of users in the channe.
+
+CHMODE_r_NONICKCHANGE
+ * Type: boolean
+ * Default: TRUE
+
+When set to TRUE channel mode +r (no unregistered users) is also applied to nick
+changes of users in the channe.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

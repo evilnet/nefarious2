@@ -1027,8 +1027,8 @@ const char* find_no_nickchange_channel(struct Client* cptr)
 	 member = member->next_channel) {
       if (IsVoicedOrOpped(member))
         continue;
-      if ((member->channel->mode.mode & MODE_MODERATED)
-          || (member->channel->mode.mode & MODE_REGONLY && !IsAccount(cptr))
+      if ((member->channel->mode.mode & MODE_MODERATED && feature_bool(FEAT_CHMODE_m_NONICKCHANGE))
+          || (member->channel->mode.mode & MODE_REGONLY && !IsAccount(cptr) && feature_bool(FEAT_CHMODE_r_NONICKCHANGE))
           || (is_banned(member, EBAN_NICK) && !is_excepted(member, EBAN_NICK)))
         return member->channel->chname;
     }
