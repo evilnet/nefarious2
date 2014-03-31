@@ -1015,7 +1015,7 @@ int whisper(struct Client* source, const char* nick, const char* channel,
   if (0 == membership || IsZombie(membership)) {
     return send_reply(source, ERR_USERNOTINCHANNEL, cli_name(dest), chptr->chname);
   }
-  if (is_silenced(source, dest))
+  if (is_silenced(source, dest, 0))
     return 0;
 
   if (IsAccountOnly(dest) && !IsAccount(source) && !IsOper(source) && (dest != source)) {
@@ -2163,17 +2163,24 @@ void set_snomask(struct Client *cptr, unsigned int newmask, int what)
  * @param[in] acptr Destination of message.
  * @return Non-zero if \a sptr is SILENCEd by \a acptr, zero if not.
  */
-int is_silenced(struct Client *sptr, struct Client *acptr)
+int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg)
 {
   struct Ban *found;
   struct User *user;
   size_t buf_used, slen;
   char buf[BUFSIZE];
 
+  if (ischanmsg && !feature_bool(FEAT_SILENCE_CHANMSGS))
+    return 0;
+
   if (IsServer(sptr) || !(user = cli_user(acptr))
       || !(found = find_ban(sptr, user->silence, EBAN_NONE, 0)))
     return 0;
   assert(!(found->flags & BAN_EXCEPTION));
+
+  if (ischanmsg && feature_bool(FEAT_SILENCE_CHANMSGS))
+    return 1;
+
   if (!MyConnect(sptr)) {
     /* Buffer positive silence to send back. */
     buf_used = strlen(found->banstr);

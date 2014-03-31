@@ -253,6 +253,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
     {
       char xxx_buf[25];
       char *s = umode_str(acptr);
+
       sendcmdto_one(cli_user(acptr)->server, CMD_NICK, cptr,
 		    "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
 		    cli_name(acptr), cli_hopcount(acptr) + 1, cli_lastnick(acptr),
@@ -292,6 +293,37 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
           sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s %s %s",
                         cli_name(acptr), MARK_GEOIP, cli_countrycode(acptr),
                         cli_continentcode(acptr));
+      }
+
+      if (feature_bool(FEAT_SILENCE_CHANMSGS)) {
+        char buf[BUFSIZE];
+        size_t buf_used = 0;
+        size_t slen = 0;
+        struct Ban *sile;
+
+        for (sile = cli_user(acptr)->silence; sile; sile = sile->next) {
+          slen = strlen(sile->banstr);
+
+          if (buf_used + slen + 4 > 400) {
+            buf[buf_used] = '\0';
+            sendcmdto_one(acptr, CMD_SILENCE, cptr, "* %s", buf);
+            buf_used = 0;
+          }
+
+          if (buf_used)
+            buf[buf_used++] = ',';
+          buf[buf_used++] = '+';
+          if (sile->flags & BAN_EXCEPTION)
+            buf[buf_used++] = '~';
+          memcpy(buf + buf_used, sile->banstr, slen);
+          buf_used += slen;
+        }
+
+        if (buf_used) {
+          buf[buf_used] = '\0';
+          sendcmdto_one(acptr, CMD_SILENCE, cptr, "* %s", buf);
+          buf_used = 0;
+        }
       }
 
       client_send_privs(cli_user(acptr)->server, cptr, acptr);

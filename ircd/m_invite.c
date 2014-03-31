@@ -139,7 +139,7 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
 
-  if (is_silenced(sptr, acptr))
+  if (is_silenced(sptr, acptr, 0))
     return 0;
 
   if (!IsChannelName(parv[2])
@@ -291,7 +291,7 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
   }
 
-  if (is_silenced(sptr, acptr))
+  if (is_silenced(sptr, acptr, 0))
     return 0;
 
   if (MyConnect(acptr)) {

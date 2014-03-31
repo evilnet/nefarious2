@@ -760,6 +760,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
         (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member)) ||
         (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
         (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
+        (is_silenced(from, member->user, 1)) ||
         cli_fd(cli_from(member->user)) < 0 ||
         cli_sentalong(member->user) == sentalong_marker)
       continue;

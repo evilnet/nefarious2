@@ -211,7 +211,7 @@ forward_silences(struct Client *sptr, char *silences, struct Client *dest)
       else if (sile->flags & BAN_DEL)
         ch = '-';
       else if (sile->flags & BAN_ADD) {
-        if (!(sile->flags & BAN_EXCEPTION))
+        if (!(sile->flags & BAN_EXCEPTION) && !feature_bool(FEAT_SILENCE_CHANMSGS))
           continue;
         ch = '+';
       } else

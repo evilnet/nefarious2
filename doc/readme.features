@@ -1266,6 +1266,13 @@ CHMODE_r_NONICKCHANGE
 When set to TRUE channel mode +r (no unregistered users) is also applied to nick
 changes of users in the channe.
 
+SILENCE_CHANMSGS
+ * Type: boolean
+ * Default: TRUE
+
+When enabled SILENCE masks are applied to channel messages as well as to private
+messages.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

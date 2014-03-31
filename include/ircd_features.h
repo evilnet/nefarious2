@@ -215,6 +215,7 @@ enum Feature {
   FEAT_TPATH,
   FEAT_CHMODE_m_NONICKCHANGE,
   FEAT_CHMODE_r_NONICKCHANGE,
+  FEAT_SILENCE_CHANMSGS,
 
   /* Extended channel modes */
   FEAT_CHMODE_a,
