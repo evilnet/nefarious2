@@ -2173,7 +2173,7 @@ int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg)
   if (ischanmsg && !feature_bool(FEAT_SILENCE_CHANMSGS))
     return 0;
 
-  if (IsServer(sptr) || !(user = cli_user(acptr))
+  if (IsServer(sptr) || IsMe(sptr) || !(user = cli_user(acptr))
       || !(found = find_ban(sptr, user->silence, EBAN_NONE, 0)))
     return 0;
   assert(!(found->flags & BAN_EXCEPTION));

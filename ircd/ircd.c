@@ -767,8 +767,6 @@ int main(int argc, char **argv) {
 
   hAddClient(&me);
   SetIPv6(&me);
-  /* I'm obviously a server */
-  SetServer(&me);
 
   write_pidfile();
   init_counters();
