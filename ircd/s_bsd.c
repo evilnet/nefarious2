@@ -269,7 +269,7 @@ static int connect_inet(struct ConfItem* aconf, struct Client* cptr)
 static IOResult client_recv(struct Client *cptr, char *buf, unsigned int length, unsigned int* count_out)
 {
   if (cli_socket(cptr).ssl)
-    return ssl_recv(&cli_socket(cptr), buf, length, count_out);
+    return ssl_recv(&cli_socket(cptr), cptr, buf, length, count_out);
   else
     return os_recv_nonb(cli_fd(cptr), buf, length, count_out);
 }
@@ -277,7 +277,7 @@ static IOResult client_recv(struct Client *cptr, char *buf, unsigned int length,
 static IOResult client_sendv(struct Client *cptr, struct MsgQ *buf, unsigned int *count_in, unsigned int *count_out)
 {
   if (cli_socket(cptr).ssl)
-    return ssl_sendv(&cli_socket(cptr), buf, count_in, count_out);
+    return ssl_sendv(&cli_socket(cptr), cptr, buf, count_in, count_out);
   else
     return os_sendv_nonb(cli_fd(cptr), buf, count_in, count_out);
 }
@@ -1072,6 +1072,7 @@ static void client_sock_callback(struct Event* ev)
 
   if (fallback) {
     const char* msg = (cli_error(cptr)) ? strerror(cli_error(cptr)) : fallback;
+    msg = (cli_sslerror(cptr)) ? cli_sslerror(cptr) : msg;
     if (!msg)
       msg = "Unknown error";
     exit_client_msg(cptr, cptr, &me, fmt, msg);

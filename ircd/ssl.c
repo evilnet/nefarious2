@@ -64,7 +64,6 @@ SSL_CTX *ssl_init_client_ctx();
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert);
 void ssl_set_nonblocking(SSL *s);
 int ssl_smart_shutdown(SSL *ssl);
-char *ssl_error_str(int err, int my_errno);
 void sslfail(char *txt);
 void binary_to_hex(unsigned char *bin, char *hex, int length);
 
@@ -247,7 +246,9 @@ int ssl_accept(struct Client *cptr)
         case SSL_ERROR_WANT_WRITE:
             return 1;
         default:
-          Debug((DEBUG_ERROR, "SSL_accept: %s", ssl_error_str(err, errno)));
+          cli_sslerror(cptr) = ssl_error_str(err, errno);
+
+          Debug((DEBUG_ERROR, "SSL_accept: %s", cli_sslerror(cptr)));
 
           SSL_set_shutdown(cli_socket(cptr).ssl, SSL_RECEIVED_SHUTDOWN);
           ssl_smart_shutdown(cli_socket(cptr).ssl);
@@ -313,10 +314,11 @@ void ssl_add_connection(struct Listener *listener, int fd)
  *  0  if socket closed from other end
  *  -1 if an unrecoverable error occurred
  */
-IOResult ssl_recv(struct Socket *socketh, char* buf,
+IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
                  unsigned int length, unsigned int* count_out)
 {
   int res;
+  unsigned long err = 0;
 
   assert(0 != socketh);
   assert(0 != buf);
@@ -343,6 +345,11 @@ IOResult ssl_recv(struct Socket *socketh, char* buf,
     SSL_shutdown(socketh->ssl); /* Send close_notify back */
     break;
   }
+
+  err = SSL_get_error(cli_socket(cptr).ssl, res);
+  cli_sslerror(cptr) = ssl_error_str(err, errno);
+  cli_error(cptr) = errno;
+
   return IO_FAILURE;
 }
 
@@ -355,7 +362,7 @@ IOResult ssl_recv(struct Socket *socketh, char* buf,
  *  0  if write call blocked, recoverable error
  *  -1 if an unrecoverable error occurred
  */
-IOResult ssl_sendv(struct Socket *socketh, struct MsgQ* buf,
+IOResult ssl_sendv(struct Socket *socketh, struct Client *cptr, struct MsgQ* buf,
                   unsigned int* count_in, unsigned int* count_out)
 {
   int res;
@@ -398,6 +405,8 @@ IOResult ssl_sendv(struct Socket *socketh, struct MsgQ* buf,
           while((errorValue = ERR_get_error())) {
             Debug((DEBUG_ERROR, "  Error Queue: %d -- %s", errorValue, ERR_error_string(errorValue, NULL)));
           }
+          cli_sslerror(cptr) = ssl_error_str(ssl_err, errno);
+          cli_error(cptr) = errno;
           return IO_FAILURE;
        }
     case SSL_ERROR_SYSCALL:
@@ -410,6 +419,8 @@ IOResult ssl_sendv(struct Socket *socketh, struct MsgQ* buf,
       }
       else {
              Debug((DEBUG_DEBUG, "SSL_write returned ERROR_SYSCALL - errno %d - returning IO_FAILURE", errno));
+             cli_sslerror(cptr) = ssl_error_str(ssl_err, errno);
+             cli_error(cptr) = errno;
              return IO_FAILURE;
       }
       /*

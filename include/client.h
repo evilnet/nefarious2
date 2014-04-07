@@ -291,6 +291,8 @@ struct Connection
   char con_buffer[BUFSIZE];          /**< Incoming message buffer; or
                                         the error that caused this
                                         clients socket to close. */
+  char*               con_sslerror;  /**< SSL Error. */
+
   struct Socket       con_socket;    /**< socket descriptor for
                                       client */
   struct Timer        con_proc;      /**< process latent messages from
@@ -456,6 +458,8 @@ struct Client {
 #define cli_freeflag(cli)	con_freeflag(cli_connect(cli))
 /** Get last error code for the client's connection. */
 #define cli_error(cli)		con_error(cli_connect(cli))
+/** Get last SSL error string. */
+#define cli_sslerror(cli)       con_sslerror(cli_connect(cli))
 /** Get server notice mask for the client. */
 #define cli_snomask(cli)	con_snomask(cli_connect(cli))
 /** Get next time a nick change is allowed for the client. */
@@ -535,6 +539,8 @@ struct Client {
 #define con_freeflag(con)	((con)->con_freeflag)
 /** Get last error code on connection. */
 #define con_error(con)		((con)->con_error)
+/** Get last SSL error string. */
+#define con_sslerror(con)       ((con)->con_sslerror)
 /** Get sentalong marker for connection. */
 #define con_sentalong(con)      ((con)->con_sentalong)
 /** Get server notice mask for connection. */

@@ -48,13 +48,14 @@ extern int ssl_starttls(struct Client *cptr);
 extern void ssl_abort(struct Client *cptr);
 extern int ssl_accept(struct Client *cptr);
 
-extern IOResult ssl_recv(struct Socket *socket, char* buf, unsigned int length, unsigned int* count_out);
-extern IOResult ssl_sendv(struct Socket *socket, struct MsgQ* buf, unsigned int* count_in, unsigned int* count_out);
+extern IOResult ssl_recv(struct Socket *socket, struct Client *cptr, char* buf, unsigned int length, unsigned int* count_out);
+extern IOResult ssl_sendv(struct Socket *socket, struct Client *cptr, struct MsgQ* buf, unsigned int* count_in, unsigned int* count_out);
 extern int ssl_send(struct Client *cptr, const char *buf, unsigned int len);
 
 extern char  *ssl_get_cipher(SSL *ssl);
 extern char* ssl_get_fingerprint(SSL *ssl);
 extern const char* ssl_get_verify_result(SSL *ssl);
+extern char *ssl_error_str(int err, int my_errno);
 
 #endif /* USE_SSL */
 #endif /* INCLUDED_ssl_h */
