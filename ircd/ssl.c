@@ -305,6 +305,18 @@ void ssl_add_connection(struct Listener *listener, int fd)
   add_connection(listener, fd, ssl);
 }
 
+void ssl_doerror(struct Client *cptr)
+{
+  unsigned long err = 0;
+  char ebuf[120];
+
+  memset(&ebuf, 0, 120);
+  err = ERR_get_error();
+  ERR_error_string(err, (char *)&ebuf);
+
+  sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for client %s: %s", cli_name(cptr), ebuf);
+}
+
 /*
  * ssl_recv - non blocking read of a connection
  * returns:
@@ -327,6 +339,7 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
   *count_out = 0;
   errno = 0;
 
+  ERR_clear_error();
   res = SSL_read(socketh->ssl, buf, length);
   switch (SSL_get_error(socketh->ssl, res)) {
   case SSL_ERROR_NONE:
@@ -349,6 +362,9 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
   err = SSL_get_error(cli_socket(cptr).ssl, res);
   cli_sslerror(cptr) = ssl_error_str(err, errno);
   cli_error(cptr) = errno;
+
+  if (err == SSL_ERROR_SSL || err == SSL_ERROR_SYSCALL)
+    ssl_doerror(cptr);
 
   return IO_FAILURE;
 }
@@ -407,6 +423,7 @@ IOResult ssl_sendv(struct Socket *socketh, struct Client *cptr, struct MsgQ* buf
           }
           cli_sslerror(cptr) = ssl_error_str(ssl_err, errno);
           cli_error(cptr) = errno;
+          ssl_doerror(cptr);
           return IO_FAILURE;
        }
     case SSL_ERROR_SYSCALL:
@@ -421,6 +438,7 @@ IOResult ssl_sendv(struct Socket *socketh, struct Client *cptr, struct MsgQ* buf
              Debug((DEBUG_DEBUG, "SSL_write returned ERROR_SYSCALL - errno %d - returning IO_FAILURE", errno));
              cli_sslerror(cptr) = ssl_error_str(ssl_err, errno);
              cli_error(cptr) = errno;
+             ssl_doerror(cptr);
              return IO_FAILURE;
       }
       /*
