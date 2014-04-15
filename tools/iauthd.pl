@@ -116,7 +116,7 @@ my $DEFAULT_CACHETIME = 60 * 60 * 24;
 
 my $STARTTIME = time();
 
-my $VERSION = "5";
+my $VERSION = "6";
 
 my %clients;
 my %dnsbl_cache;
