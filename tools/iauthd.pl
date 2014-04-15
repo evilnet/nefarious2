@@ -528,9 +528,18 @@ sub handle_dnsbl_response {
             foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
                 next unless($config_dnsbl->{'server'} eq $dnsbl_server);
                 my $flag;
-                foreach my $index (split(/,/, $config_dnsbl->{'index'})) {
-                    if($value eq $index) {
-                        $flag++;
+                if(exists $config_dnsbl->{'index'}) {
+                    foreach my $index (split(/,/, $config_dnsbl->{'index'})) {
+                        if($value eq $index) {
+                            $flag++;
+                        }
+                    }
+                }
+                if(exists $config_dnsbl->{'bitmask'}) {
+                    foreach my $bitmask (split(/,/, $config_dnsbl->{'bitmask'})) {
+                        if($bitmask & $value) {
+                            $flag++;
+                        }
                     }
                 }
                 if($flag) {
@@ -710,7 +719,13 @@ sub send_stats {
     poe_print "S iauthd.pl :Total Passed: $count_pass";
     poe_print "S iauthd.pl :Total Rejected: $count_reject";
     foreach my $config_dnsbl (@{$config{'dnsbls'}}) {
-            my $d = $config_dnsbl->{'server'} . " (" . $config_dnsbl->{'index'}. ")";
+            my $d = $config_dnsbl->{'server'};
+            if(exists $config_dnsbl->{'index'}) {
+               $d .= " (" . $config_dnsbl->{'index'}. ")";
+            }
+            if(exists $config_dnsbl->{'bitmask'}) {
+               $d .= " (" . $config_dnsbl->{'bitmask'}. ")";
+            }
             my $c = 0;
             if( exists $dnsbl_counters{$config_dnsbl->{'cfgnum'}}) {
                 $c = $dnsbl_counters{$config_dnsbl->{'cfgnum'}};
