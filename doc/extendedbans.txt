@@ -1,0 +1,53 @@
+------------------------------------------------------------------------------
+Extended Bans Overview
+------------------------------------------------------------------------------
+This is a quick attempt to document the Nefarious2 extended ban system.
+
+Extended bans allow a more far reaching and extendable mechanism to match more than the traditional nick, user, and hostname of a ban bask. Extended bans can offer additional fields (ie account, marks, real name, other channels they are in, etc)
+
+The extended ban system is handled through the same channel mode +b as normal bans. However, they use the ~ symbol (tilde) to differenciate themselves. So an extended ban to match an account named 'jobe' would look like: /MODE #somechannel +b ~a:jobe
+
+------------------------------------------------------------------------------
+Extended Action bans:
+------------------------------------------------------------------------------
+
+q - Matching users cannot send to channel
+n - Matching users cannot change their nick
+
+------------------------------------------------------------------------------
+Extended Matches:
+------------------------------------------------------------------------------
+a - Matches an account name
+c - Matches against channels the user is in
+r - Matches 'Real name' field
+m - Matches any marks the user has set on them (ie TOR)
+M - Matches any marks on the user, but only if they are not authenticated/registered
+j - Links the banlist to the banlist from another channel
+
+------------------------------------------------------------------------------
+Special Nesting Case:
+------------------------------------------------------------------------------
+Note that q and n accept only 1 parameter, but it can be another extended ban:
+  /MODE #channel +b ~q:~a:jobe   <--- this would stop account jobe from speaking
+
+------------------------------------------------------------------------------
+Examples:
+------------------------------------------------------------------------------
+Other than q and n, the rest of the extended bans accept a single parameter after the ':'.
+
+  /MODE #channel +b ~r:*bot*     <--- this would ban users with 'bot' in their username/gecos field
+
+  /MODE #channel +b ~a:jobe      <--- Ban users authenticated as account 'jobe'
+
+  /MODE #channel +b ~c:#evilnet  <--- Bans users who are also in channel #evilnet
+
+  /MODE #channel +b ~j:#afternet <--- Bans any users who are also banned in channel #afternet
+
+------------------------------------------------------------------------------
+Bugs/Limitations
+------------------------------------------------------------------------------
+You cannot currently construct a ban which combines the special fields such as account ('a') with other fields. So it is not currently possible to ban, for example, only users whose realname contains 'bot' and whose host contains 'aol.com'.  
+
+Each extended ban type can be enabled/disabled using feature lines in ircd.conf.
+
+
