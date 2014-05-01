@@ -684,6 +684,7 @@ static struct FeatureDesc {
   F_B(CHMODE_m_NONICKCHANGE, 0, 1, 0 ),
   F_B(CHMODE_r_NONICKCHANGE, 0, 1, 0 ),
   F_B(SILENCE_CHANMSGS, 0, 1, 0 ),
+  F_B(CHANNEL_CREATE_IRCOPONLY, 0, 0, 0 ),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),

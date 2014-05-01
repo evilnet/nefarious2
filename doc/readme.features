@@ -1273,6 +1273,12 @@ SILENCE_CHANMSGS
 When enabled SILENCE masks are applied to channel messages as well as to private
 messages.
 
+CHANNEL_CREATE_IRCOPONLY
+ * Type: boolean
+ * Default: FALSE
+
+When enabled only IRCops can create channels.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

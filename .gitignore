@@ -11,4 +11,5 @@ ircu.tags
 autom4te.cache
 stamp-h1
 include/patchlist.h
+.orig
 

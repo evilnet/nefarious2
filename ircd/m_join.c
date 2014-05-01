@@ -122,6 +122,11 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
       return;
     }
 
+    if (feature_bool(FEAT_CHANNEL_CREATE_IRCOPONLY) && !IsAnOper(sptr) && !IsChannelService(sptr)) {
+      send_reply(sptr, ERR_NOSUCHCHANNEL, chan);
+      return;
+    }
+
     if (!(chptr = get_channel(sptr, chan, CGT_CREATE)))
       return;
 
