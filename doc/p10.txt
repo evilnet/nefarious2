@@ -157,6 +157,7 @@ AD	ADMIN
 LL	ASLL
 A	AWAY
 B	BURST
+CAP	CAP
 CM	CLEARMODE
 CLOSE	CLOSE
 CN	CNOTICE
@@ -207,9 +208,12 @@ RESTART	RESTART
 RI	RPING
 RO	RPONG
 S	SERVER
+SERVSET	SERVLIST
+SERVSET	SERVSET
 SET	SET
 SE	SETTIME
 U	SILENCE
+SQUERY	SQUERY
 SQ	SQUIT
 R	STATS
 TI	TIME
@@ -217,7 +221,7 @@ T	TOPIC
 TR	TRACE
 UP	UPING
 USER	USER
-USERHOST USERHOST
+USERHOST	USERHOST
 USERIP	USERIP
 V	VERSION
 WC	WALLCHOPS
@@ -227,6 +231,9 @@ WV	WALLVOICES
 H	WHO
 W	WHOIS
 X	WHOWAS
+XQ	XQUERY
+XR	XREPLY
+
 SN	SVSNICK
 SJ	SVSJOIN
 SH	SETHOST
@@ -335,7 +342,7 @@ undernet and quakenet use account host hiding, an ircu2.10.11+ feature: if a use
 
 - note: if the last param of a command may have spaces - it is a fullname, reason, or "text" of any kind - the parser *must* use the last parameter of the received message, not a fixed param number. this allows room for inserting new parameters in the future. a fully compliant parser parses both "SSCCC P #channel :text" and "SSCCC P #channel 0 :text" correctly. the extra inserted parameters which are not described by the protocol, if any, may be ignored.
 
-with parameter number -1 i mean the last param, -2 is the param before the last param, etc. room for inserting future parameters without breaking a compliant parser is between the last parameter with positive number (counted from start) and first parameter with negative number (counted from end).
+- with parameter number -1 i mean the last param, -2 is the param before the last param, etc. room for inserting future parameters without breaking a compliant parser is between the last parameter with positive number (counted from start) and first parameter with negative number (counted from end).
 
 - if parameter 0 is mentioned, it is the source of the message. if it is not mentioned, the source is obvious.
 
@@ -346,14 +353,50 @@ with parameter number -1 i mean the last param, -2 is the param before the last 
 --------------------------
 {7AC} *** ACCOUNT (ircu2.10.11)
 
+ircu or nefarious with F:EXTENDED_ACCOUNTS = FALSE
 1 <target user numeric>
 2 <account name>
+3 [<account timestamp>]
+
+nefarious with F:EXTENDED_ACCOUNTS = TRUE
+1 <target user numeric>
+2 <subcommand>
+3+ [<subcommand parameters>]
+
+<subcommand> = R or M
+3 <account name>
+4 [<account timestamp>]
+
+<subcommand> = A, D, C, H or S
+3 <locidentifier>
+
+<subcommand> = A
+4 [<account timestamp>]
+
+<subcommand> = H or S
+4 <ident@host:ip>
+
+<subcommand> = S
+5 <sslfingerprint>
+
+<subcommand> = C, H or S
+-2 <account name>
+-1 <password>
 
 sets a user's account name. they are sent by a service which supports ACCOUNT when someone logs in to it. if a user's account name field is set, the ircd knows the user is "logged in", and can have a "is logged in as" line in the whois reply. it can be set exactly once for a user; it can't be changed or unset.
 
 - account messages with an account name which is longer than the maximum (12 on undernet) are a protocol violation, they are not applied to the user.
 
 - the source of an account message may be any server, but not a user.
+
+New to Nefarious:
+- sub commands available are R for register, M for modify, U for unregister, C for LOC request, H for LOC request with ident/host/ip, S for LOC request with ident/host/ip and SSL fingerprint, A for accepted LOC request and D for denied LOC request.
+
+- for sub commands H and S, when the host name contains a : (for example unresolved IPv6 address) the host name must be enclosed in [].
+
+- for LOC, the user's server may only send one of C H or S to services, and services will reply with A or D.
+
+- the U sub command is the only sub command without any additional parameters.
 
 --------------------------
 {7AD} *** ADMIN
@@ -404,7 +447,10 @@ if the timestamps are equal, the modes/bans/etc of the B are merged with the exi
 
 - <users> parameter has no prefix char. it is a comma separated list, where each entry is either <nicknum> or <nicknum>:<modes>. if the colon+modes is present, it defines membership modes which apply to that entry, and to all following entries until there's another entry which defines modes. the modes paramer contains the membership mode chars ("o" for ops, etc). for sending, it must have the modes from high priority to low priority - "ov" is valid, "vo" is not.
 
-note that ircu2.10.12 will have "op levels", which are a number at the end of the membership modes string (???)
+New to Nefarious:
+- <bans> The first ban that begins with & indicates that the masks that follow are ban exceptions and not bans. This parameter should not have a mask of its own so should consist entirely of "&"
+
+note that ircu2.10.12 will have "op levels", which are a number at the end of the membership modes string. The first number encountered for each mode combination (no voice, voice, voice and halfop) should be considered to be the absolute op level of that user, following instances of numbers should be added to the previous oplevel value until the mode combination changes.
 
 in a generated burst message, the users must be sorted by the modes: first users without modes, then users with voice, then with op, then with op+voice: num,num:v,num:o,num:ov
 
@@ -665,7 +711,10 @@ nick can be used for 2 different purposes:
 known modes with parameters are: 
 
 +r, parameter is account name (ircu2.10.11)
-+h, parameter is virtual user@host (asuka)
++h, parameter is virtual user@host (asuka and nefarious)
++f, parameter is a fake host (nefarious)
++C, parameter is a cloaked host (nefarious)
++c, parameter is a cloaked IP (nefarious
 
 the modes with parameters must only be used in the above mentioned sequence, for compatibility with implementations which support +r but dont support +h (or use +h for something different)
 
@@ -697,6 +746,15 @@ same parameters as MODE for channel mode changes
 OPMODE forces channel mode changes; they are not bounced or denied.
 
 the source should be an IRC operator.
+
+--------------------------
+{7OPER} *** OPER (nefarious)
+
+1 <server>
+2 <user>
+3 <password>
+
+forward a remote OPER login to another server for authentication. priviledges will be updated and applied by the authenticating server.
 
 --------------------------
 {7L} *** PART
@@ -745,10 +803,15 @@ send normal message, privmsg or notice.
 the message should be routed only to targets which need it: in case of a message to one user, it is sent only to the direction of the target user. a message to a channel is sent only to the directions which have non +d users in the channel.
 
 --------------------------
-*** PRIVS (???)
+{7PRIVS} *** PRIVS
 
---------------------------
-*** PROTO (???)
+1 <target>
+2+ [<privs>] (nefarious)
+
+request a list of a users ircop priviledges. if the user is not local, forward the request to the next server in the direction of the user.
+
+New to Nefarious
+- as of Nefarious, if the source of the message is a server, parameters 2 and onwards can be a list of priviledges to apply to the specified target user. if any of the priviledges specified is NONE then the target users priviledges are cleared.
 
 --------------------------
 {7Q} *** QUIT
@@ -829,18 +892,8 @@ in case of an existing server introducing another server (also during burst), th
 
 - the <flags> parameter, if present, is a + followed by one or more characters. characters include: h (hub hidden in /map), s (services), 6 (IPv6 support). the parameter may also be "0" for implementations which dont support the "flags" parameter.
 
---------------------------
-{7SH} *** SETHOST
-
-1 <numeric of target user}
-2 <new userid>
-3 <new host>
-
-change the userid and host of another user.
-
-origin: snircd (quakenet).
-can be sent only by U:lined server. the message is propagated to the target user's server, which then changes the user's userid and host,
-and sends a +h user@host mode change to inform other servers of it.
+New to Nefarious
+- the <flags> field can additionally include the o flag to indicate that a server supports op levels. If not supplied Nefarious will not send any op levels in the BURST (B) message or MODE (M) message. But instead will send traditional +o modes.
 
 --------------------------
 {7SE} *** SETTIME
@@ -895,26 +948,6 @@ if a SQ is to be sent to a directly linked target, the <target server> parameter
 remote stats request
 
 the extra parameter is for example the search mask for /stats G
-
---------------------------
-{7SJ} *** SVSJOIN (non undernet)
-
-1 <target numeric>
-2 <channel>
-
-cause someone else to join a channel. this command is not used on undernet. optional.
-channel may be a comma separated list
-servers propagate this message until it reaches the target server, which then broadcasts a normal join (J) for the target user.
-
---------------------------
-{7SN} *** SVSNICK (non undernet)
-
-1 <target numeric>
-2 <new nick>
-
-change someone else's nick. this command is not used on undernet. optional.
-
-servers propagate this message until it reaches the target server, which then broadcasts a normal nickchange (N) for the target user. in case of a collision, the target server first kills the existing user.
 
 --------------------------
 {7T} *** TOPIC
@@ -1010,6 +1043,39 @@ wallvoices message. sent to all channel operators and voiced users in the channe
 remote whois request.
 the search string parameter can be a single nick or nick mask with wildcards, and it can be a comma separated list.
 
+--------------------------
+{7SJ} *** SVSJOIN (non undernet)
+
+1 <target numeric>
+2 <channel>
+
+cause someone else to join a channel. this command is not used on undernet. optional.
+channel may be a comma separated list
+servers propagate this message until it reaches the target server, which then broadcasts a normal join (J) for the target user.
+
+--------------------------
+{7SN} *** SVSNICK (non undernet)
+
+1 <target numeric>
+2 <new nick>
+
+change someone else's nick. this command is not used on undernet. optional.
+
+servers propagate this message until it reaches the target server, which then broadcasts a normal nickchange (N) for the target user. in case of a collision, the target server first kills the existing user.
+
+--------------------------
+{7SH} *** SETHOST
+
+1 <numeric of target user}
+2 <new userid>
+3 <new host>
+
+change the userid and host of another user.
+
+origin: snircd (quakenet).
+can be sent only by U:lined server. the message is propagated to the target user's server, which then changes the user's userid and host,
+and sends a +h user@host mode change to inform other servers of it.
+
 ======================================
 {8} - KNOWN BROKEN IMPLEMENTATIONS
 ======================================
@@ -1034,3 +1100,4 @@ changes
 20100902: changed IPv6 IP encoding to be compatible with ircu2.10.12
 20111002: sethost SH
 20111002: limit/key in burst behavior to match ircu
+20140503: added a few changes applied by nefarious
