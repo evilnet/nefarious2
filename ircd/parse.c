@@ -708,56 +708,56 @@ struct Message msgtab[] = {
     TOK_MARK,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_mark, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_mark, m_ignore, m_ignore }
   },
   {
     MSG_SVSNOOP,
     TOK_SVSNOOP,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_svsnoop, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_svsnoop, m_ignore, m_ignore }
   },
   {
     MSG_SVSMODE,
     TOK_SVSMODE,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_svsmode, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_svsmode, m_ignore, m_ignore }
   },
   {
     MSG_SVSNICK,
     TOK_SVSNICK,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_svsnick, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_svsnick, m_ignore, m_ignore }
   },
   {
     MSG_SVSPART,
     TOK_SVSPART,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_svspart, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_svspart, m_ignore, m_ignore }
   },
   {
     MSG_SVSJOIN,
     TOK_SVSJOIN,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_svsjoin, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_svsjoin, m_ignore, m_ignore }
   },
   {
     MSG_SWHOIS,
     TOK_SWHOIS,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_swhois, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_swhois, m_ignore, m_ignore }
   },
   {
     MSG_FAKE,
     TOK_FAKE,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_fake, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_fake, m_ignore, m_ignore }
   },
   {
     MSG_MKPASSWD,
@@ -827,7 +827,7 @@ struct Message msgtab[] = {
     TOK_SASL,
     0, MAXPARA,         0, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ignore, ms_sasl, m_ignore, m_ignore }
+    { m_ignore, m_ignore, ms_sasl, m_ignore, m_ignore }
   },
   {
     MSG_REMOVE,
