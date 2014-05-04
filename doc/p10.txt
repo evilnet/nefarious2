@@ -448,7 +448,7 @@ if the timestamps are equal, the modes/bans/etc of the B are merged with the exi
 - <users> parameter has no prefix char. it is a comma separated list, where each entry is either <nicknum> or <nicknum>:<modes>. if the colon+modes is present, it defines membership modes which apply to that entry, and to all following entries until there's another entry which defines modes. the modes paramer contains the membership mode chars ("o" for ops, etc). for sending, it must have the modes from high priority to low priority - "ov" is valid, "vo" is not.
 
 New to Nefarious:
-- <bans> The first ban that begins with & indicates that the masks that follow are ban exceptions and not bans. This parameter should not have a mask of its own so should consist entirely of "&"
+- <bans> The first ban that begins with ~ indicates that the masks that follow are ban exceptions and not bans. This parameter should not have a mask of its own so should consist entirely of "~"
 
 note that ircu2.10.12 will have "op levels", which are a number at the end of the membership modes string. The first number encountered for each mode combination (no voice, voice, voice and halfop) should be considered to be the absolute op level of that user, following instances of numbers should be added to the previous oplevel value until the mode combination changes.
 
