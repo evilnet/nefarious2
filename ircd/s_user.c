@@ -790,12 +790,8 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       /* Invalidate all bans against the user so we check them again */
       for (member = (cli_user(cptr))->channel; member;
 	   member = member->next_channel) {
-	ClearBanValid(member);
+        ClearBanValid(member);
         ClearBanValidNick(member);
-      }
-      /* Invalidate all ban exceptions against the user so we check them again */
-      for (member = (cli_user(cptr))->channel; member;
-           member = member->next_channel) {
         ClearExceptValid(member);
         ClearExceptValidNick(member);
       }
@@ -1134,9 +1130,6 @@ hide_hostmask(struct Client *cptr)
     ClearBanValid(chan);
     ClearBanValidNick(chan);
     ClearBanValidQuiet(chan);
-  }
-  /* Invalidate all ban exceptions against the user so we check them again */
-  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
     ClearExceptValid(chan);
     ClearExceptValidNick(chan);
     ClearExceptValidQuiet(chan);
@@ -1254,9 +1247,6 @@ unhide_hostmask(struct Client *cptr)
     ClearBanValid(chan);
     ClearBanValidQuiet(chan);
     ClearBanValidNick(chan);
-  }
-  /* Invalidate all ban exceptions against the user so we check them again */
-  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
     ClearExceptValid(chan);
     ClearExceptValidQuiet(chan);
     ClearExceptValidNick(chan);
