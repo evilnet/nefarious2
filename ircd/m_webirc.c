@@ -189,7 +189,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* Undo original IP connection in IPcheck. */
-  if (!find_except_conf(sptr, EFLAG_IPCHECK)) {
+  if (IsIPChecked(sptr)) {
     IPcheck_connect_fail(sptr, 1);
     ClearIPChecked(sptr);
   }

@@ -466,7 +466,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
                            cli_sock_ip(sptr), get_client_class(sptr),
                            cli_info(sptr), NumNick(cptr) /* two %s's */);
 
-    if (!find_except_conf(sptr, EFLAG_IPCHECK))
+    if (IsIPChecked(sptr))
       IPcheck_connect_succeeded(sptr);
   }
   else {
@@ -494,7 +494,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (IsBurst(acptr) || Protocol(acptr) < 10)
         break;
     }
-    if (!find_except_conf(sptr, EFLAG_IPCHECK) && !IPcheck_remote_connect(sptr, (acptr != &me)))
+    if (IsIPChecked(sptr) && !IPcheck_remote_connect(sptr, (acptr != &me)))
     {
       /*
        * We ran out of bits to count this
