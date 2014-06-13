@@ -564,17 +564,17 @@ void add_connection(struct Listener* listener, int fd) {
   }
   else
   {
+    int isipcexempt = 0;
     /*
      * Add this local client to the IPcheck registry.
      *
      * If they're throttled, murder them, but tell them why first.
      */
-    if (!find_except_conf_by_ip(&addr.addr, EFLAG_IPCHECK))
-      SetIPChecked(new_client);
-    if (IsIPChecked(new_client) &&
+    if (find_except_conf_by_ip(&addr.addr, EFLAG_IPCHECK))
+      isipcexempt = 1;
+    if (!isipcexempt &&
         !IPcheck_local_connect(&addr.addr, &next_target))
     {
-      ClearIPChecked(new_client);
       ++ServerStats->is_ref;
 #ifdef USE_SSL
       ssl_murder(ssl, fd, throttle_message);
@@ -585,6 +585,8 @@ void add_connection(struct Listener* listener, int fd) {
       return;
     }
     new_client = make_client(0, STAT_UNKNOWN_USER);
+    if (!isipcexempt)
+      SetIPChecked(new_client);
   }
 
   /*
