@@ -163,8 +163,14 @@ int ms_svsnick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Nick collision occured, kill user with specific reason */
       send_reply(acptr2, ERR_NICKCOLLISION, nick);
       ServerStats->is_kill++;
+      /* Inform the rest of the net... */
+      sendcmdto_serv_butone(&me, CMD_KILL, 0, "%C :%s (Nickname Enforcement)",
+                            acptr2, cli_name(&me));
       SetFlag(acptr2, FLAG_KILLED);
-      exit_client(cptr, acptr2, &me, "Killed (Nickname Enforcement)");
+      /* Remove them locally. */
+      exit_client_msg(cptr, acptr2, &me,
+                      "Killed (%s (Nickname Enforcement))",
+                      feature_str(FEAT_HIS_SERVERNAME));
     }
   }
 
