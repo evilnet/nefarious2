@@ -608,7 +608,7 @@ m_cap.o: m_cap.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_snprintf.h ../include/ircd_string.h ../include/msg.h \
   ../include/numeric.h ../include/send.h ../include/s_auth.h \
   ../include/s_user.h ../include/ircd_features.h
-m_check.o: m_check.c ../include/channel.h ../include/check.h \
+m_check.o: m_check.c ../include/channel.h \
   ../include/class.h ../include/client.h ../include/destruct_event.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
   ../include/ircd_defs.h ../include/ircd_features.h ../include/ircd_reply.h \

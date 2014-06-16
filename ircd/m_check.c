@@ -22,7 +22,6 @@
  */
 
 #include "channel.h"
-#include "check.h"
 #include "class.h"
 #include "client.h"
 #include "destruct_event.h"
@@ -55,6 +54,15 @@
 #define CHECK_OPSONLY   0x04 /* -o */
 #define CHECK_SHOWIPS   0x08 /* -i */
 #define CHECK_CIDRMASK  0x10 /* automatically detected when performing a hostmask /CHECK */
+
+#define HEADERLINE "--------------------------------------------------------------------"
+#define COLOR_OFF  '\017'
+
+void checkChannel(struct Client *sptr, struct Channel *chptr);
+void checkUsers(struct Client *sptr, struct Channel *chptr, int flags);
+void checkClient(struct Client *sptr, struct Client *acptr);
+void checkServer(struct Client *sptr, struct Client *acptr);
+signed int checkHostmask(struct Client *sptr, char *hoststr, int flags);
 
 /*
  * - ASUKA ---------------------------------------------------------------------
