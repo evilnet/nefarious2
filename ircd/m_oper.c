@@ -270,14 +270,17 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
 
   if (oper_password_match(password, aconf->passwd))
   {
-    int attach_result = attach_conf(sptr, aconf);
-    if ((ACR_OK != attach_result) && (ACR_ALREADY_AUTHORIZED != attach_result)) {
-      send_reply(sptr, ERR_NOOPERHOST);
-      sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s "
-                                  "(%s@%s) (no operator block)",
-                                  (!MyUser(sptr) ? "remote " : ""), cli_name(sptr),
-                                  cli_user(sptr)->username, cli_sockhost(sptr));
-      return 0;
+    if (MyUser(sptr))
+    {
+      int attach_result = attach_conf(sptr, aconf);
+      if ((ACR_OK != attach_result) && (ACR_ALREADY_AUTHORIZED != attach_result)) {
+        send_reply(sptr, ERR_NOOPERHOST);
+        sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s "
+                                    "(%s@%s) (no operator block)",
+                                    (!MyUser(sptr) ? "remote " : ""), cli_name(sptr),
+                                    cli_user(sptr)->username, cli_sockhost(sptr));
+        return 0;
+      }
     }
     *_aconf = aconf;
     return -1;
