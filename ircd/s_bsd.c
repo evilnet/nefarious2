@@ -634,6 +634,7 @@ void add_connection(struct Listener* listener, int fd) {
     cli_socket(new_client).ssl = ssl;
     SetSSLNeedAccept(new_client);
     if (!ssl_accept(new_client)) {
+      socket_del(&(cli_socket(new_client)));
       cli_socket(new_client).ssl = NULL;
       ssl_murder(NULL, fd, sslerr_message);
       cli_fd(new_client) = -1;

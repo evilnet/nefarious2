@@ -71,6 +71,7 @@ int ssl_init(void)
 {
   SSL_library_init();
   SSL_load_error_strings();
+  ERR_load_crypto_strings();
 
   Debug((DEBUG_NOTICE, "SSL: read %d bytes of randomness", RAND_load_file("/dev/urandom", 4096)));
 
@@ -317,6 +318,18 @@ void ssl_doerror(struct Client *cptr)
   sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for client %s: %s", cli_name(cptr), ebuf);
 }
 
+void ssl_doerror_anon()
+{
+  unsigned long err = 0;
+  char ebuf[120];
+
+  memset(&ebuf, 0, 120);
+  err = ERR_get_error();
+  ERR_error_string(err, (char *)&ebuf);
+
+  sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for unknown client: %s", ebuf);
+}
+
 /*
  * ssl_recv - non blocking read of a connection
  * returns:
@@ -417,7 +430,6 @@ IOResult ssl_sendv(struct Socket *socketh, struct Client *cptr, struct MsgQ* buf
       {
           int errorValue;
           Debug((DEBUG_ERROR, "SSL_write returned SSL_ERROR_SSL, errno %d, retval %d, res %d, ssl error code %d", errno, retval, res, ssl_err));
-          ERR_load_crypto_strings();
           while((errorValue = ERR_get_error())) {
             Debug((DEBUG_ERROR, "  Error Queue: %d -- %s", errorValue, ERR_error_string(errorValue, NULL)));
           }
@@ -609,6 +621,7 @@ char *ssl_error_str(int err, int my_errno)
       break;
     case SSL_ERROR_SSL:
       ssl_errstr = "Internal OpenSSL error or protocol error";
+      ssl_doerror_anon();
       break;
     case SSL_ERROR_WANT_READ:
       ssl_errstr = "OpenSSL functions requested a read()";
