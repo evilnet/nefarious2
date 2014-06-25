@@ -221,7 +221,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
 
   sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
      "%s (%s@%s) is now operator (%c)",
-     cli_name(sptr), cli_user(sptr)->username, cli_sockhost(sptr),
+     cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost,
      IsOper(sptr) ? 'O' : 'o');
 
   if (feature_bool(FEAT_OPERMOTD))
@@ -241,7 +241,7 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     send_reply(sptr, ERR_NOOPERHOST);
     sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s (%s@%s) "
                          "(no operator block)", (!MyUser(sptr) ? "remote " : ""),
-                         cli_name(sptr), cli_user(sptr)->username, cli_sockhost(sptr));
+                         cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost);
     return 0;
   }
   assert(0 != (aconf->status & CONF_OPERATOR));
@@ -253,7 +253,7 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
       send_reply(sptr, ERR_NOOPERHOST);
       sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s (%s@%s) "
                            "(no remote oper priv)", (!MyUser(sptr) ? "remote " : ""),
-                           cli_name(sptr), cli_user(sptr)->username, cli_sockhost(sptr));
+                           cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost);
       return 0;
     }
   }
@@ -264,7 +264,7 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s "
                                 "(%s@%s) (SSL fingerprint mismatch)",
                                 (!MyUser(sptr) ? "remote " : ""), cli_name(sptr),
-                                cli_user(sptr)->username, cli_sockhost(sptr));
+                                cli_user(sptr)->username, cli_user(sptr)->realhost);
     return 0;
   }
 
@@ -278,7 +278,7 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
         sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s "
                                     "(%s@%s) (no operator block)",
                                     (!MyUser(sptr) ? "remote " : ""), cli_name(sptr),
-                                    cli_user(sptr)->username, cli_sockhost(sptr));
+                                    cli_user(sptr)->username, cli_user(sptr)->realhost);
         return 0;
       }
     }
@@ -291,7 +291,7 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     sendto_opmask_butone_global(&me, SNO_OLDREALOP, "Failed %sOPER attempt by %s (%s@%s) "
                                  "(password mis-match)", (!MyUser(sptr) ? "remote " : ""),
                                  cli_name(sptr), cli_user(sptr)->username,
-                                 cli_sockhost(sptr));
+                                 cli_user(sptr)->realhost);
     return 0;
   }
 }
