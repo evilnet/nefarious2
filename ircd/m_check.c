@@ -722,24 +722,6 @@ signed int checkHostmask(struct Client *sptr, char *hoststr, int flags) {
     cidr_check = ipmask_clean(&cidr_check, cidr_check_bits);
   }
 
-/*
-  if ((p = strchr(hostm, '/')) || ircd_aton(&cidr_check, hostm)) {
-    if (p)
-      *p = '\0';
-    if (ircd_aton(&cidr_check, hostm)) {
-      cidr_check_bits = p ? atoi(p + 1) : 128;
-      if (cidr_check_bits <= 128) {
-        flags |= CHECK_CIDRMASK;
-        if (irc_in_addr_is_ipv4(&cidr_check) && (cidr_check_bits <= 32))
-          cidr_check_bits += 96;
-        cidr_check = ipmask_clean(&cidr_check, cidr_check_bits);
-      }
-    }
-    if (p)
-      *p = '/';
-  }
-*/
-
   /* Copy formatted string into "targhost" buffer */
   ircd_snprintf(0, targhost, sizeof(targhost),  "%s!%s@%s", nickm, userm, hostm);
 
@@ -771,8 +753,7 @@ signed int checkHostmask(struct Client *sptr, char *hoststr, int flags) {
 
     if (flags & CHECK_CIDRMASK) {
       if (ipmask_check(&cli_ip(acptr), &cidr_check, cidr_check_bits) && !match(nickm, acptr->cli_name) 
-            && (!match(userm, acptr->cli_user->username) || !match(userm, acptr->cli_user->username))
-            && irc_in_addr_type_cmp(&cli_ip(acptr), &cidr_check))
+            && (!match(userm, acptr->cli_user->username) || !match(userm, acptr->cli_user->username)))
         found = 1;
     }
     else {
