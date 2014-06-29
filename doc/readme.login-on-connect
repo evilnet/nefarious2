@@ -1,18 +1,29 @@
-Login-on-connect documentation
-Last updated 22 Jun 2004 by Vampire-
+Login-on-Connect Documentation
+Last updated 29 Jun 2014 by Andromeda
 
-1. This feature is experimental.
+1. LOC is a feature intended to allow a client to log into services before
+they are fully connected to the network. For networks that do not set +x
+by default, this is a nice little security bonus as you are cloaked before
+you even finish connecting. Malicious users, /ISON, /USERIP, and low latency
+can reveal it's real host/IP before the user has a chance to connect and set
++x on themself.
 
-2. The main point is to allow clients to log in to a service bot (i.e., X)
-*before* being announced to the network. Otherwise, a combination of a
-malicious user, /ISON, /USERIP and low latency can reveal it's real host/IP
-before he gets a chance to log in and set himself +x
-
-3. Client<->Server changes:
+2. Client<->Server:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The PASS command now has the following syntax:
+The PASS command works as follows...
 
-PASS [optional I-line password] <bot nick> <username> :<passphrase>
+Syntax:
+PASS [optional I:Line password] [/Service Nick]/Account/Password
+
+Example:
+PASS /Andromeda/ThisIsMyPassword
+
+mIRC Syntax:
+/server irc.afternet.org:6667 /AuthServ/Andromeda/ThisIsMyPassword
+
+The way LOC works, it sends the account name and password to the default
+service specified in the configuration file or if specified, the service
+nick included within the syntax.
 
 If the client sends such a password message, after sending NICK,
 USER and PONG, it's username/passphrase are sent to the specified bot
@@ -20,24 +31,17 @@ for validation, while holding the client in the 'registration' state.
 If the authentication succeeds, the client's account and umode +x are set,
 after which he is introduced to the network, continuing the regular connect
 phase. If authentication fails (or the bot is not on the network), the user
-is given a chance to retry (he can do this by sending another PASS command),
-or to disconnect from the server. If he wishes to connect without a hidden
-hostmask, he can send a PASS command with no parameters.
+is given a chance to retry (they can do this by sending another PASS command),
+or to disconnect from the server. If the user wishes to connect without a
+hidden hostmask, he can send a PASS command with no parameters.
 
-Update: For buggy clients that send ("PASS :%s", whatever-the-user-typed)
-and thus are incapable of sending multiple arguments, there's a hack in
-mr_pass that splits up the argument if the first character is a ':'.
-This way users might use ":bot user :pass phrase" in their clients.
-The example above would be, in raw form:
-
-PASS ::[optional I-line password] <bot nick> <username> :<passphrase>
-
-4. Server<->Server changes:
+3. Server<->Server:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The ACCOUNT message now has the following syntax:
 
 Auth check: 
 <client's server numeric> AC <bot's numeric> C <request-id> <username> :<passphrase>
+
 Servers send this message to request a service bot to authenticate the client.
 <request-id> is not processed neither by the servers along the way nor the
 service bot. Currently this is:
@@ -50,19 +54,21 @@ towards the service bot, not unlike PRIVMSG.
 
 Auth reply:
 <bot's server numeric> AC <client's server numeric> A|D <request-id>
+
 Service bots send this in reply to an 'auth check' message from a server.
 "A" stands for "accepted", "D" for "denied". Again, hubs will have
 to proagate this message back to the client's server.
 
 Remote auth:
 <bot's server numeric> AC <client numeric> R <account> [<timestamp>]
+
 This is the current message used by service bots to announce the network
 that a user has logged in. The old format is still supported:
 <bot's server numeric> AC <client numeric> <account> [<timestamp>]
 
-5. ircu code changes
-~~~~~~~~~~~~~~~~~~~~
-A new feature, FEAT_LOGIN_ON_CONNECT (default FALSE) will specify whether
+4. IRCu Configuration:
+~~~~~~~~~~~~~~~~~~~~~~~~~
+FEAT_LOGIN_ON_CONNECT (default FALSE) will specify whether
 ircu will honour the login scheme as specified above for the PASS command.
 ircu will route ACCOUNT messages anyway, regardless of this feature's value.
 
