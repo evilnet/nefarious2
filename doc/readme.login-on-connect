@@ -35,12 +35,26 @@ is given a chance to retry (they can do this by sending another PASS command),
 or to disconnect from the server. If the user wishes to connect without a
 hidden hostmask, he can send a PASS command with no parameters.
 
-3. Server<->Server:
+3. iAuthd<->LOC:
+~~~~~~~~~~~~~~~~~~~~~~~
+When a network is using iAuthd with Nefarious 2 for scanning incoming connections
+for potential malicious users and other threats, Using LOC can bypass the iAuthd
+scan process entirely. This is useful if a user's host is listed in any DNSBL in
+use within the network.
+
+4. Server<->Server:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The ACCOUNT message now has the following syntax:
 
 Auth check: 
 <client's server numeric> AC <bot's numeric> C <request-id> <username> :<passphrase>
+
+Host check:
+<client's server numeric> AC <bot's numeric> H <request-id> <ident>@<host>:<ip> <username> :<passphrase>
+If the host contains :'s it's surrounded by []. Useful for determining IPv6 vs IPv4.
+
+Fingerprint check:
+<client's server numeric> AC <bot's numeric> S <request-id> <ident>@<host>:<ip> <sslfingerprint> <username> :<passphrase>
 
 Servers send this message to request a service bot to authenticate the client.
 <request-id> is not processed neither by the servers along the way nor the
@@ -66,7 +80,7 @@ This is the current message used by service bots to announce the network
 that a user has logged in. The old format is still supported:
 <bot's server numeric> AC <client numeric> <account> [<timestamp>]
 
-4. IRCu Configuration:
+5. IRCu Configuration:
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 FEAT_LOGIN_ON_CONNECT (default FALSE) will specify whether
 ircu will honour the login scheme as specified above for the PASS command.
