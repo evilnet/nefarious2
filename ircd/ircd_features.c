@@ -721,8 +721,8 @@ static struct FeatureDesc {
   F_B(EXTBAN_M, 0, 1, set_isupport_extbans),
 
   /* Some misc. Nefarious default paths */
-  F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", 0),
-  F_S(EPATH, FEAT_CASE | FEAT_MYOPER, "ircd.rules", 0),
+  F_S(OMPATH, FEAT_CASE | FEAT_MYOPER, "ircd.opermotd", motd_init),
+  F_S(EPATH, FEAT_CASE | FEAT_MYOPER, "ircd.rules", motd_init),
 
   /* Host hiding FEAT_'s */
   F_B(HIDDEN_HOST_QUIT, 0, 1, 0),
