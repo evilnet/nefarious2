@@ -51,7 +51,9 @@ Auth check:
 
 Host check:
 <client's server numeric> AC <bot's numeric> H <request-id> <ident>@<host>:<ip> <username> :<passphrase>
-If the host contains :'s it's surrounded by []. Useful for determining IPv6 vs IPv4.
+If the host contains :'s it should be surrounded by []. Useful for determining
+IPv6 vs IPv4 or unresolved rDNS's. Generally keeping things nice and tidy or
+easier to work with.
 
 Fingerprint check:
 <client's server numeric> AC <bot's numeric> S <request-id> <ident>@<host>:<ip> <sslfingerprint> <username> :<passphrase>
