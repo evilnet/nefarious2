@@ -83,8 +83,15 @@ const char *infotext[] = {
     "Kev, Isomer, Gte, Ghostwolf, Bleep",
     "Debugging and support:",
     "SeKs, Maniac-, HeKTik, OmniDynmc, Liandrin, Dianora",
-    "Special thanks to Angel and Buff for believing in us and putting"
-    "up with frantic late night phone calls"
+    "Special thanks to Angel and Buff for believing in us and putting",
+    "up with frantic late night phone calls",
+    "",
+    "Nefarious 2.0 modifications were provided by:",
+    "Jobe         Matthew Beeching         <jobe@mdbnet.co.uk>",
+    "Rubin        Alex Schumann            <rubin@afternet.org>",
+    "",
+    "Additional contributors to the Nefarious 2.0 branch:",
+    "Obnoxious, Andromeda",
     "",
     "Thanks goes to all other people who contributed to any version.",
     "A full listing of all coders can be found in doc/Authors in the",

@@ -223,3 +223,20 @@ Zarjazz <zarjazz@quakenet.org>
 Spike <ekips@pandora.be>
 Jeekay <jeekay@netgamers.org>
 Entrope <entrope@gamesurge.net>
+
+Nefarious 2.0
+--------
+
+The AfterNET version is based on ircu2.10.12. The number of protocol
+enhancements, changes and additions that have been added are too many
+to summarize. All patches are kept in the git repository.
+
+The current maintainer is Jobe
+
+Various additions, testings, bugfixes and documentation tweaks have
+been contributed by:
+
+Jobe <jobe@mdbnet.co.uk>
+Rubin <rubin@afternet.org>
+Andromeda <andromeda@cerberuslabs.ca>
+Obnoxious <obnoxious@binhex.org>
