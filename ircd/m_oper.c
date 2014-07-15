@@ -139,7 +139,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
       SetOper(sptr);
       if (HasPriv(sptr, PRIV_ADMIN))
         SetAdmin(sptr);
-      if (!IsHideOper(sptr))
+      if (!IsHideOper(sptr) && !IsChannelService(sptr) && !IsBot(sptr))
         ++UserStats.opers;
     }
     cli_handler(sptr) = OPER_HANDLER;

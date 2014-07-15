@@ -517,7 +517,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     hide_hostmask(sptr);
   if (IsInvisible(sptr))
     ++UserStats.inv_clients;
-  if (IsOper(sptr) && !IsHideOper(sptr))
+  if (IsOper(sptr) && !IsHideOper(sptr) && !IsChannelService(sptr) && !IsBot(sptr))
     ++UserStats.opers;
 
   tmpstr = umode_str(sptr);
@@ -1758,7 +1758,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   if (IsRegistered(acptr)) {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
       /* user now oper */
-      if (!IsHideOper(acptr))
+      if (!IsHideOper(acptr) && !IsChannelService(acptr) && !IsBot(acptr))
         ++UserStats.opers;
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;
@@ -1777,7 +1777,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
     if (FlagHas(&setflags, FLAG_OPER) && !IsOper(acptr)) {
       /* user no longer oper */
-      if (!FlagHas(&setflags, FLAG_HIDE_OPER)) {
+      if (!FlagHas(&setflags, FLAG_HIDE_OPER) && !FlagHas(&setflags, FLAG_CHSERV) && FlagHas(&setflags, FLAG_BOT)) {
         assert(UserStats.opers > 0);
         --UserStats.opers;
       }
@@ -1794,12 +1794,18 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       if (MyUser(acptr))
         cli_handler(acptr) = CLIENT_HANDLER;
     }
-    if (!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(acptr)) {
+    if (!FlagHas(&setflags, FLAG_HIDE_OPER) &&
+        !FlagHas(&setflags, FLAG_CHSERV) &&
+        !FlagHas(&setflags, FLAG_BOT) &&
+        (IsHideOper(acptr) || IsChannelService(acptr) || IsBot(acptr))) {
       if (FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
         --UserStats.opers;
       }
     }
-    if (FlagHas(&setflags, FLAG_HIDE_OPER) && !IsHideOper(acptr)) {
+    if ((FlagHas(&setflags, FLAG_HIDE_OPER) ||
+         FlagHas(&setflags, FLAG_CHSERV) ||
+         FlagHas(&setflags, FLAG_BOT)) &&
+        !IsHideOper(acptr) && !IsChannelService(acptr) && !IsBot(acptr)) {
       if (FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
         ++UserStats.opers;
       }
