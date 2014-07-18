@@ -274,6 +274,7 @@ void add_history(struct Client *cptr, int still_on)
   DupString(ww->hostname, cli_user(cptr)->host);
   if (IsHiddenHost(cptr))
     DupString(ww->realhost, cli_user(cptr)->realhost);
+  memcpy(&ww->ip, &cli_ip(cptr), sizeof(cli_ip(cptr)));
   DupString(ww->servername, cli_name(cli_user(cptr)->server));
   DupString(ww->realname, cli_info(cptr));
   if (cli_user(cptr)->away)

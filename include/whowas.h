@@ -27,6 +27,8 @@
 #define INCLUDED_sys_types_h
 #endif
 
+#include "res.h"
+
 struct Client;
 
 /*
@@ -56,6 +58,7 @@ struct Whowas {
   char *realname;               /**< Client's realname (user info). */
   char *away;                   /**< Client's away message. */
   time_t logoff;                /**< When the client logged off. */
+  struct irc_in_addr ip;        /**< Client's last IP address. */
   struct Client *online;        /**< Needed for get_history() (nick chasing). */
   struct Whowas *hnext;         /**< Next entry with the same hash value. */
   struct Whowas **hprevnextp;   /**< Pointer to previous next pointer. */
