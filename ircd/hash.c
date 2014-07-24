@@ -468,7 +468,7 @@ void list_next_channels(struct Client *cptr)
 
           modebuf[0] = modebuf[1] = parabuf[0] = '\0';
           channel_modes(cptr, modebuf, parabuf, sizeof(parabuf), chptr, NULL);
-          send_reply(cptr, RPL_LIST | SND_EXPLICIT, "%s %u %s%s%s :%s",
+          send_reply(cptr, RPL_LIST | SND_EXPLICIT, "%s %u :[%s%s%s] %s",
                      chptr->chname, chptr->users, modebuf, (parabuf[0] ? " " : ""),
                      parabuf, chptr->topic);
         } else {
