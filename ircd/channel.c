@@ -2999,6 +2999,10 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
       send_reply(state->sptr, ERR_NOPRIVILEGES);
       return;
     }
+
+    /* Reject invalid channel names */
+    if (!IsChannelName(t_str) || !strIsIrcCh(t_str))
+      return;
   } else
     t_str = state->chptr->mode.redir;
 

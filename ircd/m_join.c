@@ -153,6 +153,8 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
       if (chptr->users >= chptr->mode.limit) {
         if (IsNoLink(sptr))
           send_reply(sptr, ERR_LINKCHAN, chptr->chname, chptr->mode.redir);
+        else if (!IsChannelName(chptr->mode.redir) || !strIsIrcCh(chptr->mode.redir))
+          send_reply(sptr, ERR_NOSUCHCHANNEL, chptr->mode.redir);
         else {
           send_reply(sptr, ERR_LINKSET, chptr->chname, chptr->chname, chptr->mode.redir);
           do_join(cptr, sptr, join, create, chptr->mode.redir, key, level+1);
