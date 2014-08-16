@@ -240,7 +240,7 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * here), if kicker is not on channel, or if kicker is not a channel
    * operator, bounce the kick
    */
-  if (!IsServer(sptr) && member && cli_from(who) != cptr &&
+  if (!IsServer(sptr) && !IsChannelService(sptr) && member && cli_from(who) != cptr &&
       (!(sptr_link = find_member_link(chptr, sptr)) ||
         (!IsChanOp(sptr_link) && !IsHalfOp(sptr_link)))) {
     sendto_opmask_butone(0, SNO_HACK2, "HACK: %C KICK %H %C %s", sptr, chptr,
