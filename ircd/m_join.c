@@ -481,11 +481,15 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         {
           if (IsChanOp(member)) {
             modebuf_mode_client(&mbuf, MODE_DEL | MODE_CHANOP, member->user, OpLevel(member));
-	    member->status &= ~CHFL_CHANOP;
+            member->status &= ~CHFL_CHANOP;
 	  }
+          if (IsHalfOp(member)) {
+            modebuf_mode_client(&mbuf, MODE_DEL | MODE_HALFOP, member->user, OpLevel(member));
+            member->status &= ~CHFL_HALFOP;
+          }
           if (HasVoice(member)) {
             modebuf_mode_client(&mbuf, MODE_DEL | MODE_VOICE, member->user, OpLevel(member));
-	    member->status &= ~CHFL_VOICE;
+            member->status &= ~CHFL_VOICE;
           }
         }
         modebuf_flush(&mbuf);
