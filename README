@@ -1,11 +1,7 @@
 
-	Welcome to ircu2.10.12, the Undernet IRC daemon
+            Welcome to Nefarious 2, the Evilnet IRC daemon
 
-Version u2.10.12 of the Undernet ircd incorporates many new features
-over its predecessor, and we feel that using it will make you very
-happy indeed.
-
-New features include:
+Current features include:
   - A completely rewritten network event engine, which make full use
     of the asynchronous event engines available in FreeBSD (kqueue)
     and Solaris (/dev/poll), resulting in dramaticaly improved
@@ -19,14 +15,14 @@ New features include:
 
 INSTALLATION
 
-Please see the INSTALL file for installation instructions, for hints on how
-to best configure your OS for running ircu under high load, see the various
+Please see the INSTALL file for installation instructions, for hints on how to
+best configure your OS for running Nefarious 2 under high load, see the various
 README.<platform> files.
 
 COMPATIBILITY
 
-This version of ircu will only work with servers that use the P10 protocol,
-some of the new features will only work between ircu2.10.12 servers.
+This version of Nefarious 2 will only work with servers that use the P10
+protocol, some of the new features will only work between Nefarious 2 servers.
 
 GENERAL PERFORMANCE HINTS
 
@@ -38,14 +34,14 @@ a small amount of users, the defaults should work well enough.
  - Run an OS that supports an asynchronous network event engine; currently
    these are FreeBSD (kqueue), and Solaris (/dev/poll); possibly other BSDs
    will also support kqueue. This will have a dramatic effect on performance.
- - Make things as lean as possible: Make your server dedicated to ircu,
+ - Make things as lean as possible: Make your server dedicated to Nefarious 2,
    disable anything that is not neccesary, and build a custom kernel (where
    possible).
  - Tune kernel parameters as described in the platform-specific
    sections below.
- - With many clients connecting each second, ircu will be doing lots of DNS
-   lookups. Make sure that the DNS server(s) in your /etc/resolv.conf are as
-   close as possible, or run a local caching DNS server on your IRC server.
+ - With many clients connecting each second, Nefarious 2 will be doing lots of
+   DNS lookups. Make sure that the DNS server(s) in your /etc/resolv.conf are
+   as close as possible, or run a local caching DNS server on your IRC server.
 
 TIME SYNCHRONIZATION
 
@@ -64,19 +60,19 @@ ircd.conf.
 MORE INFORMATION
 
 For more information on this software, see the included documentation
-in the doc/ directory, as well as http://coder-com.undernet.org.
+in the doc/ directory.
 
-For general information on the Undernet, vist http://www.undernet.org
+For general information on Evilnet, visit http://evilnet.github.io/
 
 Happy IRCing!
 
 RUNNING THIS SERVER ON LINUX
 
-If you run Linux 2.6 or above (or 2.4 with appropriate patches), ircu
-can use the epoll family of system calls for much more efficient
-checks of which connections are active.  Most pre-epoll systems will
-use 100% CPU with 2000 clients; with epoll, a server may use only a
-few percent of CPU with the same load.
+If you run Linux 2.6 or above (or 2.4 with appropriate patches), Nefarious 2
+can use the epoll family of system calls for much more efficient checks of
+which connections are active.  Most pre-epoll systems will use 100% CPU with
+2000 clients; with epoll, a server may use only a few percent of CPU with the
+same load.
 
 To handle that many connections, the ircd must be started with a high
 enough file descriptor resource.  Check your distribution's docs on
@@ -85,13 +81,13 @@ load.
 
 RUNNING THIS SERVER ON FREEBSD
 
-When running on FreeBSD, ircu can make use of the kqueue() event engine, which
-results in much improved performance over the old poll()-based method. kqueue
-is included in the more recent 4.x releases of FreeBSD.
+When running on FreeBSD, Nefarious 2 can make use of the kqueue() event engine,
+which results in much improved performance over the old poll()-based method.
+kqueue is included in the more recent 4.x releases of FreeBSD.
 
-In order for ircu to be able to serve many clients simultaneously, you need
-to increase the maximum allowable number of open files in the system. To do
-this, add commands such as the following during your system's boot sequence:
+In order for Nefarious 2 to be able to serve many clients simultaneously, you
+need to increase the maximum allowable number of open files in the system. To
+do this, add commands such as the following during your system's boot sequence:
 
 sysctl -w kern.maxfiles=16384
 sysctl -w kern.maxfilesperproc=16384
@@ -122,13 +118,13 @@ Created by Sengaia <sengaia@undernet.org>, July 20 2002.
 
 RUNNING THIS SERVER ON SOLARIS
 
-When running on Solaris, ircu can make use of the /dev/poll event engine, which
-results in much improved performance over the old poll()-based method. Solaris
-versions 8 and 9 include /dev/poll out of the box, for Solaris 7 you will have
-to grab and install Patch-ID 106541-21.
+When running on Solaris, Nefarious 2 can make use of the /dev/poll event
+engine, which results in much improved performance over the old poll()-based
+method. Solaris versions 8 and 9 include /dev/poll out of the box, for Solaris
+7 you will have to grab and install Patch-ID 106541-21.
 
-In order to increase the number of clients ircu can handle, add lines such as
-the following to /etc/system:
+In order to increase the number of clients Nefarious 2 can handle, add lines
+such as the following to /etc/system:
 
 * set hard limit on file descriptors
 set rlim_fd_max = 16384
