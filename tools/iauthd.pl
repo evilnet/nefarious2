@@ -59,7 +59,6 @@
 #IAUTH CACHETIME 86400
 #IAUTH BLOCKMSG Sorry! Your connection has been rejected because of your internet address's poor reputation.
 #IAUTH DNSBL server=dnsbl.sorbs.net index=2,3,4,5,6,7,9 mark=sorbs block=anonymous
-#IAUTH DNSBL server=dnsbl.ahbl.org index=3,14,15,16,17,18,19,20 mark=ahbl block=anonymous
 #IAUTH DNSBL server=dnsbl.dronebl.org index=2,3,5,6,7,8,9,10,13,14,15 mark=dronebl block=anonymous
 #IAUTH DNSBL server=rbl.efnetrbl.org index=4 mark=tor
 #IAUTH DNSBL server=rbl.efnetrbl.org index=1,2,3,5 mark=efnetrbl block=anonymous
