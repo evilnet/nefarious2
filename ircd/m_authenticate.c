@@ -149,31 +149,39 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     ircd_strncpy(realhost, hoststr, sizeof(realhost));
 
   if (acptr) {
-    if (!EmptyString(cli_sslclifp(cptr)) && first) {
-      sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s :%s", acptr, &me,
-                    cli_fd(cptr), cli_saslcookie(cptr),
-                    parv[1], cli_sslclifp(cptr));
+    if (first) {
+      if (!EmptyString(cli_sslclifp(cptr)))
+        sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s :%s", acptr, &me,
+                      cli_fd(cptr), cli_saslcookie(cptr),
+                      parv[1], cli_sslclifp(cptr));
+      else
+        sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S :%s", acptr, &me,
+                      cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
       if (feature_bool(FEAT_SASL_SENDHOST))
         sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u H :%s@%s:%s", acptr, &me,
                       cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
                       realhost, cli_sock_ip(cptr));
-    } else
-      sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u %c :%s", acptr, &me,
-                    cli_fd(cptr), cli_saslcookie(cptr),
-                    (first ? 'S' : 'C'), parv[1]);
+    } else {
+      sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u C :%s", acptr, &me,
+                    cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
+    }
   } else {
-    if (!EmptyString(cli_sslclifp(cptr)) && first) {
-      sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u S %s :%s", &me,
-                    cli_fd(cptr), cli_saslcookie(cptr),
-                    parv[1], cli_sslclifp(cptr));
+    if (first) {
+      if (!EmptyString(cli_sslclifp(cptr)))
+        sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u S %s :%s", &me,
+                              cli_fd(cptr), cli_saslcookie(cptr),
+                              parv[1], cli_sslclifp(cptr));
+      else
+        sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u S :%s", &me,
+                              cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
       if (feature_bool(FEAT_SASL_SENDHOST))
         sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u H :%s@%s:%s", &me,
-                      cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
-                      realhost, cli_sock_ip(cptr));
-    } else
-      sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u %c :%s", &me,
-                    cli_fd(cptr), cli_saslcookie(cptr),
-                    (first ? 'S' : 'C'), parv[1]);
+                              cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
+                              realhost, cli_sock_ip(cptr));
+    } else {
+      sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u C :%s", &me,
+                            cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
+    }
   }
 
   if (!t_active(&cli_sasltimeout(cptr)))
