@@ -63,6 +63,8 @@
 #define USE_IPV4 (1 << 16)
 #define USE_IPV6 (1 << 17)
 
+extern int init_lexer_file(char* file);
+
   extern struct LocalConf   localConf;
   extern struct DenyConf*   denyConfList;
   extern struct CRuleConf*  cruleConfList;
@@ -224,6 +226,7 @@ static void free_slist(struct SLink **link) {
 %token FAKELAGFACTOR
 %token DEFAULTTEXT
 %token SSLFP
+%token INCLUDE
 %token SSLTOK
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
@@ -257,7 +260,7 @@ block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
        pseudoblock | iauthblock | forwardsblock | webircblock | spoofhostblock |
-       exceptblock | error ';';
+       exceptblock | include | error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -1831,3 +1834,8 @@ exceptlistdelay: LISTDELAY '=' YES ';'
   flags &= ~EFLAG_LISTDELAY;
 };
 
+include: INCLUDE QSTRING ';'
+{
+  if (!init_lexer_file($2))
+    parse_error("Error including file %s", $2);
+}

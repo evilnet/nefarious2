@@ -34,6 +34,7 @@
 #include "y.tab.h"
 
 extern int lineno;
+extern char* linefile;
 
 static struct lexer_token {
   const char *string;
@@ -144,6 +145,7 @@ static struct lexer_token {
   TOKEN(FAKELAGFACTOR),
   TOKEN(DEFAULTTEXT),
   TOKEN(SSLFP),
+  TOKEN(INCLUDE),
 #undef TOKEN
   { "ssl", SSLTOK },
   { "administrator", ADMIN },
@@ -240,7 +242,17 @@ find_token(char *token)
   return tok ? tok->value : 0;
 }
 
+struct include_state {
+  int lineno;
+  char* linefile;
+  FBFILE* lexer_input;
+};
+
 static FBFILE *lexer_input;
+
+#define MAX_INCLUDE_DEPTH 10
+struct include_state include_stack[MAX_INCLUDE_DEPTH];
+int include_stack_ptr = 0;
 
 #undef YY_NO_UNPUT
 #define YY_NO_UNPUT
@@ -250,6 +262,7 @@ static FBFILE *lexer_input;
 int
 init_lexer(void)
 {
+  include_stack_ptr = 0;
   lexer_input = fbopen(configfile, "r");
   if (lexer_input == NULL)
   {
@@ -264,6 +277,7 @@ init_lexer(void)
   YY_NEW_FILE;
 #endif
   lineno = 1;
+  linefile = strdup(configfile);
   return 1;
 }
 
@@ -272,14 +286,68 @@ void deinit_lexer(void)
   if (lexer_input != NULL)
   {
     fbclose(lexer_input);
+    if (linefile != NULL)
+      free(linefile);
+    linefile = NULL;
     lexer_input = NULL;
   }
 }
 
 int
+init_lexer_file(char* file)
+{
+  if (include_stack_ptr >= MAX_INCLUDE_DEPTH)
+  {
+    fprintf(stderr, "Includes nested too deeply");
+    exit(1);
+  }
+
+  include_stack[include_stack_ptr].lineno = lineno;
+  include_stack[include_stack_ptr].linefile = linefile;
+  include_stack[include_stack_ptr++].lexer_input = lexer_input;
+
+  lexer_input = fbopen(file, "r");
+
+  if (lexer_input == NULL)
+  {
+#ifdef YY_FATAL_ERROR
+    YY_FATAL_ERROR("Could not open the configuration file.");
+#else
+    fprintf(stderr, "Could not open the configuration file.");
+#endif
+    return 0;
+  }
+#ifdef YY_NEW_FILE
+  YY_NEW_FILE;
+#endif
+  lineno = 1;
+  linefile = strdup(file);
+  return 1;
+}
+
+int next_lexer_file()
+{
+  if (--include_stack_ptr < 0)
+    return 1;
+
+  if (lexer_input != NULL)
+    fbclose(lexer_input);
+  lexer_input = NULL;
+  if (linefile != NULL)
+    free(linefile);
+  linefile = NULL;
+
+  lineno = include_stack[include_stack_ptr].lineno;
+  linefile = include_stack[include_stack_ptr].linefile;
+  lexer_input = include_stack[include_stack_ptr].lexer_input;
+
+  return 0;
+}
+
+int
 yywrap(void)
 {
-  return 1;
+  return next_lexer_file();
 }
 
 %}

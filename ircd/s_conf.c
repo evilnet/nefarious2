@@ -82,6 +82,9 @@ struct qline     *GlobalQuarantineList;
 /** Current line number in scanner input. */
 int lineno;
 
+/** Current file in scanner input. */
+char* linefile;
+
 /** Configuration information for #me. */
 struct LocalConf   localConf;
 /** Global list of connection rules. */
@@ -1153,12 +1156,12 @@ int read_configuration_file(void)
 void
 yyerror(const char *msg)
 {
- sendto_opmask_butone(0, SNO_ALL, "Config file parse error line %d: %s",
-                      lineno, msg);
- log_write(LS_CONFIG, L_ERROR, 0, "Config file parse error line %d: %s",
-           lineno, msg);
+ sendto_opmask_butone(0, SNO_ALL, "Config parse error in file %s on line %d: %s",
+                      linefile, lineno, msg);
+ log_write(LS_CONFIG, L_ERROR, 0, "Config parse error in file %s on line %d: %s",
+           linefile, lineno, msg);
  if (!conf_already_read)
-   fprintf(stderr, "Config file parse error line %d: %s\n", lineno, msg);
+   fprintf(stderr, "Config parse error in file %s on line %d: %s\n", linefile, lineno, msg);
  conf_error = 1;
 }
 
