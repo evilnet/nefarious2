@@ -127,7 +127,12 @@ SSL_CTX *ssl_init_server_ctx(void)
   if (feature_bool(FEAT_SSL_REQUIRECLIENTCERT))
     vrfyopts |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
 
-  /* SSL_CTX_set_options(server_ctx, SSL_OP_NO_SSLv2); */
+  if (feature_bool(FEAT_SSL_NOSSLV2))
+    SSL_CTX_set_options(server_ctx, SSL_OP_NO_SSLv2);
+  if (feature_bool(FEAT_SSL_NOSSLV3))
+    SSL_CTX_set_options(server_ctx, SSL_OP_NO_SSLv3);
+  if (feature_bool(FEAT_SSL_NOTLSV1))
+    SSL_CTX_set_options(server_ctx, SSL_OP_NO_TLSv1);
   SSL_CTX_set_verify(server_ctx, vrfyopts, ssl_verify_callback);
   SSL_CTX_set_session_cache_mode(server_ctx, SSL_SESS_CACHE_OFF);
 
@@ -175,6 +180,12 @@ SSL_CTX *ssl_init_client_ctx(void)
     return NULL;
   }
 
+  if (feature_bool(FEAT_SSL_NOSSLV2))
+    SSL_CTX_set_options(client_ctx, SSL_OP_NO_SSLv2);
+  if (feature_bool(FEAT_SSL_NOSSLV3))
+    SSL_CTX_set_options(client_ctx, SSL_OP_NO_SSLv3);
+  if (feature_bool(FEAT_SSL_NOTLSV1))
+    SSL_CTX_set_options(client_ctx, SSL_OP_NO_TLSv1);
   SSL_CTX_set_session_cache_mode(client_ctx, SSL_SESS_CACHE_OFF);
 
   if (SSL_CTX_use_certificate_chain_file(client_ctx, feature_str(FEAT_SSL_CERTFILE)) <= 0)

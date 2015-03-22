@@ -232,7 +232,7 @@ feature_notify_oplevels(void)
   if (feature_bool(FEAT_OPLEVELS))
     SetOpLevels(&me);
   else
-    ClearOpLevels(&me);
+   ClearOpLevels(&me);
 
   /* "be,AkU,Ll,aCcDdiMmNnOpQRrSsTtZz" */
 
@@ -758,6 +758,9 @@ static struct FeatureDesc {
   F_B(SSL_VERIFYCERT, 0, 0, 0),
   F_B(SSL_NOSELFSIGNED, 0, 0, 0),
   F_B(SSL_REQUIRECLIENTCERT, 0, 0, 0),
+  F_B(SSL_NOSSLV2, 0, 1, 0),
+  F_B(SSL_NOSSLV3, 0, 1, 0),
+  F_B(SSL_NOTLSV1, 0, 1, 0),
 
   /* ZLINE FEAT_'s */
   F_B(DISABLE_ZLINES, 0, 0, 0),

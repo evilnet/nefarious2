@@ -1666,6 +1666,24 @@ SSL_REQUIRECLIENTCERT
 When enabled clients connecting via SSL will be required to provide a
 client certificate.
 
+SSL_NOSSLV2
+ * Type: boolean
+ * Default: TRUE
+
+When enabled support for SSLv2 is disabled.
+
+SSL_NOSSLV3
+ * Type: boolean
+ * Default: TRUE
+
+When enabled support for SSLv3 is disabled.
+
+SSL_NOTLSV1
+ * Type: boolean
+ * Default: TRUE
+
+When enabled support for TLSv1 is disabled.
+
 DISABLE_ZLINES
  * Type: boolean
  * Default: FALSE
