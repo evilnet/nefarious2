@@ -1836,6 +1836,5 @@ exceptlistdelay: LISTDELAY '=' YES ';'
 
 include: INCLUDE QSTRING ';'
 {
-  if (!init_lexer_file($2))
-    parse_error("Error including file %s", $2);
+  init_lexer_file($2);
 }

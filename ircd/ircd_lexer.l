@@ -25,11 +25,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "config.h"
 #include "fileio.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_string.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "y.tab.h"
 
@@ -296,10 +298,13 @@ void deinit_lexer(void)
 int
 init_lexer_file(char* file)
 {
+  static char error_buffer[1024];
+
   if (include_stack_ptr >= MAX_INCLUDE_DEPTH)
   {
-    fprintf(stderr, "Includes nested too deeply");
-    exit(1);
+    snprintf((char *)&error_buffer, 1024, "Cannot include %s: Includes nested too deeply", file);
+    yyerror(error_buffer);
+    return 0;
   }
 
   include_stack[include_stack_ptr].lineno = lineno;
@@ -310,11 +315,9 @@ init_lexer_file(char* file)
 
   if (lexer_input == NULL)
   {
-#ifdef YY_FATAL_ERROR
-    YY_FATAL_ERROR("Could not open the configuration file.");
-#else
-    fprintf(stderr, "Could not open the configuration file.");
-#endif
+    snprintf((char *)&error_buffer, 1024, "Cannot include %s: %s", file, strerror(errno));
+    yyerror(error_buffer);
+    lexer_input = include_stack[--include_stack_ptr].lexer_input;
     return 0;
   }
 #ifdef YY_NEW_FILE
