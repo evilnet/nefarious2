@@ -638,6 +638,11 @@ void checkServer(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
+   if (MyConnect(acptr) && IsSSL(acptr)) {
+    ircd_snprintf(0, outbuf, sizeof(outbuf), "    SSL Ciphers:: %s", ssl_get_cipher(cli_socket(acptr).ssl));
+    send_reply(sptr, RPL_DATASTR, outbuf);
+   }
+
    ircd_snprintf(0, outbuf, sizeof(outbuf), "        Numeric:: %s --> %d", NumServ(acptr), base64toint(acptr->cli_yxx));
    send_reply(sptr, RPL_DATASTR, outbuf);
 
