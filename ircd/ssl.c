@@ -173,7 +173,7 @@ SSL_CTX *ssl_init_client_ctx(void)
 {
   SSL_CTX *client_ctx = NULL;
 
-  client_ctx = SSL_CTX_new(SSLv3_client_method());
+  client_ctx = SSL_CTX_new(SSLv23_client_method());
   if (!client_ctx)
   {
     sslfail("Error creating new client context");
