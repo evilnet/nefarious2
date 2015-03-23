@@ -553,6 +553,12 @@ int ssl_connect(struct Socket* sock)
   if (!sock->ssl) {
     sock->ssl = SSL_new(ssl_client_ctx);
     SSL_set_fd(sock->ssl, sock->s_fd);
+    if (feature_bool(FEAT_SSL_NOSSLV2))
+      SSL_set_options(sock->ssl, SSL_OP_NO_SSLv2);
+    if (feature_bool(FEAT_SSL_NOSSLV3))
+      SSL_set_options(sock->ssl, SSL_OP_NO_SSLv3);
+    if (feature_bool(FEAT_SSL_NOTLSV1))
+      SSL_set_options(sock->ssl, SSL_OP_NO_TLSv1);
     ssl_set_nonblocking(sock->ssl);
   }
 
