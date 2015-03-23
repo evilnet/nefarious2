@@ -1777,7 +1777,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
     if (FlagHas(&setflags, FLAG_OPER) && !IsOper(acptr)) {
       /* user no longer oper */
-      if (!FlagHas(&setflags, FLAG_HIDE_OPER) && !FlagHas(&setflags, FLAG_CHSERV) && FlagHas(&setflags, FLAG_BOT)) {
+      if (!FlagHas(&setflags, FLAG_HIDE_OPER) && !FlagHas(&setflags, FLAG_CHSERV) && !FlagHas(&setflags, FLAG_BOT)) {
         assert(UserStats.opers > 0);
         --UserStats.opers;
       }
