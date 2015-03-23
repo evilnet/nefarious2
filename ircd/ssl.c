@@ -33,6 +33,7 @@
 #include "ircd_string.h"
 #include "listener.h"
 #include "s_bsd.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "send.h"
 #include "ssl.h"
@@ -154,6 +155,16 @@ SSL_CTX *ssl_init_server_ctx(void)
     sslfail("Error checking SSL private key for server context");
     SSL_CTX_free(server_ctx);
     return NULL;
+  }
+
+  if (!EmptyString(feature_str(FEAT_SSL_CIPHERS)))
+  {
+    if (SSL_CTX_set_cipher_list(server_ctx, feature_str(FEAT_SSL_CIPHERS)) == 0)
+    {
+      sslfail("Error setting SSL cipher list for clients");
+      SSL_CTX_free(server_ctx);
+      return NULL;
+    }
   }
 
   if (!EmptyString(feature_str(FEAT_SSL_CACERTFILE)))
@@ -546,7 +557,7 @@ char *ssl_get_cipher(SSL *ssl)
   return (buf);
 }
 
-int ssl_connect(struct Socket* sock)
+int ssl_connect(struct Socket* sock, struct ConfItem *aconf)
 {
   int r = 0;
 
@@ -559,6 +570,16 @@ int ssl_connect(struct Socket* sock)
       SSL_set_options(sock->ssl, SSL_OP_NO_SSLv3);
     if (feature_bool(FEAT_SSL_NOTLSV1))
       SSL_set_options(sock->ssl, SSL_OP_NO_TLSv1);
+    SSL_set_connect_state(sock->ssl);
+
+    if (!EmptyString(aconf->sslciphers))
+    {
+      if (SSL_set_cipher_list(sock->ssl, aconf->sslciphers) == 0)
+      {
+        return -2;
+      }
+    }
+
     ssl_set_nonblocking(sock->ssl);
   }
 

@@ -36,13 +36,14 @@
 
 struct Socket;
 struct Listener;
+struct ConfItem;
 
 extern int ssl_init(void);
 extern int ssl_reinit(void);
 extern void ssl_add_connection(struct Listener *listener, int fd);
 extern int ssl_murder(void *ssl, int fd, const char *buf);
 extern void ssl_free(struct Socket *socketh);
-extern int ssl_connect(struct Socket* sock);
+extern int ssl_connect(struct Socket* sock, struct ConfItem *aconf);
 extern int ssl_is_init_finished(SSL *s);
 extern int ssl_starttls(struct Client *cptr);
 extern void ssl_abort(struct Client *cptr);

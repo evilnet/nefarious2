@@ -761,6 +761,7 @@ static struct FeatureDesc {
   F_B(SSL_NOSSLV2, 0, 1, 0),
   F_B(SSL_NOSSLV3, 0, 1, 0),
   F_B(SSL_NOTLSV1, 0, 1, 0),
+  F_S(SSL_CIPHERS, FEAT_NULL, 0, 0),
 
   /* ZLINE FEAT_'s */
   F_B(DISABLE_ZLINES, 0, 0, 0),

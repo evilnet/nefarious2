@@ -73,6 +73,7 @@ struct ConfItem
   char *origin_name;  /**< Text form of origin address */
   char *passwd;       /**< Password field */
   char *sslfp;        /**< SSL certificate fingerprint */
+  char *sslciphers;   /**< SSL ciphers list */
   char *name;         /**< Name of peer */
   char *hub_limit;    /**< Mask that limits servers allowed behind
                          this one. */

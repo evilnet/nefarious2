@@ -166,6 +166,7 @@ void free_conf(struct ConfItem *aconf)
     memset(aconf->passwd, 0, strlen(aconf->passwd));
   MyFree(aconf->passwd);
   MyFree(aconf->sslfp);
+  MyFree(aconf->sslciphers);
   MyFree(aconf->name);
   MyFree(aconf->hub_limit);
   MyFree(aconf->countrymask);

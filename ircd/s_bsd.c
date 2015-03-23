@@ -359,9 +359,13 @@ static int completed_connection(struct Client* cptr)
 
   if (aconf->flags & CONF_SSL) {
 #ifdef USE_SSL
-    r = ssl_connect(&(cli_socket(cptr)));
+    r = ssl_connect(&(cli_socket(cptr)), aconf);
     if (r == -1) {
       sendto_opmask_butone(0, SNO_OLDSNO, "Connection failed to %s: SSL error",
+                           cli_name(cptr));
+      return 0;
+    } else if (r == -2) {
+      sendto_opmask_butone(0, SNO_OLDSNO, "Connection failed to %s: Unable to select SSL ciphers",
                            cli_name(cptr));
       return 0;
     } else if (r == 0)

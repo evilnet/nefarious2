@@ -1684,6 +1684,14 @@ SSL_NOTLSV1
 
 When enabled support for TLSv1 is disabled.
 
+SSL_CIPHERS
+ * Type: string
+ * Default: NULL
+
+When set configures the list of available ciphers for incoming SSL
+connections. See https://www.openssl.org/docs/apps/ciphers.html for an
+explanation on how to format this string.
+
 DISABLE_ZLINES
  * Type: boolean
  * Default: FALSE

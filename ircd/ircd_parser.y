@@ -83,7 +83,7 @@ extern int init_lexer_file(char* file);
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans, redirport, hidehostcomps;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
-  char *spoofhost, *sslfp, *description, *redirserver;
+  char *spoofhost, *sslfp, *sslciphers, *description, *redirserver;
   char *country, *continent, *ajoinchan, *ajoinnotice;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
@@ -226,6 +226,7 @@ static void free_slist(struct SLink **link) {
 %token FAKELAGFACTOR
 %token DEFAULTTEXT
 %token SSLFP
+%token SSLCIPHERS
 %token INCLUDE
 %token SSLTOK
 /* and now a lot of privileges... */
@@ -615,6 +616,7 @@ connectblock: CONNECT
    aconf->origin_name = origin;
    aconf->passwd = pass;
    aconf->sslfp = sslfp;
+   aconf->sslciphers = sslciphers;
    aconf->conn_class = c_class;
    aconf->address.port = port;
    aconf->host = host;
@@ -630,20 +632,21 @@ connectblock: CONNECT
    MyFree(name);
    MyFree(pass);
    MyFree(sslfp);
+   MyFree(sslciphers);
    MyFree(host);
    MyFree(origin);
    MyFree(hub_limit);
  }
  name = pass = host = origin = hub_limit = NULL;
  c_class = NULL;
- sslfp = NULL;
+ sslfp = sslciphers = NULL;
  port = flags = maxlinks = 0;
 };
 connectitems: connectitem connectitems | connectitem;
 connectitem: connectname | connectpass | connectclass | connecthost
               | connectport | connectvhost | connectleaf | connecthub
               | connecthublimit | connectmaxhops | connectauto | connectssl
-              | connectsslfp;
+              | connectsslfp | connectsslciphers;
 connectname: NAME '=' QSTRING ';'
 {
  MyFree(name);
@@ -708,6 +711,11 @@ connectsslfp: SSLFP '=' QSTRING ';'
 {
   MyFree(sslfp);
   sslfp = $3;
+};
+connectsslciphers: SSLCIPHERS '=' QSTRING ';'
+{
+  MyFree(sslciphers);
+  sslciphers = $3;
 };
 
 uworldblock: UWORLD '{' uworlditems '}' ';';

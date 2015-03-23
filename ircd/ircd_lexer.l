@@ -147,6 +147,7 @@ static struct lexer_token {
   TOKEN(FAKELAGFACTOR),
   TOKEN(DEFAULTTEXT),
   TOKEN(SSLFP),
+  TOKEN(SSLCIPHERS),
   TOKEN(INCLUDE),
 #undef TOKEN
   { "ssl", SSLTOK },
