@@ -1749,6 +1749,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (!FlagHas(&setflags, FLAG_SETHOST) ||
         (FlagHas(&setflags, FLAG_SETHOST) &&
          ircd_strncmp(cli_user(acptr)->sethost, sethost, HOSTLEN))) {
+      /* Make sure we forward the sethost if its changed */
+      FlagClr(&setflags, FLAG_SETHOST);
       ircd_strncpy(cli_user(acptr)->sethost, sethost, HOSTLEN);
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;

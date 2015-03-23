@@ -167,6 +167,8 @@ int m_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         else
           ircd_snprintf(0, cli_user(sptr)->sethost, USERLEN + HOSTLEN + 1, "%s@%s",
                       cli_user(sptr)->username, parv[1]);
+        if (FlagHas(&setflags, FLAG_SETHOST))
+          FlagClr(&setflags, FLAG_SETHOST);
         SetSetHost(sptr);
         SetHiddenHost(sptr);
       } else {
@@ -216,12 +218,16 @@ int mo_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       send_reply(sptr, ERR_BADHOSTMASK, hostmask);
     } else if (HasPriv(sptr, PRIV_FREEFORM)) {
       ircd_strncpy(cli_user(sptr)->sethost, hostmask, USERLEN + HOSTLEN + 1);
+      if (FlagHas(&setflags, FLAG_SETHOST))
+        FlagClr(&setflags, FLAG_SETHOST);
       SetSetHost(sptr);
       SetHiddenHost(sptr);
     } else {
       sconf = find_shost_conf(sptr, hostmask, NULL, &res);
       if ((res == 0) && (sconf != 0)) {
         ircd_strncpy(cli_user(sptr)->sethost, hostmask, USERLEN + HOSTLEN + 1);
+        if (FlagHas(&setflags, FLAG_SETHOST))
+          FlagClr(&setflags, FLAG_SETHOST);
         SetSetHost(sptr);
         SetHiddenHost(sptr);
       } else {
