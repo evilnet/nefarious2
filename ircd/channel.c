@@ -4159,6 +4159,7 @@ static void
 mode_process_clients(struct ParseState *state)
 {
   int i;
+  int newoplevel = MAXOPLEVEL + 1;
   struct Membership *member;
 
   for (i = 0; state->cli_change[i].flag; i++) {
@@ -4175,10 +4176,30 @@ mode_process_clients(struct ParseState *state)
       continue;
     }
 
+    newoplevel = MAXOPLEVEL + 1;
+    /* get op-level for member being opped */
+    if ((state->cli_change[i].flag & (MODE_ADD | MODE_CHANOP)) ==
+        (MODE_ADD | MODE_CHANOP)) {
+      /* If a valid oplevel was specified, use it.
+       * Otherwise, if being opped by an outsider, get MAXOPLEVEL.
+       * Otherwise, if not an apass channel, or state->member has
+       *   MAXOPLEVEL, get oplevel MAXOPLEVEL.
+       * Otherwise, get state->member's oplevel+1.
+       */
+      if (state->cli_change[i].oplevel <= MAXOPLEVEL)
+        newoplevel = state->cli_change[i].oplevel;
+      else if (!state->member)
+        newoplevel = MAXOPLEVEL;
+      else if (OpLevel(state->member) >= MAXOPLEVEL)
+        newoplevel = OpLevel(state->member);
+      else
+        newoplevel = OpLevel(state->member) + 1;
+    }
+
     if ((state->cli_change[i].flag & MODE_ADD &&
 	(state->cli_change[i].flag & member->status) &&
 	(!feature_bool(FEAT_ALLOW_OPLEVEL_CHANGE) ||
-	(state->cli_change[i].oplevel == member->oplevel))) ||
+	(newoplevel == member->oplevel))) ||
 	(state->cli_change[i].flag & MODE_DEL &&
 	!(state->cli_change[i].flag & member->status)))
       continue; /* no change made, don't do anything */
@@ -4244,20 +4265,7 @@ mode_process_clients(struct ParseState *state)
     /* set op-level of member being opped */
     if ((state->cli_change[i].flag & (MODE_ADD | MODE_CHANOP)) ==
 	(MODE_ADD | MODE_CHANOP)) {
-      /* If a valid oplevel was specified, use it.
-       * Otherwise, if being opped by an outsider, get MAXOPLEVEL.
-       * Otherwise, if not an apass channel, or state->member has
-       *   MAXOPLEVEL, get oplevel MAXOPLEVEL.
-       * Otherwise, get state->member's oplevel+1.
-       */
-      if (state->cli_change[i].oplevel <= MAXOPLEVEL)
-        SetOpLevel(member, state->cli_change[i].oplevel);
-      else if (!state->member)
-        SetOpLevel(member, MAXOPLEVEL);
-      else if (OpLevel(state->member) >= MAXOPLEVEL)
-          SetOpLevel(member, OpLevel(state->member));
-      else
-        SetOpLevel(member, OpLevel(state->member) + 1);
+      SetOpLevel(member, newoplevel);
     }
 
     /* actually effect the change */
