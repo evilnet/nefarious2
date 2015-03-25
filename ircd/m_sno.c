@@ -50,7 +50,7 @@ int ms_sno(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (EmptyString(message) || !mask)
     return need_more_params(sptr, "SNO");
 
-  sendto_opmask_butone(sptr, mask, "%s", message);
+  sendto_opmask_butone_from(sptr, sptr, mask, "%s", message);
   sendcmdto_serv_butone(sptr, CMD_SNO, cptr, "%d :%s", mask, message);
   return 0;
 }

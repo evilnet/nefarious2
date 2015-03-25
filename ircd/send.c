@@ -938,7 +938,7 @@ void sendto_opmask_butone_global(struct Client *one, unsigned int mask,
     msgq_clean(mb);
   }
 
-  vsendto_opmask_butone(one, mask, pattern, vl);
+  vsendto_opmask_butone(&me, one, mask, pattern, vl);
   va_end(vl);
 }
 
@@ -954,7 +954,23 @@ void sendto_opmask_butone(struct Client *one, unsigned int mask,
   va_list vl;
 
   va_start(vl, pattern);
-  vsendto_opmask_butone(one, mask, pattern, vl);
+  vsendto_opmask_butone(&me, one, mask, pattern, vl);
+  va_end(vl);
+}
+
+/** Send a server notice to all users subscribing to the indicated \a
+ * mask except for \a one from \a from.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] mask One of the SNO_* constants.
+ * @param[in] pattern Format string for server notice.
+ */
+void sendto_opmask_butone_from(struct Client *from, struct Client *one,
+                          unsigned int mask, const char *pattern, ...)
+{
+  va_list vl;
+
+  va_start(vl, pattern);
+  vsendto_opmask_butone(from, one, mask, pattern, vl);
   va_end(vl);
 }
 
@@ -976,7 +992,7 @@ void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
     *rate = CurrentTime;
 
   va_start(vl, pattern);
-  vsendto_opmask_butone(one, mask, pattern, vl);
+  vsendto_opmask_butone(&me, one, mask, pattern, vl);
   va_end(vl);
 }
 
@@ -988,8 +1004,8 @@ void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
  * @param[in] pattern Format string for server notice.
  * @param[in] vl Argument list for format string.
  */
-void vsendto_opmask_butone(struct Client *one, unsigned int mask,
-			   const char *pattern, va_list vl)
+void vsendto_opmask_butone(struct Client *from, struct Client *one,
+                           unsigned int mask, const char *pattern, va_list vl)
 {
   struct VarData vd;
   struct MsgBuf *mb;
@@ -1008,7 +1024,7 @@ void vsendto_opmask_butone(struct Client *one, unsigned int mask,
    */
   vd.vd_format = pattern;
   va_copy(vd.vd_args, vl);
-  mb = msgq_make(0, ":%s " MSG_NOTICE " * :*** Notice -- %v", cli_name(&me),
+  mb = msgq_make(0, ":%s " MSG_NOTICE " * :*** Notice -- %v", cli_name(from),
 		 &vd);
 
   for (; opslist; opslist = opslist->next)
