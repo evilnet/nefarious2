@@ -207,7 +207,7 @@ unsigned int alpha, beta, gamma, delta;
         return result;
 }
 
-char *hidehost_normalhost(char *host, int componants)
+char *hidehost_normalhost(char *host, int components)
 {
 char *p;
 static char buf[512], res[512], res2[512], result[HOSTLEN+1];
@@ -224,7 +224,7 @@ int comps = 0;
         for (p = host; *p; p++) {
                 if (*p == '.') {
                         comps++;
-                        if ((comps >= componants) && IsAlpha(*(p + 1)))
+                        if ((comps >= components) && IsAlpha(*(p + 1)))
                                 break;
                 }
         }

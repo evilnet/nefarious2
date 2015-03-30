@@ -1072,7 +1072,7 @@ struct Client {
 
 extern const char* get_client_name(const struct Client* sptr, int showip);
 extern const char* client_get_default_umode(const struct Client* sptr);
-extern int client_get_hidehostcomponants(const struct Client* sptr);
+extern int client_get_hidehostcomponents(const struct Client* sptr);
 extern int client_get_ping(const struct Client* local_client);
 extern void client_drop_sendq(struct Connection* con);
 extern void client_add_sendq(struct Connection* con,

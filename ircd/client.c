@@ -91,11 +91,11 @@ const char* client_get_default_umode(const struct Client* sptr)
   return NULL;
 }
 
-/** Find the number of host componants to hide for a client.
- * @param[in] sptr Client to find the number of host componants to hide for.
- * @return The number of host componants to hide.
+/** Find the number of host components to hide for a client.
+ * @param[in] sptr Client to find the number of host components to hide for.
+ * @return The number of host components to hide.
  */
-int client_get_hidehostcomponants(const struct Client* sptr)
+int client_get_hidehostcomponents(const struct Client* sptr)
 {
   struct ConfItem* aconf;
   struct SLink* link;
@@ -108,7 +108,7 @@ int client_get_hidehostcomponants(const struct Client* sptr)
         return aconf->hidehostcomps;
   }
 
-  return feature_int(FEAT_HOST_HIDING_COMPONANTS);
+  return feature_int(FEAT_HOST_HIDING_COMPONENTS);
 }
 
 /** Remove a connection from the list of connections with queued data.

@@ -214,6 +214,7 @@ static void free_slist(struct SLink **link) {
 %token ISMASK
 %token REDIRECT
 %token HIDEHOSTCOMPONANTS
+%token HIDEHOSTCOMPONENTS
 %token AUTOJOINCHANNEL
 %token AUTOJOINNOTICE
 %token AUTHEXEMPT
@@ -1176,6 +1177,11 @@ clientredir: REDIRECT '=' QSTRING expr ';'
   redirserver = $3;
 };
 clienthidehostcomps: HIDEHOSTCOMPONANTS '=' expr ';'
+{
+  log_write(LS_CONFIG, L_WARNING, 0, "Field \"hidehostcomponants\" deprecated, "
+            "use \"hosthidecomponents\"");
+  hidehostcomps = $3;
+} | HIDEHOSTCOMPONENTS '=' expr ';'
 {
   hidehostcomps = $3;
 };

@@ -9,7 +9,7 @@
 
 extern char *hidehost_ipv4(struct irc_in_addr *ip);
 extern char *hidehost_ipv6(struct irc_in_addr *ip);
-extern char *hidehost_normalhost(char *host, int componants);
+extern char *hidehost_normalhost(char *host, int components);
 
 #endif /* INCLUDED_ircd_cloaking_h */
 

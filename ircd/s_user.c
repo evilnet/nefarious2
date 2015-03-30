@@ -2216,13 +2216,13 @@ int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg)
 void
 user_setcloaked(struct Client *cptr)
 {
-  int componants = 0;
+  int components = 0;
 
   if ((feature_int(FEAT_HOST_HIDING_STYLE) != 2) &&
       (feature_int(FEAT_HOST_HIDING_STYLE) != 3))
     return;
 
-  componants = client_get_hidehostcomponants(cptr);
+  components = client_get_hidehostcomponents(cptr);
 
   if (!IsCloakIP(cptr)) {
     if (irc_in_addr_is_ipv4(&(cli_ip(cptr))))
@@ -2237,7 +2237,7 @@ user_setcloaked(struct Client *cptr)
       ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN, cli_user(cptr)->cloakip);
     else
       ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN,
-                    hidehost_normalhost(cli_user(cptr)->realhost, componants));
+                    hidehost_normalhost(cli_user(cptr)->realhost, components));
     SetCloakHost(cptr);
   }
 }

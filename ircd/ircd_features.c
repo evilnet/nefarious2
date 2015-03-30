@@ -453,6 +453,7 @@ typedef void (*feat_report_call)(struct Client* sptr, int marked);
 #define FEAT_INT    0x0001	/**< set if entry contains an integer value */
 #define FEAT_BOOL   0x0002	/**< set if entry contains a boolean value */
 #define FEAT_STR    0x0003	/**< set if entry contains a string value */
+#define FEAT_ALIAS  0x0004      /**< set if entry is alias for another entry */
 #define FEAT_MASK   0x000f	/**< possible value types */
 
 #define FEAT_MARK   0x0010	/**< set if entry has been changed */
@@ -481,6 +482,10 @@ typedef void (*feat_report_call)(struct Client* sptr, int marked);
 #define F_S(type, flags, v_str, notify)					      \
   { FEAT_ ## type, #type, FEAT_STR | (flags), 0, 0, 0, (v_str),		      \
     0, 0, 0, (notify), 0, 0, 0 }
+/** Declare a feature as an alias for another feature. */
+#define F_A(type, alias)                                                      \
+  { FEAT_ ## type, #type, FEAT_ALIAS, 0, FEAT_ ## alias, 0, 0,                \
+    0, 0, 0, 0, 0, 0, 0 }
 
 /** Table of feature descriptions. */
 static struct FeatureDesc {
@@ -736,7 +741,8 @@ static struct FeatureDesc {
   F_S(HOST_HIDING_KEY1, 0, "aoAr1HnR6gl3sJ7hVz4Zb7x4YwpW", 0),
   F_S(HOST_HIDING_KEY2, 0, "sdfjkLJKHlkjdkfjsdklfjlkjKLJ", 0),
   F_S(HOST_HIDING_KEY3, 0, "KJklJSDFLkjLKDFJSLKjlKJFlkjS", 0),
-  F_I(HOST_HIDING_COMPONANTS, 0, 1, 0),
+  F_A(HOST_HIDING_COMPONANTS, HOST_HIDING_COMPONENTS),
+  F_I(HOST_HIDING_COMPONENTS, 0, 1, 0),
 
   /* CTCP VERSION FEAT_'s */
   F_B(CTCP_VERSIONING, 0, 0, 0),
@@ -783,6 +789,7 @@ static struct FeatureDesc {
 #undef F_B
 #undef F_I
 #undef F_N
+#undef F_A
   { FEAT_LAST_F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
@@ -797,10 +804,28 @@ feature_desc(struct Client* from, const char *feature)
   int i;
 
   assert(0 != feature);
+  for (i = 0; features[i].type; i++) { /* find appropriate descriptor */
+    if (!strcmp(feature, features[i].type)) {
+      switch (features[i].flags & FEAT_MASK) {
+        case FEAT_ALIAS:
+          Debug((DEBUG_NOTICE, "Deprecated feature \"%s\" referenced; replace "
+                 "with %s", feature, features[features[i].def_int].type));
+          if (from) /* report a warning */
+            send_reply(from, SND_EXPLICIT | ERR_NOFEATURE,
+                       "%s :Feature deprecated, use %s", feature,
+                       features[features[i].def_int].type);
+          else
+            log_write(LS_CONFIG, L_WARNING, 0, "Feature \"%s\" deprecated, "
+                      "use \"%s\"", feature, features[features[i].def_int].type);
 
-  for (i = 0; features[i].type; i++) /* find appropriate descriptor */
-    if (!strcmp(feature, features[i].type))
-      return &features[i];
+          return &features[features[i].def_int];
+          break;
+        default:
+          return &features[i];
+          break;
+      }
+    }
+  }
 
   Debug((DEBUG_ERROR, "Unknown feature \"%s\"", feature));
   if (from) /* report an error */
