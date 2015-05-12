@@ -28,6 +28,10 @@ COMPATIBILITY
 This version of ircu will only work with servers that use the P10 protocol,
 some of the new features will only work between ircu2.10.12 servers.
 
+Nefarious 2 versions after March 22nd/commit b6ac7f6 are by default not
+backward compatable with SSL server2server links. You must add feature
+SSL_NOSSLv3 = "FALSE" until all servers are updated.
+
 GENERAL PERFORMANCE HINTS
 
 For platform-specific notes and hints, see the platform-specific
