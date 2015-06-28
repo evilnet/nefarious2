@@ -38,3 +38,4 @@ ported from Nefarious 1.
 Trystan Scott <trystan@burkee.org>: Supplied a patch for a few compiler
 warnings.
 
+Alex Schumann <rubin@afternet.org>: iAuthd development and misc bug fixes.
