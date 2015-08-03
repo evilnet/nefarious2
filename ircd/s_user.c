@@ -409,7 +409,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (feature_str(FEAT_CTCP_VERSIONING_NOTICE)) {
         char strver[BUFSIZE] = "";
         ircd_snprintf(0, strver, strlen(feature_str(FEAT_CTCP_VERSIONING_NOTICE)) + 16,
-                      "NOTICE AUTH :%s\r\n", feature_str(FEAT_CTCP_VERSIONING_NOTICE));
+                      "NOTICE * :%s\r\n", feature_str(FEAT_CTCP_VERSIONING_NOTICE));
         sendheader(sptr, strver, strlen(strver));
       }
 
