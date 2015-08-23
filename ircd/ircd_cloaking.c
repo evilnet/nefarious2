@@ -42,8 +42,6 @@
 #define KEY3 feature_str(FEAT_HOST_HIDING_KEY3)
 #define PREFIX feature_str(FEAT_HOST_HIDING_PREFIX)
 
-static inline unsigned int downsample(unsigned char *i);
-
 /** Downsamples a 128bit result to 32bits (md5 -> unsigned int) */
 static inline unsigned int downsample(unsigned char *i)
 {
