@@ -481,7 +481,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /*	ERR_OPERONLY	     520	unreal */
 #define ERR_MASKTOOWIDE	     520	/* Undernet extension -Kev */
 /*      ERR_WHOTRUNC         520        austnet */
-#define ERR_NOSUCHGLINE      512        /* Undernet extension (new) */
+#define ERR_NOSUCHGLINE      521        /* Undernet extension (new) */
 /*      ERR_LISTSYNTAX       521        dalnet
 	ERR_LISTSYNTAX       521	dalnet
 	ERR_WHOSYNTAX	     522        dalnet
