@@ -26,7 +26,12 @@ check_file() {
 }
 
 # Try to find programs we will need
-locate_program openssl && locate_program git && locate_program egrep && locate_program diff
+locate_program openssl 
+locate_program git
+locate_program egrep
+locate_program diff
+locate_program chmod
+locate_program readlink
 
 # try to find GNU awk
 awk_cmd=`which gawk`
@@ -58,6 +63,7 @@ cpath=$1
 ppath=$2
 check_file $cpath
 dpath=`dirname $cpath`
+dpath=`readlink -f $dpath`
 lpath="$dpath/linesync"
 kpath="$dpath/ircd.pem"
 #check_file $lpath
@@ -80,16 +86,21 @@ fi
 
 #Generate ssh identity from ircd.pem
 # first get the private key by just grabbing the lines that match...
-awk '/BEGIN PRIVATE KEY/,/END PRIVATE KEY/' $kpath > $tmp_path/ssh.pem
+awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' $kpath > $tmp_path/ssh.pem
 # Then we'll get the public key more properly..
 openssl x509 -in $kpath -pubkey -noout >> $tmp_path/ssh.pem
+
+chmod 600 $tmp_path/ssh.pem
 
 # To get the public key for use in authorize_keys you'd do this:
 #     ssh-keygen -i -m PKCS8 -f $tmp_path/ssh.pem >ssh.pub
 # but we dont need it ...
 
 #Override git's ssh command so we can force our custom identity
-GIT_SSH_COMMAND="ssh -i $tmp_path/ssh.pem"
+echo '#!/bin/bash' > $tmp_path/git.sh
+echo "ssh -i $tmp_path/ssh.pem \$1 \$2\n" >> $tmp_path/git.sh
+chmod a+x $tmp_path/git.sh
+export GIT_SSH="$tmp_path/git.sh"
 
 #update the repository from upstream
 prevdir=`pwd`
