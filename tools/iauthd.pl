@@ -50,6 +50,7 @@
 #          block    -  all - blocks connection if matched
 #                      anonymous - blocks connection unless LOC/SASL
 #          whitelist- listed users wont be blocked by any rbl            
+#          cachetime - Override default cache timeout. Useful for whitelists you run yourself
 #  
 #     DEBUG:      - values greater than 0 turn iauth debugging on in the ircd
 #
@@ -429,8 +430,16 @@ sub handle_client {
             $client->{'lookups'}->{$dnsbl->{'cfgnum'}} = 1;
             debug("Looking up client $source: $pi.$server");
 
+            #Use global or specific cachetime setting
+            my $cachetime = $config{'cachetime'};
+            if(exists $dnsbl->{'cachetime'}) {
+                $cachetime = $dnsbl->{'cachetime'};
+            }
+
             #purge from the cache if it matches...
-            if(exists $dnsbl_cache{"$pi.$server"} && exists $dnsbl_cache{"$pi.$server"}->{'ts'} && $dnsbl_cache{"$pi.$server"}->{'ts'} < ( time() - $config{'cachetime'}) ) {
+            if(    exists $dnsbl_cache{"$pi.$server"} 
+                && exists $dnsbl_cache{"$pi.$server"}->{'ts'} 
+                && $dnsbl_cache{"$pi.$server"}->{'ts'} < ( time() - $cachetime) ) {
                 
                 debug("Deleting stale cache entry for $pi.$server");
                 delete $dnsbl_cache{"$pi.$server"};
@@ -516,7 +525,7 @@ sub handle_dnsbl_response {
 
     my $host_ip = "$4.$3.$2.$1";
     my $dnsbl_server = "$5";
-    debug("Got a DNS reply for $host_ip from $dnsbl_server...");
+    debug("Got a ". ($iscached?"cache hit":"DNS reply") . " for $host_ip from $dnsbl_server..." . @$results . " replies...");
 
     #If this result is a hit for any dnsbls, find related clients and mark/block/whitelist etc
     foreach my $ip (@$results) {
