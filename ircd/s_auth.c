@@ -286,14 +286,13 @@ static int auth_set_username(struct AuthRequest *auth)
   {
     /* Prepend ~ to user->username. */
     s = user->username;
-    s[USERLEN] = '\0';
+    s[USERLEN-1] = '\0';
     for (last = '~'; last != '\0'; )
     {
       ch = *s;
       *s++ = last;
       last = ch;
     }
-    *s++ = last;
     *s = '\0';
   } /* else cleaned version of client-provided name is in place */
 

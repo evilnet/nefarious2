@@ -544,7 +544,7 @@ static Numeric replyTable[] = {
 /* 255 */
   { RPL_LUSERME, ":I have %u clients and %u servers", "255" },
 /* 256 */
-  { RPL_ADMINME, ":Administrative info about %s", "256" },
+  { RPL_ADMINME, "%s :Administrative info", "256" },
 /* 257 */
   { RPL_ADMINLOC1, ":%s", "257" },
 /* 258 */
