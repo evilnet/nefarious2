@@ -9,6 +9,9 @@
 # 0 0 * * * /home/irc/bin/linesync.sh /home/irc/lib/ircd.conf /home/irc/lib/ircd.pid
 #
 
+#Set this to the git repository that holds your linesync.data file
+repository=gitolite@afternet.org:linesync
+
 # This checks for the presence of an executable file in $PATH
 locate_program() {
         if [ ! -x "`which $1 2>&1`" ]; then
@@ -44,6 +47,7 @@ if [ -z "$awk_cmd" ]; then
 	is_gawk=`echo | awk --version | head -1 | egrep '^GNU.+$'`
 	if [ -z "$is_gawk" ]; then
 		echo "Your version of awk is not GNU awk. Sorry."
+        echo "Try: # sudo apt-get install gawk"
 		exit 1
 	fi
 	awk_cmd="awk"	
@@ -72,17 +76,11 @@ tpath=$PWD; cd $save_dir
 tmp_path="$dpath/tmp"
 ipath="$tmp_path/ssh.pem"
 mkdir $tmp_path > /dev/null 2>&1
+clonecmd="git clone $repository $lpath"
 
 # Not all versions of date support %s, work around it
 TS=`date +%Y%m%d%H%M%S`
 TMPFILE="$tmp_path/linesync.$TS"
-
-#Check for the git repository
-if [ ! -d "$lpath/.git" ]; then
-    echo "Cannot find a git repository at $lpath."
-    exit 10
-fi
-# TODO: check it out if its missing?
 
 #Generate ssh identity from ircd.pem
 # first get the private key by just grabbing the lines that match...
@@ -90,17 +88,33 @@ awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' $kpath > $tmp_path/ssh.pem
 # Then we'll get the public key more properly..
 openssl x509 -in $kpath -pubkey -noout >> $tmp_path/ssh.pem
 
-chmod 600 $tmp_path/ssh.pem
-
 # To get the public key for use in authorize_keys you'd do this:
 #     ssh-keygen -i -m PKCS8 -f $tmp_path/ssh.pem >ssh.pub
 # but we dont need it ...
+
+
+chmod 600 $tmp_path/ssh.pem
 
 #Override git's ssh command so we can force our custom identity
 echo '#!/bin/bash' > $tmp_path/git.sh
 echo "ssh -i $tmp_path/ssh.pem \$1 \$2\n" >> $tmp_path/git.sh
 chmod a+x $tmp_path/git.sh
 export GIT_SSH="$tmp_path/git.sh"
+
+#Check for the git repository
+if [ ! -d "$lpath" ]; then
+    echo "Cannot find a git repository at $lpath."
+    echo "...attempting to check it out"
+    prevdir=`pwd`
+    cd "$dpath"
+    clonecmd
+    cd "$prevdir"
+fi
+
+if [ ! -d "$lpath"/.git ]; then
+    echo "Error: $lpath is not a git repository. ?!"
+    exit 10
+fi
 
 #update the repository from upstream
 prevdir=`pwd`
@@ -175,6 +189,8 @@ if [ ! -z "$diff" ]; then
 
 	# Rehash ircd (without caring wether or not it succeeds)
 	kill -HUP `cat $ppath 2>/dev/null` > /dev/null 2>&1
+
+    #todo: kill iauthd?
 fi
 
 # (Try to) clean up
