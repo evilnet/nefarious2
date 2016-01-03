@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # gitysnc.sh, Copyright (c) 2015 Rubin
 # based on linesync.sh (c) 2002 Arjen Wolfs
 #
@@ -9,8 +9,39 @@
 # 0 0 * * * /home/irc/bin/linesync.sh /home/irc/lib/ircd.conf /home/irc/lib/ircd.pid
 #
 
-#Set this to the git repository that holds your linesync.data file
-repository=gitolite@afternet.org:linesync
+usage() {
+    echo "Help: "
+    echo "  $0 [-h|-i repository] <ircd.conf> <ircd.pid>"
+    echo ""
+    echo " -i repository - Perform initial setup, needed only once to set up. Provide git URL as argument"
+    echo " -h            - this help"
+    echo " ircd.conf     - Path to your ircd.conf file"
+    echo " ircd.pid      - Path to your ircd.pid file"
+    echo ""
+}
+
+#Handle argument parsing
+while getopts "hi:" opt; do
+    case $opt in
+     h)
+        usage
+        ;;
+     i)
+         echo "Doing initial setup with repository $repository" >&2
+         dosetup="yes"
+         repository="$OPTARG"
+
+         ;;
+    \?)
+        echo "Unknown option: -$OPTARG" >&2
+        exit 1
+        ;;
+    :)
+        echo "Option -$OPTARG requires an argument." >&2
+        exit 1
+    esac
+done
+shift $((OPTIND-1))
 
 # This checks for the presence of an executable file in $PATH
 locate_program() {
@@ -55,9 +86,7 @@ fi
 
 # Check for required command line parameters
 if [ -z "$1" -o -z "$2" ]; then
-        echo "Usage: $0 <conf_path> <pid_path>"
-        echo "      <conf_path>     Full path to ircd.conf (/home/irc/lib/ircd.conf)"
-        echo "      <pid_path>      Full path to ircd.pid (/home/irc/lib/ircd.pid)"
+        usage
         exit 1
 fi
 
@@ -76,7 +105,6 @@ tpath=$PWD; cd $save_dir
 tmp_path="$dpath/tmp"
 ipath="$tmp_path/ssh.pem"
 mkdir $tmp_path > /dev/null 2>&1
-clonecmd="git clone $repository $lpath"
 
 # Not all versions of date support %s, work around it
 TS=`date +%Y%m%d%H%M%S`
@@ -88,31 +116,47 @@ awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' $kpath > $tmp_path/ssh.pem
 # Then we'll get the public key more properly..
 openssl x509 -in $kpath -pubkey -noout >> $tmp_path/ssh.pem
 
-# To get the public key for use in authorize_keys you'd do this:
-#     ssh-keygen -i -m PKCS8 -f $tmp_path/ssh.pem >ssh.pub
-# but we dont need it ...
-
-
 chmod 600 $tmp_path/ssh.pem
 
 #Override git's ssh command so we can force our custom identity
 echo '#!/bin/bash' > $tmp_path/git.sh
-echo "ssh -i $tmp_path/ssh.pem \$1 \$2\n" >> $tmp_path/git.sh
+echo "ssh -oPasswordAuthentication=no -i $tmp_path/ssh.pem \$1 \$2\n" >> $tmp_path/git.sh
 chmod a+x $tmp_path/git.sh
 export GIT_SSH="$tmp_path/git.sh"
+
+
+if [ "$dosetup" = "yes" ]; then
+    echo "Doing Initial Setup..."
+    if [ -d "$lpath" ]; then
+        echo "Doing setup.. but destination directory $lpath already exists. Move it out of the way and try again"
+        exit 2
+    fi
+    echo "Note: your public key (linesync admin will have added this to keydir):"
+    ssh-keygen -i -m PKCS8 -f $tmp_path/ssh.pem 
+
+    prevdir=`pwd`
+    cd "$dpath"
+    git clone "$repository" "$lpath"
+    if [ -d "$lpath"/.git ]; then
+        echo "Initial setup success"
+        exit 0
+    else
+        echo "Problem with initial setup. See above"
+        exit 5
+    fi
+fi
 
 #Check for the git repository
 if [ ! -d "$lpath" ]; then
     echo "Cannot find a git repository at $lpath."
-    echo "...attempting to check it out"
-    prevdir=`pwd`
-    cd "$dpath"
-    $clonecmd
-    cd "$prevdir"
+    echo "check ircd.conf path argument, or re-run with -i <repository> to perform initial setup"
+    usage
+    exit 6
 fi
 
 if [ ! -d "$lpath"/.git ]; then
     echo "Error: $lpath is not a git repository. ?!"
+    usage
     exit 10
 fi
 
