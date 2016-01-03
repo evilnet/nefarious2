@@ -107,7 +107,7 @@ if [ ! -d "$lpath" ]; then
     echo "...attempting to check it out"
     prevdir=`pwd`
     cd "$dpath"
-    clonecmd
+    $clonecmd
     cd "$prevdir"
 fi
 
