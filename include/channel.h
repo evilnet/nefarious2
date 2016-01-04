@@ -373,7 +373,7 @@ struct Channel {
   struct Channel*    next;	/**< next channel in the global channel list */
   struct Channel*    prev;	/**< previous channel */
   struct Channel*    hnext;	/**< Next channel in the hash table */
-  struct DestructEvent* destruct_event;	
+  struct DestructEvent* destruct_event;
   time_t             creationtime; /**< Creation time of this channel */
   time_t             topic_time;   /**< Modification time of the topic */
   unsigned int       users;	   /**< Number of clients on this channel */
@@ -387,7 +387,7 @@ struct Channel {
   char               topic_nick[NICKLEN + USERLEN + HOSTLEN + 3]; /**< Nick of the person who set
 						*  The topic
 						*/
-  char               chname[1];	   /**< Dynamically allocated string of the 
+  char               chname[1];	   /**< Dynamically allocated string of the
 				     * channel name
 				     */
 };

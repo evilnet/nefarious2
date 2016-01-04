@@ -1104,19 +1104,18 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'c';
   if (chptr->mode.exmode & EXMODE_STRIPCOLOR)
     *mbuf++ = 'S';
-  if (*chptr->mode.redir) {
-    *mbuf++ = 'L';
-    strcat(pbuf, chptr->mode.redir);
-    previous_parameter = 1;
-  }
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
-    if (previous_parameter)
-      strcat(pbuf, " ");
     ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
     previous_parameter = 1;
   }
-
+  if (*chptr->mode.redir) {
+    *mbuf++ = 'L';
+    if (previous_parameter)
+      strcat(pbuf, " ");
+    strcat(pbuf, chptr->mode.redir);
+    previous_parameter = 1;
+  }
   if (*chptr->mode.key) {
     *mbuf++ = 'k';
     if (previous_parameter)
@@ -2090,7 +2089,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 /*  MODE_BAN,		'b', */
 /*  MODE_EXCEPT,	'e', */
     MODE_LIMIT,		'l',
-    MODE_REDIRECT,	'L', 
+    MODE_REDIRECT,	'L',
 /*  MODE_APASS,		'A', */
 /*  MODE_UPASS,		'U', */
     0x0, 0x0
@@ -2145,7 +2144,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   assert(0 != mbuf);
 
   /* If the ModeBuf is empty, we have nothing to do */
-  if (mbuf->mb_add == 0 && mbuf->mb_rem == 0 && 
+  if (mbuf->mb_add == 0 && mbuf->mb_rem == 0 &&
       mbuf->mb_exadd == 0 && mbuf->mb_exrem == 0 && mbuf->mb_count == 0)
     return 0;
 
@@ -2226,14 +2225,14 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                 (MB_TYPE(mbuf, i) & MODE_HALFOP ? 'h' : 'v');
 	totalbuflen -= IRCD_MAX(9, tmp) + 1;
       }
-    } else if (MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS | MODE_REDIRECT)) {
+    } else if (MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS)) {
       tmp = strlen(MB_STRING(mbuf, i));
 
       if ((totalbuflen - tmp) <= 0) /* don't overflow buffer */
 	MB_TYPE(mbuf, i) |= MODE_SAVE; /* save for later */
       else {
 	char mode_char;
-	switch(MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS | MODE_REDIRECT))
+	switch(MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS))
 	{
 	  case MODE_APASS:
 	    mode_char = 'A';
@@ -2241,12 +2240,9 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 	  case MODE_UPASS:
 	    mode_char = 'U';
 	    break;
-          case MODE_REDIRECT:
-            mode_char = 'L';
-            break;
-          case MODE_EXCEPT:
-            mode_char = 'e';
-            break;
+      case MODE_EXCEPT:
+        mode_char = 'e';
+        break;
 	  default:
 	    mode_char = 'b';
 	    break;
@@ -2263,6 +2259,15 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       else {
 	bufptr[(*bufptr_i)++] = 'k';
 	totalbuflen -= tmp + 1;
+      }
+    } else if (MB_TYPE(mbuf, i) & MODE_REDIRECT) {
+      tmp = strlen(MB_STRING(mbuf, i));
+
+      if ((totalbuflen - tmp) <= 0) /* don't overflow buffer */
+    MB_TYPE(mbuf, i) |= MODE_SAVE; /* save for later */
+      else {
+    bufptr[(*bufptr_i)++] = 'L';
+    totalbuflen -= tmp + 1;
       }
     } else if (MB_TYPE(mbuf, i) & MODE_LIMIT) {
       /* if it's a limit, we also format the number */
@@ -2685,6 +2690,10 @@ modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode, char *string,
   assert(0 != mbuf);
   assert(0 != (mode & (MODE_ADD | MODE_DEL)));
 
+  if (mode == (MODE_REDIRECT | MODE_DEL)) {
+      mbuf->mb_rem |= mode;
+      return;
+  }
   MB_TYPE(mbuf, mbuf->mb_count) = mode | (free ? MODE_FREE : 0);
   MB_STRING(mbuf, mbuf->mb_count) = string;
 
@@ -2801,7 +2810,7 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
       if (MB_TYPE(mbuf, i) & MODE_KEY) /* keep strings */
 	key = MB_STRING(mbuf, i);
       else if (MB_TYPE(mbuf, i) & MODE_REDIRECT)
-        redir = MB_STRING(mbuf, i);
+    redir = MB_STRING(mbuf, i);
       else if (MB_TYPE(mbuf, i) & MODE_LIMIT)
 	ircd_snprintf(0, limitbuf, sizeof(limitbuf), "%u", MB_UINT(mbuf, i));
       else if (MB_TYPE(mbuf, i) & MODE_UPASS)
@@ -2985,10 +2994,6 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
     state->parc--;
     state->max_args--;
 
-    if (!(state->flags & MODE_PARSE_WIPEOUT) && state->dir == MODE_ADD &&
-        !ircd_strcmp(state->chptr->mode.redir, t_str))
-      return;
-
     if (!ircd_strcmp(t_str, state->chptr->chname)) {
       send_reply(state->sptr, ERR_LINKSELF, t_str);
       return;
@@ -3016,6 +3021,13 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
   if (state->dir == MODE_DEL && !(*state->chptr->mode.redir))
     return;
 
+  if (state->done & DONE_REDIR) /* allow redirect to be set only once */
+    return;
+  state->done |= DONE_REDIR;
+
+  if (!state->mbuf)
+    return;
+
   /* Skip if this is a burst, we have a redirect already and the new redirect
    * is after the old one alphabetically */
   if ((state->flags & MODE_PARSE_BURST) &&
@@ -3023,12 +3035,9 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
       ircd_strcmp(state->chptr->mode.redir, t_str) <= 0)
     return;
 
-  if (state->done & DONE_REDIR) /* allow redirect to be set only once */
-    return;
-  state->done |= DONE_REDIR;
-
-  if (!state->mbuf)
-    return;
+  if (!(state->flags & MODE_PARSE_WIPEOUT) && state->dir == MODE_ADD &&
+      !ircd_strcmp(state->chptr->mode.redir, t_str))
+    return; /* no redir change */
 
   if (state->flags & MODE_PARSE_BOUNCE) {
     if (*state->chptr->mode.redir) /* reset old redir */
@@ -3090,7 +3099,7 @@ mode_parse_limit(struct ParseState *state, int *flag_p)
   /* Can't remove a limit that's not there */
   if (state->dir == MODE_DEL && !state->chptr->mode.limit)
     return;
-    
+
   /* Skip if this is a burst and a lower limit than this is set already */
   if ((state->flags & MODE_PARSE_BURST) &&
       (state->chptr->mode.mode & flag_p[0]) &&
@@ -4752,7 +4761,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 			state.chptr->mode.limit);
     if (state.chptr->mode.redir && !(state.done & DONE_REDIR))
       modebuf_mode_string(state.mbuf, MODE_DEL | MODE_REDIRECT,
-                        state.chptr->mode.redir, 0);
+              state.chptr->mode.redir, 0);
     if (*state.chptr->mode.key && !(state.done & DONE_KEY_DEL))
       modebuf_mode_string(state.mbuf, MODE_DEL | MODE_KEY,
 			  state.chptr->mode.key, 0);
