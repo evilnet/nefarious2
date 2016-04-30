@@ -101,10 +101,12 @@ static void userip_formatter(struct Client* cptr, struct Client *sptr, struct Ms
 
   if ((sptr == cptr) || IsAnOper(sptr) || !IsHiddenHost(cptr))
     ircd_snprintf(0, iphost, HOSTLEN, "%s", ircd_ntoa(&cli_ip(cptr)));
-  else if (IsHiddenHost(cptr) && IsCloakIP(cptr))
+  else if (IsCloakIP(cptr))
     ircd_snprintf(0, iphost, HOSTLEN, "%s", cli_user(cptr)->cloakip);
+  else if (IsFakeHost(cptr) || IsSetHost(cptr))
+    ircd_snprintf(0, iphost, HOSTLEN, "%s", feature_str(FEAT_HIDDEN_IP));
   else if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
-           (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) || IsAccount(cptr))
+            (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) && IsAccount(cptr))
     ircd_snprintf(0, iphost, HOSTLEN, "%s", feature_str(FEAT_HIDDEN_IP));
   else
     ircd_snprintf(0, iphost, HOSTLEN, "%s", ircd_ntoa(&cli_ip(cptr)));
@@ -131,6 +133,6 @@ int m_userip(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc < 2)
     return need_more_params(sptr, "USERIP");
-  send_user_info(sptr, parv[1], RPL_USERIP, userip_formatter); 
+  send_user_info(sptr, parv[1], RPL_USERIP, userip_formatter);
   return 0;
 }
