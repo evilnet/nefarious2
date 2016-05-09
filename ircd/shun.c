@@ -223,7 +223,7 @@ do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
           continue;
 
         if (ShunIsIpMask(shun)) {
-          if (!irc_in_addr_type_cmp(&cli_ip(acptr), &shun->sh_addr))
+          if (!irc_in_addr_type_cmp(&cli_ip(acptr), &shun->sh_addr) && shun->sh_bits)
             continue;
           if (!ipmask_check(&cli_ip(acptr), &shun->sh_addr, shun->sh_bits))
             continue;
@@ -374,7 +374,7 @@ count_users(char *mask, int flags)
     if (!match(mask, namebuf)
         || !match(mask, ipbuf)
         || (ipmask_valid && ipmask_check(&cli_ip(acptr), &ipmask, ipmask_len)
-            && irc_in_addr_type_cmp(&cli_ip(acptr), &ipmask)))
+            && (irc_in_addr_type_cmp(&cli_ip(acptr), &ipmask) && ipmask_len)))
       count++;
   }
 
@@ -1005,7 +1005,7 @@ shun_lookup(struct Client *cptr, unsigned int flags)
         continue;
 
       if (ShunIsIpMask(shun)) {
-        if (!irc_in_addr_type_cmp(&cli_ip(cptr), &shun->sh_addr))
+        if (!irc_in_addr_type_cmp(&cli_ip(cptr), &shun->sh_addr) && shun->sh_bits)
           continue;
         if (!ipmask_check(&cli_ip(cptr), &shun->sh_addr, shun->sh_bits))
           continue;

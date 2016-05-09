@@ -239,7 +239,7 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
           continue;
 
         if (GlineIsIpMask(gline)) {
-          if (!irc_in_addr_type_cmp(&cli_ip(acptr), &gline->gl_addr))
+          if (!irc_in_addr_type_cmp(&cli_ip(acptr), &gline->gl_addr) && gline->gl_bits)
             continue;
           if (!ipmask_check(&cli_ip(acptr), &gline->gl_addr, gline->gl_bits))
             continue;
@@ -396,7 +396,7 @@ count_users(char *mask, int flags)
     if (!match(mask, namebuf)
         || !match(mask, ipbuf)
         || (ipmask_valid && ipmask_check(&cli_ip(acptr), &ipmask, ipmask_len)
-            && irc_in_addr_type_cmp(&cli_ip(acptr), &ipmask)))
+            && (irc_in_addr_type_cmp(&cli_ip(acptr), &ipmask) && ipmask_len)))
       count++;
   }
 
@@ -1068,7 +1068,7 @@ gline_lookup(struct Client *cptr, unsigned int flags)
         continue;
 
       if (GlineIsIpMask(gline)) {
-        if (!irc_in_addr_type_cmp(&cli_ip(cptr), &gline->gl_addr))
+        if (!irc_in_addr_type_cmp(&cli_ip(cptr), &gline->gl_addr) && gline->gl_bits)
           continue;
         if (!ipmask_check(&cli_ip(cptr), &gline->gl_addr, gline->gl_bits))
           continue;

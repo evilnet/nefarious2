@@ -172,7 +172,7 @@ do_zline(struct Client *cptr, struct Client *sptr, struct Zline *zline)
 
       /* IP zline */
       if (ZlineIsIpMask(zline)) {
-        if (!irc_in_addr_type_cmp(&cli_ip(acptr), &zline->zl_addr))
+        if (!irc_in_addr_type_cmp(&cli_ip(acptr), &zline->zl_addr) && zline->zl_bits)
           continue;
         if (!ipmask_check(&cli_ip(acptr), &zline->zl_addr, zline->zl_bits))
           continue;
@@ -321,7 +321,7 @@ count_users(char *mask, int flags)
 
     if (!match(mask, ipbuf)
         || (ipmask_valid && ipmask_check(&cli_ip(acptr), &ipmask, ipmask_len)
-            && irc_in_addr_type_cmp(&cli_ip(acptr), &ipmask)))
+            && (irc_in_addr_type_cmp(&cli_ip(acptr), &ipmask) && ipmask_len)))
       count++;
   }
 
@@ -836,7 +836,7 @@ zline_lookup(struct Client *cptr, unsigned int flags)
       continue;
 
     if (ZlineIsIpMask(zline)) {
-      if (!irc_in_addr_type_cmp(&cli_ip(cptr), &zline->zl_addr))
+      if (!irc_in_addr_type_cmp(&cli_ip(cptr), &zline->zl_addr) && zline->zl_bits)
         continue;
       if (!ipmask_check(&cli_ip(cptr), &zline->zl_addr, zline->zl_bits))
         continue;
