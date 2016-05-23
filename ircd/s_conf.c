@@ -675,8 +675,16 @@ struct ConfItem* find_conf_exact(const char* name, struct Client *cptr, int stat
       continue;
     if (tmp->addrbits < 0)
     {
-      if (match(tmp->host, cli_sockhost(cptr)))
-        continue;
+      if ((statmask & CONF_OPERATOR) && cli_user(cptr))
+      {
+        if (match(tmp->host, cli_user(cptr)->realhost))
+          continue;
+      }
+      else
+      {
+        if (match(tmp->host, cli_sockhost(cptr)))
+          continue;
+      }
     }
     else if (!ipmask_check(&cli_ip(cptr), &tmp->address.addr, tmp->addrbits))
       continue;
