@@ -845,8 +845,8 @@ int mmexec(const char *wcm, int wminlen, const char *rcm, int rminlen)
  * @param[in] addr Address to test.
  * @param[in] mask Address to test against.
  * @param[in] bits Number of bits to test.
- * @return 0 on mismatch, 1 if bits < 128 and all bits match; -1 if
- * bits == 128 and all bits match.
+ * @return 0 on mismatch, 1 if bits <= 128 and all bits match; -1 if
+ * bits > 128 and all bits match.
  */
 int ipmask_check(const struct irc_in_addr *addr, const struct irc_in_addr *mask, unsigned char bits)
 {
