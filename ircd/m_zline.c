@@ -499,6 +499,10 @@ mo_zline(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	   !(acptr = find_match_server(target)))
     return send_reply(sptr, ERR_NOSUCHSERVER, target);
 
+  /* Z-line deprecation notice */
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Use of Z-line is deprecated. "
+ 	   " Please use G-line instead.", sptr);
+
   /* Now, is the Z-line local or global? */
   if (action == ZLINE_LOCAL_ACTIVATE || action == ZLINE_LOCAL_DEACTIVATE ||
       !acptr)
