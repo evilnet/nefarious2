@@ -624,7 +624,7 @@ void add_connection(struct Listener* listener, int fd) {
 
 /* Begin Gline */
   if (!feature_bool(FEAT_DISABLE_GLINES) && (agline = gline_lookup(new_client, 0))) {
-    ircd_snprintf(0, greason, sizeof(greason), "ERROR :(Pre rDNS/ident) G-lined (%s)", agline->gl_reason);
+    ircd_snprintf(0, greason, sizeof(greason), "ERROR :G-lined (%s)", agline->gl_reason);
 #ifdef USE_SSL
     ssl_murder(ssl, fd, greason);
 #else
