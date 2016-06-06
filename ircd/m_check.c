@@ -391,7 +391,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    send_reply(sptr, RPL_DATASTR, outbuf);
 
    if (MyUser(acptr))
-   {  
+   {
       ircd_snprintf(0, outbuf, sizeof(outbuf),  "      Signed on:: %s", myctime(acptr->cli_firsttime));
       send_reply(sptr, RPL_DATASTR, outbuf);
    }

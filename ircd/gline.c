@@ -245,7 +245,8 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
             continue;
         }
         else {
-          if (match(gline->gl_host, cli_sockhost(acptr)) != 0)
+          if ((match(gline->gl_host, cli_sockhost(acptr)) != 0) &&
+              (match(gline->gl_host, ircd_ntoa(&cli_ip(acptr))) != 0))
             continue;
         }
       }
@@ -300,7 +301,7 @@ gline_checkmask(char *mask)
 
       /* sanity-check to date */
       if (*mask || (flags & (MASK_WILDS | MASK_IP)) != MASK_IP)
-	return CHECK_REJECTED;
+        return CHECK_REJECTED;
       if (!dots) {
         if (ipmask > 128)
           return CHECK_REJECTED;
@@ -1044,6 +1045,7 @@ gline_lookup(struct Client *cptr, unsigned int flags)
 {
   struct Gline *gline;
   struct Gline *sgline;
+  char *cliip = ircd_ntoa(&cli_ip(cptr));
 
   if (find_except_conf(cptr, EFLAG_GLINE))
     return 0;
@@ -1074,7 +1076,8 @@ gline_lookup(struct Client *cptr, unsigned int flags)
           continue;
       }
       else {
-        if (match(gline->gl_host, (cli_user(cptr))->realhost) != 0)
+        if ((match(gline->gl_host, (cli_user(cptr))->realhost) != 0) &&
+            (match(gline->gl_host, cliip) != 0))
           continue;
       }
     }
