@@ -28,6 +28,7 @@
 #include "IPcheck.h"
 #include "channel.h"
 #include "class.h"
+#include "gline.h"
 #include "hash.h"
 #include "ircd_alloc.h"
 #include "ircd_log.h"
@@ -520,7 +521,9 @@ void add_connection(struct Listener* listener, int fd) {
   struct Client      *new_client;
   time_t              next_target = 0;
   struct Zline*       azline = NULL;
+  struct Gline*       agline = NULL;
   char                zreason[256];
+  char                greason[256];
 #ifdef USE_SSL
   char               *sslfp;
 #endif
@@ -618,6 +621,20 @@ void add_connection(struct Listener* listener, int fd) {
     return;
   }
 /* End Zline */
+
+/* Begin Gline */
+  if (!feature_bool(FEAT_DISABLE_GLINES) && (agline = gline_lookup(new_client, 0))) {
+    ircd_snprintf(0, greason, sizeof(greason), "ERROR :(Pre rDNS/ident) G-lined (%s)", agline->gl_reason);
+#ifdef USE_SSL
+    ssl_murder(ssl, fd, greason);
+#else
+    write(fd, greason, strlen(greason));
+    close(fd);
+#endif
+    cli_fd(new_client) = -1;
+    return;
+  }
+/* End Gline */
 
   cli_fd(new_client) = fd;
   if (!socket_add(&(cli_socket(new_client)), client_sock_callback,

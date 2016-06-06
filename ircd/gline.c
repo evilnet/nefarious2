@@ -1045,7 +1045,6 @@ gline_lookup(struct Client *cptr, unsigned int flags)
 {
   struct Gline *gline;
   struct Gline *sgline;
-  char *cliip = ircd_ntoa(&cli_ip(cptr));
 
   if (find_except_conf(cptr, EFLAG_GLINE))
     return 0;
@@ -1076,8 +1075,8 @@ gline_lookup(struct Client *cptr, unsigned int flags)
           continue;
       }
       else {
-        if ((match(gline->gl_host, (cli_user(cptr))->realhost) != 0) &&
-            (match(gline->gl_host, cliip) != 0))
+        if ((cli_user(cptr) && (match(gline->gl_host, (cli_user(cptr))->realhost) != 0)) &&
+            (match(gline->gl_host, cli_sock_ip(cptr)) != 0))
           continue;
       }
     }
