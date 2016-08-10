@@ -197,19 +197,19 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
     strcpy(buf + idx, cli_name(c2ptr));
     idx += strlen(cli_name(c2ptr));
 
-    if (feature_bool(FEAT_UHNAMES) &&
-        (IsUHNames(sptr) || CapActive(sptr, CAP_UHNAMES))) {
-      strcat(buf, "!");
-      strcat(buf, cli_user(c2ptr)->username);
-      strcat(buf, "@");
-      strcat(buf, cli_user(c2ptr)->host);
+    if ((feature_bool(FEAT_UHNAMES) && IsUHNames(sptr)) ||
+        CapActive(sptr, CAP_UHNAMES)) {
+      strcpy(buf + idx, "!");
+      strcpy(buf + idx, cli_user(c2ptr)->username);
+      strcpy(buf + idx, "@");
+      strcpy(buf + idx, cli_user(c2ptr)->host);
       idx += strlen(cli_user(c2ptr)->username);
       idx += strlen(cli_user(c2ptr)->host);
       idx += 2; /* ! and @ */
     }
 
     flag = 1;
-    if (mlen + idx + NICKLEN + 7 + USERLEN + HOSTLEN + 2 > BUFSIZE)
+    if (len + mlen + idx + NICKLEN + 8 + USERLEN + HOSTLEN + 2 > BUFSIZE)
       /* space, modifier, nick, \r \n \0 */
     {
       send_reply(sptr, (filter & NAMES_DEL) ? RPL_DELNAMREPLY : RPL_NAMREPLY, buf);
