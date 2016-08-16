@@ -1080,7 +1080,7 @@ gline_lookup(struct Client *cptr, unsigned int flags)
           continue;
       }
       else {
-        if ((cli_user(cptr) && (match(gline->gl_host, (cli_user(cptr))->realhost) != 0)) &&
+        if (!(cli_user(cptr) && (match(gline->gl_host, (cli_user(cptr))->realhost) == 0)) &&
             (match(gline->gl_host, cli_sock_ip(cptr)) != 0))
           continue;
       }
