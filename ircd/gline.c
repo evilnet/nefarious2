@@ -1065,8 +1065,13 @@ gline_lookup(struct Client *cptr, unsigned int flags)
         continue;
     }
     else {
-      if (match(gline->gl_user, (cli_user(cptr))->username) != 0)
-        continue;
+      if (cli_user(cptr)) {
+        if (match(gline->gl_user, (cli_user(cptr))->username) != 0)
+          continue;
+      }
+      else
+        if (gline->gl_user[0] != '*' || gline->gl_user[1] != '\0')
+          continue;
 
       if (GlineIsIpMask(gline)) {
         if (!irc_in_addr_type_cmp(&cli_ip(cptr), &gline->gl_addr) && gline->gl_bits)
