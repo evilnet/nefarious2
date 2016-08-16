@@ -200,12 +200,13 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
     if ((feature_bool(FEAT_UHNAMES) && IsUHNames(sptr)) ||
         CapActive(sptr, CAP_UHNAMES)) {
       strcpy(buf + idx, "!");
+      idx += 1;
       strcpy(buf + idx, cli_user(c2ptr)->username);
-      strcpy(buf + idx, "@");
-      strcpy(buf + idx, cli_user(c2ptr)->host);
       idx += strlen(cli_user(c2ptr)->username);
+      strcpy(buf + idx, "@");
+      idx += 1;
+      strcpy(buf + idx, cli_user(c2ptr)->host);
       idx += strlen(cli_user(c2ptr)->host);
-      idx += 2; /* ! and @ */
     }
 
     flag = 1;
