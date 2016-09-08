@@ -119,7 +119,7 @@ int m_links(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   {
     send_reply(sptr, RPL_ENDOFLINKS, parc < 2 ? "*" : parv[1]);
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr,
-                  "/LINKS has been disabled, from CFV-165.  Visit ", 
+                  "/LINKS has been disabled.  Visit ",
                   feature_str(FEAT_HIS_URLSERVERS));
     return 0;
   }
