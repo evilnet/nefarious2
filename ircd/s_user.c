@@ -2226,17 +2226,17 @@ user_setcloaked(struct Client *cptr)
 
   if (!IsCloakIP(cptr)) {
     if (irc_in_addr_is_ipv4(&(cli_ip(cptr))))
-      ircd_snprintf(0, cli_user(cptr)->cloakip, HOSTLEN, hidehost_ipv4(&(cli_ip(cptr))));
+      ircd_snprintf(0, cli_user(cptr)->cloakip, HOSTLEN+1, hidehost_ipv4(&(cli_ip(cptr))));
     else
-      ircd_snprintf(0, cli_user(cptr)->cloakip, HOSTLEN, hidehost_ipv6(&(cli_ip(cptr))));
+      ircd_snprintf(0, cli_user(cptr)->cloakip, HOSTLEN+1, hidehost_ipv6(&(cli_ip(cptr))));
     SetCloakIP(cptr);
   }
 
   if (!IsCloakHost(cptr)) {
-    if (!ircd_strncmp(cli_sock_ip(cptr), cli_user(cptr)->host, HOSTLEN))
-      ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN, cli_user(cptr)->cloakip);
+    if (!ircd_strncmp(cli_sock_ip(cptr), cli_user(cptr)->host, HOSTLEN+1))
+      ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN+1, cli_user(cptr)->cloakip);
     else
-      ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN,
+      ircd_snprintf(0, cli_user(cptr)->cloakhost, HOSTLEN+1,
                     hidehost_normalhost(cli_user(cptr)->realhost, components));
     SetCloakHost(cptr);
   }
