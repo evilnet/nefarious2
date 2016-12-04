@@ -170,7 +170,10 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * the kicking and the victim */
     if (MyUser(who))
       sendcmdto_one(sptr, CMD_KICK, who, "%H %C :%s", chptr, who, comment);
-    sendcmdto_one(who, CMD_JOIN, sptr, "%H", chptr);
+    if (CapActive(sptr, CAP_EXTJOIN))
+      sendcmdto_one(who, CMD_JOIN, sptr, "%H %s :%s", chptr, IsAccount(who) ? cli_account(who) : "*",  cli_info(who));
+    else
+      sendcmdto_one(who, CMD_JOIN, sptr, "%H", chptr);
     sendcmdto_one(sptr, CMD_KICK, sptr, "%H %C :%s", chptr, who, comment);
     CheckDelayedJoins(chptr);
   } else

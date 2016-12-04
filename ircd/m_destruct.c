@@ -132,7 +132,7 @@ int ms_destruct(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
 
      server1 ----------------- server2
         DESTRUCT-->   <-- DESTRUCT <-- CREATE
-     
+
      in both cases, when the DESTRUCT arrives on
      server2 we need to send synchronizing messages
      upstream (to server1).  Since sending two CREATEs

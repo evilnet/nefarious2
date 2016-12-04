@@ -632,7 +632,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                                                      CAP_NONE, CAP_EXTJOIN, "%H", chptr);
               sendcmdto_channel_capab_butserv_butone(acptr, CMD_JOIN, chptr, NULL, 0,
                                                      CAP_EXTJOIN, CAP_NONE, "%H %s :%s",
-                                                     chptr, IsAccount(acptr) ? cli_account(acptr) : "",
+                                                     chptr, IsAccount(acptr) ? cli_account(acptr) : "*",
                                                      cli_info(acptr));
               if (cli_user(acptr)->away)
                 sendcmdto_channel_capab_butserv_butone(acptr, CMD_AWAY, chptr, NULL, 0,
@@ -647,7 +647,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	    if (member->status & CHFL_CHANOP)
 	      member->status |= CHFL_BURST_ALREADY_OPPED;
             if (member->status & CHFL_HALFOP)
-              member->status |= CHFL_BURST_ALREADY_HALFOPPED;              
+              member->status |= CHFL_BURST_ALREADY_HALFOPPED;
 	    if (member->status & CHFL_VOICE)
 	      member->status |= CHFL_BURST_ALREADY_VOICED;
 	    /* Synchronize with the burst. */
