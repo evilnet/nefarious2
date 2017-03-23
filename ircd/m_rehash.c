@@ -134,7 +134,7 @@ int mo_rehash(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 #ifdef USE_SSL
       } else if (*parv[1] == 's') {
         send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reloading SSL certificates");
-        ssl_reinit();
+        ssl_reinit(0);
         return 0;
 #endif
       } else if (*parv[1] == 'q')
@@ -190,7 +190,7 @@ int ms_rehash(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 #ifdef USE_SSL
       } else if (*parv[1] == 's') {
         send_reply(sptr, SND_EXPLICIT | RPL_REHASHING, ":Reloading SSL certificates");
-        ssl_reinit();
+        ssl_reinit(0);
         return 0;
 #endif
       } else if (*parv[1] == 'q')

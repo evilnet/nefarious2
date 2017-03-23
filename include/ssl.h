@@ -39,7 +39,7 @@ struct Listener;
 struct ConfItem;
 
 extern int ssl_init(void);
-extern int ssl_reinit(void);
+extern int ssl_reinit(int sig);
 extern void ssl_add_connection(struct Listener *listener, int fd);
 extern int ssl_murder(void *ssl, int fd, const char *buf);
 extern void ssl_free(struct Socket *socketh);
