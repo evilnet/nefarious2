@@ -11,27 +11,36 @@
 
 usage() {
     echo "Help: "
-    echo "  $0 [-h|-i repository] <ircd.conf> <ircd.pid>"
+    echo "  $0 [-h|-i repository] <-p ircd.pem|-s id_rsa> <ircd.conf> <ircd.pid>"
     echo ""
-    echo " -i repository - Perform initial setup, needed only once to set up. Provide git URL as argument"
-    echo " -h            - this help"
-    echo " ircd.conf     - Path to your ircd.conf file"
-    echo " ircd.pid      - Path to your ircd.pid file"
+    echo " -h                - this help"
+    echo " -p ircd.pem       - convert this ircd.pem certificate to an ssh key and use that instead of the default ~/.ssh/id_rsa"
+    echo " -s id_rsa         - Full path to your ssh private key to use for git access (defaults to ~/.ssh/id_rsa)"
+    echo " -i repository-url - Perform initial setup, needed only once to set up. Provide git URL as argument"
+    echo " <ircd.conf>       - Full path to your ircd.conf file"
+    echo " <ircd.pid>        - Full path to your ircd.pid file"
     echo ""
 }
 
 #Handle argument parsing
-while getopts "hi:" opt; do
+while getopts "hi:p:s:" opt; do
     case $opt in
      h)
         usage
+        exit
         ;;
      i)
-         echo "Doing initial setup with repository $repository" >&2
          dosetup="yes"
          repository="$OPTARG"
 
          ;;
+     p)
+        ircdkey="yes"
+        kpath="$OPTARG"
+        ;;
+     s)
+        skey="$OPTARG"
+        ;;
     \?)
         echo "Unknown option: -$OPTARG" >&2
         exit 1
@@ -85,54 +94,92 @@ if [ -z "$awk_cmd" ]; then
 fi
 
 # Check for required command line parameters
-if [ -z "$1" -o -z "$2" ]; then
-        usage
-        exit 1
+if [ -z "$1" ] || [ -z "$2" ] ; then
+    echo "Error: No ircd.conf or ircd.pid specified"
+    usage
+    exit 1
+fi
+
+if [ -n "$skey" ] && [ -n "$ircdkey" ]; then
+    echo "Error: You cannot use -s and -p together. Pick one method to authenicate."
+    usage
+    exit;
+fi
+
+if [ -z "$skey" ] && [ -z "$ircdkey" ]; then
+    echo "Error: You must provide -s or -p. Pick one method to authenicate."
+    usage
+    exit;
+fi
+
+
+if [ -z "$skey" ]; then
+    skey="$HOME/.ssh/id_rsa"
 fi
 
 # check and set up stuff
 diff_cmd="diff"
-cpath=$1
-ppath=$2
-check_file $cpath
-dpath=`dirname $cpath`
-dpath=`readlink -f $dpath`
+cpath="$1"
+ppath="$2"
+check_file "$cpath"
+dpath=`dirname "$cpath"`
+dpath=`readlink -f "$dpath"`
 lpath="$dpath/linesync"
-kpath="$dpath/ircd.pem"
 #check_file $lpath
-save_dir=$PWD; cd $dpath
-tpath=$PWD; cd $save_dir
+save_dir="$PWD"; cd "$dpath"
+tpath="$PWD"; cd "$save_dir"
 tmp_path="$dpath/tmp"
 ipath="$tmp_path/ssh.pem"
-mkdir $tmp_path > /dev/null 2>&1
+mkdir "$tmp_path" > /dev/null 2>&1
 
 # Not all versions of date support %s, work around it
 TS=`date +%Y%m%d%H%M%S`
 TMPFILE="$tmp_path/linesync.$TS"
 
-#Generate ssh identity from ircd.pem
-# first get the private key by just grabbing the lines that match...
-awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' $kpath > $tmp_path/ssh.pem
-# Then we'll get the public key more properly..
-openssl x509 -in $kpath -pubkey -noout >> $tmp_path/ssh.pem
+echo '#!/bin/bash' > "$tmp_path/git.sh"
 
-chmod 600 $tmp_path/ssh.pem
+#If they specified -p, we generate the git ssh key from ircd.pem
+if [ -n "$ircdkey" ]; then
 
-#Override git's ssh command so we can force our custom identity
-echo '#!/bin/bash' > $tmp_path/git.sh
-echo "ssh -oPasswordAuthentication=no -i $tmp_path/ssh.pem \$1 \$2\n" >> $tmp_path/git.sh
-chmod a+x $tmp_path/git.sh
+    check_file "$kpath"
+    # first get the private key by just grabbing the lines that match...
+    awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' "$kpath" > "$ipath"
+    # Then we'll get the public key more properly..
+    if ! openssl x509 -in "$kpath" -pubkey -noout >> "$ipath"; then
+        echo "Error: I could not use $kpath as a key for some reason. Stopping!"
+        exit
+    fi
+
+    chmod 600 "$tmp_path/ssh.pem"
+
+    #Override git's ssh command so we can force our custom identity and no password
+    echo "ssh -oPasswordAuthentication=no -i \"$ipath\" \"\$1\" \"\$2\"\n" >> "$tmp_path/git.sh"
+else 
+    #Override git's ssh command so we can force our custom identity and no password
+    echo "ssh -oPasswordAuthentication=no -i \"$skey\" \"\$1\" \"\$2\"\n" >> "$tmp_path/git.sh"
+fi
+
+chmod a+x "$tmp_path/git.sh"
 export GIT_SSH="$tmp_path/git.sh"
 
 
 if [ "$dosetup" = "yes" ]; then
-    echo "Doing Initial Setup..."
+    echo "Doing initial setup with repository $repository" >&2
+
+    #Creating ssh keys if they don't exist
+    ssh-keygen -A
     if [ -d "$lpath" ]; then
         echo "Doing setup.. but destination directory $lpath already exists. Move it out of the way and try again"
         exit 2
     fi
     echo "Note: your public key (linesync admin will have added this to keydir):"
-    ssh-keygen -i -m PKCS8 -f $tmp_path/ssh.pem 
+
+    if [ -n "$ircdkey" ]; then
+        ssh-keygen -i -m PKCS8 -f "$tmp_path/ssh.pem"
+        #cat $ipath
+    else 
+        cat "$skey".pub
+    fi
 
     prevdir=`pwd`
     cd "$dpath"
@@ -162,24 +209,24 @@ fi
 
 #update the repository from upstream
 prevdir=`pwd`
-cd $lpath
+cd "$lpath"
 git reset -q --hard origin/master
 git pull --quiet
-cd $prevdir
+cd "$prevdir"
 
 #Copy the data to the temp file
-cp $lpath/linesync.data $TMPFILE
+cp "$lpath/linesync.data" "$TMPFILE"
 
 if [ ! -s "$TMPFILE" ]; then
         echo "Unable find retrieve $lpath/linesync.data, Sorry."
-	rm $TMPFILE > /dev/null 2>&1
+	rm "$TMPFILE" > /dev/null 2>&1
         exit 1
 fi
 
 # check our ircd.conf
-ircd_setup=`egrep '^# (BEGIN|END) LINESYNC$' $cpath|wc -l`
+ircd_setup=`egrep '^# (BEGIN|END) LINESYNC$' "$cpath"|wc -l`
 if [ $ircd_setup != 2 ]; then
-	cp $cpath $cpath.orig
+	cp "$cpath" "$cpath.orig"
 	echo "Performing initial merge on $cpath, original file saved as $cpath.orig."
 	
         echo "# Do NOT remove the following line, linesync.sh depends on it!" >> $cpath
@@ -202,9 +249,9 @@ if [ $ircd_setup != 2 ]; then
                         if (tolower($0)==tolower(template[i])) { dup_line++; break }
                 }
 		if (!dup_line) print $0
-        } ' tempfile=$TMPFILE < $cpath > $inpath
+        } ' "tempfile='$TMPFILE'" < "$cpath" > "$inpath"
 else
-	inpath=$cpath
+	inpath="$cpath"
 fi
 
 # Replace the marked block in ircd.conf with the new version
@@ -218,26 +265,28 @@ $0=="# END LINESYNC" {
         chop--
 }
 { if (!chop) print $0 }
-' syncfile=$TMPFILE < $inpath > $tmp_path/linesync.new.$TS
+' "syncfile='$TMPFILE'" < "$inpath" > "$tmp_path/linesync.new.$TS"
 
 # run a diff between current and new confs to see if we updated anything
 # no point sending the ircd a -HUP if this is not needed, especially on a
 # busy network, such as Undernet.
-diff=`$diff_cmd $cpath $tmp_path/linesync.new.$TS`
+diff=`"$diff_cmd" "$cpath" "$tmp_path/linesync.new.$TS"`
 if [ ! -z "$diff" ]; then
 	# Changes were detected
 
 	# Back up the current ircd.conf and replace it with the new one
-	cp $cpath  $dpath/ircd.conf.bk
-	cp $tmp_path/linesync.new.$TS $cpath
+	cp "$cpath"  "$dpath/ircd.conf.bk"
+	cp "$tmp_path/linesync.new.$TS" "$cpath"
 
 	# Rehash ircd (without caring wether or not it succeeds)
-	kill -HUP `cat $ppath 2>/dev/null` > /dev/null 2>&1
+	kill -HUP `cat "$ppath" 2>/dev/null` > /dev/null 2>&1
 
     #todo: kill iauthd?
 fi
 
 # (Try to) clean up
-rm -rf $tmp_path > /dev/null 2>&1
+if [ -n "$tmp_path" ] && [ -d "$tmp_path" ]; then
+    rm -rf "$tmp_path" > /dev/null 2>&1
+fi
 
 # That's it...
