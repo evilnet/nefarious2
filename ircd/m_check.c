@@ -490,6 +490,13 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
+#ifdef USE_SSL
+   if (MyConnect(acptr) && IsSSL(acptr)) {
+    ircd_snprintf(0, outbuf, sizeof(outbuf), "    SSL Ciphers:: %s", ssl_get_cipher(cli_socket(acptr).ssl));
+    send_reply(sptr, RPL_DATASTR, outbuf);
+   }
+#endif /* USE_SSL */
+
    if ((eflags = get_except_flags(acptr)) != 0) {
      if (eflags & EFLAG_SHUN) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "Shuns"); }
      if (eflags & EFLAG_KLINE) { if (ebuf[0]) { strcat(ebuf, ", "); } strcat(ebuf, "K:Lines"); }
@@ -648,7 +655,7 @@ void checkServer(struct Client *sptr, struct Client *acptr)
    ircd_snprintf(0, outbuf, sizeof(outbuf), "        Numeric:: %s --> %d", NumServ(acptr), base64toint(acptr->cli_yxx));
    send_reply(sptr, RPL_DATASTR, outbuf);
 
-   ircd_snprintf(0, outbuf, sizeof(outbuf), "          Users:: %d / %d", (acptr == &me) ? UserStats.local_clients : cli_serv(acptr)->clients, 
+   ircd_snprintf(0, outbuf, sizeof(outbuf), "          Users:: %d / %d", (acptr == &me) ? UserStats.local_clients : cli_serv(acptr)->clients,
                  base64toint(cli_serv(acptr)->nn_capacity));
    send_reply(sptr, RPL_DATASTR, outbuf);
 
