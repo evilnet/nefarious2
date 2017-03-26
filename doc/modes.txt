@@ -4,80 +4,11 @@ Last updated 3 Nov 2015 by Andromeda
 USER MODES
 ~~~~~~~~~~~~~~~~~
 
-o - IRC Operator
- Grants IRC Operator privileges to the user
-
-O - Local Operator
- Grants IRC Operator privileges to the user on the local server only and does not allow for network wide commands
-
-i - Invisible
- Hides the user from /who and /names when triggered by a user not on the same channel
-
-w - Wallops
- Allows the user to recieve wallop notices
-
-s - Snomask/Service Notice
- Sets the specified snomask on the user. See doc/snomask.txt for more information
-
-d - Deaf
- Makes the user deaf to incoming messages non-prefix configured channels
-
-k - Service
- Sets the target as a network service. This should NOT be used for operators or users as it WILL cause major issues
- with channel registration and other such services abilities
-
-g - Debug
- Allows the user to view debug information
-
-x - Hidden Host (Virtual Host)
- Sets a hidden host on the user based on the hidden host type configured in the features block
-
-n - No Channel
- Hides channel list from non-opers in /whois
-
-q - Common Channels Only
- Can only be private messaged from users in common channels
-
-B - Bot
- Marks the user as a bot
-
-D - Deaf to Priv
- Sets the user to deaf to private messages and notices
-
-H - Hide Oper
- Hides all indications that the user is an Operator
-
-I - No Idle
- Hides the idle time of the user for /whois requests
-
-R - Registered Only
- Only allow private messages from registered users
-
-W - Whois Notice
- Tell the user who someone performs a /whois request on him/her
-
 a - Admin
  Marks the user as an IRC Administrator
 
-X - Xtra Op
- Sets the user into God mode. This is an emergency override flag and should NOT be used
- constantly! This flag is also potentially dangerous and you should be very careful with
- it.
-
-L - No Link
- Allows the user to walk through channel redirections without being forced into the destination channel
-
-z - SSL
- Marks the user as connected via SSL
-
-r - Registered
- Marks the user as registered
-
-h - Sethost
- Sets the fakehost on the user assuming hidden host is enabled and active
-
-f - Fakehost
- Sets the fakehost on the user assuming hidden host is enabled and active
+B - Bot
+ Marks the user as a bot
 
 C - Cloakhost
  Hashed mask of the user's host to display if hidden host and/or fakehost do not meet requirements
@@ -85,96 +16,165 @@ C - Cloakhost
 c - Cloak IP
  Hashed mask of the user's IP address to display if hidden host and/or fakehost do not meet requirements
 
+D - Deaf to Priv
+ Sets the user to deaf to private messages and notices
+
+d - Deaf
+ Makes the user deaf to incoming messages non-prefix configured channels
+
+f - Fakehost
+ Sets the fakehost on the user assuming hidden host is enabled and active
+
+g - Debug
+ Allows the user to view debug information
+
+H - Hide Oper
+ Hides all indications that the user is an Operator
+
+h - Sethost
+ Sets the fakehost on the user assuming hidden host is enabled and active
+
+I - No Idle
+ Hides the idle time of the user for /whois requests
+
+i - Invisible
+ Hides the user from /who and /names when triggered by a user not on the same channel
+
+k - Service
+ Sets the target as a network service. This should NOT be used for operators or users as it WILL cause major issues
+ with channel registration and other such services abilities
+
+L - No Link
+ Allows the user to walk through channel redirections without being forced into the destination channel
+
+n - No Channel
+ Hides channel list from non-opers in /whois
+
+o - IRC Operator
+ Grants IRC Operator privileges to the user
+
+O - Local Operator
+ Grants IRC Operator privileges to the user on the local server only and does not allow for network wide commands
+
+q - Common Channels Only
+ Can only be private messaged from users in common channels
+
+R - Registered Only
+ Only allow private messages from registered users
+
+r - Registered
+ Marks the user as registered
+
+s - Snomask/Service Notice
+ Sets the specified snomask on the user. See doc/snomask.txt for more information
+
+W - Whois Notice
+ Tell the user who someone performs a /whois request on him/her
+
+w - Wallops
+ Allows the user to recieve wallop notices
+
+X - Xtra Op
+ Sets the user into God mode. This is an emergency override flag and should NOT be used
+ constantly! This flag is also potentially dangerous and you should be very careful with
+ it.
+
+x - Hidden Host (Virtual Host)
+ Sets a hidden host on the user based on the hidden host type configured in the features block
+
+z - SSL
+ Marks the user as connected via SSL
+
 
 CHANNEL MODES
 ~~~~~~~~~~~~~~~~~
 
-o - Channel Operator
- Sets +o on the user granting them channel operator abilities
-
-h - Channel HalfOp
- Sets +h on the user granting them channel half operator abilities (if enabled)
-
-v - Channel Voice
- Sets +v on the user granting channel voice abilities
-
-p - Private
- Marks a channel as private
-
-s - Secret
- Marks a channel as secret and excludes it from /list
-
-m - Moderated
- Marks a channel as moderated (muted) and only allows users with voice, halfop, and op to speak
-
-t - Topic
- Only ops can set the topic
-
-i - Invite Only
- Marks the channel as by invite only
-
-n - No External Messages
- Forbids users from outside the channel from sending messages to it
-
-r - Registered Users Only
- Only allow registered users to join the channel
-
-D - Delayed joins
- Hide all join events on the channel until the user speaks or has a mode set
-
-R - Registered
- Marks the channel as registered
-
-k - Key
- Sets a passphraze on the channel required for users to join
-
-b - Ban
- Sets a ban on the channel of the specified nick!user@host mask (wildcards permitted)
-
-e - Except
- Sets a ban exception on the channel of the specified nick!user@host mask (wildcards permitted)
-
-l - Limit
- Set the limit of users permitted to join the channel
-
-L - Redirect
- Marks the channel as being redirected to the specified destination
-
 A - APASS
- Used with OPLEVEL
-
-U - UPASS
  Used with OPLEVEL
 
 a - Admin Only
  Marks a channel as admin restricted, allowing only IRC Administrators to join
 
-O - Oper Only
- Marks a channel as oper restricted, allowing only IRC Operators to join
-
-M - Registered Moderated
- Only allows registered users and voiced/halfop'd/op'd to send messages in the channel
-
-N - No Channel Notices
- Denies sending notices to the channel
-
-z - Persistant
- Resyncs channels upon bursting
-
-Q - No Quit/Part Messages
- Hide all quit and part messages
+b - Ban
+ Sets a ban on the channel of the specified nick!user@host mask (wildcards permitted)
 
 C - No CTCP
  Block all CTCP's sent to the channel
 
-T - No Multi Target Messages
- Block all multi channel messages (such as /amsg in mIRC)
-
 c - No Colour
  Forbid the use of colours on the channel
+
+D - Delayed joins
+ Hide all join events on the channel until the user speaks or has a mode set
+
+d - Was Delayed Joins
+ Replaces +D when disabled if there are hidden users yet to join the channel
+
+e - Except
+ Sets a ban exception on the channel of the specified nick!user@host mask (wildcards permitted)
+
+h - Channel HalfOp
+ Sets +h on the user granting them channel half operator abilities (if enabled)
+
+i - Invite Only
+ Marks the channel as by invite only
+
+k - Key
+ Sets a passphraze on the channel required for users to join
+
+L - Redirect
+ Marks the channel as being redirected to the specified destination
+
+l - Limit
+ Set the limit of users permitted to join the channel
+
+M - Registered Moderated
+ Only allows registered users and voiced/halfop'd/op'd to send messages in the channel
+
+m - Moderated
+ Marks a channel as moderated (muted) and only allows users with voice, halfop, and op to speak
+
+N - No Channel Notices
+ Denies sending notices to the channel
+
+n - No External Messages
+ Forbids users from outside the channel from sending messages to it
+
+O - Oper Only
+ Marks a channel as oper restricted, allowing only IRC Operators to join
+
+o - Channel Operator
+ Sets +o on the user granting them channel operator abilities
+
+p - Private
+ Marks a channel as private
+
+Q - No Quit/Part Messages
+ Hide all quit and part messages
+
+R - Registered
+ Marks the channel as registered
+
+r - Registered Users Only
+ Only allow registered users to join the channel
 
 S - Strip
  Remove all colours and effects on all messages within the channel
 
-d - Was Delayed Joins
- Replaces +D when disabled if there are hidden users yet to join the channel
+s - Secret
+ Marks a channel as secret and excludes it from /list
+
+T - No Multi Target Messages
+ Block all multi channel messages (such as /amsg in mIRC)
+
+t - Topic
+ Only ops can set the topic
+
+U - UPASS
+ Used with OPLEVEL
+
+v - Channel Voice
+ Sets +v on the user granting channel voice abilities
+
+z - Persistant
+ Resyncs channels upon bursting
