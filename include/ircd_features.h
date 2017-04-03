@@ -312,6 +312,9 @@ enum Feature {
   FEAT_CAP_tls,
 #endif
 
+  FEAT_UPING_ENABLE,
+  FEAT_UPING_PORT,
+
   FEAT_LAST_F
 };
 

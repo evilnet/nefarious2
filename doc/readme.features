@@ -1754,3 +1754,16 @@ CAP_tls
 
 Enables announcement of the 'tls' (STARTTLS) client capability.
 
+UPING_ENABLE
+ * Type: boolean
+ * Default: TRUE
+
+Enables the server to server UDP ping server port. Change requires
+a restart of the IRCd.
+
+UPING_PORT
+ * Type: integer
+ * Default: 7007
+
+The default UDP ping server port. Change requires a restart of the
+IRCd.

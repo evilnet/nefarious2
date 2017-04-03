@@ -785,6 +785,9 @@ static struct FeatureDesc {
   F_B(CAP_tls, 0, 1, 0),
 #endif
 
+  F_B(UPING_ENABLE, FEAT_READ, 1, 0),
+  F_I(UPING_PORT, FEAT_READ, UDP_PORT, 0),
+
 #undef F_S
 #undef F_B
 #undef F_I

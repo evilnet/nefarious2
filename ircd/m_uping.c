@@ -84,8 +84,10 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "match.h"
 #include "msg.h"
@@ -138,7 +140,7 @@ int ms_uping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * Determine port: First user supplied, then default : 7007
    */
   if (EmptyString(parv[2]) || (port = atoi(parv[2])) <= 0)
-    port = atoi(UDP_PORT);
+    port = feature_int(FEAT_UPING_PORT);
 
   if (EmptyString(parv[4]) || (count = atoi(parv[4])) <= 0)
   {
@@ -174,6 +176,7 @@ int mo_uping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   struct ConfItem *aconf;
   int port;
   int count;
+  char portstr[BUFSIZE];
 
   assert(0 != cptr);
   assert(0 != sptr);
@@ -181,13 +184,15 @@ int mo_uping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   assert(IsAnOper(sptr));
 
+  ircd_snprintf(0, portstr, sizeof(portstr), "%d", feature_int(FEAT_UPING_PORT));
+
   if (parc < 2) {
     send_reply(sptr, ERR_NEEDMOREPARAMS, "UPING");
     return 0;
   }
 
   if (parc == 2) {
-    parv[parc++] = UDP_PORT;
+    parv[parc++] = portstr;
     parv[parc++] = cli_name(&me);
     parv[parc++] = "5";
   }
@@ -196,7 +201,7 @@ int mo_uping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       parv[parc++] = cli_name(&me);
     else {
       parv[parc++] = parv[2];
-      parv[2] = UDP_PORT;
+      parv[2] = portstr;
     }
     parv[parc++] = "5";
   }
@@ -212,7 +217,7 @@ int mo_uping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     else {
       parv[parc++] = parv[3];
       parv[3] = parv[2];
-      parv[2] = UDP_PORT;
+      parv[2] = portstr;
     }
   }
   if (hunt_server_cmd(sptr, CMD_UPING, sptr, 1, "%s %s %C %s", 3, parc, parv)
@@ -222,7 +227,7 @@ int mo_uping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * Determine port: First user supplied, then default : 7007
    */
   if (EmptyString(parv[2]) || (port = atoi(parv[2])) <= 0)
-    port = atoi(UDP_PORT);
+    port = feature_int(FEAT_UPING_PORT);
 
   if (EmptyString(parv[4]) || (count = atoi(parv[4])) <= 0)
   {

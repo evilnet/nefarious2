@@ -27,6 +27,7 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_events.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_osdep.h"
 #include "ircd_string.h"
@@ -132,8 +133,11 @@ int uping_init(void)
   struct irc_sockaddr from;
   int fd;
 
+  if (!feature_bool(FEAT_UPING_ENABLE))
+    return 0;
+
   memcpy(&from, &VirtualHost_v4, sizeof(from));
-  from.port = atoi(UDP_PORT);
+  from.port = feature_int(FEAT_UPING_PORT);
 
   fd = os_socket(&from, SOCK_DGRAM, "IPv4 uping listener", AF_INET);
   if (fd < 0)
@@ -147,7 +151,7 @@ int uping_init(void)
 
 #ifdef AF_INET6
   memcpy(&from, &VirtualHost_v6, sizeof(from));
-  from.port = atoi(UDP_PORT);
+  from.port = feature_int(FEAT_UPING_PORT);
 
   fd = os_socket(&from, SOCK_DGRAM, "IPv6 uping listener", AF_INET6);
   if (fd < 0)
