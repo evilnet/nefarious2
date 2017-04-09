@@ -91,7 +91,7 @@ int ssl_reinit(int sig)
   SSL_CTX *temp_ctx;
 
   if (1 == sig)
-    sendto_opmask_butone(0, SNO_OLDSNO, "Got signal SIGHUSR1, reloading SSL certificates");
+    sendto_opmask_butone(0, SNO_OLDSNO, "Got signal SIGUSR1, reloading SSL certificates");
 
   /* Attempt to reinitialize server context, return on error */
   temp_ctx = ssl_init_server_ctx();
