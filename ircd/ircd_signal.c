@@ -253,11 +253,13 @@ void setup_signals(void)
   sigemptyset(&act.sa_mask);
   sigaddset(&act.sa_mask, SIGPIPE);
   sigaddset(&act.sa_mask, SIGALRM);
+  sigaddset(&act.sa_mask, SIGUSR2);
 #ifdef  SIGWINCH
   sigaddset(&act.sa_mask, SIGWINCH);
   sigaction(SIGWINCH, &act, 0);
 #endif
   sigaction(SIGPIPE, &act, 0);
+  sigaction(SIGUSR2, &act, 0);
 
   act.sa_handler = sigalrm_handler;
   sigaction(SIGALRM, &act, 0);
