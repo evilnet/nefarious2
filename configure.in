@@ -53,6 +53,8 @@ AC_PROG_CC
 dnl ANSIfy the C compiler whenever possible.
 AM_PROG_CC_STDC
 
+AC_PROG_CC_C99
+
 dnl Checks for libraries.
 
 dnl Locate the library containing crypt
@@ -731,7 +733,7 @@ if test x"$unet_cv_enable_ssl" = xyes; then
   save_LIBS=$LIBS
 
   CFLAGS="-I$unet_cv_with_openssl_inc_prefix -lcrypto"
-  LIBS="-L$unet_cv_with_openssl_prefix -lssl -lcrypto"
+  LIBS="-Wl,-rpath=$unet_cv_with_openssl_prefix -L$unet_cv_with_openssl_prefix -lssl -lcrypto"
 
   AC_CHECK_LIB(ssl, SSL_read, [
     AC_CHECK_LIB(crypto, X509_new, [
@@ -749,7 +751,7 @@ if test x"$unet_cv_enable_ssl" = xyes; then
 
   if test "x$enable_ssl" = xyes; then
     AC_DEFINE([USE_SSL], , [Define if you are using OpenSSL])
-    LIBS="$LIBS -L$unet_cv_with_openssl_prefix $OPENSSL_LDFLAGS"
+    LIBS="$LIBS -Wl,-rpath=$unet_cv_with_openssl_prefix -L$unet_cv_with_openssl_prefix $OPENSSL_LDFLAGS"
     CFLAGS="$CFLAGS -I$unet_cv_with_openssl_inc_prefix"
   else
     AC_MSG_ERROR([Unable to find OpenSSL, Maybe you need to install the openssl and libssl-dev package, or use --with-openssl-includes and --with-openssl-libs if you have openssl installed in an odd location])
