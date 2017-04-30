@@ -871,6 +871,37 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_quit, m_ignore, m_ignore, m_ignore, m_ignore }
   },
+  /* These commands are currently unimplimented and have associated MSG/TOK
+   * defines so we will define them here as m_ignore handlers
+   */
+  {
+    MSG_DNS,
+    TOK_DNS,
+    0, MAXPARA, MFLG_SLOW | MFLG_IGNORE, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, m_ignore, m_ignore, m_ignore }
+  },
+  {
+    MSG_SERVLIST,
+    TOK_SERVLIST,
+    0, MAXPARA, MFLG_SLOW | MFLG_IGNORE, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, m_ignore, m_ignore, m_ignore }
+  },
+  {
+    MSG_SERVSET,
+    TOK_SERVSET,
+    0, MAXPARA, MFLG_SLOW | MFLG_IGNORE, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, m_ignore, m_ignore, m_ignore }
+  },
+  {
+    MSG_SQUERY,
+    TOK_SQUERY,
+    0, MAXPARA, MFLG_SLOW | MFLG_IGNORE, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, m_ignore, m_ignore, m_ignore }
+  },
   { 0 }
 };
 

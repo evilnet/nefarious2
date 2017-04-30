@@ -253,7 +253,7 @@ struct Client;
 #define CMD_SQUERY		MSG_SQUERY, TOK_SQUERY
 
 #define MSG_SERVLIST            "SERVLIST"      /* SERV -> SLIS */
-#define TOK_SERVLIST            "SERVSET"
+#define TOK_SERVLIST            "SERVLIST"
 #define CMD_SERVLIST		MSG_SERVLIST, TOK_SERVLIST
 
 #define MSG_SERVSET             "SERVSET"       /* SERV -> SSET */
