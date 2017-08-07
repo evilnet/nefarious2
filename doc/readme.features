@@ -1689,8 +1689,8 @@ SSL_CIPHERS
  * Default: NULL
 
 When set configures the list of available ciphers for incoming SSL
-connections. See https://www.openssl.org/docs/apps/ciphers.html for an
-explanation on how to format this string.
+connections. See https://www.openssl.org/docs/manmaster/man1/ciphers.html
+for an explanation on how to format this string.
 
 DISABLE_ZLINES
  * Type: boolean
