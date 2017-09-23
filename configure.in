@@ -833,9 +833,9 @@ if test x"$unet_cv_enable_geoip" = xyes; then
 fi
 
 dnl --with-maxcon allows us to set the maximum connections
-unet_maxcon=`ulimit -Hn`
+unet_maxcon=`ulimit -Sn`
 if test x"$unet_maxcon" = xunlimited; then
-    unet_maxcon=`ulimit -Sn`
+    unet_maxcon=1024
 fi
 unet_maxcon=`expr $unet_maxcon - 4`
 AC_MSG_CHECKING([max connections])

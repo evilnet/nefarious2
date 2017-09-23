@@ -7718,9 +7718,9 @@ $as_echo "$as_me: WARNING: Unable to find GeoIP, GeoIP features will not work wi
   fi
 fi
 
-unet_maxcon=`ulimit -Hn`
+unet_maxcon=`ulimit -Sn`
 if test x"$unet_maxcon" = xunlimited; then
-    unet_maxcon=`ulimit -Sn`
+    unet_maxcon=1024
 fi
 unet_maxcon=`expr $unet_maxcon - 4`
 { $as_echo "$as_me:${as_lineno-$LINENO}: checking max connections" >&5
