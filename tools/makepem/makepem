@@ -33,7 +33,7 @@ else
   echo Press Y if you want to use an SSL certificate that already exists; read sslans
 
   if [ "$sslans" != "Y" ]; then
-    openssl req -new -x509 -days 365 -nodes -out $1/ircd.pem -keyout $1/ircd.pem
+    openssl req -new -x509 -days 365 -nodes -out $1/ircd.pem -newkey rsa:4096 -keyout $1/ircd.pem
     test 1 -eq 1 || test ! -f /dev/urandom || openssl gendh -rand $1/ircd.rand 512 >> $1/ircd.pem
     test 1 -eq 1 || test -f /dev/urandom || openssl gendh 512 >> $1/ircd.pem
     openssl x509 -subject -dates -fingerprint -noout -in $1/ircd.pem
