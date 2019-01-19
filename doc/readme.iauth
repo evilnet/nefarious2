@@ -386,8 +386,8 @@ Comments: Sets policy options for the iauth conversation.  Old policy
    r - Send account name when a client authenticates using SASL.
    e - Send IRCd event notifications.
 Compatibility: The U policy is an Undernet extension and is not
-  recognized by ircd. The w, F and r policies are a Nefarious extension that
-  is not recognized by Undernet ircu or ircd.
+  recognized by ircd. The w, F, r and e policies are a Nefarious extension
+  that is not recognized by Undernet ircu or ircd.
 
 V - iauth Program Version
 Syntax: V :<version string>
