@@ -203,7 +203,8 @@ crypt_mechs_t* crypt_mech;
  if (strlen(salt) > 2)
  {
    char *s;
-   temp_hashed_pass = (char*)ircd_crypt_native(key, salt);
+   if (NULL == (temp_hashed_pass = (char*)ircd_crypt_native(key, salt)))
+     return NULL;
    if (!ircd_strcmp(temp_hashed_pass, salt))
    {
      DupString(s, temp_hashed_pass);
