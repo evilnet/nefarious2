@@ -201,7 +201,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, ajoinnotice);
 
     if (!MyUser(sptr)) {
-       sendcmdto_serv_butone(&me, CMD_SVSJOIN, NULL, "%C %s", sptr, ajoinchan);
+      sendcmdto_serv_butone(&me, CMD_SVSJOIN, NULL, "%C %s", sptr, ajoinchan);
     } else {
       ircd_strncpy(chan, ajoinchan, CHANNELLEN-1);
       join[0] = cli_name(sptr);
