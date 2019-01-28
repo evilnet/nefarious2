@@ -200,11 +200,15 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     if (!EmptyString(ajoinnotice))
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, ajoinnotice);
 
-    ircd_strncpy(chan, ajoinchan, CHANNELLEN-1);
-    join[0] = cli_name(sptr);
-    join[1] = chan;
-    join[2] = NULL;
-    m_join(sptr, sptr, 2, join);
+    if (!MyUser(sptr)) {
+       sendcmdto_serv_butone(&me, CMD_SVSJOIN, NULL, "%C %s", sptr, ajoinchan);
+    } else {
+      ircd_strncpy(chan, ajoinchan, CHANNELLEN-1);
+      join[0] = cli_name(sptr);
+      join[1] = chan;
+      join[2] = NULL;
+      m_join(sptr, sptr, 2, join);
+    }
   }
 
   if (!EmptyString(aconf->autojoinchan))
@@ -212,11 +216,15 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     if (!EmptyString(aconf->autojoinnotice))
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, aconf->autojoinnotice);
 
-    ircd_strncpy(chan, aconf->autojoinchan, CHANNELLEN-1);
-    join[0] = cli_name(sptr);
-    join[1] = chan;
-    join[2] = NULL;
-    m_join(sptr, sptr, 2, join);
+    if (!MyUser(sptr)) {
+      sendcmdto_serv_butone(&me, CMD_SVSJOIN, NULL, "%C %s", sptr, aconf->autojoinchan);
+    } else {
+      ircd_strncpy(chan, aconf->autojoinchan, CHANNELLEN-1);
+      join[0] = cli_name(sptr);
+      join[1] = chan;
+      join[2] = NULL;
+      m_join(sptr, sptr, 2, join);
+    }
   }
 
   sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
