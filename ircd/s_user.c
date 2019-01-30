@@ -1138,7 +1138,7 @@ hide_hostmask(struct Client *cptr)
     ircd_strncpy(newhost, cli_user(cptr)->fakehost, HOSTLEN);
   } else if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
       ((feature_int(FEAT_HOST_HIDING_STYLE) == 3) && IsAccount(cptr))) {
-    if (IsAnOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
+    if (IsAnOper(cptr) && !IsHideOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
       ircd_snprintf(0, newhost, HOSTLEN, "%s.%s",
                     cli_user(cptr)->account, feature_str(FEAT_HIDDEN_OPERHOST));
     else
@@ -1812,6 +1812,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       if (FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
         ++UserStats.opers;
       }
+    }
+    if ((!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(acptr)) ||
+        (FlagHas(&setflags, FLAG_HIDE_OPER) && !IsHideOper(acptr))) {
+      do_host_hiding = 1;
     }
     if (FlagHas(&setflags, FLAG_INVISIBLE) && !IsInvisible(acptr)) {
       assert(UserStats.inv_clients > 0);
