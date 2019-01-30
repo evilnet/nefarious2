@@ -1125,16 +1125,6 @@ hide_hostmask(struct Client *cptr)
       (feature_int(FEAT_HOST_HIDING_STYLE) == 3)))
     user_setcloaked(cptr);
 
-  /* Invalidate all bans against the user so we check them again */
-  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
-    ClearBanValid(chan);
-    ClearBanValidNick(chan);
-    ClearBanValidQuiet(chan);
-    ClearExceptValid(chan);
-    ClearExceptValidNick(chan);
-    ClearExceptValidQuiet(chan);
-  }
-
   /* Select the new host to change to. */
   if (IsSetHost(cptr)) {
     if ((sethostat = strstr(cli_user(cptr)->sethost, "@")) != NULL) {
@@ -1164,6 +1154,17 @@ hide_hostmask(struct Client *cptr)
   /* If the new host is the same as the current host return silently. */
   if (!ircd_strncmp(cli_user(cptr)->host, newhost, HOSTLEN))
     return 0;
+
+  /* Invalidate all bans against the user so we check them again but only
+   * if the host has actually changed, */
+  for (chan = (cli_user(cptr))->channel; chan; chan = chan->next_channel) {
+    ClearBanValid(chan);
+    ClearBanValidNick(chan);
+    ClearBanValidQuiet(chan);
+    ClearExceptValid(chan);
+    ClearExceptValidNick(chan);
+    ClearExceptValidQuiet(chan);
+  }
 
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
     sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
