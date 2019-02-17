@@ -147,7 +147,7 @@ Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
 
 R - Client Has Authenticated Using SASL or LOC
 Syntax: <id> R <account>
-Example 5 F dave
+Example 5 R dave
 States: REGISTER
 Next State: -
 Comments: Indicates that a client has authenticated using SASL or LOC and has
