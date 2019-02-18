@@ -12,4 +12,6 @@ autom4te.cache
 stamp-h1
 include/patchlist.h
 .orig
-
+tools/sidconvert/sid2num
+tools/sidconvert/num2sid
+!tools/sidconvert/Makefile
