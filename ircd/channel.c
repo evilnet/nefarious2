@@ -2058,6 +2058,15 @@ find_delayed_joins(const struct Channel *chan)
   return 0;
 }
 
+static void
+show_delayed_joins(const struct Channel *chan)
+{
+  struct Membership *memb;
+  for (memb = chan->members; memb; memb = memb->next_member)
+    if (IsDelayedJoin(memb))
+      RevealDelayedJoin(memb);
+}
+
 /** Flush out the modes
  * This is the workhorse of our ModeBuf suite; this actually generates the
  * output MODE commands, HACK notices, or whatever.  It's pretty complicated.
@@ -2160,11 +2169,13 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
   /* Must be set if going -D and some clients are hidden */
   if ((mbuf->mb_rem & MODE_DELJOINS)
-      && !(mbuf->mb_channel->mode.mode & (MODE_DELJOINS | MODE_WASDELJOINS))
-      && find_delayed_joins(mbuf->mb_channel)) {
-    mbuf->mb_channel->mode.mode |= MODE_WASDELJOINS;
-    mbuf->mb_add |= MODE_WASDELJOINS;
-    mbuf->mb_rem &= ~MODE_WASDELJOINS;
+      && !(mbuf->mb_channel->mode.mode & (MODE_DELJOINS | MODE_WASDELJOINS))) {
+    if (!feature_bool(FEAT_JOIN_ON_REMOVEDELAY) && find_delayed_joins(mbuf->mb_channel)) {
+      mbuf->mb_channel->mode.mode |= MODE_WASDELJOINS;
+      mbuf->mb_add |= MODE_WASDELJOINS;
+      mbuf->mb_rem &= ~MODE_WASDELJOINS;
+    } else
+      show_delayed_joins(mbuf->mb_channel);
   }
 
   /* +d must be cleared if +D is set */

@@ -1279,6 +1279,14 @@ CHANNEL_CREATE_IRCOPONLY
 
 When enabled only IRCops can create channels.
 
+JOIN_ON_REMOVEDELAY
+ * Type: boolean
+ * Default: TRUE
+
+When enabled JOIN's are shown for delayed join users when channel mode +D is
+removed. When disabled channel mode +d is set if there are any users who's
+JOIN is still delayed.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE
