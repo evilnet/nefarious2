@@ -124,16 +124,18 @@ int ms_svsnoop(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
 
   if (server == &me) {
-     cp = parv[2];
-     c = *cp;
-     if (c == '+') {
-        for(aconf = GlobalConfList; aconf; aconf = aconf->next) {
-            if (aconf->status & CONF_OPERATOR)
-               aconf->status = CONF_ILLEGAL;
-        }
-      } else {
-        rehash (&me, 2);
+    cp = parv[2];
+    c = *cp;
+    if (c == '+') {
+      for(aconf = GlobalConfList; aconf; aconf = aconf->next) {
+        if (aconf->status & CONF_OPERATOR)
+          aconf->status |= CONF_ILLEGAL;
       }
+      SetServerNoop(&me);
+    } else {
+      rehash (&me, 2);
+      ClearServerNoop(&me);
+    }
   }
 
   sendcmdto_serv_butone(sptr, CMD_SVSNOOP, cptr, "%s %s", parv[1], parv[2]);
