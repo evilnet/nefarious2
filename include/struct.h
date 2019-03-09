@@ -71,6 +71,7 @@ struct User {
   struct SLink*      watch;          /**< chain of watch pointer blocks */
   struct Ban*        silence;        /**< chain of silence pointer blocks */
   char*              away;           /**< pointer to away message */
+  char*              opername;       /**< pointer to /OPER user name */
   time_t             last;           /**< last time user sent a message */
   unsigned int       refcnt;         /**< Number of times this block is referenced */
   unsigned int       joined;         /**< number of channels joined */

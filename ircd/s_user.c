@@ -124,6 +124,8 @@ void free_user(struct User* user)
   if (--user->refcnt == 0) {
     if (user->away)
       MyFree(user->away);
+    if (user->opername)
+      MyFree(user->opername);
     /*
      * sanity check
      */
@@ -1463,6 +1465,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClrFlag(acptr, FLAG_OPER);
           ClrFlag(acptr, FLAG_LOCOP);
           ClrFlag(acptr, FLAG_ADMIN);
+          ClrFlag(acptr, FLAG_OPERED_LOCAL);
+          ClrFlag(acptr, FLAG_OPERED_REMOTE);
           if (MyConnect(acptr))
           {
             tmpmask = cli_snomask(acptr) & ~SNO_OPER;
@@ -1475,9 +1479,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         if (what == MODE_ADD)
           SetLocOp(acptr);
         else
-        { 
+        {
           ClrFlag(acptr, FLAG_OPER);
           ClrFlag(acptr, FLAG_LOCOP);
+          ClrFlag(acptr, FLAG_OPERED_LOCAL);
+          ClrFlag(acptr, FLAG_OPERED_REMOTE);
           if (MyConnect(acptr))
           {
             tmpmask = cli_snomask(acptr) & ~SNO_OPER;

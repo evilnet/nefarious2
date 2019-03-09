@@ -230,6 +230,9 @@ enum Flag
     FLAG_RESTRICT_PRIVMSG,          /**< Client is in a client class that has the restrict_privmsg option */
     FLAG_RESTRICT_UMODE,            /**< Client is in a client class that has the restrict_umode option */
 
+    FLAG_OPERED_LOCAL,              /**< Client /OPER'ed using a local O:Line */
+    FLAG_OPERED_REMOTE,             /**< Client /OPER'ed using a remote O:Line */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -793,6 +796,10 @@ struct Client {
 #define IsRestrictPrivMsg(x)    HasFlag(x, FLAG_RESTRICT_PRIVMSG)
 /** Return non-zero if the client cannot change his/her user modes. */
 #define IsRestrictUMode(x)      HasFlag(x, FLAG_RESTRICT_UMODE)
+/** Return non-zero if the client /OPER'ed using a local O:Line. */
+#define IsOperedLocal(x)        HasFlag(x, FLAG_OPERED_LOCAL)
+/** Return non-zero if the client /OPER'ed using a remote O:Line. */
+#define IsOperedRemote(x)       HasFlag(x, FLAG_OPERED_REMOTE)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -903,6 +910,10 @@ struct Client {
 #define SetRestrictPrivMsg(x)   SetFlag(x, FLAG_RESTRICT_PRIVMSG)
 /** Mark a client as not being allowed to change user modes. */
 #define SetRestrictUMode(x)     SetFlag(x, FLAG_RESTRICT_UMODE)
+/** Mark a client as having /OPER'ed using a local O:Line. */
+#define SetOperedLocal(x)       SetFlag(x, FLAG_OPERED_LOCAL)
+/** Matk a client as having /OPER'ed using a remote O:Line. */
+#define SetOperedRemote(x)      SetFlag(x, FLAG_OPERED_REMOTE)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 
@@ -990,6 +1001,10 @@ struct Client {
 #define ClearRestrictPrivMsg(x) ClrFlag(x, FLAG_RESTRICT_PRIVMSG)
 /** Clear the client's user mode restriction. */
 #define ClearRestrictUMode(x)   ClrFlag(x, FLAG_RESTRICT_UMODE)
+/** Client is no longer OPER'ed using a local O:Line. */
+#define ClearOperedLocal(x)     ClrFlag(x, FLAG_OPERED_LOCAL)
+/** Client is no longet OPER'ed using a remote O:Line. */
+#define ClearOperedRemote(x)    ClrFlag(x, FLAG_OPERED_REMOTE)
 /** Clear the client's pending PING flag. */
 #define ClearPingSent(x)        ClrFlag(x, FLAG_PINGSENT)
 /** Clear the client's HUB flag. */

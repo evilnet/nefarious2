@@ -429,19 +429,27 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    }
 
    if (IsService(cli_user(acptr)->server)) {
-     if (acptr)
-       send_reply(sptr, RPL_DATASTR, "         Status:: Network Service");
-     else if (IsAnOper(acptr))
-       send_reply(sptr, RPL_DATASTR, "         Status:: IRC Operator (service)");
-     else 
-       send_reply(sptr, RPL_DATASTR, "         Status:: Client (service)");
+     send_reply(sptr, RPL_DATASTR, "         Status:: Network Service");
    } else if (IsAdmin(acptr)) {
      send_reply(sptr, RPL_DATASTR, "         Status:: IRC Administrator");
-   } else if (IsAnOper(acptr)) {
+   } else if (IsOper(acptr)) {
      send_reply(sptr, RPL_DATASTR, "         Status:: IRC Operator");
+   } else if (IsLocOp(acptr)) {
+     send_reply(sptr, RPL_DATASTR, "         Status:: Local IRC Operator");
    } else {
      send_reply(sptr, RPL_DATASTR, "         Status:: Client");
    }
+
+   if (IsAnOper(acptr) && IsOperedLocal(acptr)) {
+     if (MyUser(acptr) && cli_user(acptr)->opername) {
+       ircd_snprintf(0, outbuf, sizeof(outbuf), "         Opered:: Local O:Line as %s", cli_user(acptr)->opername);
+       send_reply(sptr, RPL_DATASTR, outbuf);
+     } else
+       send_reply(sptr, RPL_DATASTR, "         Opered:: Local O:Line");
+   } else if (IsAnOper(acptr) && IsOperedRemote(acptr))
+     send_reply(sptr, RPL_DATASTR, "         Opered:: Remote O:Line");
+   else if (IsAnOper(acptr))
+     send_reply(sptr, RPL_DATASTR, "         Opered:: By Remote Server");
 
    if (MyUser(acptr)) {
      ircd_snprintf(0, outbuf, sizeof(outbuf), "          Class:: %s", get_client_class(acptr));
