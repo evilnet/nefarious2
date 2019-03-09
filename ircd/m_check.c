@@ -440,18 +440,20 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, "         Status:: Client");
    }
 
-   if (IsAnOper(acptr) && IsOperedLocal(acptr)) {
-     if (MyUser(acptr) && cli_user(acptr)->opername) {
-       ircd_snprintf(0, outbuf, sizeof(outbuf), "         Opered:: Local O:Line as %s", cli_user(acptr)->opername);
-       send_reply(sptr, RPL_DATASTR, outbuf);
-     } else
-       send_reply(sptr, RPL_DATASTR, "         Opered:: Local O:Line");
-   } else if (IsAnOper(acptr) && IsOperedRemote(acptr))
-     send_reply(sptr, RPL_DATASTR, "         Opered:: Remote O:Line");
-   else if (IsAnOper(acptr))
-     send_reply(sptr, RPL_DATASTR, "         Opered:: By Remote Server");
-
    if (MyUser(acptr)) {
+     if (IsAnOper(acptr)) {
+       if (IsOperedLocal(acptr)) {
+         if (cli_user(acptr)->opername) {
+           ircd_snprintf(0, outbuf, sizeof(outbuf), "         Opered:: Local O:Line as %s", cli_user(acptr)->opername);
+           send_reply(sptr, RPL_DATASTR, outbuf);
+         } else
+           send_reply(sptr, RPL_DATASTR, "         Opered:: Local O:Line");
+       } else if (IsOperedRemote(acptr))
+         send_reply(sptr, RPL_DATASTR, "         Opered:: Remote O:Line");
+       else
+         send_reply(sptr, RPL_DATASTR, "         Opered:: By Remote Server");
+     }
+
      ircd_snprintf(0, outbuf, sizeof(outbuf), "          Class:: %s", get_client_class(acptr));
      send_reply(sptr, RPL_DATASTR, outbuf);
    }
