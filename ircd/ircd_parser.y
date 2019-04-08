@@ -1646,7 +1646,7 @@ webircdescription: DESCRIPTION '=' QSTRING ';'
 
 spoofhostblock : SPOOFHOST QSTRING
 {
-  flags = SHFLAG_NOPASS;
+  flags = SHFLAG_NOPASS | SHFLAG_MATCHUSER;
   spoofhost = $2;
 } '{' spoofhostitems '}' ';'
 {
