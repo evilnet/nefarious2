@@ -172,7 +172,7 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   if (IsPrivDeaf(acptr) && !IsOper(sptr)) {
-    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "INVITE", cli_name(acptr));
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "INVITE", cli_name(acptr));
     return 0;
   }
 

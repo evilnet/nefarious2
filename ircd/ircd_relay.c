@@ -331,7 +331,7 @@ void relay_directed_message(struct Client* sptr, char* name, char* server, const
    * the message.
    */
   if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "PRIVMSG", cli_name(acptr));
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "PRIVMSG", cli_name(acptr));
     return;
   }
 
@@ -404,7 +404,7 @@ void relay_directed_notice(struct Client* sptr, char* name, char* server, const 
    * the message.
    */
   if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "NOTICE", cli_name(acptr));
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "NOTICE", cli_name(acptr));
     return;
   }
 
@@ -457,7 +457,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
    * the message.
    */
   if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "PRIVMSG", cli_name(acptr));
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "PRIVMSG", cli_name(acptr));
     return;
   }
 
@@ -517,7 +517,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
    * the message.
    */
   if (IsPrivDeaf(acptr) && !IsOper(sptr) && (acptr != sptr)) {
-    send_reply(sptr, ERR_PRIVDEAF, cli_name(sptr), "NOTICE", cli_name(acptr));
+    send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "NOTICE", cli_name(acptr));
     return;
   }
 
