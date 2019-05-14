@@ -125,9 +125,9 @@ struct Message msgtab[] = {
   {
     MSG_NOTICE,
     TOK_NOTICE,
-    0, MAXPARA, MFLG_SLOW | MFLG_IGNORE, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG | MFLG_IGNORE, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_ignore, m_notice, ms_notice, mo_notice, m_ignore }
+    { mr_notice, m_notice, ms_notice, mo_notice, m_ignore }
   },
   {
     MSG_WALLCHOPS,

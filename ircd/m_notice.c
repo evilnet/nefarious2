@@ -96,6 +96,7 @@
 #include "numeric.h"
 #include "send.h"
 #include "s_conf.h"
+#include "s_debug.h"
 #include "s_misc.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -104,6 +105,54 @@
 #if !defined(XXX_BOGUS_TEMP_HACK)
 #include "handlers.h"
 #endif
+
+/*
+ * mr_notice - Pre-registration message handler to catch CTCP VERSION reply
+ */
+int mr_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+{
+  int             found_g = 0;
+  char*           temp;
+  char            cversion[VERSIONLEN + 1];
+
+  assert(0 != cptr);
+  assert(cptr == sptr);
+
+  ClrFlag(sptr, FLAG_TS8);
+
+  if (parc < 2 || EmptyString(parv[1]))
+    return 0;
+  if (parc < 3 || EmptyString(parv[parc - 1]))
+    return 0;
+
+  if (feature_bool(FEAT_CTCP_VERSIONING) && MyConnect(sptr) &&
+      !ircd_strcmp(parv[1], cli_name(&me))) {
+    if ((ircd_strncmp("\x01VERSION", parv[2], 8) == 0) && (strlen(parv[2]) > 10)) {
+      temp = parv[2] + 9;
+      ircd_strncpy(cversion, temp, VERSIONLEN);
+      if (cversion[strlen(cversion)-1] == '\x01')
+        cversion[strlen(cversion)-1] = '\0';
+
+      ircd_strncpy(cli_version(sptr), cversion, VERSIONLEN);
+
+      Debug((DEBUG_INFO, "Got CTCP version from %s: %s", (IsUnknown(sptr) ? "unknown" : cli_name(sptr)), cli_version(sptr)));
+
+      if (feature_bool(FEAT_CTCP_VERSIONING_KILL)) {
+        if ((found_g = find_kill(sptr))) {
+          sendto_opmask_butone(0, found_g == -2 ? SNO_GLINE : SNO_OPERKILL,
+                               found_g == -2 ? "G-line active for %s%s" :
+                               "K-line active for %s%s",
+                               IsUnknown(sptr) ? "Unregistered Client ":"",
+                               get_client_name(sptr, SHOW_IP));
+          return exit_client_msg(cptr, sptr, &me, "Banned Client: %s", cli_version(sptr));
+        }
+      }
+      return 0;
+    }
+  }
+
+  return 0;
+}
 
 /*
  * m_notice - generic message handler
@@ -151,20 +200,26 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         cversion[strlen(cversion)-1] = '\0';
 
       ircd_strncpy(cli_version(sptr), cversion, VERSIONLEN);
-      sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s",
-                            cli_name(sptr), MARK_CVERSION, cli_version(sptr));
 
-      if (feature_bool(FEAT_CTCP_VERSIONING_CHAN)) {
-        /* Announce to channel. */
-        if ((chptr = FindChannel(feature_str(FEAT_CTCP_VERSIONING_CHANNAME)))) {
-          if (feature_bool(FEAT_CTCP_VERSIONING_USEMSG))
-            sendcmdto_channel_butone(&me, CMD_PRIVATE, chptr, &me, SKIP_DEAF | SKIP_BURST,
-                                     '\0', "%H :%s has version \002%s\002", chptr,
-                                     cli_name(sptr), cli_version(sptr));
-          else
-            sendcmdto_channel_butone(&me, CMD_NOTICE, chptr, &me, SKIP_DEAF | SKIP_BURST,
-                                     '\0', "%H :%s has version \002%s\002", chptr,
-                                     cli_name(sptr), cli_version(sptr));
+      Debug((DEBUG_INFO, "Got CTCP version from %s: %s", (IsUnknown(sptr) ? "unknown" : cli_name(sptr)), cli_version(sptr)));
+
+      if (!IsCVersionSent(sptr)) {
+        SetCVersionSent(sptr);
+        sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s",
+                              cli_name(sptr), MARK_CVERSION, cli_version(sptr));
+
+        if (feature_bool(FEAT_CTCP_VERSIONING_CHAN)) {
+          /* Announce to channel. */
+          if ((chptr = FindChannel(feature_str(FEAT_CTCP_VERSIONING_CHANNAME)))) {
+            if (feature_bool(FEAT_CTCP_VERSIONING_USEMSG))
+              sendcmdto_channel_butone(&me, CMD_PRIVATE, chptr, &me, SKIP_DEAF | SKIP_BURST,
+                                       '\0', "%H :%s has version \002%s\002", chptr,
+                                       cli_name(sptr), cli_version(sptr));
+            else
+              sendcmdto_channel_butone(&me, CMD_NOTICE, chptr, &me, SKIP_DEAF | SKIP_BURST,
+                                       '\0', "%H :%s has version \002%s\002", chptr,
+                                       cli_name(sptr), cli_version(sptr));
+          }
         }
       }
 

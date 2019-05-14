@@ -233,6 +233,7 @@ enum Flag
     FLAG_OPERED_LOCAL,              /**< Client /OPER'ed using a local O:Line */
     FLAG_OPERED_REMOTE,             /**< Client /OPER'ed using a remote O:Line */
     FLAG_SERVER_NOOP,               /**< Server has been NOOP'ed */
+    FLAG_SENT_CVERSION,             /**< Client's CTCP VERSION reply has been sent out */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -801,8 +802,10 @@ struct Client {
 #define IsOperedLocal(x)        HasFlag(x, FLAG_OPERED_LOCAL)
 /** Return non-zero if the client /OPER'ed using a remote O:Line. */
 #define IsOperedRemote(x)       HasFlag(x, FLAG_OPERED_REMOTE)
-/** Return non-zerp if the server is NOOP'ed. */
+/** Return non-zero if the server is NOOP'ed. */
 #define IsServerNoop(x)         HasFlag(x, FLAG_SERVER_NOOP)
+/** Return non-zero if the client's CTCP VERSION reply has been sent out. */
+#define IsCVersionSent(x)       HasFlag(x, FLAG_SENT_CVERSION)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -919,6 +922,8 @@ struct Client {
 #define SetOperedRemote(x)      SetFlag(x, FLAG_OPERED_REMOTE)
 /** Mark a server as having been NOOP'ed. */
 #define SetServerNoop(x)        SetFlag(x, FLAG_SERVER_NOOP)
+/** Mark a client as having had it's CTCP VERSION sent out. */
+#define SetCVersionSent(x)      SetFlag(x, FLAG_SENT_CVERSION)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 

@@ -367,6 +367,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
   struct Shun*     ashun = NULL;
   int              res = 0;
   struct SHostConf* sconf = NULL;
+  struct Channel*  chptr;
 
   user->last = CurrentTime;
   parv[0] = cli_name(sptr);
@@ -562,8 +563,24 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (cli_sslclifp(sptr) && !EmptyString(cli_sslclifp(sptr)))
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_SSLCLIFP, cli_sslclifp(sptr));
 
-    if (cli_version(sptr) && !EmptyString(cli_version(sptr)))
+    if (cli_version(sptr) && !EmptyString(cli_version(sptr))) {
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_CVERSION, cli_version(sptr));
+      SetCVersionSent(sptr);
+
+      if (feature_bool(FEAT_CTCP_VERSIONING_CHAN)) {
+        /* Announce to channel. */
+        if ((chptr = FindChannel(feature_str(FEAT_CTCP_VERSIONING_CHANNAME)))) {
+          if (feature_bool(FEAT_CTCP_VERSIONING_USEMSG))
+            sendcmdto_channel_butone(&me, CMD_PRIVATE, chptr, &me, SKIP_DEAF | SKIP_BURST,
+                                     '\0', "%H :%s has version \002%s\002", chptr,
+                                     cli_name(sptr), cli_version(sptr));
+          else
+            sendcmdto_channel_butone(&me, CMD_NOTICE, chptr, &me, SKIP_DEAF | SKIP_BURST,
+                                     '\0', "%H :%s has version \002%s\002", chptr,
+                                     cli_name(sptr), cli_version(sptr));
+        }
+      }
+    }
 
     if (cli_killmark(sptr) && !EmptyString(cli_killmark(sptr)))
       sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s :%s", cli_name(cptr), MARK_KILL, cli_killmark(sptr));

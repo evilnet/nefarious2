@@ -117,7 +117,7 @@ extern int m_names(struct Client*, struct Client*, int, char*[]);
 extern int m_nick(struct Client*, struct Client*, int, char*[]);
 extern int m_not_oper(struct Client*, struct Client*, int, char*[]);
 extern int m_notice(struct Client*, struct Client*, int, char*[]);
-extern int m_notice(struct Client*, struct Client*, int, char*[]);
+extern int mr_notice(struct Client*, struct Client*, int, char*[]);
 extern int m_oper(struct Client*, struct Client*, int, char*[]);
 extern int m_opermotd(struct Client*, struct Client*, int, char*[]);
 extern int m_part(struct Client*, struct Client*, int, char*[]);
