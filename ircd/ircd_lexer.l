@@ -150,6 +150,7 @@ static struct lexer_token {
   TOKEN(SSLFP),
   TOKEN(SSLCIPHERS),
   TOKEN(INCLUDE),
+  TOKEN(SWHOIS),
 #undef TOKEN
   { "ssl", SSLTOK },
   { "administrator", ADMIN },

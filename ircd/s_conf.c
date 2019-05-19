@@ -174,6 +174,7 @@ void free_conf(struct ConfItem *aconf)
   MyFree(aconf->redirserver);
   MyFree(aconf->autojoinchan);
   MyFree(aconf->autojoinnotice);
+  MyFree(aconf->swhois);
   MyFree(aconf);
   --GlobalConfCount;
 }

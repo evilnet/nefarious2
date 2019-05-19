@@ -84,7 +84,7 @@ extern int init_lexer_file(char* file);
   int maxchans, redirport, hidehostcomps;
   char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
   char *spoofhost, *sslfp, *sslciphers, *description, *redirserver;
-  char *country, *continent, *ajoinchan, *ajoinnotice;
+  char *country, *continent, *ajoinchan, *ajoinnotice, *swhois;
   struct SLink *hosts;
   char *stringlist[MAX_STRINGS];
   struct ListenerFlags listen_flags;
@@ -230,6 +230,7 @@ static void free_slist(struct SLink **link) {
 %token SSLCIPHERS
 %token INCLUDE
 %token SSLTOK
+%token SWHOIS
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -757,6 +758,8 @@ operblock: OPER
       DupString(aconf->autojoinchan, ajoinchan);
     if (ajoinnotice)
       DupString(aconf->autojoinnotice, ajoinnotice);
+    if (swhois)
+      DupString(aconf->swhois, swhois);
     conf_parse_userhost(aconf, link->value.cp);
     aconf->conn_class = c_class;
     aconf->snomask = snomask;
@@ -768,6 +771,7 @@ operblock: OPER
   MyFree(sslfp);
   MyFree(ajoinchan);
   MyFree(ajoinnotice);
+  MyFree(swhois);
   free_slist(&hosts);
   name = pass = NULL;
   c_class = NULL;
@@ -776,7 +780,7 @@ operblock: OPER
 };
 operitems: operitem | operitems operitem;
 operitem: opername | operpass | operhost | operclass | opersslfp | opersnomask
-           | operajoinchan | operajoinnotice | priv;
+           | operajoinchan | operajoinnotice | operswhois | priv;
 opername: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -828,6 +832,11 @@ operajoinnotice: AUTOJOINNOTICE '=' QSTRING ';'
 {
   MyFree(ajoinnotice);
   ajoinnotice = $3;
+};
+operswhois: SWHOIS '=' QSTRING ';'
+{
+  MyFree(swhois);
+  swhois = $3;
 };
 
 priv: privtype '=' yesorno ';'

@@ -232,6 +232,12 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     }
   }
 
+  if (!EmptyString(aconf->swhois))
+  {
+    ircd_strncpy(cli_user(sptr)->swhois, aconf->swhois, BUFSIZE);
+    sendcmdto_serv_butone(&me, CMD_SWHOIS, NULL, "%C :%s", sptr, aconf->swhois);
+  }
+
   sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
      "%s (%s@%s) is now operator (%c)",
      cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost,

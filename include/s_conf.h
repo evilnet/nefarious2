@@ -83,6 +83,7 @@ struct ConfItem
   int redirport;      /**< Redirect to this port. */
   char *autojoinchan; /**< Auto join channel list. */
   char *autojoinnotice; /**< Auto join notice. */
+  char *swhois;       /**< SWHOIS string to apply to user on OPER. */
   time_t hold;        /**< Earliest time to attempt an outbound
                          connect on this ConfItem. */
   int dns_pending;    /**< A dns request is pending. */
