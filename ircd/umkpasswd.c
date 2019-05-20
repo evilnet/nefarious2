@@ -287,6 +287,7 @@ char* crypt_pass(const char* pw, const char* mech)
 {
 crypt_mechs_t* crypt_mech;
 char* salt, *untagged, *tagged;
+int len;
 
  assert(NULL != pw);
  assert(NULL != mech);
@@ -304,9 +305,10 @@ char* salt, *untagged, *tagged;
 
  untagged = (char *)CryptFunc(crypt_mech->mech)(pw, salt);
  tagged = (char *)MyMalloc(strlen(untagged)+CryptTokSize(crypt_mech->mech)+1);
+ len = strlen(untagged)+1;
  memset(tagged, 0, strlen(untagged)+CryptTokSize(crypt_mech->mech)+1);
  strncpy(tagged, CryptTok(crypt_mech->mech), CryptTokSize(crypt_mech->mech));
- strncpy(tagged+CryptTokSize(crypt_mech->mech), untagged, strlen(untagged));
+ strncpy(tagged+CryptTokSize(crypt_mech->mech), untagged, len);
 
 return tagged;
 }

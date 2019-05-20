@@ -282,7 +282,7 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
         len += strlen(dp->value.cp) + 1;
         if (len > 128)
           break;
-        strncpy(p2, dp->value.cp, strlen(dp->value.cp));
+        strncpy(p2, dp->value.cp, 128-len);
         p2 += strlen(dp->value.cp);
         *p2++ = ',';
       }

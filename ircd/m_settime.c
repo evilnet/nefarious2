@@ -128,7 +128,6 @@ int ms_settime(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     else
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :SETTIME: Bad value (%Tu, "
                     "delta %ld)", sptr, t, dt);
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :SETTIME: Bad value", sptr);
     return 0;
   }
 

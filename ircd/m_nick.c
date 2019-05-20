@@ -156,7 +156,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return exit_client(cptr, cptr, &me, "Use a different port");
 
   if (*(cli_name(sptr)))
-    if ((parv[0] != '\0') && shun_lookup(sptr, 0))
+    if ((*parv[0] != '\0') && shun_lookup(sptr, 0))
       return 0;
 
   if (parc < 2) {
