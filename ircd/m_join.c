@@ -149,7 +149,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     int exceptkli = 0;
     struct Ban *ban = NULL;
 
-    if (chptr->mode.redir && (*chptr->mode.redir != '\0')) {
+    if (*chptr->mode.redir && (*chptr->mode.redir != '\0')) {
       if (chptr->users >= chptr->mode.limit) {
         if (IsNoLink(sptr))
           send_reply(sptr, ERR_LINKCHAN, chptr->chname, chptr->mode.redir);

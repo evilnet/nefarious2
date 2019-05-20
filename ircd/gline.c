@@ -234,7 +234,7 @@ do_gline(struct Client *cptr, struct Client *sptr, struct Gline *gline)
             continue;
         Debug((DEBUG_DEBUG,"Matched!"));
       } else { /* Host/IP gline */
-        if (cli_user(acptr)->username &&
+        if (*(cli_user(acptr)->username) &&
             match(gline->gl_user, (cli_user(acptr))->username) != 0)
           continue;
 

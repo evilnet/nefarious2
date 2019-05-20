@@ -4770,7 +4770,7 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     if (state.chptr->mode.limit && !(state.done & DONE_LIMIT))
       modebuf_mode_uint(state.mbuf, MODE_DEL | MODE_LIMIT,
 			state.chptr->mode.limit);
-    if (state.chptr->mode.redir && !(state.done & DONE_REDIR))
+    if (*state.chptr->mode.redir && !(state.done & DONE_REDIR))
       modebuf_mode_string(state.mbuf, MODE_DEL | MODE_REDIRECT,
               state.chptr->mode.redir, 0);
     if (*state.chptr->mode.key && !(state.done & DONE_KEY_DEL))

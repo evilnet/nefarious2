@@ -218,7 +218,7 @@ do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
             continue;
         Debug((DEBUG_DEBUG,"Matched!"));
       } else { /* Host/IP shun */
-        if (cli_user(acptr)->username &&
+        if (*(cli_user(acptr)->username) &&
             match(shun->sh_user, (cli_user(acptr))->username) != 0)
           continue;
 
