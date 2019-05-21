@@ -88,9 +88,16 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
    chptr->topic_time = ts ? ts : TStime();
    /* Fixed in 2.10.11: Don't propagate local topics */
    if (!IsLocalChannel(chptr->chname))
-     sendcmdto_serv_butone(sptr, CMD_TOPIC, cptr, "%H %s %Tu %Tu :%s", chptr,
-		           chptr->topic_nick, chptr->creationtime,
-                           chptr->topic_time, chptr->topic);
+   {
+     if (setter != NULL)
+       sendcmdto_serv_butone(sptr, CMD_TOPIC, cptr, "%H %s %Tu %Tu :%s", chptr,
+                             chptr->topic_nick, chptr->creationtime,
+                             chptr->topic_time, chptr->topic);
+     else
+       sendcmdto_serv_butone(sptr, CMD_TOPIC, cptr, "%H %Tu %Tu :%s", chptr,
+                             chptr->creationtime, chptr->topic_time,
+                             chptr->topic);
+   }
    if (newtopic)
    {
      struct Membership *member;
