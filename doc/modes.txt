@@ -178,3 +178,6 @@ v - Channel Voice
 
 z - Persistant
  Resyncs channels upon bursting
+
+Z - SSL Users Only
+ Only allow users using SSL to join the channel
