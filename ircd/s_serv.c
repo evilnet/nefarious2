@@ -290,9 +290,9 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       if (IsGeoIP(acptr)) {
         if (cli_countrycode(acptr) && !EmptyString(cli_countrycode(acptr)) &&
             cli_continentcode(acptr) && !EmptyString(cli_continentcode(acptr)))
-          sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s %s %s",
+          sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s %s %s :%s",
                         cli_name(acptr), MARK_GEOIP, cli_countrycode(acptr),
-                        cli_continentcode(acptr));
+                        cli_continentcode(acptr), cli_countryname(acptr));
       }
 
       if (feature_bool(FEAT_SILENCE_CHANMSGS)) {

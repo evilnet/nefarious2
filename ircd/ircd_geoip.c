@@ -162,26 +162,28 @@ void geoip_apply(struct Client* cptr)
  * @param[in] country Country code from MARK.
  * @param[in] continent Continent code from MARK.
  */
-void geoip_apply_mark(struct Client* cptr, char* country, char* continent)
+void geoip_apply_mark(struct Client* cptr, char* country, char* continent, char* countryname)
 {
   ircd_strncpy((char *)&cli_countrycode(cptr), (!country ? "--" : country), 3);
   ircd_strncpy((char *)&cli_continentcode(cptr), (!continent ? "--" : continent), 3);
 
+  if (countryname != NULL)
+    ircd_strncpy((char *)&cli_countryname(cptr), countryname, 256);
+  else {
 #ifdef USE_GEOIP
-  if (!country || !strcmp(country, "--"))
+    if (!country || !strcmp(country, "--"))
 #endif /* USE_GEOIP */
-    ircd_strncpy((char *)&cli_countryname(cptr), "Unknown", 8);
+      ircd_strncpy((char *)&cli_countryname(cptr), "Unknown", 8);
 #ifdef USE_GEOIP
-  else
-    ircd_strncpy((char *)&cli_countryname(cptr), GeoIP_name_by_id(GeoIP_id_by_code(country)), 256);
+    else
+      ircd_strncpy((char *)&cli_countryname(cptr), GeoIP_name_by_id(GeoIP_id_by_code(country)), 256);
+  }
+#endif /* USE_GEOIP */
 
   if (!continent || !strcmp(continent, "--"))
-#endif /* USE_GEOIP */
     ircd_strncpy((char *)&cli_continentname(cptr), "Unknown", 8);
-#ifdef USE_GEOIP
   else
     ircd_strncpy((char *)&cli_continentname(cptr), geoip_continent_name_by_code(continent), 256);
-#endif /* USE_GEOIP */
 
   SetGeoIP(cptr);
 }

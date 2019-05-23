@@ -588,9 +588,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (IsGeoIP(sptr)) {
       if (cli_countrycode(sptr) && !EmptyString(cli_countrycode(sptr)) &&
           cli_continentcode(sptr) && !EmptyString(cli_continentcode(sptr)))
-        sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s %s %s",
+        sendcmdto_serv_butone(&me, CMD_MARK, cptr, "%s %s %s %s :%s",
                       cli_name(sptr), MARK_GEOIP, cli_countrycode(sptr),
-                      cli_continentcode(sptr));
+                      cli_continentcode(sptr), cli_countryname(sptr));
     }
 
     /* To avoid sending +r to the client due to auth-on-connect, set

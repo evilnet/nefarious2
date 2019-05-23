@@ -2324,7 +2324,7 @@ static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
       sendto_iauth(cli, "E Missing :Missing mark geoip parameter");
       return 0;
     }
-    geoip_apply_mark(cli, params[1], params[2]);
+    geoip_apply_mark(cli, params[1], params[2], (parc > 3 ? params[3] : NULL));
   } else if (!ircd_strcmp(params[0], MARK_CVERSION)) {
     ircd_strncpy(cli_version(cli), params[1], VERSIONLEN);
   } else if (!ircd_strcmp(params[0], MARK_SSLCLIFP)) {

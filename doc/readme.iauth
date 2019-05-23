@@ -488,8 +488,9 @@ Comments: Sets the specified markdata for the specified marktype on
   the specified client. Currently available mark types are WEBIRC,
   GEOIP, CVERSION, SSLCLIFP, KILL and MARK. GEOIP requires both a 2
   letter country code and a 2 letter continent code both without
-  the : prefix. MARK is a simple single word tag that is added to a
-  list so you can add several MARK marks on a user.
+  the : prefix and an optional country name prefixed by a :. MARK
+  is a simple single word tag that is added to a list so you can
+  add several MARK marks on a user.
 Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
   not support this message.
 

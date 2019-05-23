@@ -119,8 +119,11 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if(parc < 5)
       return protocol_violation(sptr, "MARK geoip received too few parameters (%u)", parc);
     if ((acptr = FindUser(parv[1]))) {
-      geoip_apply_mark(acptr, parv[3], parv[4]);
-      sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s %s %s", cli_name(acptr), MARK_GEOIP, parv[3], parv[4]);
+      geoip_apply_mark(acptr, parv[3], parv[4], (parc > 5 ? parv[5] : NULL));
+      if (parc > 5)
+        sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s %s %s :%s", cli_name(acptr), MARK_GEOIP, parv[3], parv[4], parv[5]);
+      else
+        sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s %s %s", cli_name(acptr), MARK_GEOIP, parv[3], parv[4]);
     }
   } else if (!strcmp(parv[2], MARK_CVERSION)) {
     if(parc < 4)
