@@ -153,10 +153,10 @@ if [ -n "$ircdkey" ]; then
     chmod 600 "$tmp_path/ssh.pem"
 
     #Override git's ssh command so we can force our custom identity and no password
-    echo "ssh -oPasswordAuthentication=no -i \"$ipath\" \"\$1\" \"\$2\"\n" >> "$tmp_path/git.sh"
+    echo -e "ssh -oPasswordAuthentication=no -i \"$ipath\" \"\$1\" \"\$2\"\n" >> "$tmp_path/git.sh"
 else 
     #Override git's ssh command so we can force our custom identity and no password
-    echo "ssh -oPasswordAuthentication=no -i \"$skey\" \"\$1\" \"\$2\"\n" >> "$tmp_path/git.sh"
+    echo -e "ssh -oPasswordAuthentication=no -i \"$skey\" \"\$1\" \"\$2\"\n" >> "$tmp_path/git.sh"
 fi
 
 chmod a+x "$tmp_path/git.sh"
