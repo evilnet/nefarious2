@@ -127,6 +127,12 @@
 /* Maximum number of network connections */
 #undef MAXCONNECTIONS
 
+/* Path name used as a base for the MaxMindDB include files. */
+#undef MMDB_INCLUDES_PATH
+
+/* Path name used as a base for the MaxMindDB lib files. */
+#undef MMDB_LIBS_PATH
+
 /* Define if you have BSD non-blocking sockets. */
 #undef NBLOCK_BSD
 
@@ -216,6 +222,9 @@
 
 /* Define to enable the kqueue engine */
 #undef USE_KQUEUE
+
+/* Define if you are using MaxMindDB */
+#undef USE_MMDB
 
 /* Specify whether or not to use poll() */
 #undef USE_POLL

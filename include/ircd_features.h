@@ -282,6 +282,7 @@ enum Feature {
 
   /* GeoIP FEAT_'s */
   FEAT_GEOIP_ENABLE,
+  FEAT_MMDB_FILE,
   FEAT_GEOIP_FILE,
   FEAT_GEOIP_IPV6_FILE,
 

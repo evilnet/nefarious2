@@ -340,6 +340,12 @@ static void feature_notify_geoip_enable(void)
   geoip_handle_enable();
 }
 
+/** Handle update to FEAT_MMDB_FILE. */
+static void feature_notify_geoip_mmdb_file(void)
+{
+  geoip_handle_mmdb_file();
+}
+
 /** Handle update to FEAT_GEOIP_FILE. */
 static void feature_notify_geoip_file(void)
 {
@@ -755,6 +761,7 @@ static struct FeatureDesc {
 
   /* GeoIP FEAT_'s */
   F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),
+  F_S(MMDB_FILE, 0, "GeoLite2-Country.mmdb", feature_notify_geoip_mmdb_file),
   F_S(GEOIP_FILE, 0, "GeoIP.dat", feature_notify_geoip_file),
   F_S(GEOIP_IPV6_FILE, 0, "GeoIPv6.dat", feature_notify_geoip_ipv6_file),
 

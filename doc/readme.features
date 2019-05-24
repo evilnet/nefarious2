@@ -1620,7 +1620,15 @@ GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE
 
-Enables or disable GeoIP support.
+Enables or disable GeoIP support. This requires either GEOIP_FILE or MMDB_FILE
+to be set for this feature to work.
+
+MMDB_FILE
+ * Type: boolean
+ * Default: "GeoLite2-Country.mmdb"
+
+Path to a MaxMindDB format file containing at least country data for IPs.
+Can be downloaded from https://dev.maxmind.com/geoip/geoip2/geolite2/
 
 GEOIP_FILE
  * Type: string

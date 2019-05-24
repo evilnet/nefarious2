@@ -828,7 +828,68 @@ if test x"$unet_cv_enable_geoip" = xyes; then
     CFLAGS="$CFLAGS -I$unet_cv_with_geoip_inc_prefix"
   else
      AC_MSG_WARN([Unable to find GeoIP, GeoIP features will not work without libGeoIP. Disabling GeoIP support.])
-#    AC_MSG_ERROR([Unable to find GeoIP, Maybe you need to install the geoip and libgeoip-dev package, or use --with-geoip-includes and --with-geoip-libs if you have GeoIP installed in an odd location])
+  fi
+fi
+
+dnl **
+dnl **  MaxMindDB checks (GeoIP)
+dnl **
+AC_MSG_CHECKING([whether to enable MaxMindDB support])
+AC_ARG_ENABLE([mmdb],
+[  --disable-mmdb         Disable MaxMindDB support],
+[unet_cv_enable_mmdb=$enable_mmdb],
+[AC_CACHE_VAL(unet_cv_enable_mmdb,
+[unet_cv_enable_mmdb=yes])])
+AC_MSG_RESULT([$unet_cv_enable_mmdb])
+
+if test x"$unet_cv_enable_mmdb" = xyes; then
+  AC_ARG_WITH([geoip],
+  AS_HELP_STRING([--with-mmdb=dir], [Specify the installation prefix of MaxMindDB (default: /usr/local)]),
+  [base_mmdb_prefix=$withval],
+  [base_mmdb_prefix=/usr/local])
+
+  AC_MSG_CHECKING([for MaxMindDB includes])
+  AC_ARG_WITH([mmdb-includes],
+  AS_HELP_STRING([--with-mmdb-includes=dir], [Specify location of MaxMindDB header files (default: /usr/local/include)]),
+  [base_mmdb_inc=$withval],
+  [base_mmdb_inc=$base_mmdb_prefix/include])
+  [unet_cv_with_mmdb_inc_prefix=$base_mmdb_inc]
+  AC_MSG_RESULT([$unet_cv_with_mmdb_inc_prefix])
+  AC_DEFINE_UNQUOTED(MMDB_INCLUDES_PATH, "$base_mmdb_inc", [Path name used as a base for the MaxMindDB include files.])
+
+  AC_MSG_CHECKING([for MaxMindDB libraries])
+  AC_ARG_WITH([mmdb-libs],
+  AS_HELP_STRING([--with-mmdb-libs=dir], [Specify location of MaxMindDB libs (default: /usr/local/lib)]),
+  [base_mmdb_lib=$withval],
+  [base_mmdb_lib=$base_mmdb_prefix/lib])
+  [unet_cv_with_mmdb_prefix=$base_mmdb_lib]
+  AC_MSG_RESULT([$unet_cv_with_mmdb_prefix])
+  AC_DEFINE_UNQUOTED(MMDB_LIBS_PATH, "$unet_cv_with_mmdb_prefix", [Path name used as a base for the MaxMindDB lib files.])
+
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_mmdb_inc_prefix"
+  LIBS="-L$unet_cv_with_mmdb_prefix"
+
+  AC_CHECK_HEADERS($unet_cv_with_mmdb_inc_prefix/maxminddb.h, [
+    AC_CHECK_LIB(maxminddb, MMDB_lookup_string, [
+      AC_CHECK_LIB(maxminddb, MMDB_get_value, [
+        enable_mmdb="yes";
+        MMDB_LDFLAGS="-lmaxminddb"
+      ])
+    ])
+  ])
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
+
+  if test "x$enable_mmdb" = xyes; then
+    AC_DEFINE([USE_MMDB], , [Define if you are using MaxMindDB])
+    LIBS="$LIBS -L$unet_cv_with_mmdb_prefix $MMDB_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_mmdb_inc_prefix"
+  else
+     AC_MSG_WARN([Unable to find MaxMindDB, MaxMindDB features will not work without libmaxminddb. Disabling MaxMindDB support.])
   fi
 fi
 

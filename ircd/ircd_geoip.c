@@ -24,6 +24,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #include "config.h"
 
@@ -32,16 +33,25 @@
 #include "ircd_features.h"
 #include "ircd_string.h"
 #include "res.h"
+#include "s_debug.h"
 
 #ifdef USE_GEOIP
 #include <GeoIP.h>
 #endif /* USE_GEOIP */
+
+#ifdef USE_MMDB
+#include <maxminddb.h>
+#endif /* USE_MMDB */
 
 /** GeoIP structs. */
 #ifdef USE_GEOIP
 GeoIP *gi4 = NULL;
 GeoIP *gi6 = NULL;
 #endif /* USE_GEOIP */
+#ifdef USE_MMDB
+MMDB_s mmdb;
+int mmdb_loaded = 0;
+#endif /* USE_MMDB */
 
 const char geoip_continent_code[7][3] = {"--", "AF", "AS", "EU", "NA", "OC", "SA"};
 const char *geoip_continent_name[7] = {"N/A", "Africa", "Asia", "Europe",
@@ -67,6 +77,9 @@ const char* geoip_continent_name_by_code(const char* cc)
  */
 void geoip_init(void)
 {
+#ifdef USE_MMDB
+  int status = 0;
+#endif /* USE_MMDB */
 #ifdef USE_GEOIP
   if (gi4 != NULL)
     GeoIP_delete(gi4);
@@ -76,8 +89,28 @@ void geoip_init(void)
   gi6 = NULL;
 #endif /* USE_GEOIP */
 
+#ifdef USE_MMDB
+  if (mmdb_loaded) {
+    MMDB_close(&mmdb);
+    mmdb_loaded = 0;
+  }
+#endif /* USE_MMDB */
+
   if (!feature_bool(FEAT_GEOIP_ENABLE))
     return;
+
+#ifdef USE_MMDB
+  status = MMDB_open(feature_str(FEAT_MMDB_FILE), MMDB_MODE_MMAP, &mmdb);
+  if (MMDB_SUCCESS == status) {
+    mmdb_loaded = -1;
+    return;
+  }
+  else {
+    Debug((DEBUG_NOTICE, "Unable to load MaxMindDB file: %s", MMDB_strerror(status)));
+    if (MMDB_IO_ERROR == status)
+      Debug((DEBUG_NOTICE, " MaxMindDB IO Error: %s", strerror(errno)));
+  }
+#endif /* USE_MMDB */
 
 #ifdef USE_GEOIP
   /* Load IPv4 GeoIP database */
@@ -111,12 +144,49 @@ void geoip_apply(struct Client* cptr)
 #ifdef USE_GEOIP_GL
   GeoIPLookup gl;
 #endif /* USE_GEOIP_GL */
+#ifdef USE_MMDB
+  MMDB_lookup_result_s result;
+  MMDB_entry_data_s entry_data;
+  int gai_error, mmdb_error, status;
+#endif /* USE_MMDB */
 
   if (!feature_bool(FEAT_GEOIP_ENABLE))
     return;
 
   if (!(cptr))
     return;
+
+#ifdef USE_MMDB
+  if (mmdb_loaded) {
+    result = MMDB_lookup_string(&mmdb, ircd_ntoa(&cli_ip(cptr)), &gai_error, &mmdb_error);
+    if ((gai_error == 0) && (mmdb_error == MMDB_SUCCESS)) {
+      if (result.found_entry) {
+        status = MMDB_get_value(&result.entry, &entry_data, "country", "iso_code", NULL);
+        if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
+          ircd_strncpy((char *)&cli_countrycode(cptr), entry_data.utf8_string, (entry_data.data_size > 3 ? 3 : entry_data.data_size));
+        else
+          ircd_strncpy((char *)&cli_countrycode(cptr), "--", 3);
+        status = MMDB_get_value(&result.entry, &entry_data, "country", "names", "en", NULL);
+        if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
+          ircd_strncpy((char *)&cli_countryname(cptr), entry_data.utf8_string, (entry_data.data_size > 256 ? 256 : entry_data.data_size));
+        else
+          ircd_strncpy((char *)&cli_countryname(cptr), "Unknown", 8);
+        status = MMDB_get_value(&result.entry, &entry_data, "continent", "code", NULL);
+        if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
+          ircd_strncpy((char *)&cli_continentcode(cptr), entry_data.utf8_string, (entry_data.data_size > 3 ? 3 : entry_data.data_size));
+        else
+          ircd_strncpy((char *)&cli_continentcode(cptr), "--", 3);
+        status = MMDB_get_value(&result.entry, &entry_data, "continent", "names", "en", NULL);
+        if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
+          ircd_strncpy((char *)&cli_continentname(cptr), entry_data.utf8_string, (entry_data.data_size > 256 ? 256 : entry_data.data_size));
+        else
+          ircd_strncpy((char *)&cli_continentname(cptr), "Unknown", 8);
+        SetGeoIP(cptr);
+        return;
+      }
+    }
+  }
+#endif /* USE_MMDB */
 
 #ifdef USE_GEOIP
   if (irc_in_addr_is_ipv4(&cli_ip(cptr))) {
@@ -177,8 +247,8 @@ void geoip_apply_mark(struct Client* cptr, char* country, char* continent, char*
 #ifdef USE_GEOIP
     else
       ircd_strncpy((char *)&cli_countryname(cptr), GeoIP_name_by_id(GeoIP_id_by_code(country)), 256);
-  }
 #endif /* USE_GEOIP */
+  }
 
   if (!continent || !strcmp(continent, "--"))
     ircd_strncpy((char *)&cli_continentname(cptr), "Unknown", 8);
@@ -192,6 +262,35 @@ void geoip_apply_mark(struct Client* cptr, char* country, char* continent, char*
 void geoip_handle_enable(void)
 {
   geoip_init();
+}
+
+/** Handle an update to FEAT_MMDB_FILE. */
+void geoip_handle_mmdb_file(void)
+{
+#ifdef USE_MMDB
+  int status;
+#endif /* USE_MMDB */
+
+  if (!feature_bool(FEAT_GEOIP_ENABLE))
+    return;
+
+#ifdef USE_MMDB
+  if (mmdb_loaded) {
+    MMDB_close(&mmdb);
+    mmdb_loaded = 0;
+  }
+
+  status = MMDB_open(feature_str(FEAT_MMDB_FILE), MMDB_MODE_MMAP, &mmdb);
+  if (MMDB_SUCCESS == status) {
+    mmdb_loaded = -1;
+    return;
+  }
+  else {
+    Debug((DEBUG_NOTICE, "Unable to load MaxMindDB file: %s", MMDB_strerror(status)));
+    if (MMDB_IO_ERROR == status)
+      Debug((DEBUG_NOTICE, " MaxMindDB IO Error: %s", strerror(errno)));
+  }
+#endif /* USE_MMDB */
 }
 
 /** Handle an update to FEAT_GEOIP_FILE. */
@@ -247,3 +346,11 @@ const char* geoip_version(void)
 #endif /* USE_GEOIP */
 }
 
+const char* geoip_libmmdb_version(void)
+{
+#ifdef USE_MMDB
+  return MMDB_lib_version();
+#else
+  return NULL;
+#endif /* USE_MMDB */
+}

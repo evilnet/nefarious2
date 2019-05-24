@@ -159,6 +159,9 @@ int mo_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 #ifdef USE_GEOIP
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GeoIP %s", sptr, geoip_version());
 #endif
+#ifdef USE_MMDB
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :MaxMindDB %s", sptr, geoip_libmmdb_version());
+#endif
     send_supported(sptr);
   }
 
