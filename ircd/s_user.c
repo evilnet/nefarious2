@@ -1712,7 +1712,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       ClearWhoisNotice(acptr);
     if (!(feature_bool(FEAT_OPER_HIDE) && HasPriv(acptr, PRIV_HIDE_OPER)) && IsHideOper(acptr))
       ClearHideOper(acptr);
-    if (!HasPriv(acptr, PRIV_HIDE_CHANNELS) && IsNoChan(acptr))
+    if (!feature_bool(FEAT_DERESTRICT_HIDECHANS) && !HasPriv(acptr, PRIV_HIDE_CHANNELS) && IsNoChan(acptr))
       ClearNoChan(acptr);
     if (!HasPriv(acptr, PRIV_HIDE_IDLE) && IsNoIdle(acptr))
       ClearNoIdle(acptr);
