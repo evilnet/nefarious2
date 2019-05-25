@@ -683,7 +683,7 @@ static const struct UserMode {
   { FLAG_CHSERV,       'k' },
   { FLAG_DEBUG,        'g' },
   { FLAG_HIDDENHOST,   'x' },
-  { FLAG_NOCHAN,       'n' },
+  { FLAG_NOCHAN,       'p' },
   { FLAG_COMMONCHANSONLY, 'q' },
   { FLAG_BOT,          'B' },
   { FLAG_PRIVDEAF,     'D' },
@@ -1551,7 +1551,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearNoIdle(acptr);
         break;
-      case 'n':
+      case 'p':
         if (what == MODE_ADD)
           SetNoChan(acptr);
         else

@@ -47,7 +47,7 @@ k - Service
 L - No Link
  Allows the user to walk through channel redirections without being forced into the destination channel
 
-n - No Channel
+p - No Channel
  Hides channel list from non-opers in /whois
 
 o - IRC Operator
