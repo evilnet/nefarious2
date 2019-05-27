@@ -573,7 +573,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
             *(chntext + len++) = '@';
          if (HasVoice(lp))
             *(chntext + len++) = '+';
-         if (IsOper(sptr) && !ShowChannel(sptr,chptr))
+         if (!ShowChannel(sptr,chptr) || (IsNoChan(acptr) && (acptr != sptr)))
             *(chntext + len++) = '*';
          if (IsZombie(lp))
             *(chntext + len++) = '!';
