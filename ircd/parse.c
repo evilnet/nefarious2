@@ -1111,7 +1111,6 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   if ((s = strchr(ch, ' ')))
     *s++ = '\0';
 
-  expire_shuns();
   if (IsRegistered(cptr)) {
     if (*(cli_user(cptr)->username) && *(cli_user(cptr)->host)) {
       if (IsTempShun(cptr) || shun_lookup(cptr, 0))
