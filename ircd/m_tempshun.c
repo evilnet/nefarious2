@@ -105,19 +105,23 @@
 int ms_tempshun(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
+  char* reason = "no reason";
   int remove = 0;
 
   assert(0 != cptr);
   assert(0 != sptr);
   assert(IsServer(cptr));
 
-  if (parc < 4) {
+  if (parc < 3) {
     protocol_violation(sptr, "Too few arguments for TEMPSHUN");
     return need_more_params(sptr, "TEMPSHUN");
   }
 
   if (parv[1][0] == '-')
     remove = -1;
+
+  if (parc > 3)
+    reason = parv[parc-1];
 
   if (!(acptr = findNUser(parv[2])))
     return 0;
@@ -127,26 +131,26 @@ int ms_tempshun(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
       if (IsTempShun(acptr)) {
         /* let the ops know about it */
         sendto_opmask_butone_global(&me, SNO_GLINE, "Temporary shun removed from %s (%s)",
-                                    get_client_name(acptr, SHOW_IP), parv[parc-1]);
+                                    get_client_name(acptr, SHOW_IP), reason);
       }
       ClearTempShun(acptr);
     } else {
       if (!IsTempShun(acptr)) {
         if (!feature_bool(FEAT_HIS_SHUN_REASON)) {
           sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :You are shunned: %s",
-                        acptr, parv[parc-1]);
+                        acptr, reason);
         }
 
         /* let the ops know about it */
         sendto_opmask_butone_global(&me, SNO_GLINE, "Temporary shun applied to %s (%s)",
-                                    get_client_name(acptr, SHOW_IP), parv[parc-1]);
+                                    get_client_name(acptr, SHOW_IP), reason);
       }
 
       SetTempShun(acptr);
     }
   } else {
     sendcmdto_serv_butone(sptr, CMD_TEMPSHUN, cptr, "%c %C :%s",
-                          (remove ? '-' : '+'), acptr, parv[parc-1]);
+                          (remove ? '-' : '+'), acptr, reason);
   }
 
   return 0;
