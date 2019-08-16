@@ -492,6 +492,10 @@ struct Client;
 #define TOK_IRCOPS		"IRCOPS"
 #define CMD_IRCOPS		MSG_IRCOPS, TOK_IRCOPS
 
+#define MSG_TEMPSHUN	"TEMPSHUN"
+#define TOK_TEMPSHUN	"TS"
+#define CMD_TEMPSHUN	MSG_TEMPSHUN, TOK_TEMPSHUN
+
 /*
  * Constants
  */

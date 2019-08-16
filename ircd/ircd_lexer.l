@@ -205,6 +205,7 @@ static struct lexer_token {
   { "show_invis", TPRIV_SHOW_INVIS },
   { "tb", TBYTES },
   { "terabytes", TBYTES },
+  { "tempshun", TPRIV_TEMPSHUN },
   { "unlimit_query", TPRIV_UNLIMIT_QUERY },
   { "walk_lchan", TPRIV_WALK_LCHAN },
   { "wide_gline", TPRIV_WIDE_GLINE },

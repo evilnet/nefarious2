@@ -251,7 +251,7 @@ struct Message msgtab[] = {
   {
     MSG_PING,
     TOK_PING,
-    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    0, MAXPARA, MFLG_SLOW | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_unregistered, m_ping, ms_ping, mo_ping, m_ignore }
   },
@@ -857,6 +857,13 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_unregistered, m_ircops, m_ignore, m_ircops, m_ignore }
   },
+  {
+    MSG_TEMPSHUN,
+    TOK_TEMPSHUN,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+   /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+   { m_unregistered, m_not_oper, ms_tempshun, mo_tempshun, m_ignore }
+  },
 
   /* This command is an alias for QUIT during the unregistered part of
    * of the server.  This is because someone jumping via a broken web
@@ -1107,7 +1114,7 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   expire_shuns();
   if (IsRegistered(cptr)) {
     if (*(cli_user(cptr)->username) && *(cli_user(cptr)->host)) {
-      if (shun_lookup(cptr, 0))
+      if (IsTempShun(cptr) || shun_lookup(cptr, 0))
         isshun = 1;
     }
   }

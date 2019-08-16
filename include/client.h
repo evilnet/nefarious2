@@ -149,6 +149,7 @@ enum Priv
     PRIV_LOCAL_ZLINE, /**< oper can local ZLINE */
     PRIV_ZLINE, /**< oper can ZLINE */
     PRIV_WIDE_ZLINE, /**< oper can set wider Z-lines */
+    PRIV_TEMPSHUN, /**< oper can use the TEMPSHUN command */
     PRIV_LAST_PRIV /**< number of privileges */
   };
 
@@ -229,6 +230,8 @@ enum Flag
     FLAG_RESTRICT_JOIN,             /**< Client is in a client class that has the restrict_join option */
     FLAG_RESTRICT_PRIVMSG,          /**< Client is in a client class that has the restrict_privmsg option */
     FLAG_RESTRICT_UMODE,            /**< Client is in a client class that has the restrict_umode option */
+
+	FLAG_TEMPSHUN,					/**< Client has temporarily been shunned */
 
     FLAG_OPERED_LOCAL,              /**< Client /OPER'ed using a local O:Line */
     FLAG_OPERED_REMOTE,             /**< Client /OPER'ed using a remote O:Line */
@@ -798,6 +801,8 @@ struct Client {
 #define IsRestrictPrivMsg(x)    HasFlag(x, FLAG_RESTRICT_PRIVMSG)
 /** Return non-zero if the client cannot change his/her user modes. */
 #define IsRestrictUMode(x)      HasFlag(x, FLAG_RESTRICT_UMODE)
+/** Return non-zero if the client is temporarily shunned. */
+#define IsTempShun(x)           HasFlag(x, FLAG_TEMPSHUN)
 /** Return non-zero if the client /OPER'ed using a local O:Line. */
 #define IsOperedLocal(x)        HasFlag(x, FLAG_OPERED_LOCAL)
 /** Return non-zero if the client /OPER'ed using a remote O:Line. */
@@ -916,6 +921,8 @@ struct Client {
 #define SetRestrictPrivMsg(x)   SetFlag(x, FLAG_RESTRICT_PRIVMSG)
 /** Mark a client as not being allowed to change user modes. */
 #define SetRestrictUMode(x)     SetFlag(x, FLAG_RESTRICT_UMODE)
+/** Mark a client as temporarily shunned. */
+#define SetTempShun(x)          SetFlag(x, FLAG_TEMPSHUN)
 /** Mark a client as having /OPER'ed using a local O:Line. */
 #define SetOperedLocal(x)       SetFlag(x, FLAG_OPERED_LOCAL)
 /** Mark a client as having /OPER'ed using a remote O:Line. */
@@ -1011,6 +1018,8 @@ struct Client {
 #define ClearRestrictPrivMsg(x) ClrFlag(x, FLAG_RESTRICT_PRIVMSG)
 /** Clear the client's user mode restriction. */
 #define ClearRestrictUMode(x)   ClrFlag(x, FLAG_RESTRICT_UMODE)
+/** Client is no longer temporarily shunned. */
+#define ClearTempShun(x)        ClrFlag(x, FLAG_TEMPSHUN)
 /** Client is no longer OPER'ed using a local O:Line. */
 #define ClearOperedLocal(x)     ClrFlag(x, FLAG_OPERED_LOCAL)
 /** Client is no longet OPER'ed using a remote O:Line. */

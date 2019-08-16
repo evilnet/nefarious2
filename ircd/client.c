@@ -279,7 +279,7 @@ static struct {
   P(ADMIN),          P(XTRAOP),         P(SERVICE),       P(REMOTE),
   P(SHUN),           P(LOCAL_SHUN),     P(WIDE_SHUN),     P(FREEFORM),
   P(REMOTEREHASH),   P(REMOVE),         P(LOCAL_ZLINE),   P(ZLINE),
-  P(WIDE_ZLINE),
+  P(WIDE_ZLINE),     P(TEMPSHUN),
 #undef P
   { 0, 0 }
 };

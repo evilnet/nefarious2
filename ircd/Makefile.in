@@ -200,6 +200,7 @@ IRCD_SRC = \
 	m_svspart.c \
 	m_svsquit.c \
 	m_swhois.c \
+	m_tempshun.c \
 	m_time.c \
 	m_topic.c \
 	m_trace.c \
@@ -1009,6 +1010,10 @@ m_swhois.o: m_swhois.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/send.h ../include/version.h
+m_tempshun.o: m_tempshun.c ../config.h ../include/client.h ../include/hash.h \
+  ../include/ircd.h ../include/ircd_features.h  ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/msg.h ../include/numeric.h \
+  ../include/numnicks.h ../include/send.h
 m_time.o: m_time.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
