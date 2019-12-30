@@ -239,9 +239,10 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   }
 
   sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
-     "%s (%s@%s) is now an operator (%c)",
+     "%s (%s@%s) is now a %s operator (%c)",
      cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost,
-     IsOper(sptr) ? 'O' : 'o');
+     HasPriv(sptr, PRIV_PROPAGATE) ? "global" : "local",
+     HasPriv(sptr, PRIV_PROPAGATE) ? 'O' : 'o');
 
   if (feature_bool(FEAT_OPERMOTD))
     m_opermotd(sptr, sptr, 1, parv);
