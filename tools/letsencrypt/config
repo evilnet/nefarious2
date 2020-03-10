@@ -1,0 +1,11 @@
+CA="https://acme-v02.api.letsencrypt.org/directory"
+OLDCA="https://acme-v01.api.letsencrypt.org/directory"
+CHALLENGETYPE="dns-01"
+BASEDIR=$SCRIPTDIR
+DOMAINS_TXT="${BASEDIR}/domains.txt"
+CERTDIR="${BASEDIR}/certs"
+ACCOUNTDIR="${BASEDIR}/accounts"
+HOOK="${BASEDIR}/hook.sh"
+HOOK_CHAIN="yes"
+PRIVATE_KEY_RENEW="no"
+CONTACT_EMAIL="your-le-email@example.net"
