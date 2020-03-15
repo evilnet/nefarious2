@@ -29,19 +29,19 @@ and removing TXT records as: _acme-challenge.le.network.org
 
 Next setup the real network.org dns server. We add a CNAME from 
 _acme-challenge.network.org to _acme-challenge.le.network.org and an 
-NS record to *.le.network.org to our BIND server.
+NS record to le.network.org to our BIND server.
 
 Finally, we set up dehydrated, and feed it in the required domain
 consisting of: someserver.network.org with SAN of irc.network.org
 
-dehydrated will add a TXT record called_acme-challenge.le.network.org
+dehydrated will add a TXT record called _acme-challenge.le.network.org
 to BIND.  Lets-encrypt will check _acme-challenge.network.org but will find
 the CNAME to _acme-challenge.le.network.org and will follow it. When
 complete, dehydrated will remove it again (And anyway, multiple TXT records
 can exist and lets-encrypt will find the one it wants)
 
 Finally, dehydrated will copy the files together as needed to create ircd.pem
-and send a SIGHUP to ircd to reload.
+and send a SIGUSR1 to ircd to reload.
 
 This is a work in progress...
 
