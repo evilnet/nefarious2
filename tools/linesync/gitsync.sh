@@ -294,10 +294,16 @@ if [ ! -z "$diff" ]; then
 fi
 
 if [ ! -z "$certtag" ]; then
-    cdiff=`"$diff_cmd" "$dpath/fullchain.pem" "$TMPCERT"`
+    if [ ! -f "$dpath/fullchain.pem" ]; then
+        cdiff="yes"
+    else
+        cdiff=`"$diff_cmd" "$dpath/fullchain.pem" "$TMPCERT"`
+    fi
     if [ ! -z "$cdiff" ]; then
         #Changes detected
-        cp "$dpath/fullchain.pem" "$dpath/fullchain.backup"
+        if [ -f "$dpath/fullchain.pem" ]; then
+            cp "$dpath/fullchain.pem" "$dpath/fullchain.backup"
+        fi
         cp "$TMPCERT" "$dpath/fullchain.pem"
 
 	# Rehash ircd (without caring wether or not it succeeds)
@@ -308,7 +314,7 @@ fi
 
 # (Try to) clean up
 if [ -n "$tmp_path" ] && [ -d "$tmp_path" ]; then
-    rm -rf "$tmp_path" > /dev/null 2>&1
+   rm -rf "$tmp_path" #> /dev/null 2>&1
 fi
 
 # That's it...
