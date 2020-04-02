@@ -279,7 +279,7 @@ if [ ! -z "$diff" ]; then
 	cp "$tmp_path/linesync.new.$TS" "$cpath"
 
 	# Rehash ircd (without caring wether or not it succeeds)
-	kill -HUP `cat "$ppath" 2>/dev/null` > /dev/null 2>&1
+	kill -USR1 `cat "$ppath" 2>/dev/null` > /dev/null 2>&1
 
     #todo: kill iauthd?
 fi
