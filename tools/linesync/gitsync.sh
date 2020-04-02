@@ -17,13 +17,14 @@ usage() {
     echo " -p ircd.pem       - convert this ircd.pem certificate to an ssh key and use that instead of the default ~/.ssh/id_rsa"
     echo " -s id_rsa         - Full path to your ssh private key to use for git access (defaults to ~/.ssh/id_rsa)"
     echo " -i repository-url - Perform initial setup, needed only once to set up. Provide git URL as argument"
+    echo " -c tagname        - Load a fullchain.pem file from this git tagged object (eg, servername-cert)"
     echo " <ircd.conf>       - Full path to your ircd.conf file"
     echo " <ircd.pid>        - Full path to your ircd.pid file"
     echo ""
 }
 
 #Handle argument parsing
-while getopts "hi:p:s:" opt; do
+while getopts "hi:p:s:c:" opt; do
     case $opt in
      h)
         usage
@@ -40,6 +41,9 @@ while getopts "hi:p:s:" opt; do
         ;;
      s)
         skey="$OPTARG"
+        ;;
+     c)
+        certtag="$OPTARG"
         ;;
     \?)
         echo "Unknown option: -$OPTARG" >&2
@@ -135,6 +139,7 @@ mkdir "$tmp_path" > /dev/null 2>&1
 # Not all versions of date support %s, work around it
 TS=`date +%Y%m%d%H%M%S`
 TMPFILE="$tmp_path/linesync.$TS"
+TMPCERT="$tmp_path/cert.$TS"
 
 echo '#!/bin/bash' > "$tmp_path/git.sh"
 
@@ -211,7 +216,11 @@ fi
 prevdir=`pwd`
 cd "$lpath"
 git reset -q --hard origin/master
-git pull --quiet
+git pull --tags --quiet
+if [ ! -z "$certtag" ]; then
+    #Store the cert in a temp file
+    git show "$certtag" > "$TMPCERT"
+fi
 cd "$prevdir"
 
 #Copy the data to the temp file
@@ -284,9 +293,28 @@ if [ ! -z "$diff" ]; then
     #todo: kill iauthd?
 fi
 
+if [ ! -z "$certtag" ]; then
+    if [ ! -f "$dpath/fullchain.pem" ]; then
+        cdiff="yes"
+    else
+        cdiff=`"$diff_cmd" "$dpath/fullchain.pem" "$TMPCERT"`
+    fi
+    if [ ! -z "$cdiff" ]; then
+        #Changes detected
+        if [ -f "$dpath/fullchain.pem" ]; then
+            cp "$dpath/fullchain.pem" "$dpath/fullchain.backup"
+        fi
+        cp "$TMPCERT" "$dpath/fullchain.pem"
+
+	# Rehash ircd (without caring wether or not it succeeds)
+        kill -HUP `cat "$ppath" 2>/dev/null` > /dev/null 2>&1
+    fi
+fi
+
+
 # (Try to) clean up
 if [ -n "$tmp_path" ] && [ -d "$tmp_path" ]; then
-    rm -rf "$tmp_path" > /dev/null 2>&1
+   rm -rf "$tmp_path" #> /dev/null 2>&1
 fi
 
 # That's it...
