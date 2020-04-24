@@ -222,7 +222,7 @@ int comps = 0;
         for (p = host; *p; p++) {
                 if (*p == '.') {
                         comps++;
-                        if ((comps >= components) && IsAlpha(*(p + 1)))
+                        if ((comps >= components) && IsHostChar(*(p + 1)))
                                 break;
                 }
         }
