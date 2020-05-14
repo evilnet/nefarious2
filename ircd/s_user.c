@@ -416,7 +416,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
         sendheader(sptr, strver, strlen(strver));
       }
 
-      sendcmdto_one(&me, CMD_PRIVATE, sptr, "%C :\001VERSION\001", sptr);
+      if (!EmptyString(feature_str(FEAT_CTCP_VERSIONING_NICK)))
+        sendrawto_one(sptr, ":%s PRIVMSG %C :\001VERSION\001", feature_str(FEAT_CTCP_VERSIONING_NICK), sptr);
+      else
+        sendrawto_one(sptr, ":%s PRIVMSG %C :\001VERSION\001", cli_name(&me), sptr);
     }
 
     /* Look for an automatic Spoofhost to apply */

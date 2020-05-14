@@ -759,6 +759,7 @@ static struct FeatureDesc {
   F_S(CTCP_VERSIONING_CHANNAME, 0, "#opers", 0),
   F_B(CTCP_VERSIONING_USEMSG, 0, 0, 0),
   F_S(CTCP_VERSIONING_NOTICE, 0, "*** Checking your client version", 0),
+  F_S(CTCP_VERSIONING_NICK, FEAT_NULL, 0, 0),
 
   /* GeoIP FEAT_'s */
   F_B(GEOIP_ENABLE, 0, 0, feature_notify_geoip_enable),

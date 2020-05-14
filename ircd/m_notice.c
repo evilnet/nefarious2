@@ -126,7 +126,8 @@ int mr_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
 
   if (feature_bool(FEAT_CTCP_VERSIONING) && MyConnect(sptr) &&
-      !ircd_strcmp(parv[1], cli_name(&me))) {
+      (!ircd_strcmp(parv[1], cli_name(&me)) || (!EmptyString(feature_str(FEAT_CTCP_VERSIONING_NICK)) &&
+        !ircd_strcmp(parv[1], feature_str(FEAT_CTCP_VERSIONING_NICK))))) {
     if ((ircd_strncmp("\x01VERSION", parv[2], 8) == 0) && (strlen(parv[2]) > 10)) {
       temp = parv[2] + 9;
       ircd_strncpy(cversion, temp, VERSIONLEN);
@@ -192,7 +193,8 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   if (feature_bool(FEAT_CTCP_VERSIONING) && MyConnect(sptr) &&
-      !ircd_strcmp(parv[1], cli_name(&me))) {
+      (!ircd_strcmp(parv[1], cli_name(&me)) || (!EmptyString(feature_str(FEAT_CTCP_VERSIONING_NICK)) &&
+        !ircd_strcmp(parv[1], feature_str(FEAT_CTCP_VERSIONING_NICK))))) {
     if ((ircd_strncmp("\x01VERSION", parv[2], 8) == 0) && (strlen(parv[2]) > 10)) {
       temp = parv[2] + 9;
       ircd_strncpy(cversion, temp, VERSIONLEN);

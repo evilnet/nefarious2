@@ -194,6 +194,13 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;                        /* NICK message ignored */
   }
 
+  if (!EmptyString(feature_str(FEAT_CTCP_VERSIONING_NICK))) {
+    if (!ircd_strcmp(nick, feature_str(FEAT_CTCP_VERSIONING_NICK))) {
+      send_reply(sptr, ERR_NICKNAMEINUSE, nick);
+      return 0;
+    }
+  }
+
   if (!(acptr = SeekClient(nick))) {
     /*
      * No collisions, all clear...

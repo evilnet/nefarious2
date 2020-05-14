@@ -1623,6 +1623,13 @@ CTCP_VERSIONING_NOTICE
 
 Message sent to clients during the versioning process on connect.
 
+CTCP_VERSIONING_NICK
+ * Type: string
+ * Default: NULL
+
+Specifies the nick used to send CTCP VERSION requests to clients when they connect.
+Note however that when set this nick will not be available for use by users.
+
 GEOIP_ENABLE
  * Type: boolean
  * Default: FALSE
