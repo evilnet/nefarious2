@@ -84,6 +84,7 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_geoip.h"
 #include "ircd_log.h"
@@ -117,6 +118,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char* ipaddr = NULL;
   char* password = NULL;
   char* options = NULL;
+  char* optsdup = NULL;
   char* opt = NULL;
   char* optval = NULL;
   char *p = NULL;
@@ -157,7 +159,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   ares = -1;
   if (res && cli_auth(cptr))
-      ares = auth_set_webirc(cli_auth(cptr), password, username, hostname, ipaddr);
+      ares = auth_set_webirc(cli_auth(cptr), password, username, hostname, ipaddr, options);
 
   if (!ares)
     return 0;
@@ -238,7 +240,8 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ClearSSL(sptr);
 
     if (options != NULL) {
-      for (opt = ircd_strtok(&p, options, " "); opt;
+      DupString(optsdup, options);
+      for (opt = ircd_strtok(&p, optsdup, " "); opt;
            opt = ircd_strtok(&p, 0, " ")) {
         optval = strchr(opt, '=');
         if (optval != NULL)
@@ -270,6 +273,7 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         else
           Debug((DEBUG_DEBUG, "WEBIRC: Unrecognized option '%s' supplied by client", opt));
       }
+      MyFree(optsdup);
     }
   }
 
@@ -283,7 +287,11 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     SetGotId(cptr);
   }
 
-  auth_set_webirc_trusted(cli_auth(cptr), password, username, hostname, ipaddr);
+  /* Only forward options to iauthd if the authenticated WebIRC block enables options */
+  if (FlagHas(&wline->flags, WFLAG_USEOPTIONS))
+    auth_set_webirc_trusted(cli_auth(cptr), password, username, hostname, ipaddr, options);
+  else
+    auth_set_webirc_trusted(cli_auth(cptr), password, username, hostname, ipaddr, NULL);
 
   return 0;
 }

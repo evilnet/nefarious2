@@ -1324,12 +1324,15 @@ int auth_set_password(struct AuthRequest *auth, const char *password)
  * @param[in] ip IP address supplied in the WEBIRC message.
  * @return Zero if client should be kept, -1 if not forwarded.
  */
-int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip)
+int auth_set_webirc(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip, const char *opts)
 {
   assert(auth != NULL);
   if (IAuthHas(iauth, IAUTH_WEBIRC))
   {
-    sendto_iauth(auth->client, "W %s %s %s %s", password, username, hostname, ip);
+    if (opts != NULL)
+      sendto_iauth(auth->client, "W %s %s %s %s :%s", password, username, hostname, ip, opts);
+    else
+      sendto_iauth(auth->client, "W %s %s %s %s", password, username, hostname, ip);
     return 0;
   }
   return -1;
@@ -1368,11 +1371,14 @@ void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr
  * @param[in] ip IP address supplied in the WEBIRC message.
  * @return Zero if client should be kept, CPTR_KILLED if rejected.
  */
-int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip)
+int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip, const char *opts)
 {
   assert(auth != NULL);
   if (IAuthHas(iauth, IAUTH_WEBIRC))
-    sendto_iauth(auth->client, "w %s %s %s %s", password, username, hostname, ip);
+    if (opts != NULL)
+      sendto_iauth(auth->client, "w %s %s %s %s :%s", password, username, hostname, ip, opts);
+    else
+      sendto_iauth(auth->client, "w %s %s %s %s", password, username, hostname, ip);
   return 0;
 }
 

@@ -299,24 +299,28 @@ Compatibility: This is an Undernet extension and ircd does not send
   it.
 
 W - WEBIRC Message Received From Client
-Syntax: <id> W <password> <username> <hostname> <ip>
+Syntax: <id> W <password> <username> <hostname> <ip>[ :<options>]
 Example: 5 W password cgiirc localhost 127.0.0.1
 States: REGISTER
 Next State: -
 Comments: Used to forward a WEBIRC request from the client to iauthd
   for validation and application. This message is enabled by requesting
-  the 'w' policy.
+  the 'w' policy. The options argument is always forwarded in this
+  context if supplied by the client as there is no WebIRC confguration
+  available to decide whether or not to allow options at this stage.
 Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
   not send it.
 
 w - WEBIRC Message Received and Trusted From Client
-Syntax: <id> w <password> <username> <hostname> <ip>
+Syntax: <id> w <password> <username> <hostname> <ip>[ :<options>]
 Example: 5 w password cgiirc localhost 127.0.0.1
 States: REGISTER
 Next State: -
 Comments: Used to forward a WEBIRC request from the client to iauthd
   having already been validated and applied by Nefarious. This message
-  is enabled by requesting the 'w' policy.
+  is enabled by requesting the 'w' policy. In this case the options
+  argument is only supplied if the client provided one and the WebIRC
+  configuration that accepted this WEBIRC request enables options.
 Compatibility: This is a Nefarious extension, ircd and Undernet ircu do
   not send it.
 
