@@ -503,7 +503,7 @@ static void
 stats_webirc(struct Client* to, const struct StatDesc *sd, char* param)
 {
   const struct WebIRCConf *wline = conf_get_webirc_list();
-  char flags[4];
+  char flags[6];
   int i = 0;
 
   for (; wline; wline = wline->next) {
@@ -517,6 +517,10 @@ stats_webirc(struct Client* to, const struct StatDesc *sd, char* param)
       flags[i++] = 'i';
     if (FlagHas(&wline->flags, WFLAG_STRIPSSLFP))
       flags[i++] = 'f';
+    if (FlagHas(&wline->flags, WFLAG_USEOPTIONS))
+      flags[i++] = 'o';
+    if (FlagHas(&wline->flags, WFLAG_TRUSTACCOUNT))
+      flags[i++] = 'a';
 
     send_reply(to, RPL_STATSWLINE, wline->usermask, wline->hostmask,
                (wline->ident ? wline->ident : "(none)"), flags,

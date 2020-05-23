@@ -94,6 +94,7 @@
 #include "send.h"
 #include "s_auth.h"
 #include "s_conf.h"
+#include "s_debug.h"
 #include "s_misc.h"
 #include "IPcheck.h"
 
@@ -115,6 +116,10 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char* hostname = NULL;
   char* ipaddr = NULL;
   char* password = NULL;
+  char* options = NULL;
+  char* opt = NULL;
+  char* optval = NULL;
+  char *p = NULL;
   int res = 0;
   int ares = 0;
   struct WebIRCConf *wline;
@@ -137,6 +142,8 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     hostname = parv[3];
   if (!EmptyString(parv[4]))
     ipaddr = parv[4];
+  if ((parc > 5) && !EmptyString(parv[5]))
+    options = parv[5];
 
   /* And to be extra sure... (should never occur) */
   if (!password || !username || !hostname || !ipaddr) {
@@ -225,6 +232,46 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (FlagHas(&wline->flags, WFLAG_STRIPSSLFP))
     ircd_strncpy(cli_sslclifp(cptr), "", BUFSIZE + 1);
+
+  if (FlagHas(&wline->flags, WFLAG_USEOPTIONS)) {
+    /* Remove user mode +z and only add it if "secure" option is supplied. */
+    ClearSSL(sptr);
+
+    if (options != NULL) {
+      for (opt = ircd_strtok(&p, options, " "); opt;
+           opt = ircd_strtok(&p, 0, " ")) {
+        optval = strchr(opt, '=');
+        if (optval != NULL)
+          *optval++ = '\0';
+        else
+          optval = "";
+        Debug((DEBUG_DEBUG, "WEBIRC: Found option '%s' with value '%s'", opt, optval));
+
+        /* handle "secure" option */
+        if (!ircd_strcmp(opt, "secure"))
+          SetSSL(sptr);
+        /* handle "local-port" and "remote-port" options */
+        else if (!ircd_strcmp(opt, "local-port") || !ircd_strcmp(opt, "remote-port"))
+          Debug((DEBUG_DEBUG, "WEBIRC: Ignoring option '%s' as we don't use it", opt));
+        /* handle "afternet.org/account" option */
+        else if (!ircd_strcmp(opt, "afternet.org/account")) {
+          if (FlagHas(&wline->flags, WFLAG_TRUSTACCOUNT)) {
+            SetAccount(sptr);
+            ircd_strncpy(cli_user(sptr)->account, optval, ACCOUNTLEN);
+
+            if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+                (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) {
+              SetHiddenHost(sptr);
+            }
+          } else
+            Debug((DEBUG_DEBUG, "WEBIRC: Ignoring untrusted %s value '%s'", opt, optval));
+        }
+        /* Log unrecognized options */
+        else
+          Debug((DEBUG_DEBUG, "WEBIRC: Unrecognized option '%s' supplied by client", opt));
+      }
+    }
+  }
 
   if (!EmptyString(wline->description)) {
     ircd_strncpy(cli_webirc(cptr), wline->description, BUFSIZE);
