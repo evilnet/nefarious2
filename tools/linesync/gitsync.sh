@@ -216,7 +216,8 @@ fi
 prevdir=`pwd`
 cd "$lpath"
 git reset -q --hard origin/master
-git pull --tags -f --quiet
+git fetch --tags -f --quiet
+git merge -q origin/master
 if [ ! -z "$certtag" ]; then
     #Store the cert in a temp file
     git show "$certtag" > "$TMPCERT"
