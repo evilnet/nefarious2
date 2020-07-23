@@ -522,6 +522,7 @@ static void parse_command_line(int argc, char** argv) {
     default:
       printf("Usage: ircd [-f config] [-h servername] [-x loglevel] [-ntv] [-k [-c clispec]]\n"
              "\n -f config\t specify explicit configuration file"
+             "\n -d directory\t specify explicit working directory"
              "\n -x loglevel\t set debug logging verbosity"
              "\n -n or -t\t don't detach"
              "\n -v\t\t display version"
