@@ -611,6 +611,8 @@ void add_connection(struct Listener* listener, int fd) {
 /* Begin Zline */
   if (!feature_bool(FEAT_DISABLE_ZLINES) && (azline = zline_lookup(new_client, 0))) {
     ircd_snprintf(0, zreason, sizeof(zreason), "ERROR :Z-lined (%s)", azline->zl_reason);
+    if (IsIPChecked(new_client))
+      IPcheck_connect_fail(new_client, 1);
 #ifdef USE_SSL
     ssl_murder(ssl, fd, zreason);
 #else
@@ -625,6 +627,8 @@ void add_connection(struct Listener* listener, int fd) {
 /* Begin Gline */
   if (!feature_bool(FEAT_DISABLE_GLINES) && (agline = gline_lookup(new_client, 0))) {
     ircd_snprintf(0, greason, sizeof(greason), "ERROR :G-lined (%s)", agline->gl_reason);
+    if (IsIPChecked(new_client))
+      IPcheck_connect_fail(new_client, 1);
 #ifdef USE_SSL
     ssl_murder(ssl, fd, greason);
 #else
