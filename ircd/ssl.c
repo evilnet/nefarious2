@@ -180,6 +180,14 @@ SSL_CTX *ssl_init_server_ctx(void)
     }
   }
 
+#if defined(SSL_CTX_set_ecdh_auto)
+  SSL_CTX_set_ecdh_auto(server_ctx, 1);
+#elif OPENSSL_VERSION_NUMBER < 0x10100000L
+  SSL_CTX_set_tmp_ecdh(server_ctx, EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
+#else
+#endif
+  SSL_CTX_set_options(server_ctx, SSL_OP_SINGLE_ECDH_USE|SSL_OP_SINGLE_DH_USE);
+
   return server_ctx;
 }
 
