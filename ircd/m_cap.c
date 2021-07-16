@@ -54,7 +54,7 @@ static struct capabilities {
   int feat;
 } capab_list[] = {
 #define _CAP(cap, flags, name, feat) \
-	{ CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1, feat }
+    { CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1, feat }
   _CAP(NONE, CAPFL_HIDDEN|CAPFL_PROHIBIT, "none", 0),
   _CAP(NAMESX, 0, "multi-prefix", FEAT_CAP_multi_prefix),
   _CAP(UHNAMES, 0, "userhost-in-names", FEAT_CAP_userhost_in_names),
@@ -69,7 +69,7 @@ static struct capabilities {
 #undef _CAP
 };
 
-#define CAPAB_LIST_LEN	(sizeof(capab_list) / sizeof(struct capabilities))
+#define CAPAB_LIST_LEN (sizeof(capab_list) / sizeof(struct capabilities))
 
 static int
 capab_sort(const struct capabilities *cap1, const struct capabilities *cap2)
@@ -105,7 +105,7 @@ find_cap(const char **caplist_p, int *neg_p)
 
   if (!inited) { /* First, let's sort the array... */
     qsort(capab_list, CAPAB_LIST_LEN, sizeof(struct capabilities),
-	  (bqcmp)capab_sort);
+          (bqcmp)capab_sort);
     inited++; /* remember that we've done this step... */
   }
 
@@ -122,12 +122,12 @@ find_cap(const char **caplist_p, int *neg_p)
   /* OK, now see if we can look up the capability... */
   if (*caplist) {
     if (!(cap = (struct capabilities *)bsearch(caplist, capab_list,
-					       CAPAB_LIST_LEN,
-					       sizeof(struct capabilities),
-					       (bqcmp)capab_search))) {
+                 CAPAB_LIST_LEN,
+                 sizeof(struct capabilities),
+                 (bqcmp)capab_search))) {
       /* Couldn't find the capability; advance to first whitespace character */
       while (*caplist && !IsSpace(*caplist))
-	caplist++;
+        caplist++;
     } else
       caplist += cap->namelen; /* advance to end of capability name */
   }
@@ -199,7 +199,7 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     }
 
     loc += ircd_snprintf(0, capbuf + loc, sizeof(capbuf) - loc, "%s%s",
-			 pfx, capab_list[i].name);
+                         pfx, capab_list[i].name);
   }
 
   msgq_append(0, mb, "%s", capbuf); /* append capabilities to the final cmd */
@@ -234,7 +234,7 @@ cap_req(struct Client *sptr, const char *caplist)
   memset(&rem, 0, sizeof(rem));
   while (cl) { /* walk through the capabilities list... */
     if (!(cap = find_cap(&cl, &neg)) /* look up capability... */
-	|| (!neg && (cap->flags & CAPFL_PROHIBIT)) /* is it prohibited? */
+        || (!neg && (cap->flags & CAPFL_PROHIBIT)) /* is it prohibited? */
         || (neg && (cap->flags & CAPFL_STICKY))) { /* is it sticky? */
       sendcmdto_one(&me, CMD_CAP, sptr, "%s NAK :%s",
                     BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), caplist);
@@ -246,13 +246,13 @@ cap_req(struct Client *sptr, const char *caplist)
       CapClr(&set, cap->cap);
       CapClr(&cs, cap->cap);
       if (!(cap->flags & CAPFL_PROTO))
-	CapClr(&as, cap->cap);
+        CapClr(&as, cap->cap);
     } else {
       CapClr(&rem, cap->cap);
       CapSet(&set, cap->cap);
       CapSet(&cs, cap->cap);
       if (!(cap->flags & CAPFL_PROTO))
-	CapSet(&as, cap->cap);
+        CapSet(&as, cap->cap);
     }
   }
 
@@ -277,7 +277,7 @@ cap_ack(struct Client *sptr, const char *caplist)
    */
   while (cl) { /* walk through the capabilities list... */
     if (!(cap = find_cap(&cl, &neg)) || /* look up capability... */
-	(neg ? HasCap(sptr, cap->cap) : !HasCap(sptr, cap->cap))) /* uh... */
+        (neg ? HasCap(sptr, cap->cap) : !HasCap(sptr, cap->cap))) /* uh... */
       continue;
 
     if (neg) { /* set or clear the active capability... */
@@ -375,9 +375,9 @@ m_cap(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* find the subcommand handler */
   if (!(cmd = (struct subcmd *)bsearch(subcmd, cmdlist,
-				       sizeof(cmdlist) / sizeof(struct subcmd),
-				       sizeof(struct subcmd),
-				       (bqcmp)subcmd_search)))
+      sizeof(cmdlist) / sizeof(struct subcmd),
+      sizeof(struct subcmd),
+      (bqcmp)subcmd_search)))
     return send_reply(sptr, ERR_UNKNOWNCAPCMD, subcmd);
 
   /* then execute it... */
@@ -391,7 +391,7 @@ void client_check_caps(struct Client *client, struct Client *replyto)
   static char capbufp[BUFSIZE] = "";
 
   memset(&capbufp, 0, BUFSIZE);
-  
+
   for (i = 0; i < CAPAB_LIST_LEN; i++) {
     if (CapActive(client, capab_list[i].cap)) {
       if (strlen(capbufp) + capab_list[i].namelen + 4 > 70) {
@@ -410,4 +410,3 @@ void client_check_caps(struct Client *client, struct Client *replyto)
     send_reply(replyto, RPL_DATASTR, outbuf);
   }
 }
-
