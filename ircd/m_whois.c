@@ -164,9 +164,9 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
   int mlen;
   int len;
   static char buf[512];
-  
+
   const struct User* user = cli_user(acptr);
-  const char* name = (!*(cli_name(acptr))) ? "?" : cli_name(acptr);  
+  const char* name = (!*(cli_name(acptr))) ? "?" : cli_name(acptr);
   a2cptr = feature_bool(FEAT_HIS_WHOIS_SERVERNAME) && !IsAnOper(sptr)
       && sptr != acptr ? &his : user->server;
   assert(user);
@@ -183,7 +183,7 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
     for (chan = user->channel; chan; chan = chan->next_channel)
     {
        chptr = chan->channel;
-       
+
        if (!ShowChannel(sptr, chptr)
            && !(IsOper(sptr) && IsLocalChannel(chptr->chname)))
           continue;
@@ -309,19 +309,19 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
 {
   struct Client *acptr; /* Current client we're considering */
   struct User *user; 	/* the user portion of the client */
-  struct Membership* chan; 
+  struct Membership* chan;
   int invis; 		/* does +i apply? */
   int member;		/* Is this user on any channels? */
   int showperson;       /* Should we show this person? */
   int found = 0 ;	/* How many were found? */
-  
+
   /* Ech! This is hideous! */
   for (acptr = GlobalClientList; (acptr = next_client(acptr, nick));
       acptr = cli_next(acptr))
   {
-    if (!IsRegistered(acptr)) 
+    if (!IsRegistered(acptr))
       continue;
-      
+
     if (IsServer(acptr))
       continue;
     /*
@@ -334,7 +334,7 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
       assert(!cli_next(acptr));
       break;
     }
-    
+
     /*
      * 'Rules' established for sending a WHOIS reply:
      *
@@ -351,7 +351,7 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
     invis = (acptr != sptr) && IsInvisible(acptr);
     member = (user && user->channel) ? 1 : 0;
     showperson = !invis && !member;
-    
+
     /* Should we show this person now? */
     if (showperson) {
     	found++;
@@ -360,7 +360,7 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
     	  return found;
     	continue;
     }
-    
+
     /* Step through the channels this user is on */
     for (chan = user->channel; chan; chan = chan->next_channel)
     {
@@ -371,13 +371,13 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
         showperson = 1;
         break;
       }
-      
+
       /* if this channel is +p and not +s, show them */
       if (!invis && HiddenChannel(chptr) && !SecretChannel(chptr)) {
           showperson = 1;
           break;
       }
-      
+
       member = find_channel_member(sptr, chptr) ? 1 : 0;
       if (invis && !member)
         continue;
@@ -385,24 +385,24 @@ static int do_wilds(struct Client* sptr, char *nick, int count, int parc)
       /* If sptr isn't really on this channel, skip it */
       if (IsZombie(chan))
         continue;
-       
-      /* Is this a common channel? */ 
+
+      /* Is this a common channel? */
       if (member) {
         showperson = 1;
         break;
       }
     } /* of for (chan in channels) */
-    
+
     /* Don't show this person */
     if (!showperson)
       continue;
-      
+
     do_whois(sptr, acptr, parc);
     found++;
     if (count+found>MAX_WHOIS_LINES)
-       return found;  
+       return found;
   } /* of global client list */
-  
+
   return found;
 }
 
@@ -458,7 +458,7 @@ int m_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (hunt_server_cmd(sptr, CMD_WHOIS, cptr, 0, "%C :%s", 1, parc, parv) !=
        HUNTED_ISME)
     return 0;
-    
+
     parv[1] = parv[2];
   }
 
@@ -467,9 +467,9 @@ int m_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     int wilds;
 
     found = 0;
-    
+
     collapse(nick);
-    
+
     wilds = (strchr(nick, '?') || strchr(nick, '*'));
     if (!wilds) {
       struct Client *acptr = 0;
@@ -538,15 +538,14 @@ int ms_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   total = 0;
-  
+
   for (tmp = parv[1]; (nick = ircd_strtok(&p, tmp, ",")); tmp = 0)
   {
     struct Client *acptr = 0;
 
     found = 0;
-    
+
     collapse(nick);
-    
 
     acptr = FindUser(nick);
     if (acptr && !IsServer(acptr)) {
@@ -556,14 +555,14 @@ int ms_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     if (!found)
       send_reply(sptr, ERR_NOSUCHNICK, nick);
-      
+
     total+=found;
-      
+
     if (total >= MAX_WHOIS_LINES) {
       send_reply(sptr, ERR_QUERYTOOLONG, parv[1]);
       break;
     }
-      
+
     if (p)
       p[-1] = ',';
   } /* of tokenised parm[1] */
@@ -571,4 +570,3 @@ int ms_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   return 0;
 }
-
