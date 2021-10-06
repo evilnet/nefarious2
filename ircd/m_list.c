@@ -372,7 +372,7 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if ((cli_firsttime(sptr) + feature_int(FEAT_LISTDELAY) > CurrentTime) && !IsOper(sptr)) {
     if (!find_except_conf(sptr, EFLAG_LISTDELAY)) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :*** You have not been connected long enough to use /list. You must wait %d seconds after connecting",
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :*** You have not been connected long enough to use /list. You must wait %d seconds before trying again.",
                     sptr, (cli_firsttime(sptr) + feature_int(FEAT_LISTDELAY)) - CurrentTime);
       send_reply(sptr, RPL_LISTSTART);
       send_reply(sptr, RPL_LISTEND);
