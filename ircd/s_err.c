@@ -702,11 +702,11 @@ static Numeric replyTable[] = {
 /* 334 */
   { RPL_LISTUSAGE, ":%s", "334" },
 /* 335 */
-  { RPL_WHOISACCOUNTONLY, "%s :only accepts messages from registered users", "335" },
+  { RPL_WHOISBOT, "%s :is a bot", "335" },
 /* 336 */
-  { RPL_WHOISBOT, "%s :is a bot", "336" },
+  { RPL_INVITELIST, ":%s", "336" },
 /* 337 */
-  { 0 },
+  { RPL_ENDOFINVITELIST, ":End of Invite List", "337" },
 /* 338 */
   { RPL_WHOISACTUALLY, "%s %s@%s %s :Actual user@host, Actual IP", "338" },
 /* 339 */
@@ -724,9 +724,9 @@ static Numeric replyTable[] = {
 /* 345 */
   { RPL_ISSUEDINVITE, "%s %s %s :%s has been invited by %s", "345" },
 /* 346 */
-  { RPL_INVITELIST, ":%s", "346" },
+  { 0 },
 /* 347 */
-  { RPL_ENDOFINVITELIST, ":End of Invite List", "347" },
+  { 0 },
 /* 348 */
   { RPL_EXCEPTLIST, "%s %s %s %Tu", "348" },
 /* 349 */

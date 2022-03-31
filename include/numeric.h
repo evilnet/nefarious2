@@ -245,8 +245,7 @@ extern const struct Numeric* get_error_numeric(int err);
                                            RPL_WHOISOPERATOR/RPL_WHOISIDLE */
 #define RPL_WHOISCHANNELS    319
 /*      RPL_WHOIS_HIDDEN     320         Anothernet +h, ick! */
-/*	RPL_WHOISSPECIAL     320	unreal */
-#define RPL_WHOISSPECIAL     320
+#define RPL_WHOISSPECIAL     320        /* Unreal extension; also used to indicate +r to others */
 #define RPL_LISTSTART        321
 #define RPL_LIST             322
 #define RPL_LISTEND          323
@@ -266,8 +265,9 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_LISTUSAGE        334        /* Undernet extension */
 /*	RPL_COMMANDSYNTAX    334	   Dalnet */
 /*	RPL_LISTSYNTAX	     334	   unreal */
-#define RPL_WHOISACCOUNTONLY 335	/* Nefarious extension */
-#define RPL_WHOISBOT         336	/* Nefarious extension */
+#define RPL_WHOISBOT         335	/* Unreal extension */
+#define RPL_INVITELIST       336        /* ircd-hybrid extension */
+#define RPL_ENDOFINVITELIST  337        /* ircd-hybrid extension */
 /*      RPL_CHANPASSOK       338           IRCnet extension (?)*/
 #define	RPL_WHOISACTUALLY    338	/* Undernet extension, dalnet */
 /*	RPL_BADCHANPASS	     339           IRCnet extension (?) */
@@ -278,8 +278,8 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_WHOISKILL        343        /* Nefarious extension */
 
 #define RPL_ISSUEDINVITE     345        /* Undernet extension */
-#define RPL_INVITELIST       346        /* IRCnet, Undernet extension */
-#define RPL_ENDOFINVITELIST  347        /* IRCnet, Undernet extension */
+#define RPL_INVEXLIST        346        /* Reply to "MODE +I", RFC2812 calls it RPL_INVITELIST */
+#define RPL_ENDOFINVEXLIST   347        /* Reply to "MODE +I", RFC2812 calls it RPL_ENDOFINVITELIST */
 #define RPL_EXCEPTLIST       348        /* IRCnet/Nefarious extension */
 #define RPL_ENDOFEXCEPTLIST  349        /* IRCnet/Nefarious extension */
 
