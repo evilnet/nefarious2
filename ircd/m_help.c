@@ -100,9 +100,22 @@
 int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   int i;
+  char *cmd;
 
-  for (i = 0; msgtab[i].cmd; i++)
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr, msgtab[i].cmd, msgtab[i].help);
+  if (parc < 2) {
+    for (i = 0; msgtab[i].cmd; i++)
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr, msgtab[i].cmd, msgtab[i].help);
+  }
+  else {
+    cmd = parv[1];
+    for (i = 0; msgtab[i].cmd; i++) {
+      if (!strcmp(cmd, msgtab[i].cmd)) {
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr, msgtab[i].cmd, msgtab[i].help);
+        return 0;
+      }
+    }
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Unknown command", sptr);
+  }
   return 0;
 }
 
