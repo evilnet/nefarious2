@@ -259,7 +259,7 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
       send_reply(sptr, RPL_WHOISSERVICE, name, feature_str(FEAT_WHOIS_SERVICE));
 
     if (IsAccountOnly(acptr) && !IsPrivDeaf(acptr))
-      send_reply(sptr, RPL_WHOISACCOUNTONLY, name);
+      send_reply(sptr, RPL_WHOISSPECIAL, "only accepts messages from registered users");
 
     if (IsPrivDeaf(acptr))
       send_reply(sptr, RPL_WHOISPRIVDEAF, name);
