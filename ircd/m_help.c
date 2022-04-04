@@ -102,7 +102,7 @@ int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int i;
 
   for (i = 0; msgtab[i].cmd; i++)
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, msgtab[i].cmd);
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr, msgtab[i].cmd, msgtab[i].help);
   return 0;
 }
 
