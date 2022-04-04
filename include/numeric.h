@@ -564,6 +564,10 @@ extern const struct Numeric* get_error_numeric(int err);
 
 #define ERR_STARTTLS         691	/* Nefarious extension */
 
+#define RPL_HELPSTART        704	/* RatBox */
+#define RPL_HELPTXT          705	/* RatBox */
+#define RPL_ENDOFHELP        706	/* RatBox */
+
 #define RPL_LOGGEDIN         900	/* IRCv3 - SASL extension */
 #define RPL_LOGGEDOUT        901	/* IRCv3 - SASL extension */
 

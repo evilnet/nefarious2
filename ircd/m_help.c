@@ -102,20 +102,33 @@ int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int i;
   char *cmd;
 
+
   if (parc < 2) {
+    send_reply(sptr, RPL_HELPSTART, "*", "Nefarious Help System");
     for (i = 0; msgtab[i].cmd; i++)
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr, msgtab[i].cmd, msgtab[i].help);
+      send_reply(sptr, RPL_HELPTXT, "*", msgtab[i].cmd, msgtab[i].help);
+    return send_reply(sptr, RPL_ENDOFHELP, "*", "End of HELP");
   }
   else {
     cmd = parv[1];
-    for (i = 0; msgtab[i].cmd; i++) {
-      if (!strcmp(cmd, msgtab[i].cmd)) {
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr, msgtab[i].cmd, msgtab[i].help);
-        return 0;
+    for (i = 0; cmd[i]; i++) {
+      if (i == ' ') {
+        /* Not a valid command */
+        cmd = "*";
+        break;
       }
     }
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Unknown command", sptr);
+    send_reply(sptr, RPL_HELPSTART, cmd, "Nefarious Help System");
+    for (i = 0; msgtab[i].cmd; i++) {
+      if (!strcmp(cmd, msgtab[i].cmd)) {
+        send_reply(sptr, RPL_HELPTXT, cmd, msgtab[i].cmd, msgtab[i].help);
+        return send_reply(sptr, RPL_ENDOFHELP, cmd, "");
+      }
+    }
+    /* FIXME: We should return ERR_HELPNOTFOUND on unknown command (and only that);
+     * but this would conflict with ERR_QUARANTINED */
+    send_reply(sptr, RPL_HELPTXT, cmd, cmd, "is not a command");
+    return send_reply(sptr, RPL_ENDOFHELP, cmd, "");
   }
-  return 0;
 }
 
