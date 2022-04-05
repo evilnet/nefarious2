@@ -534,6 +534,7 @@ struct Message {
    * UNREGISTERED, CLIENT, SERVER, OPER, SERVICE, LAST
    */
   MessageHandler handlers[LAST_HANDLER_TYPE];
+  char *help;
 };
 
 extern struct Message msgtab[];

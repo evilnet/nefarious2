@@ -1440,11 +1440,11 @@ static Numeric replyTable[] = {
 /* 703 */
   { 0 },
 /* 704 */
-  { 0 },
+  { RPL_HELPSTART, "%s :%s", "704" },
 /* 705 */
-  { 0 },
+  { RPL_HELPTXT, "%s :%s %s", "705" },
 /* 706 */
-  { 0 },
+  { RPL_ENDOFHELP, "%s :%s", "706" },
 /* 707 */
   { 0 },
 /* 708 */
