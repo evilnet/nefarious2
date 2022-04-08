@@ -158,8 +158,11 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	OpLevel(member2), OpLevel(member), "kick",
 	OpLevel(member) == OpLevel(member2) ? "the same" : "a higher");
 
-  /* We rely on ircd_snprintf to truncate the comment */
-  comment = EmptyString(parv[parc - 1]) ? parv[0] : parv[parc - 1];
+  if (parc > 3)
+    /* We rely on ircd_snprintf to truncate the comment */
+    comment = EmptyString(parv[parc - 1]) ? parv[0] : parv[parc - 1];
+  else
+    comment = parv[0];
 
   if (!IsLocalChannel(name))
     sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,
