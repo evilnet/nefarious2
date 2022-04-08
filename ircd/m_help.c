@@ -128,7 +128,7 @@ int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* FIXME: We should return ERR_HELPNOTFOUND on unknown command (and only that);
      * but this would conflict with ERR_QUARANTINED */
     send_reply(sptr, RPL_HELPTXT, cmd, cmd, "is not a command");
-    return send_reply(sptr, RPL_ENDOFHELP, cmd, "");
+    return send_reply(sptr, RPL_ENDOFHELP, cmd, "End of HELP");
   }
 }
 
