@@ -215,6 +215,8 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
       *(p1++) = 'x';
     if (IsSSL(acptr))
       *(p1++) = 'z';
+    if (IsBot(acptr))
+      *(p1++) = 'B';
   }
 
   if (!fields || (fields & WHO_FIELD_DIS))

@@ -2498,6 +2498,7 @@ void init_isupport(void)
   add_isupport_s("CHANTYPES", feature_bool(FEAT_LOCAL_CHANNELS) ? "#&" : "#");
   add_isupport_s("PREFIX", feature_bool(FEAT_HALFOPS) ? "(ohv)@%+" : "(ov)@+");
   add_isupport_s("STATUSMSG", feature_bool(FEAT_HALFOPS) ? "@%+" : "@+");
+  add_isupport_s("BOT", "B");
 
   add_isupport_s("CHANMODES", cmodebuf);
 
