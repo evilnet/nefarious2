@@ -791,3 +791,36 @@ int check_if_ipmask(const char *mask)
   return has_digit;
 }
 
+/* Check if a username is valid */
+int valid_username(const char* name) {
+  const char *c = NULL;
+
+  for (c = name; *c; c++) {
+    if (!IsUserChar(*c))
+      return 0;
+  }
+
+  return 1;
+}
+
+/* Check if a hostname is valid */
+int valid_hostname(const char* name) {
+  const char *c = NULL;
+
+  /* Empty strings are not valid hosts */
+  if (EmptyString(name))
+    return 0;
+  /* Don't allow leading period */
+  if (*name == '.')
+    return 0;
+  /* Don't allow trailing period */
+  if (name[strlen(name)-1] == '.')
+    return 0;
+
+  for (c = name; *c; c++) {
+    if (!IsHostChar(*c))
+      return 0;
+  }
+
+  return 1;
+}

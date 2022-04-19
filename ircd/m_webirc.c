@@ -182,6 +182,22 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
+  /* Check supplied IP address is valid */
+  if (!ipmask_parse(ipaddr, &addr, NULL)) {
+    sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                                "WEBIRC Attempt with invalid IP address from %s [%s]",
+                                cli_sockhost(sptr), cli_sock_ip(sptr));
+    return exit_client(cptr, sptr, &me, "WEBIRC Invalid IP address");
+  }
+
+  /* Check supplied host name is valid */
+  if (!valid_hostname(hostname)) {
+    sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                                "WEBIRC Attempt with invalid host name from %s [%s]",
+                                cli_sockhost(sptr), cli_sock_ip(sptr));
+    return exit_client(cptr, sptr, &me, "WEBIRC Invalid host name");
+  }
+
   /* Send connection notice to inform opers of the change of IP and host. */
   if (feature_bool(FEAT_CONNEXIT_NOTICES))
     sendto_opmask_butone_global(&me, SNO_WEBIRC,
@@ -204,7 +220,6 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* Update the IP and charge them as a remote connect. */
-  ircd_aton(&addr, ipaddr);
   memcpy(&cli_ip(sptr), &addr, sizeof(cli_ip(sptr)));
   if (!find_except_conf(sptr, EFLAG_IPCHECK))
     IPcheck_remote_connect(sptr, 0);

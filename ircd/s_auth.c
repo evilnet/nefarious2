@@ -1374,11 +1374,12 @@ void auth_set_originalip(struct AuthRequest *auth, const struct irc_in_addr addr
 int auth_set_webirc_trusted(struct AuthRequest *auth, const char *password, const char *username, const char *hostname, const char *ip, const char *opts)
 {
   assert(auth != NULL);
-  if (IAuthHas(iauth, IAUTH_WEBIRC))
+  if (IAuthHas(iauth, IAUTH_WEBIRC)) {
     if (opts != NULL)
       sendto_iauth(auth->client, "w %s %s %s %s :%s", password, username, hostname, ip, opts);
     else
       sendto_iauth(auth->client, "w %s %s %s %s", password, username, hostname, ip);
+  }
   return 0;
 }
 
