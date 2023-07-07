@@ -181,7 +181,7 @@ int mo_tempshun(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
   if (parc < 2)
     return need_more_params(sptr, "TEMPSHUN");
 
-  if (parc > 3)
+  if (parc > 2)
     reason = parv[parc-1];
 
   if (parv[1][0] == '-') {
