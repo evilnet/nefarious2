@@ -200,7 +200,7 @@ int mo_tempshun(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
       if (IsTempShun(acptr)) {
         /* let the ops know about it */
         sendto_opmask_butone_global(&me, SNO_GLINE, "Temporary shun removed from %s (%s)",
-                                    get_client_name(acptr, SHOW_IP), parv[parc-1]);
+                                    get_client_name(acptr, SHOW_IP), reason);
       }
       ClearTempShun(acptr);
     } else {
