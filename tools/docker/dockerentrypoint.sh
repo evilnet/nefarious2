@@ -37,7 +37,6 @@ sed -i "s/%IRCD_ADMIN_LOCATION%/${IRCD_ADMIN_LOCATION}/g" $BASECONF
 sed -i "s/%IRCD_ADMIN_CONTACT%/${IRCD_ADMIN_CONTACT}/g" $BASECONF
 
 # Generate a pem file if there isnt one...
-ls -l /home/nefarious/ircd/
 if [ ! -f /home/nefarious/ircd/ircd.pem ]; then
     echo "Generating self signed ssl key for ircd.pem"
     openssl req -new --x509 -days 365 -nodes -out ircd.pem -newkey rsa:4096 -keyout ircd.pem -subj "/CN=$IRCD_GENERAL_NAME/"
@@ -48,5 +47,6 @@ if [ ! -f /home/nefarious/ircd/ircd.pem ]; then
 fi
 
 #Now run CMD from Dockerfile...
+
 exec "$@"
 

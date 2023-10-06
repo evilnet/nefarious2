@@ -6,7 +6,7 @@ ENV UID 1234
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update && apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git libgeoip-dev libmaxminddb-dev vim
 
-VOLUME ["/home/nefarious"]
+#VOLUME ["/home/nefarious/ircd"]
 
 RUN mkdir -p /home/nefarious/nefarious2
 RUN mkdir -p /home/nefarious/ircd
@@ -22,8 +22,10 @@ WORKDIR  /home/nefarious/nefarious2
 
 #Build and install nefarious
 # maxcon bug https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=578038 - docker build limit seems different than docker run limit
-RUN ./configure --libdir=/home/nefarious/ircd --mandir=/home/nefarious/ircd --bindir=/home/nefarious/ircd \
- --with-geoip=/usr --with-mmdb=/usr --enable-debug --with-maxcon=4096
+#RUN ./configure --libdir=/home/nefarious/ircd --mandir=/home/nefarious/ircd --bindir=/home/nefarious/ircd \
+#--with-geoip=/usr --with-mmdbp=/usr\
+RUN ./configure --libdir=/home/nefarious/ircd \
+ --enable-debug --with-maxcon=4096
 RUN make
 RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 
@@ -39,7 +41,7 @@ COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
 
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
-CMD ["/home/nefarious/ircd/ircd", "-n", "-x", "9"]
+CMD ["/home/nefarious/bin/ircd", "-n", "-x", "9"]
 
 
 
