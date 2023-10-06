@@ -265,7 +265,11 @@ void setup_signals(void)
   sigaction(SIGALRM, &act, 0);
 
   signal_add(&sig_hup, sighup_callback, 0, SIGHUP);
+
+#ifdef RESTART_ON_SIGINT
   signal_add(&sig_int, sigint_callback, 0, SIGINT);
+#endif
+
   signal_add(&sig_term, sigterm_callback, 0, SIGTERM);
   signal_add(&sig_chld, sigchld_callback, 0, SIGCHLD);
   signal_add(&sig_usr1, sigusr1_callback, 0, SIGUSR1);
