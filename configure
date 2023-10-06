@@ -730,7 +730,7 @@ with_geoip
 with_geoip_includes
 with_geoip_libs
 enable_mmdb
-with_mmdbp
+with_mmdb
 with_mmdb_includes
 with_mmdb_libs
 with_maxcon
@@ -7748,9 +7748,9 @@ $as_echo "$unet_cv_enable_mmdb" >&6; }
 
 if test x"$unet_cv_enable_mmdb" = xyes; then
 
-# Check whether --with-mmdbp was given.
-if test "${with_mmdbp+set}" = set; then :
-  withval=$with_mmdbp; base_mmdb_prefix=$withval
+# Check whether --with-mmdb was given.
+if test "${with_mmdb+set}" = set; then :
+  withval=$with_mmdb; base_mmdb_prefix=$withval
 else
   base_mmdb_prefix=/usr/local
 fi
