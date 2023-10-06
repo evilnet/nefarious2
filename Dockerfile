@@ -34,4 +34,4 @@ COPY tools/docker/base.conf /home/nefarious/ircd/base.conf
 
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
-CMD ["/home/nefarious/ircd/ircd", "-n"]
+CMD ["/home/nefarious/ircd/ircd", "-n", "-x", "9"]
