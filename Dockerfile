@@ -6,6 +6,8 @@ ENV UID 1234
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update && apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git libgeoip-dev libmaxminddb-dev vim
 
+VOLUME ["/home/nefarious"]
+
 RUN mkdir -p /home/nefarious/nefarious2
 RUN mkdir -p /home/nefarious/ircd
 COPY . /home/nefarious/nefarious2
@@ -27,7 +29,10 @@ RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ir
 
 WORKDIR /home/nefarious/ircd
 
-COPY tools/docker/base.conf /home/nefarious/ircd/base.conf
+#This ircd.conf just includes the other 2
+COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
+COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
+COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
 
 #Clean up build
 #RUN rm -rf /home/nefarious/nefarious2
@@ -35,3 +40,6 @@ COPY tools/docker/base.conf /home/nefarious/ircd/base.conf
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
 CMD ["/home/nefarious/ircd/ircd", "-n", "-x", "9"]
+
+
+
