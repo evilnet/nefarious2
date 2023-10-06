@@ -23,7 +23,7 @@ WORKDIR  /home/nefarious/nefarious2
 #Build and install nefarious
 # maxcon bug https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=578038 - docker build limit seems different than docker run limit
 RUN ./configure --libdir=/home/nefarious/ircd --mandir=/home/nefarious/ircd --bindir=/home/nefarious/ircd \
--with-geoip=/usr --with-mmdb=/usr --enable-debug --with-maxcon=4096
+ --with-geoip=/usr --with-mmdb=/usr --enable-debug --with-maxcon=4096
 RUN make
 RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 
