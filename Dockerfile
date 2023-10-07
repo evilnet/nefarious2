@@ -4,13 +4,15 @@ ENV GID 1234
 ENV UID 1234
 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update 
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update && apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update && apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl libtime-duration-perl
 #libgeoip-dev libmaxminddb-dev 
 
 RUN mkdir -p /home/nefarious/nefarious2
 RUN mkdir -p /home/nefarious/ircd
 COPY . /home/nefarious/nefarious2
 COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
+COPY ./tools/linesync /home/nefarious/ircd/linesync
+COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
 
 RUN groupadd -g ${GID} nefarious
 RUN useradd -u ${UID} -g ${GID} nefarious
