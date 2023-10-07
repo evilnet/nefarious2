@@ -843,7 +843,7 @@ AC_ARG_ENABLE([mmdb],
 AC_MSG_RESULT([$unet_cv_enable_mmdb])
 
 if test x"$unet_cv_enable_mmdb" = xyes; then
-  AC_ARG_WITH([geoip],
+  AC_ARG_WITH([mmdb],
   AS_HELP_STRING([--with-mmdb=dir], [Specify the installation prefix of MaxMindDB (default: /usr/local)]),
   [base_mmdb_prefix=$withval],
   [base_mmdb_prefix=/usr/local])

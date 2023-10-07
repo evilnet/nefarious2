@@ -134,7 +134,11 @@ static void sigint_callback(struct Event* ev)
   assert(SIGINT == sig_signal(ev_signal(ev)));
   assert(SIGINT == ev_data(ev));
 
+#ifdef RESTART_ON_SIGINT
   server_restart("caught signal: SIGINT");
+#else
+  server_die("received signal SIGINT (Ctrl-C)");
+#endif
 }
 
 /** Allocate a child callback record.
