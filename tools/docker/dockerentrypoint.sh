@@ -36,14 +36,17 @@ sed -i "s/%IRCD_GENERAL_NUMERIC%/${IRCD_GENERAL_NUMERIC}/g" $BASECONF
 sed -i "s/%IRCD_ADMIN_LOCATION%/${IRCD_ADMIN_LOCATION}/g" $BASECONF
 sed -i "s/%IRCD_ADMIN_CONTACT%/${IRCD_ADMIN_CONTACT}/g" $BASECONF
 
-# Generate a pem file if there isnt one...
-if [ ! -f /home/nefarious/ircd/ircd.pem ]; then
-    echo "Generating self signed ssl key for ircd.pem"
-    openssl req -new --x509 -days 365 -nodes -out ircd.pem -newkey rsa:4096 -keyout ircd.pem -subj "/CN=$IRCD_GENERAL_NAME/"
-    #test 1 -eq 1 || test ! -f /dev/urandom || openssl gendh -rand $1/ircd.rand 512 >> $1/ircd.pem
-    #test 1 -eq 1 || test -f /dev/urandom || openssl gendh 512 >> $1/ircd.pem
-    openssl x509 -subject -dates -fingerprint -noout -in $IRCDPEM
+#If cmd is the ircd...
+if [ "$1" == "/home/nefarious/bin/ircd" ]; then
+    # Generate a pem file if there isnt one...
+    if [ ! -f /home/nefarious/ircd/ircd.pem ]; then
+        echo "Generating self signed ssl key for ircd.pem"
+        openssl req -new --x509 -days 365 -nodes -out ircd.pem -newkey rsa:4096 -keyout ircd.pem -subj "/CN=$IRCD_GENERAL_NAME/"
+        test 1 -eq 1 || test ! -f /dev/urandom || openssl gendh -rand $1/ircd.rand 512 >> $1/ircd.pem
+        test 1 -eq 1 || test -f /dev/urandom || openssl gendh 512 >> $1/ircd.pem
+        openssl x509 -subject -dates -fingerprint -noout -in $IRCDPEM
 
+    fi
 fi
 
 #Now run CMD from Dockerfile...
