@@ -14,6 +14,13 @@ COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
 COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh
 COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
 
+#This ircd.conf just includes the other 3
+COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
+COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
+COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
+COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
+
+
 RUN groupadd -g ${GID} nefarious
 RUN useradd -u ${UID} -g ${GID} nefarious
 RUN chown -R nefarious:nefarious /home/nefarious
@@ -32,12 +39,6 @@ RUN make
 RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 
 WORKDIR /home/nefarious/ircd
-
-#This ircd.conf just includes the other 2
-COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
-COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
-COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
-COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 
 USER root
 #Clean up build
