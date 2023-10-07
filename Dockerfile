@@ -11,7 +11,7 @@ RUN mkdir -p /home/nefarious/nefarious2
 RUN mkdir -p /home/nefarious/ircd
 COPY . /home/nefarious/nefarious2
 COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
-COPY ./tools/linesync /home/nefarious/ircd/linesync
+COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh
 COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
 
 RUN groupadd -g ${GID} nefarious
@@ -37,6 +37,7 @@ WORKDIR /home/nefarious/ircd
 COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
 COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
 COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
+COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 
 USER root
 #Clean up build
