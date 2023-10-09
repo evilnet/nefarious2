@@ -15,3 +15,4 @@ include/patchlist.h
 tools/sidconvert/sid2num
 tools/sidconvert/num2sid
 !tools/sidconvert/Makefile
+.*.sw?
