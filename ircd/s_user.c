@@ -450,7 +450,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
     send_supported(sptr);
 
 #ifdef USE_SSL
-    if (IsSSL(sptr))
+    if (cli_socket(sptr).ssl)
     {
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :You are connected to %s with %s", sptr,
                     cli_name(&me), ssl_get_cipher(cli_socket(sptr).ssl));

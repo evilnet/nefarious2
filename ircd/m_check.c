@@ -501,7 +501,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    }
 
 #ifdef USE_SSL
-   if (MyConnect(acptr) && IsSSL(acptr)) {
+   if (MyConnect(acptr) && cli_socket(acptr).ssl) {
     ircd_snprintf(0, outbuf, sizeof(outbuf), "    SSL Ciphers:: %s", ssl_get_cipher(cli_socket(acptr).ssl));
     send_reply(sptr, RPL_DATASTR, outbuf);
    }
@@ -659,7 +659,7 @@ void checkServer(struct Client *sptr, struct Client *acptr)
    }
 
 #ifdef USE_SSL
-   if (MyConnect(acptr) && IsSSL(acptr)) {
+   if (MyConnect(acptr) && cli_socket(acptr).ssl) {
     ircd_snprintf(0, outbuf, sizeof(outbuf), "    SSL Ciphers:: %s", ssl_get_cipher(cli_socket(acptr).ssl));
     send_reply(sptr, RPL_DATASTR, outbuf);
    }
