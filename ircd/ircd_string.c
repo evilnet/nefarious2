@@ -63,7 +63,7 @@ int string_has_wildcards(const char* str)
  * @param str The string to check.
  * @return 1 if the string is valid UTF-8, 0 otherwise.
  */
-_Bool string_is_utf8(const char * str)
+int string_is_valid_utf8(const char * str)
 {
     assert(str != NULL);
 
@@ -161,7 +161,8 @@ int string_contains_non_ascii(const char* str)
     return 0;
 }
 
-/** Check whether \a str contains non-printable characters.
+/** Check whether \a str contains either only ASCII characters or properly
+ * encoded UTF-8 characters.
  * @param[in] str String that might contain such characters.
  * @return Non-zero if \a str contains non-printable characters,
  * zero if there are none.
@@ -169,10 +170,8 @@ int string_contains_non_ascii(const char* str)
 int string_character_structure_is_sane(const char* str)
 {
 	assert(str!= NULL);
-	
-	// bool is_valid_utf8 = validate_utf8_fast(str, strlen(str));
 
-    if (string_is_utf8(str) || !string_contains_non_ascii(str)) {
+    if (string_is_valid_utf8(str) || !string_contains_non_ascii(str)) {
 		return 1;
 	}
 

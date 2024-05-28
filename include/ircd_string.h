@@ -21,7 +21,7 @@ struct irc_in_addr;
 
 extern int string_has_wildcards(const char* str);
 
-extern int string_is_utf8(const char* str);
+extern int string_is_valid_utf8(const char* str);
 
 extern int string_contains_non_ascii (const char* str);
 
