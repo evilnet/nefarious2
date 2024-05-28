@@ -21,6 +21,8 @@ struct irc_in_addr;
 
 extern int string_has_wildcards(const char* str);
 
+extern int string_has_utf8(const char* str);
+
 extern char*       ircd_strncpy(char* dest, const char* src, size_t len);
 extern int         ircd_strcmp(const char *a, const char *b);
 extern int         ircd_strncmp(const char *a, const char *b, size_t n);

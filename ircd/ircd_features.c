@@ -698,6 +698,7 @@ static struct FeatureDesc {
   F_B(CHANNEL_CREATE_IRCOPONLY, 0, 0, 0 ),
   F_B(JOIN_ON_REMOVEDELAY, 0, 1, 0 ),
   F_B(DERESTRICT_HIDECHANS, 0, 1, 0 ),
+  F_B(PROHIBIT_UTF8_CHANNELS, 0, 1, 0 ),
 
   /* Extended channel modes */
   F_B(CHMODE_a, 0, 1, 0),

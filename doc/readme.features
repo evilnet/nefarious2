@@ -1294,6 +1294,13 @@ DERESTRICT_HIDECHANS
 When enable user mode +p can be set by any user. When disabled only IRCops
 with the hide_channels privilege can set user mode +p.
 
+PROHIBIT_UTF8_CHANNELS
+ * Type: boolean
+ * Default: TRUE
+
+When enabled, channels that have at least one UTF-8 character in its name
+cannot be joined by users.
+
 CHMODE_a
  * Type: boolean
  * Default: TRUE

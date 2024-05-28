@@ -57,6 +57,24 @@ int string_has_wildcards(const char* str)
   return 0;
 }
 
+/** Check whether \a str contains a character with a code point > 127.
+ * @param[in] str String that might contain such characters.
+ * @return Non-zero if \a str contains characters with code points > 127,
+ * zero if there are none.
+ */
+int string_has_utf8(const char* str)
+{
+  assert(str != NULL);
+  
+  for ( ; *str; ++str) {
+    // Check if the character is a multi-byte UTF-8 character
+    if ((unsigned char)*str > 127)
+      return 1;
+  }
+  
+  return 0;
+}
+
 /** Split a string on certain delimiters.
  * This is a reentrant version of normal strtok().  The first call for
  * a particular input string must use a non-NULL \a str; *save will be
