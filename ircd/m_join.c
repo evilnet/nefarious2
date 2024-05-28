@@ -334,7 +334,7 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       continue;
     }
 
-    if (feature_bool(FEAT_PROHIBIT_UTF8_CHANNELS) && string_has_utf8(name)) {
+    if (feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY) && !string_character_structure_is_sane(name)) {
         send_reply(sptr, ERR_NOSUCHCHANNEL, name);
         continue;
     }

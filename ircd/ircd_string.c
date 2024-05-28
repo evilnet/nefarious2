@@ -57,22 +57,126 @@ int string_has_wildcards(const char* str)
   return 0;
 }
 
-/** Check whether \a str contains a character with a code point > 127.
+/**
+ * Check if a given string is a valid UTF-8 encoded string.
+ *
+ * @param str The string to check.
+ * @return 1 if the string is valid UTF-8, 0 otherwise.
+ */
+_Bool string_is_utf8(const char * str)
+{
+    assert(str != NULL);
+
+
+    const unsigned char * bytes = (const unsigned char *)str;
+    while(*bytes)
+    {
+        if( (// ASCII
+             // use bytes[0] <= 0x7F to allow ASCII control characters
+                bytes[0] == 0x09 ||
+                bytes[0] == 0x0A ||
+                bytes[0] == 0x0D ||
+                (0x20 <= bytes[0] && bytes[0] <= 0x7E)
+            )
+        ) {
+            bytes += 1;
+            continue;
+        }
+
+        if( (// non-overlong 2-byte
+                (0xC2 <= bytes[0] && bytes[0] <= 0xDF) &&
+                (0x80 <= bytes[1] && bytes[1] <= 0xBF)
+            )
+        ) {
+            bytes += 2;
+            continue;
+        }
+
+        if( (// excluding overlongs
+                bytes[0] == 0xE0 &&
+                (0xA0 <= bytes[1] && bytes[1] <= 0xBF) &&
+                (0x80 <= bytes[2] && bytes[2] <= 0xBF)
+            ) ||
+            (// straight 3-byte
+                ((0xE1 <= bytes[0] && bytes[0] <= 0xEC) ||
+                    bytes[0] == 0xEE ||
+                    bytes[0] == 0xEF) &&
+                (0x80 <= bytes[1] && bytes[1] <= 0xBF) &&
+                (0x80 <= bytes[2] && bytes[2] <= 0xBF)
+            ) ||
+            (// excluding surrogates
+                bytes[0] == 0xED &&
+                (0x80 <= bytes[1] && bytes[1] <= 0x9F) &&
+                (0x80 <= bytes[2] && bytes[2] <= 0xBF)
+            )
+        ) {
+            bytes += 3;
+            continue;
+        }
+
+        if( (// planes 1-3
+                bytes[0] == 0xF0 &&
+                (0x90 <= bytes[1] && bytes[1] <= 0xBF) &&
+                (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
+                (0x80 <= bytes[3] && bytes[3] <= 0xBF)
+            ) ||
+            (// planes 4-15
+                (0xF1 <= bytes[0] && bytes[0] <= 0xF3) &&
+                (0x80 <= bytes[1] && bytes[1] <= 0xBF) &&
+                (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
+                (0x80 <= bytes[3] && bytes[3] <= 0xBF)
+            ) ||
+            (// plane 16
+                bytes[0] == 0xF4 &&
+                (0x80 <= bytes[1] && bytes[1] <= 0x8F) &&
+                (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
+           		(0x80 <= bytes[3] && bytes[3] <= 0xBF)
+            )
+        ) {
+            bytes += 4;
+            continue;
+        }
+
+        return 0;
+    }
+
+    return 1;
+}  
+
+/** Check whether \a str contains non-ASCII characters.
  * @param[in] str String that might contain such characters.
  * @return Non-zero if \a str contains characters with code points > 127,
  * zero if there are none.
  */
-int string_has_utf8(const char* str)
+int string_contains_non_ascii(const char* str)
 {
-  assert(str != NULL);
-  
-  for ( ; *str; ++str) {
-    // Check if the character is a multi-byte UTF-8 character
-    if ((unsigned char)*str > 127)
-      return 1;
-  }
-  
-  return 0;
+    assert(str != NULL);
+
+    for ( ; *str; ++str) {
+        if ((unsigned char)*str > 127) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/** Check whether \a str contains non-printable characters.
+ * @param[in] str String that might contain such characters.
+ * @return Non-zero if \a str contains non-printable characters,
+ * zero if there are none.
+ */
+int string_character_structure_is_sane(const char* str)
+{
+	assert(str!= NULL);
+	
+	// bool is_valid_utf8 = validate_utf8_fast(str, strlen(str));
+
+    if (string_is_utf8(str) || !string_contains_non_ascii(str)) {
+		return 1;
+	}
+
+	return 0;
 }
 
 /** Split a string on certain delimiters.
