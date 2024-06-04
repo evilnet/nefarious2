@@ -334,6 +334,11 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       continue;
     }
 
+    if (feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY) && !string_character_structure_is_sane(name)) {
+        send_reply(sptr, ERR_NOSUCHCHANNEL, name);
+        continue;
+    }
+
     if (cli_user(sptr)->joined >= get_client_maxchans(sptr)
 	&& !HasPriv(sptr, PRIV_CHAN_LIMIT)) {
       send_reply(sptr, ERR_TOOMANYCHANNELS, name);
