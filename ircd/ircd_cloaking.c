@@ -207,7 +207,7 @@ unsigned int alpha, beta, gamma, delta;
 
 char *hidehost_normalhost(char *host, int components)
 {
-char *p;
+char *p, *c;
 static char buf[512], res[512], res2[512], result[HOSTLEN+1];
 unsigned int alpha, n;
 int comps = 0;
@@ -237,7 +237,12 @@ int comps = 0;
                 if (len <= HOSTLEN)
                         strcat(result, p);
                 else
-                        strcat(result, p + (len - HOSTLEN));
+                {
+                        c = p + (len - HOSTLEN);
+                        if ((*c == '.') && *(c+1))
+                                c++;
+                        strcat(result, c);
+                }
         } else
                 ircd_snprintf(0, result, HOSTLEN, "%s-%X", PREFIX, alpha);
 
