@@ -83,9 +83,9 @@ void load_tunefile(void)
     return;
   Debug((DEBUG_DEBUG, "Reading tune file"));
 
-  fgets(buf, 1023, tunefile);
+  (void)!fgets(buf, 1023, tunefile);
   UserStats.local_clients_max = atol(buf);
-  fgets(buf, 1023, tunefile);
+  (void)!fgets(buf, 1023, tunefile);
   UserStats.clients_max = atol(buf);
   fclose(tunefile);
 }

@@ -20,6 +20,9 @@
  * $Id: ircd_lexer.l 1851 2007-11-30 22:10:04Z klmitch $
  */
 
+%option nounput
+%option noinput
+
 %{
 #include <unistd.h>
 #include <stdio.h>

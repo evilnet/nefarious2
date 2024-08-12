@@ -289,7 +289,7 @@ signal_handler(int sig)
 
   c = (unsigned char) sig; /* only write 1 byte to identify sig */
 
-  write(sigInfo.fd, &c, 1);
+  (void)!write(sigInfo.fd, &c, 1);
 }
 
 /** Callback for signal "socket" (really pipe) events.

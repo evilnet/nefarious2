@@ -471,7 +471,7 @@ static void parse_command_line(int argc, char** argv) {
   int opt;
 
   if (thisServer.euid != thisServer.uid)
-    setuid(thisServer.uid);
+    (void)!setuid(thisServer.uid);
 
   /* Do we really need to sanity check the non-NULLness of optarg?  That's
    * getopt()'s job...  Removing those... -zs

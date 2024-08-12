@@ -533,7 +533,7 @@ int ssl_murder(void *ssl, int fd, const char *buf)
 {
   if (!ssl) {
     if (buf)
-      write(fd, buf, strlen(buf));
+      (void)!write(fd, buf, strlen(buf));
   } else {
     if (buf)
       SSL_write((SSL *) ssl, buf, strlen(buf));
