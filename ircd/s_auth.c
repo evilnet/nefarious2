@@ -1568,7 +1568,7 @@ int iauth_do_spawn(struct IAuth *iauth, int automatic)
 /** Restart an %IAuth program.
  * @return 0 on failure, 1 on success, 2 on no IAuth program.
  */
-int auth_restart()
+int auth_restart(void)
 {
   static struct IAuth *iauthnew;
   int ii;

@@ -264,8 +264,7 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
       msg_allocated = 0,	/* memory used by struct Msg */
       msgbuf_allocated = 0,	/* memory used by struct MsgBuf */
       listenersm = 0,           /* memory used by listetners */
-      rm = 0,                   /* res memory used */
-      totcl = 0, totch = 0, totww = 0, tot = 0;
+      totcl = 0, totch = 0, totww = 0;
 
   count_whowas_memory(&wwu, &wwm, &wwa, &wwam);
   wwm += sizeof(struct Whowas) * feature_int(FEAT_NICKNAMEHISTORYLENGTH);
@@ -395,13 +394,6 @@ void count_memory(struct Client *cptr, const struct StatDesc *sd,
    * replies all on its own.
    */
   msgq_count_memory(cptr, &msg_allocated, &msgbuf_allocated);
-
-  rm = cres_mem(cptr);
-
-  tot =
-      totww + totch + totcl + com + cl * sizeof(struct ConnectionClass) +
-      dbufs_allocated + msg_allocated + msgbuf_allocated + rm;
-  tot += sizeof(void *) * HASHSIZE * 3;
 
 #if defined(MDEBUG)
   send_reply(cptr, SND_EXPLICIT | RPL_STATSDEBUG, ":Allocations: %zu(%zu)",

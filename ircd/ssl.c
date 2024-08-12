@@ -60,8 +60,8 @@
 SSL_CTX *ssl_server_ctx;
 SSL_CTX *ssl_client_ctx;
 
-SSL_CTX *ssl_init_server_ctx();
-SSL_CTX *ssl_init_client_ctx();
+SSL_CTX *ssl_init_server_ctx(void);
+SSL_CTX *ssl_init_client_ctx(void);
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert);
 void ssl_set_nonblocking(SSL *s);
 int ssl_smart_shutdown(SSL *ssl);
@@ -351,7 +351,7 @@ void ssl_doerror(struct Client *cptr)
   sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for client %s: %s", cli_name(cptr), ebuf);
 }
 
-void ssl_doerror_anon()
+void ssl_doerror_anon(void)
 {
   unsigned long err = 0;
   char ebuf[120];

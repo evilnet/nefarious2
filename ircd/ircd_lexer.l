@@ -337,7 +337,7 @@ init_lexer_file(char* file)
   return 1;
 }
 
-int next_lexer_file()
+int next_lexer_file(void)
 {
   if (--include_stack_ptr < 0)
     return 1;

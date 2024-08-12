@@ -2292,7 +2292,7 @@ static struct SLink *isupport_lines; /**< List of formatted ISUPPORT lines. */
 
 /** Mark #isupport_lines as dirty and needing a rebuild. */
 static void
-touch_isupport()
+touch_isupport(void)
 {
   while (isupport_lines) {
     struct SLink *link = isupport_lines;
@@ -2389,7 +2389,7 @@ void del_isupport(const char *name)
 
 /** Populate #isupport_lines from #isupport. */
 static void
-build_isupport_lines()
+build_isupport_lines(void)
 {
   struct ISupport *is;
   struct SLink **plink;

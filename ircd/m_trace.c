@@ -112,7 +112,6 @@ void do_trace(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   int doall;
   int link_s[MAXCONNECTIONS];
   int link_u[MAXCONNECTIONS];
-  int cnt = 0;
   int wilds;
   int dow;
 
@@ -210,11 +209,9 @@ void do_trace(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     switch (cli_status(acptr)) {
       case STAT_CONNECTING:
 	send_reply(sptr, RPL_TRACECONNECTING, conClass, cli_name(acptr));
-        cnt++;
         break;
       case STAT_HANDSHAKE:
 	send_reply(sptr, RPL_TRACEHANDSHAKE, conClass, cli_name(acptr));
-        cnt++;
         break;
       case STAT_ME:
         break;
@@ -222,11 +219,9 @@ void do_trace(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       case STAT_UNKNOWN_USER:
 	send_reply(sptr, RPL_TRACEUNKNOWN, conClass,
 		   get_client_name(acptr, HIDE_IP));
-        cnt++;
         break;
       case STAT_UNKNOWN_SERVER:
 	send_reply(sptr, RPL_TRACEUNKNOWN, conClass, "Unknown Server");
-        cnt++;
         break;
       case STAT_USER:
         /* Only opers see users if there is a wildcard
@@ -241,7 +236,6 @@ void do_trace(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	    send_reply(sptr, RPL_TRACEUSER, conClass,
 		       get_client_name(acptr, SHOW_IP),
 		       CurrentTime - cli_lasttime(acptr));
-          cnt++;
         }
         break;
         /*
@@ -279,11 +273,9 @@ void do_trace(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                      (*(cli_serv(acptr))->by) ?  cli_serv(acptr)->by : "*", "*",
                      cli_name(&me), CurrentTime - cli_lasttime(acptr),
 		     CurrentTime - cli_serv(acptr)->timestamp);
-        cnt++;
         break;
       default:                  /* We actually shouldn't come here, -msa */
 	send_reply(sptr, RPL_TRACENEWTYPE, get_client_name(acptr, HIDE_IP));
-        cnt++;
         break;
     }
   }

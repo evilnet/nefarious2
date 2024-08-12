@@ -1179,7 +1179,7 @@ shun_memory_count(size_t *sh_size)
 
 /** Check for and remove any expired shuns.
  */
-void expire_shuns()
+void expire_shuns(void)
 {
   struct Shun *shun;
   struct Shun *sshun;

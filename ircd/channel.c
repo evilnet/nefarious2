@@ -3587,11 +3587,11 @@ bmatch(struct Ban *old_ban, struct Ban *new_ban)
 int apply_ban(struct Ban **banlist, struct Ban *newban, int do_free)
 {
   struct Ban *ban;
-  size_t count = 0;
+  //size_t count = 0;
 
   assert(newban->flags & (BAN_ADD|BAN_DEL));
   if (newban->flags & BAN_ADD) {
-    size_t totlen = 0;
+    //size_t totlen = 0;
     /* If a less specific *active* entry is found, fail.  */
     for (ban = *banlist; ban; ban = ban->next) {
       if (!bmatch(ban, newban) && !(ban->flags & BAN_DEL)) {
@@ -3599,10 +3599,10 @@ int apply_ban(struct Ban **banlist, struct Ban *newban, int do_free)
           free_ban(newban);
         return 1;
       }
-      if (!(ban->flags & (BAN_OVERLAPPED|BAN_DEL))) {
-        count++;
-        totlen += strlen(ban->banstr);
-      }
+      //if (!(ban->flags & (BAN_OVERLAPPED|BAN_DEL))) {
+      //  count++;
+      //  totlen += strlen(ban->banstr);
+      //}
     }
     /* Mark more specific entries and add this one to the end of the list. */
     while ((ban = *banlist) != NULL) {
@@ -3645,11 +3645,11 @@ int apply_ban(struct Ban **banlist, struct Ban *newban, int do_free)
 int apply_except(struct Ban **exceptlist, struct Ban *newban, int do_free)
 {
   struct Ban *ban;
-  size_t count = 0;
+  //size_t count = 0;
 
   assert(newban->flags & (BAN_ADD|BAN_DEL));
   if (newban->flags & BAN_ADD) {
-    size_t totlen = 0;
+    //size_t totlen = 0;
     /* If a less specific *active* entry is found, fail.  */
     for (ban = *exceptlist; ban; ban = ban->next) {
       if (!bmatch(ban, newban) && !(ban->flags & BAN_DEL)) {
@@ -3657,10 +3657,10 @@ int apply_except(struct Ban **exceptlist, struct Ban *newban, int do_free)
           free_ban(newban);
         return 1;
       }
-      if (!(ban->flags & (BAN_OVERLAPPED|BAN_DEL))) {
-        count++;
-        totlen += strlen(ban->banstr);
-      }
+      //if (!(ban->flags & (BAN_OVERLAPPED|BAN_DEL))) {
+      //  count++;
+      //  totlen += strlen(ban->banstr);
+      //}
     }
     /* Mark more specific entries and add this one to the end of the list. */
     while ((ban = *exceptlist) != NULL) {
