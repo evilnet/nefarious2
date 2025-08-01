@@ -25,7 +25,7 @@ give should NOT start with a "." and you should not use quotes.
 
 RELIABLE_CLOCK
  * Type: boolean
- * Default: FALSE
+ * Default: TRUE
 
 You should really ONLY specify "TRUE" here when your system clock is
 stable and accurate at all times (within a few seconds).  If you are
