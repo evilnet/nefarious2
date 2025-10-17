@@ -112,7 +112,7 @@ int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   else {
     cmd = parv[1];
     for (i = 0; cmd[i]; i++) {
-      if (i == ' ') {
+      if (cmd[i] == ' ') {
         /* Not a valid command */
         cmd = "*";
         break;
