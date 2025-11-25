@@ -161,6 +161,7 @@ void free_conf(struct ConfItem *aconf)
     delete_resolver_queries(aconf);
   MyFree(aconf->username);
   MyFree(aconf->host);
+  MyFree(aconf->from_host);
   MyFree(aconf->origin_name);
   if (aconf->passwd)
     memset(aconf->passwd, 0, strlen(aconf->passwd));
@@ -645,8 +646,11 @@ struct ConfItem* attach_confs_byhost(struct Client* cptr, const char* host,
 
   for (tmp = GlobalConfList; tmp; tmp = tmp->next) {
     if (0 != (tmp->status & statmask) && !IsIllegal(tmp)) {
-      assert(0 != tmp->host);
-      if (0 == match(tmp->host, host) || 0 == ircd_strcmp(tmp->host, host)) { 
+      /* For server connections, check from_host instead of host */
+      const char *check_host = ((tmp->status & CONF_SERVER) && tmp->from_host)
+                               ? tmp->from_host : tmp->host;
+      assert(0 != check_host);
+      if (0 == match(check_host, host) || 0 == ircd_strcmp(check_host, host)) {
         if (ACR_OK == attach_conf(cptr, tmp) && !first)
           first = tmp;
       }
@@ -743,8 +747,11 @@ struct ConfItem* find_conf_byhost(struct SLink* lp, const char* host,
   for (; lp; lp = lp->next) {
     tmp = lp->value.aconf;
     if (0 != (tmp->status & statmask)) {
-      assert(0 != tmp->host);
-      if (0 == match(tmp->host, host))
+      /* For server connections, check from_host instead of host */
+      const char *check_host = ((tmp->status & CONF_SERVER) && tmp->from_host)
+                               ? tmp->from_host : tmp->host;
+      assert(0 != check_host);
+      if (0 == match(check_host, host))
         return tmp;
     }
   }
@@ -764,9 +771,16 @@ struct ConfItem* find_conf_byip(struct SLink* lp, const struct irc_in_addr* ip,
 
   for (; lp; lp = lp->next) {
     tmp = lp->value.aconf;
-    if (0 != (tmp->status & statmask)
-        && !irc_in_addr_cmp(&tmp->address.addr, ip))
-      return tmp;
+    if (0 != (tmp->status & statmask)) {
+      /* For server connections with from_host set, check from_address */
+      if ((tmp->status & CONF_SERVER) && tmp->from_host && tmp->from_addrbits >= 0) {
+        if (ipmask_check(ip, &tmp->from_address, tmp->from_addrbits))
+          return tmp;
+      } else {
+        if (!irc_in_addr_cmp(&tmp->address.addr, ip))
+          return tmp;
+      }
+    }
   }
   return 0;
 }

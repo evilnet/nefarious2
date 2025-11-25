@@ -82,7 +82,7 @@ extern int init_lexer_file(char* file);
   int fakelagfactor;
   int tping, tconn, maxlinks, sendq, recvq, port, invert, stringno, flags;
   int maxchans, redirport, hidehostcomps;
-  char *name, *pass, *host, *ip, *username, *origin, *hub_limit;
+  char *name, *pass, *host, *from_host, *ip, *username, *origin, *hub_limit;
   char *spoofhost, *sslfp, *sslciphers, *description, *redirserver;
   char *country, *continent, *ajoinchan, *ajoinnotice, *swhois;
   struct SLink *hosts;
@@ -135,6 +135,7 @@ static void free_slist(struct SLink **link) {
 %token RECVQ
 %token NAME
 %token HOST
+%token FROM
 %token IP
 %token USERNAME
 %token PASS
@@ -610,8 +611,9 @@ connectblock: CONNECT
   parse_error("Password too long in connect block");
  else if (host == NULL)
   parse_error("Missing host in connect block");
- else if (strchr(host, '*') || strchr(host, '?'))
-  parse_error("Invalid host '%s' in connect block", host);
+ /* Allow wildcards in host field for Docker/dynamic IPs */
+ /* else if (strchr(host, '*') || strchr(host, '?'))
+  parse_error("Invalid host '%s' in connect block", host); */
  else if (c_class == NULL)
   parse_error("Missing or non-existent class in connect block");
  else {
@@ -624,6 +626,23 @@ connectblock: CONNECT
    aconf->conn_class = c_class;
    aconf->address.port = port;
    aconf->host = host;
+   /* Set from_host for incoming connection validation.
+    * If not specified, default to host value for backward compatibility.
+    */
+   if (from_host) {
+     unsigned char addrbits;
+     aconf->from_host = from_host;
+     /* Try to parse as IP mask */
+     if (ipmask_parse(from_host, &aconf->from_address, &addrbits)) {
+       aconf->from_addrbits = addrbits;
+     } else {
+       aconf->from_addrbits = -1;
+     }
+   } else {
+     /* Default: use host for both outbound and inbound */
+     DupString(aconf->from_host, host);
+     aconf->from_addrbits = -1;
+   }
    /* If the user specified a hub allowance, but not maximum links,
     * allow an effectively unlimited number of hops.
     */
@@ -638,16 +657,17 @@ connectblock: CONNECT
    MyFree(sslfp);
    MyFree(sslciphers);
    MyFree(host);
+   MyFree(from_host);
    MyFree(origin);
    MyFree(hub_limit);
  }
- name = pass = host = origin = hub_limit = NULL;
+ name = pass = host = from_host = origin = hub_limit = NULL;
  c_class = NULL;
  sslfp = sslciphers = NULL;
  port = flags = maxlinks = 0;
 };
 connectitems: connectitem connectitems | connectitem;
-connectitem: connectname | connectpass | connectclass | connecthost
+connectitem: connectname | connectpass | connectclass | connecthost | connectfrom
               | connectport | connectvhost | connectleaf | connecthub
               | connecthublimit | connectmaxhops | connectauto | connectssl
               | connectsslfp | connectsslciphers;
@@ -672,6 +692,11 @@ connecthost: HOST '=' QSTRING ';'
 {
  MyFree(host);
  host = $3;
+};
+connectfrom: FROM '=' QSTRING ';'
+{
+ MyFree(from_host);
+ from_host = $3;
 };
 connectport: PORT '=' NUMBER ';'
 {
