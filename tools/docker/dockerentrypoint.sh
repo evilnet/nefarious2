@@ -1,40 +1,43 @@
 #!/bin/bash
 
-# Apply ENV to ircd.conf
-# ...
+# Nefarious IRCd Docker Entrypoint
+# Reads base.conf-dist, replaces all %VARIABLE% placeholders with environment
+# variable values, and writes out base.conf
 
 BASECONFDIST=/home/nefarious/ircd/base.conf-dist
 BASECONF=/home/nefarious/ircd/base.conf
 IRCDPEM=/home/nefarious/ircd/ircd.pem
 
-if [ -z "${IRCD_GENERAL_NAME}" ]; then
-        IRCD_GENERAL_NAME="localhost.localdomain"
-fi
-if [ -z "${IRCD_GENERAL_DESCRIPTION}" ]; then
-        IRCD_GENERAL_DESCRIPTION="localhost.localdomain"
-fi
-if [ -z "${IRCD_ADMIN_LOCATION}" ]; then
-        IRCD_ADMIN_LOCATION="Somewhere"
-fi
+# Set defaults for required variables (can be overridden by environment)
+: "${IRCD_GENERAL_NAME:=localhost.localdomain}"
+: "${IRCD_GENERAL_DESCRIPTION:=localhost.localdomain}"
+: "${IRCD_ADMIN_LOCATION:=Somewhere}"
+: "${IRCD_ADMIN_CONTACT:=root@localhost}"
+: "${IRCD_GENERAL_NUMERIC:=1}"
 
-if [ -z "${IRCD_ADMIN_CONTACT}" ]; then
-        IRCD_ADMIN_CONTACT="root@localhost"
-fi
+# Copy the template to base.conf location
+cp "$BASECONFDIST" "$BASECONF"
 
-if [ -z "${IRCD_GENERAL_NUMERIC}" ]; then
-        IRCD_GENERAL_NUMERIC=1
-fi
+# Find all %VARIABLE% placeholders in the config and substitute them
+# with corresponding environment variable values
+grep -oE '%[A-Za-z_][A-Za-z0-9_]*%' "$BASECONF" | sort -u | while read -r placeholder; do
+    # Extract variable name (remove the % signs)
+    varname="${placeholder:1:-1}"
 
+    # Get the value from environment (indirect expansion)
+    value="${!varname}"
 
-#Copy the template to base.conf location
-cp $BASECONFDIST $BASECONF
+    # Only substitute if the variable is set
+    if [ -n "$value" ]; then
+        # Escape special characters for sed (/, &, \)
+        escaped_value=$(printf '%s\n' "$value" | sed -e 's/[\/&]/\\&/g')
+        sed -i "s|${placeholder}|${escaped_value}|g" "$BASECONF"
+    else
+        echo "Warning: No value set for ${varname}, leaving ${placeholder} unchanged"
+    fi
+done
 
-#Modify base.conf template with env variables
-sed -i "s/%IRCD_GENERAL_NAME%/${IRCD_GENERAL_NAME}/g" $BASECONF
-sed -i "s/%IRCD_GENERAL_DESCRIPTION%/${IRCD_GENERAL_DESCRIPTION}/g" $BASECONF
-sed -i "s/%IRCD_GENERAL_NUMERIC%/${IRCD_GENERAL_NUMERIC}/g" $BASECONF
-sed -i "s/%IRCD_ADMIN_LOCATION%/${IRCD_ADMIN_LOCATION}/g" $BASECONF
-sed -i "s/%IRCD_ADMIN_CONTACT%/${IRCD_ADMIN_CONTACT}/g" $BASECONF
+echo "Generated $BASECONF from template"
 
 #If cmd is the ircd...
 if [ "$1" == "/home/nefarious/bin/ircd" ]; then

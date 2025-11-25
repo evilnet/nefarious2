@@ -4,22 +4,13 @@ ENV GID 1234
 ENV UID 1234
 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update 
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update && apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl libtime-duration-perl procps net-tools
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update && apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl libtime-duration-perl procps net-tools iputils-ping bind9-host
 #libgeoip-dev libmaxminddb-dev 
 
 RUN mkdir -p /home/nefarious/nefarious2
 RUN mkdir -p /home/nefarious/ircd
+
 COPY . /home/nefarious/nefarious2
-COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
-COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh
-COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
-
-#This ircd.conf just includes the other 3
-COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
-COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
-COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
-COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
-
 
 RUN groupadd -g ${GID} nefarious
 RUN useradd -u ${UID} -g ${GID} nefarious
@@ -47,6 +38,16 @@ RUN apt-get remove -y build-essential && apt-get autoremove -y
 RUN apt-get clean
 
 USER nefarious
+
+COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
+COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh
+COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
+
+#This ircd.conf just includes the other 3
+COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
+COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
+COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
+COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
