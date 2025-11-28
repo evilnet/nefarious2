@@ -60,6 +60,7 @@ static struct lexer_token {
   TOKEN(RECVQ),
   TOKEN(NAME),
   TOKEN(HOST),
+  TOKEN(FROM),
   TOKEN(IP),
   TOKEN(USERNAME),
   TOKEN(PASS),

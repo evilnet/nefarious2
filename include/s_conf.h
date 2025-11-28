@@ -71,7 +71,8 @@ struct ConfItem
   struct irc_sockaddr origin;  /**< Local address for outbound connections */
   struct irc_sockaddr address; /**< IP and port */
   char *username;     /**< For CONF_CLIENT and CONF_OPERATOR, username mask. */
-  char *host;         /**< Peer hostname */
+  char *host;         /**< Peer hostname (for outbound connections) */
+  char *from_host;    /**< Hostname/IP mask for inbound server connections */
   char *origin_name;  /**< Text form of origin address */
   char *passwd;       /**< Password field */
   char *sslfp;        /**< SSL certificate fingerprint */
@@ -91,6 +92,8 @@ struct ConfItem
   int dns_pending;    /**< A dns request is pending. */
   int flags;          /**< Additional modifiers for item. */
   int addrbits;       /**< Number of bits valid in ConfItem::address. */
+  int from_addrbits;  /**< Number of bits valid in from_host IP mask. */
+  struct irc_in_addr from_address; /**< Parsed IP address for from_host. */
   unsigned int snomask; /**< Default server notice mask. */
   int hidehostcomps;  /**< Host name components to hide. */
   struct Privs privs; /**< Privileges for opers. */
