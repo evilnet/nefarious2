@@ -3,9 +3,15 @@ FROM debian:12
 ENV GID 1234
 ENV UID 1234
 
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update 
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update && apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl libtime-duration-perl procps net-tools iputils-ping bind9-host
-#libgeoip-dev libmaxminddb-dev 
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host
+#libgeoip-dev libmaxminddb-dev
+
+# Perl dependencies for iauthd.pl (commented out - using TypeScript version)
+#RUN DEBIAN_FRONTEND=noninteractive apt-get -y install libpoe-perl libpoe-component-client-dns-perl libterm-readkey-perl libfile-slurp-perl libtime-duration-perl
+
+# Node.js for iauthd-ts
+RUN DEBIAN_FRONTEND=noninteractive apt-get -y install nodejs npm 
 
 RUN mkdir -p /home/nefarious/nefarious2
 RUN mkdir -p /home/nefarious/ircd
@@ -29,6 +35,16 @@ RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096
 RUN make
 RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 
+# Build iauthd-ts
+WORKDIR /home/nefarious/nefarious2/tools/iauthd-ts
+RUN npm install && npm run build
+
+# Copy iauthd-ts to ircd directory
+RUN cp -r /home/nefarious/nefarious2/tools/iauthd-ts/dist /home/nefarious/ircd/iauthd-ts
+RUN cp /home/nefarious/nefarious2/tools/iauthd-ts/package.json /home/nefarious/ircd/iauthd-ts/
+WORKDIR /home/nefarious/ircd/iauthd-ts
+RUN npm install --omit=dev
+
 WORKDIR /home/nefarious/ircd
 
 USER root
@@ -41,7 +57,9 @@ USER nefarious
 
 COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
 COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh
-COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
+
+# Perl iauthd (commented out - using TypeScript version)
+#COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
 
 #This ircd.conf just includes the other 3
 COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
