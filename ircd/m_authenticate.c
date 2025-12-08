@@ -94,6 +94,7 @@
 #include "numnicks.h"
 #include "random.h"
 #include "send.h"
+#include "s_auth.h"
 #include "s_misc.h"
 #include "s_user.h"
 
@@ -119,6 +120,45 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
 
   if (IsSASLComplete(cptr))
     return send_reply(cptr, ERR_SASLALREADY);
+
+  /* Check if IAuth handles SASL */
+  if (auth_iauth_handles_sasl()) {
+    /* Route SASL to IAuth */
+    if (!cli_saslcookie(cptr)) {
+      do {
+        cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
+      } while (!cli_saslcookie(cptr));
+      first = 1;
+    }
+
+    if (strchr(hoststr, ':') != NULL)
+      ircd_snprintf(0, realhost, sizeof(realhost), "[%s]", hoststr);
+    else
+      ircd_strncpy(realhost, hoststr, sizeof(realhost));
+
+    if (first) {
+      if (*parv[1] == ':' || strchr(parv[1], ' '))
+        return exit_client(cptr, sptr, sptr, "Malformed AUTHENTICATE");
+
+      /* Send SASL start to IAuth */
+      auth_send_sasl_start(cptr, parv[1], cli_sslclifp(cptr));
+
+      /* Send host info if configured */
+      if (feature_bool(FEAT_SASL_SENDHOST))
+        auth_send_sasl_host(cptr, cli_username(cptr), realhost, cli_sock_ip(cptr));
+    } else {
+      /* Send SASL continuation data to IAuth */
+      auth_send_sasl_data(cptr, parv[1]);
+    }
+
+    if (!t_active(&cli_sasltimeout(cptr)))
+      timer_add(timer_init(&cli_sasltimeout(cptr)), sasl_timeout_callback, (void*) cptr,
+                TT_RELATIVE, feature_int(FEAT_SASL_TIMEOUT));
+
+    return 0;
+  }
+
+  /* Original code: route SASL to services via P10 */
 
   /* Look up the target server */
   if (!(acptr = cli_saslagent(cptr))) {
