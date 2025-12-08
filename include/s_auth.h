@@ -61,5 +61,11 @@ extern void auth_close_unused(void);
 extern void report_iauth_conf(struct Client *cptr, const struct StatDesc *sd, char *param);
 extern void report_iauth_stats(struct Client *cptr, const struct StatDesc *sd, char *param);
 
+/* SASL via IAuth */
+extern int auth_iauth_handles_sasl(void);
+extern int auth_send_sasl_start(struct Client *cptr, const char *mechanism, const char *certfp);
+extern int auth_send_sasl_host(struct Client *cptr, const char *username, const char *host, const char *ip);
+extern int auth_send_sasl_data(struct Client *cptr, const char *data);
+
 #endif /* INCLUDED_s_auth_h */
 

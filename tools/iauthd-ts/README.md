@@ -9,6 +9,7 @@ This is a port of the original Perl `iauthd.pl` to TypeScript/Node.js.
 - **DNSBL Lookups**: Check connecting clients against multiple DNS blacklists
 - **Flexible Matching**: Match by index value or bitmask
 - **Caching**: DNS results are cached to reduce lookup overhead
+- **SASL Authentication**: Handle SASL PLAIN authentication directly in IAuth (no services required)
 - **SASL/LOC Support**: Exempt authenticated users from blocks
 - **WEBIRC Support**: Re-check real IP for trusted proxy connections
 - **Marking**: Tag users with marks visible to operators
@@ -50,6 +51,14 @@ iauthd-ts communicates with Nefarious via stdin/stdout using the IAuth protocol:
 | iauthd → IRCd | `D <id> <ip> <port> [class]` | Accept client |
 | iauthd → IRCd | `k <id> <ip> <port> :<reason>` | Reject client |
 | iauthd → IRCd | `m <id> <ip> <port> MARK <data>` | Mark client |
+| IRCd → iauthd | `A <id> <ip> <port> S <mechanism> [:<certfp>]` | SASL auth start |
+| IRCd → iauthd | `A <id> <ip> <port> H :<user@host:ip>` | SASL host info |
+| IRCd → iauthd | `a <id> <ip> <port> :<data>` | SASL auth data |
+| iauthd → IRCd | `c <id> <ip> <port> :<challenge>` | SASL challenge |
+| iauthd → IRCd | `L <id> <ip> <port> <account>` | SASL login success |
+| iauthd → IRCd | `f <id> <ip> <port>` | SASL auth failed |
+| iauthd → IRCd | `l <id> <ip> <port> :<mechanisms>` | SASL mechanism list |
+| iauthd → IRCd | `Z <id> <ip> <port>` | SASL auth complete |
 
 ## Requirements
 
@@ -106,6 +115,18 @@ Message shown to blocked users.
 ```
 Enable debug output.
 
+#### SASLDB
+```
+#IAUTH SASLDB /path/to/users
+```
+Path to the SASL users file. When set, iauthd-ts will handle SASL PLAIN authentication directly instead of routing to services. The policy must include 'S' for this to work.
+
+#### SASLFAILMSG
+```
+#IAUTH SASLFAILMSG Authentication failed
+```
+Message shown when SASL authentication fails.
+
 #### DNSBL
 ```
 #IAUTH DNSBL server=<server> [options...]
@@ -145,6 +166,41 @@ Options:
 # Whitelist from a private DNSBL
 #IAUTH DNSBL server=whitelist.example.com whitelist cachetime=3600
 ```
+
+### SASL Authentication Configuration
+
+To enable SASL authentication handling in iauthd-ts (instead of routing to services):
+
+1. **Create a users file** (`users` or any path you prefer):
+   ```
+   # Format: username:passwordhash
+   # Use genhash.ts to create hashes
+   admin:$5$salt$hashedpassword
+   user1:$6$salt$hashedpassword
+   ```
+
+2. **Generate password hashes**:
+   ```bash
+   npx tsx src/genhash.ts mypassword sha256
+   # Output: $5$randomsalt$hashedpasswordvalue
+   ```
+
+3. **Configure iauthd-ts**:
+   ```
+   #IAUTH POLICY RTAWUwFrS
+   #IAUTH SASLDB /path/to/users
+   #IAUTH SASLFAILMSG Invalid username or password
+   ```
+
+   The `S` in the policy enables SASL handling.
+
+4. **Supported hash formats**:
+   - `$5$salt$hash` - SHA-256 (recommended)
+   - `$6$salt$hash` - SHA-512
+   - `$1$salt$hash` - MD5 (legacy)
+   - Plain text (for testing only)
+
+The users file is automatically reloaded when modified (checked on each SASL attempt).
 
 ## Usage
 
@@ -203,7 +259,10 @@ iauthd-ts/
 │   ├── iauth.ts      # Main IAuth daemon class
 │   ├── config.ts     # Configuration parser
 │   ├── dnsbl.ts      # DNSBL lookup and caching
+│   ├── sasl.ts       # SASL authentication handling
+│   ├── genhash.ts    # Password hash generator utility
 │   └── types.ts      # TypeScript interfaces
+├── users.example     # Example SASL users file
 ├── tests/
 │   ├── config.test.ts   # Config parser tests
 │   ├── dnsbl.test.ts    # DNSBL function tests

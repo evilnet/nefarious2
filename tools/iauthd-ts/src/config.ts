@@ -10,6 +10,7 @@ const DEFAULT_CACHE_TIME = 60 * 60 * 24; // 24 hours
 const DEFAULT_DNS_TIMEOUT = 5;
 const DEFAULT_BLOCK_MSG = 'Your internet address has been rejected due to reputation (DNSBL).';
 const DEFAULT_POLICY = 'RTAWUwFr';
+const DEFAULT_SASL_FAIL_MSG = 'SASL authentication failed';
 
 /**
  * Parse a DNSBL configuration line
@@ -73,6 +74,7 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
     blockMsg: DEFAULT_BLOCK_MSG,
     cacheTime: DEFAULT_CACHE_TIME,
     debug: false,
+    saslFailMsg: DEFAULT_SASL_FAIL_MSG,
   };
 
   const configLines: string[] = [];
@@ -116,6 +118,14 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
 
       case 'CACHETIME':
         config.cacheTime = parseInt(args.trim(), 10) || DEFAULT_CACHE_TIME;
+        break;
+
+      case 'SASLDB':
+        config.saslUsersFile = args.trim();
+        break;
+
+      case 'SASLFAILMSG':
+        config.saslFailMsg = args.trim();
         break;
     }
   }

@@ -38,6 +38,22 @@ export interface Config {
   cacheTime: number;
   /** Debug mode */
   debug: boolean;
+  /** Path to users file for SASL authentication */
+  saslUsersFile?: string;
+  /** Message shown when SASL authentication fails */
+  saslFailMsg: string;
+}
+
+/** SASL session state */
+export interface SASLState {
+  /** SASL mechanism being used */
+  mechanism?: string;
+  /** Whether we've sent the initial response */
+  started: boolean;
+  /** SSL client certificate fingerprint (if provided) */
+  certfp?: string;
+  /** Client host info (user@host:ip) */
+  hostInfo?: string;
 }
 
 /** Client state during registration */
@@ -68,6 +84,8 @@ export interface ClientState {
   account?: string;
   /** DNSBL hits (cfgNum -> hit) */
   hits: Map<number, boolean>;
+  /** SASL authentication state */
+  sasl?: SASLState;
 }
 
 /** DNSBL cache entry */

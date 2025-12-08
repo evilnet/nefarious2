@@ -1,0 +1,24 @@
+# SASL Users File for iauthd-ts
+# Format: username:passwordhash
+#
+# Supported hash formats:
+#   $5$salt$hash  - SHA-256 crypt
+#   $6$salt$hash  - SHA-512 crypt
+#   $1$salt$hash  - MD5 crypt
+#   plaintext     - Plain text (for testing only, not recommended)
+#
+# Use the genhash.ts utility to generate hashes:
+#   npx tsx src/genhash.ts <password> [sha256|sha512|md5]
+#
+# Example entries:
+
+# Test user with plain text password (for testing only!)
+testuser:testpass
+
+# User with SHA-256 hashed password
+# To generate: npx tsx src/genhash.ts mypassword sha256
+#admin:$5$randomsalt$hashedpasswordhere
+
+# User with SHA-512 hashed password (most secure)
+# To generate: npx tsx src/genhash.ts mypassword sha512
+#secureuser:$6$randomsalt$hashedpasswordhere

@@ -171,6 +171,7 @@ enum IAuthFlag
   IAUTH_SSLFP,                          /**< Enable Nefarious SSL client certificate fingerprint notifcation. */
   IAUTH_ACCOUNT,                        /**< Enable Nefarious SASL account notification. */
   IAUTH_EVENTS,                         /**< Enable Nefarious Event notifications. */
+  IAUTH_SASL,                           /**< Enable SASL authentication handling in IAuth. */
   IAUTH_LAST_FLAG                       /**< total number of flags */
 };
 /** Declare a bitset structure indexed by IAuthFlag. */
@@ -1432,6 +1433,59 @@ int auth_cap_done(struct AuthRequest *auth)
   return check_auth_finished(auth);
 }
 
+/** Check if IAuth is configured to handle SASL authentication.
+ * @return Non-zero if IAuth handles SASL, zero otherwise.
+ */
+int auth_iauth_handles_sasl(void)
+{
+  return IAuthHas(iauth, IAUTH_SASL);
+}
+
+/** Send SASL authentication start to IAuth.
+ * @param[in] cptr Client starting SASL.
+ * @param[in] mechanism SASL mechanism name.
+ * @param[in] certfp SSL certificate fingerprint (may be NULL).
+ * @return Non-zero on success, zero on failure.
+ */
+int auth_send_sasl_start(struct Client *cptr, const char *mechanism, const char *certfp)
+{
+  if (!IAuthHas(iauth, IAUTH_SASL))
+    return 0;
+
+  if (!EmptyString(certfp))
+    return sendto_iauth(cptr, "A S %s :%s", mechanism, certfp);
+  else
+    return sendto_iauth(cptr, "A S :%s", mechanism);
+}
+
+/** Send SASL host information to IAuth.
+ * @param[in] cptr Client authenticating.
+ * @param[in] username Client's username.
+ * @param[in] host Client's hostname.
+ * @param[in] ip Client's IP address.
+ * @return Non-zero on success, zero on failure.
+ */
+int auth_send_sasl_host(struct Client *cptr, const char *username, const char *host, const char *ip)
+{
+  if (!IAuthHas(iauth, IAUTH_SASL))
+    return 0;
+
+  return sendto_iauth(cptr, "A H :%s@%s:%s", username, host, ip);
+}
+
+/** Send SASL authentication data to IAuth.
+ * @param[in] cptr Client authenticating.
+ * @param[in] data Base64-encoded SASL data.
+ * @return Non-zero on success, zero on failure.
+ */
+int auth_send_sasl_data(struct Client *cptr, const char *data)
+{
+  if (!IAuthHas(iauth, IAUTH_SASL))
+    return 0;
+
+  return sendto_iauth(cptr, "a :%s", data);
+}
+
 /** Attempt to spawn the process for an IAuth instance.
  * @param[in] iauth IAuth descriptor.
  * @param[in] automatic If non-zero, apply sanity checks against
@@ -1828,6 +1882,7 @@ static int iauth_cmd_policy(struct IAuth *iauth, struct Client *cli,
     case 'F': IAuthSet(iauth, IAUTH_SSLFP); break;
     case 'r': IAuthSet(iauth, IAUTH_ACCOUNT); break;
     case 'e': IAuthSet(iauth, IAUTH_EVENTS); break;
+    case 'S': IAuthSet(iauth, IAUTH_SASL); break;
     }
 
   /* Optionally notify operators. */
@@ -2429,6 +2484,117 @@ static int iauth_cmd_xquery(struct IAuth *iauth, struct Client *cli,
   return 0;
 }
 
+/** Handle SASL challenge from IAuth.
+ * @param[in] iauth Active IAuth session.
+ * @param[in] cli Client referenced by command.
+ * @param[in] parc Number of parameters (1).
+ * @param[in] params Challenge data (base64).
+ * @return Zero.
+ */
+static int iauth_cmd_sasl_challenge(struct IAuth *iauth, struct Client *cli,
+                                    int parc, char **params)
+{
+  if (EmptyString(params[0]))
+    return 0;
+
+  /* Forward challenge to client */
+  sendrawto_one(cli, "AUTHENTICATE %s", params[0]);
+  return 0;
+}
+
+/** Handle SASL login success from IAuth.
+ * @param[in] iauth Active IAuth session.
+ * @param[in] cli Client referenced by command.
+ * @param[in] parc Number of parameters (1+).
+ * @param[in] params Account name.
+ * @return Non-zero to check auth completion.
+ */
+static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
+                                   int parc, char **params)
+{
+  size_t len;
+
+  if (EmptyString(params[0])) {
+    sendto_iauth(cli, "E Missing :Missing account parameter");
+    return 0;
+  }
+
+  /* Check length of account name. */
+  len = strcspn(params[0], ": ");
+  if (len > ACCOUNTLEN) {
+    sendto_iauth(cli, "E Invalid :Account parameter too long");
+    return 0;
+  }
+
+  /* Store account in SASL fields */
+  ircd_strncpy(cli_saslaccount(cli), params[0], ACCOUNTLEN);
+
+  /* If account has a creation timestamp, use it. */
+  if (params[0][len] == ':') {
+    cli_saslacccreate(cli) = strtoul(params[0] + len + 1, NULL, 10);
+  }
+
+  /* Send RPL_LOGGEDIN to client */
+  send_reply(cli, RPL_LOGGEDIN, cli_name(cli), cli_user(cli) ? cli_user(cli)->username : "*",
+             cli_user(cli) ? cli_user(cli)->host : "*", cli_saslaccount(cli), cli_saslaccount(cli));
+
+  return 0;
+}
+
+/** Handle SASL authentication failure from IAuth.
+ * @param[in] iauth Active IAuth session.
+ * @param[in] cli Client referenced by command.
+ * @param[in] parc Number of parameters.
+ * @param[in] params Unused.
+ * @return Zero.
+ */
+static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
+                               int parc, char **params)
+{
+  send_reply(cli, ERR_SASLFAIL, EmptyString(params[0]) ? "" : params[0]);
+  return 0;
+}
+
+/** Handle SASL mechanism list from IAuth.
+ * @param[in] iauth Active IAuth session.
+ * @param[in] cli Client referenced by command.
+ * @param[in] parc Number of parameters (1).
+ * @param[in] params Mechanism list.
+ * @return Zero.
+ */
+static int iauth_cmd_sasl_mechs(struct IAuth *iauth, struct Client *cli,
+                                int parc, char **params)
+{
+  if (EmptyString(params[0]))
+    return 0;
+
+  send_reply(cli, ERR_SASLMECHS, params[0]);
+  return 0;
+}
+
+/** Handle SASL authentication success (done) from IAuth.
+ * @param[in] iauth Active IAuth session.
+ * @param[in] cli Client referenced by command.
+ * @param[in] parc Number of parameters.
+ * @param[in] params Unused.
+ * @return Zero.
+ */
+static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
+                               int parc, char **params)
+{
+  /* Mark SASL as complete */
+  SetFlag(cli, FLAG_SASLCOMPLETE);
+
+  /* Send success to client */
+  send_reply(cli, RPL_SASLSUCCESS);
+
+  /* Cancel SASL timeout */
+  if (t_active(&cli_sasltimeout(cli)))
+    timer_del(&cli_sasltimeout(cli));
+
+  return 0;
+}
+
 /** Parse a \a message from \a iauth.
  * @param[in] iauth Active IAuth session.
  * @param[in] message Message to be parsed.
@@ -2472,6 +2638,12 @@ static void iauth_parse(struct IAuth *iauth, char *message)
 	     */
   case 'K': handler = iauth_cmd_kill; has_cli = 2; break;
   case 'r': /* we handle termination directly */ return;
+  /* SASL-related commands from IAuth */
+  case 'c': handler = iauth_cmd_sasl_challenge; has_cli = 2; break;
+  case 'L': handler = iauth_cmd_sasl_loggedin; has_cli = 2; break;
+  case 'f': handler = iauth_cmd_sasl_fail; has_cli = 2; break;
+  case 'l': handler = iauth_cmd_sasl_mechs; has_cli = 2; break;
+  case 'Z': handler = iauth_cmd_sasl_done; has_cli = 2; break;
   default:  sendto_iauth(NULL, "E Garbage :[%s]", message); return;
   }
 
