@@ -1,0 +1,120 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+**Nefarious IRCd** is an IRC server daemon based on ircu (the Undernet IRC daemon). This is a C codebase using GNU Autotools for building. It implements the P10 protocol and includes features like:
+- Asynchronous event engines (epoll on Linux, kqueue on BSD, /dev/poll on Solaris)
+- Account persistence during netsplits
+- Dynamic configuration via F: (feature) lines
+- SSL/TLS support for server-to-server and client connections
+
+## Build Commands
+
+```bash
+# Configure the build
+./configure --enable-debug --with-maxcon=4096
+
+# Compile
+make
+
+# Install (by default to $HOME/bin, $HOME/lib)
+make install
+
+# Clean build artifacts
+make clean
+```
+
+Configuration options can be viewed with `./configure --help`. Common options:
+- `--enable-debug` - Enable debugging support
+- `--with-maxcon=N` - Set maximum connections (default varies by platform)
+- `--prefix=PATH` - Installation prefix (default: $HOME)
+- `--libdir=PATH`, `--bindir=PATH`, `--mandir=PATH` - Specific install directories
+
+## Docker Build
+
+Docker support is in `tools/docker/`:
+
+```bash
+# Build Docker image
+docker build -t nefarious .
+
+# The Dockerfile:
+# - Uses Debian 12 base
+# - Installs build dependencies and Perl modules for iauthd
+# - Runs as non-root user (UID/GID 1234)
+# - Configures with --enable-debug --with-maxcon=4096
+# - Removes build tools after compilation to reduce image size
+```
+
+## Configuration System
+
+Nefarious uses a hierarchical configuration file (`ircd.conf`) with block-based syntax. The configuration format is documented in `doc/example.conf`.
+
+### Docker Configuration
+
+For Docker deployments, the configuration uses environment variable templating:
+1. Template file: `tools/docker/base.conf-dist` contains `%VARIABLE_NAME%` placeholders
+2. Entry point script: `tools/docker/dockerentrypoint.sh` substitutes environment variables via sed
+3. Final config is written at container startup to `base.conf`
+
+Required environment variables (with defaults in dockerentrypoint.sh):
+- `IRCD_GENERAL_NAME` - Server name (default: localhost.localdomain)
+- `IRCD_GENERAL_DESCRIPTION` - Server description
+- `IRCD_GENERAL_NUMERIC` - Server numeric (0-4095, must be unique on network)
+- `IRCD_ADMIN_LOCATION` - Admin location info
+- `IRCD_ADMIN_CONTACT` - Admin contact info
+
+The Docker setup uses multiple config files included by main `ircd.conf`:
+- `base.conf` - Generated from base.conf-dist with variable substitution
+- `local.conf` - Local server-specific settings
+- `linesync.conf` - Line sync configuration
+
+## Code Architecture
+
+### Event Engine
+Nefarious uses platform-specific event engines for efficient I/O multiplexing:
+- **Linux**: `engine_epoll.c` (epoll family - most efficient)
+- **FreeBSD**: `engine_kqueue.c` (kqueue)
+- **Solaris**: `engine_devpoll.c` (/dev/poll)
+- **Fallback**: `engine_poll.c`, `engine_select.c`
+
+The engine is selected automatically at configure time based on platform.
+
+### Command Handlers
+IRC commands are implemented in `ircd/m_*.c` files (e.g., `m_join.c`, `m_privmsg.c`, `m_mode.c`). Each file handles one or more related IRC commands using a message table registration system.
+
+### Core Subsystems
+- **Client management**: `client.c`, `IPcheck.c` - Track connected clients and IP limits
+- **Channel management**: `channel.c` - Channel state, modes, membership
+- **Network I/O**: `listener.c` - Accept incoming connections; engine_*.c - Event handling
+- **Protocol**: `ircd_relay.c`, `m_*.c` - P10 protocol implementation
+- **Features**: `ircd_features.c` - Dynamic runtime configuration (F: lines)
+- **DNS resolution**: `ircd_res.c`, `ircd_reslib.c` - Asynchronous DNS
+- **Authentication**: Tools include `iauthd.pl` for external authentication
+
+### Helper Tools
+Located in `tools/`:
+- `iauthd.pl` - IAuth daemon for external authentication (Perl)
+- `linesync/` - Git-based configuration synchronization
+- `docker/` - Docker configuration and entry point
+- `convert-conf` - Convert old ircd.conf format to current format (built during make)
+
+## Documentation
+
+All documentation is in `doc/`:
+- `example.conf` - Complete configuration file example with inline documentation
+- `readme.features` - Detailed feature documentation (F: lines)
+- `readme.iauth` - IAuth protocol documentation
+- `p10.txt`, `p10.html` - P10 protocol specification
+- `modes.txt` - Channel and user modes
+- Platform-specific: `freebsd.txt`, `linux-poll.patch`
+- Feature-specific: `readme.gline`, `readme.zline`, `readme.shun`, `readme.who`
+
+## Important Notes
+
+- Server numeric must be unique on the network and cannot be changed without restart
+- Time synchronization via NTP is critical - clock skew causes serious issues
+- The codebase is designed for high-performance with thousands of simultaneous connections
+- SSL certificates are auto-generated by dockerentrypoint.sh if not present (ircd.pem)
