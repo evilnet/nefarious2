@@ -171,11 +171,19 @@ export GIT_SSH="$tmp_path/git.sh"
 if [ "$dosetup" = "yes" ]; then
     echo "Doing initial setup with repository $repository" >&2
 
-    #Creating ssh keys if they don't exist
-    ssh-keygen -A
-    if [ -d "$lpath" ]; then
-        echo "Doing setup.. but destination directory $lpath already exists. Move it out of the way and try again"
+    # Check if destination already has a git repo
+    if [ -d "$lpath/.git" ]; then
+        echo "Doing setup.. but $lpath already contains a git repository."
+        echo "Remove it first if you want to re-clone: rm -rf $lpath"
         exit 2
+    fi
+    # Remove empty directory if it exists (e.g., from bind mount)
+    if [ -d "$lpath" ]; then
+        rmdir "$lpath" 2>/dev/null || {
+            echo "Doing setup.. but destination directory $lpath already exists and is not empty."
+            echo "Move it out of the way and try again"
+            exit 2
+        }
     fi
     echo "Note: your public key (linesync admin will have added this to keydir):"
 
