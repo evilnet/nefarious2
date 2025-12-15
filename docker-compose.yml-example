@@ -39,8 +39,8 @@ services:
   #   depends_on:
   #     - nefarious
   #   volumes:
-  #     # SSH keys - persistent storage
-  #     - linesync-ssh:/home/linesync/.ssh
+  #     # SSH keys directory
+  #     - ./linesync-ssh:/home/linesync/.ssh
   #     # Config file - same bind mount as nefarious
   #     - ./local.conf:/home/linesync/ircd/local.conf
   #     # Linesync git repo directory (created by setup)
@@ -54,6 +54,3 @@ services:
   #     # Optional: sync SSL certs from git tag
   #     # CERT_TAG: myserver-cert
 
-# Uncomment if using linesync
-# volumes:
-#   linesync-ssh:

@@ -45,7 +45,25 @@ show_help() {
 # Generate SSH keypair
 do_keygen() {
     local keytype="${1:-ed25519}"
-    local keyfile="/home/linesync/.ssh/id_${keytype}"
+    local sshdir="/home/linesync/.ssh"
+    local keyfile="${sshdir}/id_${keytype}"
+
+    # Check if .ssh directory exists
+    if [ ! -d "$sshdir" ]; then
+        echo "Error: SSH directory $sshdir does not exist"
+        echo "Create the directory on the host first: mkdir -p ./linesync-ssh"
+        exit 1
+    fi
+
+    # Check if directory is writable
+    if [ ! -w "$sshdir" ]; then
+        echo "Error: SSH directory $sshdir is not writable"
+        echo "Fix permissions on the host: chmod 700 ./linesync-ssh && chown $(id -u):$(id -g) ./linesync-ssh"
+        exit 1
+    fi
+
+    # Ensure proper directory permissions
+    chmod 700 "$sshdir" 2>/dev/null || true
 
     if [ -f "$keyfile" ]; then
         echo "Key already exists at $keyfile"
@@ -56,6 +74,10 @@ do_keygen() {
 
     echo "Generating ${keytype} keypair..."
     ssh-keygen -t "$keytype" -f "$keyfile" -N "" -C "linesync@$(hostname)"
+
+    # Set proper permissions on the key files
+    chmod 600 "$keyfile"
+    chmod 644 "${keyfile}.pub"
 
     echo ""
     echo "Key generated successfully!"
