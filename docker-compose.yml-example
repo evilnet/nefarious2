@@ -1,0 +1,22 @@
+services:
+  nefarious:
+    image: ghcr.io/evilnet/nefarious2:latest
+    container_name: nefarious
+    restart: unless-stopped
+    ports:
+      - "6667:6667"   # IRC (plaintext)
+      - "6697:6697"   # IRC (SSL)
+      - "7000:7000"   # IRC (plaintext)
+      - "4497:4497"   # Server link (SSL)
+      - "9998:9998"   # Services link (SSL)
+    environment:
+      IRCD_GENERAL_NAME: irc.example.com
+      IRCD_GENERAL_DESCRIPTION: "My IRC Server"
+      IRCD_GENERAL_NUMERIC: 1
+      IRCD_ADMIN_LOCATION: "New York, USA"
+      IRCD_ADMIN_CONTACT: "admin@example.com"
+    volumes:
+      # Persist SSL certificate
+      - ./ircd.pem:/home/nefarious/ircd/ircd.pem
+      # Custom configuration (optional)
+      - ./local.conf:/home/nefarious/ircd/local.conf

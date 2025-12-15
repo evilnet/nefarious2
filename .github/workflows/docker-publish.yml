@@ -5,10 +5,11 @@ on:
   release:
     types: [published]
 
-  # Trigger on commits to master branch
+  # Trigger on commits to master and develop branches
   push:
     branches:
       - master
+      - develop
 
 env:
   REGISTRY: ghcr.io
@@ -51,6 +52,10 @@ jobs:
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/master' && github.event_name == 'push' }}
             # Tag with commit SHA for master branch commits
             type=sha,prefix={{branch}}-,enable=${{ github.ref == 'refs/heads/master' }}
+            # Tag as 'dev' for develop branch commits
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
+            # Tag with commit SHA for develop branch commits
+            type=sha,prefix={{branch}}-,enable=${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5

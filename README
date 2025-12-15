@@ -70,6 +70,45 @@ For general information on Evilnet, visit http://evilnet.github.io/
 
 Happy IRCing!
 
+DOCKER
+
+Nefarious is available as a Docker image from GitHub Container Registry:
+
+  docker pull ghcr.io/evilnet/nefarious2:latest   # Latest release
+  docker pull ghcr.io/evilnet/nefarious2:edge     # Latest master branch
+  docker pull ghcr.io/evilnet/nefarious2:dev      # Latest develop branch
+
+Environment Variables:
+
+  IRCD_GENERAL_NAME         Server name (default: localhost.localdomain)
+  IRCD_GENERAL_DESCRIPTION  Server description (default: localhost.localdomain)
+  IRCD_GENERAL_NUMERIC      Server numeric, must be unique on network (default: 1)
+  IRCD_ADMIN_LOCATION       Admin location info (default: Somewhere)
+  IRCD_ADMIN_CONTACT        Admin contact info (default: root@localhost)
+
+Example:
+
+  docker run -d \
+    -p 6667:6667 \
+    -p 6697:6697 \
+    -e IRCD_GENERAL_NAME=irc.example.com \
+    -e IRCD_GENERAL_DESCRIPTION="My IRC Server" \
+    -e IRCD_GENERAL_NUMERIC=1 \
+    -e IRCD_ADMIN_LOCATION="New York, USA" \
+    -e IRCD_ADMIN_CONTACT="admin@example.com" \
+    ghcr.io/evilnet/nefarious2:latest
+
+Exposed Ports:
+
+  6667   IRC (plaintext)
+  6697   IRC (SSL)
+  7000   IRC (plaintext)
+  4497   Server link (SSL)
+  9998   Services link (SSL)
+  16667  IRC (plaintext)
+
+SSL certificates are auto-generated on first run if not provided.
+
 RUNNING THIS SERVER ON LINUX
 
 If you run Linux 2.6 or above (or 2.4 with appropriate patches), Nefarious 2
