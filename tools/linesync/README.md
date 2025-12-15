@@ -9,6 +9,7 @@ A Docker sidecar container for automated git-based configuration synchronization
 - Configurable sync interval
 - Support for SSL certificate sync via git tags
 - Multiple operation modes: keygen, setup, sync, once
+- Automatic UID/GID remapping via fixuid for bind mount compatibility
 
 ## Quick Start
 
@@ -19,10 +20,13 @@ cd tools/linesync
 docker build -t linesync .
 ```
 
-### 2. Generate SSH keys
+### 2. Create directories and generate SSH keys
 
 ```bash
-docker run --rm -v linesync-ssh:/home/linesync/.ssh linesync keygen
+mkdir -p ./linesync-ssh ./linesync
+docker run --rm -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  linesync keygen
 ```
 
 This outputs a public key. Add it to your git repository's deploy keys.
@@ -30,9 +34,10 @@ This outputs a public key. Add it to your git repository's deploy keys.
 ### 3. Initial repository setup
 
 ```bash
-docker run --rm \
-  -v linesync-ssh:/home/linesync/.ssh \
-  -v nefarious-config:/home/linesync/ircd \
+docker run --rm -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  -v ./local.conf:/home/linesync/ircd/local.conf \
+  -v ./linesync:/home/linesync/ircd/linesync \
   -e GIT_REPOSITORY=git@github.com:yourorg/linesync-data.git \
   linesync setup
 ```
@@ -42,32 +47,45 @@ docker run --rm \
 ```bash
 docker run -d \
   --name linesync \
-  -v linesync-ssh:/home/linesync/.ssh \
-  -v nefarious-config:/home/linesync/ircd \
+  -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  -v ./local.conf:/home/linesync/ircd/local.conf \
+  -v ./linesync:/home/linesync/ircd/linesync \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e NEFARIOUS_CONTAINER=nefarious \
   -e SYNC_INTERVAL=300 \
+  -e IRCD_CONF=/home/linesync/ircd/local.conf \
   linesync sync
 ```
 
 ## Command Line Usage
 
+**Note:** Use `-u "$(id -u):$(id -g)"` to match your host user's UID/GID for proper file permissions on bind mounts.
+
 ### Generate SSH keypair
 
 ```bash
+mkdir -p ./linesync-ssh
+
 # Generate ed25519 key (default, recommended)
-docker run --rm -v linesync-ssh:/home/linesync/.ssh linesync keygen
+docker run --rm -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  linesync keygen
 
 # Generate RSA key
-docker run --rm -v linesync-ssh:/home/linesync/.ssh linesync keygen rsa
+docker run --rm -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  linesync keygen rsa
 ```
 
 ### Initial setup (clone repository)
 
 ```bash
-docker run --rm \
-  -v linesync-ssh:/home/linesync/.ssh \
-  -v /path/to/ircd:/home/linesync/ircd \
+mkdir -p ./linesync
+docker run --rm -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  -v ./local.conf:/home/linesync/ircd/local.conf \
+  -v ./linesync:/home/linesync/ircd/linesync \
   -e GIT_REPOSITORY=git@github.com:yourorg/linesync-data.git \
   linesync setup
 ```
@@ -75,19 +93,22 @@ docker run --rm \
 ### Run sync once
 
 ```bash
-docker run --rm \
-  -v linesync-ssh:/home/linesync/.ssh \
-  -v /path/to/ircd:/home/linesync/ircd \
+docker run --rm -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  -v ./local.conf:/home/linesync/ircd/local.conf \
+  -v ./linesync:/home/linesync/ircd/linesync \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -e IRCD_CONF=/home/linesync/ircd/local.conf \
   linesync once
 ```
 
 ### Interactive shell (debugging)
 
 ```bash
-docker run --rm -it \
-  -v linesync-ssh:/home/linesync/.ssh \
-  -v /path/to/ircd:/home/linesync/ircd \
+docker run --rm -it -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  -v ./local.conf:/home/linesync/ircd/local.conf \
+  -v ./linesync:/home/linesync/ircd/linesync \
   linesync shell
 ```
 
@@ -96,52 +117,58 @@ docker run --rm -it \
 ```yaml
 services:
   nefarious:
-    image: nefarious:latest
+    image: ghcr.io/evilnet/nefarious2:latest
     container_name: nefarious
     volumes:
-      - nefarious-config:/home/nefarious/ircd
+      - ./ircd.pem:/home/nefarious/ircd/ircd.pem
+      - ./local.conf:/home/nefarious/ircd/local.conf
     ports:
       - "6667:6667"
       - "4497:4497"
 
   linesync:
-    build: ./nefarious/tools/linesync
+    image: ghcr.io/evilnet/nefarious2-linesync:latest
     container_name: linesync
+    # Match your host user's UID:GID for bind mount permissions
+    user: "${UID}:${GID}"
     depends_on:
       - nefarious
     volumes:
-      # SSH keys - persistent storage
-      - linesync-ssh:/home/linesync/.ssh
-      # Share config directory with nefarious
-      - nefarious-config:/home/linesync/ircd
+      # SSH keys directory
+      - ./linesync-ssh:/home/linesync/.ssh
+      # Config file - same bind mount as nefarious
+      - ./local.conf:/home/linesync/ircd/local.conf
+      # Linesync git repo directory
+      - ./linesync:/home/linesync/ircd/linesync
       # Docker socket for signaling
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       NEFARIOUS_CONTAINER: nefarious
       SYNC_INTERVAL: 300
+      IRCD_CONF: /home/linesync/ircd/local.conf
       # Optional: sync SSL certs from git tag
       # CERT_TAG: myserver-cert
-
-volumes:
-  nefarious-config:
-  linesync-ssh:
 ```
 
 ### Initial Setup with Compose
 
 ```bash
+# 0. Create required directories
+mkdir -p ./linesync-ssh ./linesync
+touch ./local.conf
+
 # 1. Generate SSH key
-docker compose run --rm linesync keygen
+UID=$(id -u) GID=$(id -g) docker compose run --rm linesync keygen
 
 # 2. Add the public key to your git repo's deploy keys
 
 # 3. Clone the linesync repository
-docker compose run --rm \
+UID=$(id -u) GID=$(id -g) docker compose run --rm \
   -e GIT_REPOSITORY=git@github.com:yourorg/linesync-data.git \
   linesync setup
 
 # 4. Start the services
-docker compose up -d
+UID=$(id -u) GID=$(id -g) docker compose up -d
 ```
 
 ## Environment Variables
@@ -204,10 +231,27 @@ docker run ... -e CERT_TAG=myserver-cert linesync sync
 - Consider running the sidecar with `--read-only` filesystem (with tmpfs for `/tmp`)
 - SSH keys should be stored in a named volume or secrets manager
 
+## UID/GID Remapping
+
+The container uses [fixuid](https://github.com/boxboat/fixuid) to automatically remap the internal user's UID/GID to match yours at runtime. This ensures files created in bind-mounted directories are owned by your host user.
+
+**How it works:**
+1. You specify `user: "${UID}:${GID}"` in docker-compose (or `-u "$(id -u):$(id -g)"` on command line)
+2. fixuid runs at container startup and remaps the `linesync` user to match
+3. All file operations use your host UID/GID
+
+**Without UID/GID mapping:** Files would be owned by UID 1234 (the container's default), causing permission issues.
+
 ## Troubleshooting
 
 ### "SSH key not found"
 Run `keygen` mode first to generate keys, or mount existing keys to `/home/linesync/.ssh`.
+
+### "SSH directory does not exist" or "not writable"
+Create the directory on the host first:
+```bash
+mkdir -p ./linesync-ssh
+```
 
 ### "Linesync repository not found"
 Run `setup` mode first to clone the repository.
@@ -215,10 +259,21 @@ Run `setup` mode first to clone the repository.
 ### "Could not signal container"
 Ensure the Docker socket is mounted and the container name matches `NEFARIOUS_CONTAINER`.
 
+### Permission denied on bind mounts
+Make sure you're passing the UID/GID:
+```bash
+# Command line
+docker run -u "$(id -u):$(id -g)" ...
+
+# Docker compose
+UID=$(id -u) GID=$(id -g) docker compose up
+```
+
 ### Debug with shell access
 ```bash
-docker run --rm -it \
-  -v linesync-ssh:/home/linesync/.ssh \
-  -v nefarious-config:/home/linesync/ircd \
+docker run --rm -it -u "$(id -u):$(id -g)" \
+  -v ./linesync-ssh:/home/linesync/.ssh \
+  -v ./local.conf:/home/linesync/ircd/local.conf \
+  -v ./linesync:/home/linesync/ircd/linesync \
   linesync shell
 ```

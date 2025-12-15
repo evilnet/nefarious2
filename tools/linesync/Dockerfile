@@ -5,9 +5,13 @@
 #   keygen  - Generate SSH keypair for git authentication
 #   setup   - Clone the linesync repository (initial setup)
 #   sync    - Continuous sync loop (default)
+#
+# Supports UID/GID remapping via fixuid. In docker-compose:
+#   user: "${UID}:${GID}"
 
 FROM debian:12-slim
 
+# Default UID/GID (can be remapped at runtime via fixuid)
 ENV GID=1234
 ENV UID=1234
 
@@ -32,9 +36,16 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Create user matching nefarious container
+# Create user
 RUN groupadd -g ${GID} linesync \
     && useradd -u ${UID} -g ${GID} -m linesync
+
+# Install fixuid for UID/GID remapping at runtime
+RUN ARCH="$(dpkg --print-architecture)" && \
+    curl -fsSL "https://github.com/boxboat/fixuid/releases/download/v0.6.0/fixuid-0.6.0-linux-${ARCH}.tar.gz" | tar -C /usr/local/bin -xzf - && \
+    chmod 4755 /usr/local/bin/fixuid && \
+    mkdir -p /etc/fixuid && \
+    printf "user: linesync\ngroup: linesync\npaths:\n  - /home/linesync\n" > /etc/fixuid/config.yml
 
 # Create directories
 RUN mkdir -p /home/linesync/.ssh \
@@ -46,12 +57,12 @@ COPY gitsync.sh /home/linesync/gitsync.sh
 COPY linesync-entrypoint.sh /home/linesync/entrypoint.sh
 RUN chmod +x /home/linesync/gitsync.sh /home/linesync/entrypoint.sh
 
-USER linesync
+USER linesync:linesync
 WORKDIR /home/linesync
 
 # SSH config for git
 RUN echo "Host *\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile /home/linesync/.ssh/known_hosts" > /home/linesync/.ssh/config \
     && chmod 600 /home/linesync/.ssh/config
 
-ENTRYPOINT ["/home/linesync/entrypoint.sh"]
+ENTRYPOINT ["fixuid", "-q", "/home/linesync/entrypoint.sh"]
 CMD ["sync"]
