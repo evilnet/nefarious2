@@ -174,16 +174,14 @@ if [ "$dosetup" = "yes" ]; then
     # Check if destination already has a git repo
     if [ -d "$lpath/.git" ]; then
         echo "Doing setup.. but $lpath already contains a git repository."
-        echo "Remove it first if you want to re-clone: rm -rf $lpath"
+        echo "Remove it first if you want to re-clone: rm -rf $lpath/*"
         exit 2
     fi
-    # Remove empty directory if it exists (e.g., from bind mount)
-    if [ -d "$lpath" ]; then
-        rmdir "$lpath" 2>/dev/null || {
-            echo "Doing setup.. but destination directory $lpath already exists and is not empty."
-            echo "Move it out of the way and try again"
-            exit 2
-        }
+    # Check if directory exists and is not empty (allow empty dirs for bind mounts)
+    if [ -d "$lpath" ] && [ -n "$(ls -A "$lpath" 2>/dev/null)" ]; then
+        echo "Doing setup.. but destination directory $lpath already exists and is not empty."
+        echo "Move it out of the way and try again"
+        exit 2
     fi
     echo "Note: your public key (linesync admin will have added this to keydir):"
 
