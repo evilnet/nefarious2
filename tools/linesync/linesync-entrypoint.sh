@@ -4,6 +4,64 @@
 
 set -e
 
+# =============================================================================
+# UID/GID Auto-Detection and Privilege Dropping
+# =============================================================================
+# If running as root, detect the UID/GID from mounted directories and drop
+# privileges to match. This allows bind mounts to work without manual -u flags.
+
+if [ "$(id -u)" = "0" ]; then
+    # Detect UID/GID from mounted directories (in order of preference)
+    TARGET_UID=""
+    TARGET_GID=""
+
+    for detect_path in /home/linesync/.ssh /home/linesync/ircd; do
+        if [ -d "$detect_path" ]; then
+            TARGET_UID=$(stat -c %u "$detect_path")
+            TARGET_GID=$(stat -c %g "$detect_path")
+            # Skip if owned by root (probably not a bind mount)
+            if [ "$TARGET_UID" != "0" ]; then
+                break
+            fi
+        fi
+    done
+
+    # Default to 1000:1000 if detection failed or got root
+    : "${TARGET_UID:=1000}"
+    : "${TARGET_GID:=1000}"
+
+    # Get current linesync UID/GID
+    CURRENT_UID=$(id -u linesync)
+    CURRENT_GID=$(id -g linesync)
+
+    # Modify user/group if needed
+    if [ "$TARGET_GID" != "$CURRENT_GID" ]; then
+        groupmod -g "$TARGET_GID" linesync 2>/dev/null || true
+    fi
+    if [ "$TARGET_UID" != "$CURRENT_UID" ]; then
+        usermod -u "$TARGET_UID" linesync 2>/dev/null || true
+    fi
+
+    # Fix ownership of home directory
+    chown -R linesync:linesync /home/linesync 2>/dev/null || true
+
+    # Ensure SSH config exists
+    if [ ! -f /home/linesync/.ssh/config ]; then
+        mkdir -p /home/linesync/.ssh
+        echo -e "Host *\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile /home/linesync/.ssh/known_hosts" > /home/linesync/.ssh/config
+        chmod 700 /home/linesync/.ssh
+        chmod 600 /home/linesync/.ssh/config
+        chown -R linesync:linesync /home/linesync/.ssh
+    fi
+
+    # Re-exec this script as linesync user
+    exec gosu linesync "$0" "$@"
+fi
+
+# =============================================================================
+# Main Entrypoint (running as linesync user)
+# =============================================================================
+
 # Configuration with defaults
 : "${SYNC_INTERVAL:=300}"           # Sync interval in seconds (default: 5 minutes)
 : "${IRCD_CONF:=/home/linesync/ircd/ircd.conf}"
@@ -58,7 +116,7 @@ do_keygen() {
     # Check if directory is writable
     if [ ! -w "$sshdir" ]; then
         echo "Error: SSH directory $sshdir is not writable"
-        echo "Fix permissions on the host: chmod 700 ./linesync-ssh && chown $(id -u):$(id -g) ./linesync-ssh"
+        echo "Check that the directory exists and has correct permissions"
         exit 1
     fi
 

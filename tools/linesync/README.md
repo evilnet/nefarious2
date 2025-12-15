@@ -9,7 +9,7 @@ A Docker sidecar container for automated git-based configuration synchronization
 - Configurable sync interval
 - Support for SSL certificate sync via git tags
 - Multiple operation modes: keygen, setup, sync, once
-- Automatic UID/GID remapping via fixuid for bind mount compatibility
+- Automatic UID/GID detection from bind mounts (no manual configuration needed)
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ docker build -t linesync .
 
 ```bash
 mkdir -p ./linesync-ssh ./linesync
-docker run --rm -u "$(id -u):$(id -g)" \
+docker run --rm \
   -v ./linesync-ssh:/home/linesync/.ssh \
   linesync keygen
 ```
@@ -34,7 +34,7 @@ This outputs a public key. Add it to your git repository's deploy keys.
 ### 3. Initial repository setup
 
 ```bash
-docker run --rm -u "$(id -u):$(id -g)" \
+docker run --rm \
   -v ./linesync-ssh:/home/linesync/.ssh \
   -v ./local.conf:/home/linesync/ircd/local.conf \
   -v ./linesync:/home/linesync/ircd/linesync \
@@ -47,7 +47,6 @@ docker run --rm -u "$(id -u):$(id -g)" \
 ```bash
 docker run -d \
   --name linesync \
-  -u "$(id -u):$(id -g)" \
   -v ./linesync-ssh:/home/linesync/.ssh \
   -v ./local.conf:/home/linesync/ircd/local.conf \
   -v ./linesync:/home/linesync/ircd/linesync \
@@ -60,20 +59,18 @@ docker run -d \
 
 ## Command Line Usage
 
-**Note:** Use `-u "$(id -u):$(id -g)"` to match your host user's UID/GID for proper file permissions on bind mounts.
-
 ### Generate SSH keypair
 
 ```bash
 mkdir -p ./linesync-ssh
 
 # Generate ed25519 key (default, recommended)
-docker run --rm -u "$(id -u):$(id -g)" \
+docker run --rm \
   -v ./linesync-ssh:/home/linesync/.ssh \
   linesync keygen
 
 # Generate RSA key
-docker run --rm -u "$(id -u):$(id -g)" \
+docker run --rm \
   -v ./linesync-ssh:/home/linesync/.ssh \
   linesync keygen rsa
 ```
@@ -82,7 +79,7 @@ docker run --rm -u "$(id -u):$(id -g)" \
 
 ```bash
 mkdir -p ./linesync
-docker run --rm -u "$(id -u):$(id -g)" \
+docker run --rm \
   -v ./linesync-ssh:/home/linesync/.ssh \
   -v ./local.conf:/home/linesync/ircd/local.conf \
   -v ./linesync:/home/linesync/ircd/linesync \
@@ -93,7 +90,7 @@ docker run --rm -u "$(id -u):$(id -g)" \
 ### Run sync once
 
 ```bash
-docker run --rm -u "$(id -u):$(id -g)" \
+docker run --rm \
   -v ./linesync-ssh:/home/linesync/.ssh \
   -v ./local.conf:/home/linesync/ircd/local.conf \
   -v ./linesync:/home/linesync/ircd/linesync \
@@ -105,7 +102,7 @@ docker run --rm -u "$(id -u):$(id -g)" \
 ### Interactive shell (debugging)
 
 ```bash
-docker run --rm -it -u "$(id -u):$(id -g)" \
+docker run --rm -it \
   -v ./linesync-ssh:/home/linesync/.ssh \
   -v ./local.conf:/home/linesync/ircd/local.conf \
   -v ./linesync:/home/linesync/ircd/linesync \
@@ -129,8 +126,6 @@ services:
   linesync:
     image: ghcr.io/evilnet/nefarious2-linesync:latest
     container_name: linesync
-    # Match your host user's UID:GID for bind mount permissions
-    user: "${UID}:${GID}"
     depends_on:
       - nefarious
     volumes:
@@ -158,17 +153,17 @@ mkdir -p ./linesync-ssh ./linesync
 touch ./local.conf
 
 # 1. Generate SSH key
-UID=$(id -u) GID=$(id -g) docker compose run --rm linesync keygen
+docker compose run --rm linesync keygen
 
 # 2. Add the public key to your git repo's deploy keys
 
 # 3. Clone the linesync repository
-UID=$(id -u) GID=$(id -g) docker compose run --rm \
+docker compose run --rm \
   -e GIT_REPOSITORY=git@github.com:yourorg/linesync-data.git \
   linesync setup
 
 # 4. Start the services
-UID=$(id -u) GID=$(id -g) docker compose up -d
+docker compose up -d
 ```
 
 ## Environment Variables
@@ -229,18 +224,19 @@ docker run ... -e CERT_TAG=myserver-cert linesync sync
 - The Docker socket mount grants significant privileges. The container can control other containers.
 - Use read-only deploy keys in your git repository
 - Consider running the sidecar with `--read-only` filesystem (with tmpfs for `/tmp`)
-- SSH keys should be stored in a named volume or secrets manager
+- SSH keys should be stored securely
 
-## UID/GID Remapping
+## UID/GID Auto-Detection
 
-The container uses [fixuid](https://github.com/boxboat/fixuid) to automatically remap the internal user's UID/GID to match yours at runtime. This ensures files created in bind-mounted directories are owned by your host user.
+The container automatically detects the UID/GID of your bind-mounted directories and runs as that user. This means files created by the container will be owned by your host user without any manual configuration.
 
 **How it works:**
-1. You specify `user: "${UID}:${GID}"` in docker-compose (or `-u "$(id -u):$(id -g)"` on command line)
-2. fixuid runs at container startup and remaps the `linesync` user to match
-3. All file operations use your host UID/GID
+1. Container starts as root
+2. Entrypoint detects the owner of mounted directories (e.g., `./linesync-ssh`)
+3. Modifies the internal `linesync` user to match that UID/GID
+4. Drops privileges and runs the actual command as that user
 
-**Without UID/GID mapping:** Files would be owned by UID 1234 (the container's default), causing permission issues.
+This happens automatically - no `-u` flags or environment variables needed.
 
 ## Troubleshooting
 
@@ -259,19 +255,9 @@ Run `setup` mode first to clone the repository.
 ### "Could not signal container"
 Ensure the Docker socket is mounted and the container name matches `NEFARIOUS_CONTAINER`.
 
-### Permission denied on bind mounts
-Make sure you're passing the UID/GID:
-```bash
-# Command line
-docker run -u "$(id -u):$(id -g)" ...
-
-# Docker compose
-UID=$(id -u) GID=$(id -g) docker compose up
-```
-
 ### Debug with shell access
 ```bash
-docker run --rm -it -u "$(id -u):$(id -g)" \
+docker run --rm -it \
   -v ./linesync-ssh:/home/linesync/.ssh \
   -v ./local.conf:/home/linesync/ircd/local.conf \
   -v ./linesync:/home/linesync/ircd/linesync \

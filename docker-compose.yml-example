@@ -36,8 +36,6 @@ services:
   #   # build: ./tools/linesync
   #   container_name: linesync
   #   restart: unless-stopped
-  #   # Match your host user's UID:GID for bind mount permissions
-  #   user: "${UID}:${GID}"
   #   depends_on:
   #     - nefarious
   #   volumes:

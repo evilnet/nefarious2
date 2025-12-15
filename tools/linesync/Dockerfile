@@ -6,14 +6,13 @@
 #   setup   - Clone the linesync repository (initial setup)
 #   sync    - Continuous sync loop (default)
 #
-# Supports UID/GID remapping via fixuid. In docker-compose:
-#   user: "${UID}:${GID}"
+# Automatically detects UID/GID from mounted directories for proper permissions.
 
 FROM debian:12-slim
 
-# Default UID/GID (can be remapped at runtime via fixuid)
-ENV GID=1234
-ENV UID=1234
+# Default UID/GID (will be overridden at runtime based on mounted directory ownership)
+ENV LINESYNC_UID=1000
+ENV LINESYNC_GID=1000
 
 # Install required tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (for sending signals to nefarious container)
@@ -36,16 +36,9 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends docker-ce-cli \
     && rm -rf /var/lib/apt/lists/*
 
-# Create user
-RUN groupadd -g ${GID} linesync \
-    && useradd -u ${UID} -g ${GID} -m linesync
-
-# Install fixuid for UID/GID remapping at runtime
-RUN ARCH="$(dpkg --print-architecture)" && \
-    curl -fsSL "https://github.com/boxboat/fixuid/releases/download/v0.6.0/fixuid-0.6.0-linux-${ARCH}.tar.gz" | tar -C /usr/local/bin -xzf - && \
-    chmod 4755 /usr/local/bin/fixuid && \
-    mkdir -p /etc/fixuid && \
-    printf "user: linesync\ngroup: linesync\npaths:\n  - /home/linesync\n" > /etc/fixuid/config.yml
+# Create user (UID/GID will be adjusted at runtime)
+RUN groupadd -g ${LINESYNC_GID} linesync \
+    && useradd -u ${LINESYNC_UID} -g ${LINESYNC_GID} -m linesync
 
 # Create directories
 RUN mkdir -p /home/linesync/.ssh \
@@ -57,12 +50,11 @@ COPY gitsync.sh /home/linesync/gitsync.sh
 COPY linesync-entrypoint.sh /home/linesync/entrypoint.sh
 RUN chmod +x /home/linesync/gitsync.sh /home/linesync/entrypoint.sh
 
-USER linesync:linesync
+# SSH config template (will be copied to user's .ssh at runtime)
+RUN echo "Host *\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile /home/linesync/.ssh/known_hosts" > /etc/ssh/ssh_config.d/linesync.conf
+
 WORKDIR /home/linesync
 
-# SSH config for git
-RUN echo "Host *\n  StrictHostKeyChecking accept-new\n  UserKnownHostsFile /home/linesync/.ssh/known_hosts" > /home/linesync/.ssh/config \
-    && chmod 600 /home/linesync/.ssh/config
-
-ENTRYPOINT ["fixuid", "-q", "/home/linesync/entrypoint.sh"]
+# Run as root initially; entrypoint will drop privileges after detecting UID/GID
+ENTRYPOINT ["/home/linesync/entrypoint.sh"]
 CMD ["sync"]
