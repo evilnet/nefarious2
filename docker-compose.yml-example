@@ -31,7 +31,9 @@ services:
   #   4. docker compose up -d
   #
   # linesync:
-  #   build: ./tools/linesync
+  #   image: ghcr.io/evilnet/nefarious2-linesync:latest
+  #   # Or build locally:
+  #   # build: ./tools/linesync
   #   container_name: linesync
   #   restart: unless-stopped
   #   depends_on:
