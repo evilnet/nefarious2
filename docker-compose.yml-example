@@ -20,3 +20,38 @@ services:
       - ./ircd.pem:/home/nefarious/ircd/ircd.pem
       # Custom configuration (optional)
       - ./local.conf:/home/nefarious/ircd/local.conf
+
+  # Linesync Sidecar - Git-based configuration sync
+  # Uncomment to enable automatic config updates from a git repository
+  #
+  # Setup steps:
+  #   1. docker compose run --rm linesync keygen
+  #   2. Add the public key to your git repo's deploy keys
+  #   3. docker compose run --rm -e GIT_REPOSITORY=git@github.com:yourorg/linesync-data.git linesync setup
+  #   4. docker compose up -d
+  #
+  # linesync:
+  #   build: ./tools/linesync
+  #   container_name: linesync
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - nefarious
+  #   volumes:
+  #     # SSH keys - persistent storage
+  #     - linesync-ssh:/home/linesync/.ssh
+  #     # Config file - same bind mount as nefarious
+  #     - ./local.conf:/home/linesync/ircd/local.conf
+  #     # Linesync git repo directory (created by setup)
+  #     - ./linesync:/home/linesync/ircd/linesync
+  #     # Docker socket for sending SIGHUP to nefarious
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   environment:
+  #     NEFARIOUS_CONTAINER: nefarious
+  #     SYNC_INTERVAL: 300
+  #     IRCD_CONF: /home/linesync/ircd/local.conf
+  #     # Optional: sync SSL certs from git tag
+  #     # CERT_TAG: myserver-cert
+
+# Uncomment if using linesync
+# volumes:
+#   linesync-ssh:
