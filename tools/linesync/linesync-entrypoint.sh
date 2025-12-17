@@ -70,6 +70,7 @@ fi
 : "${NEFARIOUS_CONTAINER:=nefarious}"
 : "${GIT_REPOSITORY:=}"
 : "${CERT_TAG:=}"
+: "${CERT_FILE:=}"                  # Output path for certificate (default: fullchain.pem in conf dir)
 
 GITSYNC="/home/linesync/gitsync.sh"
 
@@ -92,6 +93,7 @@ show_help() {
     echo "  NEFARIOUS_CONTAINER Name of nefarious container to signal (default: nefarious)"
     echo "  GIT_REPOSITORY      Git repository URL (required for setup mode)"
     echo "  CERT_TAG            Git tag for SSL certificate (optional)"
+    echo "  CERT_FILE           Output path for certificate (default: fullchain.pem in conf dir)"
     echo ""
     echo "Volume Mounts:"
     echo "  /home/linesync/.ssh         SSH keys directory"
@@ -186,6 +188,9 @@ do_sync_once() {
 
     if [ -n "$CERT_TAG" ]; then
         sync_args="$sync_args -c $CERT_TAG"
+        if [ -n "$CERT_FILE" ]; then
+            sync_args="$sync_args -C $CERT_FILE"
+        fi
     fi
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running sync..."
@@ -221,6 +226,9 @@ do_sync_once() {
 
 # Continuous sync loop
 do_sync_loop() {
+    # Handle shutdown signals gracefully
+    trap 'echo "[$(date "+%Y-%m-%d %H:%M:%S")] Shutting down..."; exit 0' SIGTERM SIGINT
+
     echo "Starting linesync daemon"
     echo "Sync interval: ${SYNC_INTERVAL}s"
     echo "Config: $IRCD_CONF"
@@ -247,7 +255,9 @@ do_sync_loop() {
     while true; do
         do_sync_once
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Sleeping ${SYNC_INTERVAL}s..."
-        sleep "$SYNC_INTERVAL"
+        # Sleep in background so trap can interrupt
+        sleep "$SYNC_INTERVAL" &
+        wait $!
     done
 }
 

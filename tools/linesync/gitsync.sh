@@ -17,14 +17,15 @@ usage() {
     echo " -p ircd.pem       - convert this ircd.pem certificate to an ssh key and use that instead of the default ~/.ssh/id_rsa"
     echo " -s id_rsa         - Full path to your ssh private key to use for git access (defaults to ~/.ssh/id_rsa)"
     echo " -i repository-url - Perform initial setup, needed only once to set up. Provide git URL as argument"
-    echo " -c tagname        - Load a fullchain.pem file from this git tagged object (eg, servername-cert)"
+    echo " -c tagname        - Load a certificate from this git tagged object (eg, servername-cert)"
+    echo " -C certfile       - Write the certificate to this file (default: fullchain.pem in ircd.conf directory)"
     echo " <ircd.conf>       - Full path to your ircd.conf file"
     echo " <ircd.pid>        - Full path to your ircd.pid file"
     echo ""
 }
 
 #Handle argument parsing
-while getopts "hi:p:s:c:" opt; do
+while getopts "hi:p:s:c:C:" opt; do
     case $opt in
      h)
         usage
@@ -44,6 +45,9 @@ while getopts "hi:p:s:c:" opt; do
         ;;
      c)
         certtag="$OPTARG"
+        ;;
+     C)
+        certfile="$OPTARG"
         ;;
     \?)
         echo "Unknown option: -$OPTARG" >&2
@@ -301,17 +305,20 @@ if [ ! -z "$diff" ]; then
 fi
 
 if [ ! -z "$certtag" ]; then
-    if [ ! -f "$dpath/fullchain.pem" ]; then
+    # Use provided certfile path or default to fullchain.pem
+    : "${certfile:=$dpath/fullchain.pem}"
+
+    if [ ! -f "$certfile" ]; then
         cdiff="yes"
     else
-        cdiff=`"$diff_cmd" "$dpath/fullchain.pem" "$TMPCERT"`
+        cdiff=`"$diff_cmd" "$certfile" "$TMPCERT"`
     fi
     if [ ! -z "$cdiff" ]; then
         #Changes detected
-        if [ -f "$dpath/fullchain.pem" ]; then
-            cp "$dpath/fullchain.pem" "$dpath/fullchain.backup"
+        if [ -f "$certfile" ]; then
+            cp "$certfile" "${certfile}.backup"
         fi
-        cp "$TMPCERT" "$dpath/fullchain.pem"
+        cp "$TMPCERT" "$certfile"
 
 	# Rehash pem files (without caring wether or not it succeeds)
         kill -USR1 `cat "$ppath" 2>/dev/null` > /dev/null 2>&1
