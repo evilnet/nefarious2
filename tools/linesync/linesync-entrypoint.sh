@@ -15,7 +15,7 @@ if [ "$(id -u)" = "0" ]; then
     TARGET_UID=""
     TARGET_GID=""
 
-    for detect_path in /home/linesync/.ssh /home/linesync/ircd; do
+    for detect_path in /home/linesync/ircd/ircd.conf ; do
         if [ -d "$detect_path" ]; then
             TARGET_UID=$(stat -c %u "$detect_path")
             TARGET_GID=$(stat -c %g "$detect_path")
