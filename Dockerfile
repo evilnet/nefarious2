@@ -61,15 +61,15 @@ COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh
 # Perl iauthd (commented out - using TypeScript version)
 #COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
 
-#This ircd.conf just includes the other 3
-COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
+#ircd-docker.conf includes the other config files
+COPY tools/docker/ircd-docker.conf /home/nefarious/ircd/ircd-docker.conf
 COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
-COPY tools/docker/local.conf /home/nefarious/ircd/local.conf
+COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
 COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
-CMD ["/home/nefarious/bin/ircd", "-n", "-x", "9"]
+CMD ["/home/nefarious/bin/ircd", "-n", "-x", "9", "-c", "ircd-docker.conf"]
 
 
 
