@@ -61,8 +61,9 @@ USER nefarious
 COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
 COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh
 
-# Perl iauthd (commented out - using TypeScript version)
-#COPY ./tools/iauthd.pl /home/nefarious/ircd/iauthd.pl
+# Create wrapper script for iauthd.pl that runs the Node.js version
+RUN printf '#!/bin/sh\nexec node /home/nefarious/ircd/iauthd-ts/index.js "$@"\n' > /home/nefarious/ircd/iauthd.pl && \
+    chmod +x /home/nefarious/ircd/iauthd.pl
 
 #ircd-docker.conf includes the other config files
 COPY tools/docker/ircd-docker.conf /home/nefarious/ircd/ircd-docker.conf
