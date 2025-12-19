@@ -72,7 +72,7 @@ COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
-CMD ["/home/nefarious/bin/ircd", "-n", "-x", "9", "-c", "ircd-docker.conf"]
+CMD ["/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd-docker.conf"]
 
 
 
