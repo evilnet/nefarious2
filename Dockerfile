@@ -47,6 +47,9 @@ RUN npm install --omit=dev
 
 WORKDIR /home/nefarious/ircd
 
+# Symlink ircd.log to stdout so docker logs captures it
+RUN ln -sf /dev/stdout /home/nefarious/ircd/ircd.log
+
 USER root
 #Clean up build
 RUN rm -rf /home/nefarious/nefarious2
