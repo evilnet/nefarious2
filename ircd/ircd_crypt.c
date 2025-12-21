@@ -55,6 +55,7 @@
 #include "ircd_crypt_native.h"
 #include "ircd_crypt_plain.h"
 #include "ircd_crypt_smd5.h"
+#include "ircd_crypt_bcrypt.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <unistd.h>
@@ -199,6 +200,21 @@ crypt_mechs_t* crypt_mech;
   return hashed_pass;
  }
 
+ /* try bcrypt ($2a$, $2b$, $2y$) - pass directly to system crypt */
+ if (strlen(salt) > 4 && salt[0] == '$' && salt[1] == '2' &&
+     (salt[2] == 'a' || salt[2] == 'b' || salt[2] == 'y') && salt[3] == '$')
+ {
+   char *s;
+   Debug((DEBUG_DEBUG, "ircd_crypt: detected bcrypt hash"));
+   if (NULL == (temp_hashed_pass = (char*)ircd_crypt_native(key, salt)))
+     return NULL;
+   if (!ircd_strcmp(temp_hashed_pass, salt))
+   {
+     DupString(s, temp_hashed_pass);
+     return s;
+   }
+ }
+
  /* try to use native crypt for an old-style (untagged) password */
  if (strlen(salt) > 2)
  {
@@ -242,6 +258,7 @@ void ircd_crypt_init(void)
  ircd_register_crypt_smd5();
  ircd_register_crypt_plain();
  ircd_register_crypt_native();
+ ircd_register_crypt_bcrypt();
 
 return;
 }

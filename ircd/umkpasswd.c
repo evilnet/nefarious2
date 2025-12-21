@@ -42,6 +42,7 @@
 #include "ircd_crypt_smd5.h"
 #include "ircd_crypt_native.h"
 #include "ircd_crypt_plain.h"
+#include "ircd_crypt_bcrypt.h"
 
 /* bleah, evil globals */
 umkpasswd_conf_t* umkpasswd_conf;
@@ -256,6 +257,7 @@ void load_mechs(void)
  ircd_register_crypt_native();
  ircd_register_crypt_smd5();
  ircd_register_crypt_plain(); /* yes I know it's slightly pointless */
+ ircd_register_crypt_bcrypt();
 
 return;
 }

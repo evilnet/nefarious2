@@ -77,7 +77,8 @@ CRYPTO_SRC = \
 	ircd_md5.c \
 	ircd_crypt_plain.c \
 	ircd_crypt_smd5.c \
-	ircd_crypt_native.c
+	ircd_crypt_native.c \
+	ircd_crypt_bcrypt.c
 
 UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	ircd_alloc.c \
@@ -486,7 +487,7 @@ ircd_crypt.o: ircd_crypt.c ../config.h ../include/ircd_crypt.h \
   ../include/ircd_alloc.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_string.h ../include/s_debug.h \
   ../include/ircd_crypt_native.h ../include/ircd_crypt_plain.h \
-  ../include/ircd_crypt_smd5.h
+  ../include/ircd_crypt_smd5.h ../include/ircd_crypt_bcrypt.h
 ircd_crypt_native.o: ircd_crypt_native.c ../config.h \
   ../include/ircd_crypt.h ../include/ircd_crypt_native.h \
   ../include/ircd_log.h ../include/s_debug.h ../include/ircd_alloc.h
@@ -496,6 +497,9 @@ ircd_crypt_plain.o: ircd_crypt_plain.c ../config.h ../include/ircd_crypt.h \
 ircd_crypt_smd5.o: ircd_crypt_smd5.c ../config.h ../include/ircd_crypt.h \
   ../include/ircd_crypt_smd5.h ../include/ircd_log.h ../include/ircd_md5.h \
   ../include/s_debug.h ../include/ircd_alloc.h
+ircd_crypt_bcrypt.o: ircd_crypt_bcrypt.c ../config.h ../include/ircd_crypt.h \
+  ../include/ircd_crypt_bcrypt.h ../include/ircd_log.h ../include/s_debug.h \
+  ../include/ircd_alloc.h
 ircd_events.o: ircd_events.c ../config.h ../include/ircd_events.h \
   ../include/ircd.h ../include/ircd_alloc.h ../include/ircd_log.h \
   ../include/ircd_snprintf.h ../include/s_debug.h
@@ -1306,7 +1310,7 @@ umkpasswd.o: umkpasswd.c ../config.h ../include/ircd_alloc.h \
   ../include/ircd_log.h ../include/ircd_string.h ../include/umkpasswd.h \
   ../include/s_debug.h ../include/ircd_md5.h ../include/ircd_crypt.h \
   ../include/ircd_crypt_smd5.h ../include/ircd_crypt_native.h \
-  ../include/ircd_crypt_plain.h
+  ../include/ircd_crypt_plain.h ../include/ircd_crypt_bcrypt.h
 uping.o: uping.c ../config.h ../include/uping.h ../include/client.h \
   ../include/ircd.h ../include/ircd_alloc.h ../include/ircd_events.h \
   ../include/ircd_log.h ../include/ircd_osdep.h ../include/ircd_string.h \
