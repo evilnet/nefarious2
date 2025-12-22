@@ -247,6 +247,140 @@ describe('IAuth Protocol Integration', () => {
     });
   });
 
+  describe('SASL PLAIN Authentication', () => {
+    let harness: IAuthTestHarness;
+    let usersPath: string;
+
+    beforeEach(async () => {
+      // Create users file with test user (password: testpass)
+      usersPath = join(tempDir, 'users');
+      // Plain text password for testing
+      writeFileSync(usersPath, 'testuser:testpass\n');
+
+      // Config with SASL enabled (S in policy) and users file
+      writeFileSync(configPath, `
+#IAUTH POLICY SRTAWUwFr
+#IAUTH SASLDB ${usersPath}
+#IAUTH SASLFAILMSG Authentication failed
+`);
+      harness = await createTestHarness(configPath);
+    });
+
+    afterEach(async () => {
+      await harness?.close();
+      try {
+        unlinkSync(usersPath);
+      } catch {}
+    });
+
+    it('should respond with challenge when SASL PLAIN is requested', async () => {
+      // IRCd introduces a client
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+
+      // IRCd sends SASL start with mechanism
+      // Format: <id> A S :<mechanism>
+      harness.send('0 A S :PLAIN');
+
+      // iauthd should respond with empty challenge ('+' means ready)
+      // Format: c <id> <ip> <port> :<challenge>
+      const challengeLine = await harness.waitForOutput(/^c 0 192\.168\.1\.10 12345 :\+$/);
+      expect(challengeLine).toBeDefined();
+    });
+
+    it('should send L and Z messages on successful authentication', async () => {
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+      harness.send('0 A S :PLAIN');
+
+      await harness.waitForOutput(/^c 0/);
+
+      // Send SASL continuation with credentials
+      // Format: <id> a :<base64_data>
+      // Base64 of "\0testuser\0testpass" (SASL PLAIN format)
+      const credentials = Buffer.from('\0testuser\0testpass').toString('base64');
+      harness.send(`0 a :${credentials}`);
+
+      // iauthd should respond with L (login success) then Z (SASL complete)
+      // Format: L <id> <ip> <port> <account>
+      const loginLine = await harness.waitForOutput(/^L 0 192\.168\.1\.10 12345 testuser$/);
+      expect(loginLine).toBeDefined();
+
+      // Format: Z <id> <ip> <port>
+      const completeLine = await harness.waitForOutput(/^Z 0 192\.168\.1\.10 12345$/);
+      expect(completeLine).toBeDefined();
+    });
+
+    it('should send f message on failed authentication', async () => {
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+      harness.send('0 A S :PLAIN');
+
+      await harness.waitForOutput(/^c 0/);
+
+      // Send wrong credentials
+      const credentials = Buffer.from('\0testuser\0wrongpass').toString('base64');
+      harness.send(`0 a :${credentials}`);
+
+      // iauthd should respond with f (auth failed)
+      // Format: f <id> <ip> <port>
+      const failLine = await harness.waitForOutput(/^f 0 192\.168\.1\.10 12345$/);
+      expect(failLine).toBeDefined();
+    });
+
+    it('should handle SASL host info message', async () => {
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+
+      // IRCd sends host info with SASL start
+      // Format: <id> A H :<user@host:ip>
+      harness.send('0 A H :user@testhost.example.com:192.168.1.10');
+
+      // Should see debug about host info
+      const hostLine = await harness.waitForOutput(/SASL host info.*testhost/i);
+      expect(hostLine).toBeDefined();
+    });
+
+    it('should handle mechanism with certfp', async () => {
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+
+      // Format with certfp: <id> A S <mechanism> :<certfp>
+      harness.send('0 A S PLAIN :abc123fingerprint');
+
+      // Should respond with challenge
+      const challengeLine = await harness.waitForOutput(/^c 0/);
+      expect(challengeLine).toBeDefined();
+    });
+
+    it('should send mechanism list for unsupported mechanism', async () => {
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+
+      // Request unsupported mechanism
+      harness.send('0 A S :EXTERNAL');
+
+      // Should respond with mechanism list
+      // Format: l <id> <ip> <port> :<mechanisms>
+      const mechLine = await harness.waitForOutput(/^l 0 192\.168\.1\.10 12345 :PLAIN$/);
+      expect(mechLine).toBeDefined();
+    });
+
+    it('should complete full SASL flow then accept client', async () => {
+      harness.send('0 C 192.168.1.10 12345 10.0.0.1 6667');
+      harness.send('0 A S :PLAIN');
+
+      await harness.waitForOutput(/^c 0/);
+
+      const credentials = Buffer.from('\0testuser\0testpass').toString('base64');
+      harness.send(`0 a :${credentials}`);
+
+      await harness.waitForOutput(/^L 0/);
+      await harness.waitForOutput(/^Z 0/);
+
+      // Now hurry up to finish connection
+      harness.send('0 H Users');
+
+      // Should accept the client with D message
+      const doneLine = await harness.waitForOutput(/^D 0 192\.168\.1\.10 12345/);
+      expect(doneLine).toBeDefined();
+    });
+  });
+
   describe('WEBIRC Handling', () => {
     let harness: IAuthTestHarness;
 

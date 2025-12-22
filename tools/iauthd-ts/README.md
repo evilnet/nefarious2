@@ -20,7 +20,7 @@ This is a port of the original Perl `iauthd.pl` to TypeScript/Node.js.
 
 ```
 ┌─────────────┐     stdin/stdout      ┌─────────────┐
-│  Nefarious  │ ◄──────────────────► │  iauthd-ts  │
+│  Nefarious  │ ◄──────────────────►  │  iauthd-ts  │
 │    IRCd     │    IAuth Protocol     │             │
 └─────────────┘                       └──────┬──────┘
                                              │

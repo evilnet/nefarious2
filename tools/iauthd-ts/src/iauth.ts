@@ -188,6 +188,8 @@ export class IAuthDaemon {
 
   /**
    * Handle a line from ircd
+   * Format: <id> <message> <args...>
+   * Example: 26 C 172.19.0.1 12345 172.19.0.2 6667
    */
   private handleLine(line: string): void {
     if (!line) return;
@@ -329,7 +331,9 @@ export class IAuthDaemon {
    */
   private async startDNSBLLookups(client: ClientState): Promise<void> {
     if (!isIPv4(client.ip)) {
-      this.debug(`Unknown IP format: ${client.ip}, probably IPv6... ignoring`);
+      this.debug(`Unknown IP format: ${client.ip}, probably IPv6... skipping DNSBL`);
+      // IPv6 clients skip DNSBL but still need to be processed
+      // They'll be accepted when Hurry arrives since they have no pending lookups
       return;
     }
 
@@ -589,8 +593,9 @@ export class IAuthDaemon {
 
   /**
    * Handle SASL authentication start (A message from IRCd)
-   * Format: A <id> <ip> <port> <mechanism> [:<certfp>]
-   * Or for host info: A <id> <ip> <port> H :<user@host:ip>
+   * Format from IRCd: "A S :<mechanism>" or "A S <mechanism> :<certfp>"
+   * Or for host info: "A H :<user@host:ip>"
+   * After handleLine parsing, args = "S :PLAIN" or "H :user@host:ip"
    */
   private handleSASLStart(id: number, args: string): void {
     if (!this.saslEnabled()) {
@@ -604,33 +609,15 @@ export class IAuthDaemon {
       this.loadUsersDb();
     }
 
-    // Parse: <ip> <port> <mechanism_or_H> [:<extra>]
-    const spaceIdx = args.indexOf(' ');
-    if (spaceIdx === -1) {
-      this.debug(`Invalid SASL A message format: ${args}`);
-      return;
-    }
-
-    const ip = args.substring(0, spaceIdx);
-    const rest = args.substring(spaceIdx + 1);
-
-    const parts = rest.split(' ');
-    if (parts.length < 2) {
-      this.debug(`Invalid SASL A message format: ${args}`);
-      return;
-    }
-
-    const port = parseInt(parts[0], 10);
-    const mechanismOrType = parts[1];
-
     // Get or create client state
     let client = this.clients.get(id);
     if (!client) {
       // Create minimal client state for SASL-only handling
+      // We don't have IP/port from this message, use placeholders
       client = {
         id,
-        ip,
-        port,
+        ip: '0.0.0.0',
+        port: 0,
         serverIp: '',
         serverPort: 0,
         whitelist: false,
@@ -648,9 +635,20 @@ export class IAuthDaemon {
       client.sasl = { started: false };
     }
 
+    // Parse: first character is type (S or H), rest is data
+    // Format: "S :PLAIN" or "S PLAIN :certfp" or "H :user@host:ip"
+    const spaceIdx = args.indexOf(' ');
+    if (spaceIdx === -1) {
+      this.debug(`Invalid SASL A message format: ${args}`);
+      return;
+    }
+
+    const msgType = args.substring(0, spaceIdx);
+    const rest = args.substring(spaceIdx + 1);
+
     // Check if this is host info (H) or mechanism start (S)
-    if (mechanismOrType === 'H') {
-      // Host info: A <id> <ip> <port> H :<user@host:ip>
+    if (msgType === 'H') {
+      // Host info: H :<user@host:ip>
       const colonIdx = rest.indexOf(':');
       if (colonIdx !== -1) {
         client.sasl.hostInfo = rest.substring(colonIdx + 1);
@@ -659,20 +657,23 @@ export class IAuthDaemon {
       return;
     }
 
-    if (mechanismOrType === 'S') {
-      // Mechanism start: A <id> <ip> <port> S <mechanism> [:<certfp>]
-      // Format from IRCd: S <mechanism> or S <mechanism> :<certfp>
-      const mechanismPart = parts.slice(2).join(' ');
-      const colonIdx = mechanismPart.indexOf(':');
-
+    if (msgType === 'S') {
+      // Mechanism start: S :<mechanism> or S <mechanism> :<certfp>
       let mechanism: string;
       let certfp: string | undefined;
 
-      if (colonIdx !== -1) {
-        mechanism = mechanismPart.substring(0, colonIdx).trim();
-        certfp = mechanismPart.substring(colonIdx + 1).trim();
+      if (rest.startsWith(':')) {
+        // Format: S :PLAIN
+        mechanism = rest.substring(1).trim();
       } else {
-        mechanism = mechanismPart.trim();
+        // Format: S PLAIN :certfp
+        const colonIdx = rest.indexOf(':');
+        if (colonIdx !== -1) {
+          mechanism = rest.substring(0, colonIdx).trim();
+          certfp = rest.substring(colonIdx + 1).trim();
+        } else {
+          mechanism = rest.trim();
+        }
       }
 
       this.debug(`SASL start for ${id}: mechanism=${mechanism}, certfp=${certfp || 'none'}`);
@@ -689,20 +690,20 @@ export class IAuthDaemon {
         return;
       }
 
-      // For PLAIN mechanism, we need to wait for the data in the C message
-      // Send an empty challenge to request the credentials
+      // For PLAIN mechanism, send empty challenge to request credentials
       if (mechanism.toUpperCase() === 'PLAIN') {
         this.sendSASLChallenge(id, '+');
       }
       return;
     }
 
-    this.debug(`Unknown SASL A message type: ${mechanismOrType}`);
+    this.debug(`Unknown SASL A message type: ${msgType}`);
   }
 
   /**
    * Handle SASL authentication continuation (a message from IRCd)
-   * Format: a <id> <ip> <port> :<base64_data>
+   * Format from IRCd: "a :<base64_data>"
+   * After handleLine parsing, args = ":<base64_data>"
    */
   private handleSASLContinue(id: number, args: string): void {
     if (!this.saslEnabled()) {
@@ -717,7 +718,7 @@ export class IAuthDaemon {
       return;
     }
 
-    // Parse: <ip> <port> :<data>
+    // Parse: :<data>
     const colonIdx = args.indexOf(':');
     if (colonIdx === -1) {
       this.debug(`Invalid SASL a message format: ${args}`);
@@ -783,6 +784,7 @@ export class IAuthDaemon {
     const client = this.clients.get(id);
     if (client) {
       this.send(`L ${id} ${client.ip} ${client.port} ${account}`);
+      this.send(`Z ${id} ${client.ip} ${client.port}`);
     }
   }
 

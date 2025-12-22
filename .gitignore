@@ -20,3 +20,4 @@ tools/sidconvert/num2sid
 # iauthd-ts build artifacts
 tools/iauthd-ts/dist/
 tools/iauthd-ts/node_modules/
+.claude/settings.local.json
