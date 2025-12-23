@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "parse.h"
+#include "capab.h"
 #include "class.h"
 #include "client.h"
 #include "channel.h"
@@ -1204,8 +1205,54 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   if (IsDead(cptr))
     return 0;
 
+  /* Clear any previous label */
+  cli_label(cptr)[0] = '\0';
+
   para[0] = cli_name(from);
   for (ch = buffer; *ch == ' '; ch++);  /* Eat leading spaces */
+
+  /* Parse message tags if present (IRCv3.2) */
+  if (*ch == '@') {
+    char *tag_end;
+    char *tag_start = ch + 1;  /* Skip the @ */
+
+    /* Find end of tags (space before command) */
+    tag_end = strchr(tag_start, ' ');
+    if (tag_end) {
+      /* Look for label= in the tags */
+      char *label_start = tag_start;
+      while (label_start < tag_end) {
+        if (strncmp(label_start, "label=", 6) == 0) {
+          /* Found label tag - extract value */
+          char *label_val = label_start + 6;
+          char *label_end = label_val;
+          /* Find end of label value (semicolon or space) */
+          while (label_end < tag_end && *label_end != ';')
+            label_end++;
+          /* Copy label value if client has labeled-response capability */
+          if (CapActive(cptr, CAP_LABELEDRESP) &&
+              feature_bool(FEAT_CAP_labeled_response)) {
+            size_t label_len = label_end - label_val;
+            if (label_len >= sizeof(cli_label(cptr)))
+              label_len = sizeof(cli_label(cptr)) - 1;
+            memcpy(cli_label(cptr), label_val, label_len);
+            cli_label(cptr)[label_len] = '\0';
+          }
+          break;
+        }
+        /* Move to next tag (after semicolon) */
+        while (label_start < tag_end && *label_start != ';')
+          label_start++;
+        if (*label_start == ';')
+          label_start++;
+      }
+      /* Advance past tags to the command */
+      ch = tag_end;
+      while (*ch == ' ')
+        ch++;
+    }
+  }
+
   if (*ch == ':')               /* Is any client doing this ? */
   {
     for (++ch; *ch && *ch != ' '; ++ch)

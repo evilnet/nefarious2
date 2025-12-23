@@ -142,7 +142,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
   /* Echo message back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
-    sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
+    sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
 }
 
 /** Relay a local user's notice to a channel.
@@ -200,7 +200,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
   /* Echo notice back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
-    sendcmdto_one(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
+    sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
 }
 
 /** Relay a message to a channel.
@@ -491,7 +491,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
 
   /* Echo message back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
-    sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
+    sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
 }
 
 /** Relay a private notice from a local user.
@@ -550,7 +550,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
   /* Echo notice back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
-    sendcmdto_one(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, text);
+    sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, text);
 }
 
 /** Relay a private message that arrived from a server.

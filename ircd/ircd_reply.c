@@ -27,8 +27,10 @@
 #include "config.h"
 
 #include "ircd_reply.h"
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
 #include "msg.h"
@@ -40,6 +42,7 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
+#include <sys/time.h>
 
 /** Report a protocol violation warning to anyone listening.  This can
  * be easily used to clean up the last couple of parts of the code.
@@ -86,6 +89,8 @@ int send_reply(struct Client *to, int reply, ...)
   struct VarData vd;
   struct MsgBuf *mb;
   const struct Numeric *num;
+  char tagbuf[256];
+  int use_tags = 0;
 
   assert(0 != to);
   assert(0 != reply);
@@ -101,8 +106,49 @@ int send_reply(struct Client *to, int reply, ...)
 
   assert(0 != vd.vd_format);
 
-  /* build buffer */
-  mb = msgq_make(cli_from(to), "%:#C %s %C %v", &me, num->str, to, &vd);
+  /* Check if we need message tags for this client */
+  if (MyConnect(to)) {
+    int pos = 0;
+    int need_label = feature_bool(FEAT_CAP_labeled_response) &&
+                     CapActive(to, CAP_LABELEDRESP) && cli_label(to)[0];
+    int need_time = feature_bool(FEAT_CAP_server_time) &&
+                    CapActive(to, CAP_SERVERTIME);
+
+    if (need_label || need_time) {
+      tagbuf[0] = '@';
+      pos = 1;
+
+      if (need_label) {
+        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
+      }
+
+      if (need_time) {
+        struct timeval tv;
+        struct tm tm;
+        if (pos > 1 && pos < (int)sizeof(tagbuf) - 1)
+          tagbuf[pos++] = ';';
+        gettimeofday(&tv, NULL);
+        gmtime_r(&tv.tv_sec, &tm);
+        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
+                        "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                        tm.tm_hour, tm.tm_min, tm.tm_sec,
+                        tv.tv_usec / 1000);
+      }
+
+      if (pos < (int)sizeof(tagbuf) - 1) {
+        tagbuf[pos++] = ' ';
+        tagbuf[pos] = '\0';
+      }
+      use_tags = 1;
+    }
+  }
+
+  /* build buffer with or without tags */
+  if (use_tags)
+    mb = msgq_make(cli_from(to), "%s%:#C %s %C %v", tagbuf, &me, num->str, to, &vd);
+  else
+    mb = msgq_make(cli_from(to), "%:#C %s %C %v", &me, num->str, to, &vd);
 
   va_end(vd.vd_args);
 

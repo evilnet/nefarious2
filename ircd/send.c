@@ -130,14 +130,75 @@ static char *format_message_tags(char *buf, size_t buflen, struct Client *from)
   return buf;
 }
 
-/** Check if a client wants message tags (server-time or account-tag).
+/** Check if a client wants message tags (server-time, account-tag, or label).
  * @param[in] to Recipient client.
  * @return Non-zero if client has any message tag capability active.
  */
 static int wants_message_tags(struct Client *to)
 {
   return (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME)) ||
-         (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG));
+         (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG)) ||
+         (feature_bool(FEAT_CAP_labeled_response) && CapActive(to, CAP_LABELEDRESP) &&
+          MyConnect(to) && cli_label(to)[0]);
+}
+
+/** Format message tags for a specific recipient, including label if applicable.
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag).
+ * @param[in] to Recipient client (for label tag).
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_for(char *buf, size_t buflen, struct Client *from, struct Client *to)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
+  int use_label = feature_bool(FEAT_CAP_labeled_response) &&
+                  CapActive(to, CAP_LABELEDRESP) &&
+                  to && MyConnect(to) && cli_label(to)[0];
+  int pos = 0;
+
+  if (!use_time && !use_account && !use_label)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  if (use_label) {
+    pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    if (IsAccount(from)) {
+      pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                      cli_user(from)->account);
+    } else {
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+    }
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
 }
 
 /*
@@ -411,6 +472,44 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 
   mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
 		 &vd);
+
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+
+  msgq_clean(mb);
+}
+
+/**
+ * Send a (prefixed) command to a single client with message tags.
+ * Includes @label, @time, and @account tags if the recipient supports them.
+ * @param[in] from Client sending the command.
+ * @param[in] cmd Long name of command (used if \a to is a user).
+ * @param[in] tok Short name of command (used if \a to is a server).
+ * @param[in] to Destination of command.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
+		   struct Client *to, const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[256];
+  char *tags;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern; /* set up the struct VarData for %v */
+  va_start(vd.vd_args, pattern);
+
+  tags = format_message_tags_for(tagbuf, sizeof(tagbuf), from, to);
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
 
   va_end(vd.vd_args);
 

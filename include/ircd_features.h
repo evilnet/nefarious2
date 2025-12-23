@@ -319,6 +319,7 @@ enum Feature {
   FEAT_CAP_account_tag,
   FEAT_CAP_chghost,
   FEAT_CAP_invite_notify,
+  FEAT_CAP_labeled_response,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif

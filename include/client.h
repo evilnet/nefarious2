@@ -310,6 +310,7 @@ struct Connection
   unsigned short      con_capab_version; /**< CAP version (0, 301, 302) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
+  char                con_label[64]; /**< Current command label for labeled-response */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -418,6 +419,8 @@ struct Client {
 #define cli_active(cli)		con_active(cli_connect(cli))
 /** Get CAP version for client (0, 301, 302) */
 #define cli_capab_version(cli)	con_capab_version(cli_connect(cli))
+/** Get current command label for labeled-response */
+#define cli_label(cli)		con_label(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -618,6 +621,8 @@ struct Client {
 #define con_capab_version(con)  ((con)->con_capab_version)
 /** Get the auth request for the connection. */
 #define con_auth(con)		((con)->con_auth)
+/** Get the current command label for labeled-response. */
+#define con_label(con)		((con)->con_label)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */
