@@ -107,20 +107,28 @@
  * Used for client-only tags like +typing.
  * IRCv3 specification: https://ircv3.net/specs/extensions/message-tags
  *
- * Note: Client-only tags (prefixed with +) are extracted by parse.c
- * and stored temporarily. This handler relays them to recipients.
+ * Client-only tags (prefixed with +) are extracted by parse.c
+ * and stored in cli_client_tags(). This handler relays them to recipients.
  */
 int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Channel* chptr;
   struct Client* acptr;
   char* target;
+  const char* client_tags;
 
   assert(0 != cptr);
   assert(cptr == sptr);
 
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NEEDMOREPARAMS, "TAGMSG");
+
+  /* Get the client-only tags extracted from the message */
+  client_tags = cli_client_tags(sptr);
+
+  /* TAGMSG without client-only tags is meaningless */
+  if (!client_tags || !*client_tags)
+    return 0;
 
   target = parv[1];
 
@@ -134,12 +142,16 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!client_can_send_to_channel(sptr, chptr, 0))
       return send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
 
-    /* Relay TAGMSG to channel members with message-tags capability */
-    /* Note: For now, we only relay locally. S2S relay requires Phase 13b. */
-    sendcmdto_channel_capab_butserv_butone(sptr, CMD_TAGMSG, chptr, sptr,
-                                           SKIP_DEAF | SKIP_BURST,
-                                           CAP_SERVERTIME, CAP_NONE,
-                                           "%H", chptr);
+    /* Relay TAGMSG with client-only tags to local channel members */
+    sendcmdto_channel_client_tags(sptr, CMD_TAGMSG, chptr, sptr,
+                                  SKIP_DEAF | SKIP_BURST, client_tags,
+                                  "%H", chptr);
+
+    /* Propagate to other servers (S2S with tags in P10 message) */
+    if (!IsLocalChannel(chptr->chname)) {
+      sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
+                            client_tags, chptr->chname);
+    }
   }
   else {
     /* Target is a user */
@@ -147,11 +159,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!acptr)
       return send_reply(sptr, ERR_NOSUCHNICK, target);
 
-    /* Only send to local users with message-tags capability */
-    if (MyConnect(acptr) && CapActive(acptr, CAP_SERVERTIME)) {
-      sendcmdto_one_tags(sptr, CMD_TAGMSG, acptr, "%C", acptr);
+    if (MyConnect(acptr)) {
+      /* Local user - deliver with client-only tags */
+      if (CapActive(acptr, CAP_SERVERTIME)) {
+        sendcmdto_one_client_tags(sptr, CMD_TAGMSG, acptr, client_tags,
+                                  "%C", acptr);
+      }
     }
-    /* Note: S2S relay for remote users requires Phase 13b */
+    else {
+      /* Remote user - forward to their server with tags */
+      sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
+                    client_tags, acptr);
+    }
   }
 
   return 0;
@@ -161,16 +180,19 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  * ms_tagmsg - server message handler
  *
  * parv[0] = sender prefix
- * parv[1] = target (channel or user)
+ * parv[1] = @client-tags or target
+ * parv[2] = target (if parv[1] is tags)
  *
  * Handle TAGMSG from other servers (P10: TM token).
- * Note: Full S2S tag propagation requires Phase 13.
+ * Format: NUMERIC TM @+typing=active #channel
+ *         or: NUMERIC TM #channel (legacy, no tags - ignored)
  */
 int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Channel* chptr;
   struct Client* acptr;
   char* target;
+  char* client_tags = NULL;
 
   assert(0 != cptr);
   assert(0 != sptr);
@@ -182,7 +204,21 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2 || EmptyString(parv[1]))
     return 0;
 
-  target = parv[1];
+  /* Check if first param is client-only tags (starts with @) */
+  if (parv[1][0] == '@') {
+    client_tags = parv[1] + 1;  /* Skip the @ prefix */
+    if (parc < 3 || EmptyString(parv[2]))
+      return 0;
+    target = parv[2];
+  }
+  else {
+    /* Legacy format without tags - silently ignore */
+    return 0;
+  }
+
+  /* TAGMSG without client-only tags is meaningless */
+  if (!client_tags || !*client_tags)
+    return 0;
 
   /* Check if target is a channel */
   if (IsChannelName(target)) {
@@ -191,13 +227,13 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return 0;
 
     /* Relay to local channel members with message-tags capability */
-    sendcmdto_channel_capab_butserv_butone(sptr, CMD_TAGMSG, chptr, cptr,
-                                           SKIP_DEAF | SKIP_BURST,
-                                           CAP_SERVERTIME, CAP_NONE,
-                                           "%H", chptr);
+    sendcmdto_channel_client_tags(sptr, CMD_TAGMSG, chptr, cptr,
+                                  SKIP_DEAF | SKIP_BURST, client_tags,
+                                  "%H", chptr);
 
     /* Propagate to other servers */
-    sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "%s", target);
+    sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
+                          client_tags, target);
   }
   else {
     /* Target is a user */
@@ -208,14 +244,16 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return 0;
 
     if (MyConnect(acptr)) {
-      /* Local user - deliver if they have message-tags capability */
+      /* Local user - deliver with client-only tags */
       if (CapActive(acptr, CAP_SERVERTIME)) {
-        sendcmdto_one_tags(sptr, CMD_TAGMSG, acptr, "%C", acptr);
+        sendcmdto_one_client_tags(sptr, CMD_TAGMSG, acptr, client_tags,
+                                  "%C", acptr);
       }
     }
     else {
-      /* Remote user - forward to their server */
-      sendcmdto_one(sptr, CMD_TAGMSG, acptr, "%C", acptr);
+      /* Remote user - forward to their server with tags */
+      sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
+                    client_tags, acptr);
     }
   }
 

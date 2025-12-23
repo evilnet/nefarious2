@@ -44,6 +44,11 @@ extern void sendcmdto_one_tags(struct Client *from, const char *cmd,
 			  const char *tok, struct Client *to,
 			  const char *pattern, ...);
 
+/* Send TAGMSG with client-only tags to a single client */
+extern void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
+                               struct Client *to, const char *client_tags,
+                               const char *pattern, ...);
+
 /* Same as above, except it puts the message on the priority queue */
 extern void sendcmdto_prio_one(struct Client *from, const char *cmd,
 			       const char *tok, struct Client *to,
@@ -94,6 +99,12 @@ extern void sendcmdto_channel_capab_butserv_butone(struct Client *from,
                                             int withcap,
                                             int skipcap,
                                             const char *pattern, ...);
+
+/* Send TAGMSG with client-only tags to channel members with message-tags capability */
+extern void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
+                                   struct Channel *to, struct Client *one,
+                                   unsigned int skip, const char *client_tags,
+                                   const char *pattern, ...);
 
 /* Send command to all servers interested in a channel */
 extern void sendcmdto_channel_servers_butone(struct Client *from,

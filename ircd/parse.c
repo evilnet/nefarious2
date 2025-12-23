@@ -1221,8 +1221,9 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   if (IsDead(cptr))
     return 0;
 
-  /* Clear any previous label */
+  /* Clear any previous label and client-only tags */
   cli_label(cptr)[0] = '\0';
+  cli_client_tags(cptr)[0] = '\0';
 
   para[0] = cli_name(from);
   for (ch = buffer; *ch == ' '; ch++);  /* Eat leading spaces */
@@ -1235,32 +1236,48 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     /* Find end of tags (space before command) */
     tag_end = strchr(tag_start, ' ');
     if (tag_end) {
-      /* Look for label= in the tags */
-      char *label_start = tag_start;
-      while (label_start < tag_end) {
-        if (strncmp(label_start, "label=", 6) == 0) {
-          /* Found label tag - extract value */
-          char *label_val = label_start + 6;
-          char *label_end = label_val;
-          /* Find end of label value (semicolon or space) */
-          while (label_end < tag_end && *label_end != ';')
-            label_end++;
-          /* Copy label value if client has labeled-response capability */
+      char *scan = tag_start;
+      int client_tags_pos = 0;
+
+      while (scan < tag_end) {
+        char *tag_name = scan;
+        char *next_semi = scan;
+        size_t tag_len;
+
+        /* Find end of this tag (semicolon or end) */
+        while (next_semi < tag_end && *next_semi != ';')
+          next_semi++;
+        tag_len = next_semi - tag_name;
+
+        /* Check for label= tag */
+        if (strncmp(tag_name, "label=", 6) == 0) {
+          /* Extract label value if client has capability */
           if (CapActive(cptr, CAP_LABELEDRESP) &&
               feature_bool(FEAT_CAP_labeled_response)) {
-            size_t label_len = label_end - label_val;
+            char *label_val = tag_name + 6;
+            size_t label_len = next_semi - label_val;
             if (label_len >= sizeof(cli_label(cptr)))
               label_len = sizeof(cli_label(cptr)) - 1;
             memcpy(cli_label(cptr), label_val, label_len);
             cli_label(cptr)[label_len] = '\0';
           }
-          break;
         }
-        /* Move to next tag (after semicolon) */
-        while (label_start < tag_end && *label_start != ';')
-          label_start++;
-        if (*label_start == ';')
-          label_start++;
+        /* Check for client-only tags (prefixed with +) */
+        else if (*tag_name == '+') {
+          /* Copy client-only tag to buffer for TAGMSG relay */
+          if (client_tags_pos + tag_len + 2 < sizeof(cli_client_tags(cptr))) {
+            if (client_tags_pos > 0)
+              cli_client_tags(cptr)[client_tags_pos++] = ';';
+            memcpy(cli_client_tags(cptr) + client_tags_pos, tag_name, tag_len);
+            client_tags_pos += tag_len;
+            cli_client_tags(cptr)[client_tags_pos] = '\0';
+          }
+        }
+
+        /* Move to next tag */
+        scan = next_semi;
+        if (*scan == ';')
+          scan++;
       }
       /* Advance past tags to the command */
       ch = tag_end;

@@ -257,6 +257,90 @@ static char *format_message_tags_for(char *buf, size_t buflen, struct Client *fr
   return format_message_tags_for_ex(buf, buflen, from, to, NULL);
 }
 
+/** Format message tags including client-only tags for TAGMSG relay.
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag and client tags).
+ * @param[in] to Recipient client (for label tag).
+ * @param[in] client_tags Client-only tags string (e.g., "+typing=active;+reply=msgid").
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_with_client(char *buf, size_t buflen, struct Client *from,
+                                              struct Client *to, const char *client_tags)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
+  int use_label = feature_bool(FEAT_CAP_labeled_response) &&
+                  CapActive(to, CAP_LABELEDRESP) &&
+                  to && MyConnect(to) && cli_label(to)[0];
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
+                  to && MyConnect(to) && cli_batch_id(to)[0];
+  int use_client_tags = client_tags && *client_tags;
+  int pos = 0;
+
+  /* TAGMSG is only useful if there are client-only tags to relay */
+  if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  /* Client-only tags first (these are the primary content for TAGMSG) */
+  if (use_client_tags) {
+    pos += snprintf(buf + pos, buflen - pos, "%s", client_tags);
+  }
+
+  /* When in a batch, use @batch instead of @label */
+  if (use_batch) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
+  } else if (use_label) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    if (IsAccount(from)) {
+      pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                      cli_user(from)->account);
+    } else {
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+    }
+  }
+
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
 /*
  * dead_link
  *
@@ -574,6 +658,43 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
   else
     mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
 		   &vd);
+
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+
+  msgq_clean(mb);
+}
+
+/**
+ * Send TAGMSG with client-only tags to a single local client.
+ * Used for relaying +typing and other client-only tags.
+ * @param[in] from Client sending the TAGMSG.
+ * @param[in] cmd Long name of command (TAGMSG).
+ * @param[in] to Destination of command.
+ * @param[in] client_tags Client-only tags string from sender (e.g., "+typing=active").
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
+                               struct Client *to, const char *client_tags,
+                               const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[1024];
+  char *tags;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, cmd, &vd);
 
   va_end(vd.vd_args);
 
@@ -968,6 +1089,54 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   msgq_clean(mb);
   if (mb_tags)
     msgq_clean(mb_tags);
+}
+
+/** Send TAGMSG with client-only tags to channel members with message-tags capability.
+ * Used for relaying +typing and other client-only tags to channels.
+ * @param[in] from Client originating the TAGMSG.
+ * @param[in] cmd Long name of command (TAGMSG).
+ * @param[in] to Destination channel.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] skip Bitmask of SKIP_DEAF, SKIP_NONOPS, SKIP_NONVOICES indicating which clients to skip.
+ * @param[in] client_tags Client-only tags string from sender (e.g., "+typing=active").
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
+                                   struct Channel *to, struct Client *one,
+                                   unsigned int skip, const char *client_tags,
+                                   const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  struct Membership *member;
+  char tagbuf[1024];
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  /* Send to each local channel member with message-tags capability */
+  for (member = to->members; member; member = member->next_member) {
+    if (!MyConnect(member->user)
+        || member->user == one
+        || IsZombie(member)
+        || (skip & SKIP_DEAF && IsDeaf(member->user))
+        || (skip & SKIP_NONOPS && !IsChanOp(member))
+        || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
+        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member))
+        || !wants_message_tags(member->user))
+        continue;
+
+    /* Build message with client-only tags for this recipient */
+    if (format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, member->user, client_tags)) {
+      va_start(vd.vd_args, pattern);
+      mb = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+      va_end(vd.vd_args);
+      send_buffer(member->user, mb, 0);
+      msgq_clean(mb);
+    }
+  }
+
+  va_end(vd.vd_args);
 }
 
 /** Send a (prefixed) command to all servers with users on \a to.

@@ -313,6 +313,7 @@ struct Connection
   char                con_label[64]; /**< Current command label for labeled-response */
   char                con_batch_id[16]; /**< Current batch reference ID */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
+  char                con_client_tags[512]; /**< Client-only tags (+tag=value) for TAGMSG relay */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -427,6 +428,8 @@ struct Client {
 #define cli_batch_id(cli)	con_batch_id(cli_connect(cli))
 /** Get batch sequence number */
 #define cli_batch_seq(cli)	con_batch_seq(cli_connect(cli))
+/** Get client-only tags buffer for TAGMSG relay */
+#define cli_client_tags(cli)	con_client_tags(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -633,6 +636,8 @@ struct Client {
 #define con_batch_id(con)	((con)->con_batch_id)
 /** Get the batch sequence number. */
 #define con_batch_seq(con)	((con)->con_batch_seq)
+/** Get the client-only tags buffer for TAGMSG relay. */
+#define con_client_tags(con)	((con)->con_client_tags)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */
