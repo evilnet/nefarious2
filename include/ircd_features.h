@@ -324,6 +324,7 @@ enum Feature {
   FEAT_CAP_setname,
   FEAT_CAP_standard_replies,
   FEAT_MSGID,
+  FEAT_P10_MESSAGE_TAGS,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif

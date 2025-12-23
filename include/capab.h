@@ -23,8 +23,41 @@
  * @version $Id: capab.h 1349 2005-04-05 01:46:05Z entrope $
  */
 
-#ifndef INCLUDED_client_h
-#include "client.h"
+/* Forward declaration for function prototype */
+struct Client;
+
+/** Number of bits in an unsigned long. */
+#ifndef FLAGSET_NBITS
+#define FLAGSET_NBITS (8 * sizeof(unsigned long))
+#endif
+/** Index for a flag in the bits array. */
+#ifndef FLAGSET_INDEX
+#define FLAGSET_INDEX(flag) ((flag) / FLAGSET_NBITS)
+#endif
+/** Element bit for flag. */
+#ifndef FLAGSET_MASK
+#define FLAGSET_MASK(flag) (1ul<<((flag) % FLAGSET_NBITS))
+#endif
+/** Declare a flagset structure of a particular size. */
+#ifndef DECLARE_FLAGSET
+#define DECLARE_FLAGSET(name,max) \
+  struct name \
+  { \
+    unsigned long bits[((max + FLAGSET_NBITS - 1) / FLAGSET_NBITS)]; \
+  }
+#endif
+
+/** Test whether a flag is set in a flagset. */
+#ifndef FlagHas
+#define FlagHas(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] & FLAGSET_MASK(flag))
+#endif
+/** Set a flag in a flagset. */
+#ifndef FlagSet
+#define FlagSet(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] |= FLAGSET_MASK(flag))
+#endif
+/** Clear a flag in a flagset. */
+#ifndef FlagClr
+#define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
 #endif
 
 #define CAPFL_HIDDEN	0x0001	/**< Do not advertize this capability */

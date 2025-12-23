@@ -314,6 +314,8 @@ struct Connection
   char                con_batch_id[16]; /**< Current batch reference ID */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
   char                con_client_tags[512]; /**< Client-only tags (+tag=value) for TAGMSG relay */
+  char                con_s2s_time[32];  /**< S2S @time tag from incoming message */
+  char                con_s2s_msgid[64]; /**< S2S @msgid tag from incoming message */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -430,6 +432,10 @@ struct Client {
 #define cli_batch_seq(cli)	con_batch_seq(cli_connect(cli))
 /** Get client-only tags buffer for TAGMSG relay */
 #define cli_client_tags(cli)	con_client_tags(cli_connect(cli))
+/** Get S2S @time tag from incoming message */
+#define cli_s2s_time(cli)	con_s2s_time(cli_connect(cli))
+/** Get S2S @msgid tag from incoming message */
+#define cli_s2s_msgid(cli)	con_s2s_msgid(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -638,6 +644,10 @@ struct Client {
 #define con_batch_seq(con)	((con)->con_batch_seq)
 /** Get the client-only tags buffer for TAGMSG relay. */
 #define con_client_tags(con)	((con)->con_client_tags)
+/** Get the S2S @time tag from incoming message. */
+#define con_s2s_time(con)	((con)->con_s2s_time)
+/** Get the S2S @msgid tag from incoming message. */
+#define con_s2s_msgid(con)	((con)->con_s2s_msgid)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */

@@ -143,7 +143,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
 
     /* Relay TAGMSG with client-only tags to local channel members */
-    sendcmdto_channel_client_tags(sptr, CMD_TAGMSG, chptr, sptr,
+    sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, sptr,
                                   SKIP_DEAF | SKIP_BURST, client_tags,
                                   "%H", chptr);
 
@@ -162,7 +162,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags */
       if (CapActive(acptr, CAP_SERVERTIME)) {
-        sendcmdto_one_client_tags(sptr, CMD_TAGMSG, acptr, client_tags,
+        sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
       }
     }
@@ -227,7 +227,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return 0;
 
     /* Relay to local channel members with message-tags capability */
-    sendcmdto_channel_client_tags(sptr, CMD_TAGMSG, chptr, cptr,
+    sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, cptr,
                                   SKIP_DEAF | SKIP_BURST, client_tags,
                                   "%H", chptr);
 
@@ -246,7 +246,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags */
       if (CapActive(acptr, CAP_SERVERTIME)) {
-        sendcmdto_one_client_tags(sptr, CMD_TAGMSG, acptr, client_tags,
+        sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
       }
     }

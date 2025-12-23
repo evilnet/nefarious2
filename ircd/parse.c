@@ -1442,15 +1442,57 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
     return 0;
 
   /*
-   * IRCv3.2 Message Tags: If line starts with @, extract and skip tags.
+   * IRCv3.2 Message Tags: If line starts with @, extract and store tags.
    * Format: @tag1=value;tag2;+clienttag=value NUMERIC TOKEN params
-   * For now, we just skip past tags (Phase 13a - foundation).
-   * Full tag processing will be added in Phase 13b/13c.
+   * We extract @time and @msgid for S2S relay (Phase 13c).
    */
+  /* Clear previous S2S tags */
+  cli_s2s_time(cptr)[0] = '\0';
+  cli_s2s_msgid(cptr)[0] = '\0';
+
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
     char *tagend = strchr(ch, ' ');
     if (tagend) {
+      char *tagpos = ch + 1;  /* Skip the @ prefix */
+      char *semicolon;
+
+      /* Parse individual tags */
+      while (tagpos < tagend) {
+        char *tag_name = tagpos;
+        int tag_len;
+
+        /* Find the end of this tag (semicolon or end of tags) */
+        semicolon = memchr(tagpos, ';', tagend - tagpos);
+        if (semicolon)
+          tag_len = semicolon - tagpos;
+        else
+          tag_len = tagend - tagpos;
+
+        /* Check for @time tag */
+        if (tag_len >= 5 && memcmp(tag_name, "time=", 5) == 0) {
+          int value_len = tag_len - 5;
+          if (value_len < (int)sizeof(cli_s2s_time(cptr))) {
+            memcpy(cli_s2s_time(cptr), tag_name + 5, value_len);
+            cli_s2s_time(cptr)[value_len] = '\0';
+          }
+        }
+        /* Check for @msgid tag */
+        else if (tag_len >= 6 && memcmp(tag_name, "msgid=", 6) == 0) {
+          int value_len = tag_len - 6;
+          if (value_len < (int)sizeof(cli_s2s_msgid(cptr))) {
+            memcpy(cli_s2s_msgid(cptr), tag_name + 6, value_len);
+            cli_s2s_msgid(cptr)[value_len] = '\0';
+          }
+        }
+
+        /* Move to next tag */
+        if (semicolon)
+          tagpos = semicolon + 1;
+        else
+          break;
+      }
+
       /* Skip past the @ prefix and tags to the actual message */
       ch = tagend;
       while (*ch == ' ')

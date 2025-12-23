@@ -164,6 +164,67 @@ static char *generate_msgid(char *buf, size_t buflen)
   return buf;
 }
 
+/** Format message tags for S2S (server-to-server) relay.
+ * If the message came from another server with tags, preserve them.
+ * Otherwise, generate new @time and @msgid tags.
+ * @param[out] buf Buffer for tag string (includes trailing space).
+ * @param[in] buflen Size of buffer.
+ * @param[in] cptr Server connection the message came from (for incoming tags).
+ * @param[out] msgid_out Optional: buffer to store the msgid used (for echo-message).
+ * @param[in] msgid_out_len Size of msgid_out buffer.
+ * @return Pointer to buf, or NULL if P10_MESSAGE_TAGS is disabled.
+ */
+static char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
+                             char *msgid_out, size_t msgid_out_len)
+{
+  int pos = 0;
+  char timebuf[32];
+  char msgidbuf[64];
+  const char *time_tag = NULL;
+  const char *msgid_tag = NULL;
+
+  /* Check if P10 message tags are enabled */
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return NULL;
+
+  /* Check for incoming S2S tags from cptr */
+  if (cptr && cli_s2s_time(cptr)[0])
+    time_tag = cli_s2s_time(cptr);
+  if (cptr && cli_s2s_msgid(cptr)[0])
+    msgid_tag = cli_s2s_msgid(cptr);
+
+  /* Generate new tags if not present */
+  if (!time_tag) {
+    struct timeval tv;
+    struct tm tm;
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             tv.tv_usec / 1000);
+    time_tag = timebuf;
+  }
+
+  if (!msgid_tag) {
+    generate_msgid(msgidbuf, sizeof(msgidbuf));
+    msgid_tag = msgidbuf;
+  }
+
+  /* Store msgid for caller if requested (for echo-message) */
+  if (msgid_out && msgid_out_len > 0) {
+    ircd_strncpy(msgid_out, msgid_tag, msgid_out_len - 1);
+    msgid_out[msgid_out_len - 1] = '\0';
+  }
+
+  /* Format the tag string with trailing space */
+  pos = snprintf(buf, buflen, "@time=%s;msgid=%s ", time_tag, msgid_tag);
+  if (pos >= (int)buflen)
+    buf[buflen - 1] = '\0';
+
+  return buf;
+}
+
 /** Format message tags for a specific recipient, including label if applicable.
  * @param[out] buf Buffer for tag string.
  * @param[in] buflen Size of buffer.
@@ -604,14 +665,29 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct Client *cptr;
+  char s2s_tagbuf[128];
 
   to = cli_from(to);
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
-		 &vd);
+  /* For S2S messages (PRIVMSG/NOTICE to servers), add S2S tags */
+  if ((IsServer(to) || IsMe(to)) &&
+      (strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0) &&
+      feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    /* Get incoming server connection for tag preservation */
+    cptr = MyConnect(from) ? NULL : cli_from(from);
+    if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
+      mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
+    } else {
+      mb = msgq_make(to, "%:#C %s %v", from, tok, &vd);
+    }
+  } else {
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+                   &vd);
+  }
 
   va_end(vd.vd_args);
 
@@ -1204,13 +1280,19 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct MsgBuf *user_mb;
   struct MsgBuf *user_mb_tags = NULL;  /* tagged version (server-time + account-tag) */
   struct MsgBuf *serv_mb;
+  struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
   struct Client *service;
+  struct Client *cptr;  /* Server connection for incoming S2S tags */
   const char *userfmt;
   const char *usercmd;
   char tagbuf[128];
+  char s2s_tagbuf[128];
   char userfmt_tags[64];
 
   vd.vd_format = pattern;
+
+  /* Get the server connection for S2S tag handling */
+  cptr = MyConnect(from) ? NULL : cli_from(from);
 
   /* Build buffer to send to users */
   usercmd = cmd;
@@ -1237,10 +1319,17 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     va_end(vd.vd_args);
   }
 
-  /* Build buffer to send to servers */
-  va_start(vd.vd_args, pattern);
-  serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
-  va_end(vd.vd_args);
+  /* Build buffer to send to servers - with S2S tags if enabled */
+  if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
+    va_start(vd.vd_args, pattern);
+    serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+    va_end(vd.vd_args);
+    serv_mb = serv_mb_tags;  /* Use tagged version */
+  } else {
+    va_start(vd.vd_args, pattern);
+    serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+  }
 
   /* send buffer along! */
   bump_sentalong(one);
@@ -1632,10 +1721,10 @@ void send_batch_start(struct Client *to, const char *type)
 
   /* Send BATCH +refid type */
   if (tagbuf[0])
-    mb = msgq_make(cli_from(to), "%s:%s " MSG_BATCH " +%s %s",
+    mb = msgq_make(cli_from(to), "%s:%s " MSG_BATCH_CMD " +%s %s",
                    tagbuf, cli_name(&me), cli_batch_id(to), type);
   else
-    mb = msgq_make(cli_from(to), ":%s " MSG_BATCH " +%s %s",
+    mb = msgq_make(cli_from(to), ":%s " MSG_BATCH_CMD " +%s %s",
                    cli_name(&me), cli_batch_id(to), type);
 
   send_buffer(to, mb, 0);
@@ -1659,7 +1748,7 @@ void send_batch_end(struct Client *to)
     return;
 
   /* Send BATCH -refid */
-  mb = msgq_make(cli_from(to), ":%s " MSG_BATCH " -%s",
+  mb = msgq_make(cli_from(to), ":%s " MSG_BATCH_CMD " -%s",
                  cli_name(&me), cli_batch_id(to));
 
   send_buffer(to, mb, 0);
