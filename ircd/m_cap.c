@@ -67,6 +67,7 @@ static struct capabilities {
   _CAP_V(SASL, 0, "sasl", FEAT_CAP_sasl, "PLAIN,EXTERNAL,OAUTHBEARER"),
   _CAP(CAPNOTIFY, 0, "cap-notify", FEAT_CAP_cap_notify),
   _CAP(SERVERTIME, 0, "server-time", FEAT_CAP_server_time),
+  _CAP(ECHOMSG, 0, "echo-message", FEAT_CAP_echo_message),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
