@@ -314,6 +314,7 @@ enum Feature {
   FEAT_CAP_account_notify,
   FEAT_CAP_sasl,
   FEAT_CAP_cap_notify,
+  FEAT_CAP_server_time,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif

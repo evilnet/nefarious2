@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "send.h"
+#include "capab.h"
 #include "channel.h"
 #include "class.h"
 #include "client.h"
@@ -48,6 +49,7 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 
 /** Last used marker value. */
 static int sentalong_marker;
@@ -57,6 +59,25 @@ struct SLink *opsarray[32];     /* don't use highest bit unless you change
 /** Linked list of all connections with data queued to send. */
 static struct Connection *send_queues;
 char *GlobalForwards[256];
+
+/** Format current time as ISO 8601 timestamp for server-time capability.
+ * @param[out] buf Buffer to write timestamp to.
+ * @param[in] buflen Size of buffer.
+ * @return Pointer to buf.
+ */
+static char *format_server_time(char *buf, size_t buflen)
+{
+  struct timeval tv;
+  struct tm tm;
+
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  snprintf(buf, buflen, "@time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ ",
+           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+           tm.tm_hour, tm.tm_min, tm.tm_sec,
+           tv.tv_usec / 1000);
+  return buf;
+}
 
 /*
  * dead_link
@@ -475,8 +496,10 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct MsgBuf *mb_st = NULL;  /* server-time version */
   struct Membership *chan;
   struct Membership *member;
+  char timebuf[64];
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -490,6 +513,14 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   /* build the buffer */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
+
+  /* build server-time version if feature enabled */
+  if (feature_bool(FEAT_CAP_server_time)) {
+    va_start(vd.vd_args, pattern);
+    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
+                      from, cmd, &vd);
+    va_end(vd.vd_args);
+  }
 
   bump_sentalong(from);
   /*
@@ -505,14 +536,23 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
           && member->user != one
           && cli_sentalong(member->user) != sentalong_marker) {
 	cli_sentalong(member->user) = sentalong_marker;
-	send_buffer(member->user, mb, 0);
+	if (mb_st && CapActive(member->user, CAP_SERVERTIME))
+	  send_buffer(member->user, mb_st, 0);
+	else
+	  send_buffer(member->user, mb, 0);
       }
   }
 
-  if (MyConnect(from) && from != one)
-    send_buffer(from, mb, 0);
+  if (MyConnect(from) && from != one) {
+    if (mb_st && CapActive(from, CAP_SERVERTIME))
+      send_buffer(from, mb_st, 0);
+    else
+      send_buffer(from, mb, 0);
+  }
 
   msgq_clean(mb);
+  if (mb_st)
+    msgq_clean(mb_st);
 }
 
 /** Send a (prefixed) command to all channels that \a from is on.
@@ -529,8 +569,10 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct MsgBuf *mb_st = NULL;  /* server-time version */
   struct Membership *chan;
   struct Membership *member;
+  char timebuf[64];
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -544,6 +586,14 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   /* build the buffer */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
+
+  /* build server-time version if feature enabled */
+  if (feature_bool(FEAT_CAP_server_time)) {
+    va_start(vd.vd_args, pattern);
+    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
+                      from, cmd, &vd);
+    va_end(vd.vd_args);
+  }
 
   bump_sentalong(from);
   /*
@@ -561,14 +611,23 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
           && ((withcap == CAP_NONE) || CapActive(member->user, withcap))
           && ((skipcap == CAP_NONE) || !CapActive(member->user, skipcap))) {
         cli_sentalong(member->user) = sentalong_marker;
-        send_buffer(member->user, mb, 0);
+        if (mb_st && CapActive(member->user, CAP_SERVERTIME))
+          send_buffer(member->user, mb_st, 0);
+        else
+          send_buffer(member->user, mb, 0);
       }
   }
 
-  if (MyConnect(from) && from != one)
-    send_buffer(from, mb, 0);
+  if (MyConnect(from) && from != one) {
+    if (mb_st && CapActive(from, CAP_SERVERTIME))
+      send_buffer(from, mb_st, 0);
+    else
+      send_buffer(from, mb, 0);
+  }
 
   msgq_clean(mb);
+  if (mb_st)
+    msgq_clean(mb_st);
 }
 
 /** Send a (prefixed) command to all local users on a channel.
@@ -587,7 +646,9 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct MsgBuf *mb_st = NULL;  /* server-time version */
   struct Membership *member;
+  char timebuf[64];
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
@@ -596,20 +657,33 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
+  /* build server-time version if feature enabled */
+  if (feature_bool(FEAT_CAP_server_time)) {
+    va_start(vd.vd_args, pattern);
+    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
+                      from, cmd, &vd);
+    va_end(vd.vd_args);
+  }
+
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
     if (!MyConnect(member->user)
-        || member->user == one 
+        || member->user == one
         || IsZombie(member)
         || (skip & SKIP_DEAF && IsDeaf(member->user))
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
         continue;
+    if (mb_st && CapActive(member->user, CAP_SERVERTIME))
+      send_buffer(member->user, mb_st, 0);
+    else
       send_buffer(member->user, mb, 0);
   }
 
   msgq_clean(mb);
+  if (mb_st)
+    msgq_clean(mb_st);
 }
 
 /** Send a (prefixed) command to all local users on a channel with or without
@@ -632,7 +706,9 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct MsgBuf *mb_st = NULL;  /* server-time version */
   struct Membership *member;
+  char timebuf[64];
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
@@ -640,6 +716,14 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   /* build the buffer */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
+
+  /* build server-time version if feature enabled */
+  if (feature_bool(FEAT_CAP_server_time)) {
+    va_start(vd.vd_args, pattern);
+    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
+                      from, cmd, &vd);
+    va_end(vd.vd_args);
+  }
 
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
@@ -653,10 +737,15 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         || ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
         continue;
+    if (mb_st && CapActive(member->user, CAP_SERVERTIME))
+      send_buffer(member->user, mb_st, 0);
+    else
       send_buffer(member->user, mb, 0);
   }
 
   msgq_clean(mb);
+  if (mb_st)
+    msgq_clean(mb_st);
 }
 
 /** Send a (prefixed) command to all servers with users on \a to.
@@ -722,10 +811,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct Membership *member;
   struct VarData vd;
   struct MsgBuf *user_mb;
+  struct MsgBuf *user_mb_st = NULL;  /* server-time version */
   struct MsgBuf *serv_mb;
   struct Client *service;
   const char *userfmt;
   const char *usercmd;
+  char timebuf[64];
+  char userfmt_st[64];
 
   vd.vd_format = pattern;
 
@@ -745,6 +837,15 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   va_start(vd.vd_args, pattern);
   user_mb = msgq_make(0, userfmt, from, usercmd, &vd);
   va_end(vd.vd_args);
+
+  /* Build server-time version if feature enabled */
+  if (feature_bool(FEAT_CAP_server_time)) {
+    format_server_time(timebuf, sizeof(timebuf));
+    ircd_snprintf(0, userfmt_st, sizeof(userfmt_st), "%%s%s", userfmt);
+    va_start(vd.vd_args, pattern);
+    user_mb_st = msgq_make(0, userfmt_st, timebuf, from, usercmd, &vd);
+    va_end(vd.vd_args);
+  }
 
   /* Build buffer to send to servers */
   va_start(vd.vd_args, pattern);
@@ -767,9 +868,12 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       continue;
     cli_sentalong(member->user) = sentalong_marker;
 
-    if (MyConnect(member->user)) /* pick right buffer to send */
-      send_buffer(member->user, user_mb, 0);
-    else
+    if (MyConnect(member->user)) { /* pick right buffer to send */
+      if (user_mb_st && CapActive(member->user, CAP_SERVERTIME))
+        send_buffer(member->user, user_mb_st, 0);
+      else
+        send_buffer(member->user, user_mb, 0);
+    } else
       send_buffer(member->user, serv_mb, 0);
   }
   /* Consult service forwarding table. */
@@ -781,6 +885,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   }
 
   msgq_clean(user_mb);
+  if (user_mb_st)
+    msgq_clean(user_mb_st);
   msgq_clean(serv_mb);
 }
 

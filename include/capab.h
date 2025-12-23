@@ -46,6 +46,7 @@ enum Capab {
   _CAP(ACCNOTIFY, 0, "account-notify", 0),
   _CAP(SASL, 0, "sasl", 0),
   _CAP(CAPNOTIFY, 0, "cap-notify", 0),
+  _CAP(SERVERTIME, 0, "server-time", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif
