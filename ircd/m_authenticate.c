@@ -136,8 +136,20 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   if (strlen(parv[1]) > 400)
     return send_reply(cptr, ERR_SASLTOOLONG);
 
-  if (IsSASLComplete(cptr))
-    return send_reply(cptr, ERR_SASLALREADY);
+  /* For registered users, allow re-authentication (e.g., OAuth token refresh).
+   * Reset SASL state and start a new session instead of rejecting.
+   */
+  if (IsSASLComplete(cptr)) {
+    /* Clear the SASLComplete flag to allow new auth */
+    ClearSASLComplete(cptr);
+    /* Clear old SASL session state */
+    if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))
+      cli_saslagentref(cli_saslagent(cptr))--;
+    cli_saslagent(cptr) = NULL;
+    cli_saslcookie(cptr) = 0;
+    if (t_active(&cli_sasltimeout(cptr)))
+      timer_del(&cli_sasltimeout(cptr));
+  }
 
   /* Check if IAuth handles SASL */
   if (auth_iauth_handles_sasl()) {

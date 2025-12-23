@@ -52,21 +52,26 @@ static struct capabilities {
   char *name;
   int namelen;
   int feat;
+  char *value;           /**< CAP 302 value (e.g., "PLAIN,EXTERNAL" for sasl) */
 } capab_list[] = {
 #define _CAP(cap, flags, name, feat) \
-    { CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1, feat }
+    { CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1, feat, 0 }
+#define _CAP_V(cap, flags, name, feat, val) \
+    { CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1, feat, val }
   _CAP(NONE, CAPFL_HIDDEN|CAPFL_PROHIBIT, "none", 0),
   _CAP(NAMESX, 0, "multi-prefix", FEAT_CAP_multi_prefix),
   _CAP(UHNAMES, 0, "userhost-in-names", FEAT_CAP_userhost_in_names),
   _CAP(EXTJOIN, 0, "extended-join", FEAT_CAP_extended_join),
   _CAP(AWAYNOTIFY, 0, "away-notify", FEAT_CAP_away_notify),
   _CAP(ACCNOTIFY, 0, "account-notify", FEAT_CAP_account_notify),
-  _CAP(SASL, 0, "sasl", FEAT_CAP_sasl),
+  _CAP_V(SASL, 0, "sasl", FEAT_CAP_sasl, "PLAIN,EXTERNAL,OAUTHBEARER"),
+  _CAP(CAPNOTIFY, 0, "cap-notify", FEAT_CAP_cap_notify),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
 /*  CAPLIST */
 #undef _CAP
+#undef _CAP_V
 };
 
 #define CAPAB_LIST_LEN (sizeof(capab_list) / sizeof(struct capabilities))
@@ -146,7 +151,7 @@ find_cap(const char **caplist_p, int *neg_p)
 
 /** Send a CAP \a subcmd list of capability changes to \a sptr.
  * If more than one line is necessary, each line before the last has
- * an added "*" parameter before that line's capability list.
+ * an added "*" parameter before that line's capability list (CAP 302).
  * @param[in] sptr Client receiving capability list.
  * @param[in] set Capabilities to show as set (with ack and sticky modifiers).
  * @param[in] rem Capabalities to show as removed (with no other modifier).
@@ -156,9 +161,11 @@ static int
 send_caplist(struct Client *sptr, const struct CapSet *set,
              const struct CapSet *rem, const char *subcmd)
 {
-  char capbuf[BUFSIZE] = "", pfx[16];
+  char capbuf[BUFSIZE] = "", pfx[16], valbuf[128];
   struct MsgBuf *mb;
-  int i, loc, len, flags, pfx_len;
+  int i, loc, len, flags, pfx_len, val_len;
+  int cap_version = cli_capab_version(sptr);
+  int is_ls = (ircd_strcmp(subcmd, "LS") == 0);
 
   /* set up the buffer for the final LS message... */
   mb = msgq_make(sptr, "%:#C " MSG_CAP " %s %s :", &me,
@@ -191,15 +198,28 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     }
     pfx[pfx_len] = '\0';
 
-    len = capab_list[i].namelen + pfx_len; /* how much we'd add... */
+    /* Build value string for CAP 302+ */
+    valbuf[0] = '\0';
+    val_len = 0;
+    if (is_ls && cap_version >= 302 && capab_list[i].value) {
+      val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
+    }
+
+    len = capab_list[i].namelen + pfx_len + val_len; /* how much we'd add... */
     if (msgq_bufleft(mb) < loc + len + 2) { /* would add too much; must flush */
-      sendcmdto_one(&me, CMD_CAP, sptr, "%s %s :%s",
-                    BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr),  subcmd, capbuf);
+      /* For CAP 302+, use * continuation marker */
+      if (cap_version >= 302) {
+        sendcmdto_one(&me, CMD_CAP, sptr, "%s %s * :%s",
+                      BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd, capbuf);
+      } else {
+        sendcmdto_one(&me, CMD_CAP, sptr, "%s %s :%s",
+                      BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), subcmd, capbuf);
+      }
       capbuf[(loc = 0)] = '\0'; /* re-terminate the buffer... */
     }
 
-    loc += ircd_snprintf(0, capbuf + loc, sizeof(capbuf) - loc, "%s%s",
-                         pfx, capab_list[i].name);
+    loc += ircd_snprintf(0, capbuf + loc, sizeof(capbuf) - loc, "%s%s%s",
+                         pfx, capab_list[i].name, valbuf);
   }
 
   msgq_append(0, mb, "%s", capbuf); /* append capabilities to the final cmd */
@@ -214,6 +234,14 @@ cap_ls(struct Client *sptr, const char *caplist)
 {
   if (IsUnknown(sptr) && cli_auth(sptr)) /* registration hasn't completed; suspend it... */
     auth_cap_start(cli_auth(sptr));
+
+  /* Parse CAP version from CAP LS 302 */
+  if (caplist && *caplist) {
+    int version = atoi(caplist);
+    if (version > 0)
+      cli_capab_version(sptr) = version;
+  }
+
   return send_caplist(sptr, 0, 0, "LS"); /* send list of capabilities */
 }
 

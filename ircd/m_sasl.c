@@ -82,6 +82,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_features.h"
@@ -96,6 +97,7 @@
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_misc.h"
+#include "s_user.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -198,6 +200,55 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (data[0] == 'S') {
       SetSASLComplete(acptr);
       send_reply(acptr, RPL_SASLSUCCESS);
+
+      /* For registered users (post-registration reauth), update their account
+       * and broadcast AC to propagate the change network-wide.
+       */
+      if (IsRegistered(acptr) && cli_user(acptr) && cli_saslaccount(acptr)[0]) {
+        char type = IsAccount(acptr) ? 'M' : 'R';
+
+        /* Update account if changed */
+        if (ircd_strcmp(cli_user(acptr)->account, cli_saslaccount(acptr)) != 0) {
+          ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN);
+          SetAccount(acptr);
+
+          if (cli_saslacccreate(acptr))
+            cli_user(acptr)->acc_create = cli_saslacccreate(acptr);
+
+          /* Notify channel members with account-notify capability */
+          sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr,
+                                                  CAP_ACCNOTIFY, CAP_NONE,
+                                                  "%s", cli_user(acptr)->account);
+
+          /* Propagate to other servers - use extended format if enabled */
+          if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
+            if (cli_user(acptr)->acc_create) {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu",
+                                    acptr, type, cli_user(acptr)->account,
+                                    cli_user(acptr)->acc_create);
+            } else {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s",
+                                    acptr, type, cli_user(acptr)->account);
+            }
+          } else {
+            /* Non-extended format: AC <user> <account> [timestamp] */
+            if (cli_user(acptr)->acc_create) {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s %Tu",
+                                    acptr, cli_user(acptr)->account,
+                                    cli_user(acptr)->acc_create);
+            } else {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s",
+                                    acptr, cli_user(acptr)->account);
+            }
+          }
+
+          /* Apply hidden host if applicable */
+          if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+               (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
+              IsHiddenHost(acptr))
+            hide_hostmask(acptr);
+        }
+      }
     } else if (data[0] == 'F') {
       send_reply(acptr, ERR_SASLFAIL, "");
     } else if (data[0] == 'A') {

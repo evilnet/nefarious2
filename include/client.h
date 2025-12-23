@@ -307,6 +307,7 @@ struct Connection
                                       client */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) */
+  unsigned short      con_capab_version; /**< CAP version (0, 301, 302) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
 };
@@ -415,6 +416,8 @@ struct Client {
 #define cli_capab(cli)		con_capab(cli_connect(cli))
 /** Get active client capabilities for client */
 #define cli_active(cli)		con_active(cli_connect(cli))
+/** Get CAP version for client (0, 301, 302) */
+#define cli_capab_version(cli)	con_capab_version(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -611,6 +614,8 @@ struct Client {
 #define con_capab(con)          (&(con)->con_capab)
 /** Get the active capabilities for the connection. */
 #define con_active(con)         (&(con)->con_active)
+/** Get the CAP version for the connection (0, 301, 302). */
+#define con_capab_version(con)  ((con)->con_capab_version)
 /** Get the auth request for the connection. */
 #define con_auth(con)		((con)->con_auth)
 
@@ -1034,6 +1039,8 @@ struct Client {
 #define ClearOpLevels(x)        ClrFlag(x, FLAG_OPLEVELS)
 /** Clear the client's account status. */
 #define ClearAccount(x)         ClrFlag(x, FLAG_ACCOUNT)
+/** Clear the client's SASL authentication complete flag. */
+#define ClearSASLComplete(x)    ClrFlag(x, FLAG_SASLCOMPLETE)
 
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */

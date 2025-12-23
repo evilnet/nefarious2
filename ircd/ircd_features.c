@@ -796,6 +796,7 @@ static struct FeatureDesc {
   F_B(CAP_away_notify, 0, 1, 0),
   F_B(CAP_account_notify, 0, 1, 0),
   F_B(CAP_sasl, 0, 1, 0),
+  F_B(CAP_cap_notify, 0, 1, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif
