@@ -121,6 +121,7 @@ IRCD_SRC = \
 	m_asll.c \
 	m_authenticate.c \
 	m_away.c \
+	m_batch.c \
 	m_burst.c \
 	m_cap.c \
 	m_check.c \

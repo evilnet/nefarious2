@@ -1771,6 +1771,104 @@ int has_active_batch(struct Client *cptr)
 }
 
 /**
+ * Start an S2S batch and send to all servers.
+ * Used for netjoin/netsplit coordination across the network.
+ * @param[in] sptr Server starting the batch.
+ * @param[in] type Batch type (netjoin, netsplit).
+ * @param[in] server1 First server in the split/join (optional).
+ * @param[in] server2 Second server in the split/join (optional).
+ */
+void send_s2s_batch_start(struct Client *sptr, const char *type,
+                          const char *server1, const char *server2)
+{
+  char batch_id[32];
+  struct Client *acptr;
+
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return;
+
+  /* Generate unique batch ID using server numeric + timestamp + counter */
+  generate_batch_id(sptr, batch_id, sizeof(batch_id));
+
+  /* Send to all servers */
+  if (server1 && server2) {
+    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s %s",
+                          batch_id, type, server1, server2);
+  }
+  else if (server1) {
+    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s",
+                          batch_id, type, server1);
+  }
+  else {
+    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s",
+                          batch_id, type);
+  }
+
+  /* Store batch ID for later reference */
+  ircd_strncpy(cli_s2s_batch_id(sptr), batch_id, sizeof(con_s2s_batch_id(cli_connect(sptr))) - 1);
+  cli_s2s_batch_id(sptr)[sizeof(con_s2s_batch_id(cli_connect(sptr))) - 1] = '\0';
+  ircd_strncpy(cli_s2s_batch_type(sptr), type, sizeof(con_s2s_batch_type(cli_connect(sptr))) - 1);
+  cli_s2s_batch_type(sptr)[sizeof(con_s2s_batch_type(cli_connect(sptr))) - 1] = '\0';
+
+  /* Send batch start to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    if (server1 && server2) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s %s",
+                    batch_id, type, server1, server2);
+    }
+    else if (server1) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s",
+                    batch_id, type, server1);
+    }
+    else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s",
+                    batch_id, type);
+    }
+  }
+}
+
+/**
+ * End an S2S batch and send to all servers.
+ * @param[in] sptr Server ending the batch.
+ * @param[in] batch_id Batch ID to end (or NULL to use stored ID).
+ */
+void send_s2s_batch_end(struct Client *sptr, const char *batch_id)
+{
+  struct Client *acptr;
+  const char *id;
+
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return;
+
+  /* Use provided ID or the stored one */
+  id = batch_id ? batch_id : cli_s2s_batch_id(sptr);
+  if (!id || !*id)
+    return;
+
+  /* Send to all servers */
+  sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "-%s", id);
+
+  /* Send batch end to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", id);
+  }
+
+  /* Clear stored batch ID */
+  cli_s2s_batch_id(sptr)[0] = '\0';
+  cli_s2s_batch_type(sptr)[0] = '\0';
+}
+
+/**
  * Send a standard reply (FAIL/WARN/NOTE) to a client.
  * Internal helper function.
  * @param[in] to Client to send to.

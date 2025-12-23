@@ -74,25 +74,39 @@ struct AuthRequest;
 typedef unsigned long flagpage_t;
 
 /** Number of bits in a flagpage_t. */
+#ifndef FLAGSET_NBITS
 #define FLAGSET_NBITS (8 * sizeof(flagpage_t))
+#endif
 /** Element number for flag \a flag. */
+#ifndef FLAGSET_INDEX
 #define FLAGSET_INDEX(flag) ((flag) / FLAGSET_NBITS)
+#endif
 /** Element bit for flag \a flag. */
+#ifndef FLAGSET_MASK
 #define FLAGSET_MASK(flag) (1ul<<((flag) % FLAGSET_NBITS))
+#endif
 
 /** Declare a flagset structure of a particular size. */
+#ifndef DECLARE_FLAGSET
 #define DECLARE_FLAGSET(name,max) \
   struct name \
   { \
     unsigned long bits[((max + FLAGSET_NBITS - 1) / FLAGSET_NBITS)]; \
   }
+#endif
 
 /** Test whether a flag is set in a flagset. */
+#ifndef FlagHas
 #define FlagHas(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] & FLAGSET_MASK(flag))
+#endif
 /** Set a flag in a flagset. */
+#ifndef FlagSet
 #define FlagSet(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] |= FLAGSET_MASK(flag))
+#endif
 /** Clear a flag in a flagset. */
+#ifndef FlagClr
 #define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
+#endif
 
 /** String containing valid user modes, in no particular order. */
 #define infousermodes "adgiknoqswxzBDHLNORWX"
@@ -316,6 +330,8 @@ struct Connection
   char                con_client_tags[512]; /**< Client-only tags (+tag=value) for TAGMSG relay */
   char                con_s2s_time[32];  /**< S2S @time tag from incoming message */
   char                con_s2s_msgid[64]; /**< S2S @msgid tag from incoming message */
+  char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
+  char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -436,6 +452,10 @@ struct Client {
 #define cli_s2s_time(cli)	con_s2s_time(cli_connect(cli))
 /** Get S2S @msgid tag from incoming message */
 #define cli_s2s_msgid(cli)	con_s2s_msgid(cli_connect(cli))
+/** Get S2S batch ID from server */
+#define cli_s2s_batch_id(cli)	con_s2s_batch_id(cli_connect(cli))
+/** Get S2S batch type from server */
+#define cli_s2s_batch_type(cli)	con_s2s_batch_type(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -648,6 +668,10 @@ struct Client {
 #define con_s2s_time(con)	((con)->con_s2s_time)
 /** Get the S2S @msgid tag from incoming message. */
 #define con_s2s_msgid(con)	((con)->con_s2s_msgid)
+/** Get the S2S batch ID from server. */
+#define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
+/** Get the S2S batch type from server. */
+#define con_s2s_batch_type(con)	((con)->con_s2s_batch_type)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */

@@ -183,6 +183,11 @@ extern void send_batch_end(struct Client *to);
 /* Check if a client has an active batch */
 extern int has_active_batch(struct Client *cptr);
 
+/* S2S batch functions for netjoin/netsplit coordination */
+extern void send_s2s_batch_start(struct Client *sptr, const char *type,
+                                 const char *server1, const char *server2);
+extern void send_s2s_batch_end(struct Client *sptr, const char *batch_id);
+
 /* IRCv3 standard-replies (FAIL/WARN/NOTE) */
 extern void send_fail(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);

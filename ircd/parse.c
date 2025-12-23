@@ -910,6 +910,14 @@ struct Message msgtab[] = {
     "- TAGMSG target - Send message with only tags (no content)"
   },
   {
+    MSG_BATCH_CMD,
+    TOK_BATCH_CMD,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_batch, m_ignore, m_ignore },
+    ""
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,
