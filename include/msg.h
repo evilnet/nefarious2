@@ -500,6 +500,10 @@ struct Client;
 #define TOK_TEMPSHUN	"TS"
 #define CMD_TEMPSHUN	MSG_TEMPSHUN, TOK_TEMPSHUN
 
+#define MSG_BATCH	"BATCH"
+#define TOK_BATCH	"BATCH"
+#define CMD_BATCH	MSG_BATCH, TOK_BATCH
+
 /*
  * Constants
  */

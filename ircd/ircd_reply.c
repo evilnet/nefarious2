@@ -109,16 +109,21 @@ int send_reply(struct Client *to, int reply, ...)
   /* Check if we need message tags for this client */
   if (MyConnect(to)) {
     int pos = 0;
-    int need_label = feature_bool(FEAT_CAP_labeled_response) &&
+    int need_batch = feature_bool(FEAT_CAP_batch) &&
+                     CapActive(to, CAP_BATCH) && cli_batch_id(to)[0];
+    int need_label = !need_batch && feature_bool(FEAT_CAP_labeled_response) &&
                      CapActive(to, CAP_LABELEDRESP) && cli_label(to)[0];
     int need_time = feature_bool(FEAT_CAP_server_time) &&
                     CapActive(to, CAP_SERVERTIME);
 
-    if (need_label || need_time) {
+    if (need_batch || need_label || need_time) {
       tagbuf[0] = '@';
       pos = 1;
 
-      if (need_label) {
+      /* Use @batch when in a batch, otherwise @label */
+      if (need_batch) {
+        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "batch=%s", cli_batch_id(to));
+      } else if (need_label) {
         pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
       }
 

@@ -163,4 +163,13 @@ extern void sendto_mode_butone(struct Client *one, struct Client *from, const ch
 extern void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
                            const char *pattern, va_list vl);
 
+/* Start a batch for a client (labeled-response integration) */
+extern void send_batch_start(struct Client *to, const char *type);
+
+/* End a batch for a client */
+extern void send_batch_end(struct Client *to);
+
+/* Check if a client has an active batch */
+extern int has_active_batch(struct Client *cptr);
+
 #endif /* INCLUDED_send_h */

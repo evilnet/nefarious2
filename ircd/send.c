@@ -156,15 +156,20 @@ static char *format_message_tags_for(char *buf, size_t buflen, struct Client *fr
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapActive(to, CAP_LABELEDRESP) &&
                   to && MyConnect(to) && cli_label(to)[0];
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
+                  to && MyConnect(to) && cli_batch_id(to)[0];
   int pos = 0;
 
-  if (!use_time && !use_account && !use_label)
+  if (!use_time && !use_account && !use_label && !use_batch)
     return NULL;
 
   buf[0] = '@';
   pos = 1;
 
-  if (use_label) {
+  /* When in a batch, use @batch instead of @label */
+  if (use_batch) {
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
+  } else if (use_label) {
     pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
   }
 
@@ -1350,5 +1355,101 @@ void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mo
     }
   }
   msgq_clean(mb);
+}
+
+/**
+ * Generate a unique batch reference ID.
+ * @param[in] cptr Client to generate batch ID for.
+ * @param[out] buf Buffer to store the generated ID.
+ * @param[in] buflen Size of the buffer.
+ * @return Pointer to the buffer.
+ */
+static char *generate_batch_id(struct Client *cptr, char *buf, size_t buflen)
+{
+  unsigned int seq = con_batch_seq(cli_connect(cptr))++;
+  ircd_snprintf(NULL, buf, buflen, "%s%u", cli_yxx(cptr), seq);
+  return buf;
+}
+
+/**
+ * Start a batch for a client.
+ * Sends BATCH +refid type to the client and stores the batch ID.
+ * @param[in] to Client to start batch for.
+ * @param[in] type Batch type (e.g., "labeled-response", "netjoin").
+ */
+void send_batch_start(struct Client *to, const char *type)
+{
+  struct MsgBuf *mb;
+  char tagbuf[256];
+  int pos = 0;
+
+  if (!feature_bool(FEAT_CAP_batch) || !CapActive(to, CAP_BATCH) || !MyConnect(to))
+    return;
+
+  /* Generate a new batch ID */
+  generate_batch_id(to, cli_batch_id(to), sizeof(con_batch_id(cli_connect(to))));
+
+  /* Build message tags - include label if this is for labeled-response */
+  tagbuf[0] = '\0';
+  if (feature_bool(FEAT_CAP_labeled_response) &&
+      CapActive(to, CAP_LABELEDRESP) && cli_label(to)[0]) {
+    tagbuf[0] = '@';
+    pos = 1;
+    pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
+    if (pos < (int)sizeof(tagbuf) - 1) {
+      tagbuf[pos++] = ' ';
+      tagbuf[pos] = '\0';
+    }
+  }
+
+  /* Send BATCH +refid type */
+  if (tagbuf[0])
+    mb = msgq_make(cli_from(to), "%s:%s " MSG_BATCH " +%s %s",
+                   tagbuf, cli_name(&me), cli_batch_id(to), type);
+  else
+    mb = msgq_make(cli_from(to), ":%s " MSG_BATCH " +%s %s",
+                   cli_name(&me), cli_batch_id(to), type);
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
+/**
+ * End the current batch for a client.
+ * Sends BATCH -refid to the client and clears the batch ID.
+ * @param[in] to Client to end batch for.
+ */
+void send_batch_end(struct Client *to)
+{
+  struct MsgBuf *mb;
+
+  if (!feature_bool(FEAT_CAP_batch) || !CapActive(to, CAP_BATCH) || !MyConnect(to))
+    return;
+
+  /* Only end if there's an active batch */
+  if (!cli_batch_id(to)[0])
+    return;
+
+  /* Send BATCH -refid */
+  mb = msgq_make(cli_from(to), ":%s " MSG_BATCH " -%s",
+                 cli_name(&me), cli_batch_id(to));
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+
+  /* Clear the batch ID */
+  cli_batch_id(to)[0] = '\0';
+}
+
+/**
+ * Check if a client has an active batch.
+ * @param[in] cptr Client to check.
+ * @return Non-zero if batch is active, zero otherwise.
+ */
+int has_active_batch(struct Client *cptr)
+{
+  if (!MyConnect(cptr))
+    return 0;
+  return cli_batch_id(cptr)[0] != '\0';
 }
 

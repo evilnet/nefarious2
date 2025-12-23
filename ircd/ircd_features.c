@@ -803,6 +803,7 @@ static struct FeatureDesc {
   F_B(CAP_chghost, 0, 1, 0),
   F_B(CAP_invite_notify, 0, 1, 0),
   F_B(CAP_labeled_response, 0, 1, 0),
+  F_B(CAP_batch, 0, 1, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif
