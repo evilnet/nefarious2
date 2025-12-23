@@ -107,6 +107,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   struct Client* acptr;
   int first = 0;
   char realhost[HOSTLEN + 3];
+  char agentname[NUMNICKLEN + 1];
   char *hoststr = (cli_sockhost(cptr) ? cli_sockhost(cptr) : cli_sock_ip(cptr));
 
   if (!CapActive(cptr, CAP_SASL))
@@ -188,44 +189,28 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   else
     ircd_strncpy(realhost, hoststr, sizeof(realhost));
 
-  if (acptr) {
-    if (first) {
-      if (*parv[1] == ':' || strchr(parv[1], ' '))
-		return exit_client(cptr, sptr, sptr, "Malformed AUTHENTICATE");
-      if (!EmptyString(cli_sslclifp(cptr)))
-        sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S %s :%s", acptr, &me,
-                      cli_fd(cptr), cli_saslcookie(cptr),
-                      parv[1], cli_sslclifp(cptr));
-      else
-        sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u S :%s", acptr, &me,
-                      cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
-      if (feature_bool(FEAT_SASL_SENDHOST))
-        sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u H :%s@%s:%s", acptr, &me,
-                      cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
-                      realhost, cli_sock_ip(cptr));
-    } else {
-      sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u C :%s", acptr, &me,
+  if (acptr)
+    ircd_snprintf(0, agentname, sizeof(agentname), "%C", acptr);
+  else
+    ircd_snprintf(0, agentname, sizeof(agentname), "%s", "*");
+
+  if (first) {
+    if (*parv[1] == ':' || strchr(parv[1], ' '))
+      return exit_client(cptr, sptr, sptr, "Malformed AUTHENTICATE");
+    if (!EmptyString(cli_sslclifp(cptr)))
+      sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u S %s :%s", agentname, &me,
+                    cli_fd(cptr), cli_saslcookie(cptr),
+                    parv[1], cli_sslclifp(cptr));
+    else
+      sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u S :%s", agentname, &me,
                     cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
-    }
+    if (feature_bool(FEAT_SASL_SENDHOST))
+      sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u H :%s@%s:%s", agentname, &me,
+                    cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
+                    realhost, cli_sock_ip(cptr));
   } else {
-    if (first) {
-      if (*parv[1] == ':' || strchr(parv[1], ' '))
-        return exit_client(cptr, sptr, sptr, "Malformed AUTHENTICATE");
-      if (!EmptyString(cli_sslclifp(cptr)))
-        sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u S %s :%s", &me,
-                              cli_fd(cptr), cli_saslcookie(cptr),
-                              parv[1], cli_sslclifp(cptr));
-      else
-        sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u S :%s", &me,
-                              cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
-      if (feature_bool(FEAT_SASL_SENDHOST))
-        sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u H :%s@%s:%s", &me,
-                              cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
-                              realhost, cli_sock_ip(cptr));
-    } else {
-      sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u C :%s", &me,
-                            cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
-    }
+    sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u C :%s", agentname, &me,
+                  cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
   }
 
   if (!t_active(&cli_sasltimeout(cptr)))
