@@ -504,8 +504,11 @@ int exit_client(struct Client *cptr,
     /* Start IRCv3 netsplit batch for local clients */
     send_netsplit_batch_start(victim, cli_serv(victim)->up,
                                netsplit_batch_id, sizeof(netsplit_batch_id));
+    /* Set active batch so QUIT messages include @batch tag */
+    set_active_network_batch(netsplit_batch_id);
     exit_downlinks(victim, killer, comment1);
-    /* End IRCv3 netsplit batch */
+    /* Clear active batch and end IRCv3 netsplit batch */
+    set_active_network_batch(NULL);
     send_netsplit_batch_end(netsplit_batch_id);
   }
   exit_one_client(victim, comment);

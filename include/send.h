@@ -195,6 +195,10 @@ extern void send_netsplit_batch_start(struct Client *server, struct Client *upli
                                        char *batch_id_out, size_t batch_id_len);
 extern void send_netsplit_batch_end(const char *batch_id);
 
+/* Active network batch tracking for @batch tag inclusion in QUIT/JOIN messages */
+extern void set_active_network_batch(const char *batch_id);
+extern const char *get_active_network_batch(void);
+
 /* IRCv3 standard-replies (FAIL/WARN/NOTE) */
 extern void send_fail(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);

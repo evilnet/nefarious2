@@ -58,6 +58,12 @@ struct SLink *opsarray[32];     /* don't use highest bit unless you change
 				   atoi to strtoul in sendto_op_mask() */
 /** Linked list of all connections with data queued to send. */
 static struct Connection *send_queues;
+
+/** Active network batch ID for netjoin/netsplit batching.
+ * When non-empty, all QUIT/JOIN messages to local clients with batch capability
+ * will include @batch=<id> tag per IRCv3 netsplit/netjoin batch spec.
+ */
+static char active_network_batch_id[32] = "";
 char *GlobalForwards[256];
 
 /** Format current time as ISO 8601 timestamp for server-time capability.
@@ -77,6 +83,28 @@ static char *format_server_time(char *buf, size_t buflen)
            tm.tm_hour, tm.tm_min, tm.tm_sec,
            tv.tv_usec / 1000);
   return buf;
+}
+
+/** Set the active network batch ID for netjoin/netsplit batching.
+ * When set, QUIT/JOIN messages to batch-capable clients will include @batch tag.
+ * @param[in] batch_id Batch ID to set, or NULL/empty to clear.
+ */
+void set_active_network_batch(const char *batch_id)
+{
+  if (batch_id && *batch_id) {
+    ircd_strncpy(active_network_batch_id, batch_id, sizeof(active_network_batch_id) - 1);
+    active_network_batch_id[sizeof(active_network_batch_id) - 1] = '\0';
+  } else {
+    active_network_batch_id[0] = '\0';
+  }
+}
+
+/** Get the active network batch ID.
+ * @return Current batch ID, or empty string if none active.
+ */
+const char *get_active_network_batch(void)
+{
+  return active_network_batch_id;
 }
 
 /** Format message tags (server-time and account-tag) for outgoing messages.
@@ -112,6 +140,72 @@ static char *format_message_tags(char *buf, size_t buflen, struct Client *from)
 
   if (use_account && from && cli_user(from)) {
     if (use_time && pos < (int)buflen - 1) {
+      buf[pos++] = ';';
+    }
+    if (IsAccount(from)) {
+      pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                      cli_user(from)->account);
+    } else {
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+    }
+  }
+
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
+/** Format message tags with network batch ID for netjoin/netsplit.
+ * Same as format_message_tags but includes @batch tag when active_network_batch_id is set.
+ * @param[out] buf Buffer to write tags to.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag).
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_with_network_batch(char *buf, size_t buflen, struct Client *from)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time);
+  int use_account = feature_bool(FEAT_CAP_account_tag);
+  int use_batch = active_network_batch_id[0] != '\0';
+  int pos = 0;
+
+  if (!use_time && !use_account && !use_batch)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  /* @batch tag first (most important for batched messages) */
+  if (use_batch) {
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", active_network_batch_id);
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (pos > 1 && pos < (int)buflen - 1) {
       buf[pos++] = ';';
     }
     if (IsAccount(from)) {
@@ -917,10 +1011,12 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
+  struct MsgBuf *mb_tags = NULL;       /* tagged version (server-time + account-tag) */
+  struct MsgBuf *mb_tags_batch = NULL; /* tagged version with @batch for network batches */
   struct Membership *chan;
   struct Membership *member;
   char tagbuf[128];
+  char tagbuf_batch[128];
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -942,6 +1038,14 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
     va_end(vd.vd_args);
   }
 
+  /* build batch-aware tagged version if network batch is active */
+  if (active_network_batch_id[0] &&
+      format_message_tags_with_network_batch(tagbuf_batch, sizeof(tagbuf_batch), from)) {
+    va_start(vd.vd_args, pattern);
+    mb_tags_batch = msgq_make(0, "%s%:#C %s %v", tagbuf_batch, from, cmd, &vd);
+    va_end(vd.vd_args);
+  }
+
   bump_sentalong(from);
   /*
    * loop through from's channels, and the members on their channels
@@ -956,7 +1060,10 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
           && member->user != one
           && cli_sentalong(member->user) != sentalong_marker) {
 	cli_sentalong(member->user) = sentalong_marker;
-	if (mb_tags && wants_message_tags(member->user))
+	/* Use batch-tagged version for batch-capable clients during network batch */
+	if (mb_tags_batch && CapActive(member->user, CAP_BATCH))
+	  send_buffer(member->user, mb_tags_batch, 0);
+	else if (mb_tags && wants_message_tags(member->user))
 	  send_buffer(member->user, mb_tags, 0);
 	else
 	  send_buffer(member->user, mb, 0);
@@ -964,7 +1071,9 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   }
 
   if (MyConnect(from) && from != one) {
-    if (mb_tags && wants_message_tags(from))
+    if (mb_tags_batch && CapActive(from, CAP_BATCH))
+      send_buffer(from, mb_tags_batch, 0);
+    else if (mb_tags && wants_message_tags(from))
       send_buffer(from, mb_tags, 0);
     else
       send_buffer(from, mb, 0);
@@ -973,6 +1082,8 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   msgq_clean(mb);
   if (mb_tags)
     msgq_clean(mb_tags);
+  if (mb_tags_batch)
+    msgq_clean(mb_tags_batch);
 }
 
 /** Send a (prefixed) command to all channels that \a from is on.
@@ -1896,6 +2007,9 @@ void send_netjoin_batch_start(struct Client *server, struct Client *uplink)
                sizeof(cli_serv(server)->batch_id) - 1);
   cli_serv(server)->batch_id[sizeof(cli_serv(server)->batch_id) - 1] = '\0';
 
+  /* Set active network batch so JOIN messages include @batch tag */
+  set_active_network_batch(batch_id);
+
   /* Send batch start to local clients with batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!MyConnect(acptr) || !IsUser(acptr))
@@ -1931,6 +2045,9 @@ void send_netjoin_batch_end(struct Client *server)
   batch_id = cli_serv(server)->batch_id;
   if (!batch_id || !*batch_id)
     return;
+
+  /* Clear active network batch */
+  set_active_network_batch(NULL);
 
   /* Send batch end to local clients with batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
