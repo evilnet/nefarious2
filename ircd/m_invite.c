@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
@@ -198,6 +199,12 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   if (!IsLocalChannel(chptr->chname) || MyConnect(acptr)) {
+    /* Send invite-notify to channel members with the capability */
+    if (feature_bool(FEAT_CAP_invite_notify))
+      sendcmdto_channel_capab_butserv_butone(sptr, CMD_INVITE, chptr, sptr, 0,
+                                             CAP_INVITENOTIFY, CAP_NONE,
+                                             "%C %H", acptr, chptr);
+
     if (feature_bool(FEAT_ANNOUNCE_INVITES)) {
       /* Announce to channel operators. */
       sendcmdto_channel_butserv_butone(&his, get_error_numeric(RPL_ISSUEDINVITE)->str,
@@ -301,6 +308,12 @@ int ms_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendcmdto_one(sptr, CMD_INVITE, acptr, "%s %H %Tu", cli_name(acptr), chptr,
                   chptr->creationtime);
   }
+
+  /* Send invite-notify to channel members with the capability */
+  if (feature_bool(FEAT_CAP_invite_notify))
+    sendcmdto_channel_capab_butserv_butone(sptr, CMD_INVITE, chptr, sptr, 0,
+                                           CAP_INVITENOTIFY, CAP_NONE,
+                                           "%C %H", acptr, chptr);
 
   if (feature_bool(FEAT_ANNOUNCE_INVITES)) {
     /* Announce to channel operators. */

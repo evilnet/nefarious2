@@ -70,6 +70,7 @@ static struct capabilities {
   _CAP(ECHOMSG, 0, "echo-message", FEAT_CAP_echo_message),
   _CAP(ACCOUNTTAG, 0, "account-tag", FEAT_CAP_account_tag),
   _CAP(CHGHOST, 0, "chghost", FEAT_CAP_chghost),
+  _CAP(INVITENOTIFY, 0, "invite-notify", FEAT_CAP_invite_notify),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
