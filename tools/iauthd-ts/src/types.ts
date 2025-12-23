@@ -2,6 +2,8 @@
  * TypeScript types for iauthd
  */
 
+import type { AuthProviderConfig } from './auth/types.js';
+
 /** DNSBL configuration entry */
 export interface DNSBLConfig {
   /** Config line number for identification */
@@ -38,10 +40,12 @@ export interface Config {
   cacheTime: number;
   /** Debug mode */
   debug: boolean;
-  /** Path to users file for SASL authentication */
+  /** Path to users file for SASL authentication (legacy, use authProviders) */
   saslUsersFile?: string;
   /** Message shown when SASL authentication fails */
   saslFailMsg: string;
+  /** Authentication providers configuration */
+  authProviders: AuthProviderConfig[];
 }
 
 /** SASL session state */

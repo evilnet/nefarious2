@@ -15,13 +15,10 @@ import {
   matchesDNSBL,
 } from './dnsbl.js';
 import {
-  parseUsersFile,
-  usersFileModified,
   decodeSASLPlain,
-  authenticatePlain,
   getSupportedMechanisms,
-  type UsersDB,
 } from './sasl.js';
+import { AuthManager } from './auth/index.js';
 import type { Config, ClientState, DNSBLConfig, CLIOptions, SASLState } from './types.js';
 
 const VERSION = '1.0.0';
@@ -38,12 +35,13 @@ export class IAuthDaemon {
   private countSaslFail = 0;
   private startTime = Date.now();
   private rl: Interface | null = null;
-  private usersDb: UsersDB | null = null;
+  private authManager: AuthManager | null = null;
+  private authInitialized = false;
 
   constructor(options: CLIOptions) {
     this.options = options;
     this.configPath = options.config;
-    const { config, configLines } = readConfigFile(options.config);
+    const { config } = readConfigFile(options.config);
     this.config = config;
 
     // Initialize DNSBL counters
@@ -51,25 +49,33 @@ export class IAuthDaemon {
       this.dnsblCounters.set(dnsbl.cfgNum, 0);
     }
 
-    // Load SASL users database if configured
-    this.loadUsersDb();
+    // Initialize auth manager asynchronously
+    this.initializeAuth();
   }
 
   /**
-   * Load or reload the SASL users database
+   * Initialize the authentication manager
    */
-  private loadUsersDb(): void {
-    if (this.config.saslUsersFile) {
-      this.usersDb = parseUsersFile(this.config.saslUsersFile);
-      this.debug(`Loaded ${this.usersDb.users.size} users from ${this.config.saslUsersFile}`);
+  private async initializeAuth(): Promise<void> {
+    if (this.config.authProviders.length > 0) {
+      this.authManager = new AuthManager(this.config.authProviders);
+      try {
+        await this.authManager.initialize();
+        this.authInitialized = true;
+        const info = this.authManager.getProviderInfo();
+        this.debug(`Initialized ${info.length} auth provider(s): ${info.map(p => p.name).join(', ')}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.debug(`Failed to initialize auth manager: ${message}`);
+      }
     }
   }
 
   /**
-   * Check if SASL is enabled (users file configured and has entries)
+   * Check if SASL/auth is enabled
    */
   private saslEnabled(): boolean {
-    return this.usersDb !== null && this.usersDb.users.size > 0;
+    return this.authManager !== null && this.authManager.hasProviders();
   }
 
   /**
@@ -156,7 +162,10 @@ export class IAuthDaemon {
     if (this.saslEnabled()) {
       this.send(`S iauthd-ts :SASL Success: ${this.countSaslSuccess}`);
       this.send(`S iauthd-ts :SASL Failed: ${this.countSaslFail}`);
-      this.send(`S iauthd-ts :SASL Users Loaded: ${this.usersDb?.users.size || 0}`);
+      const providerInfo = this.authManager!.getProviderInfo();
+      for (const p of providerInfo) {
+        this.send(`S iauthd-ts :Auth Provider: ${p.name} (priority=${p.priority}, healthy=${p.healthy})`);
+      }
     }
 
     for (const dnsbl of this.config.dnsbls) {
@@ -253,7 +262,14 @@ export class IAuthDaemon {
           this.debug('Got a rehash. Rereading config file');
           const { config } = readConfigFile(this.configPath);
           this.config = config;
-          this.loadUsersDb();
+          // Reinitialize auth providers
+          if (this.authManager) {
+            this.authManager.reload().catch(err => {
+              this.debug(`Failed to reload auth manager: ${err}`);
+            });
+          } else {
+            this.initializeAuth();
+          }
           this.sendNewConfig();
         }
         break;
@@ -604,11 +620,6 @@ export class IAuthDaemon {
       return;
     }
 
-    // Reload users file if modified
-    if (this.usersDb && usersFileModified(this.usersDb)) {
-      this.loadUsersDb();
-    }
-
     // Get or create client state
     let client = this.clients.get(id);
     if (!client) {
@@ -729,7 +740,11 @@ export class IAuthDaemon {
     const data = args.substring(colonIdx + 1);
 
     if (client.sasl.mechanism?.toUpperCase() === 'PLAIN') {
-      this.handleSASLPlain(client, data);
+      this.handleSASLPlain(client, data).catch(err => {
+        this.debug(`SASL PLAIN auth error: ${err}`);
+        this.sendSASLFail(id);
+        this.countSaslFail++;
+      });
     } else {
       this.debug(`Unhandled SASL mechanism: ${client.sasl.mechanism}`);
       this.sendSASLFail(id);
@@ -739,7 +754,7 @@ export class IAuthDaemon {
   /**
    * Handle SASL PLAIN authentication
    */
-  private handleSASLPlain(client: ClientState, base64Data: string): void {
+  private async handleSASLPlain(client: ClientState, base64Data: string): Promise<void> {
     const decoded = decodeSASLPlain(base64Data);
 
     if (!decoded) {
@@ -751,15 +766,19 @@ export class IAuthDaemon {
 
     this.debug(`SASL PLAIN auth attempt for ${client.id}: authcid=${decoded.authcid}`);
 
-    const account = authenticatePlain(this.usersDb!, decoded.authcid, decoded.password);
+    const result = await this.authManager!.authenticate(
+      decoded.authcid,
+      decoded.password,
+      decoded.authzid
+    );
 
-    if (account) {
-      this.debug(`SASL PLAIN auth success for ${client.id}: account=${account}`);
-      client.account = account;
-      this.sendSASLSuccess(client.id, account);
+    if (result.success && result.account) {
+      this.debug(`SASL PLAIN auth success for ${client.id}: account=${result.account}`);
+      client.account = result.account;
+      this.sendSASLSuccess(client.id, result.account);
       this.countSaslSuccess++;
     } else {
-      this.debug(`SASL PLAIN auth failed for ${client.id}`);
+      this.debug(`SASL PLAIN auth failed for ${client.id}: ${result.error || 'unknown'}`);
       this.sendSASLFail(client.id);
       this.countSaslFail++;
     }

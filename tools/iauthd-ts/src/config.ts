@@ -5,6 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import type { Config, DNSBLConfig } from './types.js';
+import { parseAuthConfig, convertSASLDB } from './auth/config.js';
 
 const DEFAULT_CACHE_TIME = 60 * 60 * 24; // 24 hours
 const DEFAULT_DNS_TIMEOUT = 5;
@@ -75,6 +76,7 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
     cacheTime: DEFAULT_CACHE_TIME,
     debug: false,
     saslFailMsg: DEFAULT_SASL_FAIL_MSG,
+    authProviders: [],
   };
 
   const configLines: string[] = [];
@@ -121,11 +123,20 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
         break;
 
       case 'SASLDB':
+        // Legacy support: convert to file auth provider
         config.saslUsersFile = args.trim();
+        config.authProviders.push(convertSASLDB(args.trim()));
         break;
 
       case 'SASLFAILMSG':
         config.saslFailMsg = args.trim();
+        break;
+
+      case 'AUTH':
+        const authConfig = parseAuthConfig(args);
+        if (authConfig) {
+          config.authProviders.push(authConfig);
+        }
         break;
     }
   }
