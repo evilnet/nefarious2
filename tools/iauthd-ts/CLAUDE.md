@@ -143,6 +143,9 @@ Use `#IAUTH AUTH` to configure authentication backends. Multiple providers can b
 ```
 
 #### LDAP Direct Bind Mode
+
+> **Note**: LDAP support has not yet been tested against real LDAP servers. Use with caution and please report any issues.
+
 User binds directly with their credentials using a DN template:
 ```
 #IAUTH AUTH provider=ldap uri=ldap://ldap.example.com:389 mode=direct userdn=uid=%s,ou=users,dc=example,dc=com

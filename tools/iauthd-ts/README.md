@@ -202,6 +202,82 @@ To enable SASL authentication handling in iauthd-ts (instead of routing to servi
 
 The users file is automatically reloaded when modified (checked on each SASL attempt).
 
+### Modular Authentication Providers
+
+iauthd-ts supports a modular authentication system with multiple backends. Providers are tried in priority order (lower number = tried first) until one succeeds.
+
+#### AUTH Directive
+```
+#IAUTH AUTH provider=<type> [options...]
+```
+
+#### File Provider
+Uses a static users file (same as SASLDB but with explicit provider syntax):
+```
+#IAUTH AUTH provider=file path=/path/to/users priority=50
+```
+
+#### LDAP Provider
+
+> **Note**: LDAP support has not yet been tested with real LDAP servers. Please report any issues.
+
+Two modes are supported:
+
+**Direct Bind Mode** - Binds directly as the user:
+```
+#IAUTH AUTH provider=ldap uri=ldap://ldap.example.com:389 mode=direct userdn=uid=%s,ou=users,dc=example,dc=com
+```
+
+**Search Mode** - Admin bind, search for user, then bind as user:
+```
+#IAUTH AUTH provider=ldap uri=ldaps://ldap.example.com:636 mode=search basedn=ou=users,dc=example,dc=com binddn=cn=admin,dc=example,dc=com bindpass=secret userfilter=(uid=%s) groupdn=cn=ircusers,ou=groups,dc=example,dc=com
+```
+
+LDAP Options:
+| Option | Required | Mode | Description |
+|--------|----------|------|-------------|
+| `uri` | Yes | Both | LDAP server URI (ldap:// or ldaps://) |
+| `mode` | Yes | Both | `direct` or `search` |
+| `userdn` | Yes | direct | DN template with `%s` for username |
+| `basedn` | Yes | search | Base DN for user search |
+| `binddn` | Yes | search | Admin bind DN |
+| `bindpass` | Yes | search | Admin bind password |
+| `userfilter` | Yes | search | Search filter with `%s` for username |
+| `groupdn` | No | search | Group DN for membership check |
+| `accountattr` | No | Both | Attribute to use as account name |
+| `timeout` | No | Both | Connection timeout in ms (default: 5000) |
+| `priority` | No | Both | Provider priority (default: 100) |
+
+#### Keycloak Provider
+Authenticates via Keycloak using Resource Owner Password Credentials (ROPC) grant:
+```
+#IAUTH AUTH provider=keycloak url=https://keycloak.example.com realm=myrealm clientid=irc-client
+```
+
+With client secret (for confidential clients):
+```
+#IAUTH AUTH provider=keycloak url=https://keycloak.example.com realm=myrealm clientid=irc-client clientsecret=mysecret
+```
+
+Keycloak Options:
+| Option | Required | Description |
+|--------|----------|-------------|
+| `url` | Yes | Keycloak server URL |
+| `realm` | Yes | Realm name |
+| `clientid` | Yes | Client ID |
+| `clientsecret` | No | Client secret (for confidential clients) |
+| `accountattr` | No | JWT claim to use as account name (default: preferred_username) |
+| `timeout` | No | Request timeout in ms (default: 5000) |
+| `priority` | No | Provider priority (default: 100) |
+
+#### Multiple Providers (Fallback Chain)
+Configure multiple providers with different priorities. Lower priority = tried first:
+```
+#IAUTH AUTH provider=ldap uri=ldaps://ldap.example.com mode=direct userdn=uid=%s,ou=users,dc=example,dc=com priority=10
+#IAUTH AUTH provider=keycloak url=https://keycloak.example.com realm=irc clientid=irc-client priority=20
+#IAUTH AUTH provider=file path=/path/to/local-users priority=100
+```
+
 ## Usage
 
 ### Command Line
