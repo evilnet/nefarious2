@@ -79,6 +79,67 @@ static char *format_server_time(char *buf, size_t buflen)
   return buf;
 }
 
+/** Format message tags (server-time and account-tag) for outgoing messages.
+ * Builds combined tag string including both @time and @account as configured.
+ * @param[out] buf Buffer to write tags to.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag).
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags(char *buf, size_t buflen, struct Client *from)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time);
+  int use_account = feature_bool(FEAT_CAP_account_tag);
+  int pos = 0;
+
+  if (!use_time && !use_account)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (use_time && pos < (int)buflen - 1) {
+      buf[pos++] = ';';
+    }
+    if (IsAccount(from)) {
+      pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                      cli_user(from)->account);
+    } else {
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+    }
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
+/** Check if a client wants message tags (server-time or account-tag).
+ * @param[in] to Recipient client.
+ * @return Non-zero if client has any message tag capability active.
+ */
+static int wants_message_tags(struct Client *to)
+{
+  return (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME)) ||
+         (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG));
+}
+
 /*
  * dead_link
  *
@@ -496,10 +557,10 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_st = NULL;  /* server-time version */
+  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
   struct Membership *chan;
   struct Membership *member;
-  char timebuf[64];
+  char tagbuf[128];
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -514,11 +575,10 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
-  /* build server-time version if feature enabled */
-  if (feature_bool(FEAT_CAP_server_time)) {
+  /* build tagged version if any tag features enabled */
+  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
     va_start(vd.vd_args, pattern);
-    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
-                      from, cmd, &vd);
+    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
     va_end(vd.vd_args);
   }
 
@@ -536,23 +596,23 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
           && member->user != one
           && cli_sentalong(member->user) != sentalong_marker) {
 	cli_sentalong(member->user) = sentalong_marker;
-	if (mb_st && CapActive(member->user, CAP_SERVERTIME))
-	  send_buffer(member->user, mb_st, 0);
+	if (mb_tags && wants_message_tags(member->user))
+	  send_buffer(member->user, mb_tags, 0);
 	else
 	  send_buffer(member->user, mb, 0);
       }
   }
 
   if (MyConnect(from) && from != one) {
-    if (mb_st && CapActive(from, CAP_SERVERTIME))
-      send_buffer(from, mb_st, 0);
+    if (mb_tags && wants_message_tags(from))
+      send_buffer(from, mb_tags, 0);
     else
       send_buffer(from, mb, 0);
   }
 
   msgq_clean(mb);
-  if (mb_st)
-    msgq_clean(mb_st);
+  if (mb_tags)
+    msgq_clean(mb_tags);
 }
 
 /** Send a (prefixed) command to all channels that \a from is on.
@@ -569,10 +629,10 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_st = NULL;  /* server-time version */
+  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
   struct Membership *chan;
   struct Membership *member;
-  char timebuf[64];
+  char tagbuf[128];
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -587,11 +647,10 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
-  /* build server-time version if feature enabled */
-  if (feature_bool(FEAT_CAP_server_time)) {
+  /* build tagged version if any tag features enabled */
+  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
     va_start(vd.vd_args, pattern);
-    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
-                      from, cmd, &vd);
+    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
     va_end(vd.vd_args);
   }
 
@@ -611,23 +670,23 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
           && ((withcap == CAP_NONE) || CapActive(member->user, withcap))
           && ((skipcap == CAP_NONE) || !CapActive(member->user, skipcap))) {
         cli_sentalong(member->user) = sentalong_marker;
-        if (mb_st && CapActive(member->user, CAP_SERVERTIME))
-          send_buffer(member->user, mb_st, 0);
+        if (mb_tags && wants_message_tags(member->user))
+          send_buffer(member->user, mb_tags, 0);
         else
           send_buffer(member->user, mb, 0);
       }
   }
 
   if (MyConnect(from) && from != one) {
-    if (mb_st && CapActive(from, CAP_SERVERTIME))
-      send_buffer(from, mb_st, 0);
+    if (mb_tags && wants_message_tags(from))
+      send_buffer(from, mb_tags, 0);
     else
       send_buffer(from, mb, 0);
   }
 
   msgq_clean(mb);
-  if (mb_st)
-    msgq_clean(mb_st);
+  if (mb_tags)
+    msgq_clean(mb_tags);
 }
 
 /** Send a (prefixed) command to all local users on a channel.
@@ -646,9 +705,9 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_st = NULL;  /* server-time version */
+  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
   struct Membership *member;
-  char timebuf[64];
+  char tagbuf[128];
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
@@ -657,11 +716,10 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
-  /* build server-time version if feature enabled */
-  if (feature_bool(FEAT_CAP_server_time)) {
+  /* build tagged version if any tag features enabled */
+  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
     va_start(vd.vd_args, pattern);
-    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
-                      from, cmd, &vd);
+    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
     va_end(vd.vd_args);
   }
 
@@ -675,15 +733,15 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
         continue;
-    if (mb_st && CapActive(member->user, CAP_SERVERTIME))
-      send_buffer(member->user, mb_st, 0);
+    if (mb_tags && wants_message_tags(member->user))
+      send_buffer(member->user, mb_tags, 0);
     else
       send_buffer(member->user, mb, 0);
   }
 
   msgq_clean(mb);
-  if (mb_st)
-    msgq_clean(mb_st);
+  if (mb_tags)
+    msgq_clean(mb_tags);
 }
 
 /** Send a (prefixed) command to all local users on a channel with or without
@@ -706,9 +764,9 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_st = NULL;  /* server-time version */
+  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
   struct Membership *member;
-  char timebuf[64];
+  char tagbuf[128];
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
@@ -717,11 +775,10 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
-  /* build server-time version if feature enabled */
-  if (feature_bool(FEAT_CAP_server_time)) {
+  /* build tagged version if any tag features enabled */
+  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
     va_start(vd.vd_args, pattern);
-    mb_st = msgq_make(0, "%s%:#C %s %v", format_server_time(timebuf, sizeof(timebuf)),
-                      from, cmd, &vd);
+    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
     va_end(vd.vd_args);
   }
 
@@ -737,15 +794,15 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         || ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
         continue;
-    if (mb_st && CapActive(member->user, CAP_SERVERTIME))
-      send_buffer(member->user, mb_st, 0);
+    if (mb_tags && wants_message_tags(member->user))
+      send_buffer(member->user, mb_tags, 0);
     else
       send_buffer(member->user, mb, 0);
   }
 
   msgq_clean(mb);
-  if (mb_st)
-    msgq_clean(mb_st);
+  if (mb_tags)
+    msgq_clean(mb_tags);
 }
 
 /** Send a (prefixed) command to all servers with users on \a to.
@@ -811,13 +868,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct Membership *member;
   struct VarData vd;
   struct MsgBuf *user_mb;
-  struct MsgBuf *user_mb_st = NULL;  /* server-time version */
+  struct MsgBuf *user_mb_tags = NULL;  /* tagged version (server-time + account-tag) */
   struct MsgBuf *serv_mb;
   struct Client *service;
   const char *userfmt;
   const char *usercmd;
-  char timebuf[64];
-  char userfmt_st[64];
+  char tagbuf[128];
+  char userfmt_tags[64];
 
   vd.vd_format = pattern;
 
@@ -838,12 +895,11 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   user_mb = msgq_make(0, userfmt, from, usercmd, &vd);
   va_end(vd.vd_args);
 
-  /* Build server-time version if feature enabled */
-  if (feature_bool(FEAT_CAP_server_time)) {
-    format_server_time(timebuf, sizeof(timebuf));
-    ircd_snprintf(0, userfmt_st, sizeof(userfmt_st), "%%s%s", userfmt);
+  /* Build tagged version if any tag features enabled */
+  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
+    ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
     va_start(vd.vd_args, pattern);
-    user_mb_st = msgq_make(0, userfmt_st, timebuf, from, usercmd, &vd);
+    user_mb_tags = msgq_make(0, userfmt_tags, tagbuf, from, usercmd, &vd);
     va_end(vd.vd_args);
   }
 
@@ -869,8 +925,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     cli_sentalong(member->user) = sentalong_marker;
 
     if (MyConnect(member->user)) { /* pick right buffer to send */
-      if (user_mb_st && CapActive(member->user, CAP_SERVERTIME))
-        send_buffer(member->user, user_mb_st, 0);
+      if (user_mb_tags && wants_message_tags(member->user))
+        send_buffer(member->user, user_mb_tags, 0);
       else
         send_buffer(member->user, user_mb, 0);
     } else
@@ -885,8 +941,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   }
 
   msgq_clean(user_mb);
-  if (user_mb_st)
-    msgq_clean(user_mb_st);
+  if (user_mb_tags)
+    msgq_clean(user_mb_tags);
   msgq_clean(serv_mb);
 }
 

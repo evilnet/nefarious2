@@ -48,6 +48,7 @@ enum Capab {
   _CAP(CAPNOTIFY, 0, "cap-notify", 0),
   _CAP(SERVERTIME, 0, "server-time", 0),
   _CAP(ECHOMSG, 0, "echo-message", 0),
+  _CAP(ACCOUNTTAG, 0, "account-tag", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif

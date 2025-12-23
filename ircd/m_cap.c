@@ -68,6 +68,7 @@ static struct capabilities {
   _CAP(CAPNOTIFY, 0, "cap-notify", FEAT_CAP_cap_notify),
   _CAP(SERVERTIME, 0, "server-time", FEAT_CAP_server_time),
   _CAP(ECHOMSG, 0, "echo-message", FEAT_CAP_echo_message),
+  _CAP(ACCOUNTTAG, 0, "account-tag", FEAT_CAP_account_tag),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
