@@ -499,8 +499,15 @@ int exit_client(struct Client *cptr,
     }
   }
   /* Then remove the client structures */
-  if (IsServer(victim))
+  if (IsServer(victim)) {
+    char netsplit_batch_id[32] = "";
+    /* Start IRCv3 netsplit batch for local clients */
+    send_netsplit_batch_start(victim, cli_serv(victim)->up,
+                               netsplit_batch_id, sizeof(netsplit_batch_id));
     exit_downlinks(victim, killer, comment1);
+    /* End IRCv3 netsplit batch */
+    send_netsplit_batch_end(netsplit_batch_id);
+  }
   exit_one_client(victim, comment);
 
   /*

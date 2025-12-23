@@ -188,6 +188,13 @@ extern void send_s2s_batch_start(struct Client *sptr, const char *type,
                                  const char *server1, const char *server2);
 extern void send_s2s_batch_end(struct Client *sptr, const char *batch_id);
 
+/* Netjoin/netsplit batch functions for automatic batching */
+extern void send_netjoin_batch_start(struct Client *server, struct Client *uplink);
+extern void send_netjoin_batch_end(struct Client *server);
+extern void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
+                                       char *batch_id_out, size_t batch_id_len);
+extern void send_netsplit_batch_end(const char *batch_id);
+
 /* IRCv3 standard-replies (FAIL/WARN/NOTE) */
 extern void send_fail(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);

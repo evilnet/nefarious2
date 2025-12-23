@@ -1869,6 +1869,148 @@ void send_s2s_batch_end(struct Client *sptr, const char *batch_id)
 }
 
 /**
+ * Start a netjoin batch when a server reconnects.
+ * Generates a batch ID and stores it on the server struct for later.
+ * Sends BATCH +id netjoin server1 server2 to clients with batch cap.
+ * @param[in] server Server that is reconnecting (junction server).
+ * @param[in] uplink Server's uplink (server one hop closer to us).
+ */
+void send_netjoin_batch_start(struct Client *server, struct Client *uplink)
+{
+  struct Client *acptr;
+  char batch_id[32];
+  static unsigned long netjoin_seq = 0;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!server || !cli_serv(server))
+    return;
+
+  /* Generate unique batch ID */
+  ircd_snprintf(NULL, batch_id, sizeof(batch_id), "NJ%s%lu",
+                cli_yxx(&me), netjoin_seq++);
+
+  /* Store on server struct */
+  ircd_strncpy(cli_serv(server)->batch_id, batch_id,
+               sizeof(cli_serv(server)->batch_id) - 1);
+  cli_serv(server)->batch_id[sizeof(cli_serv(server)->batch_id) - 1] = '\0';
+
+  /* Send batch start to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    if (uplink) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netjoin %s %s",
+                    batch_id, cli_name(uplink), cli_name(server));
+    } else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netjoin %s",
+                    batch_id, cli_name(server));
+    }
+  }
+}
+
+/**
+ * End a netjoin batch when END_OF_BURST is received.
+ * @param[in] server Server that finished bursting.
+ */
+void send_netjoin_batch_end(struct Client *server)
+{
+  struct Client *acptr;
+  const char *batch_id;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!server || !cli_serv(server))
+    return;
+
+  batch_id = cli_serv(server)->batch_id;
+  if (!batch_id || !*batch_id)
+    return;
+
+  /* Send batch end to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batch_id);
+  }
+
+  /* Clear stored batch ID */
+  cli_serv(server)->batch_id[0] = '\0';
+}
+
+/**
+ * Start a netsplit batch when a server disconnects.
+ * @param[in] server Server that is disconnecting.
+ * @param[in] uplink Server's uplink.
+ * @param[out] batch_id_out Buffer to store generated batch ID (min 32 bytes).
+ */
+void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
+                                char *batch_id_out, size_t batch_id_len)
+{
+  struct Client *acptr;
+  static unsigned long netsplit_seq = 0;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!batch_id_out || batch_id_len < 16)
+    return;
+
+  /* Generate unique batch ID */
+  ircd_snprintf(NULL, batch_id_out, batch_id_len, "NS%s%lu",
+                cli_yxx(&me), netsplit_seq++);
+
+  /* Send batch start to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    if (uplink && server) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netsplit %s %s",
+                    batch_id_out, cli_name(uplink), cli_name(server));
+    } else if (server) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netsplit %s",
+                    batch_id_out, cli_name(server));
+    }
+  }
+}
+
+/**
+ * End a netsplit batch.
+ * @param[in] batch_id Batch ID from send_netsplit_batch_start.
+ */
+void send_netsplit_batch_end(const char *batch_id)
+{
+  struct Client *acptr;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!batch_id || !*batch_id)
+    return;
+
+  /* Send batch end to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batch_id);
+  }
+}
+
+/**
  * Send a standard reply (FAIL/WARN/NOTE) to a client.
  * Internal helper function.
  * @param[in] to Client to send to.

@@ -768,9 +768,12 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     for (bcptr = cli_serv(acptr)->up; !IsMe(bcptr); bcptr = cli_serv(bcptr)->up)
       if (IsBurstOrBurstAck(bcptr))
           break;
-    if (IsMe(bcptr))
+    if (IsMe(bcptr)) {
       sendto_opmask_butone(0, SNO_NETWORK, "Net junction: %s %s",
                            cli_name(sptr), cli_name(acptr));
+      /* Start IRCv3 netjoin batch for local clients */
+      send_netjoin_batch_start(acptr, cli_serv(acptr)->up);
+    }
   }
   /*
    * Old sendto_serv_but_one() call removed because we now need to send
