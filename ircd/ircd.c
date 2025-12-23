@@ -128,6 +128,9 @@ static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
 /** Non-zero until we want to exit. */
 int running = 1;
 
+/** Counter for generating unique message IDs. */
+unsigned long MsgIdCounter = 0;
+
 
 /*----------------------------------------------------------------------------
  * API: server_die

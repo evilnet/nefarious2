@@ -172,4 +172,12 @@ extern void send_batch_end(struct Client *to);
 /* Check if a client has an active batch */
 extern int has_active_batch(struct Client *cptr);
 
+/* IRCv3 standard-replies (FAIL/WARN/NOTE) */
+extern void send_fail(struct Client *to, const char *command, const char *code,
+                      const char *context, const char *description);
+extern void send_warn(struct Client *to, const char *command, const char *code,
+                      const char *context, const char *description);
+extern void send_note(struct Client *to, const char *command, const char *code,
+                      const char *context, const char *description);
+
 #endif /* INCLUDED_send_h */

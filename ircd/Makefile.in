@@ -186,6 +186,7 @@ IRCD_SRC = \
 	m_sethost.c \
 	m_setname.c \
 	m_settime.c \
+	m_tagmsg.c \
 	m_shun.c \
 	m_silence.c \
 	m_smo.c \

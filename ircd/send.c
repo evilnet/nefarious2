@@ -122,6 +122,13 @@ static char *format_message_tags(char *buf, size_t buflen, struct Client *from)
     }
   }
 
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
   if (pos < (int)buflen - 1) {
     buf[pos++] = ' ';
     buf[pos] = '\0';
@@ -142,14 +149,31 @@ static int wants_message_tags(struct Client *to)
           MyConnect(to) && cli_label(to)[0]);
 }
 
+/** Generate a unique message ID for IRCv3 message-ids.
+ * Format: <server_numeric>-<startup_ts>-<counter>
+ * @param[out] buf Buffer to write message ID to.
+ * @param[in] buflen Size of buffer.
+ * @return Pointer to buf.
+ */
+static char *generate_msgid(char *buf, size_t buflen)
+{
+  snprintf(buf, buflen, "%s-%lu-%lu",
+           cli_yxx(&me),
+           (unsigned long)cli_firsttime(&me),
+           ++MsgIdCounter);
+  return buf;
+}
+
 /** Format message tags for a specific recipient, including label if applicable.
  * @param[out] buf Buffer for tag string.
  * @param[in] buflen Size of buffer.
  * @param[in] from Source client (for account tag).
  * @param[in] to Recipient client (for label tag).
+ * @param[in] msgid Message ID to include, or NULL for none.
  * @return Pointer to buf, or NULL if no tags to add.
  */
-static char *format_message_tags_for(char *buf, size_t buflen, struct Client *from, struct Client *to)
+static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client *from,
+                                        struct Client *to, const char *msgid)
 {
   int use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
@@ -158,9 +182,10 @@ static char *format_message_tags_for(char *buf, size_t buflen, struct Client *fr
                   to && MyConnect(to) && cli_label(to)[0];
   int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
+  int use_msgid = msgid && *msgid;
   int pos = 0;
 
-  if (!use_time && !use_account && !use_label && !use_batch)
+  if (!use_time && !use_account && !use_label && !use_batch && !use_msgid)
     return NULL;
 
   buf[0] = '@';
@@ -171,6 +196,13 @@ static char *format_message_tags_for(char *buf, size_t buflen, struct Client *fr
     pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
   } else if (use_label) {
     pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+  }
+
+  /* Add @msgid for message tracking (IRCv3 message-ids) */
+  if (use_msgid) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "msgid=%s", msgid);
   }
 
   if (use_time) {
@@ -198,12 +230,31 @@ static char *format_message_tags_for(char *buf, size_t buflen, struct Client *fr
     }
   }
 
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
   if (pos < (int)buflen - 1) {
     buf[pos++] = ' ';
     buf[pos] = '\0';
   }
 
   return buf;
+}
+
+/** Format message tags for a specific recipient (wrapper without msgid).
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag).
+ * @param[in] to Recipient client (for label tag).
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_for(char *buf, size_t buflen, struct Client *from, struct Client *to)
+{
+  return format_message_tags_for_ex(buf, buflen, from, to, NULL);
 }
 
 /*
@@ -499,15 +550,23 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  char tagbuf[256];
+  char tagbuf[512];
+  char msgidbuf[64];
   char *tags;
+  const char *msgid = NULL;
 
   to = cli_from(to);
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  tags = format_message_tags_for(tagbuf, sizeof(tagbuf), from, to);
+  /* Generate msgid for PRIVMSG and NOTICE if feature enabled */
+  if (feature_bool(FEAT_MSGID) &&
+      (cmd == CMD_PRIVATE || cmd == CMD_NOTICE)) {
+    msgid = generate_msgid(msgidbuf, sizeof(msgidbuf));
+  }
+
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
@@ -1451,5 +1510,91 @@ int has_active_batch(struct Client *cptr)
   if (!MyConnect(cptr))
     return 0;
   return cli_batch_id(cptr)[0] != '\0';
+}
+
+/**
+ * Send a standard reply (FAIL/WARN/NOTE) to a client.
+ * Internal helper function.
+ * @param[in] to Client to send to.
+ * @param[in] type Reply type (FAIL, WARN, or NOTE).
+ * @param[in] command Command that generated this reply (or "*" for general).
+ * @param[in] code Machine-readable code (e.g., "ACCOUNT_REQUIRED").
+ * @param[in] context Optional context parameter (NULL if none).
+ * @param[in] description Human-readable description.
+ */
+static void send_standard_reply(struct Client *to, const char *type,
+                                 const char *command, const char *code,
+                                 const char *context, const char *description)
+{
+  struct MsgBuf *mb;
+  char tagbuf[512];
+
+  if (!MyConnect(to))
+    return;
+
+  /* Only send to clients with standard-replies capability */
+  if (!feature_bool(FEAT_CAP_standard_replies) || !CapActive(to, CAP_STANDARDREPLIES))
+    return;
+
+  /* Format tags (label, time) if applicable */
+  if (format_message_tags_for(tagbuf, sizeof(tagbuf), NULL, to)) {
+    if (context && *context)
+      mb = msgq_make(to, "%s%s %s %s %s :%s", tagbuf, type, command, code, context, description);
+    else
+      mb = msgq_make(to, "%s%s %s %s :%s", tagbuf, type, command, code, description);
+  } else {
+    if (context && *context)
+      mb = msgq_make(to, "%s %s %s %s :%s", type, command, code, context, description);
+    else
+      mb = msgq_make(to, "%s %s %s :%s", type, command, code, description);
+  }
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
+/**
+ * Send a FAIL reply to a client (IRCv3 standard-replies).
+ * Indicates an error that prevented the command from executing.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general failure).
+ * @param[in] code Machine-readable error code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable error message.
+ */
+void send_fail(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  send_standard_reply(to, "FAIL", command, code, context, description);
+}
+
+/**
+ * Send a WARN reply to a client (IRCv3 standard-replies).
+ * Indicates a warning that didn't prevent command execution.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general warning).
+ * @param[in] code Machine-readable warning code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable warning message.
+ */
+void send_warn(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  send_standard_reply(to, "WARN", command, code, context, description);
+}
+
+/**
+ * Send a NOTE reply to a client (IRCv3 standard-replies).
+ * Provides informational feedback about a command.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general note).
+ * @param[in] code Machine-readable info code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable info message.
+ */
+void send_note(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  send_standard_reply(to, "NOTE", command, code, context, description);
 }
 

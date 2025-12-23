@@ -54,6 +54,7 @@ extern char*          configfile;
 extern int            debuglevel;
 extern char*          debugmode;
 extern int	      running;
+extern unsigned long  MsgIdCounter;   /**< Counter for unique message IDs */
 
 #endif /* INCLUDED_ircd_h */
 

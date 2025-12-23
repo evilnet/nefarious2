@@ -74,6 +74,7 @@ static struct capabilities {
   _CAP(LABELEDRESP, 0, "labeled-response", FEAT_CAP_labeled_response),
   _CAP(BATCH, 0, "batch", FEAT_CAP_batch),
   _CAP(SETNAME, 0, "setname", FEAT_CAP_setname),
+  _CAP(STANDARDREPLIES, 0, "standard-replies", FEAT_CAP_standard_replies),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif

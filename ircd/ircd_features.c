@@ -805,6 +805,8 @@ static struct FeatureDesc {
   F_B(CAP_labeled_response, 0, 1, 0),
   F_B(CAP_batch, 0, 1, 0),
   F_B(CAP_setname, 0, 1, 0),
+  F_B(CAP_standard_replies, 0, 1, 0),
+  F_B(MSGID, 0, 1, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

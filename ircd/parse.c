@@ -902,6 +902,14 @@ struct Message msgtab[] = {
     "- SETNAME :newrealname - Change your realname (GECOS)"
   },
   {
+    MSG_TAGMSG,
+    TOK_TAGMSG,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_tagmsg, ms_tagmsg, m_tagmsg, m_ignore },
+    "- TAGMSG target - Send message with only tags (no content)"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,
@@ -1415,6 +1423,24 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
 
   if (IsDead(cptr))
     return 0;
+
+  /*
+   * IRCv3.2 Message Tags: If line starts with @, extract and skip tags.
+   * Format: @tag1=value;tag2;+clienttag=value NUMERIC TOKEN params
+   * For now, we just skip past tags (Phase 13a - foundation).
+   * Full tag processing will be added in Phase 13b/13c.
+   */
+  if (*ch == '@') {
+    /* Find the end of tags (first space after @) */
+    char *tagend = strchr(ch, ' ');
+    if (tagend) {
+      /* Skip past the @ prefix and tags to the actual message */
+      ch = tagend;
+      while (*ch == ' ')
+        ch++;
+    }
+    /* If no space found, malformed - continue with original parse */
+  }
 
   para[0] = cli_name(from);
 

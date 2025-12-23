@@ -322,6 +322,8 @@ enum Feature {
   FEAT_CAP_labeled_response,
   FEAT_CAP_batch,
   FEAT_CAP_setname,
+  FEAT_CAP_standard_replies,
+  FEAT_MSGID,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif
