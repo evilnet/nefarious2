@@ -112,6 +112,7 @@ extern void sendcmdto_channel_butone(struct Client *from, const char *cmd,
                                    chanops and halfops) */
 #define SKIP_NONHOPS	0x10	/**< skip users that aren't halfopped (includes
                                    chanops) */
+#define SKIP_CHGHOST	0x20	/**< skip users that have chghost capability */
 
 /* Send command to all users having a particular flag set */
 extern void sendwallto_group_butone(struct Client *from, int type, 

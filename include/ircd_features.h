@@ -317,6 +317,7 @@ enum Feature {
   FEAT_CAP_server_time,
   FEAT_CAP_echo_message,
   FEAT_CAP_account_tag,
+  FEAT_CAP_chghost,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif

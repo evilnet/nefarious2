@@ -731,7 +731,8 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_DEAF && IsDeaf(member->user))
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
-        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
+        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
+        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST)))
         continue;
     if (mb_tags && wants_message_tags(member->user))
       send_buffer(member->user, mb_tags, 0);
@@ -791,6 +792,7 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
+        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
         || ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         || ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
         continue;
