@@ -73,6 +73,7 @@ static struct capabilities {
   _CAP(INVITENOTIFY, 0, "invite-notify", FEAT_CAP_invite_notify),
   _CAP(LABELEDRESP, 0, "labeled-response", FEAT_CAP_labeled_response),
   _CAP(BATCH, 0, "batch", FEAT_CAP_batch),
+  _CAP(SETNAME, 0, "setname", FEAT_CAP_setname),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif

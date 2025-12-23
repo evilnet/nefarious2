@@ -53,6 +53,7 @@ enum Capab {
   _CAP(INVITENOTIFY, 0, "invite-notify", 0),
   _CAP(LABELEDRESP, 0, "labeled-response", 0),
   _CAP(BATCH, 0, "batch", 0),
+  _CAP(SETNAME, 0, "setname", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif

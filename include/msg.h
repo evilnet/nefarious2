@@ -504,6 +504,10 @@ struct Client;
 #define TOK_BATCH	"BATCH"
 #define CMD_BATCH	MSG_BATCH, TOK_BATCH
 
+#define MSG_SETNAME	"SETNAME"
+#define TOK_SETNAME	"SE"
+#define CMD_SETNAME	MSG_SETNAME, TOK_SETNAME
+
 /*
  * Constants
  */

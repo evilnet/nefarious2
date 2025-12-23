@@ -184,6 +184,7 @@ IRCD_SRC = \
 	m_server.c \
 	m_set.c \
 	m_sethost.c \
+	m_setname.c \
 	m_settime.c \
 	m_shun.c \
 	m_silence.c \

@@ -894,6 +894,14 @@ struct Message msgtab[] = {
     ""
   },
   {
+    MSG_SETNAME,
+    TOK_SETNAME,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_setname, ms_setname, m_setname, m_ignore },
+    "- SETNAME :newrealname - Change your realname (GECOS)"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,
