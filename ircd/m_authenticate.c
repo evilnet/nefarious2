@@ -82,6 +82,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_features.h"
@@ -133,8 +134,11 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   if (parc < 2) /* have enough parameters? */
     return need_more_params(cptr, "AUTHENTICATE");
 
-  if (strlen(parv[1]) > 400)
+  if (strlen(parv[1]) > 400) {
+    if (CapActive(cptr, CAP_STANDARDREPLIES))
+      send_fail(cptr, "AUTHENTICATE", "TOO_LONG", NULL, "SASL message too long");
     return send_reply(cptr, ERR_SASLTOOLONG);
+  }
 
   /* For registered users, allow re-authentication (e.g., OAuth token refresh).
    * Reset SASL state and start a new session instead of rejecting.
@@ -198,8 +202,11 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       acptr = NULL;
   }
 
-  if (!acptr && strcmp(feature_str(FEAT_SASL_SERVER), "*"))
+  if (!acptr && strcmp(feature_str(FEAT_SASL_SERVER), "*")) {
+    if (CapActive(cptr, CAP_STANDARDREPLIES))
+      send_fail(cptr, "AUTHENTICATE", "SASL_FAIL", NULL, "SASL service unavailable");
     return send_reply(cptr, ERR_SASLFAIL, ": service unavailable");
+  }
 
   /* If it's to us, do nothing; otherwise, forward the query */
   if (acptr && IsMe(acptr))

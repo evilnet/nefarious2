@@ -120,8 +120,11 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(0 != cptr);
   assert(cptr == sptr);
 
-  if (parc < 2 || EmptyString(parv[1]))
+  if (parc < 2 || EmptyString(parv[1])) {
+    if (CapActive(sptr, CAP_STANDARDREPLIES))
+      send_fail(sptr, "TAGMSG", "NEED_MORE_PARAMS", NULL, "Missing target");
     return send_reply(sptr, ERR_NEEDMOREPARAMS, "TAGMSG");
+  }
 
   /* Get the client-only tags extracted from the message */
   client_tags = cli_client_tags(sptr);
@@ -135,12 +138,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Check if target is a channel */
   if (IsChannelName(target)) {
     chptr = FindChannel(target);
-    if (!chptr)
+    if (!chptr) {
+      if (CapActive(sptr, CAP_STANDARDREPLIES))
+        send_fail(sptr, "TAGMSG", "INVALID_TARGET", target, "No such channel");
       return send_reply(sptr, ERR_NOSUCHCHANNEL, target);
+    }
 
     /* Check if user can send to channel */
-    if (!client_can_send_to_channel(sptr, chptr, 0))
+    if (!client_can_send_to_channel(sptr, chptr, 0)) {
+      if (CapActive(sptr, CAP_STANDARDREPLIES))
+        send_fail(sptr, "TAGMSG", "CANNOT_SEND", chptr->chname, "Cannot send to channel");
       return send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
+    }
 
     /* Relay TAGMSG with client-only tags to local channel members */
     sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, sptr,
@@ -156,8 +165,11 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   else {
     /* Target is a user */
     acptr = FindUser(target);
-    if (!acptr)
+    if (!acptr) {
+      if (CapActive(sptr, CAP_STANDARDREPLIES))
+        send_fail(sptr, "TAGMSG", "INVALID_TARGET", target, "No such nick");
       return send_reply(sptr, ERR_NOSUCHNICK, target);
+    }
 
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags */

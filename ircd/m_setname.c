@@ -111,11 +111,17 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(cptr == sptr);
 
   /* Check if setname capability is enabled */
-  if (!feature_bool(FEAT_CAP_setname))
+  if (!feature_bool(FEAT_CAP_setname)) {
+    if (CapActive(sptr, CAP_STANDARDREPLIES))
+      send_fail(sptr, "SETNAME", "DISABLED", NULL, "SETNAME command is disabled");
     return send_reply(sptr, ERR_UNKNOWNCOMMAND, "SETNAME");
+  }
 
-  if (parc < 2 || EmptyString(parv[1]))
+  if (parc < 2 || EmptyString(parv[1])) {
+    if (CapActive(sptr, CAP_STANDARDREPLIES))
+      send_fail(sptr, "SETNAME", "NEED_MORE_PARAMS", NULL, "Missing realname");
     return send_reply(sptr, ERR_NEEDMOREPARAMS, "SETNAME");
+  }
 
   newname = parv[1];
 
