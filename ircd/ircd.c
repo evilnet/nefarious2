@@ -123,6 +123,7 @@ static char   *dbg_client;                /**< Client specifier for chkconf */
 static struct Timer connect_timer; /**< timer structure for try_connections() */
 static struct Timer ping_timer; /**< timer structure for check_pings() */
 static struct Timer destruct_event_timer; /**< timer structure for exec_expired_destruct_events() */
+static struct Timer history_purge_timer; /**< timer structure for history_purge_callback() */
 
 /** Daemon information. */
 static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
@@ -509,8 +510,34 @@ static void check_pings(struct Event* ev) {
   
   Debug((DEBUG_DEBUG, "[%i] check_pings() again in %is",
 	 CurrentTime, next_check-CurrentTime));
-  
+
   timer_add(&ping_timer, check_pings, 0, TT_ABSOLUTE, next_check);
+}
+
+/** Periodic callback to purge old history messages.
+ * Runs every hour to enforce CHATHISTORY_RETENTION policy.
+ * @param[in] ev Timer event (ignored).
+ */
+static void history_purge_callback(struct Event* ev)
+{
+  int retention_days;
+  unsigned long max_age_seconds;
+
+  (void)ev; /* unused */
+
+  /* Only run if chathistory is enabled */
+  if (!feature_bool(FEAT_CAP_draft_chathistory))
+    return;
+
+  if (!history_is_available())
+    return;
+
+  retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
+  if (retention_days <= 0)
+    return; /* Retention disabled */
+
+  max_age_seconds = (unsigned long)retention_days * 24 * 60 * 60;
+  history_purge_old(max_age_seconds);
 }
 
 
@@ -803,6 +830,7 @@ int main(int argc, char **argv) {
   timer_add(timer_init(&connect_timer), try_connections, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&ping_timer), check_pings, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&destruct_event_timer), exec_expired_destruct_events, 0, TT_PERIODIC, 60);
+  timer_add(timer_init(&history_purge_timer), history_purge_callback, 0, TT_PERIODIC, 3600); /* Run every hour */
 
   CurrentTime = time(NULL);
 

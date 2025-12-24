@@ -83,10 +83,12 @@
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
@@ -96,6 +98,64 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
+#include <sys/time.h>
+
+/** Counter for generating unique message IDs for history */
+static unsigned long tagmsg_history_counter = 0;
+
+/**
+ * Store a TAGMSG in channel history for event-playback.
+ * TAGMSG content is stored as the client-only tags.
+ */
+static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
+                                  const char *client_tags)
+{
+  struct timeval tv;
+  struct tm tm;
+  char timestamp[32];
+  char msgid[64];
+  char sender[HISTORY_SENDER_LEN];
+  const char *account;
+
+  if (!history_is_available())
+    return;
+
+  /* Only store if event-playback is enabled */
+  if (!feature_bool(FEAT_CAP_draft_event_playback))
+    return;
+
+  /* Generate ISO 8601 timestamp */
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  ircd_snprintf(0, timestamp, sizeof(timestamp),
+                "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                tv.tv_usec / 1000);
+
+  /* Generate unique msgid */
+  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                cli_yxx(&me),
+                (unsigned long)cli_firsttime(&me),
+                ++tagmsg_history_counter);
+
+  /* Build sender string: nick!user@host */
+  if (cli_user(sptr))
+    ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                  cli_name(sptr),
+                  cli_user(sptr)->username,
+                  cli_user(sptr)->host);
+  else
+    ircd_strncpy(sender, cli_name(sptr), sizeof(sender) - 1);
+
+  /* Get account name if logged in */
+  account = (cli_user(sptr) && cli_user(sptr)->account[0])
+            ? cli_user(sptr)->account : NULL;
+
+  /* Store in database - content is the client-only tags */
+  history_store_message(msgid, timestamp, chptr->chname, sender,
+                        account, HISTORY_TAGMSG, client_tags);
+}
 
 /*
  * m_tagmsg - local client message handler
@@ -155,6 +215,9 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, sptr,
                                   SKIP_DEAF | SKIP_BURST, client_tags,
                                   "%H", chptr);
+
+    /* Store for chathistory event-playback */
+    store_tagmsg_history(sptr, chptr, client_tags);
 
     /* Propagate to other servers (S2S with tags in P10 message) */
     if (!IsLocalChannel(chptr->chname)) {

@@ -42,6 +42,9 @@
  * Returns RPL_ISUPPORT (005) messages to the client. Requires the
  * draft/extended-isupport capability to be negotiated.
  *
+ * When the client also has batch capability, ISUPPORT is wrapped
+ * in a draft/isupport batch.
+ *
  * @param[in] cptr Client that sent us the message.
  * @param[in] sptr Original source of message.
  * @param[in] parc Number of arguments.
@@ -53,8 +56,9 @@ int m_isupport(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (!HasCap(sptr, CAP_DRAFT_EXTISUPPORT))
     return send_reply(sptr, ERR_UNKNOWNCOMMAND, "ISUPPORT");
 
-  /* Send ISUPPORT - reuses existing infrastructure from s_user.c */
-  send_supported(sptr);
+  /* Send ISUPPORT - use batched version which will wrap in batch
+   * if client has batch capability, otherwise sends plain ISUPPORT */
+  send_supported_batched(sptr);
 
   return 0;
 }

@@ -918,13 +918,107 @@ void history_free_targets(struct HistoryTarget *list)
 
 int history_purge_old(unsigned long max_age_seconds)
 {
-  /* TODO: Implement purge logic
-   * - Calculate cutoff timestamp
-   * - Iterate all messages
-   * - Delete those older than cutoff
-   * - Update targets table accordingly
-   */
-  return 0;
+  MDB_txn *txn;
+  MDB_cursor *cursor;
+  MDB_val key, data;
+  time_t cutoff_time;
+  struct tm *tm_info;
+  char cutoff_ts[HISTORY_TIMESTAMP_LEN];
+  char msg_target[CHANNELLEN + 1];
+  char msg_timestamp[HISTORY_TIMESTAMP_LEN];
+  char msg_msgid[HISTORY_MSGID_LEN];
+  int deleted = 0;
+  int rc;
+
+  if (!history_available)
+    return -1;
+
+  if (max_age_seconds == 0)
+    return 0; /* Retention disabled */
+
+  /* Calculate cutoff timestamp */
+  cutoff_time = time(NULL) - max_age_seconds;
+  tm_info = gmtime(&cutoff_time);
+  if (!tm_info)
+    return -1;
+
+  ircd_snprintf(0, cutoff_ts, sizeof(cutoff_ts),
+                "%04d-%02d-%02dT%02d:%02d:%02d.000Z",
+                tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
+                tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+
+  Debug((DEBUG_DEBUG, "history: purging messages older than %s", cutoff_ts));
+
+  /* Begin write transaction */
+  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdb_txn_begin failed: %s",
+              mdb_strerror(rc));
+    return -1;
+  }
+
+  /* Open cursor on messages database */
+  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdb_cursor_open failed: %s",
+              mdb_strerror(rc));
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Iterate from the beginning (oldest messages first due to key structure) */
+  rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
+  while (rc == 0) {
+    /* Parse the key to get timestamp */
+    if (parse_key(key.mv_data, key.mv_size,
+                  msg_target, msg_timestamp, msg_msgid) == 0) {
+      /* Compare timestamp with cutoff */
+      if (strcmp(msg_timestamp, cutoff_ts) < 0) {
+        /* Message is older than cutoff - delete it */
+
+        /* First delete from msgid index if we have a msgid */
+        if (msg_msgid[0] != '\0') {
+          MDB_val msgid_key;
+          msgid_key.mv_size = strlen(msg_msgid);
+          msgid_key.mv_data = msg_msgid;
+          mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+        }
+
+        /* Delete the message using cursor */
+        rc = mdb_cursor_del(cursor, 0);
+        if (rc == 0) {
+          deleted++;
+        }
+
+        /* Move to next (cursor position is already at next after del) */
+        rc = mdb_cursor_get(cursor, &key, &data, MDB_GET_CURRENT);
+        if (rc == MDB_NOTFOUND) {
+          /* Deleted last entry, try to get next */
+          rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+        }
+        continue;
+      }
+    }
+
+    rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+  }
+
+  mdb_cursor_close(cursor);
+
+  /* Commit the transaction */
+  rc = mdb_txn_commit(txn);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdb_txn_commit failed: %s",
+              mdb_strerror(rc));
+    return -1;
+  }
+
+  if (deleted > 0) {
+    log_write(LS_SYSTEM, L_INFO, 0, "history: purged %d old messages (cutoff: %s)",
+              deleted, cutoff_ts);
+  }
+
+  return deleted;
 }
 
 int history_msgid_to_timestamp(const char *msgid, char *timestamp)

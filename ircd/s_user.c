@@ -2606,5 +2606,49 @@ send_supported(struct Client *cptr)
   return 0; /* convenience return, if it's ever needed */
 }
 
+/** Send RPL_ISUPPORT lines to \a cptr wrapped in a batch.
+ * Used when client has both batch and draft/extended-isupport capabilities.
+ * @param[in] cptr Client to send ISUPPORT to.
+ * @return Zero.
+ */
+int
+send_supported_batched(struct Client *cptr)
+{
+  struct SLink *line;
+  char batchid[12];
+  static unsigned long isupport_batch_counter = 0;
+
+  if (isupport && !isupport_lines)
+    build_isupport_lines();
+
+  /* Check if we should use batch wrapping */
+  if (!CapActive(cptr, CAP_BATCH)) {
+    /* No batch support, fall back to regular ISUPPORT */
+    for (line = isupport_lines; line; line = line->next)
+      send_reply(cptr, RPL_ISUPPORT, line->value.cp);
+    return 0;
+  }
+
+  /* Generate unique batch ID */
+  ircd_snprintf(0, batchid, sizeof(batchid), "%s%lu",
+                cli_yxx(&me), ++isupport_batch_counter);
+
+  /* Start batch: BATCH +id draft/isupport */
+  sendcmdto_one(&me, CMD_BATCH_CMD, cptr, "+%s draft/isupport", batchid);
+
+  /* Send each ISUPPORT line with batch tag */
+  for (line = isupport_lines; line; line = line->next) {
+    sendrawto_one(cptr, "@batch=%s :%s 005 %s %s :are supported by this server",
+                  batchid, cli_name(&me),
+                  IsRegistered(cptr) ? cli_name(cptr) : "*",
+                  line->value.cp);
+  }
+
+  /* End batch: BATCH -id */
+  sendcmdto_one(&me, CMD_BATCH_CMD, cptr, "-%s", batchid);
+
+  return 0;
+}
+
 /* vim: shiftwidth=2 
  */ 
