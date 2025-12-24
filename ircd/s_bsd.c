@@ -55,6 +55,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "struct.h"
+#include "websocket.h"
 #include "sys.h"
 #include "uping.h"
 #include "version.h"
@@ -70,8 +71,13 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+
+#ifndef IOV_MAX
+#define IOV_MAX 1024
+#endif /* IOV_MAX */
 
 /** Array of my own clients, indexed by file descriptor. */
 struct Client*            LocalClientArray[MAXCONNECTIONS];
@@ -297,6 +303,88 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
   unsigned int bytes_written = 0;
   unsigned int bytes_count = 0;
   assert(0 != cptr);
+
+  /*
+   * For WebSocket clients, we need to wrap each IRC line in a WebSocket frame.
+   * We extract data from the MsgQ, frame it, and send the framed version.
+   */
+  if (IsWebSocket(cptr)) {
+    static char ws_frame[BUFSIZE + 16];
+    static char irc_line[BUFSIZE + 4];
+    struct iovec iov[IOV_MAX];
+    int iovcnt;
+    int i, line_len = 0;
+    int frame_len;
+    IOResult result;
+    int send_result;
+
+    /* Get data from message queue as iovecs */
+    iovcnt = msgq_mapiov(buf, iov, IOV_MAX, &bytes_count);
+
+    /* Concatenate iovecs into single buffer for framing */
+    for (i = 0; i < iovcnt && line_len < (int)sizeof(irc_line) - 1; i++) {
+      int copy_len = iov[i].iov_len;
+      if (line_len + copy_len >= (int)sizeof(irc_line))
+        copy_len = sizeof(irc_line) - line_len - 1;
+      memcpy(irc_line + line_len, iov[i].iov_base, copy_len);
+      line_len += copy_len;
+    }
+    irc_line[line_len] = '\0';
+
+    /* Strip \r\n from end - WebSocket IRC doesn't need it */
+    while (line_len > 0 && (irc_line[line_len-1] == '\r' || irc_line[line_len-1] == '\n'))
+      irc_line[--line_len] = '\0';
+
+    if (line_len > 0) {
+      /* Encode as WebSocket frame (text mode for IRC) */
+      frame_len = websocket_encode_frame(irc_line, line_len,
+                                         (unsigned char *)ws_frame, 1);
+
+#ifdef USE_SSL
+      if (cli_socket(cptr).ssl) {
+        /* SSL WebSocket - use SSL_write directly */
+        send_result = SSL_write(cli_socket(cptr).ssl, ws_frame, frame_len);
+        if (send_result > 0) {
+          result = IO_SUCCESS;
+          bytes_written = send_result;
+        } else {
+          int ssl_err = SSL_get_error(cli_socket(cptr).ssl, send_result);
+          if (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ)
+            result = IO_BLOCKED;
+          else
+            result = IO_FAILURE;
+          bytes_written = 0;
+        }
+      } else
+#endif
+        result = os_send_nonb(cli_fd(cptr), ws_frame, frame_len, &bytes_written);
+
+      switch (result) {
+      case IO_SUCCESS:
+        ClrFlag(cptr, FLAG_BLOCKED);
+        cli_sendB(cptr) += bytes_written;
+        cli_sendB(&me)  += bytes_written;
+        /* Return original byte count so msgq knows how much to delete */
+        if (bytes_written >= (unsigned)frame_len)
+          bytes_written = bytes_count;
+        else
+          bytes_written = 0; /* Partial write - don't delete from queue */
+        if (bytes_written < bytes_count)
+          SetFlag(cptr, FLAG_BLOCKED);
+        break;
+      case IO_BLOCKED:
+        SetFlag(cptr, FLAG_BLOCKED);
+        bytes_written = 0;
+        break;
+      case IO_FAILURE:
+        cli_error(cptr) = errno;
+        SetFlag(cptr, FLAG_DEADSOCKET);
+        bytes_written = 0;
+        break;
+      }
+    }
+    return bytes_written;
+  }
 
 #ifdef USE_SSL
   switch (client_sendv(cptr, buf, &bytes_count, &bytes_written)) {
@@ -682,6 +770,11 @@ void add_connection(struct Listener* listener, int fd) {
   }
 #endif
 
+  /* Mark WebSocket connections - they need handshake before IRC protocol */
+  if (listener_websocket(listener) && feature_bool(FEAT_DRAFT_WEBSOCKET)) {
+    SetWSNeedHandshake(new_client);
+  }
+
   Count_newunknown(UserStats);
   /* if we've made it this far we can put the client on the auth query pile */
   start_auth(new_client);
@@ -754,6 +847,54 @@ static int read_packet(struct Client *cptr, int socket_ready)
     return connect_dopacket(cptr, readbuf, length);
   else
   {
+    /*
+     * For WebSocket clients, decode frames before queuing.
+     * WebSocket frames wrap the IRC protocol data.
+     */
+    if (length > 0 && IsWebSocket(cptr)) {
+      static char ws_payload[BUFSIZE + 16];
+      int ws_len, opcode, consumed;
+      const unsigned char *ws_data = (const unsigned char *)readbuf;
+      int ws_remaining = length;
+
+      while (ws_remaining > 0) {
+        consumed = websocket_decode_frame(ws_data, ws_remaining,
+                                          ws_payload, sizeof(ws_payload),
+                                          &ws_len, &opcode);
+        if (consumed == 0) {
+          /* Incomplete frame - save for later */
+          /* TODO: Implement frame buffering for partial frames */
+          break;
+        } else if (consumed < 0) {
+          /* Frame error */
+          return exit_client(cptr, cptr, &me, "WebSocket frame error");
+        }
+
+        /* Handle control frames */
+        if (opcode >= WS_OPCODE_CLOSE) {
+          if (!websocket_handle_control(cptr, opcode, ws_payload, ws_len)) {
+            /* Close frame received */
+            return exit_client(cptr, cptr, &me, "WebSocket closed");
+          }
+        } else if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
+          /* Data frame - add line ending if needed and queue */
+          if (ws_len > 0) {
+            /* WebSocket IRC: messages don't require \r\n, add \n for parser */
+            if (ws_len < (int)sizeof(ws_payload) - 1 &&
+                ws_payload[ws_len - 1] != '\n') {
+              ws_payload[ws_len++] = '\n';
+            }
+            if (dbuf_put(&(cli_recvQ(cptr)), ws_payload, ws_len) == 0)
+              return exit_client(cptr, cptr, &me, "dbuf_put fail");
+          }
+        }
+
+        ws_data += consumed;
+        ws_remaining -= consumed;
+      }
+      length = 0; /* Data processed via WebSocket path */
+    }
+
     /*
      * Before we even think of parsing what we just read, stick
      * it on the end of the receive queue and do it when its

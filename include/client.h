@@ -233,6 +233,8 @@ enum Flag
     FLAG_SSL,                       /**< User is connected via SSL (+z) */
     FLAG_STARTTLS,                  /**< User is connecting with StartTLS */
     FLAG_SSLNEEDACCEPT,             /**< Client needs SSL_accept() to be called again */
+    FLAG_WEBSOCKET,                 /**< Client is connected via WebSocket */
+    FLAG_WSNEEDHANDSHAKE,           /**< WebSocket client needs handshake */
 
     FLAG_IPCEXEMPT,                 /**< User is IPcheck exempt */
     FLAG_IPCNOTEXEMPT,              /**< User is not IPcheck exempt */
@@ -889,6 +891,10 @@ struct Client {
 #define IsStartTLS(x)           HasFlag(x, FLAG_STARTTLS)
 /** Return non-zero if the client still needs SSL_accept(). */
 #define IsSSLNeedAccept(x)      HasFlag(x, FLAG_SSLNEEDACCEPT)
+/** Return non-zero if the client is connected via WebSocket. */
+#define IsWebSocket(x)          HasFlag(x, FLAG_WEBSOCKET)
+/** Return non-zero if the client needs WebSocket handshake. */
+#define IsWSNeedHandshake(x)    HasFlag(x, FLAG_WSNEEDHANDSHAKE)
 /** Return non-zero if the client is IPcheck exempt. */
 #define IsIPCheckExempt(x)      HasFlag(x, FLAG_IPCEXEMPT)
 /** Return non-zero if the client is not IPcheck exempt. */
@@ -1009,6 +1015,10 @@ struct Client {
 #define SetStartTLS(x)          SetFlag(x, FLAG_STARTTLS)
 /** Mark a client as needing SSL_accept(). */
 #define SetSSLNeedAccept(x)     SetFlag(x, FLAG_SSLNEEDACCEPT)
+/** Mark a client as connected via WebSocket. */
+#define SetWebSocket(x)         SetFlag(x, FLAG_WEBSOCKET)
+/** Mark a client as needing WebSocket handshake. */
+#define SetWSNeedHandshake(x)   SetFlag(x, FLAG_WSNEEDHANDSHAKE)
 /** Mark a client as IPcheck exempt. */
 #define SetIPCheckExempt(x)     SetFlag(x, FLAG_IPCEXEMPT)
 /** Mark a client as not IPcheck exempt. */
@@ -1114,6 +1124,10 @@ struct Client {
 #define ClearStartTLS(x)        ClrFlag(x, FLAG_STARTTLS)
 /** Client no longer needs SSL_accept(). */
 #define ClearSSLNeedAccept(x)   ClrFlag(x, FLAG_SSLNEEDACCEPT)
+/** Client no longer connected via WebSocket. */
+#define ClearWebSocket(x)       ClrFlag(x, FLAG_WEBSOCKET)
+/** Client no longer needs WebSocket handshake. */
+#define ClearWSNeedHandshake(x) ClrFlag(x, FLAG_WSNEEDHANDSHAKE)
 /** Clear the client's join restriction. */
 #define ClearRestrictJoin(x)    ClrFlag(x, FLAG_RESTRICT_JOIN)
 /** Clear the client's PRIVMSG/NOTICE restriction. */

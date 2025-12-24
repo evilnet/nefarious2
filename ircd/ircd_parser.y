@@ -234,6 +234,7 @@ static void free_slist(struct SLink **link) {
 %token SWHOIS
 %token ENABLEOPTIONS
 %token TRUSTACCOUNT
+%token WEBSOCKET
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -977,7 +978,7 @@ portblock: PORT '{' portitems '}' ';' {
   port = 0;
 };
 portitems: portitem portitems | portitem;
-portitem: portnumber | portvhost | portvhostnumber | portmask | portserver | porthidden | portssl;
+portitem: portnumber | portvhost | portvhostnumber | portmask | portserver | porthidden | portssl | portwebsocket;
 portnumber: PORT '=' address_family NUMBER ';'
 {
   if ($4 < 1 || $4 > 65535) {
@@ -1046,6 +1047,14 @@ portssl: SSLTOK '=' YES ';'
 } | SSLTOK '=' NO ';'
 {
   FlagClr(&listen_flags, LISTEN_SSL);
+}
+
+portwebsocket: WEBSOCKET '=' YES ';'
+{
+  FlagSet(&listen_flags, LISTEN_WEBSOCKET);
+} | WEBSOCKET '=' NO ';'
+{
+  FlagClr(&listen_flags, LISTEN_WEBSOCKET);
 }
 
 clientblock: CLIENT

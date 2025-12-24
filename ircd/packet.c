@@ -32,6 +32,7 @@
 #include "s_bsd.h"
 #include "s_misc.h"
 #include "send.h"
+#include "websocket.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -121,6 +122,38 @@ int connect_dopacket(struct Client *cptr, const char *buffer, int length)
   assert(0 != cptr);
 
   update_bytes_received(cptr, length);
+
+  /* Handle WebSocket handshake if needed */
+  if (IsWSNeedHandshake(cptr)) {
+    int result;
+    /* Accumulate data in client buffer for HTTP request */
+    client_buffer = cli_buffer(cptr);
+    endp = client_buffer + cli_count(cptr);
+
+    /* Copy incoming data to buffer */
+    while (length > 0 && (endp - client_buffer) < BUFSIZE - 1) {
+      *endp++ = *buffer++;
+      length--;
+    }
+    *endp = '\0';
+    cli_count(cptr) = endp - client_buffer;
+
+    /* Try to complete handshake */
+    result = websocket_handshake(cptr, client_buffer, cli_count(cptr));
+    if (result == 0) {
+      /* Need more data */
+      return 1;
+    } else if (result < 0) {
+      /* Handshake failed */
+      return exit_client(cptr, cptr, &me, "WebSocket handshake failed");
+    }
+    /* Handshake succeeded - clear buffer and continue normally */
+    cli_count(cptr) = 0;
+    /* Process any remaining data after handshake (unlikely) */
+    if (length <= 0)
+      return 1;
+    buffer = buffer; /* Continue with remaining data */
+  }
 
   client_buffer = cli_buffer(cptr);
   endp = client_buffer + cli_count(cptr);
