@@ -94,6 +94,7 @@
 #include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -194,6 +195,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
 
+        /* Load account-linked metadata from LMDB */
+        metadata_load_account(acptr, parv[3]);
+
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
           Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
@@ -263,6 +267,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         ircd_strncpy(cli_user(acptr)->account, cli_loc(acptr)->account,
                         ACCOUNTLEN);
 
+        /* Load account-linked metadata from LMDB */
+        metadata_load_account(acptr, cli_loc(acptr)->account);
+
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
         }
@@ -322,6 +329,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);
+
+    /* Load account-linked metadata from LMDB */
+    metadata_load_account(acptr, parv[2]);
 
     sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                            "%s", cli_user(acptr)->account);

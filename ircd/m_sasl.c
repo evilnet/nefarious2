@@ -98,6 +98,7 @@
 #include "s_bsd.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -217,6 +218,9 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         if (ircd_strcmp(cli_user(acptr)->account, cli_saslaccount(acptr)) != 0) {
           ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN);
           SetAccount(acptr);
+
+          /* Load account-linked metadata from LMDB */
+          metadata_load_account(acptr, cli_saslaccount(acptr));
 
           if (cli_saslacccreate(acptr))
             cli_user(acptr)->acc_create = cli_saslacccreate(acptr);
