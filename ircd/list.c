@@ -44,6 +44,7 @@
 #include "send.h"
 #include "struct.h"
 #include "whowas.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stddef.h>  /* offsetof */
@@ -307,6 +308,9 @@ void free_client(struct Client* cptr)
   }
 
   cli_connect(cptr) = 0;
+
+  /* Free metadata and subscriptions for this client */
+  metadata_free_client(cptr);
 
   dealloc_client(cptr); /* actually destroy the client */
 }

@@ -1551,10 +1551,10 @@ static Numeric replyTable[] = {
   { 0 },
 /* 759 */
   { 0 },
-/* 760 */
-  { 0 },
-/* 761 */
-  { 0 },
+/* 760 - RPL_WHOISKEYVALUE */
+  { RPL_WHOISKEYVALUE, "%s %s %s * :%s", "760" },
+/* 761 - RPL_KEYVALUE */
+  { RPL_KEYVALUE, "%s %s * :%s", "761" },
 /* 762 */
   { 0 },
 /* 763 */
@@ -1563,24 +1563,24 @@ static Numeric replyTable[] = {
   { 0 },
 /* 765 */
   { 0 },
-/* 766 */
-  { 0 },
+/* 766 - RPL_KEYNOTSET */
+  { RPL_KEYNOTSET, "%s %s :key not set", "766" },
 /* 767 */
   { 0 },
 /* 768 */
   { 0 },
 /* 769 */
   { 0 },
-/* 770 */
-  { 0 },
-/* 771 */
-  { 0 },
-/* 772 */
-  { 0 },
+/* 770 - RPL_METADATASUBOK */
+  { RPL_METADATASUBOK, "%s :subscribed", "770" },
+/* 771 - RPL_METADATAUNSUBOK */
+  { RPL_METADATAUNSUBOK, "%s :unsubscribed", "771" },
+/* 772 - RPL_METADATASUBS */
+  { RPL_METADATASUBS, "%s", "772" },
 /* 773 */
   { 0 },
-/* 774 */
-  { 0 },
+/* 774 - RPL_METADATASYNCLATER */
+  { RPL_METADATASYNCLATER, "%s :sync deferred", "774" },
 /* 775 */
   { 0 },
 /* 776 */

@@ -544,6 +544,10 @@ struct Client;
 #define TOK_RENAME	"RN"
 #define CMD_RENAME	MSG_RENAME, TOK_RENAME
 
+#define MSG_METADATA	"METADATA"
+#define TOK_METADATA	"MD"
+#define CMD_METADATA	MSG_METADATA, TOK_METADATA
+
 /*
  * Constants
  */

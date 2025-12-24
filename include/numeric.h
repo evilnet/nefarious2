@@ -568,6 +568,15 @@ extern const struct Numeric* get_error_numeric(int err);
 #define RPL_HELPTXT          705	/* RatBox */
 #define RPL_ENDOFHELP        706	/* RatBox */
 
+/* IRCv3 - Metadata extension (760-774) */
+#define RPL_WHOISKEYVALUE    760	/* IRCv3 - Metadata (WHOIS integration) */
+#define RPL_KEYVALUE         761	/* IRCv3 - Metadata key-value pair */
+#define RPL_KEYNOTSET        766	/* IRCv3 - Metadata key not set */
+#define RPL_METADATASUBOK    770	/* IRCv3 - Metadata subscription OK */
+#define RPL_METADATAUNSUBOK  771	/* IRCv3 - Metadata unsubscription OK */
+#define RPL_METADATASUBS     772	/* IRCv3 - Metadata subscribed keys */
+#define RPL_METADATASYNCLATER 774	/* IRCv3 - Metadata sync deferred */
+
 #define RPL_LOGGEDIN         900	/* IRCv3 - SASL extension */
 #define RPL_LOGGEDOUT        901	/* IRCv3 - SASL extension */
 

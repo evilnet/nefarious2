@@ -98,6 +98,7 @@ enum Capab {
   _CAP(DRAFT_ACCOUNTREG, 0, "draft/account-registration", 0),
   _CAP(DRAFT_READMARKER, 0, "draft/read-marker", 0),
   _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", 0),
+  _CAP(DRAFT_METADATA2, 0, "draft/metadata-2", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif

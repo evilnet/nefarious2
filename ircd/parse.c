@@ -982,6 +982,14 @@ struct Message msgtab[] = {
     "<oldchannel> <newchannel> [:<reason>] - Rename a channel"
   },
   {
+    MSG_METADATA,
+    TOK_METADATA,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_metadata, ms_metadata, m_metadata, m_ignore },
+    "<subcommand> [args] - Manage user/channel metadata"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

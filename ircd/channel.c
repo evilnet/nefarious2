@@ -54,6 +54,7 @@
 #include "sys.h"
 #include "whowas.h"
 #include "history.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -427,6 +428,10 @@ int destruct_channel(struct Channel* chptr)
     next = ban->next;
     free_ban(ban);
   }
+
+  /* Free channel metadata */
+  metadata_free_channel(chptr);
+
   if (chptr->prev)
     chptr->prev->next = chptr->next;
   else

@@ -36,6 +36,7 @@
 
 struct SLink;
 struct Client;
+struct MetadataEntry;
 
 /*
  * General defines
@@ -387,6 +388,7 @@ struct Channel {
   char               topic_nick[NICKLEN + USERLEN + HOSTLEN + 3]; /**< Nick of the person who set
 						*  The topic
 						*/
+  struct MetadataEntry* metadata;  /**< Channel metadata (draft/metadata-2) */
   char               chname[1];	   /**< Dynamically allocated string of the
 				     * channel name
 				     */

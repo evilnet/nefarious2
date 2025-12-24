@@ -61,6 +61,8 @@ struct Whowas;
 struct hostent;
 struct Privs;
 struct AuthRequest;
+struct MetadataEntry;
+struct MetadataSub;
 
 /*
  * Structures
@@ -399,6 +401,10 @@ struct Client {
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
   struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
+
+  /* IRCv3 Metadata */
+  struct MetadataEntry* cli_metadata;    /**< Client metadata key-value pairs */
+  struct MetadataSub*   cli_metadatasub; /**< Client metadata subscriptions */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -528,6 +534,10 @@ struct Client {
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
 /** Get Timer for SASL timeout. */
 #define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
+/** Get client metadata list. */
+#define cli_metadata(cli)        ((cli)->cli_metadata)
+/** Get client metadata subscriptions. */
+#define cli_metadatasub(cli)     ((cli)->cli_metadatasub)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))

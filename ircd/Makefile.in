@@ -180,7 +180,9 @@ IRCD_SRC = \
 	m_redact.c \
 	m_register.c \
 	m_markread.c \
+	m_metadata.c \
 	m_rename.c \
+	metadata.c \
 	m_rehash.c \
 	m_remove.c \
 	m_reset.c \
