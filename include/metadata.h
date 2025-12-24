@@ -132,9 +132,10 @@ extern struct MetadataEntry *metadata_get_client(struct Client *cptr, const char
  * @param[in] cptr Client to set metadata on.
  * @param[in] key Key name.
  * @param[in] value Value to set (NULL to delete).
+ * @param[in] visibility Visibility level (METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE).
  * @return 0 on success, -1 on error.
  */
-extern int metadata_set_client(struct Client *cptr, const char *key, const char *value);
+extern int metadata_set_client(struct Client *cptr, const char *key, const char *value, int visibility);
 
 /** List all metadata for a client.
  * @param[in] cptr Client to list metadata for.
@@ -158,9 +159,10 @@ extern struct MetadataEntry *metadata_get_channel(struct Channel *chptr, const c
  * @param[in] chptr Channel to set metadata on.
  * @param[in] key Key name.
  * @param[in] value Value to set (NULL to delete).
+ * @param[in] visibility Visibility level (METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE).
  * @return 0 on success, -1 on error.
  */
-extern int metadata_set_channel(struct Channel *chptr, const char *key, const char *value);
+extern int metadata_set_channel(struct Channel *chptr, const char *key, const char *value, int visibility);
 
 /** List all metadata for a channel.
  * @param[in] chptr Channel to list metadata for.

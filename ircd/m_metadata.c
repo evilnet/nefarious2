@@ -302,15 +302,28 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
+/** Parse visibility string.
+ * @param[in] vis Visibility string ("*" or "private").
+ * @return METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
+ */
+static int parse_visibility(const char *vis)
+{
+  if (vis && ircd_strcmp(vis, "private") == 0)
+    return METADATA_VIS_PRIVATE;
+  return METADATA_VIS_PUBLIC;
+}
+
 /** Handle SET subcommand.
- * METADATA SET <target> <key> [<value>]
+ * METADATA SET <target> <key> [<visibility>] [<value>]
  * If no value, deletes the key.
+ * Visibility is "*" for public (default) or "private" for private.
  */
 static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
 {
   const char *target;
   const char *key;
   const char *value = NULL;
+  int visibility = METADATA_VIS_PUBLIC;
   int is_channel = 0;
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
@@ -326,8 +339,31 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
 
   target = parv[2];
   key = parv[3];
-  if (parc >= 5)
-    value = parv[4];
+
+  /* Parse optional visibility and value.
+   * Format options:
+   * SET target key                    -> delete
+   * SET target key :value             -> set public (value starts with :)
+   * SET target key * :value           -> set public
+   * SET target key private :value     -> set private
+   */
+  if (parc >= 5) {
+    /* Check if parv[4] is visibility or value */
+    if (parv[4][0] == '*' && parv[4][1] == '\0') {
+      /* Explicit public visibility */
+      visibility = METADATA_VIS_PUBLIC;
+      if (parc >= 6)
+        value = parv[5];
+    } else if (ircd_strcmp(parv[4], "private") == 0) {
+      /* Private visibility */
+      visibility = METADATA_VIS_PRIVATE;
+      if (parc >= 6)
+        value = parv[5];
+    } else {
+      /* No explicit visibility, parv[4] is the value */
+      value = parv[4];
+    }
+  }
 
   if (!is_valid_key(key)) {
     send_fail(sptr, "METADATA", "KEY_INVALID", key,
@@ -378,9 +414,9 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
 
   /* Perform the set/delete */
   if (is_channel) {
-    rc = metadata_set_channel(target_channel, key, value);
+    rc = metadata_set_channel(target_channel, key, value, visibility);
   } else {
-    rc = metadata_set_client(target_client, key, value);
+    rc = metadata_set_client(target_client, key, value, visibility);
   }
 
   if (rc < 0) {
@@ -389,16 +425,21 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Send confirmation with visibility (new metadata is public by default) */
-  send_keyvalue(sptr, target, key, value, "*");
+  /* Send confirmation with visibility */
+  send_keyvalue(sptr, target, key, value,
+                visibility == METADATA_VIS_PRIVATE ? "private" : "*");
 
-  /* Notify local subscribers */
-  notify_subscribers(target, key, value);
+  /* Notify local subscribers (only for public metadata) */
+  if (visibility == METADATA_VIS_PUBLIC) {
+    notify_subscribers(target, key, value);
+  }
 
-  /* Propagate to other servers */
+  /* Propagate to other servers with visibility */
   if (value) {
-    sendcmdto_serv_butone(sptr, CMD_METADATA, NULL, "%s %s :%s",
-                          target, key, value);
+    sendcmdto_serv_butone(sptr, CMD_METADATA, NULL, "%s %s %s :%s",
+                          target, key,
+                          visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                          value);
   } else {
     sendcmdto_serv_butone(sptr, CMD_METADATA, NULL, "%s %s",
                           target, key);
@@ -789,7 +830,11 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  * parv[0] = sender prefix
  * parv[1] = target
  * parv[2] = key
- * parv[3] = value (optional, absence means delete)
+ * parv[3] = visibility ("*" or "P") (optional for backwards compat)
+ * parv[4] = value (optional, absence means delete)
+ *
+ * For backwards compatibility, if parv[3] is present but not a visibility
+ * token, treat it as the value.
  *
  * @param[in] cptr Client that sent us the message.
  * @param[in] sptr Original source of message.
@@ -801,6 +846,7 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   const char *target;
   const char *key;
   const char *value = NULL;
+  int visibility = METADATA_VIS_PUBLIC;
   int is_channel = 0;
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
@@ -810,8 +856,23 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   target = parv[1];
   key = parv[2];
-  if (parc >= 4)
-    value = parv[3];
+
+  /* Parse visibility and value.
+   * New format: target key [visibility] [:value]
+   * Old format: target key [:value]
+   */
+  if (parc >= 4) {
+    /* Check if parv[3] is a visibility token */
+    if ((parv[3][0] == '*' && parv[3][1] == '\0') ||
+        (parv[3][0] == 'P' && parv[3][1] == '\0')) {
+      visibility = (parv[3][0] == 'P') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC;
+      if (parc >= 5)
+        value = parv[4];
+    } else {
+      /* Old format or no visibility - parv[3] is value */
+      value = parv[3];
+    }
+  }
 
   if (!is_valid_key(key))
     return 0;
@@ -828,20 +889,24 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       return 0;
   }
 
-  /* Apply the change */
+  /* Apply the change with visibility */
   if (is_channel) {
-    metadata_set_channel(target_channel, key, value);
+    metadata_set_channel(target_channel, key, value, visibility);
   } else {
-    metadata_set_client(target_client, key, value);
+    metadata_set_client(target_client, key, value, visibility);
   }
 
-  /* Notify local subscribers */
-  notify_subscribers(target, key, value);
+  /* Notify local subscribers (only for public metadata) */
+  if (visibility == METADATA_VIS_PUBLIC) {
+    notify_subscribers(target, key, value);
+  }
 
-  /* Propagate to other servers */
+  /* Propagate to other servers with visibility */
   if (value) {
-    sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s :%s",
-                          target, key, value);
+    sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
+                          target, key,
+                          visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                          value);
   } else {
     sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s",
                           target, key);

@@ -576,9 +576,10 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
  * @param[in] cptr Client to set metadata on.
  * @param[in] key Key name.
  * @param[in] value Value to set (NULL to delete).
+ * @param[in] visibility Visibility level (METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE).
  * @return 0 on success, -1 on error.
  */
-int metadata_set_client(struct Client *cptr, const char *key, const char *value)
+int metadata_set_client(struct Client *cptr, const char *key, const char *value, int visibility)
 {
   struct MetadataEntry *entry, *prev = NULL;
   const char *account = NULL;
@@ -606,11 +607,13 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value)
       if (!entry->value)
         return -1;
       strcpy(entry->value, value);
+      entry->visibility = visibility;
     } else {
       /* Create new */
       entry = create_entry(key, value);
       if (!entry)
         return -1;
+      entry->visibility = visibility;
       entry->next = cli_metadata(cptr);
       cli_metadata(cptr) = entry;
     }
@@ -746,9 +749,10 @@ struct MetadataEntry *metadata_get_channel(struct Channel *chptr, const char *ke
  * @param[in] chptr Channel to set metadata on.
  * @param[in] key Key name.
  * @param[in] value Value to set (NULL to delete).
+ * @param[in] visibility Visibility level (METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE).
  * @return 0 on success, -1 on error.
  */
-int metadata_set_channel(struct Channel *chptr, const char *key, const char *value)
+int metadata_set_channel(struct Channel *chptr, const char *key, const char *value, int visibility)
 {
   struct MetadataEntry *entry, *prev = NULL;
 
@@ -771,11 +775,13 @@ int metadata_set_channel(struct Channel *chptr, const char *key, const char *val
       if (!entry->value)
         return -1;
       strcpy(entry->value, value);
+      entry->visibility = visibility;
     } else {
       /* Create new */
       entry = create_entry(key, value);
       if (!entry)
         return -1;
+      entry->visibility = visibility;
       entry->next = chptr->metadata;
       chptr->metadata = entry;
     }
