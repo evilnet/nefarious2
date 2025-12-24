@@ -475,6 +475,30 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     if (IsIPChecked(sptr))
       IPcheck_connect_succeeded(sptr);
+
+    /* Apply pre-away state if set (IRCv3 draft/pre-away) */
+    if (con_pre_away(cli_connect(sptr))) {
+      if (con_pre_away(cli_connect(sptr)) == 2) {
+        /* AWAY * - set away but with empty message (hidden connection) */
+        if (!user->away) {
+          user->away = (char*) MyMalloc(1);
+          user->away[0] = '\0';
+        }
+        /* Don't broadcast AWAY * to servers - it's a hidden connection */
+      } else {
+        /* Normal away with message */
+        unsigned int len = strlen(con_pre_away_msg(cli_connect(sptr)));
+        if (user->away)
+          MyFree(user->away);
+        user->away = (char*) MyMalloc(len + 1);
+        strcpy(user->away, con_pre_away_msg(cli_connect(sptr)));
+        /* Broadcast to servers */
+        sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", user->away);
+      }
+      /* Clear pre-away state */
+      con_pre_away(cli_connect(sptr)) = 0;
+      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+    }
   }
   else {
     struct Client *acptr = user->server;

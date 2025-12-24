@@ -314,7 +314,7 @@ struct Message msgtab[] = {
     TOK_AWAY,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_away, ms_away, m_away, m_ignore },
+    { mu_away, m_away, ms_away, m_away, m_ignore },
     "[:<reason>] - Marks yourself as away, or back."
   },
   {

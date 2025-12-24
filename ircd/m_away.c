@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -201,4 +202,44 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   return 0;
 }
 
+/*
+ * mu_away - unregistered client message handler (IRCv3 draft/pre-away)
+ *
+ * Stores away state for application after registration completes.
+ * Requires draft/pre-away capability to be negotiated.
+ *
+ * parv[0] = sender prefix
+ * parv[1] = away message (optional, "*" means away without message)
+ */
+int mu_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+{
+  struct Connection *con;
+  char* away_message = (parc > 1) ? parv[1] : NULL;
+
+  assert(0 != cptr);
+  assert(cptr == sptr);
+
+  /* Require draft/pre-away capability */
+  if (!HasCap(sptr, CAP_DRAFT_PREAWAY))
+    return 0;  /* Silently ignore if capability not negotiated */
+
+  con = cli_connect(sptr);
+
+  if (EmptyString(away_message)) {
+    /* AWAY with no params = present (clear pre-away) */
+    con_pre_away(con) = 0;
+    con_pre_away_msg(con)[0] = '\0';
+  } else if (away_message[0] == '*' && away_message[1] == '\0') {
+    /* AWAY * = away without message (special hidden state) */
+    con_pre_away(con) = 2;
+    con_pre_away_msg(con)[0] = '\0';
+  } else {
+    /* AWAY :message = normal away */
+    con_pre_away(con) = 1;
+    ircd_strncpy(con_pre_away_msg(con), away_message, AWAYLEN);
+    con_pre_away_msg(con)[AWAYLEN] = '\0';
+  }
+
+  return 0;
+}
 

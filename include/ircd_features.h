@@ -325,6 +325,7 @@ enum Feature {
   FEAT_CAP_standard_replies,
   FEAT_CAP_draft_no_implicit_names,
   FEAT_CAP_draft_extended_isupport,
+  FEAT_CAP_draft_pre_away,
   FEAT_MSGID,
   FEAT_P10_MESSAGE_TAGS,
 #ifdef USE_SSL

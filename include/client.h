@@ -332,6 +332,8 @@ struct Connection
   char                con_s2s_msgid[64]; /**< S2S @msgid tag from incoming message */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
+  unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
+  char                con_pre_away_msg[AWAYLEN + 1]; /**< Pre-registration away message */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -672,6 +674,10 @@ struct Client {
 #define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
 /** Get the S2S batch type from server. */
 #define con_s2s_batch_type(con)	((con)->con_s2s_batch_type)
+/** Get the pre-registration away state. */
+#define con_pre_away(con)	((con)->con_pre_away)
+/** Get the pre-registration away message. */
+#define con_pre_away_msg(con)	((con)->con_pre_away_msg)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */
