@@ -342,6 +342,7 @@ struct Connection
   struct SLink*       con_ml_messages; /**< List of multiline messages */
   int                 con_ml_msg_count; /**< Number of messages in batch */
   int                 con_ml_total_bytes; /**< Total bytes in batch */
+  time_t              con_ml_batch_start; /**< When batch was started (for timeout) */
   /* Current message @batch tag for PRIVMSG interception */
   char                con_msg_batch_tag[16]; /**< @batch tag from current message */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
@@ -479,6 +480,8 @@ struct Client {
 #define cli_ml_msg_count(cli)	con_ml_msg_count(cli_connect(cli))
 /** Get multiline total bytes. */
 #define cli_ml_total_bytes(cli)	con_ml_total_bytes(cli_connect(cli))
+/** Get multiline batch start time. */
+#define cli_ml_batch_start(cli)	con_ml_batch_start(cli_connect(cli))
 /** Get current message @batch tag. */
 #define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
 /** Get current message concat flag. */
@@ -713,6 +716,8 @@ struct Client {
 #define con_ml_msg_count(con)	((con)->con_ml_msg_count)
 /** Get the multiline total bytes. */
 #define con_ml_total_bytes(con)	((con)->con_ml_total_bytes)
+/** Get the multiline batch start time. */
+#define con_ml_batch_start(con)	((con)->con_ml_batch_start)
 /** Get the current message @batch tag. */
 #define con_msg_batch_tag(con)	((con)->con_msg_batch_tag)
 /** Get the current message draft/multiline-concat flag. */

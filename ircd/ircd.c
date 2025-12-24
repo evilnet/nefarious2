@@ -27,6 +27,7 @@
 #include "IPcheck.h"
 #include "class.h"
 #include "client.h"
+#include "handlers.h"
 #include "crule.h"
 #include "destruct_event.h"
 #include "hash.h"
@@ -378,6 +379,9 @@ static void check_pings(struct Event* ev) {
       exit_client(cptr, cptr, &me, cli_info(cptr));
       continue;
     }
+
+    /* Check for client batch timeout (draft/multiline) */
+    check_client_batch_timeout(cptr);
 
     Debug((DEBUG_DEBUG, "check_pings(%s)=status:%s current: %d",
 	   cli_name(cptr),

@@ -194,6 +194,39 @@ clear_multiline_batch(struct Connection *con)
   con_ml_messages(con) = NULL;
   con_ml_msg_count(con) = 0;
   con_ml_total_bytes(con) = 0;
+  con_ml_batch_start(con) = 0;
+}
+
+/** Check for and handle client batch timeout.
+ * Called periodically from check_pings().
+ * @param[in] cptr Client to check.
+ * @return 1 if batch was timed out, 0 otherwise.
+ */
+int
+check_client_batch_timeout(struct Client *cptr)
+{
+  struct Connection *con;
+  time_t timeout;
+
+  if (!MyConnect(cptr))
+    return 0;
+
+  con = cli_connect(cptr);
+  if (!con_ml_batch_id(con)[0])
+    return 0; /* No active batch */
+
+  timeout = feature_int(FEAT_CLIENT_BATCH_TIMEOUT);
+  if (timeout <= 0)
+    return 0; /* Timeout disabled */
+
+  if (CurrentTime - con_ml_batch_start(con) < timeout)
+    return 0; /* Not timed out yet */
+
+  /* Batch has timed out - send FAIL and clear */
+  send_fail(cptr, "BATCH", "TIMEOUT", con_ml_batch_id(con),
+            "Batch timed out");
+  clear_multiline_batch(con);
+  return 1;
 }
 
 /** Add a message to the multiline batch */
@@ -533,6 +566,7 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_ml_messages(con) = NULL;
     con_ml_msg_count(con) = 0;
     con_ml_total_bytes(con) = 0;
+    con_ml_batch_start(con) = CurrentTime;
   }
   else {
     /* End batch */
