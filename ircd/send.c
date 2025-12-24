@@ -243,6 +243,99 @@ static int wants_message_tags(struct Client *to)
           MyConnect(to) && cli_label(to)[0]);
 }
 
+/** Flags for format_message_tags_ex() tag selection */
+#define TAGS_TIME     0x01  /**< Include @time tag */
+#define TAGS_ACCOUNT  0x02  /**< Include @account tag */
+#define TAGS_BATCH    0x04  /**< Include @batch tag (network batch) */
+#define TAGS_BOT      0x08  /**< Include @bot tag */
+
+/** Format message tags with explicit control over which tags to include.
+ * @param[out] buf Buffer to write tags to.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag and bot detection).
+ * @param[in] flags TAGS_* flags indicating which tags to include.
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *from, int flags)
+{
+  int pos = 0;
+  int use_time = flags & TAGS_TIME;
+  int use_account = flags & TAGS_ACCOUNT;
+  int use_batch = (flags & TAGS_BATCH) && active_network_batch_id[0];
+  int use_bot = (flags & TAGS_BOT) && from && IsBot(from);
+
+  if (!use_time && !use_account && !use_batch && !use_bot)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  /* @batch tag first (most important for batched messages) */
+  if (use_batch) {
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", active_network_batch_id);
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    if (IsAccount(from))
+      pos += snprintf(buf + pos, buflen - pos, "account=%s", cli_user(from)->account);
+    else
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+  }
+
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (use_bot) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
+/** Get the tag flags appropriate for a client based on their capabilities.
+ * @param[in] to Recipient client.
+ * @param[in] from Source client (for bot detection).
+ * @param[in] include_batch Whether to include batch tag if network batch is active.
+ * @return TAGS_* flags for this client.
+ */
+static int get_client_tag_flags(struct Client *to, struct Client *from, int include_batch)
+{
+  int flags = 0;
+
+  if (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME))
+    flags |= TAGS_TIME;
+  if (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG))
+    flags |= TAGS_ACCOUNT;
+  if (include_batch && CapActive(to, CAP_BATCH) && active_network_batch_id[0])
+    flags |= TAGS_BATCH;
+  /* Bot tag is sent to any client that gets any tags */
+  if (flags && from && IsBot(from))
+    flags |= TAGS_BOT;
+
+  return flags;
+}
+
 /** Generate a unique message ID for IRCv3 message-ids.
  * Format: <server_numeric>-<startup_ts>-<counter>
  * @param[out] buf Buffer to write message ID to.
@@ -1011,12 +1104,12 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_tags = NULL;       /* tagged version (server-time + account-tag) */
-  struct MsgBuf *mb_tags_batch = NULL; /* tagged version with @batch for network batches */
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
   char tagbuf[128];
-  char tagbuf_batch[128];
+  int flags;
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -1027,24 +1120,9 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
-
-  /* build tagged version if any tag features enabled */
-  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
-    va_start(vd.vd_args, pattern);
-    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
-    va_end(vd.vd_args);
-  }
-
-  /* build batch-aware tagged version if network batch is active */
-  if (active_network_batch_id[0] &&
-      format_message_tags_with_network_batch(tagbuf_batch, sizeof(tagbuf_batch), from)) {
-    va_start(vd.vd_args, pattern);
-    mb_tags_batch = msgq_make(0, "%s%:#C %s %v", tagbuf_batch, from, cmd, &vd);
-    va_end(vd.vd_args);
-  }
 
   bump_sentalong(from);
   /*
@@ -1060,30 +1138,39 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
           && member->user != one
           && cli_sentalong(member->user) != sentalong_marker) {
 	cli_sentalong(member->user) = sentalong_marker;
-	/* Use batch-tagged version for batch-capable clients during network batch */
-	if (mb_tags_batch && CapActive(member->user, CAP_BATCH))
-	  send_buffer(member->user, mb_tags_batch, 0);
-	else if (mb_tags && wants_message_tags(member->user))
-	  send_buffer(member->user, mb_tags, 0);
-	else
+	flags = get_client_tag_flags(member->user, from, 1);
+	if (flags) {
+	  /* Build cached message buffer for this flag combination if needed */
+	  if (!mb_cache[flags]) {
+	    if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+	      va_start(vd.vd_args, pattern);
+	      mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+	      va_end(vd.vd_args);
+	    }
+	  }
+	  if (mb_cache[flags])
+	    send_buffer(member->user, mb_cache[flags], 0);
+	  else
+	    send_buffer(member->user, mb, 0);
+	} else {
 	  send_buffer(member->user, mb, 0);
+	}
       }
   }
 
   if (MyConnect(from) && from != one) {
-    if (mb_tags_batch && CapActive(from, CAP_BATCH))
-      send_buffer(from, mb_tags_batch, 0);
-    else if (mb_tags && wants_message_tags(from))
-      send_buffer(from, mb_tags, 0);
+    flags = get_client_tag_flags(from, from, 1);
+    if (flags && mb_cache[flags])
+      send_buffer(from, mb_cache[flags], 0);
     else
       send_buffer(from, mb, 0);
   }
 
   msgq_clean(mb);
-  if (mb_tags)
-    msgq_clean(mb_tags);
-  if (mb_tags_batch)
-    msgq_clean(mb_tags_batch);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
 }
 
 /** Send a (prefixed) command to all channels that \a from is on.
@@ -1100,10 +1187,12 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
   char tagbuf[128];
+  int flags;
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -1114,16 +1203,9 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
-
-  /* build tagged version if any tag features enabled */
-  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
-    va_start(vd.vd_args, pattern);
-    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
-    va_end(vd.vd_args);
-  }
 
   bump_sentalong(from);
   /*
@@ -1141,23 +1223,39 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
           && ((withcap == CAP_NONE) || CapActive(member->user, withcap))
           && ((skipcap == CAP_NONE) || !CapActive(member->user, skipcap))) {
         cli_sentalong(member->user) = sentalong_marker;
-        if (mb_tags && wants_message_tags(member->user))
-          send_buffer(member->user, mb_tags, 0);
-        else
+        flags = get_client_tag_flags(member->user, from, 0);
+        if (flags) {
+          /* Build cached message buffer for this flag combination if needed */
+          if (!mb_cache[flags]) {
+            if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+              va_start(vd.vd_args, pattern);
+              mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+              va_end(vd.vd_args);
+            }
+          }
+          if (mb_cache[flags])
+            send_buffer(member->user, mb_cache[flags], 0);
+          else
+            send_buffer(member->user, mb, 0);
+        } else {
           send_buffer(member->user, mb, 0);
+        }
       }
   }
 
   if (MyConnect(from) && from != one) {
-    if (mb_tags && wants_message_tags(from))
-      send_buffer(from, mb_tags, 0);
+    flags = get_client_tag_flags(from, from, 0);
+    if (flags && mb_cache[flags])
+      send_buffer(from, mb_cache[flags], 0);
     else
       send_buffer(from, mb, 0);
   }
 
   msgq_clean(mb);
-  if (mb_tags)
-    msgq_clean(mb_tags);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
 }
 
 /** Send a (prefixed) command to all local users on a channel.
@@ -1176,23 +1274,18 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
   char tagbuf[128];
+  int flags;
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
-
-  /* build tagged version if any tag features enabled */
-  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
-    va_start(vd.vd_args, pattern);
-    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
-    va_end(vd.vd_args);
-  }
 
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
@@ -1205,15 +1298,30 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
         || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST)))
         continue;
-    if (mb_tags && wants_message_tags(member->user))
-      send_buffer(member->user, mb_tags, 0);
-    else
+    flags = get_client_tag_flags(member->user, from, 0);
+    if (flags) {
+      /* Build cached message buffer for this flag combination if needed */
+      if (!mb_cache[flags]) {
+        if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+          va_start(vd.vd_args, pattern);
+          mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+          va_end(vd.vd_args);
+        }
+      }
+      if (mb_cache[flags])
+        send_buffer(member->user, mb_cache[flags], 0);
+      else
+        send_buffer(member->user, mb, 0);
+    } else {
       send_buffer(member->user, mb, 0);
+    }
   }
 
   msgq_clean(mb);
-  if (mb_tags)
-    msgq_clean(mb_tags);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
 }
 
 /** Send a (prefixed) command to all local users on a channel with or without
@@ -1236,23 +1344,18 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  struct MsgBuf *mb_tags = NULL;  /* tagged version (server-time + account-tag) */
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
   char tagbuf[128];
+  int flags;
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
-
-  /* build tagged version if any tag features enabled */
-  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
-    va_start(vd.vd_args, pattern);
-    mb_tags = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
-    va_end(vd.vd_args);
-  }
 
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
@@ -1267,15 +1370,30 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         || ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
         continue;
-    if (mb_tags && wants_message_tags(member->user))
-      send_buffer(member->user, mb_tags, 0);
-    else
+    flags = get_client_tag_flags(member->user, from, 0);
+    if (flags) {
+      /* Build cached message buffer for this flag combination if needed */
+      if (!mb_cache[flags]) {
+        if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+          va_start(vd.vd_args, pattern);
+          mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+          va_end(vd.vd_args);
+        }
+      }
+      if (mb_cache[flags])
+        send_buffer(member->user, mb_cache[flags], 0);
+      else
+        send_buffer(member->user, mb, 0);
+    } else {
       send_buffer(member->user, mb, 0);
+    }
   }
 
   msgq_clean(mb);
-  if (mb_tags)
-    msgq_clean(mb_tags);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
 }
 
 /** Send TAGMSG with client-only tags to channel members with message-tags capability.
@@ -1389,7 +1507,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct Membership *member;
   struct VarData vd;
   struct MsgBuf *user_mb;
-  struct MsgBuf *user_mb_tags = NULL;  /* tagged version (server-time + account-tag) */
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *user_mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
   struct Client *service;
@@ -1399,6 +1518,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   char tagbuf[128];
   char s2s_tagbuf[128];
   char userfmt_tags[64];
+  int tflags;
 
   vd.vd_format = pattern;
 
@@ -1422,13 +1542,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   user_mb = msgq_make(0, userfmt, from, usercmd, &vd);
   va_end(vd.vd_args);
 
-  /* Build tagged version if any tag features enabled */
-  if (format_message_tags(tagbuf, sizeof(tagbuf), from)) {
-    ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
-    va_start(vd.vd_args, pattern);
-    user_mb_tags = msgq_make(0, userfmt_tags, tagbuf, from, usercmd, &vd);
-    va_end(vd.vd_args);
-  }
+  /* Prepare tagged format string for building cached buffers */
+  ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
 
   /* Build buffer to send to servers - with S2S tags if enabled */
   if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
@@ -1459,10 +1574,23 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     cli_sentalong(member->user) = sentalong_marker;
 
     if (MyConnect(member->user)) { /* pick right buffer to send */
-      if (user_mb_tags && wants_message_tags(member->user))
-        send_buffer(member->user, user_mb_tags, 0);
-      else
+      tflags = get_client_tag_flags(member->user, from, 0);
+      if (tflags) {
+        /* Build cached message buffer for this flag combination if needed */
+        if (!user_mb_cache[tflags]) {
+          if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, tflags)) {
+            va_start(vd.vd_args, pattern);
+            user_mb_cache[tflags] = msgq_make(0, userfmt_tags, tagbuf, from, usercmd, &vd);
+            va_end(vd.vd_args);
+          }
+        }
+        if (user_mb_cache[tflags])
+          send_buffer(member->user, user_mb_cache[tflags], 0);
+        else
+          send_buffer(member->user, user_mb, 0);
+      } else {
         send_buffer(member->user, user_mb, 0);
+      }
     } else
       send_buffer(member->user, serv_mb, 0);
   }
@@ -1475,8 +1603,10 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   }
 
   msgq_clean(user_mb);
-  if (user_mb_tags)
-    msgq_clean(user_mb_tags);
+  for (tflags = 0; tflags < 16; tflags++) {
+    if (user_mb_cache[tflags])
+      msgq_clean(user_mb_cache[tflags]);
+  }
   msgq_clean(serv_mb);
 }
 
