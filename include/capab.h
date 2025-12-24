@@ -95,6 +95,7 @@ enum Capab {
   _CAP(DRAFT_CHATHISTORY, 0, "draft/chathistory", 0),
   _CAP(DRAFT_EVENTPLAYBACK, 0, "draft/event-playback", 0),
   _CAP(DRAFT_REDACT, 0, "draft/message-redaction", 0),
+  _CAP(DRAFT_ACCOUNTREG, 0, "draft/account-registration", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif

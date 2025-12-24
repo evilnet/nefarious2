@@ -942,6 +942,30 @@ struct Message msgtab[] = {
     "<target> <msgid> [:<reason>] - Redact a previously sent message"
   },
   {
+    MSG_REGISTER,
+    TOK_REGISTER,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_register, m_register, m_ignore, m_register, m_ignore },
+    "<account> <email|*> <password> - Register an account"
+  },
+  {
+    MSG_VERIFY,
+    TOK_VERIFY,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_verify, m_verify, m_ignore, m_verify, m_ignore },
+    "<account> <code> - Verify account registration"
+  },
+  {
+    MSG_REGREPLY,
+    TOK_REGREPLY,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_regreply, m_ignore, ms_regreply },
+    ""
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

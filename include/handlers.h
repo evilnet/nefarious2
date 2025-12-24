@@ -282,6 +282,9 @@ extern int m_batch(struct Client*, struct Client*, int, char*[]);
 extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
+extern int m_register(struct Client*, struct Client*, int, char*[]);
+extern int m_verify(struct Client*, struct Client*, int, char*[]);
+extern int ms_regreply(struct Client*, struct Client*, int, char*[]);
 
 #endif /* INCLUDED_handlers_h */
 
