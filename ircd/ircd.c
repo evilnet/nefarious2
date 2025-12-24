@@ -30,6 +30,7 @@
 #include "crule.h"
 #include "destruct_event.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd_alloc.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
@@ -799,6 +800,16 @@ int main(int argc, char **argv) {
   init_counters();
   load_tunefile();
   geoip_init();
+
+#ifdef USE_LMDB
+  /* Initialize chathistory database */
+  if (feature_bool(FEAT_CAP_draft_chathistory)) {
+    if (history_init(feature_str(FEAT_CHATHISTORY_DB)) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize chathistory database, feature disabled");
+    }
+  }
+#endif
 
   Debug((DEBUG_NOTICE, "Server ready..."));
   log_write(LS_SYSTEM, L_NOTICE, 0, "Server Ready");

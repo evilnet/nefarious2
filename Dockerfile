@@ -33,7 +33,8 @@ WORKDIR  /home/nefarious/nefarious2
 # --with-geoip=/usr --with-mmdb=/usr \
 RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096
 RUN make
-RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
+#RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
+RUN make install
 
 # Build iauthd-ts
 WORKDIR /home/nefarious/nefarious2/tools/iauthd-ts

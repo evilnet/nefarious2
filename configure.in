@@ -893,6 +893,62 @@ if test x"$unet_cv_enable_mmdb" = xyes; then
   fi
 fi
 
+dnl **
+dnl **  LMDB checks (for chathistory)
+dnl **
+AC_MSG_CHECKING([whether to enable LMDB/chathistory support])
+AC_ARG_ENABLE([lmdb],
+[  --disable-lmdb          Disable LMDB/chathistory support],
+[unet_cv_enable_lmdb=$enable_lmdb],
+[AC_CACHE_VAL(unet_cv_enable_lmdb,
+[unet_cv_enable_lmdb=yes])])
+AC_MSG_RESULT([$unet_cv_enable_lmdb])
+
+if test x"$unet_cv_enable_lmdb" = xyes; then
+  AC_ARG_WITH([lmdb],
+  AS_HELP_STRING([--with-lmdb=dir], [Specify the installation prefix of LMDB (default: /usr)]),
+  [base_lmdb_prefix=$withval],
+  [base_lmdb_prefix=/usr])
+
+  AC_MSG_CHECKING([for LMDB includes])
+  AC_ARG_WITH([lmdb-includes],
+  AS_HELP_STRING([--with-lmdb-includes=dir], [Specify location of LMDB header files (default: /usr/include)]),
+  [unet_cv_with_lmdb_inc_prefix=$withval],
+  [unet_cv_with_lmdb_inc_prefix=$base_lmdb_prefix/include])
+  AC_MSG_RESULT([$unet_cv_with_lmdb_inc_prefix])
+
+  AC_MSG_CHECKING([for LMDB libraries])
+  AC_ARG_WITH([lmdb-libs],
+  AS_HELP_STRING([--with-lmdb-libs=dir], [Specify location of LMDB libs (default: /usr/lib)]),
+  [unet_cv_with_lmdb_prefix=$withval],
+  [unet_cv_with_lmdb_prefix=$base_lmdb_prefix/lib])
+  AC_MSG_RESULT([$unet_cv_with_lmdb_prefix])
+
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_lmdb_inc_prefix"
+  LIBS="-L$unet_cv_with_lmdb_prefix -llmdb"
+
+  AC_CHECK_LIB(lmdb, mdb_env_create, [
+    AC_CHECK_HEADERS($unet_cv_with_lmdb_inc_prefix/lmdb.h, [
+      enable_lmdb="yes";
+      LMDB_LDFLAGS="-llmdb"
+    ])
+  ])
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
+
+  if test "x$enable_lmdb" = xyes; then
+    AC_DEFINE([USE_LMDB], , [Define if you are using LMDB for chathistory])
+    LIBS="$LIBS -L$unet_cv_with_lmdb_prefix $LMDB_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_lmdb_inc_prefix"
+  else
+     AC_MSG_WARN([Unable to find LMDB, chathistory features will not work without liblmdb. Disabling LMDB support.])
+  fi
+fi
+
 dnl --with-maxcon allows us to set the maximum connections
 unet_maxcon=`ulimit -Sn`
 if test x"$unet_maxcon" = xunlimited; then

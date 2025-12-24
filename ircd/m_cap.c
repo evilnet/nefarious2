@@ -98,6 +98,8 @@ static struct capabilities {
   _CAP(DRAFT_EXTISUPPORT, 0, "draft/extended-isupport", FEAT_CAP_draft_extended_isupport),
   _CAP(DRAFT_PREAWAY, 0, "draft/pre-away", FEAT_CAP_draft_pre_away),
   _CAP(DRAFT_MULTILINE, 0, "draft/multiline", FEAT_CAP_draft_multiline),
+  _CAP(DRAFT_CHATHISTORY, 0, "draft/chathistory", FEAT_CAP_draft_chathistory),
+  _CAP(DRAFT_EVENTPLAYBACK, 0, "draft/event-playback", FEAT_CAP_draft_event_playback),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif

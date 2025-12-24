@@ -926,6 +926,14 @@ struct Message msgtab[] = {
     "+id type [params] | -id - Start or end a message batch"
   },
   {
+    MSG_CHATHISTORY,
+    TOK_CHATHISTORY,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_chathistory, m_ignore, m_chathistory, m_ignore },
+    "subcommand target ref [ref] limit - Query message history"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

@@ -2580,6 +2580,12 @@ void init_isupport(void)
   add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
   add_isupport_s("MAXLIST", imaxlist);
   add_isupport_s("ELIST", "CT");
+
+  /* IRCv3 draft/chathistory support */
+  if (feature_bool(FEAT_CAP_draft_chathistory)) {
+    add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
+    add_isupport_s("MSGREFTYPES", "timestamp,msgid");
+  }
 }
 
 /** Send RPL_ISUPPORT lines to \a cptr.

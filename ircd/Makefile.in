@@ -97,6 +97,7 @@ IRCD_SRC = \
 	fileio.c \
 	gline.c \
 	hash.c \
+	history.c \
 	ircd.c \
 	ircd_alloc.c \
 	ircd_cloaking.c \
@@ -124,6 +125,7 @@ IRCD_SRC = \
 	m_batch.c \
 	m_burst.c \
 	m_cap.c \
+	m_chathistory.c \
 	m_check.c \
 	m_clearmode.c \
 	m_close.c \
@@ -468,6 +470,9 @@ hash.o: hash.c ../config.h ../include/hash.h ../include/client.h \
   ../include/ircd_string.h ../include/ircd.h ../include/match.h \
   ../include/msg.h ../include/numeric.h ../include/random.h \
   ../include/send.h ../include/struct.h ../include/sys.h ../include/watch.h
+history.o: history.c ../config.h ../include/history.h ../include/ircd_alloc.h \
+  ../include/ircd_log.h ../include/ircd_snprintf.h ../include/ircd_string.h \
+  ../include/s_debug.h
 ircd.o: ircd.c ../config.h ../include/ircd.h ../include/IPcheck.h \
   ../include/class.h ../include/client.h ../include/crule.h \
   ../include/destruct_event.h ../include/hash.h ../include/ircd_alloc.h \
@@ -625,6 +630,12 @@ m_cap.o: m_cap.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_snprintf.h ../include/ircd_string.h ../include/msg.h \
   ../include/numeric.h ../include/send.h ../include/s_auth.h \
   ../include/s_user.h ../include/ircd_features.h
+m_chathistory.o: m_chathistory.c ../config.h ../include/capab.h \
+  ../include/channel.h ../include/client.h ../include/hash.h \
+  ../include/history.h ../include/ircd.h ../include/ircd_alloc.h \
+  ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
+  ../include/ircd_snprintf.h ../include/ircd_string.h ../include/msg.h \
+  ../include/numeric.h ../include/numnicks.h ../include/send.h
 m_check.o: m_check.c ../include/channel.h \
   ../include/class.h ../include/client.h ../include/destruct_event.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \

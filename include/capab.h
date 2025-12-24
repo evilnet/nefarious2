@@ -92,6 +92,8 @@ enum Capab {
   _CAP(DRAFT_EXTISUPPORT, 0, "draft/extended-isupport", 0),
   _CAP(DRAFT_PREAWAY, 0, "draft/pre-away", 0),
   _CAP(DRAFT_MULTILINE, 0, "draft/multiline", 0),
+  _CAP(DRAFT_CHATHISTORY, 0, "draft/chathistory", 0),
+  _CAP(DRAFT_EVENTPLAYBACK, 0, "draft/event-playback", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif
