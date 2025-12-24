@@ -606,6 +606,13 @@ m_away.o: m_away.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_alloc.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/s_user.h ../include/send.h
+m_batch.o: m_batch.c ../config.h ../include/capab.h ../include/channel.h \
+  ../include/client.h ../include/hash.h ../include/ircd.h \
+  ../include/ircd_alloc.h ../include/ircd_features.h ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/ircd_snprintf.h ../include/ircd_string.h \
+  ../include/list.h ../include/msg.h ../include/numeric.h \
+  ../include/numnicks.h ../include/send.h ../include/s_misc.h \
+  ../include/s_user.h
 m_burst.o: m_burst.c ../config.h ../include/channel.h ../include/client.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
@@ -725,6 +732,9 @@ m_ison.o: m_ison.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msgq.h ../include/numeric.h \
   ../include/send.h
+m_isupport.o: m_isupport.c ../config.h ../include/capab.h \
+  ../include/client.h ../include/ircd_reply.h ../include/numeric.h \
+  ../include/s_user.h
 m_join.o: m_join.c ../config.h ../include/channel.h ../include/class.h \
   ../include/client.h ../include/gline.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_chattr.h ../include/ircd_features.h \
@@ -932,6 +942,10 @@ m_sethost.o: m_sethost.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd_reply.h ../include/ircd_snprintf.h \
   ../include/ircd_string.h ../include/numeric.h ../include/numnicks.h \
   ../include/s_conf.h ../include/s_user.h ../include/send.h
+m_setname.o: m_setname.c ../config.h ../include/capab.h ../include/client.h \
+  ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \
+  ../include/numeric.h ../include/numnicks.h ../include/send.h
 m_settime.o: m_settime.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_snprintf.h \
@@ -1023,6 +1037,11 @@ m_tempshun.o: m_tempshun.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h  ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/send.h
+m_tagmsg.o: m_tagmsg.c ../config.h ../include/capab.h ../include/channel.h \
+  ../include/client.h ../include/hash.h ../include/ircd.h \
+  ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
+  ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
+  ../include/numnicks.h ../include/send.h ../include/s_user.h
 m_time.o: m_time.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
