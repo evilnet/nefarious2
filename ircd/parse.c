@@ -990,6 +990,14 @@ struct Message msgtab[] = {
     "<subcommand> [args] - Manage user/channel metadata"
   },
   {
+    MSG_WEBPUSH,
+    TOK_WEBPUSH,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_webpush, ms_webpush, m_webpush, m_ignore },
+    "REGISTER|UNREGISTER <endpoint> [keys] - Manage web push subscriptions"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

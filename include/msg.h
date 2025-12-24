@@ -548,6 +548,10 @@ struct Client;
 #define TOK_METADATA	"MD"
 #define CMD_METADATA	MSG_METADATA, TOK_METADATA
 
+#define MSG_WEBPUSH	"WEBPUSH"
+#define TOK_WEBPUSH	"WP"
+#define CMD_WEBPUSH	MSG_WEBPUSH, TOK_WEBPUSH
+
 /*
  * Constants
  */

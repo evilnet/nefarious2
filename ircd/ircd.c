@@ -157,6 +157,30 @@ const char* get_sasl_mechanisms(void)
   return SaslMechanisms[0] ? SaslMechanisms : NULL;
 }
 
+/** VAPID public key received from services. Empty means webpush unavailable. */
+char VapidPublicKey[VAPID_KEY_LEN] = "";
+
+/** Set the VAPID public key (called when services announces it).
+ * @param[in] key Base64url-encoded VAPID public key.
+ */
+void set_vapid_pubkey(const char *key)
+{
+  if (key && *key) {
+    ircd_strncpy(VapidPublicKey, key, VAPID_KEY_LEN - 1);
+    VapidPublicKey[VAPID_KEY_LEN - 1] = '\0';
+  } else {
+    VapidPublicKey[0] = '\0';
+  }
+}
+
+/** Get the VAPID public key for ISUPPORT/CAP.
+ * @return VAPID public key, or NULL if none set.
+ */
+const char* get_vapid_pubkey(void)
+{
+  return VapidPublicKey[0] ? VapidPublicKey : NULL;
+}
+
 /*----------------------------------------------------------------------------
  * API: server_die
  *--------------------------------------------------------------------------*/

@@ -257,6 +257,11 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
         val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=max-bytes=%d,max-lines=%d",
                                 feature_int(FEAT_MULTILINE_MAX_BYTES),
                                 feature_int(FEAT_MULTILINE_MAX_LINES));
+      } else if (capab_list[i].cap == CAP_DRAFT_WEBPUSH) {
+        /* Show VAPID key if available from services */
+        const char *vapid = get_vapid_pubkey();
+        if (vapid)
+          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=vapid=%s", vapid);
       } else if (capab_list[i].value) {
         val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
       }
