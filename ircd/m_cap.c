@@ -26,6 +26,7 @@
 
 #include "config.h"
 
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_chattr.h"
@@ -36,12 +37,30 @@
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
+#include "numnicks.h"
+#include "querycmds.h"
 #include "send.h"
 #include "s_auth.h"
 #include "s_user.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+/** Check if the SASL server is available.
+ * @return 1 if SASL server is connected, 0 otherwise.
+ */
+static int
+sasl_server_available(void)
+{
+  const char *sasl_server = feature_str(FEAT_SASL_SERVER);
+
+  /* If set to "*", SASL is broadcast to all servers - check if any exist */
+  if (!strcmp(sasl_server, "*"))
+    return (UserStats.servers > 0);
+
+  /* Otherwise, check if the specific SASL server is connected */
+  return (find_match_server((char *)sasl_server) != NULL);
+}
 
 typedef int (*bqcmp)(const void *, const void *);
 
@@ -191,6 +210,10 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
         && !(set && CapHas(set, capab_list[i].cap))
         && (rem || set || (flags & CAPFL_HIDDEN)
             || (capab_list[i].feat && (!feature_bool(capab_list[i].feat)))))
+      continue;
+
+    /* Don't advertise SASL if the SASL server is not available */
+    if (capab_list[i].cap == CAP_SASL && is_ls && !sasl_server_available())
       continue;
 
     /* Build the prefix (space separator and any modifiers needed). */
