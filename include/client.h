@@ -405,6 +405,8 @@ struct Client {
   /* IRCv3 Metadata */
   struct MetadataEntry* cli_metadata;    /**< Client metadata key-value pairs */
   struct MetadataSub*   cli_metadatasub; /**< Client metadata subscriptions */
+  time_t                cli_metadata_lastcmd;  /**< Time of last metadata command */
+  int                   cli_metadata_cmdcnt;   /**< Metadata commands this second */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -538,6 +540,10 @@ struct Client {
 #define cli_metadata(cli)        ((cli)->cli_metadata)
 /** Get client metadata subscriptions. */
 #define cli_metadatasub(cli)     ((cli)->cli_metadatasub)
+/** Get time of last metadata command. */
+#define cli_metadata_lastcmd(cli) ((cli)->cli_metadata_lastcmd)
+/** Get metadata command count for current second. */
+#define cli_metadata_cmdcnt(cli)  ((cli)->cli_metadata_cmdcnt)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))

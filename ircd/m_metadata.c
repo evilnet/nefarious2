@@ -194,14 +194,52 @@ static void notify_subscribers(const char *target, const char *key, const char *
   }
 }
 
-/** Send a KEYVALUE reply.
- * Format: :<server> 761 <client> <target> <key> [*] :<value>
- * The * indicates visibility (we don't implement private visibility yet)
+/** Check if a client can see a specific metadata entry.
+ * @param[in] viewer Client requesting to view.
+ * @param[in] owner Client that owns the metadata (NULL for channels).
+ * @param[in] entry Metadata entry to check.
+ * @return 1 if visible, 0 if not.
  */
-static void send_keyvalue(struct Client *to, const char *target, const char *key, const char *value)
+static int can_view_metadata(struct Client *viewer, struct Client *owner,
+                             struct MetadataEntry *entry)
+{
+  if (!entry)
+    return 0;
+
+  /* Public metadata is visible to all */
+  if (entry->visibility == METADATA_VIS_PUBLIC)
+    return 1;
+
+  /* Private metadata visible to owner */
+  if (owner && owner == viewer)
+    return 1;
+
+  /* Opers can see all metadata */
+  if (IsOper(viewer))
+    return 1;
+
+  return 0;
+}
+
+/** Get visibility string for metadata entry.
+ * @param[in] entry Metadata entry.
+ * @return "*" for public, "private" for private.
+ */
+static const char *get_visibility_str(struct MetadataEntry *entry)
+{
+  if (entry && entry->visibility == METADATA_VIS_PRIVATE)
+    return "private";
+  return "*";
+}
+
+/** Send a KEYVALUE reply.
+ * Format: :<server> 761 <client> <target> <key> <visibility> :<value>
+ */
+static void send_keyvalue(struct Client *to, const char *target, const char *key,
+                          const char *value, const char *visibility)
 {
   if (value && *value)
-    send_reply(to, RPL_KEYVALUE, target, key, value);
+    send_reply(to, RPL_KEYVALUE, target, key, visibility ? visibility : "*", value);
   else
     send_reply(to, RPL_KEYNOTSET, target, key);
 }
@@ -249,7 +287,13 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
     }
 
     if (entry) {
-      send_keyvalue(sptr, target, key, entry->value);
+      /* Check visibility */
+      if (can_view_metadata(sptr, is_channel ? NULL : target_client, entry)) {
+        send_keyvalue(sptr, target, key, entry->value, get_visibility_str(entry));
+      } else {
+        /* Private metadata not visible - show as not set */
+        send_reply(sptr, RPL_KEYNOTSET, target, key);
+      }
     } else {
       send_reply(sptr, RPL_KEYNOTSET, target, key);
     }
@@ -345,8 +389,8 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Send confirmation */
-  send_keyvalue(sptr, target, key, value);
+  /* Send confirmation with visibility (new metadata is public by default) */
+  send_keyvalue(sptr, target, key, value, "*");
 
   /* Notify local subscribers */
   notify_subscribers(target, key, value);
@@ -396,11 +440,9 @@ static int metadata_cmd_list(struct Client *sptr, int parc, char *parv[])
   }
 
   while (entry) {
-    /* Only show public metadata (or all if it's self/owner) */
-    if (entry->visibility == METADATA_VIS_PUBLIC ||
-        (!is_channel && target_client == sptr) ||
-        IsOper(sptr)) {
-      send_keyvalue(sptr, target, entry->key, entry->value);
+    /* Check visibility using helper function */
+    if (can_view_metadata(sptr, is_channel ? NULL : target_client, entry)) {
+      send_keyvalue(sptr, target, entry->key, entry->value, get_visibility_str(entry));
     }
     entry = entry->next;
   }
@@ -536,15 +578,149 @@ static int metadata_cmd_subs(struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
+/** Send subscribed metadata for a target to client within a batch.
+ * @param[in] sptr Client requesting sync.
+ * @param[in] target Target name (nick or channel).
+ * @param[in] target_client Client if user target.
+ * @param[in] target_channel Channel if channel target.
+ * @param[in] is_channel 1 if channel, 0 if user.
+ * @return Number of metadata items sent.
+ */
+static int sync_target_metadata(struct Client *sptr, const char *target,
+                                struct Client *target_client,
+                                struct Channel *target_channel,
+                                int is_channel)
+{
+  struct MetadataEntry *entry;
+  struct MetadataSub *sub;
+  int count = 0;
+
+  /* Get metadata list for target */
+  if (is_channel) {
+    entry = metadata_list_channel(target_channel);
+  } else {
+    entry = metadata_list_client(target_client);
+  }
+
+  /* Send each metadata item if client is subscribed to that key */
+  while (entry) {
+    /* Check if client is subscribed to this key */
+    if (metadata_sub_check(sptr, entry->key)) {
+      /* Send metadata notification */
+      if (entry->value && *entry->value) {
+        sendrawto_one(sptr, "@batch=%s :%s METADATA %s %s * :%s",
+                      cli_batch_id(sptr), cli_name(&me), target,
+                      entry->key, entry->value);
+      } else {
+        sendrawto_one(sptr, "@batch=%s :%s METADATA %s %s * :",
+                      cli_batch_id(sptr), cli_name(&me), target,
+                      entry->key);
+      }
+      count++;
+    }
+    entry = entry->next;
+  }
+
+  return count;
+}
+
 /** Handle SYNC subcommand.
- * METADATA SYNC [<target>]
- * Requests all subscribed metadata for target (or all targets).
+ * METADATA SYNC <target>
+ * Requests all subscribed metadata for target.
+ * For channels, includes metadata for all users in the channel.
  */
 static int metadata_cmd_sync(struct Client *sptr, int parc, char *parv[])
 {
-  /* SYNC is complex - for now just acknowledge */
-  /* Real implementation would iterate subscriptions and send matching metadata */
-  send_reply(sptr, RPL_METADATASYNCLATER, "*");
+  const char *target;
+  int is_channel = 0;
+  struct Client *target_client = NULL;
+  struct Channel *target_channel = NULL;
+  struct Membership *member;
+  int count = 0;
+
+  if (parc < 3) {
+    send_fail(sptr, "METADATA", "INVALID_PARAMS", NULL,
+              "SYNC requires a target");
+    return 0;
+  }
+
+  target = parv[2];
+
+  if (!can_see_target(sptr, target, &is_channel, &target_client, &target_channel)) {
+    send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+              "Invalid target");
+    return 0;
+  }
+
+  /* Check if client has any subscriptions */
+  if (metadata_sub_count(sptr) == 0) {
+    /* No subscriptions - nothing to sync */
+    return 0;
+  }
+
+  /* Start metadata batch */
+  send_batch_start(sptr, "metadata");
+
+  /* If no active batch (client doesn't support batch), send later */
+  if (!cli_batch_id(sptr)[0]) {
+    send_reply(sptr, RPL_METADATASYNCLATER, target);
+    return 0;
+  }
+
+  if (is_channel) {
+    /* Sync channel metadata */
+    count += sync_target_metadata(sptr, target, NULL, target_channel, 1);
+
+    /* Sync metadata for all users in the channel */
+    for (member = target_channel->members; member; member = member->next_member) {
+      struct Client *member_client = member->user;
+      if (member_client && IsUser(member_client)) {
+        count += sync_target_metadata(sptr, cli_name(member_client),
+                                       member_client, NULL, 0);
+      }
+    }
+  } else {
+    /* Sync user metadata */
+    count += sync_target_metadata(sptr, target, target_client, NULL, 0);
+  }
+
+  /* End metadata batch */
+  send_batch_end(sptr);
+
+  return 0;
+}
+
+/** Check and update rate limiting for metadata commands.
+ * Uses a token bucket style limiter: allows burst up to limit per second,
+ * then rejects until the next second.
+ * @param[in] sptr Client sending the command.
+ * @return 1 if rate limited (reject), 0 if ok to proceed.
+ */
+static int check_metadata_rate_limit(struct Client *sptr)
+{
+  int rate_limit = feature_int(FEAT_METADATA_RATE_LIMIT);
+
+  /* Rate limit of 0 disables limiting */
+  if (rate_limit <= 0)
+    return 0;
+
+  /* Opers bypass rate limiting */
+  if (IsOper(sptr))
+    return 0;
+
+  /* Reset counter if we're in a new second */
+  if (cli_metadata_lastcmd(sptr) != CurrentTime) {
+    cli_metadata_lastcmd(sptr) = CurrentTime;
+    cli_metadata_cmdcnt(sptr) = 1;
+    return 0;
+  }
+
+  /* Increment and check */
+  cli_metadata_cmdcnt(sptr)++;
+  if (cli_metadata_cmdcnt(sptr) > rate_limit) {
+    return 1;  /* Rate limited */
+  }
+
   return 0;
 }
 
@@ -566,6 +742,13 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Must have draft/metadata-2 capability */
   if (!CapActive(sptr, CAP_DRAFT_METADATA2)) {
     return send_reply(sptr, ERR_UNKNOWNCOMMAND, "METADATA");
+  }
+
+  /* Check rate limiting */
+  if (check_metadata_rate_limit(sptr)) {
+    send_fail(sptr, "METADATA", "RATE_LIMITED", NULL,
+              "Too many metadata commands, slow down");
+    return 0;
   }
 
   if (parc < 2 || EmptyString(parv[1])) {

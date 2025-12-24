@@ -35,6 +35,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -374,6 +375,11 @@ cap_ack(struct Client *sptr, const char *caplist)
       if (cap->flags & CAPFL_STICKY)
         continue; /* but don't clear sticky capabilities */
       CapClr(cli_active(sptr), cap->cap);
+
+      /* Clean up metadata subscriptions when metadata-2 is disabled */
+      if (cap->cap == CAP_DRAFT_METADATA2) {
+        metadata_sub_free(sptr);
+      }
     } else {
       if (cap->flags & CAPFL_PROHIBIT)
         continue; /* and don't set prohibited ones */
@@ -403,6 +409,11 @@ cap_clear(struct Client *sptr, const char *caplist)
     CapClr(cli_capab(sptr), cap->cap);
     if (!(cap->flags & CAPFL_PROTO))
       CapClr(cli_active(sptr), cap->cap);
+
+    /* Clean up metadata subscriptions when metadata-2 is cleared */
+    if (cap->cap == CAP_DRAFT_METADATA2) {
+      metadata_sub_free(sptr);
+    }
   }
   send_caplist(sptr, 0, &cleared, "ACK");
 
