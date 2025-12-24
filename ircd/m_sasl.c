@@ -122,6 +122,12 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ext = parv[5];
 
   if (!strcmp(parv[1], "*")) {
+    /* Check for mechanism list broadcast: SASL * * M :PLAIN,EXTERNAL,... */
+    if (!strcmp(token, "*") && reply[0] == 'M') {
+      set_sasl_mechanisms(data);
+      log_write(LS_SYSTEM, L_INFO, 0, "SASL mechanisms set to: %s", data);
+    }
+
     if (ext != NULL)
       sendcmdto_serv_butone(sptr, CMD_SASL, cptr, "* %s %s %s :%s",
                                    token, reply, data, ext);

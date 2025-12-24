@@ -56,5 +56,14 @@ extern char*          debugmode;
 extern int	      running;
 extern unsigned long  MsgIdCounter;   /**< Counter for unique message IDs */
 
+/** SASL mechanism list received from services (dynamic, for CAP LS) */
+#define SASL_MECHS_LEN 128
+extern char           SaslMechanisms[SASL_MECHS_LEN];
+
+/** Set the SASL mechanism list (called when services announces mechanisms) */
+extern void set_sasl_mechanisms(const char *mechs);
+/** Get the SASL mechanism list (for CAP LS value) */
+extern const char* get_sasl_mechanisms(void);
+
 #endif /* INCLUDED_ircd_h */
 

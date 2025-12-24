@@ -233,8 +233,17 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     /* Build value string for CAP 302+ */
     valbuf[0] = '\0';
     val_len = 0;
-    if (is_ls && cap_version >= 302 && capab_list[i].value) {
-      val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
+    if (is_ls && cap_version >= 302) {
+      /* For SASL, use dynamic mechanism list if available */
+      if (capab_list[i].cap == CAP_SASL) {
+        const char *mechs = get_sasl_mechanisms();
+        if (mechs)
+          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", mechs);
+        else if (capab_list[i].value)
+          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
+      } else if (capab_list[i].value) {
+        val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
+      }
     }
 
     len = capab_list[i].namelen + pfx_len + val_len; /* how much we'd add... */

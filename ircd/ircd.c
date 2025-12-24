@@ -131,6 +131,29 @@ int running = 1;
 /** Counter for generating unique message IDs. */
 unsigned long MsgIdCounter = 0;
 
+/** SASL mechanism list received from services. Empty means use default. */
+char SaslMechanisms[SASL_MECHS_LEN] = "";
+
+/** Set the SASL mechanism list (called when services announces mechanisms).
+ * @param[in] mechs Comma-separated list of mechanism names.
+ */
+void set_sasl_mechanisms(const char *mechs)
+{
+  if (mechs && *mechs) {
+    ircd_strncpy(SaslMechanisms, mechs, SASL_MECHS_LEN - 1);
+    SaslMechanisms[SASL_MECHS_LEN - 1] = '\0';
+  } else {
+    SaslMechanisms[0] = '\0';
+  }
+}
+
+/** Get the SASL mechanism list for CAP LS.
+ * @return Mechanism list, or NULL if none set.
+ */
+const char* get_sasl_mechanisms(void)
+{
+  return SaslMechanisms[0] ? SaslMechanisms : NULL;
+}
 
 /*----------------------------------------------------------------------------
  * API: server_die
