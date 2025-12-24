@@ -47,6 +47,7 @@
 #include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
+#include "s_bsd.h"
 #include "s_user.h"
 #include "send.h"
 
@@ -63,6 +64,7 @@ static int metadata_cmd_sub(struct Client *sptr, int parc, char *parv[]);
 static int metadata_cmd_unsub(struct Client *sptr, int parc, char *parv[]);
 static int metadata_cmd_subs(struct Client *sptr, int parc, char *parv[]);
 static int metadata_cmd_sync(struct Client *sptr, int parc, char *parv[]);
+static void notify_subscribers(const char *target, const char *key, const char *value);
 
 /** Check if key is valid per spec (letters, digits, hyphens, underscores, dots, colons, forward slashes)
  * and doesn't start with a digit.
@@ -155,6 +157,40 @@ static int can_modify_target(struct Client *sptr, const char *target, int is_cha
     if (target_client != sptr && !IsOper(sptr))
       return 0;
     return 1;
+  }
+}
+
+/** Notify all clients subscribed to a metadata key about a change.
+ * @param[in] target Target name (nick or channel).
+ * @param[in] key Metadata key that changed.
+ * @param[in] value New value (NULL if deleted).
+ */
+static void notify_subscribers(const char *target, const char *key, const char *value)
+{
+  struct Client *acptr;
+  int fd;
+
+  /* Iterate over all local clients */
+  for (fd = HighestFd; fd >= 0; --fd) {
+    if (!(acptr = LocalClientArray[fd]))
+      continue;
+    if (!IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_DRAFT_METADATA2))
+      continue;
+
+    /* Check if subscribed to this key */
+    if (!metadata_sub_check(acptr, key))
+      continue;
+
+    /* Send notification: METADATA <target> <key> [*] :<value> */
+    if (value && *value) {
+      sendrawto_one(acptr, ":%s METADATA %s %s * :%s",
+                    cli_name(&me), target, key, value);
+    } else {
+      sendrawto_one(acptr, ":%s METADATA %s %s * :",
+                    cli_name(&me), target, key);
+    }
   }
 }
 
@@ -312,7 +348,17 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   /* Send confirmation */
   send_keyvalue(sptr, target, key, value);
 
-  /* TODO: Notify subscribers and propagate to other servers */
+  /* Notify local subscribers */
+  notify_subscribers(target, key, value);
+
+  /* Propagate to other servers */
+  if (value) {
+    sendcmdto_serv_butone(sptr, CMD_METADATA, NULL, "%s %s :%s",
+                          target, key, value);
+  } else {
+    sendcmdto_serv_butone(sptr, CMD_METADATA, NULL, "%s %s",
+                          target, key);
+  }
 
   return 0;
 }
@@ -606,6 +652,9 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     metadata_set_client(target_client, key, value);
   }
 
+  /* Notify local subscribers */
+  notify_subscribers(target, key, value);
+
   /* Propagate to other servers */
   if (value) {
     sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s :%s",
@@ -614,8 +663,6 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s",
                           target, key);
   }
-
-  /* TODO: Notify subscribed clients */
 
   return 0;
 }
