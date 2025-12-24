@@ -66,6 +66,55 @@ extern void metadata_init(void);
 /** Shutdown the metadata subsystem */
 extern void metadata_shutdown(void);
 
+/** Initialize LMDB for metadata persistence.
+ * @param[in] dbpath Path to the database directory.
+ * @return 0 on success, -1 on error.
+ */
+extern int metadata_lmdb_init(const char *dbpath);
+
+/** Shutdown LMDB metadata storage. */
+extern void metadata_lmdb_shutdown(void);
+
+/** Check if LMDB metadata storage is available.
+ * @return 1 if available, 0 if not.
+ */
+extern int metadata_lmdb_is_available(void);
+
+/** Get account metadata from LMDB.
+ * @param[in] account Account name.
+ * @param[in] key Metadata key.
+ * @param[out] value Buffer for value (at least METADATA_VALUE_LEN).
+ * @return 0 on success, 1 if not found, -1 on error.
+ */
+extern int metadata_account_get(const char *account, const char *key, char *value);
+
+/** Set account metadata in LMDB.
+ * @param[in] account Account name.
+ * @param[in] key Metadata key.
+ * @param[in] value Value to set (NULL to delete).
+ * @return 0 on success, -1 on error.
+ */
+extern int metadata_account_set(const char *account, const char *key, const char *value);
+
+/** List all metadata for an account from LMDB.
+ * @param[in] account Account name.
+ * @return Head of metadata list (caller must free).
+ */
+extern struct MetadataEntry *metadata_account_list(const char *account);
+
+/** Clear all metadata for an account in LMDB.
+ * @param[in] account Account name.
+ * @return 0 on success, -1 on error.
+ */
+extern int metadata_account_clear(const char *account);
+
+/** Load metadata from LMDB for a logged-in user.
+ * Called when a user logs into an account.
+ * @param[in] cptr Client that just logged in.
+ * @param[in] account Account name.
+ */
+extern void metadata_load_account(struct Client *cptr, const char *account);
+
 /** Validate a metadata key name.
  * @param[in] key Key name to validate.
  * @return 1 if valid, 0 if invalid.
