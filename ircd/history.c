@@ -950,6 +950,182 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
   return 0;
 }
 
+int history_lookup_message(const char *target, const char *msgid,
+                            struct HistoryMessage **msg)
+{
+  MDB_txn *txn;
+  MDB_val key, data;
+  struct HistoryMessage *m;
+  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char timestamp[HISTORY_TIMESTAMP_LEN];
+  int keylen;
+  int rc;
+
+  *msg = NULL;
+
+  if (!history_available)
+    return -1;
+
+  /* First, look up the msgid to get target and timestamp */
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0)
+    return -1;
+
+  key.mv_size = strlen(msgid);
+  key.mv_data = (void *)msgid;
+
+  rc = mdb_get(txn, history_msgid_dbi, &key, &data);
+  if (rc == MDB_NOTFOUND) {
+    mdb_txn_abort(txn);
+    return 1; /* Not found */
+  }
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Value is target\0timestamp - extract timestamp */
+  {
+    const char *sep;
+    sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
+    if (!sep) {
+      mdb_txn_abort(txn);
+      return -1;
+    }
+    sep++; /* Skip separator */
+    if ((size_t)((char *)data.mv_data + data.mv_size - sep) >= HISTORY_TIMESTAMP_LEN) {
+      mdb_txn_abort(txn);
+      return -1;
+    }
+    memcpy(timestamp, sep, (char *)data.mv_data + data.mv_size - sep);
+    timestamp[(char *)data.mv_data + data.mv_size - sep] = '\0';
+  }
+
+  /* Build key for main database lookup: target\0timestamp\0msgid */
+  keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
+  if (keylen < 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  key.mv_size = keylen;
+  key.mv_data = keybuf;
+
+  rc = mdb_get(txn, history_dbi, &key, &data);
+  if (rc == MDB_NOTFOUND) {
+    mdb_txn_abort(txn);
+    return 1; /* Not found */
+  }
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Allocate and populate message structure */
+  m = (struct HistoryMessage *)MyMalloc(sizeof(struct HistoryMessage));
+  if (!m) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+  memset(m, 0, sizeof(*m));
+
+  /* Parse the message */
+  if (deserialize_message(data.mv_data, data.mv_size, m) != 0) {
+    MyFree(m);
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Fill in the key fields */
+  ircd_strncpy(m->msgid, msgid, sizeof(m->msgid) - 1);
+  ircd_strncpy(m->target, target, sizeof(m->target) - 1);
+  ircd_strncpy(m->timestamp, timestamp, sizeof(m->timestamp) - 1);
+  m->next = NULL;
+
+  mdb_txn_abort(txn);
+  *msg = m;
+  return 0;
+}
+
+int history_delete_message(const char *target, const char *msgid)
+{
+  MDB_txn *txn;
+  MDB_val key, data;
+  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char timestamp[HISTORY_TIMESTAMP_LEN];
+  int keylen;
+  int rc;
+
+  if (!history_available)
+    return -1;
+
+  /* First, look up the msgid to get the timestamp */
+  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  if (rc != 0)
+    return -1;
+
+  key.mv_size = strlen(msgid);
+  key.mv_data = (void *)msgid;
+
+  rc = mdb_get(txn, history_msgid_dbi, &key, &data);
+  if (rc == MDB_NOTFOUND) {
+    mdb_txn_abort(txn);
+    return 1; /* Not found */
+  }
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Extract timestamp from value (target\0timestamp) */
+  {
+    const char *sep;
+    sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
+    if (!sep) {
+      mdb_txn_abort(txn);
+      return -1;
+    }
+    sep++; /* Skip separator */
+    if ((size_t)((char *)data.mv_data + data.mv_size - sep) >= HISTORY_TIMESTAMP_LEN) {
+      mdb_txn_abort(txn);
+      return -1;
+    }
+    memcpy(timestamp, sep, (char *)data.mv_data + data.mv_size - sep);
+    timestamp[(char *)data.mv_data + data.mv_size - sep] = '\0';
+  }
+
+  /* Delete from msgid index */
+  key.mv_size = strlen(msgid);
+  key.mv_data = (void *)msgid;
+  rc = mdb_del(txn, history_msgid_dbi, &key, NULL);
+  if (rc != 0 && rc != MDB_NOTFOUND) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Build key for main database: target\0timestamp\0msgid */
+  keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
+  if (keylen < 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Delete from main message database */
+  key.mv_size = keylen;
+  key.mv_data = keybuf;
+  rc = mdb_del(txn, history_dbi, &key, NULL);
+  if (rc != 0 && rc != MDB_NOTFOUND) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdb_txn_commit(txn);
+  if (rc != 0)
+    return -1;
+
+  return 0;
+}
+
 int history_is_available(void)
 {
   return history_available;
@@ -958,6 +1134,8 @@ int history_is_available(void)
 #else /* !USE_LMDB */
 
 /* Stub implementations when LMDB is not available */
+#include "history.h"
+#include <stddef.h>
 
 int history_init(const char *dbpath)
 {
@@ -1053,6 +1231,20 @@ int history_purge_old(unsigned long max_age_seconds)
 int history_msgid_to_timestamp(const char *msgid, char *timestamp)
 {
   (void)msgid; (void)timestamp;
+  return -1;
+}
+
+int history_lookup_message(const char *target, const char *msgid,
+                            struct HistoryMessage **msg)
+{
+  (void)target; (void)msgid;
+  *msg = NULL;
+  return -1;
+}
+
+int history_delete_message(const char *target, const char *msgid)
+{
+  (void)target; (void)msgid;
   return -1;
 }
 

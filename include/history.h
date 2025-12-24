@@ -226,4 +226,22 @@ extern int history_msgid_to_timestamp(const char *msgid, char *timestamp);
  */
 extern int history_is_available(void);
 
+/** Delete a message from the history database.
+ * Used by message-redaction to remove redacted messages.
+ * @param[in] target Channel or nick where message was sent.
+ * @param[in] msgid Message ID to delete.
+ * @return 0 on success, -1 on error, 1 if not found.
+ */
+extern int history_delete_message(const char *target, const char *msgid);
+
+/** Lookup a message by ID and verify sender.
+ * Used by message-redaction to validate authorization.
+ * @param[in] target Channel or nick where message was sent.
+ * @param[in] msgid Message ID to look up.
+ * @param[out] msg Pointer to result (caller must free with history_free_messages).
+ * @return 0 on success, -1 on error, 1 if not found.
+ */
+extern int history_lookup_message(const char *target, const char *msgid,
+                                   struct HistoryMessage **msg);
+
 #endif /* INCLUDED_history_h */

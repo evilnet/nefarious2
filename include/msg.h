@@ -520,6 +520,10 @@ struct Client;
 #define TOK_CHATHISTORY	"CH"
 #define CMD_CHATHISTORY	MSG_CHATHISTORY, TOK_CHATHISTORY
 
+#define MSG_REDACT	"REDACT"
+#define TOK_REDACT	"RD"
+#define CMD_REDACT	MSG_REDACT, TOK_REDACT
+
 /*
  * Constants
  */

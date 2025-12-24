@@ -934,6 +934,14 @@ struct Message msgtab[] = {
     "subcommand target ref [ref] limit - Query message history"
   },
   {
+    MSG_REDACT,
+    TOK_REDACT,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_redact, ms_redact, m_redact, m_ignore },
+    "<target> <msgid> [:<reason>] - Redact a previously sent message"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,
