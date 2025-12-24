@@ -809,6 +809,9 @@ static struct FeatureDesc {
   F_B(CAP_draft_no_implicit_names, 0, 1, 0),
   F_B(CAP_draft_extended_isupport, 0, 1, 0),
   F_B(CAP_draft_pre_away, 0, 1, 0),
+  F_B(CAP_draft_multiline, 0, 1, 0),
+  F_I(MULTILINE_MAX_BYTES, 0, 4096, 0),
+  F_I(MULTILINE_MAX_LINES, 0, 24, 0),
   F_B(MSGID, 0, 1, 0),
   F_B(P10_MESSAGE_TAGS, 0, 0, 0),
 #ifdef USE_SSL

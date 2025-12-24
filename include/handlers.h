@@ -278,6 +278,7 @@ extern int ms_xquery(struct Client*, struct Client*, int, char*[]);
 extern int ms_xreply(struct Client*, struct Client*, int, char*[]);
 extern int ms_zline(struct Client*, struct Client*, int, char*[]);
 extern int ms_batch(struct Client*, struct Client*, int, char*[]);
+extern int m_batch(struct Client*, struct Client*, int, char*[]);
 
 #endif /* INCLUDED_handlers_h */
 

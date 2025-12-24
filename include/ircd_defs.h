@@ -95,6 +95,13 @@
 /** Maximum length for away messages.
  */
 #define AWAYLEN		250
+/** Maximum length of a channel name.
+ * Also defined in channel.h; having it here allows client.h to use it
+ * without creating a circular dependency.
+ */
+#ifndef CHANNELLEN
+#define CHANNELLEN	200
+#endif
 /** Exactly long enough to hold one protocol message (RFC 1459)
  * including the line termination (\\r\\n).  DO NOT CHANGE THIS!!!!
  */

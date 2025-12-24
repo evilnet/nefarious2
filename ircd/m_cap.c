@@ -97,6 +97,7 @@ static struct capabilities {
   _CAP(DRAFT_NOIMPLICITNAMES, 0, "draft/no-implicit-names", FEAT_CAP_draft_no_implicit_names),
   _CAP(DRAFT_EXTISUPPORT, 0, "draft/extended-isupport", FEAT_CAP_draft_extended_isupport),
   _CAP(DRAFT_PREAWAY, 0, "draft/pre-away", FEAT_CAP_draft_pre_away),
+  _CAP(DRAFT_MULTILINE, 0, "draft/multiline", FEAT_CAP_draft_multiline),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
@@ -244,6 +245,11 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", mechs);
         else if (capab_list[i].value)
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
+      } else if (capab_list[i].cap == CAP_DRAFT_MULTILINE) {
+        /* Build dynamic multiline value from features */
+        val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=max-bytes=%d,max-lines=%d",
+                                feature_int(FEAT_MULTILINE_MAX_BYTES),
+                                feature_int(FEAT_MULTILINE_MAX_LINES));
       } else if (capab_list[i].value) {
         val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
       }

@@ -326,6 +326,9 @@ enum Feature {
   FEAT_CAP_draft_no_implicit_names,
   FEAT_CAP_draft_extended_isupport,
   FEAT_CAP_draft_pre_away,
+  FEAT_CAP_draft_multiline,
+  FEAT_MULTILINE_MAX_BYTES,
+  FEAT_MULTILINE_MAX_LINES,
   FEAT_MSGID,
   FEAT_P10_MESSAGE_TAGS,
 #ifdef USE_SSL

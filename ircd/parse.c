@@ -922,8 +922,8 @@ struct Message msgtab[] = {
     TOK_BATCH_CMD,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_ignore, m_ignore, ms_batch, m_ignore, m_ignore },
-    ""
+    { m_ignore, m_batch, ms_batch, m_batch, m_ignore },
+    "+id type [params] | -id - Start or end a message batch"
   },
   {
     MSG_FINGERPRINT,
@@ -1237,9 +1237,11 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   if (IsDead(cptr))
     return 0;
 
-  /* Clear any previous label and client-only tags */
+  /* Clear any previous label, client-only tags, and batch tags */
   cli_label(cptr)[0] = '\0';
   cli_client_tags(cptr)[0] = '\0';
+  cli_msg_batch_tag(cptr)[0] = '\0';
+  cli_msg_concat(cptr) = 0;
 
   para[0] = cli_name(from);
   for (ch = buffer; *ch == ' '; ch++);  /* Eat leading spaces */
@@ -1277,6 +1279,23 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
             memcpy(cli_label(cptr), label_val, label_len);
             cli_label(cptr)[label_len] = '\0';
           }
+        }
+        /* Check for batch= tag (draft/multiline) */
+        else if (strncmp(tag_name, "batch=", 6) == 0) {
+          /* Extract batch ID for multiline message handling */
+          if (CapActive(cptr, CAP_DRAFT_MULTILINE)) {
+            char *batch_val = tag_name + 6;
+            size_t batch_len = next_semi - batch_val;
+            if (batch_len >= sizeof(cli_msg_batch_tag(cptr)))
+              batch_len = sizeof(cli_msg_batch_tag(cptr)) - 1;
+            memcpy(cli_msg_batch_tag(cptr), batch_val, batch_len);
+            cli_msg_batch_tag(cptr)[batch_len] = '\0';
+          }
+        }
+        /* Check for draft/multiline-concat tag */
+        else if (tag_len == 22 && strncmp(tag_name, "draft/multiline-concat", 22) == 0) {
+          if (CapActive(cptr, CAP_DRAFT_MULTILINE))
+            cli_msg_concat(cptr) = 1;
         }
         /* Check for client-only tags (prefixed with +) */
         else if (*tag_name == '+') {

@@ -334,6 +334,15 @@ struct Connection
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
   char                con_pre_away_msg[AWAYLEN + 1]; /**< Pre-registration away message */
+  /* Multiline batch state (draft/multiline) */
+  char                con_ml_batch_id[16]; /**< Active multiline batch ID */
+  char                con_ml_target[CHANNELLEN + 1]; /**< Multiline batch target (channel or nick) */
+  struct SLink*       con_ml_messages; /**< List of multiline messages */
+  int                 con_ml_msg_count; /**< Number of messages in batch */
+  int                 con_ml_total_bytes; /**< Total bytes in batch */
+  /* Current message @batch tag for PRIVMSG interception */
+  char                con_msg_batch_tag[16]; /**< @batch tag from current message */
+  unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -458,6 +467,20 @@ struct Client {
 #define cli_s2s_batch_id(cli)	con_s2s_batch_id(cli_connect(cli))
 /** Get S2S batch type from server */
 #define cli_s2s_batch_type(cli)	con_s2s_batch_type(cli_connect(cli))
+/** Get active multiline batch ID. */
+#define cli_ml_batch_id(cli)	con_ml_batch_id(cli_connect(cli))
+/** Get multiline batch target. */
+#define cli_ml_target(cli)	con_ml_target(cli_connect(cli))
+/** Get multiline message list. */
+#define cli_ml_messages(cli)	con_ml_messages(cli_connect(cli))
+/** Get multiline message count. */
+#define cli_ml_msg_count(cli)	con_ml_msg_count(cli_connect(cli))
+/** Get multiline total bytes. */
+#define cli_ml_total_bytes(cli)	con_ml_total_bytes(cli_connect(cli))
+/** Get current message @batch tag. */
+#define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
+/** Get current message concat flag. */
+#define cli_msg_concat(cli)	con_msg_concat(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -678,6 +701,20 @@ struct Client {
 #define con_pre_away(con)	((con)->con_pre_away)
 /** Get the pre-registration away message. */
 #define con_pre_away_msg(con)	((con)->con_pre_away_msg)
+/** Get the multiline batch ID. */
+#define con_ml_batch_id(con)	((con)->con_ml_batch_id)
+/** Get the multiline batch target. */
+#define con_ml_target(con)	((con)->con_ml_target)
+/** Get the multiline message list. */
+#define con_ml_messages(con)	((con)->con_ml_messages)
+/** Get the multiline message count. */
+#define con_ml_msg_count(con)	((con)->con_ml_msg_count)
+/** Get the multiline total bytes. */
+#define con_ml_total_bytes(con)	((con)->con_ml_total_bytes)
+/** Get the current message @batch tag. */
+#define con_msg_batch_tag(con)	((con)->con_msg_batch_tag)
+/** Get the current message draft/multiline-concat flag. */
+#define con_msg_concat(con)	((con)->con_msg_concat)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */
