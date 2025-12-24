@@ -108,6 +108,10 @@ struct Client;
 #define TOK_INFO                "F"
 #define CMD_INFO		MSG_INFO, TOK_INFO
 
+#define MSG_ISUPPORT            "ISUPPORT"      /* ISUPPORT (IRCv3 draft/extended-isupport) */
+#define TOK_ISUPPORT            "IS"
+#define CMD_ISUPPORT		MSG_ISUPPORT, TOK_ISUPPORT
+
 #define MSG_LINKS               "LINKS"         /* LINK */
 #define TOK_LINKS               "LI"
 #define CMD_LINKS		MSG_LINKS, TOK_LINKS

@@ -807,6 +807,7 @@ static struct FeatureDesc {
   F_B(CAP_setname, 0, 1, 0),
   F_B(CAP_standard_replies, 0, 1, 0),
   F_B(CAP_draft_no_implicit_names, 0, 1, 0),
+  F_B(CAP_draft_extended_isupport, 0, 1, 0),
   F_B(MSGID, 0, 1, 0),
   F_B(P10_MESSAGE_TAGS, 0, 0, 0),
 #ifdef USE_SSL

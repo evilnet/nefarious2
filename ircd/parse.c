@@ -526,6 +526,14 @@ struct Message msgtab[] = {
     "- Returns information about the local server"
   },
   {
+    MSG_ISUPPORT,
+    TOK_ISUPPORT,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_isupport, m_isupport, m_ignore, m_isupport, m_ignore },
+    "- Returns ISUPPORT tokens (requires draft/extended-isupport cap)"
+  },
+  {
     MSG_MOTD,
     TOK_MOTD,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
