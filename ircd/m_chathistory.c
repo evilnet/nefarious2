@@ -103,6 +103,22 @@ static void generate_batch_id(char *buf, size_t buflen, struct Client *sptr)
   ircd_snprintf(0, buf, buflen, "hist%lu%s", ++batch_counter, cli_yxx(sptr));
 }
 
+/** Check if message type should be sent to client.
+ * Without draft/event-playback, only PRIVMSG and NOTICE are sent.
+ * @param[in] sptr Client to check.
+ * @param[in] type Message type.
+ * @return 1 if should send, 0 if should skip.
+ */
+static int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
+{
+  /* PRIVMSG and NOTICE are always sent */
+  if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE)
+    return 1;
+
+  /* Other events require draft/event-playback capability */
+  return CapActive(sptr, CAP_DRAFT_EVENTPLAYBACK);
+}
+
 /** Send history messages as a batch response.
  * @param[in] sptr Client to send to.
  * @param[in] target Target name for batch.
@@ -130,6 +146,10 @@ static void send_history_batch(struct Client *sptr, const char *target,
 
   /* Send each message */
   for (msg = messages; msg; msg = msg->next) {
+    /* Filter events based on event-playback capability */
+    if (!should_send_message_type(sptr, msg->type))
+      continue;
+
     cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
     if (CapActive(sptr, CAP_BATCH)) {

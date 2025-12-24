@@ -38,9 +38,76 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "history.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h> /* for atoi() */
+#include <sys/time.h>
+#include <time.h>
+
+#ifdef USE_LMDB
+/** Counter for generating unique message IDs for TOPIC event history storage */
+static unsigned long topic_history_msgid_counter = 0;
+
+/** Store a TOPIC event in the history database.
+ * @param[in] sptr Client that set the topic.
+ * @param[in] chptr Channel where topic was set.
+ * @param[in] topic The new topic text.
+ */
+static void store_topic_event(struct Client *sptr, struct Channel *chptr,
+                              const char *topic)
+{
+  struct timeval tv;
+  struct tm tm;
+  char timestamp[32];
+  char msgid[64];
+  char sender[HISTORY_SENDER_LEN];
+  const char *account;
+
+  if (!history_is_available())
+    return;
+
+  /* Check if chathistory feature is enabled */
+  if (!feature_bool(FEAT_CAP_draft_chathistory))
+    return;
+
+  /* Only store for local users to avoid duplicates */
+  if (!MyUser(sptr))
+    return;
+
+  /* Generate ISO 8601 timestamp */
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  ircd_snprintf(0, timestamp, sizeof(timestamp),
+                "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                tv.tv_usec / 1000);
+
+  /* Generate unique msgid */
+  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                cli_yxx(&me),
+                (unsigned long)cli_firsttime(&me),
+                ++topic_history_msgid_counter);
+
+  /* Build sender string: nick!user@host */
+  if (cli_user(sptr))
+    ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                  cli_name(sptr),
+                  cli_user(sptr)->username,
+                  cli_user(sptr)->host);
+  else
+    ircd_strncpy(sender, cli_name(sptr), sizeof(sender) - 1);
+
+  /* Get account name if logged in */
+  account = (cli_user(sptr) && cli_user(sptr)->account[0])
+            ? cli_user(sptr)->account : NULL;
+
+  /* Store in database */
+  history_store_message(msgid, timestamp, chptr->chname, sender,
+                        account, HISTORY_TOPIC, topic ? topic : "");
+}
+#endif /* USE_LMDB */
 
 /** Set a channel topic or report an error.
  * @param[in] sptr Original topic setter.
@@ -110,6 +177,11 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
      sendcmdto_channel_butserv_butone(from, CMD_TOPIC, chptr, NULL, 0,
       				       (setter ? "%H :%s (%s)" : "%H :%s%s"),
                                        chptr, chptr->topic, (setter ? nick : ""));
+
+#ifdef USE_LMDB
+     /* Store TOPIC event in history */
+     store_topic_event(sptr, chptr, chptr->topic);
+#endif
    }
       /* if this is the same topic as before we send it to the person that
        * set it (so they knew it went through ok), but don't bother sending

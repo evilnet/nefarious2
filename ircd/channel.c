@@ -53,11 +53,14 @@
 #include "struct.h"
 #include "sys.h"
 #include "whowas.h"
+#include "history.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
 /** Linked list containing the full list of all channels */
 struct Channel* GlobalChannelList = 0;
@@ -74,6 +77,68 @@ static size_t bans_alloc;
 static size_t bans_inuse;
 
 int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix);
+
+#ifdef USE_LMDB
+/** Counter for generating unique message IDs for channel event history storage */
+static unsigned long channel_history_msgid_counter = 0;
+
+/** Store a channel event (JOIN, PART, etc.) in the history database.
+ * Generates a unique msgid and timestamp, then stores the event.
+ * @param[in] sptr Client that triggered the event.
+ * @param[in] chptr Target channel.
+ * @param[in] text Event content (e.g., part reason, empty for joins).
+ * @param[in] type Event type (HISTORY_JOIN, HISTORY_PART, etc.).
+ */
+static void store_channel_event(struct Client *sptr, struct Channel *chptr,
+                                const char *text, enum HistoryMessageType type)
+{
+  struct timeval tv;
+  struct tm tm;
+  char timestamp[32];
+  char msgid[64];
+  char sender[HISTORY_SENDER_LEN];
+  const char *account;
+
+  if (!history_is_available())
+    return;
+
+  /* Check if chathistory feature is enabled */
+  if (!feature_bool(FEAT_CAP_draft_chathistory))
+    return;
+
+  /* Generate ISO 8601 timestamp */
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  ircd_snprintf(0, timestamp, sizeof(timestamp),
+                "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                tv.tv_usec / 1000);
+
+  /* Generate unique msgid */
+  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                cli_yxx(&me),
+                (unsigned long)cli_firsttime(&me),
+                ++channel_history_msgid_counter);
+
+  /* Build sender string: nick!user@host */
+  if (cli_user(sptr))
+    ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                  cli_name(sptr),
+                  cli_user(sptr)->username,
+                  cli_user(sptr)->host);
+  else
+    ircd_strncpy(sender, cli_name(sptr), sizeof(sender) - 1);
+
+  /* Get account name if logged in */
+  account = (cli_user(sptr) && cli_user(sptr)->account[0])
+            ? cli_user(sptr)->account : NULL;
+
+  /* Store in database */
+  history_store_message(msgid, timestamp, chptr->chname, sender,
+                        account, type, text ? text : "");
+}
+#endif /* USE_LMDB */
 
 #if !defined(NDEBUG)
 /** return the length (>=0) of a chain of links.
@@ -1842,6 +1907,41 @@ struct Channel *get_channel(struct Client *cptr, char *chname, ChannelGetType fl
   return chptr;
 }
 
+/** Rename a channel.
+ * Updates the channel name in the hash table and channel structure.
+ * Only allows renaming to names that fit in the allocated space.
+ *
+ * @param[in] chptr Channel to rename.
+ * @param[in] newname New name for the channel.
+ * @return 0 on success, -1 if new name is too long, -2 if new name exists.
+ */
+int rename_channel(struct Channel *chptr, const char *newname)
+{
+  size_t oldlen, newlen;
+
+  if (!chptr || !newname || !*newname)
+    return -1;
+
+  oldlen = strlen(chptr->chname);
+  newlen = strlen(newname);
+
+  /* New name must fit in allocated space */
+  if (newlen > oldlen)
+    return -1;
+
+  /* Check if new name already exists */
+  if (FindChannel(newname))
+    return -2;
+
+  /* Update hash table first (removes from old bucket, adds to new) */
+  hChangeChannel(chptr, newname);
+
+  /* Copy new name into channel structure */
+  strcpy(chptr->chname, newname);
+
+  return 0;
+}
+
 /** invite a user to a channel.
  *
  * Adds an invite for a user to a channel.  Limits the number of invites
@@ -2411,7 +2511,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 		mbuf->mb_channel, rembuf_i ? "-" : "", rembuf,
 		addbuf_i ? "+" : "", addbuf, remstr, addstr);
 
-    if (mbuf->mb_dest & MODEBUF_DEST_CHANNEL)
+    if (mbuf->mb_dest & MODEBUF_DEST_CHANNEL) {
       sendcmdto_channel_butserv_butone(app_source, CMD_MODE, mbuf->mb_channel, NULL, 0,
                                        "%H %s%s%s%s%s%s%s%s", mbuf->mb_channel,
                                        rembuf_i || rembuf_local_i ? "-" : "",
@@ -2419,6 +2519,21 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                        addbuf_i || addbuf_local_i ? "+" : "",
                                        addbuf, addbuf_local,
                                        remstr, addstr);
+
+#ifdef USE_LMDB
+      /* Store MODE event in history (only from local users) */
+      if (MyUser(mbuf->mb_source)) {
+        char mode_text[512];
+        ircd_snprintf(0, mode_text, sizeof(mode_text), "%s%s%s%s%s%s%s%s",
+                      rembuf_i || rembuf_local_i ? "-" : "",
+                      rembuf, rembuf_local,
+                      addbuf_i || addbuf_local_i ? "+" : "",
+                      addbuf, addbuf_local,
+                      remstr, addstr);
+        store_channel_event(mbuf->mb_source, mbuf->mb_channel, mode_text, HISTORY_MODE);
+      }
+#endif
+    }
   }
 
   /* Now are we supposed to propagate to other servers? */
@@ -4878,6 +4993,15 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       sendcmdto_one(jbuf->jb_source, CMD_PART, jbuf->jb_source,
 		    (flags & CHFL_BANNED || !jbuf->jb_comment) ?
 		    ":%H" : "%H :%s", chan, jbuf->jb_comment);
+
+#ifdef USE_LMDB
+    /* Store PART event in history (only from local users to avoid duplicates) */
+    if (MyUser(jbuf->jb_source) && !(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
+      store_channel_event(jbuf->jb_source, chan,
+                          (flags & CHFL_BANNED || !jbuf->jb_comment) ? "" : jbuf->jb_comment,
+                          HISTORY_PART);
+#endif
+
     /* XXX: Shouldn't we send a PART here anyway? */
     /* to users on the channel?  Why?  From their POV, the user isn't on
      * the channel anymore anyway.  We don't send to servers until below,
@@ -4911,6 +5035,12 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                                              CAP_EXTJOIN, CAP_NONE, "%H %s :%s", chan,
                                              IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
                                              cli_info(jbuf->jb_source));
+
+#ifdef USE_LMDB
+      /* Store JOIN event in history (only from local users to avoid duplicates) */
+      if (MyUser(jbuf->jb_source))
+        store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN);
+#endif
 
       if (cli_user(jbuf->jb_source)->away)
         sendcmdto_channel_capab_butserv_butone(jbuf->jb_source, CMD_AWAY, chan, NULL, 0,

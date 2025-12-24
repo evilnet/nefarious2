@@ -974,6 +974,14 @@ struct Message msgtab[] = {
     "<target> [timestamp=<ts>] - Get or set read marker for target"
   },
   {
+    MSG_RENAME,
+    TOK_RENAME,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_rename, ms_rename, m_rename, m_ignore },
+    "<oldchannel> <newchannel> [:<reason>] - Rename a channel"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

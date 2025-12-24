@@ -93,8 +93,82 @@
 #include "numnicks.h"
 #include "send.h"
 #include "ircd_features.h"
+#include "history.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+#include <sys/time.h>
+#include <time.h>
+
+#ifdef USE_LMDB
+/** Counter for generating unique message IDs for KICK event history storage */
+static unsigned long kick_history_msgid_counter = 0;
+
+/** Store a KICK event in the history database.
+ * The message content is formatted as "kicked_nick :reason" per event-playback spec.
+ * @param[in] sptr Client that did the kick.
+ * @param[in] chptr Channel where kick occurred.
+ * @param[in] who Client that was kicked.
+ * @param[in] comment Kick reason.
+ */
+static void store_kick_event(struct Client *sptr, struct Channel *chptr,
+                             struct Client *who, const char *comment)
+{
+  struct timeval tv;
+  struct tm tm;
+  char timestamp[32];
+  char msgid[64];
+  char sender[HISTORY_SENDER_LEN];
+  char kick_text[512];
+  const char *account;
+
+  if (!history_is_available())
+    return;
+
+  /* Check if chathistory feature is enabled */
+  if (!feature_bool(FEAT_CAP_draft_chathistory))
+    return;
+
+  /* Only store for local users to avoid duplicates */
+  if (!MyUser(sptr))
+    return;
+
+  /* Generate ISO 8601 timestamp */
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  ircd_snprintf(0, timestamp, sizeof(timestamp),
+                "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                tv.tv_usec / 1000);
+
+  /* Generate unique msgid */
+  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                cli_yxx(&me),
+                (unsigned long)cli_firsttime(&me),
+                ++kick_history_msgid_counter);
+
+  /* Build sender string: nick!user@host */
+  if (cli_user(sptr))
+    ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                  cli_name(sptr),
+                  cli_user(sptr)->username,
+                  cli_user(sptr)->host);
+  else
+    ircd_strncpy(sender, cli_name(sptr), sizeof(sender) - 1);
+
+  /* Get account name if logged in */
+  account = (cli_user(sptr) && cli_user(sptr)->account[0])
+            ? cli_user(sptr)->account : NULL;
+
+  /* Build kick text: "kicked_nick :reason" */
+  ircd_snprintf(0, kick_text, sizeof(kick_text), "%s :%s",
+                cli_name(who), comment ? comment : "");
+
+  /* Store in database */
+  history_store_message(msgid, timestamp, chptr->chname, sender,
+                        account, HISTORY_KICK, kick_text);
+}
+#endif /* USE_LMDB */
 
 /*
  * m_kick - generic message handler
@@ -182,6 +256,11 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   } else
     sendcmdto_channel_butserv_butone(sptr, CMD_KICK, chptr, NULL, 0, "%H %C :%s", chptr, who,
                                      comment);
+
+#ifdef USE_LMDB
+  /* Store KICK event in history */
+  store_kick_event(sptr, chptr, who, comment);
+#endif
 
   make_zombie(member, who, cptr, sptr, chptr);
 

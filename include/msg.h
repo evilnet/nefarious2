@@ -540,6 +540,10 @@ struct Client;
 #define TOK_MARKREAD	"MR"
 #define CMD_MARKREAD	MSG_MARKREAD, TOK_MARKREAD
 
+#define MSG_RENAME	"RENAME"
+#define TOK_RENAME	"RN"
+#define CMD_RENAME	MSG_RENAME, TOK_RENAME
+
 /*
  * Constants
  */
