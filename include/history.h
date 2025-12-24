@@ -226,6 +226,31 @@ extern int history_msgid_to_timestamp(const char *msgid, char *timestamp);
  */
 extern int history_is_available(void);
 
+/*
+ * Read Marker API (IRCv3 draft/read-marker)
+ *
+ * Read markers are stored per account+target in the same LMDB environment.
+ * Key: "account\0target"
+ * Value: ISO 8601 timestamp
+ */
+
+/** Get the read marker timestamp for an account and target.
+ * @param[in] account Account name.
+ * @param[in] target Channel name or nick.
+ * @param[out] timestamp Buffer for timestamp (at least HISTORY_TIMESTAMP_LEN).
+ * @return 0 on success, 1 if not found, -1 on error.
+ */
+extern int readmarker_get(const char *account, const char *target, char *timestamp);
+
+/** Set the read marker timestamp for an account and target.
+ * Only updates if the new timestamp is greater than the stored one.
+ * @param[in] account Account name.
+ * @param[in] target Channel name or nick.
+ * @param[in] timestamp ISO 8601 timestamp.
+ * @return 0 on success (updated), 1 if not updated (older timestamp), -1 on error.
+ */
+extern int readmarker_set(const char *account, const char *target, const char *timestamp);
+
 /** Delete a message from the history database.
  * Used by message-redaction to remove redacted messages.
  * @param[in] target Channel or nick where message was sent.

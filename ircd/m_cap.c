@@ -102,6 +102,7 @@ static struct capabilities {
   _CAP(DRAFT_EVENTPLAYBACK, 0, "draft/event-playback", FEAT_CAP_draft_event_playback),
   _CAP(DRAFT_REDACT, 0, "draft/message-redaction", FEAT_CAP_draft_message_redaction),
   _CAP(DRAFT_ACCOUNTREG, 0, "draft/account-registration", FEAT_CAP_draft_account_registration),
+  _CAP(DRAFT_READMARKER, 0, "draft/read-marker", FEAT_CAP_draft_read_marker),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif

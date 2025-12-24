@@ -966,6 +966,14 @@ struct Message msgtab[] = {
     ""
   },
   {
+    MSG_MARKREAD,
+    TOK_MARKREAD,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_markread, m_ignore, m_markread, m_ignore },
+    "<target> [timestamp=<ts>] - Get or set read marker for target"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

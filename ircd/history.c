@@ -57,6 +57,9 @@ static MDB_dbi history_msgid_dbi;
 /** Target tracking database for TARGETS query */
 static MDB_dbi history_targets_dbi;
 
+/** Read markers database (IRCv3 draft/read-marker) */
+static MDB_dbi history_readmarkers_dbi;
+
 /** Flag indicating if history is available */
 static int history_available = 0;
 
@@ -64,7 +67,7 @@ static int history_available = 0;
 #define HISTORY_MAP_SIZE (1UL * 1024 * 1024 * 1024)
 
 /** Maximum number of named databases */
-#define HISTORY_MAX_DBS 4
+#define HISTORY_MAX_DBS 5
 
 /** Key separator character */
 #define KEY_SEP '\0'
@@ -332,6 +335,17 @@ int history_init(const char *dbpath)
     return -1;
   }
 
+  /* Open readmarkers database */
+  rc = mdb_dbi_open(txn, "readmarkers", MDB_CREATE, &history_readmarkers_dbi);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(readmarkers) failed: %s",
+              mdb_strerror(rc));
+    mdb_txn_abort(txn);
+    mdb_env_close(history_env);
+    history_env = NULL;
+    return -1;
+  }
+
   rc = mdb_txn_commit(txn);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_txn_commit failed: %s",
@@ -355,6 +369,7 @@ void history_shutdown(void)
   mdb_dbi_close(history_env, history_dbi);
   mdb_dbi_close(history_env, history_msgid_dbi);
   mdb_dbi_close(history_env, history_targets_dbi);
+  mdb_dbi_close(history_env, history_readmarkers_dbi);
   mdb_env_close(history_env);
   history_env = NULL;
   history_available = 0;
@@ -1131,6 +1146,133 @@ int history_is_available(void)
   return history_available;
 }
 
+/** Build a readmarker key from account and target.
+ * @param[out] key Output buffer.
+ * @param[in] keysize Size of output buffer.
+ * @param[in] account Account name.
+ * @param[in] target Channel or nick.
+ * @return Length of key, or -1 on error.
+ */
+static int build_readmarker_key(char *key, int keysize,
+                                const char *account, const char *target)
+{
+  int pos = 0;
+  int len;
+
+  /* Copy account */
+  len = strlen(account);
+  if (pos + len + 1 >= keysize) return -1;
+  memcpy(key + pos, account, len);
+  pos += len;
+  key[pos++] = KEY_SEP;
+
+  /* Copy target */
+  len = strlen(target);
+  if (pos + len >= keysize) return -1;
+  memcpy(key + pos, target, len);
+  pos += len;
+
+  return pos;
+}
+
+int readmarker_get(const char *account, const char *target, char *timestamp)
+{
+  MDB_txn *txn;
+  MDB_val key, data;
+  char keybuf[ACCOUNTLEN + CHANNELLEN + 4];
+  int keylen;
+  int rc;
+
+  if (!history_available)
+    return -1;
+
+  keylen = build_readmarker_key(keybuf, sizeof(keybuf), account, target);
+  if (keylen < 0)
+    return -1;
+
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0)
+    return -1;
+
+  key.mv_size = keylen;
+  key.mv_data = keybuf;
+
+  rc = mdb_get(txn, history_readmarkers_dbi, &key, &data);
+  mdb_txn_abort(txn);
+
+  if (rc == MDB_NOTFOUND)
+    return 1; /* Not found */
+  if (rc != 0)
+    return -1;
+
+  /* Copy timestamp to output */
+  if (data.mv_size >= HISTORY_TIMESTAMP_LEN)
+    return -1;
+  memcpy(timestamp, data.mv_data, data.mv_size);
+  timestamp[data.mv_size] = '\0';
+
+  return 0;
+}
+
+int readmarker_set(const char *account, const char *target, const char *timestamp)
+{
+  MDB_txn *txn;
+  MDB_val key, data;
+  char keybuf[ACCOUNTLEN + CHANNELLEN + 4];
+  char existing_ts[HISTORY_TIMESTAMP_LEN];
+  int keylen;
+  int rc;
+
+  if (!history_available)
+    return -1;
+
+  keylen = build_readmarker_key(keybuf, sizeof(keybuf), account, target);
+  if (keylen < 0)
+    return -1;
+
+  /* Begin write transaction */
+  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  if (rc != 0)
+    return -1;
+
+  key.mv_size = keylen;
+  key.mv_data = keybuf;
+
+  /* Check existing value */
+  rc = mdb_get(txn, history_readmarkers_dbi, &key, &data);
+  if (rc == 0) {
+    /* Existing timestamp found - only update if new is greater */
+    if (data.mv_size < sizeof(existing_ts)) {
+      memcpy(existing_ts, data.mv_data, data.mv_size);
+      existing_ts[data.mv_size] = '\0';
+      if (strcmp(timestamp, existing_ts) <= 0) {
+        /* New timestamp is not greater, don't update */
+        mdb_txn_abort(txn);
+        return 1;
+      }
+    }
+  } else if (rc != MDB_NOTFOUND) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Store new timestamp */
+  data.mv_size = strlen(timestamp);
+  data.mv_data = (void *)timestamp;
+
+  rc = mdb_put(txn, history_readmarkers_dbi, &key, &data, 0);
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdb_txn_commit(txn);
+  if (rc != 0)
+    return -1;
+
+  return 0;
+}
+
 #else /* !USE_LMDB */
 
 /* Stub implementations when LMDB is not available */
@@ -1251,6 +1393,18 @@ int history_delete_message(const char *target, const char *msgid)
 int history_is_available(void)
 {
   return 0;
+}
+
+int readmarker_get(const char *account, const char *target, char *timestamp)
+{
+  (void)account; (void)target; (void)timestamp;
+  return -1;
+}
+
+int readmarker_set(const char *account, const char *target, const char *timestamp)
+{
+  (void)account; (void)target; (void)timestamp;
+  return -1;
 }
 
 #endif /* USE_LMDB */

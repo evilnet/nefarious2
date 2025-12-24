@@ -536,6 +536,10 @@ struct Client;
 #define TOK_REGREPLY	"RR"
 #define CMD_REGREPLY	MSG_REGREPLY, TOK_REGREPLY
 
+#define MSG_MARKREAD	"MARKREAD"
+#define TOK_MARKREAD	"MR"
+#define CMD_MARKREAD	MSG_MARKREAD, TOK_MARKREAD
+
 /*
  * Constants
  */

@@ -44,6 +44,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "sys.h"
+#include "handlers.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -280,6 +281,9 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
                chptr->topic_time);
   }
+
+  /* Send MARKREAD for draft/read-marker before NAMES (per spec: after JOIN, before 366) */
+  send_markread_on_join(sptr, chptr->chname);
 
   /* Skip implicit NAMES if client has draft/no-implicit-names capability */
   if (!HasCap(sptr, CAP_DRAFT_NOIMPLICITNAMES))

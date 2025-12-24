@@ -814,6 +814,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_event_playback, 0, 0, 0),
   F_B(CAP_draft_message_redaction, 0, 0, 0),
   F_B(CAP_draft_account_registration, 0, 0, 0),
+  F_B(CAP_draft_read_marker, 0, 0, 0),
   F_I(REDACT_WINDOW, 0, 300, 0),
   F_I(REDACT_OPER_WINDOW, 0, 0, 0),
   F_B(REDACT_CHANOP_OTHERS, 0, 1, 0),
