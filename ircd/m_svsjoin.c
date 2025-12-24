@@ -25,6 +25,7 @@
 
 #include "config.h"
 
+#include "capab.h"
 #include "channel.h"
 #include "client.h"
 #include "gline.h"
@@ -194,7 +195,9 @@ int ms_svsjoin(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		 chptr->topic_time);
     }
 
-    do_names(acptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
+    /* Skip implicit NAMES if client has draft/no-implicit-names capability */
+    if (!HasCap(acptr, CAP_DRAFT_NOIMPLICITNAMES))
+      do_names(acptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
   }
 
   joinbuf_flush(&join); /* must be first, if there's a JOIN 0 */

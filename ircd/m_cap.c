@@ -94,6 +94,7 @@ static struct capabilities {
   _CAP(BATCH, 0, "batch", FEAT_CAP_batch),
   _CAP(SETNAME, 0, "setname", FEAT_CAP_setname),
   _CAP(STANDARDREPLIES, 0, "standard-replies", FEAT_CAP_standard_replies),
+  _CAP(DRAFT_NOIMPLICITNAMES, 0, "draft/no-implicit-names", FEAT_CAP_draft_no_implicit_names),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif

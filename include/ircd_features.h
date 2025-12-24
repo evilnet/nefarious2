@@ -323,6 +323,7 @@ enum Feature {
   FEAT_CAP_batch,
   FEAT_CAP_setname,
   FEAT_CAP_standard_replies,
+  FEAT_CAP_draft_no_implicit_names,
   FEAT_MSGID,
   FEAT_P10_MESSAGE_TAGS,
 #ifdef USE_SSL
