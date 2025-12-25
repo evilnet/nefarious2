@@ -834,6 +834,8 @@ static struct FeatureDesc {
   F_B(DRAFT_WEBSOCKET, 0, 1, 0),
   F_B(MSGID, 0, 1, 0),
   F_B(P10_MESSAGE_TAGS, 0, 0, 0),
+  F_B(PRESENCE_AGGREGATION, 0, 0, 0),
+  F_S(AWAY_STAR_MSG, FEAT_NULL, "Away", 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

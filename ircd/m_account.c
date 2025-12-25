@@ -80,6 +80,7 @@
  */
 #include "config.h"
 
+#include "account_conn.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -164,6 +165,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                                     "(ACCOUNT Removal)", cli_name(acptr));
         assert(0 != cli_user(acptr)->account[0]);
 
+        /* Remove from presence aggregation registry before clearing account */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+          account_conn_remove(acptr);
+        }
+
         ClearAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
 
@@ -197,6 +203,15 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         /* Load account-linked metadata from LMDB */
         metadata_load_account(acptr, parv[3]);
+
+        /* Register with presence aggregation */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+          account_conn_add(acptr);
+          /* Set away state if user is already away */
+          if (cli_user(acptr)->away) {
+            account_conn_set_away(acptr, CONN_AWAY, cli_user(acptr)->away);
+          }
+        }
 
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);

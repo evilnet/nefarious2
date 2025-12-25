@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "s_user.h"
+#include "account_conn.h"
 #include "capab.h"
 #include "IPcheck.h"
 #include "channel.h"
@@ -477,27 +478,40 @@ int register_user(struct Client *cptr, struct Client *sptr)
       IPcheck_connect_succeeded(sptr);
 
     /* Apply pre-away state if set (IRCv3 draft/pre-away) */
-    if (con_pre_away(cli_connect(sptr))) {
-      if (con_pre_away(cli_connect(sptr)) == 2) {
-        /* AWAY * - set away but with empty message (hidden connection) */
-        if (!user->away) {
-          user->away = (char*) MyMalloc(1);
-          user->away[0] = '\0';
+    {
+      int pre_away_type = con_pre_away(cli_connect(sptr));
+      if (pre_away_type) {
+        if (pre_away_type == 2) {
+          /* AWAY * - set away but with empty message (hidden connection) */
+          if (!user->away) {
+            user->away = (char*) MyMalloc(1);
+            user->away[0] = '\0';
+          }
+          /* Don't broadcast AWAY * to servers - it's a hidden connection */
+        } else {
+          /* Normal away with message */
+          unsigned int len = strlen(con_pre_away_msg(cli_connect(sptr)));
+          if (user->away)
+            MyFree(user->away);
+          user->away = (char*) MyMalloc(len + 1);
+          strcpy(user->away, con_pre_away_msg(cli_connect(sptr)));
+          /* Broadcast to servers */
+          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", user->away);
         }
-        /* Don't broadcast AWAY * to servers - it's a hidden connection */
-      } else {
-        /* Normal away with message */
-        unsigned int len = strlen(con_pre_away_msg(cli_connect(sptr)));
-        if (user->away)
-          MyFree(user->away);
-        user->away = (char*) MyMalloc(len + 1);
-        strcpy(user->away, con_pre_away_msg(cli_connect(sptr)));
-        /* Broadcast to servers */
-        sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", user->away);
+        /* Clear pre-away state */
+        con_pre_away(cli_connect(sptr)) = 0;
+        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+
+        /* Register with presence aggregation if feature enabled and logged in */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+          enum ConnAwayState state = (pre_away_type == 2) ? CONN_AWAY_STAR : CONN_AWAY;
+          account_conn_add(sptr);
+          account_conn_set_away(sptr, state, user->away);
+        }
+      } else if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+        /* No pre-away, just register as present */
+        account_conn_add(sptr);
       }
-      /* Clear pre-away state */
-      con_pre_away(cli_connect(sptr)) = 0;
-      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
     }
   }
   else {

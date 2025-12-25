@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "s_misc.h"
+#include "account_conn.h"
 #include "IPcheck.h"
 #include "channel.h"
 #include "client.h"
@@ -277,6 +278,11 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * (Note: The notice is to the local clients *only*)
      */
     sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
+
+    /* Remove from presence aggregation registry before channel cleanup */
+    if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(bcptr)) {
+      account_conn_remove(bcptr);
+    }
 
 #ifdef USE_LMDB
     /* Store QUIT events in history before removing from channels */

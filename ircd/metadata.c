@@ -32,16 +32,29 @@
  */
 #include "config.h"
 
+#include "account_conn.h"
 #include "channel.h"
 #include "client.h"
 #include "ircd_alloc.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
 #include "s_user.h"
 #include "struct.h"
 
 #include <string.h>
+
+/** Virtual $presence metadata key */
+#define METADATA_KEY_PRESENCE "$presence"
+
+/** Virtual $last_present metadata key */
+#define METADATA_KEY_LAST_PRESENT "$last_present"
+
+/** Static buffer for virtual presence metadata entry */
+static struct MetadataEntry presence_entry;
+static char presence_value[64];
 
 #ifdef USE_LMDB
 #include <lmdb.h>
@@ -561,6 +574,60 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
 
   if (!cptr || !key)
     return NULL;
+
+  /* Handle virtual presence keys for presence aggregation */
+  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(cptr)) {
+    /* Handle $presence key */
+    if (ircd_strcmp(key, METADATA_KEY_PRESENCE) == 0) {
+      struct AccountEntry *acc_entry = account_conn_find(cli_account(cptr));
+      if (acc_entry) {
+        const char *state_str;
+        switch (acc_entry->effective_state) {
+          case CONN_PRESENT:
+            state_str = "present";
+            break;
+          case CONN_AWAY:
+            if (acc_entry->effective_away_msg[0])
+              ircd_snprintf(0, presence_value, sizeof(presence_value),
+                            "away:%s", acc_entry->effective_away_msg);
+            else
+              strcpy(presence_value, "away");
+            state_str = NULL;
+            break;
+          case CONN_AWAY_STAR:
+            state_str = "away-star";
+            break;
+          default:
+            state_str = "unknown";
+            break;
+        }
+        if (state_str)
+          strcpy(presence_value, state_str);
+
+        memset(&presence_entry, 0, sizeof(presence_entry));
+        ircd_strncpy(presence_entry.key, METADATA_KEY_PRESENCE, METADATA_KEY_LEN);
+        presence_entry.value = presence_value;
+        presence_entry.visibility = METADATA_VIS_PUBLIC;
+        presence_entry.next = NULL;
+        return &presence_entry;
+      }
+    }
+
+    /* Handle $last_present key */
+    if (ircd_strcmp(key, METADATA_KEY_LAST_PRESENT) == 0) {
+      time_t last = account_conn_last_present(cli_account(cptr));
+      if (last > 0) {
+        ircd_snprintf(0, presence_value, sizeof(presence_value), "%lu",
+                      (unsigned long)last);
+        memset(&presence_entry, 0, sizeof(presence_entry));
+        ircd_strncpy(presence_entry.key, METADATA_KEY_LAST_PRESENT, METADATA_KEY_LEN);
+        presence_entry.value = presence_value;
+        presence_entry.visibility = METADATA_VIS_PUBLIC;
+        presence_entry.next = NULL;
+        return &presence_entry;
+      }
+    }
+  }
 
   /* Check in-memory cache first */
   for (entry = cli_metadata(cptr); entry; entry = entry->next) {

@@ -81,10 +81,12 @@
  */
 #include "config.h"
 
+#include "account_conn.h"
 #include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -156,13 +158,69 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char* away_message = parv[1];
   int was_away = cli_user(sptr)->away != 0;
+  int is_away;
+  int is_away_star = 0;
 
   assert(0 != cptr);
   assert(cptr == sptr);
 
-  if (user_set_away(cli_user(sptr), away_message))
+  /* Check for AWAY * (hidden connection) before processing */
+  if (away_message && away_message[0] == '*' && away_message[1] == '\0') {
+    is_away_star = 1;
+    /* Use configured fallback message for away-star */
+    if (feature_str(FEAT_AWAY_STAR_MSG)) {
+      away_message = (char *)feature_str(FEAT_AWAY_STAR_MSG);
+    }
+  }
+
+  is_away = user_set_away(cli_user(sptr), away_message);
+
+  /* Presence aggregation path for logged-in users */
+  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+    enum ConnAwayState new_state;
+    int effective_changed;
+
+    if (is_away_star) {
+      new_state = CONN_AWAY_STAR;
+      send_reply(sptr, RPL_NOWAWAY);
+    } else if (is_away) {
+      new_state = CONN_AWAY;
+      send_reply(sptr, RPL_NOWAWAY);
+    } else {
+      new_state = CONN_PRESENT;
+      send_reply(sptr, RPL_UNAWAY);
+    }
+
+    /* Update this connection's state in the registry */
+    effective_changed = account_conn_set_away(sptr, new_state, away_message);
+
+    /* Only broadcast when effective presence changes */
+    if (effective_changed) {
+      struct AccountEntry *entry = account_conn_find(cli_account(sptr));
+      if (entry) {
+        if (entry->effective_state == CONN_PRESENT) {
+          /* Became present - broadcast unaway */
+          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+          sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+                                                 CAP_AWAYNOTIFY, CAP_NONE, "");
+        } else {
+          /* Became away - broadcast with effective message */
+          const char *msg = entry->effective_away_msg[0] ?
+                            entry->effective_away_msg : away_message;
+          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", msg);
+          sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+                                                 CAP_AWAYNOTIFY, CAP_NONE,
+                                                 ":%s", msg);
+        }
+      }
+    }
+    return 0;
+  }
+
+  /* Original non-aggregated path */
+  if (is_away)
   {
-    if (!was_away)    
+    if (!was_away)
       sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
     send_reply(sptr, RPL_NOWAWAY);
     sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE,
@@ -186,6 +244,8 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char* away_message = parv[1];
+  int is_away;
+  int is_away_star = 0;
 
   assert(0 != cptr);
   assert(0 != sptr);
@@ -195,7 +255,31 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsServer(sptr))
     return protocol_violation(sptr,"Server trying to set itself away");
 
-  if (user_set_away(cli_user(sptr), away_message))
+  /* Check for AWAY * (hidden connection) from P10 */
+  if (away_message && away_message[0] == '*' && away_message[1] == '\0') {
+    is_away_star = 1;
+    /* Use configured fallback message for away-star */
+    if (feature_str(FEAT_AWAY_STAR_MSG)) {
+      away_message = (char *)feature_str(FEAT_AWAY_STAR_MSG);
+    }
+  }
+
+  is_away = user_set_away(cli_user(sptr), away_message);
+
+  /* Update presence aggregation state for logged-in users */
+  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+    enum ConnAwayState new_state;
+    if (is_away_star)
+      new_state = CONN_AWAY_STAR;
+    else if (is_away)
+      new_state = CONN_AWAY;
+    else
+      new_state = CONN_PRESENT;
+    account_conn_set_away(sptr, new_state, away_message);
+    /* Aggregation already happened; just propagate */
+  }
+
+  if (is_away)
     sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
   else
     sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
@@ -209,7 +293,7 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  * Requires draft/pre-away capability to be negotiated.
  *
  * parv[0] = sender prefix
- * parv[1] = away message (optional, "*" means away without message)
+ * parv[1] = away message (optional, "*" means away without message/hidden)
  */
 int mu_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
@@ -230,9 +314,15 @@ int mu_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_pre_away(con) = 0;
     con_pre_away_msg(con)[0] = '\0';
   } else if (away_message[0] == '*' && away_message[1] == '\0') {
-    /* AWAY * = away without message (special hidden state) */
+    /* AWAY * = away-star (hidden connection, doesn't count as present) */
     con_pre_away(con) = 2;
-    con_pre_away_msg(con)[0] = '\0';
+    /* Use configured away-star message as fallback */
+    if (feature_str(FEAT_AWAY_STAR_MSG)) {
+      ircd_strncpy(con_pre_away_msg(con), feature_str(FEAT_AWAY_STAR_MSG), AWAYLEN);
+      con_pre_away_msg(con)[AWAYLEN] = '\0';
+    } else {
+      con_pre_away_msg(con)[0] = '\0';
+    }
   } else {
     /* AWAY :message = normal away */
     con_pre_away(con) = 1;

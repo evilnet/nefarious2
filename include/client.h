@@ -502,6 +502,8 @@ struct Client {
 #define cli_info(cli)		((cli)->cli_info)
 /** Get client account string. */
 #define cli_account(cli)       (cli_user(cli) ? cli_user(cli)->account : "0")
+/** Get client account connection registry entry. */
+#define cli_account_conn(cli)  (cli_user(cli) ? cli_user(cli)->account_conn : NULL)
 /** Get client connection IP address. */
 #define cli_connectip(cli)      ((cli)->cli_connectip)
 /** Get client connection host name. */
