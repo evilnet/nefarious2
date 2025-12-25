@@ -53,6 +53,8 @@
 
 #include <string.h>
 
+#include "ircd_compress.h"
+
 /** Virtual $presence metadata key */
 #define METADATA_KEY_PRESENCE "$presence"
 
@@ -224,6 +226,10 @@ int metadata_account_get(const char *account, const char *key, char *value)
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
   int keylen;
   int rc;
+#ifdef USE_ZSTD
+  unsigned char decompressed[METADATA_VALUE_LEN];
+  size_t decompressed_len;
+#endif
 
   if (!metadata_lmdb_available || !account || !key || !value)
     return -1;
@@ -247,6 +253,21 @@ int metadata_account_get(const char *account, const char *key, char *value)
   if (rc != 0)
     return -1;
 
+#ifdef USE_ZSTD
+  /* Check if data is compressed and decompress if needed */
+  if (is_compressed(mdata.mv_data, mdata.mv_size)) {
+    if (decompress_data(mdata.mv_data, mdata.mv_size,
+                        decompressed, sizeof(decompressed), &decompressed_len) < 0) {
+      return -1;
+    }
+    if (decompressed_len >= METADATA_VALUE_LEN)
+      return -1;
+    memcpy(value, decompressed, decompressed_len);
+    value[decompressed_len] = '\0';
+    return 0;
+  }
+#endif
+
   if (mdata.mv_size >= METADATA_VALUE_LEN)
     return -1;
 
@@ -269,6 +290,11 @@ int metadata_account_set(const char *account, const char *key, const char *value
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
   int keylen;
   int rc;
+#ifdef USE_ZSTD
+  unsigned char compressed[METADATA_VALUE_LEN + 64];
+  size_t compressed_len;
+  size_t value_len;
+#endif
 
   if (!metadata_lmdb_available || !account || !key)
     return -1;
@@ -285,8 +311,20 @@ int metadata_account_set(const char *account, const char *key, const char *value
   mkey.mv_size = keylen;
 
   if (value) {
+#ifdef USE_ZSTD
+    value_len = strlen(value);
+    if (compress_data((const unsigned char *)value, value_len,
+                      compressed, sizeof(compressed), &compressed_len) >= 0) {
+      mdata.mv_data = compressed;
+      mdata.mv_size = compressed_len;
+    } else {
+      mdata.mv_data = (void *)value;
+      mdata.mv_size = value_len;
+    }
+#else
     mdata.mv_data = (void *)value;
     mdata.mv_size = strlen(value);
+#endif
     rc = mdb_put(txn, metadata_dbi, &mkey, &mdata, 0);
   } else {
     rc = mdb_del(txn, metadata_dbi, &mkey, NULL);
@@ -317,6 +355,10 @@ struct MetadataEntry *metadata_account_list(const char *account)
   int prefixlen;
   struct MetadataEntry *head = NULL, *tail = NULL, *entry;
   int rc;
+#ifdef USE_ZSTD
+  unsigned char decompressed[METADATA_VALUE_LEN];
+  size_t decompressed_len;
+#endif
 
   if (!metadata_lmdb_available || !account)
     return NULL;
@@ -359,13 +401,33 @@ struct MetadataEntry *metadata_account_list(const char *account)
     memcpy(entry->key, (char *)mkey.mv_data + prefixlen, mkey.mv_size - prefixlen);
     entry->key[mkey.mv_size - prefixlen] = '\0';
 
-    entry->value = (char *)MyMalloc(mdata.mv_size + 1);
-    if (!entry->value) {
-      MyFree(entry);
-      break;
+#ifdef USE_ZSTD
+    /* Check if data is compressed and decompress if needed */
+    if (is_compressed(mdata.mv_data, mdata.mv_size)) {
+      if (decompress_data(mdata.mv_data, mdata.mv_size,
+                          decompressed, sizeof(decompressed), &decompressed_len) < 0) {
+        MyFree(entry);
+        rc = mdb_cursor_get(cursor, &mkey, &mdata, MDB_NEXT);
+        continue;
+      }
+      entry->value = (char *)MyMalloc(decompressed_len + 1);
+      if (!entry->value) {
+        MyFree(entry);
+        break;
+      }
+      memcpy(entry->value, decompressed, decompressed_len);
+      entry->value[decompressed_len] = '\0';
+    } else
+#endif
+    {
+      entry->value = (char *)MyMalloc(mdata.mv_size + 1);
+      if (!entry->value) {
+        MyFree(entry);
+        break;
+      }
+      memcpy(entry->value, mdata.mv_data, mdata.mv_size);
+      entry->value[mdata.mv_size] = '\0';
     }
-    memcpy(entry->value, mdata.mv_data, mdata.mv_size);
-    entry->value[mdata.mv_size] = '\0';
 
     entry->visibility = METADATA_VIS_PUBLIC;
     entry->next = NULL;

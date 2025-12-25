@@ -27,8 +27,10 @@
 #include "class.h"
 #include "client.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_compress.h"
 #include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -431,6 +433,22 @@ set_isupport_network(void)
 {
     add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
 }
+
+#ifdef USE_ZSTD
+/** Update compression threshold from feature. */
+static void
+feature_notify_compress_threshold(void)
+{
+    compress_set_threshold((size_t)feature_int(FEAT_COMPRESS_THRESHOLD));
+}
+
+/** Update compression level from feature. */
+static void
+feature_notify_compress_level(void)
+{
+    compress_set_level(feature_int(FEAT_COMPRESS_LEVEL));
+}
+#endif /* USE_ZSTD */
 
 /** Sets a feature to the given value.
  * @param[in] from Client trying to set parameters.
@@ -840,6 +858,11 @@ static struct FeatureDesc {
   F_I(METADATA_X3_TIMEOUT, 0, 60, 0),
   F_I(METADATA_QUEUE_SIZE, 0, 1000, 0),
   F_B(METADATA_BURST, 0, 1, 0),
+#ifdef USE_ZSTD
+  F_I(COMPRESS_THRESHOLD, 0, 256, feature_notify_compress_threshold),
+  F_I(COMPRESS_LEVEL, 0, 3, feature_notify_compress_level),
+#endif
+  F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

@@ -102,6 +102,7 @@ IRCD_SRC = \
 	ircd.c \
 	ircd_alloc.c \
 	ircd_cloaking.c \
+	ircd_compress.c \
 	ircd_crypt.c \
 	ircd_events.c \
 	ircd_features.c \

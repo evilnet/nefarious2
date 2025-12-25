@@ -29,6 +29,7 @@
 #define INCLUDED_history_h
 
 #include "ircd_defs.h"
+#include <stddef.h>
 
 struct Client;
 
@@ -268,5 +269,16 @@ extern int history_delete_message(const char *target, const char *msgid);
  */
 extern int history_lookup_message(const char *target, const char *msgid,
                                    struct HistoryMessage **msg);
+
+/** Set history database map size.
+ * Must be called before history_init().
+ * @param[in] size_mb Size in megabytes.
+ */
+extern void history_set_map_size(size_t size_mb);
+
+/** Get history database map size.
+ * @return Current map size in bytes.
+ */
+extern size_t history_get_map_size(void);
 
 #endif /* INCLUDED_history_h */

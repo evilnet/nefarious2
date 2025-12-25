@@ -33,6 +33,7 @@
 #include "hash.h"
 #include "history.h"
 #include "ircd_alloc.h"
+#include "ircd_compress.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_geoip.h"
@@ -867,6 +868,13 @@ int main(int argc, char **argv) {
 #ifdef USE_LMDB
   /* Initialize chathistory database */
   if (feature_bool(FEAT_CAP_draft_chathistory)) {
+    /* Set map size from feature before init */
+    history_set_map_size((size_t)feature_int(FEAT_HISTORY_MAP_SIZE_MB));
+#ifdef USE_ZSTD
+    /* Initialize compression with configured threshold and level */
+    compress_init((size_t)feature_int(FEAT_COMPRESS_THRESHOLD),
+                  feature_int(FEAT_COMPRESS_LEVEL));
+#endif
     if (history_init(feature_str(FEAT_CHATHISTORY_DB)) != 0) {
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize chathistory database, feature disabled");

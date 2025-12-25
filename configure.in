@@ -949,6 +949,62 @@ if test x"$unet_cv_enable_lmdb" = xyes; then
   fi
 fi
 
+dnl **
+dnl **  Zstd compression checks (for chathistory/metadata compression)
+dnl **
+AC_MSG_CHECKING([whether to enable zstd compression support])
+AC_ARG_ENABLE([zstd],
+[  --disable-zstd          Disable zstd compression support],
+[unet_cv_enable_zstd=$enable_zstd],
+[AC_CACHE_VAL(unet_cv_enable_zstd,
+[unet_cv_enable_zstd=yes])])
+AC_MSG_RESULT([$unet_cv_enable_zstd])
+
+if test x"$unet_cv_enable_zstd" = xyes; then
+  AC_ARG_WITH([zstd],
+  AS_HELP_STRING([--with-zstd=dir], [Specify the installation prefix of zstd (default: /usr)]),
+  [base_zstd_prefix=$withval],
+  [base_zstd_prefix=/usr])
+
+  AC_MSG_CHECKING([for zstd includes])
+  AC_ARG_WITH([zstd-includes],
+  AS_HELP_STRING([--with-zstd-includes=dir], [Specify location of zstd header files (default: /usr/include)]),
+  [unet_cv_with_zstd_inc_prefix=$withval],
+  [unet_cv_with_zstd_inc_prefix=$base_zstd_prefix/include])
+  AC_MSG_RESULT([$unet_cv_with_zstd_inc_prefix])
+
+  AC_MSG_CHECKING([for zstd libraries])
+  AC_ARG_WITH([zstd-libs],
+  AS_HELP_STRING([--with-zstd-libs=dir], [Specify location of zstd libs (default: /usr/lib)]),
+  [unet_cv_with_zstd_prefix=$withval],
+  [unet_cv_with_zstd_prefix=$base_zstd_prefix/lib])
+  AC_MSG_RESULT([$unet_cv_with_zstd_prefix])
+
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_zstd_inc_prefix"
+  LIBS="-L$unet_cv_with_zstd_prefix -lzstd"
+
+  AC_CHECK_LIB(zstd, ZSTD_compress, [
+    AC_CHECK_HEADERS($unet_cv_with_zstd_inc_prefix/zstd.h, [
+      enable_zstd="yes";
+      ZSTD_LDFLAGS="-lzstd"
+    ])
+  ])
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
+
+  if test "x$enable_zstd" = xyes; then
+    AC_DEFINE([USE_ZSTD], , [Define if you are using zstd compression])
+    LIBS="$LIBS -L$unet_cv_with_zstd_prefix $ZSTD_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_zstd_inc_prefix"
+  else
+     AC_MSG_WARN([Unable to find zstd, compression features will not be available. Disabling zstd support.])
+  fi
+fi
+
 dnl --with-maxcon allows us to set the maximum connections
 unet_maxcon=`ulimit -Sn`
 if test x"$unet_maxcon" = xunlimited; then

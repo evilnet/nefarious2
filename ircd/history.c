@@ -35,6 +35,7 @@
 
 #include "history.h"
 #include "ircd_alloc.h"
+#include "ircd_compress.h"
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
@@ -63,14 +64,17 @@ static MDB_dbi history_readmarkers_dbi;
 /** Flag indicating if history is available */
 static int history_available = 0;
 
-/** Maximum database size (1GB default) */
-#define HISTORY_MAP_SIZE (1UL * 1024 * 1024 * 1024)
+/** Maximum database size (1GB default, configurable) */
+static size_t history_map_size = 1UL * 1024 * 1024 * 1024;
 
 /** Maximum number of named databases */
 #define HISTORY_MAX_DBS 5
 
 /** Key separator character */
 #define KEY_SEP '\0'
+
+/** Maximum value buffer size for serialization */
+#define HISTORY_VALUE_BUFSIZE 1024
 
 /** Message type names for serialization */
 static const char *history_type_names[] = {
@@ -142,7 +146,7 @@ static int serialize_message(char *buf, int bufsize,
 }
 
 /** Deserialize a message from a buffer.
- * @param[in] data Serialized data.
+ * @param[in] data Serialized data (possibly compressed).
  * @param[in] datalen Length of data.
  * @param[out] msg Message structure to fill.
  * @return 0 on success, -1 on error.
@@ -153,6 +157,21 @@ static int deserialize_message(const char *data, int datalen,
   const char *p, *end;
   char *field;
   int type;
+#ifdef USE_ZSTD
+  char decompressed[HISTORY_VALUE_BUFSIZE];
+  size_t decompressed_len;
+
+  /* Check if data is compressed and decompress if needed */
+  if (is_compressed((const unsigned char *)data, datalen)) {
+    if (decompress_data((const unsigned char *)data, datalen,
+                        (unsigned char *)decompressed, sizeof(decompressed),
+                        &decompressed_len) < 0) {
+      return -1;
+    }
+    data = decompressed;
+    datalen = decompressed_len;
+  }
+#endif
 
   p = data;
   end = data + datalen;
@@ -272,8 +291,8 @@ int history_init(const char *dbpath)
     return -1;
   }
 
-  /* Set map size */
-  rc = mdb_env_set_mapsize(history_env, HISTORY_MAP_SIZE);
+  /* Set map size (configurable, default 1GB) */
+  rc = mdb_env_set_mapsize(history_env, history_map_size);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_env_set_mapsize failed: %s",
               mdb_strerror(rc));
@@ -385,9 +404,13 @@ int history_store_message(const char *msgid, const char *timestamp,
   MDB_txn *txn;
   MDB_val key, data;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-  char valbuf[HISTORY_SENDER_LEN + ACCOUNTLEN + HISTORY_CONTENT_LEN + 16];
+  char valbuf[HISTORY_VALUE_BUFSIZE];
   int keylen, vallen;
   int rc;
+#ifdef USE_ZSTD
+  unsigned char compressed[HISTORY_VALUE_BUFSIZE + 64];
+  size_t compressed_len;
+#endif
 
   if (!history_available)
     return -1;
@@ -409,11 +432,22 @@ int history_store_message(const char *msgid, const char *timestamp,
     return -1;
   }
 
-  /* Store message */
+  /* Store message (with optional compression) */
   key.mv_size = keylen;
   key.mv_data = keybuf;
+#ifdef USE_ZSTD
+  if (compress_data((unsigned char *)valbuf, vallen,
+                    compressed, sizeof(compressed), &compressed_len) >= 0) {
+    data.mv_size = compressed_len;
+    data.mv_data = compressed;
+  } else {
+    data.mv_size = vallen;
+    data.mv_data = valbuf;
+  }
+#else
   data.mv_size = vallen;
   data.mv_data = valbuf;
+#endif
 
   rc = mdb_put(txn, history_dbi, &key, &data, 0);
   if (rc != 0) {
@@ -1367,6 +1401,24 @@ int readmarker_set(const char *account, const char *target, const char *timestam
   return 0;
 }
 
+/** Set history database map size.
+ * Must be called before history_init().
+ * @param[in] size_mb Size in megabytes.
+ */
+void history_set_map_size(size_t size_mb)
+{
+  if (size_mb > 0)
+    history_map_size = size_mb * 1024 * 1024;
+}
+
+/** Get history database map size.
+ * @return Current map size in bytes.
+ */
+size_t history_get_map_size(void)
+{
+  return history_map_size;
+}
+
 #else /* !USE_LMDB */
 
 /* Stub implementations when LMDB is not available */
@@ -1499,6 +1551,16 @@ int readmarker_set(const char *account, const char *target, const char *timestam
 {
   (void)account; (void)target; (void)timestamp;
   return -1;
+}
+
+void history_set_map_size(size_t size_mb)
+{
+  (void)size_mb;
+}
+
+size_t history_get_map_size(void)
+{
+  return 0;
 }
 
 #endif /* USE_LMDB */
