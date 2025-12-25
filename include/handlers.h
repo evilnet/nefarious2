@@ -287,6 +287,7 @@ extern int m_register(struct Client*, struct Client*, int, char*[]);
 extern int m_verify(struct Client*, struct Client*, int, char*[]);
 extern int ms_regreply(struct Client*, struct Client*, int, char*[]);
 extern int m_markread(struct Client*, struct Client*, int, char*[]);
+extern int ms_markread(struct Client*, struct Client*, int, char*[]);
 extern void send_markread_on_join(struct Client*, const char*);
 extern int m_rename(struct Client*, struct Client*, int, char*[]);
 extern int ms_rename(struct Client*, struct Client*, int, char*[]);

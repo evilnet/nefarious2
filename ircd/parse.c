@@ -970,7 +970,7 @@ struct Message msgtab[] = {
     TOK_MARKREAD,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_markread, m_ignore, m_markread, m_ignore },
+    { m_unregistered, m_markread, ms_markread, m_markread, m_ignore },
     "<target> [timestamp=<ts>] - Get or set read marker for target"
   },
   {
