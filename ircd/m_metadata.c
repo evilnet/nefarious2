@@ -246,6 +246,11 @@ static void send_keyvalue(struct Client *to, const char *target, const char *key
 
 /** Handle GET subcommand.
  * METADATA GET <target> <key> [<key>...]
+ *
+ * Flow:
+ * 1. If target is online user/channel, get from memory
+ * 2. If target is offline, check LMDB cache
+ * 3. If not in LMDB, send MDQ to X3 (response will be async)
  */
 static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
 {
@@ -254,6 +259,7 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
   int i;
+  int target_found;
 
   if (parc < 4) {
     send_fail(sptr, "METADATA", "INVALID_PARAMS", NULL,
@@ -263,16 +269,14 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
 
   target = parv[2];
 
-  if (!can_see_target(sptr, target, &is_channel, &target_client, &target_channel)) {
-    send_fail(sptr, "METADATA", "TARGET_INVALID", target,
-              "Invalid target");
-    return 0;
-  }
+  /* Check if target exists online */
+  target_found = can_see_target(sptr, target, &is_channel, &target_client, &target_channel);
 
   /* Process each key */
   for (i = 3; i < parc; i++) {
     const char *key = parv[i];
     struct MetadataEntry *entry = NULL;
+    int found = 0;
 
     if (!is_valid_key(key)) {
       send_fail(sptr, "METADATA", "KEY_INVALID", key,
@@ -280,21 +284,59 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       continue;
     }
 
-    if (is_channel) {
-      entry = metadata_get_channel(target_channel, key);
-    } else {
-      entry = metadata_get_client(target_client, key);
+    if (target_found) {
+      /* Target is online - get from memory */
+      if (is_channel) {
+        entry = metadata_get_channel(target_channel, key);
+      } else {
+        entry = metadata_get_client(target_client, key);
+      }
+
+      if (entry) {
+        /* Check visibility */
+        if (can_view_metadata(sptr, is_channel ? NULL : target_client, entry)) {
+          send_keyvalue(sptr, target, key, entry->value, get_visibility_str(entry));
+          found = 1;
+        }
+      }
     }
 
-    if (entry) {
-      /* Check visibility */
-      if (can_view_metadata(sptr, is_channel ? NULL : target_client, entry)) {
-        send_keyvalue(sptr, target, key, entry->value, get_visibility_str(entry));
-      } else {
-        /* Private metadata not visible - show as not set */
-        send_reply(sptr, RPL_KEYNOTSET, target, key);
+    if (!found && !is_channel && !IsChannelName(target)) {
+      /* Target is not online and not a channel - try LMDB cache for account */
+      char value_buf[METADATA_VALUE_LEN + 1];
+
+      if (metadata_lmdb_is_available()) {
+        if (metadata_account_get(target, key, value_buf) == 0) {
+          /* Found in LMDB cache */
+          const char *vis_str = "*";
+          const char *val = value_buf;
+
+          /* Parse visibility prefix */
+          if (val[0] == 'P' && val[1] == ':') {
+            vis_str = "private";
+            val = val + 2;
+          }
+
+          if (*val) {
+            send_keyvalue(sptr, target, key, val, vis_str);
+            found = 1;
+          }
+        }
       }
-    } else {
+
+      if (!found) {
+        /* Not in cache - send MDQ to X3 if available.
+         * Response will come back via ms_metadata and be forwarded
+         * to the client via metadata_handle_response.
+         */
+        if (metadata_send_query(sptr, target, key) == 0) {
+          /* Query sent - response will be async, don't send NOT_SET yet */
+          continue;
+        }
+      }
+    }
+
+    if (!found) {
       send_reply(sptr, RPL_KEYNOTSET, target, key);
     }
   }
@@ -846,16 +888,19 @@ int ms_metadataquery(struct Client *cptr, struct Client *sptr, int parc, char *p
   const char *target;
   const char *key;
   int is_channel = 0;
+  int is_from_services = 0;
   struct MetadataEntry *entry = NULL;
   struct MetadataEntry *list = NULL;
   struct MetadataEntry *next;
   char value_buf[METADATA_VALUE_LEN + 1];
 
-  /* Signal X3 heartbeat */
+  /* Check if this is from services */
   if (IsServer(sptr) && IsService(sptr)) {
+    is_from_services = 1;
     metadata_x3_heartbeat();
   } else if (!IsServer(sptr) && cli_user(sptr) &&
              cli_user(sptr)->server && IsService(cli_user(sptr)->server)) {
+    is_from_services = 1;
     metadata_x3_heartbeat();
   }
 
@@ -871,8 +916,41 @@ int ms_metadataquery(struct Client *cptr, struct Client *sptr, int parc, char *p
     return 0;
 
   /* Log MDQ request for debugging */
-  log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: %s queries %s key=%s",
-            cli_name(sptr), target, key);
+  log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: %s queries %s key=%s (from_services=%d)",
+            cli_name(sptr), target, key, is_from_services);
+
+  /* If MDQ is from another IRCd (not services), we have two options:
+   * 1. If X3 is available, forward to X3 (authoritative source)
+   * 2. If X3 is unavailable, try to answer from local LMDB cache
+   *
+   * This handles multi-hop topologies: Client -> ServerA -> ServerB -> X3
+   */
+  if (!is_from_services) {
+    struct Client *services = NULL;
+    struct Client *acptr;
+
+    /* Find services server to forward to */
+    for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+      if (IsServer(acptr) && IsService(acptr)) {
+        services = acptr;
+        break;
+      }
+    }
+
+    if (services && metadata_x3_is_available()) {
+      /* X3 is available - forward to authoritative source */
+      sendcmdto_one(sptr, CMD_METADATAQUERY, services, "%s %s", target, key);
+      log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: Forwarding to %s", cli_name(services));
+      return 0;
+    }
+
+    /* X3 unavailable - try to answer from local LMDB cache.
+     * Fall through to the cache lookup code below, but send response
+     * back to the requesting server (cptr) instead of sptr.
+     */
+    log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: X3 unavailable, checking local cache");
+    /* Fall through to process locally */
+  }
 
   /* Determine if channel or account */
   is_channel = IsChannelName(target);
@@ -987,12 +1065,15 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   int is_channel = 0;
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
+  int is_from_services = 0;
 
-  /* Signal X3 heartbeat if this is from a services server */
+  /* Check if this is from a services server (potential MDQ response) */
   if (IsServer(sptr) && IsService(sptr)) {
+    is_from_services = 1;
     metadata_x3_heartbeat();
   } else if (!IsServer(sptr) && cli_user(sptr) &&
              cli_user(sptr)->server && IsService(cli_user(sptr)->server)) {
+    is_from_services = 1;
     metadata_x3_heartbeat();
   }
 
@@ -1030,15 +1111,33 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       return 0;
   } else {
     target_client = FindUser(target);
-    if (!target_client)
+    /* For MDQ responses from services, target might be offline account */
+    if (!target_client && !is_from_services)
       return 0;
   }
 
   /* Apply the change with visibility */
   if (is_channel) {
     metadata_set_channel(target_channel, key, value, visibility);
-  } else {
+  } else if (target_client) {
     metadata_set_client(target_client, key, value, visibility);
+  }
+
+  /* If from services and target is offline, cache in LMDB */
+  if (is_from_services && !target_client && !is_channel && value) {
+    if (metadata_lmdb_is_available()) {
+      /* Store with visibility prefix */
+      char stored_value[METADATA_VALUE_LEN + 3];
+      if (visibility == METADATA_VIS_PRIVATE) {
+        ircd_snprintf(0, stored_value, sizeof(stored_value), "P:%s", value);
+      } else {
+        ircd_strncpy(stored_value, value, METADATA_VALUE_LEN);
+      }
+      metadata_account_set(target, key, stored_value);
+    }
+
+    /* Forward to any clients waiting for this MDQ response */
+    metadata_handle_response(target, key, value, visibility);
   }
 
   /* Notify local subscribers (only for public metadata) */

@@ -320,4 +320,52 @@ extern void metadata_burst_client(struct Client *sptr, struct Client *cptr);
  */
 extern void metadata_burst_channel(struct Channel *chptr, struct Client *cptr);
 
+/* ========== MDQ Request Tracking ========== */
+
+/** Maximum pending MDQ requests */
+#define METADATA_MAX_PENDING 100
+
+/** Timeout for pending MDQ requests (seconds) */
+#define METADATA_REQUEST_TIMEOUT 30
+
+/** Pending MDQ request structure */
+struct MetadataRequest {
+  struct Client *client;              /**< Client waiting for response */
+  char target[ACCOUNTLEN + 1];        /**< Target account/channel */
+  char key[METADATA_KEY_LEN];         /**< Key requested (or "*") */
+  time_t timestamp;                   /**< When request was made */
+  struct MetadataRequest *next;       /**< Next in list */
+};
+
+/** Send an MDQ query to services for a target.
+ * @param[in] sptr Client requesting metadata.
+ * @param[in] target Target account or channel name.
+ * @param[in] key Key to query (or "*" for all).
+ * @return 0 on success, -1 on error.
+ */
+extern int metadata_send_query(struct Client *sptr, const char *target, const char *key);
+
+/** Check if there are pending MDQ requests for a target/key.
+ * Called when MD response is received to forward to waiting clients.
+ * @param[in] target Target that metadata was received for.
+ * @param[in] key Key that was received.
+ * @param[in] value Value received.
+ * @param[in] visibility Visibility level.
+ */
+extern void metadata_handle_response(const char *target, const char *key,
+                                     const char *value, int visibility);
+
+/** Clean up expired MDQ requests.
+ * Called periodically from the main loop.
+ */
+extern void metadata_expire_requests(void);
+
+/** Clean up MDQ requests for a disconnecting client.
+ * @param[in] cptr Client that is disconnecting.
+ */
+extern void metadata_cleanup_client_requests(struct Client *cptr);
+
+/** Initialize MDQ request tracking. */
+extern void metadata_request_init(void);
+
 #endif /* INCLUDED_metadata_h */

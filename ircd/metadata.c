@@ -35,15 +35,20 @@
 #include "account_conn.h"
 #include "channel.h"
 #include "client.h"
+#include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_defs.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
+#include "msg.h"
+#include "numeric.h"
 #include "s_user.h"
+#include "send.h"
 #include "struct.h"
 
 #include <string.h>
@@ -792,6 +797,7 @@ void metadata_free_client(struct Client *cptr)
   free_entry_list(cli_metadata(cptr));
   cli_metadata(cptr) = NULL;
   metadata_sub_free(cptr);
+  metadata_cleanup_client_requests(cptr);
 }
 
 /** Get metadata for a channel.
@@ -1333,4 +1339,254 @@ void metadata_burst_channel(struct Channel *chptr, struct Client *cptr)
   /* Stub - actual implementation in channel.c */
   (void)chptr;
   (void)cptr;
+}
+
+/* ========== MDQ Request Tracking ========== */
+
+/** Pending MDQ requests list */
+static struct MetadataRequest *mdq_pending_head = NULL;
+static int mdq_pending_count = 0;
+
+/** Find the services server (X3).
+ * @return Pointer to services server, or NULL if not connected.
+ */
+static struct Client *find_services_server(void)
+{
+  struct Client *acptr;
+
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (IsServer(acptr) && IsService(acptr))
+      return acptr;
+  }
+
+  return NULL;
+}
+
+/** Initialize MDQ request tracking. */
+void metadata_request_init(void)
+{
+  mdq_pending_head = NULL;
+  mdq_pending_count = 0;
+}
+
+/** Send an MDQ query to services for a target.
+ * @param[in] sptr Client requesting metadata.
+ * @param[in] target Target account or channel name.
+ * @param[in] key Key to query (or "*" for all).
+ * @return 0 on success, -1 on error.
+ */
+int metadata_send_query(struct Client *sptr, const char *target, const char *key)
+{
+  struct Client *services;
+  struct MetadataRequest *req;
+
+  if (!sptr || !target || !key)
+    return -1;
+
+  /* Check if X3 is available */
+  if (!metadata_x3_is_available()) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_send_query: X3 not available, cannot query %s", target);
+    return -1;
+  }
+
+  /* Find services server */
+  services = find_services_server();
+  if (!services) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_send_query: No services server found");
+    return -1;
+  }
+
+  /* Check if we've hit the pending request limit */
+  if (mdq_pending_count >= METADATA_MAX_PENDING) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "metadata_send_query: Too many pending requests (%d), rejecting",
+              mdq_pending_count);
+    return -1;
+  }
+
+  /* Check if there's already a pending request for this target/key from this client */
+  for (req = mdq_pending_head; req; req = req->next) {
+    if (req->client == sptr &&
+        ircd_strcmp(req->target, target) == 0 &&
+        ircd_strcmp(req->key, key) == 0) {
+      /* Already pending, don't send duplicate */
+      log_write(LS_DEBUG, L_DEBUG, 0,
+                "metadata_send_query: Duplicate request for %s key %s", target, key);
+      return 0;
+    }
+  }
+
+  /* Create pending request entry */
+  req = (struct MetadataRequest *)MyMalloc(sizeof(struct MetadataRequest));
+  if (!req)
+    return -1;
+
+  req->client = sptr;
+  ircd_strncpy(req->target, target, ACCOUNTLEN);
+  ircd_strncpy(req->key, key, METADATA_KEY_LEN - 1);
+  req->key[METADATA_KEY_LEN - 1] = '\0';
+  req->timestamp = CurrentTime;
+  req->next = mdq_pending_head;
+  mdq_pending_head = req;
+  mdq_pending_count++;
+
+  /* Send MDQ to services */
+  sendcmdto_one(&me, CMD_METADATAQUERY, services, "%s %s", target, key);
+
+  log_write(LS_DEBUG, L_DEBUG, 0,
+            "metadata_send_query: Sent MDQ for %s key %s (pending: %d)",
+            target, key, mdq_pending_count);
+
+  return 0;
+}
+
+/** Check if there are pending MDQ requests for a target/key.
+ * Called when MD response is received to forward to waiting clients.
+ * @param[in] target Target that metadata was received for.
+ * @param[in] key Key that was received.
+ * @param[in] value Value received.
+ * @param[in] visibility Visibility level.
+ */
+void metadata_handle_response(const char *target, const char *key,
+                              const char *value, int visibility)
+{
+  struct MetadataRequest *req, *prev, *next;
+  int matched = 0;
+
+  if (!target || !key)
+    return;
+
+  prev = NULL;
+  for (req = mdq_pending_head; req; req = next) {
+    next = req->next;
+
+    /* Check if this request matches the response */
+    if (ircd_strcmp(req->target, target) == 0 &&
+        (ircd_strcmp(req->key, "*") == 0 || ircd_strcmp(req->key, key) == 0)) {
+
+      /* Send response to waiting client if still connected */
+      if (req->client && !IsDead(req->client) && MyUser(req->client)) {
+        const char *vis_str = (visibility == METADATA_VIS_PRIVATE) ? "private" : "*";
+
+        if (value && *value) {
+          send_reply(req->client, RPL_KEYVALUE, target, key, vis_str, value);
+        } else {
+          send_reply(req->client, RPL_KEYNOTSET, target, key);
+        }
+
+        matched++;
+        log_write(LS_DEBUG, L_DEBUG, 0,
+                  "metadata_handle_response: Forwarded %s.%s to %s",
+                  target, key, cli_name(req->client));
+      }
+
+      /* For wildcard requests, keep the request alive for more responses
+       * but mark timestamp to trigger timeout after a short period */
+      if (req->key[0] == '*') {
+        /* Set a shorter timeout for wildcard collection (5 seconds) */
+        if (CurrentTime - req->timestamp < 5) {
+          prev = req;
+          continue;
+        }
+      }
+
+      /* Remove this request */
+      if (prev)
+        prev->next = next;
+      else
+        mdq_pending_head = next;
+
+      MyFree(req);
+      mdq_pending_count--;
+    } else {
+      prev = req;
+    }
+  }
+
+  if (matched > 0) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_handle_response: Matched %d requests for %s.%s",
+              matched, target, key);
+  }
+}
+
+/** Clean up expired MDQ requests.
+ * Called periodically from the main loop.
+ */
+void metadata_expire_requests(void)
+{
+  struct MetadataRequest *req, *prev, *next;
+  int expired = 0;
+
+  prev = NULL;
+  for (req = mdq_pending_head; req; req = next) {
+    next = req->next;
+
+    if (CurrentTime - req->timestamp > METADATA_REQUEST_TIMEOUT) {
+      /* Request has timed out - send error to client */
+      if (req->client && !IsDead(req->client) && MyUser(req->client)) {
+        send_reply(req->client, RPL_KEYNOTSET, req->target, req->key);
+        log_write(LS_DEBUG, L_DEBUG, 0,
+                  "metadata_expire_requests: Timed out request for %s.%s from %s",
+                  req->target, req->key, cli_name(req->client));
+      }
+
+      /* Remove this request */
+      if (prev)
+        prev->next = next;
+      else
+        mdq_pending_head = next;
+
+      MyFree(req);
+      mdq_pending_count--;
+      expired++;
+    } else {
+      prev = req;
+    }
+  }
+
+  if (expired > 0) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_expire_requests: Expired %d requests (remaining: %d)",
+              expired, mdq_pending_count);
+  }
+}
+
+/** Clean up MDQ requests for a disconnecting client.
+ * @param[in] cptr Client that is disconnecting.
+ */
+void metadata_cleanup_client_requests(struct Client *cptr)
+{
+  struct MetadataRequest *req, *prev, *next;
+  int cleaned = 0;
+
+  if (!cptr)
+    return;
+
+  prev = NULL;
+  for (req = mdq_pending_head; req; req = next) {
+    next = req->next;
+
+    if (req->client == cptr) {
+      /* Remove this request */
+      if (prev)
+        prev->next = next;
+      else
+        mdq_pending_head = next;
+
+      MyFree(req);
+      mdq_pending_count--;
+      cleaned++;
+    } else {
+      prev = req;
+    }
+  }
+
+  if (cleaned > 0) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_cleanup_client_requests: Cleaned %d requests for %s",
+              cleaned, cli_name(cptr));
+  }
 }

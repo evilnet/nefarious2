@@ -412,6 +412,7 @@ static void check_pings(struct Event* ev) {
     /* Check X3 availability (only once per ping cycle for services servers) */
     if (i == 0 && feature_bool(FEAT_METADATA_CACHE_ENABLED)) {
       metadata_x3_check();
+      metadata_expire_requests();
     }
 
     Debug((DEBUG_DEBUG, "check_pings(%s)=status:%s current: %d",
