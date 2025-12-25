@@ -990,6 +990,14 @@ struct Message msgtab[] = {
     "<subcommand> [args] - Manage user/channel metadata"
   },
   {
+    MSG_METADATAQUERY,
+    TOK_METADATAQUERY,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_metadataquery, m_ignore, m_ignore },
+    "<target> [key|*] - Query metadata for account/channel (S2S only)"
+  },
+  {
     MSG_WEBPUSH,
     TOK_WEBPUSH,
     0, MAXPARA, MFLG_SLOW, 0, NULL,

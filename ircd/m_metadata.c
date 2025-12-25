@@ -823,6 +823,143 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 }
 
+/** ms_metadataquery - Handle METADATAQUERY (MDQ) command from server.
+ *
+ * Used for on-demand metadata sync - allows services (X3) to query
+ * metadata for offline users or channels from the IRCd's LMDB cache.
+ *
+ * Format: [SOURCE] MDQ [TARGET] [KEY|*]
+ *
+ * parv[0] = sender prefix
+ * parv[1] = target (account name or channel)
+ * parv[2] = key to query, or "*" for all keys
+ *
+ * Response: Standard MD tokens sent back to the source server.
+ *
+ * @param[in] cptr Client that sent us the message.
+ * @param[in] sptr Original source of message.
+ * @param[in] parc Number of arguments.
+ * @param[in] parv Argument vector.
+ */
+int ms_metadataquery(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  const char *target;
+  const char *key;
+  int is_channel = 0;
+  struct MetadataEntry *entry = NULL;
+  struct MetadataEntry *list = NULL;
+  struct MetadataEntry *next;
+  char value_buf[METADATA_VALUE_LEN + 1];
+
+  /* Signal X3 heartbeat */
+  if (IsServer(sptr) && IsService(sptr)) {
+    metadata_x3_heartbeat();
+  } else if (!IsServer(sptr) && cli_user(sptr) &&
+             cli_user(sptr)->server && IsService(cli_user(sptr)->server)) {
+    metadata_x3_heartbeat();
+  }
+
+  if (parc < 3) {
+    /* Need at least target and key */
+    return 0;
+  }
+
+  target = parv[1];
+  key = parv[2];
+
+  if (!target || !key)
+    return 0;
+
+  /* Log MDQ request for debugging */
+  log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: %s queries %s key=%s",
+            cli_name(sptr), target, key);
+
+  /* Determine if channel or account */
+  is_channel = IsChannelName(target);
+
+  if (is_channel) {
+    /* Channel metadata query - look up from channel structure first,
+     * then fall back to LMDB for unloaded/offline channels */
+    struct Channel *chptr = FindChannel(target);
+
+    if (chptr) {
+      /* Channel exists in memory */
+      if (key[0] == '*' && key[1] == '\0') {
+        /* Return all metadata for channel */
+        entry = metadata_list_channel(chptr);
+        while (entry) {
+          const char *vis_str = (entry->visibility == METADATA_VIS_PRIVATE) ? "P" : "*";
+          if (entry->value && *entry->value) {
+            sendcmdto_one(&me, CMD_METADATA, cptr, "%s %s %s :%s",
+                          target, entry->key, vis_str, entry->value);
+          }
+          entry = entry->next;
+        }
+      } else {
+        /* Single key query */
+        entry = metadata_get_channel(chptr, key);
+        if (entry && entry->value && *entry->value) {
+          const char *vis_str = (entry->visibility == METADATA_VIS_PRIVATE) ? "P" : "*";
+          sendcmdto_one(&me, CMD_METADATA, cptr, "%s %s %s :%s",
+                        target, key, vis_str, entry->value);
+        }
+      }
+    }
+    /* For channels not in memory, we could query LMDB but currently
+     * channel metadata in LMDB is keyed by channel name directly */
+  } else {
+    /* Account metadata query - query LMDB cache */
+    if (!metadata_lmdb_is_available()) {
+      /* LMDB not available, can't respond */
+      return 0;
+    }
+
+    if (key[0] == '*' && key[1] == '\0') {
+      /* Return all metadata for account from LMDB */
+      list = metadata_account_list(target);
+      entry = list;
+      while (entry) {
+        /* Parse visibility from stored value if prefixed with P: */
+        const char *vis_str = "*";
+        const char *val = entry->value;
+        if (val && val[0] == 'P' && val[1] == ':') {
+          vis_str = "P";
+          val = val + 2;
+        }
+        if (val && *val) {
+          sendcmdto_one(&me, CMD_METADATA, cptr, "%s %s %s :%s",
+                        target, entry->key, vis_str, val);
+        }
+        entry = entry->next;
+      }
+      /* Free the list returned by metadata_account_list */
+      entry = list;
+      while (entry) {
+        next = entry->next;
+        metadata_free_entry(entry);
+        entry = next;
+      }
+    } else {
+      /* Single key query */
+      if (metadata_account_get(target, key, value_buf) == 0) {
+        /* Parse visibility from stored value */
+        const char *vis_str = "*";
+        const char *val = value_buf;
+        if (val[0] == 'P' && val[1] == ':') {
+          vis_str = "P";
+          val = val + 2;
+        }
+        if (*val) {
+          sendcmdto_one(&me, CMD_METADATA, cptr, "%s %s %s :%s",
+                        target, key, vis_str, val);
+        }
+      }
+    }
+  }
+
+  return 0;
+}
+
 /** ms_metadata - Handle METADATA command from server.
  *
  * Used for propagating metadata changes across the network.
