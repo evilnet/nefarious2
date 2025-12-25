@@ -1510,6 +1510,17 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
       sendcmdto_one(&me, CMD_TOPIC, cptr, "%H %s %Tu %Tu :%s", chptr,
                     chptr->topic_nick, chptr->creationtime,
                     chptr->topic_time, chptr->topic);
+
+  /* Burst channel metadata if enabled */
+  if (feature_bool(FEAT_METADATA_BURST)) {
+    struct MetadataEntry *entry;
+    for (entry = chptr->metadata; entry; entry = entry->next) {
+      sendcmdto_one(&me, CMD_METADATA, cptr, "%s %s %s :%s",
+                    chptr->chname, entry->key,
+                    entry->visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                    entry->value ? entry->value : "");
+    }
+  }
 }
 
 /** Canonify a mask.

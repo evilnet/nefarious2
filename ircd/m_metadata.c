@@ -851,6 +851,14 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
 
+  /* Signal X3 heartbeat if this is from a services server */
+  if (IsServer(sptr) && IsService(sptr)) {
+    metadata_x3_heartbeat();
+  } else if (!IsServer(sptr) && cli_user(sptr) &&
+             cli_user(sptr)->server && IsService(cli_user(sptr)->server)) {
+    metadata_x3_heartbeat();
+  }
+
   if (parc < 3)
     return 0;
 

@@ -66,6 +66,7 @@
 #include "userload.h"
 #include "version.h"
 #include "whowas.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -407,6 +408,11 @@ static void check_pings(struct Event* ev) {
 
     /* Check for client batch timeout (draft/multiline) */
     check_client_batch_timeout(cptr);
+
+    /* Check X3 availability (only once per ping cycle for services servers) */
+    if (i == 0 && feature_bool(FEAT_METADATA_CACHE_ENABLED)) {
+      metadata_x3_check();
+    }
 
     Debug((DEBUG_DEBUG, "check_pings(%s)=status:%s current: %d",
 	   cli_name(cptr),

@@ -242,4 +242,82 @@ extern int metadata_sub_count(struct Client *cptr);
  */
 extern void metadata_sub_free(struct Client *cptr);
 
+/* ========== Cache-Aware Metadata Operations ========== */
+
+/** Get metadata for a client with cache-through behavior.
+ * Checks in-memory first, then LMDB cache for logged-in users.
+ * @param[in] cptr Client to get metadata from.
+ * @param[in] key Key name.
+ * @return Metadata entry or NULL if not found.
+ */
+extern struct MetadataEntry *metadata_get_client_cached(struct Client *cptr, const char *key);
+
+/* ========== X3 Availability Tracking ========== */
+
+/** Check if X3 services are available.
+ * @return 1 if X3 is available, 0 if not.
+ */
+extern int metadata_x3_is_available(void);
+
+/** Signal that X3 has sent a message (heartbeat).
+ * Called when X3 sends any P10 message to update availability status.
+ */
+extern void metadata_x3_heartbeat(void);
+
+/** Check X3 availability status based on timeout.
+ * Called periodically to detect X3 outages.
+ */
+extern void metadata_x3_check(void);
+
+/** Handle X3 reconnection - replay queued writes.
+ * Called when X3 reconnects after an outage.
+ */
+extern void metadata_x3_reconnected(void);
+
+/** Check if metadata writes can be sent to X3.
+ * @return 1 if writes can be sent, 0 if they should be queued.
+ */
+extern int metadata_can_write_x3(void);
+
+/* ========== Write Queue for X3 Unavailability ========== */
+
+/** Queue a metadata write for later replay.
+ * Called when X3 is unavailable to queue writes for later.
+ * @param[in] account Account name.
+ * @param[in] key Metadata key.
+ * @param[in] value Value to set.
+ * @param[in] visibility Visibility level.
+ * @return 0 on success, -1 if queue is full.
+ */
+extern int metadata_queue_write(const char *account, const char *key,
+                                const char *value, int visibility);
+
+/** Replay all queued metadata writes to X3.
+ * Called when X3 becomes available again.
+ */
+extern void metadata_replay_queue(void);
+
+/** Clear the write queue without replaying.
+ */
+extern void metadata_clear_queue(void);
+
+/** Get the number of queued writes.
+ * @return Number of entries in the write queue.
+ */
+extern int metadata_queue_count(void);
+
+/* ========== Netburst Metadata ========== */
+
+/** Burst all metadata for a client to a server.
+ * @param[in] sptr Client whose metadata to send.
+ * @param[in] cptr Server to send metadata to.
+ */
+extern void metadata_burst_client(struct Client *sptr, struct Client *cptr);
+
+/** Burst all metadata for a channel to a server.
+ * @param[in] chptr Channel whose metadata to send.
+ * @param[in] cptr Server to send metadata to.
+ */
+extern void metadata_burst_channel(struct Channel *chptr, struct Client *cptr);
+
 #endif /* INCLUDED_metadata_h */

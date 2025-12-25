@@ -836,6 +836,10 @@ static struct FeatureDesc {
   F_B(P10_MESSAGE_TAGS, 0, 0, 0),
   F_B(PRESENCE_AGGREGATION, 0, 0, 0),
   F_S(AWAY_STAR_MSG, FEAT_NULL, "Away", 0),
+  F_B(METADATA_CACHE_ENABLED, 0, 1, 0),
+  F_I(METADATA_X3_TIMEOUT, 0, 60, 0),
+  F_I(METADATA_QUEUE_SIZE, 0, 1000, 0),
+  F_B(METADATA_BURST, 0, 1, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

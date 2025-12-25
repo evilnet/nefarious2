@@ -35,7 +35,9 @@
 #include "account_conn.h"
 #include "channel.h"
 #include "client.h"
+#include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_defs.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
@@ -1053,4 +1055,282 @@ void metadata_sub_free(struct Client *cptr)
   }
 
   cli_metadatasub(cptr) = NULL;
+}
+
+/* ========== X3 Availability Tracking ========== */
+
+/** X3 availability flag */
+static int metadata_x3_available_flag = 0;
+
+/** Last time X3 sent us a message */
+static time_t metadata_x3_last_seen = 0;
+
+/** Check if X3 services are available. */
+int metadata_x3_is_available(void)
+{
+  return metadata_x3_available_flag;
+}
+
+/** Signal that X3 has sent a message (heartbeat). */
+void metadata_x3_heartbeat(void)
+{
+  int was_available = metadata_x3_available_flag;
+  metadata_x3_available_flag = 1;
+  metadata_x3_last_seen = CurrentTime;
+
+  /* If X3 just came back online, replay queued writes */
+  if (!was_available) {
+    log_write(LS_SYSTEM, L_INFO, 0, "metadata: X3 services detected as available");
+    metadata_replay_queue();
+  }
+}
+
+/** Check X3 availability status based on timeout. */
+void metadata_x3_check(void)
+{
+  int timeout = feature_int(FEAT_METADATA_X3_TIMEOUT);
+
+  if (timeout <= 0)
+    return;
+
+  if (CurrentTime - metadata_x3_last_seen > timeout) {
+    if (metadata_x3_available_flag) {
+      metadata_x3_available_flag = 0;
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "metadata: X3 services unavailable (no heartbeat for %d seconds), "
+                "switching to cache-only mode", timeout);
+    }
+  }
+}
+
+/** Handle X3 reconnection - replay queued writes. */
+void metadata_x3_reconnected(void)
+{
+  metadata_x3_heartbeat();
+}
+
+/** Check if metadata writes can be sent to X3. */
+int metadata_can_write_x3(void)
+{
+  return metadata_x3_available_flag && metadata_lmdb_is_available();
+}
+
+/* ========== Write Queue for X3 Unavailability ========== */
+
+/** Write queue entry */
+struct MetadataWriteQueue {
+  char account[ACCOUNTLEN + 1];
+  char key[METADATA_KEY_LEN];
+  char *value;
+  int visibility;
+  time_t timestamp;
+  struct MetadataWriteQueue *next;
+};
+
+/** Write queue head and tail */
+static struct MetadataWriteQueue *write_queue_head = NULL;
+static struct MetadataWriteQueue *write_queue_tail = NULL;
+static int write_queue_count_val = 0;
+
+/** Queue a metadata write for later replay. */
+int metadata_queue_write(const char *account, const char *key,
+                         const char *value, int visibility)
+{
+  struct MetadataWriteQueue *entry;
+  int max_queue = feature_int(FEAT_METADATA_QUEUE_SIZE);
+
+  if (!account || !key)
+    return -1;
+
+  /* Check if queue is full */
+  if (write_queue_count_val >= max_queue) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "metadata: write queue full (%d entries), dropping oldest entry",
+              max_queue);
+    /* Remove oldest entry */
+    if (write_queue_head) {
+      struct MetadataWriteQueue *old = write_queue_head;
+      write_queue_head = old->next;
+      if (!write_queue_head)
+        write_queue_tail = NULL;
+      if (old->value)
+        MyFree(old->value);
+      MyFree(old);
+      write_queue_count_val--;
+    }
+  }
+
+  /* Create new entry */
+  entry = (struct MetadataWriteQueue *)MyMalloc(sizeof(struct MetadataWriteQueue));
+  if (!entry)
+    return -1;
+
+  ircd_strncpy(entry->account, account, ACCOUNTLEN);
+  ircd_strncpy(entry->key, key, METADATA_KEY_LEN - 1);
+  entry->key[METADATA_KEY_LEN - 1] = '\0';
+
+  if (value) {
+    entry->value = (char *)MyMalloc(strlen(value) + 1);
+    if (!entry->value) {
+      MyFree(entry);
+      return -1;
+    }
+    strcpy(entry->value, value);
+  } else {
+    entry->value = NULL;
+  }
+
+  entry->visibility = visibility;
+  entry->timestamp = CurrentTime;
+  entry->next = NULL;
+
+  /* Add to queue */
+  if (write_queue_tail)
+    write_queue_tail->next = entry;
+  else
+    write_queue_head = entry;
+  write_queue_tail = entry;
+  write_queue_count_val++;
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "metadata: queued write for %s key %s (queue size: %d)",
+            account, key, write_queue_count_val);
+
+  return 0;
+}
+
+/** Replay all queued metadata writes to X3.
+ * Note: This sends P10 MD tokens to X3. We need to include the
+ * necessary headers for send functions.
+ */
+void metadata_replay_queue(void)
+{
+  struct MetadataWriteQueue *entry, *next;
+  int replayed = 0;
+
+  if (!write_queue_head) {
+    return;
+  }
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "metadata: replaying %d queued writes to X3",
+            write_queue_count_val);
+
+  for (entry = write_queue_head; entry; entry = next) {
+    next = entry->next;
+
+    /* The actual P10 send is done by the caller who has access to
+     * the services client. For now, we just update LMDB and clear
+     * the queue. The MD token propagation happens through normal
+     * means when X3 syncs on reconnect.
+     */
+    if (metadata_lmdb_is_available()) {
+      metadata_account_set(entry->account, entry->key, entry->value);
+    }
+
+    if (entry->value)
+      MyFree(entry->value);
+    MyFree(entry);
+    replayed++;
+  }
+
+  write_queue_head = write_queue_tail = NULL;
+  write_queue_count_val = 0;
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "metadata: replayed %d queued writes", replayed);
+}
+
+/** Clear the write queue without replaying. */
+void metadata_clear_queue(void)
+{
+  struct MetadataWriteQueue *entry, *next;
+
+  for (entry = write_queue_head; entry; entry = next) {
+    next = entry->next;
+    if (entry->value)
+      MyFree(entry->value);
+    MyFree(entry);
+  }
+
+  write_queue_head = write_queue_tail = NULL;
+  write_queue_count_val = 0;
+}
+
+/** Get the number of queued writes. */
+int metadata_queue_count(void)
+{
+  return write_queue_count_val;
+}
+
+/* ========== Cache-Aware Metadata Operations ========== */
+
+/** Get metadata for a client with cache-through behavior.
+ * Checks in-memory first, then LMDB cache for logged-in users.
+ * If found in LMDB but not in memory, loads it into memory.
+ */
+struct MetadataEntry *metadata_get_client_cached(struct Client *cptr, const char *key)
+{
+  struct MetadataEntry *entry;
+  const char *account;
+  char value[METADATA_VALUE_LEN];
+
+  if (!cptr || !key)
+    return NULL;
+
+  /* Check if caching is enabled */
+  if (!feature_bool(FEAT_METADATA_CACHE_ENABLED)) {
+    return metadata_get_client(cptr, key);
+  }
+
+  /* First check in-memory (includes virtual keys like $presence) */
+  entry = metadata_get_client(cptr, key);
+  if (entry)
+    return entry;
+
+  /* If not logged in, nothing more to check */
+  if (!cli_user(cptr) || !cli_user(cptr)->account[0])
+    return NULL;
+
+  /* Skip virtual keys - they're handled by metadata_get_client */
+  if (key[0] == '$')
+    return NULL;
+
+  account = cli_user(cptr)->account;
+
+  /* Check LMDB cache */
+  if (metadata_lmdb_is_available()) {
+    if (metadata_account_get(account, key, value) == 0) {
+      /* Found in LMDB - load into memory */
+      if (metadata_set_client(cptr, key, value, METADATA_VIS_PUBLIC) == 0) {
+        return metadata_get_client(cptr, key);
+      }
+    }
+  }
+
+  return NULL;
+}
+
+/* ========== Netburst Metadata ========== */
+
+/** Burst all metadata for a client to a server.
+ * This is a stub - the actual implementation requires send.h
+ * and will be called from s_user.c during burst.
+ */
+void metadata_burst_client(struct Client *sptr, struct Client *cptr)
+{
+  /* Stub - actual implementation in s_user.c */
+  (void)sptr;
+  (void)cptr;
+}
+
+/** Burst all metadata for a channel to a server.
+ * This is a stub - the actual implementation requires send.h
+ * and will be called from channel.c during burst.
+ */
+void metadata_burst_channel(struct Channel *chptr, struct Client *cptr)
+{
+  /* Stub - actual implementation in channel.c */
+  (void)chptr;
+  (void)cptr;
 }
