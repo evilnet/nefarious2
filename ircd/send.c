@@ -107,13 +107,18 @@ const char *get_active_network_batch(void)
   return active_network_batch_id;
 }
 
-/** Check if a client wants message tags (server-time, account-tag, or label).
+/** Check if a client wants message tags.
  * Used for TAGMSG filtering - only clients with message-tags capability can receive TAGMSGs.
  * @param[in] to Recipient client.
- * @return Non-zero if client has any message tag capability active.
+ * @return Non-zero if client has message-tags capability active.
  */
 static int wants_message_tags(struct Client *to)
 {
+  /* Primary check: message-tags capability */
+  if (CapActive(to, CAP_MSGTAGS))
+    return 1;
+
+  /* Fallback: any capability that implies message tag support */
   return (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME)) ||
          (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG)) ||
          (feature_bool(FEAT_CAP_labeled_response) && CapActive(to, CAP_LABELEDRESP) &&

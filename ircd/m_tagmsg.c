@@ -235,11 +235,13 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
 
     if (MyConnect(acptr)) {
-      /* Local user - deliver with client-only tags */
-      if (CapActive(acptr, CAP_SERVERTIME)) {
+      /* Local user - deliver with client-only tags if they support message-tags */
+      if (CapActive(acptr, CAP_MSGTAGS)) {
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
       }
+      /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
+       * per the IRCv3 spec - there's no message body to send as fallback */
     }
     else {
       /* Remote user - forward to their server with tags */
@@ -319,11 +321,12 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return 0;
 
     if (MyConnect(acptr)) {
-      /* Local user - deliver with client-only tags */
-      if (CapActive(acptr, CAP_SERVERTIME)) {
+      /* Local user - deliver with client-only tags if they support message-tags */
+      if (CapActive(acptr, CAP_MSGTAGS)) {
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
       }
+      /* Note: If client doesn't support message-tags, TAGMSG is silently dropped */
     }
     else {
       /* Remote user - forward to their server with tags */
