@@ -553,8 +553,14 @@ static int history_query_internal(const char *target,
     }
     op = MDB_PREV;
   } else {
-    /* For AFTER, go forwards */
+    /* For AFTER, go forwards from AFTER the reference */
     rc = mdb_cursor_get(cursor, &key, &data, MDB_SET_RANGE);
+    /* Skip any messages that match the reference timestamp prefix
+     * (AFTER means strictly after, not including the reference) */
+    while (rc == 0 && key.mv_size >= (size_t)start_keylen &&
+           memcmp(key.mv_data, start_key, start_keylen) == 0) {
+      rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    }
     op = MDB_NEXT;
   }
 

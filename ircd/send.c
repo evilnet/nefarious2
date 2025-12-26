@@ -811,6 +811,78 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
   msgq_clean(mb);
 }
 
+/** Send a (prefixed) command to a single local client with message tags,
+ * returning the generated msgid.
+ * @param[in] from Client originating the message.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command (used if \a to is a server or &me).
+ * @param[in] to Destination of command.
+ * @param[out] msgid_out Buffer to store generated msgid.
+ * @param[in] msgid_out_len Size of msgid_out buffer.
+ * @param[out] time_out Buffer to store generated timestamp.
+ * @param[in] time_out_len Size of time_out buffer.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *tok,
+		   struct Client *to, char *msgid_out, size_t msgid_out_len,
+		   char *time_out, size_t time_out_len,
+		   const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[512];
+  char msgidbuf[64];
+  char timebuf[32];
+  char *tags;
+  const char *msgid = NULL;
+  struct timeval tv;
+  struct tm tm;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  /* Generate msgid for PRIVMSG and NOTICE if feature enabled */
+  if (feature_bool(FEAT_MSGID) &&
+      (strcmp(cmd, MSG_PRIVATE) == 0 || strcmp(cmd, MSG_NOTICE) == 0)) {
+    msgid = generate_msgid(msgidbuf, sizeof(msgidbuf));
+    if (msgid_out && msgid_out_len > 0) {
+      ircd_strncpy(msgid_out, msgid, msgid_out_len - 1);
+      msgid_out[msgid_out_len - 1] = '\0';
+    }
+  } else if (msgid_out && msgid_out_len > 0) {
+    msgid_out[0] = '\0';
+  }
+
+  /* Generate timestamp */
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+           tm.tm_hour, tm.tm_min, tm.tm_sec,
+           tv.tv_usec / 1000);
+  if (time_out && time_out_len > 0) {
+    ircd_strncpy(time_out, timebuf, time_out_len - 1);
+    time_out[time_out_len - 1] = '\0';
+  }
+
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+
+  msgq_clean(mb);
+}
+
 /**
  * Send TAGMSG with client-only tags to a single local client.
  * Used for relaying +typing and other client-only tags.

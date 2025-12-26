@@ -83,23 +83,19 @@
  */
 
 #ifdef USE_LMDB
-/** Counter for generating unique message IDs for history storage */
-static unsigned long history_msgid_counter = 0;
-
 /** Store a channel message in the history database.
- * Generates a unique msgid and timestamp, then stores the message.
+ * Stores the message with the provided msgid and timestamp.
  * @param[in] sptr Client that sent the message.
  * @param[in] chptr Target channel.
  * @param[in] text Message content.
  * @param[in] type Message type (HISTORY_PRIVMSG or HISTORY_NOTICE).
+ * @param[in] msgid Message ID (same one sent to clients via echo-message).
+ * @param[in] timestamp ISO 8601 timestamp.
  */
 static void store_channel_history(struct Client *sptr, struct Channel *chptr,
-                                   const char *text, enum HistoryMessageType type)
+                                   const char *text, enum HistoryMessageType type,
+                                   const char *msgid, const char *timestamp)
 {
-  struct timeval tv;
-  struct tm tm;
-  char timestamp[32];
-  char msgid[64];
   char sender[HISTORY_SENDER_LEN];
   const char *account;
 
@@ -109,21 +105,6 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   /* Check if chathistory feature is enabled */
   if (!feature_bool(FEAT_CAP_draft_chathistory))
     return;
-
-  /* Generate ISO 8601 timestamp */
-  gettimeofday(&tv, NULL);
-  gmtime_r(&tv.tv_sec, &tm);
-  ircd_snprintf(0, timestamp, sizeof(timestamp),
-                "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                tm.tm_hour, tm.tm_min, tm.tm_sec,
-                tv.tv_usec / 1000);
-
-  /* Generate unique msgid */
-  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                cli_yxx(&me),
-                (unsigned long)cli_firsttime(&me),
-                ++history_msgid_counter);
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -149,14 +130,13 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
  * @param[in] acptr Target client.
  * @param[in] text Message content.
  * @param[in] type Message type (HISTORY_PRIVMSG or HISTORY_NOTICE).
+ * @param[in] msgid Message ID (same one sent to clients via echo-message).
+ * @param[in] timestamp ISO 8601 timestamp.
  */
 static void store_private_history(struct Client *sptr, struct Client *acptr,
-                                   const char *text, enum HistoryMessageType type)
+                                   const char *text, enum HistoryMessageType type,
+                                   const char *msgid, const char *timestamp)
 {
-  struct timeval tv;
-  struct tm tm;
-  char timestamp[32];
-  char msgid[64];
   char sender[HISTORY_SENDER_LEN];
   char target[NICKLEN * 2 + 2];  /* nick1:nick2 */
   const char *account;
@@ -172,21 +152,6 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   /* Check if private message history is enabled (separate feature) */
   if (!feature_bool(FEAT_CHATHISTORY_PRIVATE))
     return;
-
-  /* Generate ISO 8601 timestamp */
-  gettimeofday(&tv, NULL);
-  gmtime_r(&tv.tv_sec, &tm);
-  ircd_snprintf(0, timestamp, sizeof(timestamp),
-                "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                tm.tm_hour, tm.tm_min, tm.tm_sec,
-                tv.tv_usec / 1000);
-
-  /* Generate unique msgid */
-  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                cli_yxx(&me),
-                (unsigned long)cli_firsttime(&me),
-                ++history_msgid_counter);
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -281,13 +246,42 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
   sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
 			   SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, mytext);
 
+#ifdef USE_LMDB
+  {
+    char msgid[64] = "";
+    char timestamp[32] = "";
+
+    /* Echo message back to sender if they have echo-message capability */
+    /* Use the variant that returns msgid/timestamp so we can store them in history */
+    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
+      sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
+                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
+                               "%H :%s", chptr, mytext);
+    else if (feature_bool(FEAT_MSGID)) {
+      /* Generate msgid and timestamp even if not echoing, for history storage */
+      struct timeval tv;
+      struct tm tm;
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      ircd_snprintf(0, timestamp, sizeof(timestamp),
+                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                    cli_yxx(&me),
+                    (unsigned long)cli_firsttime(&me),
+                    ++MsgIdCounter);
+    }
+
+    /* Store message in history database for draft/chathistory */
+    if (msgid[0])
+      store_channel_history(sptr, chptr, mytext, HISTORY_PRIVMSG, msgid, timestamp);
+  }
+#else
   /* Echo message back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
     sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
-
-#ifdef USE_LMDB
-  /* Store message in history database for draft/chathistory */
-  store_channel_history(sptr, chptr, mytext, HISTORY_PRIVMSG);
 #endif
 }
 
@@ -344,13 +338,40 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
 			   SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, mytext);
 
+#ifdef USE_LMDB
+  {
+    char msgid[64] = "";
+    char timestamp[32] = "";
+
+    /* Echo notice back to sender if they have echo-message capability */
+    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
+      sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
+                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
+                               "%H :%s", chptr, mytext);
+    else if (feature_bool(FEAT_MSGID)) {
+      struct timeval tv;
+      struct tm tm;
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      ircd_snprintf(0, timestamp, sizeof(timestamp),
+                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                    cli_yxx(&me),
+                    (unsigned long)cli_firsttime(&me),
+                    ++MsgIdCounter);
+    }
+
+    /* Store notice in history database for draft/chathistory */
+    if (msgid[0])
+      store_channel_history(sptr, chptr, mytext, HISTORY_NOTICE, msgid, timestamp);
+  }
+#else
   /* Echo notice back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
     sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
-
-#ifdef USE_LMDB
-  /* Store notice in history database for draft/chathistory */
-  store_channel_history(sptr, chptr, mytext, HISTORY_NOTICE);
 #endif
 }
 
@@ -381,7 +402,24 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
                             SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
 #ifdef USE_LMDB
     /* Store server-relayed message in history database */
-    store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG);
+    if (feature_bool(FEAT_MSGID)) {
+      char msgid[64];
+      char timestamp[32];
+      struct timeval tv;
+      struct tm tm;
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      ircd_snprintf(0, timestamp, sizeof(timestamp),
+                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                    cli_yxx(&me),
+                    (unsigned long)cli_firsttime(&me),
+                    ++MsgIdCounter);
+      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, msgid, timestamp);
+    }
 #endif
   }
   else
@@ -414,7 +452,24 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 			     SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
 #ifdef USE_LMDB
     /* Store server-relayed notice in history database */
-    store_channel_history(sptr, chptr, text, HISTORY_NOTICE);
+    if (feature_bool(FEAT_MSGID)) {
+      char msgid[64];
+      char timestamp[32];
+      struct timeval tv;
+      struct tm tm;
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      ircd_snprintf(0, timestamp, sizeof(timestamp),
+                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                    cli_yxx(&me),
+                    (unsigned long)cli_firsttime(&me),
+                    ++MsgIdCounter);
+      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, msgid, timestamp);
+    }
 #endif
   }
 }
@@ -649,12 +704,38 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
 
   /* Echo message back to sender if they have echo-message capability */
+#ifdef USE_LMDB
+  {
+    char msgid[64] = "";
+    char timestamp[32] = "";
+
+    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
+      sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
+                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
+                               "%C :%s", acptr, text);
+    else if (feature_bool(FEAT_MSGID)) {
+      struct timeval tv;
+      struct tm tm;
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      ircd_snprintf(0, timestamp, sizeof(timestamp),
+                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                    cli_yxx(&me),
+                    (unsigned long)cli_firsttime(&me),
+                    ++MsgIdCounter);
+    }
+
+    /* Store private message in history database (if enabled) */
+    if (msgid[0])
+      store_private_history(sptr, acptr, text, HISTORY_PRIVMSG, msgid, timestamp);
+  }
+#else
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
     sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
-
-#ifdef USE_LMDB
-  /* Store private message in history database (if enabled) */
-  store_private_history(sptr, acptr, text, HISTORY_PRIVMSG);
 #endif
 }
 
@@ -712,13 +793,40 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
   sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
 
+#ifdef USE_LMDB
+  {
+    char msgid[64] = "";
+    char timestamp[32] = "";
+
+    /* Echo notice back to sender if they have echo-message capability */
+    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
+      sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
+                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
+                               "%C :%s", acptr, text);
+    else if (feature_bool(FEAT_MSGID)) {
+      struct timeval tv;
+      struct tm tm;
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      ircd_snprintf(0, timestamp, sizeof(timestamp),
+                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                    cli_yxx(&me),
+                    (unsigned long)cli_firsttime(&me),
+                    ++MsgIdCounter);
+    }
+
+    /* Store private notice in history database (if enabled) */
+    if (msgid[0])
+      store_private_history(sptr, acptr, text, HISTORY_NOTICE, msgid, timestamp);
+  }
+#else
   /* Echo notice back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
     sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, text);
-
-#ifdef USE_LMDB
-  /* Store private notice in history database (if enabled) */
-  store_private_history(sptr, acptr, text, HISTORY_NOTICE);
 #endif
 }
 
@@ -753,7 +861,24 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
 
 #ifdef USE_LMDB
   /* Store server-relayed private message in history database (if enabled) */
-  store_private_history(sptr, acptr, text, HISTORY_PRIVMSG);
+  if (feature_bool(FEAT_MSGID)) {
+    char msgid[64];
+    char timestamp[32];
+    struct timeval tv;
+    struct tm tm;
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    ircd_snprintf(0, timestamp, sizeof(timestamp),
+                  "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec,
+                  tv.tv_usec / 1000);
+    ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                  cli_yxx(&me),
+                  (unsigned long)cli_firsttime(&me),
+                  ++MsgIdCounter);
+    store_private_history(sptr, acptr, text, HISTORY_PRIVMSG, msgid, timestamp);
+  }
 #endif
 }
 
@@ -786,7 +911,24 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
 
 #ifdef USE_LMDB
   /* Store server-relayed private notice in history database (if enabled) */
-  store_private_history(sptr, acptr, text, HISTORY_NOTICE);
+  if (feature_bool(FEAT_MSGID)) {
+    char msgid[64];
+    char timestamp[32];
+    struct timeval tv;
+    struct tm tm;
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    ircd_snprintf(0, timestamp, sizeof(timestamp),
+                  "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec,
+                  tv.tv_usec / 1000);
+    ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                  cli_yxx(&me),
+                  (unsigned long)cli_firsttime(&me),
+                  ++MsgIdCounter);
+    store_private_history(sptr, acptr, text, HISTORY_NOTICE, msgid, timestamp);
+  }
 #endif
 }
 

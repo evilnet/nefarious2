@@ -44,6 +44,13 @@ extern void sendcmdto_one_tags(struct Client *from, const char *cmd,
 			  const char *tok, struct Client *to,
 			  const char *pattern, ...);
 
+/* Same as above, but also return the generated msgid and timestamp */
+extern void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd,
+			  const char *tok, struct Client *to,
+			  char *msgid_out, size_t msgid_out_len,
+			  char *time_out, size_t time_out_len,
+			  const char *pattern, ...);
+
 /* Send TAGMSG with client-only tags to a single client */
 extern void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
                                struct Client *to, const char *client_tags,
