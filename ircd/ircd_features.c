@@ -860,6 +860,7 @@ static struct FeatureDesc {
   F_I(METADATA_X3_TIMEOUT, 0, 60, 0),
   F_I(METADATA_QUEUE_SIZE, 0, 1000, 0),
   F_B(METADATA_BURST, 0, 1, 0),
+  F_S(METADATA_DB, 0, "metadata", 0),
 #ifdef USE_ZSTD
   F_I(COMPRESS_THRESHOLD, 0, 256, feature_notify_compress_threshold),
   F_I(COMPRESS_LEVEL, 0, 3, feature_notify_compress_level),

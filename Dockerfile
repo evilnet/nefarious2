@@ -20,6 +20,8 @@ COPY . /home/nefarious/nefarious2
 
 RUN groupadd -g ${GID} nefarious
 RUN useradd -u ${UID} -g ${GID} nefarious
+# Create LMDB directories for chathistory and metadata storage
+RUN mkdir -p /home/nefarious/ircd/history /home/nefarious/ircd/metadata
 RUN chown -R nefarious:nefarious /home/nefarious
 USER nefarious
 
@@ -56,6 +58,8 @@ USER root
 #Clean up build
 RUN rm -rf /home/nefarious/nefarious2
 RUN apt-get remove -y build-essential && apt-get autoremove -y && apt-get clean
+# Install gosu for dropping privileges after fixing volume permissions
+RUN apt-get update && apt-get install -y gosu && apt-get clean
 
 USER nefarious
 
@@ -72,6 +76,7 @@ COPY tools/docker/base.conf-dist /home/nefarious/ircd/base.conf-dist
 COPY tools/docker/ircd.conf /home/nefarious/ircd/ircd.conf
 COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 
+# Run entrypoint (volume permissions fixed by init container in docker-compose)
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
 CMD ["/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd-docker.conf"]

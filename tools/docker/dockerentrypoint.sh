@@ -4,6 +4,16 @@
 # Reads base.conf-dist, replaces all %VARIABLE% placeholders with environment
 # variable values, and writes out base.conf
 
+# Fix ownership of mounted volumes (runs as root, will drop to nefarious later)
+if [ "$(id -u)" = "0" ]; then
+    # Fix LMDB directory permissions
+    for dir in /home/nefarious/ircd/history /home/nefarious/ircd/metadata; do
+        if [ -d "$dir" ]; then
+            chown -R nefarious:nefarious "$dir"
+        fi
+    done
+fi
+
 BASECONFDIST=/home/nefarious/ircd/base.conf-dist
 BASECONF=/home/nefarious/ircd/base.conf
 IRCDPEM=/home/nefarious/ircd/ircd.pem
@@ -53,6 +63,10 @@ if [ "$1" == "/home/nefarious/bin/ircd" ]; then
 fi
 
 #Now run CMD from Dockerfile...
-
-exec "$@"
+# Drop privileges to nefarious user if running as root
+if [ "$(id -u)" = "0" ]; then
+    exec gosu nefarious "$@"
+else
+    exec "$@"
+fi
 

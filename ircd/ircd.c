@@ -880,6 +880,14 @@ int main(int argc, char **argv) {
                 "Failed to initialize chathistory database, feature disabled");
     }
   }
+
+  /* Initialize metadata LMDB database */
+  if (feature_bool(FEAT_CAP_draft_metadata_2)) {
+    if (metadata_lmdb_init(feature_str(FEAT_METADATA_DB)) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize metadata database");
+    }
+  }
 #endif
 
   Debug((DEBUG_NOTICE, "Server ready..."));
