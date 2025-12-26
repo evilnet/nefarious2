@@ -216,6 +216,12 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                   SKIP_DEAF | SKIP_BURST, client_tags,
                                   "%H", chptr);
 
+    /* Echo TAGMSG back to sender if they have echo-message capability */
+    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG)) {
+      sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
+                                "%H", chptr);
+    }
+
     /* Store for chathistory event-playback */
     store_tagmsg_history(sptr, chptr, client_tags);
 
@@ -242,11 +248,24 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       }
       /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
        * per the IRCv3 spec - there's no message body to send as fallback */
+
+      /* Echo TAGMSG back to sender if they have echo-message capability
+       * (but not if they're messaging themselves) */
+      if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr) {
+        sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
+                                  "%C", acptr);
+      }
     }
     else {
       /* Remote user - forward to their server with tags */
       sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
                     client_tags, acptr);
+
+      /* Echo TAGMSG back to sender if they have echo-message capability */
+      if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG)) {
+        sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
+                                  "%C", acptr);
+      }
     }
   }
 
