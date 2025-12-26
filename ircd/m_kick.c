@@ -87,6 +87,7 @@
 #include "ircd.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
