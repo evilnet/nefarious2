@@ -88,6 +88,7 @@ enum Capab {
   _CAP(BATCH, 0, "batch", 0),
   _CAP(SETNAME, 0, "setname", 0),
   _CAP(STANDARDREPLIES, 0, "standard-replies", 0),
+  _CAP(MSGTAGS, 0, "message-tags", 0),
   _CAP(DRAFT_NOIMPLICITNAMES, 0, "draft/no-implicit-names", 0),
   _CAP(DRAFT_EXTISUPPORT, 0, "draft/extended-isupport", 0),
   _CAP(DRAFT_PREAWAY, 0, "draft/pre-away", 0),

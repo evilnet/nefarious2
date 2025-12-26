@@ -139,7 +139,11 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Propagate to other servers */
   sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
-  /* Notify channel members with setname capability */
+  /* Echo SETNAME back to the sender per IRCv3 spec */
+  if (CapActive(sptr, CAP_SETNAME))
+    sendcmdto_one(sptr, CMD_SETNAME, sptr, ":%s", cli_info(sptr));
+
+  /* Notify channel members with setname capability (excluding sender who already got echo) */
   sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
                                          CAP_SETNAME, CAP_NONE,
                                          ":%s", cli_info(sptr));

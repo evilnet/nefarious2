@@ -95,6 +95,7 @@ static struct capabilities {
   _CAP(BATCH, 0, "batch", FEAT_CAP_batch),
   _CAP(SETNAME, 0, "setname", FEAT_CAP_setname),
   _CAP(STANDARDREPLIES, 0, "standard-replies", FEAT_CAP_standard_replies),
+  _CAP(MSGTAGS, 0, "message-tags", FEAT_CAP_message_tags),
   _CAP(DRAFT_NOIMPLICITNAMES, 0, "draft/no-implicit-names", FEAT_CAP_draft_no_implicit_names),
   _CAP(DRAFT_EXTISUPPORT, 0, "draft/extended-isupport", FEAT_CAP_draft_extended_isupport),
   _CAP(DRAFT_PREAWAY, 0, "draft/pre-away", FEAT_CAP_draft_pre_away),
@@ -106,6 +107,7 @@ static struct capabilities {
   _CAP(DRAFT_READMARKER, 0, "draft/read-marker", FEAT_CAP_draft_read_marker),
   _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", FEAT_CAP_draft_channel_rename),
   _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "max-subs=50,max-keys=20,max-value-bytes=1024"),
+  _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
