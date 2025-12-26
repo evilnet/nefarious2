@@ -165,7 +165,9 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* Check if feature is enabled */
   if (!feature_bool(FEAT_CAP_draft_message_redaction)) {
-    return send_reply(sptr, ERR_DISABLED, "REDACT");
+    send_fail(sptr, "REDACT", "DISABLED", NULL,
+              "Message redaction is not enabled on this server");
+    return 0;
   }
 
   /* Need at least target and msgid */

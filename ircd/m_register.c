@@ -142,7 +142,9 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Check if feature is enabled */
   if (!feature_bool(FEAT_CAP_draft_account_registration)) {
     Debug((DEBUG_DEBUG, "m_register: feature disabled"));
-    return send_reply(sptr, ERR_DISABLED, "REGISTER");
+    send_fail(sptr, "REGISTER", "DISABLED", NULL,
+              "Account registration is not enabled on this server");
+    return 0;
   }
   Debug((DEBUG_DEBUG, "m_register: feature enabled, checking params"));
 
@@ -237,7 +239,9 @@ int m_verify(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* Check if feature is enabled */
   if (!feature_bool(FEAT_CAP_draft_account_registration)) {
-    return send_reply(sptr, ERR_DISABLED, "VERIFY");
+    send_fail(sptr, "VERIFY", "DISABLED", NULL,
+              "Account registration is not enabled on this server");
+    return 0;
   }
 
   /* Need account and code */

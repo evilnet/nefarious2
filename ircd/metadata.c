@@ -341,6 +341,51 @@ int metadata_account_set(const char *account, const char *key, const char *value
   return (rc == 0) ? 0 : -1;
 }
 
+/** Set account metadata in LMDB without compression (raw passthrough).
+ * Used for compression passthrough when data is already compressed.
+ * @param[in] account Account name.
+ * @param[in] key Metadata key.
+ * @param[in] raw_value Raw (possibly compressed) data.
+ * @param[in] raw_len Length of raw data.
+ * @return 0 on success, -1 on error.
+ */
+int metadata_account_set_raw(const char *account, const char *key,
+                             const unsigned char *raw_value, size_t raw_len)
+{
+  MDB_txn *txn;
+  MDB_val mkey, mdata;
+  char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
+  int keylen;
+  int rc;
+
+  if (!metadata_lmdb_available || !account || !key || !raw_value || raw_len == 0)
+    return -1;
+
+  keylen = build_lmdb_key(keybuf, sizeof(keybuf), account, key);
+  if (keylen < 0)
+    return -1;
+
+  rc = mdb_txn_begin(metadata_env, NULL, 0, &txn);
+  if (rc != 0)
+    return -1;
+
+  mkey.mv_data = keybuf;
+  mkey.mv_size = keylen;
+
+  /* Store raw data directly without compression */
+  mdata.mv_data = (void *)raw_value;
+  mdata.mv_size = raw_len;
+
+  rc = mdb_put(txn, metadata_dbi, &mkey, &mdata, 0);
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdb_txn_commit(txn);
+  return (rc == 0) ? 0 : -1;
+}
+
 /** List all metadata for an account from LMDB.
  * Caller must free the returned list with metadata entries.
  * @param[in] account Account name.

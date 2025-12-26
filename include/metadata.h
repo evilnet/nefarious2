@@ -96,6 +96,17 @@ extern int metadata_account_get(const char *account, const char *key, char *valu
  */
 extern int metadata_account_set(const char *account, const char *key, const char *value);
 
+/** Set account metadata in LMDB without compression (raw passthrough).
+ * Used for compression passthrough when data is already compressed.
+ * @param[in] account Account name.
+ * @param[in] key Metadata key.
+ * @param[in] raw_value Raw (possibly compressed) data.
+ * @param[in] raw_len Length of raw data.
+ * @return 0 on success, -1 on error.
+ */
+extern int metadata_account_set_raw(const char *account, const char *key,
+                                    const unsigned char *raw_value, size_t raw_len);
+
 /** List all metadata for an account from LMDB.
  * @param[in] account Account name.
  * @return Head of metadata list (caller must free).
