@@ -58,8 +58,6 @@ USER root
 #Clean up build
 RUN rm -rf /home/nefarious/nefarious2
 RUN apt-get remove -y build-essential && apt-get autoremove -y && apt-get clean
-# Install gosu for dropping privileges after fixing volume permissions
-RUN apt-get update && apt-get install -y gosu && apt-get clean
 
 USER nefarious
 

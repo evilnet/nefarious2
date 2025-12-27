@@ -3,16 +3,7 @@
 # Nefarious IRCd Docker Entrypoint
 # Reads base.conf-dist, replaces all %VARIABLE% placeholders with environment
 # variable values, and writes out base.conf
-
-# Fix ownership of mounted volumes (runs as root, will drop to nefarious later)
-if [ "$(id -u)" = "0" ]; then
-    # Fix LMDB directory permissions
-    for dir in /home/nefarious/ircd/history /home/nefarious/ircd/metadata; do
-        if [ -d "$dir" ]; then
-            chown -R nefarious:nefarious "$dir"
-        fi
-    done
-fi
+# Volume permissions are handled by init container in docker-compose
 
 BASECONFDIST=/home/nefarious/ircd/base.conf-dist
 BASECONF=/home/nefarious/ircd/base.conf
@@ -62,11 +53,6 @@ if [ "$1" == "/home/nefarious/bin/ircd" ]; then
     fi
 fi
 
-#Now run CMD from Dockerfile...
-# Drop privileges to nefarious user if running as root
-if [ "$(id -u)" = "0" ]; then
-    exec gosu nefarious "$@"
-else
-    exec "$@"
-fi
+# Run CMD from Dockerfile
+exec "$@"
 
