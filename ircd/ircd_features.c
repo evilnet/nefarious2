@@ -833,6 +833,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_event_playback, 0, 0, 0),
   F_B(CAP_draft_message_redaction, 0, 0, 0),
   F_B(CAP_draft_account_registration, 0, 0, 0),
+  F_S(REGISTER_SERVER, 0, "*", 0),
   F_B(CAP_draft_read_marker, 0, 0, 0),
   F_B(CAP_draft_channel_rename, 0, 0, 0),
   F_B(CAP_draft_metadata_2, 0, 0, 0),

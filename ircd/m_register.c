@@ -52,15 +52,33 @@
 extern struct Client* LocalClientArray[];
 
 /** Find the services server (X3).
+ * Uses FEAT_REGISTER_SERVER to determine which server to use:
+ * - "*" (default): Find any server with +s (service) flag
+ * - Specific name: Use find_match_server to find a matching server
  * @return Pointer to services server, or NULL if not connected.
  */
 static struct Client *find_services_server(void)
 {
-  /* For now, find any server that's a service (has +s) */
-  /* TODO: Make this configurable via a new FEAT_SERVICES_SERVER */
+  const char *server_name = feature_str(FEAT_REGISTER_SERVER);
   struct Client *acptr;
 
-  Debug((DEBUG_DEBUG, "find_services_server: Searching for service server"));
+  Debug((DEBUG_DEBUG, "find_services_server: REGISTER_SERVER=%s", server_name));
+
+  /* If a specific server is configured, try to find it */
+  if (strcmp(server_name, "*") != 0) {
+    acptr = find_match_server((char *)server_name);
+    if (acptr) {
+      Debug((DEBUG_DEBUG, "find_services_server: Found configured server %s",
+             cli_name(acptr)));
+      return acptr;
+    }
+    Debug((DEBUG_DEBUG, "find_services_server: Configured server %s not found",
+           server_name));
+    return NULL;
+  }
+
+  /* Default: find any server that's a service (has +s) */
+  Debug((DEBUG_DEBUG, "find_services_server: Searching for any service server"));
 
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (IsServer(acptr)) {

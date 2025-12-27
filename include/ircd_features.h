@@ -332,6 +332,7 @@ enum Feature {
   FEAT_CAP_draft_event_playback,
   FEAT_CAP_draft_message_redaction,
   FEAT_CAP_draft_account_registration,
+  FEAT_REGISTER_SERVER,
   FEAT_CAP_draft_read_marker,
   FEAT_CAP_draft_channel_rename,
   FEAT_CAP_draft_metadata_2,
