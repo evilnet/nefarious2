@@ -339,14 +339,14 @@ struct Connection
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
   char                con_pre_away_msg[AWAYLEN + 1]; /**< Pre-registration away message */
   /* Multiline batch state (draft/multiline) */
-  char                con_ml_batch_id[16]; /**< Active multiline batch ID */
+  char                con_ml_batch_id[65]; /**< Active multiline batch ID (IRCv3 allows up to 64 chars) */
   char                con_ml_target[CHANNELLEN + 1]; /**< Multiline batch target (channel or nick) */
   struct SLink*       con_ml_messages; /**< List of multiline messages */
   int                 con_ml_msg_count; /**< Number of messages in batch */
   int                 con_ml_total_bytes; /**< Total bytes in batch */
   time_t              con_ml_batch_start; /**< When batch was started (for timeout) */
   /* Current message @batch tag for PRIVMSG interception */
-  char                con_msg_batch_tag[16]; /**< @batch tag from current message */
+  char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
 };
 
