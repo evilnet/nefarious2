@@ -1184,11 +1184,22 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     } else if (target_client) {
       metadata_set_client(target_client, key, value, visibility);
     }
-  } else {
-    /* For compressed data, we need to decompress for in-memory storage
-     * but can store raw in LMDB. For now, just skip in-memory for online users
-     * since the primary use case is offline account caching. */
-    /* TODO: Decompress and store in memory for online users if needed */
+  } else if (raw_len > 0) {
+    /* For compressed data, decompress and store in memory for online users */
+#ifdef USE_ZSTD
+    char decompressed[METADATA_VALUE_LEN];
+    size_t decompressed_len;
+    if (decompress_data(raw_data, raw_len,
+                        (unsigned char *)decompressed, sizeof(decompressed) - 1,
+                        &decompressed_len) >= 0) {
+      decompressed[decompressed_len] = '\0';
+      if (is_channel) {
+        metadata_set_channel(target_channel, key, decompressed, visibility);
+      } else if (target_client) {
+        metadata_set_client(target_client, key, decompressed, visibility);
+      }
+    }
+#endif
   }
 
   /* If from services and target is offline, cache in LMDB */
