@@ -285,6 +285,7 @@ struct Connection
   unsigned int        con_snomask;   /**< mask for server messages */
   time_t              con_nextnick;  /**< Next time a nick change is allowed */
   time_t              con_nexttarget;/**< Next time a target change is allowed */
+  time_t              con_nextaway;  /**< Next time an AWAY change is allowed */
   time_t              con_lasttime;  /**< Last time data read from socket */
   time_t              con_since;     /**< Last time we accepted a command */
   struct MsgQ         con_sendQ;     /**< Outgoing message queue */
@@ -563,6 +564,8 @@ struct Client {
 #define cli_nextnick(cli)	con_nextnick(cli_connect(cli))
 /** Get next time a target change is allowed for the client. */
 #define cli_nexttarget(cli)	con_nexttarget(cli_connect(cli))
+/** Get next time an AWAY change is allowed for the client. */
+#define cli_nextaway(cli)	con_nextaway(cli_connect(cli))
 /** Get SendQ for client. */
 #define cli_sendQ(cli)		con_sendQ(cli_connect(cli))
 /** Get RecvQ for client. */
@@ -646,6 +649,8 @@ struct Client {
 #define con_nextnick(con)	((con)->con_nextnick)
 /** Get next new target time for connection. */
 #define con_nexttarget(con)	((con)->con_nexttarget)
+/** Get next AWAY change time for connection. */
+#define con_nextaway(con)	((con)->con_nextaway)
 /** Get last time we read from the connection. */
 #define con_lasttime(con)       ((con)->con_lasttime)
 /** Get last time we accepted a command from the connection. */

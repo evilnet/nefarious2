@@ -151,8 +151,9 @@ static int user_set_away(struct User* user, char* message)
  * parv[0] = sender prefix
  * parv[1] = away message
  *
- * TODO: Throttle aways - many people have a script which resets the away
- *       message every 10 seconds which really chews the bandwidth.
+ * FEAT_AWAY_THROTTLE: Minimum seconds between AWAY changes (0 = disabled).
+ * Prevents scripts that reset away message every few seconds from
+ * generating excessive network traffic.
  */
 int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
@@ -160,9 +161,21 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int was_away = cli_user(sptr)->away != 0;
   int is_away;
   int is_away_star = 0;
+  int throttle;
 
   assert(0 != cptr);
   assert(cptr == sptr);
+
+  /* Check AWAY throttle - silently drop if too soon after last change */
+  throttle = feature_int(FEAT_AWAY_THROTTLE);
+  if (throttle > 0) {
+    if (CurrentTime < cli_nextaway(cptr)) {
+      /* Too soon - silently ignore (no error to avoid spam) */
+      return 0;
+    }
+    /* Update next allowed time */
+    cli_nextaway(cptr) = CurrentTime + throttle;
+  }
 
   /* Check for AWAY * (hidden connection) before processing */
   if (away_message && away_message[0] == '*' && away_message[1] == '\0') {
