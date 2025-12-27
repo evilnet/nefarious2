@@ -926,6 +926,14 @@ struct Message msgtab[] = {
     "+id type [params] | -id - Start or end a message batch"
   },
   {
+    MSG_MULTILINE,
+    TOK_MULTILINE,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_multiline, m_ignore, m_ignore },
+    "S2S multiline batch relay - internal use only"
+  },
+  {
     MSG_CHATHISTORY,
     TOK_CHATHISTORY,
     0, MAXPARA, MFLG_SLOW, 0, NULL,

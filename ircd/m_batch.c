@@ -53,6 +53,7 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "s_bsd.h"
 #include "send.h"
 #include "s_misc.h"
 #include "s_user.h"
@@ -472,6 +473,68 @@ process_multiline_batch(struct Client *sptr)
         sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
       }
     }
+
+    /* S2S relay for private messages to remote users */
+    if (!MyConnect(acptr)) {
+      char s2s_batch_id[16];
+      ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
+                    cli_yxx(sptr), (unsigned long)CurrentTime);
+
+      first = 1;
+      for (lp = con_ml_messages(con); lp; lp = lp->next) {
+        int concat = lp->value.cp[0];
+        char *text = lp->value.cp + 1;
+
+        if (first) {
+          /* Start batch with first line */
+          sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "+%s %s :%s",
+                                s2s_batch_id, cli_name(acptr), text);
+          first = 0;
+        } else if (concat) {
+          /* Concat line */
+          sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "c%s %s :%s",
+                                s2s_batch_id, cli_name(acptr), text);
+        } else {
+          /* Normal continuation */
+          sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "%s %s :%s",
+                                s2s_batch_id, cli_name(acptr), text);
+        }
+      }
+      /* End batch */
+      sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "-%s %s :",
+                            s2s_batch_id, cli_name(acptr));
+    }
+  }
+
+  /* S2S relay for channel messages */
+  if (is_channel && chptr) {
+    char s2s_batch_id[16];
+    ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
+                  cli_yxx(sptr), (unsigned long)CurrentTime);
+
+    first = 1;
+    for (lp = con_ml_messages(con); lp; lp = lp->next) {
+      int concat = lp->value.cp[0];
+      char *text = lp->value.cp + 1;
+
+      if (first) {
+        /* Start batch with first line */
+        sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "+%s %s :%s",
+                              s2s_batch_id, chptr->chname, text);
+        first = 0;
+      } else if (concat) {
+        /* Concat line */
+        sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "c%s %s :%s",
+                              s2s_batch_id, chptr->chname, text);
+      } else {
+        /* Normal continuation */
+        sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "%s %s :%s",
+                              s2s_batch_id, chptr->chname, text);
+      }
+    }
+    /* End batch */
+    sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "-%s %s :",
+                          s2s_batch_id, chptr->chname);
   }
 
   clear_multiline_batch(con);
@@ -584,6 +647,339 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     /* Process and deliver the batch */
     process_multiline_batch(sptr);
+  }
+
+  return 0;
+}
+
+/*
+ * S2S Multiline batch relay structures and functions
+ */
+
+/** Structure to hold a pending multiline batch from S2S */
+struct S2SMultilineBatch {
+  char batch_id[16];            /**< Batch ID */
+  char target[CHANNELLEN + 1];  /**< Target channel or nick */
+  struct Client *sender;        /**< Original sender client */
+  struct SLink *messages;       /**< Linked list of messages */
+  int msg_count;                /**< Number of messages */
+  time_t start_time;            /**< When batch started */
+};
+
+/** Global array of pending S2S multiline batches (indexed by server connection) */
+static struct S2SMultilineBatch *s2s_ml_batches[MAXCONNECTIONS];
+
+/** Find an S2S multiline batch by batch ID */
+static struct S2SMultilineBatch *
+find_s2s_multiline_batch(const char *batch_id)
+{
+  int i;
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (s2s_ml_batches[i] && strcmp(s2s_ml_batches[i]->batch_id, batch_id) == 0)
+      return s2s_ml_batches[i];
+  }
+  return NULL;
+}
+
+/** Create a new S2S multiline batch */
+static struct S2SMultilineBatch *
+create_s2s_multiline_batch(const char *batch_id, const char *target,
+                           struct Client *sender)
+{
+  int i;
+  struct S2SMultilineBatch *batch;
+
+  /* Find an empty slot */
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (!s2s_ml_batches[i])
+      break;
+  }
+  if (i >= MAXCONNECTIONS)
+    return NULL;  /* No available slot */
+
+  batch = (struct S2SMultilineBatch *)MyMalloc(sizeof(struct S2SMultilineBatch));
+  ircd_strncpy(batch->batch_id, batch_id, sizeof(batch->batch_id) - 1);
+  batch->batch_id[sizeof(batch->batch_id) - 1] = '\0';
+  ircd_strncpy(batch->target, target, sizeof(batch->target) - 1);
+  batch->target[sizeof(batch->target) - 1] = '\0';
+  batch->sender = sender;
+  batch->messages = NULL;
+  batch->msg_count = 0;
+  batch->start_time = CurrentTime;
+
+  s2s_ml_batches[i] = batch;
+  return batch;
+}
+
+/** Free an S2S multiline batch */
+static void
+free_s2s_multiline_batch(struct S2SMultilineBatch *batch)
+{
+  struct SLink *lp, *next;
+  int i;
+
+  if (!batch)
+    return;
+
+  /* Free messages */
+  for (lp = batch->messages; lp; lp = next) {
+    next = lp->next;
+    if (lp->value.cp)
+      MyFree(lp->value.cp);
+    free_link(lp);
+  }
+
+  /* Remove from array */
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (s2s_ml_batches[i] == batch) {
+      s2s_ml_batches[i] = NULL;
+      break;
+    }
+  }
+
+  MyFree(batch);
+}
+
+/** Add a message to an S2S multiline batch */
+static void
+add_s2s_multiline_message(struct S2SMultilineBatch *batch, const char *text, int concat)
+{
+  struct SLink *lp;
+  char *msgcopy;
+  int len;
+
+  if (!batch || !text)
+    return;
+
+  len = strlen(text);
+  msgcopy = (char *)MyMalloc(len + 2);
+  msgcopy[0] = concat ? 1 : 0;  /* Flag byte */
+  strcpy(msgcopy + 1, text);
+
+  lp = make_link();
+  lp->value.cp = msgcopy;
+  lp->next = NULL;
+
+  /* Append to end of list */
+  if (!batch->messages) {
+    batch->messages = lp;
+  } else {
+    struct SLink *tail;
+    for (tail = batch->messages; tail->next; tail = tail->next)
+      ;
+    tail->next = lp;
+  }
+
+  batch->msg_count++;
+}
+
+/** Deliver a completed S2S multiline batch to local clients */
+static void
+deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr)
+{
+  struct Channel *chptr = NULL;
+  struct Client *acptr = NULL;
+  struct SLink *lp;
+  struct Membership *member;
+  int is_channel;
+  int first;
+  struct Client *sptr = batch->sender;
+
+  if (!batch || !batch->messages || !sptr)
+    return;
+
+  is_channel = IsChannelName(batch->target);
+
+  /* Validate target */
+  if (is_channel) {
+    chptr = FindChannel(batch->target);
+    if (!chptr)
+      return;  /* Channel doesn't exist locally */
+  } else {
+    acptr = FindUser(batch->target);
+    if (!acptr || !MyConnect(acptr))
+      return;  /* User doesn't exist or isn't local */
+  }
+
+  /* Deliver to local recipients */
+  if (is_channel) {
+    for (member = chptr->members; member; member = member->next_member) {
+      struct Client *to = member->user;
+
+      if (!MyConnect(to))
+        continue;  /* Only deliver to local users */
+
+      if (to == sptr)
+        continue;  /* Skip sender (they already got echo) */
+
+      if (CapActive(to, CAP_DRAFT_MULTILINE) && CapActive(to, CAP_BATCH)) {
+        /* Send as batch to supporting clients */
+        char batchid[16];
+        ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+                      NumNick(sptr), con_batch_seq(cli_connect(to))++);
+
+        sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
+                      batchid, chptr->chname);
+
+        first = 1;
+        for (lp = batch->messages; lp; lp = lp->next) {
+          int concat = lp->value.cp[0];
+          char *text = lp->value.cp + 1;
+
+          if (first && !concat) {
+            sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                          batchid, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), chptr->chname, text);
+            first = 0;
+          } else if (concat) {
+            sendrawto_one(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                          batchid, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), chptr->chname, text);
+          } else {
+            sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                          batchid, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), chptr->chname, text);
+          }
+        }
+
+        sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
+      } else {
+        /* Fallback: send as individual messages */
+        for (lp = batch->messages; lp; lp = lp->next) {
+          char *text = lp->value.cp + 1;
+          sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
+        }
+      }
+    }
+  } else if (acptr && MyConnect(acptr)) {
+    /* Private message to local user */
+    if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
+      char batchid[16];
+      ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+                    NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
+
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
+                    batchid, cli_name(acptr));
+
+      first = 1;
+      for (lp = batch->messages; lp; lp = lp->next) {
+        int concat = lp->value.cp[0];
+        char *text = lp->value.cp + 1;
+
+        if (first && !concat) {
+          sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                        batchid, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), cli_name(acptr), text);
+          first = 0;
+        } else if (concat) {
+          sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                        batchid, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), cli_name(acptr), text);
+        } else {
+          sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                        batchid, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), cli_name(acptr), text);
+        }
+      }
+
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
+    } else {
+      for (lp = batch->messages; lp; lp = lp->next) {
+        char *text = lp->value.cp + 1;
+        sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+      }
+    }
+  }
+
+  /* Propagate to other servers (except where it came from) */
+  /* Note: This happens in ms_multiline which already propagates */
+}
+
+/*
+ * ms_multiline - server message handler for S2S multiline batch
+ *
+ * P10 Format:
+ *   [USER_NUMERIC] ML +batchid target :first_line   (start batch + first line)
+ *   [USER_NUMERIC] ML batchid target :line          (normal continuation)
+ *   [USER_NUMERIC] ML cbatchid target :line         (concat continuation)
+ *   [USER_NUMERIC] ML -batchid target :             (end batch)
+ *
+ * parv[0] = sender prefix
+ * parv[1] = batch_id with modifier (+, c, or -)
+ * parv[2] = target
+ * parv[3] = text (may be empty for end)
+ */
+int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+{
+  char *batch_ref;
+  char *target;
+  char *text;
+  int is_start = 0, is_end = 0, is_concat = 0;
+  struct S2SMultilineBatch *batch;
+
+  assert(0 != cptr);
+  assert(0 != sptr);
+
+  /* Sender must be a user */
+  if (!IsUser(sptr))
+    return protocol_violation(cptr, "Non-user sending MULTILINE");
+
+  if (parc < 3)
+    return 0;
+
+  batch_ref = parv[1];
+  target = parv[2];
+  text = (parc >= 4 && !EmptyString(parv[3])) ? parv[3] : "";
+
+  /* Parse batch modifier */
+  if (batch_ref[0] == '+') {
+    is_start = 1;
+    batch_ref++;
+  } else if (batch_ref[0] == '-') {
+    is_end = 1;
+    batch_ref++;
+  } else if (batch_ref[0] == 'c') {
+    is_concat = 1;
+    batch_ref++;
+  }
+
+  if (EmptyString(batch_ref))
+    return 0;
+
+  /* Propagate to other servers first */
+  sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "%s%s %s :%s",
+                        is_start ? "+" : (is_end ? "-" : (is_concat ? "c" : "")),
+                        batch_ref, target, text);
+
+  if (is_start) {
+    /* Start new batch */
+    batch = find_s2s_multiline_batch(batch_ref);
+    if (batch) {
+      /* Batch ID collision - clear old one */
+      free_s2s_multiline_batch(batch);
+    }
+
+    batch = create_s2s_multiline_batch(batch_ref, target, sptr);
+    if (!batch)
+      return 0;  /* No room for new batch */
+
+    /* Add first line if present */
+    if (!EmptyString(text))
+      add_s2s_multiline_message(batch, text, 0);
+  }
+  else if (is_end) {
+    /* End batch and deliver */
+    batch = find_s2s_multiline_batch(batch_ref);
+    if (batch) {
+      deliver_s2s_multiline_batch(batch, cptr);
+      free_s2s_multiline_batch(batch);
+    }
+  }
+  else {
+    /* Continuation line */
+    batch = find_s2s_multiline_batch(batch_ref);
+    if (batch)
+      add_s2s_multiline_message(batch, text, is_concat);
   }
 
   return 0;

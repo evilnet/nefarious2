@@ -556,6 +556,10 @@ struct Client;
 #define TOK_WEBPUSH	"WP"
 #define CMD_WEBPUSH	MSG_WEBPUSH, TOK_WEBPUSH
 
+#define MSG_MULTILINE	"MULTILINE"
+#define TOK_MULTILINE	"ML"
+#define CMD_MULTILINE	MSG_MULTILINE, TOK_MULTILINE
+
 /*
  * Constants
  */
