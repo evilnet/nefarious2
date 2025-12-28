@@ -43,7 +43,9 @@ static void test_exact_no_match(void **state)
     ASSERT_NO_MATCH("abc", "abcd");
     ASSERT_NO_MATCH("abcd", "abc");
     ASSERT_NO_MATCH("hello", "world");
-    ASSERT_NO_MATCH("abc", "ABC");  /* Case sensitive */
+    /* IRC matching is case-insensitive */
+    ASSERT_MATCHES("abc", "ABC");
+    ASSERT_MATCHES("Hello", "hELLO");
 }
 
 

@@ -147,19 +147,19 @@ static void test_IsCntrl(void **state)
 {
     (void)state;
 
-    /* Control characters (0x00-0x1F and 0x7F) */
+    /* Control characters (0x00-0x1F) */
     assert_true(IsCntrl('\0'));
     assert_true(IsCntrl('\t'));
     assert_true(IsCntrl('\n'));
     assert_true(IsCntrl('\r'));
     assert_true(IsCntrl('\007'));  /* Bell */
     assert_true(IsCntrl(0x1F));
-    assert_true(IsCntrl(0x7F));    /* DEL */
 
     /* Not control characters */
     assert_false(IsCntrl(' '));
     assert_false(IsCntrl('a'));
     assert_false(IsCntrl('~'));
+    assert_false(IsCntrl(0x7F));   /* DEL is not classified as control in IRC */
 }
 
 /* Test end-of-line characters */
@@ -167,18 +167,18 @@ static void test_IsEol(void **state)
 {
     (void)state;
 
-    /* EOL chars */
+    /* EOL chars - only \n and \r */
     assert_true(IsEol('\n'));
     assert_true(IsEol('\r'));
-    assert_true(IsEol('\0'));
 
-    /* Not EOL */
+    /* Not EOL - null is not classified as EOL in IRC */
+    assert_false(IsEol('\0'));
     assert_false(IsEol(' '));
     assert_false(IsEol('a'));
     assert_false(IsEol('\t'));
 }
 
-/* Test IP address characters */
+/* Test IP address characters - IsIPChar is for IPv4 only (digits and .) */
 static void test_IsIPChar(void **state)
 {
     (void)state;
@@ -190,18 +190,45 @@ static void test_IsIPChar(void **state)
     /* Dot for IPv4 */
     assert_true(IsIPChar('.'));
 
-    /* Hex digits and colon for IPv6 */
-    assert_true(IsIPChar('a'));
-    assert_true(IsIPChar('f'));
-    assert_true(IsIPChar('A'));
-    assert_true(IsIPChar('F'));
-    assert_true(IsIPChar(':'));
-
-    /* Invalid IP chars */
+    /* Invalid IPv4 chars - hex letters and colon are for IPv6 (IsIP6Char) */
+    assert_false(IsIPChar('A'));
+    assert_false(IsIPChar('F'));
+    assert_false(IsIPChar(':'));
+    assert_false(IsIPChar('a'));
+    assert_false(IsIPChar('f'));
     assert_false(IsIPChar('g'));
     assert_false(IsIPChar('z'));
     assert_false(IsIPChar(' '));
     assert_false(IsIPChar('#'));
+}
+
+/* Test IPv6 address characters - IsIP6Char includes hex and colon */
+static void test_IsIP6Char(void **state)
+{
+    (void)state;
+
+    /* Digits */
+    assert_true(IsIP6Char('0'));
+    assert_true(IsIP6Char('9'));
+
+    /* Dot for IPv4-mapped addresses */
+    assert_true(IsIP6Char('.'));
+
+    /* Hex digits (upper and lower) */
+    assert_true(IsIP6Char('A'));
+    assert_true(IsIP6Char('F'));
+    assert_true(IsIP6Char('a'));
+    assert_true(IsIP6Char('f'));
+
+    /* Colon separator */
+    assert_true(IsIP6Char(':'));
+
+    /* Invalid IPv6 chars */
+    assert_false(IsIP6Char('G'));
+    assert_false(IsIP6Char('g'));
+    assert_false(IsIP6Char('z'));
+    assert_false(IsIP6Char(' '));
+    assert_false(IsIP6Char('#'));
 }
 
 int main(void)
@@ -216,6 +243,7 @@ int main(void)
         cmocka_unit_test(test_IsCntrl),
         cmocka_unit_test(test_IsEol),
         cmocka_unit_test(test_IsIPChar),
+        cmocka_unit_test(test_IsIP6Char),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

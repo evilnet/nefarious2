@@ -71,23 +71,24 @@ ircd_string_t: $(IRCD_STRING_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_STRING_T_OBJS)
 
 # CMocka tests - these use proper assertions
-IRCD_CHATTR_CMOCKA_OBJS = ircd_chattr_cmocka.o ../ircd_string.o
+# All CMocka tests need test_stub.o for log_write/log_inassert stubs
+IRCD_CHATTR_CMOCKA_OBJS = ircd_chattr_cmocka.o test_stub.o ../ircd_string.o
 ircd_chattr_cmocka: $(IRCD_CHATTR_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_CHATTR_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
-IRCD_MATCH_CMOCKA_OBJS = ircd_match_cmocka.o ../ircd_string.o ../match.o
+IRCD_MATCH_CMOCKA_OBJS = ircd_match_cmocka.o test_stub.o ../ircd_string.o ../match.o
 ircd_match_cmocka: $(IRCD_MATCH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_MATCH_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
-IRCD_STRING_CMOCKA_OBJS = ircd_string_cmocka.o ../ircd_string.o
+IRCD_STRING_CMOCKA_OBJS = ircd_string_cmocka.o test_stub.o ../ircd_string.o
 ircd_string_cmocka: $(IRCD_STRING_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_STRING_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
-NUMNICKS_CMOCKA_OBJS = numnicks_cmocka.o ../numnicks.o ../ircd_string.o
+NUMNICKS_CMOCKA_OBJS = numnicks_cmocka.o test_stub.o ../numnicks.o ../ircd_string.o ../ircd_alloc.o ../match.o
 numnicks_cmocka: $(NUMNICKS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(NUMNICKS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
-IRCD_IN_ADDR_CMOCKA_OBJS = ircd_in_addr_cmocka.o ../ircd_string.o ../match.o ../numnicks.o
+IRCD_IN_ADDR_CMOCKA_OBJS = ircd_in_addr_cmocka.o test_stub.o ../ircd_string.o ../match.o ../numnicks.o ../ircd_alloc.o
 ircd_in_addr_cmocka: $(IRCD_IN_ADDR_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_IN_ADDR_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
