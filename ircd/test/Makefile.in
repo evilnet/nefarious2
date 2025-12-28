@@ -20,7 +20,8 @@ CMOCKA_TESTPROGS = \
 	ircd_string_cmocka \
 	numnicks_cmocka \
 	ircd_in_addr_cmocka \
-	ircd_compress_cmocka
+	ircd_compress_cmocka \
+	ircd_cloaking_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -36,6 +37,7 @@ DEP_SRC = \
 	numnicks_cmocka.c \
 	ircd_in_addr_cmocka.c \
 	ircd_compress_cmocka.c \
+	ircd_cloaking_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -99,6 +101,12 @@ ircd_in_addr_cmocka: $(IRCD_IN_ADDR_CMOCKA_OBJS)
 IRCD_COMPRESS_CMOCKA_OBJS = ircd_compress_cmocka.o test_stub.o ../ircd_compress.o
 ircd_compress_cmocka: $(IRCD_COMPRESS_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_COMPRESS_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
+
+# ircd_cloaking tests - uses #include .c approach to access static functions
+# Links against ircd_md5.o for MD5 hashing used in cloaking
+IRCD_CLOAKING_CMOCKA_OBJS = ircd_cloaking_cmocka.o test_stub.o ../ircd_md5.o ../ircd_string.o
+ircd_cloaking_cmocka: $(IRCD_CLOAKING_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_CLOAKING_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
