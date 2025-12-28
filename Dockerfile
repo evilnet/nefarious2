@@ -4,7 +4,7 @@ ENV GID 1234
 ENV UID 1234
 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host liblmdb-dev libzstd-dev
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host liblmdb-dev libzstd-dev libcmocka-dev
 #libgeoip-dev libmaxminddb-dev
 
 # Perl dependencies for iauthd.pl (commented out - using TypeScript version)

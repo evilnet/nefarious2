@@ -6,22 +6,33 @@ CFLAGS   = -g -Wall
 LDFLAGS  =
 CC = @CC@
 
+# Legacy test programs (print-based, no assertions)
 TESTPROGS = \
 	ircd_chattr_t \
 	ircd_in_addr_t \
 	ircd_match_t \
 	ircd_string_t
 
+# CMocka test programs (proper assertions)
+CMOCKA_TESTPROGS = \
+	ircd_chattr_cmocka
+
+CMOCKA_LIBS = -lcmocka
+
 DEP_SRC = \
 	ircd_chattr_t.c \
 	ircd_in_addr_t.c \
 	ircd_match_t.c \
 	ircd_string_t.c \
+	ircd_chattr_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
 
 build: ${TESTPROGS}
+
+# Build CMocka tests separately (requires libcmocka-dev)
+cmocka: ${CMOCKA_TESTPROGS}
 
 depend: ${DEP_SRC}
 	@cd ${srcdir} && \
@@ -51,12 +62,17 @@ IRCD_STRING_T_OBJS = ircd_string_t.o test_stub.o ../ircd_string.o
 ircd_string_t: $(IRCD_STRING_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_STRING_T_OBJS)
 
+# CMocka tests - these use proper assertions
+IRCD_CHATTR_CMOCKA_OBJS = ircd_chattr_cmocka.o ../ircd_string.o
+ircd_chattr_cmocka: $(IRCD_CHATTR_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_CHATTR_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
 
-.PHONY: distclean clean test
+.PHONY: distclean clean test test-cmocka test-all cmocka
 
-# Run all unit tests
+# Run legacy unit tests (default - runs during Docker build)
 test: ${TESTPROGS}
 	@echo "Running nefarious unit tests..."
 	@failed=0; \
@@ -77,11 +93,32 @@ test: ${TESTPROGS}
 		exit 1; \
 	fi
 
+# Run CMocka tests (requires libcmocka-dev)
+test-cmocka: ${CMOCKA_TESTPROGS}
+	@echo "Running CMocka unit tests..."
+	@failed=0; \
+	for t in ${CMOCKA_TESTPROGS}; do \
+		echo "  Running $$t..."; \
+		if ./$$t 2>&1 | tee $$t.log; then \
+			: ; \
+		else \
+			failed=1; \
+		fi; \
+	done; \
+	if [ $$failed -ne 0 ]; then \
+		echo "Some CMocka tests failed!"; \
+		exit 1; \
+	fi
+
+# Run all tests (legacy + CMocka)
+test-all: test test-cmocka
+	@echo "All tests completed."
+
 distclean: clean
 	rm -f Makefile
 
 clean:
-	rm -f core *.o *.log ${TESTPROGS}
+	rm -f core *.o *.log ${TESTPROGS} ${CMOCKA_TESTPROGS}
 
 # DO NOT DELETE THIS LINE (or the blank line after it) -- make depend depends on them.
 
