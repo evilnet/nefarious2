@@ -335,12 +335,22 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       }
     }
 
-    if (!found && !is_channel && !IsChannelName(target)) {
-      /* Target is not online and not a channel - try LMDB cache for account */
+    /* For registered users/channels, if not in memory, check LMDB cache then X3 */
+    if (!found && !is_channel) {
+      /* Get account name for cache lookup */
+      const char *account = NULL;
       char value_buf[METADATA_VALUE_LEN + 1];
 
-      if (metadata_lmdb_is_available()) {
-        if (metadata_account_get(target, key, value_buf) == 0) {
+      if (target_client && IsAccount(target_client)) {
+        /* Online registered user - use their account name for cache lookup */
+        account = cli_account(target_client);
+      } else if (!target_found && !IsChannelName(target)) {
+        /* Offline user - target is the account name */
+        account = target;
+      }
+
+      if (account && metadata_lmdb_is_available()) {
+        if (metadata_account_get(account, key, value_buf) == 0) {
           /* Found in LMDB cache */
           const char *vis_str = "*";
           const char *val = value_buf;
@@ -354,17 +364,54 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
           if (*val) {
             send_keyvalue(sptr, target, key, val, vis_str);
             found = 1;
+
+            /* For online users, also load into memory for faster subsequent access */
+            if (target_client) {
+              metadata_set_client(target_client, key, val,
+                                  (vis_str[0] == 'p') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC);
+            }
           }
         }
       }
 
-      if (!found) {
-        /* Not in cache - send MDQ to X3 if available.
-         * Response will come back via ms_metadata and be forwarded
-         * to the client via metadata_handle_response.
-         */
-        if (metadata_send_query(sptr, target, key) == 0) {
+      /* If still not found and we have an account, query X3 (authoritative source) */
+      if (!found && account) {
+        if (metadata_send_query(sptr, account, key) == 0) {
           /* Query sent - response will be async, don't send NOT_SET yet */
+          continue;
+        }
+      }
+    }
+
+    /* For registered channels, check LMDB cache if not in memory */
+    if (!found && is_channel && target_channel) {
+      char value_buf[METADATA_VALUE_LEN + 1];
+
+      if (metadata_lmdb_is_available()) {
+        if (metadata_account_get(target, key, value_buf) == 0) {
+          /* Found in LMDB cache - load into channel memory */
+          const char *vis_str = "*";
+          const char *val = value_buf;
+
+          if (val[0] == 'P' && val[1] == ':') {
+            vis_str = "private";
+            val = val + 2;
+          }
+
+          if (*val) {
+            send_keyvalue(sptr, target, key, val, vis_str);
+            found = 1;
+
+            /* Load into channel's in-memory metadata */
+            metadata_set_channel(target_channel, key, val,
+                                 (vis_str[0] == 'p') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC);
+          }
+        }
+      }
+
+      /* Query X3 for registered channel metadata if not cached */
+      if (!found) {
+        if (metadata_send_query(sptr, target, key) == 0) {
           continue;
         }
       }
@@ -1202,9 +1249,25 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 #endif
   }
 
-  /* If from services and target is offline, cache in LMDB */
-  if (is_from_services && !target_client && !is_channel && value) {
-    if (metadata_lmdb_is_available()) {
+  /* If from services, cache in LMDB for registered users/channels */
+  if (is_from_services && value) {
+    const char *cache_key = NULL;
+
+    if (!is_channel) {
+      /* For users, get the account name for cache key */
+      if (target_client && IsAccount(target_client)) {
+        /* Online registered user - cache under their account */
+        cache_key = cli_account(target_client);
+      } else if (!target_client) {
+        /* Offline user - target is the account name */
+        cache_key = target;
+      }
+    } else if (target_channel) {
+      /* Registered channel - cache under channel name */
+      cache_key = target;
+    }
+
+    if (cache_key && metadata_lmdb_is_available()) {
       if (is_compressed && raw_len > 0) {
         /* Store raw compressed data directly - no recompression needed! */
         /* Prepend visibility if private */
@@ -1213,13 +1276,13 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
           prefixed[0] = 'P';
           prefixed[1] = ':';
           memcpy(prefixed + 2, raw_data, raw_len);
-          metadata_account_set_raw(target, key, prefixed, raw_len + 2);
+          metadata_account_set_raw(cache_key, key, prefixed, raw_len + 2);
         } else {
-          metadata_account_set_raw(target, key, raw_data, raw_len);
+          metadata_account_set_raw(cache_key, key, raw_data, raw_len);
         }
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "ms_metadata: Stored compressed passthrough for %s/%s (%zu bytes)",
-                  target, key, raw_len);
+                  cache_key, key, raw_len);
       } else {
         /* Store with visibility prefix (will compress automatically) */
         char stored_value[METADATA_VALUE_LEN + 3];
@@ -1228,26 +1291,29 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
         } else {
           ircd_strncpy(stored_value, value, METADATA_VALUE_LEN);
         }
-        metadata_account_set(target, key, stored_value);
+        metadata_account_set(cache_key, key, stored_value);
       }
+      log_write(LS_DEBUG, L_DEBUG, 0,
+                "ms_metadata: Cached X3 metadata %s/%s in LMDB", cache_key, key);
     }
 
-    /* Forward to any clients waiting for this MDQ response */
-    /* For compressed data, we need to decompress for the client */
-    if (is_compressed && raw_len > 0) {
-      /* Decompress for the response */
+    /* Forward to any clients waiting for this MDQ response (offline users only) */
+    if (!target_client && !is_channel) {
+      if (is_compressed && raw_len > 0) {
+        /* Decompress for the response */
 #ifdef USE_ZSTD
-      char decompressed[METADATA_VALUE_LEN];
-      size_t decompressed_len;
-      if (decompress_data(raw_data, raw_len,
-                          (unsigned char *)decompressed, sizeof(decompressed) - 1,
-                          &decompressed_len) >= 0) {
-        decompressed[decompressed_len] = '\0';
-        metadata_handle_response(target, key, decompressed, visibility);
-      }
+        char decompressed[METADATA_VALUE_LEN];
+        size_t decompressed_len;
+        if (decompress_data(raw_data, raw_len,
+                            (unsigned char *)decompressed, sizeof(decompressed) - 1,
+                            &decompressed_len) >= 0) {
+          decompressed[decompressed_len] = '\0';
+          metadata_handle_response(target, key, decompressed, visibility);
+        }
 #endif
-    } else {
-      metadata_handle_response(target, key, value, visibility);
+      } else {
+        metadata_handle_response(target, key, value, visibility);
+      }
     }
   }
 
