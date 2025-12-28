@@ -54,7 +54,28 @@ ircd_string_t: $(IRCD_STRING_T_OBJS)
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
 
-.PHONY: distclean clean
+.PHONY: distclean clean test
+
+# Run all unit tests
+test: ${TESTPROGS}
+	@echo "Running nefarious unit tests..."
+	@failed=0; \
+	for t in ${TESTPROGS}; do \
+		echo "  Running $$t..."; \
+		if ./$$t > $$t.log 2>&1; then \
+			echo "    PASSED"; \
+		else \
+			echo "    FAILED (exit code $$?)"; \
+			cat $$t.log; \
+			failed=1; \
+		fi; \
+	done; \
+	if [ $$failed -eq 0 ]; then \
+		echo "All unit tests passed."; \
+	else \
+		echo "Some tests failed!"; \
+		exit 1; \
+	fi
 
 distclean: clean
 	rm -f Makefile

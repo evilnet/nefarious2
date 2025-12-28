@@ -36,6 +36,8 @@ WORKDIR  /home/nefarious/nefarious2
 # Enable LMDB for chathistory and zstd for compression
 RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096 --with-lmdb=/usr --with-zstd=/usr
 RUN make
+# Run unit tests during build (they require the built object files)
+RUN make test
 #RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 RUN make install
 
