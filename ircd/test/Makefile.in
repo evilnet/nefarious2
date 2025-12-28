@@ -19,9 +19,11 @@ CMOCKA_TESTPROGS = \
 	ircd_match_cmocka \
 	ircd_string_cmocka \
 	numnicks_cmocka \
-	ircd_in_addr_cmocka
+	ircd_in_addr_cmocka \
+	ircd_compress_cmocka
 
 CMOCKA_LIBS = -lcmocka
+ZSTD_LIBS = -lzstd
 
 DEP_SRC = \
 	ircd_chattr_t.c \
@@ -33,6 +35,7 @@ DEP_SRC = \
 	ircd_string_cmocka.c \
 	numnicks_cmocka.c \
 	ircd_in_addr_cmocka.c \
+	ircd_compress_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -91,6 +94,11 @@ numnicks_cmocka: $(NUMNICKS_CMOCKA_OBJS)
 IRCD_IN_ADDR_CMOCKA_OBJS = ircd_in_addr_cmocka.o test_stub.o ../ircd_string.o ../match.o ../numnicks.o ../ircd_alloc.o
 ircd_in_addr_cmocka: $(IRCD_IN_ADDR_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_IN_ADDR_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ircd_compress tests - requires zstd library
+IRCD_COMPRESS_CMOCKA_OBJS = ircd_compress_cmocka.o test_stub.o ../ircd_compress.o
+ircd_compress_cmocka: $(IRCD_COMPRESS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_COMPRESS_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
