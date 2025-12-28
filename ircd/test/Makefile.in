@@ -22,7 +22,8 @@ CMOCKA_TESTPROGS = \
 	ircd_in_addr_cmocka \
 	ircd_compress_cmocka \
 	ircd_cloaking_cmocka \
-	dbuf_cmocka
+	dbuf_cmocka \
+	ircd_crypt_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -40,6 +41,7 @@ DEP_SRC = \
 	ircd_compress_cmocka.c \
 	ircd_cloaking_cmocka.c \
 	dbuf_cmocka.c \
+	ircd_crypt_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -114,6 +116,11 @@ ircd_cloaking_cmocka: $(IRCD_CLOAKING_CMOCKA_OBJS)
 DBUF_CMOCKA_OBJS = dbuf_cmocka.o test_stub.o ../ircd_string.o
 dbuf_cmocka: $(DBUF_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(DBUF_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ircd_crypt tests - password hashing mechanisms
+IRCD_CRYPT_CMOCKA_OBJS = ircd_crypt_cmocka.o test_stub.o ../ircd_string.o ../ircd_md5.o
+ircd_crypt_cmocka: $(IRCD_CRYPT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_CRYPT_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
