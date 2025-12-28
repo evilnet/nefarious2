@@ -24,7 +24,8 @@ CMOCKA_TESTPROGS = \
 	ircd_cloaking_cmocka \
 	dbuf_cmocka \
 	ircd_crypt_cmocka \
-	crule_cmocka
+	crule_cmocka \
+	history_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -44,6 +45,7 @@ DEP_SRC = \
 	dbuf_cmocka.c \
 	ircd_crypt_cmocka.c \
 	crule_cmocka.c \
+	history_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -128,6 +130,11 @@ ircd_crypt_cmocka: $(IRCD_CRYPT_CMOCKA_OBJS)
 CRULE_CMOCKA_OBJS = crule_cmocka.o test_stub.o ../ircd_string.o
 crule_cmocka: $(CRULE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CRULE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# history tests - serialization functions (no LMDB required)
+HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../ircd_string.o
+history_cmocka: $(HISTORY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
