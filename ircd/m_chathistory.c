@@ -38,16 +38,20 @@
 #include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "s_bsd.h"
 #include "send.h"
 
+/* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
 #include <stdlib.h>
 
@@ -230,6 +234,33 @@ static int check_history_access(struct Client *sptr, const char *target)
   }
 }
 
+/* Forward declaration for federation query */
+static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
+                                           const char *subcmd, const char *ref,
+                                           int limit,
+                                           struct HistoryMessage *local_msgs,
+                                           int local_count);
+
+/** Check if we should trigger federation query.
+ * Returns 1 if we should federate, 0 otherwise.
+ */
+static int should_federate(const char *target, int local_count, int limit)
+{
+  /* Only federate for channels, not PMs */
+  if (!IsChannelName(target))
+    return 0;
+
+  /* Check if federation is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return 0;
+
+  /* If we got fewer messages than requested, try federation */
+  if (local_count < limit)
+    return 1;
+
+  return 0;
+}
+
 /** Handle CHATHISTORY LATEST subcommand.
  * @param[in] sptr Client sending the command.
  * @param[in] target Target channel or nick.
@@ -267,7 +298,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     return 0;
   }
 
-  /* Query history */
+  /* Query local history */
   count = history_query_latest(target, ref_type, ref_value, limit, &messages);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
@@ -275,7 +306,19 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     return 0;
   }
 
-  /* Send response */
+  /* Check if we should try federation */
+  if (should_federate(target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, target, "LATEST",
+                                              ref_str, limit, messages, count);
+    if (req) {
+      /* Federation started - response will be sent when complete */
+      /* Note: messages ownership transferred to req */
+      return 0;
+    }
+    /* Federation failed to start, fall through to local-only response */
+  }
+
+  /* Send local-only response */
   send_history_batch(sptr, target, messages, count);
 
   /* Free messages */
@@ -320,6 +363,14 @@ static int chathistory_before(struct Client *sptr, const char *target,
     return 0;
   }
 
+  /* Check if we should try federation */
+  if (should_federate(target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, target, "BEFORE",
+                                              ref_str, limit, messages, count);
+    if (req)
+      return 0;
+  }
+
   send_history_batch(sptr, target, messages, count);
   history_free_messages(messages);
 
@@ -362,6 +413,14 @@ static int chathistory_after(struct Client *sptr, const char *target,
     return 0;
   }
 
+  /* Check if we should try federation */
+  if (should_federate(target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, target, "AFTER",
+                                              ref_str, limit, messages, count);
+    if (req)
+      return 0;
+  }
+
   send_history_batch(sptr, target, messages, count);
   history_free_messages(messages);
 
@@ -402,6 +461,14 @@ static int chathistory_around(struct Client *sptr, const char *target,
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
     return 0;
+  }
+
+  /* Check if we should try federation */
+  if (should_federate(target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, target, "AROUND",
+                                              ref_str, limit, messages, count);
+    if (req)
+      return 0;
   }
 
   send_history_batch(sptr, target, messages, count);
@@ -626,4 +693,479 @@ int m_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv
               "Unknown subcommand");
     return 0;
   }
+}
+
+/*
+ * S2S Chathistory Federation
+ *
+ * Protocol:
+ *   [SERVER] CH Q <target> <subcmd> <ref> <limit> <reqid>   - Query
+ *   [SERVER] CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - Response
+ *   [SERVER] CH E <reqid> <count>   - End response
+ */
+
+/** Maximum pending federation requests */
+#define MAX_FED_REQUESTS 64
+
+/** Maximum messages collected per request */
+#define MAX_FED_MESSAGES 500
+
+/** Structure for a pending federation request */
+struct FedRequest {
+  char reqid[32];                     /**< Request ID */
+  char target[CHANNELLEN + 1];        /**< Target channel */
+  struct Client *client;              /**< Client waiting for response */
+  struct HistoryMessage *local_msgs;  /**< Local LMDB results */
+  struct HistoryMessage *fed_msgs;    /**< Federated results */
+  int local_count;                    /**< Number of local messages */
+  int fed_count;                      /**< Number of federated messages */
+  int servers_pending;                /**< Servers we're waiting for */
+  time_t start_time;                  /**< When request started */
+  int limit;                          /**< Original limit requested */
+  struct Timer timer;                 /**< Timeout timer (embedded) */
+  int timer_active;                   /**< Whether timer is active */
+};
+
+/** Global array of pending federation requests */
+static struct FedRequest *fed_requests[MAX_FED_REQUESTS];
+
+/** Counter for generating unique request IDs */
+static unsigned long fed_reqid_counter = 0;
+
+/** Find a federation request by ID */
+static struct FedRequest *find_fed_request(const char *reqid)
+{
+  int i;
+  for (i = 0; i < MAX_FED_REQUESTS; i++) {
+    if (fed_requests[i] && strcmp(fed_requests[i]->reqid, reqid) == 0)
+      return fed_requests[i];
+  }
+  return NULL;
+}
+
+/** Free a federation request */
+static void free_fed_request(struct FedRequest *req)
+{
+  int i;
+
+  if (!req)
+    return;
+
+  /* Free message lists */
+  if (req->local_msgs)
+    history_free_messages(req->local_msgs);
+  if (req->fed_msgs)
+    history_free_messages(req->fed_msgs);
+
+  /* Remove timer if active */
+  if (req->timer_active)
+    timer_del(&req->timer);
+
+  /* Remove from array */
+  for (i = 0; i < MAX_FED_REQUESTS; i++) {
+    if (fed_requests[i] == req) {
+      fed_requests[i] = NULL;
+      break;
+    }
+  }
+
+  MyFree(req);
+}
+
+/** Add a message to the federated results list */
+static void add_fed_message(struct FedRequest *req, const char *msgid,
+                            const char *timestamp, int type,
+                            const char *sender, const char *account,
+                            const char *content)
+{
+  struct HistoryMessage *msg, *tail;
+
+  if (!req || req->fed_count >= MAX_FED_MESSAGES)
+    return;
+
+  msg = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
+  ircd_strncpy(msg->msgid, msgid, sizeof(msg->msgid) - 1);
+  ircd_strncpy(msg->timestamp, timestamp, sizeof(msg->timestamp) - 1);
+  ircd_strncpy(msg->target, req->target, sizeof(msg->target) - 1);
+  ircd_strncpy(msg->sender, sender, sizeof(msg->sender) - 1);
+  if (account && strcmp(account, "*") != 0)
+    ircd_strncpy(msg->account, account, sizeof(msg->account) - 1);
+  msg->type = type;
+  if (content)
+    ircd_strncpy(msg->content, content, sizeof(msg->content) - 1);
+  msg->next = NULL;
+
+  /* Append to list */
+  if (!req->fed_msgs) {
+    req->fed_msgs = msg;
+  } else {
+    for (tail = req->fed_msgs; tail->next; tail = tail->next)
+      ;
+    tail->next = msg;
+  }
+  req->fed_count++;
+}
+
+/** Check if message already exists in a list (by msgid) */
+static int message_exists(struct HistoryMessage *list, const char *msgid)
+{
+  struct HistoryMessage *m;
+  for (m = list; m; m = m->next) {
+    if (strcmp(m->msgid, msgid) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+/** Merge and deduplicate two message lists, sort by timestamp */
+static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
+                                              struct HistoryMessage *list2,
+                                              int limit)
+{
+  struct HistoryMessage *result = NULL, *tail = NULL;
+  struct HistoryMessage *m, *next, *best;
+  struct HistoryMessage *p1 = list1, *p2 = list2;
+  int count = 0;
+
+  /* Simple merge: collect all unique messages, sort by timestamp */
+  /* First, add all from list1 */
+  for (m = list1; m && count < limit; m = m->next) {
+    struct HistoryMessage *copy = (struct HistoryMessage *)MyCalloc(1, sizeof(*copy));
+    memcpy(copy, m, sizeof(*copy));
+    copy->next = NULL;
+    if (!result) {
+      result = tail = copy;
+    } else {
+      tail->next = copy;
+      tail = copy;
+    }
+    count++;
+  }
+
+  /* Add unique messages from list2 */
+  for (m = list2; m && count < limit; m = m->next) {
+    if (!message_exists(result, m->msgid)) {
+      struct HistoryMessage *copy = (struct HistoryMessage *)MyCalloc(1, sizeof(*copy));
+      memcpy(copy, m, sizeof(*copy));
+      copy->next = NULL;
+      if (!result) {
+        result = tail = copy;
+      } else {
+        tail->next = copy;
+        tail = copy;
+      }
+      count++;
+    }
+  }
+
+  /* Simple bubble sort by timestamp (descending for LATEST) */
+  /* For small lists this is fine; for large lists we'd want better sorting */
+  if (result && result->next) {
+    int swapped;
+    do {
+      swapped = 0;
+      struct HistoryMessage **pp = &result;
+      while (*pp && (*pp)->next) {
+        struct HistoryMessage *a = *pp;
+        struct HistoryMessage *b = a->next;
+        /* Sort descending by timestamp (newest first) */
+        if (strcmp(a->timestamp, b->timestamp) < 0) {
+          a->next = b->next;
+          b->next = a;
+          *pp = b;
+          swapped = 1;
+        }
+        pp = &((*pp)->next);
+      }
+    } while (swapped);
+  }
+
+  return result;
+}
+
+/** Complete a federation request and send results to client */
+static void complete_fed_request(struct FedRequest *req)
+{
+  struct HistoryMessage *merged;
+  int total;
+
+  if (!req || !req->client)
+    return;
+
+  /* Merge local and federated results */
+  merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit);
+
+  /* Count total */
+  total = 0;
+  for (struct HistoryMessage *m = merged; m; m = m->next)
+    total++;
+
+  /* Send to client */
+  send_history_batch(req->client, req->target, merged, total);
+
+  /* Free merged list */
+  history_free_messages(merged);
+
+  /* Clean up request */
+  free_fed_request(req);
+}
+
+/** Timer callback for federation timeout */
+static void fed_timeout_callback(struct Event *ev)
+{
+  struct FedRequest *req;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+
+  req = (struct FedRequest *)t_data(ev_timer(ev));
+  if (!req)
+    return;
+
+  req->timer_active = 0;  /* Timer has expired */
+
+  /* Complete with whatever we have */
+  complete_fed_request(req);
+}
+
+/** Count connected servers */
+static int count_servers(void)
+{
+  int count = 0;
+  struct DLink *lp;
+
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next)
+    count++;
+
+  return count;
+}
+
+/** Send a federation query to all servers
+ * @param[in] sptr Client requesting history
+ * @param[in] target Channel name
+ * @param[in] subcmd Subcommand (LATEST, BEFORE, etc.)
+ * @param[in] ref Reference string
+ * @param[in] limit Maximum messages
+ * @param[in] local_msgs Already-retrieved local messages
+ * @param[in] local_count Number of local messages
+ * @return Request ID or NULL on failure
+ */
+static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
+                                           const char *subcmd, const char *ref,
+                                           int limit,
+                                           struct HistoryMessage *local_msgs,
+                                           int local_count)
+{
+  struct FedRequest *req;
+  char reqid[32];
+  int i, server_count;
+  struct DLink *lp;
+
+  /* Check if federation is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return NULL;
+
+  /* Count connected servers */
+  server_count = count_servers();
+  if (server_count == 0)
+    return NULL;  /* No servers to query */
+
+  /* Find empty slot */
+  for (i = 0; i < MAX_FED_REQUESTS; i++) {
+    if (!fed_requests[i])
+      break;
+  }
+  if (i >= MAX_FED_REQUESTS)
+    return NULL;  /* No room */
+
+  /* Generate request ID */
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu",
+                cli_yxx(&me), ++fed_reqid_counter);
+
+  /* Create request */
+  req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+  ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+  ircd_strncpy(req->target, target, sizeof(req->target) - 1);
+  req->client = sptr;
+  req->local_msgs = local_msgs;
+  req->local_count = local_count;
+  req->fed_msgs = NULL;
+  req->fed_count = 0;
+  req->servers_pending = server_count;
+  req->start_time = CurrentTime;
+  req->limit = limit;
+
+  fed_requests[i] = req;
+
+  /* Set timeout timer */
+  timer_add(timer_init(&req->timer), fed_timeout_callback,
+            (void *)req, TT_RELATIVE,
+            feature_int(FEAT_CHATHISTORY_TIMEOUT));
+  req->timer_active = 1;
+
+  /* Send query to all servers */
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *server = lp->value.cptr;
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %s %s %d %s",
+                  target, subcmd, ref, limit, reqid);
+  }
+
+  return req;
+}
+
+/*
+ * ms_chathistory - server message handler for S2S chathistory federation
+ *
+ * P10 Format:
+ *   [SERVER] CH Q <target> <subcmd> <ref> <limit> <reqid>   - Query
+ *   [SERVER] CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - Response
+ *   [SERVER] CH E <reqid> <count>   - End response
+ *
+ * parv[0] = sender prefix
+ * parv[1] = subcommand (Q, R, or E)
+ * parv[2+] = parameters based on subcommand
+ */
+int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  char *subcmd;
+  struct Client *origin;
+
+  assert(0 != cptr);
+  assert(0 != sptr);
+
+  /* Sender must be a server */
+  if (!IsServer(sptr))
+    return 0;
+
+  if (parc < 2)
+    return 0;
+
+  subcmd = parv[1];
+
+  if (strcmp(subcmd, "Q") == 0) {
+    /* Query: Q <target> <subcmd> <ref> <limit> <reqid> */
+    char *target, *query_subcmd, *ref, *reqid;
+    int limit, count;
+    struct HistoryMessage *messages = NULL;
+    struct HistoryMessage *msg;
+    enum HistoryRefType ref_type;
+    const char *ref_value;
+
+    if (parc < 7)
+      return 0;
+
+    target = parv[2];
+    query_subcmd = parv[3];
+    ref = parv[4];
+    limit = atoi(parv[5]);
+    reqid = parv[6];
+
+    /* Propagate query to other servers (except source) */
+    sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "Q %s %s %s %d %s",
+                          target, query_subcmd, ref, limit, reqid);
+
+    /* Only process for channels (not PMs) */
+    if (!IsChannelName(target)) {
+      /* Send empty response for PMs */
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      return 0;
+    }
+
+    /* Check if we have history backend */
+    if (!history_is_available()) {
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      return 0;
+    }
+
+    /* Parse reference */
+    if (parse_reference(ref, &ref_type, &ref_value) != 0) {
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      return 0;
+    }
+
+    /* Query local LMDB based on subcommand */
+    if (ircd_strcmp(query_subcmd, "LATEST") == 0) {
+      count = history_query_latest(target, ref_type, ref_value, limit, &messages);
+    } else if (ircd_strcmp(query_subcmd, "BEFORE") == 0) {
+      count = history_query_before(target, ref_type, ref_value, limit, &messages);
+    } else if (ircd_strcmp(query_subcmd, "AFTER") == 0) {
+      count = history_query_after(target, ref_type, ref_value, limit, &messages);
+    } else if (ircd_strcmp(query_subcmd, "AROUND") == 0) {
+      count = history_query_around(target, ref_type, ref_value, limit, &messages);
+    } else {
+      /* Unsupported subcommand for federation */
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      return 0;
+    }
+
+    if (count <= 0) {
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      return 0;
+    }
+
+    /* Send response messages */
+    for (msg = messages; msg; msg = msg->next) {
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
+                    reqid, msg->msgid, msg->timestamp, msg->type,
+                    msg->sender, msg->account[0] ? msg->account : "*",
+                    msg->content);
+    }
+
+    /* Send end marker */
+    sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, count);
+
+    history_free_messages(messages);
+  }
+  else if (strcmp(subcmd, "R") == 0) {
+    /* Response: R <reqid> <msgid> <ts> <type> <sender> <account> :<content> */
+    char *reqid, *msgid, *timestamp, *sender, *account, *content;
+    int type;
+    struct FedRequest *req;
+
+    if (parc < 8)
+      return 0;
+
+    reqid = parv[2];
+    msgid = parv[3];
+    timestamp = parv[4];
+    type = atoi(parv[5]);
+    sender = parv[6];
+    account = parv[7];
+    content = (parc > 8) ? parv[8] : "";
+
+    /* Find the request */
+    req = find_fed_request(reqid);
+    if (!req)
+      return 0;  /* Request not found or already completed */
+
+    /* Add message to federated results */
+    add_fed_message(req, msgid, timestamp, type, sender, account, content);
+  }
+  else if (strcmp(subcmd, "E") == 0) {
+    /* End: E <reqid> <count> */
+    char *reqid;
+    int count;
+    struct FedRequest *req;
+
+    if (parc < 4)
+      return 0;
+
+    reqid = parv[2];
+    count = atoi(parv[3]);
+
+    /* Find the request */
+    req = find_fed_request(reqid);
+    if (!req)
+      return 0;
+
+    /* Decrement pending count */
+    req->servers_pending--;
+
+    /* If all servers have responded, complete the request */
+    if (req->servers_pending <= 0) {
+      complete_fed_request(req);
+    }
+  }
+
+  return 0;
 }

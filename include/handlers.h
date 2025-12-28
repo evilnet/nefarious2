@@ -282,6 +282,7 @@ extern int m_batch(struct Client*, struct Client*, int, char*[]);
 extern int check_client_batch_timeout(struct Client*);
 extern int ms_multiline(struct Client*, struct Client*, int, char*[]);
 extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
+extern int ms_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
 extern int m_register(struct Client*, struct Client*, int, char*[]);

@@ -938,7 +938,7 @@ struct Message msgtab[] = {
     TOK_CHATHISTORY,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_chathistory, m_ignore, m_chathistory, m_ignore },
+    { m_unregistered, m_chathistory, ms_chathistory, m_chathistory, m_ignore },
     "subcommand target ref [ref] limit - Query message history"
   },
   {
