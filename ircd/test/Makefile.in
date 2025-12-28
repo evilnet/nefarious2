@@ -15,7 +15,11 @@ TESTPROGS = \
 
 # CMocka test programs (proper assertions)
 CMOCKA_TESTPROGS = \
-	ircd_chattr_cmocka
+	ircd_chattr_cmocka \
+	ircd_match_cmocka \
+	ircd_string_cmocka \
+	numnicks_cmocka \
+	ircd_in_addr_cmocka
 
 CMOCKA_LIBS = -lcmocka
 
@@ -25,6 +29,10 @@ DEP_SRC = \
 	ircd_match_t.c \
 	ircd_string_t.c \
 	ircd_chattr_cmocka.c \
+	ircd_match_cmocka.c \
+	ircd_string_cmocka.c \
+	numnicks_cmocka.c \
+	ircd_in_addr_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -66,6 +74,22 @@ ircd_string_t: $(IRCD_STRING_T_OBJS)
 IRCD_CHATTR_CMOCKA_OBJS = ircd_chattr_cmocka.o ../ircd_string.o
 ircd_chattr_cmocka: $(IRCD_CHATTR_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_CHATTR_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+IRCD_MATCH_CMOCKA_OBJS = ircd_match_cmocka.o ../ircd_string.o ../match.o
+ircd_match_cmocka: $(IRCD_MATCH_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_MATCH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+IRCD_STRING_CMOCKA_OBJS = ircd_string_cmocka.o ../ircd_string.o
+ircd_string_cmocka: $(IRCD_STRING_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_STRING_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+NUMNICKS_CMOCKA_OBJS = numnicks_cmocka.o ../numnicks.o ../ircd_string.o
+numnicks_cmocka: $(NUMNICKS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(NUMNICKS_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+IRCD_IN_ADDR_CMOCKA_OBJS = ircd_in_addr_cmocka.o ../ircd_string.o ../match.o ../numnicks.o
+ircd_in_addr_cmocka: $(IRCD_IN_ADDR_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_IN_ADDR_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
