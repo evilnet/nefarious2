@@ -142,12 +142,15 @@ static void test_IsChannelChar(void **state)
     assert_false(IsChannelChar('\0'));  /* No null */
 }
 
-/* Test control characters */
+/* Test control characters
+ * Note: ircu defines NTL_CNTRL as 0x00-0x1F only, excluding DEL (0x7F).
+ * This differs from C's iscntrl() which includes DEL. This is intentional
+ * ircu behavior preserved in nefarious. */
 static void test_IsCntrl(void **state)
 {
     (void)state;
 
-    /* Control characters (0x00-0x1F) */
+    /* Control characters (0x00-0x1F per ircu definition) */
     assert_true(IsCntrl('\0'));
     assert_true(IsCntrl('\t'));
     assert_true(IsCntrl('\n'));
@@ -159,19 +162,22 @@ static void test_IsCntrl(void **state)
     assert_false(IsCntrl(' '));
     assert_false(IsCntrl('a'));
     assert_false(IsCntrl('~'));
-    assert_false(IsCntrl(0x7F));   /* DEL is not classified as control in IRC */
+    /* DEL (0x7F) is intentionally NOT classified as control in ircu/nefarious */
+    assert_false(IsCntrl(0x7F));
 }
 
-/* Test end-of-line characters */
+/* Test end-of-line characters
+ * Note: ircu defines NTL_EOL as only \r and \n. NUL is not included because
+ * it's used as string terminator, not a line terminator in IRC protocol. */
 static void test_IsEol(void **state)
 {
     (void)state;
 
-    /* EOL chars - only \n and \r */
+    /* EOL chars per ircu: only \n and \r */
     assert_true(IsEol('\n'));
     assert_true(IsEol('\r'));
 
-    /* Not EOL - null is not classified as EOL in IRC */
+    /* NUL is intentionally not EOL in ircu - it's the string terminator */
     assert_false(IsEol('\0'));
     assert_false(IsEol(' '));
     assert_false(IsEol('a'));

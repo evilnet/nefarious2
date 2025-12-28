@@ -212,14 +212,18 @@ static void test_ip_base64_roundtrip(void **state)
 
 /* ========== Edge cases ========== */
 
+/* Test empty string handling.
+ * Note: base64toint() is designed for parsing server numerics from the P10
+ * protocol, where empty strings should never occur in practice. The function
+ * behavior on empty input is undefined - it may return garbage or -1 depending
+ * on how the convert[] table handles the NUL character. We just verify it
+ * doesn't crash, as this is an edge case that shouldn't occur in normal use. */
 static void test_base64_empty_string(void **state)
 {
     (void)state;
 
-    /* Empty string behavior - implementation returns -1 or other value
-     * depending on the code path. Just verify it doesn't crash. */
+    /* Just verify empty string doesn't crash - result is undefined */
     (void)base64toint("");
-    /* If we got here without crashing, the test passes */
 }
 
 static void test_base64_max_values(void **state)

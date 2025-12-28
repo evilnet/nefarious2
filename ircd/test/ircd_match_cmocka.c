@@ -36,6 +36,10 @@ static void test_exact_match(void **state)
     ASSERT_MATCHES("", "");  /* Empty strings match */
 }
 
+/* Test non-matching strings.
+ * Note: IRC matching is case-insensitive per RFC 1459 section 2.2, which
+ * defines a special case mapping where {}|^ are lowercase of []\~. This
+ * is historical IRC behavior required for nickname/channel comparison. */
 static void test_exact_no_match(void **state)
 {
     (void)state;
@@ -43,7 +47,8 @@ static void test_exact_no_match(void **state)
     ASSERT_NO_MATCH("abc", "abcd");
     ASSERT_NO_MATCH("abcd", "abc");
     ASSERT_NO_MATCH("hello", "world");
-    /* IRC matching is case-insensitive */
+
+    /* IRC matching is case-insensitive (RFC 1459 section 2.2) */
     ASSERT_MATCHES("abc", "ABC");
     ASSERT_MATCHES("Hello", "hELLO");
 }

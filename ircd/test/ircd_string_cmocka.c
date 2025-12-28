@@ -301,6 +301,11 @@ static void test_ParseInterval_combined(void **state)
 
 /* ========== is_timestamp ========== */
 
+/* Test is_timestamp - checks if string contains only digits (and dots).
+ * Note: ircu implementation returns true for empty string because the loop
+ * "while (IsDigit(*str)) ++str" immediately hits NUL, then "*str == '\0'"
+ * returns true. This is vacuous truth - callers should check for empty first
+ * if that matters. This is historical ircu behavior preserved in nefarious. */
 static void test_is_timestamp(void **state)
 {
     (void)state;
@@ -309,7 +314,8 @@ static void test_is_timestamp(void **state)
     assert_true(is_timestamp("1234567890"));
     assert_true(is_timestamp("0"));
     assert_true(is_timestamp("999999999"));
-    /* Empty string returns true (vacuously - no non-digits) */
+
+    /* Empty string: ircu returns true (vacuously valid - no invalid chars) */
     assert_true(is_timestamp(""));
 
     /* Invalid timestamps */
@@ -321,6 +327,12 @@ static void test_is_timestamp(void **state)
 
 /* ========== valid_username ========== */
 
+/* Test valid_username - checks if all chars are valid user ID chars.
+ * Note: ircu implementation returns true for empty string because the loop
+ * "for (c = name; *c; c++)" never executes, so it returns 1. This is vacuous
+ * truth - callers should check for empty first if that matters.
+ * Compare to valid_hostname() which explicitly rejects empty strings.
+ * This is historical ircu behavior preserved in nefarious. */
 static void test_valid_username(void **state)
 {
     (void)state;
@@ -329,7 +341,8 @@ static void test_valid_username(void **state)
     assert_true(valid_username("user"));
     assert_true(valid_username("user123"));
     assert_true(valid_username("a"));
-    /* Empty string returns true (vacuously valid) */
+
+    /* Empty string: ircu returns true (vacuously valid - no invalid chars) */
     assert_true(valid_username(""));
 
     /* Invalid usernames */
