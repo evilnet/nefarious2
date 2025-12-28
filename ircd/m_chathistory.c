@@ -714,7 +714,7 @@ int m_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv
 struct FedRequest {
   char reqid[32];                     /**< Request ID */
   char target[CHANNELLEN + 1];        /**< Target channel */
-  struct Client *client;              /**< Client waiting for response */
+  char client_yxx[6];                 /**< Client numeric (YXX) for safe lookup */
   struct HistoryMessage *local_msgs;  /**< Local LMDB results */
   struct HistoryMessage *fed_msgs;    /**< Federated results */
   int local_count;                    /**< Number of local messages */
@@ -887,10 +887,19 @@ static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
 static void complete_fed_request(struct FedRequest *req)
 {
   struct HistoryMessage *merged;
+  struct Client *client;
   int total;
 
-  if (!req || !req->client)
+  if (!req)
     return;
+
+  /* Look up the client by numeric - they may have disconnected */
+  client = findNUser(req->client_yxx);
+  if (!client) {
+    /* Client disconnected, just clean up */
+    free_fed_request(req);
+    return;
+  }
 
   /* Merge local and federated results */
   merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit);
@@ -901,7 +910,7 @@ static void complete_fed_request(struct FedRequest *req)
     total++;
 
   /* Send to client */
-  send_history_batch(req->client, req->target, merged, total);
+  send_history_batch(client, req->target, merged, total);
 
   /* Free merged list */
   history_free_messages(merged);
@@ -986,7 +995,10 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
   ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
   ircd_strncpy(req->target, target, sizeof(req->target) - 1);
-  req->client = sptr;
+  /* Store full client numeric (server + client) for safe lookup later
+   * findNUser expects the full numeric like "BjAAU" not just the client part "AAU" */
+  ircd_snprintf(0, req->client_yxx, sizeof(req->client_yxx), "%s%s",
+                cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
   req->local_msgs = local_msgs;
   req->local_count = local_count;
   req->fed_msgs = NULL;
