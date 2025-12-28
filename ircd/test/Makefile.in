@@ -21,7 +21,8 @@ CMOCKA_TESTPROGS = \
 	numnicks_cmocka \
 	ircd_in_addr_cmocka \
 	ircd_compress_cmocka \
-	ircd_cloaking_cmocka
+	ircd_cloaking_cmocka \
+	dbuf_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -38,6 +39,7 @@ DEP_SRC = \
 	ircd_in_addr_cmocka.c \
 	ircd_compress_cmocka.c \
 	ircd_cloaking_cmocka.c \
+	dbuf_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -107,6 +109,11 @@ ircd_compress_cmocka: $(IRCD_COMPRESS_CMOCKA_OBJS)
 IRCD_CLOAKING_CMOCKA_OBJS = ircd_cloaking_cmocka.o test_stub.o ../ircd_md5.o ../ircd_string.o
 ircd_cloaking_cmocka: $(IRCD_CLOAKING_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(IRCD_CLOAKING_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# dbuf tests - inlines dbuf.c with stubs for feature_int/bool/flush_connections
+DBUF_CMOCKA_OBJS = dbuf_cmocka.o test_stub.o ../ircd_string.o
+dbuf_cmocka: $(DBUF_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(DBUF_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
