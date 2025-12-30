@@ -52,7 +52,7 @@
 #include "res.h"
 #include "s_auth.h"
 #include "dnsbl.h"
-#include "linesync.h"
+#include "gitsync.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -748,8 +748,8 @@ int main(int argc, char **argv) {
 
   dnsbl_init();
 
-#ifdef USE_CURL
-  linesync_init();
+#ifdef USE_LIBGIT2
+  gitsync_init();
 #endif
 
   IPcheck_init();

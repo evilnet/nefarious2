@@ -264,9 +264,9 @@ struct Client;
 #define TOK_REHASH              "RH"
 #define CMD_REHASH		MSG_REHASH, TOK_REHASH
 
-#define MSG_LINESYNC            "LINESYNC"      /* LS */
-#define TOK_LINESYNC            "LS"
-#define CMD_LINESYNC		MSG_LINESYNC, TOK_LINESYNC
+#define MSG_GITSYNC             "GITSYNC"       /* GS */
+#define TOK_GITSYNC             "GS"
+#define CMD_GITSYNC		MSG_GITSYNC, TOK_GITSYNC
 
 #define MSG_RESTART             "RESTART"       /* REST */
 #define TOK_RESTART             "RESTART"

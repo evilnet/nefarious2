@@ -809,14 +809,14 @@ static struct FeatureDesc {
   F_I(DNSBL_CACHETIME, 0, 86400, 0),
   F_S(DNSBL_BLOCKMSG, 0, "Your IP is listed in a DNS blacklist", 0),
 
-#ifdef USE_CURL
-  /* Linesync FEAT_'s */
-  F_B(LINESYNC_ENABLE, 0, 0, 0),
-  F_I(LINESYNC_INTERVAL, 0, 3600, 0),
-  F_S(LINESYNC_URL, 0, "", 0),
-  F_S(LINESYNC_CA_CERT, 0, "", 0),
-  F_S(LINESYNC_CLIENT_CERT, 0, "", 0),
-  F_S(LINESYNC_CLIENT_KEY, 0, "", 0),
+#ifdef USE_LIBGIT2
+  /* GitSync FEAT_'s */
+  F_B(GITSYNC_ENABLE, 0, 0, 0),
+  F_I(GITSYNC_INTERVAL, 0, 300, 0),
+  F_S(GITSYNC_REPOSITORY, 0, "", 0),
+  F_S(GITSYNC_BRANCH, 0, "master", 0),
+  F_S(GITSYNC_SSH_KEY, 0, "", 0),
+  F_S(GITSYNC_LOCAL_PATH, 0, "gitsync", 0),
 #endif
 
 #undef F_S

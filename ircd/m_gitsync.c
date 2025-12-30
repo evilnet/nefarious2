@@ -1,5 +1,5 @@
 /*
- * IRC - Internet Relay Chat, ircd/m_linesync.c
+ * IRC - Internet Relay Chat, ircd/m_gitsync.c
  * Copyright (C) 2025 Nefarious Development
  *
  * This program is free software; you can redistribute it and/or modify
@@ -17,7 +17,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /** @file
- * @brief Handlers for LINESYNC command.
+ * @brief Handlers for GITSYNC command.
  */
 #include "config.h"
 
@@ -36,27 +36,27 @@
 #include "s_user.h"
 #include "send.h"
 
-#ifdef USE_CURL
-#include "linesync.h"
+#ifdef USE_LIBGIT2
+#include "gitsync.h"
 #endif
 
 #include <stdlib.h>
 #include <string.h>
 
-/** Handle LINESYNC command from an operator.
+/** Handle GITSYNC command from an operator.
  * parv[0] = sender prefix
  * parv[1] = action (force|status) or target server
  * parv[2] = action if parv[1] is target
  *
  * Usage:
- *   /LINESYNC force        - Trigger immediate sync on local server
- *   /LINESYNC status       - Show sync status on local server
- *   /LINESYNC server force - Trigger sync on remote server
- *   /LINESYNC * force      - Trigger sync on all servers
+ *   /GITSYNC force        - Trigger immediate sync on local server
+ *   /GITSYNC status       - Show sync status on local server
+ *   /GITSYNC server force - Trigger sync on remote server
+ *   /GITSYNC * force      - Trigger sync on all servers
  */
-int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
-#ifdef USE_CURL
+#ifdef USE_LIBGIT2
   const char *action;
   const char *target = NULL;
   struct Client *acptr;
@@ -64,14 +64,14 @@ int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   int is_status = 0;
 
   /* Check privilege */
-  if (!HasPriv(sptr, PRIV_LINESYNC))
+  if (!HasPriv(sptr, PRIV_GITSYNC))
     return send_reply(sptr, ERR_NOPRIVILEGES);
 
   /* Parse arguments */
   if (parc < 2) {
     /* No args - show usage */
     send_reply(sptr, SND_EXPLICIT | RPL_STATSCONN,
-               ":Usage: /LINESYNC [server] <force|status>");
+               ":Usage: /GITSYNC [server] <force|status>");
     return 0;
   }
 
@@ -91,7 +91,7 @@ int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     }
     if (!is_force && !is_status) {
       send_reply(sptr, SND_EXPLICIT | RPL_STATSCONN,
-                 ":Usage: /LINESYNC [server] <force|status>");
+                 ":Usage: /GITSYNC [server] <force|status>");
       return 0;
     }
   }
@@ -102,7 +102,7 @@ int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   if (target) {
     if (strcmp(target, "*") == 0) {
       /* Broadcast to all servers */
-      sendcmdto_serv_butone(sptr, CMD_LINESYNC, cptr, "* %s", action);
+      sendcmdto_serv_butone(sptr, CMD_GITSYNC, cptr, "* %s", action);
       /* Also do local */
     } else {
       /* Find target server */
@@ -112,7 +112,7 @@ int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       }
       if (!IsMe(acptr)) {
         /* Forward to remote server */
-        sendcmdto_one(sptr, CMD_LINESYNC, acptr, "%C %s", acptr, action);
+        sendcmdto_one(sptr, CMD_GITSYNC, acptr, "%C %s", acptr, action);
         return 0;
       }
       /* Target is us, fall through to local handling */
@@ -121,34 +121,39 @@ int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   /* Handle local action */
   if (is_force) {
-    enum LinesyncStatus status;
+    enum GitsyncStatus status;
 
-    if (!feature_bool(FEAT_LINESYNC_ENABLE)) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Linesync is disabled", sptr);
+    if (!feature_bool(FEAT_GITSYNC_ENABLE)) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync is disabled", sptr);
       return 0;
     }
 
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Triggering linesync...", sptr);
-    status = linesync_trigger(sptr, 1);
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Triggering GitSync...", sptr);
+    status = gitsync_trigger(sptr, 1);
 
-    if (status == LINESYNC_OK) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Linesync completed successfully", sptr);
+    if (status == GITSYNC_OK) {
+      const struct GitsyncStats *stats = gitsync_get_stats();
+      sendcmdto_one(&me, CMD_NOTICE, sptr,
+                    "%C :GitSync completed successfully (commit %.8s)",
+                    sptr, stats->last_commit);
     } else {
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Linesync failed: %s",
-                    sptr, linesync_status_str(status));
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync failed: %s",
+                    sptr, gitsync_status_str(status));
     }
   } else if (is_status) {
-    const struct LinesyncStats *stats = linesync_get_stats();
+    const struct GitsyncStats *stats = gitsync_get_stats();
     char timebuf[64];
 
-    if (feature_bool(FEAT_LINESYNC_ENABLE)) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Linesync Status: Enabled", sptr);
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  URL: %s",
-                    sptr, feature_str(FEAT_LINESYNC_URL));
+    if (feature_bool(FEAT_GITSYNC_ENABLE)) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync Status: Enabled", sptr);
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Repository: %s",
+                    sptr, feature_str(FEAT_GITSYNC_REPOSITORY));
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Branch: %s",
+                    sptr, feature_str(FEAT_GITSYNC_BRANCH));
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Interval: %d seconds",
-                    sptr, feature_int(FEAT_LINESYNC_INTERVAL));
+                    sptr, feature_int(FEAT_GITSYNC_INTERVAL));
     } else {
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Linesync Status: Disabled", sptr);
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync Status: Disabled", sptr);
     }
 
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Successful syncs: %lu",
@@ -164,8 +169,13 @@ int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Last sync: Never", sptr);
     }
 
+    if (stats->last_commit[0]) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Last commit: %.8s",
+                    sptr, stats->last_commit);
+    }
+
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Last status: %s",
-                  sptr, linesync_status_str(stats->last_status));
+                  sptr, gitsync_status_str(stats->last_status));
 
     if (stats->last_error[0]) {
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Last error: %s",
@@ -175,18 +185,18 @@ int mo_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   return 0;
 #else
-  return send_reply(sptr, ERR_DISABLED, "LINESYNC");
+  return send_reply(sptr, ERR_DISABLED, "GITSYNC");
 #endif
 }
 
-/** Handle LINESYNC command from a server.
+/** Handle GITSYNC command from a server.
  * parv[0] = sender prefix (oper numnick)
  * parv[1] = target server or "*"
  * parv[2] = action (force|status)
  */
-int ms_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
-#ifdef USE_CURL
+#ifdef USE_LIBGIT2
   const char *target;
   const char *action;
   struct Client *acptr;
@@ -200,7 +210,7 @@ int ms_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   /* Check if this is for us */
   if (strcmp(target, "*") == 0) {
     /* Broadcast - forward to other servers and handle locally */
-    sendcmdto_serv_butone(sptr, CMD_LINESYNC, cptr, "* %s", action);
+    sendcmdto_serv_butone(sptr, CMD_GITSYNC, cptr, "* %s", action);
   } else {
     acptr = FindNServer(target);
     if (!acptr)
@@ -209,7 +219,7 @@ int ms_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     if (!acptr || !IsMe(acptr)) {
       /* Not for us, forward */
       if (acptr)
-        sendcmdto_one(sptr, CMD_LINESYNC, acptr, "%C %s", acptr, action);
+        sendcmdto_one(sptr, CMD_GITSYNC, acptr, "%C %s", acptr, action);
       return 0;
     }
     /* Fall through to handle locally */
@@ -217,39 +227,42 @@ int ms_linesync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   /* Handle local action */
   if (ircd_strcmp(action, "force") == 0) {
-    if (!feature_bool(FEAT_LINESYNC_ENABLE)) {
+    if (!feature_bool(FEAT_GITSYNC_ENABLE)) {
       if (IsOper(sptr))
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Linesync is disabled on %s",
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync is disabled on %s",
                       sptr, cli_name(&me));
       return 0;
     }
 
-    linesync_trigger(sptr, 1);
+    gitsync_trigger(sptr, 1);
 
     if (IsOper(sptr)) {
-      const struct LinesyncStats *stats = linesync_get_stats();
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Linesync on %s: %s",
-                    sptr, cli_name(&me), linesync_status_str(stats->last_status));
+      const struct GitsyncStats *stats = gitsync_get_stats();
+      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync on %s: %s (commit %.8s)",
+                    sptr, cli_name(&me), gitsync_status_str(stats->last_status),
+                    stats->last_commit);
     }
   } else if (ircd_strcmp(action, "status") == 0) {
     if (IsOper(sptr)) {
-      const struct LinesyncStats *stats = linesync_get_stats();
+      const struct GitsyncStats *stats = gitsync_get_stats();
       char timebuf[64];
 
-      if (feature_bool(FEAT_LINESYNC_ENABLE)) {
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s Linesync: Enabled, %lu syncs, %lu failures",
+      if (feature_bool(FEAT_GITSYNC_ENABLE)) {
+        sendcmdto_one(&me, CMD_NOTICE, sptr,
+                      "%C :%s GitSync: Enabled, %lu syncs, %lu failures",
                       sptr, cli_name(&me), stats->syncs, stats->failures);
       } else {
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s Linesync: Disabled",
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s GitSync: Disabled",
                       sptr, cli_name(&me));
       }
 
       if (stats->last_sync > 0) {
         struct tm *tm = localtime(&stats->last_sync);
         strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", tm);
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s Last sync: %s (%s)",
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s Last sync: %s (%s, %.8s)",
                       sptr, cli_name(&me), timebuf,
-                      linesync_status_str(stats->last_status));
+                      gitsync_status_str(stats->last_status),
+                      stats->last_commit);
       }
     }
   }

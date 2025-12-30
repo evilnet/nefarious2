@@ -87,6 +87,7 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	umkpasswd.c
 
 IRCD_SRC = \
+	account_conn.c \
 	IPcheck.c \
 	channel.c \
 	class.c \
@@ -98,9 +99,11 @@ IRCD_SRC = \
 	fileio.c \
 	gline.c \
 	hash.c \
+	history.c \
 	ircd.c \
 	ircd_alloc.c \
 	ircd_cloaking.c \
+	ircd_compress.c \
 	ircd_crypt.c \
 	ircd_events.c \
 	ircd_features.c \
@@ -117,14 +120,16 @@ IRCD_SRC = \
 	lex.yy.c \
 	list.c \
 	listener.c \
-	linesync.c \
+	gitsync.c \
 	m_account.c \
 	m_admin.c \
 	m_asll.c \
 	m_authenticate.c \
 	m_away.c \
+	m_batch.c \
 	m_burst.c \
 	m_cap.c \
+	m_chathistory.c \
 	m_check.c \
 	m_clearmode.c \
 	m_close.c \
@@ -143,6 +148,7 @@ IRCD_SRC = \
 	m_gline.c \
 	m_help.c \
 	m_info.c \
+	m_isupport.c \
 	m_invite.c \
 	m_ircops.c \
 	m_isnef.c \
@@ -175,7 +181,14 @@ IRCD_SRC = \
 	m_protoctl.c \
 	m_pseudo.c \
 	m_quit.c \
-	m_linesync.c \
+	m_redact.c \
+	m_register.c \
+	m_markread.c \
+	m_metadata.c \
+	m_rename.c \
+	m_webpush.c \
+	metadata.c \
+	m_gitsync.c \
 	m_rehash.c \
 	m_remove.c \
 	m_reset.c \
@@ -187,7 +200,9 @@ IRCD_SRC = \
 	m_server.c \
 	m_set.c \
 	m_sethost.c \
+	m_setname.c \
 	m_settime.c \
+	m_tagmsg.c \
 	m_shun.c \
 	m_silence.c \
 	m_smo.c \
@@ -250,6 +265,7 @@ IRCD_SRC = \
 	send.c \
 	shun.c \
 	ssl.c \
+	websocket.c \
 	uping.c \
 	userload.c \
 	watch.c \
@@ -466,6 +482,9 @@ hash.o: hash.c ../config.h ../include/hash.h ../include/client.h \
   ../include/ircd_string.h ../include/ircd.h ../include/match.h \
   ../include/msg.h ../include/numeric.h ../include/random.h \
   ../include/send.h ../include/struct.h ../include/sys.h ../include/watch.h
+history.o: history.c ../config.h ../include/history.h ../include/ircd_alloc.h \
+  ../include/ircd_log.h ../include/ircd_snprintf.h ../include/ircd_string.h \
+  ../include/s_debug.h
 ircd.o: ircd.c ../config.h ../include/ircd.h ../include/IPcheck.h \
   ../include/class.h ../include/client.h ../include/crule.h \
   ../include/destruct_event.h ../include/hash.h ../include/ircd_alloc.h \
@@ -604,6 +623,13 @@ m_away.o: m_away.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_alloc.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/s_user.h ../include/send.h
+m_batch.o: m_batch.c ../config.h ../include/capab.h ../include/channel.h \
+  ../include/client.h ../include/hash.h ../include/ircd.h \
+  ../include/ircd_alloc.h ../include/ircd_features.h ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/ircd_snprintf.h ../include/ircd_string.h \
+  ../include/list.h ../include/msg.h ../include/numeric.h \
+  ../include/numnicks.h ../include/send.h ../include/s_misc.h \
+  ../include/s_user.h
 m_burst.o: m_burst.c ../config.h ../include/channel.h ../include/client.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
@@ -616,6 +642,12 @@ m_cap.o: m_cap.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_snprintf.h ../include/ircd_string.h ../include/msg.h \
   ../include/numeric.h ../include/send.h ../include/s_auth.h \
   ../include/s_user.h ../include/ircd_features.h
+m_chathistory.o: m_chathistory.c ../config.h ../include/capab.h \
+  ../include/channel.h ../include/client.h ../include/hash.h \
+  ../include/history.h ../include/ircd.h ../include/ircd_alloc.h \
+  ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
+  ../include/ircd_snprintf.h ../include/ircd_string.h ../include/msg.h \
+  ../include/numeric.h ../include/numnicks.h ../include/send.h
 m_check.o: m_check.c ../include/channel.h \
   ../include/class.h ../include/client.h ../include/destruct_event.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
@@ -723,6 +755,9 @@ m_ison.o: m_ison.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msgq.h ../include/numeric.h \
   ../include/send.h
+m_isupport.o: m_isupport.c ../config.h ../include/capab.h \
+  ../include/client.h ../include/ircd_reply.h ../include/numeric.h \
+  ../include/s_user.h
 m_join.o: m_join.c ../config.h ../include/channel.h ../include/class.h \
   ../include/client.h ../include/gline.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_chattr.h ../include/ircd_features.h \
@@ -930,6 +965,10 @@ m_sethost.o: m_sethost.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd_reply.h ../include/ircd_snprintf.h \
   ../include/ircd_string.h ../include/numeric.h ../include/numnicks.h \
   ../include/s_conf.h ../include/s_user.h ../include/send.h
+m_setname.o: m_setname.c ../config.h ../include/capab.h ../include/client.h \
+  ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/ircd_string.h ../include/msg.h \
+  ../include/numeric.h ../include/numnicks.h ../include/send.h
 m_settime.o: m_settime.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_snprintf.h \
@@ -1021,6 +1060,11 @@ m_tempshun.o: m_tempshun.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h  ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/send.h
+m_tagmsg.o: m_tagmsg.c ../config.h ../include/capab.h ../include/channel.h \
+  ../include/client.h ../include/hash.h ../include/ircd.h \
+  ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
+  ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
+  ../include/numnicks.h ../include/send.h ../include/s_user.h
 m_time.o: m_time.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
@@ -1308,6 +1352,11 @@ ssl.o: ssl.c ../config.h ../include/client.h ../include/ircd_alloc.h \
   ../include/ircd_snprintf.h ../include/ircd_string.h ../include/listener.h \
   ../include/s_bsd.h ../include/s_debug.h ../include/send.h \
   ../include/ssl.h
+websocket.o: websocket.c ../config.h ../include/websocket.h \
+  ../include/client.h ../include/ircd.h ../include/ircd_alloc.h \
+  ../include/ircd_log.h ../include/ircd_osdep.h ../include/ircd_snprintf.h \
+  ../include/ircd_string.h ../include/listener.h ../include/s_bsd.h \
+  ../include/s_debug.h ../include/send.h
 table_gen.o: table_gen.c ../config.h ../include/ircd_chattr.h
 umkpasswd.o: umkpasswd.c ../config.h ../include/ircd_alloc.h \
   ../include/ircd_log.h ../include/ircd_string.h ../include/umkpasswd.h \

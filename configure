@@ -761,7 +761,9 @@ enable_zstd
 with_zstd
 with_zstd_includes
 with_zstd_libs
-with_curl
+with_libgit2
+with_libgit2_includes
+with_libgit2_libs
 with_maxcon
 '
       ac_precious_vars='build_alias
@@ -1458,7 +1460,10 @@ Optional Packages:
                           Specify location of zstd header files (default:
                           /usr/include)
   --with-zstd-libs=dir    Specify location of zstd libs (default: /usr/lib)
-  --with-curl             Enable libcurl for linesync feature
+  --with-libgit2          Enable libgit2 for gitsync feature
+  --with-libgit2-includes=dir
+                          Specify location of libgit2 header files
+  --with-libgit2-libs=dir Specify location of libgit2 libs
   --with-maxcon=maxcon    Maximum number of connections server will accept
 
 Some influential environment variables:
@@ -9148,41 +9153,55 @@ printf "%s\n" "$as_me: WARNING: Unable to find zstd, compression features will n
   fi
 fi
 
-enable_curl="no"
+enable_libgit2="no"
 
-# Check whether --with-curl was given.
-if test ${with_curl+y}
+# Check whether --with-libgit2 was given.
+if test ${with_libgit2+y}
 then :
-  withval=$with_curl; with_curl=$withval
+  withval=$with_libgit2; with_libgit2=$withval
 else case e in #(
-  e) with_curl=check ;;
+  e) with_libgit2=check ;;
 esac
 fi
 
 
-if test "x$with_curl" != xno; then
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curl-config" >&5
-printf %s "checking for curl-config... " >&6; }
-  CURL_CONFIG=`which curl-config 2>/dev/null`
-  if test -n "$CURL_CONFIG" && test -x "$CURL_CONFIG"; then
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $CURL_CONFIG" >&5
-printf "%s\n" "$CURL_CONFIG" >&6; }
-    CURL_CFLAGS=`$CURL_CONFIG --cflags`
-    CURL_LIBS=`$CURL_CONFIG --libs`
+if test "x$with_libgit2" != xno; then
 
-    save_CFLAGS=$CFLAGS
-    save_LIBS=$LIBS
-    CFLAGS="$CFLAGS $CURL_CFLAGS"
-    LIBS="$LIBS $CURL_LIBS"
+# Check whether --with-libgit2-includes was given.
+if test ${with_libgit2_includes+y}
+then :
+  withval=$with_libgit2_includes; unet_cv_with_libgit2_inc_prefix=$withval
+else case e in #(
+  e) unet_cv_with_libgit2_inc_prefix=/usr/include ;;
+esac
+fi
 
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curl_easy_init in -lcurl" >&5
-printf %s "checking for curl_easy_init in -lcurl... " >&6; }
-if test ${ac_cv_lib_curl_curl_easy_init+y}
+
+
+# Check whether --with-libgit2-libs was given.
+if test ${with_libgit2_libs+y}
+then :
+  withval=$with_libgit2_libs; unet_cv_with_libgit2_prefix=$withval
+else case e in #(
+  e) unet_cv_with_libgit2_prefix=/usr/lib ;;
+esac
+fi
+
+
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_libgit2_inc_prefix"
+  LIBS="-L$unet_cv_with_libgit2_prefix -lgit2"
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for git_libgit2_init in -lgit2" >&5
+printf %s "checking for git_libgit2_init in -lgit2... " >&6; }
+if test ${ac_cv_lib_git2_git_libgit2_init+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
   e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-lcurl  $LIBS"
+LIBS="-lgit2  $LIBS"
 cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -9195,20 +9214,20 @@ cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 #ifdef __cplusplus
 extern "C"
 #endif
-char curl_easy_init (void);
+char git_libgit2_init (void);
 int
 main (void)
 {
-return curl_easy_init ();
+return git_libgit2_init ();
   ;
   return 0;
 }
 _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
-  ac_cv_lib_curl_curl_easy_init=yes
+  ac_cv_lib_git2_git_libgit2_init=yes
 else case e in #(
-  e) ac_cv_lib_curl_curl_easy_init=no ;;
+  e) ac_cv_lib_git2_git_libgit2_init=no ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
@@ -9216,19 +9235,20 @@ rm -f core conftest.err conftest.$ac_objext conftest.beam \
 LIBS=$ac_check_lib_save_LIBS ;;
 esac
 fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curl_curl_easy_init" >&5
-printf "%s\n" "$ac_cv_lib_curl_curl_easy_init" >&6; }
-if test "x$ac_cv_lib_curl_curl_easy_init" = xyes
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_git2_git_libgit2_init" >&5
+printf "%s\n" "$ac_cv_lib_git2_git_libgit2_init" >&6; }
+if test "x$ac_cv_lib_git2_git_libgit2_init" = xyes
 then :
 
-             for ac_header in curl/curl.h
+           for ac_header in git2.h
 do :
-  ac_fn_c_check_header_compile "$LINENO" "curl/curl.h" "ac_cv_header_curl_curl_h" "$ac_includes_default"
-if test "x$ac_cv_header_curl_curl_h" = xyes
+  ac_fn_c_check_header_compile "$LINENO" "git2.h" "ac_cv_header_git2_h" "$ac_includes_default"
+if test "x$ac_cv_header_git2_h" = xyes
 then :
-  printf "%s\n" "#define HAVE_CURL_CURL_H 1" >>confdefs.h
+  printf "%s\n" "#define HAVE_GIT2_H 1" >>confdefs.h
 
-        enable_curl="yes"
+      enable_libgit2="yes"
+      LIBGIT2_LDFLAGS="-lgit2"
 
 fi
 
@@ -9237,92 +9257,21 @@ done
 fi
 
 
-    CFLAGS=$save_CFLAGS
-    LIBS=$save_LIBS
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
 
-    if test "x$enable_curl" = xyes; then
+  if test "x$enable_libgit2" = xyes; then
 
-printf "%s\n" "#define USE_CURL /**/" >>confdefs.h
+printf "%s\n" "#define USE_LIBGIT2 /**/" >>confdefs.h
 
-      LIBS="$LIBS $CURL_LIBS"
-      CFLAGS="$CFLAGS $CURL_CFLAGS"
-    fi
+    LIBS="$LIBS -L$unet_cv_with_libgit2_prefix $LIBGIT2_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_libgit2_inc_prefix"
   else
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: not found" >&5
-printf "%s\n" "not found" >&6; }
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curl_easy_init in -lcurl" >&5
-printf %s "checking for curl_easy_init in -lcurl... " >&6; }
-if test ${ac_cv_lib_curl_curl_easy_init+y}
-then :
-  printf %s "(cached) " >&6
-else case e in #(
-  e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-lcurl  $LIBS"
-cat confdefs.h - <<_ACEOF >conftest.$ac_ext
-/* end confdefs.h.  */
-
-/* Override any GCC internal prototype to avoid an error.
-   Use char because int might match the return type of a GCC
-   builtin and then its argument prototype would still apply.
-   The 'extern "C"' is for builds by C++ compilers;
-   although this is not generally supported in C code supporting it here
-   has little cost and some practical benefit (sr 110532).  */
-#ifdef __cplusplus
-extern "C"
-#endif
-char curl_easy_init (void);
-int
-main (void)
-{
-return curl_easy_init ();
-  ;
-  return 0;
-}
-_ACEOF
-if ac_fn_c_try_link "$LINENO"
-then :
-  ac_cv_lib_curl_curl_easy_init=yes
-else case e in #(
-  e) ac_cv_lib_curl_curl_easy_init=no ;;
-esac
-fi
-rm -f core conftest.err conftest.$ac_objext conftest.beam \
-    conftest$ac_exeext conftest.$ac_ext
-LIBS=$ac_check_lib_save_LIBS ;;
-esac
-fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curl_curl_easy_init" >&5
-printf "%s\n" "$ac_cv_lib_curl_curl_easy_init" >&6; }
-if test "x$ac_cv_lib_curl_curl_easy_init" = xyes
-then :
-
-             for ac_header in curl/curl.h
-do :
-  ac_fn_c_check_header_compile "$LINENO" "curl/curl.h" "ac_cv_header_curl_curl_h" "$ac_includes_default"
-if test "x$ac_cv_header_curl_curl_h" = xyes
-then :
-  printf "%s\n" "#define HAVE_CURL_CURL_H 1" >>confdefs.h
-
-        enable_curl="yes"
-
-printf "%s\n" "#define USE_CURL /**/" >>confdefs.h
-
-        LIBS="$LIBS -lcurl"
-
-fi
-
-done
-
-fi
-
-
-    if test "x$enable_curl" != xyes; then
-      if test "x$with_curl" = xyes; then
-        as_fn_error $? "libcurl requested but not found" "$LINENO" 5
-      else
-        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: libcurl not found, linesync feature will not be available" >&5
-printf "%s\n" "$as_me: WARNING: libcurl not found, linesync feature will not be available" >&2;}
-      fi
+    if test "x$with_libgit2" = xyes; then
+      as_fn_error $? "libgit2 requested but not found" "$LINENO" 5
+    else
+      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: libgit2 not found, gitsync feature will not be available" >&5
+printf "%s\n" "$as_me: WARNING: libgit2 not found, gitsync feature will not be available" >&2;}
     fi
   fi
 fi

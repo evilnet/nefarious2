@@ -1005,58 +1005,49 @@ if test x"$unet_cv_enable_zstd" = xyes; then
   fi
 fi
 
-dnl Check for libcurl (for linesync feature)
-enable_curl="no"
-AC_ARG_WITH([curl],
-AS_HELP_STRING([--with-curl], [Enable libcurl for linesync feature]),
-[with_curl=$withval],
-[with_curl=check])
+dnl Check for libgit2 (for gitsync feature)
+enable_libgit2="no"
+AC_ARG_WITH([libgit2],
+AS_HELP_STRING([--with-libgit2], [Enable libgit2 for gitsync feature]),
+[with_libgit2=$withval],
+[with_libgit2=check])
 
-if test "x$with_curl" != xno; then
-  dnl Try curl-config first
-  AC_MSG_CHECKING([for curl-config])
-  CURL_CONFIG=`which curl-config 2>/dev/null`
-  if test -n "$CURL_CONFIG" && test -x "$CURL_CONFIG"; then
-    AC_MSG_RESULT([$CURL_CONFIG])
-    CURL_CFLAGS=`$CURL_CONFIG --cflags`
-    CURL_LIBS=`$CURL_CONFIG --libs`
+if test "x$with_libgit2" != xno; then
+  AC_ARG_WITH([libgit2-includes],
+  AS_HELP_STRING([--with-libgit2-includes=dir], [Specify location of libgit2 header files]),
+  [unet_cv_with_libgit2_inc_prefix=$withval],
+  [unet_cv_with_libgit2_inc_prefix=/usr/include])
 
-    save_CFLAGS=$CFLAGS
-    save_LIBS=$LIBS
-    CFLAGS="$CFLAGS $CURL_CFLAGS"
-    LIBS="$LIBS $CURL_LIBS"
+  AC_ARG_WITH([libgit2-libs],
+  AS_HELP_STRING([--with-libgit2-libs=dir], [Specify location of libgit2 libs]),
+  [unet_cv_with_libgit2_prefix=$withval],
+  [unet_cv_with_libgit2_prefix=/usr/lib])
 
-    AC_CHECK_LIB(curl, curl_easy_init, [
-      AC_CHECK_HEADERS(curl/curl.h, [
-        enable_curl="yes"
-      ])
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_libgit2_inc_prefix"
+  LIBS="-L$unet_cv_with_libgit2_prefix -lgit2"
+
+  AC_CHECK_LIB(git2, git_libgit2_init, [
+    AC_CHECK_HEADERS(git2.h, [
+      enable_libgit2="yes"
+      LIBGIT2_LDFLAGS="-lgit2"
     ])
+  ])
 
-    CFLAGS=$save_CFLAGS
-    LIBS=$save_LIBS
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
 
-    if test "x$enable_curl" = xyes; then
-      AC_DEFINE([USE_CURL], , [Define if you are using libcurl for linesync])
-      LIBS="$LIBS $CURL_LIBS"
-      CFLAGS="$CFLAGS $CURL_CFLAGS"
-    fi
+  if test "x$enable_libgit2" = xyes; then
+    AC_DEFINE([USE_LIBGIT2], , [Define if you are using libgit2 for gitsync])
+    LIBS="$LIBS -L$unet_cv_with_libgit2_prefix $LIBGIT2_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_libgit2_inc_prefix"
   else
-    AC_MSG_RESULT([not found])
-    dnl Fallback to direct library check
-    AC_CHECK_LIB(curl, curl_easy_init, [
-      AC_CHECK_HEADERS(curl/curl.h, [
-        enable_curl="yes"
-        AC_DEFINE([USE_CURL], , [Define if you are using libcurl for linesync])
-        LIBS="$LIBS -lcurl"
-      ])
-    ])
-
-    if test "x$enable_curl" != xyes; then
-      if test "x$with_curl" = xyes; then
-        AC_MSG_ERROR([libcurl requested but not found])
-      else
-        AC_MSG_WARN([libcurl not found, linesync feature will not be available])
-      fi
+    if test "x$with_libgit2" = xyes; then
+      AC_MSG_ERROR([libgit2 requested but not found])
+    else
+      AC_MSG_WARN([libgit2 not found, gitsync feature will not be available])
     fi
   fi
 fi
@@ -1115,5 +1106,5 @@ ircu is now hopefully configured for your system.
   /dev/poll engine:    $unet_cv_enable_devpoll
   epoll() engine:      $unet_cv_enable_epoll
 
-  libcurl (linesync):  $enable_curl
+  libgit2 (gitsync):   $enable_libgit2
 "])
