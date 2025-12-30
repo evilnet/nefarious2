@@ -134,7 +134,9 @@ static void send_history_batch(struct Client *sptr, const char *target,
 {
   struct HistoryMessage *msg;
   char batchid[BATCH_ID_LEN];
+  char iso_time[32];
   const char *cmd;
+  const char *time_str;
 
   if (count == 0)
     messages = NULL;
@@ -156,26 +158,32 @@ static void send_history_batch(struct Client *sptr, const char *target,
 
     cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
+    /* Convert Unix timestamp to ISO 8601 for @time= tag (IRCv3 requires ISO) */
+    if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) == 0)
+      time_str = iso_time;
+    else
+      time_str = msg->timestamp;  /* Fallback if conversion fails */
+
     if (CapActive(sptr, CAP_BATCH)) {
       /* With batch */
       if (msg->account[0]) {
         sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
-                      batchid, msg->timestamp, msg->msgid, msg->account,
+                      batchid, time_str, msg->msgid, msg->account,
                       msg->sender, cmd, target, msg->content);
       } else {
         sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s :%s",
-                      batchid, msg->timestamp, msg->msgid,
+                      batchid, time_str, msg->msgid,
                       msg->sender, cmd, target, msg->content);
       }
     } else {
       /* Without batch (shouldn't happen if client has chathistory, but fallback) */
       if (msg->account[0]) {
         sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s :%s",
-                      msg->timestamp, msg->msgid, msg->account,
+                      time_str, msg->msgid, msg->account,
                       msg->sender, cmd, target, msg->content);
       } else {
         sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s :%s",
-                      msg->timestamp, msg->msgid,
+                      time_str, msg->msgid,
                       msg->sender, cmd, target, msg->content);
       }
     }
@@ -537,6 +545,8 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   enum HistoryRefType ref_type1, ref_type2;
   const char *ts1, *ts2;
   char batchid[BATCH_ID_LEN];
+  char iso_time[32];
+  const char *time_str;
   int limit, count, max_limit;
 
   /* TARGETS uses timestamp references only */
@@ -579,14 +589,20 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   for (tgt = targets; tgt; tgt = tgt->next) {
     /* Check access for each target before including */
     if (check_history_access(sptr, tgt->target) == 0) {
+      /* Convert Unix timestamp to ISO 8601 for client display */
+      if (history_unix_to_iso(tgt->last_timestamp, iso_time, sizeof(iso_time)) == 0)
+        time_str = iso_time;
+      else
+        time_str = tgt->last_timestamp;  /* Fallback if conversion fails */
+
       if (CapActive(sptr, CAP_BATCH)) {
-        sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s %s",
+        sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
                       batchid, cli_name(&me), "chathistory", cli_name(&me),
-                      tgt->target, tgt->last_timestamp);
+                      tgt->target, time_str);
       } else {
-        sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s %s",
+        sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
                       cli_name(&me), "chathistory", cli_name(&me),
-                      tgt->target, tgt->last_timestamp);
+                      tgt->target, time_str);
       }
     }
   }

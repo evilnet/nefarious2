@@ -738,11 +738,16 @@ int history_query_before(const char *target, enum HistoryRefType ref_type,
 
   *result = NULL;
 
-  /* Convert msgid to timestamp if needed */
+  /* Convert reference to Unix timestamp format */
   if (ref_type == HISTORY_REF_MSGID) {
     if (history_msgid_to_timestamp(reference, timestamp) != 0)
       return 0; /* msgid not found, return empty */
     reference = timestamp;
+  } else if (ref_type == HISTORY_REF_TIMESTAMP) {
+    /* Client sends ISO 8601, convert to Unix for lookup */
+    if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
+      reference = timestamp;
+    /* If conversion fails, assume it's already Unix format */
   }
 
   /* Build starting key */
@@ -764,11 +769,16 @@ int history_query_after(const char *target, enum HistoryRefType ref_type,
 
   *result = NULL;
 
-  /* Convert msgid to timestamp if needed */
+  /* Convert reference to Unix timestamp format */
   if (ref_type == HISTORY_REF_MSGID) {
     if (history_msgid_to_timestamp(reference, timestamp) != 0)
       return 0;
     reference = timestamp;
+  } else if (ref_type == HISTORY_REF_TIMESTAMP) {
+    /* Client sends ISO 8601, convert to Unix for lookup */
+    if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
+      reference = timestamp;
+    /* If conversion fails, assume it's already Unix format */
   }
 
   keylen = build_key(keybuf, sizeof(keybuf), target, reference, NULL);
@@ -791,13 +801,19 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
 
   if (ref_type == HISTORY_REF_NONE) {
     /* LATEST * - start from end of target's range */
-    /* Use a timestamp far in the future */
-    keylen = build_key(keybuf, sizeof(keybuf), target, "9999-12-31T23:59:59.999Z", NULL);
+    /* Use a Unix timestamp far in the future (year 2999) */
+    keylen = build_key(keybuf, sizeof(keybuf), target, "32503680000.000", NULL);
   } else {
+    /* Convert reference to Unix timestamp format */
     if (ref_type == HISTORY_REF_MSGID) {
       if (history_msgid_to_timestamp(reference, timestamp) != 0)
         return 0;
       reference = timestamp;
+    } else if (ref_type == HISTORY_REF_TIMESTAMP) {
+      /* Client sends ISO 8601, convert to Unix for lookup */
+      if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
+        reference = timestamp;
+      /* If conversion fails, assume it's already Unix format */
     }
     keylen = build_key(keybuf, sizeof(keybuf), target, reference, NULL);
   }
@@ -871,11 +887,17 @@ int history_query_between(const char *target,
   if (!history_available)
     return -1;
 
-  /* Convert msgids to timestamps */
+  /* Convert references to Unix timestamps */
   if (ref_type1 == HISTORY_REF_MSGID) {
     if (history_msgid_to_timestamp(reference1, timestamp1) != 0)
       return 0;
     ref1 = timestamp1;
+  } else if (ref_type1 == HISTORY_REF_TIMESTAMP) {
+    /* Client sends ISO 8601, convert to Unix for lookup */
+    if (history_iso_to_unix(reference1, timestamp1, sizeof(timestamp1)) == 0)
+      ref1 = timestamp1;
+    else
+      ref1 = reference1;  /* Assume already Unix format */
   } else {
     ref1 = reference1;
   }
@@ -884,6 +906,12 @@ int history_query_between(const char *target,
     if (history_msgid_to_timestamp(reference2, timestamp2) != 0)
       return 0;
     ref2 = timestamp2;
+  } else if (ref_type2 == HISTORY_REF_TIMESTAMP) {
+    /* Client sends ISO 8601, convert to Unix for lookup */
+    if (history_iso_to_unix(reference2, timestamp2, sizeof(timestamp2)) == 0)
+      ref2 = timestamp2;
+    else
+      ref2 = reference2;  /* Assume already Unix format */
   } else {
     ref2 = reference2;
   }
@@ -964,6 +992,8 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
   MDB_cursor *cursor;
   MDB_val key, data;
   struct HistoryTarget *head = NULL, *tail = NULL, *tgt;
+  char unix_ts1[HISTORY_TIMESTAMP_LEN];
+  char unix_ts2[HISTORY_TIMESTAMP_LEN];
   const char *ts1, *ts2;
   int count = 0;
   int rc;
@@ -973,13 +1003,22 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
   if (!history_available)
     return -1;
 
+  /* Convert client ISO timestamps to Unix for comparison */
+  if (history_iso_to_unix(timestamp1, unix_ts1, sizeof(unix_ts1)) == 0)
+    ts1 = unix_ts1;
+  else
+    ts1 = timestamp1;  /* Assume already Unix format */
+
+  if (history_iso_to_unix(timestamp2, unix_ts2, sizeof(unix_ts2)) == 0)
+    ts2 = unix_ts2;
+  else
+    ts2 = timestamp2;  /* Assume already Unix format */
+
   /* Ensure ts1 < ts2 */
-  if (strcmp(timestamp1, timestamp2) > 0) {
-    ts1 = timestamp2;
-    ts2 = timestamp1;
-  } else {
-    ts1 = timestamp1;
-    ts2 = timestamp2;
+  if (strcmp(ts1, ts2) > 0) {
+    const char *tmp = ts1;
+    ts1 = ts2;
+    ts2 = tmp;
   }
 
   rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
