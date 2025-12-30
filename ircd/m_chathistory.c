@@ -126,7 +126,8 @@ static const char *s2s_to_subcmd(char c)
 
 /** Convert client reference to efficient S2S format.
  * Input:  "timestamp=1234.567" or "msgid=abc" or "*"
- * Output: "T1234.567" or "Mabc" or "*"
+ * Output: "1234.567" or "AB-1234-5" or "*"
+ * No prefix needed - timestamps start with digit, msgids don't.
  * @param[in] ref Client reference string.
  * @param[out] buf Buffer for S2S format.
  * @param[in] buflen Buffer size.
@@ -144,12 +145,14 @@ static char *ref_to_s2s(const char *ref, char *buf, size_t buflen)
   }
 
   if (strncmp(ref, "timestamp=", 10) == 0) {
-    ircd_snprintf(0, buf, buflen, "T%s", ref + 10);
+    ircd_strncpy(buf, ref + 10, buflen - 1);
+    buf[buflen - 1] = '\0';
     return buf;
   }
 
   if (strncmp(ref, "msgid=", 6) == 0) {
-    ircd_snprintf(0, buf, buflen, "M%s", ref + 6);
+    ircd_strncpy(buf, ref + 6, buflen - 1);
+    buf[buflen - 1] = '\0';
     return buf;
   }
 
@@ -157,10 +160,11 @@ static char *ref_to_s2s(const char *ref, char *buf, size_t buflen)
 }
 
 /** Parse S2S reference format.
- * Input:  "T1234.567" or "Mabc" or "*"
+ * Input:  "1234.567" (timestamp) or "AB-1234-5" (msgid) or "*" (none)
+ * Timestamps always start with a digit, msgids never do (they start with server numeric).
  * @param[in] ref S2S reference string.
  * @param[out] ref_type Type of reference.
- * @param[out] value Pointer to value (after prefix char).
+ * @param[out] value Pointer to value.
  * @return 0 on success, -1 on error.
  */
 static int parse_s2s_reference(const char *ref, enum HistoryRefType *ref_type, const char **value)
@@ -174,19 +178,17 @@ static int parse_s2s_reference(const char *ref, enum HistoryRefType *ref_type, c
     return 0;
   }
 
-  if (*ref == 'T') {
+  /* Timestamps start with a digit, msgids start with server numeric (letter) */
+  if (IsDigit(*ref)) {
     *ref_type = HISTORY_REF_TIMESTAMP;
-    *value = ref + 1;
+    *value = ref;
     return 0;
   }
 
-  if (*ref == 'M') {
-    *ref_type = HISTORY_REF_MSGID;
-    *value = ref + 1;
-    return 0;
-  }
-
-  return -1;
+  /* Anything else is a msgid */
+  *ref_type = HISTORY_REF_MSGID;
+  *value = ref;
+  return 0;
 }
 
 /** Generate a unique batch ID for chathistory response.
