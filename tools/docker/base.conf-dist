@@ -7,6 +7,17 @@ General {
 Features {
      "LOG" = "SYSTEM" "FILE" "ircd.log";
      "LOG" = "SYSTEM" "LEVEL" "CRIT";
+
+     # Enable draft IRCv3 capabilities
+     "CAP_draft_chathistory" = "TRUE";
+     "CAP_draft_metadata_2" = "TRUE";
+
+     # PM Chathistory consent settings
+     "CHATHISTORY_PRIVATE" = "TRUE";
+     # Consent mode: 0=global (opt-out), 1=single-party (either opts in), 2=multi-party (both must opt in)
+     "CHATHISTORY_PRIVATE_CONSENT" = "2";
+     # Send policy notice on connect
+     "CHATHISTORY_PM_NOTICE" = "TRUE";
 };
 
 Admin {
@@ -35,6 +46,8 @@ Class {
      pingfreq = 1 minutes 30 seconds;
      maxlinks = 100;
      sendq = 160000;
+     fakelagminimum = 0;
+     fakelagfactor = 0;
 };
 
 Class {
@@ -70,6 +83,8 @@ Class {
      maxlinks = 4000;
      sendq = 160000;
      usermode = "x";
+     fakelagminimum = 0;
+     fakelagfactor = 0;
 };
 
 # This is an "I line" block. This one lets everyone in.
