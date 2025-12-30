@@ -265,6 +265,19 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
         const char *vapid = get_vapid_pubkey();
         if (vapid)
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=vapid=%s", vapid);
+      } else if (capab_list[i].cap == CAP_DRAFT_CHATHISTORY) {
+        /* Build chathistory value with limit and optional pm policy */
+        if (feature_bool(FEAT_CHATHISTORY_ADVERTISE_PM) &&
+            feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
+          int consent = feature_int(FEAT_CHATHISTORY_PRIVATE_CONSENT);
+          const char *pm_mode = (consent == 0) ? "global" :
+                                (consent == 1) ? "single" : "multi";
+          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d,pm=%s",
+                                  feature_int(FEAT_CHATHISTORY_MAX), pm_mode);
+        } else {
+          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d",
+                                  feature_int(FEAT_CHATHISTORY_MAX));
+        }
       } else if (capab_list[i].value) {
         val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
       }

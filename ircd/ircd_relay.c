@@ -66,6 +66,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "send.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -124,6 +125,60 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
                         account, type, text);
 }
 
+/** Get PM history preference for a client.
+ * @param[in] cptr Client to check.
+ * @return 1 if opted in, -1 if explicitly opted out, 0 if no preference.
+ */
+static int get_pm_history_pref(struct Client *cptr)
+{
+  struct MetadataEntry *entry;
+
+  if (!cptr || !IsUser(cptr))
+    return 0;
+
+  entry = metadata_get_client(cptr, "chathistory.pm");
+  if (!entry)
+    return 0;  /* No preference set */
+
+  /* Empty value or "0" = explicit opt-out */
+  if (!entry->value || !entry->value[0] || entry->value[0] == '0')
+    return -1;
+
+  /* Any other value = opt-in */
+  return 1;
+}
+
+/** Check consent for PM history storage.
+ * @param[in] sender Message sender.
+ * @param[in] recipient Message recipient.
+ * @return 1 if consent granted, 0 otherwise.
+ */
+static int pm_history_consent(struct Client *sender, struct Client *recipient)
+{
+  int mode = feature_int(FEAT_CHATHISTORY_PRIVATE_CONSENT);
+  int sender_pref = get_pm_history_pref(sender);
+  int recipient_pref = get_pm_history_pref(recipient);
+
+  if (mode == 0) {
+    /* Global mode - store unless either party explicitly opted out */
+    return (sender_pref != -1 && recipient_pref != -1);
+  }
+
+  if (mode == 1) {
+    /* Single-party - store if either opted in (and neither opted out) */
+    if (sender_pref == -1 || recipient_pref == -1)
+      return 0;
+    return (sender_pref == 1 || recipient_pref == 1);
+  }
+
+  if (mode == 2) {
+    /* Multi-party - store only if both explicitly opted in */
+    return (sender_pref == 1 && recipient_pref == 1);
+  }
+
+  return 0;
+}
+
 /** Store a private (DM) message in the history database.
  * Uses a consistent target format: sorted pair of nicks as "nick1:nick2".
  * @param[in] sptr Client that sent the message.
@@ -151,6 +206,10 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
 
   /* Check if private message history is enabled (separate feature) */
   if (!feature_bool(FEAT_CHATHISTORY_PRIVATE))
+    return;
+
+  /* Check per-user consent based on configured mode */
+  if (!pm_history_consent(sptr, acptr))
     return;
 
   /* Build sender string: nick!user@host */

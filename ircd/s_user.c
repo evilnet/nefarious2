@@ -465,6 +465,34 @@ int register_user(struct Client *cptr, struct Client *sptr)
     m_lusers(sptr, sptr, 1, parv);
     update_load();
     motd_signon(sptr);
+
+    /* PM chathistory policy notification (feature-gated) */
+    if (feature_bool(FEAT_CHATHISTORY_PM_NOTICE) &&
+        feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
+      int consent = feature_int(FEAT_CHATHISTORY_PRIVATE_CONSENT);
+      const char *policy, *action;
+
+      if (consent == 0) {
+        policy = "private messages are stored by default";
+        action = "To opt-out: /METADATA * SET chathistory.pm * :0";
+      } else if (consent == 1) {
+        policy = "private messages are stored if either party opts in (opt-out overrides)";
+        action = "To opt-in: /METADATA * SET chathistory.pm * :1 | To opt-out: /METADATA * SET chathistory.pm * :0";
+      } else {
+        policy = "private messages are stored only if both parties opt in";
+        action = "To opt-in: /METADATA * SET chathistory.pm * :1";
+      }
+
+      if (CapActive(sptr, CAP_STANDARDREPLIES)) {
+        /* IRCv3 standard-replies NOTE */
+        send_note(sptr, "CHATHISTORY", "PM_POLICY", policy, action);
+      } else {
+        /* Fallback NOTICE for all clients */
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :PM history: %s. %s",
+                      sptr, policy, action);
+      }
+    }
+
     if (cli_snomask(sptr) & SNO_NOISY)
       set_snomask(sptr, cli_snomask(sptr) & SNO_NOISY, SNO_ADD);
     if (feature_bool(FEAT_CONNEXIT_NOTICES))
