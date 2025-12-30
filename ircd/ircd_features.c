@@ -817,6 +817,9 @@ static struct FeatureDesc {
   F_S(GITSYNC_BRANCH, 0, "master", 0),
   F_S(GITSYNC_SSH_KEY, 0, "", 0),
   F_S(GITSYNC_LOCAL_PATH, 0, "gitsync", 0),
+  F_S(GITSYNC_CONF_FILE, 0, "gitsync.conf", 0),
+  F_S(GITSYNC_CERT_TAG, 0, "", 0),
+  F_S(GITSYNC_CERT_FILE, 0, "", 0),  /* Empty = use SSL_CERTFILE */
 #endif
 
 #undef F_S

@@ -62,6 +62,7 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct Client *acptr;
   int is_force = 0;
   int is_status = 0;
+  int is_pubkey = 0;
 
   /* Check privilege */
   if (!HasPriv(sptr, PRIV_GITSYNC))
@@ -71,7 +72,7 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (parc < 2) {
     /* No args - show usage */
     send_reply(sptr, SND_EXPLICIT | RPL_STATSCONN,
-               ":Usage: /GITSYNC [server] <force|status>");
+               ":Usage: /GITSYNC [server] <force|status|pubkey>");
     return 0;
   }
 
@@ -80,6 +81,8 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     is_force = 1;
   } else if (ircd_strcmp(parv[1], "status") == 0) {
     is_status = 1;
+  } else if (ircd_strcmp(parv[1], "pubkey") == 0) {
+    is_pubkey = 1;
   } else {
     /* First arg is target server */
     target = parv[1];
@@ -88,15 +91,24 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         is_force = 1;
       else if (ircd_strcmp(parv[2], "status") == 0)
         is_status = 1;
+      else if (ircd_strcmp(parv[2], "pubkey") == 0)
+        is_pubkey = 1;
     }
-    if (!is_force && !is_status) {
+    if (!is_force && !is_status && !is_pubkey) {
       send_reply(sptr, SND_EXPLICIT | RPL_STATSCONN,
-                 ":Usage: /GITSYNC [server] <force|status>");
+                 ":Usage: /GITSYNC [server] <force|status|pubkey>");
       return 0;
     }
   }
 
-  action = is_force ? "force" : "status";
+  action = is_force ? "force" : (is_status ? "status" : "pubkey");
+
+  /* Pubkey is local-only, don't forward */
+  if (is_pubkey && target) {
+    sendcmdto_one(&me, CMD_NOTICE, sptr,
+                  "%C :GITSYNC PUBKEY is local-only, cannot forward to server", sptr);
+    return 0;
+  }
 
   /* Handle remote target */
   if (target) {
@@ -181,6 +193,54 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :  Last error: %s",
                     sptr, stats->last_error);
     }
+  } else if (is_pubkey) {
+    /* Show the public key for GitLab/GitHub setup */
+    const char *ssh_key_path;
+    char pubkey_path[512];
+    char cmd[1024];
+    FILE *fp;
+    char line[1024];
+    int from_file = 0;
+
+    ssh_key_path = feature_str(FEAT_GITSYNC_SSH_KEY);
+    if (!ssh_key_path || !*ssh_key_path) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr,
+                    "%C :No SSH key configured (GITSYNC_SSH_KEY not set)", sptr);
+      return 0;
+    }
+
+    /* Try to read existing .pub file first */
+    ircd_snprintf(0, pubkey_path, sizeof(pubkey_path), "%s.pub", ssh_key_path);
+    fp = fopen(pubkey_path, "r");
+    if (fp) {
+      from_file = 1;
+    } else {
+      /* Generate public key from private key using ssh-keygen */
+      ircd_snprintf(0, cmd, sizeof(cmd), "ssh-keygen -y -f \"%s\" 2>/dev/null", ssh_key_path);
+      fp = popen(cmd, "r");
+      if (!fp) {
+        sendcmdto_one(&me, CMD_NOTICE, sptr,
+                      "%C :Cannot read or generate public key from %s", sptr, ssh_key_path);
+        return 0;
+      }
+    }
+
+    sendcmdto_one(&me, CMD_NOTICE, sptr,
+                  "%C :Public key for GitSync (add to GitLab/GitHub):", sptr);
+
+    while (fgets(line, sizeof(line), fp)) {
+      /* Remove trailing newline */
+      size_t len = strlen(line);
+      if (len > 0 && line[len-1] == '\n')
+        line[len-1] = '\0';
+      if (line[0])
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, line);
+    }
+
+    if (from_file)
+      fclose(fp);
+    else
+      pclose(fp);
   }
 
   return 0;

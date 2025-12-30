@@ -37,10 +37,16 @@
 #include "numeric.h"
 #include "s_conf.h"
 #include "s_debug.h"
+#include "s_misc.h"
 #include "s_stats.h"
 #include "send.h"
+#ifdef USE_SSL
+#include "ssl.h"
+#endif
 
 #include <git2.h>
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -372,6 +378,7 @@ gitsync_validate_content(const char *content, size_t len)
 }
 
 /** Apply downloaded configuration
+ * Writes to gitsync.conf and triggers a rehash.
  * @param content Configuration content
  * @param len Content length
  * @return GITSYNC_OK on success, error code otherwise
@@ -379,22 +386,170 @@ gitsync_validate_content(const char *content, size_t len)
 static enum GitsyncStatus
 gitsync_apply(const char *content, size_t len)
 {
-  /* For now, just log what we would apply */
-  Debug((DEBUG_INFO, "GitSync: Would apply %zu bytes of configuration", len));
+  const char *conf_file;
+  FILE *fp;
+  size_t written;
 
-  /* TODO: Actually apply the configuration
-   * This would involve:
-   * 1. Writing to a temp file
-   * 2. Including it via the config parser
-   * 3. Rehashing specific blocks (Gline, Shun, etc.)
-   */
+  conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
+  if (!conf_file || !*conf_file)
+    conf_file = "gitsync.conf";
+
+  Debug((DEBUG_INFO, "GitSync: Writing %zu bytes to %s", len, conf_file));
+
+  /* Write content to config file */
+  fp = fopen(conf_file, "w");
+  if (!fp) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Cannot open %s for writing: %s", conf_file, strerror(errno));
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
+    return GITSYNC_APPLY_ERROR;
+  }
+
+  /* Write header comment */
+  fprintf(fp, "# GitSync configuration - DO NOT EDIT\n");
+  fprintf(fp, "# Auto-generated from git commit %.8s\n", gitsync_stats.last_commit);
+  fprintf(fp, "# Last sync: %s\n\n", myctime(CurrentTime));
+
+  /* Write the actual content */
+  written = fwrite(content, 1, len, fp);
+  fclose(fp);
+
+  if (written != len) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Short write to %s: wrote %zu of %zu bytes",
+                  conf_file, written, len);
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
+    return GITSYNC_APPLY_ERROR;
+  }
 
   sendto_opmask_butone(0, SNO_OLDSNO,
-                       "GitSync: Downloaded %zu bytes of configuration (commit %.8s)",
-                       len, gitsync_stats.last_commit);
+                       "GitSync: Wrote %zu bytes to %s (commit %.8s), rehashing",
+                       len, conf_file, gitsync_stats.last_commit);
+
+  /* Trigger a rehash to load the new configuration */
+  rehash(&me, 0);
 
   return GITSYNC_OK;
 }
+
+#ifdef USE_SSL
+/** Update TLS certificate from git tag
+ * @param repo Repository
+ * @param tag_name Name of tag containing certificate
+ * @return 1 if certificate was updated, 0 otherwise
+ */
+static int
+gitsync_update_cert(git_repository *repo, const char *tag_name)
+{
+  git_object *obj = NULL;
+  const git_blob *blob = NULL;
+  const char *cert_content;
+  size_t cert_size;
+  const char *cert_file;
+  FILE *fp;
+  char *old_content = NULL;
+  size_t old_size = 0;
+  struct stat st;
+  int changed = 0;
+  int error;
+  char refspec[256];
+
+  cert_file = feature_str(FEAT_GITSYNC_CERT_FILE);
+  if (!cert_file || !*cert_file)
+    cert_file = feature_str(FEAT_SSL_CERTFILE);  /* Use IRCd's SSL cert file */
+
+  /* Look up the tag */
+  ircd_snprintf(0, refspec, sizeof(refspec), "refs/tags/%s", tag_name);
+  error = git_revparse_single(&obj, repo, refspec);
+  if (error < 0) {
+    /* Try without refs/tags prefix */
+    error = git_revparse_single(&obj, repo, tag_name);
+    if (error < 0) {
+      Debug((DEBUG_INFO, "GitSync: Tag %s not found", tag_name));
+      return 0;
+    }
+  }
+
+  /* Peel to blob if it's an annotated tag */
+  if (git_object_type(obj) == GIT_OBJECT_TAG) {
+    git_object *target = NULL;
+    error = git_tag_peel(&target, (git_tag *)obj);
+    git_object_free(obj);
+    if (error < 0) {
+      Debug((DEBUG_INFO, "GitSync: Cannot peel tag %s", tag_name));
+      return 0;
+    }
+    obj = target;
+  }
+
+  /* Check if it's a blob */
+  if (git_object_type(obj) != GIT_OBJECT_BLOB) {
+    Debug((DEBUG_INFO, "GitSync: Tag %s is not a blob (type %d)",
+           tag_name, git_object_type(obj)));
+    git_object_free(obj);
+    return 0;
+  }
+
+  blob = (const git_blob *)obj;
+  cert_content = (const char *)git_blob_rawcontent(blob);
+  cert_size = git_blob_rawsize(blob);
+
+  /* Read existing cert file for comparison */
+  if (stat(cert_file, &st) == 0 && st.st_size > 0) {
+    fp = fopen(cert_file, "r");
+    if (fp) {
+      old_content = (char *)MyMalloc(st.st_size + 1);
+      if (old_content) {
+        old_size = fread(old_content, 1, st.st_size, fp);
+        old_content[old_size] = '\0';
+      }
+      fclose(fp);
+    }
+  }
+
+  /* Check if content changed */
+  if (old_content == NULL || old_size != cert_size ||
+      memcmp(old_content, cert_content, cert_size) != 0) {
+    /* Backup old cert */
+    if (stat(cert_file, &st) == 0) {
+      char backup_path[512];
+      ircd_snprintf(0, backup_path, sizeof(backup_path), "%s.backup", cert_file);
+      rename(cert_file, backup_path);
+    }
+
+    /* Write new cert */
+    fp = fopen(cert_file, "w");
+    if (fp) {
+      if (fwrite(cert_content, 1, cert_size, fp) == cert_size) {
+        changed = 1;
+        sendto_opmask_butone(0, SNO_OLDSNO,
+                             "GitSync: Updated TLS certificate from tag %s", tag_name);
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "GitSync: Updated TLS certificate from tag %s", tag_name);
+      } else {
+        log_write(LS_SYSTEM, L_ERROR, 0,
+                  "GitSync: Failed to write certificate to %s", cert_file);
+      }
+      fclose(fp);
+
+      /* Reload SSL certificates */
+      if (changed) {
+        ssl_reinit(1);
+      }
+    } else {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "GitSync: Cannot open %s for writing: %s",
+                cert_file, strerror(errno));
+    }
+  }
+
+  if (old_content)
+    MyFree(old_content);
+  git_object_free(obj);
+
+  return changed;
+}
+#endif /* USE_SSL */
 
 /** Timer callback for periodic gitsync
  * @param ev Timer event
@@ -422,9 +577,28 @@ void
 gitsync_start_timer(void)
 {
   int interval;
+  const char *conf_file;
+  struct stat st;
+  FILE *fp;
 
   if (!feature_bool(FEAT_GITSYNC_ENABLE))
     return;
+
+  /* Ensure gitsync.conf exists so include directive doesn't fail */
+  conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
+  if (!conf_file || !*conf_file)
+    conf_file = "gitsync.conf";
+
+  if (stat(conf_file, &st) != 0) {
+    /* File doesn't exist, create empty placeholder */
+    fp = fopen(conf_file, "w");
+    if (fp) {
+      fprintf(fp, "# GitSync configuration placeholder\n");
+      fprintf(fp, "# This file will be populated when gitsync runs\n");
+      fclose(fp);
+      Debug((DEBUG_INFO, "GitSync: Created empty %s", conf_file));
+    }
+  }
 
   interval = feature_int(FEAT_GITSYNC_INTERVAL);
   if (interval < 60)
@@ -538,6 +712,16 @@ gitsync_trigger(struct Client *sptr, int force)
     }
   }
 
+  /* Check for certificate update from git tag */
+#ifdef USE_SSL
+  {
+    const char *cert_tag = feature_str(FEAT_GITSYNC_CERT_TAG);
+    if (cert_tag && *cert_tag) {
+      gitsync_update_cert(repo, cert_tag);
+    }
+  }
+#endif
+
   /* Read linesync.data */
   status = gitsync_read_data(repo_path, &content, &len);
   git_repository_free(repo);
@@ -617,6 +801,7 @@ gitsync_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":GitSync Statistics:");
 
   if (feature_bool(FEAT_GITSYNC_ENABLE)) {
+    const char *cert_tag;
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":  Status: Enabled");
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":  Repository: %s",
                feature_str(FEAT_GITSYNC_REPOSITORY));
@@ -624,6 +809,16 @@ gitsync_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                feature_str(FEAT_GITSYNC_BRANCH));
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":  Interval: %d seconds",
                feature_int(FEAT_GITSYNC_INTERVAL));
+    cert_tag = feature_str(FEAT_GITSYNC_CERT_TAG);
+    if (cert_tag && *cert_tag) {
+      const char *cert_file = feature_str(FEAT_GITSYNC_CERT_FILE);
+      if (!cert_file || !*cert_file)
+        cert_file = feature_str(FEAT_SSL_CERTFILE);
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":  Cert Tag: %s",
+                 cert_tag);
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":  Cert File: %s",
+                 cert_file);
+    }
   } else {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":  Status: Disabled");
   }
