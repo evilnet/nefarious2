@@ -290,12 +290,87 @@ static void send_history_batch(struct Client *sptr, const char *target,
   }
 }
 
+/** Normalize a PM target to the canonical nick1:nick2 format.
+ * Clients can query with just a nickname (per IRCv3 spec), but internally
+ * PM history is stored with target key "lowerNick:higherNick" (sorted).
+ *
+ * @param[in] sptr Client requesting history (their nick is the other party).
+ * @param[in] target Target name (plain nick or already nick:nick format).
+ * @param[out] normalized Buffer to store normalized target (at least NICKLEN*2+2).
+ * @param[in] buflen Size of normalized buffer.
+ * @return 0 on success, -1 on error (invalid nick, user not found, etc.)
+ */
+static int normalize_pm_target(struct Client *sptr, const char *target,
+                                char *normalized, size_t buflen)
+{
+  const char *nick1, *nick2;
+  const char *colon = strchr(target, ':');
+
+  if (colon) {
+    /* Already in nick:nick format - just validate and optionally copy */
+    char n1[NICKLEN + 1], n2[NICKLEN + 1];
+    size_t len1 = colon - target;
+    if (len1 > NICKLEN || len1 == 0)
+      return -1;
+
+    memcpy(n1, target, len1);
+    n1[len1] = '\0';
+    ircd_strncpy(n2, colon + 1, NICKLEN);
+    if (!n2[0])
+      return -1;
+
+    /* Verify sender is one of the nicks */
+    if (ircd_strcmp(cli_name(sptr), n1) != 0 &&
+        ircd_strcmp(cli_name(sptr), n2) != 0)
+      return -1;
+
+    /* Write normalized target if buffer provided */
+    if (normalized && buflen > 0) {
+      /* Ensure consistent sorting (lowerNick:higherNick) */
+      if (ircd_strcmp(n1, n2) < 0) {
+        nick1 = n1;
+        nick2 = n2;
+      } else {
+        nick1 = n2;
+        nick2 = n1;
+      }
+      ircd_snprintf(0, normalized, buflen, "%s:%s", nick1, nick2);
+    }
+  } else {
+    /* Plain nickname - construct nick1:nick2 from sender + target */
+    struct Client *target_client = FindUser(target);
+    if (!target_client) {
+      /* Target user not found - could be offline. For now, still allow
+       * the query (history might exist from when they were online). */
+    }
+
+    /* Write normalized target if buffer provided */
+    if (normalized && buflen > 0) {
+      /* Sort nicks for consistent key format */
+      if (ircd_strcmp(cli_name(sptr), target) < 0) {
+        nick1 = cli_name(sptr);
+        nick2 = target;
+      } else {
+        nick1 = target;
+        nick2 = cli_name(sptr);
+      }
+      ircd_snprintf(0, normalized, buflen, "%s:%s", nick1, nick2);
+    }
+  }
+
+  return 0;
+}
+
 /** Check if client can access history for a target.
  * @param[in] sptr Client requesting history.
- * @param[in] target Target name.
+ * @param[in] target Target name (channel, plain nick, or nick:nick format).
+ * @param[out] normalized_target If non-NULL and target is a PM, receives
+ *             the normalized nick1:nick2 format for LMDB lookup.
+ * @param[in] normalized_len Size of normalized_target buffer.
  * @return 0 if allowed, -1 if not.
  */
-static int check_history_access(struct Client *sptr, const char *target)
+static int check_history_access(struct Client *sptr, const char *target,
+                                 char *normalized_target, size_t normalized_len)
 {
   struct Channel *chptr;
   struct Membership *member;
@@ -311,28 +386,14 @@ static int check_history_access(struct Client *sptr, const char *target)
       /* User not on channel - could check for invite, etc. */
       return -1;
     }
+    /* For channels, normalized target is same as input */
+    if (normalized_target && normalized_len > 0)
+      ircd_strncpy(normalized_target, target, normalized_len - 1);
     return 0;
   } else {
-    /* Private message history - target should be nick:nick format */
-    /* For now, just check that user is one of the nicks */
-    const char *colon = strchr(target, ':');
-    if (!colon)
+    /* Private message history */
+    if (normalize_pm_target(sptr, target, normalized_target, normalized_len) != 0)
       return -1;
-
-    /* Extract nicks and verify sender is one of them */
-    char nick1[NICKLEN + 1], nick2[NICKLEN + 1];
-    size_t len1 = colon - target;
-    if (len1 > NICKLEN)
-      return -1;
-
-    memcpy(nick1, target, len1);
-    nick1[len1] = '\0';
-    ircd_strncpy(nick2, colon + 1, NICKLEN);
-
-    if (ircd_strcmp(cli_name(sptr), nick1) != 0 &&
-        ircd_strcmp(cli_name(sptr), nick2) != 0)
-      return -1;
-
     return 0;
   }
 }
@@ -378,6 +439,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  char lookup_target[NICKLEN * 2 + 2];  /* Normalized target for LMDB lookup */
 
   /* Parse reference */
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0) {
@@ -394,15 +456,15 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   if (limit > max_limit)
     limit = max_limit;
 
-  /* Check access */
-  if (check_history_access(sptr, target) != 0) {
+  /* Check access and normalize target (for PMs, converts nick to nick:nick format) */
+  if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
     send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
               "No access to target");
     return 0;
   }
 
-  /* Query local history */
-  count = history_query_latest(target, ref_type, ref_value, limit, &messages);
+  /* Query local history using normalized target */
+  count = history_query_latest(lookup_target, ref_type, ref_value, limit, &messages);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -410,8 +472,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, target, "LATEST",
+  if (should_federate(lookup_target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, "LATEST",
                                               ref_str, limit, messages, count);
     if (req) {
       /* Federation started - response will be sent when complete */
@@ -421,8 +483,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     /* Federation failed to start, fall through to local-only response */
   }
 
-  /* Send local-only response */
-  send_history_batch(sptr, target, messages, count);
+  /* Send local-only response using normalized target */
+  send_history_batch(sptr, lookup_target, messages, count);
 
   /* Free messages */
   history_free_messages(messages);
@@ -438,6 +500,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  char lookup_target[NICKLEN * 2 + 2];
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -453,13 +516,13 @@ static int chathistory_before(struct Client *sptr, const char *target,
   if (limit > max_limit)
     limit = max_limit;
 
-  if (check_history_access(sptr, target) != 0) {
+  if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
     send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
               "No access to target");
     return 0;
   }
 
-  count = history_query_before(target, ref_type, ref_value, limit, &messages);
+  count = history_query_before(lookup_target, ref_type, ref_value, limit, &messages);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -467,14 +530,14 @@ static int chathistory_before(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, target, "BEFORE",
+  if (should_federate(lookup_target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, "BEFORE",
                                               ref_str, limit, messages, count);
     if (req)
       return 0;
   }
 
-  send_history_batch(sptr, target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count);
   history_free_messages(messages);
 
   return 0;
@@ -488,6 +551,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  char lookup_target[NICKLEN * 2 + 2];
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -503,13 +567,13 @@ static int chathistory_after(struct Client *sptr, const char *target,
   if (limit > max_limit)
     limit = max_limit;
 
-  if (check_history_access(sptr, target) != 0) {
+  if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
     send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
               "No access to target");
     return 0;
   }
 
-  count = history_query_after(target, ref_type, ref_value, limit, &messages);
+  count = history_query_after(lookup_target, ref_type, ref_value, limit, &messages);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -517,14 +581,14 @@ static int chathistory_after(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, target, "AFTER",
+  if (should_federate(lookup_target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, "AFTER",
                                               ref_str, limit, messages, count);
     if (req)
       return 0;
   }
 
-  send_history_batch(sptr, target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count);
   history_free_messages(messages);
 
   return 0;
@@ -538,6 +602,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  char lookup_target[NICKLEN * 2 + 2];
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -553,13 +618,13 @@ static int chathistory_around(struct Client *sptr, const char *target,
   if (limit > max_limit)
     limit = max_limit;
 
-  if (check_history_access(sptr, target) != 0) {
+  if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
     send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
               "No access to target");
     return 0;
   }
 
-  count = history_query_around(target, ref_type, ref_value, limit, &messages);
+  count = history_query_around(lookup_target, ref_type, ref_value, limit, &messages);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -567,14 +632,14 @@ static int chathistory_around(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, target, "AROUND",
+  if (should_federate(lookup_target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, "AROUND",
                                               ref_str, limit, messages, count);
     if (req)
       return 0;
   }
 
-  send_history_batch(sptr, target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count);
   history_free_messages(messages);
 
   return 0;
@@ -589,6 +654,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type1, ref_type2;
   const char *ref_value1, *ref_value2;
   int limit, count, max_limit;
+  char lookup_target[NICKLEN * 2 + 2];
 
   if (parse_reference(ref1_str, &ref_type1, &ref_value1) != 0 ||
       ref_type1 == HISTORY_REF_NONE) {
@@ -611,13 +677,13 @@ static int chathistory_between(struct Client *sptr, const char *target,
   if (limit > max_limit)
     limit = max_limit;
 
-  if (check_history_access(sptr, target) != 0) {
+  if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
     send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
               "No access to target");
     return 0;
   }
 
-  count = history_query_between(target, ref_type1, ref_value1,
+  count = history_query_between(lookup_target, ref_type1, ref_value1,
                                  ref_type2, ref_value2, limit, &messages);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
@@ -625,7 +691,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
     return 0;
   }
 
-  send_history_batch(sptr, target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count);
   history_free_messages(messages);
 
   return 0;
@@ -682,8 +748,10 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   }
 
   for (tgt = targets; tgt; tgt = tgt->next) {
-    /* Check access for each target before including */
-    if (check_history_access(sptr, tgt->target) == 0) {
+    /* Check access for each target before including.
+     * Note: targets from LMDB are already in internal format (nick1:nick2 for PMs),
+     * so we pass NULL for normalized_target since we don't need normalization. */
+    if (check_history_access(sptr, tgt->target, NULL, 0) == 0) {
       /* Convert Unix timestamp to ISO 8601 for client display */
       if (history_unix_to_iso(tgt->last_timestamp, iso_time, sizeof(iso_time)) == 0)
         time_str = iso_time;
