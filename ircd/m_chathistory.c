@@ -96,6 +96,99 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
   return -1;
 }
 
+/** Convert client subcmd to efficient S2S single-char format.
+ * L=LATEST, B=BEFORE, A=AFTER, R=AROUND, W=BETWEEN, T=TARGETS
+ */
+static char subcmd_to_s2s(const char *subcmd)
+{
+  if (ircd_strcmp(subcmd, "LATEST") == 0)  return 'L';
+  if (ircd_strcmp(subcmd, "BEFORE") == 0)  return 'B';
+  if (ircd_strcmp(subcmd, "AFTER") == 0)   return 'A';
+  if (ircd_strcmp(subcmd, "AROUND") == 0)  return 'R';
+  if (ircd_strcmp(subcmd, "BETWEEN") == 0) return 'W';
+  if (ircd_strcmp(subcmd, "TARGETS") == 0) return 'T';
+  return '?';
+}
+
+/** Convert S2S single-char subcmd to full name for history queries. */
+static const char *s2s_to_subcmd(char c)
+{
+  switch (c) {
+    case 'L': return "LATEST";
+    case 'B': return "BEFORE";
+    case 'A': return "AFTER";
+    case 'R': return "AROUND";
+    case 'W': return "BETWEEN";
+    case 'T': return "TARGETS";
+    default:  return NULL;
+  }
+}
+
+/** Convert client reference to efficient S2S format.
+ * Input:  "timestamp=1234.567" or "msgid=abc" or "*"
+ * Output: "T1234.567" or "Mabc" or "*"
+ * @param[in] ref Client reference string.
+ * @param[out] buf Buffer for S2S format.
+ * @param[in] buflen Buffer size.
+ * @return Pointer to buf, or NULL on error.
+ */
+static char *ref_to_s2s(const char *ref, char *buf, size_t buflen)
+{
+  if (!ref || !buf || buflen < 2)
+    return NULL;
+
+  if (*ref == '*') {
+    buf[0] = '*';
+    buf[1] = '\0';
+    return buf;
+  }
+
+  if (strncmp(ref, "timestamp=", 10) == 0) {
+    ircd_snprintf(0, buf, buflen, "T%s", ref + 10);
+    return buf;
+  }
+
+  if (strncmp(ref, "msgid=", 6) == 0) {
+    ircd_snprintf(0, buf, buflen, "M%s", ref + 6);
+    return buf;
+  }
+
+  return NULL;
+}
+
+/** Parse S2S reference format.
+ * Input:  "T1234.567" or "Mabc" or "*"
+ * @param[in] ref S2S reference string.
+ * @param[out] ref_type Type of reference.
+ * @param[out] value Pointer to value (after prefix char).
+ * @return 0 on success, -1 on error.
+ */
+static int parse_s2s_reference(const char *ref, enum HistoryRefType *ref_type, const char **value)
+{
+  if (!ref || !*ref)
+    return -1;
+
+  if (*ref == '*') {
+    *ref_type = HISTORY_REF_NONE;
+    *value = ref;
+    return 0;
+  }
+
+  if (*ref == 'T') {
+    *ref_type = HISTORY_REF_TIMESTAMP;
+    *value = ref + 1;
+    return 0;
+  }
+
+  if (*ref == 'M') {
+    *ref_type = HISTORY_REF_MSGID;
+    *value = ref + 1;
+    return 0;
+  }
+
+  return -1;
+}
+
 /** Generate a unique batch ID for chathistory response.
  * @param[out] buf Buffer for batch ID.
  * @param[in] buflen Size of buffer.
@@ -983,6 +1076,8 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
 {
   struct FedRequest *req;
   char reqid[32];
+  char s2s_ref[64];
+  char s2s_subcmd;
   int i, server_count;
   struct DLink *lp;
 
@@ -994,6 +1089,14 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   server_count = count_servers();
   if (server_count == 0)
     return NULL;  /* No servers to query */
+
+  /* Convert to efficient S2S format */
+  s2s_subcmd = subcmd_to_s2s(subcmd);
+  if (s2s_subcmd == '?')
+    return NULL;  /* Unknown subcmd */
+
+  if (!ref_to_s2s(ref, s2s_ref, sizeof(s2s_ref)))
+    return NULL;  /* Invalid reference */
 
   /* Find empty slot */
   for (i = 0; i < MAX_FED_REQUESTS; i++) {
@@ -1031,11 +1134,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
             feature_int(FEAT_CHATHISTORY_TIMEOUT));
   req->timer_active = 1;
 
-  /* Send query to all servers */
+  /* Send query to all servers using efficient S2S format:
+   * CH Q <target> <subcmd:1char> <ref:T/M prefix> <limit> <reqid>
+   */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     struct Client *server = lp->value.cptr;
-    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %s %s %d %s",
-                  target, subcmd, ref, limit, reqid);
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s",
+                  target, s2s_subcmd, s2s_ref, limit, reqid);
   }
 
   return req;
@@ -1044,10 +1149,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
 /*
  * ms_chathistory - server message handler for S2S chathistory federation
  *
- * P10 Format:
- *   [SERVER] CH Q <target> <subcmd> <ref> <limit> <reqid>   - Query
+ * P10 Format (optimized for efficiency):
+ *   [SERVER] CH Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid>   - Query
  *   [SERVER] CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - Response
  *   [SERVER] CH E <reqid> <count>   - End response
+ *
+ * Subcmd codes: L=LATEST, B=BEFORE, A=AFTER, R=AROUND, W=BETWEEN, T=TARGETS
+ * Ref format: T<timestamp>, M<msgid>, or * for none
  *
  * parv[0] = sender prefix
  * parv[1] = subcommand (Q, R, or E)
@@ -1071,8 +1179,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
   subcmd = parv[1];
 
   if (strcmp(subcmd, "Q") == 0) {
-    /* Query: Q <target> <subcmd> <ref> <limit> <reqid> */
-    char *target, *query_subcmd, *ref, *reqid;
+    /* Query: Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid> */
+    char *target, *query_subcmd_str, *ref, *reqid;
+    char query_subcmd_char;
+    const char *query_subcmd_full;
     int limit, count;
     struct HistoryMessage *messages = NULL;
     struct HistoryMessage *msg;
@@ -1083,14 +1193,14 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
 
     target = parv[2];
-    query_subcmd = parv[3];
+    query_subcmd_str = parv[3];
     ref = parv[4];
     limit = atoi(parv[5]);
     reqid = parv[6];
 
-    /* Propagate query to other servers (except source) */
+    /* Propagate query to other servers (except source) - keep efficient format */
     sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "Q %s %s %s %d %s",
-                          target, query_subcmd, ref, limit, reqid);
+                          target, query_subcmd_str, ref, limit, reqid);
 
     /* Only process for channels (not PMs) */
     if (!IsChannelName(target)) {
@@ -1105,20 +1215,24 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    /* Parse reference */
-    if (parse_reference(ref, &ref_type, &ref_value) != 0) {
+    /* Parse S2S reference format (T..., M..., *) */
+    if (parse_s2s_reference(ref, &ref_type, &ref_value) != 0) {
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
       return 0;
     }
 
+    /* Parse single-char subcmd */
+    query_subcmd_char = query_subcmd_str[0];
+    query_subcmd_full = s2s_to_subcmd(query_subcmd_char);
+
     /* Query local LMDB based on subcommand */
-    if (ircd_strcmp(query_subcmd, "LATEST") == 0) {
+    if (query_subcmd_char == 'L') {
       count = history_query_latest(target, ref_type, ref_value, limit, &messages);
-    } else if (ircd_strcmp(query_subcmd, "BEFORE") == 0) {
+    } else if (query_subcmd_char == 'B') {
       count = history_query_before(target, ref_type, ref_value, limit, &messages);
-    } else if (ircd_strcmp(query_subcmd, "AFTER") == 0) {
+    } else if (query_subcmd_char == 'A') {
       count = history_query_after(target, ref_type, ref_value, limit, &messages);
-    } else if (ircd_strcmp(query_subcmd, "AROUND") == 0) {
+    } else if (query_subcmd_char == 'R') {
       count = history_query_around(target, ref_type, ref_value, limit, &messages);
     } else {
       /* Unsupported subcommand for federation */
