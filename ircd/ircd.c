@@ -51,6 +51,8 @@
 #include "querycmds.h"
 #include "res.h"
 #include "s_auth.h"
+#include "dnsbl.h"
+#include "linesync.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -743,6 +745,12 @@ int main(int argc, char **argv) {
   uping_init();
 
   stats_init();
+
+  dnsbl_init();
+
+#ifdef USE_CURL
+  linesync_init();
+#endif
 
   IPcheck_init();
   timer_add(timer_init(&connect_timer), try_connections, 0, TT_RELATIVE, 1);

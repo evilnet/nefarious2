@@ -94,6 +94,7 @@ IRCD_SRC = \
 	crule.c \
 	dbuf.c \
 	destruct_event.c \
+	dnsbl.c \
 	fileio.c \
 	gline.c \
 	hash.c \
@@ -116,6 +117,7 @@ IRCD_SRC = \
 	lex.yy.c \
 	list.c \
 	listener.c \
+	linesync.c \
 	m_account.c \
 	m_admin.c \
 	m_asll.c \
@@ -173,6 +175,7 @@ IRCD_SRC = \
 	m_protoctl.c \
 	m_pseudo.c \
 	m_quit.c \
+	m_linesync.c \
 	m_rehash.c \
 	m_remove.c \
 	m_reset.c \

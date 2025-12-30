@@ -56,6 +56,8 @@
 #include "struct.h"
 #include "userload.h"
 #include "zline.h"
+#include "dnsbl.h"
+#include "linesync.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -726,6 +728,14 @@ struct StatDesc statsinfo[] = {
   { ' ', "iauth", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_IAUTH,
     report_iauth_stats, 0,
     "IAuth statistics." },
+  { ' ', "dnsbl", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
+    dnsbl_report_stats, 0,
+    "DNSBL statistics and configuration." },
+#ifdef USE_CURL
+  { ' ', "linesync", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
+    linesync_report_stats, 0,
+    "Linesync statistics and configuration." },
+#endif
   { ' ', "iauthconf", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_IAUTH,
     report_iauth_conf, 0,
     "IAuth configuration." },

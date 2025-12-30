@@ -620,6 +620,16 @@ struct Message msgtab[] = {
     { m_unregistered, m_not_oper, ms_rehash, mo_rehash, m_ignore },
     "- Reloads the server's configuration"
   },
+#ifdef USE_CURL
+  {
+    MSG_LINESYNC,
+    TOK_LINESYNC,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_not_oper, ms_linesync, mo_linesync, m_ignore },
+    "- Triggers or shows status of linesync"
+  },
+#endif
   {
     MSG_RESTART,
     TOK_RESTART,

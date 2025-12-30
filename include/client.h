@@ -111,6 +111,7 @@ enum Priv
     PRIV_LOCAL_KILL, /**< oper can local KILL */
     PRIV_REHASH, /**< oper can REHASH */
     PRIV_RESTART, /**< oper can RESTART */
+    PRIV_LINESYNC, /**< oper can trigger LINESYNC */
     PRIV_DIE, /**< oper can DIE */
     PRIV_GLINE, /**< oper can GLINE */
     PRIV_LOCAL_GLINE, /**< oper can local GLINE */

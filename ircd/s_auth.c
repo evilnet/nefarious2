@@ -37,6 +37,7 @@
 
 #include "s_auth.h"
 #include "class.h"
+#include "dnsbl.h"
 #include "client.h"
 #include "hash.h"
 #include "IPcheck.h"
@@ -91,6 +92,7 @@ enum AuthRequestFlag {
     AR_IAUTH_SOFT_DONE, /**< iauth has no objection to client */
     AR_PASSWORD_CHECKED, /**< client password already checked */
     AR_LOC_DONE,        /**< loc messages have been sent */
+    AR_DNSBL_PENDING,   /**< native DNSBL check pending */
     AR_NUM_FLAGS
 };
 
@@ -109,6 +111,7 @@ struct AuthRequest {
   struct AuthRequestFlags flags;  /**< current state of request */
   unsigned int        cookie;     /**< cookie the user must PONG */
   unsigned short      port;       /**< client's remote port number */
+  struct DNSBLRequest *dnsbl_request; /**< native DNSBL check request */
 };
 
 /** Array of message text (with length) pairs for AUTH status
@@ -566,6 +569,54 @@ static int check_auth_finished(struct AuthRequest *auth)
     FlagSet(&auth->flags, AR_PASSWORD_CHECKED);
   }
 
+  /* Check if native DNSBL lookup is done. */
+  if (FlagHas(&auth->flags, AR_DNSBL_PENDING))
+  {
+    Debug((DEBUG_INFO, "Auth %p [%d] still has flag AR_DNSBL_PENDING", auth,
+           cli_fd(auth->client)));
+    return 0;
+  }
+
+  /* Check DNSBL result and reject if blocked. */
+  if (IsUserPort(auth->client) && auth->dnsbl_request)
+  {
+    enum DNSBLAction action;
+    const char *mark;
+    int blocked = dnsbl_result(auth->client, auth->dnsbl_request, &action, &mark);
+
+    if (blocked && action == DNSBL_ACT_BLOCK_ALL)
+    {
+      ServerStats->is_ref++;
+      sendto_opmask_butone(0, SNO_GLINE, "DNSBL blocked connection from %s (%s@%s) [%s]",
+                           cli_name(auth->client),
+                           IsIdented(auth->client) ? cli_username(auth->client) : "unknown",
+                           cli_sockhost(auth->client),
+                           ircd_ntoa(&cli_ip(auth->client)));
+      send_reply(auth->client, SND_EXPLICIT | ERR_YOUREBANNEDCREEP,
+                 ":%s", feature_str(FEAT_DNSBL_BLOCKMSG));
+      return exit_client(auth->client, auth->client, &me, "DNSBL blocked");
+    }
+    else if (blocked && action == DNSBL_ACT_BLOCK_ANON && EmptyString(cli_user(auth->client)->account))
+    {
+      /* Block anonymous - will be checked again after auth */
+      ServerStats->is_ref++;
+      sendto_opmask_butone(0, SNO_GLINE, "DNSBL blocked anonymous connection from %s (%s@%s) [%s]",
+                           cli_name(auth->client),
+                           IsIdented(auth->client) ? cli_username(auth->client) : "unknown",
+                           cli_sockhost(auth->client),
+                           ircd_ntoa(&cli_ip(auth->client)));
+      send_reply(auth->client, SND_EXPLICIT | ERR_YOUREBANNEDCREEP,
+                 ":%s (Log in to connect)", feature_str(FEAT_DNSBL_BLOCKMSG));
+      return exit_client(auth->client, auth->client, &me, "DNSBL blocked (anonymous)");
+    }
+    else if (action == DNSBL_ACT_MARK && mark)
+    {
+      /* Apply the mark to the client */
+      add_mark(auth->client, mark);
+      SetMarked(auth->client);
+    }
+  }
+
   /* Check if iauth is done. */
   if (FlagHas(&auth->flags, AR_IAUTH_PENDING))
   {
@@ -911,6 +962,11 @@ void destroy_auth_request(struct AuthRequest* auth)
     delete_resolver_queries(auth);
   }
 
+  if (FlagHas(&auth->flags, AR_DNSBL_PENDING) || auth->dnsbl_request) {
+    dnsbl_cancel(auth->dnsbl_request);
+    auth->dnsbl_request = NULL;
+  }
+
   if (-1 < s_fd(&auth->socket)) {
     close(s_fd(&auth->socket));
     socket_del(&auth->socket);
@@ -926,6 +982,19 @@ void destroy_auth_request(struct AuthRequest* auth)
   cli_auth(auth->client) = NULL;
   auth->next = auth_freelist;
   auth_freelist = auth;
+}
+
+/** Called when DNSBL lookup completes for a client.
+ * @param[in] auth The auth request whose DNSBL lookup is complete.
+ */
+void auth_dnsbl_complete(struct AuthRequest *auth)
+{
+  if (!auth || !auth->client)
+    return;
+
+  Debug((DEBUG_DNS, "DNSBL: Lookup complete for client %p", auth->client));
+  FlagClr(&auth->flags, AR_DNSBL_PENDING);
+  check_auth_finished(auth);
 }
 
 /** Handle a 'ping' (authorization) timeout for a client.
@@ -1220,6 +1289,12 @@ void start_auth(struct Client* client)
 
   /* Try to start ident lookup. */
   start_auth_query(auth);
+
+  /* Try to start native DNSBL lookup. */
+  if (IsUserPort(client) && dnsbl_check(client, &auth->dnsbl_request)) {
+    Debug((DEBUG_DNS, "DNSBL: Started check for client %p", client));
+    FlagSet(&auth->flags, AR_DNSBL_PENDING);
+  }
 
   /* Add client to GlobalClientList. */
   add_client_to_list(client);

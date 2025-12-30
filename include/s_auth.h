@@ -51,6 +51,7 @@ extern int auth_cap_start(struct AuthRequest *auth);
 extern int auth_cap_done(struct AuthRequest *auth);
 extern void auth_end_loc(struct AuthRequest *auth);
 extern void destroy_auth_request(struct AuthRequest *req);
+extern void auth_dnsbl_complete(struct AuthRequest *auth);
 
 extern int auth_restart(void);
 extern int auth_spawn(int argc, char *argv[]);

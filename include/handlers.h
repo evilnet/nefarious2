@@ -167,6 +167,9 @@ extern int mo_gline(struct Client*, struct Client*, int, char*[]);
 extern int mo_info(struct Client*, struct Client*, int, char*[]);
 extern int mo_jupe(struct Client*, struct Client*, int, char*[]);
 extern int mo_kill(struct Client*, struct Client*, int, char*[]);
+#ifdef USE_CURL
+extern int mo_linesync(struct Client*, struct Client*, int, char*[]);
+#endif
 extern int mo_notice(struct Client*, struct Client*, int, char*[]);
 extern int mo_oper(struct Client*, struct Client*, int, char*[]);
 extern int mo_opmode(struct Client*, struct Client*, int, char*[]);
@@ -218,6 +221,9 @@ extern int ms_jupe(struct Client*, struct Client*, int, char*[]);
 extern int ms_kick(struct Client*, struct Client*, int, char*[]);
 extern int ms_kill(struct Client*, struct Client*, int, char*[]);
 extern int ms_links(struct Client*, struct Client*, int, char*[]);
+#ifdef USE_CURL
+extern int ms_linesync(struct Client*, struct Client*, int, char*[]);
+#endif
 extern int ms_lusers(struct Client*, struct Client*, int, char*[]);
 extern int ms_mark(struct Client*, struct Client*, int, char*[]);
 extern int ms_mode(struct Client*, struct Client*, int, char*[]);

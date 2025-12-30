@@ -50,6 +50,7 @@
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
+#include "dnsbl.h"
 #include "s_misc.h"
 #include "send.h"
 #include "struct.h"
@@ -95,6 +96,10 @@ extern int init_lexer_file(char* file);
   struct Privs privs_dirty;
   struct WebIRCFlags wflags;
   struct ClassRestrictFlags crestrict;
+  /* DNSBL block parsing globals */
+  char *dnsbl_domain, *dnsbl_index, *dnsbl_mark;
+  unsigned int dnsbl_bitmask;
+  int dnsbl_action, dnsbl_score;
 
 static void parse_error(char *pattern,...) {
   static char error_buffer[1024];
@@ -191,6 +196,13 @@ static void free_slist(struct SLink **link) {
 %token DNS
 %token FORWARDS
 %token WEBIRC
+%token DNSBL
+%token BITMASK
+%token SCORE
+%token ACTION
+%token BLOCK_ALL
+%token BLOCK_ANON
+%token WHITELIST
 %token IDENT
 %token USERIDENT
 %token IGNOREIDENT
@@ -236,7 +248,7 @@ static void free_slist(struct SLink **link) {
 %token TRUSTACCOUNT
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
-%token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
+%token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_LINESYNC TPRIV_DIE
 %token TPRIV_LOCAL_GLINE TPRIV_LOCAL_JUPE TPRIV_LOCAL_BADCHAN
 %token TPRIV_LOCAL_OPMODE TPRIV_OPMODE TPRIV_SET TPRIV_WHOX TPRIV_BADCHAN
 %token TPRIV_SEE_CHAN TPRIV_SHOW_INVIS TPRIV_SHOW_ALL_INVIS TPRIV_PROPAGATE
@@ -266,7 +278,7 @@ block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
        pseudoblock | iauthblock | forwardsblock | webircblock | spoofhostblock |
-       exceptblock | include | error ';';
+       exceptblock | dnsblblock | include | error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -883,6 +895,7 @@ privtype: TPRIV_CHAN_LIMIT { $$ = PRIV_CHAN_LIMIT; } |
           TPRIV_LOCAL_KILL { $$ = PRIV_LOCAL_KILL; } |
           TPRIV_REHASH { $$ = PRIV_REHASH; } |
           TPRIV_RESTART { $$ = PRIV_RESTART; } |
+          TPRIV_LINESYNC { $$ = PRIV_LINESYNC; } |
           TPRIV_DIE { $$ = PRIV_DIE; } |
           GLINE { $$ = PRIV_GLINE; } |
           TPRIV_LOCAL_GLINE { $$ = PRIV_LOCAL_GLINE; } |
@@ -1897,6 +1910,69 @@ exceptlistdelay: LISTDELAY '=' YES ';'
 } | LISTDELAY '=' NO ';'
 {
   flags &= ~EFLAG_LISTDELAY;
+};
+
+dnsblblock: DNSBL
+{
+  dnsbl_domain = dnsbl_index = dnsbl_mark = NULL;
+  dnsbl_bitmask = 0;
+  dnsbl_action = DNSBL_ACT_MARK;
+  dnsbl_score = 0;
+} '{' dnsblitems '}' ';'
+{
+  if (dnsbl_domain == NULL)
+    parse_error("Missing name in DNSBL block");
+  else {
+    dnsbl_add_server(dnsbl_domain, dnsbl_index, dnsbl_bitmask,
+                     dnsbl_action, dnsbl_mark, dnsbl_score);
+  }
+  MyFree(dnsbl_domain);
+  MyFree(dnsbl_index);
+  MyFree(dnsbl_mark);
+  dnsbl_domain = dnsbl_index = dnsbl_mark = NULL;
+  dnsbl_bitmask = 0;
+  dnsbl_action = DNSBL_ACT_MARK;
+  dnsbl_score = 0;
+};
+dnsblitems: dnsblitem dnsblitems | dnsblitem;
+dnsblitem: dnsblname | dnsblindex | dnsblbitmask | dnsblaction | dnsblmark | dnsblscore;
+dnsblname: NAME '=' QSTRING ';'
+{
+  MyFree(dnsbl_domain);
+  dnsbl_domain = $3;
+};
+dnsblindex: HOST '=' QSTRING ';'
+{
+  /* HOST used as "index" for reply values, e.g., "2,3,5" */
+  MyFree(dnsbl_index);
+  dnsbl_index = $3;
+};
+dnsblbitmask: BITMASK '=' expr ';'
+{
+  dnsbl_bitmask = $3;
+};
+dnsblaction: ACTION '=' MARK ';'
+{
+  dnsbl_action = DNSBL_ACT_MARK;
+} | ACTION '=' BLOCK_ALL ';'
+{
+  dnsbl_action = DNSBL_ACT_BLOCK_ALL;
+} | ACTION '=' BLOCK_ANON ';'
+{
+  dnsbl_action = DNSBL_ACT_BLOCK_ANON;
+} | ACTION '=' WHITELIST ';'
+{
+  dnsbl_action = DNSBL_ACT_WHITELIST;
+};
+dnsblmark: REASON '=' QSTRING ';'
+{
+  /* REASON is used as the mark string */
+  MyFree(dnsbl_mark);
+  dnsbl_mark = $3;
+};
+dnsblscore: SCORE '=' expr ';'
+{
+  dnsbl_score = $3;
 };
 
 include: INCLUDE QSTRING ';'
