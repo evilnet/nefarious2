@@ -126,6 +126,7 @@ static struct Timer connect_timer; /**< timer structure for try_connections() */
 static struct Timer ping_timer; /**< timer structure for check_pings() */
 static struct Timer destruct_event_timer; /**< timer structure for exec_expired_destruct_events() */
 static struct Timer history_purge_timer; /**< timer structure for history_purge_callback() */
+static struct Timer metadata_purge_timer; /**< timer structure for metadata_purge_callback() */
 
 /** Daemon information. */
 static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
@@ -548,6 +549,28 @@ static void history_purge_callback(struct Event* ev)
   history_purge_old(max_age_seconds);
 }
 
+/** Periodic callback to purge expired metadata cache entries.
+ * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL.
+ * @param[in] ev Timer event (ignored).
+ */
+static void metadata_purge_callback(struct Event* ev)
+{
+  (void)ev; /* unused */
+
+  /* Only run if metadata caching is enabled */
+  if (!feature_bool(FEAT_METADATA_CACHE_ENABLED))
+    return;
+
+  if (!metadata_lmdb_is_available())
+    return;
+
+  /* TTL of 0 disables purging */
+  if (feature_int(FEAT_METADATA_CACHE_TTL) <= 0)
+    return;
+
+  metadata_account_purge_expired();
+}
+
 
 /** Parse command line arguments.
  * Global variables are updated to reflect the arguments.
@@ -839,6 +862,8 @@ int main(int argc, char **argv) {
   timer_add(timer_init(&ping_timer), check_pings, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&destruct_event_timer), exec_expired_destruct_events, 0, TT_PERIODIC, 60);
   timer_add(timer_init(&history_purge_timer), history_purge_callback, 0, TT_PERIODIC, 3600); /* Run every hour */
+  timer_add(timer_init(&metadata_purge_timer), metadata_purge_callback, 0, TT_PERIODIC,
+            feature_int(FEAT_METADATA_PURGE_FREQUENCY)); /* Default: hourly */
 
   CurrentTime = time(NULL);
 

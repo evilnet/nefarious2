@@ -47,6 +47,7 @@
 #include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
+#include "s_debug.h"
 #include "s_stats.h"
 #include "s_user.h"
 #include "send.h"
@@ -109,6 +110,98 @@ static int build_lmdb_key(char *key, int keysize, const char *target, const char
   pos += len;
 
   return pos;
+}
+
+/** TTL value prefix marker */
+#define TTL_PREFIX 'T'
+
+/** Encode a value with TTL timestamp.
+ * Format: T<timestamp>|<value>
+ * @param[out] buf Output buffer.
+ * @param[in] bufsize Size of output buffer.
+ * @param[in] value Value to encode.
+ * @param[in] timestamp Unix timestamp when cached.
+ * @return Length written, or -1 on error.
+ */
+static int encode_ttl_value(char *buf, size_t bufsize, const char *value, time_t timestamp)
+{
+  int len;
+  size_t value_len = strlen(value);
+
+  len = ircd_snprintf(0, buf, bufsize, "%c%lu|", TTL_PREFIX, (unsigned long)timestamp);
+  if (len < 0 || (size_t)len >= bufsize)
+    return -1;
+
+  if (len + value_len >= bufsize)
+    return -1;
+
+  memcpy(buf + len, value, value_len);
+  return len + value_len;
+}
+
+/** Decode a TTL-encoded value.
+ * @param[in] data Raw stored data.
+ * @param[in] data_len Length of raw data.
+ * @param[out] value Buffer for decoded value.
+ * @param[in] value_size Size of value buffer.
+ * @param[out] timestamp_out Pointer to store timestamp (may be NULL).
+ * @return 0 on success, 1 if not TTL-encoded (legacy), -1 on error.
+ */
+static int decode_ttl_value(const void *data, size_t data_len, char *value,
+                            size_t value_size, time_t *timestamp_out)
+{
+  const char *p = (const char *)data;
+  const char *pipe;
+  unsigned long ts;
+  char *endp;
+  size_t value_len;
+
+  if (data_len == 0 || p[0] != TTL_PREFIX) {
+    /* Legacy format - no TTL prefix, copy as-is */
+    if (data_len >= value_size)
+      return -1;
+    memcpy(value, data, data_len);
+    value[data_len] = '\0';
+    if (timestamp_out)
+      *timestamp_out = 0; /* Unknown timestamp */
+    return 1; /* Legacy format */
+  }
+
+  /* Find the pipe separator */
+  pipe = memchr(p + 1, '|', data_len - 1);
+  if (!pipe)
+    return -1;
+
+  /* Parse timestamp */
+  ts = strtoul(p + 1, &endp, 10);
+  if (endp != pipe)
+    return -1;
+
+  if (timestamp_out)
+    *timestamp_out = (time_t)ts;
+
+  /* Extract value */
+  value_len = data_len - (pipe - p) - 1;
+  if (value_len >= value_size)
+    return -1;
+
+  memcpy(value, pipe + 1, value_len);
+  value[value_len] = '\0';
+
+  return 0;
+}
+
+/** Check if a cached value has expired.
+ * @param[in] timestamp When the value was cached.
+ * @param[in] ttl TTL in seconds (0 = no expiry).
+ * @return 1 if expired, 0 if still valid.
+ */
+static int is_value_expired(time_t timestamp, int ttl)
+{
+  if (ttl <= 0 || timestamp == 0)
+    return 0; /* No TTL or unknown timestamp - never expires */
+
+  return (CurrentTime - timestamp) > ttl;
 }
 
 /** Initialize LMDB for metadata storage.
@@ -218,17 +311,20 @@ int metadata_lmdb_is_available(void)
  * @param[in] account Account name.
  * @param[in] key Metadata key.
  * @param[out] value Buffer for value (at least METADATA_VALUE_LEN).
- * @return 0 on success, 1 if not found, -1 on error.
+ * @return 0 on success, 1 if not found or expired, -1 on error.
  */
 int metadata_account_get(const char *account, const char *key, char *value)
 {
   MDB_txn *txn;
   MDB_val mkey, mdata;
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
+  char decoded[METADATA_VALUE_LEN];
   int keylen;
   int rc;
+  time_t timestamp;
+  int ttl;
 #ifdef USE_ZSTD
-  unsigned char decompressed[METADATA_VALUE_LEN];
+  unsigned char decompressed[METADATA_VALUE_LEN + 64];
   size_t decompressed_len;
 #endif
 
@@ -261,20 +357,42 @@ int metadata_account_get(const char *account, const char *key, char *value)
                         decompressed, sizeof(decompressed), &decompressed_len) < 0) {
       return -1;
     }
-    if (decompressed_len >= METADATA_VALUE_LEN)
+    /* Decode TTL from decompressed data */
+    rc = decode_ttl_value(decompressed, decompressed_len, decoded,
+                          sizeof(decoded), &timestamp);
+    if (rc < 0)
       return -1;
-    memcpy(value, decompressed, decompressed_len);
-    value[decompressed_len] = '\0';
+
+    /* Check TTL */
+    ttl = feature_int(FEAT_METADATA_CACHE_TTL);
+    if (is_value_expired(timestamp, ttl)) {
+      Debug((DEBUG_DEBUG, "metadata: cached value for %s.%s expired", account, key));
+      return 1; /* Treat as not found */
+    }
+
+    if (strlen(decoded) >= METADATA_VALUE_LEN)
+      return -1;
+    strcpy(value, decoded);
     return 0;
   }
 #endif
 
-  if (mdata.mv_size >= METADATA_VALUE_LEN)
+  /* Decode TTL from raw data */
+  rc = decode_ttl_value(mdata.mv_data, mdata.mv_size, decoded,
+                        sizeof(decoded), &timestamp);
+  if (rc < 0)
     return -1;
 
-  memcpy(value, mdata.mv_data, mdata.mv_size);
-  value[mdata.mv_size] = '\0';
+  /* Check TTL */
+  ttl = feature_int(FEAT_METADATA_CACHE_TTL);
+  if (is_value_expired(timestamp, ttl)) {
+    Debug((DEBUG_DEBUG, "metadata: cached value for %s.%s expired", account, key));
+    return 1; /* Treat as not found */
+  }
 
+  if (strlen(decoded) >= METADATA_VALUE_LEN)
+    return -1;
+  strcpy(value, decoded);
   return 0;
 }
 
@@ -289,12 +407,13 @@ int metadata_account_set(const char *account, const char *key, const char *value
   MDB_txn *txn;
   MDB_val mkey, mdata;
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
+  char encoded[METADATA_VALUE_LEN + 32]; /* Extra space for TTL prefix */
   int keylen;
+  int encoded_len;
   int rc;
 #ifdef USE_ZSTD
   unsigned char compressed[METADATA_VALUE_LEN + 64];
   size_t compressed_len;
-  size_t value_len;
 #endif
 
   if (!metadata_lmdb_available || !account || !key)
@@ -312,19 +431,25 @@ int metadata_account_set(const char *account, const char *key, const char *value
   mkey.mv_size = keylen;
 
   if (value) {
+    /* Encode value with current timestamp for TTL tracking */
+    encoded_len = encode_ttl_value(encoded, sizeof(encoded), value, CurrentTime);
+    if (encoded_len < 0) {
+      mdb_txn_abort(txn);
+      return -1;
+    }
+
 #ifdef USE_ZSTD
-    value_len = strlen(value);
-    if (compress_data((const unsigned char *)value, value_len,
+    if (compress_data((const unsigned char *)encoded, encoded_len,
                       compressed, sizeof(compressed), &compressed_len) >= 0) {
       mdata.mv_data = compressed;
       mdata.mv_size = compressed_len;
     } else {
-      mdata.mv_data = (void *)value;
-      mdata.mv_size = value_len;
+      mdata.mv_data = encoded;
+      mdata.mv_size = encoded_len;
     }
 #else
-    mdata.mv_data = (void *)value;
-    mdata.mv_size = strlen(value);
+    mdata.mv_data = encoded;
+    mdata.mv_size = encoded_len;
 #endif
     rc = mdb_put(txn, metadata_dbi, &mkey, &mdata, 0);
   } else {
@@ -564,6 +689,95 @@ struct MetadataEntry *metadata_channel_load(const char *channel)
   return metadata_account_list(channel);
 }
 
+/** Purge expired metadata entries from LMDB.
+ * Called periodically to enforce METADATA_CACHE_TTL.
+ * @return Number of entries purged, or -1 on error.
+ */
+int metadata_account_purge_expired(void)
+{
+  MDB_txn *txn;
+  MDB_cursor *cursor;
+  MDB_val mkey, mdata;
+  int ttl;
+  int purged = 0;
+  int rc;
+#ifdef USE_ZSTD
+  unsigned char decompressed[METADATA_VALUE_LEN + 64];
+  size_t decompressed_len;
+#endif
+  char decoded[METADATA_VALUE_LEN];
+  time_t timestamp;
+
+  if (!metadata_lmdb_available)
+    return -1;
+
+  ttl = feature_int(FEAT_METADATA_CACHE_TTL);
+  if (ttl <= 0)
+    return 0; /* TTL disabled, nothing to purge */
+
+  rc = mdb_txn_begin(metadata_env, NULL, 0, &txn);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: purge mdb_txn_begin failed: %s",
+              mdb_strerror(rc));
+    return -1;
+  }
+
+  rc = mdb_cursor_open(txn, metadata_dbi, &cursor);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: purge mdb_cursor_open failed: %s",
+              mdb_strerror(rc));
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdb_cursor_get(cursor, &mkey, &mdata, MDB_FIRST);
+  while (rc == 0) {
+    int decode_rc;
+    int expired = 0;
+
+#ifdef USE_ZSTD
+    if (is_compressed(mdata.mv_data, mdata.mv_size)) {
+      if (decompress_data(mdata.mv_data, mdata.mv_size,
+                          decompressed, sizeof(decompressed), &decompressed_len) >= 0) {
+        decode_rc = decode_ttl_value(decompressed, decompressed_len, decoded,
+                                     sizeof(decoded), &timestamp);
+        if (decode_rc >= 0 && is_value_expired(timestamp, ttl)) {
+          expired = 1;
+        }
+      }
+    } else
+#endif
+    {
+      decode_rc = decode_ttl_value(mdata.mv_data, mdata.mv_size, decoded,
+                                   sizeof(decoded), &timestamp);
+      if (decode_rc >= 0 && is_value_expired(timestamp, ttl)) {
+        expired = 1;
+      }
+    }
+
+    if (expired) {
+      mdb_cursor_del(cursor, 0);
+      purged++;
+    }
+
+    rc = mdb_cursor_get(cursor, &mkey, &mdata, MDB_NEXT);
+  }
+
+  mdb_cursor_close(cursor);
+  rc = mdb_txn_commit(txn);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: purge mdb_txn_commit failed: %s",
+              mdb_strerror(rc));
+    return -1;
+  }
+
+  if (purged > 0) {
+    log_write(LS_SYSTEM, L_INFO, 0, "metadata: purged %d expired cache entries", purged);
+  }
+
+  return purged;
+}
+
 #else /* !USE_LMDB */
 
 /* Stub implementations when LMDB is not available */
@@ -574,6 +788,7 @@ int metadata_account_get(const char *account, const char *key, char *value) { re
 int metadata_account_set(const char *account, const char *key, const char *value) { return -1; }
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_clear(const char *account) { return -1; }
+int metadata_account_purge_expired(void) { return -1; }
 int metadata_channel_persist(const char *channel, const char *key, const char *value) { return -1; }
 struct MetadataEntry *metadata_channel_load(const char *channel) { return NULL; }
 

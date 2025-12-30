@@ -119,6 +119,12 @@ extern struct MetadataEntry *metadata_account_list(const char *account);
  */
 extern int metadata_account_clear(const char *account);
 
+/** Purge expired metadata entries from LMDB.
+ * Called periodically to enforce METADATA_CACHE_TTL.
+ * @return Number of entries purged, or -1 on error.
+ */
+extern int metadata_account_purge_expired(void);
+
 /** Load metadata from LMDB for a logged-in user.
  * Called when a user logs into an account.
  * @param[in] cptr Client that just logged in.
