@@ -64,6 +64,10 @@ static struct Timer gitsync_timer;
 /** libgit2 initialized flag */
 static int git_initialized = 0;
 
+/** Runtime storage for TOFU host fingerprint */
+static char gitsync_runtime_fingerprint[128];
+static char gitsync_runtime_host[256];
+
 /** Status code to string mapping */
 static const char *status_strings[] = {
   "OK",
@@ -121,21 +125,116 @@ gitsync_cred_callback(git_credential **out, const char *url,
                                     NULL);  /* No passphrase */
 }
 
-/** Certificate check callback (accept all for now)
+/** Format SSH host key fingerprint as hex string
+ * @param hash Raw hash bytes
+ * @param hash_len Length of hash
+ * @param buf Output buffer
+ * @param buflen Buffer size
+ */
+static void
+gitsync_format_fingerprint(const unsigned char *hash, size_t hash_len,
+                           char *buf, size_t buflen)
+{
+  size_t i;
+  size_t pos = 0;
+
+  for (i = 0; i < hash_len && pos + 3 < buflen; i++) {
+    if (i > 0)
+      buf[pos++] = ':';
+    ircd_snprintf(0, buf + pos, buflen - pos, "%02x", hash[i]);
+    pos += 2;
+  }
+  buf[pos] = '\0';
+}
+
+/** Certificate check callback with TOFU (Trust On First Use)
  * @param cert Certificate
- * @param valid Validity flag
+ * @param valid Validity flag from libgit2
  * @param host Host being accessed
  * @param payload User payload
- * @return 0 to accept
+ * @return 0 to accept, -1 to reject
  */
 static int
 gitsync_cert_callback(git_cert *cert, int valid, const char *host, void *payload)
 {
-  (void)cert;
+  git_cert_hostkey *hostkey;
+  char fingerprint[128];
+  const char *configured_fp;
+  const char *trusted_fp;
+
   (void)valid;
-  (void)host;
   (void)payload;
-  return 0;  /* Accept certificate */
+
+  /* Only handle SSH host keys */
+  if (cert->cert_type != GIT_CERT_HOSTKEY_LIBSSH2) {
+    Debug((DEBUG_INFO, "GitSync: Non-SSH certificate type %d", cert->cert_type));
+    return 0;  /* Accept non-SSH certs (e.g., HTTPS) */
+  }
+
+  hostkey = (git_cert_hostkey *)cert;
+
+  /* Format the fingerprint - prefer SHA256, fallback to SHA1 */
+  if (hostkey->type & GIT_CERT_SSH_SHA256) {
+    gitsync_format_fingerprint(hostkey->hash_sha256, 32, fingerprint, sizeof(fingerprint));
+  } else if (hostkey->type & GIT_CERT_SSH_SHA1) {
+    gitsync_format_fingerprint(hostkey->hash_sha1, 20, fingerprint, sizeof(fingerprint));
+  } else if (hostkey->type & GIT_CERT_SSH_MD5) {
+    gitsync_format_fingerprint(hostkey->hash_md5, 16, fingerprint, sizeof(fingerprint));
+  } else {
+    Debug((DEBUG_INFO, "GitSync: Unknown host key hash type"));
+    return -1;  /* Reject unknown hash type */
+  }
+
+  /* Check configured fingerprint first */
+  configured_fp = feature_str(FEAT_GITSYNC_HOST_FINGERPRINT);
+
+  /* Determine which fingerprint to trust */
+  if (configured_fp && *configured_fp) {
+    trusted_fp = configured_fp;
+  } else if (gitsync_runtime_fingerprint[0]) {
+    trusted_fp = gitsync_runtime_fingerprint;
+  } else {
+    trusted_fp = NULL;
+  }
+
+  if (!trusted_fp) {
+    /* TOFU: First connection, trust and store this fingerprint */
+    ircd_strncpy(gitsync_runtime_fingerprint, fingerprint,
+                 sizeof(gitsync_runtime_fingerprint) - 1);
+    ircd_strncpy(gitsync_runtime_host, host,
+                 sizeof(gitsync_runtime_host) - 1);
+
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: TOFU - Trusting host %s with fingerprint %s", host, fingerprint);
+    log_write(LS_SYSTEM, L_INFO, 0,
+      "GitSync: TOFU - Trusting host %s with fingerprint %s", host, fingerprint);
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: To persist, add to config: Set GITSYNC_HOST_FINGERPRINT \"%s\"",
+      fingerprint);
+
+    return 0;  /* Accept */
+  }
+
+  /* Verify fingerprint matches */
+  if (ircd_strcmp(fingerprint, trusted_fp) != 0) {
+    /* FINGERPRINT MISMATCH - possible MITM attack! */
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: WARNING! Host key for %s has CHANGED!", host);
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: Expected: %s", trusted_fp);
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: Got:      %s", fingerprint);
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: Rejecting connection - possible MITM attack!");
+    log_write(LS_SYSTEM, L_CRIT, 0,
+      "GitSync: HOST KEY MISMATCH for %s! Expected %s, got %s",
+      host, trusted_fp, fingerprint);
+
+    return -1;  /* REJECT */
+  }
+
+  Debug((DEBUG_INFO, "GitSync: Host key verified for %s", host));
+  return 0;  /* Accept - fingerprint matches */
 }
 
 /** Get full path to local repository
@@ -218,6 +317,8 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
 
   fetch_opts.callbacks.credentials = gitsync_cred_callback;
   fetch_opts.callbacks.certificate_check = gitsync_cert_callback;
+  /* Fetch all tags (equivalent to git fetch --tags) */
+  fetch_opts.download_tags = GIT_REMOTE_DOWNLOAD_TAGS_ALL;
 
   /* Get origin remote */
   error = git_remote_lookup(&remote, repo, "origin");
@@ -228,8 +329,8 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
     return GITSYNC_FETCH_ERROR;
   }
 
-  /* Fetch from origin */
-  Debug((DEBUG_INFO, "GitSync: Fetching from origin"));
+  /* Fetch from origin with tags */
+  Debug((DEBUG_INFO, "GitSync: Fetching from origin (with tags)"));
   error = git_remote_fetch(remote, NULL, &fetch_opts, "gitsync fetch");
   git_remote_free(remote);
 
@@ -338,6 +439,51 @@ gitsync_read_data(const char *repo_path, char **content, size_t *len)
   return GITSYNC_OK;
 }
 
+/** Check for dangerous include directives
+ * Allows relative includes (e.g., include "klines.conf";)
+ * Blocks absolute paths and path traversal
+ * @param content Content to search
+ * @return 1 if dangerous include found, 0 if safe
+ */
+static int
+gitsync_has_dangerous_include(const char *content)
+{
+  const char *p = content;
+
+  while (*p) {
+    /* Check for "include" keyword (case-insensitive) */
+    if ((*p == 'i' || *p == 'I') &&
+        (p[1] == 'n' || p[1] == 'N') &&
+        (p[2] == 'c' || p[2] == 'C') &&
+        (p[3] == 'l' || p[3] == 'L') &&
+        (p[4] == 'u' || p[4] == 'U') &&
+        (p[5] == 'd' || p[5] == 'D') &&
+        (p[6] == 'e' || p[6] == 'E')) {
+      /* Check it's at start of line or after whitespace */
+      if (p == content || isspace((unsigned char)p[-1])) {
+        const char *q = p + 7;
+        /* Skip whitespace after "include" */
+        while (*q && isspace((unsigned char)*q))
+          q++;
+        /* Check for quoted path */
+        if (*q == '"') {
+          q++;
+          /* Check for absolute path */
+          if (*q == '/') {
+            return 1;  /* Absolute path - dangerous */
+          }
+          /* Check for path traversal */
+          if (q[0] == '.' && q[1] == '.') {
+            return 1;  /* Path traversal - dangerous */
+          }
+        }
+      }
+    }
+    p++;
+  }
+  return 0;
+}
+
 /** Validate downloaded content
  * @param content Downloaded content
  * @param len Length of content
@@ -351,6 +497,16 @@ gitsync_validate_content(const char *content, size_t len)
 
   if (!content || len == 0)
     return 0;
+
+  /* Reject dangerous include directives (absolute paths, path traversal) */
+  if (gitsync_has_dangerous_include(content)) {
+    ircd_strncpy(gitsync_stats.last_error,
+                 "Content contains dangerous include (absolute path or ../)",
+                 sizeof(gitsync_stats.last_error) - 1);
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: Rejected content with dangerous include directive");
+    return 0;
+  }
 
   /* Basic validation: check for balanced braces and no dangerous patterns */
   for (p = content; *p; p++) {
@@ -370,15 +526,33 @@ gitsync_validate_content(const char *content, size_t len)
   if (strstr(content, "$(") || strstr(content, "`"))
     return 0;
 
-  /* Reject attempts to include other files (path traversal) */
+  /* Reject path traversal anywhere in content */
   if (strstr(content, "../") || strstr(content, "..\\"))
     return 0;
 
   return 1;
 }
 
+/** Check if content matches last applied content
+ * We store a hash of the last applied content to detect changes.
+ */
+static char gitsync_last_content_hash[64];
+
+/** Simple hash of content for change detection */
+static void
+gitsync_hash_content(const char *content, size_t len, char *hash, size_t hashlen)
+{
+  /* Simple checksum - just use first 8 bytes of content + length */
+  unsigned long h = len;
+  size_t i;
+  for (i = 0; i < len && i < 1024; i++) {
+    h = h * 31 + (unsigned char)content[i];
+  }
+  ircd_snprintf(0, hash, hashlen, "%08lx%08lx", (unsigned long)len, h);
+}
+
 /** Apply downloaded configuration
- * Writes to gitsync.conf and triggers a rehash.
+ * Writes to gitsync.conf and triggers a rehash only if content changed.
  * @param content Configuration content
  * @param len Content length
  * @return GITSYNC_OK on success, error code otherwise
@@ -389,10 +563,19 @@ gitsync_apply(const char *content, size_t len)
   const char *conf_file;
   FILE *fp;
   size_t written;
+  char content_hash[64];
 
   conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
   if (!conf_file || !*conf_file)
     conf_file = "gitsync.conf";
+
+  /* Check if content has changed */
+  gitsync_hash_content(content, len, content_hash, sizeof(content_hash));
+  if (gitsync_last_content_hash[0] &&
+      strcmp(content_hash, gitsync_last_content_hash) == 0) {
+    Debug((DEBUG_INFO, "GitSync: Content unchanged, skipping write"));
+    return GITSYNC_OK;
+  }
 
   Debug((DEBUG_INFO, "GitSync: Writing %zu bytes to %s", len, conf_file));
 
@@ -421,6 +604,10 @@ gitsync_apply(const char *content, size_t len)
     log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
     return GITSYNC_APPLY_ERROR;
   }
+
+  /* Remember hash for future comparisons */
+  ircd_strncpy(gitsync_last_content_hash, content_hash,
+               sizeof(gitsync_last_content_hash) - 1);
 
   sendto_opmask_butone(0, SNO_OLDSNO,
                        "GitSync: Wrote %zu bytes to %s (commit %.8s), rehashing",
@@ -848,6 +1035,42 @@ gitsync_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, ":  Last error: %s",
                stats->last_error);
   }
+}
+
+const char *
+gitsync_get_host_fingerprint(char *host, size_t hostlen)
+{
+  const char *configured_fp;
+
+  /* Return configured fingerprint if set */
+  configured_fp = feature_str(FEAT_GITSYNC_HOST_FINGERPRINT);
+  if (configured_fp && *configured_fp) {
+    if (host && hostlen > 0)
+      ircd_strncpy(host, "(configured)", hostlen - 1);
+    return configured_fp;
+  }
+
+  /* Return runtime TOFU fingerprint if established */
+  if (gitsync_runtime_fingerprint[0]) {
+    if (host && hostlen > 0)
+      ircd_strncpy(host, gitsync_runtime_host, hostlen - 1);
+    return gitsync_runtime_fingerprint;
+  }
+
+  return NULL;
+}
+
+void
+gitsync_clear_host_fingerprint(void)
+{
+  if (gitsync_runtime_fingerprint[0]) {
+    sendto_opmask_butone(0, SNO_OLDSNO,
+      "GitSync: Cleared TOFU host fingerprint for %s", gitsync_runtime_host);
+    log_write(LS_SYSTEM, L_INFO, 0,
+      "GitSync: Cleared TOFU host fingerprint for %s", gitsync_runtime_host);
+  }
+  gitsync_runtime_fingerprint[0] = '\0';
+  gitsync_runtime_host[0] = '\0';
 }
 
 #endif /* USE_LIBGIT2 */

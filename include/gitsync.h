@@ -88,6 +88,17 @@ extern const struct GitsyncStats *gitsync_get_stats(void);
  */
 extern void gitsync_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
 
+/** Get current SSH host fingerprint
+ * @param[out] host Buffer for host name (may be NULL)
+ * @param hostlen Host buffer size
+ * @return Fingerprint string, or NULL if not established
+ */
+extern const char *gitsync_get_host_fingerprint(char *host, size_t hostlen);
+
+/** Clear runtime SSH host fingerprint (for TOFU reset)
+ */
+extern void gitsync_clear_host_fingerprint(void);
+
 #endif /* USE_LIBGIT2 */
 
 #endif /* INCLUDED_gitsync_h */
