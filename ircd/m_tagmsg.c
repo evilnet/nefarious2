@@ -111,7 +111,6 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
                                   const char *client_tags)
 {
   struct timeval tv;
-  struct tm tm;
   char timestamp[32];
   char msgid[64];
   char sender[HISTORY_SENDER_LEN];
@@ -124,14 +123,11 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CAP_draft_event_playback))
     return;
 
-  /* Generate ISO 8601 timestamp */
+  /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
-  gmtime_r(&tv.tv_sec, &tm);
-  ircd_snprintf(0, timestamp, sizeof(timestamp),
-                "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                tm.tm_hour, tm.tm_min, tm.tm_sec,
-                tv.tv_usec / 1000);
+  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                (unsigned long)tv.tv_sec,
+                (unsigned long)(tv.tv_usec / 1000));
 
   /* Generate unique msgid */
   ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",

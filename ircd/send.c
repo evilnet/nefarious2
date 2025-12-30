@@ -855,16 +855,17 @@ void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *
     msgid_out[0] = '\0';
   }
 
-  /* Generate timestamp */
+  /* Generate timestamp - ISO for client @time= tag, Unix for storage */
   gettimeofday(&tv, NULL);
   gmtime_r(&tv.tv_sec, &tm);
   snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
            tm.tm_hour, tm.tm_min, tm.tm_sec,
            tv.tv_usec / 1000);
+  /* Return Unix timestamp for internal storage/S2S */
   if (time_out && time_out_len > 0) {
-    ircd_strncpy(time_out, timebuf, time_out_len - 1);
-    time_out[time_out_len - 1] = '\0';
+    snprintf(time_out, time_out_len, "%lu.%03lu",
+             (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
   }
 
   tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);

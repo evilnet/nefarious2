@@ -21,16 +21,20 @@
  *
  * Specification: https://ircv3.net/specs/extensions/read-marker
  *
- * MARKREAD <target> [timestamp=YYYY-MM-DDThh:mm:ss.sssZ]
+ * Client Protocol (ISO 8601 timestamps per IRCv3 spec):
+ *   MARKREAD <target> [timestamp=YYYY-MM-DDThh:mm:ss.sssZ]
  *
  * This implementation routes read markers through X3 services for
  * authoritative storage and multi-device synchronization.
  *
- * P10 Protocol:
- *   SET: [SERVER] MR S <user_numeric> <target> <timestamp>
+ * P10 Protocol (Unix timestamps for S2S):
+ *   SET: [SERVER] MR S <user_numeric> <target> <unix_timestamp>
  *   GET: [SERVER] MR G <user_numeric> <target>
- *   REPLY: [X3] MR R <target_server> <user_numeric> <target> <timestamp>
- *   BROADCAST: [X3] MR <account> <target> <timestamp>
+ *   REPLY: [X3] MR R <target_server> <user_numeric> <target> <unix_timestamp>
+ *   BROADCAST: [X3] MR <account> <target> <unix_timestamp>
+ *
+ * Timestamps are stored internally as Unix (seconds.milliseconds) and
+ * converted to ISO 8601 only for client-facing protocol.
  */
 #include "config.h"
 
@@ -53,18 +57,20 @@
 #include <string.h>
 #include <stdlib.h>
 
-/** Maximum timestamp length (ISO 8601 with milliseconds) */
+/** Maximum timestamp length */
 #define MARKREAD_TS_LEN 32
 
-/** Parse timestamp= parameter from argument.
+/** Parse timestamp= parameter from client argument.
+ * Extracts ISO 8601 timestamp and converts to Unix timestamp for internal use.
  * @param[in] arg Argument string (e.g., "timestamp=2025-01-01T00:00:00.000Z")
- * @param[out] ts Buffer for extracted timestamp.
- * @param[in] tslen Size of ts buffer.
+ * @param[out] unix_ts Buffer for Unix timestamp (seconds.milliseconds).
+ * @param[in] tslen Size of unix_ts buffer.
  * @return 1 if found and valid format, 0 otherwise.
  */
-static int parse_timestamp_param(const char *arg, char *ts, size_t tslen)
+static int parse_timestamp_param(const char *arg, char *unix_ts, size_t tslen)
 {
   const char *eq;
+  char iso_ts[32];
 
   if (!arg)
     return 0;
@@ -83,33 +89,44 @@ static int parse_timestamp_param(const char *arg, char *ts, size_t tslen)
   if (eq[10] != 'T')
     return 0;
 
-  /* Copy to output */
-  ircd_strncpy(ts, eq, tslen - 1);
-  ts[tslen - 1] = '\0';
+  /* Copy ISO timestamp */
+  ircd_strncpy(iso_ts, eq, sizeof(iso_ts) - 1);
+  iso_ts[sizeof(iso_ts) - 1] = '\0';
+
+  /* Convert to Unix timestamp for internal use */
+  if (history_iso_to_unix(iso_ts, unix_ts, tslen) != 0)
+    return 0;
 
   return 1;
 }
 
 /** Send MARKREAD response to a client.
+ * Converts internal Unix timestamp to ISO 8601 for client display.
  * @param[in] to Client to send to.
  * @param[in] target Channel or nick.
- * @param[in] timestamp ISO 8601 timestamp (or "*" if unknown).
+ * @param[in] unix_ts Unix timestamp (or "*" if unknown).
  */
-static void send_markread(struct Client *to, const char *target, const char *timestamp)
+static void send_markread(struct Client *to, const char *target, const char *unix_ts)
 {
+  char iso_ts[32];
+
   /* Format: MARKREAD <target> timestamp=<ts>
    * The timestamp can be "*" if unknown.
    */
-  if (timestamp && *timestamp)
-    sendrawto_one(to, "MARKREAD %s timestamp=%s", target, timestamp);
-  else
+  if (!unix_ts || !*unix_ts || *unix_ts == '*') {
     sendrawto_one(to, "MARKREAD %s timestamp=*", target);
+  } else if (history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0) {
+    sendrawto_one(to, "MARKREAD %s timestamp=%s", target, iso_ts);
+  } else {
+    /* Conversion failed - send as-is (might already be ISO or invalid) */
+    sendrawto_one(to, "MARKREAD %s timestamp=%s", target, unix_ts);
+  }
 }
 
 /** Notify all local clients with matching account about a read marker update.
  * @param[in] account Account name.
  * @param[in] target Channel or nick.
- * @param[in] timestamp The timestamp.
+ * @param[in] unix_ts Unix timestamp (will be converted to ISO for clients).
  */
 static void notify_local_clients(const char *account, const char *target, const char *timestamp)
 {

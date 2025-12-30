@@ -45,6 +45,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/time.h>
 
 /** LMDB environment */
 static MDB_env *history_env = NULL;
@@ -86,7 +87,7 @@ static const char *history_type_names[] = {
  * @param[out] key Output buffer.
  * @param[in] keysize Size of output buffer.
  * @param[in] target Channel or nick.
- * @param[in] timestamp ISO 8601 timestamp (or NULL for just target).
+ * @param[in] timestamp Unix timestamp (or NULL for just target).
  * @param[in] msgid Message ID (or NULL).
  * @return Length of key.
  */
@@ -262,6 +263,107 @@ static int parse_key(const char *key, int keylen,
       msgid[0] = '\0';
   }
 
+  return 0;
+}
+
+/*
+ * Timestamp Conversion Functions
+ *
+ * Internal storage and S2S use Unix timestamps (seconds.milliseconds).
+ * Client-facing @time= tags use ISO 8601 per IRCv3 spec.
+ */
+
+char *history_format_timestamp(char *buf, size_t buflen)
+{
+  struct timeval tv;
+
+  gettimeofday(&tv, NULL);
+  ircd_snprintf(0, buf, buflen, "%lu.%03lu",
+                (unsigned long)tv.tv_sec,
+                (unsigned long)(tv.tv_usec / 1000));
+  return buf;
+}
+
+int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_buflen)
+{
+  unsigned long secs;
+  unsigned int millis = 0;
+  char *dot;
+  time_t t;
+  struct tm tm;
+
+  if (!unix_ts || !iso_buf || iso_buflen < 25)
+    return -1;
+
+  secs = strtoul(unix_ts, &dot, 10);
+  if (dot && *dot == '.') {
+    millis = strtoul(dot + 1, NULL, 10);
+    /* Ensure exactly 3 digits */
+    if (millis > 999) millis = 999;
+  }
+
+  t = (time_t)secs;
+  if (!gmtime_r(&t, &tm))
+    return -1;
+
+  ircd_snprintf(0, iso_buf, iso_buflen,
+                "%04d-%02d-%02dT%02d:%02d:%02d.%03uZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec, millis);
+  return 0;
+}
+
+int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
+{
+  struct tm tm;
+  time_t t;
+  unsigned int millis = 0;
+  const char *p;
+  char *end;
+
+  if (!iso_ts || !unix_buf || unix_buflen < 15)
+    return -1;
+
+  /* Parse ISO 8601: YYYY-MM-DDThh:mm:ss[.sss]Z */
+  memset(&tm, 0, sizeof(tm));
+
+  /* Parse date */
+  tm.tm_year = strtol(iso_ts, &end, 10) - 1900;
+  if (!end || *end != '-') return -1;
+  p = end + 1;
+
+  tm.tm_mon = strtol(p, &end, 10) - 1;
+  if (!end || *end != '-') return -1;
+  p = end + 1;
+
+  tm.tm_mday = strtol(p, &end, 10);
+  if (!end || *end != 'T') return -1;
+  p = end + 1;
+
+  /* Parse time */
+  tm.tm_hour = strtol(p, &end, 10);
+  if (!end || *end != ':') return -1;
+  p = end + 1;
+
+  tm.tm_min = strtol(p, &end, 10);
+  if (!end || *end != ':') return -1;
+  p = end + 1;
+
+  tm.tm_sec = strtol(p, &end, 10);
+
+  /* Parse optional milliseconds */
+  if (end && *end == '.') {
+    millis = strtoul(end + 1, &end, 10);
+    if (millis > 999) millis = 999;
+  }
+
+  /* Convert to Unix time */
+  t = timegm(&tm);
+  if (t == (time_t)-1)
+    return -1;
+
+  ircd_snprintf(0, unix_buf, unix_buflen, "%lu.%03u",
+                (unsigned long)t, millis);
   return 0;
 }
 
@@ -962,7 +1064,6 @@ int history_purge_old(unsigned long max_age_seconds)
   MDB_cursor *cursor;
   MDB_val key, data;
   time_t cutoff_time;
-  struct tm *tm_info;
   char cutoff_ts[HISTORY_TIMESTAMP_LEN];
   char msg_target[CHANNELLEN + 1];
   char msg_timestamp[HISTORY_TIMESTAMP_LEN];
@@ -976,16 +1077,10 @@ int history_purge_old(unsigned long max_age_seconds)
   if (max_age_seconds == 0)
     return 0; /* Retention disabled */
 
-  /* Calculate cutoff timestamp */
+  /* Calculate cutoff timestamp (Unix format) */
   cutoff_time = time(NULL) - max_age_seconds;
-  tm_info = gmtime(&cutoff_time);
-  if (!tm_info)
-    return -1;
-
-  ircd_snprintf(0, cutoff_ts, sizeof(cutoff_ts),
-                "%04d-%02d-%02dT%02d:%02d:%02d.000Z",
-                tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
-                tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+  ircd_snprintf(0, cutoff_ts, sizeof(cutoff_ts), "%lu.000",
+                (unsigned long)cutoff_time);
 
   Debug((DEBUG_DEBUG, "history: purging messages older than %s", cutoff_ts));
 

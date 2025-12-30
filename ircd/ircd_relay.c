@@ -260,14 +260,10 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     else if (feature_bool(FEAT_MSGID)) {
       /* Generate msgid and timestamp even if not echoing, for history storage */
       struct timeval tv;
-      struct tm tm;
       gettimeofday(&tv, NULL);
-      gmtime_r(&tv.tv_sec, &tm);
-      ircd_snprintf(0, timestamp, sizeof(timestamp),
-                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
       ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                     cli_yxx(&me),
                     (unsigned long)cli_firsttime(&me),
@@ -350,14 +346,10 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
                                "%H :%s", chptr, mytext);
     else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
-      struct tm tm;
       gettimeofday(&tv, NULL);
-      gmtime_r(&tv.tv_sec, &tm);
-      ircd_snprintf(0, timestamp, sizeof(timestamp),
-                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
       ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                     cli_yxx(&me),
                     (unsigned long)cli_firsttime(&me),
@@ -406,14 +398,10 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       char msgid[64];
       char timestamp[32];
       struct timeval tv;
-      struct tm tm;
       gettimeofday(&tv, NULL);
-      gmtime_r(&tv.tv_sec, &tm);
-      ircd_snprintf(0, timestamp, sizeof(timestamp),
-                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
       ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                     cli_yxx(&me),
                     (unsigned long)cli_firsttime(&me),
@@ -456,14 +444,10 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       char msgid[64];
       char timestamp[32];
       struct timeval tv;
-      struct tm tm;
       gettimeofday(&tv, NULL);
-      gmtime_r(&tv.tv_sec, &tm);
-      ircd_snprintf(0, timestamp, sizeof(timestamp),
-                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
       ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                     cli_yxx(&me),
                     (unsigned long)cli_firsttime(&me),
@@ -715,14 +699,10 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
                                "%C :%s", acptr, text);
     else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
-      struct tm tm;
       gettimeofday(&tv, NULL);
-      gmtime_r(&tv.tv_sec, &tm);
-      ircd_snprintf(0, timestamp, sizeof(timestamp),
-                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
       ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                     cli_yxx(&me),
                     (unsigned long)cli_firsttime(&me),
@@ -805,14 +785,10 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
                                "%C :%s", acptr, text);
     else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
-      struct tm tm;
       gettimeofday(&tv, NULL);
-      gmtime_r(&tv.tv_sec, &tm);
-      ircd_snprintf(0, timestamp, sizeof(timestamp),
-                    "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
       ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                     cli_yxx(&me),
                     (unsigned long)cli_firsttime(&me),
@@ -865,14 +841,10 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
     char msgid[64];
     char timestamp[32];
     struct timeval tv;
-    struct tm tm;
     gettimeofday(&tv, NULL);
-    gmtime_r(&tv.tv_sec, &tm);
-    ircd_snprintf(0, timestamp, sizeof(timestamp),
-                  "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                  tm.tm_hour, tm.tm_min, tm.tm_sec,
-                  tv.tv_usec / 1000);
+    ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec,
+                  (unsigned long)(tv.tv_usec / 1000));
     ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                   cli_yxx(&me),
                   (unsigned long)cli_firsttime(&me),
@@ -915,14 +887,10 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
     char msgid[64];
     char timestamp[32];
     struct timeval tv;
-    struct tm tm;
     gettimeofday(&tv, NULL);
-    gmtime_r(&tv.tv_sec, &tm);
-    ircd_snprintf(0, timestamp, sizeof(timestamp),
-                  "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                  tm.tm_hour, tm.tm_min, tm.tm_sec,
-                  tv.tv_usec / 1000);
+    ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec,
+                  (unsigned long)(tv.tv_usec / 1000));
     ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                   cli_yxx(&me),
                   (unsigned long)cli_firsttime(&me),

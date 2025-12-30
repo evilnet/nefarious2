@@ -36,8 +36,8 @@ struct Client;
 /** Maximum size of a message ID */
 #define HISTORY_MSGID_LEN 64
 
-/** Maximum size of a timestamp string (ISO 8601) */
-#define HISTORY_TIMESTAMP_LEN 32
+/** Maximum size of a timestamp string (Unix timestamp with milliseconds) */
+#define HISTORY_TIMESTAMP_LEN 20
 
 /** Maximum size of sender string (nick!user@host) */
 #define HISTORY_SENDER_LEN (NICKLEN + USERLEN + HOSTLEN + 3)
@@ -64,7 +64,7 @@ enum HistoryMessageType {
  */
 struct HistoryMessage {
   char msgid[HISTORY_MSGID_LEN];       /**< Unique message ID */
-  char timestamp[HISTORY_TIMESTAMP_LEN]; /**< ISO 8601 UTC timestamp */
+  char timestamp[HISTORY_TIMESTAMP_LEN]; /**< Unix timestamp (seconds.milliseconds) */
   char target[CHANNELLEN + 1];         /**< Channel name or nick */
   char sender[HISTORY_SENDER_LEN];     /**< nick!user@host of sender */
   char account[ACCOUNTLEN + 1];        /**< Sender's account name (or empty) */
@@ -109,7 +109,7 @@ extern void history_shutdown(void);
 
 /** Store a message in the history database.
  * @param[in] msgid Unique message ID.
- * @param[in] timestamp ISO 8601 UTC timestamp.
+ * @param[in] timestamp Unix timestamp (seconds.milliseconds as string).
  * @param[in] target Channel or nick.
  * @param[in] sender Full sender mask (nick!user@host).
  * @param[in] account Sender's account name (may be NULL).
@@ -188,8 +188,8 @@ extern int history_query_between(const char *target,
 
 /** Query targets with recent message activity.
  * Used for CHATHISTORY TARGETS command.
- * @param[in] timestamp1 Start of time range (ISO 8601).
- * @param[in] timestamp2 End of time range (ISO 8601).
+ * @param[in] timestamp1 Start of time range (Unix timestamp).
+ * @param[in] timestamp2 End of time range (Unix timestamp).
  * @param[in] limit Maximum targets to return.
  * @param[out] result Pointer to result list head (caller must free).
  * @return Number of targets returned, or -1 on error.
@@ -228,11 +228,41 @@ extern int history_msgid_to_timestamp(const char *msgid, char *timestamp);
 extern int history_is_available(void);
 
 /*
+ * Timestamp Conversion API
+ *
+ * Internal storage and S2S use Unix timestamps (seconds.milliseconds).
+ * Client-facing @time= tags use ISO 8601 per IRCv3 spec.
+ */
+
+/** Format current time as Unix timestamp string.
+ * @param[out] buf Buffer for timestamp (at least HISTORY_TIMESTAMP_LEN).
+ * @param[in] buflen Size of buffer.
+ * @return Pointer to buf.
+ */
+extern char *history_format_timestamp(char *buf, size_t buflen);
+
+/** Convert Unix timestamp to ISO 8601 for client display.
+ * @param[in] unix_ts Unix timestamp string (seconds.milliseconds).
+ * @param[out] iso_buf Buffer for ISO 8601 output (at least 32 bytes).
+ * @param[in] iso_buflen Size of ISO buffer.
+ * @return 0 on success, -1 on error.
+ */
+extern int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_buflen);
+
+/** Convert ISO 8601 timestamp to Unix timestamp.
+ * @param[in] iso_ts ISO 8601 timestamp string.
+ * @param[out] unix_buf Buffer for Unix timestamp (at least HISTORY_TIMESTAMP_LEN).
+ * @param[in] unix_buflen Size of Unix buffer.
+ * @return 0 on success, -1 on error.
+ */
+extern int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen);
+
+/*
  * Read Marker API (IRCv3 draft/read-marker)
  *
  * Read markers are stored per account+target in the same LMDB environment.
  * Key: "account\0target"
- * Value: ISO 8601 timestamp
+ * Value: Unix timestamp (seconds.milliseconds as string)
  */
 
 /** Get the read marker timestamp for an account and target.
@@ -247,7 +277,7 @@ extern int readmarker_get(const char *account, const char *target, char *timesta
  * Only updates if the new timestamp is greater than the stored one.
  * @param[in] account Account name.
  * @param[in] target Channel name or nick.
- * @param[in] timestamp ISO 8601 timestamp.
+ * @param[in] timestamp Unix timestamp (seconds.milliseconds as string).
  * @return 0 on success (updated), 1 if not updated (older timestamp), -1 on error.
  */
 extern int readmarker_set(const char *account, const char *target, const char *timestamp);
