@@ -38,8 +38,8 @@ RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096 
 RUN make
 # Run unit tests during build (they require the built object files)
 RUN make test
-#RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
-RUN make install
+# make install runs an interactive SSL generator - pre-create pem to skip, then remove so entrypoint generates fresh one
+RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 
 # Build iauthd-ts
 WORKDIR /home/nefarious/nefarious2/tools/iauthd-ts
