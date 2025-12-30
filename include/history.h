@@ -311,4 +311,13 @@ extern void history_set_map_size(size_t size_mb);
  */
 extern size_t history_get_map_size(void);
 
+struct StatDesc;
+
+/** Report CHATHISTORY statistics for /STATS.
+ * @param[in] to Client requesting stats.
+ * @param[in] sd Stats descriptor.
+ * @param[in] param Extra parameter (unused).
+ */
+extern void history_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
+
 #endif /* INCLUDED_history_h */

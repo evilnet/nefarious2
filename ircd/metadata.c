@@ -47,6 +47,7 @@
 #include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
+#include "s_stats.h"
 #include "s_user.h"
 #include "send.h"
 #include "struct.h"
@@ -1696,4 +1697,64 @@ void metadata_cleanup_client_requests(struct Client *cptr)
               "metadata_cleanup_client_requests: Cleaned %d requests for %s",
               cleaned, cli_name(cptr));
   }
+}
+
+void
+metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "M :METADATA Statistics");
+
+#ifdef USE_LMDB
+  {
+    MDB_stat stat;
+    MDB_envinfo info;
+    MDB_txn *txn;
+    int rc;
+
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "M :  LMDB Backend: %s",
+               metadata_lmdb_available ? "Available" : "Unavailable");
+
+    if (metadata_lmdb_available && metadata_env) {
+      /* Get environment info */
+      rc = mdb_env_info(metadata_env, &info);
+      if (rc == 0) {
+        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                   "M :  Map size: %lu MB",
+                   (unsigned long)(info.me_mapsize / (1024 * 1024)));
+      }
+
+      /* Get database stats */
+      rc = mdb_txn_begin(metadata_env, NULL, MDB_RDONLY, &txn);
+      if (rc == 0) {
+        rc = mdb_stat(txn, metadata_dbi, &stat);
+        if (rc == 0) {
+          send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                     "M :  Account metadata DB: %lu entries",
+                     (unsigned long)stat.ms_entries);
+        }
+        mdb_txn_abort(txn);
+      }
+    }
+  }
+#else
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "M :  LMDB Backend: Not compiled in");
+#endif
+
+  /* X3 availability status */
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "M :  X3 Services: %s",
+             metadata_x3_is_available() ? "Available" : "Unavailable");
+
+  /* Write queue status */
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "M :  Write queue: %d pending",
+             metadata_queue_count());
+
+  /* Pending MDQ requests */
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "M :  MDQ requests: %d pending",
+             mdq_pending_count);
 }

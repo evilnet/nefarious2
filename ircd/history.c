@@ -37,9 +37,12 @@
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
 #include "ircd_log.h"
+#include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "numeric.h"
 #include "s_debug.h"
+#include "s_stats.h"
 
 #include <lmdb.h>
 #include <string.h>
@@ -1559,6 +1562,76 @@ size_t history_get_map_size(void)
   return history_map_size;
 }
 
+void
+history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  MDB_stat stat;
+  MDB_envinfo info;
+  MDB_txn *txn;
+  int rc;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :CHATHISTORY Statistics");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  LMDB Backend: %s",
+             history_available ? "Available" : "Unavailable");
+
+  if (!history_available) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  (LMDB not initialized)");
+    return;
+  }
+
+  /* Get environment info */
+  rc = mdb_env_info(history_env, &info);
+  if (rc == 0) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Map size: %lu MB",
+               (unsigned long)(info.me_mapsize / (1024 * 1024)));
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Last transaction ID: %lu",
+               (unsigned long)info.me_last_txnid);
+  }
+
+  /* Get per-database stats */
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc == 0) {
+    /* Main message database */
+    rc = mdb_stat(txn, history_dbi, &stat);
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  Messages DB: %lu entries, depth %u",
+                 (unsigned long)stat.ms_entries, stat.ms_depth);
+    }
+
+    /* Message ID index */
+    rc = mdb_stat(txn, history_msgid_dbi, &stat);
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  MsgID index: %lu entries",
+                 (unsigned long)stat.ms_entries);
+    }
+
+    /* Targets database */
+    rc = mdb_stat(txn, history_targets_dbi, &stat);
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  Targets DB: %lu entries",
+                 (unsigned long)stat.ms_entries);
+    }
+
+    /* Read markers database */
+    rc = mdb_stat(txn, history_readmarkers_dbi, &stat);
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  Read markers: %lu entries",
+                 (unsigned long)stat.ms_entries);
+    }
+
+    mdb_txn_abort(txn);
+  }
+}
+
 #else /* !USE_LMDB */
 
 /* Stub implementations when LMDB is not available */
@@ -1701,6 +1774,14 @@ void history_set_map_size(size_t size_mb)
 size_t history_get_map_size(void)
 {
   return 0;
+}
+
+void
+history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  (void)sd; (void)param;
+  /* For stub version, we need send_reply - include the headers */
+  /* This function is only callable if stats are registered, which requires LMDB */
 }
 
 #endif /* USE_LMDB */

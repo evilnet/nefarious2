@@ -379,4 +379,13 @@ extern void metadata_cleanup_client_requests(struct Client *cptr);
 /** Initialize MDQ request tracking. */
 extern void metadata_request_init(void);
 
+struct StatDesc;
+
+/** Report METADATA statistics for /STATS.
+ * @param[in] to Client requesting stats.
+ * @param[in] sd Stats descriptor.
+ * @param[in] param Extra parameter (unused).
+ */
+extern void metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
+
 #endif /* INCLUDED_metadata_h */
