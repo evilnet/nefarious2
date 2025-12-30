@@ -206,6 +206,9 @@ extern void send_netsplit_batch_end(const char *batch_id);
 extern void set_active_network_batch(const char *batch_id);
 extern const char *get_active_network_batch(void);
 
+/* Generate unique message ID for IRCv3 message-ids */
+extern char *generate_msgid(char *buf, size_t buflen);
+
 /* IRCv3 standard-replies (FAIL/WARN/NOTE) */
 extern void send_fail(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);

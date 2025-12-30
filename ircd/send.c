@@ -37,6 +37,7 @@
 #include "list.h"
 #include "match.h"
 #include "msg.h"
+#include "numeric.h"
 #include "numnicks.h"
 #include "parse.h"
 #include "s_bsd.h"
@@ -224,7 +225,7 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
  * @param[in] buflen Size of buffer.
  * @return Pointer to buf.
  */
-static char *generate_msgid(char *buf, size_t buflen)
+char *generate_msgid(char *buf, size_t buflen)
 {
   snprintf(buf, buflen, "%s-%lu-%lu",
            cli_yxx(&me),
@@ -2232,9 +2233,40 @@ static void send_standard_reply(struct Client *to, const char *type,
   if (!MyConnect(to))
     return;
 
-  /* Only send to clients with standard-replies capability */
-  if (!feature_bool(FEAT_CAP_standard_replies) || !CapActive(to, CAP_STANDARDREPLIES))
+  /* If client doesn't have standard-replies, fall back to numerics or NOTICE */
+  if (!feature_bool(FEAT_CAP_standard_replies) || !CapActive(to, CAP_STANDARDREPLIES)) {
+    /* Map known error codes to traditional numerics where applicable */
+    if (strcmp(type, "FAIL") == 0) {
+      if (strcmp(code, "NEED_MORE_PARAMS") == 0) {
+        /* ERR_NEEDMOREPARAMS (461) */
+        mb = msgq_make(to, ":%s 461 %s %s :Not enough parameters",
+                       cli_name(&me), IsRegistered(to) ? cli_name(to) : "*", command);
+        send_buffer(to, mb, 0);
+        msgq_clean(mb);
+        return;
+      }
+      if (strcmp(code, "ALREADY_AUTHENTICATED") == 0) {
+        /* ERR_ALREADYREGISTRED (462) */
+        mb = msgq_make(to, ":%s 462 %s :You may not reregister",
+                       cli_name(&me), IsRegistered(to) ? cli_name(to) : "*");
+        send_buffer(to, mb, 0);
+        msgq_clean(mb);
+        return;
+      }
+    }
+    /* Fall back to NOTICE for unmapped codes */
+    if (context && *context)
+      mb = msgq_make(to, ":%s NOTICE %s :%s %s %s %s :%s",
+                     cli_name(&me), IsRegistered(to) ? cli_name(to) : "*",
+                     type, command, code, context, description);
+    else
+      mb = msgq_make(to, ":%s NOTICE %s :%s %s %s :%s",
+                     cli_name(&me), IsRegistered(to) ? cli_name(to) : "*",
+                     type, command, code, description);
+    send_buffer(to, mb, 0);
+    msgq_clean(mb);
     return;
+  }
 
   /* Format tags (label, time) if applicable */
   if (format_message_tags_for(tagbuf, sizeof(tagbuf), NULL, to)) {
