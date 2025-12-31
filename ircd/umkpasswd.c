@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
 /* ircu headers */
@@ -116,27 +117,49 @@ void log_write(enum LogSys subsys, enum LogLevel severity,
   va_end(vl);
 }
 
-/* quick and dirty salt generator */
+/** Generate random bytes from /dev/urandom
+ * @param buf Buffer to fill
+ * @param len Number of bytes to generate
+ * @return 0 on success, -1 on failure
+ */
+static int get_random_bytes(unsigned char* buf, size_t len)
+{
+  int fd;
+  ssize_t n;
+
+  fd = open("/dev/urandom", O_RDONLY);
+  if (fd < 0)
+    return -1;
+
+  n = read(fd, buf, len);
+  close(fd);
+
+  return (n == (ssize_t)len) ? 0 : -1;
+}
+
+/* secure salt generator using /dev/urandom */
 char *make_salt(const char *salts)
 {
 char *tmp = NULL;
-long int n = 0;
+unsigned char rand_bytes[2];
+size_t salts_len;
 
- /* try and get around them running this time after time in quick succession */
- sleep(1);
- srandom((unsigned int)time(NULL));
+ salts_len = strlen(salts);
 
  if((tmp = calloc(3, sizeof(char))) != NULL)
  {
-  /* can't optimize this much more than just doing it twice */
-  n = ((float)(strlen(salts))*random()/(RAND_MAX+1.0));
-  memcpy(tmp, (salts+n), 1);
-  sleep(2);
-  n = ((float)(strlen(salts))*random()/(RAND_MAX+1.0));
-  memcpy((tmp+1), (salts+n), 1);
+  /* Use /dev/urandom for cryptographically secure random salt */
+  if (get_random_bytes(rand_bytes, 2) < 0) {
+    /* Fallback to less secure method if /dev/urandom unavailable */
+    rand_bytes[0] = (unsigned char)(time(NULL) & 0xFF);
+    rand_bytes[1] = (unsigned char)((time(NULL) >> 8) & 0xFF);
+  }
+
+  tmp[0] = salts[rand_bytes[0] % salts_len];
+  tmp[1] = salts[rand_bytes[1] % salts_len];
 
   Debug((DEBUG_DEBUG, "salts = %s", salts));
-  Debug((DEBUG_DEBUG, "strlen(salts) = %d", strlen(salts)));
+  Debug((DEBUG_DEBUG, "strlen(salts) = %d", salts_len));
  }
 
 return tmp;

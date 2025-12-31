@@ -45,13 +45,13 @@ struct ChildRecord {
   pid_t cpid;
 };
 
-/** Counts various types of signals that we receive. */
-static struct tag_SignalCounter {
-  unsigned int alrm; /**< Received SIGALRM count. */
-  unsigned int hup;  /**< Received SIGHUP count. */
-  unsigned int chld; /**< Received SIGCHLD count. */
-  unsigned int usr1; /**< Received SIGUSR1 count. */
-} SignalCounter;
+/** Counts various types of signals that we receive.
+ * Using volatile sig_atomic_t for signal-safe access from handlers.
+ */
+static volatile sig_atomic_t SignalCounter_alrm = 0; /**< Received SIGALRM count. */
+static volatile sig_atomic_t SignalCounter_hup = 0;  /**< Received SIGHUP count. */
+static volatile sig_atomic_t SignalCounter_chld = 0; /**< Received SIGCHLD count. */
+static volatile sig_atomic_t SignalCounter_usr1 = 0; /**< Received SIGUSR1 count. */
 
 /** Event generator for SIGHUP. */
 static struct Signal sig_hup;
@@ -78,7 +78,7 @@ static struct ChildRecord *crec_freelist;
  */
 static void sigalrm_handler(int sig)
 {
-  ++SignalCounter.alrm;
+  ++SignalCounter_alrm;
 }
 
 /** Signal callback for SIGTERM.
@@ -104,7 +104,7 @@ static void sighup_callback(struct Event* ev)
   assert(SIGHUP == sig_signal(ev_signal(ev)));
   assert(SIGHUP == ev_data(ev));
 
-  ++SignalCounter.hup;
+  ++SignalCounter_hup;
   rehash(&me, 1);
 }
 
@@ -118,7 +118,7 @@ static void sigusr1_callback(struct Event* ev)
   assert(SIGUSR1 == sig_signal(ev_signal(ev)));
   assert(SIGUSR1 == ev_data(ev));
 
-  ++SignalCounter.usr1;
+  ++SignalCounter_usr1;
 #ifdef USE_SSL
   ssl_reinit(1);
 #endif
@@ -239,7 +239,7 @@ static void sigchld_callback(struct Event *ev)
   pid_t cpid;
   int status;
 
-  ++SignalCounter.chld;
+  ++SignalCounter_chld;
   do {
     cpid = waitpid(-1, &status, WNOHANG);
     if (cpid > 0)

@@ -556,15 +556,12 @@ char *ssl_get_cipher(SSL *ssl)
   int bits;
   const SSL_CIPHER *c;
 
-  buf[0] = '\0';
-  strcpy(buf, SSL_get_version(ssl));
-  strcat(buf, "-");
-  strcat(buf, SSL_get_cipher(ssl));
   c = SSL_get_current_cipher(ssl);
   SSL_CIPHER_get_bits(c, &bits);
-  strcat(buf, "-");
-  strcat(buf, (char *)itoa(bits));
-  strcat(buf, "bits");
+
+  /* Use ircd_snprintf for safe bounded string formatting */
+  ircd_snprintf(0, buf, sizeof(buf), "%s-%s-%dbits",
+                SSL_get_version(ssl), SSL_get_cipher(ssl), bits);
   return (buf);
 }
 

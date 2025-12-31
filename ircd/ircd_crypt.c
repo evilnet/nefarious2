@@ -60,6 +60,7 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <unistd.h>
 #include <string.h>
+#include <openssl/crypto.h>
 
 /* evil global */
 crypt_mechs_t* crypt_mechs_root;
@@ -267,6 +268,7 @@ int oper_password_match(const char* to_match, const char* passwd)
 {
   char *crypted;
   int res;
+  size_t crypted_len, passwd_len;
   /*
    * use first two chars of the password they send in as salt
    *
@@ -282,7 +284,16 @@ int oper_password_match(const char* to_match, const char* passwd)
 
   if (!crypted)
    return 0;
-  res = strcmp(crypted, passwd);
+
+  /* Use constant-time comparison to prevent timing attacks */
+  crypted_len = strlen(crypted);
+  passwd_len = strlen(passwd);
+  if (crypted_len != passwd_len) {
+    res = 1;
+  } else {
+    res = CRYPTO_memcmp(crypted, passwd, crypted_len);
+  }
+
   MyFree(crypted);
   return 0 == res;
 }

@@ -35,6 +35,7 @@
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "msg.h"
+#include "random.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
@@ -46,9 +47,9 @@ static char saltChars[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0
 static char *make_salt(void)
 {
   static char salt[3];
-  srandom(CurrentTime); /* may not be the BEST salt, but its close */
-  salt[0] = saltChars[random() % 64];
-  salt[1] = saltChars[random() % 64];
+  /* Use ircrandom() for better entropy than time-seeded random() */
+  salt[0] = saltChars[ircrandom() % 64];
+  salt[1] = saltChars[ircrandom() % 64];
   salt[2] = '\0';
   return salt;
 }
@@ -57,12 +58,12 @@ static char *make_md5_salt(void)
 {
   static char salt[13];
   int i;
-  srandom(CurrentTime); /* may not be the BEST salt, but its close */
+  /* Use ircrandom() for better entropy than time-seeded random() */
   salt[0] = '$';
   salt[1] = '1';
   salt[2] = '$';
   for (i=3; i<11; i++)
-    salt[i] = saltChars[random() % 64];
+    salt[i] = saltChars[ircrandom() % 64];
   salt[11] = '$';
   salt[12] = '\0';
   return salt;

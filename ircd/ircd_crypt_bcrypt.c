@@ -35,6 +35,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <time.h>
 #include <fcntl.h>
 #ifdef HAVE_CRYPT_H

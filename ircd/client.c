@@ -393,15 +393,22 @@ char *client_print_privs(struct Client *client)
 {
   int i;
   static char privbufp[BUFSIZE] = "";
+  size_t pos = 0;
+  size_t namelen;
 
   privbufp[0] = '\0';
   for (i = 0; privtab[i].name; i++) {
     if (HasPriv(client, privtab[i].priv)) {
-      strcat(privbufp, privtab[i].name);
-      strcat(privbufp, " ");
+      namelen = strlen(privtab[i].name);
+      /* Check bounds before appending: name + space + null terminator */
+      if (pos + namelen + 2 > sizeof(privbufp))
+        break;
+      memcpy(privbufp + pos, privtab[i].name, namelen);
+      pos += namelen;
+      privbufp[pos++] = ' ';
     }
   }
-  privbufp[strlen(privbufp)] = 0;
+  privbufp[pos] = '\0';
 
   return (char *)privbufp;
 }

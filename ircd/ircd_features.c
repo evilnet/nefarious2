@@ -276,11 +276,13 @@ feature_notify_excepts(void)
 
   add_isupport_s("CHANMODES", cmodebuf);
 
-  strcat(imaxlist, "b:");
-  strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
+  /* Use ircd_snprintf for safer string formatting */
   if (feature_bool(FEAT_EXCEPTS)) {
-    strcat(imaxlist, ",e:");
-    strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
+    ircd_snprintf(0, imaxlist, sizeof(imaxlist), "b:%d,e:%d",
+                  feature_int(FEAT_MAXBANS), feature_int(FEAT_MAXEXCEPTS));
+  } else {
+    ircd_snprintf(0, imaxlist, sizeof(imaxlist), "b:%d",
+                  feature_int(FEAT_MAXBANS));
   }
 
   add_isupport_s("MAXLIST", imaxlist);
@@ -294,11 +296,13 @@ set_isupport_maxexcepts(void)
 
     add_isupport_i("MAXBANS", feature_int(FEAT_MAXBANS));
 
-    strcat(imaxlist, "b:");
-    strcat(imaxlist, itoa(feature_int(FEAT_MAXBANS)));
+    /* Use ircd_snprintf for safer string formatting */
     if (feature_bool(FEAT_EXCEPTS)) {
-      strcat(imaxlist, ",e:");
-      strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
+      ircd_snprintf(0, imaxlist, sizeof(imaxlist), "b:%d,e:%d",
+                    feature_int(FEAT_MAXBANS), feature_int(FEAT_MAXEXCEPTS));
+    } else {
+      ircd_snprintf(0, imaxlist, sizeof(imaxlist), "b:%d",
+                    feature_int(FEAT_MAXBANS));
     }
 
     add_isupport_s("MAXLIST", imaxlist);

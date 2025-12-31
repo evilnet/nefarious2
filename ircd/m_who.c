@@ -318,15 +318,18 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* I'd love to add also a check on the number of matches fields per time */
   counter = (2048 / (counter + 4));
-  if (mask && (strlen(mask) > 510))
-    mask[510] = '\0';
   move_marker();
   commas = (mask && strchr(mask, ','));
 
   /* First treat mask as a list of plain nicks/channels */
   if (mask)
   {
-    strcpy(mymask, mask);
+    /* Safe bounded copy to mymask */
+    size_t len = strlen(mask);
+    if (len >= sizeof(mymask))
+      len = sizeof(mymask) - 1;
+    memcpy(mymask, mask, len);
+    mymask[len] = '\0';
     for (p = 0, nick = ircd_strtok(&p, mymask, ","); nick;
         nick = ircd_strtok(&p, 0, ","))
     {

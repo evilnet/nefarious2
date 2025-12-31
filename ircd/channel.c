@@ -1056,6 +1056,8 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
                           struct Channel *chptr, struct Membership *member)
 {
   int previous_parameter = 0;
+  size_t pbuf_pos = 0;
+  size_t len;
 
   assert(0 != mbuf);
   assert(0 != pbuf);
@@ -1106,44 +1108,78 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'S';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
-    ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
+    pbuf_pos = ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
     previous_parameter = 1;
   }
   if (*chptr->mode.redir) {
     *mbuf++ = 'L';
-    if (previous_parameter)
-      strcat(pbuf, " ");
-    strcat(pbuf, chptr->mode.redir);
-    previous_parameter = 1;
+    len = strlen(chptr->mode.redir);
+    if (pbuf_pos + len + 2 < (size_t)buflen) {
+      if (previous_parameter)
+        pbuf[pbuf_pos++] = ' ';
+      memcpy(pbuf + pbuf_pos, chptr->mode.redir, len);
+      pbuf_pos += len;
+      pbuf[pbuf_pos] = '\0';
+      previous_parameter = 1;
+    }
   }
   if (*chptr->mode.key) {
     *mbuf++ = 'k';
-    if (previous_parameter)
-      strcat(pbuf, " ");
     if (is_chan_op(cptr, chptr) || IsServer(cptr) || IsOper(cptr)) {
-      strcat(pbuf, chptr->mode.key);
-    } else
-      strcat(pbuf, "*");
-    previous_parameter = 1;
+      len = strlen(chptr->mode.key);
+      if (pbuf_pos + len + 2 < (size_t)buflen) {
+        if (previous_parameter)
+          pbuf[pbuf_pos++] = ' ';
+        memcpy(pbuf + pbuf_pos, chptr->mode.key, len);
+        pbuf_pos += len;
+        pbuf[pbuf_pos] = '\0';
+        previous_parameter = 1;
+      }
+    } else if (pbuf_pos + 3 < (size_t)buflen) {
+      if (previous_parameter)
+        pbuf[pbuf_pos++] = ' ';
+      pbuf[pbuf_pos++] = '*';
+      pbuf[pbuf_pos] = '\0';
+      previous_parameter = 1;
+    }
   }
   if (*chptr->mode.apass && (IsOpLevels(cptr) || !IsServer(cptr))) {
     *mbuf++ = 'A';
-    if (previous_parameter)
-      strcat(pbuf, " ");
     if (IsServer(cptr) || IsOper(cptr)) {
-      strcat(pbuf, chptr->mode.apass);
-    } else
-      strcat(pbuf, "*");
-    previous_parameter = 1;
+      len = strlen(chptr->mode.apass);
+      if (pbuf_pos + len + 2 < (size_t)buflen) {
+        if (previous_parameter)
+          pbuf[pbuf_pos++] = ' ';
+        memcpy(pbuf + pbuf_pos, chptr->mode.apass, len);
+        pbuf_pos += len;
+        pbuf[pbuf_pos] = '\0';
+        previous_parameter = 1;
+      }
+    } else if (pbuf_pos + 3 < (size_t)buflen) {
+      if (previous_parameter)
+        pbuf[pbuf_pos++] = ' ';
+      pbuf[pbuf_pos++] = '*';
+      pbuf[pbuf_pos] = '\0';
+      previous_parameter = 1;
+    }
   }
   if (*chptr->mode.upass && (IsOpLevels(cptr) || !IsServer(cptr))) {
     *mbuf++ = 'U';
-    if (previous_parameter)
-      strcat(pbuf, " ");
     if (IsServer(cptr) || (member && IsChanOp(member) && OpLevel(member) == 0) || IsOper(cptr)) {
-      strcat(pbuf, chptr->mode.upass);
-    } else
-      strcat(pbuf, "*");
+      len = strlen(chptr->mode.upass);
+      if (pbuf_pos + len + 2 < (size_t)buflen) {
+        if (previous_parameter)
+          pbuf[pbuf_pos++] = ' ';
+        memcpy(pbuf + pbuf_pos, chptr->mode.upass, len);
+        pbuf_pos += len;
+        pbuf[pbuf_pos] = '\0';
+      }
+    } else if (pbuf_pos + 3 < (size_t)buflen) {
+      if (previous_parameter)
+        pbuf[pbuf_pos++] = ' ';
+      pbuf[pbuf_pos++] = '*';
+      pbuf[pbuf_pos] = '\0';
+    }
   }
   *mbuf = '\0';
 }
@@ -3016,8 +3052,8 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
       return;
     }
 
-    /* Reject invalid channel names */
-    if (!IsChannelName(t_str) || !strIsIrcCh(t_str))
+    /* Reject invalid channel names or those exceeding CHANNELLEN */
+    if (!IsChannelName(t_str) || !strIsIrcCh(t_str) || strlen(t_str) > CHANNELLEN)
       return;
   } else
     t_str = state->chptr->mode.redir;
