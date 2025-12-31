@@ -584,7 +584,14 @@ static int check_auth_finished(struct AuthRequest *auth)
     const char *mark;
     int blocked = dnsbl_result(auth->client, auth->dnsbl_request, &action, &mark);
 
-    if (blocked && action == DNSBL_ACT_BLOCK_ALL)
+    if (action == DNSBL_ACT_WHITELIST)
+    {
+      /* Native DNSBL whitelist hit - exempt client from all connection blocks */
+      SetDNSBLExempt(auth->client);
+      Debug((DEBUG_DNS, "DNSBL: Client %s whitelisted, setting exempt flag",
+             cli_name(auth->client)));
+    }
+    else if (blocked && action == DNSBL_ACT_BLOCK_ALL)
     {
       ServerStats->is_ref++;
       sendto_opmask_butone(0, SNO_GLINE, "DNSBL blocked connection from %s (%s@%s) [%s]",
@@ -2431,6 +2438,19 @@ static int iauth_cmd_done_account(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_kill(struct IAuth *iauth, struct Client *cli,
 			  int parc, char **params)
 {
+  /* Check if client is exempt due to native DNSBL whitelist */
+  if (IsDNSBLExempt(cli))
+  {
+    Debug((DEBUG_INFO, "IAuth kill for %s blocked by DNSBL whitelist exemption",
+           cli_name(cli)));
+    sendto_opmask_butone(0, SNO_AUTH,
+      "IAuth kill for %s blocked (DNSBL whitelisted)",
+      cli_name(cli));
+    if (cli_auth(cli))
+      FlagClr(&cli_auth(cli)->flags, AR_IAUTH_PENDING);
+    return 0;
+  }
+
   if (cli_auth(cli))
     FlagClr(&cli_auth(cli)->flags, AR_IAUTH_PENDING);
   if (EmptyString(params[0]))

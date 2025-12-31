@@ -99,6 +99,12 @@ extern const char *gitsync_get_host_fingerprint(char *host, size_t hostlen);
  */
 extern void gitsync_clear_host_fingerprint(void);
 
+/** Generate an Ed25519 SSH key for GitSync authentication
+ * @param key_path Path to save the private key (OpenSSH format)
+ * @return 1 on success, 0 on failure
+ */
+extern int gitsync_generate_ssh_key(const char *key_path);
+
 #endif /* USE_LIBGIT2 */
 
 #endif /* INCLUDED_gitsync_h */

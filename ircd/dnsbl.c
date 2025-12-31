@@ -318,71 +318,124 @@ dnsbl_cache_expire(void)
   }
 }
 
+/** Per-query context for DNSBL DNS lookups
+ * Each DNS query gets its own context to avoid race conditions
+ * with the server pointer being overwritten.
+ */
+struct DNSBLQueryContext {
+  struct DNSBLRequest *request;  /**< Parent request */
+  struct DNSBLServer *server;    /**< Server this query is for */
+};
+
+/** Free a DNSBL request and all its resources */
+static void
+dnsbl_request_free(struct DNSBLRequest *req)
+{
+  if (!req)
+    return;
+
+  if (req->mark)
+    MyFree(req->mark);
+  MyFree(req);
+}
+
 /** Callback for DNSBL DNS lookup completion */
 static void
 dnsbl_dns_callback(void *vptr, const struct irc_in_addr *addr, const char *h)
 {
-  struct DNSBLRequest *req = (struct DNSBLRequest *)vptr;
+  struct DNSBLQueryContext *ctx = (struct DNSBLQueryContext *)vptr;
+  struct DNSBLRequest *req;
+  struct DNSBLServer *server;
   unsigned int result_byte;
 
-  if (!req || !req->client)
+  if (!ctx) {
     return;
+  }
+
+  req = ctx->request;
+  server = ctx->server;
+
+  /* Free the per-query context */
+  MyFree(ctx);
+
+  if (!req) {
+    return;
+  }
 
   req->pending_count--;
 
-  if (addr) {
-    /* We got a response - extract the last octet as the result */
-    if (irc_in_addr_is_ipv4(addr)) {
-      result_byte = addr->in6_16[7] & 0xFF;
-    } else {
-      result_byte = addr->in6_16[7] & 0xFF;
+  /* Check if request was cancelled (client disconnected) */
+  if (req->cancelled) {
+    /* If this was the last pending query, free the request */
+    if (req->pending_count == 0) {
+      dnsbl_request_free(req);
     }
+    return;
+  }
 
-    Debug((DEBUG_DNS, "DNSBL: Got response for %s, result byte=%u, bitmask=0x%x",
-           req->server->domain, result_byte, req->server->bitmask));
+  if (!req->client) {
+    /* Client gone but not properly cancelled - clean up */
+    if (req->pending_count == 0) {
+      dnsbl_request_free(req);
+    }
+    return;
+  }
 
-    /* Check if this result matches our bitmask */
-    if (req->server->bitmask & (1 << result_byte)) {
-      req->server->hits++;
-      req->result |= (1 << result_byte);
+  if (addr && server) {
+    /* We got a response - extract the last octet as the result */
+    result_byte = addr->in6_16[7] & 0xFF;
 
-      /* Process the action based on priority */
-      switch (req->server->action) {
-      case DNSBL_ACT_WHITELIST:
-        req->whitelisted = 1;
-        dnsbl_stats.total_whitelists++;
-        Debug((DEBUG_DNS, "DNSBL: Whitelist hit from %s", req->server->domain));
-        break;
+    /* Clamp result_byte to valid bitmask range (0-31) to avoid UB */
+    if (result_byte >= 32) {
+      Debug((DEBUG_DNS, "DNSBL: Result byte %u from %s out of bitmask range, ignoring",
+             result_byte, server->domain));
+    } else {
+      Debug((DEBUG_DNS, "DNSBL: Got response for %s, result byte=%u, bitmask=0x%x",
+             server->domain, result_byte, server->bitmask));
 
-      case DNSBL_ACT_BLOCK_ALL:
-        if (req->action < DNSBL_ACT_BLOCK_ALL && !req->whitelisted) {
-          req->action = DNSBL_ACT_BLOCK_ALL;
-          req->server->blocks++;
-          dnsbl_stats.total_blocks++;
-        }
-        break;
+      /* Check if this result matches our bitmask */
+      if (server->bitmask & (1U << result_byte)) {
+        server->hits++;
+        req->result |= (1U << result_byte);
 
-      case DNSBL_ACT_BLOCK_ANON:
-        if (req->action < DNSBL_ACT_BLOCK_ANON && !req->whitelisted) {
-          req->action = DNSBL_ACT_BLOCK_ANON;
-          req->server->blocks++;
-        }
-        break;
+        /* Process the action based on priority */
+        switch (server->action) {
+        case DNSBL_ACT_WHITELIST:
+          req->whitelisted = 1;
+          dnsbl_stats.total_whitelists++;
+          Debug((DEBUG_DNS, "DNSBL: Whitelist hit from %s", server->domain));
+          break;
 
-      case DNSBL_ACT_MARK:
-        if (req->action < DNSBL_ACT_MARK && !req->whitelisted) {
-          req->action = DNSBL_ACT_MARK;
-          if (req->server->mark) {
-            if (req->mark)
-              MyFree(req->mark);
-            DupString(req->mark, req->server->mark);
+        case DNSBL_ACT_BLOCK_ALL:
+          if (req->action < DNSBL_ACT_BLOCK_ALL && !req->whitelisted) {
+            req->action = DNSBL_ACT_BLOCK_ALL;
+            server->blocks++;
+            dnsbl_stats.total_blocks++;
           }
-          dnsbl_stats.total_marks++;
-        }
-        break;
+          break;
 
-      default:
-        break;
+        case DNSBL_ACT_BLOCK_ANON:
+          if (req->action < DNSBL_ACT_BLOCK_ANON && !req->whitelisted) {
+            req->action = DNSBL_ACT_BLOCK_ANON;
+            server->blocks++;
+          }
+          break;
+
+        case DNSBL_ACT_MARK:
+          if (req->action < DNSBL_ACT_MARK && !req->whitelisted) {
+            req->action = DNSBL_ACT_MARK;
+            if (server->mark) {
+              if (req->mark)
+                MyFree(req->mark);
+              DupString(req->mark, server->mark);
+            }
+            dnsbl_stats.total_marks++;
+          }
+          break;
+
+        default:
+          break;
+        }
       }
     }
   }
@@ -404,6 +457,7 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
   struct DNSBLServer *server;
   struct DNSBLRequest *req;
   struct DNSBLCacheEntry *cached;
+  struct DNSBLQueryContext *ctx;
   char query[DNSBL_QUERY_MAXLEN];
   int started = 0;
 
@@ -431,6 +485,7 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
 
   req->client = cptr;
   req->action = DNSBL_ACT_NONE;
+  req->cancelled = 0;
 
   /* Return the request to the caller */
   if (request)
@@ -438,7 +493,13 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
 
   /* Start lookups for each configured DNSBL */
   for (server = dnsbl_servers; server; server = server->next) {
-    req->server = server;
+    /* Create per-query context to avoid stale server pointer issue */
+    ctx = (struct DNSBLQueryContext *)MyCalloc(1, sizeof(struct DNSBLQueryContext));
+    if (!ctx)
+      continue;
+
+    ctx->request = req;
+    ctx->server = server;
 
     /* Format the query based on IP version */
     if (irc_in_addr_is_ipv4(&cli_ip(cptr))) {
@@ -455,9 +516,16 @@ dnsbl_check(struct Client *cptr, struct DNSBLRequest **request)
     req->pending_count++;
     dnsbl_stats.total_lookups++;
 
-    /* Start the DNS lookup */
-    gethost_byname(query, dnsbl_dns_callback, req);
+    /* Start the DNS lookup with per-query context */
+    gethost_byname(query, dnsbl_dns_callback, ctx);
     started++;
+  }
+
+  /* If no queries started, clean up the request */
+  if (started == 0) {
+    MyFree(req);
+    if (request)
+      *request = NULL;
   }
 
   return started > 0 ? 1 : 0;
@@ -469,13 +537,20 @@ dnsbl_cancel(struct DNSBLRequest *request)
   if (!request)
     return;
 
-  /* Note: DNS requests will complete on their own, but we disconnect
-   * the client reference so callbacks become no-ops */
+  /* Mark request as cancelled - don't free it here!
+   * The DNS callbacks will complete asynchronously and check the
+   * cancelled flag. The last callback to complete will free the request.
+   * This prevents use-after-free when a malicious/slow DNS server
+   * delays responses until after the client disconnects.
+   */
+  request->cancelled = 1;
   request->client = NULL;
 
-  if (request->mark)
-    MyFree(request->mark);
-  MyFree(request);
+  /* If no queries are pending, we can free immediately */
+  if (request->pending_count == 0) {
+    dnsbl_request_free(request);
+  }
+  /* Otherwise, the last callback will free it */
 }
 
 int

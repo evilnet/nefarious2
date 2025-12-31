@@ -239,6 +239,8 @@ enum Flag
     FLAG_SERVER_NOOP,               /**< Server has been NOOP'ed */
     FLAG_SENT_CVERSION,             /**< Client's CTCP VERSION reply has been sent out */
 
+    FLAG_DNSBL_EXEMPT,              /**< Client is exempt from blocks (native DNSBL whitelist hit) */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -812,6 +814,8 @@ struct Client {
 #define IsServerNoop(x)         HasFlag(x, FLAG_SERVER_NOOP)
 /** Return non-zero if the client's CTCP VERSION reply has been sent out. */
 #define IsCVersionSent(x)       HasFlag(x, FLAG_SENT_CVERSION)
+/** Return non-zero if the client is exempt from blocks (native DNSBL whitelist). */
+#define IsDNSBLExempt(x)        HasFlag(x, FLAG_DNSBL_EXEMPT)
 /** Return non-zero if the client has an active PING request. */
 #define IsPingSent(x)           HasFlag(x, FLAG_PINGSENT)
 
@@ -932,6 +936,8 @@ struct Client {
 #define SetServerNoop(x)        SetFlag(x, FLAG_SERVER_NOOP)
 /** Mark a client as having had it's CTCP VERSION sent out. */
 #define SetCVersionSent(x)      SetFlag(x, FLAG_SENT_CVERSION)
+/** Mark a client as exempt from blocks (native DNSBL whitelist). */
+#define SetDNSBLExempt(x)       SetFlag(x, FLAG_DNSBL_EXEMPT)
 /** Mark a client as having a pending PING. */
 #define SetPingSent(x)          SetFlag(x, FLAG_PINGSENT)
 

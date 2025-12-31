@@ -70,11 +70,11 @@ struct DNSBLCacheEntry {
 /** DNSBL lookup request tracking */
 struct DNSBLRequest {
   struct Client *client;         /**< Associated client */
-  struct DNSBLServer *server;    /**< DNSBL server being queried */
   struct DNSBLRequest *next;     /**< Next pending request */
   int pending_count;             /**< Number of pending lookups */
   unsigned int result;           /**< Accumulated result */
   int whitelisted;               /**< Set if whitelist hit */
+  int cancelled;                 /**< Set if request was cancelled (client disconnected) */
   enum DNSBLAction action;       /**< Highest priority action */
   char *mark;                    /**< Mark string to apply */
 };

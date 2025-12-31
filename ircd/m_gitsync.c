@@ -308,6 +308,17 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         return 0;
       }
 
+      /* Check if SSH key exists, generate it if not */
+      if (access(ssh_key_path, F_OK) != 0) {
+        sendcmdto_one(&me, CMD_NOTICE, sptr,
+                      "%C :SSH key not found, generating...", sptr);
+        if (!gitsync_generate_ssh_key(ssh_key_path)) {
+          sendcmdto_one(&me, CMD_NOTICE, sptr,
+                        "%C :Failed to generate SSH key", sptr);
+          return 0;
+        }
+      }
+
       /* Try to read existing .pub file first */
       ircd_snprintf(0, pubkey_path, sizeof(pubkey_path), "%s.pub", ssh_key_path);
       fp = fopen(pubkey_path, "r");

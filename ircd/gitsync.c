@@ -52,12 +52,6 @@
 #include <ctype.h>
 #include <sys/stat.h>
 
-#ifdef USE_SSL
-#include <openssl/evp.h>
-#include <openssl/pem.h>
-#include <openssl/err.h>
-#endif
-
 /** Maximum size of linesync.data file (1 MB) */
 #define GITSYNC_MAX_SIZE (1024 * 1024)
 
@@ -87,154 +81,48 @@ static const char *status_strings[] = {
   "Apply error"
 };
 
-#ifdef USE_SSL
-/** Generate an Ed25519 SSH key for GitSync authentication
- * @param key_path Path to save the private key (PEM format)
+/** Generate an Ed25519 SSH key for GitSync authentication using ssh-keygen
+ * @param key_path Path to save the private key (OpenSSH format)
  * @return 1 on success, 0 on failure
  */
-static int
+int
 gitsync_generate_ssh_key(const char *key_path)
 {
-  EVP_PKEY *pkey = NULL;
-  EVP_PKEY_CTX *ctx = NULL;
-  FILE *fp = NULL;
-  BIO *bio = NULL;
+  char cmd[1024];
   char pubkey_path[512];
-  unsigned char *pubkey_data = NULL;
-  size_t pubkey_len = 0;
-  int ret = 0;
+  char pubkey_line[512];
+  FILE *fp;
+  int ret;
 
-  /* Create key generation context for Ed25519 */
-  ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
-  if (!ctx) {
+  /* Use ssh-keygen to generate Ed25519 key in OpenSSH format */
+  ircd_snprintf(0, cmd, sizeof(cmd),
+                "ssh-keygen -t ed25519 -f '%s' -N '' -C 'gitsync@nefarious' -q",
+                key_path);
+
+  ret = system(cmd);
+  if (ret != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: Failed to create EVP_PKEY_CTX for Ed25519");
-    goto cleanup;
+              "GitSync: ssh-keygen failed with exit code %d", ret);
+    return 0;
   }
 
-  if (EVP_PKEY_keygen_init(ctx) <= 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: Failed to initialize key generation");
-    goto cleanup;
-  }
-
-  if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: Failed to generate Ed25519 key");
-    goto cleanup;
-  }
-
-  /* Write private key in PEM format */
-  fp = fopen(key_path, "w");
-  if (!fp) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: Cannot open %s for writing: %s",
-              key_path, strerror(errno));
-    goto cleanup;
-  }
-
-  /* Set restrictive permissions before writing key */
-  if (fchmod(fileno(fp), 0600) != 0) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "GitSync: Cannot set permissions on %s: %s",
-              key_path, strerror(errno));
-  }
-
-  if (!PEM_write_PrivateKey(fp, pkey, NULL, NULL, 0, NULL, NULL)) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: Failed to write private key to %s", key_path);
-    fclose(fp);
-    unlink(key_path);
-    fp = NULL;
-    goto cleanup;
-  }
-  fclose(fp);
-  fp = NULL;
-
-  /* Write public key in OpenSSH format for display/registration */
+  /* Log the public key for reference */
   ircd_snprintf(0, pubkey_path, sizeof(pubkey_path), "%s.pub", key_path);
+  fp = fopen(pubkey_path, "r");
+  if (fp) {
+    if (fgets(pubkey_line, sizeof(pubkey_line), fp)) {
+      /* Remove trailing newline */
+      char *nl = strchr(pubkey_line, '\n');
+      if (nl) *nl = '\0';
 
-  bio = BIO_new(BIO_s_mem());
-  if (bio && PEM_write_bio_PUBKEY(bio, pkey)) {
-    /* Get raw public key bytes for OpenSSH format */
-    size_t raw_len = 0;
-    if (EVP_PKEY_get_raw_public_key(pkey, NULL, &raw_len) > 0) {
-      pubkey_data = (unsigned char *)MyMalloc(raw_len);
-      if (pubkey_data && EVP_PKEY_get_raw_public_key(pkey, pubkey_data, &raw_len) > 0) {
-        /* Create OpenSSH format: "ssh-ed25519 <base64-encoded-key>" */
-        /* The key blob is: 4-byte length + "ssh-ed25519" + 4-byte length + raw key */
-        unsigned char blob[128];
-        size_t blob_len = 0;
-        const char *keytype = "ssh-ed25519";
-        size_t keytype_len = strlen(keytype);
-        char *b64 = NULL;
-        int b64_len;
-
-        /* Build the blob */
-        blob[blob_len++] = (keytype_len >> 24) & 0xff;
-        blob[blob_len++] = (keytype_len >> 16) & 0xff;
-        blob[blob_len++] = (keytype_len >> 8) & 0xff;
-        blob[blob_len++] = keytype_len & 0xff;
-        memcpy(blob + blob_len, keytype, keytype_len);
-        blob_len += keytype_len;
-        blob[blob_len++] = (raw_len >> 24) & 0xff;
-        blob[blob_len++] = (raw_len >> 16) & 0xff;
-        blob[blob_len++] = (raw_len >> 8) & 0xff;
-        blob[blob_len++] = raw_len & 0xff;
-        memcpy(blob + blob_len, pubkey_data, raw_len);
-        blob_len += raw_len;
-
-        /* Base64 encode */
-        b64_len = ((blob_len + 2) / 3) * 4 + 1;
-        b64 = (char *)MyMalloc(b64_len);
-        if (b64) {
-          EVP_EncodeBlock((unsigned char *)b64, blob, blob_len);
-
-          fp = fopen(pubkey_path, "w");
-          if (fp) {
-            fprintf(fp, "ssh-ed25519 %s gitsync@%s\n", b64,
-                    feature_str(FEAT_GITSYNC_REPOSITORY) ? feature_str(FEAT_GITSYNC_REPOSITORY) : "nefarious");
-            fclose(fp);
-            fp = NULL;
-
-            /* Announce the public key so admin can register it */
-            sendto_opmask_butone(0, SNO_OLDSNO,
-              "GitSync: Generated new SSH key. Public key saved to %s", pubkey_path);
-            sendto_opmask_butone(0, SNO_OLDSNO,
-              "GitSync: ssh-ed25519 %s gitsync@nefarious", b64);
-            log_write(LS_SYSTEM, L_INFO, 0,
-              "GitSync: Generated SSH key, public key: ssh-ed25519 %s", b64);
-          }
-          MyFree(b64);
-        }
-        MyFree(pubkey_data);
-        pubkey_data = NULL;
-      }
+      log_write(LS_SYSTEM, L_INFO, 0,
+        "GitSync: Generated SSH key at %s, public key: %s", key_path, pubkey_line);
     }
+    fclose(fp);
   }
 
-  sendto_opmask_butone(0, SNO_OLDSNO,
-    "GitSync: Generated new Ed25519 SSH key at %s", key_path);
-  log_write(LS_SYSTEM, L_INFO, 0,
-    "GitSync: Generated new Ed25519 SSH key at %s", key_path);
-
-  ret = 1;
-
-cleanup:
-  if (pubkey_data)
-    MyFree(pubkey_data);
-  if (bio)
-    BIO_free(bio);
-  if (fp)
-    fclose(fp);
-  if (pkey)
-    EVP_PKEY_free(pkey);
-  if (ctx)
-    EVP_PKEY_CTX_free(ctx);
-
-  return ret;
+  return 1;
 }
-#endif /* USE_SSL */
 
 /** SSH credentials callback for libgit2
  * @param out Credential output
@@ -263,19 +151,13 @@ gitsync_cred_callback(git_credential **out, const char *url,
   if (ssh_key && *ssh_key) {
     /* GITSYNC_SSH_KEY is set - use dedicated gitsync key */
     if (stat(ssh_key, &st) != 0) {
-      /* Key file doesn't exist - generate it */
-#ifdef USE_SSL
+      /* Key file doesn't exist - generate it using ssh-keygen */
       Debug((DEBUG_INFO, "GitSync: SSH key %s not found, generating...", ssh_key));
       if (!gitsync_generate_ssh_key(ssh_key)) {
         ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
                       "Failed to generate SSH key at %s", ssh_key);
         return GIT_EAUTH;
       }
-#else
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "GitSync: Cannot generate SSH key - SSL support not compiled in");
-      return GIT_EAUTH;
-#endif
     }
   } else {
     /* Fall back to SSL certificate (contains private key) */
