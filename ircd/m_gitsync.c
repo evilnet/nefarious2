@@ -40,9 +40,282 @@
 #include "gitsync.h"
 #endif
 
+#include <ctype.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/evp.h>
+#include <openssl/bio.h>
+
+/** Validate that a path contains only safe characters.
+ * Allows alphanumeric, underscore, hyphen, dot, and forward slash.
+ * Rejects paths containing ".." to prevent directory traversal.
+ * @param path Path to validate
+ * @return 1 if safe, 0 if unsafe
+ */
+static int
+validate_safe_path(const char *path)
+{
+  const char *p;
+
+  if (!path || !*path)
+    return 0;
+
+  for (p = path; *p; p++) {
+    if (!isalnum((unsigned char)*p) &&
+        *p != '_' && *p != '-' && *p != '.' && *p != '/') {
+      return 0;
+    }
+  }
+
+  /* Reject directory traversal attempts */
+  if (strstr(path, ".."))
+    return 0;
+
+  return 1;
+}
+
+/** Run ssh-keygen -y to extract public key from private key file.
+ * Uses fork/exec instead of popen for security.
+ * @param key_path Path to private key file
+ * @param output Buffer to store output
+ * @param output_size Size of output buffer
+ * @return Number of bytes read, or -1 on error
+ */
+static int
+run_ssh_keygen_pubkey(const char *key_path, char *output, size_t output_size)
+{
+  pid_t pid;
+  int pipefd[2];
+  int status;
+  ssize_t total = 0;
+
+  if (!validate_safe_path(key_path))
+    return -1;
+
+  if (pipe(pipefd) < 0)
+    return -1;
+
+  pid = fork();
+  if (pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return -1;
+  }
+
+  if (pid == 0) {
+    /* Child process */
+    int devnull;
+
+    close(pipefd[0]);  /* Close read end */
+
+    /* Redirect stdout to pipe */
+    if (dup2(pipefd[1], STDOUT_FILENO) < 0)
+      _exit(127);
+    close(pipefd[1]);
+
+    /* Redirect stderr to /dev/null */
+    devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDERR_FILENO);
+      close(devnull);
+    }
+
+    /* Redirect stdin from /dev/null */
+    devnull = open("/dev/null", O_RDONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDIN_FILENO);
+      close(devnull);
+    }
+
+    execlp("ssh-keygen", "ssh-keygen", "-y", "-f", key_path, (char *)NULL);
+    _exit(127);
+  }
+
+  /* Parent process */
+  close(pipefd[1]);  /* Close write end */
+
+  /* Read output */
+  while (total < (ssize_t)(output_size - 1)) {
+    ssize_t n = read(pipefd[0], output + total, output_size - 1 - total);
+    if (n <= 0)
+      break;
+    total += n;
+  }
+  output[total] = '\0';
+
+  close(pipefd[0]);
+
+  /* Wait for child */
+  waitpid(pid, &status, 0);
+
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    return -1;
+
+  return total;
+}
+
+/** Extract public key from X509 certificate and convert to SSH format.
+ * Uses OpenSSL library APIs to extract the public key, then fork/exec
+ * ssh-keygen to convert to SSH format.
+ * @param pem_path Path to PEM certificate file
+ * @param output Buffer to store SSH public key
+ * @param output_size Size of output buffer
+ * @return Number of bytes read, or -1 on error
+ */
+static int
+extract_pubkey_from_pem(const char *pem_path, char *output, size_t output_size)
+{
+  FILE *pem_fp = NULL;
+  X509 *cert = NULL;
+  EVP_PKEY *pkey = NULL;
+  BIO *bio = NULL;
+  char *pubkey_pem = NULL;
+  long pubkey_len;
+  char tmpfile[256];
+  int tmpfd = -1;
+  pid_t pid;
+  int pipefd[2];
+  int status;
+  ssize_t total = 0;
+  int result = -1;
+
+  if (!validate_safe_path(pem_path))
+    return -1;
+
+  /* Open and read the certificate */
+  pem_fp = fopen(pem_path, "r");
+  if (!pem_fp)
+    goto cleanup;
+
+  /* Read X509 certificate */
+  cert = PEM_read_X509(pem_fp, NULL, NULL, NULL);
+  if (!cert) {
+    /* Try reading from start again in case file has private key first */
+    rewind(pem_fp);
+    /* Skip past any private key */
+    while (fgets(output, output_size, pem_fp)) {
+      if (strstr(output, "-----BEGIN CERTIFICATE-----") ||
+          strstr(output, "-----BEGIN X509 CERTIFICATE-----")) {
+        /* Found certificate start, seek back */
+        fseek(pem_fp, -(long)strlen(output), SEEK_CUR);
+        break;
+      }
+    }
+    cert = PEM_read_X509(pem_fp, NULL, NULL, NULL);
+  }
+  fclose(pem_fp);
+  pem_fp = NULL;
+
+  if (!cert)
+    goto cleanup;
+
+  /* Extract public key from certificate */
+  pkey = X509_get_pubkey(cert);
+  if (!pkey)
+    goto cleanup;
+
+  /* Write public key to memory BIO in PEM format */
+  bio = BIO_new(BIO_s_mem());
+  if (!bio)
+    goto cleanup;
+
+  if (!PEM_write_bio_PUBKEY(bio, pkey))
+    goto cleanup;
+
+  pubkey_len = BIO_get_mem_data(bio, &pubkey_pem);
+  if (pubkey_len <= 0)
+    goto cleanup;
+
+  /* Write public key to temp file for ssh-keygen */
+  ircd_strncpy(tmpfile, "/tmp/gitsync_pubkey.XXXXXX", sizeof(tmpfile) - 1);
+  tmpfd = mkstemp(tmpfile);
+  if (tmpfd < 0)
+    goto cleanup;
+
+  if (write(tmpfd, pubkey_pem, pubkey_len) != pubkey_len) {
+    close(tmpfd);
+    unlink(tmpfile);
+    goto cleanup;
+  }
+  close(tmpfd);
+  tmpfd = -1;
+
+  /* Run ssh-keygen to convert to SSH format */
+  if (pipe(pipefd) < 0) {
+    unlink(tmpfile);
+    goto cleanup;
+  }
+
+  pid = fork();
+  if (pid < 0) {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    unlink(tmpfile);
+    goto cleanup;
+  }
+
+  if (pid == 0) {
+    /* Child process */
+    int devnull;
+
+    close(pipefd[0]);
+
+    if (dup2(pipefd[1], STDOUT_FILENO) < 0)
+      _exit(127);
+    close(pipefd[1]);
+
+    devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDERR_FILENO);
+      close(devnull);
+    }
+
+    devnull = open("/dev/null", O_RDONLY);
+    if (devnull >= 0) {
+      dup2(devnull, STDIN_FILENO);
+      close(devnull);
+    }
+
+    execlp("ssh-keygen", "ssh-keygen", "-i", "-m", "PKCS8", "-f", tmpfile, (char *)NULL);
+    _exit(127);
+  }
+
+  /* Parent process */
+  close(pipefd[1]);
+
+  while (total < (ssize_t)(output_size - 1)) {
+    ssize_t n = read(pipefd[0], output + total, output_size - 1 - total);
+    if (n <= 0)
+      break;
+    total += n;
+  }
+  output[total] = '\0';
+
+  close(pipefd[0]);
+  waitpid(pid, &status, 0);
+
+  unlink(tmpfile);
+
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && total > 0)
+    result = total;
+
+cleanup:
+  if (pem_fp)
+    fclose(pem_fp);
+  if (cert)
+    X509_free(cert);
+  if (pkey)
+    EVP_PKEY_free(pkey);
+  if (bio)
+    BIO_free(bio);
+
+  return result;
+}
 
 /** Handle GITSYNC command from an operator.
  * parv[0] = sender prefix
@@ -232,12 +505,10 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     const char *ssh_key_path;
     const char *pem_path;
     char pubkey_path[512];
-    char cmd[1024];
-    char tmpfile[256];
     FILE *fp;
-    char line[1024];
-    int from_file = 0;
+    char output[2048];
     int from_pem = 0;
+    int result;
 
     /* Check if user requested PEM mode */
     if (parc > 2 && ircd_strcmp(parv[2], "pem") == 0) {
@@ -248,14 +519,7 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     if (from_pem) {
-      /* PEM mode: Extract SSH key from SSL certificate
-       * This matches gitsync.sh -p option behavior:
-       * 1. Extract private key from PEM
-       * 2. Extract public key using openssl
-       * 3. Convert to SSH format using ssh-keygen
-       */
-      int tmpfd;
-
+      /* PEM mode: Extract SSH key from SSL certificate using OpenSSL APIs */
       pem_path = feature_str(FEAT_SSL_CERTFILE);
       if (!pem_path || !*pem_path) {
         sendcmdto_one(&me, CMD_NOTICE, sptr,
@@ -263,33 +527,8 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         return 0;
       }
 
-      /* Create secure temp file using mkstemp */
-      ircd_strncpy(tmpfile, "/tmp/gitsync_pem.XXXXXX", sizeof(tmpfile) - 1);
-      tmpfd = mkstemp(tmpfile);
-      if (tmpfd < 0) {
-        sendcmdto_one(&me, CMD_NOTICE, sptr,
-                      "%C :Cannot create temp file", sptr);
-        return 0;
-      }
-      close(tmpfd);  /* We just need the filename, shell will use it */
-
-      /* Extract private key and public key from PEM, then convert to SSH format
-       * This replicates gitsync.sh -p logic:
-       * awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' "$kpath" > "$ipath"
-       * openssl x509 -in "$kpath" -pubkey -noout >> "$ipath"
-       * ssh-keygen -i -m PKCS8 -f "$tmp_path/ssh.pem"
-       */
-      ircd_snprintf(0, cmd, sizeof(cmd),
-        "( "
-        "awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' \"%s\" > \"%s\" && "
-        "openssl x509 -in \"%s\" -pubkey -noout >> \"%s\" && "
-        "ssh-keygen -i -m PKCS8 -f \"%s\" 2>/dev/null"
-        ") ; rm -f \"%s\"",
-        pem_path, tmpfile, pem_path, tmpfile, tmpfile, tmpfile);
-
-      fp = popen(cmd, "r");
-      if (!fp) {
-        unlink(tmpfile);  /* Clean up on error */
+      result = extract_pubkey_from_pem(pem_path, output, sizeof(output));
+      if (result < 0) {
         sendcmdto_one(&me, CMD_NOTICE, sptr,
                       "%C :Cannot extract public key from PEM %s", sptr, pem_path);
         return 0;
@@ -297,6 +536,26 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
       sendcmdto_one(&me, CMD_NOTICE, sptr,
                     "%C :Public key extracted from PEM (add to GitLab/GitHub):", sptr);
+
+      /* Output the key, splitting long lines for IRC */
+      {
+        char *p = output;
+        size_t len = strlen(output);
+        /* Remove trailing newline */
+        if (len > 0 && output[len-1] == '\n') {
+          output[len-1] = '\0';
+          len--;
+        }
+        while (len > 0) {
+          size_t chunk = (len > 400) ? 400 : len;
+          char save = p[chunk];
+          p[chunk] = '\0';
+          sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, p);
+          p[chunk] = save;
+          p += chunk;
+          len -= chunk;
+        }
+      }
     } else {
       /* Standard SSH key mode */
       ssh_key_path = feature_str(FEAT_GITSYNC_SSH_KEY);
@@ -308,63 +567,73 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         return 0;
       }
 
-      /* Check if SSH key exists, generate it if not */
-      if (access(ssh_key_path, F_OK) != 0) {
+      /* Ensure SSH key exists (gitsync_generate_ssh_key handles both
+       * generation and detection of existing key atomically to prevent TOCTOU) */
+      if (!gitsync_generate_ssh_key(ssh_key_path)) {
         sendcmdto_one(&me, CMD_NOTICE, sptr,
-                      "%C :SSH key not found, generating...", sptr);
-        if (!gitsync_generate_ssh_key(ssh_key_path)) {
-          sendcmdto_one(&me, CMD_NOTICE, sptr,
-                        "%C :Failed to generate SSH key", sptr);
-          return 0;
-        }
+                      "%C :Failed to generate or validate SSH key", sptr);
+        return 0;
       }
 
       /* Try to read existing .pub file first */
       ircd_snprintf(0, pubkey_path, sizeof(pubkey_path), "%s.pub", ssh_key_path);
       fp = fopen(pubkey_path, "r");
       if (fp) {
-        from_file = 1;
+        char line[1024];
+        sendcmdto_one(&me, CMD_NOTICE, sptr,
+                      "%C :Public key for GitSync (add to GitLab/GitHub):", sptr);
+        while (fgets(line, sizeof(line), fp)) {
+          size_t len = strlen(line);
+          char *p;
+          if (len > 0 && line[len-1] == '\n')
+            line[len-1] = '\0';
+          len = strlen(line);
+          p = line;
+          while (len > 0) {
+            size_t chunk = (len > 400) ? 400 : len;
+            char save = p[chunk];
+            p[chunk] = '\0';
+            sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, p);
+            p[chunk] = save;
+            p += chunk;
+            len -= chunk;
+          }
+        }
+        fclose(fp);
       } else {
-        /* Generate public key from private key using ssh-keygen */
-        ircd_snprintf(0, cmd, sizeof(cmd), "ssh-keygen -y -f \"%s\" 2>/dev/null", ssh_key_path);
-        fp = popen(cmd, "r");
-        if (!fp) {
+        /* Generate public key from private key using ssh-keygen (secure fork/exec) */
+        result = run_ssh_keygen_pubkey(ssh_key_path, output, sizeof(output));
+        if (result < 0) {
           sendcmdto_one(&me, CMD_NOTICE, sptr,
                         "%C :Cannot read or generate public key from %s", sptr, ssh_key_path);
           sendcmdto_one(&me, CMD_NOTICE, sptr,
                         "%C :Tip: Use '/GITSYNC pubkey pem' to extract from SSL certificate", sptr);
           return 0;
         }
+
+        sendcmdto_one(&me, CMD_NOTICE, sptr,
+                      "%C :Public key for GitSync (add to GitLab/GitHub):", sptr);
+
+        /* Output the key, splitting long lines for IRC */
+        {
+          char *p = output;
+          size_t len = strlen(output);
+          if (len > 0 && output[len-1] == '\n') {
+            output[len-1] = '\0';
+            len--;
+          }
+          while (len > 0) {
+            size_t chunk = (len > 400) ? 400 : len;
+            char save = p[chunk];
+            p[chunk] = '\0';
+            sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, p);
+            p[chunk] = save;
+            p += chunk;
+            len -= chunk;
+          }
+        }
       }
-
-      sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :Public key for GitSync (add to GitLab/GitHub):", sptr);
     }
-
-    while (fgets(line, sizeof(line), fp)) {
-      /* Remove trailing newline */
-      size_t len = strlen(line);
-      char *p;
-      if (len > 0 && line[len-1] == '\n')
-        line[len-1] = '\0';
-      len = strlen(line);
-      /* Split long lines to fit IRC message limits (~400 bytes content) */
-      p = line;
-      while (len > 0) {
-        size_t chunk = (len > 400) ? 400 : len;
-        char save = p[chunk];
-        p[chunk] = '\0';
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, p);
-        p[chunk] = save;
-        p += chunk;
-        len -= chunk;
-      }
-    }
-
-    if (from_file)
-      fclose(fp);
-    else
-      pclose(fp);
   } else if (is_hostkey) {
     /* Show or reset SSH host key fingerprint */
     const char *fingerprint;
@@ -525,17 +794,13 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       const char *ssh_key_path;
       const char *pem_path;
       char pubkey_path[512];
-      char cmd[1024];
-      char tmpfile[256];
       FILE *fp;
-      char line[1024];
-      int from_file = 0;
+      char output[2048];
       int from_pem = (subarg && ircd_strcmp(subarg, "pem") == 0);
+      int result;
 
       if (from_pem) {
-        /* PEM mode: Extract SSH key from SSL certificate */
-        int tmpfd;
-
+        /* PEM mode: Extract SSH key from SSL certificate using OpenSSL APIs */
         pem_path = feature_str(FEAT_SSL_CERTFILE);
         if (!pem_path || !*pem_path) {
           sendcmdto_one(&me, CMD_NOTICE, sptr,
@@ -544,28 +809,8 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
           return 0;
         }
 
-        /* Create secure temp file using mkstemp */
-        ircd_strncpy(tmpfile, "/tmp/gitsync_pem.XXXXXX", sizeof(tmpfile) - 1);
-        tmpfd = mkstemp(tmpfile);
-        if (tmpfd < 0) {
-          sendcmdto_one(&me, CMD_NOTICE, sptr,
-                        "%C :%s GitSync: Cannot create temp file",
-                        sptr, cli_name(&me));
-          return 0;
-        }
-        close(tmpfd);
-
-        ircd_snprintf(0, cmd, sizeof(cmd),
-          "( "
-          "awk '/BEGIN .*PRIVATE KEY/,/END .*PRIVATE KEY/' \"%s\" > \"%s\" && "
-          "openssl x509 -in \"%s\" -pubkey -noout >> \"%s\" && "
-          "ssh-keygen -i -m PKCS8 -f \"%s\" 2>/dev/null"
-          ") ; rm -f \"%s\"",
-          pem_path, tmpfile, pem_path, tmpfile, tmpfile, tmpfile);
-
-        fp = popen(cmd, "r");
-        if (!fp) {
-          unlink(tmpfile);
+        result = extract_pubkey_from_pem(pem_path, output, sizeof(output));
+        if (result < 0) {
           sendcmdto_one(&me, CMD_NOTICE, sptr,
                         "%C :%s GitSync: Cannot extract public key from PEM",
                         sptr, cli_name(&me));
@@ -575,6 +820,26 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         sendcmdto_one(&me, CMD_NOTICE, sptr,
                       "%C :%s GitSync Public Key (from PEM):",
                       sptr, cli_name(&me));
+
+        /* Output the key, splitting long lines for IRC */
+        {
+          char *p = output;
+          size_t len = strlen(output);
+          if (len > 0 && output[len-1] == '\n') {
+            output[len-1] = '\0';
+            len--;
+          }
+          while (len > 0) {
+            size_t chunk = (len > 350) ? 350 : len;
+            char save = p[chunk];
+            p[chunk] = '\0';
+            sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s   %s",
+                          sptr, cli_name(&me), p);
+            p[chunk] = save;
+            p += chunk;
+            len -= chunk;
+          }
+        }
       } else {
         /* Standard SSH key mode */
         ssh_key_path = feature_str(FEAT_GITSYNC_SSH_KEY);
@@ -588,47 +853,64 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         ircd_snprintf(0, pubkey_path, sizeof(pubkey_path), "%s.pub", ssh_key_path);
         fp = fopen(pubkey_path, "r");
         if (fp) {
-          from_file = 1;
+          char line[1024];
+          sendcmdto_one(&me, CMD_NOTICE, sptr,
+                        "%C :%s GitSync Public Key:",
+                        sptr, cli_name(&me));
+          while (fgets(line, sizeof(line), fp)) {
+            size_t len = strlen(line);
+            char *p;
+            if (len > 0 && line[len-1] == '\n')
+              line[len-1] = '\0';
+            len = strlen(line);
+            p = line;
+            while (len > 0) {
+              size_t chunk = (len > 350) ? 350 : len;
+              char save = p[chunk];
+              p[chunk] = '\0';
+              sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s   %s",
+                            sptr, cli_name(&me), p);
+              p[chunk] = save;
+              p += chunk;
+              len -= chunk;
+            }
+          }
+          fclose(fp);
         } else {
-          ircd_snprintf(0, cmd, sizeof(cmd), "ssh-keygen -y -f \"%s\" 2>/dev/null", ssh_key_path);
-          fp = popen(cmd, "r");
-          if (!fp) {
+          /* Generate public key from private key using ssh-keygen (secure fork/exec) */
+          result = run_ssh_keygen_pubkey(ssh_key_path, output, sizeof(output));
+          if (result < 0) {
             sendcmdto_one(&me, CMD_NOTICE, sptr,
                           "%C :%s GitSync: Cannot read public key",
                           sptr, cli_name(&me));
             return 0;
           }
+
+          sendcmdto_one(&me, CMD_NOTICE, sptr,
+                        "%C :%s GitSync Public Key:",
+                        sptr, cli_name(&me));
+
+          /* Output the key, splitting long lines for IRC */
+          {
+            char *p = output;
+            size_t len = strlen(output);
+            if (len > 0 && output[len-1] == '\n') {
+              output[len-1] = '\0';
+              len--;
+            }
+            while (len > 0) {
+              size_t chunk = (len > 350) ? 350 : len;
+              char save = p[chunk];
+              p[chunk] = '\0';
+              sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s   %s",
+                            sptr, cli_name(&me), p);
+              p[chunk] = save;
+              p += chunk;
+              len -= chunk;
+            }
+          }
         }
-
-        sendcmdto_one(&me, CMD_NOTICE, sptr,
-                      "%C :%s GitSync Public Key:",
-                      sptr, cli_name(&me));
       }
-
-      while (fgets(line, sizeof(line), fp)) {
-        size_t len = strlen(line);
-        char *p;
-        if (len > 0 && line[len-1] == '\n')
-          line[len-1] = '\0';
-        len = strlen(line);
-        /* Split long lines to fit IRC message limits (~350 bytes with server prefix) */
-        p = line;
-        while (len > 0) {
-          size_t chunk = (len > 350) ? 350 : len;
-          char save = p[chunk];
-          p[chunk] = '\0';
-          sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s   %s",
-                        sptr, cli_name(&me), p);
-          p[chunk] = save;
-          p += chunk;
-          len -= chunk;
-        }
-      }
-
-      if (from_file)
-        fclose(fp);
-      else
-        pclose(fp);
     }
   }
 

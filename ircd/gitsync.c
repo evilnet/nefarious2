@@ -51,6 +51,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 /** Maximum size of linesync.data file (1 MB) */
 #define GITSYNC_MAX_SIZE (1024 * 1024)
@@ -81,28 +84,133 @@ static const char *status_strings[] = {
   "Apply error"
 };
 
+/** Validate a file path contains only safe characters.
+ * Allowed: alphanumeric, underscore, hyphen, dot, forward slash
+ * @param path Path to validate
+ * @return 1 if valid, 0 if contains unsafe characters
+ */
+static int
+validate_safe_path(const char *path)
+{
+  const char *p;
+  if (!path || !*path)
+    return 0;
+  for (p = path; *p; p++) {
+    if (!isalnum((unsigned char)*p) &&
+        *p != '_' && *p != '-' && *p != '.' && *p != '/') {
+      return 0;
+    }
+  }
+  /* Reject paths with .. to prevent directory traversal */
+  if (strstr(path, ".."))
+    return 0;
+  return 1;
+}
+
 /** Generate an Ed25519 SSH key for GitSync authentication using ssh-keygen
+ * Uses fork/exec to avoid shell command injection vulnerabilities.
+ * Uses atomic file creation to prevent TOCTOU race conditions.
  * @param key_path Path to save the private key (OpenSSH format)
- * @return 1 on success, 0 on failure
+ * @return 1 on success (including if key already exists), 0 on failure
  */
 int
 gitsync_generate_ssh_key(const char *key_path)
 {
-  char cmd[1024];
   char pubkey_path[512];
   char pubkey_line[512];
   FILE *fp;
-  int ret;
+  pid_t pid;
+  int status;
+  int fd;
+  struct stat st;
 
-  /* Use ssh-keygen to generate Ed25519 key in OpenSSH format */
-  ircd_snprintf(0, cmd, sizeof(cmd),
-                "ssh-keygen -t ed25519 -f '%s' -N '' -C 'gitsync@nefarious' -q",
-                key_path);
-
-  ret = system(cmd);
-  if (ret != 0) {
+  /* Validate path contains only safe characters */
+  if (!validate_safe_path(key_path)) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "GitSync: ssh-keygen failed with exit code %d", ret);
+              "GitSync: Invalid characters in key path: %s", key_path);
+    return 0;
+  }
+
+  /* Atomic check: try to create the file with O_CREAT | O_EXCL | O_NOFOLLOW
+   * This prevents TOCTOU race conditions and symlink attacks */
+  fd = open(key_path, O_CREAT | O_EXCL | O_NOFOLLOW | O_WRONLY, 0600);
+  if (fd < 0) {
+    if (errno == EEXIST) {
+      /* File already exists - check if it's a regular file (not a symlink) */
+      if (lstat(key_path, &st) == 0) {
+        if (S_ISLNK(st.st_mode)) {
+          log_write(LS_SYSTEM, L_ERROR, 0,
+                    "GitSync: SSH key path is a symlink (possible attack): %s", key_path);
+          return 0;
+        }
+        if (S_ISREG(st.st_mode)) {
+          /* Regular file exists - key already generated */
+          return 1;
+        }
+      }
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "GitSync: SSH key path exists but is not a regular file: %s", key_path);
+      return 0;
+    }
+#ifdef ELOOP
+    if (errno == ELOOP) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "GitSync: SSH key path is a symlink (possible attack): %s", key_path);
+      return 0;
+    }
+#endif
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Cannot create SSH key file: %s: %s", key_path, strerror(errno));
+    return 0;
+  }
+
+  /* We successfully created a placeholder file atomically - remove it before ssh-keygen */
+  close(fd);
+  unlink(key_path);
+
+  /* Use fork/exec to run ssh-keygen safely without shell */
+  pid = fork();
+  if (pid < 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: fork() failed: %s", strerror(errno));
+    return 0;
+  }
+
+  if (pid == 0) {
+    /* Child process - exec ssh-keygen */
+    /* Close stdin, redirect stdout/stderr to /dev/null for -q behavior */
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+      dup2(devnull, STDIN_FILENO);
+      dup2(devnull, STDOUT_FILENO);
+      dup2(devnull, STDERR_FILENO);
+      if (devnull > STDERR_FILENO)
+        close(devnull);
+    }
+
+    execlp("ssh-keygen", "ssh-keygen",
+           "-t", "ed25519",
+           "-f", key_path,
+           "-N", "",
+           "-C", "gitsync@nefarious",
+           "-q",
+           (char *)NULL);
+
+    /* If exec fails, exit with error */
+    _exit(127);
+  }
+
+  /* Parent process - wait for child */
+  if (waitpid(pid, &status, 0) < 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: waitpid() failed: %s", strerror(errno));
+    return 0;
+  }
+
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: ssh-keygen failed with exit code %d",
+              WIFEXITED(status) ? WEXITSTATUS(status) : -1);
     return 0;
   }
 
