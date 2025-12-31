@@ -274,10 +274,19 @@ void setup_signals(void)
   signal_add(&sig_chld, sigchld_callback, 0, SIGCHLD);
   signal_add(&sig_usr1, sigusr1_callback, 0, SIGUSR1);
 
-  /* Note: SIGALRM is set up with sa_flags=0 (no SA_RESTART), so
-   * syscalls will be interrupted by SIGALRM on modern systems.
-   * The deprecated siginterrupt() call is no longer needed.
+#ifdef HAVE_RESTARTABLE_SYSCALLS
+  /* siginterrupt is deprecated on modern systems (sa_flags=0 already
+   * prevents SA_RESTART), but kept for compatibility with ancient systems.
    */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  siginterrupt(SIGALRM, 1);
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+#endif
 }
 
 /** Kill and clean up all child processes. */
