@@ -102,12 +102,29 @@
 
 static void sasl_timeout_callback(struct Event* ev);
 
+/** Send a SASL message to either a specific server or broadcast to all.
+ * @param[in] cptr Client initiating SASL (used for broadcast exclusion).
+ * @param[in] acptr Target server, or NULL to broadcast.
+ * @param[in] type SASL message type (S, H, or C).
+ * @param[in] data Message payload after the type.
+ */
+static void send_sasl_message(struct Client *cptr, struct Client *acptr,
+                              char type, const char *data)
+{
+  if (acptr)
+    sendcmdto_one(&me, CMD_SASL, acptr, "%C %C!%u.%u %c %s", acptr, &me,
+                  cli_fd(cptr), cli_saslcookie(cptr), type, data);
+  else
+    sendcmdto_serv_butone(&me, CMD_SASL, cptr, "* %C!%u.%u %c %s", &me,
+                          cli_fd(cptr), cli_saslcookie(cptr), type, data);
+}
+
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
   int first = 0;
   char realhost[HOSTLEN + 3];
-  char agentname[NUMNICKLEN + 1];
+  char sasldata[BUFSIZE];
   char *hoststr = (cli_sockhost(cptr) ? cli_sockhost(cptr) : cli_sock_ip(cptr));
 
   if (!CapActive(cptr, CAP_SASL))
@@ -189,28 +206,22 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   else
     ircd_strncpy(realhost, hoststr, sizeof(realhost));
 
-  if (acptr)
-    ircd_snprintf(0, agentname, sizeof(agentname), "%C", acptr);
-  else
-    ircd_snprintf(0, agentname, sizeof(agentname), "%s", "*");
-
   if (first) {
     if (*parv[1] == ':' || strchr(parv[1], ' '))
       return exit_client(cptr, sptr, sptr, "Malformed AUTHENTICATE");
     if (!EmptyString(cli_sslclifp(cptr)))
-      sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u S %s :%s", agentname, &me,
-                    cli_fd(cptr), cli_saslcookie(cptr),
-                    parv[1], cli_sslclifp(cptr));
+      ircd_snprintf(0, sasldata, sizeof(sasldata), "%s :%s", parv[1], cli_sslclifp(cptr));
     else
-      sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u S :%s", agentname, &me,
-                    cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
-    if (feature_bool(FEAT_SASL_SENDHOST))
-      sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u H :%s@%s:%s", agentname, &me,
-                    cli_fd(cptr), cli_saslcookie(cptr), cli_username(cptr),
-                    realhost, cli_sock_ip(cptr));
+      ircd_snprintf(0, sasldata, sizeof(sasldata), ":%s", parv[1]);
+    send_sasl_message(cptr, acptr, 'S', sasldata);
+    if (feature_bool(FEAT_SASL_SENDHOST)) {
+      ircd_snprintf(0, sasldata, sizeof(sasldata), ":%s@%s:%s",
+                    cli_username(cptr), realhost, cli_sock_ip(cptr));
+      send_sasl_message(cptr, acptr, 'H', sasldata);
+    }
   } else {
-    sendcmdto_one(&me, CMD_SASL, acptr, "%s %C!%u.%u C :%s", agentname, &me,
-                  cli_fd(cptr), cli_saslcookie(cptr), parv[1]);
+    ircd_snprintf(0, sasldata, sizeof(sasldata), ":%s", parv[1]);
+    send_sasl_message(cptr, acptr, 'C', sasldata);
   }
 
   if (!t_active(&cli_sasltimeout(cptr)))
