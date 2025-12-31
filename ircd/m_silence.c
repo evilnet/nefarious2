@@ -86,7 +86,7 @@ apply_silence(struct Client *sptr, char *mask)
   }
 
   /* Make the silence and set additional flags. */
-  ircd_strncpy(orig_mask, mask, sizeof(orig_mask) - 1);
+  ircd_strncpy(orig_mask, mask, sizeof(orig_mask));
   sile = make_ban(pretty_mask(mask));
   sile->flags |= flags;
 

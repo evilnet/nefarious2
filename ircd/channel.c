@@ -109,7 +109,7 @@ set_ban_mask(struct Ban *ban, const char *banstr)
       sep = strrchr(b, '@');
   } else
     sep = strrchr(b, '@');
-  ircd_strncpy(ban->banstr, banstr, sizeof(ban->banstr) - 1);
+  ircd_strncpy(ban->banstr, banstr, sizeof(ban->banstr));
   if (sep) {
     ban->nu_len = sep - b;
     if (ban->flags & BAN_EXTENDED)
@@ -1652,18 +1652,18 @@ int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix) {
     return 0;
 
   if (extban->flags & EBAN_NOCHILD)
-    ircd_strlcpy(extban->mask, b, sizeof(extban->mask));
+    ircd_strncpy(extban->mask, b, sizeof(extban->mask));
   else {
     r = parse_extban(b, extban, level + 1, prefix);
     if (r == 0)
-      ircd_strlcpy(extban->mask, b, sizeof(extban->mask));
+      ircd_strncpy(extban->mask, b, sizeof(extban->mask));
     else
       return r;
   }
 
   if (!(extban->flags & EBAN_MASKTYPE)) {
     char *sep;
-    ircd_strlcpy(extban->mask, collapse(pretty_mask(extban->mask)), sizeof(extban->mask));
+    ircd_strncpy(extban->mask, collapse(pretty_mask(extban->mask)), sizeof(extban->mask));
     sep = strrchr(extban->mask, '@');
     extban->nu_len = sep - extban->mask;
   }
@@ -3099,7 +3099,7 @@ mode_parse_redir(struct ParseState *state, int *flag_p)
     if (state->dir == MODE_DEL) /* remove the old redirect */
       *state->chptr->mode.redir = '\0';
     else
-      ircd_strncpy(state->chptr->mode.redir, t_str, CHANNELLEN);
+      ircd_strncpy(state->chptr->mode.redir, t_str, CHANNELLEN + 1);
   }
 }
 
@@ -3293,7 +3293,7 @@ mode_parse_key(struct ParseState *state, int *flag_p)
     if (state->dir == MODE_DEL) /* remove the old key */
       *state->chptr->mode.key = '\0';
     else
-      ircd_strncpy(state->chptr->mode.key, t_str, KEYLEN);
+      ircd_strncpy(state->chptr->mode.key, t_str, KEYLEN + 1);
   }
 }
 
@@ -3412,7 +3412,7 @@ mode_parse_upass(struct ParseState *state, int *flag_p)
     if (state->dir == MODE_DEL) /* remove the old upass */
       *state->chptr->mode.upass = '\0';
     else
-      ircd_strncpy(state->chptr->mode.upass, t_str, KEYLEN);
+      ircd_strncpy(state->chptr->mode.upass, t_str, KEYLEN + 1);
   }
 }
 
@@ -3537,7 +3537,7 @@ mode_parse_apass(struct ParseState *state, int *flag_p)
        * this is a BURST. */
       if (state->chptr->mode.apass[0] == '\0' ||
           (state->flags & MODE_PARSE_BURST))
-        ircd_strncpy(state->chptr->mode.apass, t_str, KEYLEN);
+        ircd_strncpy(state->chptr->mode.apass, t_str, KEYLEN + 1);
       /* Make it VERY clear to the user that this is a one-time password */
       if (MyUser(state->sptr)) {
 	send_reply(state->sptr, RPL_APASSWARN_SET, state->chptr->mode.apass);
@@ -3786,7 +3786,7 @@ mode_parse_ban(struct ParseState *state, int *flag_p)
   newban->flags = ((state->dir == MODE_ADD) ? BAN_ADD : BAN_DEL)
       | (*flag_p == MODE_BAN ? 0 : BAN_EXCEPTION);
   set_ban_mask(newban, pmask);
-  ircd_strncpy(newban->who, IsUser(state->sptr) ? cli_name(state->sptr) : "*", NICKLEN);
+  ircd_strncpy(newban->who, IsUser(state->sptr) ? cli_name(state->sptr) : "*", NICKLEN + 1);
   newban->when = TStime();
   apply_ban(&state->chptr->banlist, newban, 0);
 }
@@ -3971,7 +3971,7 @@ mode_parse_except(struct ParseState *state, int *flag_p)
   newban->flags = ((state->dir == MODE_ADD) ? BAN_ADD : BAN_DEL)
       | (*flag_p == MODE_EXCEPT ? 0 : BAN_EXCEPTION);
   set_ban_mask(newban, pmask);
-  ircd_strncpy(newban->who, IsUser(state->sptr) ? cli_name(state->sptr) : "*", NICKLEN);
+  ircd_strncpy(newban->who, IsUser(state->sptr) ? cli_name(state->sptr) : "*", NICKLEN + 1);
   newban->when = TStime();
   apply_except(&state->chptr->exceptlist, newban, 0);
 }

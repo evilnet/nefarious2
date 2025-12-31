@@ -277,7 +277,7 @@ static int auth_set_username(struct AuthRequest *auth)
 
   if (FlagHas(&auth->flags, AR_IAUTH_FUSERNAME))
   {
-    ircd_strncpy(user->username, cli_username(sptr), USERLEN);
+    ircd_strncpy(user->username, cli_username(sptr), USERLEN + 1);
   }
   else if (IsIdented(sptr))
   {
@@ -433,7 +433,7 @@ static void auth_complete_sasl(struct Client *client)
   if (IsSASLComplete(client) && cli_saslaccount(client)[0]) {
     if (cli_saslacccreate(client))
       cli_user(client)->acc_create = cli_saslacccreate(client);
-    ircd_strncpy(cli_user(client)->account, cli_saslaccount(client), ACCOUNTLEN);
+    ircd_strncpy(cli_user(client)->account, cli_saslaccount(client), ACCOUNTLEN + 1);
     SetAccount(client);
   }
 
@@ -654,8 +654,8 @@ static int preregister_user(struct Client *cptr)
   static time_t last_too_many1;
   static time_t last_too_many2;
 
-  ircd_strncpy(cli_user(cptr)->host, cli_sockhost(cptr), HOSTLEN);
-  ircd_strncpy(cli_user(cptr)->realhost, cli_sockhost(cptr), HOSTLEN);
+  ircd_strncpy(cli_user(cptr)->host, cli_sockhost(cptr), HOSTLEN + 1);
+  ircd_strncpy(cli_user(cptr)->realhost, cli_sockhost(cptr), HOSTLEN + 1);
 
   /* Set client's GeoIP data */
   geoip_apply(cptr);
@@ -852,7 +852,7 @@ static void read_auth_reply(struct AuthRequest* auth)
       sendheader(auth->client, REPORT_FIN_ID);
     ++ServerStats->is_asuc;
     if (!FlagHas(&auth->flags, AR_IAUTH_USERNAME)) {
-      ircd_strncpy(cli_username(auth->client), username, USERLEN);
+      ircd_strncpy(cli_username(auth->client), username, USERLEN + 1);
       SetGotId(auth->client);
     }
     if (IAuthHas(iauth, IAUTH_UNDERNET))
@@ -1056,9 +1056,9 @@ static void auth_dns_callback(void* vptr, const struct irc_in_addr *addr, const 
     if (IsUserPort(auth->client))
       sendheader(auth->client, REPORT_FIN_DNS);
     if (IsIPSpoofed(auth->client))
-      ircd_strncpy(cli_connecthost(auth->client), h_name, HOSTLEN);
+      ircd_strncpy(cli_connecthost(auth->client), h_name, HOSTLEN + 1);
     else
-      ircd_strncpy(cli_sockhost(auth->client), h_name, HOSTLEN);
+      ircd_strncpy(cli_sockhost(auth->client), h_name, HOSTLEN + 1);
     sendto_iauth(auth->client, "N %s", h_name);
   }
   check_auth_finished(auth);
@@ -1268,9 +1268,9 @@ int auth_set_user(struct AuthRequest *auth, const char *username, const char *ho
     return 0;
   FlagClr(&auth->flags, AR_NEEDS_USER);
   cptr = auth->client;
-  ircd_strncpy(cli_info(cptr), userinfo, REALLEN);
+  ircd_strncpy(cli_info(cptr), userinfo, REALLEN + 1);
   clean_username(cli_user(cptr)->username, username);
-  ircd_strncpy(cli_user(cptr)->host, cli_sockhost(cptr), HOSTLEN);
+  ircd_strncpy(cli_user(cptr)->host, cli_sockhost(cptr), HOSTLEN + 1);
   if (IAuthHas(iauth, IAUTH_UNDERNET))
     sendto_iauth(cptr, "U %s %s %s :%s", cli_user(cptr)->username, hostname, servername, userinfo);
   else if (IAuthHas(iauth, IAUTH_ADDLINFO))
@@ -2051,7 +2051,7 @@ static int iauth_cmd_username_forced(struct IAuth *iauth, struct Client *cli,
   assert(cli_auth(cli) != NULL);
   FlagClr(&cli_auth(cli)->flags, AR_AUTH_PENDING);
   if (!EmptyString(params[0])) {
-    ircd_strncpy(cli_username(cli), params[0], USERLEN);
+    ircd_strncpy(cli_username(cli), params[0], USERLEN + 1);
     SetGotId(cli);
     FlagSet(&cli_auth(cli)->flags, AR_IAUTH_USERNAME);
     FlagSet(&cli_auth(cli)->flags, AR_IAUTH_FUSERNAME);
@@ -2072,7 +2072,7 @@ static int iauth_cmd_username_good(struct IAuth *iauth, struct Client *cli,
   assert(cli_auth(cli) != NULL);
   FlagClr(&cli_auth(cli)->flags, AR_AUTH_PENDING);
   if (!EmptyString(params[0])) {
-    ircd_strncpy(cli_username(cli), params[0], USERLEN);
+    ircd_strncpy(cli_username(cli), params[0], USERLEN + 1);
     SetGotId(cli);
     FlagSet(&cli_auth(cli)->flags, AR_IAUTH_USERNAME);
   }
@@ -2092,7 +2092,7 @@ static int iauth_cmd_username_bad(struct IAuth *iauth, struct Client *cli,
   assert(cli_auth(cli) != NULL);
   FlagClr(&cli_auth(cli)->flags, AR_AUTH_PENDING);
   if (!EmptyString(params[0]))
-    ircd_strncpy(cli_user(cli)->username, params[0], USERLEN);
+    ircd_strncpy(cli_user(cli)->username, params[0], USERLEN + 1);
   return 1;
 }
 
@@ -2127,19 +2127,19 @@ static int iauth_cmd_hostname(struct IAuth *iauth, struct Client *cli,
   /* Copy old details to cli_connectip and cli_connecthost. */
   if (!IsIPSpoofed(cli)) {
     memcpy(&cli_connectip(cli), &cli_ip(cli), sizeof(cli_ip(cli)));
-    ircd_strncpy(cli_connecthost(cli), cli_sockhost(cli), HOSTLEN);
+    ircd_strncpy(cli_connecthost(cli), cli_sockhost(cli), HOSTLEN + 1);
     SetIPSpoofed(cli);
   }
 
   /* Set hostname from params. */
-  ircd_strncpy(cli_sockhost(cli), params[0], HOSTLEN);
+  ircd_strncpy(cli_sockhost(cli), params[0], HOSTLEN + 1);
   /* If we have gotten here, the user is in a "hurry" state and has
    * been pre-registered.  Their hostname was set during that, and
    * needs to be overwritten now.
    */
   if (FlagHas(&auth->flags, AR_IAUTH_HURRY)) {
-    ircd_strncpy(cli_user(cli)->host, cli_sockhost(cli), HOSTLEN);
-    ircd_strncpy(cli_user(cli)->realhost, cli_sockhost(cli), HOSTLEN);
+    ircd_strncpy(cli_user(cli)->host, cli_sockhost(cli), HOSTLEN + 1);
+    ircd_strncpy(cli_user(cli)->realhost, cli_sockhost(cli), HOSTLEN + 1);
   }
   return 1;
 }
@@ -2176,7 +2176,7 @@ static int iauth_cmd_ip_address(struct IAuth *iauth, struct Client *cli,
   /* Copy old details to cli_connectip and cli_connecthost. */
   if (!IsIPSpoofed(cli)) {
     memcpy(&cli_connectip(cli), &cli_ip(cli), sizeof(cli_ip(cli)));
-    ircd_strncpy(cli_connecthost(cli), cli_sockhost(cli), HOSTLEN);
+    ircd_strncpy(cli_connecthost(cli), cli_sockhost(cli), HOSTLEN + 1);
     SetIPSpoofed(cli);
   }
 
@@ -2339,7 +2339,7 @@ static int iauth_cmd_done_account(struct IAuth *iauth, struct Client *cli,
   }
 
   /* Copy account name to User structure. */
-  ircd_strncpy(cli_user(cli)->account, params[0], ACCOUNTLEN);
+  ircd_strncpy(cli_user(cli)->account, params[0], ACCOUNTLEN + 1);
   SetAccount(cli);
 
   /* Fall through to the normal "done" handler. */
@@ -2380,7 +2380,7 @@ static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
   }
   /* params[0] == type, params[1] == data */
   if (!ircd_strcmp(params[0], MARK_WEBIRC)) {
-    ircd_strncpy(cli_webirc(cli), params[1], BUFSIZE);
+    ircd_strncpy(cli_webirc(cli), params[1], BUFSIZE + 1);
   } else if (!ircd_strcmp(params[0], MARK_GEOIP)) {
     if ((parc < 3) || EmptyString(params[1]) || EmptyString(params[2])) {
       sendto_iauth(cli, "E Missing :Missing mark geoip parameter");
@@ -2388,11 +2388,11 @@ static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
     }
     geoip_apply_mark(cli, params[1], params[2], (parc > 3 ? params[3] : NULL));
   } else if (!ircd_strcmp(params[0], MARK_CVERSION)) {
-    ircd_strncpy(cli_version(cli), params[1], VERSIONLEN);
+    ircd_strncpy(cli_version(cli), params[1], VERSIONLEN + 1);
   } else if (!ircd_strcmp(params[0], MARK_SSLCLIFP)) {
-    ircd_strncpy(cli_sslclifp(cli), params[1], BUFSIZE);
+    ircd_strncpy(cli_sslclifp(cli), params[1], BUFSIZE + 1);
   } else if (!ircd_strcmp(params[0], MARK_KILL)) {
-    ircd_strncpy(cli_killmark(cli), params[1], BUFSIZE);
+    ircd_strncpy(cli_killmark(cli), params[1], BUFSIZE + 1);
   } else if (!ircd_strcmp(params[0], MARK_MARK) || !ircd_strcmp(params[0], MARK_DNSBL_DATA)) {
     add_mark(cli, params[1]);
     SetMarked(cli);
@@ -2527,7 +2527,7 @@ static int iauth_cmd_sasl_loggedin(struct IAuth *iauth, struct Client *cli,
   }
 
   /* Store account in SASL fields */
-  ircd_strncpy(cli_saslaccount(cli), params[0], ACCOUNTLEN);
+  ircd_strncpy(cli_saslaccount(cli), params[0], ACCOUNTLEN + 1);
 
   /* If account has a creation timestamp, use it. */
   if (params[0][len] == ':') {

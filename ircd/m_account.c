@@ -164,7 +164,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         assert(0 != cli_user(acptr)->account[0]);
 
         ClearAccount(acptr);
-        ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN);
+        ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
 
         sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                                "*");
@@ -191,7 +191,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         if (ircd_strncmp(cli_user(acptr)->account, parv[3], ACCOUNTLEN) == 0)
           return 0;
 
-        ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN);
+        ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
 
         if (parc > 4) {
@@ -320,7 +320,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
              "timestamp %Tu", parv[2], cli_user(acptr)->acc_create));
     }
 
-    ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN);
+    ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);
 
     sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,

@@ -261,99 +261,32 @@ char* canonize(char* buffer)
   return cbuf;
 }
 
-/** Copy one string to another, not to exceed a certain length.
- * @param[in] s1 Output buffer.
+/** Copy one string to another with guaranteed null-termination.
+ * Operates like BSD strlcpy - always null-terminates if size > 0.
+ * @param[out] s1 Output buffer.
  * @param[in] s2 Source buffer.
- * @param[in] n Maximum number of bytes to write, plus one.
+ * @param[in] n Full size of destination buffer (not size-1).
  * @return The original input buffer \a s1.
+ *
+ * Note: Unlike the original implementation, this takes the FULL buffer
+ * size and always null-terminates safely. Callers that previously passed
+ * (size-1) should now pass (size) or use sizeof(buffer).
  */
 char* ircd_strncpy(char* s1, const char* s2, size_t n)
 {
-  char* endp = s1 + n;
-  char* s = s1;
+  char* dst = s1;
 
   assert(0 != s1);
   assert(0 != s2);
 
-  while (s < endp && (*s++ = *s2++))
-    ;
-  if (s == endp)
-    *s = '\0';
-  return s1;
-}
-
-/** Copy string to buffer with guaranteed null-termination (BSD strlcpy).
- * @param[out] dst Destination buffer.
- * @param[in] src Source string.
- * @param[in] size Full size of destination buffer.
- * @return Length of src (allows truncation detection: if retval >= size, truncated).
- *
- * Unlike strncpy/ircd_strncpy:
- * - Always null-terminates if size > 0
- * - Takes full buffer size, not size-1
- * - Returns src length for truncation detection
- */
-size_t ircd_strlcpy(char* dst, const char* src, size_t size)
-{
-  const char* s = src;
-  size_t n = size;
-
-  assert(dst != NULL);
-  assert(src != NULL);
-
-  /* Copy as many bytes as will fit */
   if (n != 0) {
     while (--n != 0) {
-      if ((*dst++ = *s++) == '\0')
-        return s - src - 1;
+      if ((*dst++ = *s2++) == '\0')
+        return s1;
     }
-    /* Not enough room, null-terminate and traverse rest of src */
     *dst = '\0';
   }
-
-  /* Count remaining characters in src */
-  while (*s++)
-    ;
-
-  return s - src - 1;
-}
-
-/** Append string to buffer with guaranteed null-termination (BSD strlcat).
- * @param[in,out] dst Destination buffer (must be null-terminated).
- * @param[in] src Source string to append.
- * @param[in] size Full size of destination buffer.
- * @return Length of string it tried to create (dstlen + srclen).
- *
- * If retval >= size, truncation occurred.
- */
-size_t ircd_strlcat(char* dst, const char* src, size_t size)
-{
-  const char* s = src;
-  size_t n = size;
-  size_t dlen;
-
-  assert(dst != NULL);
-  assert(src != NULL);
-
-  /* Find end of dst and adjust count */
-  while (n-- != 0 && *dst != '\0')
-    dst++;
-  dlen = size - n - 1;
-
-  if (n == 0)
-    return dlen + strlen(s);
-
-  /* Append src */
-  while (*s != '\0') {
-    if (n != 1) {
-      *dst++ = *s;
-      n--;
-    }
-    s++;
-  }
-  *dst = '\0';
-
-  return dlen + (s - src);
+  return s1;
 }
 
 #ifndef FORCEINLINE
@@ -517,7 +450,7 @@ char* host_from_uh(char* buf, const char* userhost, size_t len)
     ++s;
   else
     s = userhost;
-  ircd_strlcpy(buf, s, len + 1);
+  ircd_strncpy(buf, s, len + 1);
   return buf;
 }
 

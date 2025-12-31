@@ -181,7 +181,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   } else if (reply[0] == 'L') {
     if (parc > 5)
       cli_saslacccreate(acptr) = atoi(parv[5]);
-    ircd_strncpy(cli_saslaccount(acptr), data, ACCOUNTLEN);
+    ircd_strncpy(cli_saslaccount(acptr), data, ACCOUNTLEN + 1);
     send_reply(acptr, RPL_LOGGEDIN,
                BadPtr(cli_name(acptr)) ? "*" : cli_name(acptr),
                (!cli_user(acptr) || BadPtr(cli_user(acptr)->username)) ? "*" : cli_user(acptr)->username,

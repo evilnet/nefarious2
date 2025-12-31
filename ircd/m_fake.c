@@ -126,7 +126,7 @@ int ms_fake(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* Assign and propagate the fakehost */
   SetFakeHost(target);
-  ircd_strncpy(cli_user(target)->fakehost, parv[2], HOSTLEN);
+  ircd_strncpy(cli_user(target)->fakehost, parv[2], HOSTLEN + 1);
   hide_hostmask(target);
 
   sendcmdto_serv_butone(sptr, CMD_FAKE, cptr, "%C %s", target,

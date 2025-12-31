@@ -582,8 +582,8 @@ int mr_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       (IsUnknown(cptr) || IsHandshake(cptr)) &&
       0 != ircd_strcmp(cli_name(cptr), host))
     hChangeClient(cptr, host);
-  ircd_strncpy(cli_name(cptr), host, HOSTLEN);
-  ircd_strncpy(cli_info(cptr), parv[parc-1][0] ? parv[parc-1] : cli_name(&me), REALLEN);
+  ircd_strncpy(cli_name(cptr), host, HOSTLEN + 1);
+  ircd_strncpy(cli_info(cptr), parv[parc-1][0] ? parv[parc-1] : cli_name(&me), REALLEN + 1);
   cli_hopcount(cptr) = hop;
 
   if (conf_check_server(cptr)) {
@@ -742,8 +742,8 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   cli_serv(acptr)->prot = prot;
   cli_serv(acptr)->timestamp = timestamp;
   cli_hopcount(acptr) = hop;
-  ircd_strncpy(cli_name(acptr), host, HOSTLEN);
-  ircd_strncpy(cli_info(acptr), parv[parc-1], REALLEN);
+  ircd_strncpy(cli_name(acptr), host, HOSTLEN + 1);
+  ircd_strncpy(cli_info(acptr), parv[parc-1], REALLEN + 1);
   cli_serv(acptr)->up = sptr;
   cli_serv(acptr)->updown = add_dlink(&(cli_serv(sptr))->down, acptr);
   /* Use cptr, because we do protocol 9 -> 10 translation

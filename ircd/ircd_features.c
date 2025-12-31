@@ -170,14 +170,14 @@ feature_log_reset(struct Client* from, const char* const* fields, int count)
 static void
 feature_notify_servername(void)
 {
-  ircd_strncpy(cli_name(&his), feature_str(FEAT_HIS_SERVERNAME), HOSTLEN);
+  ircd_strncpy(cli_name(&his), feature_str(FEAT_HIS_SERVERNAME), HOSTLEN + 1);
 }
 
 /** Handle an update to FEAT_HIS_SERVERINFO. */
 static void
 feature_notify_serverinfo(void)
 {
-  ircd_strncpy(cli_info(&his), feature_str(FEAT_HIS_SERVERINFO), REALLEN);
+  ircd_strncpy(cli_info(&his), feature_str(FEAT_HIS_SERVERINFO), REALLEN + 1);
 }
 
 /** Report the value of a log setting.

@@ -113,7 +113,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
   char*        modes;
   char*        parv[2];
   char*        join[3];
-  char         chan[CHANNELLEN-1];
+  char         chan[CHANNELLEN + 1];
   char*        ajoinchan;
   char*        ajoinnotice;
   unsigned int snomask = 0;
@@ -208,7 +208,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     if (!MyUser(sptr)) {
       sendcmdto_serv_butone(&me, CMD_SVSJOIN, NULL, "%C %s", sptr, ajoinchan);
     } else {
-      ircd_strncpy(chan, ajoinchan, CHANNELLEN-1);
+      ircd_strncpy(chan, ajoinchan, CHANNELLEN + 1);
       join[0] = cli_name(sptr);
       join[1] = chan;
       join[2] = NULL;
@@ -224,7 +224,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     if (!MyUser(sptr)) {
       sendcmdto_serv_butone(&me, CMD_SVSJOIN, NULL, "%C %s", sptr, aconf->autojoinchan);
     } else {
-      ircd_strncpy(chan, aconf->autojoinchan, CHANNELLEN-1);
+      ircd_strncpy(chan, aconf->autojoinchan, CHANNELLEN + 1);
       join[0] = cli_name(sptr);
       join[1] = chan;
       join[2] = NULL;
@@ -234,7 +234,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
 
   if (!EmptyString(aconf->swhois))
   {
-    ircd_strncpy(cli_user(sptr)->swhois, aconf->swhois, BUFSIZE);
+    ircd_strncpy(cli_user(sptr)->swhois, aconf->swhois, BUFSIZE + 1);
     sendcmdto_serv_butone(&me, CMD_SWHOIS, NULL, "%C :%s", sptr, aconf->swhois);
   }
 

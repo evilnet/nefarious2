@@ -130,11 +130,11 @@ int mr_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         !ircd_strcmp(parv[1], feature_str(FEAT_CTCP_VERSIONING_NICK))))) {
     if ((ircd_strncmp("\x01VERSION", parv[2], 8) == 0) && (strlen(parv[2]) > 10)) {
       temp = parv[2] + 9;
-      ircd_strncpy(cversion, temp, VERSIONLEN);
+      ircd_strncpy(cversion, temp, VERSIONLEN + 1);
       if (cversion[strlen(cversion)-1] == '\x01')
         cversion[strlen(cversion)-1] = '\0';
 
-      ircd_strncpy(cli_version(sptr), cversion, VERSIONLEN);
+      ircd_strncpy(cli_version(sptr), cversion, VERSIONLEN + 1);
 
       Debug((DEBUG_INFO, "Got CTCP version from %s: %s", (IsUnknown(sptr) ? "unknown" : cli_name(sptr)), cli_version(sptr)));
 
@@ -197,11 +197,11 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         !ircd_strcmp(parv[1], feature_str(FEAT_CTCP_VERSIONING_NICK))))) {
     if ((ircd_strncmp("\x01VERSION", parv[2], 8) == 0) && (strlen(parv[2]) > 10)) {
       temp = parv[2] + 9;
-      ircd_strncpy(cversion, temp, VERSIONLEN);
+      ircd_strncpy(cversion, temp, VERSIONLEN + 1);
       if (cversion[strlen(cversion)-1] == '\x01')
         cversion[strlen(cversion)-1] = '\0';
 
-      ircd_strncpy(cli_version(sptr), cversion, VERSIONLEN);
+      ircd_strncpy(cli_version(sptr), cversion, VERSIONLEN + 1);
 
       Debug((DEBUG_INFO, "Got CTCP version from %s: %s", (IsUnknown(sptr) ? "unknown" : cli_name(sptr)), cli_version(sptr)));
 

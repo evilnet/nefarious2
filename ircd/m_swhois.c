@@ -117,7 +117,7 @@ int ms_swhois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!(acptr = findNUser(parv[1])))
     return 0;
 
-  ircd_strncpy(cli_user(acptr)->swhois, swhois, BUFSIZE);
+  ircd_strncpy(cli_user(acptr)->swhois, swhois, BUFSIZE + 1);
   if (swhois && !EmptyString(swhois)) {
     sendcmdto_serv_butone(sptr, CMD_SWHOIS, cptr, "%C :%s", acptr, swhois);
   } else {

@@ -241,8 +241,8 @@ void SetServerYXX(struct Client* cptr, struct Client* server, const char* yxx)
 {
   unsigned int index;
   if (5 == strlen(yxx)) {
-    ircd_strncpy(cli_yxx(server), yxx, 2);
-    ircd_strncpy(cli_serv(server)->nn_capacity, yxx + 2, 3);
+    ircd_strncpy(cli_yxx(server), yxx, 3);
+    ircd_strncpy(cli_serv(server)->nn_capacity, yxx + 2, 4);
   }
   else {
     (cli_yxx(server))[0]               = yxx[0];

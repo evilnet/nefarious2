@@ -156,12 +156,12 @@ int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       cli_loc(cptr)->cookie = 0;
 
       ircd_strncpy(cli_loc(cptr)->password, locargv[--i], ACCPASSWDLEN);
-      ircd_strncpy(cli_loc(cptr)->account, locargv[--i], ACCOUNTLEN);
+      ircd_strncpy(cli_loc(cptr)->account, locargv[--i], ACCOUNTLEN + 1);
 
       if ((i>0) && !EmptyString(locargv[i-1]))
-        ircd_strncpy(cli_loc(cptr)->service, locargv[--i], NICKLEN);
+        ircd_strncpy(cli_loc(cptr)->service, locargv[--i], NICKLEN + 1);
       else
-        ircd_strncpy(cli_loc(cptr)->service, feature_str(FEAT_LOC_DEFAULT_SERVICE), NICKLEN);
+        ircd_strncpy(cli_loc(cptr)->service, feature_str(FEAT_LOC_DEFAULT_SERVICE), NICKLEN + 1);
     }
   }
 
@@ -175,6 +175,6 @@ int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   if (cli_passwd(cptr)[0] == '\0')
-    ircd_strncpy(cli_passwd(cptr), password, PASSWDLEN);
+    ircd_strncpy(cli_passwd(cptr), password, PASSWDLEN + 1);
   return cli_auth(cptr) ? auth_set_password(cli_auth(cptr), password) : 0;
 }

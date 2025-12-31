@@ -1449,7 +1449,7 @@ int find_kill(struct Client *cptr)
 
       if ((deny->flags & DENY_FLAGS_AUTHEX) && IsAccount(cptr)) {
         if (!EmptyString(deny->mark) && EmptyString(cli_killmark(cptr)))
-          ircd_strncpy(cli_killmark(cptr), deny->mark, BUFSIZE);
+          ircd_strncpy(cli_killmark(cptr), deny->mark, BUFSIZE + 1);
         continue;
       }
 

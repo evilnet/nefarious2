@@ -886,8 +886,8 @@ int connect_server(struct ConfItem* aconf, struct Client* by)
   /*
    * Copy these in so we have something for error detection.
    */
-  ircd_strncpy(cli_name(cptr), aconf->name, HOSTLEN);
-  ircd_strncpy(cli_sockhost(cptr), aconf->host, HOSTLEN);
+  ircd_strncpy(cli_name(cptr), aconf->name, HOSTLEN + 1);
+  ircd_strncpy(cli_sockhost(cptr), aconf->host, HOSTLEN + 1);
 
   /*
    * Attach config entries to client here rather than in
@@ -967,7 +967,7 @@ void init_server_identity(void)
   const struct LocalConf* conf = conf_get_local();
   assert(0 != conf);
 
-  ircd_strncpy(cli_name(&me), conf->name, HOSTLEN);
+  ircd_strncpy(cli_name(&me), conf->name, HOSTLEN + 1);
   SetYXXServerName(&me, conf->numeric);
 }
 

@@ -96,8 +96,8 @@ dbg_malloc(size_t size, const char *type, const char *file, int line)
     return mh;
   memfrob((void*)(mh + 1), size);
   mh->magic = 0xA110CA7E;
-  ircd_strncpy(mh->type, type, sizeof(mh->type) - 1)[sizeof(mh->type) - 1] = 0;
-  ircd_strncpy(mh->file, file, sizeof(mh->file) - 1)[sizeof(mh->file) - 1] = 0;
+  ircd_strncpy(mh->type, type, sizeof(mh->type))[sizeof(mh->type) - 1] = 0;
+  ircd_strncpy(mh->file, file, sizeof(mh->file))[sizeof(mh->file) - 1] = 0;
   mh->line = line;
   mh->length = size;
   mh->since = CurrentTime;
@@ -122,8 +122,8 @@ dbg_malloc_zero(size_t size, const char *type, const char *file, int line)
     return mh;
   memset((void*)(mh + 1), 0, size);
   mh->magic = 0xA110CA7E;
-  ircd_strncpy(mh->type, type, sizeof(mh->type) - 1)[sizeof(mh->type) - 1] = 0;
-  ircd_strncpy(mh->file, file, sizeof(mh->file) - 1)[sizeof(mh->file) - 1] = 0;
+  ircd_strncpy(mh->type, type, sizeof(mh->type))[sizeof(mh->type) - 1] = 0;
+  ircd_strncpy(mh->file, file, sizeof(mh->file))[sizeof(mh->file) - 1] = 0;
   mh->line = line;
   mh->length = size;
   mdbg_bytes_allocated += size;

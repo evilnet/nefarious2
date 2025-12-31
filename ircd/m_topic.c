@@ -68,13 +68,13 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
     */
    newtopic=ircd_strncmp(chptr->topic,topic,TOPICLEN)!=0;
    /* setting a topic */
-   ircd_strncpy(chptr->topic, topic, TOPICLEN);
+   ircd_strncpy(chptr->topic, topic, TOPICLEN + 1);
    if (setter != NULL) {
      memset(chptr->topic_nick, 0, NICKLEN + USERLEN + HOSTLEN + 3);
      ircd_strncpy(chptr->topic_nick, setter, NICKLEN + USERLEN + HOSTLEN + 3);
      nicktok = ircd_strtok(&p, setter, "!");
      if (nicktok != NULL)
-       ircd_strncpy((char *)&nick, nicktok, NICKLEN);
+       ircd_strncpy((char *)&nick, nicktok, NICKLEN + 1);
    } else {
      memset(chptr->topic_nick, 0, NICKLEN + USERLEN + HOSTLEN + 3);
      if (feature_bool(FEAT_HOST_IN_TOPIC)) {
@@ -83,7 +83,7 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
      } else {
        ircd_strncpy(chptr->topic_nick, cli_name(from), NICKLEN + USERLEN + HOSTLEN + 3);
      }
-     ircd_strncpy((char *)&nick, cli_name(from), NICKLEN);
+     ircd_strncpy((char *)&nick, cli_name(from), NICKLEN + 1);
    }
    chptr->topic_time = ts ? ts : TStime();
    /* Fixed in 2.10.11: Don't propagate local topics */

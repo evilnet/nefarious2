@@ -173,9 +173,9 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
     flags[len] = '\0';
 
     if (irc_in_addr_unspec(&listener->addr.addr))
-      ircd_strncpy(bindip, "*", SOCKIPLEN);
+      ircd_strncpy(bindip, "*", SOCKIPLEN + 1);
     else
-      ircd_strncpy(bindip, ircd_ntoa(&listener->addr.addr), SOCKIPLEN);
+      ircd_strncpy(bindip, ircd_ntoa(&listener->addr.addr), SOCKIPLEN + 1);
 
     send_reply(sptr, RPL_STATSPLINE, listener->addr.port, listener->ref_count,
 	       flags, listener_active(listener) ? "active" : "disabled",

@@ -476,7 +476,7 @@ do_query_name(dns_callback_f callback, void *ctx, const char *name,
 {
   char host_name[HOSTLEN + 1];
 
-  ircd_strncpy(host_name, name, HOSTLEN);
+  ircd_strncpy(host_name, name, HOSTLEN + 1);
   add_local_domain(host_name, HOSTLEN);
 
   if (request == NULL)
@@ -729,7 +729,7 @@ proc_answer(struct reslist *request, HEADER* header, char* buf, char* eob)
         else if (n == 0)
           return(0); /* no more answers left */
 
-        ircd_strncpy(request->name, hostbuf, HOSTLEN);
+        ircd_strncpy(request->name, hostbuf, HOSTLEN + 1);
 
         return(1);
         break;

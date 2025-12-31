@@ -81,7 +81,7 @@ int ms_svsident(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
   if (strlen(parv[2]) > USERLEN)
     return protocol_violation(sptr, "Ident too long in SVSIDENT command");
 
-  ircd_strncpy(newident, parv[2], USERLEN);
+  ircd_strncpy(newident, parv[2], USERLEN + 1);
 
   for (s = (char *)&newident; *s; s++)
   {
@@ -95,8 +95,8 @@ int ms_svsident(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
   if (legalident == 0)
     return protocol_violation(sptr, "Illegal characters in SVSIDENT ident");
 
-  ircd_strncpy(cli_user(acptr)->username, newident, USERLEN);
-  ircd_strncpy(cli_username(acptr), newident, USERLEN);
+  ircd_strncpy(cli_user(acptr)->username, newident, USERLEN + 1);
+  ircd_strncpy(cli_username(acptr), newident, USERLEN + 1);
 
   sendcmdto_serv_butone(sptr, CMD_SVSIDENT, cptr, "%C %s", acptr, cli_username(acptr));
 

@@ -311,7 +311,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return need_more_params(sptr, "NICK");
   }
 
-  ircd_strncpy(nick, parv[1], NICKLEN);
+  ircd_strncpy(nick, parv[1], NICKLEN + 1);
   nick[NICKLEN] = '\0';
 
   if (IsServer(sptr))

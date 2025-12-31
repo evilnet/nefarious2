@@ -94,7 +94,7 @@ static void dead_link(struct Client *to, char *notice)
   /*
    * Keep a copy of the last comment, for later use...
    */
-  ircd_strncpy(cli_info(to), notice, REALLEN);
+  ircd_strncpy(cli_info(to), notice, REALLEN + 1);
 
   if (!IsUser(to) && !IsUnknown(to) && !HasFlag(to, FLAG_CLOSING))
     sendto_opmask_butone(0, SNO_OLDSNO, "%s for %s", cli_info(to), cli_name(to));

@@ -376,8 +376,7 @@ int addNickJupes(const char *nicks)
 
   if (nicks && *nicks)
   {
-    ircd_strncpy(temp, nicks, BUFSIZE);
-    temp[BUFSIZE] = '\0';
+    ircd_strncpy(temp, nicks, BUFSIZE + 1);
     p = NULL;
     for (one = ircd_strtok(&p, temp, ","); one; one = ircd_strtok(&p, NULL, ","))
     {
@@ -391,7 +390,7 @@ loop:
         if (jupesCount == JUPEMAX)
           return 1;             /* Error: Jupe table is full ! */
         jupesCount++;
-        ircd_strncpy(jupeTable[pos], one, NICKLEN);
+        ircd_strncpy(jupeTable[pos], one, NICKLEN + 1);
         jupeTable[pos][NICKLEN] = '\000';       /* Better safe than sorry :) */
         continue;
       }

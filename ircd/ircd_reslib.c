@@ -209,7 +209,7 @@ parse_resvconf(void)
       *p = '\0';  /* take the first word */
 
     if (strcasecmp(opt, "domain") == 0)
-      ircd_strncpy(irc_domain, arg, HOSTLEN);
+      ircd_strncpy(irc_domain, arg, HOSTLEN + 1);
     else if (strcasecmp(opt, "nameserver") == 0)
       add_nameserver(arg);
   }
