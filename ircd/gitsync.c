@@ -52,6 +52,12 @@
 #include <ctype.h>
 #include <sys/stat.h>
 
+#ifdef USE_SSL
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/err.h>
+#endif
+
 /** Maximum size of linesync.data file (1 MB) */
 #define GITSYNC_MAX_SIZE (1024 * 1024)
 
@@ -81,6 +87,155 @@ static const char *status_strings[] = {
   "Apply error"
 };
 
+#ifdef USE_SSL
+/** Generate an Ed25519 SSH key for GitSync authentication
+ * @param key_path Path to save the private key (PEM format)
+ * @return 1 on success, 0 on failure
+ */
+static int
+gitsync_generate_ssh_key(const char *key_path)
+{
+  EVP_PKEY *pkey = NULL;
+  EVP_PKEY_CTX *ctx = NULL;
+  FILE *fp = NULL;
+  BIO *bio = NULL;
+  char pubkey_path[512];
+  unsigned char *pubkey_data = NULL;
+  size_t pubkey_len = 0;
+  int ret = 0;
+
+  /* Create key generation context for Ed25519 */
+  ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
+  if (!ctx) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Failed to create EVP_PKEY_CTX for Ed25519");
+    goto cleanup;
+  }
+
+  if (EVP_PKEY_keygen_init(ctx) <= 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Failed to initialize key generation");
+    goto cleanup;
+  }
+
+  if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Failed to generate Ed25519 key");
+    goto cleanup;
+  }
+
+  /* Write private key in PEM format */
+  fp = fopen(key_path, "w");
+  if (!fp) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Cannot open %s for writing: %s",
+              key_path, strerror(errno));
+    goto cleanup;
+  }
+
+  /* Set restrictive permissions before writing key */
+  if (fchmod(fileno(fp), 0600) != 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "GitSync: Cannot set permissions on %s: %s",
+              key_path, strerror(errno));
+  }
+
+  if (!PEM_write_PrivateKey(fp, pkey, NULL, NULL, 0, NULL, NULL)) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Failed to write private key to %s", key_path);
+    fclose(fp);
+    unlink(key_path);
+    fp = NULL;
+    goto cleanup;
+  }
+  fclose(fp);
+  fp = NULL;
+
+  /* Write public key in OpenSSH format for display/registration */
+  ircd_snprintf(0, pubkey_path, sizeof(pubkey_path), "%s.pub", key_path);
+
+  bio = BIO_new(BIO_s_mem());
+  if (bio && PEM_write_bio_PUBKEY(bio, pkey)) {
+    /* Get raw public key bytes for OpenSSH format */
+    size_t raw_len = 0;
+    if (EVP_PKEY_get_raw_public_key(pkey, NULL, &raw_len) > 0) {
+      pubkey_data = (unsigned char *)MyMalloc(raw_len);
+      if (pubkey_data && EVP_PKEY_get_raw_public_key(pkey, pubkey_data, &raw_len) > 0) {
+        /* Create OpenSSH format: "ssh-ed25519 <base64-encoded-key>" */
+        /* The key blob is: 4-byte length + "ssh-ed25519" + 4-byte length + raw key */
+        unsigned char blob[128];
+        size_t blob_len = 0;
+        const char *keytype = "ssh-ed25519";
+        size_t keytype_len = strlen(keytype);
+        char *b64 = NULL;
+        int b64_len;
+
+        /* Build the blob */
+        blob[blob_len++] = (keytype_len >> 24) & 0xff;
+        blob[blob_len++] = (keytype_len >> 16) & 0xff;
+        blob[blob_len++] = (keytype_len >> 8) & 0xff;
+        blob[blob_len++] = keytype_len & 0xff;
+        memcpy(blob + blob_len, keytype, keytype_len);
+        blob_len += keytype_len;
+        blob[blob_len++] = (raw_len >> 24) & 0xff;
+        blob[blob_len++] = (raw_len >> 16) & 0xff;
+        blob[blob_len++] = (raw_len >> 8) & 0xff;
+        blob[blob_len++] = raw_len & 0xff;
+        memcpy(blob + blob_len, pubkey_data, raw_len);
+        blob_len += raw_len;
+
+        /* Base64 encode */
+        b64_len = ((blob_len + 2) / 3) * 4 + 1;
+        b64 = (char *)MyMalloc(b64_len);
+        if (b64) {
+          EVP_EncodeBlock((unsigned char *)b64, blob, blob_len);
+
+          fp = fopen(pubkey_path, "w");
+          if (fp) {
+            fprintf(fp, "ssh-ed25519 %s gitsync@%s\n", b64,
+                    feature_str(FEAT_GITSYNC_REPOSITORY) ? feature_str(FEAT_GITSYNC_REPOSITORY) : "nefarious");
+            fclose(fp);
+            fp = NULL;
+
+            /* Announce the public key so admin can register it */
+            sendto_opmask_butone(0, SNO_OLDSNO,
+              "GitSync: Generated new SSH key. Public key saved to %s", pubkey_path);
+            sendto_opmask_butone(0, SNO_OLDSNO,
+              "GitSync: ssh-ed25519 %s gitsync@nefarious", b64);
+            log_write(LS_SYSTEM, L_INFO, 0,
+              "GitSync: Generated SSH key, public key: ssh-ed25519 %s", b64);
+          }
+          MyFree(b64);
+        }
+        MyFree(pubkey_data);
+        pubkey_data = NULL;
+      }
+    }
+  }
+
+  sendto_opmask_butone(0, SNO_OLDSNO,
+    "GitSync: Generated new Ed25519 SSH key at %s", key_path);
+  log_write(LS_SYSTEM, L_INFO, 0,
+    "GitSync: Generated new Ed25519 SSH key at %s", key_path);
+
+  ret = 1;
+
+cleanup:
+  if (pubkey_data)
+    MyFree(pubkey_data);
+  if (bio)
+    BIO_free(bio);
+  if (fp)
+    fclose(fp);
+  if (pkey)
+    EVP_PKEY_free(pkey);
+  if (ctx)
+    EVP_PKEY_CTX_free(ctx);
+
+  return ret;
+}
+#endif /* USE_SSL */
+
 /** SSH credentials callback for libgit2
  * @param out Credential output
  * @param url URL being accessed
@@ -96,7 +251,7 @@ gitsync_cred_callback(git_credential **out, const char *url,
 {
   const char *ssh_key;
   const char *pubkey_path;
-  char pubkey_buf[512];
+  struct stat st;
 
   (void)url;
   (void)payload;
@@ -105,18 +260,34 @@ gitsync_cred_callback(git_credential **out, const char *url,
     return GIT_PASSTHROUGH;
 
   ssh_key = feature_str(FEAT_GITSYNC_SSH_KEY);
-  if (!ssh_key || !*ssh_key) {
-    /* Try default SSH key location */
-    ssh_key = NULL;
+  if (ssh_key && *ssh_key) {
+    /* GITSYNC_SSH_KEY is set - use dedicated gitsync key */
+    if (stat(ssh_key, &st) != 0) {
+      /* Key file doesn't exist - generate it */
+#ifdef USE_SSL
+      Debug((DEBUG_INFO, "GitSync: SSH key %s not found, generating...", ssh_key));
+      if (!gitsync_generate_ssh_key(ssh_key)) {
+        ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                      "Failed to generate SSH key at %s", ssh_key);
+        return GIT_EAUTH;
+      }
+#else
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "GitSync: Cannot generate SSH key - SSL support not compiled in");
+      return GIT_EAUTH;
+#endif
+    }
+  } else {
+    /* Fall back to SSL certificate (contains private key) */
+    ssh_key = feature_str(FEAT_SSL_CERTFILE);
+    if (!ssh_key || !*ssh_key)
+      ssh_key = "ssl/ircd.pem";  /* Default location */
   }
 
-  /* Build public key path */
-  if (ssh_key) {
-    ircd_snprintf(0, pubkey_buf, sizeof(pubkey_buf), "%s.pub", ssh_key);
-    pubkey_path = pubkey_buf;
-  } else {
-    pubkey_path = NULL;
-  }
+  /* For PEM files, we don't have a separate .pub file - libgit2 can extract it */
+  pubkey_path = NULL;
+
+  Debug((DEBUG_INFO, "GitSync: Using SSH key from %s", ssh_key));
 
   return git_credential_ssh_key_new(out,
                                     username_from_url ? username_from_url : "git",
@@ -275,8 +446,12 @@ dir_exists(const char *path)
 static enum GitsyncStatus
 gitsync_clone(const char *repo_url, const char *local_path, git_repository **repo)
 {
-  git_clone_options clone_opts = GIT_CLONE_OPTIONS_INIT;
+  git_clone_options clone_opts;
   int error;
+
+  /* Initialize clone options - use runtime init for ABI compatibility */
+  git_clone_options_init(&clone_opts, GIT_CLONE_OPTIONS_VERSION);
+  git_fetch_options_init(&clone_opts.fetch_opts, GIT_FETCH_OPTIONS_VERSION);
 
   clone_opts.fetch_opts.callbacks.credentials = gitsync_cred_callback;
   clone_opts.fetch_opts.callbacks.certificate_check = gitsync_cert_callback;
@@ -309,11 +484,14 @@ static enum GitsyncStatus
 gitsync_fetch_and_reset(git_repository *repo, const char *branch)
 {
   git_remote *remote = NULL;
-  git_fetch_options fetch_opts = GIT_FETCH_OPTIONS_INIT;
+  git_fetch_options fetch_opts;
   git_reference *ref = NULL;
   git_object *target = NULL;
   char refspec[256];
   int error;
+
+  /* Initialize fetch options - use runtime init for ABI compatibility */
+  git_fetch_options_init(&fetch_opts, GIT_FETCH_OPTIONS_VERSION);
 
   fetch_opts.callbacks.credentials = gitsync_cred_callback;
   fetch_opts.callbacks.certificate_check = gitsync_cert_callback;
@@ -553,6 +731,8 @@ gitsync_hash_content(const char *content, size_t len, char *hash, size_t hashlen
 
 /** Apply downloaded configuration
  * Writes to gitsync.conf and triggers a rehash only if content changed.
+ * Uses safe write: writes to .new, backs up old to .bak, then renames.
+ * If rehash fails, restores from backup.
  * @param content Configuration content
  * @param len Content length
  * @return GITSYNC_OK on success, error code otherwise
@@ -564,6 +744,10 @@ gitsync_apply(const char *content, size_t len)
   FILE *fp;
   size_t written;
   char content_hash[64];
+  char new_file[512];
+  char bak_file[512];
+  struct stat st;
+  int had_backup = 0;
 
   conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
   if (!conf_file || !*conf_file)
@@ -577,13 +761,17 @@ gitsync_apply(const char *content, size_t len)
     return GITSYNC_OK;
   }
 
+  /* Build temp and backup filenames */
+  ircd_snprintf(0, new_file, sizeof(new_file), "%s.new", conf_file);
+  ircd_snprintf(0, bak_file, sizeof(bak_file), "%s.bak", conf_file);
+
   Debug((DEBUG_INFO, "GitSync: Writing %zu bytes to %s", len, conf_file));
 
-  /* Write content to config file */
-  fp = fopen(conf_file, "w");
+  /* Write content to temp file first */
+  fp = fopen(new_file, "w");
   if (!fp) {
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
-                  "Cannot open %s for writing: %s", conf_file, strerror(errno));
+                  "Cannot open %s for writing: %s", new_file, strerror(errno));
     log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
     return GITSYNC_APPLY_ERROR;
   }
@@ -600,14 +788,31 @@ gitsync_apply(const char *content, size_t len)
   if (written != len) {
     ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
                   "Short write to %s: wrote %zu of %zu bytes",
-                  conf_file, written, len);
+                  new_file, written, len);
     log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
+    unlink(new_file);
     return GITSYNC_APPLY_ERROR;
   }
 
-  /* Remember hash for future comparisons */
-  ircd_strncpy(gitsync_last_content_hash, content_hash,
-               sizeof(gitsync_last_content_hash) - 1);
+  /* Backup existing config file if it exists */
+  if (stat(conf_file, &st) == 0) {
+    unlink(bak_file);  /* Remove old backup */
+    if (rename(conf_file, bak_file) == 0) {
+      had_backup = 1;
+      Debug((DEBUG_INFO, "GitSync: Backed up %s to %s", conf_file, bak_file));
+    }
+  }
+
+  /* Rename new file to config file (atomic on most filesystems) */
+  if (rename(new_file, conf_file) != 0) {
+    ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                  "Cannot rename %s to %s: %s", new_file, conf_file, strerror(errno));
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
+    /* Try to restore backup */
+    if (had_backup)
+      rename(bak_file, conf_file);
+    return GITSYNC_APPLY_ERROR;
+  }
 
   sendto_opmask_butone(0, SNO_OLDSNO,
                        "GitSync: Wrote %zu bytes to %s (commit %.8s), rehashing",
@@ -615,6 +820,32 @@ gitsync_apply(const char *content, size_t len)
 
   /* Trigger a rehash to load the new configuration */
   rehash(&me, 0);
+
+  /* Check if config parsing failed */
+  if (conf_get_error_flag()) {
+    sendto_opmask_butone(0, SNO_OLDSNO,
+                         "GitSync: Config parse error detected, restoring backup");
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Config parse error, restoring %s from backup", conf_file);
+
+    if (had_backup && rename(bak_file, conf_file) == 0) {
+      /* Rehash again with restored config */
+      rehash(&me, 0);
+      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                    "Config parse error - restored from backup");
+    } else {
+      ircd_snprintf(0, gitsync_stats.last_error, sizeof(gitsync_stats.last_error),
+                    "Config parse error - no backup to restore");
+    }
+    return GITSYNC_VALIDATION_ERROR;
+  }
+
+  /* Success - remember hash and clean up backup */
+  ircd_strncpy(gitsync_last_content_hash, content_hash,
+               sizeof(gitsync_last_content_hash) - 1);
+
+  /* Keep backup for safety, but could optionally delete it here */
+  /* unlink(bak_file); */
 
   return GITSYNC_OK;
 }
@@ -868,6 +1099,19 @@ gitsync_trigger(struct Client *sptr, int force)
                       sptr, gitsync_stats.last_error);
       }
       return status;
+    }
+    /* Get HEAD commit hash after clone */
+    {
+      git_reference *head_ref = NULL;
+      git_object *head_obj = NULL;
+      if (git_repository_head(&head_ref, repo) == 0 &&
+          git_reference_peel(&head_obj, head_ref, GIT_OBJECT_COMMIT) == 0) {
+        git_oid_tostr(gitsync_stats.last_commit, sizeof(gitsync_stats.last_commit),
+                      git_object_id(head_obj));
+        git_object_free(head_obj);
+      }
+      if (head_ref)
+        git_reference_free(head_ref);
     }
   } else {
     /* Open existing repository */

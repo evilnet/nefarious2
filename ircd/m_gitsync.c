@@ -167,17 +167,8 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Triggering GitSync...", sptr);
-    status = gitsync_trigger(sptr, 1);
-
-    if (status == GITSYNC_OK) {
-      const struct GitsyncStats *stats = gitsync_get_stats();
-      sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :GitSync completed successfully (commit %.8s)",
-                    sptr, stats->last_commit);
-    } else {
-      sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :GitSync failed: %s",
-                    sptr, gitsync_status_str(status));
-    }
+    /* gitsync_trigger sends its own success/failure messages */
+    gitsync_trigger(sptr, 1);
   } else if (is_status) {
     const struct GitsyncStats *stats = gitsync_get_stats();
     char timebuf[64];
@@ -342,10 +333,21 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     while (fgets(line, sizeof(line), fp)) {
       /* Remove trailing newline */
       size_t len = strlen(line);
+      char *p;
       if (len > 0 && line[len-1] == '\n')
         line[len-1] = '\0';
-      if (line[0])
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, line);
+      len = strlen(line);
+      /* Split long lines to fit IRC message limits (~400 bytes content) */
+      p = line;
+      while (len > 0) {
+        size_t chunk = (len > 400) ? 400 : len;
+        char save = p[chunk];
+        p[chunk] = '\0';
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s", sptr, p);
+        p[chunk] = save;
+        p += chunk;
+        len -= chunk;
+      }
     }
 
     if (from_file)
@@ -594,11 +596,22 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
       while (fgets(line, sizeof(line), fp)) {
         size_t len = strlen(line);
+        char *p;
         if (len > 0 && line[len-1] == '\n')
           line[len-1] = '\0';
-        if (line[0])
+        len = strlen(line);
+        /* Split long lines to fit IRC message limits (~350 bytes with server prefix) */
+        p = line;
+        while (len > 0) {
+          size_t chunk = (len > 350) ? 350 : len;
+          char save = p[chunk];
+          p[chunk] = '\0';
           sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s   %s",
-                        sptr, cli_name(&me), line);
+                        sptr, cli_name(&me), p);
+          p[chunk] = save;
+          p += chunk;
+          len -= chunk;
+        }
       }
 
       if (from_file)
