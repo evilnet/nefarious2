@@ -4,7 +4,7 @@ ENV GID 1234
 ENV UID 1234
 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host liblmdb-dev libzstd-dev libcmocka-dev libgit2-dev openssh-client
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host libgit2-dev openssh-client
 #libgeoip-dev libmaxminddb-dev
 
 # Perl dependencies for iauthd.pl (commented out - using TypeScript version)
@@ -20,8 +20,6 @@ COPY . /home/nefarious/nefarious2
 
 RUN groupadd -g ${GID} nefarious
 RUN useradd -u ${UID} -g ${GID} nefarious
-# Create LMDB directories for chathistory and metadata storage
-RUN mkdir -p /home/nefarious/ircd/history /home/nefarious/ircd/metadata
 RUN chown -R nefarious:nefarious /home/nefarious
 USER nefarious
 
@@ -33,11 +31,8 @@ WORKDIR  /home/nefarious/nefarious2
 
 # I cant get the maxminddb library to compile in at all in debian 12, give up on geoip for now
 # --with-geoip=/usr --with-mmdb=/usr \
-# Enable LMDB for chathistory and zstd for compression
-RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096 --with-lmdb=/usr --with-zstd=/usr --with-libgit2=/usr
+RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096 --with-libgit2=/usr
 RUN make
-# Run unit tests during build (they require the built object files)
-RUN make test
 # make install runs an interactive SSL generator - pre-create pem to skip, then remove so entrypoint generates fresh one
 RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 

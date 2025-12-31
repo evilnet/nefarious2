@@ -57,9 +57,7 @@
 #include "userload.h"
 #include "zline.h"
 #include "dnsbl.h"
-#include "history.h"
 #include "gitsync.h"
-#include "metadata.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -738,12 +736,6 @@ struct StatDesc statsinfo[] = {
     gitsync_report_stats, 0,
     "GitSync statistics and configuration." },
 #endif
-  { ' ', "chathistory", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
-    history_report_stats, 0,
-    "CHATHISTORY storage statistics." },
-  { ' ', "metadata", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
-    metadata_report_stats, 0,
-    "METADATA storage and queue statistics." },
   { ' ', "iauthconf", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_IAUTH,
     report_iauth_conf, 0,
     "IAuth configuration." },

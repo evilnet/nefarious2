@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "s_conf.h"
+#include "dnsbl.h"
 #include "IPcheck.h"
 #include "class.h"
 #include "client.h"
@@ -1294,6 +1295,7 @@ int rehash(struct Client *cptr, int sig)
   clearNickJupes();
 
   clear_quarantines();
+  dnsbl_clear_servers();
 
   class_mark_delete();
   mark_listeners_closing();
