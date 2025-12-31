@@ -1652,18 +1652,18 @@ int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix) {
     return 0;
 
   if (extban->flags & EBAN_NOCHILD)
-    ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
+    ircd_strlcpy(extban->mask, b, sizeof(extban->mask));
   else {
     r = parse_extban(b, extban, level + 1, prefix);
     if (r == 0)
-      ircd_strncpy(extban->mask, b, NICKLEN+USERLEN+HOSTLEN+3);
+      ircd_strlcpy(extban->mask, b, sizeof(extban->mask));
     else
       return r;
   }
 
   if (!(extban->flags & EBAN_MASKTYPE)) {
     char *sep;
-    ircd_strncpy(extban->mask, collapse(pretty_mask(extban->mask)), NICKLEN+USERLEN+HOSTLEN+3);
+    ircd_strlcpy(extban->mask, collapse(pretty_mask(extban->mask)), sizeof(extban->mask));
     sep = strrchr(extban->mask, '@');
     extban->nu_len = sep - extban->mask;
   }
