@@ -268,7 +268,7 @@ int oper_password_match(const char* to_match, const char* passwd)
 {
   char *crypted;
   int res;
-  size_t crypted_len, passwd_len;
+  size_t crypted_len, passwd_len, cmp_len;
   /*
    * use first two chars of the password they send in as salt
    *
@@ -285,14 +285,14 @@ int oper_password_match(const char* to_match, const char* passwd)
   if (!crypted)
    return 0;
 
-  /* Use constant-time comparison to prevent timing attacks */
+  /* Use constant-time comparison to prevent timing attacks.
+   * Always perform comparison to avoid leaking length info. */
   crypted_len = strlen(crypted);
   passwd_len = strlen(passwd);
-  if (crypted_len != passwd_len) {
-    res = 1;
-  } else {
-    res = CRYPTO_memcmp(crypted, passwd, crypted_len);
-  }
+  cmp_len = (crypted_len < passwd_len) ? crypted_len : passwd_len;
+  res = CRYPTO_memcmp(crypted, passwd, cmp_len);
+  /* Lengths must also match - XOR is non-zero if different */
+  res |= (crypted_len ^ passwd_len);
 
   MyFree(crypted);
   return 0 == res;
