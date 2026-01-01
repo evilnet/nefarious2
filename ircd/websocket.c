@@ -66,6 +66,7 @@
 #define WS_MAX_PAYLOAD 16384
 
 /* Subprotocol types */
+#define WS_SUBPROTO_NONE   0  /**< No subprotocol requested by client */
 #define WS_SUBPROTO_BINARY 1
 #define WS_SUBPROTO_TEXT   2
 
@@ -128,7 +129,7 @@ static int parse_ws_handshake(const char *buffer, int length,
   int found_key = 0;
   int found_version = 0;
 
-  *subproto = WS_SUBPROTO_BINARY; /* Default to binary */
+  *subproto = WS_SUBPROTO_NONE; /* RFC 6455 §4.2.2: Don't assume subprotocol unless client requests */
   ws_key[0] = '\0';
 
   /* Check for GET request */
@@ -197,12 +198,23 @@ static int parse_ws_handshake(const char *buffer, int length,
  * @param[in] subproto The selected subprotocol (WS_SUBPROTO_*).
  * @param[out] response Output buffer (at least 256 bytes).
  * @return Length of response.
+ *
+ * RFC 6455 §4.2.2: If the server does not wish to agree to one of the
+ * suggested subprotocols, it MUST NOT send back a Sec-WebSocket-Protocol
+ * header field in its response.
  */
 static int build_ws_response(const char *accept_key, int subproto, char *response)
 {
-  const char *proto_name = (subproto == WS_SUBPROTO_TEXT)
-                           ? "text.ircv3.net"
-                           : "binary.ircv3.net";
+  /* RFC 6455 §4.2.2: Only include Sec-WebSocket-Protocol if client requested one */
+  if (subproto == WS_SUBPROTO_NONE) {
+    return ircd_snprintf(0, response, 256,
+      "HTTP/1.1 101 Switching Protocols\r\n"
+      "Upgrade: websocket\r\n"
+      "Connection: Upgrade\r\n"
+      "Sec-WebSocket-Accept: %s\r\n"
+      "\r\n",
+      accept_key);
+  }
 
   return ircd_snprintf(0, response, 256,
     "HTTP/1.1 101 Switching Protocols\r\n"
@@ -211,7 +223,8 @@ static int build_ws_response(const char *accept_key, int subproto, char *respons
     "Sec-WebSocket-Accept: %s\r\n"
     "Sec-WebSocket-Protocol: %s\r\n"
     "\r\n",
-    accept_key, proto_name);
+    accept_key,
+    (subproto == WS_SUBPROTO_TEXT) ? "text.ircv3.net" : "binary.ircv3.net");
 }
 
 /** Handle WebSocket handshake for a new connection.
@@ -275,6 +288,7 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
 
   Debug((DEBUG_DEBUG, "WebSocket: Handshake complete for %s (subproto=%s)",
          cli_sockhost(cptr),
+         subproto == WS_SUBPROTO_NONE ? "none" :
          subproto == WS_SUBPROTO_TEXT ? "text" : "binary"));
 
   return 1;
@@ -293,6 +307,12 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
  * @param[out] opcode The frame opcode.
  * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
  * @return Number of bytes consumed from frame, 0 if incomplete, -1 on error.
+ *
+ * RFC 6455 Compliance:
+ * - §5.2: RSV1-3 bits MUST be 0 unless extension negotiated (we negotiate none)
+ * - §5.1: Client-to-server frames MUST be masked
+ * - §5.2: Reserved opcodes (0x03-0x07, 0x0B-0x0F) MUST cause connection failure
+ * - §5.5: Control frames MUST have payload length <= 125 bytes
  */
 int websocket_decode_frame(const unsigned char *frame, int frame_len,
                            char *payload, int payload_size,
@@ -301,6 +321,8 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
   int pos = 0;
   int masked;
   int fin;
+  int rsv;
+  int is_control;
   unsigned long long plen;
   unsigned char mask[4];
   int i;
@@ -313,14 +335,37 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
   if (frame_len < 2)
     return 0;
 
-  /* Parse first byte: FIN + opcode */
-  *opcode = frame[0] & 0x0F;
+  /* Parse first byte: FIN + RSV1-3 + opcode */
   fin = (frame[0] & WS_FIN) ? 1 : 0;
+  rsv = (frame[0] >> 4) & 0x07;  /* RSV1-3 are bits 6-4 */
+  *opcode = frame[0] & 0x0F;
+
+  /* RFC 6455 §5.2: RSV bits MUST be 0 unless extension negotiated */
+  if (rsv != 0) {
+    Debug((DEBUG_DEBUG, "WebSocket: RSV bits set (0x%x) without extension - protocol error", rsv));
+    return -1;
+  }
+
+  /* RFC 6455 §5.2: Reserved opcodes MUST cause connection failure */
+  /* Data frames: 0x0-0x2 valid, 0x3-0x7 reserved */
+  /* Control frames: 0x8-0xA valid, 0xB-0xF reserved */
+  if ((*opcode >= 0x03 && *opcode <= 0x07) || (*opcode >= 0x0B && *opcode <= 0x0F)) {
+    Debug((DEBUG_DEBUG, "WebSocket: Reserved opcode 0x%x - protocol error", *opcode));
+    return -1;
+  }
+
+  is_control = (*opcode >= 0x08);
 
   /* Parse second byte: MASK + payload length */
   masked = (frame[1] & WS_MASK) ? 1 : 0;
   plen = frame[1] & 0x7F;
   pos = 2;
+
+  /* RFC 6455 §5.1: Client-to-server frames MUST be masked */
+  if (!masked) {
+    Debug((DEBUG_DEBUG, "WebSocket: Client frame not masked - protocol error"));
+    return -1;
+  }
 
   /* Extended payload length */
   if (plen == 126) {
@@ -337,19 +382,23 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
     pos = 10;
   }
 
+  /* RFC 6455 §5.5: Control frames MUST have payload length <= 125 bytes */
+  if (is_control && plen > 125) {
+    Debug((DEBUG_DEBUG, "WebSocket: Control frame payload too large (%llu > 125) - protocol error", plen));
+    return -1;
+  }
+
   /* Sanity check payload length */
   if (plen > WS_MAX_PAYLOAD) {
     Debug((DEBUG_DEBUG, "WebSocket: Frame too large: %llu bytes", plen));
     return -1;
   }
 
-  /* Get mask if present (client-to-server MUST be masked) */
-  if (masked) {
-    if (frame_len < pos + 4)
-      return 0;
-    memcpy(mask, frame + pos, 4);
-    pos += 4;
-  }
+  /* Get mask (required for client-to-server frames - we already verified masked=1 above) */
+  if (frame_len < pos + 4)
+    return 0;
+  memcpy(mask, frame + pos, 4);
+  pos += 4;
 
   /* Check if we have complete payload */
   if (frame_len < pos + (int)plen)
@@ -363,10 +412,7 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
 
   /* Copy and unmask payload */
   for (i = 0; i < (int)plen; i++) {
-    if (masked)
-      payload[i] = frame[pos + i] ^ mask[i % 4];
-    else
-      payload[i] = frame[pos + i];
+    payload[i] = frame[pos + i] ^ mask[i % 4];
   }
   payload[plen] = '\0';
   *payload_len = (int)plen;
