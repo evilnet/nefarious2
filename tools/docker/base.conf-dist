@@ -123,6 +123,12 @@ Port {
      ssl = yes;
 };
 
+# WebSocket port for browser-based clients
+Port {
+     port = 8443;
+     ssl = yes;
+     websocket = yes;
+};
 
 # Do NOT remove the following lines; linesync.sh depends on them!
 # BEGIN LINESYNC

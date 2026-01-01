@@ -31,6 +31,7 @@
 #include "parse.h"
 #include "s_bsd.h"
 #include "s_misc.h"
+#include "s_debug.h"
 #include "send.h"
 #include "websocket.h"
 
@@ -123,8 +124,12 @@ int connect_dopacket(struct Client *cptr, const char *buffer, int length)
 
   update_bytes_received(cptr, length);
 
+  Debug((DEBUG_DEBUG, "connect_dopacket: IsWSNeedHandshake=%d, IsSSL=%d, length=%d",
+         IsWSNeedHandshake(cptr), IsSSL(cptr), length));
+
   /* Handle WebSocket handshake if needed */
   if (IsWSNeedHandshake(cptr)) {
+    Debug((DEBUG_DEBUG, "Processing WebSocket handshake"));
     int result;
     /* Accumulate data in client buffer for HTTP request */
     client_buffer = cli_buffer(cptr);

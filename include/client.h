@@ -349,6 +349,12 @@ struct Connection
   /* Current message @batch tag for PRIVMSG interception */
   char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
+  /* WebSocket state for RFC 6455 compliance */
+  unsigned char       con_ws_frame_buf[BUFSIZE]; /**< Partial WebSocket frame buffer */
+  int                 con_ws_frame_len;   /**< Length of data in frame buffer */
+  char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
+  int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
+  int                 con_ws_frag_opcode; /**< Opcode of first fragment */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -495,6 +501,16 @@ struct Client {
 #define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
 /** Get current message concat flag. */
 #define cli_msg_concat(cli)	con_msg_concat(cli_connect(cli))
+/** Get WebSocket partial frame buffer. */
+#define cli_ws_frame_buf(cli)	con_ws_frame_buf(cli_connect(cli))
+/** Get WebSocket partial frame buffer length. */
+#define cli_ws_frame_len(cli)	con_ws_frame_len(cli_connect(cli))
+/** Get WebSocket fragment reassembly buffer. */
+#define cli_ws_frag_buf(cli)	con_ws_frag_buf(cli_connect(cli))
+/** Get WebSocket fragment reassembly buffer length. */
+#define cli_ws_frag_len(cli)	con_ws_frag_len(cli_connect(cli))
+/** Get WebSocket first fragment opcode. */
+#define cli_ws_frag_opcode(cli)	con_ws_frag_opcode(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -745,6 +761,16 @@ struct Client {
 #define con_msg_batch_tag(con)	((con)->con_msg_batch_tag)
 /** Get the current message draft/multiline-concat flag. */
 #define con_msg_concat(con)	((con)->con_msg_concat)
+/** Get WebSocket partial frame buffer. */
+#define con_ws_frame_buf(con)	((con)->con_ws_frame_buf)
+/** Get WebSocket partial frame buffer length. */
+#define con_ws_frame_len(con)	((con)->con_ws_frame_len)
+/** Get WebSocket fragment reassembly buffer. */
+#define con_ws_frag_buf(con)	((con)->con_ws_frag_buf)
+/** Get WebSocket fragment reassembly buffer length. */
+#define con_ws_frag_len(con)	((con)->con_ws_frag_len)
+/** Get WebSocket first fragment opcode. */
+#define con_ws_frag_opcode(con)	((con)->con_ws_frag_opcode)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */

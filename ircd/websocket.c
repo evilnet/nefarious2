@@ -36,6 +36,7 @@
 #include "s_bsd.h"
 #include "s_debug.h"
 #include "send.h"
+#include "ssl.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@
 #ifdef USE_SSL
 #include <openssl/sha.h>
 #include <openssl/evp.h>
+#include <openssl/ssl.h>
 #endif
 
 /* WebSocket magic GUID for handshake (RFC 6455) */
@@ -250,18 +252,26 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
 
   /* Send handshake response directly */
   /* Note: We bypass the normal send queue for the handshake */
-  if (os_send_nonb(cli_fd(cptr), response, resp_len, NULL) != IO_SUCCESS) {
-    Debug((DEBUG_DEBUG, "WebSocket: Failed to send handshake response to %s",
-           cli_sockhost(cptr)));
-    return -1;
+  /* Use SSL_write for SSL connections, os_send_nonb for plain */
+  if (cli_socket(cptr).ssl) {
+    int send_result = SSL_write(cli_socket(cptr).ssl, response, resp_len);
+    if (send_result <= 0) {
+      Debug((DEBUG_DEBUG, "WebSocket: Failed to send handshake response to %s (SSL_write returned %d)",
+             cli_sockhost(cptr), send_result));
+      return -1;
+    }
+  } else {
+    unsigned int bytes_sent;
+    if (os_send_nonb(cli_fd(cptr), response, resp_len, &bytes_sent) != IO_SUCCESS) {
+      Debug((DEBUG_DEBUG, "WebSocket: Failed to send handshake response to %s",
+             cli_sockhost(cptr)));
+      return -1;
+    }
   }
 
   /* Mark client as WebSocket and clear handshake flag */
   SetWebSocket(cptr);
   ClearWSNeedHandshake(cptr);
-
-  /* Store subprotocol preference - we'll use this when sending */
-  /* For now we treat both the same on the server side */
 
   Debug((DEBUG_DEBUG, "WebSocket: Handshake complete for %s (subproto=%s)",
          cli_sockhost(cptr),
@@ -281,20 +291,23 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
  * @param[in] payload_size Size of payload buffer.
  * @param[out] payload_len Length of decoded payload.
  * @param[out] opcode The frame opcode.
+ * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
  * @return Number of bytes consumed from frame, 0 if incomplete, -1 on error.
  */
 int websocket_decode_frame(const unsigned char *frame, int frame_len,
                            char *payload, int payload_size,
-                           int *payload_len, int *opcode)
+                           int *payload_len, int *opcode, int *is_fin)
 {
   int pos = 0;
   int masked;
+  int fin;
   unsigned long long plen;
   unsigned char mask[4];
   int i;
 
   *payload_len = 0;
   *opcode = 0;
+  *is_fin = 0;
 
   /* Need at least 2 bytes for header */
   if (frame_len < 2)
@@ -302,7 +315,7 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
 
   /* Parse first byte: FIN + opcode */
   *opcode = frame[0] & 0x0F;
-  /* int fin = (frame[0] & WS_FIN) ? 1 : 0; */
+  fin = (frame[0] & WS_FIN) ? 1 : 0;
 
   /* Parse second byte: MASK + payload length */
   masked = (frame[1] & WS_MASK) ? 1 : 0;
@@ -357,6 +370,7 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
   }
   payload[plen] = '\0';
   *payload_len = (int)plen;
+  *is_fin = fin;
 
   return pos + (int)plen;
 }
@@ -411,6 +425,26 @@ int websocket_encode_frame(const char *data, int data_len,
  * @param[in] payload_len Payload length.
  * @return 1 to continue, 0 to close connection.
  */
+/** Helper to send raw WebSocket frame data (SSL-aware).
+ * @param[in] cptr Client connection.
+ * @param[in] data Data to send.
+ * @param[in] len Length of data.
+ * @return 1 on success, 0 on failure.
+ */
+static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
+{
+#ifdef USE_SSL
+  if (cli_socket(cptr).ssl) {
+    int result = SSL_write(cli_socket(cptr).ssl, data, len);
+    return (result > 0) ? 1 : 0;
+  }
+#endif
+  {
+    unsigned int bytes_sent;
+    return (os_send_nonb(cli_fd(cptr), (char *)data, len, &bytes_sent) == IO_SUCCESS) ? 1 : 0;
+  }
+}
+
 int websocket_handle_control(struct Client *cptr, int opcode,
                              const char *payload, int payload_len)
 {
@@ -430,7 +464,7 @@ int websocket_handle_control(struct Client *cptr, int opcode,
         response[1] = 0;
         resp_len = 2;
       }
-      os_send_nonb(cli_fd(cptr), (char *)response, resp_len, NULL);
+      ws_send_raw(cptr, response, resp_len);
       return 1;
 
     case WS_OPCODE_PONG:
@@ -450,7 +484,7 @@ int websocket_handle_control(struct Client *cptr, int opcode,
         response[1] = 0;
         resp_len = 2;
       }
-      os_send_nonb(cli_fd(cptr), (char *)response, resp_len, NULL);
+      ws_send_raw(cptr, response, resp_len);
       return 0; /* Signal to close connection */
 
     default:

@@ -305,6 +305,15 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
   assert(0 != cptr);
 
   /*
+   * For WebSocket clients awaiting handshake, don't send any IRC data yet.
+   * Data will be queued and delivered after handshake completes.
+   */
+  if (IsWSNeedHandshake(cptr)) {
+    SetFlag(cptr, FLAG_BLOCKED);
+    return 0;
+  }
+
+  /*
    * For WebSocket clients, we need to wrap each IRC line in a WebSocket frame.
    * We extract data from the MsgQ, frame it, and send the framed version.
    */
@@ -340,15 +349,20 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
       frame_len = websocket_encode_frame(irc_line, line_len,
                                          (unsigned char *)ws_frame, 1);
 
+      Debug((DEBUG_DEBUG, "WebSocket deliver: line_len=%d, frame_len=%d, msg='%.50s'",
+             line_len, frame_len, irc_line));
+
 #ifdef USE_SSL
       if (cli_socket(cptr).ssl) {
         /* SSL WebSocket - use SSL_write directly */
         send_result = SSL_write(cli_socket(cptr).ssl, ws_frame, frame_len);
+        Debug((DEBUG_DEBUG, "WebSocket SSL_write: result=%d", send_result));
         if (send_result > 0) {
           result = IO_SUCCESS;
           bytes_written = send_result;
         } else {
           int ssl_err = SSL_get_error(cli_socket(cptr).ssl, send_result);
+          Debug((DEBUG_DEBUG, "WebSocket SSL_write error: ssl_err=%d", ssl_err));
           if (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ)
             result = IO_BLOCKED;
           else
@@ -771,7 +785,10 @@ void add_connection(struct Listener* listener, int fd) {
 #endif
 
   /* Mark WebSocket connections - they need handshake before IRC protocol */
+  Debug((DEBUG_DEBUG, "WebSocket check: listener_websocket=%d, FEAT_DRAFT_WEBSOCKET=%d, listener_port=%d",
+         listener_websocket(listener), feature_bool(FEAT_DRAFT_WEBSOCKET), listener->addr.port));
   if (listener_websocket(listener) && feature_bool(FEAT_DRAFT_WEBSOCKET)) {
+    Debug((DEBUG_DEBUG, "Setting WSNeedHandshake for new client"));
     SetWSNeedHandshake(new_client);
   }
 
@@ -848,44 +865,155 @@ static int read_packet(struct Client *cptr, int socket_ready)
   else
   {
     /*
+     * Handle WebSocket handshake for client connections.
+     * This must happen before normal client data processing.
+     */
+    if (IsWSNeedHandshake(cptr)) {
+      int result;
+      char *client_buffer;
+      char *endp;
+      const char *src;
+
+      Debug((DEBUG_DEBUG, "Client WebSocket handshake: length=%d", length));
+
+      /* Accumulate data in client buffer for HTTP request */
+      client_buffer = cli_buffer(cptr);
+      endp = client_buffer + cli_count(cptr);
+      src = readbuf;
+
+      /* Copy incoming data to buffer */
+      while (length > 0 && (endp - client_buffer) < BUFSIZE - 1) {
+        *endp++ = *src++;
+        length--;
+      }
+      *endp = '\0';
+      cli_count(cptr) = endp - client_buffer;
+
+      /* Try to complete handshake */
+      result = websocket_handshake(cptr, client_buffer, cli_count(cptr));
+      if (result == 0) {
+        /* Need more data */
+        return 1;
+      } else if (result < 0) {
+        /* Handshake failed */
+        return exit_client(cptr, cptr, &me, "WebSocket handshake failed");
+      }
+      /* Handshake succeeded - clear buffer and unblock sends */
+      Debug((DEBUG_DEBUG, "WebSocket handshake completed successfully"));
+      cli_count(cptr) = 0;
+      ClrFlag(cptr, FLAG_BLOCKED);  /* Allow queued messages to be sent */
+      /* Trigger send of queued data */
+      send_queued(cptr);
+      /* If no remaining data, we're done for now */
+      if (length <= 0)
+        return 1;
+    }
+
+    /*
      * For WebSocket clients, decode frames before queuing.
      * WebSocket frames wrap the IRC protocol data.
+     * Supports RFC 6455 fragmentation and partial frame buffering.
      */
     if (length > 0 && IsWebSocket(cptr)) {
-      static char ws_payload[BUFSIZE + 16];
-      int ws_len, opcode, consumed;
-      const unsigned char *ws_data = (const unsigned char *)readbuf;
-      int ws_remaining = length;
+      char ws_payload[BUFSIZE + 16];  /* Stack-local, not static */
+      int ws_len, opcode, consumed, is_fin;
+      unsigned char *ws_data;
+      int ws_remaining;
+      int copy_len;
+
+      Debug((DEBUG_DEBUG, "WebSocket receive: length=%d, IsWebSocket=%d", length, IsWebSocket(cptr)));
+
+      /* Prepend any partial frame from previous read */
+      if (cli_ws_frame_len(cptr) > 0) {
+        copy_len = length;
+        if (copy_len > BUFSIZE - cli_ws_frame_len(cptr))
+          copy_len = BUFSIZE - cli_ws_frame_len(cptr);
+        memcpy(cli_ws_frame_buf(cptr) + cli_ws_frame_len(cptr), readbuf, copy_len);
+        ws_data = cli_ws_frame_buf(cptr);
+        ws_remaining = cli_ws_frame_len(cptr) + copy_len;
+      } else {
+        ws_data = (unsigned char *)readbuf;
+        ws_remaining = length;
+      }
 
       while (ws_remaining > 0) {
         consumed = websocket_decode_frame(ws_data, ws_remaining,
                                           ws_payload, sizeof(ws_payload),
-                                          &ws_len, &opcode);
+                                          &ws_len, &opcode, &is_fin);
+        Debug((DEBUG_DEBUG, "WebSocket decode: consumed=%d, ws_len=%d, opcode=%d, is_fin=%d, remaining=%d",
+               consumed, ws_len, opcode, is_fin, ws_remaining));
         if (consumed == 0) {
-          /* Incomplete frame - save for later */
-          /* TODO: Implement frame buffering for partial frames */
+          /* Incomplete frame - save for next read */
+          Debug((DEBUG_DEBUG, "WebSocket: Incomplete frame, saving %d bytes", ws_remaining));
+          if (ws_remaining > 0 && ws_remaining < BUFSIZE) {
+            memmove(cli_ws_frame_buf(cptr), ws_data, ws_remaining);
+            cli_ws_frame_len(cptr) = ws_remaining;
+          }
           break;
         } else if (consumed < 0) {
           /* Frame error */
+          Debug((DEBUG_DEBUG, "WebSocket: Frame error (consumed=%d)", consumed));
           return exit_client(cptr, cptr, &me, "WebSocket frame error");
         }
 
-        /* Handle control frames */
+        Debug((DEBUG_DEBUG, "WebSocket frame payload: '%.50s'", ws_payload));
+        cli_ws_frame_len(cptr) = 0;  /* Frame consumed successfully */
+
+        /* Handle control frames (always complete, can be interleaved) */
         if (opcode >= WS_OPCODE_CLOSE) {
           if (!websocket_handle_control(cptr, opcode, ws_payload, ws_len)) {
             /* Close frame received */
             return exit_client(cptr, cptr, &me, "WebSocket closed");
           }
-        } else if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
-          /* Data frame - add line ending if needed and queue */
-          if (ws_len > 0) {
-            /* WebSocket IRC: messages don't require \r\n, add \n for parser */
-            if (ws_len < (int)sizeof(ws_payload) - 1 &&
-                ws_payload[ws_len - 1] != '\n') {
-              ws_payload[ws_len++] = '\n';
+        }
+        /* Handle continuation frame (part of fragmented message) */
+        else if (opcode == WS_OPCODE_CONTINUATION) {
+          /* Append to fragment buffer */
+          if (cli_ws_frag_len(cptr) + ws_len <= 16384) {
+            memcpy(cli_ws_frag_buf(cptr) + cli_ws_frag_len(cptr), ws_payload, ws_len);
+            cli_ws_frag_len(cptr) += ws_len;
+          } else {
+            /* Fragment too large */
+            return exit_client(cptr, cptr, &me, "WebSocket fragment overflow");
+          }
+          if (is_fin) {
+            /* Fragment complete - deliver reassembled message */
+            char *frag_data = cli_ws_frag_buf(cptr);
+            int frag_len = cli_ws_frag_len(cptr);
+            if (frag_len > 0) {
+              /* Add line ending if needed */
+              if (frag_len < 16384 - 1 && frag_data[frag_len - 1] != '\n') {
+                frag_data[frag_len++] = '\n';
+              }
+              if (dbuf_put(&(cli_recvQ(cptr)), frag_data, frag_len) == 0)
+                return exit_client(cptr, cptr, &me, "dbuf_put fail");
             }
-            if (dbuf_put(&(cli_recvQ(cptr)), ws_payload, ws_len) == 0)
-              return exit_client(cptr, cptr, &me, "dbuf_put fail");
+            cli_ws_frag_len(cptr) = 0;
+            cli_ws_frag_opcode(cptr) = 0;
+          }
+        }
+        /* Handle data frames (TEXT or BINARY) */
+        else if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
+          if (!is_fin) {
+            /* First fragment - save to fragment buffer */
+            cli_ws_frag_opcode(cptr) = opcode;
+            if (ws_len <= 16384) {
+              memcpy(cli_ws_frag_buf(cptr), ws_payload, ws_len);
+              cli_ws_frag_len(cptr) = ws_len;
+            } else {
+              return exit_client(cptr, cptr, &me, "WebSocket fragment overflow");
+            }
+          } else {
+            /* Complete frame - deliver immediately */
+            if (ws_len > 0) {
+              /* WebSocket IRC: messages don't require \r\n, add \n for parser */
+              if (ws_len < (int)sizeof(ws_payload) - 1 &&
+                  ws_payload[ws_len - 1] != '\n') {
+                ws_payload[ws_len++] = '\n';
+              }
+              if (dbuf_put(&(cli_recvQ(cptr)), ws_payload, ws_len) == 0)
+                return exit_client(cptr, cptr, &me, "dbuf_put fail");
+            }
           }
         }
 

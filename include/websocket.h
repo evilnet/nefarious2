@@ -47,11 +47,12 @@ extern int websocket_handshake(struct Client *cptr, const char *buffer, int leng
  * @param[in] payload_size Size of payload buffer.
  * @param[out] payload_len Length of decoded payload.
  * @param[out] opcode The frame opcode.
+ * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
  * @return Number of bytes consumed from frame, 0 if incomplete, -1 on error.
  */
 extern int websocket_decode_frame(const unsigned char *frame, int frame_len,
                                   char *payload, int payload_size,
-                                  int *payload_len, int *opcode);
+                                  int *payload_len, int *opcode, int *is_fin);
 
 /** Encode data as a WebSocket frame.
  * @param[in] data Data to encode.
