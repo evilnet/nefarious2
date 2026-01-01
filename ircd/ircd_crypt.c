@@ -188,9 +188,9 @@ crypt_mechs_t* crypt_mech;
    }
    memset(hashed_pass, 0, sizeof(char)*strlen(temp_hashed_pass)
     +crypt_mech->mech->crypt_token_size + 1);
-   ircd_strncpy(hashed_pass, crypt_mech->mech->crypt_token, 
-    crypt_mech->mech->crypt_token_size);
-   ircd_strncpy(hashed_pass + crypt_mech->mech->crypt_token_size, temp_hashed_pass, strlen(temp_hashed_pass));
+   ircd_strncpy(hashed_pass, crypt_mech->mech->crypt_token,
+    crypt_mech->mech->crypt_token_size + 1);
+   ircd_strncpy(hashed_pass + crypt_mech->mech->crypt_token_size, temp_hashed_pass, strlen(temp_hashed_pass) + 1);
    Debug((DEBUG_DEBUG, "ircd_crypt: tagged pass is %s", hashed_pass));
   } else {
    Debug((DEBUG_DEBUG, "ircd_crypt: will try next mechanism at 0x%X", 
