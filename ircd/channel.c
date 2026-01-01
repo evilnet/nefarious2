@@ -1037,6 +1037,30 @@ const char* find_no_nickchange_channel(struct Client* cptr)
 }
 
 
+/** Helper to append a mode parameter to the parameter buffer.
+ * @param pbuf      The parameter buffer.
+ * @param pos       Pointer to current position in buffer.
+ * @param buflen    Total buffer length.
+ * @param param     The parameter string to append.
+ * @param prev_param Pointer to previous_parameter flag.
+ * @returns 1 if appended successfully, 0 if buffer too small.
+ */
+static int append_mode_param(char *pbuf, size_t *pos, size_t buflen,
+                             const char *param, int *prev_param)
+{
+  size_t len = strlen(param);
+  if (*pos + len + 2 < buflen) {
+    if (*prev_param)
+      pbuf[(*pos)++] = ' ';
+    memcpy(pbuf + *pos, param, len);
+    *pos += len;
+    pbuf[*pos] = '\0';
+    *prev_param = 1;
+    return 1;
+  }
+  return 0;
+}
+
 /** Fill mbuf/pbuf with modes from chptr
  * write the "simple" list of channel modes for channel chptr onto buffer mbuf
  * with the parameters in pbuf as visible by cptr.
@@ -1057,7 +1081,6 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
 {
   int previous_parameter = 0;
   size_t pbuf_pos = 0;
-  size_t len;
 
   assert(0 != mbuf);
   assert(0 != pbuf);
@@ -1113,72 +1136,30 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
   }
   if (*chptr->mode.redir) {
     *mbuf++ = 'L';
-    len = strlen(chptr->mode.redir);
-    if (pbuf_pos + len + 2 < (size_t)buflen) {
-      if (previous_parameter)
-        pbuf[pbuf_pos++] = ' ';
-      memcpy(pbuf + pbuf_pos, chptr->mode.redir, len);
-      pbuf_pos += len;
-      pbuf[pbuf_pos] = '\0';
-      previous_parameter = 1;
-    }
+    append_mode_param(pbuf, &pbuf_pos, buflen, chptr->mode.redir, &previous_parameter);
   }
   if (*chptr->mode.key) {
     *mbuf++ = 'k';
     if (is_chan_op(cptr, chptr) || IsServer(cptr) || IsOper(cptr)) {
-      len = strlen(chptr->mode.key);
-      if (pbuf_pos + len + 2 < (size_t)buflen) {
-        if (previous_parameter)
-          pbuf[pbuf_pos++] = ' ';
-        memcpy(pbuf + pbuf_pos, chptr->mode.key, len);
-        pbuf_pos += len;
-        pbuf[pbuf_pos] = '\0';
-        previous_parameter = 1;
-      }
-    } else if (pbuf_pos + 3 < (size_t)buflen) {
-      if (previous_parameter)
-        pbuf[pbuf_pos++] = ' ';
-      pbuf[pbuf_pos++] = '*';
-      pbuf[pbuf_pos] = '\0';
-      previous_parameter = 1;
+      append_mode_param(pbuf, &pbuf_pos, buflen, chptr->mode.key, &previous_parameter);
+    } else {
+      append_mode_param(pbuf, &pbuf_pos, buflen, "*", &previous_parameter);
     }
   }
   if (*chptr->mode.apass && (IsOpLevels(cptr) || !IsServer(cptr))) {
     *mbuf++ = 'A';
     if (IsServer(cptr) || IsOper(cptr)) {
-      len = strlen(chptr->mode.apass);
-      if (pbuf_pos + len + 2 < (size_t)buflen) {
-        if (previous_parameter)
-          pbuf[pbuf_pos++] = ' ';
-        memcpy(pbuf + pbuf_pos, chptr->mode.apass, len);
-        pbuf_pos += len;
-        pbuf[pbuf_pos] = '\0';
-        previous_parameter = 1;
-      }
-    } else if (pbuf_pos + 3 < (size_t)buflen) {
-      if (previous_parameter)
-        pbuf[pbuf_pos++] = ' ';
-      pbuf[pbuf_pos++] = '*';
-      pbuf[pbuf_pos] = '\0';
-      previous_parameter = 1;
+      append_mode_param(pbuf, &pbuf_pos, buflen, chptr->mode.apass, &previous_parameter);
+    } else {
+      append_mode_param(pbuf, &pbuf_pos, buflen, "*", &previous_parameter);
     }
   }
   if (*chptr->mode.upass && (IsOpLevels(cptr) || !IsServer(cptr))) {
     *mbuf++ = 'U';
     if (IsServer(cptr) || (member && IsChanOp(member) && OpLevel(member) == 0) || IsOper(cptr)) {
-      len = strlen(chptr->mode.upass);
-      if (pbuf_pos + len + 2 < (size_t)buflen) {
-        if (previous_parameter)
-          pbuf[pbuf_pos++] = ' ';
-        memcpy(pbuf + pbuf_pos, chptr->mode.upass, len);
-        pbuf_pos += len;
-        pbuf[pbuf_pos] = '\0';
-      }
-    } else if (pbuf_pos + 3 < (size_t)buflen) {
-      if (previous_parameter)
-        pbuf[pbuf_pos++] = ' ';
-      pbuf[pbuf_pos++] = '*';
-      pbuf[pbuf_pos] = '\0';
+      append_mode_param(pbuf, &pbuf_pos, buflen, chptr->mode.upass, &previous_parameter);
+    } else {
+      append_mode_param(pbuf, &pbuf_pos, buflen, "*", &previous_parameter);
     }
   }
   *mbuf = '\0';
