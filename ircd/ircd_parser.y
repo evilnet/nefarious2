@@ -387,7 +387,7 @@ generaldesc: DESCRIPTION '=' QSTRING ';'
 {
   MyFree(localConf.description);
   localConf.description = $3;
-  ircd_strncpy(cli_info(&me), $3, REALLEN);
+  ircd_strncpy(cli_info(&me), $3, REALLEN + 1);
 };
 
 generalvhost: VHOST '=' QSTRING ';'

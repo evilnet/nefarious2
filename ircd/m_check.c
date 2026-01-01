@@ -722,25 +722,25 @@ signed int checkHostmask(struct Client *sptr, char *hoststr, int flags) {
   strcpy(hostm,"*");
 
   if (!strchr(hoststr, '!') && !strchr(hoststr, '@'))
-    ircd_strncpy(hostm,hoststr,HOSTLEN);
+    ircd_strncpy(hostm,hoststr,sizeof(hostm));
   else {
     if ((p = strchr(hoststr, '@'))) {
       *p++ = '\0';
-      if (*p) ircd_strncpy(hostm,p, HOSTLEN);
+      if (*p) ircd_strncpy(hostm,p, sizeof(hostm));
     }
 
     /* Get the nick!user mask */
     if ((p = strchr(hoststr, '!'))) {
       *p++ = '\0';
-      if (*p) ircd_strncpy(userm,p,USERLEN);
-      if (*hoststr) ircd_strncpy(nickm,hoststr,NICKLEN);
+      if (*p) ircd_strncpy(userm,p,sizeof(userm));
+      if (*hoststr) ircd_strncpy(nickm,hoststr,sizeof(nickm));
     }
     else if (*hoststr) {
       /* Durz: We should only do the following *IF* the hoststr has not already been
        * copied into hostm (ie. neither ! or @ specified).. otherwise, when we do
        * /quote check *.barrysworld.com - we end up with targhost as: *!*.barryswo@*.barrysworld.com
        */
-      ircd_strncpy(userm,hoststr,USERLEN);
+      ircd_strncpy(userm,hoststr,sizeof(userm));
     }
   }
 

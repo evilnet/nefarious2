@@ -402,7 +402,7 @@ struct ListingArgs {
   time_t max_topic_time;
   time_t min_topic_time;
   unsigned int bucket;
-  char wildcard[CHANNELLEN];
+  char wildcard[CHANNELLEN + 1];
 };
 
 struct ModeBuf {

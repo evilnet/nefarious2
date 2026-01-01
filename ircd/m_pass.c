@@ -155,7 +155,7 @@ int mr_pass(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       cli_loc(cptr)->cookie = 0;
 
-      ircd_strncpy(cli_loc(cptr)->password, locargv[--i], ACCPASSWDLEN);
+      ircd_strncpy(cli_loc(cptr)->password, locargv[--i], ACCPASSWDLEN + 1);
       ircd_strncpy(cli_loc(cptr)->account, locargv[--i], ACCOUNTLEN + 1);
 
       if ((i>0) && !EmptyString(locargv[i-1]))

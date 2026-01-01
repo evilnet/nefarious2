@@ -451,7 +451,7 @@ struct ConfItem *conf_debug_iline(const char *client)
     if (client[tmp] == '@') {
       if (tmp > USERLEN)
         tmp = USERLEN;
-      ircd_strncpy(username, client, tmp);
+      ircd_strncpy(username, client, tmp + 1);
       /* and fall through */
       client += tmp + 1;
     }
@@ -480,7 +480,7 @@ struct ConfItem *conf_debug_iline(const char *client)
     tmp = strcspn(client, ",");
     if (tmp > HOSTLEN)
       tmp = HOSTLEN;
-    ircd_strncpy(hostname, client, tmp);
+    ircd_strncpy(hostname, client, tmp + 1);
     client += tmp + (client[tmp] != '\0');
   }
 

@@ -355,9 +355,9 @@ const char* options = "a:d:lm:u:y:5";
  len = strlen(DPATH) + strlen(CPATH) + 2;
  umkpasswd_conf->conf = (char *)MyMalloc(len*sizeof(char));
  memset(umkpasswd_conf->conf, 0, len*sizeof(char));
- ircd_strncpy(umkpasswd_conf->conf, DPATH, strlen(DPATH));
+ ircd_strncpy(umkpasswd_conf->conf, DPATH, strlen(DPATH) + 1);
  *((umkpasswd_conf->conf) + strlen(DPATH)) = '/';
- ircd_strncpy((umkpasswd_conf->conf) + strlen(DPATH) + 1, CPATH, strlen(CPATH));
+ ircd_strncpy((umkpasswd_conf->conf) + strlen(DPATH) + 1, CPATH, strlen(CPATH) + 1);
 
  len = 0;
 
