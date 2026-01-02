@@ -291,4 +291,6 @@ extern int find_mark_match(struct Client* sptr, const char* mask);
 extern int add_mark(struct Client* sptr, const char* dnsbl);
 extern int del_marks(struct Client* sptr);
 
+extern int conf_get_error_flag(void);
+
 #endif /* INCLUDED_s_conf_h */

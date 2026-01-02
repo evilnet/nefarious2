@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "s_conf.h"
+#include "dnsbl.h"
 #include "IPcheck.h"
 #include "class.h"
 #include "client.h"
@@ -1189,6 +1190,15 @@ yyerror(const char *msg)
  conf_error = 1;
 }
 
+/** Get the configuration error flag.
+ * @return Non-zero if a parse error occurred during last config read.
+ */
+int
+conf_get_error_flag(void)
+{
+  return conf_error;
+}
+
 /** Attach CONF_UWORLD items to a server and everything attached to it. */
 static void
 attach_conf_uworld(struct Client *cptr)
@@ -1285,6 +1295,7 @@ int rehash(struct Client *cptr, int sig)
   clearNickJupes();
 
   clear_quarantines();
+  dnsbl_clear_servers();
 
   class_mark_delete();
   mark_listeners_closing();

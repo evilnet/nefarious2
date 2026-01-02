@@ -803,6 +803,26 @@ static struct FeatureDesc {
   F_B(UPING_ENABLE, FEAT_READ, 1, 0),
   F_I(UPING_PORT, FEAT_READ, UDP_PORT, 0),
 
+  /* Native DNSBL FEAT_'s */
+  F_B(NATIVE_DNSBL, 0, 0, 0),
+  F_I(DNSBL_TIMEOUT, 0, 5, 0),
+  F_I(DNSBL_CACHETIME, 0, 86400, 0),
+  F_S(DNSBL_BLOCKMSG, 0, "Your IP is listed in a DNS blacklist", 0),
+
+#ifdef USE_LIBGIT2
+  /* GitSync FEAT_'s */
+  F_B(GITSYNC_ENABLE, 0, 0, 0),
+  F_I(GITSYNC_INTERVAL, 0, 300, 0),
+  F_S(GITSYNC_REPOSITORY, 0, "", 0),
+  F_S(GITSYNC_BRANCH, 0, "master", 0),
+  F_S(GITSYNC_SSH_KEY, 0, "", 0),
+  F_S(GITSYNC_LOCAL_PATH, 0, "gitsync", 0),
+  F_S(GITSYNC_CONF_FILE, 0, "gitsync.conf", 0),
+  F_S(GITSYNC_CERT_TAG, 0, "", 0),
+  F_S(GITSYNC_CERT_FILE, 0, "", 0),  /* Empty = use SSL_CERTFILE */
+  F_S(GITSYNC_HOST_FINGERPRINT, 0, "", 0),  /* SSH host key fingerprint (TOFU) */
+#endif
+
 #undef F_S
 #undef F_B
 #undef F_I
