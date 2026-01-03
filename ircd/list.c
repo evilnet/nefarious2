@@ -284,17 +284,37 @@ void free_client(struct Client* cptr)
   if (cli_connect(cptr))
     MyFree(cli_loc(cptr));
 
-  /* Loop through local clients and clear cli_saslagent if it's cptr. */
+  /* Loop through local clients and abort SASL sessions if agent is cptr.
+   * This proactively notifies clients when the SASL services server disconnects
+   * instead of making them wait for SASL_TIMEOUT.
+   */
   if (cli_saslagentref(cptr) > 0) {
     struct Client *acptr;
     int fd = 0;
+    int aborted = 0;
 
     for (fd = HighestFd; fd >= 0; --fd) {
       if ((acptr = LocalClientArray[fd])) {
         if (cli_saslagent(acptr) == cptr) {
+          /* Abort the SASL session - this sends ERR_SASLFAIL to the client */
+          if (cli_saslcookie(acptr) && !IsSASLComplete(acptr)) {
+            /* Only log first few to avoid log spam during netsplit */
+            if (aborted < 5) {
+              log_write(LS_DEBUG, L_DEBUG, 0,
+                        "SASL: Aborting session for %C - agent %C disconnected",
+                        acptr, cptr);
+            }
+            abort_sasl(acptr, 0);  /* 0 = not a timeout, just abort */
+            aborted++;
+          }
           cli_saslagent(acptr) = NULL;
         }
       }
+    }
+    if (aborted > 0) {
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "SASL: Aborted %d pending sessions due to agent %C disconnect",
+                aborted, cptr);
     }
     cli_saslagentref(cptr) = 0;
   }
