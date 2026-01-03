@@ -250,6 +250,12 @@ static int connect_inet(struct ConfItem* aconf, struct Client* cptr)
   if (!os_set_tos(cli_fd(cptr), feature_int(FEAT_TOS_SERVER), family)) {
     report_error(TOS_ERROR_MSG, cli_name(cptr), errno);
   }
+  /*
+   * Disable Nagle's algorithm for low-latency server-to-server links.
+   */
+  if (feature_bool(FEAT_TCP_NODELAY_S2S)) {
+    os_set_tcp_nodelay(cli_fd(cptr));
+  }
   if ((result = os_connect_nonb(cli_fd(cptr), &aconf->address)) == IO_FAILURE) {
     cli_error(cptr) = errno;
     report_error(CONNECT_ERROR_MSG, cli_name(cptr), errno);
@@ -666,6 +672,12 @@ void add_connection(struct Listener* listener, int fd) {
    * source route, and the normal routing takes over.
    */
   os_disable_options(fd);
+  /*
+   * Disable Nagle's algorithm for low-latency client connections.
+   */
+  if (feature_bool(FEAT_TCP_NODELAY_C2S)) {
+    os_set_tcp_nodelay(fd);
+  }
 
   if (listener_server(listener))
   {

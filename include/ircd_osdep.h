@@ -51,6 +51,7 @@ extern int os_set_fdlimit(unsigned int max_descriptors);
 extern int os_set_listen(int fd, int backlog);
 extern int os_set_nonblocking(int fd);
 extern int os_set_reuseaddr(int fd);
+extern int os_set_tcp_nodelay(int fd);
 extern int os_set_sockbufs(int fd, unsigned int ssize, unsigned int rsize);
 extern int os_set_tos(int fd,int tos,int family);
 extern int os_socketpair(int sv[2]);
