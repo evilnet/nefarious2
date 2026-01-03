@@ -203,15 +203,33 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* OK we now know who the message is for, let's deal with it! */
 
+  /* Validate the sender is a valid server (not dead/disconnecting) */
+  if (!IsServer(sptr) || IsDead(sptr)) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "SASL: Response from invalid/dead server %C, ignoring", sptr);
+    return 0;
+  }
+
   /* If we don't know who the agent is we do now, else check its the same agent */
   if (!cli_saslagent(acptr)) {
     cli_saslagent(acptr) = sptr;
     cli_saslagentref(sptr)++;
   } else if (cli_saslagent(acptr) != sptr) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "SASL: Agent mismatch for %C - expected %C, got %C (ignoring response)",
-              acptr, cli_saslagent(acptr), sptr);
-    return 0;
+    /* Check if existing agent is dead - if so, accept new agent */
+    if (IsDead(cli_saslagent(acptr)) || !IsServer(cli_saslagent(acptr))) {
+      log_write(LS_DEBUG, L_DEBUG, 0,
+                "SASL: Previous agent %C is dead, accepting new agent %C",
+                cli_saslagent(acptr), sptr);
+      if (cli_saslagentref(cli_saslagent(acptr)))
+        cli_saslagentref(cli_saslagent(acptr))--;
+      cli_saslagent(acptr) = sptr;
+      cli_saslagentref(sptr)++;
+    } else {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL: Agent mismatch for %C - expected %C, got %C (ignoring response)",
+                acptr, cli_saslagent(acptr), sptr);
+      return 0;
+    }
   }
 
   if (reply[0] == 'C') {
@@ -325,6 +343,13 @@ int abort_sasl(struct Client* cptr, int timeout) {
       acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER));
     else
       acptr = NULL;
+  }
+
+  /* Validate agent is still a valid, connected server */
+  if (acptr && (IsDead(acptr) || !IsServer(acptr))) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "SASL abort: Agent %C is dead/invalid, broadcasting instead", acptr);
+    acptr = NULL;
   }
 
   if (timeout)

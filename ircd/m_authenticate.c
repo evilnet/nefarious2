@@ -186,6 +186,21 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       acptr = NULL;
   }
 
+  /* Validate agent is still a valid, connected server */
+  if (acptr && (IsDead(acptr) || !IsServer(acptr))) {
+    /* Clear stale agent reference */
+    if (cli_saslagent(cptr) == acptr) {
+      if (cli_saslagentref(acptr))
+        cli_saslagentref(acptr)--;
+      cli_saslagent(cptr) = NULL;
+    }
+    /* Try to find a new agent */
+    if (strcmp(feature_str(FEAT_SASL_SERVER), "*"))
+      acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER));
+    else
+      acptr = NULL;
+  }
+
   if (!acptr && strcmp(feature_str(FEAT_SASL_SERVER), "*")) {
     if (CapActive(cptr, CAP_STANDARDREPLIES))
       send_fail(cptr, "AUTHENTICATE", "SASL_FAIL", NULL, "SASL service unavailable");
