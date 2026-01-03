@@ -407,6 +407,7 @@ struct Client {
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
+  time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
   struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
 
   /* IRCv3 Metadata */
@@ -553,6 +554,8 @@ struct Client {
 #define cli_saslacccreate(cli)  ((cli)->cli_saslacccreate)
 /** Get SASL session cookie. */
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
+/** Get SASL start timestamp. */
+#define cli_saslstart(cli)      ((cli)->cli_saslstart)
 /** Get Timer for SASL timeout. */
 #define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
 /** Get client metadata list. */

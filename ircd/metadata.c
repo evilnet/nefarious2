@@ -1099,8 +1099,18 @@ void metadata_load_account(struct Client *cptr, const char *account)
 {
   struct MetadataEntry *list, *entry;
 
-  if (!cptr || !account || !metadata_lmdb_is_available())
+  if (!cptr || !account) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_load_account: Invalid parameters (cptr=%p, account=%s)",
+              (void *)cptr, account ? account : "(null)");
     return;
+  }
+  if (!metadata_lmdb_is_available()) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_load_account: LMDB not available for account '%s' (%C)",
+              account, cptr);
+    return;
+  }
 
   /* Clear any existing in-memory metadata */
   free_entry_list(cli_metadata(cptr));

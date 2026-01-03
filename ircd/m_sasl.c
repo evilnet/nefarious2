@@ -155,25 +155,51 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* If token is not prefixed with my numnick then ignore */
-  if (strncmp(cli_yxx(&me), token, 2))
+  if (strncmp(cli_yxx(&me), token, 2)) {
+    log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Token prefix mismatch - expected %s, got %.2s (from %C)",
+              cli_yxx(&me), token, sptr);
     return 0;
+  }
 
   /* If there is no fd then it is an invalid token */
-  if ((fdstr = strchr(token, '!')) == NULL)
+  if ((fdstr = strchr(token, '!')) == NULL) {
+    protocol_violation(sptr, "SASL: Malformed token - missing fd separator '!' in '%s'", token);
     return 0;
+  }
   fdstr++;
 
   /* If there is no cookie then it is also an invalid token */
-  if ((cookiestr = strchr(token, '.')) == NULL)
+  if ((cookiestr = strchr(token, '.')) == NULL) {
+    protocol_violation(sptr, "SASL: Malformed token - missing cookie separator '.' in '%s'", token);
     return 0;
+  }
   *cookiestr++ = '\0';
 
   fd = atoi(fdstr);
   cookie = atoi(cookiestr);
 
   /* Could not find a matching client, ignore the message */
-  if (!(acptr = LocalClientArray[fd]) || (cli_saslcookie(acptr) != cookie))
+  if (!(acptr = LocalClientArray[fd])) {
+    log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Client for fd %u not found (from %C, cookie %u)",
+              fd, sptr, cookie);
     return 0;
+  }
+  if (cli_saslcookie(acptr) != cookie) {
+    log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Cookie mismatch for %C (fd %u) - expected %u, got %u (from %C)",
+              acptr, fd, cli_saslcookie(acptr), cookie, sptr);
+    return 0;
+  }
+
+  /* Check for stale SASL responses (FD reuse protection) */
+  if (cli_saslstart(acptr) > 0) {
+    int timeout = feature_int(FEAT_SASL_TIMEOUT);
+    if (timeout > 0 && (CurrentTime - cli_saslstart(acptr)) > timeout) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL: Stale response for %C (fd %u) - session started %ld seconds ago (timeout %d)",
+                acptr, fd, (long)(CurrentTime - cli_saslstart(acptr)), timeout);
+      return 0;
+    }
+  }
 
   /* OK we now know who the message is for, let's deal with it! */
 
@@ -181,8 +207,12 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!cli_saslagent(acptr)) {
     cli_saslagent(acptr) = sptr;
     cli_saslagentref(sptr)++;
-  } else if (cli_saslagent(acptr) != sptr)
+  } else if (cli_saslagent(acptr) != sptr) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL: Agent mismatch for %C - expected %C, got %C (ignoring response)",
+              acptr, cli_saslagent(acptr), sptr);
     return 0;
+  }
 
   if (reply[0] == 'C') {
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
@@ -216,11 +246,14 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
         /* Update account if changed */
         if (ircd_strcmp(cli_user(acptr)->account, cli_saslaccount(acptr)) != 0) {
+          /* Load account-linked metadata BEFORE setting account flag.
+           * This ensures metadata is in place before we propagate the account
+           * change to other servers and notify channel members.
+           */
+          metadata_load_account(acptr, cli_saslaccount(acptr));
+
           ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN);
           SetAccount(acptr);
-
-          /* Load account-linked metadata from LMDB */
-          metadata_load_account(acptr, cli_saslaccount(acptr));
 
           if (cli_saslacccreate(acptr))
             cli_user(acptr)->acc_create = cli_saslacccreate(acptr);
@@ -268,6 +301,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       cli_saslagentref(cli_saslagent(acptr))--;
     cli_saslagent(acptr) = NULL;
     cli_saslcookie(acptr) = 0;
+    cli_saslstart(acptr) = 0;
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
   } else if (reply[0] == 'M')
@@ -309,6 +343,7 @@ int abort_sasl(struct Client* cptr, int timeout) {
     cli_saslagentref(cli_saslagent(cptr))--;
   cli_saslagent(cptr) = NULL;
   cli_saslcookie(cptr) = 0;
+  cli_saslstart(cptr) = 0;
 
   return 0;
 }

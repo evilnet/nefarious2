@@ -198,11 +198,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         if (ircd_strncmp(cli_user(acptr)->account, parv[3], ACCOUNTLEN) == 0)
           return 0;
 
+        /* Load account-linked metadata BEFORE setting account flag */
+        metadata_load_account(acptr, parv[3]);
+
         ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
-
-        /* Load account-linked metadata from LMDB */
-        metadata_load_account(acptr, parv[3]);
 
         /* Register with presence aggregation */
         if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
@@ -278,12 +278,12 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         return 0; /* most probably, user disconnected */
 
       if (type == 'A') {
+        /* Load account-linked metadata BEFORE setting account flag */
+        metadata_load_account(acptr, cli_loc(acptr)->account);
+
         SetAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, cli_loc(acptr)->account,
                         ACCOUNTLEN);
-
-        /* Load account-linked metadata from LMDB */
-        metadata_load_account(acptr, cli_loc(acptr)->account);
 
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
@@ -342,11 +342,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
              "timestamp %Tu", parv[2], cli_user(acptr)->acc_create));
     }
 
+    /* Load account-linked metadata BEFORE setting account flag */
+    metadata_load_account(acptr, parv[2]);
+
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);
-
-    /* Load account-linked metadata from LMDB */
-    metadata_load_account(acptr, parv[2]);
 
     sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                            "%s", cli_user(acptr)->account);
