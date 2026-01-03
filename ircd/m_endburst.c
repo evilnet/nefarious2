@@ -115,9 +115,13 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
   assert(0 != cptr);
   assert(0 != sptr);
 
-  sendto_opmask_butone(0, SNO_NETWORK, "Completed net.burst from %C.", 
+  sendto_opmask_butone(0, SNO_NETWORK, "Completed net.burst from %C.",
   	sptr);
   sendcmdto_serv_butone(sptr, CMD_END_OF_BURST, cptr, "");
+
+  /* End IRCv3 netjoin batch for local clients */
+  send_netjoin_batch_end(sptr);
+
   ClearBurst(sptr);
   SetBurstAck(sptr);
   if (MyConnect(sptr))

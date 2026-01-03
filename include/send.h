@@ -39,6 +39,23 @@ extern void sendcmdto_one(struct Client *from, const char *cmd,
 			  const char *tok, struct Client *to,
 			  const char *pattern, ...);
 
+/* Same as above, but include message tags (label, time, account) */
+extern void sendcmdto_one_tags(struct Client *from, const char *cmd,
+			  const char *tok, struct Client *to,
+			  const char *pattern, ...);
+
+/* Same as above, but also return the generated msgid and timestamp */
+extern void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd,
+			  const char *tok, struct Client *to,
+			  char *msgid_out, size_t msgid_out_len,
+			  char *time_out, size_t time_out_len,
+			  const char *pattern, ...);
+
+/* Send TAGMSG with client-only tags to a single client */
+extern void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
+                               struct Client *to, const char *client_tags,
+                               const char *pattern, ...);
+
 /* Same as above, except it puts the message on the priority queue */
 extern void sendcmdto_prio_one(struct Client *from, const char *cmd,
 			       const char *tok, struct Client *to,
@@ -90,6 +107,12 @@ extern void sendcmdto_channel_capab_butserv_butone(struct Client *from,
                                             int skipcap,
                                             const char *pattern, ...);
 
+/* Send TAGMSG with client-only tags to channel members with message-tags capability */
+extern void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
+                                   struct Channel *to, struct Client *one,
+                                   unsigned int skip, const char *client_tags,
+                                   const char *pattern, ...);
+
 /* Send command to all servers interested in a channel */
 extern void sendcmdto_channel_servers_butone(struct Client *from,
                                              const char *cmd,
@@ -112,6 +135,7 @@ extern void sendcmdto_channel_butone(struct Client *from, const char *cmd,
                                    chanops and halfops) */
 #define SKIP_NONHOPS	0x10	/**< skip users that aren't halfopped (includes
                                    chanops) */
+#define SKIP_CHGHOST	0x20	/**< skip users that have chghost capability */
 
 /* Send command to all users having a particular flag set */
 extern void sendwallto_group_butone(struct Client *from, int type, 
@@ -156,5 +180,41 @@ extern void sendto_mode_butone(struct Client *one, struct Client *from, const ch
 /* Same as above, but with variable argument list */
 extern void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mode,
                            const char *pattern, va_list vl);
+
+/* Start a batch for a client (labeled-response integration) */
+extern void send_batch_start(struct Client *to, const char *type);
+
+/* End a batch for a client */
+extern void send_batch_end(struct Client *to);
+
+/* Check if a client has an active batch */
+extern int has_active_batch(struct Client *cptr);
+
+/* S2S batch functions for netjoin/netsplit coordination */
+extern void send_s2s_batch_start(struct Client *sptr, const char *type,
+                                 const char *server1, const char *server2);
+extern void send_s2s_batch_end(struct Client *sptr, const char *batch_id);
+
+/* Netjoin/netsplit batch functions for automatic batching */
+extern void send_netjoin_batch_start(struct Client *server, struct Client *uplink);
+extern void send_netjoin_batch_end(struct Client *server);
+extern void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
+                                       char *batch_id_out, size_t batch_id_len);
+extern void send_netsplit_batch_end(const char *batch_id);
+
+/* Active network batch tracking for @batch tag inclusion in QUIT/JOIN messages */
+extern void set_active_network_batch(const char *batch_id);
+extern const char *get_active_network_batch(void);
+
+/* Generate unique message ID for IRCv3 message-ids */
+extern char *generate_msgid(char *buf, size_t buflen);
+
+/* IRCv3 standard-replies (FAIL/WARN/NOTE) */
+extern void send_fail(struct Client *to, const char *command, const char *code,
+                      const char *context, const char *description);
+extern void send_warn(struct Client *to, const char *command, const char *code,
+                      const char *context, const char *description);
+extern void send_note(struct Client *to, const char *command, const char *code,
+                      const char *context, const char *description);
 
 #endif /* INCLUDED_send_h */

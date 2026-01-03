@@ -3,6 +3,7 @@
 # Nefarious IRCd Docker Entrypoint
 # Reads base.conf-dist, replaces all %VARIABLE% placeholders with environment
 # variable values, and writes out base.conf
+# Volume permissions are handled by init container in docker-compose
 
 BASECONFDIST=/home/nefarious/ircd/base.conf-dist
 BASECONF=/home/nefarious/ircd/base.conf
@@ -52,7 +53,6 @@ if [ "$1" == "/home/nefarious/bin/ircd" ]; then
     fi
 fi
 
-#Now run CMD from Dockerfile...
-
+# Run CMD from Dockerfile
 exec "$@"
 

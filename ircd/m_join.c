@@ -25,6 +25,7 @@
 
 #include "config.h"
 
+#include "capab.h"
 #include "channel.h"
 #include "class.h"
 #include "client.h"
@@ -43,6 +44,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "sys.h"
+#include "handlers.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -280,7 +282,12 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
                chptr->topic_time);
   }
 
-  do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
+  /* Send MARKREAD for draft/read-marker before NAMES (per spec: after JOIN, before 366) */
+  send_markread_on_join(sptr, chptr->chname);
+
+  /* Skip implicit NAMES if client has draft/no-implicit-names capability */
+  if (!HasCap(sptr, CAP_DRAFT_NOIMPLICITNAMES))
+    do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
 }
 
 /** Handle a JOIN message from a client connection.

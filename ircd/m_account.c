@@ -80,6 +80,7 @@
  */
 #include "config.h"
 
+#include "account_conn.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -94,6 +95,7 @@
 #include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -163,6 +165,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                                     "(ACCOUNT Removal)", cli_name(acptr));
         assert(0 != cli_user(acptr)->account[0]);
 
+        /* Remove from presence aggregation registry before clearing account */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+          account_conn_remove(acptr);
+        }
+
         ClearAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
 
@@ -191,8 +198,20 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         if (ircd_strncmp(cli_user(acptr)->account, parv[3], ACCOUNTLEN) == 0)
           return 0;
 
+        /* Load account-linked metadata BEFORE setting account flag */
+        metadata_load_account(acptr, parv[3]);
+
         ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
+
+        /* Register with presence aggregation */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+          account_conn_add(acptr);
+          /* Set away state if user is already away */
+          if (cli_user(acptr)->away) {
+            account_conn_set_away(acptr, CONN_AWAY, cli_user(acptr)->away);
+          }
+        }
 
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
@@ -259,6 +278,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         return 0; /* most probably, user disconnected */
 
       if (type == 'A') {
+        /* Load account-linked metadata BEFORE setting account flag */
+        metadata_load_account(acptr, cli_loc(acptr)->account);
+
         SetAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, cli_loc(acptr)->account,
                         ACCOUNTLEN);
@@ -319,6 +341,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
       Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
              "timestamp %Tu", parv[2], cli_user(acptr)->acc_create));
     }
+
+    /* Load account-linked metadata BEFORE setting account flag */
+    metadata_load_account(acptr, parv[2]);
 
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);

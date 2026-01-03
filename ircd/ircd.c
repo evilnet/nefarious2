@@ -27,10 +27,13 @@
 #include "IPcheck.h"
 #include "class.h"
 #include "client.h"
+#include "handlers.h"
 #include "crule.h"
 #include "destruct_event.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd_alloc.h"
+#include "ircd_compress.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_geoip.h"
@@ -64,6 +67,7 @@
 #include "userload.h"
 #include "version.h"
 #include "whowas.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -121,6 +125,8 @@ static char   *dbg_client;                /**< Client specifier for chkconf */
 static struct Timer connect_timer; /**< timer structure for try_connections() */
 static struct Timer ping_timer; /**< timer structure for check_pings() */
 static struct Timer destruct_event_timer; /**< timer structure for exec_expired_destruct_events() */
+static struct Timer history_purge_timer; /**< timer structure for history_purge_callback() */
+static struct Timer metadata_purge_timer; /**< timer structure for metadata_purge_callback() */
 
 /** Daemon information. */
 static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
@@ -128,6 +134,56 @@ static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
 /** Non-zero until we want to exit. */
 int running = 1;
 
+/** Counter for generating unique message IDs. */
+unsigned long MsgIdCounter = 0;
+
+/** SASL mechanism list received from services. Empty means use default. */
+char SaslMechanisms[SASL_MECHS_LEN] = "";
+
+/** Set the SASL mechanism list (called when services announces mechanisms).
+ * @param[in] mechs Comma-separated list of mechanism names.
+ */
+void set_sasl_mechanisms(const char *mechs)
+{
+  if (mechs && *mechs) {
+    ircd_strncpy(SaslMechanisms, mechs, SASL_MECHS_LEN - 1);
+    SaslMechanisms[SASL_MECHS_LEN - 1] = '\0';
+  } else {
+    SaslMechanisms[0] = '\0';
+  }
+}
+
+/** Get the SASL mechanism list for CAP LS.
+ * @return Mechanism list, or NULL if none set.
+ */
+const char* get_sasl_mechanisms(void)
+{
+  return SaslMechanisms[0] ? SaslMechanisms : NULL;
+}
+
+/** VAPID public key received from services. Empty means webpush unavailable. */
+char VapidPublicKey[VAPID_KEY_LEN] = "";
+
+/** Set the VAPID public key (called when services announces it).
+ * @param[in] key Base64url-encoded VAPID public key.
+ */
+void set_vapid_pubkey(const char *key)
+{
+  if (key && *key) {
+    ircd_strncpy(VapidPublicKey, key, VAPID_KEY_LEN - 1);
+    VapidPublicKey[VAPID_KEY_LEN - 1] = '\0';
+  } else {
+    VapidPublicKey[0] = '\0';
+  }
+}
+
+/** Get the VAPID public key for ISUPPORT/CAP.
+ * @return VAPID public key, or NULL if none set.
+ */
+const char* get_vapid_pubkey(void)
+{
+  return VapidPublicKey[0] ? VapidPublicKey : NULL;
+}
 
 /*----------------------------------------------------------------------------
  * API: server_die
@@ -352,6 +408,15 @@ static void check_pings(struct Event* ev) {
       continue;
     }
 
+    /* Check for client batch timeout (draft/multiline) */
+    check_client_batch_timeout(cptr);
+
+    /* Check X3 availability (only once per ping cycle for services servers) */
+    if (i == 0 && feature_bool(FEAT_METADATA_CACHE_ENABLED)) {
+      metadata_x3_check();
+      metadata_expire_requests();
+    }
+
     Debug((DEBUG_DEBUG, "check_pings(%s)=status:%s current: %d",
 	   cli_name(cptr),
 	   IsPingSent(cptr) ? "[Ping Sent]" : "[]", 
@@ -454,8 +519,56 @@ static void check_pings(struct Event* ev) {
   
   Debug((DEBUG_DEBUG, "[%i] check_pings() again in %is",
 	 CurrentTime, next_check-CurrentTime));
-  
+
   timer_add(&ping_timer, check_pings, 0, TT_ABSOLUTE, next_check);
+}
+
+/** Periodic callback to purge old history messages.
+ * Runs every hour to enforce CHATHISTORY_RETENTION policy.
+ * @param[in] ev Timer event (ignored).
+ */
+static void history_purge_callback(struct Event* ev)
+{
+  int retention_days;
+  unsigned long max_age_seconds;
+
+  (void)ev; /* unused */
+
+  /* Only run if chathistory is enabled */
+  if (!feature_bool(FEAT_CAP_draft_chathistory))
+    return;
+
+  if (!history_is_available())
+    return;
+
+  retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
+  if (retention_days <= 0)
+    return; /* Retention disabled */
+
+  max_age_seconds = (unsigned long)retention_days * 24 * 60 * 60;
+  history_purge_old(max_age_seconds);
+}
+
+/** Periodic callback to purge expired metadata cache entries.
+ * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL.
+ * @param[in] ev Timer event (ignored).
+ */
+static void metadata_purge_callback(struct Event* ev)
+{
+  (void)ev; /* unused */
+
+  /* Only run if metadata caching is enabled */
+  if (!feature_bool(FEAT_METADATA_CACHE_ENABLED))
+    return;
+
+  if (!metadata_lmdb_is_available())
+    return;
+
+  /* TTL of 0 disables purging */
+  if (feature_int(FEAT_METADATA_CACHE_TTL) <= 0)
+    return;
+
+  metadata_account_purge_expired();
 }
 
 
@@ -748,6 +861,9 @@ int main(int argc, char **argv) {
   timer_add(timer_init(&connect_timer), try_connections, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&ping_timer), check_pings, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&destruct_event_timer), exec_expired_destruct_events, 0, TT_PERIODIC, 60);
+  timer_add(timer_init(&history_purge_timer), history_purge_callback, 0, TT_PERIODIC, 3600); /* Run every hour */
+  timer_add(timer_init(&metadata_purge_timer), metadata_purge_callback, 0, TT_PERIODIC,
+            feature_int(FEAT_METADATA_PURGE_FREQUENCY)); /* Default: hourly */
 
   CurrentTime = time(NULL);
 
@@ -773,6 +889,36 @@ int main(int argc, char **argv) {
   init_counters();
   load_tunefile();
   geoip_init();
+
+#ifdef USE_LMDB
+  /* Initialize chathistory database */
+  if (feature_bool(FEAT_CAP_draft_chathistory)) {
+    /* Set map size from feature before init */
+    history_set_map_size((size_t)feature_int(FEAT_HISTORY_MAP_SIZE_MB));
+#ifdef USE_ZSTD
+    /* Initialize compression with configured threshold and level */
+    compress_init((size_t)feature_int(FEAT_COMPRESS_THRESHOLD),
+                  feature_int(FEAT_COMPRESS_LEVEL));
+#endif
+    if (history_init(feature_str(FEAT_CHATHISTORY_DB)) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize chathistory database, feature disabled");
+    }
+  }
+
+  /* Initialize metadata LMDB database */
+  if (feature_bool(FEAT_CAP_draft_metadata_2)) {
+    if (metadata_lmdb_init(feature_str(FEAT_METADATA_DB)) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize metadata database");
+    }
+  }
+#endif
+
+#ifdef USE_LIBGIT2
+  /* Start gitsync timer after config is loaded */
+  gitsync_start_timer();
+#endif
 
   Debug((DEBUG_NOTICE, "Server ready..."));
   log_write(LS_SYSTEM, L_NOTICE, 0, "Server Ready");

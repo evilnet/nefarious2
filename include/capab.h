@@ -23,8 +23,41 @@
  * @version $Id: capab.h 1349 2005-04-05 01:46:05Z entrope $
  */
 
-#ifndef INCLUDED_client_h
-#include "client.h"
+/* Forward declaration for function prototype */
+struct Client;
+
+/** Number of bits in an unsigned long. */
+#ifndef FLAGSET_NBITS
+#define FLAGSET_NBITS (8 * sizeof(unsigned long))
+#endif
+/** Index for a flag in the bits array. */
+#ifndef FLAGSET_INDEX
+#define FLAGSET_INDEX(flag) ((flag) / FLAGSET_NBITS)
+#endif
+/** Element bit for flag. */
+#ifndef FLAGSET_MASK
+#define FLAGSET_MASK(flag) (1ul<<((flag) % FLAGSET_NBITS))
+#endif
+/** Declare a flagset structure of a particular size. */
+#ifndef DECLARE_FLAGSET
+#define DECLARE_FLAGSET(name,max) \
+  struct name \
+  { \
+    unsigned long bits[((max + FLAGSET_NBITS - 1) / FLAGSET_NBITS)]; \
+  }
+#endif
+
+/** Test whether a flag is set in a flagset. */
+#ifndef FlagHas
+#define FlagHas(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] & FLAGSET_MASK(flag))
+#endif
+/** Set a flag in a flagset. */
+#ifndef FlagSet
+#define FlagSet(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] |= FLAGSET_MASK(flag))
+#endif
+/** Clear a flag in a flagset. */
+#ifndef FlagClr
+#define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
 #endif
 
 #define CAPFL_HIDDEN	0x0001	/**< Do not advertize this capability */
@@ -45,6 +78,29 @@ enum Capab {
   _CAP(AWAYNOTIFY, 0, "away-notify", 0),
   _CAP(ACCNOTIFY, 0, "account-notify", 0),
   _CAP(SASL, 0, "sasl", 0),
+  _CAP(CAPNOTIFY, 0, "cap-notify", 0),
+  _CAP(SERVERTIME, 0, "server-time", 0),
+  _CAP(ECHOMSG, 0, "echo-message", 0),
+  _CAP(ACCOUNTTAG, 0, "account-tag", 0),
+  _CAP(CHGHOST, 0, "chghost", 0),
+  _CAP(INVITENOTIFY, 0, "invite-notify", 0),
+  _CAP(LABELEDRESP, 0, "labeled-response", 0),
+  _CAP(BATCH, 0, "batch", 0),
+  _CAP(SETNAME, 0, "setname", 0),
+  _CAP(STANDARDREPLIES, 0, "standard-replies", 0),
+  _CAP(MSGTAGS, 0, "message-tags", 0),
+  _CAP(DRAFT_NOIMPLICITNAMES, 0, "draft/no-implicit-names", 0),
+  _CAP(DRAFT_EXTISUPPORT, 0, "draft/extended-isupport", 0),
+  _CAP(DRAFT_PREAWAY, 0, "draft/pre-away", 0),
+  _CAP(DRAFT_MULTILINE, 0, "draft/multiline", 0),
+  _CAP(DRAFT_CHATHISTORY, 0, "draft/chathistory", 0),
+  _CAP(DRAFT_EVENTPLAYBACK, 0, "draft/event-playback", 0),
+  _CAP(DRAFT_REDACT, 0, "draft/message-redaction", 0),
+  _CAP(DRAFT_ACCOUNTREG, 0, "draft/account-registration", 0),
+  _CAP(DRAFT_READMARKER, 0, "draft/read-marker", 0),
+  _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", 0),
+  _CAP(DRAFT_METADATA2, 0, "draft/metadata-2", 0),
+  _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
 #endif

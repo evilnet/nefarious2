@@ -27,6 +27,8 @@
 #include "config.h"
 
 #include "s_user.h"
+#include "account_conn.h"
+#include "capab.h"
 #include "IPcheck.h"
 #include "channel.h"
 #include "class.h"
@@ -463,6 +465,34 @@ int register_user(struct Client *cptr, struct Client *sptr)
     m_lusers(sptr, sptr, 1, parv);
     update_load();
     motd_signon(sptr);
+
+    /* PM chathistory policy notification (feature-gated) */
+    if (feature_bool(FEAT_CHATHISTORY_PM_NOTICE) &&
+        feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
+      int consent = feature_int(FEAT_CHATHISTORY_PRIVATE_CONSENT);
+      const char *policy, *action;
+
+      if (consent == 0) {
+        policy = "private messages are stored by default";
+        action = "To opt-out: /METADATA * SET chathistory.pm * :0";
+      } else if (consent == 1) {
+        policy = "private messages are stored if either party opts in (opt-out overrides)";
+        action = "To opt-in: /METADATA * SET chathistory.pm * :1 | To opt-out: /METADATA * SET chathistory.pm * :0";
+      } else {
+        policy = "private messages are stored only if both parties opt in";
+        action = "To opt-in: /METADATA * SET chathistory.pm * :1";
+      }
+
+      if (CapActive(sptr, CAP_STANDARDREPLIES)) {
+        /* IRCv3 standard-replies NOTE */
+        send_note(sptr, "CHATHISTORY", "PM_POLICY", policy, action);
+      } else {
+        /* Fallback NOTICE for all clients */
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :PM history: %s. %s",
+                      sptr, policy, action);
+      }
+    }
+
     if (cli_snomask(sptr) & SNO_NOISY)
       set_snomask(sptr, cli_snomask(sptr) & SNO_NOISY, SNO_ADD);
     if (feature_bool(FEAT_CONNEXIT_NOTICES))
@@ -474,6 +504,43 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     if (IsIPChecked(sptr))
       IPcheck_connect_succeeded(sptr);
+
+    /* Apply pre-away state if set (IRCv3 draft/pre-away) */
+    {
+      int pre_away_type = con_pre_away(cli_connect(sptr));
+      if (pre_away_type) {
+        if (pre_away_type == 2) {
+          /* AWAY * - set away but with empty message (hidden connection) */
+          if (!user->away) {
+            user->away = (char*) MyMalloc(1);
+            user->away[0] = '\0';
+          }
+          /* Don't broadcast AWAY * to servers - it's a hidden connection */
+        } else {
+          /* Normal away with message */
+          unsigned int len = strlen(con_pre_away_msg(cli_connect(sptr)));
+          if (user->away)
+            MyFree(user->away);
+          user->away = (char*) MyMalloc(len + 1);
+          strcpy(user->away, con_pre_away_msg(cli_connect(sptr)));
+          /* Broadcast to servers */
+          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", user->away);
+        }
+        /* Clear pre-away state */
+        con_pre_away(cli_connect(sptr)) = 0;
+        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+
+        /* Register with presence aggregation if feature enabled and logged in */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+          enum ConnAwayState state = (pre_away_type == 2) ? CONN_AWAY_STAR : CONN_AWAY;
+          account_conn_add(sptr);
+          account_conn_set_away(sptr, state, user->away);
+        }
+      } else if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+        /* No pre-away, just register as present */
+        account_conn_add(sptr);
+      }
+    }
   }
   else {
     struct Client *acptr = user->server;
@@ -1127,6 +1194,8 @@ hide_hostmask(struct Client *cptr)
 {
   char newhost[HOSTLEN+1];
   char newuser[USERLEN+1];
+  char oldhost[HOSTLEN+1];
+  char olduser[USERLEN+1];
   char* sethostat = NULL;
   char* userat = NULL;
   struct Membership *chan;
@@ -1188,14 +1257,26 @@ hide_hostmask(struct Client *cptr)
     ClearExceptValidQuiet(chan);
   }
 
+  /* Save old user/host for CHGHOST notification */
+  ircd_strncpy(oldhost, cli_user(cptr)->host, HOSTLEN);
+  ircd_strncpy(olduser, cli_user(cptr)->username, USERLEN);
+
+  /* For clients without chghost capability, use QUIT+JOIN if enabled */
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
-    sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
+    sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
+                  CAP_NONE, CAP_CHGHOST, ":%s",
                   feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
 
   /* Finally copy the new host to the users current host. */
   ircd_strncpy(cli_user(cptr)->host, newhost, HOSTLEN + 1);
   if (newuser[0] != '\0')
     ircd_strncpy(cli_user(cptr)->username, newuser, USERLEN + 1);
+
+  /* Send CHGHOST to clients with the chghost capability */
+  if (feature_bool(FEAT_CAP_chghost))
+    sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
+                  CAP_CHGHOST, CAP_NONE, "%s %s",
+                  cli_user(cptr)->username, cli_user(cptr)->host);
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
@@ -1212,37 +1293,39 @@ hide_hostmask(struct Client *cptr)
   {
     if (IsZombie(chan))
       continue;
-    /* Send a JOIN unless the user's join has been delayed. */
+    /* Send a JOIN unless the user's join has been delayed.
+     * Skip clients with chghost capability - they got CHGHOST instead.
+     */
     if (!IsDelayedJoin(chan)) {
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
                                          CAP_NONE, CAP_EXTJOIN, "%H", chan->channel);
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
                                          CAP_EXTJOIN, CAP_NONE, "%H %s :%s", chan->channel,
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
       if (cli_user(cptr)->away)
-        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, 0,
+        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, SKIP_CHGHOST,
                                                CAP_AWAYNOTIFY, CAP_NONE, ":%s",
                                                cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +ohv %C %C %C", chan->channel, cptr,
                                        cptr, cptr);
     else if (IsChanOp(chan) && IsHalfOp(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +oh %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +ov %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +hv %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) || IsHalfOp(chan) || HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
         "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : (IsHalfOp(chan) ? 'h' : 'v'), cptr);
   }
   return 0;
@@ -1275,10 +1358,18 @@ unhide_hostmask(struct Client *cptr)
     ClearExceptValidNick(chan);
   }
 
+  /* For clients without chghost capability, use QUIT+JOIN if enabled */
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
-    sendcmdto_common_channels_butone(cptr, CMD_QUIT, cptr, ":%s",
+    sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
+                  CAP_NONE, CAP_CHGHOST, ":%s",
                   feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
   ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->realhost, HOSTLEN + 1);
+
+  /* Send CHGHOST to clients with the chghost capability */
+  if (feature_bool(FEAT_CAP_chghost))
+    sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
+                  CAP_CHGHOST, CAP_NONE, "%s %s",
+                  cli_user(cptr)->username, cli_user(cptr)->host);
 
   /* ok, the client is now fully unhidden, so let them know -- hikari */
   if (MyConnect(cptr))
@@ -1289,7 +1380,8 @@ unhide_hostmask(struct Client *cptr)
 
   /*
    * Go through all channels the client was on, rejoin him
-   * and set the modes, if any
+   * and set the modes, if any.
+   * Skip clients with chghost capability - they got CHGHOST instead.
    */
   for (chan = cli_user(cptr)->channel; chan; chan = chan->next_channel)
   {
@@ -1297,35 +1389,35 @@ unhide_hostmask(struct Client *cptr)
       continue;
     /* Send a JOIN unless the user's join has been delayed. */
     if (!IsDelayedJoin(chan)) {
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
                                          CAP_NONE, CAP_EXTJOIN, "%H", chan->channel);
-      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, 0,
+      sendcmdto_channel_capab_butserv_butone(cptr, CMD_JOIN, chan->channel, cptr, SKIP_CHGHOST,
                                          CAP_EXTJOIN, CAP_NONE, "%H %s :%s", chan->channel,
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
       if (cli_user(cptr)->away)
-        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, 0,
+        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, SKIP_CHGHOST,
                                                CAP_AWAYNOTIFY, CAP_NONE, ":%s",
                                                cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +ohv %C %C", chan->channel, cptr,
                                        cptr, cptr);
     else if (IsChanOp(chan) && IsHalfOp(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +oh %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +ov %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsHalfOp(chan) && HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
                                        "%H +hv %C %C", chan->channel, cptr,
                                        cptr);
     else if (IsChanOp(chan) || IsHalfOp(chan) || HasVoice(chan))
-      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, 0,
+      sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
         "%H +%c %C", chan->channel, IsChanOp(chan) ? 'o' : (IsHalfOp(chan) ? 'h' : 'v'), cptr);
   }
   return 0;
@@ -2530,6 +2622,12 @@ void init_isupport(void)
   add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
   add_isupport_s("MAXLIST", imaxlist);
   add_isupport_s("ELIST", "CT");
+
+  /* IRCv3 draft/chathistory support */
+  if (feature_bool(FEAT_CAP_draft_chathistory)) {
+    add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
+    add_isupport_s("MSGREFTYPES", "timestamp,msgid");
+  }
 }
 
 /** Send RPL_ISUPPORT lines to \a cptr.
@@ -2548,6 +2646,50 @@ send_supported(struct Client *cptr)
     send_reply(cptr, RPL_ISUPPORT, line->value.cp);
 
   return 0; /* convenience return, if it's ever needed */
+}
+
+/** Send RPL_ISUPPORT lines to \a cptr wrapped in a batch.
+ * Used when client has both batch and draft/extended-isupport capabilities.
+ * @param[in] cptr Client to send ISUPPORT to.
+ * @return Zero.
+ */
+int
+send_supported_batched(struct Client *cptr)
+{
+  struct SLink *line;
+  char batchid[12];
+  static unsigned long isupport_batch_counter = 0;
+
+  if (isupport && !isupport_lines)
+    build_isupport_lines();
+
+  /* Check if we should use batch wrapping */
+  if (!CapActive(cptr, CAP_BATCH)) {
+    /* No batch support, fall back to regular ISUPPORT */
+    for (line = isupport_lines; line; line = line->next)
+      send_reply(cptr, RPL_ISUPPORT, line->value.cp);
+    return 0;
+  }
+
+  /* Generate unique batch ID */
+  ircd_snprintf(0, batchid, sizeof(batchid), "%s%lu",
+                cli_yxx(&me), ++isupport_batch_counter);
+
+  /* Start batch: BATCH +id draft/isupport */
+  sendcmdto_one(&me, CMD_BATCH_CMD, cptr, "+%s draft/isupport", batchid);
+
+  /* Send each ISUPPORT line with batch tag */
+  for (line = isupport_lines; line; line = line->next) {
+    sendrawto_one(cptr, "@batch=%s :%s 005 %s %s :are supported by this server",
+                  batchid, cli_name(&me),
+                  IsRegistered(cptr) ? cli_name(cptr) : "*",
+                  line->value.cp);
+  }
+
+  /* End batch: BATCH -id */
+  sendcmdto_one(&me, CMD_BATCH_CMD, cptr, "-%s", batchid);
+
+  return 0;
 }
 
 /* vim: shiftwidth=2 

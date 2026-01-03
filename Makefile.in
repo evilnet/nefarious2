@@ -33,7 +33,7 @@ IRCD_MAKEFILES = Makefile ircd/Makefile ircd/test/Makefile
 
 all: build
 
-.PHONY: server build depend install config update diff patch export update
+.PHONY: server build depend install config update diff patch export update test
 # Some versions of make give a warning when this is empty:
 .SUFFIXES: .dummy
 
@@ -100,6 +100,10 @@ depend: ${IRCD_MAKEFILES}
 		echo "Making dependencies in $$i..."; \
 		cd $$i; ${MAKE} depend; cd ..; \
 	done
+
+test: ${IRCD_MAKEFILES}
+	@echo "Running unit tests..."
+	cd ircd/test && ${MAKE} test
 
 install: ${IRCD_MAKEFILES}
 	test -d ${prefix} || mkdir ${prefix}

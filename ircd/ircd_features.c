@@ -27,8 +27,10 @@
 #include "class.h"
 #include "client.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_compress.h"
 #include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -432,6 +434,22 @@ set_isupport_network(void)
     add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
 }
 
+#ifdef USE_ZSTD
+/** Update compression threshold from feature. */
+static void
+feature_notify_compress_threshold(void)
+{
+    compress_set_threshold((size_t)feature_int(FEAT_COMPRESS_THRESHOLD));
+}
+
+/** Update compression level from feature. */
+static void
+feature_notify_compress_level(void)
+{
+    compress_set_level(feature_int(FEAT_COMPRESS_LEVEL));
+}
+#endif /* USE_ZSTD */
+
 /** Sets a feature to the given value.
  * @param[in] from Client trying to set parameters.
  * @param[in] fields Array of parameters to set.
@@ -531,6 +549,8 @@ static struct FeatureDesc {
   F_B(HUB, 0, 0, feature_notify_hub),
   F_B(WALLOPS_OPER_ONLY, 0, 0, 0),
   F_B(NODNS, 0, 0, 0),
+  F_B(TCP_NODELAY_C2S, 0, 0, 0),
+  F_B(TCP_NODELAY_S2S, 0, 0, 0),
   F_N(RANDOM_SEED, FEAT_NODISP, random_seed_set, 0, 0, 0, 0, 0, 0),
   F_S(DEFAULT_LIST_PARAM, FEAT_NULL, 0, list_set_default),
   F_I(NICKNAMEHISTORYLENGTH, 0, 800, whowas_realloc),
@@ -796,6 +816,67 @@ static struct FeatureDesc {
   F_B(CAP_away_notify, 0, 1, 0),
   F_B(CAP_account_notify, 0, 1, 0),
   F_B(CAP_sasl, 0, 1, 0),
+  F_B(CAP_cap_notify, 0, 1, 0),
+  F_B(CAP_server_time, 0, 1, 0),
+  F_B(CAP_echo_message, 0, 1, 0),
+  F_B(CAP_account_tag, 0, 1, 0),
+  F_B(CAP_chghost, 0, 1, 0),
+  F_B(CAP_invite_notify, 0, 1, 0),
+  F_B(CAP_labeled_response, 0, 1, 0),
+  F_B(CAP_batch, 0, 1, 0),
+  F_B(CAP_setname, 0, 1, 0),
+  F_B(CAP_standard_replies, 0, 1, 0),
+  F_B(CAP_message_tags, 0, 1, 0),
+  F_B(CAP_draft_no_implicit_names, 0, 1, 0),
+  F_B(CAP_draft_extended_isupport, 0, 1, 0),
+  F_B(CAP_draft_pre_away, 0, 1, 0),
+  F_B(CAP_draft_multiline, 0, 1, 0),
+  F_B(CAP_draft_chathistory, 0, 1, 0),
+  F_B(CAP_draft_event_playback, 0, 0, 0),
+  F_B(CAP_draft_message_redaction, 0, 0, 0),
+  F_B(CAP_draft_account_registration, 0, 0, 0),
+  F_S(REGISTER_SERVER, 0, "*", 0),
+  F_B(CAP_draft_read_marker, 0, 0, 0),
+  F_B(CAP_draft_channel_rename, 0, 0, 0),
+  F_B(CAP_draft_metadata_2, 0, 0, 0),
+  F_B(CAP_draft_webpush, 0, 0, 0),
+  F_I(METADATA_MAX_KEYS, 0, 20, 0),
+  F_I(METADATA_MAX_VALUE_BYTES, 0, 1024, 0),
+  F_I(METADATA_MAX_SUBS, 0, 50, 0),
+  F_I(METADATA_RATE_LIMIT, 0, 10, 0),
+  F_I(REDACT_WINDOW, 0, 300, 0),
+  F_I(REDACT_OPER_WINDOW, 0, 0, 0),
+  F_B(REDACT_CHANOP_OTHERS, 0, 1, 0),
+  F_I(CHATHISTORY_MAX, 0, 100, 0),
+  F_B(CHATHISTORY_PRIVATE, 0, 0, 0),
+  F_I(CHATHISTORY_PRIVATE_CONSENT, 0, 2, 0),
+  F_B(CHATHISTORY_ADVERTISE_PM, 0, 0, 0),
+  F_B(CHATHISTORY_PM_NOTICE, 0, 0, 0),
+  F_S(CHATHISTORY_DB, 0, "history", 0),
+  F_I(CHATHISTORY_RETENTION, 0, 7, 0),
+  F_B(CHATHISTORY_FEDERATION, 0, 1, 0),
+  F_I(CHATHISTORY_TIMEOUT, 0, 5, 0),
+  F_I(MULTILINE_MAX_BYTES, 0, 4096, 0),
+  F_I(MULTILINE_MAX_LINES, 0, 24, 0),
+  F_I(CLIENT_BATCH_TIMEOUT, 0, 30, 0),
+  F_B(DRAFT_WEBSOCKET, 0, 1, 0),
+  F_B(MSGID, 0, 1, 0),
+  F_B(P10_MESSAGE_TAGS, 0, 0, 0),
+  F_B(PRESENCE_AGGREGATION, 0, 0, 0),
+  F_S(AWAY_STAR_MSG, FEAT_NULL, "Away", 0),
+  F_I(AWAY_THROTTLE, 0, 0, 0),
+  F_B(METADATA_CACHE_ENABLED, 0, 1, 0),
+  F_I(METADATA_X3_TIMEOUT, 0, 60, 0),
+  F_I(METADATA_QUEUE_SIZE, 0, 1000, 0),
+  F_B(METADATA_BURST, 0, 1, 0),
+  F_S(METADATA_DB, 0, "metadata", 0),
+  F_I(METADATA_CACHE_TTL, 0, 14400, 0),
+  F_I(METADATA_PURGE_FREQUENCY, 0, 3600, 0),
+#ifdef USE_ZSTD
+  F_I(COMPRESS_THRESHOLD, 0, 256, feature_notify_compress_threshold),
+  F_I(COMPRESS_LEVEL, 0, 3, feature_notify_compress_level),
+#endif
+  F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

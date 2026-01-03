@@ -37,6 +37,7 @@ struct Client;
 struct User;
 struct Membership;
 struct SLink;
+struct AccountConn;
 
 /** Describes a server on the network. */
 struct Server {
@@ -61,6 +62,7 @@ struct Server {
 
   char *last_error_msg;         /**< Allocated memory with last message receive with an ERROR */
   char by[NICKLEN + 1];         /**< Numnick of client who requested the link */
+  char batch_id[32];            /**< IRCv3 batch ID for netjoin/netsplit */
 };
 
 /** Describes a user on the network. */
@@ -70,6 +72,7 @@ struct User {
   struct SLink*      invited;        /**< chain of invite pointer blocks */
   struct SLink*      watch;          /**< chain of watch pointer blocks */
   struct Ban*        silence;        /**< chain of silence pointer blocks */
+  struct AccountConn* account_conn;  /**< link to presence aggregation registry */
   char*              away;           /**< pointer to away message */
   char*              opername;       /**< pointer to /OPER user name */
   time_t             last;           /**< last time user sent a message */

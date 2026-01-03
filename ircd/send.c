@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "send.h"
+#include "capab.h"
 #include "channel.h"
 #include "class.h"
 #include "client.h"
@@ -36,6 +37,7 @@
 #include "list.h"
 #include "match.h"
 #include "msg.h"
+#include "numeric.h"
 #include "numnicks.h"
 #include "parse.h"
 #include "s_bsd.h"
@@ -48,6 +50,7 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
 #include <string.h>
+#include <sys/time.h>
 
 /** Last used marker value. */
 static int sentalong_marker;
@@ -56,7 +59,418 @@ struct SLink *opsarray[32];     /* don't use highest bit unless you change
 				   atoi to strtoul in sendto_op_mask() */
 /** Linked list of all connections with data queued to send. */
 static struct Connection *send_queues;
+
+/** Active network batch ID for netjoin/netsplit batching.
+ * When non-empty, all QUIT/JOIN messages to local clients with batch capability
+ * will include @batch=<id> tag per IRCv3 netsplit/netjoin batch spec.
+ */
+static char active_network_batch_id[32] = "";
 char *GlobalForwards[256];
+
+/** Format current time as ISO 8601 timestamp for server-time capability.
+ * @param[out] buf Buffer to write timestamp to.
+ * @param[in] buflen Size of buffer.
+ * @return Pointer to buf.
+ */
+static char *format_server_time(char *buf, size_t buflen)
+{
+  struct timeval tv;
+  struct tm tm;
+
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  snprintf(buf, buflen, "@time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ ",
+           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+           tm.tm_hour, tm.tm_min, tm.tm_sec,
+           tv.tv_usec / 1000);
+  return buf;
+}
+
+/** Set the active network batch ID for netjoin/netsplit batching.
+ * When set, QUIT/JOIN messages to batch-capable clients will include @batch tag.
+ * @param[in] batch_id Batch ID to set, or NULL/empty to clear.
+ */
+void set_active_network_batch(const char *batch_id)
+{
+  if (batch_id && *batch_id) {
+    ircd_strncpy(active_network_batch_id, batch_id, sizeof(active_network_batch_id) - 1);
+    active_network_batch_id[sizeof(active_network_batch_id) - 1] = '\0';
+  } else {
+    active_network_batch_id[0] = '\0';
+  }
+}
+
+/** Get the active network batch ID.
+ * @return Current batch ID, or empty string if none active.
+ */
+const char *get_active_network_batch(void)
+{
+  return active_network_batch_id;
+}
+
+/** Check if a client wants message tags.
+ * Used for TAGMSG filtering - only clients with message-tags capability can receive TAGMSGs.
+ * @param[in] to Recipient client.
+ * @return Non-zero if client has message-tags capability active.
+ */
+static int wants_message_tags(struct Client *to)
+{
+  /* Primary check: message-tags capability */
+  if (CapActive(to, CAP_MSGTAGS))
+    return 1;
+
+  /* Fallback: any capability that implies message tag support */
+  return (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME)) ||
+         (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG)) ||
+         (feature_bool(FEAT_CAP_labeled_response) && CapActive(to, CAP_LABELEDRESP) &&
+          MyConnect(to) && cli_label(to)[0]);
+}
+
+/** Flags for format_message_tags_ex() tag selection */
+#define TAGS_TIME     0x01  /**< Include @time tag */
+#define TAGS_ACCOUNT  0x02  /**< Include @account tag */
+#define TAGS_BATCH    0x04  /**< Include @batch tag (network batch) */
+#define TAGS_BOT      0x08  /**< Include @bot tag */
+
+/** Format message tags with explicit control over which tags to include.
+ * @param[out] buf Buffer to write tags to.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag and bot detection).
+ * @param[in] flags TAGS_* flags indicating which tags to include.
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *from, int flags)
+{
+  int pos = 0;
+  int use_time = flags & TAGS_TIME;
+  int use_account = flags & TAGS_ACCOUNT;
+  int use_batch = (flags & TAGS_BATCH) && active_network_batch_id[0];
+  int use_bot = (flags & TAGS_BOT) && from && IsBot(from);
+
+  if (!use_time && !use_account && !use_batch && !use_bot)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  /* @batch tag first (most important for batched messages) */
+  if (use_batch) {
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", active_network_batch_id);
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    if (IsAccount(from))
+      pos += snprintf(buf + pos, buflen - pos, "account=%s", cli_user(from)->account);
+    else
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+  }
+
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (use_bot) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
+/** Get the tag flags appropriate for a client based on their capabilities.
+ * @param[in] to Recipient client.
+ * @param[in] from Source client (for bot detection).
+ * @param[in] include_batch Whether to include batch tag if network batch is active.
+ * @return TAGS_* flags for this client.
+ */
+static int get_client_tag_flags(struct Client *to, struct Client *from, int include_batch)
+{
+  int flags = 0;
+
+  if (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME))
+    flags |= TAGS_TIME;
+  if (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG))
+    flags |= TAGS_ACCOUNT;
+  if (include_batch && CapActive(to, CAP_BATCH) && active_network_batch_id[0])
+    flags |= TAGS_BATCH;
+  /* Bot tag is sent to any client that gets any tags */
+  if (flags && from && IsBot(from))
+    flags |= TAGS_BOT;
+
+  return flags;
+}
+
+/** Generate a unique message ID for IRCv3 message-ids.
+ * Format: <server_numeric>-<startup_ts>-<counter>
+ * @param[out] buf Buffer to write message ID to.
+ * @param[in] buflen Size of buffer.
+ * @return Pointer to buf.
+ */
+char *generate_msgid(char *buf, size_t buflen)
+{
+  snprintf(buf, buflen, "%s-%lu-%lu",
+           cli_yxx(&me),
+           (unsigned long)cli_firsttime(&me),
+           ++MsgIdCounter);
+  return buf;
+}
+
+/** Format message tags for S2S (server-to-server) relay.
+ * If the message came from another server with tags, preserve them.
+ * Otherwise, generate new @time and @msgid tags.
+ * @param[out] buf Buffer for tag string (includes trailing space).
+ * @param[in] buflen Size of buffer.
+ * @param[in] cptr Server connection the message came from (for incoming tags).
+ * @param[out] msgid_out Optional: buffer to store the msgid used (for echo-message).
+ * @param[in] msgid_out_len Size of msgid_out buffer.
+ * @return Pointer to buf, or NULL if P10_MESSAGE_TAGS is disabled.
+ */
+static char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
+                             char *msgid_out, size_t msgid_out_len)
+{
+  int pos = 0;
+  char timebuf[32];
+  char msgidbuf[64];
+  const char *time_tag = NULL;
+  const char *msgid_tag = NULL;
+
+  /* Check if P10 message tags are enabled */
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return NULL;
+
+  /* Check for incoming S2S tags from cptr */
+  if (cptr && cli_s2s_time(cptr)[0])
+    time_tag = cli_s2s_time(cptr);
+  if (cptr && cli_s2s_msgid(cptr)[0])
+    msgid_tag = cli_s2s_msgid(cptr);
+
+  /* Generate new tags if not present */
+  if (!time_tag) {
+    struct timeval tv;
+    struct tm tm;
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_hour, tm.tm_min, tm.tm_sec,
+             tv.tv_usec / 1000);
+    time_tag = timebuf;
+  }
+
+  if (!msgid_tag) {
+    generate_msgid(msgidbuf, sizeof(msgidbuf));
+    msgid_tag = msgidbuf;
+  }
+
+  /* Store msgid for caller if requested (for echo-message) */
+  if (msgid_out && msgid_out_len > 0) {
+    ircd_strncpy(msgid_out, msgid_tag, msgid_out_len - 1);
+    msgid_out[msgid_out_len - 1] = '\0';
+  }
+
+  /* Format the tag string with trailing space */
+  pos = snprintf(buf, buflen, "@time=%s;msgid=%s ", time_tag, msgid_tag);
+  if (pos >= (int)buflen)
+    buf[buflen - 1] = '\0';
+
+  return buf;
+}
+
+/** Format message tags for a specific recipient, including label if applicable.
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag).
+ * @param[in] to Recipient client (for label tag).
+ * @param[in] msgid Message ID to include, or NULL for none.
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client *from,
+                                        struct Client *to, const char *msgid)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
+  int use_label = feature_bool(FEAT_CAP_labeled_response) &&
+                  CapActive(to, CAP_LABELEDRESP) &&
+                  to && MyConnect(to) && cli_label(to)[0];
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
+                  to && MyConnect(to) && cli_batch_id(to)[0];
+  int use_msgid = msgid && *msgid;
+  int pos = 0;
+
+  if (!use_time && !use_account && !use_label && !use_batch && !use_msgid)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  /* When in a batch, use @batch instead of @label */
+  if (use_batch) {
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
+  } else if (use_label) {
+    pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+  }
+
+  /* Add @msgid for message tracking (IRCv3 message-ids) */
+  if (use_msgid) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "msgid=%s", msgid);
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    if (IsAccount(from)) {
+      pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                      cli_user(from)->account);
+    } else {
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+    }
+  }
+
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
+/** Format message tags for a specific recipient (wrapper without msgid).
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag).
+ * @param[in] to Recipient client (for label tag).
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_for(char *buf, size_t buflen, struct Client *from, struct Client *to)
+{
+  return format_message_tags_for_ex(buf, buflen, from, to, NULL);
+}
+
+/** Format message tags including client-only tags for TAGMSG relay.
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag and client tags).
+ * @param[in] to Recipient client (for label tag).
+ * @param[in] client_tags Client-only tags string (e.g., "+typing=active;+reply=msgid").
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_with_client(char *buf, size_t buflen, struct Client *from,
+                                              struct Client *to, const char *client_tags)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
+  int use_label = feature_bool(FEAT_CAP_labeled_response) &&
+                  CapActive(to, CAP_LABELEDRESP) &&
+                  to && MyConnect(to) && cli_label(to)[0];
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
+                  to && MyConnect(to) && cli_batch_id(to)[0];
+  int use_client_tags = client_tags && *client_tags;
+  int pos = 0;
+
+  /* TAGMSG is only useful if there are client-only tags to relay */
+  if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  /* Client-only tags first (these are the primary content for TAGMSG) */
+  if (use_client_tags) {
+    pos += snprintf(buf + pos, buflen - pos, "%s", client_tags);
+  }
+
+  /* When in a batch, use @batch instead of @label */
+  if (use_batch) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
+  } else if (use_label) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    if (IsAccount(from)) {
+      pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                      cli_user(from)->account);
+    } else {
+      pos += snprintf(buf + pos, buflen - pos, "account=*");
+    }
+  }
+
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
 
 /*
  * dead_link
@@ -321,14 +735,185 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct Client *cptr;
+  char s2s_tagbuf[128];
 
   to = cli_from(to);
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
-		 &vd);
+  /* For S2S messages (PRIVMSG/NOTICE to servers), add S2S tags */
+  if ((IsServer(to) || IsMe(to)) &&
+      (strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0) &&
+      feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    /* Get incoming server connection for tag preservation */
+    cptr = MyConnect(from) ? NULL : cli_from(from);
+    if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
+      mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
+    } else {
+      mb = msgq_make(to, "%:#C %s %v", from, tok, &vd);
+    }
+  } else {
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+                   &vd);
+  }
+
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+
+  msgq_clean(mb);
+}
+
+/**
+ * Send a (prefixed) command to a single client with message tags.
+ * Includes @label, @time, and @account tags if the recipient supports them.
+ * @param[in] from Client sending the command.
+ * @param[in] cmd Long name of command (used if \a to is a user).
+ * @param[in] tok Short name of command (used if \a to is a server).
+ * @param[in] to Destination of command.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
+		   struct Client *to, const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[512];
+  char msgidbuf[64];
+  char *tags;
+  const char *msgid = NULL;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern; /* set up the struct VarData for %v */
+  va_start(vd.vd_args, pattern);
+
+  /* Generate msgid for PRIVMSG and NOTICE if feature enabled */
+  if (feature_bool(FEAT_MSGID) &&
+      (cmd == CMD_PRIVATE || cmd == CMD_NOTICE)) {
+    msgid = generate_msgid(msgidbuf, sizeof(msgidbuf));
+  }
+
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+
+  msgq_clean(mb);
+}
+
+/** Send a (prefixed) command to a single local client with message tags,
+ * returning the generated msgid.
+ * @param[in] from Client originating the message.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command (used if \a to is a server or &me).
+ * @param[in] to Destination of command.
+ * @param[out] msgid_out Buffer to store generated msgid.
+ * @param[in] msgid_out_len Size of msgid_out buffer.
+ * @param[out] time_out Buffer to store generated timestamp.
+ * @param[in] time_out_len Size of time_out buffer.
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *tok,
+		   struct Client *to, char *msgid_out, size_t msgid_out_len,
+		   char *time_out, size_t time_out_len,
+		   const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[512];
+  char msgidbuf[64];
+  char timebuf[32];
+  char *tags;
+  const char *msgid = NULL;
+  struct timeval tv;
+  struct tm tm;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  /* Generate msgid for PRIVMSG and NOTICE if feature enabled */
+  if (feature_bool(FEAT_MSGID) &&
+      (strcmp(cmd, MSG_PRIVATE) == 0 || strcmp(cmd, MSG_NOTICE) == 0)) {
+    msgid = generate_msgid(msgidbuf, sizeof(msgidbuf));
+    if (msgid_out && msgid_out_len > 0) {
+      ircd_strncpy(msgid_out, msgid, msgid_out_len - 1);
+      msgid_out[msgid_out_len - 1] = '\0';
+    }
+  } else if (msgid_out && msgid_out_len > 0) {
+    msgid_out[0] = '\0';
+  }
+
+  /* Generate timestamp - ISO for client @time= tag, Unix for storage */
+  gettimeofday(&tv, NULL);
+  gmtime_r(&tv.tv_sec, &tm);
+  snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+           tm.tm_hour, tm.tm_min, tm.tm_sec,
+           tv.tv_usec / 1000);
+  /* Return Unix timestamp for internal storage/S2S */
+  if (time_out && time_out_len > 0) {
+    snprintf(time_out, time_out_len, "%lu.%03lu",
+             (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
+  }
+
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+
+  msgq_clean(mb);
+}
+
+/**
+ * Send TAGMSG with client-only tags to a single local client.
+ * Used for relaying +typing and other client-only tags.
+ * @param[in] from Client sending the TAGMSG.
+ * @param[in] cmd Long name of command (TAGMSG).
+ * @param[in] to Destination of command.
+ * @param[in] client_tags Client-only tags string from sender (e.g., "+typing=active").
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
+                               struct Client *to, const char *client_tags,
+                               const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[1024];
+  char *tags;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, cmd, &vd);
 
   va_end(vd.vd_args);
 
@@ -475,8 +1060,12 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
+  char tagbuf[128];
+  int flags;
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -487,7 +1076,7 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
@@ -505,14 +1094,39 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
           && member->user != one
           && cli_sentalong(member->user) != sentalong_marker) {
 	cli_sentalong(member->user) = sentalong_marker;
-	send_buffer(member->user, mb, 0);
+	flags = get_client_tag_flags(member->user, from, 1);
+	if (flags) {
+	  /* Build cached message buffer for this flag combination if needed */
+	  if (!mb_cache[flags]) {
+	    if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+	      va_start(vd.vd_args, pattern);
+	      mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+	      va_end(vd.vd_args);
+	    }
+	  }
+	  if (mb_cache[flags])
+	    send_buffer(member->user, mb_cache[flags], 0);
+	  else
+	    send_buffer(member->user, mb, 0);
+	} else {
+	  send_buffer(member->user, mb, 0);
+	}
       }
   }
 
-  if (MyConnect(from) && from != one)
-    send_buffer(from, mb, 0);
+  if (MyConnect(from) && from != one) {
+    flags = get_client_tag_flags(from, from, 1);
+    if (flags && mb_cache[flags])
+      send_buffer(from, mb_cache[flags], 0);
+    else
+      send_buffer(from, mb, 0);
+  }
 
   msgq_clean(mb);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
 }
 
 /** Send a (prefixed) command to all channels that \a from is on.
@@ -529,8 +1143,12 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
+  char tagbuf[128];
+  int flags;
 
   assert(0 != from);
   assert(0 != cli_from(from));
@@ -541,7 +1159,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
@@ -561,14 +1179,39 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
           && ((withcap == CAP_NONE) || CapActive(member->user, withcap))
           && ((skipcap == CAP_NONE) || !CapActive(member->user, skipcap))) {
         cli_sentalong(member->user) = sentalong_marker;
-        send_buffer(member->user, mb, 0);
+        flags = get_client_tag_flags(member->user, from, 0);
+        if (flags) {
+          /* Build cached message buffer for this flag combination if needed */
+          if (!mb_cache[flags]) {
+            if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+              va_start(vd.vd_args, pattern);
+              mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+              va_end(vd.vd_args);
+            }
+          }
+          if (mb_cache[flags])
+            send_buffer(member->user, mb_cache[flags], 0);
+          else
+            send_buffer(member->user, mb, 0);
+        } else {
+          send_buffer(member->user, mb, 0);
+        }
       }
   }
 
-  if (MyConnect(from) && from != one)
-    send_buffer(from, mb, 0);
+  if (MyConnect(from) && from != one) {
+    flags = get_client_tag_flags(from, from, 0);
+    if (flags && mb_cache[flags])
+      send_buffer(from, mb_cache[flags], 0);
+    else
+      send_buffer(from, mb, 0);
+  }
 
   msgq_clean(mb);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
 }
 
 /** Send a (prefixed) command to all local users on a channel.
@@ -587,29 +1230,54 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
+  char tagbuf[128];
+  int flags;
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
     if (!MyConnect(member->user)
-        || member->user == one 
+        || member->user == one
         || IsZombie(member)
         || (skip & SKIP_DEAF && IsDeaf(member->user))
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
-        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
+        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
+        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST)))
         continue;
+    flags = get_client_tag_flags(member->user, from, 0);
+    if (flags) {
+      /* Build cached message buffer for this flag combination if needed */
+      if (!mb_cache[flags]) {
+        if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+          va_start(vd.vd_args, pattern);
+          mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+          va_end(vd.vd_args);
+        }
+      }
+      if (mb_cache[flags])
+        send_buffer(member->user, mb_cache[flags], 0);
+      else
+        send_buffer(member->user, mb, 0);
+    } else {
       send_buffer(member->user, mb, 0);
+    }
   }
 
   msgq_clean(mb);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
 }
 
 /** Send a (prefixed) command to all local users on a channel with or without
@@ -632,12 +1300,16 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
+  char tagbuf[128];
+  int flags;
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  /* build the buffer */
+  /* build the base buffer (no tags) */
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
@@ -650,13 +1322,82 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
+        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
         || ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         || ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
         continue;
+    flags = get_client_tag_flags(member->user, from, 0);
+    if (flags) {
+      /* Build cached message buffer for this flag combination if needed */
+      if (!mb_cache[flags]) {
+        if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, flags)) {
+          va_start(vd.vd_args, pattern);
+          mb_cache[flags] = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+          va_end(vd.vd_args);
+        }
+      }
+      if (mb_cache[flags])
+        send_buffer(member->user, mb_cache[flags], 0);
+      else
+        send_buffer(member->user, mb, 0);
+    } else {
       send_buffer(member->user, mb, 0);
+    }
   }
 
   msgq_clean(mb);
+  for (flags = 0; flags < 16; flags++) {
+    if (mb_cache[flags])
+      msgq_clean(mb_cache[flags]);
+  }
+}
+
+/** Send TAGMSG with client-only tags to channel members with message-tags capability.
+ * Used for relaying +typing and other client-only tags to channels.
+ * @param[in] from Client originating the TAGMSG.
+ * @param[in] cmd Long name of command (TAGMSG).
+ * @param[in] to Destination channel.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] skip Bitmask of SKIP_DEAF, SKIP_NONOPS, SKIP_NONVOICES indicating which clients to skip.
+ * @param[in] client_tags Client-only tags string from sender (e.g., "+typing=active").
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
+                                   struct Channel *to, struct Client *one,
+                                   unsigned int skip, const char *client_tags,
+                                   const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  struct Membership *member;
+  char tagbuf[1024];
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  /* Send to each local channel member with message-tags capability */
+  for (member = to->members; member; member = member->next_member) {
+    if (!MyConnect(member->user)
+        || member->user == one
+        || IsZombie(member)
+        || (skip & SKIP_DEAF && IsDeaf(member->user))
+        || (skip & SKIP_NONOPS && !IsChanOp(member))
+        || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
+        || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member))
+        || !wants_message_tags(member->user))
+        continue;
+
+    /* Build message with client-only tags for this recipient */
+    if (format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, member->user, client_tags)) {
+      va_start(vd.vd_args, pattern);
+      mb = msgq_make(0, "%s%:#C %s %v", tagbuf, from, cmd, &vd);
+      va_end(vd.vd_args);
+      send_buffer(member->user, mb, 0);
+      msgq_clean(mb);
+    }
+  }
+
+  va_end(vd.vd_args);
 }
 
 /** Send a (prefixed) command to all servers with users on \a to.
@@ -722,12 +1463,23 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct Membership *member;
   struct VarData vd;
   struct MsgBuf *user_mb;
+  /* Per-capability message buffers - only send tags client actually requested */
+  struct MsgBuf *user_mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct MsgBuf *serv_mb;
+  struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
   struct Client *service;
+  struct Client *cptr;  /* Server connection for incoming S2S tags */
   const char *userfmt;
   const char *usercmd;
+  char tagbuf[128];
+  char s2s_tagbuf[128];
+  char userfmt_tags[64];
+  int tflags;
 
   vd.vd_format = pattern;
+
+  /* Get the server connection for S2S tag handling */
+  cptr = MyConnect(from) ? NULL : cli_from(from);
 
   /* Build buffer to send to users */
   usercmd = cmd;
@@ -746,10 +1498,20 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   user_mb = msgq_make(0, userfmt, from, usercmd, &vd);
   va_end(vd.vd_args);
 
-  /* Build buffer to send to servers */
-  va_start(vd.vd_args, pattern);
-  serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
-  va_end(vd.vd_args);
+  /* Prepare tagged format string for building cached buffers */
+  ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
+
+  /* Build buffer to send to servers - with S2S tags if enabled */
+  if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
+    va_start(vd.vd_args, pattern);
+    serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+    va_end(vd.vd_args);
+    serv_mb = serv_mb_tags;  /* Use tagged version */
+  } else {
+    va_start(vd.vd_args, pattern);
+    serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+  }
 
   /* send buffer along! */
   bump_sentalong(one);
@@ -767,9 +1529,25 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       continue;
     cli_sentalong(member->user) = sentalong_marker;
 
-    if (MyConnect(member->user)) /* pick right buffer to send */
-      send_buffer(member->user, user_mb, 0);
-    else
+    if (MyConnect(member->user)) { /* pick right buffer to send */
+      tflags = get_client_tag_flags(member->user, from, 0);
+      if (tflags) {
+        /* Build cached message buffer for this flag combination if needed */
+        if (!user_mb_cache[tflags]) {
+          if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, tflags)) {
+            va_start(vd.vd_args, pattern);
+            user_mb_cache[tflags] = msgq_make(0, userfmt_tags, tagbuf, from, usercmd, &vd);
+            va_end(vd.vd_args);
+          }
+        }
+        if (user_mb_cache[tflags])
+          send_buffer(member->user, user_mb_cache[tflags], 0);
+        else
+          send_buffer(member->user, user_mb, 0);
+      } else {
+        send_buffer(member->user, user_mb, 0);
+      }
+    } else
       send_buffer(member->user, serv_mb, 0);
   }
   /* Consult service forwarding table. */
@@ -781,6 +1559,10 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   }
 
   msgq_clean(user_mb);
+  for (tflags = 0; tflags < 16; tflags++) {
+    if (user_mb_cache[tflags])
+      msgq_clean(user_mb_cache[tflags]);
+  }
   msgq_clean(serv_mb);
 }
 
@@ -1087,5 +1869,464 @@ void vsendto_mode_butone(struct Client *one, struct Client *from, const char *mo
     }
   }
   msgq_clean(mb);
+}
+
+/**
+ * Generate a unique batch reference ID.
+ * @param[in] cptr Client to generate batch ID for.
+ * @param[out] buf Buffer to store the generated ID.
+ * @param[in] buflen Size of the buffer.
+ * @return Pointer to the buffer.
+ */
+static char *generate_batch_id(struct Client *cptr, char *buf, size_t buflen)
+{
+  unsigned int seq = con_batch_seq(cli_connect(cptr))++;
+  ircd_snprintf(NULL, buf, buflen, "%s%u", cli_yxx(cptr), seq);
+  return buf;
+}
+
+/**
+ * Start a batch for a client.
+ * Sends BATCH +refid type to the client and stores the batch ID.
+ * @param[in] to Client to start batch for.
+ * @param[in] type Batch type (e.g., "labeled-response", "netjoin").
+ */
+void send_batch_start(struct Client *to, const char *type)
+{
+  struct MsgBuf *mb;
+  char tagbuf[256];
+  int pos = 0;
+
+  if (!feature_bool(FEAT_CAP_batch) || !CapActive(to, CAP_BATCH) || !MyConnect(to))
+    return;
+
+  /* Generate a new batch ID */
+  generate_batch_id(to, cli_batch_id(to), sizeof(con_batch_id(cli_connect(to))));
+
+  /* Build message tags - include label if this is for labeled-response */
+  tagbuf[0] = '\0';
+  if (feature_bool(FEAT_CAP_labeled_response) &&
+      CapActive(to, CAP_LABELEDRESP) && cli_label(to)[0]) {
+    tagbuf[0] = '@';
+    pos = 1;
+    pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
+    if (pos < (int)sizeof(tagbuf) - 1) {
+      tagbuf[pos++] = ' ';
+      tagbuf[pos] = '\0';
+    }
+  }
+
+  /* Send BATCH +refid type */
+  if (tagbuf[0])
+    mb = msgq_make(cli_from(to), "%s:%s " MSG_BATCH_CMD " +%s %s",
+                   tagbuf, cli_name(&me), cli_batch_id(to), type);
+  else
+    mb = msgq_make(cli_from(to), ":%s " MSG_BATCH_CMD " +%s %s",
+                   cli_name(&me), cli_batch_id(to), type);
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
+/**
+ * End the current batch for a client.
+ * Sends BATCH -refid to the client and clears the batch ID.
+ * @param[in] to Client to end batch for.
+ */
+void send_batch_end(struct Client *to)
+{
+  struct MsgBuf *mb;
+
+  if (!feature_bool(FEAT_CAP_batch) || !CapActive(to, CAP_BATCH) || !MyConnect(to))
+    return;
+
+  /* Only end if there's an active batch */
+  if (!cli_batch_id(to)[0])
+    return;
+
+  /* Send BATCH -refid */
+  mb = msgq_make(cli_from(to), ":%s " MSG_BATCH_CMD " -%s",
+                 cli_name(&me), cli_batch_id(to));
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+
+  /* Clear the batch ID */
+  cli_batch_id(to)[0] = '\0';
+}
+
+/**
+ * Check if a client has an active batch.
+ * @param[in] cptr Client to check.
+ * @return Non-zero if batch is active, zero otherwise.
+ */
+int has_active_batch(struct Client *cptr)
+{
+  if (!MyConnect(cptr))
+    return 0;
+  return cli_batch_id(cptr)[0] != '\0';
+}
+
+/**
+ * Start an S2S batch and send to all servers.
+ * Used for netjoin/netsplit coordination across the network.
+ * @param[in] sptr Server starting the batch.
+ * @param[in] type Batch type (netjoin, netsplit).
+ * @param[in] server1 First server in the split/join (optional).
+ * @param[in] server2 Second server in the split/join (optional).
+ */
+void send_s2s_batch_start(struct Client *sptr, const char *type,
+                          const char *server1, const char *server2)
+{
+  char batch_id[32];
+  struct Client *acptr;
+
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return;
+
+  /* Generate unique batch ID using server numeric + timestamp + counter */
+  generate_batch_id(sptr, batch_id, sizeof(batch_id));
+
+  /* Send to all servers */
+  if (server1 && server2) {
+    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s %s",
+                          batch_id, type, server1, server2);
+  }
+  else if (server1) {
+    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s",
+                          batch_id, type, server1);
+  }
+  else {
+    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s",
+                          batch_id, type);
+  }
+
+  /* Store batch ID for later reference */
+  ircd_strncpy(cli_s2s_batch_id(sptr), batch_id, sizeof(con_s2s_batch_id(cli_connect(sptr))) - 1);
+  cli_s2s_batch_id(sptr)[sizeof(con_s2s_batch_id(cli_connect(sptr))) - 1] = '\0';
+  ircd_strncpy(cli_s2s_batch_type(sptr), type, sizeof(con_s2s_batch_type(cli_connect(sptr))) - 1);
+  cli_s2s_batch_type(sptr)[sizeof(con_s2s_batch_type(cli_connect(sptr))) - 1] = '\0';
+
+  /* Send batch start to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    if (server1 && server2) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s %s",
+                    batch_id, type, server1, server2);
+    }
+    else if (server1) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s",
+                    batch_id, type, server1);
+    }
+    else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s",
+                    batch_id, type);
+    }
+  }
+}
+
+/**
+ * End an S2S batch and send to all servers.
+ * @param[in] sptr Server ending the batch.
+ * @param[in] batch_id Batch ID to end (or NULL to use stored ID).
+ */
+void send_s2s_batch_end(struct Client *sptr, const char *batch_id)
+{
+  struct Client *acptr;
+  const char *id;
+
+  if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
+    return;
+
+  /* Use provided ID or the stored one */
+  id = batch_id ? batch_id : cli_s2s_batch_id(sptr);
+  if (!id || !*id)
+    return;
+
+  /* Send to all servers */
+  sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "-%s", id);
+
+  /* Send batch end to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", id);
+  }
+
+  /* Clear stored batch ID */
+  cli_s2s_batch_id(sptr)[0] = '\0';
+  cli_s2s_batch_type(sptr)[0] = '\0';
+}
+
+/**
+ * Start a netjoin batch when a server reconnects.
+ * Generates a batch ID and stores it on the server struct for later.
+ * Sends BATCH +id netjoin server1 server2 to clients with batch cap.
+ * @param[in] server Server that is reconnecting (junction server).
+ * @param[in] uplink Server's uplink (server one hop closer to us).
+ */
+void send_netjoin_batch_start(struct Client *server, struct Client *uplink)
+{
+  struct Client *acptr;
+  char batch_id[32];
+  static unsigned long netjoin_seq = 0;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!server || !cli_serv(server))
+    return;
+
+  /* Generate unique batch ID */
+  ircd_snprintf(NULL, batch_id, sizeof(batch_id), "NJ%s%lu",
+                cli_yxx(&me), netjoin_seq++);
+
+  /* Store on server struct */
+  ircd_strncpy(cli_serv(server)->batch_id, batch_id,
+               sizeof(cli_serv(server)->batch_id) - 1);
+  cli_serv(server)->batch_id[sizeof(cli_serv(server)->batch_id) - 1] = '\0';
+
+  /* Set active network batch so JOIN messages include @batch tag */
+  set_active_network_batch(batch_id);
+
+  /* Send batch start to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    if (uplink) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netjoin %s %s",
+                    batch_id, cli_name(uplink), cli_name(server));
+    } else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netjoin %s",
+                    batch_id, cli_name(server));
+    }
+  }
+}
+
+/**
+ * End a netjoin batch when END_OF_BURST is received.
+ * @param[in] server Server that finished bursting.
+ */
+void send_netjoin_batch_end(struct Client *server)
+{
+  struct Client *acptr;
+  const char *batch_id;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!server || !cli_serv(server))
+    return;
+
+  batch_id = cli_serv(server)->batch_id;
+  if (!batch_id || !*batch_id)
+    return;
+
+  /* Clear active network batch */
+  set_active_network_batch(NULL);
+
+  /* Send batch end to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batch_id);
+  }
+
+  /* Clear stored batch ID */
+  cli_serv(server)->batch_id[0] = '\0';
+}
+
+/**
+ * Start a netsplit batch when a server disconnects.
+ * @param[in] server Server that is disconnecting.
+ * @param[in] uplink Server's uplink.
+ * @param[out] batch_id_out Buffer to store generated batch ID (min 32 bytes).
+ */
+void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
+                                char *batch_id_out, size_t batch_id_len)
+{
+  struct Client *acptr;
+  static unsigned long netsplit_seq = 0;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!batch_id_out || batch_id_len < 16)
+    return;
+
+  /* Generate unique batch ID */
+  ircd_snprintf(NULL, batch_id_out, batch_id_len, "NS%s%lu",
+                cli_yxx(&me), netsplit_seq++);
+
+  /* Send batch start to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    if (uplink && server) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netsplit %s %s",
+                    batch_id_out, cli_name(uplink), cli_name(server));
+    } else if (server) {
+      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netsplit %s",
+                    batch_id_out, cli_name(server));
+    }
+  }
+}
+
+/**
+ * End a netsplit batch.
+ * @param[in] batch_id Batch ID from send_netsplit_batch_start.
+ */
+void send_netsplit_batch_end(const char *batch_id)
+{
+  struct Client *acptr;
+
+  if (!feature_bool(FEAT_CAP_batch))
+    return;
+
+  if (!batch_id || !*batch_id)
+    return;
+
+  /* Send batch end to local clients with batch capability */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!MyConnect(acptr) || !IsUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_BATCH))
+      continue;
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batch_id);
+  }
+}
+
+/**
+ * Send a standard reply (FAIL/WARN/NOTE) to a client.
+ * Internal helper function.
+ * @param[in] to Client to send to.
+ * @param[in] type Reply type (FAIL, WARN, or NOTE).
+ * @param[in] command Command that generated this reply (or "*" for general).
+ * @param[in] code Machine-readable code (e.g., "ACCOUNT_REQUIRED").
+ * @param[in] context Optional context parameter (NULL if none).
+ * @param[in] description Human-readable description.
+ */
+static void send_standard_reply(struct Client *to, const char *type,
+                                 const char *command, const char *code,
+                                 const char *context, const char *description)
+{
+  struct MsgBuf *mb;
+  char tagbuf[512];
+
+  if (!MyConnect(to))
+    return;
+
+  /* If client doesn't have standard-replies, fall back to numerics or NOTICE */
+  if (!feature_bool(FEAT_CAP_standard_replies) || !CapActive(to, CAP_STANDARDREPLIES)) {
+    /* Map known error codes to traditional numerics where applicable */
+    if (strcmp(type, "FAIL") == 0) {
+      if (strcmp(code, "NEED_MORE_PARAMS") == 0) {
+        /* ERR_NEEDMOREPARAMS (461) */
+        mb = msgq_make(to, ":%s 461 %s %s :Not enough parameters",
+                       cli_name(&me), IsRegistered(to) ? cli_name(to) : "*", command);
+        send_buffer(to, mb, 0);
+        msgq_clean(mb);
+        return;
+      }
+      if (strcmp(code, "ALREADY_AUTHENTICATED") == 0) {
+        /* ERR_ALREADYREGISTRED (462) */
+        mb = msgq_make(to, ":%s 462 %s :You may not reregister",
+                       cli_name(&me), IsRegistered(to) ? cli_name(to) : "*");
+        send_buffer(to, mb, 0);
+        msgq_clean(mb);
+        return;
+      }
+    }
+    /* Fall back to NOTICE for unmapped codes */
+    if (context && *context)
+      mb = msgq_make(to, ":%s NOTICE %s :%s %s %s %s :%s",
+                     cli_name(&me), IsRegistered(to) ? cli_name(to) : "*",
+                     type, command, code, context, description);
+    else
+      mb = msgq_make(to, ":%s NOTICE %s :%s %s %s :%s",
+                     cli_name(&me), IsRegistered(to) ? cli_name(to) : "*",
+                     type, command, code, description);
+    send_buffer(to, mb, 0);
+    msgq_clean(mb);
+    return;
+  }
+
+  /* Format tags (label, time) if applicable */
+  if (format_message_tags_for(tagbuf, sizeof(tagbuf), NULL, to)) {
+    if (context && *context)
+      mb = msgq_make(to, "%s%s %s %s %s :%s", tagbuf, type, command, code, context, description);
+    else
+      mb = msgq_make(to, "%s%s %s %s :%s", tagbuf, type, command, code, description);
+  } else {
+    if (context && *context)
+      mb = msgq_make(to, "%s %s %s %s :%s", type, command, code, context, description);
+    else
+      mb = msgq_make(to, "%s %s %s :%s", type, command, code, description);
+  }
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
+/**
+ * Send a FAIL reply to a client (IRCv3 standard-replies).
+ * Indicates an error that prevented the command from executing.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general failure).
+ * @param[in] code Machine-readable error code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable error message.
+ */
+void send_fail(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  send_standard_reply(to, "FAIL", command, code, context, description);
+}
+
+/**
+ * Send a WARN reply to a client (IRCv3 standard-replies).
+ * Indicates a warning that didn't prevent command execution.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general warning).
+ * @param[in] code Machine-readable warning code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable warning message.
+ */
+void send_warn(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  send_standard_reply(to, "WARN", command, code, context, description);
+}
+
+/**
+ * Send a NOTE reply to a client (IRCv3 standard-replies).
+ * Provides informational feedback about a command.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general note).
+ * @param[in] code Machine-readable info code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable info message.
+ */
+void send_note(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  send_standard_reply(to, "NOTE", command, code, context, description);
 }
 
