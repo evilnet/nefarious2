@@ -903,6 +903,7 @@ struct FedRequest {
   int limit;                          /**< Original limit requested */
   struct Timer timer;                 /**< Timeout timer (embedded) */
   int timer_active;                   /**< Whether timer is active */
+  int response_sent;                  /**< Whether response was already sent */
 };
 
 /** Global array of pending federation requests */
@@ -1062,21 +1063,24 @@ static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
   return result;
 }
 
-/** Complete a federation request and send results to client */
-static void complete_fed_request(struct FedRequest *req)
+/** Send federation results to client (does NOT free the request)
+ * Call this to send results, then let timer destroy event free the request.
+ */
+static void send_fed_response(struct FedRequest *req)
 {
   struct HistoryMessage *merged;
   struct Client *client;
   int total;
 
-  if (!req)
+  if (!req || req->response_sent)
     return;
+
+  req->response_sent = 1;  /* Mark as sent to prevent double-send */
 
   /* Look up the client by numeric - they may have disconnected */
   client = findNUser(req->client_yxx);
   if (!client) {
-    /* Client disconnected, just clean up */
-    free_fed_request(req);
+    /* Client disconnected, nothing to send */
     return;
   }
 
@@ -1093,27 +1097,63 @@ static void complete_fed_request(struct FedRequest *req)
 
   /* Free merged list */
   history_free_messages(merged);
-
-  /* Clean up request */
-  free_fed_request(req);
 }
 
-/** Timer callback for federation timeout */
+/** Complete a federation request - sends response and triggers cleanup.
+ * For timeout path: timer_run will call ET_DESTROY after we return.
+ * For early completion: we call timer_del which triggers ET_DESTROY.
+ */
+static void complete_fed_request(struct FedRequest *req)
+{
+  if (!req)
+    return;
+
+  /* Send response to client */
+  send_fed_response(req);
+
+  /* If timer is still active (early completion), delete it.
+   * timer_del will trigger ET_DESTROY callback which frees the request.
+   * If timer already expired (timeout path), timer_run will send ET_DESTROY.
+   */
+  if (req->timer_active) {
+    req->timer_active = 0;
+    timer_del(&req->timer);
+    /* Note: timer_del triggers ET_DESTROY, which calls free_fed_request */
+  }
+  /* If !timer_active, we're in the timeout callback and timer_run will
+   * send ET_DESTROY after we return, so don't free here */
+}
+
+/** Timer callback for federation timeout.
+ * Handles both ET_EXPIRE (timeout) and ET_DESTROY (cleanup).
+ */
 static void fed_timeout_callback(struct Event *ev)
 {
   struct FedRequest *req;
-
-  if (ev_type(ev) != ET_EXPIRE)
-    return;
 
   req = (struct FedRequest *)t_data(ev_timer(ev));
   if (!req)
     return;
 
-  req->timer_active = 0;  /* Timer has expired */
+  switch (ev_type(ev)) {
+  case ET_EXPIRE:
+    /* Timer expired - complete with whatever we have.
+     * Don't free here - timer_run will send ET_DESTROY after we return.
+     */
+    req->timer_active = 0;
+    complete_fed_request(req);
+    break;
 
-  /* Complete with whatever we have */
-  complete_fed_request(req);
+  case ET_DESTROY:
+    /* Timer is being destroyed - safe to free the request now.
+     * This is called by timer_run after ET_EXPIRE, or by timer_del.
+     */
+    free_fed_request(req);
+    break;
+
+  default:
+    break;
+  }
 }
 
 /** Count connected servers */
