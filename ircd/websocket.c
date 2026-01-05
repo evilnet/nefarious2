@@ -28,6 +28,7 @@
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_osdep.h"
 #include "ircd_snprintf.h"
@@ -285,6 +286,14 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
   /* Mark client as WebSocket and clear handshake flag */
   SetWebSocket(cptr);
   ClearWSNeedHandshake(cptr);
+
+  /* Apply WebSocket-specific recvq limit (typically higher than regular clients
+   * because WebSocket frames can bundle multiple IRC lines) */
+  {
+    unsigned int ws_recvq = feature_int(FEAT_WEBSOCKET_RECVQ);
+    if (ws_recvq > 0)
+      cli_max_recvq(cptr) = ws_recvq;
+  }
 
   Debug((DEBUG_DEBUG, "WebSocket: Handshake complete for %s (subproto=%s)",
          cli_sockhost(cptr),

@@ -1470,8 +1470,26 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     lagmin = 2;
   if (lagfactor < 0)
     lagfactor = 120;
-  if (((mptr->flags & MFLG_SLOW) || !IsAnOper(cptr)) && lagfactor > 0)
-    cli_since(cptr) += (lagmin + i / lagfactor);
+  if (((mptr->flags & MFLG_SLOW) || !IsAnOper(cptr)) && lagfactor > 0) {
+    int lag = lagmin + i / lagfactor;
+    /*
+     * If client is in a multiline batch, accumulate lag instead of
+     * applying immediately. Per IRCv3 multiline spec, servers should
+     * recognize that batched messages are transmitted simultaneously
+     * and not count each line separately for flood protection.
+     * The accumulated lag is applied once when the batch ends.
+     *
+     * MULTILINE_MAX_LAG caps accumulated lag to prevent extremely long
+     * batches from building up massive lag debt.
+     */
+    if (cli_ml_batch_id(cptr)[0]) {
+      int max_lag = feature_int(FEAT_MULTILINE_MAX_LAG);
+      cli_ml_lag_accum(cptr) += lag;
+      if (max_lag > 0 && cli_ml_lag_accum(cptr) > max_lag)
+        cli_ml_lag_accum(cptr) = max_lag;
+    } else
+      cli_since(cptr) += lag;
+  }
   /*
    * Allow only 1 msg per 2 seconds
    * (on average) to prevent dumping.

@@ -346,6 +346,11 @@ struct Connection
   int                 con_ml_msg_count; /**< Number of messages in batch */
   int                 con_ml_total_bytes; /**< Total bytes in batch */
   time_t              con_ml_batch_start; /**< When batch was started (for timeout) */
+  int                 con_ml_lag_accum;   /**< Accumulated fake lag during batch (applied at end) */
+  /* Batch rate limiting (FEAT_BATCH_RATE_LIMIT) */
+  time_t              con_batch_minute;   /**< Start of current rate limit window */
+  int                 con_batch_count;    /**< Number of batches in current window */
+  int                 con_ml_had_fallback; /**< Batch had recipients needing fallback (for recipient discount) */
   /* Current message @batch tag for PRIVMSG interception */
   char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
@@ -498,6 +503,14 @@ struct Client {
 #define cli_ml_total_bytes(cli)	con_ml_total_bytes(cli_connect(cli))
 /** Get multiline batch start time. */
 #define cli_ml_batch_start(cli)	con_ml_batch_start(cli_connect(cli))
+/** Get accumulated lag during batch. */
+#define cli_ml_lag_accum(cli)	con_ml_lag_accum(cli_connect(cli))
+/** Get batch rate limit window start time. */
+#define cli_batch_minute(cli)	con_batch_minute(cli_connect(cli))
+/** Get batch count in current rate limit window. */
+#define cli_batch_count(cli)	con_batch_count(cli_connect(cli))
+/** Get whether batch had fallback recipients. */
+#define cli_ml_had_fallback(cli)	con_ml_had_fallback(cli_connect(cli))
 /** Get current message @batch tag. */
 #define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
 /** Get current message concat flag. */
@@ -760,6 +773,14 @@ struct Client {
 #define con_ml_total_bytes(con)	((con)->con_ml_total_bytes)
 /** Get the multiline batch start time. */
 #define con_ml_batch_start(con)	((con)->con_ml_batch_start)
+/** Get the accumulated lag during batch (to apply at batch end). */
+#define con_ml_lag_accum(con)	((con)->con_ml_lag_accum)
+/** Get the batch rate limit window start time. */
+#define con_batch_minute(con)	((con)->con_batch_minute)
+/** Get the batch count in current rate limit window. */
+#define con_batch_count(con)	((con)->con_batch_count)
+/** Get whether batch had fallback recipients. */
+#define con_ml_had_fallback(con)	((con)->con_ml_had_fallback)
 /** Get the current message @batch tag. */
 #define con_msg_batch_tag(con)	((con)->con_msg_batch_tag)
 /** Get the current message draft/multiline-concat flag. */

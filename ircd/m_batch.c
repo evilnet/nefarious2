@@ -191,6 +191,52 @@ clear_multiline_batch(struct Connection *con)
     free_link(lp);
   }
 
+  /* Apply accumulated lag from the batch with a configurable discount.
+   * Per IRCv3 multiline spec, we should be lenient for batched messages,
+   * but we can't ignore lag entirely or malicious clients could abuse
+   * multiline batches to flood channels (recipients who don't support
+   * multiline still receive each line as a separate PRIVMSG).
+   *
+   * MULTILINE_LAG_DISCOUNT controls what percentage of lag is applied for DMs:
+   *   100 = full lag (no benefit to multiline, like regular messages)
+   *   50  = 50% lag (default - rewards multiline while preventing abuse)
+   *   0   = no lag (dangerous - allows unlimited multiline flooding)
+   *
+   * MULTILINE_CHANNEL_LAG_DISCOUNT is used for channel messages (typically
+   * higher than DM discount since channels affect more users).
+   *
+   * MULTILINE_RECIPIENT_DISCOUNT: When enabled, if ALL recipients support
+   * draft/multiline (no fallback to individual PRIVMSGs was needed), we can
+   * be more lenient since the batch was delivered as intended - halve the
+   * lag discount percentage.
+   */
+  if (con_ml_lag_accum(con) > 0) {
+    int discount;
+    int discounted_lag;
+
+    /* Use different discount for channels vs DMs */
+    if (con_ml_target(con)[0] && IsChannelName(con_ml_target(con)))
+      discount = feature_int(FEAT_MULTILINE_CHANNEL_LAG_DISCOUNT);
+    else
+      discount = feature_int(FEAT_MULTILINE_LAG_DISCOUNT);
+
+    /* If all recipients supported multiline (no fallback), halve the discount */
+    if (feature_bool(FEAT_MULTILINE_RECIPIENT_DISCOUNT) && !con_ml_had_fallback(con))
+      discount = discount / 2;
+
+    /* Clamp discount to valid range */
+    if (discount < 0)
+      discount = 0;
+    else if (discount > 100)
+      discount = 100;
+
+    discounted_lag = (con_ml_lag_accum(con) * discount) / 100;
+    if (discounted_lag < 2 && discount > 0)
+      discounted_lag = 2;  /* Minimum one message worth (unless fully disabled) */
+    con_since(con) += discounted_lag;
+  }
+  con_ml_lag_accum(con) = 0;
+
   con_ml_batch_id(con)[0] = '\0';
   con_ml_target(con)[0] = '\0';
   con_ml_messages(con) = NULL;
@@ -331,6 +377,9 @@ process_multiline_batch(struct Client *sptr)
 
   is_channel = IsChannelName(con_ml_target(con));
 
+  /* Initialize fallback tracking for recipient-aware discounting */
+  con_ml_had_fallback(con) = 0;
+
   /* Validate target */
   if (is_channel) {
     chptr = FindChannel(con_ml_target(con));
@@ -425,6 +474,7 @@ process_multiline_batch(struct Client *sptr)
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
         /* Fallback: send as individual messages */
+        con_ml_had_fallback(con) = 1;  /* Track for recipient-aware discounting */
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           char *text = lp->value.cp + 1;
           sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
@@ -558,6 +608,7 @@ process_multiline_batch(struct Client *sptr)
 
       sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
     } else {
+      con_ml_had_fallback(con) = 1;  /* Track for recipient-aware discounting */
       for (lp = con_ml_messages(con); lp; lp = lp->next) {
         char *text = lp->value.cp + 1;
         sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
@@ -709,6 +760,25 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return 0;
     }
 
+    /* Batch rate limiting (FEAT_BATCH_RATE_LIMIT) */
+    {
+      int rate_limit = feature_int(FEAT_BATCH_RATE_LIMIT);
+      if (rate_limit > 0) {
+        /* Reset counter if we're in a new minute */
+        if (CurrentTime - con_batch_minute(con) >= 60) {
+          con_batch_minute(con) = CurrentTime;
+          con_batch_count(con) = 0;
+        }
+        /* Check rate limit */
+        if (con_batch_count(con) >= rate_limit) {
+          send_fail(sptr, "BATCH", "RATE_LIMIT_EXCEEDED", batch_ref,
+                    "Too many batches per minute");
+          return 0;
+        }
+        con_batch_count(con)++;
+      }
+    }
+
     /* Check if there's already an active batch */
     if (con_ml_batch_id(con)[0]) {
       /* Clear the old batch */
@@ -728,6 +798,7 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_ml_msg_count(con) = 0;
     con_ml_total_bytes(con) = 0;
     con_ml_batch_start(con) = CurrentTime;
+    con_ml_lag_accum(con) = 0;  /* Reset lag accumulator for new batch */
   }
   else {
     /* End batch */
