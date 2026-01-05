@@ -4,7 +4,7 @@ ENV GID 1234
 ENV UID 1234
 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host liblmdb-dev libzstd-dev libcmocka-dev
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host liblmdb-dev libzstd-dev libcmocka-dev valgrind
 #libgeoip-dev libmaxminddb-dev
 
 # Perl dependencies for iauthd.pl (commented out - using TypeScript version)
@@ -21,7 +21,8 @@ COPY . /home/nefarious/nefarious2
 RUN groupadd -g ${GID} nefarious
 RUN useradd -u ${UID} -g ${GID} nefarious
 # Create LMDB directories for chathistory and metadata storage
-RUN mkdir -p /home/nefarious/ircd/history /home/nefarious/ircd/metadata
+# Create cores directory for valgrind logs
+RUN mkdir -p /home/nefarious/ircd/history /home/nefarious/ircd/metadata /home/nefarious/ircd/cores
 RUN chown -R nefarious:nefarious /home/nefarious
 USER nefarious
 
@@ -79,7 +80,9 @@ COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 # Run entrypoint (volume permissions fixed by init container in docker-compose)
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
-CMD ["/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd-docker.conf"]
+# Run with Valgrind for memory testing (logs to cores mount for easy access)
+# %n = sequence number for unique filenames per run (starts at 0)
+CMD ["valgrind", "--leak-check=full", "--show-leak-kinds=all", "--track-origins=yes", "--log-file=/home/nefarious/ircd/cores/valgrind.%n.log", "/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd-docker.conf"]
 
 
 

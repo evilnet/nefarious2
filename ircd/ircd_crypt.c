@@ -56,6 +56,7 @@
 #include "ircd_crypt_plain.h"
 #include "ircd_crypt_smd5.h"
 #include "ircd_crypt_bcrypt.h"
+#include "ircd_crypt_pbkdf2.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <unistd.h>
@@ -260,6 +261,8 @@ void ircd_crypt_init(void)
  ircd_register_crypt_plain();
  ircd_register_crypt_native();
  ircd_register_crypt_bcrypt();
+ ircd_register_crypt_pbkdf2();
+ ircd_register_crypt_pbkdf2_sha512();
 
 return;
 }
