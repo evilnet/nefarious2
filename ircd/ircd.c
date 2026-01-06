@@ -68,6 +68,7 @@
 #include "version.h"
 #include "whowas.h"
 #include "metadata.h"
+#include "ml_storage.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -127,6 +128,7 @@ static struct Timer ping_timer; /**< timer structure for check_pings() */
 static struct Timer destruct_event_timer; /**< timer structure for exec_expired_destruct_events() */
 static struct Timer history_purge_timer; /**< timer structure for history_purge_callback() */
 static struct Timer metadata_purge_timer; /**< timer structure for metadata_purge_callback() */
+static struct Timer ml_storage_timer; /**< timer structure for ml_storage_expire() */
 
 /** Daemon information. */
 static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
@@ -571,6 +573,21 @@ static void metadata_purge_callback(struct Event* ev)
   metadata_account_purge_expired();
 }
 
+/** Periodic callback to expire old multiline storage entries.
+ * Runs every 5 minutes to enforce MULTILINE_STORAGE_TTL.
+ * @param[in] ev Timer event (ignored).
+ */
+static void ml_storage_callback(struct Event* ev)
+{
+  (void)ev; /* unused */
+
+  /* Only run if multiline storage is enabled */
+  if (!feature_bool(FEAT_MULTILINE_STORAGE_ENABLED))
+    return;
+
+  ml_storage_expire();
+}
+
 
 /** Parse command line arguments.
  * Global variables are updated to reflect the arguments.
@@ -864,6 +881,10 @@ int main(int argc, char **argv) {
   timer_add(timer_init(&history_purge_timer), history_purge_callback, 0, TT_PERIODIC, 3600); /* Run every hour */
   timer_add(timer_init(&metadata_purge_timer), metadata_purge_callback, 0, TT_PERIODIC,
             feature_int(FEAT_METADATA_PURGE_FREQUENCY)); /* Default: hourly */
+  timer_add(timer_init(&ml_storage_timer), ml_storage_callback, 0, TT_PERIODIC, 300); /* Run every 5 minutes */
+
+  /* Initialize multiline storage */
+  ml_storage_init();
 
   CurrentTime = time(NULL);
 

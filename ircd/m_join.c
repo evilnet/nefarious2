@@ -45,6 +45,7 @@
 #include "send.h"
 #include "sys.h"
 #include "handlers.h"
+#include "ml_storage.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -344,6 +345,17 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY) && !string_character_structure_is_sane(name)) {
         send_reply(sptr, ERR_NOSUCHCHANNEL, name);
         continue;
+    }
+
+    /* Check for virtual &ml- channel (multiline message retrieval) */
+    if (ml_storage_is_virtual_channel(name)) {
+      if (!feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
+        send_reply(sptr, ERR_NOSUCHCHANNEL, name);
+        continue;
+      }
+      /* Deliver stored content and continue (no actual channel join) */
+      ml_storage_deliver(sptr, name + 4);  /* Skip "&ml-" prefix */
+      continue;
     }
 
     if (cli_user(sptr)->joined >= get_client_maxchans(sptr)

@@ -59,6 +59,7 @@
 #include "s_user.h"
 #include "msgq.h"
 #include "class.h"
+#include "ml_storage.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -536,11 +537,16 @@ process_multiline_batch(struct Client *sptr)
             sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - upgrade client for multiline support]",
                           chptr, total_lines - sent);
           } else if (send_notice == 2) {
-            /* Include retrieval hint - for now just note about multiline support
-             * TODO: When HistServ/&ml- channels implemented, provide FETCH hint
-             */
-            sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
-                          chptr, total_lines - sent, chptr->chname, batch_base_msgid);
+            /* Store full content for retrieval and provide hint */
+            if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
+              ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
+                               con_ml_messages(con), total_lines);
+              sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s to view full message]",
+                            chptr, total_lines - sent, batch_base_msgid);
+            } else {
+              sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
+                            chptr, total_lines - sent, chptr->chname, batch_base_msgid);
+            }
           }
         }
       }
@@ -756,8 +762,16 @@ process_multiline_batch(struct Client *sptr)
           sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - upgrade client for multiline support]",
                         acptr, total_lines - sent);
         } else if (send_notice == 2) {
-          sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
-                        acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
+          /* Store full content for retrieval and provide hint */
+          if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
+            ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
+                             con_ml_messages(con), total_lines);
+            sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /join &ml-%s to view full message]",
+                          acptr, total_lines - sent, batch_base_msgid);
+          } else {
+            sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /msg HistServ FETCH %s %s]",
+                          acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
+          }
         }
       }
     }
@@ -1255,8 +1269,16 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - upgrade client for multiline support]",
                         chptr, total_lines - sent);
         } else if (send_notice == 2) {
-          sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
-                        chptr, total_lines - sent, chptr->chname, batch_base_msgid);
+          /* Store full content for retrieval and provide hint */
+          if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
+            ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
+                             batch->messages, total_lines);
+            sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s to view full message]",
+                          chptr, total_lines - sent, batch_base_msgid);
+          } else {
+            sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
+                          chptr, total_lines - sent, chptr->chname, batch_base_msgid);
+          }
         }
       }
     }
@@ -1351,8 +1373,16 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - upgrade client for multiline support]",
                       acptr, total_lines - sent);
       } else if (send_notice == 2) {
-        sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
-                      acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
+        /* Store full content for retrieval and provide hint */
+        if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
+          ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
+                           batch->messages, total_lines);
+          sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /join &ml-%s to view full message]",
+                        acptr, total_lines - sent, batch_base_msgid);
+        } else {
+          sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /msg HistServ FETCH %s %s]",
+                        acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
+        }
       }
     }
   }

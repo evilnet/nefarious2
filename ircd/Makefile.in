@@ -240,6 +240,7 @@ IRCD_SRC = \
 	m_xreply.c \
 	m_zline.c \
 	match.c \
+	ml_storage.c \
 	memdebug.c \
 	motd.c \
 	msgq.c \
