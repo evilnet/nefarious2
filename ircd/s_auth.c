@@ -2391,6 +2391,8 @@ static int iauth_cmd_mark(struct IAuth *iauth, struct Client *cli,
     ircd_strncpy(cli_version(cli), params[1], VERSIONLEN + 1);
   } else if (!ircd_strcmp(params[0], MARK_SSLCLIFP)) {
     ircd_strncpy(cli_sslclifp(cli), params[1], BUFSIZE + 1);
+  } else if (!ircd_strcmp(params[0], MARK_SSLCLIEXP)) {
+    cli_sslcliexp(cli) = strtoul(params[1], NULL, 10);
   } else if (!ircd_strcmp(params[0], MARK_KILL)) {
     ircd_strncpy(cli_killmark(cli), params[1], BUFSIZE + 1);
   } else if (!ircd_strcmp(params[0], MARK_MARK) || !ircd_strcmp(params[0], MARK_DNSBL_DATA)) {

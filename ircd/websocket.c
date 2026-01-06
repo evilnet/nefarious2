@@ -118,10 +118,11 @@ static int compute_accept_key(const char *client_key, char *accept_key)
  * @param[in] length Length of buffer.
  * @param[out] ws_key Output buffer for Sec-WebSocket-Key (at least 64 bytes).
  * @param[out] subproto Output for selected subprotocol (WS_SUBPROTO_*).
+ * @param[out] origin Output buffer for Origin header (at least 256 bytes).
  * @return 1 if valid WebSocket upgrade request, 0 otherwise.
  */
 static int parse_ws_handshake(const char *buffer, int length,
-                               char *ws_key, int *subproto)
+                               char *ws_key, int *subproto, char *origin)
 {
   const char *line, *end;
   const char *key_start;
@@ -132,6 +133,7 @@ static int parse_ws_handshake(const char *buffer, int length,
 
   *subproto = WS_SUBPROTO_NONE; /* RFC 6455 §4.2.2: Don't assume subprotocol unless client requests */
   ws_key[0] = '\0';
+  origin[0] = '\0';
 
   /* Check for GET request */
   if (length < 4 || strncmp(buffer, "GET ", 4) != 0)
@@ -183,6 +185,21 @@ static int parse_ws_handshake(const char *buffer, int length,
       else if (strstr(line, "binary.ircv3.net"))
         *subproto = WS_SUBPROTO_BINARY;
     }
+    /* Get Origin header for validation */
+    else if (strncasecmp(line, "Origin:", 7) == 0) {
+      key_start = line + 7;
+      while (*key_start == ' ' && key_start < end)
+        key_start++;
+      if (key_start < end) {
+        size_t origlen = end - key_start;
+        if (origlen > 255) origlen = 255;
+        memcpy(origin, key_start, origlen);
+        origin[origlen] = '\0';
+        /* Trim trailing spaces */
+        while (origlen > 0 && origin[origlen-1] == ' ')
+          origin[--origlen] = '\0';
+      }
+    }
 
     line = end + 2;
 
@@ -228,6 +245,93 @@ static int build_ws_response(const char *accept_key, int subproto, char *respons
     (subproto == WS_SUBPROTO_TEXT) ? "text.ircv3.net" : "binary.ircv3.net");
 }
 
+/** Validate WebSocket origin against allowed origins.
+ * @param[in] origin The Origin header value from client.
+ * @return 1 if origin is allowed, 0 if rejected.
+ *
+ * If WEBSOCKET_ORIGIN feature is empty, all origins are allowed.
+ * Otherwise, the origin must match one of the space-separated patterns.
+ * Patterns support '*' as a wildcard prefix (e.g., "*.example.com").
+ */
+static int validate_ws_origin(const char *origin)
+{
+  const char *allowed = feature_str(FEAT_WEBSOCKET_ORIGIN);
+  const char *p, *end;
+  char pattern[256];
+  size_t plen, olen;
+
+  /* Empty allowed list = allow all origins */
+  if (!allowed || !*allowed)
+    return 1;
+
+  /* No origin header = reject if origin validation is configured */
+  if (!origin || !*origin) {
+    Debug((DEBUG_DEBUG, "WebSocket: No Origin header, rejecting (origin validation enabled)"));
+    return 0;
+  }
+
+  olen = strlen(origin);
+
+  /* Check each space-separated pattern */
+  p = allowed;
+  while (*p) {
+    /* Skip whitespace */
+    while (*p == ' ' || *p == ',')
+      p++;
+    if (!*p)
+      break;
+
+    /* Find end of pattern */
+    end = p;
+    while (*end && *end != ' ' && *end != ',')
+      end++;
+
+    plen = end - p;
+    if (plen >= sizeof(pattern))
+      plen = sizeof(pattern) - 1;
+    memcpy(pattern, p, plen);
+    pattern[plen] = '\0';
+
+    /* Check for wildcard prefix match (*.example.com) */
+    if (pattern[0] == '*' && pattern[1] == '.') {
+      /* Match suffix - origin must end with pattern (minus the *) */
+      size_t suffix_len = plen - 1;  /* Length of ".example.com" */
+      if (olen >= suffix_len) {
+        if (strcasecmp(origin + olen - suffix_len, pattern + 1) == 0) {
+          Debug((DEBUG_DEBUG, "WebSocket: Origin %s matches wildcard %s", origin, pattern));
+          return 1;
+        }
+      }
+    } else {
+      /* Exact match */
+      if (strcasecmp(origin, pattern) == 0) {
+        Debug((DEBUG_DEBUG, "WebSocket: Origin %s matches exactly", origin));
+        return 1;
+      }
+    }
+
+    p = end;
+  }
+
+  Debug((DEBUG_DEBUG, "WebSocket: Origin %s not in allowed list", origin));
+  return 0;
+}
+
+/** Build HTTP 403 Forbidden response for invalid origin.
+ * @param[out] response Output buffer (at least 128 bytes).
+ * @return Length of response.
+ */
+static int build_ws_forbidden_response(char *response)
+{
+  return ircd_snprintf(0, response, 128,
+    "HTTP/1.1 403 Forbidden\r\n"
+    "Content-Type: text/plain\r\n"
+    "Content-Length: 16\r\n"
+    "Connection: close\r\n"
+    "\r\n"
+    "Origin forbidden");
+}
+
 /** Handle WebSocket handshake for a new connection.
  * @param[in] cptr Client attempting to connect.
  * @param[in] buffer Raw data received.
@@ -240,6 +344,7 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
   char ws_key[64];
   char accept_key[64];
   char response[256];
+  char origin[256];
   int subproto;
   int resp_len;
 
@@ -248,9 +353,24 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
     return 0; /* Need more data */
 
   /* Parse the handshake request */
-  if (!parse_ws_handshake(buffer, length, ws_key, &subproto)) {
+  if (!parse_ws_handshake(buffer, length, ws_key, &subproto, origin)) {
     Debug((DEBUG_DEBUG, "WebSocket: Invalid handshake from %s",
            cli_sockhost(cptr)));
+    return -1;
+  }
+
+  /* Validate origin if configured */
+  if (!validate_ws_origin(origin)) {
+    Debug((DEBUG_DEBUG, "WebSocket: Origin '%s' rejected for %s",
+           origin[0] ? origin : "(none)", cli_sockhost(cptr)));
+    /* Send 403 response before closing */
+    resp_len = build_ws_forbidden_response(response);
+    if (cli_socket(cptr).ssl) {
+      SSL_write(cli_socket(cptr).ssl, response, resp_len);
+    } else {
+      unsigned int bytes_sent;
+      os_send_nonb(cli_fd(cptr), response, resp_len, &bytes_sent);
+    }
     return -1;
   }
 

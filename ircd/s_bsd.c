@@ -480,8 +480,11 @@ static int completed_connection(struct Client* cptr)
     } else if (r == 0)
       return 1;
     sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
-    if (sslfp)
+    if (sslfp) {
       ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
+      if (feature_bool(FEAT_CERT_EXPIRY_TRACKING))
+        cli_sslcliexp(cptr) = ssl_get_cert_expiry(cli_socket(cptr).ssl);
+    }
     SetSSL(cptr);
 #endif
   }
@@ -791,8 +794,11 @@ void add_connection(struct Listener* listener, int fd) {
     SetSSL(new_client);
     cli_socket(new_client).ssl = ssl;
     sslfp = ssl_get_fingerprint(ssl);
-    if (sslfp)
+    if (sslfp) {
       ircd_strncpy(cli_sslclifp(new_client), sslfp, BUFSIZE+1);
+      if (feature_bool(FEAT_CERT_EXPIRY_TRACKING))
+        cli_sslcliexp(new_client) = ssl_get_cert_expiry(ssl);
+    }
   }
 #endif
 

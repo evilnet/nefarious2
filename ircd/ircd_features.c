@@ -803,6 +803,7 @@ static struct FeatureDesc {
   F_B(SSL_NOSSLV3, 0, 1, 0),
   F_B(SSL_NOTLSV1, 0, 1, 0),
   F_S(SSL_CIPHERS, FEAT_NULL, 0, 0),
+  F_B(CERT_EXPIRY_TRACKING, 0, 1, 0),
 
   /* ZLINE FEAT_'s */
   F_B(DISABLE_ZLINES, 0, 0, 0),
@@ -866,6 +867,7 @@ static struct FeatureDesc {
   F_I(CLIENT_BATCH_TIMEOUT, 0, 30, 0),
   F_B(DRAFT_WEBSOCKET, 0, 1, 0),
   F_I(WEBSOCKET_RECVQ, 0, 8192, 0),
+  F_S(WEBSOCKET_ORIGIN, 0, "", 0),
   F_B(MSGID, 0, 1, 0),
   F_B(P10_MESSAGE_TAGS, 0, 0, 0),
   F_B(PRESENCE_AGGREGATION, 0, 0, 0),

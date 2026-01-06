@@ -33,6 +33,7 @@
 #ifdef USE_SSL
 
 #include <openssl/ssl.h>
+#include <time.h>
 
 struct Socket;
 struct Listener;
@@ -55,6 +56,7 @@ extern int ssl_send(struct Client *cptr, const char *buf, unsigned int len);
 
 extern char  *ssl_get_cipher(SSL *ssl);
 extern char* ssl_get_fingerprint(SSL *ssl);
+extern time_t ssl_get_cert_expiry(SSL *ssl);
 extern const char* ssl_get_verify_result(SSL *ssl);
 extern char *ssl_error_str(int err, int my_errno);
 

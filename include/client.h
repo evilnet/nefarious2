@@ -404,6 +404,7 @@ struct Client {
   char cli_webirc[BUFSIZE + 1];     /**< webirc description */
   char cli_version[VERSIONLEN + 1]; /**< Free form client version information */
   char cli_sslclifp[BUFSIZE + 1];   /**< SSL client certificate fingerprint if available */
+  time_t cli_sslcliexp;             /**< SSL client certificate expiration timestamp */
   char cli_killmark[BUFSIZE + 1];   /**< Kill block mark */
 
   /* SASL */
@@ -545,6 +546,8 @@ struct Client {
 #define cli_version(cli)        ((cli)->cli_version)
 /** Get a clients SSL fingerprint string. */
 #define cli_sslclifp(cli)       ((cli)->cli_sslclifp)
+/** Get a clients SSL certificate expiration timestamp. */
+#define cli_sslcliexp(cli)      ((cli)->cli_sslcliexp)
 /** Get a clients Kill block exemption mark. */
 #define cli_killmark(cli)       ((cli)->cli_killmark)
 /** Get all marks set for client. */
