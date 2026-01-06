@@ -111,7 +111,7 @@ typedef unsigned long flagpage_t;
 #endif
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "adgiknoqswxzBDHLNORWX"
+#define infousermodes "adgiknoqswxzBDHLMNORWX"
 
 /** Operator privileges. */
 enum Priv
@@ -255,6 +255,8 @@ enum Flag
     FLAG_OPERED_REMOTE,             /**< Client /OPER'ed using a remote O:Line */
     FLAG_SERVER_NOOP,               /**< Server has been NOOP'ed */
     FLAG_SENT_CVERSION,             /**< Client's CTCP VERSION reply has been sent out */
+
+    FLAG_MULTILINE_EXPAND,          /**< User opts into full multiline expansion (+M) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */

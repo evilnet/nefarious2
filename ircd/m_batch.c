@@ -57,6 +57,8 @@
 #include "send.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "msgq.h"
+#include "class.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -366,6 +368,9 @@ process_multiline_batch(struct Client *sptr)
   struct Membership *member;
   int is_channel;
   int first;
+  char batch_base_msgid[64];  /* Base msgid for entire batch */
+  int msg_seq;  /* Sequence counter for submessage ordering */
+  int fallback_count = 0;  /* Track recipients who got truncated fallback */
 
   if (!con_ml_batch_id(con)[0])
     return 0;  /* No active batch */
@@ -404,6 +409,12 @@ process_multiline_batch(struct Client *sptr)
     }
   }
 
+  /* Generate ONE base msgid for the entire multiline batch.
+   * Each line will get this base msgid with a sequence suffix: base:00, base:01, etc.
+   * This ensures all lines can be retrieved together via CHATHISTORY by msgid prefix.
+   */
+  generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
+
   /* Deliver to recipients */
   if (is_channel) {
     /* For each member of the channel */
@@ -427,15 +438,17 @@ process_multiline_batch(struct Client *sptr)
                       batchid, chptr->chname);
 
         first = 1;
+        msg_seq = 0;  /* Reset sequence for each recipient's delivery */
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          /* Generate fresh msgid and time for each message when client supports message-tags */
+          /* Format msgid with sequence suffix for submessage ordering: base:00, base:01, etc. */
           if (use_tags) {
             format_time_tag(timebuf, sizeof(timebuf));
-            generate_msgid(msgidbuf, sizeof(msgidbuf));
+            ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
           }
+          msg_seq++;
 
           if (first && !concat) {
             if (use_tags) {
@@ -473,18 +486,103 @@ process_multiline_batch(struct Client *sptr)
 
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
-        /* Fallback: send as individual messages */
+        /* Fallback: send as individual messages
+         * If recipient has +M (multiline expand), send full expansion
+         * Otherwise use graduated truncation based on batch size
+         */
+        int total_lines = con_ml_msg_count(con);
+
         con_ml_had_fallback(con) = 1;  /* Track for recipient-aware discounting */
-        for (lp = con_ml_messages(con); lp; lp = lp->next) {
-          char *text = lp->value.cp + 1;
-          sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
+        fallback_count++;  /* Count for sender WARN notification */
+
+        if (HasFlag(to, FLAG_MULTILINE_EXPAND)) {
+          /* User opted in with +M: send all lines without truncation */
+          for (lp = con_ml_messages(con); lp; lp = lp->next) {
+            char *text = lp->value.cp + 1;
+            sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
+          }
+        } else {
+          /* Graduated response based on batch size:
+           * - 1-threshold lines: send all, no notice (too short to be disruptive)
+           * - (threshold+1)-10 lines: send up to max_lines, truncation notice
+           * - 11+ lines: send fewer lines, notice with retrieval hint
+           */
+          int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);  /* default: 3 */
+          int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);  /* default: 5 */
+          int lines_to_send;
+          int send_notice;
+
+          if (total_lines <= threshold) {
+            /* Small batch: send all, no notice */
+            lines_to_send = total_lines;
+            send_notice = 0;
+          } else if (total_lines <= 10) {
+            /* Medium batch: send up to max_lines, send notice */
+            lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
+            send_notice = 1;
+          } else {
+            /* Large batch: send fewer lines, send notice with retrieval hint */
+            lines_to_send = (threshold < max_lines) ? threshold : max_lines;
+            send_notice = 2;
+          }
+
+          int sent = 0;
+          for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next, sent++) {
+            char *text = lp->value.cp + 1;
+            sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
+          }
+
+          if (send_notice == 1) {
+            sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - upgrade client for multiline support]",
+                          chptr, total_lines - sent);
+          } else if (send_notice == 2) {
+            /* Include retrieval hint - for now just note about multiline support
+             * TODO: When HistServ/&ml- channels implemented, provide FETCH hint
+             */
+            sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
+                          chptr, total_lines - sent, chptr->chname, batch_base_msgid);
+          }
         }
       }
     }
 
-    /* Echo to sender if echo-message enabled */
+    /* Echo to sender if echo-message enabled
+     * Bounded echo protection: allows echo to proceed even if SendQ is
+     * near the limit, as long as we stay within an extended limit
+     * (sendq_limit + input_bytes * ECHO_MAX_FACTOR). This prevents
+     * "Max sendQ exceeded" disconnects from echo-message expansions
+     * while still protecting against amplification attacks by bounding
+     * the protection to a multiple of the input.
+     *
+     * Logic: Skip echo if adding echo bytes would exceed extended limit.
+     * Without protection, skip if already over normal limit.
+     */
     if (CapActive(sptr, CAP_ECHOMSG)) {
-      if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+      int skip_echo = 0;
+
+      if (MyConnect(sptr)) {
+        unsigned int batch_input_bytes = con_ml_total_bytes(con);
+        unsigned int current_sendq = MsgQLength(&(cli_sendQ(sptr)));
+        unsigned int sendq_limit = get_sendq(sptr);
+
+        if (feature_bool(FEAT_MULTILINE_ECHO_PROTECT)) {
+          /* Protected: allow up to sendq_limit + bounded echo headroom */
+          unsigned int max_echo_bytes = batch_input_bytes * feature_int(FEAT_MULTILINE_ECHO_MAX_FACTOR);
+          unsigned int extended_limit = sendq_limit + max_echo_bytes;
+
+          /* Skip if current SendQ already exceeds extended limit */
+          if (current_sendq > extended_limit) {
+            skip_echo = 1;
+          }
+        } else {
+          /* Unprotected: skip echo if already at/over normal limit */
+          if (current_sendq >= sendq_limit) {
+            skip_echo = 1;
+          }
+        }
+      }
+
+      if (!skip_echo && CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
         char batchid[16];
         char timebuf[32];
         char msgidbuf[64];
@@ -497,14 +595,17 @@ process_multiline_batch(struct Client *sptr)
                       batchid, chptr->chname);
 
         first = 1;
+        msg_seq = 0;  /* Reset sequence for echo delivery */
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
+          /* Format msgid with sequence suffix for submessage ordering */
           if (use_tags) {
             format_time_tag(timebuf, sizeof(timebuf));
-            generate_msgid(msgidbuf, sizeof(msgidbuf));
+            ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
           }
+          msg_seq++;
 
           if (first && !concat) {
             if (use_tags) {
@@ -541,7 +642,8 @@ process_multiline_batch(struct Client *sptr)
         }
 
         sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
-      } else {
+      } else if (!skip_echo) {
+        /* Fallback echo for non-multiline-capable sender */
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           char *text = lp->value.cp + 1;
           sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, text);
@@ -563,14 +665,17 @@ process_multiline_batch(struct Client *sptr)
                     batchid, cli_name(acptr));
 
       first = 1;
+      msg_seq = 0;  /* Reset sequence for DM delivery */
       for (lp = con_ml_messages(con); lp; lp = lp->next) {
         int concat = lp->value.cp[0];
         char *text = lp->value.cp + 1;
 
+        /* Format msgid with sequence suffix for submessage ordering */
         if (use_tags) {
           format_time_tag(timebuf, sizeof(timebuf));
-          generate_msgid(msgidbuf, sizeof(msgidbuf));
+          ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
         }
+        msg_seq++;
 
         if (first && !concat) {
           if (use_tags) {
@@ -608,18 +713,82 @@ process_multiline_batch(struct Client *sptr)
 
       sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
     } else {
-      con_ml_had_fallback(con) = 1;  /* Track for recipient-aware discounting */
-      for (lp = con_ml_messages(con); lp; lp = lp->next) {
-        char *text = lp->value.cp + 1;
-        sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+      /* Fallback for DM: send as individual messages
+       * If recipient has +M (multiline expand), send full expansion
+       * Otherwise use graduated truncation based on batch size
+       */
+      int total_lines = con_ml_msg_count(con);
+
+      con_ml_had_fallback(con) = 1;
+      fallback_count++;  /* Count for sender WARN notification */
+
+      if (HasFlag(acptr, FLAG_MULTILINE_EXPAND)) {
+        /* User opted in with +M: send all lines without truncation */
+        for (lp = con_ml_messages(con); lp; lp = lp->next) {
+          char *text = lp->value.cp + 1;
+          sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+        }
+      } else {
+        /* Graduated response based on batch size */
+        int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);
+        int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+        int lines_to_send;
+        int send_notice;
+
+        if (total_lines <= threshold) {
+          lines_to_send = total_lines;
+          send_notice = 0;
+        } else if (total_lines <= 10) {
+          lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
+          send_notice = 1;
+        } else {
+          lines_to_send = (threshold < max_lines) ? threshold : max_lines;
+          send_notice = 2;
+        }
+
+        int sent = 0;
+        for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next, sent++) {
+          char *text = lp->value.cp + 1;
+          sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+        }
+
+        if (send_notice == 1) {
+          sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - upgrade client for multiline support]",
+                        acptr, total_lines - sent);
+        } else if (send_notice == 2) {
+          sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
+                        acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
+        }
       }
     }
 
-    /* Echo to sender */
+    /* Echo to sender with bounded protection (same logic as channel echo) */
     if (CapActive(sptr, CAP_ECHOMSG)) {
-      for (lp = con_ml_messages(con); lp; lp = lp->next) {
-        char *text = lp->value.cp + 1;
-        sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
+      int skip_dm_echo = 0;
+
+      if (MyConnect(sptr)) {
+        unsigned int batch_input_bytes = con_ml_total_bytes(con);
+        unsigned int current_sendq = MsgQLength(&(cli_sendQ(sptr)));
+        unsigned int sendq_limit = get_sendq(sptr);
+
+        if (feature_bool(FEAT_MULTILINE_ECHO_PROTECT)) {
+          unsigned int max_echo_bytes = batch_input_bytes * feature_int(FEAT_MULTILINE_ECHO_MAX_FACTOR);
+          unsigned int extended_limit = sendq_limit + max_echo_bytes;
+          if (current_sendq > extended_limit) {
+            skip_dm_echo = 1;
+          }
+        } else {
+          if (current_sendq >= sendq_limit) {
+            skip_dm_echo = 1;
+          }
+        }
+      }
+
+      if (!skip_dm_echo) {
+        for (lp = con_ml_messages(con); lp; lp = lp->next) {
+          char *text = lp->value.cp + 1;
+          sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
+        }
       }
     }
 
@@ -684,6 +853,16 @@ process_multiline_batch(struct Client *sptr)
     /* End batch */
     sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "-%s %s :",
                           s2s_batch_id, chptr->chname);
+  }
+
+  /* Notify sender about fallback if they support standard-replies */
+  if (fallback_count > 0 && feature_bool(FEAT_MULTILINE_FALLBACK_NOTIFY)
+      && CapActive(sptr, CAP_STANDARDREPLIES)) {
+    char desc[128];
+    ircd_snprintf(0, desc, sizeof(desc), "Message truncated for %d legacy recipient%s",
+                  fallback_count, fallback_count == 1 ? "" : "s");
+    send_warn(sptr, "BATCH", "MULTILINE_FALLBACK",
+              is_channel ? chptr->chname : cli_name(acptr), desc);
   }
 
   clear_multiline_batch(con);
@@ -953,9 +1132,14 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
   int is_channel;
   int first;
   struct Client *sptr = batch->sender;
+  char batch_base_msgid[64];  /* Base msgid for entire batch */
+  int msg_seq;  /* Sequence counter for submessage ordering */
 
   if (!batch || !batch->messages || !sptr)
     return;
+
+  /* Generate ONE base msgid for the entire S2S multiline batch */
+  generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
   is_channel = IsChannelName(batch->target);
 
@@ -995,14 +1179,17 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
                       batchid, chptr->chname);
 
         first = 1;
+        msg_seq = 0;  /* Reset sequence for each recipient's delivery */
         for (lp = batch->messages; lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
+          /* Format msgid with sequence suffix for submessage ordering */
           if (use_tags) {
             format_time_tag(timebuf, sizeof(timebuf));
-            generate_msgid(msgidbuf, sizeof(msgidbuf));
+            ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
           }
+          msg_seq++;
 
           if (first && !concat) {
             if (use_tags) {
@@ -1040,10 +1227,36 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
-        /* Fallback: send as individual messages */
-        for (lp = batch->messages; lp; lp = lp->next) {
+        /* Fallback: graduated truncation for S2S channel delivery */
+        int total_lines = batch->msg_count;
+        int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);
+        int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+        int lines_to_send;
+        int send_notice;
+
+        if (total_lines <= threshold) {
+          lines_to_send = total_lines;
+          send_notice = 0;
+        } else if (total_lines <= 10) {
+          lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
+          send_notice = 1;
+        } else {
+          lines_to_send = (threshold < max_lines) ? threshold : max_lines;
+          send_notice = 2;
+        }
+
+        int sent = 0;
+        for (lp = batch->messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
           char *text = lp->value.cp + 1;
           sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
+        }
+
+        if (send_notice == 1) {
+          sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - upgrade client for multiline support]",
+                        chptr, total_lines - sent);
+        } else if (send_notice == 2) {
+          sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
+                        chptr, total_lines - sent, chptr->chname, batch_base_msgid);
         }
       }
     }
@@ -1062,14 +1275,17 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
                     batchid, cli_name(acptr));
 
       first = 1;
+      msg_seq = 0;  /* Reset sequence for S2S DM delivery */
       for (lp = batch->messages; lp; lp = lp->next) {
         int concat = lp->value.cp[0];
         char *text = lp->value.cp + 1;
 
+        /* Format msgid with sequence suffix for submessage ordering */
         if (use_tags) {
           format_time_tag(timebuf, sizeof(timebuf));
-          generate_msgid(msgidbuf, sizeof(msgidbuf));
+          ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
         }
+        msg_seq++;
 
         if (first && !concat) {
           if (use_tags) {
@@ -1107,9 +1323,36 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
       sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
     } else {
-      for (lp = batch->messages; lp; lp = lp->next) {
+      /* Fallback: graduated truncation for S2S DM delivery */
+      int total_lines = batch->msg_count;
+      int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);
+      int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+      int lines_to_send;
+      int send_notice;
+
+      if (total_lines <= threshold) {
+        lines_to_send = total_lines;
+        send_notice = 0;
+      } else if (total_lines <= 10) {
+        lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
+        send_notice = 1;
+      } else {
+        lines_to_send = (threshold < max_lines) ? threshold : max_lines;
+        send_notice = 2;
+      }
+
+      int sent = 0;
+      for (lp = batch->messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
         char *text = lp->value.cp + 1;
         sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+      }
+
+      if (send_notice == 1) {
+        sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - upgrade client for multiline support]",
+                      acptr, total_lines - sent);
+      } else if (send_notice == 2) {
+        sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - full content available via /msg HistServ FETCH %s %s]",
+                      acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
       }
     }
   }

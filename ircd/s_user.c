@@ -772,7 +772,8 @@ static const struct UserMode {
   { FLAG_SETHOST,      'h' },
   { FLAG_FAKEHOST,     'f' },
   { FLAG_CLOAKHOST,    'C' },
-  { FLAG_CLOAKIP,      'c' }
+  { FLAG_CLOAKIP,      'c' },
+  { FLAG_MULTILINE_EXPAND, 'M' }
 };
 
 /** Length of #userModeList. */
