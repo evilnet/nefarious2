@@ -503,10 +503,9 @@ process_multiline_batch(struct Client *sptr)
             sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
           }
         } else {
-          /* Graduated response based on batch size:
+          /* Truncation with retrieval hint:
            * - 1-threshold lines: send all, no notice (too short to be disruptive)
-           * - (threshold+1)-10 lines: send up to max_lines, truncation notice
-           * - 11+ lines: send fewer lines, notice with retrieval hint
+           * - threshold+ lines: truncate to max_lines, provide retrieval hint
            */
           int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);  /* default: 3 */
           int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);  /* default: 5 */
@@ -517,14 +516,10 @@ process_multiline_batch(struct Client *sptr)
             /* Small batch: send all, no notice */
             lines_to_send = total_lines;
             send_notice = 0;
-          } else if (total_lines <= 10) {
-            /* Medium batch: send up to max_lines, send notice */
+          } else {
+            /* Truncate and provide retrieval hint */
             lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
             send_notice = 1;
-          } else {
-            /* Large batch: send fewer lines, send notice with retrieval hint */
-            lines_to_send = (threshold < max_lines) ? threshold : max_lines;
-            send_notice = 2;
           }
 
           int sent = 0;
@@ -533,10 +528,7 @@ process_multiline_batch(struct Client *sptr)
             sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
           }
 
-          if (send_notice == 1) {
-            sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - upgrade client for multiline support]",
-                          chptr, total_lines - sent);
-          } else if (send_notice == 2) {
+          if (send_notice) {
             /* Store full content for retrieval and provide hint */
             if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
               ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
@@ -735,7 +727,7 @@ process_multiline_batch(struct Client *sptr)
           sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
         }
       } else {
-        /* Graduated response based on batch size */
+        /* Truncation with retrieval hint */
         int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);
         int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
         int lines_to_send;
@@ -744,12 +736,9 @@ process_multiline_batch(struct Client *sptr)
         if (total_lines <= threshold) {
           lines_to_send = total_lines;
           send_notice = 0;
-        } else if (total_lines <= 10) {
+        } else {
           lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
           send_notice = 1;
-        } else {
-          lines_to_send = (threshold < max_lines) ? threshold : max_lines;
-          send_notice = 2;
         }
 
         int sent = 0;
@@ -758,10 +747,7 @@ process_multiline_batch(struct Client *sptr)
           sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
         }
 
-        if (send_notice == 1) {
-          sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - upgrade client for multiline support]",
-                        acptr, total_lines - sent);
-        } else if (send_notice == 2) {
+        if (send_notice) {
           /* Store full content for retrieval and provide hint */
           if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
             ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
@@ -1241,7 +1227,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
-        /* Fallback: graduated truncation for S2S channel delivery */
+        /* Fallback: truncation with retrieval hint for S2S channel delivery */
         int total_lines = batch->msg_count;
         int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);
         int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
@@ -1251,12 +1237,9 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         if (total_lines <= threshold) {
           lines_to_send = total_lines;
           send_notice = 0;
-        } else if (total_lines <= 10) {
+        } else {
           lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
           send_notice = 1;
-        } else {
-          lines_to_send = (threshold < max_lines) ? threshold : max_lines;
-          send_notice = 2;
         }
 
         int sent = 0;
@@ -1265,10 +1248,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
         }
 
-        if (send_notice == 1) {
-          sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - upgrade client for multiline support]",
-                        chptr, total_lines - sent);
-        } else if (send_notice == 2) {
+        if (send_notice) {
           /* Store full content for retrieval and provide hint */
           if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
             ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
@@ -1345,7 +1325,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
       sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
     } else {
-      /* Fallback: graduated truncation for S2S DM delivery */
+      /* Fallback: truncation with retrieval hint for S2S DM delivery */
       int total_lines = batch->msg_count;
       int threshold = feature_int(FEAT_MULTILINE_LEGACY_THRESHOLD);
       int max_lines = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
@@ -1355,12 +1335,9 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       if (total_lines <= threshold) {
         lines_to_send = total_lines;
         send_notice = 0;
-      } else if (total_lines <= 10) {
+      } else {
         lines_to_send = (max_lines < total_lines) ? max_lines : total_lines;
         send_notice = 1;
-      } else {
-        lines_to_send = (threshold < max_lines) ? threshold : max_lines;
-        send_notice = 2;
       }
 
       int sent = 0;
@@ -1369,10 +1346,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
       }
 
-      if (send_notice == 1) {
-        sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - upgrade client for multiline support]",
-                      acptr, total_lines - sent);
-      } else if (send_notice == 2) {
+      if (send_notice) {
         /* Store full content for retrieval and provide hint */
         if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
           ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
