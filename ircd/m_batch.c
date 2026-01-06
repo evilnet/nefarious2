@@ -242,6 +242,7 @@ clear_multiline_batch(struct Connection *con)
 
   con_ml_batch_id(con)[0] = '\0';
   con_ml_target(con)[0] = '\0';
+  con_ml_label(con)[0] = '\0';
   con_ml_messages(con) = NULL;
   con_ml_msg_count(con) = 0;
   con_ml_total_bytes(con) = 0;
@@ -885,8 +886,10 @@ process_multiline_batch(struct Client *sptr)
     char desc[128];
     ircd_snprintf(0, desc, sizeof(desc), "Message truncated for %d legacy recipient%s",
                   fallback_count, fallback_count == 1 ? "" : "s");
-    send_warn(sptr, "BATCH", "MULTILINE_FALLBACK",
-              is_channel ? chptr->chname : cli_name(acptr), desc);
+    /* Use saved label from BATCH +id for labeled-response correlation */
+    send_warn_with_label(sptr, "BATCH", "MULTILINE_FALLBACK",
+                         is_channel ? chptr->chname : cli_name(acptr), desc,
+                         con_ml_label(con)[0] ? con_ml_label(con) : NULL);
   }
 
   clear_multiline_batch(con);
@@ -1002,6 +1005,15 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_ml_total_bytes(con) = 0;
     con_ml_batch_start(con) = CurrentTime;
     con_ml_lag_accum(con) = 0;  /* Reset lag accumulator for new batch */
+
+    /* Save the label from BATCH +id for labeled-response on WARN */
+    if (cli_label(sptr)[0]) {
+      ircd_strncpy(con_ml_label(con), cli_label(sptr),
+                   sizeof(con->con_ml_label) - 1);
+      con_ml_label(con)[sizeof(con->con_ml_label) - 1] = '\0';
+    } else {
+      con_ml_label(con)[0] = '\0';
+    }
   }
   else {
     /* End batch */

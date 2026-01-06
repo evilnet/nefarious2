@@ -2214,7 +2214,7 @@ void send_netsplit_batch_end(const char *batch_id)
 }
 
 /**
- * Send a standard reply (FAIL/WARN/NOTE) to a client.
+ * Send a standard reply (FAIL/WARN/NOTE) to a client with optional explicit label.
  * Internal helper function.
  * @param[in] to Client to send to.
  * @param[in] type Reply type (FAIL, WARN, or NOTE).
@@ -2222,13 +2222,17 @@ void send_netsplit_batch_end(const char *batch_id)
  * @param[in] code Machine-readable code (e.g., "ACCOUNT_REQUIRED").
  * @param[in] context Optional context parameter (NULL if none).
  * @param[in] description Human-readable description.
+ * @param[in] label Optional explicit label (NULL to use cli_label).
  */
-static void send_standard_reply(struct Client *to, const char *type,
-                                 const char *command, const char *code,
-                                 const char *context, const char *description)
+static void send_standard_reply_ex(struct Client *to, const char *type,
+                                    const char *command, const char *code,
+                                    const char *context, const char *description,
+                                    const char *label)
 {
   struct MsgBuf *mb;
   char tagbuf[512];
+  int pos = 0;
+  int use_time, use_label;
 
   if (!MyConnect(to))
     return;
@@ -2268,8 +2272,39 @@ static void send_standard_reply(struct Client *to, const char *type,
     return;
   }
 
-  /* Format tags (label, time) if applicable */
-  if (format_message_tags_for(tagbuf, sizeof(tagbuf), NULL, to)) {
+  /* Format tags with explicit label override if provided */
+  use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  use_label = feature_bool(FEAT_CAP_labeled_response) &&
+              CapActive(to, CAP_LABELEDRESP) &&
+              ((label && *label) || cli_label(to)[0]);
+
+  if (use_time || use_label) {
+    tagbuf[0] = '@';
+    pos = 1;
+
+    if (use_label) {
+      /* Use explicit label if provided, otherwise use cli_label */
+      const char *lbl = (label && *label) ? label : cli_label(to);
+      pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", lbl);
+    }
+
+    if (use_time) {
+      struct timeval tv;
+      struct tm tm;
+      if (pos > 1 && pos < (int)sizeof(tagbuf) - 1)
+        tagbuf[pos++] = ';';
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
+                      "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec,
+                      (long)(tv.tv_usec / 1000));
+    }
+
+    tagbuf[pos++] = ' ';
+    tagbuf[pos] = '\0';
+
     if (context && *context)
       mb = msgq_make(to, "%s%s %s %s %s :%s", tagbuf, type, command, code, context, description);
     else
@@ -2283,6 +2318,23 @@ static void send_standard_reply(struct Client *to, const char *type,
 
   send_buffer(to, mb, 0);
   msgq_clean(mb);
+}
+
+/**
+ * Send a standard reply (FAIL/WARN/NOTE) to a client.
+ * Internal helper function.
+ * @param[in] to Client to send to.
+ * @param[in] type Reply type (FAIL, WARN, or NOTE).
+ * @param[in] command Command that generated this reply (or "*" for general).
+ * @param[in] code Machine-readable code (e.g., "ACCOUNT_REQUIRED").
+ * @param[in] context Optional context parameter (NULL if none).
+ * @param[in] description Human-readable description.
+ */
+static void send_standard_reply(struct Client *to, const char *type,
+                                 const char *command, const char *code,
+                                 const char *context, const char *description)
+{
+  send_standard_reply_ex(to, type, command, code, context, description, NULL);
 }
 
 /**
@@ -2313,6 +2365,23 @@ void send_warn(struct Client *to, const char *command, const char *code,
                const char *context, const char *description)
 {
   send_standard_reply(to, "WARN", command, code, context, description);
+}
+
+/**
+ * Send a WARN reply with an explicit label (IRCv3 standard-replies + labeled-response).
+ * Used when the warning relates to an earlier command whose label was saved.
+ * @param[in] to Client to send to.
+ * @param[in] command Command name (or "*" for general warning).
+ * @param[in] code Machine-readable warning code.
+ * @param[in] context Optional context (NULL if none).
+ * @param[in] description Human-readable warning message.
+ * @param[in] label Explicit label to include (NULL uses cli_label).
+ */
+void send_warn_with_label(struct Client *to, const char *command, const char *code,
+                          const char *context, const char *description,
+                          const char *label)
+{
+  send_standard_reply_ex(to, "WARN", command, code, context, description, label);
 }
 
 /**

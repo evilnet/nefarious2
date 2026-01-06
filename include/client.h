@@ -349,6 +349,7 @@ struct Connection
   int                 con_ml_total_bytes; /**< Total bytes in batch */
   time_t              con_ml_batch_start; /**< When batch was started (for timeout) */
   int                 con_ml_lag_accum;   /**< Accumulated fake lag during batch (applied at end) */
+  char                con_ml_label[64];   /**< Label from BATCH +id for labeled-response on WARN */
   /* Batch rate limiting (FEAT_BATCH_RATE_LIMIT) */
   time_t              con_batch_minute;   /**< Start of current rate limit window */
   int                 con_batch_count;    /**< Number of batches in current window */
@@ -508,6 +509,8 @@ struct Client {
 #define cli_ml_batch_start(cli)	con_ml_batch_start(cli_connect(cli))
 /** Get accumulated lag during batch. */
 #define cli_ml_lag_accum(cli)	con_ml_lag_accum(cli_connect(cli))
+/** Get label from BATCH +id for labeled-response. */
+#define cli_ml_label(cli)	con_ml_label(cli_connect(cli))
 /** Get batch rate limit window start time. */
 #define cli_batch_minute(cli)	con_batch_minute(cli_connect(cli))
 /** Get batch count in current rate limit window. */
@@ -780,6 +783,8 @@ struct Client {
 #define con_ml_batch_start(con)	((con)->con_ml_batch_start)
 /** Get the accumulated lag during batch (to apply at batch end). */
 #define con_ml_lag_accum(con)	((con)->con_ml_lag_accum)
+/** Get the label from BATCH +id for labeled-response on WARN. */
+#define con_ml_label(con)	((con)->con_ml_label)
 /** Get the batch rate limit window start time. */
 #define con_batch_minute(con)	((con)->con_batch_minute)
 /** Get the batch count in current rate limit window. */

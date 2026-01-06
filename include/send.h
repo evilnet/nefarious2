@@ -214,6 +214,9 @@ extern void send_fail(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);
 extern void send_warn(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);
+extern void send_warn_with_label(struct Client *to, const char *command, const char *code,
+                                 const char *context, const char *description,
+                                 const char *label);
 extern void send_note(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);
 
