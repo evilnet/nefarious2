@@ -66,6 +66,125 @@
 #include <sys/time.h>
 
 /*
+ * send_multiline_fallback - Send truncated multiline with retrieval hints
+ *
+ * Implements the graceful fallback chain for legacy clients:
+ * 1. Native chathistory (client can retrieve via CHATHISTORY AROUND)
+ * 2. HistServ available (client can /msg HistServ FETCH)
+ * 3. Local &ml- storage (ultimate fallback, zero dependencies)
+ *
+ * Uses configurable preview budget (FEAT_MULTILINE_LEGACY_MAX_LINES):
+ * - ≤max_preview lines: send all, no notice
+ * - >max_preview lines: send max_preview lines + retrieval notice
+ *
+ * Parameters:
+ *   sptr        - sender client
+ *   to          - recipient client
+ *   target      - channel name or nick (for retrieval hint)
+ *   msgid       - base msgid for retrieval
+ *   messages    - linked list of message lines
+ *   total_lines - total line count
+ *   is_channel  - 1 if channel, 0 if DM
+ *   chptr       - channel pointer (NULL for DMs)
+ */
+static void send_multiline_fallback(struct Client *sptr, struct Client *to,
+                                     const char *target, const char *msgid,
+                                     struct SLink *messages, int total_lines,
+                                     int is_channel, struct Channel *chptr)
+{
+  struct SLink *lp;
+  int lines_to_send;
+  int send_notice;
+  int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+
+  /* Configurable preview budget */
+  if (total_lines <= max_preview) {
+    lines_to_send = total_lines;
+    send_notice = 0;
+  } else {
+    lines_to_send = max_preview;
+    send_notice = 1;
+  }
+
+  /* Send preview lines */
+  int sent = 0;
+  for (lp = messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
+    char *text = lp->value.cp + 1;
+    if (is_channel) {
+      sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
+    } else {
+      sendcmdto_one(sptr, CMD_PRIVATE, to, "%C :%s", to, text);
+    }
+  }
+
+  if (!send_notice)
+    return;
+
+  int remaining = total_lines - sent;
+
+  /* Fallback chain: chathistory -> HistServ -> &ml- storage */
+  if (CapActive(to, CAP_DRAFT_CHATHISTORY)) {
+    /* Tier 2: Client has native chathistory capability */
+    if (is_channel) {
+      if (remaining <= 15) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
+                      chptr, remaining, target, msgid, remaining + sent);
+      } else {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Message continues (%d lines total) - CHATHISTORY AROUND %s msgid=%s %d]",
+                      chptr, total_lines, target, msgid, total_lines);
+      }
+    } else {
+      if (remaining <= 15) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
+                      to, remaining, target, msgid, remaining + sent);
+      } else {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[Message continues (%d lines total) - CHATHISTORY AROUND %s msgid=%s %d]",
+                      to, total_lines, target, msgid, total_lines);
+      }
+    }
+  } else if (FindClient("HistServ")) {
+    /* Tier 3: HistServ available - queries server's history via P10 */
+    if (is_channel) {
+      if (remaining <= 15) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
+                      chptr, remaining, target, msgid);
+      } else {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Message continues (%d lines total) - /msg HistServ FETCH %s %s]",
+                      chptr, total_lines, target, msgid);
+      }
+    } else {
+      if (remaining <= 15) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /msg HistServ FETCH %s %s]",
+                      to, remaining, target, msgid);
+      } else {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[Message continues (%d lines total) - /msg HistServ FETCH %s %s]",
+                      to, total_lines, target, msgid);
+      }
+    }
+  } else {
+    /* Tier 4: Ultimate fallback - local &ml- storage (zero dependencies) */
+    ml_storage_store(msgid, cli_name(sptr), target, messages, total_lines);
+    if (is_channel) {
+      if (remaining <= 15) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s to view full message]",
+                      chptr, remaining, msgid);
+      } else {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Message continues (%d lines total) - /join &ml-%s to view]",
+                      chptr, total_lines, msgid);
+      }
+    } else {
+      if (remaining <= 15) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /join &ml-%s to view full message]",
+                      to, remaining, msgid);
+      } else {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[Message continues (%d lines total) - /join &ml-%s to view]",
+                      to, total_lines, msgid);
+      }
+    }
+  }
+}
+
+/*
  * ms_batch - server message handler
  *
  * parv[0] = sender prefix (server numeric)
@@ -504,56 +623,9 @@ process_multiline_batch(struct Client *sptr)
             sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
           }
         } else {
-          /* 3-tier truncation with retrieval hints:
-           * - Small (1-5 lines): send all, no notice
-           * - Medium (6-10 lines): send 4 lines + truncation notice
-           * - Large (11+ lines): no preview, just retrieval notice
-           */
-          int lines_to_send;
-          int send_notice;  /* 0=none, 1=medium (X more), 2=large (full msg) */
-
-          if (total_lines <= 5) {
-            /* Small batch: send all, no notice */
-            lines_to_send = total_lines;
-            send_notice = 0;
-          } else if (total_lines <= 10) {
-            /* Medium batch: send 4 lines + truncation notice */
-            lines_to_send = 4;
-            send_notice = 1;
-          } else {
-            /* Large batch: no preview, just retrieval notice */
-            lines_to_send = 0;
-            send_notice = 2;
-          }
-
-          int sent = 0;
-          for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next, sent++) {
-            char *text = lp->value.cp + 1;
-            sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
-          }
-
-          if (send_notice) {
-            /* Store full content for retrieval */
-            if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
-              ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
-                               con_ml_messages(con), total_lines);
-              if (send_notice == 1) {
-                sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s to view full message]",
-                              chptr, total_lines - sent, batch_base_msgid);
-              } else {
-                sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Multiline message (%d lines) - /join &ml-%s to view]",
-                              chptr, total_lines, batch_base_msgid);
-              }
-            } else {
-              if (send_notice == 1) {
-                sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
-                              chptr, total_lines - sent, chptr->chname, batch_base_msgid);
-              } else {
-                sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Multiline message (%d lines) - /msg HistServ FETCH %s %s]",
-                              chptr, total_lines, chptr->chname, batch_base_msgid);
-              }
-            }
-          }
+          /* Graceful fallback: chathistory -> HistServ -> &ml- storage */
+          send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
+                                   con_ml_messages(con), total_lines, 1, chptr);
         }
       }
     }
@@ -741,49 +813,9 @@ process_multiline_batch(struct Client *sptr)
           sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
         }
       } else {
-        /* 3-tier truncation with retrieval hints */
-        int lines_to_send;
-        int send_notice;  /* 0=none, 1=medium (X more), 2=large (full msg) */
-
-        if (total_lines <= 5) {
-          lines_to_send = total_lines;
-          send_notice = 0;
-        } else if (total_lines <= 10) {
-          lines_to_send = 4;
-          send_notice = 1;
-        } else {
-          lines_to_send = 0;
-          send_notice = 2;
-        }
-
-        int sent = 0;
-        for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next, sent++) {
-          char *text = lp->value.cp + 1;
-          sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
-        }
-
-        if (send_notice) {
-          /* Store full content for retrieval */
-          if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
-            ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
-                             con_ml_messages(con), total_lines);
-            if (send_notice == 1) {
-              sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /join &ml-%s to view full message]",
-                            acptr, total_lines - sent, batch_base_msgid);
-            } else {
-              sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[Multiline message (%d lines) - /join &ml-%s to view]",
-                            acptr, total_lines, batch_base_msgid);
-            }
-          } else {
-            if (send_notice == 1) {
-              sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /msg HistServ FETCH %s %s]",
-                            acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
-            } else {
-              sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[Multiline message (%d lines) - /msg HistServ FETCH %s %s]",
-                            acptr, total_lines, cli_name(acptr), batch_base_msgid);
-            }
-          }
-        }
+        /* Graceful fallback: chathistory -> HistServ -> &ml- storage */
+        send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
+                                 con_ml_messages(con), total_lines, 0, NULL);
       }
     }
 
@@ -1263,50 +1295,9 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
-        /* Fallback: 3-tier truncation for S2S channel delivery */
-        int total_lines = batch->msg_count;
-        int lines_to_send;
-        int send_notice;  /* 0=none, 1=medium (X more), 2=large (full msg) */
-
-        if (total_lines <= 5) {
-          lines_to_send = total_lines;
-          send_notice = 0;
-        } else if (total_lines <= 10) {
-          lines_to_send = 4;
-          send_notice = 1;
-        } else {
-          lines_to_send = 0;
-          send_notice = 2;
-        }
-
-        int sent = 0;
-        for (lp = batch->messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
-          char *text = lp->value.cp + 1;
-          sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
-        }
-
-        if (send_notice) {
-          /* Store full content for retrieval */
-          if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
-            ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
-                             batch->messages, total_lines);
-            if (send_notice == 1) {
-              sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s to view full message]",
-                            chptr, total_lines - sent, batch_base_msgid);
-            } else {
-              sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Multiline message (%d lines) - /join &ml-%s to view]",
-                            chptr, total_lines, batch_base_msgid);
-            }
-          } else {
-            if (send_notice == 1) {
-              sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
-                            chptr, total_lines - sent, chptr->chname, batch_base_msgid);
-            } else {
-              sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Multiline message (%d lines) - /msg HistServ FETCH %s %s]",
-                            chptr, total_lines, chptr->chname, batch_base_msgid);
-            }
-          }
-        }
+        /* Graceful fallback for S2S channel delivery */
+        send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
+                                 batch->messages, batch->msg_count, 1, chptr);
       }
     }
   } else if (acptr && MyConnect(acptr)) {
@@ -1372,50 +1363,9 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
       sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
     } else {
-      /* Fallback: 3-tier truncation for S2S DM delivery */
-      int total_lines = batch->msg_count;
-      int lines_to_send;
-      int send_notice;  /* 0=none, 1=medium (X more), 2=large (full msg) */
-
-      if (total_lines <= 5) {
-        lines_to_send = total_lines;
-        send_notice = 0;
-      } else if (total_lines <= 10) {
-        lines_to_send = 4;
-        send_notice = 1;
-      } else {
-        lines_to_send = 0;
-        send_notice = 2;
-      }
-
-      int sent = 0;
-      for (lp = batch->messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
-        char *text = lp->value.cp + 1;
-        sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
-      }
-
-      if (send_notice) {
-        /* Store full content for retrieval */
-        if (feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
-          ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
-                           batch->messages, total_lines);
-          if (send_notice == 1) {
-            sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /join &ml-%s to view full message]",
-                          acptr, total_lines - sent, batch_base_msgid);
-          } else {
-            sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[Multiline message (%d lines) - /join &ml-%s to view]",
-                          acptr, total_lines, batch_base_msgid);
-          }
-        } else {
-          if (send_notice == 1) {
-            sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[%d more lines - /msg HistServ FETCH %s %s]",
-                          acptr, total_lines - sent, cli_name(acptr), batch_base_msgid);
-          } else {
-            sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :[Multiline message (%d lines) - /msg HistServ FETCH %s %s]",
-                          acptr, total_lines, cli_name(acptr), batch_base_msgid);
-          }
-        }
-      }
+      /* Graceful fallback for S2S DM delivery */
+      send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
+                               batch->messages, batch->msg_count, 0, NULL);
     }
   }
 
