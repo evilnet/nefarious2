@@ -68,12 +68,19 @@
 #include "ssl.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+
+/** Maximum number of config/stats entries from IAuth to prevent DoS. */
+#define IAUTH_LIST_MAX 1000
+
+/** Circuit breaker threshold: consecutive timeouts before bypassing IAUTH_REQUIRED. */
+#define IAUTH_CIRCUIT_BREAKER_THRESHOLD 10
 
 /** Pending operations during registration. */
 enum AuthRequestFlag {
@@ -195,9 +202,15 @@ struct IAuth {
   char i_errbuf[BUFSIZE+1];             /**< partial unprocessed error line */
   char *i_version;                      /**< iauth version string */
   struct SLink *i_config;               /**< configuration string list */
+  struct SLink *i_config_tail;          /**< tail of config list for O(1) append */
+  unsigned int i_config_count;          /**< number of config entries */
   struct SLink *i_stats;                /**< statistics string list */
+  struct SLink *i_stats_tail;           /**< tail of stats list for O(1) append */
+  unsigned int i_stats_count;           /**< number of stats entries */
   char **i_argv;                        /**< argument list */
   int i_argc;                           /**< number of arguments in argument list */
+  unsigned int i_timeout_count;         /**< consecutive auth timeout counter for circuit breaker */
+  int i_circuit_open;                   /**< 1 if circuit breaker is tripped (bypassing IAUTH_REQUIRED) */
 };
 
 /** Return whether flag \a flag is set on \a iauth. */
@@ -965,8 +978,30 @@ int auth_ping_timeout(struct Client *cptr)
   if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
     if (IAuthHas(iauth, IAUTH_REQUIRED)
         && !FlagHas(&auth->flags, AR_IAUTH_SOFT_DONE)) {
-      sendheader(cptr, REPORT_FAIL_IAUTH);
-      return exit_client_msg(cptr, cptr, &me, "Authorization Timeout");
+      /* Circuit breaker: track consecutive timeouts. */
+      if (iauth)
+        iauth->i_timeout_count++;
+
+      /* Check if circuit breaker should trip. */
+      if (iauth && !iauth->i_circuit_open &&
+          iauth->i_timeout_count >= IAUTH_CIRCUIT_BREAKER_THRESHOLD) {
+        iauth->i_circuit_open = 1;
+        log_write(LS_IAUTH, L_WARNING, 0,
+                  "IAuth circuit breaker tripped after %u timeouts - "
+                  "bypassing IAUTH_REQUIRED",
+                  iauth->i_timeout_count);
+        sendto_opmask_butone(NULL, SNO_AUTH,
+                             "IAuth circuit breaker OPEN: bypassing "
+                             "IAUTH_REQUIRED after %u consecutive timeouts",
+                             iauth->i_timeout_count);
+      }
+
+      /* If circuit is open, allow client through instead of killing. */
+      if (!iauth || !iauth->i_circuit_open) {
+        sendheader(cptr, REPORT_FAIL_IAUTH);
+        return exit_client_msg(cptr, cptr, &me, "Authorization Timeout");
+      }
+      /* Circuit open: let client proceed despite timeout. */
     }
     sendto_iauth(cptr, "T");
     FlagClr(&auth->flags, AR_IAUTH_PENDING);
@@ -1131,7 +1166,7 @@ static void start_dns_query(struct AuthRequest *auth)
   }
 
   if (irc_in_addr_is_loopback(&cli_ip(auth->client))) {
-    strcpy(cli_sockhost(auth->client), cli_name(&me));
+    ircd_strncpy(cli_sockhost(auth->client), cli_name(&me), HOSTLEN);
     sendto_iauth(auth->client, "N %s", cli_sockhost(auth->client));
     return;
   }
@@ -1709,6 +1744,11 @@ void auth_mark_closing(void)
  */
 static void iauth_disconnect(struct IAuth *iauth)
 {
+  int ii;
+  int released = 0;
+  struct Client *cli;
+  struct AuthRequest *auth;
+
   if (iauth == NULL)
     return;
 
@@ -1725,6 +1765,24 @@ static void iauth_disconnect(struct IAuth *iauth)
     socket_del(i_socket(iauth));
     s_fd(i_socket(iauth)) = -1;
   }
+
+  /* Release any clients stuck waiting for IAuth response. */
+  for (ii = 0; ii <= HighestFd; ii++) {
+    cli = LocalClientArray[ii];
+    if (!cli || !(auth = cli_auth(cli)))
+      continue;
+    if (FlagHas(&auth->flags, AR_IAUTH_PENDING)) {
+      FlagClr(&auth->flags, AR_IAUTH_PENDING);
+      released++;
+      /* Try to complete registration now that IAuth is gone. */
+      check_auth_finished(auth);
+    }
+  }
+
+  if (released > 0)
+    sendto_opmask_butone(NULL, SNO_AUTH,
+                         "IAuth disconnected: released %d pending client(s)",
+                         released);
 }
 
 /** Close all %IAuth connections marked as closing. */
@@ -1732,7 +1790,31 @@ void auth_close_unused(void)
 {
   if (IAuthHas(iauth, IAUTH_CLOSING)) {
     int ii;
+    struct SLink *node, *next;
+
     iauth_disconnect(iauth);
+
+    /* Free version string */
+    MyFree(iauth->i_version);
+    iauth->i_version = NULL;
+
+    /* Free config list */
+    for (node = iauth->i_config; node; node = next) {
+      next = node->next;
+      MyFree(node->value.cp);
+      free_link(node);
+    }
+    iauth->i_config = NULL;
+
+    /* Free stats list */
+    for (node = iauth->i_stats; node; node = next) {
+      next = node->next;
+      MyFree(node->value.cp);
+      free_link(node);
+    }
+    iauth->i_stats = NULL;
+
+    /* Free argv */
     if (iauth->i_argv) {
       for (ii = 0; iauth->i_argv[ii]; ++ii)
         MyFree(iauth->i_argv[ii]);
@@ -1834,9 +1916,17 @@ static int iauth_cmd_snotice(struct IAuth *iauth, struct Client *cli,
 static int iauth_cmd_debuglevel(struct IAuth *iauth, struct Client *cli,
 				int parc, char **params)
 {
-  int new_level;
+  int new_level = 0;
 
-  new_level = parc > 0 ? atoi(params[0]) : 0;
+  if (parc > 0 && params[0]) {
+    char *endptr;
+    long val;
+    errno = 0;
+    val = strtol(params[0], &endptr, 10);
+    /* Accept the value if it parsed successfully and fits in int range */
+    if (errno != ERANGE && endptr != params[0] && val >= 0 && val <= INT_MAX)
+      new_level = (int)val;
+  }
   if (i_debug(iauth) > 0 || new_level > 0) {
     /* The "ia_dbg" name is borrowed from (IRCnet) ircd. */
     sendto_opmask_butone(NULL, SNO_AUTH, "ia_dbg = %d", new_level);
@@ -1960,6 +2050,8 @@ static int iauth_cmd_newconfig(struct IAuth *iauth, struct Client *cli,
 
   head = iauth->i_config;
   iauth->i_config = NULL;
+  iauth->i_config_tail = NULL;
+  iauth->i_config_count = 0;
   for (; head; head = next) {
     next = head->next;
     MyFree(head->value.cp);
@@ -1981,14 +2073,25 @@ static int iauth_cmd_config(struct IAuth *iauth, struct Client *cli,
 {
   struct SLink *node;
 
-  if (iauth->i_config) {
-    for (node = iauth->i_config; node->next; node = node->next) ;
-    node = node->next = make_link();
-  } else {
-    node = iauth->i_config = make_link();
+  /* Enforce limit to prevent DoS from misbehaving IAuth */
+  if (iauth->i_config_count >= IAUTH_LIST_MAX) {
+    log_write(LS_IAUTH, L_WARNING, 0,
+              "IAuth config list limit reached (%u entries)", IAUTH_LIST_MAX);
+    return 0;
   }
+
+  node = make_link();
   node->value.cp = paste_params(parc, params);
   node->next = 0; /* must be explicitly cleared */
+
+  /* Use tail pointer for O(1) append */
+  if (iauth->i_config_tail) {
+    iauth->i_config_tail->next = node;
+  } else {
+    iauth->i_config = node;
+  }
+  iauth->i_config_tail = node;
+  iauth->i_config_count++;
   return 0;
 }
 
@@ -2007,6 +2110,8 @@ static int iauth_cmd_newstats(struct IAuth *iauth, struct Client *cli,
 
   head = iauth->i_stats;
   iauth->i_stats = NULL;
+  iauth->i_stats_tail = NULL;
+  iauth->i_stats_count = 0;
   for (; head; head = next) {
     next = head->next;
     MyFree(head->value.cp);
@@ -2027,14 +2132,26 @@ static int iauth_cmd_stats(struct IAuth *iauth, struct Client *cli,
 			   int parc, char **params)
 {
   struct SLink *node;
-  if (iauth->i_stats) {
-    for (node = iauth->i_stats; node->next; node = node->next) ;
-    node = node->next = make_link();
-  } else {
-    node = iauth->i_stats = make_link();
+
+  /* Enforce limit to prevent DoS from misbehaving IAuth */
+  if (iauth->i_stats_count >= IAUTH_LIST_MAX) {
+    log_write(LS_IAUTH, L_WARNING, 0,
+              "IAuth stats list limit reached (%u entries)", IAUTH_LIST_MAX);
+    return 0;
   }
+
+  node = make_link();
   node->value.cp = paste_params(parc, params);
   node->next = 0; /* must be explicitly cleared */
+
+  /* Use tail pointer for O(1) append */
+  if (iauth->i_stats_tail) {
+    iauth->i_stats_tail->next = node;
+  } else {
+    iauth->i_stats = node;
+  }
+  iauth->i_stats_tail = node;
+  iauth->i_stats_count++;
   return 0;
 }
 
@@ -2051,6 +2168,10 @@ static int iauth_cmd_username_forced(struct IAuth *iauth, struct Client *cli,
   assert(cli_auth(cli) != NULL);
   FlagClr(&cli_auth(cli)->flags, AR_AUTH_PENDING);
   if (!EmptyString(params[0])) {
+    /* Log forced username change for audit trail. */
+    log_write(LS_IAUTH, L_INFO, 0,
+              "IAuth forced username for %s: %s",
+              cli_sock_ip(cli), params[0]);
     ircd_strncpy(cli_username(cli), params[0], USERLEN + 1);
     SetGotId(cli);
     FlagSet(&cli_auth(cli)->flags, AR_IAUTH_USERNAME);
@@ -2131,6 +2252,11 @@ static int iauth_cmd_hostname(struct IAuth *iauth, struct Client *cli,
     SetIPSpoofed(cli);
   }
 
+  /* Log the hostname change for audit trail. */
+  log_write(LS_IAUTH, L_INFO, 0,
+            "IAuth changed hostname for %s from %s to %s",
+            cli_sock_ip(cli), cli_sockhost(cli), params[0]);
+
   /* Set hostname from params. */
   ircd_strncpy(cli_sockhost(cli), params[0], HOSTLEN + 1);
   /* If we have gotten here, the user is in a "hurry" state and has
@@ -2191,6 +2317,11 @@ static int iauth_cmd_ip_address(struct IAuth *iauth, struct Client *cli,
     IPcheck_connect_fail(cli, 1);
     ClearIPChecked(cli);
   }
+
+  /* Log the IP change for audit trail. */
+  log_write(LS_IAUTH, L_INFO, 0,
+            "IAuth changed IP for client from %s to %s",
+            ircd_ntoa(&cli_ip(cli)), params[0]);
 
   /* Update the IP and charge them as a remote connect. */
   memcpy(&cli_ip(cli), &addr, sizeof(cli_ip(cli)));
@@ -2275,6 +2406,19 @@ static int iauth_cmd_done_client(struct IAuth *iauth, struct Client *cli,
   /* Clear iauth pending flag. */
   assert(cli_auth(cli) != NULL);
   FlagClr(&cli_auth(cli)->flags, AR_IAUTH_PENDING);
+
+  /* Reset circuit breaker on successful IAuth response. */
+  if (iauth && iauth->i_timeout_count > 0) {
+    if (iauth->i_circuit_open) {
+      log_write(LS_IAUTH, L_INFO, 0,
+                "IAuth circuit breaker reset - IAuth responding again");
+      sendto_opmask_butone(NULL, SNO_AUTH,
+                           "IAuth circuit breaker CLOSED: IAuth responding "
+                           "normally again");
+    }
+    iauth->i_timeout_count = 0;
+    iauth->i_circuit_open = 0;
+  }
 
   /* If a connection class was specified (and usable), assign the client to it. */
   if (!EmptyString(params[0])) {
@@ -2677,9 +2821,14 @@ static void iauth_parse(struct IAuth *iauth, char *message)
     handler(iauth, NULL, parc, params);
   } else {
     /* Try to find the client associated with the request. */
-    id = strtol(params[0], NULL, 10);
+    char *endptr;
+    errno = 0;
+    id = strtol(params[0], &endptr, 10);
     if (parc < 3)
       sendto_iauth(NULL, "E Missing :Need <id> <ip> <port>");
+    else if (errno == ERANGE || endptr == params[0] || (*endptr && !IsSpace(*endptr)))
+      /* Invalid client ID format. */
+      sendto_iauth(NULL, "E BadId :[%s] is not a valid client id", params[0]);
     else if (id < 0 || id > HighestFd || !(cli = LocalClientArray[id]))
       /* Client no longer exists (or never existed). */
       sendto_iauth(NULL, "E Gone :[%s %s %s]", params[0], params[1],
@@ -2692,22 +2841,33 @@ static void iauth_parse(struct IAuth *iauth, char *message)
     else {
       struct irc_sockaddr addr;
       int res;
+      long port_val;
+      char *port_end;
 
       /* Parse IP address and port number from parameters */
       res = ipmask_parse(params[1], &addr.addr, NULL);
-      addr.port = strtol(params[2], NULL, 10);
+      errno = 0;
+      port_val = strtol(params[2], &port_end, 10);
+      if (errno == ERANGE || port_end == params[2] ||
+          (*port_end && !IsSpace(*port_end)) ||
+          port_val < 0 || port_val > 65535) {
+        sendto_iauth(cli, "E BadPort :[%s] is not a valid port", params[2]);
+      }
+      else {
+        addr.port = (unsigned short)port_val;
 
-      /* Check IP address and port number against expected. */
-      if (0 == res ||
-	  (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
-           irc_in_addr_cmp(&addr.addr, &cli_connectip(cli))) ||
-	  (auth && addr.port != auth->port))
-	/* Report mismatch to iauth. */
-	sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],
-		     ircd_ntoa(&cli_ip(cli)));
-      else if (handler(iauth, cli, parc - 3, params + 3) > 0)
-	/* Handler indicated a possible state change. */
-	check_auth_finished(auth);
+        /* Check IP address and port number against expected. */
+        if (0 == res ||
+            (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
+             irc_in_addr_cmp(&addr.addr, &cli_connectip(cli))) ||
+            (auth && addr.port != auth->port))
+          /* Report mismatch to iauth. */
+          sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],
+                       ircd_ntoa(&cli_ip(cli)));
+        else if (handler(iauth, cli, parc - 3, params + 3) > 0)
+          /* Handler indicated a possible state change. */
+          check_auth_finished(auth);
+      }
     }
   }
 }
@@ -2749,8 +2909,12 @@ static void iauth_read(struct IAuth *iauth)
 
   /* Put unused data back into connection's buffer. */
   iauth->i_count = strlen(sol);
-  if (iauth->i_count > BUFSIZE)
+  if (iauth->i_count > BUFSIZE) {
+    log_write(LS_IAUTH, L_WARNING, 0,
+              "IAuth partial line truncated: %u > %u bytes",
+              iauth->i_count, BUFSIZE);
     iauth->i_count = BUFSIZE;
+  }
   memcpy(iauth->i_buffer, sol, iauth->i_count);
 }
 
@@ -2822,8 +2986,12 @@ static void iauth_read_stderr(struct IAuth *iauth)
 
   /* Put unused data back into connection's buffer. */
   iauth->i_errcount = strlen(sol);
-  if (iauth->i_errcount > BUFSIZE)
+  if (iauth->i_errcount > BUFSIZE) {
+    log_write(LS_IAUTH, L_WARNING, 0,
+              "IAuth stderr line truncated: %u > %u bytes",
+              iauth->i_errcount, BUFSIZE);
     iauth->i_errcount = BUFSIZE;
+  }
   memcpy(iauth->i_errbuf, sol, iauth->i_errcount);
 }
 

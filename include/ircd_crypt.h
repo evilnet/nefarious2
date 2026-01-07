@@ -67,5 +67,44 @@ extern int oper_password_match(const char* to_match, const char* passwd);
 /* exported variables */
 extern crypt_mechs_t* crypt_mechs_root;
 
+/*
+ * Async password verification API
+ *
+ * These functions offload CPU-intensive password hashing to a thread pool,
+ * preventing the main event loop from blocking during bcrypt/PBKDF2 operations.
+ */
+
+/** Result codes for async verification callback */
+#define CRYPT_VERIFY_MATCH     1   /**< Password matches */
+#define CRYPT_VERIFY_NOMATCH   0   /**< Password doesn't match */
+#define CRYPT_VERIFY_ERROR    -1   /**< Error during verification */
+
+/**
+ * Callback invoked when async password verification completes.
+ * @param[in] result CRYPT_VERIFY_MATCH, CRYPT_VERIFY_NOMATCH, or CRYPT_VERIFY_ERROR
+ * @param[in] ctx User-provided context pointer
+ */
+typedef void (*crypt_verify_callback)(int result, void *ctx);
+
+/**
+ * Asynchronously verify a password against a hash.
+ * The verification runs in a worker thread; when complete, the callback
+ * is invoked in the main thread via thread_pool_poll().
+ *
+ * @param[in] password Plaintext password to verify
+ * @param[in] hash Stored hash to verify against
+ * @param[in] callback Function to call with result
+ * @param[in] ctx Context pointer passed to callback
+ * @return 0 if async verification started, -1 on error (falls back to sync)
+ */
+extern int ircd_crypt_verify_async(const char *password, const char *hash,
+                                   crypt_verify_callback callback, void *ctx);
+
+/**
+ * Check if async password verification is available.
+ * @return 1 if thread pool is running, 0 otherwise
+ */
+extern int ircd_crypt_async_available(void);
+
 #endif /* INCLUDED_ircd_crypt_h */
 

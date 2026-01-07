@@ -28,6 +28,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "s_debug.h"
+#include "thread_pool.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -338,6 +339,7 @@ engine_loop(struct Generators *gen)
       gen_ref_dec(sock);
     }
     timer_run();
+    thread_pool_poll(); /* process completed async tasks */
   }
   MyFree(events);
 }

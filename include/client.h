@@ -258,6 +258,8 @@ enum Flag
 
     FLAG_MULTILINE_EXPAND,          /**< User opts into full multiline expansion (+M) */
 
+    FLAG_OPER_PENDING,              /**< Async OPER password verification in progress */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -909,6 +911,8 @@ struct Client {
 #define IsLocOp(x)              (MyConnect(x) && HasFlag(x, FLAG_LOCOP))
 /** Return non-zero if the client has set mode +o (global operator). */
 #define IsOper(x)               HasFlag(x, FLAG_OPER)
+/** Return non-zero if the client has pending async OPER verification. */
+#define IsOperPending(x)        HasFlag(x, FLAG_OPER_PENDING)
 /** Return non-zero if the client has an active UDP ping request. */
 #define IsUPing(x)              HasFlag(x, FLAG_UPING)
 /** Return non-zero if the client has no '\n' in its buffer. */
@@ -1037,6 +1041,8 @@ struct Client {
 #define SetLocOp(x)             SetFlag(x, FLAG_LOCOP)
 /** Mark a client as having mode +o (global operator). */
 #define SetOper(x)              SetFlag(x, FLAG_OPER)
+/** Mark a client as having pending async OPER verification. */
+#define SetOperPending(x)       SetFlag(x, FLAG_OPER_PENDING)
 /** Mark a client as having a pending UDP ping. */
 #define SetUPing(x)             SetFlag(x, FLAG_UPING)
 /** Mark a client as having mode +w (wallops). */
@@ -1156,6 +1162,8 @@ struct Client {
 #define ClearLocOp(x)           ClrFlag(x, FLAG_LOCOP)
 /** Remove mode +o (global operator) from the client. */
 #define ClearOper(x)            ClrFlag(x, FLAG_OPER)
+/** Clear the client's pending async OPER verification flag. */
+#define ClearOperPending(x)     ClrFlag(x, FLAG_OPER_PENDING)
 /** Clear the client's pending UDP ping flag. */
 #define ClearUPing(x)           ClrFlag(x, FLAG_UPING)
 /** Remove mode +w (wallops) from the client. */

@@ -79,7 +79,8 @@ CRYPTO_SRC = \
 	ircd_crypt_smd5.c \
 	ircd_crypt_native.c \
 	ircd_crypt_bcrypt.c \
-	ircd_crypt_pbkdf2.c
+	ircd_crypt_pbkdf2.c \
+	ircd_crypt_async.c
 
 UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	ircd_alloc.c \
@@ -109,6 +110,7 @@ IRCD_SRC = \
 	ircd_features.c \
 	ircd_geoip.c \
 	ircd_log.c \
+	ircd_log_async.c \
 	ircd_relay.c \
 	ircd_reply.c \
 	ircd_res.c \
@@ -264,6 +266,7 @@ IRCD_SRC = \
 	send.c \
 	shun.c \
 	ssl.c \
+	thread_pool.c \
 	websocket.c \
 	uping.c \
 	userload.c \

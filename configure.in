@@ -64,6 +64,14 @@ AC_SEARCH_LIBS(crypt, descrypt crypt, ,
 dnl Do all the checks necessary to figure out -lnsl / -lsocket stuff
 AC_LIBRARY_NET
 
+dnl Check for pthreads (required for thread pool)
+AC_CHECK_HEADERS([pthread.h])
+AC_SEARCH_LIBS(pthread_create, pthread, [
+  AC_DEFINE([HAVE_PTHREAD], [1], [Define if pthreads is available])
+], [
+  AC_MSG_WARN([pthreads not found; async password verification disabled])
+])
+
 dnl Checks for header files.
 AC_HEADER_STDC
 AC_CHECK_HEADERS(crypt.h poll.h inttypes.h stdint.h sys/devpoll.h sys/epoll.h sys/event.h sys/param.h sys/resource.h sys/socket.h)

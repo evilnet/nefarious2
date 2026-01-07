@@ -38,10 +38,12 @@
 #include "ircd_features.h"
 #include "ircd_geoip.h"
 #include "ircd_log.h"
+#include "ircd_log_async.h"
 #include "ircd_reply.h"
 #include "ircd_signal.h"
 #include "ircd_string.h"
 #include "ircd_crypt.h"
+#include "thread_pool.h"
 #include "jupe.h"
 #include "list.h"
 #include "match.h"
@@ -238,6 +240,8 @@ void server_restart(const char *message)
   Debug((DEBUG_NOTICE, "Restarting server..."));
   flush_connections(0);
 
+  log_async_shutdown();  /* Flush pending log entries before shutdown */
+  thread_pool_shutdown();
   log_close();
 
   close_connections(!(thisServer.bootopt & (BOOT_TTY | BOOT_DEBUG | BOOT_CHKCONF)));
@@ -824,6 +828,23 @@ int main(int argc, char **argv) {
 
   setup_signals();
   feature_init(); /* initialize features... */
+
+  /* Initialize thread pool for async operations (bcrypt, etc.)
+   * Must be after feature_init() to read THREAD_POOL_SIZE config */
+  if (thread_pool_init(feature_int(FEAT_THREAD_POOL_SIZE)) < 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "Thread pool init failed; password verification will be synchronous");
+  }
+
+  /* Initialize async logging if enabled
+   * Must be after feature_init() to read ASYNC_LOGGING config */
+  if (feature_bool(FEAT_ASYNC_LOGGING)) {
+    if (log_async_init(0) < 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Async logging init failed; logging will be synchronous");
+    }
+  }
+
   init_isupport(); /* initialize RPL_ISUPPORT... */
   log_init(*argv);
   set_nomem_handler(outofmemory);

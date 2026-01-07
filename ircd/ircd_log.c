@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "ircd_log.h"
+#include "ircd_log_async.h"
 #include "client.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
@@ -442,8 +443,27 @@ log_vwrite(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
     vector[2].iov_base = (void*) "\n"; /* terminate lines with a \n */
     vector[2].iov_len = 1;
 
-    /* write it out to the log file */
-    (void)!writev(desc->file->fd, vector, 3);
+    /* Try async logging if available and enabled */
+    if (log_async_available() && feature_bool(FEAT_ASYNC_LOGGING)) {
+      /* Build combined log entry for async write */
+      char async_buf[LOG_BUFSIZE + 64];
+      int async_len;
+
+      async_len = ircd_snprintf(0, async_buf, sizeof(async_buf), "%s%s\n",
+                                timebuf, buf);
+
+      /* Use async write - if it fails or falls back, that's OK */
+      if (log_async_write(desc->file->fd,
+                          (flags & LOG_DOSYSLOG) ? (ldata->syslog | desc->facility) : 0,
+                          async_buf, async_len) == 0) {
+        /* Successfully queued async - skip sync write and syslog */
+        flags &= ~(LOG_DOFILELOG | LOG_DOSYSLOG);
+      }
+    }
+
+    /* Sync fallback: write it out to the log file */
+    if (flags & LOG_DOFILELOG)
+      (void)!writev(desc->file->fd, vector, 3);
   }
 
   /* oh yeah, syslog it too... */

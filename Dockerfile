@@ -81,8 +81,7 @@ COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
 # Run with Valgrind for memory testing (logs to cores mount for easy access)
-# %n = sequence number for unique filenames per run (starts at 0)
-CMD ["valgrind", "--leak-check=full", "--show-leak-kinds=all", "--track-origins=yes", "--log-file=/home/nefarious/ircd/cores/valgrind.%n.log", "/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd-docker.conf"]
+CMD ["valgrind", "--leak-check=full", "--show-leak-kinds=all", "--track-origins=yes", "--log-file=/home/nefarious/ircd/cores/valgrind.log", "/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd-docker.conf"]
 
 
 
