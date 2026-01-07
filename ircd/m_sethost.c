@@ -84,6 +84,8 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
+#include "ircd_crypt.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -91,11 +93,90 @@
 #include "ircd_string.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "s_bsd.h"
 #include "s_conf.h"
+#include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+
+/** Context for async SETHOST password verification */
+struct sethost_verify_ctx {
+  int fd;                               /**< Client fd for lookup */
+  char hostmask[USERLEN + HOSTLEN + 2]; /**< Requested user@host mask */
+  struct SHostConf *sconf;              /**< Matched config block */
+  struct Flags setflags;                /**< Backed up client flags */
+};
+
+/**
+ * Apply SETHOST changes to a client after password verification succeeds.
+ * @param[in] sptr Client to apply changes to
+ * @param[in] hostmask Hostmask to set (user@host or just host)
+ * @param[in] sconf Matched SpoofHost configuration (may be NULL)
+ * @param[in] setflags Backed up client flags for mode change notification
+ */
+static void apply_sethost_changes(struct Client *sptr, const char *hostmask,
+                                   struct SHostConf *sconf, struct Flags *setflags)
+{
+  /* Apply the spoofhost */
+  if (strchr(hostmask, '@') != NULL)
+    ircd_strncpy(cli_user(sptr)->sethost, hostmask, HOSTLEN + 1);
+  else
+    ircd_snprintf(0, cli_user(sptr)->sethost, USERLEN + HOSTLEN + 1, "%s@%s",
+                  cli_user(sptr)->username, hostmask);
+
+  if (FlagHas(setflags, FLAG_SETHOST))
+    FlagClr(setflags, FLAG_SETHOST);
+  SetSetHost(sptr);
+  SetHiddenHost(sptr);
+
+  hide_hostmask(sptr);
+  send_umode_out(sptr, sptr, setflags, 0);
+}
+
+/**
+ * Callback invoked when async SETHOST password verification completes.
+ * Called in main thread context via thread_pool_poll().
+ */
+static void sethost_password_verified(int result, void *arg)
+{
+  struct sethost_verify_ctx *ctx = arg;
+  struct Client *sptr;
+
+  /* Look up client by fd */
+  if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS) {
+    MyFree(ctx);
+    return;
+  }
+
+  sptr = LocalClientArray[ctx->fd];
+
+  /* Verify client still exists and is pending verification */
+  if (!sptr || IsDead(sptr) || !IsSetHostPending(sptr)) {
+    Debug((DEBUG_DEBUG, "sethost_password_verified: client gone or not pending "
+           "(fd %d)", ctx->fd));
+    MyFree(ctx);
+    return;
+  }
+
+  /* Clear pending flag */
+  ClearSetHostPending(sptr);
+
+  if (result == CRYPT_VERIFY_MATCH) {
+    /* Password matched - apply SETHOST changes */
+    Debug((DEBUG_INFO, "sethost_password_verified: SETHOST success for %s",
+           cli_name(sptr)));
+    apply_sethost_changes(sptr, ctx->hostmask, ctx->sconf, &ctx->setflags);
+  } else {
+    /* Password didn't match */
+    send_reply(sptr, ERR_PASSWDMISMATCH);
+    Debug((DEBUG_INFO, "sethost_password_verified: SETHOST failed for %s",
+           cli_name(sptr)));
+  }
+
+  MyFree(ctx);
+}
 
 /*
  * m_sethost - generic message handler
@@ -114,40 +195,77 @@ int m_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2)
     return need_more_params(sptr, "SETHOST");
 
+  /* Already pending async verification? */
+  if (IsSetHostPending(sptr))
+    return 0;
+
   /* Back up the flags first */
   setflags = cli_flags(sptr);
 
   if (ircd_strcmp("undo", parv[1]) == 0) {
     ClearSetHost(sptr);
     cli_user(sptr)->sethost[0] = '\0';
-  } else if (parc < 3) {
+    hide_hostmask(sptr);
+    send_umode_out(cptr, sptr, &setflags, 0);
+    return 0;
+  }
+
+  if (parc < 3)
     return need_more_params(sptr, "SETHOST");
-  } else {
-    if (!valid_hostname(parv[1])) {
-      send_reply(sptr, ERR_BADHOSTMASK, parv[1]);
-    } else {
-      sconf = find_shost_conf(sptr, parv[1], parv[2], &res);
-      if ((res == 0) && (sconf != 0)) {
-        if (strchr(parv[1], '@') != NULL)
-          ircd_strncpy(cli_user(sptr)->sethost, parv[1], HOSTLEN + 1);
-        else
-          ircd_snprintf(0, cli_user(sptr)->sethost, USERLEN + HOSTLEN + 1, "%s@%s",
-                      cli_user(sptr)->username, parv[1]);
-        if (FlagHas(&setflags, FLAG_SETHOST))
-          FlagClr(&setflags, FLAG_SETHOST);
-        SetSetHost(sptr);
-        SetHiddenHost(sptr);
-      } else {
-          if (res == 1)
-            send_reply(sptr, ERR_PASSWDMISMATCH);
-          else
-            send_reply(sptr, ERR_HOSTUNAVAIL, parv[1]);
+
+  if (!valid_hostname(parv[1])) {
+    send_reply(sptr, ERR_BADHOSTMASK, parv[1]);
+    return 0;
+  }
+
+  /* Find matching SHost block by host (without password check) */
+  sconf = find_shost_conf_by_host(sptr, parv[1]);
+  if (!sconf) {
+    send_reply(sptr, ERR_HOSTUNAVAIL, parv[1]);
+    return 0;
+  }
+
+  /* Check if password is required */
+  if (!EmptyString(sconf->passwd)) {
+    /* Password required - try async verification if available */
+    if (ircd_crypt_async_available()) {
+      struct sethost_verify_ctx *ctx;
+
+      ctx = (struct sethost_verify_ctx *)MyMalloc(sizeof(struct sethost_verify_ctx));
+      ctx->fd = cli_fd(sptr);
+      ctx->sconf = sconf;
+      ctx->setflags = setflags;
+      ircd_strncpy(ctx->hostmask, parv[1], sizeof(ctx->hostmask) - 1);
+
+      if (ircd_crypt_verify_async(parv[2], sconf->passwd,
+                                   sethost_password_verified, ctx) == 0) {
+        /* Async verification started */
+        SetSetHostPending(sptr);
+        Debug((DEBUG_INFO, "m_sethost: started async verification for %s",
+               cli_name(sptr)));
+        return 0;
       }
+
+      /* Async failed to start, fall back to sync */
+      MyFree(ctx);
+      Debug((DEBUG_DEBUG, "m_sethost: async failed, falling back to sync for %s",
+             cli_name(sptr)));
+    }
+
+    /* Synchronous password verification (blocking if bcrypt) */
+    sconf = find_shost_conf(sptr, parv[1], parv[2], &res);
+    if (res == 1) {
+      send_reply(sptr, ERR_PASSWDMISMATCH);
+      return 0;
+    }
+    if (res == 2 || !sconf) {
+      send_reply(sptr, ERR_HOSTUNAVAIL, parv[1]);
+      return 0;
     }
   }
 
-  hide_hostmask(sptr);
-  send_umode_out(cptr, sptr, &setflags, 0);
+  /* Password verified (or not required) - apply changes */
+  apply_sethost_changes(sptr, parv[1], sconf, &setflags);
 
   return 0;
 }
@@ -170,41 +288,100 @@ int mo_sethost(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2)
     return need_more_params(sptr, "SETHOST");
 
+  /* Already pending async verification? */
+  if (IsSetHostPending(sptr))
+    return 0;
+
   /* Back up the flags first */
   setflags = cli_flags(sptr);
 
   if (ircd_strcmp("undo", parv[1]) == 0) {
     ClearSetHost(sptr);
     cli_user(sptr)->sethost[0] = '\0';
-  } else if (parc < 3) {
+    hide_hostmask(sptr);
+    send_umode_out(cptr, sptr, &setflags, 0);
+    return 0;
+  }
+
+  if (parc < 3)
     return need_more_params(sptr, "SETHOST");
-  } else {
-    ircd_snprintf(0, hostmask, USERLEN + HOSTLEN + 1, "%s@%s", parv[1], parv[2]);
-    if (!valid_username(parv[1]) || !valid_hostname(parv[2])) {
-      send_reply(sptr, ERR_BADHOSTMASK, hostmask);
-    } else if (HasPriv(sptr, PRIV_FREEFORM)) {
-      ircd_strncpy(cli_user(sptr)->sethost, hostmask, USERLEN + HOSTLEN + 1);
-      if (FlagHas(&setflags, FLAG_SETHOST))
-        FlagClr(&setflags, FLAG_SETHOST);
-      SetSetHost(sptr);
-      SetHiddenHost(sptr);
-    } else {
-      sconf = find_shost_conf(sptr, hostmask, NULL, &res);
-      if ((res == 0) && (sconf != 0)) {
-        ircd_strncpy(cli_user(sptr)->sethost, hostmask, USERLEN + HOSTLEN + 1);
-        if (FlagHas(&setflags, FLAG_SETHOST))
-          FlagClr(&setflags, FLAG_SETHOST);
-        SetSetHost(sptr);
-        SetHiddenHost(sptr);
-      } else {
-        send_reply(sptr, ERR_HOSTUNAVAIL, hostmask);
+
+  ircd_snprintf(0, hostmask, USERLEN + HOSTLEN + 1, "%s@%s", parv[1], parv[2]);
+
+  if (!valid_username(parv[1]) || !valid_hostname(parv[2])) {
+    send_reply(sptr, ERR_BADHOSTMASK, hostmask);
+    return 0;
+  }
+
+  /* If oper has PRIV_FREEFORM, allow any hostmask without password */
+  if (HasPriv(sptr, PRIV_FREEFORM)) {
+    ircd_strncpy(cli_user(sptr)->sethost, hostmask, USERLEN + HOSTLEN + 1);
+    if (FlagHas(&setflags, FLAG_SETHOST))
+      FlagClr(&setflags, FLAG_SETHOST);
+    SetSetHost(sptr);
+    SetHiddenHost(sptr);
+    hide_hostmask(sptr);
+    send_umode_out(cptr, sptr, &setflags, 0);
+    return 0;
+  }
+
+  /* Find matching SHost block by host (without password check) */
+  sconf = find_shost_conf_by_host(sptr, hostmask);
+  if (!sconf) {
+    send_reply(sptr, ERR_HOSTUNAVAIL, hostmask);
+    return 0;
+  }
+
+  /* Check if password is required */
+  if (!EmptyString(sconf->passwd)) {
+    /* Oper needs password too (unless PRIV_FREEFORM which was handled above) */
+    if (parc < 4) {
+      send_reply(sptr, ERR_NEEDMOREPARAMS, "SETHOST");
+      return 0;
+    }
+
+    /* Password required - try async verification if available */
+    if (ircd_crypt_async_available()) {
+      struct sethost_verify_ctx *ctx;
+
+      ctx = (struct sethost_verify_ctx *)MyMalloc(sizeof(struct sethost_verify_ctx));
+      ctx->fd = cli_fd(sptr);
+      ctx->sconf = sconf;
+      ctx->setflags = setflags;
+      ircd_strncpy(ctx->hostmask, hostmask, sizeof(ctx->hostmask) - 1);
+
+      if (ircd_crypt_verify_async(parv[3], sconf->passwd,
+                                   sethost_password_verified, ctx) == 0) {
+        /* Async verification started */
+        SetSetHostPending(sptr);
+        Debug((DEBUG_INFO, "mo_sethost: started async verification for %s",
+               cli_name(sptr)));
+        return 0;
       }
+
+      /* Async failed to start, fall back to sync */
+      MyFree(ctx);
+      Debug((DEBUG_DEBUG, "mo_sethost: async failed, falling back to sync for %s",
+             cli_name(sptr)));
+    }
+
+    /* Synchronous password verification (blocking if bcrypt) */
+    sconf = find_shost_conf(sptr, hostmask, parv[3], &res);
+    if (res != 0 || !sconf) {
+      send_reply(sptr, ERR_HOSTUNAVAIL, hostmask);
+      return 0;
     }
   }
+
+  /* Password verified (or not required) - apply changes */
+  ircd_strncpy(cli_user(sptr)->sethost, hostmask, USERLEN + HOSTLEN + 1);
+  if (FlagHas(&setflags, FLAG_SETHOST))
+    FlagClr(&setflags, FLAG_SETHOST);
+  SetSetHost(sptr);
+  SetHiddenHost(sptr);
 
   hide_hostmask(sptr);
   send_umode_out(cptr, sptr, &setflags, 0);
 
   return 0;
 }
-

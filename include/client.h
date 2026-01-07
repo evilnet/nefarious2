@@ -259,6 +259,8 @@ enum Flag
     FLAG_MULTILINE_EXPAND,          /**< User opts into full multiline expansion (+M) */
 
     FLAG_OPER_PENDING,              /**< Async OPER password verification in progress */
+    FLAG_WEBIRC_PENDING,            /**< Async WEBIRC password verification in progress */
+    FLAG_SETHOST_PENDING,           /**< Async SETHOST password verification in progress */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -913,6 +915,10 @@ struct Client {
 #define IsOper(x)               HasFlag(x, FLAG_OPER)
 /** Return non-zero if the client has pending async OPER verification. */
 #define IsOperPending(x)        HasFlag(x, FLAG_OPER_PENDING)
+/** Return non-zero if the client has pending async WEBIRC verification. */
+#define IsWebIRCPending(x)      HasFlag(x, FLAG_WEBIRC_PENDING)
+/** Return non-zero if the client has pending async SETHOST verification. */
+#define IsSetHostPending(x)     HasFlag(x, FLAG_SETHOST_PENDING)
 /** Return non-zero if the client has an active UDP ping request. */
 #define IsUPing(x)              HasFlag(x, FLAG_UPING)
 /** Return non-zero if the client has no '\n' in its buffer. */
@@ -1043,6 +1049,10 @@ struct Client {
 #define SetOper(x)              SetFlag(x, FLAG_OPER)
 /** Mark a client as having pending async OPER verification. */
 #define SetOperPending(x)       SetFlag(x, FLAG_OPER_PENDING)
+/** Mark a client as having pending async WEBIRC verification. */
+#define SetWebIRCPending(x)     SetFlag(x, FLAG_WEBIRC_PENDING)
+/** Mark a client as having pending async SETHOST verification. */
+#define SetSetHostPending(x)    SetFlag(x, FLAG_SETHOST_PENDING)
 /** Mark a client as having a pending UDP ping. */
 #define SetUPing(x)             SetFlag(x, FLAG_UPING)
 /** Mark a client as having mode +w (wallops). */
@@ -1164,6 +1174,10 @@ struct Client {
 #define ClearOper(x)            ClrFlag(x, FLAG_OPER)
 /** Clear the client's pending async OPER verification flag. */
 #define ClearOperPending(x)     ClrFlag(x, FLAG_OPER_PENDING)
+/** Clear the client's pending async WEBIRC verification flag. */
+#define ClearWebIRCPending(x)   ClrFlag(x, FLAG_WEBIRC_PENDING)
+/** Clear the client's pending async SETHOST verification flag. */
+#define ClearSetHostPending(x)  ClrFlag(x, FLAG_SETHOST_PENDING)
 /** Clear the client's pending UDP ping flag. */
 #define ClearUPing(x)           ClrFlag(x, FLAG_UPING)
 /** Remove mode +w (wallops) from the client. */
