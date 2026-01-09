@@ -886,6 +886,32 @@ struct WebIRCConf* find_webirc_conf(struct Client *cptr, char *passwd, int* stat
   return 0;
 }
 
+/** Find WebIRC configuration by host/IP match only (no password verification).
+ * This is used for async password verification - we find the matching block
+ * first, then verify the password asynchronously.
+ * @param[in] cptr Client to match WebIRC configuration against.
+ * @return Matching WebIRCConf or NULL if no match found.
+ */
+struct WebIRCConf* find_webirc_conf_by_host(struct Client *cptr)
+{
+  struct WebIRCConf *wconf;
+
+  for (wconf = webircConfList; wconf; wconf = wconf->next) {
+    if (wconf->usermask && match(wconf->usermask, cli_username(cptr)))
+      continue;
+    if (wconf->bits > 0) {
+      if (!ipmask_check(&cli_ip(cptr), &wconf->address, wconf->bits))
+        continue;
+    } else if (wconf->hostmask && match(wconf->hostmask, cli_sockhost(cptr)))
+      continue;
+
+    /* Found a matching host/IP - return it (password check deferred) */
+    return wconf;
+  }
+
+  return NULL;
+}
+
 /** Free all WebIRC configurations from #webircConfList. */
 void conf_erase_webirc_list(void)
 {
@@ -977,6 +1003,49 @@ struct SHostConf* find_shost_conf(struct Client *cptr, char *host, char *passwd,
   }
 
   return 0;
+}
+
+/** Find SpoofHost configuration by hostmask match only (no password verification).
+ * This is used for async password verification - we find the matching block
+ * first, then verify the password asynchronously.
+ * @param[in] cptr Client to match SpoofHost configuration against.
+ * @param[in] host Spoofhost to look for.
+ * @return Matching SHostConf or NULL if no match found.
+ */
+struct SHostConf* find_shost_conf_by_host(struct Client *cptr, const char *host)
+{
+  struct SHostConf* sconf;
+
+  if (!host)
+    return NULL;
+
+  for (sconf = shostConfList; sconf; sconf = sconf->next) {
+    /* Check hostmask match */
+    if (!(sconf->flags & SHFLAG_ISMASK) && strcmp(sconf->spoofhost, host))
+      continue;
+    if ((sconf->flags & SHFLAG_ISMASK) && match(sconf->spoofhost, host))
+      continue;
+
+    /* Check usermask if configured */
+    if (sconf->usermask) {
+      if (match(sconf->usermask, cli_username(cptr)) &&
+          !((sconf->flags & SHFLAG_MATCHUSER) && cli_user(cptr) &&
+            !match(sconf->usermask, cli_user(cptr)->username)))
+        continue;
+    }
+
+    /* Check IP/host match */
+    if (sconf->bits > 0) {
+      if (!ipmask_check(&cli_ip(cptr), &sconf->address, sconf->bits))
+        continue;
+    } else if (sconf->hostmask && match(sconf->hostmask, cli_sockhost(cptr)))
+      continue;
+
+    /* Found a matching host - return it (password check deferred) */
+    return sconf;
+  }
+
+  return NULL;
 }
 
 /** Free all SpoofHost configurations from #shostConfList. */

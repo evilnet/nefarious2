@@ -28,6 +28,7 @@
 #include "ircd_alloc.h"
 #include "ircd_log.h"
 #include "s_debug.h"
+#include "thread_pool.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -423,6 +424,7 @@ engine_loop(struct Generators* gen)
     }
 
     timer_run(); /* execute any pending timers */
+    thread_pool_poll(); /* process completed async tasks */
   }
 }
 

@@ -54,6 +54,8 @@ enum ListenerFlag {
   LISTEN_IPV6,
   /** Port is SSL enabled. */
   LISTEN_SSL,
+  /** Port accepts WebSocket connections. */
+  LISTEN_WEBSOCKET,
   /** Sentinel for counting listener flags. */
   LISTEN_LAST_FLAG
 };
@@ -79,6 +81,7 @@ struct Listener {
 #define listener_server(LISTENER) FlagHas(&(LISTENER)->flags, LISTEN_SERVER)
 #define listener_active(LISTENER) FlagHas(&(LISTENER)->flags, LISTEN_ACTIVE)
 #define listener_ssl(LISTENER)    FlagHas(&(LISTENER)->flags, LISTEN_SSL)
+#define listener_websocket(LISTENER) FlagHas(&(LISTENER)->flags, LISTEN_WEBSOCKET)
 
 extern void        add_listener(int port, const char* vaddr_ip, 
                                 const char* mask,

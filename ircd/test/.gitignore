@@ -1,6 +1,25 @@
 Makefile
+Makefile.in.tmp
+
+# Legacy test binaries
 ircd_chattr_t
 ircd_in_addr_t
 ircd_string_t
 ircd_match_t
+
+# CMocka test binaries
+ircd_chattr_cmocka
+ircd_string_cmocka
+numnicks_cmocka
+ircd_in_addr_cmocka
+ircd_compress_cmocka
+ircd_cloaking_cmocka
+dbuf_cmocka
+ircd_crypt_cmocka
+crule_cmocka
+history_cmocka
+dnsbl_cmocka
+ircd_match_cmocka
+
 *.log
+*.o

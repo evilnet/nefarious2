@@ -62,6 +62,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -347,6 +348,17 @@ int os_set_reuseaddr(int fd)
 {
   unsigned int opt = 1;
   return (0 == setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                          (const char*) &opt, sizeof(opt)));
+}
+
+/** Disable Nagle's algorithm on a socket for low-latency sends.
+ * @param[in] fd %Socket file descriptor to manipulate.
+ * @return Non-zero on success, or zero on failure.
+ */
+int os_set_tcp_nodelay(int fd)
+{
+  unsigned int opt = 1;
+  return (0 == setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
                           (const char*) &opt, sizeof(opt)));
 }
 

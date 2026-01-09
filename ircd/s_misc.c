@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "s_misc.h"
+#include "account_conn.h"
 #include "IPcheck.h"
 #include "channel.h"
 #include "client.h"
@@ -58,6 +59,7 @@
 #include "uping.h"
 #include "userload.h"
 #include "watch.h"
+#include "history.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <fcntl.h>
@@ -65,6 +67,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 /** Array of English month names (0 = January). */
@@ -173,6 +177,69 @@ const char* get_client_name(const struct Client* sptr, int showip)
   return nbuf;
 }
 
+#ifdef USE_LMDB
+/** Counter for generating unique message IDs for QUIT event history storage */
+static unsigned long quit_history_msgid_counter = 0;
+
+/** Store QUIT events in history for all channels the user is on.
+ * This is called before remove_user_from_all_channels() so we can
+ * iterate through the user's channels.
+ * @param[in] sptr Client that is quitting.
+ * @param[in] comment The quit message.
+ */
+static void store_quit_events(struct Client *sptr, const char *comment)
+{
+  struct Membership *member;
+  struct timeval tv;
+  char timestamp[32];
+  char msgid[64];
+  char sender[HISTORY_SENDER_LEN];
+  const char *account;
+
+  if (!history_is_available())
+    return;
+
+  /* Check if chathistory feature is enabled */
+  if (!feature_bool(FEAT_CAP_draft_chathistory))
+    return;
+
+  /* Only store for local users to avoid duplicates */
+  if (!MyUser(sptr))
+    return;
+
+  /* Generate Unix timestamp (same for all channels) */
+  gettimeofday(&tv, NULL);
+  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                (unsigned long)tv.tv_sec,
+                (unsigned long)(tv.tv_usec / 1000));
+
+  /* Build sender string: nick!user@host */
+  if (cli_user(sptr))
+    ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                  cli_name(sptr),
+                  cli_user(sptr)->username,
+                  cli_user(sptr)->host);
+  else
+    ircd_strncpy(sender, cli_name(sptr), sizeof(sender) - 1);
+
+  /* Get account name if logged in */
+  account = (cli_user(sptr) && cli_user(sptr)->account[0])
+            ? cli_user(sptr)->account : NULL;
+
+  /* Store QUIT event for each channel the user is on */
+  for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
+    /* Generate unique msgid for each channel's QUIT event */
+    ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                  cli_yxx(&me),
+                  (unsigned long)cli_firsttime(&me),
+                  ++quit_history_msgid_counter);
+
+    history_store_message(msgid, timestamp, member->channel->chname, sender,
+                          account, HISTORY_QUIT, comment ? comment : "");
+  }
+}
+#endif /* USE_LMDB */
+
 /**
  * Exit one client, local or remote. Assuming for local client that
  * all dependents already have been removed, and socket is closed.
@@ -207,6 +274,16 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * (Note: The notice is to the local clients *only*)
      */
     sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
+
+    /* Remove from presence aggregation registry before channel cleanup */
+    if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(bcptr)) {
+      account_conn_remove(bcptr);
+    }
+
+#ifdef USE_LMDB
+    /* Store QUIT events in history before removing from channels */
+    store_quit_events(bcptr, comment);
+#endif
 
     remove_user_from_all_channels(bcptr);
 
@@ -499,8 +576,18 @@ int exit_client(struct Client *cptr,
     }
   }
   /* Then remove the client structures */
-  if (IsServer(victim))
+  if (IsServer(victim)) {
+    char netsplit_batch_id[32] = "";
+    /* Start IRCv3 netsplit batch for local clients */
+    send_netsplit_batch_start(victim, cli_serv(victim)->up,
+                               netsplit_batch_id, sizeof(netsplit_batch_id));
+    /* Set active batch so QUIT messages include @batch tag */
+    set_active_network_batch(netsplit_batch_id);
     exit_downlinks(victim, killer, comment1);
+    /* Clear active batch and end IRCv3 netsplit batch */
+    set_active_network_batch(NULL);
+    send_netsplit_batch_end(netsplit_batch_id);
+  }
   exit_one_client(victim, comment);
 
   /*

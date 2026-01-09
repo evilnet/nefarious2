@@ -46,6 +46,7 @@
 #include <sys/uio.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <openssl/bio.h>
@@ -303,8 +304,11 @@ int ssl_accept(struct Client *cptr)
   if (SSL_is_init_finished(cli_socket(cptr).ssl))
   {
     char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
-    if (sslfp)
+    if (sslfp) {
       ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
+      if (feature_bool(FEAT_CERT_EXPIRY_TRACKING))
+        cli_sslcliexp(cptr) = ssl_get_cert_expiry(cli_socket(cptr).ssl);
+    }
   }
 
   return -1;
@@ -625,6 +629,39 @@ char* ssl_get_fingerprint(SSL *ssl)
   X509_free(cert);
 
   return (hex);
+}
+
+/**
+ * Get the expiration time of the peer's SSL client certificate.
+ * @param ssl The SSL connection
+ * @return Unix timestamp of certificate expiration, or 0 if no certificate or error
+ */
+time_t ssl_get_cert_expiry(SSL *ssl)
+{
+  X509 *cert;
+  const ASN1_TIME *not_after;
+  struct tm tm_exp;
+  time_t exp_time = 0;
+
+  cert = SSL_get_peer_certificate(ssl);
+  if (!cert)
+    return 0;
+
+  not_after = X509_get0_notAfter(cert);
+  if (!not_after) {
+    X509_free(cert);
+    return 0;
+  }
+
+  /* Convert ASN1_TIME to struct tm */
+  memset(&tm_exp, 0, sizeof(tm_exp));
+  if (ASN1_TIME_to_tm(not_after, &tm_exp) == 1) {
+    /* Convert to time_t (timegm for UTC) */
+    exp_time = timegm(&tm_exp);
+  }
+
+  X509_free(cert);
+  return exp_time;
 }
 
 void ssl_set_nonblocking(SSL *s)

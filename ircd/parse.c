@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "parse.h"
+#include "capab.h"
 #include "class.h"
 #include "client.h"
 #include "channel.h"
@@ -313,7 +314,7 @@ struct Message msgtab[] = {
     TOK_AWAY,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_away, ms_away, m_away, m_ignore },
+    { mu_away, m_away, ms_away, m_away, m_ignore },
     "[:<reason>] - Marks yourself as away, or back."
   },
   {
@@ -523,6 +524,14 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_unregistered, m_info, ms_info, mo_info, m_ignore },
     "- Returns information about the local server"
+  },
+  {
+    MSG_ISUPPORT,
+    TOK_ISUPPORT,
+    0, MAXPARA, MFLG_SLOW | MFLG_UNREG, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_isupport, m_isupport, m_ignore, m_isupport, m_ignore },
+    "- Returns ISUPPORT tokens (requires draft/extended-isupport cap)"
   },
   {
     MSG_MOTD,
@@ -893,6 +902,118 @@ struct Message msgtab[] = {
     ""
   },
   {
+    MSG_SETNAME,
+    TOK_SETNAME,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_setname, ms_setname, m_setname, m_ignore },
+    "- SETNAME :newrealname - Change your realname (GECOS)"
+  },
+  {
+    MSG_TAGMSG,
+    TOK_TAGMSG,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_tagmsg, ms_tagmsg, m_tagmsg, m_ignore },
+    "- TAGMSG target - Send message with only tags (no content)"
+  },
+  {
+    MSG_BATCH_CMD,
+    TOK_BATCH_CMD,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_batch, ms_batch, m_batch, m_ignore },
+    "+id type [params] | -id - Start or end a message batch"
+  },
+  {
+    MSG_MULTILINE,
+    TOK_MULTILINE,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_multiline, m_ignore, m_ignore },
+    "S2S multiline batch relay - internal use only"
+  },
+  {
+    MSG_CHATHISTORY,
+    TOK_CHATHISTORY,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_chathistory, ms_chathistory, m_chathistory, m_ignore },
+    "subcommand target ref [ref] limit - Query message history"
+  },
+  {
+    MSG_REDACT,
+    TOK_REDACT,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_redact, ms_redact, m_redact, m_ignore },
+    "<target> <msgid> [:<reason>] - Redact a previously sent message"
+  },
+  {
+    MSG_REGISTER,
+    TOK_REGISTER,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_register, m_register, m_ignore, m_register, m_ignore },
+    "<account> <email|*> <password> - Register an account"
+  },
+  {
+    MSG_VERIFY,
+    TOK_VERIFY,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_verify, m_verify, m_ignore, m_verify, m_ignore },
+    "<account> <code> - Verify account registration"
+  },
+  {
+    MSG_REGREPLY,
+    TOK_REGREPLY,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_regreply, m_ignore, ms_regreply },
+    ""
+  },
+  {
+    MSG_MARKREAD,
+    TOK_MARKREAD,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_markread, ms_markread, m_markread, m_ignore },
+    "<target> [timestamp=<ts>] - Get or set read marker for target"
+  },
+  {
+    MSG_RENAME,
+    TOK_RENAME,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_rename, ms_rename, m_rename, m_ignore },
+    "<oldchannel> <newchannel> [:<reason>] - Rename a channel"
+  },
+  {
+    MSG_METADATA,
+    TOK_METADATA,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_metadata, ms_metadata, m_metadata, m_ignore },
+    "<subcommand> [args] - Manage user/channel metadata"
+  },
+  {
+    MSG_METADATAQUERY,
+    TOK_METADATAQUERY,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_metadataquery, m_ignore, m_ignore },
+    "<target> [key|*] - Query metadata for account/channel (S2S only)"
+  },
+  {
+    MSG_WEBPUSH,
+    TOK_WEBPUSH,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_webpush, ms_webpush, m_webpush, m_ignore },
+    "REGISTER|UNREGISTER <endpoint> [keys] - Manage web push subscriptions"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,
@@ -1204,8 +1325,90 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   if (IsDead(cptr))
     return 0;
 
+  /* Clear any previous label, client-only tags, and batch tags */
+  cli_label(cptr)[0] = '\0';
+  cli_client_tags(cptr)[0] = '\0';
+  cli_msg_batch_tag(cptr)[0] = '\0';
+  cli_msg_concat(cptr) = 0;
+
   para[0] = cli_name(from);
   for (ch = buffer; *ch == ' '; ch++);  /* Eat leading spaces */
+
+  /* Parse message tags if present (IRCv3.2) */
+  if (*ch == '@') {
+    char *tag_end;
+    char *tag_start = ch + 1;  /* Skip the @ */
+
+    /* Find end of tags (space before command) */
+    tag_end = strchr(tag_start, ' ');
+    if (tag_end) {
+      char *scan = tag_start;
+      int client_tags_pos = 0;
+
+      while (scan < tag_end) {
+        char *tag_name = scan;
+        char *next_semi = scan;
+        size_t tag_len;
+
+        /* Find end of this tag (semicolon or end) */
+        while (next_semi < tag_end && *next_semi != ';')
+          next_semi++;
+        tag_len = next_semi - tag_name;
+
+        /* Check for label= tag */
+        if (strncmp(tag_name, "label=", 6) == 0) {
+          /* Extract label value if client has capability */
+          if (CapActive(cptr, CAP_LABELEDRESP) &&
+              feature_bool(FEAT_CAP_labeled_response)) {
+            char *label_val = tag_name + 6;
+            size_t label_len = next_semi - label_val;
+            if (label_len >= sizeof(cli_label(cptr)))
+              label_len = sizeof(cli_label(cptr)) - 1;
+            memcpy(cli_label(cptr), label_val, label_len);
+            cli_label(cptr)[label_len] = '\0';
+          }
+        }
+        /* Check for batch= tag (draft/multiline) */
+        else if (strncmp(tag_name, "batch=", 6) == 0) {
+          /* Extract batch ID for multiline message handling */
+          if (CapActive(cptr, CAP_DRAFT_MULTILINE)) {
+            char *batch_val = tag_name + 6;
+            size_t batch_len = next_semi - batch_val;
+            if (batch_len >= sizeof(cli_msg_batch_tag(cptr)))
+              batch_len = sizeof(cli_msg_batch_tag(cptr)) - 1;
+            memcpy(cli_msg_batch_tag(cptr), batch_val, batch_len);
+            cli_msg_batch_tag(cptr)[batch_len] = '\0';
+          }
+        }
+        /* Check for draft/multiline-concat tag */
+        else if (tag_len == 22 && strncmp(tag_name, "draft/multiline-concat", 22) == 0) {
+          if (CapActive(cptr, CAP_DRAFT_MULTILINE))
+            cli_msg_concat(cptr) = 1;
+        }
+        /* Check for client-only tags (prefixed with +) */
+        else if (*tag_name == '+') {
+          /* Copy client-only tag to buffer for TAGMSG relay */
+          if (client_tags_pos + tag_len + 2 < sizeof(cli_client_tags(cptr))) {
+            if (client_tags_pos > 0)
+              cli_client_tags(cptr)[client_tags_pos++] = ';';
+            memcpy(cli_client_tags(cptr) + client_tags_pos, tag_name, tag_len);
+            client_tags_pos += tag_len;
+            cli_client_tags(cptr)[client_tags_pos] = '\0';
+          }
+        }
+
+        /* Move to next tag */
+        scan = next_semi;
+        if (*scan == ';')
+          scan++;
+      }
+      /* Advance past tags to the command */
+      ch = tag_end;
+      while (*ch == ' ')
+        ch++;
+    }
+  }
+
   if (*ch == ':')               /* Is any client doing this ? */
   {
     for (++ch; *ch && *ch != ' '; ++ch)
@@ -1267,8 +1470,26 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     lagmin = 2;
   if (lagfactor < 0)
     lagfactor = 120;
-  if (((mptr->flags & MFLG_SLOW) || !IsAnOper(cptr)) && lagfactor > 0)
-    cli_since(cptr) += (lagmin + i / lagfactor);
+  if (((mptr->flags & MFLG_SLOW) || !IsAnOper(cptr)) && lagfactor > 0) {
+    int lag = lagmin + i / lagfactor;
+    /*
+     * If client is in a multiline batch, accumulate lag instead of
+     * applying immediately. Per IRCv3 multiline spec, servers should
+     * recognize that batched messages are transmitted simultaneously
+     * and not count each line separately for flood protection.
+     * The accumulated lag is applied once when the batch ends.
+     *
+     * MULTILINE_MAX_LAG caps accumulated lag to prevent extremely long
+     * batches from building up massive lag debt.
+     */
+    if (cli_ml_batch_id(cptr)[0]) {
+      int max_lag = feature_int(FEAT_MULTILINE_MAX_LAG);
+      cli_ml_lag_accum(cptr) += lag;
+      if (max_lag > 0 && cli_ml_lag_accum(cptr) > max_lag)
+        cli_ml_lag_accum(cptr) = max_lag;
+    } else
+      cli_since(cptr) += lag;
+  }
   /*
    * Allow only 1 msg per 2 seconds
    * (on average) to prevent dumping.
@@ -1360,6 +1581,66 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
 
   if (IsDead(cptr))
     return 0;
+
+  /*
+   * IRCv3.2 Message Tags: If line starts with @, extract and store tags.
+   * Format: @tag1=value;tag2;+clienttag=value NUMERIC TOKEN params
+   * We extract @time and @msgid for S2S relay (Phase 13c).
+   */
+  /* Clear previous S2S tags */
+  cli_s2s_time(cptr)[0] = '\0';
+  cli_s2s_msgid(cptr)[0] = '\0';
+
+  if (*ch == '@') {
+    /* Find the end of tags (first space after @) */
+    char *tagend = strchr(ch, ' ');
+    if (tagend) {
+      char *tagpos = ch + 1;  /* Skip the @ prefix */
+      char *semicolon;
+
+      /* Parse individual tags */
+      while (tagpos < tagend) {
+        char *tag_name = tagpos;
+        int tag_len;
+
+        /* Find the end of this tag (semicolon or end of tags) */
+        semicolon = memchr(tagpos, ';', tagend - tagpos);
+        if (semicolon)
+          tag_len = semicolon - tagpos;
+        else
+          tag_len = tagend - tagpos;
+
+        /* Check for @time tag */
+        if (tag_len >= 5 && memcmp(tag_name, "time=", 5) == 0) {
+          int value_len = tag_len - 5;
+          if (value_len < (int)sizeof(cli_s2s_time(cptr))) {
+            memcpy(cli_s2s_time(cptr), tag_name + 5, value_len);
+            cli_s2s_time(cptr)[value_len] = '\0';
+          }
+        }
+        /* Check for @msgid tag */
+        else if (tag_len >= 6 && memcmp(tag_name, "msgid=", 6) == 0) {
+          int value_len = tag_len - 6;
+          if (value_len < (int)sizeof(cli_s2s_msgid(cptr))) {
+            memcpy(cli_s2s_msgid(cptr), tag_name + 6, value_len);
+            cli_s2s_msgid(cptr)[value_len] = '\0';
+          }
+        }
+
+        /* Move to next tag */
+        if (semicolon)
+          tagpos = semicolon + 1;
+        else
+          break;
+      }
+
+      /* Skip past the @ prefix and tags to the actual message */
+      ch = tagend;
+      while (*ch == ' ')
+        ch++;
+    }
+    /* If no space found, malformed - continue with original parse */
+  }
 
   para[0] = cli_name(from);
 

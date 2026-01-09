@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_chattr.h"
@@ -96,6 +97,9 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
+
+/* External function from m_batch.c for multiline message handling */
+extern int multiline_add_message(struct Client *sptr, const char *text, int concat);
 
 /*
  * m_privmsg - generic message handler
@@ -122,6 +126,18 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc < 3 || EmptyString(parv[parc - 1]))
     return send_reply(sptr, ERR_NOTEXTTOSEND);
+
+  /*
+   * Check for multiline batch interception (draft/multiline).
+   * If this message has a @batch tag matching an active multiline batch,
+   * add it to the batch instead of delivering immediately.
+   */
+  if (cli_msg_batch_tag(sptr)[0] != '\0' &&
+      cli_ml_batch_id(sptr)[0] != '\0' &&
+      strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
+    /* This PRIVMSG is part of an active multiline batch - add to batch */
+    return multiline_add_message(sptr, parv[parc - 1], cli_msg_concat(sptr));
+  }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
 
@@ -212,6 +228,15 @@ int mo_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc < 3 || EmptyString(parv[parc - 1]))
     return send_reply(sptr, ERR_NOTEXTTOSEND);
+
+  /*
+   * Check for multiline batch interception (draft/multiline).
+   */
+  if (cli_msg_batch_tag(sptr)[0] != '\0' &&
+      cli_ml_batch_id(sptr)[0] != '\0' &&
+      strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
+    return multiline_add_message(sptr, parv[parc - 1], cli_msg_concat(sptr));
+  }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
 

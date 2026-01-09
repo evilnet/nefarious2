@@ -82,6 +82,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_features.h"
@@ -96,6 +97,8 @@
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_misc.h"
+#include "s_user.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -120,6 +123,12 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ext = parv[5];
 
   if (!strcmp(parv[1], "*")) {
+    /* Check for mechanism list broadcast: SASL * * M :PLAIN,EXTERNAL,... */
+    if (!strcmp(token, "*") && reply[0] == 'M') {
+      set_sasl_mechanisms(data);
+      log_write(LS_SYSTEM, L_INFO, 0, "SASL mechanisms set to: %s", data);
+    }
+
     if (ext != NULL)
       sendcmdto_serv_butone(sptr, CMD_SASL, cptr, "* %s %s %s :%s",
                                    token, reply, data, ext);
@@ -146,34 +155,82 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* If token is not prefixed with my numnick then ignore */
-  if (strncmp(cli_yxx(&me), token, 2))
+  if (strncmp(cli_yxx(&me), token, 2)) {
+    log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Token prefix mismatch - expected %s, got %.2s (from %C)",
+              cli_yxx(&me), token, sptr);
     return 0;
+  }
 
   /* If there is no fd then it is an invalid token */
-  if ((fdstr = strchr(token, '!')) == NULL)
+  if ((fdstr = strchr(token, '!')) == NULL) {
+    protocol_violation(sptr, "SASL: Malformed token - missing fd separator '!' in '%s'", token);
     return 0;
+  }
   fdstr++;
 
   /* If there is no cookie then it is also an invalid token */
-  if ((cookiestr = strchr(token, '.')) == NULL)
+  if ((cookiestr = strchr(token, '.')) == NULL) {
+    protocol_violation(sptr, "SASL: Malformed token - missing cookie separator '.' in '%s'", token);
     return 0;
+  }
   *cookiestr++ = '\0';
 
   fd = atoi(fdstr);
   cookie = atoi(cookiestr);
 
   /* Could not find a matching client, ignore the message */
-  if (!(acptr = LocalClientArray[fd]) || (cli_saslcookie(acptr) != cookie))
+  if (!(acptr = LocalClientArray[fd])) {
+    log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Client for fd %u not found (from %C, cookie %u)",
+              fd, sptr, cookie);
     return 0;
+  }
+  if (cli_saslcookie(acptr) != cookie) {
+    log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Cookie mismatch for %C (fd %u) - expected %u, got %u (from %C)",
+              acptr, fd, cli_saslcookie(acptr), cookie, sptr);
+    return 0;
+  }
+
+  /* Check for stale SASL responses (FD reuse protection) */
+  if (cli_saslstart(acptr) > 0) {
+    int timeout = feature_int(FEAT_SASL_TIMEOUT);
+    if (timeout > 0 && (CurrentTime - cli_saslstart(acptr)) > timeout) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL: Stale response for %C (fd %u) - session started %ld seconds ago (timeout %d)",
+                acptr, fd, (long)(CurrentTime - cli_saslstart(acptr)), timeout);
+      return 0;
+    }
+  }
 
   /* OK we now know who the message is for, let's deal with it! */
+
+  /* Validate the sender is a valid server (not dead/disconnecting) */
+  if (!IsServer(sptr) || IsDead(sptr)) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "SASL: Response from invalid/dead server %C, ignoring", sptr);
+    return 0;
+  }
 
   /* If we don't know who the agent is we do now, else check its the same agent */
   if (!cli_saslagent(acptr)) {
     cli_saslagent(acptr) = sptr;
     cli_saslagentref(sptr)++;
-  } else if (cli_saslagent(acptr) != sptr)
-    return 0;
+  } else if (cli_saslagent(acptr) != sptr) {
+    /* Check if existing agent is dead - if so, accept new agent */
+    if (IsDead(cli_saslagent(acptr)) || !IsServer(cli_saslagent(acptr))) {
+      log_write(LS_DEBUG, L_DEBUG, 0,
+                "SASL: Previous agent %C is dead, accepting new agent %C",
+                cli_saslagent(acptr), sptr);
+      if (cli_saslagentref(cli_saslagent(acptr)))
+        cli_saslagentref(cli_saslagent(acptr))--;
+      cli_saslagent(acptr) = sptr;
+      cli_saslagentref(sptr)++;
+    } else {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL: Agent mismatch for %C - expected %C, got %C (ignoring response)",
+                acptr, cli_saslagent(acptr), sptr);
+      return 0;
+    }
+  }
 
   if (reply[0] == 'C') {
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
@@ -198,6 +255,61 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (data[0] == 'S') {
       SetSASLComplete(acptr);
       send_reply(acptr, RPL_SASLSUCCESS);
+
+      /* For registered users (post-registration reauth), update their account
+       * and broadcast AC to propagate the change network-wide.
+       */
+      if (IsRegistered(acptr) && cli_user(acptr) && cli_saslaccount(acptr)[0]) {
+        char type = IsAccount(acptr) ? 'M' : 'R';
+
+        /* Update account if changed */
+        if (ircd_strcmp(cli_user(acptr)->account, cli_saslaccount(acptr)) != 0) {
+          /* Load account-linked metadata BEFORE setting account flag.
+           * This ensures metadata is in place before we propagate the account
+           * change to other servers and notify channel members.
+           */
+          metadata_load_account(acptr, cli_saslaccount(acptr));
+
+          ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN);
+          SetAccount(acptr);
+
+          if (cli_saslacccreate(acptr))
+            cli_user(acptr)->acc_create = cli_saslacccreate(acptr);
+
+          /* Notify channel members with account-notify capability */
+          sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr,
+                                                  CAP_ACCNOTIFY, CAP_NONE,
+                                                  "%s", cli_user(acptr)->account);
+
+          /* Propagate to other servers - use extended format if enabled */
+          if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
+            if (cli_user(acptr)->acc_create) {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu",
+                                    acptr, type, cli_user(acptr)->account,
+                                    cli_user(acptr)->acc_create);
+            } else {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s",
+                                    acptr, type, cli_user(acptr)->account);
+            }
+          } else {
+            /* Non-extended format: AC <user> <account> [timestamp] */
+            if (cli_user(acptr)->acc_create) {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s %Tu",
+                                    acptr, cli_user(acptr)->account,
+                                    cli_user(acptr)->acc_create);
+            } else {
+              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s",
+                                    acptr, cli_user(acptr)->account);
+            }
+          }
+
+          /* Apply hidden host if applicable */
+          if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
+               (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
+              IsHiddenHost(acptr))
+            hide_hostmask(acptr);
+        }
+      }
     } else if (data[0] == 'F') {
       send_reply(acptr, ERR_SASLFAIL, "");
     } else if (data[0] == 'A') {
@@ -207,6 +319,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       cli_saslagentref(cli_saslagent(acptr))--;
     cli_saslagent(acptr) = NULL;
     cli_saslcookie(acptr) = 0;
+    cli_saslstart(acptr) = 0;
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
   } else if (reply[0] == 'M')
@@ -232,6 +345,13 @@ int abort_sasl(struct Client* cptr, int timeout) {
       acptr = NULL;
   }
 
+  /* Validate agent is still a valid, connected server */
+  if (acptr && (IsDead(acptr) || !IsServer(acptr))) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "SASL abort: Agent %C is dead/invalid, broadcasting instead", acptr);
+    acptr = NULL;
+  }
+
   if (timeout)
     send_reply(cptr, ERR_SASLFAIL, ": request timed out");
   else
@@ -248,6 +368,7 @@ int abort_sasl(struct Client* cptr, int timeout) {
     cli_saslagentref(cli_saslagent(cptr))--;
   cli_saslagent(cptr) = NULL;
   cli_saslcookie(cptr) = 0;
+  cli_saslstart(cptr) = 0;
 
   return 0;
 }

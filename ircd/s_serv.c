@@ -60,6 +60,8 @@
 #include "sys.h"
 #include "userload.h"
 #include "zline.h"
+#include "metadata.h"
+#include "ircd_features.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -279,9 +281,13 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
                       cli_name(acptr), MARK_MARK, lp->value.cp);
       }
 
-      if (cli_sslclifp(acptr) && !EmptyString(cli_sslclifp(acptr)))
+      if (cli_sslclifp(acptr) && !EmptyString(cli_sslclifp(acptr))) {
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_SSLCLIFP, cli_sslclifp(acptr));
+        if (feature_bool(FEAT_CERT_EXPIRY_TRACKING) && cli_sslcliexp(acptr) > 0)
+          sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%lu",
+                        cli_name(acptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(acptr));
+      }
 
       if (cli_killmark(acptr) && !EmptyString(cli_killmark(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
@@ -327,6 +333,17 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       }
 
       client_send_privs(cli_user(acptr)->server, cptr, acptr);
+
+      /* Burst user metadata if enabled */
+      if (feature_bool(FEAT_METADATA_BURST)) {
+        struct MetadataEntry *entry;
+        for (entry = cli_metadata(acptr); entry; entry = entry->next) {
+          sendcmdto_one(cli_user(acptr)->server, CMD_METADATA, cptr, "%C %s %s :%s",
+                        acptr, entry->key,
+                        entry->visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                        entry->value ? entry->value : "");
+        }
+      }
     }
   }
   /*
