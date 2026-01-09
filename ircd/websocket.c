@@ -260,8 +260,8 @@ static int validate_ws_origin(const char *origin)
   char pattern[256];
   size_t plen, olen;
 
-  /* Empty allowed list = allow all origins */
-  if (!allowed || !*allowed)
+  /* Empty allowed list or "*" = allow all origins (including missing Origin header) */
+  if (!allowed || !*allowed || (allowed[0] == '*' && allowed[1] == '\0'))
     return 1;
 
   /* No origin header = reject if origin validation is configured */
