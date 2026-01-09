@@ -847,7 +847,8 @@ static int read_packet(struct Client *cptr, int socket_ready)
 
   if (socket_ready &&
       !(IsUser(cptr) &&
-	DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr))) {
+	DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr) +
+	(cli_ml_batch_id(cptr)[0] ? feature_int(FEAT_MULTILINE_MAX_BYTES) : 0))) {
 #ifdef USE_SSL
     switch (client_recv(cptr, readbuf, sizeof(readbuf), &length)) {
 #else
@@ -1049,8 +1050,21 @@ static int read_packet(struct Client *cptr, int socket_ready)
     if (length > 0 && dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
       return exit_client(cptr, cptr, &me, "dbuf_put fail");
 
-    if (DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr))
-      return exit_client(cptr, cptr, &me, "Excess Flood");
+    /*
+     * Check for buffer flood, but allow extra buffer space during
+     * multiline batches. When a client is mid-batch (cli_ml_batch_id
+     * is non-empty), they may legitimately send many lines rapidly.
+     * We allow up to MULTILINE_MAX_BYTES extra on top of normal recvq.
+     */
+    {
+      unsigned int max_recvq = get_recvq(cptr);
+      if (cli_ml_batch_id(cptr)[0]) {
+        /* Client is in multiline batch - allow extra buffer space */
+        max_recvq += feature_int(FEAT_MULTILINE_MAX_BYTES);
+      }
+      if (DBufLength(&(cli_recvQ(cptr))) > max_recvq)
+        return exit_client(cptr, cptr, &me, "Excess Flood");
+    }
 
     while (DBufLength(&(cli_recvQ(cptr))) && !NoNewLine(cptr) && 
            (IsTrusted(cptr) || cli_since(cptr) - CurrentTime < 10))
