@@ -1205,12 +1205,18 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
   const char *sep;
   int rc;
 
-  if (!history_available)
+  log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: looking up msgid=%s", msgid);
+
+  if (!history_available) {
+    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: history not available");
     return -1;
+  }
 
   rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
-  if (rc != 0)
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: txn_begin failed: %s", mdb_strerror(rc));
     return -1;
+  }
 
   key.mv_size = strlen(msgid);
   key.mv_data = (void *)msgid;
@@ -1218,8 +1224,10 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
   rc = mdb_get(txn, history_msgid_dbi, &key, &data);
   mdb_txn_abort(txn);
 
-  if (rc != 0)
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: mdb_get failed for msgid=%s: %s", msgid, mdb_strerror(rc));
     return -1;
+  }
 
   /* Value is target\0timestamp - extract timestamp */
   sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
