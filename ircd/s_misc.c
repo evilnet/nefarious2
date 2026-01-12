@@ -471,6 +471,7 @@ int exit_client(struct Client *cptr,
     if (IsUser(victim) || IsUserPort(victim)) {
       abort_sasl(victim, 0);
       auth_send_exit(victim);
+      pending_rename_client_exit(victim);
     }
 
     if (IsUser(victim))

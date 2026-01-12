@@ -96,6 +96,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "metadata.h"
+#include "channel.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -260,12 +261,39 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                       parv[1], parv[2], parv[3], parv[4], parv[5]);
       return 0;
     } else if (type == 'A' || type == 'D') {
-      /* LOC Replies (A=accept, D=deny) */
-      if (parc < 4)
+      /* LOC Replies (A=accept, D=deny) or Rename Permission Replies */
+      if (parc < 3)
         return need_more_params(sptr, "ACCOUNT");
 
-      if (!(acptr = FindNServer(parv[1])))
-        return 0; /* target not online, ignore */
+      /* First check if this is a server numeric (LOC reply) */
+      acptr = FindNServer(parv[1]);
+
+      if (!acptr) {
+        /* Not a server numeric - check for rename permission response */
+        unsigned int cookie = atoi(parv[1]);
+        struct PendingRename *pr = pending_rename_find(cookie);
+
+        if (pr) {
+          /* Found a pending rename with this cookie */
+          if (type == 'A') {
+            Debug((DEBUG_DEBUG, "ACCOUNT rename allow cookie=%u", cookie));
+            pending_rename_complete(pr);
+          } else {
+            /* Deny response: parv[3] contains the reason (trailing param) */
+            const char *reason = (parc > 3) ? parv[3] : "Permission denied";
+            Debug((DEBUG_DEBUG, "ACCOUNT rename deny cookie=%u reason=%s", cookie, reason));
+            pending_rename_deny(pr, reason);
+          }
+          return 0;
+        }
+
+        /* Neither LOC reply nor rename reply - ignore */
+        return 0;
+      }
+
+      /* LOC reply - need at least 4 params */
+      if (parc < 4)
+        return need_more_params(sptr, "ACCOUNT");
 
       if (!IsMe(acptr)) {
         /* in-transit message, forward it */

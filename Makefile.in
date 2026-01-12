@@ -40,7 +40,7 @@ all: build
 build: ${IRCD_MAKEFILES}
 	@for i in ${SUBDIRS}; do \
 		echo "Building $$i..."; \
-		cd $$i; ${MAKE} build; cd ..; \
+		cd $$i && ${MAKE} build || exit 1; cd ..; \
 	done
 
 config:
@@ -98,7 +98,7 @@ maintainer-clean: root-distclean ${IRCD_MAKEFILES}
 depend: ${IRCD_MAKEFILES}
 	@for i in ${SUBDIRS}; do \
 		echo "Making dependencies in $$i..."; \
-		cd $$i; ${MAKE} depend; cd ..; \
+		cd $$i && ${MAKE} depend || exit 1; cd ..; \
 	done
 
 test: ${IRCD_MAKEFILES}
@@ -109,13 +109,13 @@ install: ${IRCD_MAKEFILES}
 	test -d ${prefix} || mkdir ${prefix}
 	@for i in ${SUBDIRS}; do \
 		echo "Installing $$i..."; \
-		cd $$i; ${MAKE} install; cd ..; \
+		cd $$i && ${MAKE} install || exit 1; cd ..; \
 	done
 
 uninstall: ${IRCD_MAKEFILES}
 	@for i in ${SUBDIRS}; do \
 		echo "Uninstalling $$i..."; \
-		cd $$i; ${MAKE} uninstall; cd ..; \
+		cd $$i && ${MAKE} uninstall || exit 1; cd ..; \
 	done
 
 ${srcdir}/aclocal.m4: acinclude.m4

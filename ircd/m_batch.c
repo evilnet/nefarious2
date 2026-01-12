@@ -60,6 +60,7 @@
 #include "msgq.h"
 #include "class.h"
 #include "ml_storage.h"
+#include "history.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -490,7 +491,6 @@ process_multiline_batch(struct Client *sptr)
   int is_channel;
   int first;
   char batch_base_msgid[64];  /* Base msgid for entire batch */
-  int msg_seq;  /* Sequence counter for submessage ordering */
   int fallback_count = 0;  /* Track recipients who got truncated fallback */
 
   if (!con_ml_batch_id(con)[0])
@@ -549,7 +549,6 @@ process_multiline_batch(struct Client *sptr)
         /* Send as batch to supporting clients */
         char batchid[16];
         char timebuf[32];
-        char msgidbuf[64];
         int use_tags = CapActive(to, CAP_MSGTAGS);
 
         ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
@@ -559,22 +558,19 @@ process_multiline_batch(struct Client *sptr)
                       batchid, chptr->chname);
 
         first = 1;
-        msg_seq = 0;  /* Reset sequence for each recipient's delivery */
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          /* Format msgid with sequence suffix for submessage ordering: base:00, base:01, etc. */
+          /* All lines in the batch share the same msgid per IRCv3 multiline spec */
           if (use_tags) {
             format_time_tag(timebuf, sizeof(timebuf));
-            ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
           }
-          msg_seq++;
 
           if (first && !concat) {
             if (use_tags) {
               sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -585,7 +581,7 @@ process_multiline_batch(struct Client *sptr)
           } else if (concat) {
             if (use_tags) {
               sendrawto_one(to, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
@@ -595,7 +591,7 @@ process_multiline_batch(struct Client *sptr)
           } else {
             if (use_tags) {
               sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -669,7 +665,6 @@ process_multiline_batch(struct Client *sptr)
       if (!skip_echo && CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
         char batchid[16];
         char timebuf[32];
-        char msgidbuf[64];
         int use_tags = CapActive(sptr, CAP_MSGTAGS);
 
         ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
@@ -679,22 +674,19 @@ process_multiline_batch(struct Client *sptr)
                       batchid, chptr->chname);
 
         first = 1;
-        msg_seq = 0;  /* Reset sequence for echo delivery */
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          /* Format msgid with sequence suffix for submessage ordering */
+          /* All lines in the batch share the same msgid per IRCv3 multiline spec */
           if (use_tags) {
             format_time_tag(timebuf, sizeof(timebuf));
-            ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
           }
-          msg_seq++;
 
           if (first && !concat) {
             if (use_tags) {
               sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -705,7 +697,7 @@ process_multiline_batch(struct Client *sptr)
           } else if (concat) {
             if (use_tags) {
               sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
@@ -715,7 +707,7 @@ process_multiline_batch(struct Client *sptr)
           } else {
             if (use_tags) {
               sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -739,7 +731,6 @@ process_multiline_batch(struct Client *sptr)
     if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
       char batchid[16];
       char timebuf[32];
-      char msgidbuf[64];
       int use_tags = CapActive(acptr, CAP_MSGTAGS);
 
       ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
@@ -749,22 +740,19 @@ process_multiline_batch(struct Client *sptr)
                     batchid, cli_name(acptr));
 
       first = 1;
-      msg_seq = 0;  /* Reset sequence for DM delivery */
       for (lp = con_ml_messages(con); lp; lp = lp->next) {
         int concat = lp->value.cp[0];
         char *text = lp->value.cp + 1;
 
-        /* Format msgid with sequence suffix for submessage ordering */
+        /* All lines in the batch share the same msgid per IRCv3 multiline spec */
         if (use_tags) {
           format_time_tag(timebuf, sizeof(timebuf));
-          ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
         }
-        msg_seq++;
 
         if (first && !concat) {
           if (use_tags) {
             sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                           get_displayed_host(sptr), cli_name(acptr), text);
           } else {
             sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -775,7 +763,7 @@ process_multiline_batch(struct Client *sptr)
         } else if (concat) {
           if (use_tags) {
             sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                           get_displayed_host(sptr), cli_name(acptr), text);
           } else {
             sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
@@ -785,7 +773,7 @@ process_multiline_batch(struct Client *sptr)
         } else {
           if (use_tags) {
             sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                           get_displayed_host(sptr), cli_name(acptr), text);
           } else {
             sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -922,6 +910,66 @@ process_multiline_batch(struct Client *sptr)
     send_warn_with_label(sptr, "BATCH", "MULTILINE_FALLBACK",
                          is_channel ? chptr->chname : cli_name(acptr), desc,
                          con_ml_label(con)[0] ? con_ml_label(con) : NULL);
+  }
+
+  /* Store multiline batch to history with the base msgid.
+   * Concatenate all lines (respecting concat flags) into a single message.
+   * This allows CHATHISTORY retrieval by the base msgid.
+   */
+  log_write(LS_SYSTEM, L_INFO, 0, "multiline: history_is_available=%d, target=%s, msgid=%s",
+            history_is_available(), is_channel ? chptr->chname : cli_name(acptr),
+            batch_base_msgid);
+  if (history_is_available()) {
+    char history_content[4096];  /* Reasonable max for multiline concatenated */
+    size_t content_len = 0;
+    char sender_mask[256];
+    char timestamp[HISTORY_TIMESTAMP_LEN];
+
+    /* Build sender mask nick!user@host */
+    ircd_snprintf(0, sender_mask, sizeof(sender_mask), "%s!%s@%s",
+                  cli_name(sptr), cli_user(sptr)->username,
+                  get_displayed_host(sptr));
+
+    /* Build concatenated content, respecting concat flags */
+    for (lp = con_ml_messages(con); lp; lp = lp->next) {
+      int concat = lp->value.cp[0];
+      char *text = lp->value.cp + 1;
+      size_t text_len = strlen(text);
+
+      /* Add newline separator if not concat and not first line */
+      if (content_len > 0 && !concat) {
+        if (content_len < sizeof(history_content) - 1) {
+          history_content[content_len++] = '\n';
+        }
+      }
+
+      /* Append text (truncate if exceeds buffer) */
+      if (content_len + text_len < sizeof(history_content) - 1) {
+        memcpy(history_content + content_len, text, text_len);
+        content_len += text_len;
+      } else if (content_len < sizeof(history_content) - 1) {
+        /* Partial fit - copy what we can */
+        size_t remaining = sizeof(history_content) - 1 - content_len;
+        memcpy(history_content + content_len, text, remaining);
+        content_len += remaining;
+      }
+    }
+    history_content[content_len] = '\0';
+
+    /* Get timestamp for storage */
+    history_format_timestamp(timestamp, sizeof(timestamp));
+
+    /* Store with base msgid (no sub-IDs) for retrieval */
+    {
+      int store_result = history_store_message(batch_base_msgid, timestamp,
+                          is_channel ? chptr->chname : cli_name(acptr),
+                          sender_mask,
+                          cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
+                          HISTORY_PRIVMSG,
+                          history_content);
+      log_write(LS_SYSTEM, L_INFO, 0, "multiline: history_store_message returned %d for msgid=%s target=%s",
+                store_result, batch_base_msgid, is_channel ? chptr->chname : cli_name(acptr));
+    }
   }
 
   clear_multiline_batch(con);
@@ -1201,7 +1249,6 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
   int first;
   struct Client *sptr = batch->sender;
   char batch_base_msgid[64];  /* Base msgid for entire batch */
-  int msg_seq;  /* Sequence counter for submessage ordering */
 
   if (!batch || !batch->messages || !sptr)
     return;
@@ -1237,7 +1284,6 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         /* Send as batch to supporting clients */
         char batchid[16];
         char timebuf[32];
-        char msgidbuf[64];
         int use_tags = CapActive(to, CAP_MSGTAGS);
 
         ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
@@ -1247,22 +1293,19 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
                       batchid, chptr->chname);
 
         first = 1;
-        msg_seq = 0;  /* Reset sequence for each recipient's delivery */
         for (lp = batch->messages; lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          /* Format msgid with sequence suffix for submessage ordering */
+          /* All lines in the batch share the same msgid per IRCv3 multiline spec */
           if (use_tags) {
             format_time_tag(timebuf, sizeof(timebuf));
-            ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
           }
-          msg_seq++;
 
           if (first && !concat) {
             if (use_tags) {
               sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -1273,7 +1316,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           } else if (concat) {
             if (use_tags) {
               sendrawto_one(to, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
@@ -1283,7 +1326,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           } else {
             if (use_tags) {
               sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                             get_displayed_host(sptr), chptr->chname, text);
             } else {
               sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -1305,7 +1348,6 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
       char batchid[16];
       char timebuf[32];
-      char msgidbuf[64];
       int use_tags = CapActive(acptr, CAP_MSGTAGS);
 
       ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
@@ -1315,22 +1357,19 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
                     batchid, cli_name(acptr));
 
       first = 1;
-      msg_seq = 0;  /* Reset sequence for S2S DM delivery */
       for (lp = batch->messages; lp; lp = lp->next) {
         int concat = lp->value.cp[0];
         char *text = lp->value.cp + 1;
 
-        /* Format msgid with sequence suffix for submessage ordering */
+        /* All lines in the batch share the same msgid per IRCv3 multiline spec */
         if (use_tags) {
           format_time_tag(timebuf, sizeof(timebuf));
-          ircd_snprintf(0, msgidbuf, sizeof(msgidbuf), "%s:%02d", batch_base_msgid, msg_seq);
         }
-        msg_seq++;
 
         if (first && !concat) {
           if (use_tags) {
             sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                           get_displayed_host(sptr), cli_name(acptr), text);
           } else {
             sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -1341,7 +1380,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         } else if (concat) {
           if (use_tags) {
             sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                           get_displayed_host(sptr), cli_name(acptr), text);
           } else {
             sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
@@ -1351,7 +1390,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         } else {
           if (use_tags) {
             sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, msgidbuf, cli_name(sptr), cli_user(sptr)->username,
+                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
                           get_displayed_host(sptr), cli_name(acptr), text);
           } else {
             sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
@@ -1369,8 +1408,57 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     }
   }
 
-  /* Propagate to other servers (except where it came from) */
-  /* Note: This happens in ms_multiline which already propagates */
+  /* Store S2S multiline batch to history.
+   * The originating server may have stored it, but we store locally
+   * to ensure history is available for local clients.
+   */
+  if (history_is_available() && sptr) {
+    char history_content[4096];
+    size_t content_len = 0;
+    char sender_mask[256];
+    char timestamp[HISTORY_TIMESTAMP_LEN];
+
+    /* Build sender mask nick!user@host */
+    ircd_snprintf(0, sender_mask, sizeof(sender_mask), "%s!%s@%s",
+                  cli_name(sptr), cli_user(sptr)->username,
+                  get_displayed_host(sptr));
+
+    /* Build concatenated content, respecting concat flags */
+    for (lp = batch->messages; lp; lp = lp->next) {
+      int concat = lp->value.cp[0];
+      char *text = lp->value.cp + 1;
+      size_t text_len = strlen(text);
+
+      /* Add newline separator if not concat and not first line */
+      if (content_len > 0 && !concat) {
+        if (content_len < sizeof(history_content) - 1) {
+          history_content[content_len++] = '\n';
+        }
+      }
+
+      /* Append text (truncate if exceeds buffer) */
+      if (content_len + text_len < sizeof(history_content) - 1) {
+        memcpy(history_content + content_len, text, text_len);
+        content_len += text_len;
+      } else if (content_len < sizeof(history_content) - 1) {
+        size_t remaining = sizeof(history_content) - 1 - content_len;
+        memcpy(history_content + content_len, text, remaining);
+        content_len += remaining;
+      }
+    }
+    history_content[content_len] = '\0';
+
+    /* Get timestamp for storage */
+    history_format_timestamp(timestamp, sizeof(timestamp));
+
+    /* Store with base msgid for retrieval */
+    history_store_message(batch_base_msgid, timestamp,
+                          is_channel ? chptr->chname : cli_name(acptr),
+                          sender_mask,
+                          cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
+                          HISTORY_PRIVMSG,
+                          history_content);
+  }
 }
 
 /*

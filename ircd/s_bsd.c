@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "s_bsd.h"
+#include "capab.h"
 #include "client.h"
 #include "IPcheck.h"
 #include "channel.h"
@@ -848,7 +849,7 @@ static int read_packet(struct Client *cptr, int socket_ready)
   if (socket_ready &&
       !(IsUser(cptr) &&
 	DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr) +
-	(cli_ml_batch_id(cptr)[0] ? feature_int(FEAT_MULTILINE_MAX_BYTES) : 0))) {
+	((cli_ml_batch_id(cptr)[0] || CapActive(cptr, CAP_DRAFT_MULTILINE)) ? feature_int(FEAT_MULTILINE_MAX_BYTES) : 0))) {
 #ifdef USE_SSL
     switch (client_recv(cptr, readbuf, sizeof(readbuf), &length)) {
 #else
@@ -1051,15 +1052,16 @@ static int read_packet(struct Client *cptr, int socket_ready)
       return exit_client(cptr, cptr, &me, "dbuf_put fail");
 
     /*
-     * Check for buffer flood, but allow extra buffer space during
-     * multiline batches. When a client is mid-batch (cli_ml_batch_id
-     * is non-empty), they may legitimately send many lines rapidly.
-     * We allow up to MULTILINE_MAX_BYTES extra on top of normal recvq.
+     * Check for buffer flood, but allow extra buffer space for clients
+     * with multiline capability. When a client has draft/multiline enabled,
+     * they may send BATCH + id, many lines, BATCH - id all at once in a
+     * single TCP burst. The batch ID won't be set until BATCH + is parsed,
+     * so we must check capability, not just active batch state.
      */
     {
       unsigned int max_recvq = get_recvq(cptr);
-      if (cli_ml_batch_id(cptr)[0]) {
-        /* Client is in multiline batch - allow extra buffer space */
+      if (cli_ml_batch_id(cptr)[0] || CapActive(cptr, CAP_DRAFT_MULTILINE)) {
+        /* Client has multiline cap or is in batch - allow extra buffer space */
         max_recvq += feature_int(FEAT_MULTILINE_MAX_BYTES);
       }
       if (DBufLength(&(cli_recvQ(cptr))) > max_recvq)
