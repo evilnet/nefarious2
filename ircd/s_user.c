@@ -1698,6 +1698,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearNoLink(acptr);
         break;
+      case 'M':
+        if (what == MODE_ADD)
+          SetFlag(acptr, FLAG_MULTILINE_EXPAND);
+        else
+          ClrFlag(acptr, FLAG_MULTILINE_EXPAND);
+        break;
       case 'x':
         if (what == MODE_ADD) {
           SetHiddenHost(acptr);

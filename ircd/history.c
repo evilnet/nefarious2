@@ -525,6 +525,19 @@ int history_store_message(const char *msgid, const char *timestamp,
   if (keylen < 0)
     return -1;
 
+  /* Log the key being stored (with nulls as dots) */
+  {
+    char key_preview[128];
+    int preview_len = keylen < 120 ? keylen : 120;
+    memcpy(key_preview, keybuf, preview_len);
+    key_preview[preview_len] = '\0';
+    for (int i = 0; i < preview_len; i++) {
+      if (key_preview[i] == '\0') key_preview[i] = '.';
+    }
+    log_write(LS_SYSTEM, L_INFO, 0, "history_store_message: storing key='%s' (len=%d) target='%s' ts='%s' msgid='%s'",
+              key_preview, keylen, target, timestamp, msgid);
+  }
+
   /* Serialize value */
   vallen = serialize_message(valbuf, sizeof(valbuf), type, sender, account, content);
   if (vallen < 0)
@@ -649,17 +662,22 @@ static int history_query_internal(const char *target,
   if (direction == HISTORY_DIR_BEFORE || direction == HISTORY_DIR_LATEST) {
     /* For BEFORE/LATEST, we want to go backwards from the reference */
     rc = mdb_cursor_get(cursor, &key, &data, MDB_SET_RANGE);
+    log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: SET_RANGE rc=%d (%s)",
+              rc, rc == 0 ? "found" : (rc == MDB_NOTFOUND ? "not found" : mdb_strerror(rc)));
     if (rc == MDB_NOTFOUND) {
       /* Position at last entry */
       rc = mdb_cursor_get(cursor, &key, &data, MDB_LAST);
+      log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: MDB_LAST rc=%d", rc);
     } else if (rc == 0) {
       /* Move back one since SET_RANGE gives us >= */
       rc = mdb_cursor_get(cursor, &key, &data, MDB_PREV);
+      log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: MDB_PREV rc=%d", rc);
     }
     op = MDB_PREV;
   } else {
     /* For AFTER, go forwards from AFTER the reference */
     rc = mdb_cursor_get(cursor, &key, &data, MDB_SET_RANGE);
+    log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: AFTER SET_RANGE rc=%d", rc);
     /* Skip any messages that match the reference timestamp prefix
      * (AFTER means strictly after, not including the reference) */
     while (rc == 0 && key.mv_size >= (size_t)start_keylen &&
@@ -669,12 +687,37 @@ static int history_query_internal(const char *target,
     op = MDB_NEXT;
   }
 
+  /* Log cursor position after positioning */
+  if (rc == 0) {
+    char key_preview[64];
+    size_t preview_len = key.mv_size < 60 ? key.mv_size : 60;
+    memcpy(key_preview, key.mv_data, preview_len);
+    key_preview[preview_len] = '\0';
+    /* Replace null bytes with dots for display */
+    for (size_t i = 0; i < preview_len; i++) {
+      if (key_preview[i] == '\0') key_preview[i] = '.';
+    }
+    log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: positioned at key='%s' (len=%zu)",
+              key_preview, key.mv_size);
+  } else {
+    log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: no position, rc=%d", rc);
+  }
+
   /* Iterate and collect messages */
   while (rc == 0 && count < limit) {
     /* Check if still in target's range */
     if (key.mv_size < (size_t)target_prefix_len ||
         memcmp(key.mv_data, target_prefix, target_prefix_len) != 0) {
       /* Outside target range */
+      char key_preview[64];
+      size_t preview_len = key.mv_size < 60 ? key.mv_size : 60;
+      memcpy(key_preview, key.mv_data, preview_len);
+      key_preview[preview_len] = '\0';
+      for (size_t i = 0; i < preview_len; i++) {
+        if (key_preview[i] == '\0') key_preview[i] = '.';
+      }
+      log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: key='%s' outside target range, breaking",
+                key_preview);
       if (direction == HISTORY_DIR_BEFORE || direction == HISTORY_DIR_LATEST)
         break;
       /* For AFTER, move to next */
@@ -727,6 +770,9 @@ static int history_query_internal(const char *target,
   mdb_cursor_close(cursor);
   mdb_txn_abort(txn);
 
+  log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: returning count=%d for target='%s'",
+            count, target);
+
   *result = head;
   return count;
 }
@@ -757,6 +803,9 @@ int history_query_before(const char *target, enum HistoryRefType ref_type,
   keylen = build_key(keybuf, sizeof(keybuf), target, reference, NULL);
   if (keylen < 0)
     return -1;
+
+  log_write(LS_SYSTEM, L_INFO, 0, "history_query_before: target='%s' timestamp='%s' keylen=%d",
+            target, reference, keylen);
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_BEFORE, limit, result);
@@ -832,39 +881,62 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
                          struct HistoryMessage **result)
 {
-  struct HistoryMessage *before = NULL, *after = NULL;
+  struct HistoryMessage *before = NULL, *after = NULL, *ref_msg = NULL;
   int half = limit / 2;
-  int count_before, count_after;
+  int count_before, count_after, count_ref = 0;
 
   *result = NULL;
+
+  /* For msgid references, also look up the reference message itself.
+   * BEFORE and AFTER both exclude the reference, but AROUND should include it.
+   */
+  if (ref_type == HISTORY_REF_MSGID) {
+    int rc = history_lookup_message(target, reference, &ref_msg);
+    if (rc == 0 && ref_msg) {
+      count_ref = 1;
+      log_write(LS_SYSTEM, L_INFO, 0, "history_query_around: found reference msg at ts=%s",
+                ref_msg->timestamp);
+    }
+  }
 
   /* Get messages before reference */
   count_before = history_query_before(target, ref_type, reference, half, &before);
   if (count_before < 0) {
     history_free_messages(before);
+    history_free_messages(ref_msg);
     return -1;
   }
 
-  /* Get messages after reference */
-  count_after = history_query_after(target, ref_type, reference, limit - count_before, &after);
+  /* Get messages after reference (reduce limit by ref_msg if found) */
+  count_after = history_query_after(target, ref_type, reference,
+                                    limit - count_before - count_ref, &after);
   if (count_after < 0) {
     history_free_messages(before);
+    history_free_messages(ref_msg);
     history_free_messages(after);
     return -1;
   }
 
-  /* Concatenate lists: before + after */
+  /* Concatenate lists: before + ref_msg + after */
   if (before) {
     struct HistoryMessage *tail = before;
     while (tail->next)
       tail = tail->next;
-    tail->next = after;
+    if (ref_msg) {
+      tail->next = ref_msg;
+      ref_msg->next = after;
+    } else {
+      tail->next = after;
+    }
     *result = before;
+  } else if (ref_msg) {
+    ref_msg->next = after;
+    *result = ref_msg;
   } else {
     *result = after;
   }
 
-  return count_before + count_after;
+  return count_before + count_ref + count_after;
 }
 
 int history_query_between(const char *target,
@@ -1229,17 +1301,25 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
     return -1;
   }
 
-  /* Value is target\0timestamp - extract timestamp */
+  /* Value is target\0timestamp\0 - extract timestamp (exclude trailing separator) */
   sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
   if (!sep)
     return -1;
 
-  sep++; /* Skip separator */
-  if ((size_t)((char *)data.mv_data + data.mv_size - sep) >= HISTORY_TIMESTAMP_LEN)
-    return -1;
+  sep++; /* Skip separator after target */
 
-  memcpy(timestamp, sep, (char *)data.mv_data + data.mv_size - sep);
-  timestamp[(char *)data.mv_data + data.mv_size - sep] = '\0';
+  /* Calculate copy length - exclude trailing KEY_SEP if present */
+  {
+    size_t copy_len = (char *)data.mv_data + data.mv_size - sep;
+    /* build_key adds trailing KEY_SEP, exclude it */
+    if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
+      copy_len--;
+    if (copy_len >= HISTORY_TIMESTAMP_LEN)
+      return -1;
+    memcpy(timestamp, sep, copy_len);
+    timestamp[copy_len] = '\0';
+    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: extracted timestamp='%s' (len=%zu)", timestamp, copy_len);
+  }
 
   return 0;
 }
@@ -1278,21 +1358,26 @@ int history_lookup_message(const char *target, const char *msgid,
     return -1;
   }
 
-  /* Value is target\0timestamp - extract timestamp */
+  /* Value is target\0timestamp\0 - extract timestamp (exclude trailing KEY_SEP) */
   {
     const char *sep;
+    size_t copy_len;
     sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
     if (!sep) {
       mdb_txn_abort(txn);
       return -1;
     }
-    sep++; /* Skip separator */
-    if ((size_t)((char *)data.mv_data + data.mv_size - sep) >= HISTORY_TIMESTAMP_LEN) {
+    sep++; /* Skip separator after target */
+    copy_len = (char *)data.mv_data + data.mv_size - sep;
+    /* build_key adds trailing KEY_SEP, exclude it */
+    if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
+      copy_len--;
+    if (copy_len >= HISTORY_TIMESTAMP_LEN) {
       mdb_txn_abort(txn);
       return -1;
     }
-    memcpy(timestamp, sep, (char *)data.mv_data + data.mv_size - sep);
-    timestamp[(char *)data.mv_data + data.mv_size - sep] = '\0';
+    memcpy(timestamp, sep, copy_len);
+    timestamp[copy_len] = '\0';
   }
 
   /* Build key for main database lookup: target\0timestamp\0msgid */

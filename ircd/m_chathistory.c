@@ -54,9 +54,141 @@
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
 #include <stdlib.h>
+#include <openssl/evp.h>
 
 /** Maximum batch ID length */
 #define BATCH_ID_LEN 16
+
+/** Max bytes per base64 chunk (after encoding).
+ * P10 line limit is 512 bytes. After headers (~100 bytes), we have ~400 safe.
+ * Raw data: 300 bytes -> 400 base64 chars.
+ */
+#define CH_CHUNK_RAW_SIZE 300
+#define CH_CHUNK_B64_SIZE 400
+
+/** Check if content needs base64 encoding (contains newline or is too long).
+ * @param[in] content Content string to check.
+ * @return 1 if encoding needed, 0 otherwise.
+ */
+static int ch_needs_encoding(const char *content)
+{
+  if (!content)
+    return 0;
+  /* Encode if contains newline (would corrupt P10 stream) */
+  if (strchr(content, '\n') != NULL)
+    return 1;
+  /* Encode if too long for single P10 message (after headers ~100 bytes) */
+  if (strlen(content) > 400)
+    return 1;
+  return 0;
+}
+
+/** Base64 encode a string using OpenSSL.
+ * @param[in] input Input data.
+ * @param[in] inlen Input length.
+ * @param[out] output Output buffer (must be at least (inlen*4/3)+5 bytes).
+ * @return Length of encoded string.
+ */
+static int ch_base64_encode(const char *input, size_t inlen, char *output)
+{
+  int outlen;
+  EVP_EncodeBlock((unsigned char *)output, (const unsigned char *)input, inlen);
+  outlen = ((inlen + 2) / 3) * 4;
+  output[outlen] = '\0';
+  return outlen;
+}
+
+/** Send a chathistory response with base64 chunking if needed.
+ * Protocol:
+ *   CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - normal
+ *   CH B <reqid> <msgid> <ts> <type> <sender> <account> + :<b64>    - start/more
+ *   CH B <reqid> <msgid> + :<b64>                                    - continue
+ *   CH B <reqid> <msgid> :<b64>                                      - final
+ * @param[in] sptr Target server.
+ * @param[in] reqid Request ID.
+ * @param[in] msg History message.
+ */
+static void send_ch_response(struct Client *sptr, const char *reqid,
+                             struct HistoryMessage *msg)
+{
+  const char *account = msg->account[0] ? msg->account : "*";
+
+  /* Check if content needs base64 encoding */
+  if (!ch_needs_encoding(msg->content)) {
+    /* Simple case: send as-is */
+    sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
+                  reqid, msg->msgid, msg->timestamp, msg->type,
+                  msg->sender, account, msg->content);
+    return;
+  }
+
+  /* Base64 encode the content */
+  size_t content_len = strlen(msg->content);
+  size_t b64_len = ((content_len + 2) / 3) * 4 + 1;
+  char *b64 = MyMalloc(b64_len);
+  if (!b64) {
+    /* Fallback: send truncated without encoding */
+    sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
+                  reqid, msg->msgid, msg->timestamp, msg->type,
+                  msg->sender, account, "[content too large]");
+    return;
+  }
+
+  ch_base64_encode(msg->content, content_len, b64);
+  size_t b64_total = strlen(b64);
+
+  /* If it fits in one message, send complete B message (no + marker) */
+  if (b64_total <= CH_CHUNK_B64_SIZE) {
+    sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s %s %d %s %s :%s",
+                  reqid, msg->msgid, msg->timestamp, msg->type,
+                  msg->sender, account, b64);
+    MyFree(b64);
+    return;
+  }
+
+  /* Multi-chunk: send with chunking */
+  size_t offset = 0;
+  int first = 1;
+
+  while (offset < b64_total) {
+    size_t remaining = b64_total - offset;
+    size_t chunk_size = (remaining > CH_CHUNK_B64_SIZE) ? CH_CHUNK_B64_SIZE : remaining;
+    int more = (offset + chunk_size < b64_total);
+    char chunk[CH_CHUNK_B64_SIZE + 1];
+
+    memcpy(chunk, b64 + offset, chunk_size);
+    chunk[chunk_size] = '\0';
+
+    if (first) {
+      /* First chunk: include all metadata, + marker if more coming */
+      if (more) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s %s %d %s %s + :%s",
+                      reqid, msg->msgid, msg->timestamp, msg->type,
+                      msg->sender, account, chunk);
+      } else {
+        /* Single chunk that just barely needed encoding */
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s %s %d %s %s :%s",
+                      reqid, msg->msgid, msg->timestamp, msg->type,
+                      msg->sender, account, chunk);
+      }
+      first = 0;
+    } else {
+      /* Continuation chunk: just reqid, msgid, and marker */
+      if (more) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s + :%s",
+                      reqid, msg->msgid, chunk);
+      } else {
+        /* Final chunk: no + marker */
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s :%s",
+                      reqid, msg->msgid, chunk);
+      }
+    }
+
+    offset += chunk_size;
+  }
+
+  MyFree(b64);
+}
 
 /** Message type names for formatting */
 static const char *msg_type_cmd[] = {
@@ -178,6 +310,19 @@ static int parse_s2s_reference(const char *ref, enum HistoryRefType *ref_type, c
     return 0;
   }
 
+  /* Handle IRC client format prefixes (X3 sends these) */
+  if (strncmp(ref, "timestamp=", 10) == 0) {
+    *ref_type = HISTORY_REF_TIMESTAMP;
+    *value = ref + 10;
+    return 0;
+  }
+
+  if (strncmp(ref, "msgid=", 6) == 0) {
+    *ref_type = HISTORY_REF_MSGID;
+    *value = ref + 6;
+    return 0;
+  }
+
   /* Timestamps start with a digit, msgids start with server numeric (letter) */
   if (IsDigit(*ref)) {
     *ref_type = HISTORY_REF_TIMESTAMP;
@@ -216,6 +361,187 @@ static int should_send_message_type(struct Client *sptr, enum HistoryMessageType
 
   /* Other events require draft/event-playback capability */
   return CapActive(sptr, CAP_DRAFT_EVENTPLAYBACK);
+}
+
+/** Send a single history message, handling multiline content.
+ * If content contains newlines and client supports multiline, send as nested batch.
+ * Otherwise truncate to first line.
+ *
+ * @param[in] sptr Client to send to.
+ * @param[in] msg Message to send.
+ * @param[in] target Target name.
+ * @param[in] outer_batchid Outer chathistory batch ID (or NULL if no batch).
+ * @param[in] time_str ISO timestamp string.
+ * @param[in] cmd Command name (PRIVMSG, NOTICE, etc.).
+ */
+static void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
+                                  const char *target, const char *outer_batchid,
+                                  const char *time_str, const char *cmd)
+{
+  char *newline;
+  char first_line[512];
+  char *content = msg->content;
+
+  /* Check if content contains newlines (stored multiline) */
+  newline = strchr(content, '\n');
+
+  if (newline && CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+    /* Re-batch as draft/multiline nested inside chathistory batch */
+    static unsigned long ml_counter = 0;
+    char ml_batchid[BATCH_ID_LEN];
+    char *line_start = content;
+    char *line_end;
+    int first = 1;
+
+    /* Generate unique multiline batch ID */
+    ircd_snprintf(0, ml_batchid, sizeof(ml_batchid), "ml%lu%s", ++ml_counter, cli_yxx(sptr));
+
+    /* Start nested multiline batch (inside outer chathistory batch) */
+    if (outer_batchid) {
+      sendrawto_one(sptr, "@batch=%s :testnet.fractalrealities.net BATCH +%s draft/multiline %s",
+                    outer_batchid, ml_batchid, target);
+    } else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
+                    ml_batchid, target);
+    }
+
+    /* Send each line with the same msgid (per multiline spec) */
+    while (line_start && *line_start) {
+      line_end = strchr(line_start, '\n');
+      if (line_end) {
+        /* Copy line without newline */
+        size_t len = line_end - line_start;
+        if (len >= sizeof(first_line))
+          len = sizeof(first_line) - 1;
+        memcpy(first_line, line_start, len);
+        first_line[len] = '\0';
+        line_start = line_end + 1;
+      } else {
+        /* Last line (no trailing newline) */
+        ircd_strncpy(first_line, line_start, sizeof(first_line) - 1);
+        line_start = NULL;
+      }
+
+      /* Send line as part of multiline batch */
+      if (first) {
+        /* First line gets time and msgid */
+        if (msg->account[0]) {
+          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
+                        ml_batchid, time_str, msg->msgid, msg->account,
+                        msg->sender, cmd, target, first_line);
+        } else {
+          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s :%s",
+                        ml_batchid, time_str, msg->msgid,
+                        msg->sender, cmd, target, first_line);
+        }
+        first = 0;
+      } else {
+        /* Subsequent lines - same msgid, batch tag only */
+        if (msg->account[0]) {
+          sendrawto_one(sptr, "@batch=%s;msgid=%s;account=%s :%s %s %s :%s",
+                        ml_batchid, msg->msgid, msg->account,
+                        msg->sender, cmd, target, first_line);
+        } else {
+          sendrawto_one(sptr, "@batch=%s;msgid=%s :%s %s %s :%s",
+                        ml_batchid, msg->msgid,
+                        msg->sender, cmd, target, first_line);
+        }
+      }
+    }
+
+    /* End nested multiline batch */
+    if (outer_batchid) {
+      sendrawto_one(sptr, "@batch=%s :testnet.fractalrealities.net BATCH -%s",
+                    outer_batchid, ml_batchid);
+    } else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", ml_batchid);
+    }
+  } else if (newline && outer_batchid) {
+    /* Tier 2: Client has chathistory batch but not multiline capability.
+     * Send each line as separate PRIVMSG within the chathistory batch.
+     * This allows full content retrieval even without multiline support.
+     * All lines share the same msgid so clients know they're related.
+     */
+    char *line_start = content;
+    char *line_end;
+    int first = 1;
+
+    while (line_start && *line_start) {
+      line_end = strchr(line_start, '\n');
+      if (line_end) {
+        size_t len = line_end - line_start;
+        if (len >= sizeof(first_line))
+          len = sizeof(first_line) - 1;
+        memcpy(first_line, line_start, len);
+        first_line[len] = '\0';
+        line_start = line_end + 1;
+      } else {
+        ircd_strncpy(first_line, line_start, sizeof(first_line) - 1);
+        line_start = NULL;
+      }
+
+      /* Send each line as separate message in batch */
+      if (first) {
+        /* First line gets time and msgid */
+        if (msg->account[0]) {
+          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
+                        outer_batchid, time_str, msg->msgid, msg->account,
+                        msg->sender, cmd, target, first_line);
+        } else {
+          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s :%s",
+                        outer_batchid, time_str, msg->msgid,
+                        msg->sender, cmd, target, first_line);
+        }
+        first = 0;
+      } else {
+        /* Subsequent lines - same msgid indicates they're part of same logical message */
+        if (msg->account[0]) {
+          sendrawto_one(sptr, "@batch=%s;msgid=%s;account=%s :%s %s %s :%s",
+                        outer_batchid, msg->msgid, msg->account,
+                        msg->sender, cmd, target, first_line);
+        } else {
+          sendrawto_one(sptr, "@batch=%s;msgid=%s :%s %s %s :%s",
+                        outer_batchid, msg->msgid,
+                        msg->sender, cmd, target, first_line);
+        }
+      }
+    }
+  } else {
+    /* Tier 3: No chathistory batch or no newlines - send single message */
+    /* If there are newlines but no batch, truncate to first line */
+    if (newline) {
+      size_t len = newline - content;
+      if (len >= sizeof(first_line))
+        len = sizeof(first_line) - 1;
+      memcpy(first_line, content, len);
+      first_line[len] = '\0';
+      content = first_line;
+    }
+
+    if (outer_batchid) {
+      /* With batch (but no newlines) */
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
+                      outer_batchid, time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s :%s",
+                      outer_batchid, time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    } else {
+      /* Without batch */
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s :%s",
+                      time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s :%s",
+                      time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    }
+  }
 }
 
 /** Send history messages as a batch response.
@@ -259,29 +585,10 @@ static void send_history_batch(struct Client *sptr, const char *target,
     else
       time_str = msg->timestamp;  /* Fallback if conversion fails */
 
-    if (CapActive(sptr, CAP_BATCH)) {
-      /* With batch */
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
-                      batchid, time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, msg->content);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s :%s",
-                      batchid, time_str, msg->msgid,
-                      msg->sender, cmd, target, msg->content);
-      }
-    } else {
-      /* Without batch (shouldn't happen if client has chathistory, but fallback) */
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s :%s",
-                      time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, msg->content);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s :%s",
-                      time_str, msg->msgid,
-                      msg->sender, cmd, target, msg->content);
-      }
-    }
+    /* Send message, handling multiline content if present */
+    send_history_message(sptr, msg, target,
+                         CapActive(sptr, CAP_BATCH) ? batchid : NULL,
+                         time_str, cmd);
   }
 
   /* End batch */
@@ -912,6 +1219,130 @@ static struct FedRequest *fed_requests[MAX_FED_REQUESTS];
 /** Counter for generating unique request IDs */
 static unsigned long fed_reqid_counter = 0;
 
+/** Maximum number of pending base64 chunks */
+#define MAX_PENDING_CHUNKS 64
+
+/** Structure for tracking base64 chunked messages */
+struct ChunkEntry {
+  char key[128];           /**< reqid:msgid */
+  char reqid[32];
+  char msgid[64];
+  char timestamp[32];
+  int type;
+  char sender[64];
+  char account[64];
+  char *b64_data;          /**< Accumulated base64 */
+  size_t b64_len;
+  size_t b64_alloc;
+};
+
+/** Global array of pending chunks */
+static struct ChunkEntry *pending_chunks[MAX_PENDING_CHUNKS];
+
+/** Find a chunk entry by key */
+static struct ChunkEntry *find_chunk(const char *key)
+{
+  int i;
+  for (i = 0; i < MAX_PENDING_CHUNKS; i++) {
+    if (pending_chunks[i] && strcmp(pending_chunks[i]->key, key) == 0)
+      return pending_chunks[i];
+  }
+  return NULL;
+}
+
+/** Free a chunk entry */
+static void free_chunk(struct ChunkEntry *chunk)
+{
+  int i;
+  if (!chunk)
+    return;
+  if (chunk->b64_data)
+    MyFree(chunk->b64_data);
+  for (i = 0; i < MAX_PENDING_CHUNKS; i++) {
+    if (pending_chunks[i] == chunk) {
+      pending_chunks[i] = NULL;
+      break;
+    }
+  }
+  MyFree(chunk);
+}
+
+/** Create a new chunk entry */
+static struct ChunkEntry *create_chunk(const char *reqid, const char *msgid,
+                                       const char *timestamp, int type,
+                                       const char *sender, const char *account)
+{
+  struct ChunkEntry *chunk;
+  int i;
+
+  for (i = 0; i < MAX_PENDING_CHUNKS; i++) {
+    if (!pending_chunks[i])
+      break;
+  }
+  if (i >= MAX_PENDING_CHUNKS)
+    return NULL;
+
+  chunk = (struct ChunkEntry *)MyCalloc(1, sizeof(struct ChunkEntry));
+  ircd_snprintf(0, chunk->key, sizeof(chunk->key), "%s:%s", reqid, msgid);
+  ircd_strncpy(chunk->reqid, reqid, sizeof(chunk->reqid) - 1);
+  ircd_strncpy(chunk->msgid, msgid, sizeof(chunk->msgid) - 1);
+  ircd_strncpy(chunk->timestamp, timestamp, sizeof(chunk->timestamp) - 1);
+  chunk->type = type;
+  ircd_strncpy(chunk->sender, sender, sizeof(chunk->sender) - 1);
+  ircd_strncpy(chunk->account, account, sizeof(chunk->account) - 1);
+  chunk->b64_alloc = 1024;
+  chunk->b64_data = MyMalloc(chunk->b64_alloc);
+  chunk->b64_data[0] = '\0';
+  chunk->b64_len = 0;
+
+  pending_chunks[i] = chunk;
+  return chunk;
+}
+
+/** Append base64 data to chunk */
+static void append_chunk_data(struct ChunkEntry *chunk, const char *b64)
+{
+  size_t add_len = strlen(b64);
+  if (chunk->b64_len + add_len + 1 > chunk->b64_alloc) {
+    chunk->b64_alloc = (chunk->b64_len + add_len + 1) * 2;
+    chunk->b64_data = MyRealloc(chunk->b64_data, chunk->b64_alloc);
+  }
+  memcpy(chunk->b64_data + chunk->b64_len, b64, add_len + 1);
+  chunk->b64_len += add_len;
+}
+
+/** Base64 decode using OpenSSL.
+ * @param[in] input Base64 encoded string.
+ * @param[in] inlen Input length.
+ * @param[out] output Decoded output (caller frees).
+ * @param[out] outlen Decoded length.
+ * @return 1 on success, 0 on failure.
+ */
+static int ch_base64_decode(const char *input, size_t inlen, char **output, size_t *outlen)
+{
+  size_t alloc_len = (inlen * 3) / 4 + 4;
+  char *decoded = MyMalloc(alloc_len);
+  int decoded_len;
+
+  decoded_len = EVP_DecodeBlock((unsigned char *)decoded,
+                                 (const unsigned char *)input, inlen);
+  if (decoded_len < 0) {
+    MyFree(decoded);
+    return 0;
+  }
+
+  /* EVP_DecodeBlock includes padding - adjust for actual length */
+  while (inlen > 0 && input[inlen - 1] == '=') {
+    decoded_len--;
+    inlen--;
+  }
+
+  decoded[decoded_len] = '\0';
+  *output = decoded;
+  *outlen = decoded_len;
+  return 1;
+}
+
 /** Find a federation request by ID */
 static struct FedRequest *find_fed_request(const char *reqid)
 {
@@ -1355,12 +1786,13 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    /* Send response messages */
+    /* Send response messages.
+     * Uses base64 chunked encoding for content with newlines or long content.
+     * - CH R: normal response (content as-is)
+     * - CH B: base64 encoded response (with chunking if needed)
+     */
     for (msg = messages; msg; msg = msg->next) {
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
-                    reqid, msg->msgid, msg->timestamp, msg->type,
-                    msg->sender, msg->account[0] ? msg->account : "*",
-                    msg->content);
+      send_ch_response(sptr, reqid, msg);
     }
 
     /* Send end marker */
@@ -1392,6 +1824,85 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Add message to federated results */
     add_fed_message(req, msgid, timestamp, type, sender, account, content);
+  }
+  else if (strcmp(subcmd, "B") == 0) {
+    /* Base64 Response: B <reqid> <msgid> <ts> <type> <sender> <account> [+] :<b64>
+     * Or continuation:  B <reqid> <msgid> [+] :<b64>
+     * + marker means more chunks coming. No + means final.
+     */
+    char *reqid, *msgid;
+    const char *b64_data;
+    struct FedRequest *req;
+    struct ChunkEntry *chunk;
+    char chunk_key[128];
+    int has_more = 0;
+    int is_continuation = 0;
+
+    if (parc < 4)
+      return 0;
+
+    reqid = parv[2];
+    msgid = parv[3];
+
+    /* Find the request */
+    req = find_fed_request(reqid);
+    if (!req)
+      return 0;
+
+    /* Determine message format based on parc:
+     * parc=5: continuation "B <reqid> <msgid> :<b64>" (final)
+     * parc=6: continuation "B <reqid> <msgid> + :<b64>" (more)
+     * parc=9: full "B <reqid> <msgid> <ts> <type> <sender> <account> :<b64>" (complete)
+     * parc=10: full "B <reqid> <msgid> <ts> <type> <sender> <account> + :<b64>" (first)
+     */
+    if (parc <= 6) {
+      is_continuation = 1;
+      if (parc == 6 && strcmp(parv[4], "+") == 0) {
+        has_more = 1;
+        b64_data = parv[5];
+      } else {
+        has_more = 0;
+        b64_data = parv[4];
+      }
+    } else {
+      is_continuation = 0;
+      if (parc == 10 && strcmp(parv[8], "+") == 0) {
+        has_more = 1;
+        b64_data = parv[9];
+      } else {
+        has_more = 0;
+        b64_data = (parc > 8) ? parv[8] : "";
+      }
+    }
+
+    /* Create chunk key */
+    ircd_snprintf(0, chunk_key, sizeof(chunk_key), "%s:%s", reqid, msgid);
+
+    if (is_continuation) {
+      chunk = find_chunk(chunk_key);
+      if (!chunk)
+        return 0;  /* Continuation without start */
+    } else {
+      chunk = create_chunk(reqid, msgid, parv[4], atoi(parv[5]), parv[6], parv[7]);
+      if (!chunk)
+        return 0;  /* No slots available */
+    }
+
+    /* Append base64 data */
+    append_chunk_data(chunk, b64_data);
+
+    if (!has_more) {
+      /* Final chunk - decode and add to results */
+      char *decoded;
+      size_t decoded_len;
+
+      if (ch_base64_decode(chunk->b64_data, chunk->b64_len, &decoded, &decoded_len)) {
+        add_fed_message(req, chunk->msgid, chunk->timestamp, chunk->type,
+                        chunk->sender, chunk->account, decoded);
+        MyFree(decoded);
+      }
+      free_chunk(chunk);
+    }
   }
   else if (strcmp(subcmd, "E") == 0) {
     /* End: E <reqid> <count> */
