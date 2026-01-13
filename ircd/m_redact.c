@@ -119,12 +119,14 @@ static void propagate_redact_to_channel(struct Client *sptr, struct Channel *chp
   for (member = chptr->members; member; member = member->next_member) {
     struct Client *acptr = member->user;
 
-    /* Skip sender */
-    if (acptr == sptr)
+    /* Only send to local clients with message-redaction capability */
+    if (!MyUser(acptr))
+      continue;
+    if (!CapActive(acptr, CAP_DRAFT_REDACT))
       continue;
 
-    /* Only send to clients with message-redaction capability */
-    if (!CapActive(acptr, CAP_DRAFT_REDACT))
+    /* Echo to sender only if they have echo-message capability (like PRIVMSG) */
+    if (acptr == sptr && !CapActive(acptr, CAP_ECHOMSG))
       continue;
 
     if (reason && *reason) {

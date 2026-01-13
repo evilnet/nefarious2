@@ -1964,7 +1964,7 @@ int rename_channel(struct Channel *chptr, const char *newname)
   strcpy(newchptr->chname, newname);
 
   /* Update hash table */
-  hRemoveChannel(chptr);
+  hRemChannel(chptr);
   hAddChannel(newchptr);
 
   /* Update global linked list */
