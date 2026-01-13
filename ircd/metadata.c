@@ -1716,14 +1716,7 @@ int metadata_send_query(struct Client *sptr, const char *target, const char *key
   if (!sptr || !target || !key)
     return -1;
 
-  /* Check if X3 is available */
-  if (!metadata_x3_is_available()) {
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "metadata_send_query: X3 not available, cannot query %s", target);
-    return -1;
-  }
-
-  /* Find services server */
+  /* Find services server - this is the authoritative check for X3 availability */
   services = find_services_server();
   if (!services) {
     log_write(LS_DEBUG, L_DEBUG, 0,
