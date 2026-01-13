@@ -1204,13 +1204,18 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   /* Parse visibility, Z flag, and value.
    * Compressed format: target key visibility Z :base64_data
    * Normal format: target key [visibility] [:value]
+   * Error format: target key ! :error_code (from services for NOTARGET)
    * Old format: target key [:value]
    */
   if (parc >= 4) {
     /* Check if parv[3] is a visibility token */
     if ((parv[3][0] == '*' && parv[3][1] == '\0') ||
-        (parv[3][0] == 'P' && parv[3][1] == '\0')) {
-      visibility = (parv[3][0] == 'P') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC;
+        (parv[3][0] == 'P' && parv[3][1] == '\0') ||
+        (parv[3][0] == '!' && parv[3][1] == '\0')) {
+      if (parv[3][0] == '!')
+        visibility = METADATA_VIS_ERROR;
+      else
+        visibility = (parv[3][0] == 'P') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC;
 
       /* Check for Z flag (compression passthrough) */
       if (parc >= 5 && parv[4][0] == 'Z' && parv[4][1] == '\0') {
@@ -1224,6 +1229,15 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       /* Old format or no visibility - parv[3] is value */
       value = parv[3];
     }
+  }
+
+  /* Handle error response from services (NOTARGET = no such account/channel) */
+  if (visibility == METADATA_VIS_ERROR && is_from_services) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "ms_metadata: Error response for %s: %s", target, value ? value : "(no value)");
+    /* Forward error to waiting MDQ clients */
+    metadata_handle_response(target, key, value, METADATA_VIS_ERROR);
+    return 0;  /* Don't cache or propagate error responses */
   }
 
   if (!is_valid_key(key))

@@ -45,6 +45,7 @@ struct Channel;
 /** Visibility levels for metadata */
 #define METADATA_VIS_PUBLIC  0  /* Anyone can see */
 #define METADATA_VIS_PRIVATE 1  /* Only owner can see */
+#define METADATA_VIS_ERROR   2  /* Error response (no such target) */
 
 /** Metadata entry structure */
 struct MetadataEntry {

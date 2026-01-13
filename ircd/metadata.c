@@ -1803,6 +1803,17 @@ void metadata_handle_response(const char *target, const char *key,
       if (req->client && !IsDead(req->client) && MyUser(req->client)) {
         const char *vis_str = (visibility == METADATA_VIS_PRIVATE) ? "private" : "*";
 
+        /* Handle error response from services (no such target) */
+        if (visibility == METADATA_VIS_ERROR) {
+          send_fail(req->client, "METADATA", "TARGET_INVALID", target,
+                    "No such account or channel");
+          matched++;
+          log_write(LS_DEBUG, L_DEBUG, 0,
+                    "metadata_handle_response: Sent TARGET_INVALID for %s to %s",
+                    target, cli_name(req->client));
+          goto remove_request;
+        }
+
         /* Check visibility for private metadata */
         if (visibility == METADATA_VIS_PRIVATE) {
           int can_view = 0;
