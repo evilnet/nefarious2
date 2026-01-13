@@ -349,7 +349,7 @@ extern void metadata_burst_channel(struct Channel *chptr, struct Client *cptr);
 /** Pending MDQ request structure */
 struct MetadataRequest {
   struct Client *client;              /**< Client waiting for response */
-  char target[ACCOUNTLEN + 1];        /**< Target account/channel */
+  char target[CHANNELLEN + 1];        /**< Target account/channel (channels can be 200 chars) */
   char key[METADATA_KEY_LEN];         /**< Key requested (or "*") */
   time_t timestamp;                   /**< When request was made */
   struct MetadataRequest *next;       /**< Next in list */

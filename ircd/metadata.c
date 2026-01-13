@@ -1750,7 +1750,7 @@ int metadata_send_query(struct Client *sptr, const char *target, const char *key
     return -1;
 
   req->client = sptr;
-  ircd_strncpy(req->target, target, ACCOUNTLEN);
+  ircd_strncpy(req->target, target, CHANNELLEN);
   ircd_strncpy(req->key, key, METADATA_KEY_LEN - 1);
   req->key[METADATA_KEY_LEN - 1] = '\0';
   req->timestamp = CurrentTime;
