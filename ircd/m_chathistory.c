@@ -49,6 +49,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "s_bsd.h"
+#include "s_conf.h"
 #include "send.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -66,7 +67,9 @@
 #define CH_CHUNK_RAW_SIZE 300
 #define CH_CHUNK_B64_SIZE 400
 
-/** Check if content needs base64 encoding (contains newline or is too long).
+/** Check if content needs base64 encoding.
+ * Note: New multiline content uses \x1F separators, but we must still check for
+ * \n to handle legacy data that was stored with newline separators.
  * @param[in] content Content string to check.
  * @return 1 if encoding needed, 0 otherwise.
  */
@@ -74,7 +77,7 @@ static int ch_needs_encoding(const char *content)
 {
   if (!content)
     return 0;
-  /* Encode if contains newline (would corrupt P10 stream) */
+  /* Encode if contains newline (legacy data or would corrupt P10 stream) */
   if (strchr(content, '\n') != NULL)
     return 1;
   /* Encode if too long for single P10 message (after headers ~100 bytes) */
@@ -196,6 +199,98 @@ static const char *msg_type_cmd[] = {
   "KICK", "MODE", "TOPIC", "TAGMSG"
 };
 
+/** Validate a timestamp value.
+ * Valid formats:
+ *   - Unix timestamp: digits with optional decimal (e.g., "1234567890.123")
+ *   - ISO 8601: "YYYY-MM-DDTHH:MM:SS.sssZ" or similar
+ * @param[in] ts Timestamp string to validate.
+ * @return 1 if valid, 0 if invalid.
+ */
+static int validate_timestamp(const char *ts)
+{
+  const char *p;
+
+  if (!ts || !*ts)
+    return 0;
+
+  /* Check for Unix timestamp format: digits with optional decimal point */
+  if (IsDigit(*ts)) {
+    int has_decimal = 0;
+    for (p = ts; *p; p++) {
+      if (*p == '.') {
+        if (has_decimal)
+          return 0;  /* Multiple decimals */
+        has_decimal = 1;
+      } else if (*p == 'T' || *p == '-' || *p == ':' || *p == 'Z') {
+        /* This looks like ISO 8601 format - validate below */
+        break;
+      } else if (!IsDigit(*p)) {
+        return 0;  /* Invalid character */
+      }
+    }
+    if (!*p)
+      return 1;  /* Valid Unix timestamp */
+  }
+
+  /* Check for ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]Z
+   * Relaxed validation - just check basic structure */
+  if (strlen(ts) >= 19) {  /* Minimum: YYYY-MM-DDTHH:MM:SS */
+    /* Check YYYY-MM-DD pattern at start */
+    if (IsDigit(ts[0]) && IsDigit(ts[1]) && IsDigit(ts[2]) && IsDigit(ts[3]) &&
+        ts[4] == '-' &&
+        IsDigit(ts[5]) && IsDigit(ts[6]) &&
+        ts[7] == '-' &&
+        IsDigit(ts[8]) && IsDigit(ts[9]) &&
+        ts[10] == 'T') {
+      return 1;  /* Valid ISO 8601 */
+    }
+  }
+
+  return 0;  /* Invalid format */
+}
+
+/** Validate a timestamp value in strict ISO 8601 format only.
+ * Per IRCv3 chathistory spec, clients should send ISO 8601 timestamps.
+ * Valid format: "YYYY-MM-DDTHH:MM:SS[.sss]Z"
+ * @param[in] ts Timestamp string to validate.
+ * @return 1 if valid ISO 8601, 0 if invalid.
+ */
+static int validate_iso_timestamp(const char *ts)
+{
+  if (!ts || !*ts)
+    return 0;
+
+  /* Check for ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]Z
+   * Relaxed validation - just check basic structure */
+  if (strlen(ts) >= 19) {  /* Minimum: YYYY-MM-DDTHH:MM:SS */
+    /* Check YYYY-MM-DD pattern at start */
+    if (IsDigit(ts[0]) && IsDigit(ts[1]) && IsDigit(ts[2]) && IsDigit(ts[3]) &&
+        ts[4] == '-' &&
+        IsDigit(ts[5]) && IsDigit(ts[6]) &&
+        ts[7] == '-' &&
+        IsDigit(ts[8]) && IsDigit(ts[9]) &&
+        ts[10] == 'T') {
+      return 1;  /* Valid ISO 8601 */
+    }
+  }
+
+  return 0;  /* Not ISO 8601 format */
+}
+
+/** Validate a client-facing timestamp value.
+ * Respects FEAT_CHATHISTORY_STRICT_TIMESTAMPS:
+ *   - If TRUE: only accepts ISO 8601 format (per IRCv3 spec)
+ *   - If FALSE: accepts both ISO 8601 and Unix timestamps (permissive)
+ * @param[in] ts Timestamp string to validate.
+ * @return 1 if valid, 0 if invalid.
+ */
+static int validate_client_timestamp(const char *ts)
+{
+  if (feature_bool(FEAT_CHATHISTORY_STRICT_TIMESTAMPS))
+    return validate_iso_timestamp(ts);
+  return validate_timestamp(ts);
+}
+
 /** Parse a message reference (timestamp= or msgid=).
  * @param[in] ref Reference string.
  * @param[out] ref_type Type of reference.
@@ -214,8 +309,13 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
   }
 
   if (strncmp(ref, "timestamp=", 10) == 0) {
+    const char *ts = ref + 10;
+    /* Validate the timestamp value per IRCv3 spec.
+     * Uses validate_client_timestamp which respects STRICT_TIMESTAMPS config. */
+    if (!validate_client_timestamp(ts))
+      return -1;
     *ref_type = HISTORY_REF_TIMESTAMP;
-    *value = ref + 10;
+    *value = ts;
     return 0;
   }
 
@@ -364,8 +464,8 @@ static int should_send_message_type(struct Client *sptr, enum HistoryMessageType
 }
 
 /** Send a single history message, handling multiline content.
- * If content contains newlines and client supports multiline, send as nested batch.
- * Otherwise truncate to first line.
+ * If content contains \x1F separators and client supports multiline,
+ * send as nested batch. Otherwise truncate to first line.
  *
  * @param[in] sptr Client to send to.
  * @param[in] msg Message to send.
@@ -378,14 +478,14 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
                                   const char *target, const char *outer_batchid,
                                   const char *time_str, const char *cmd)
 {
-  char *newline;
+  char *separator;
   char first_line[512];
   char *content = msg->content;
 
-  /* Check if content contains newlines (stored multiline) */
-  newline = strchr(content, '\n');
+  /* Check if content contains Unit Separator (multiline) */
+  separator = strchr(content, '\x1F');
 
-  if (newline && CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+  if (separator && CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
     /* Re-batch as draft/multiline nested inside chathistory batch */
     static unsigned long ml_counter = 0;
     char ml_batchid[BATCH_ID_LEN];
@@ -407,9 +507,9 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
 
     /* Send each line with the same msgid (per multiline spec) */
     while (line_start && *line_start) {
-      line_end = strchr(line_start, '\n');
+      line_end = strchr(line_start, '\x1F');
       if (line_end) {
-        /* Copy line without newline */
+        /* Copy line without separator */
         size_t len = line_end - line_start;
         if (len >= sizeof(first_line))
           len = sizeof(first_line) - 1;
@@ -417,7 +517,7 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
         first_line[len] = '\0';
         line_start = line_end + 1;
       } else {
-        /* Last line (no trailing newline) */
+        /* Last line (no trailing separator) */
         ircd_strncpy(first_line, line_start, sizeof(first_line) - 1);
         line_start = NULL;
       }
@@ -456,7 +556,7 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
     } else {
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", ml_batchid);
     }
-  } else if (newline && outer_batchid) {
+  } else if (separator && outer_batchid) {
     /* Tier 2: Client has chathistory batch but not multiline capability.
      * Send each line as separate PRIVMSG within the chathistory batch.
      * This allows full content retrieval even without multiline support.
@@ -467,7 +567,7 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
     int first = 1;
 
     while (line_start && *line_start) {
-      line_end = strchr(line_start, '\n');
+      line_end = strchr(line_start, '\x1F');
       if (line_end) {
         size_t len = line_end - line_start;
         if (len >= sizeof(first_line))
@@ -507,10 +607,10 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
       }
     }
   } else {
-    /* Tier 3: No chathistory batch or no newlines - send single message */
-    /* If there are newlines but no batch, truncate to first line */
-    if (newline) {
-      size_t len = newline - content;
+    /* Tier 3: No chathistory batch or no separators - send single message */
+    /* If there are separators but no batch, truncate to first line */
+    if (separator) {
+      size_t len = separator - content;
       if (len >= sizeof(first_line))
         len = sizeof(first_line) - 1;
       memcpy(first_line, content, len);
@@ -519,7 +619,7 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
     }
 
     if (outer_batchid) {
-      /* With batch (but no newlines) */
+      /* With batch (but no separators) */
       if (msg->account[0]) {
         sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
                       outer_batchid, time_str, msg->msgid, msg->account,
@@ -725,7 +825,18 @@ static int should_federate(const char *target, int local_count, int limit)
   if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
     return 0;
 
-  /* If we got fewer messages than requested, try federation */
+  /* Federate if we got fewer messages than requested.
+   * Note: count_servers() already skips U-lined services (X3 etc.) since
+   * they don't store chat history. If only services are connected,
+   * start_fed_query() returns NULL and we return local results immediately.
+   *
+   * TODO: This still has a "kick the can" problem for multi-server:
+   * - If local_count == 0 and remote servers exist, we federate
+   * - But if remote servers also have no history, we wait for timeout
+   * - The spec says return empty batch immediately, but we can't know
+   *   if remote servers have history without asking them
+   * - Possible future optimization: async channel presence tracking
+   */
   if (local_count < limit)
     return 1;
 
@@ -1587,14 +1698,27 @@ static void fed_timeout_callback(struct Event *ev)
   }
 }
 
-/** Count connected servers */
+/** Check if a server is U-lined (services).
+ * U-lined servers don't store chat history, so we skip them in federation.
+ */
+static int is_ulined_server(struct Client *server)
+{
+  return find_conf_byhost(cli_confs(server), cli_name(server), CONF_UWORLD) != NULL;
+}
+
+/** Count connected non-U-lined servers (real IRC servers only).
+ * U-lined servers (services like X3) don't store chat history.
+ */
 static int count_servers(void)
 {
   int count = 0;
   struct DLink *lp;
 
-  for (lp = cli_serv(&me)->down; lp; lp = lp->next)
-    count++;
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *server = lp->value.cptr;
+    if (!is_ulined_server(server))
+      count++;
+  }
 
   return count;
 }
@@ -1675,11 +1799,14 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
             feature_int(FEAT_CHATHISTORY_TIMEOUT));
   req->timer_active = 1;
 
-  /* Send query to all servers using efficient S2S format:
+  /* Send query to non-U-lined servers using efficient S2S format:
    * CH Q <target> <subcmd:1char> <ref:T/M prefix> <limit> <reqid>
+   * Skip U-lined servers (services) as they don't store chat history.
    */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     struct Client *server = lp->value.cptr;
+    if (is_ulined_server(server))
+      continue;  /* Services don't store history */
     sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s",
                   target, s2s_subcmd, s2s_ref, limit, reqid);
   }
@@ -1787,7 +1914,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
 
     /* Send response messages.
-     * Uses base64 chunked encoding for content with newlines or long content.
+     * Uses base64 chunked encoding for long content (>400 bytes).
      * - CH R: normal response (content as-is)
      * - CH B: base64 encoded response (with chunking if needed)
      */

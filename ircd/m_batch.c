@@ -936,10 +936,14 @@ process_multiline_batch(struct Client *sptr)
       char *text = lp->value.cp + 1;
       size_t text_len = strlen(text);
 
-      /* Add newline separator if not concat and not first line */
+      /* Add Unit Separator (\x1F) if not concat and not first line.
+       * Using \x1F instead of \n avoids base64 encoding overhead in P10 federation
+       * while still allowing multiline content to be stored and retrieved.
+       * HistServ/chathistory converts \x1F back to newlines when displaying.
+       */
       if (content_len > 0 && !concat) {
         if (content_len < sizeof(history_content) - 1) {
-          history_content[content_len++] = '\n';
+          history_content[content_len++] = '\x1F';
         }
       }
 
@@ -1429,10 +1433,14 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       char *text = lp->value.cp + 1;
       size_t text_len = strlen(text);
 
-      /* Add newline separator if not concat and not first line */
+      /* Add Unit Separator (\x1F) if not concat and not first line.
+       * Using \x1F instead of \n avoids base64 encoding overhead in P10 federation
+       * while still allowing multiline content to be stored and retrieved.
+       * HistServ/chathistory converts \x1F back to newlines when displaying.
+       */
       if (content_len > 0 && !concat) {
         if (content_len < sizeof(history_content) - 1) {
-          history_content[content_len++] = '\n';
+          history_content[content_len++] = '\x1F';
         }
       }
 
