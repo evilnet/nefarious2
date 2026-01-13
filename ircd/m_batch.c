@@ -666,12 +666,19 @@ process_multiline_batch(struct Client *sptr)
         char batchid[16];
         char timebuf[32];
         int use_tags = CapActive(sptr, CAP_MSGTAGS);
+        int use_label = con_ml_label(con)[0] && CapActive(sptr, CAP_LABELEDRESP);
 
         ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                       NumNick(sptr), con_batch_seq(con)++);
 
-        sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
-                      batchid, chptr->chname);
+        /* Include label in BATCH echo per IRCv3 labeled-response spec */
+        if (use_label) {
+          sendrawto_one(sptr, "@label=%s :%s BATCH +%s draft/multiline %s",
+                        con_ml_label(con), cli_name(&me), batchid, chptr->chname);
+        } else {
+          sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
+                        batchid, chptr->chname);
+        }
 
         first = 1;
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
