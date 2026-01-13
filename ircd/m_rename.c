@@ -210,8 +210,8 @@ void pending_rename_complete(struct PendingRename *pr)
     return;
   }
 
-  /* Perform the rename */
-  rc = rename_channel(pr->channel, pr->newname);
+  /* Perform the rename (updates pr->channel if reallocated) */
+  rc = rename_channel(&pr->channel, pr->newname);
   if (rc != 0) {
     send_fail(pr->client, "RENAME", "CANNOT_RENAME", pr->oldname,
               "Rename failed");
@@ -456,8 +456,8 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN);
   oldname_buf[CHANNELLEN] = '\0';
 
-  /* Perform the rename */
-  rc = rename_channel(chptr, newname);
+  /* Perform the rename (updates chptr if reallocated) */
+  rc = rename_channel(&chptr, newname);
   if (rc == -1) {
     send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
               "New channel name is too long");
@@ -518,8 +518,8 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN);
   oldname_buf[CHANNELLEN] = '\0';
 
-  /* Perform the rename */
-  rc = rename_channel(chptr, newname);
+  /* Perform the rename (updates chptr if reallocated) */
+  rc = rename_channel(&chptr, newname);
   if (rc != 0) {
     /* Rename failed - log and continue */
     log_write(LS_DEBUG, L_ERROR, 0,

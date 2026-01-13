@@ -1923,19 +1923,22 @@ struct Channel *get_channel(struct Client *cptr, char *chname, ChannelGetType fl
  * Updates the channel name in the hash table and channel structure.
  * Reallocates the channel structure if the new name is longer.
  *
- * @param[in] chptr Channel to rename.
+ * @param[in,out] chptr_p Pointer to channel pointer. Updated if reallocation occurs.
  * @param[in] newname New name for the channel.
  * @return 0 on success, -1 if invalid params, -2 if new name exists.
  */
-int rename_channel(struct Channel *chptr, const char *newname)
+int rename_channel(struct Channel **chptr_p, const char *newname)
 {
+  struct Channel *chptr;
   size_t oldlen, newlen;
   struct Channel *newchptr;
   struct Membership *member;
   struct SLink *link;
 
-  if (!chptr || !newname || !*newname)
+  if (!chptr_p || !*chptr_p || !newname || !*newname)
     return -1;
+
+  chptr = *chptr_p;
 
   newlen = strlen(newname);
   if (newlen > CHANNELLEN)
@@ -1998,6 +2001,9 @@ int rename_channel(struct Channel *chptr, const char *newname)
 
   /* Free old channel structure */
   MyFree(chptr);
+
+  /* Update caller's pointer */
+  *chptr_p = newchptr;
 
   return 0;
 }
