@@ -1784,15 +1784,27 @@ void metadata_handle_response(const char *target, const char *key,
   if (!target || !key)
     return;
 
+  log_write(LS_DEBUG, L_DEBUG, 0,
+            "metadata_handle_response: target=%s key=%s vis=%d pending_count=%d",
+            target, key, visibility, mdq_pending_count);
+
   prev = NULL;
   for (req = mdq_pending_head; req; req = next) {
     next = req->next;
+
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "metadata_handle_response: checking req target=%s key=%s client=%s",
+              req->target, req->key, req->client ? cli_name(req->client) : "(null)");
 
     /* Check if this request matches the response */
     if (ircd_strcmp(req->target, target) == 0 &&
         (ircd_strcmp(req->key, "*") == 0 || ircd_strcmp(req->key, key) == 0)) {
 
       /* Send response to waiting client if still connected */
+      log_write(LS_DEBUG, L_DEBUG, 0,
+                "metadata_handle_response: MATCHED! client=%p dead=%d myuser=%d",
+                (void *)req->client, req->client ? IsDead(req->client) : -1,
+                req->client ? MyUser(req->client) : -1);
       if (req->client && !IsDead(req->client) && MyUser(req->client)) {
         const char *vis_str = (visibility == METADATA_VIS_PRIVATE) ? "private" : "*";
 
