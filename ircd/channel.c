@@ -1921,35 +1921,83 @@ struct Channel *get_channel(struct Client *cptr, char *chname, ChannelGetType fl
 
 /** Rename a channel.
  * Updates the channel name in the hash table and channel structure.
- * Only allows renaming to names that fit in the allocated space.
+ * Reallocates the channel structure if the new name is longer.
  *
  * @param[in] chptr Channel to rename.
  * @param[in] newname New name for the channel.
- * @return 0 on success, -1 if new name is too long, -2 if new name exists.
+ * @return 0 on success, -1 if invalid params, -2 if new name exists.
  */
 int rename_channel(struct Channel *chptr, const char *newname)
 {
   size_t oldlen, newlen;
+  struct Channel *newchptr;
+  struct Membership *member;
+  struct SLink *link;
 
   if (!chptr || !newname || !*newname)
     return -1;
 
-  oldlen = strlen(chptr->chname);
   newlen = strlen(newname);
-
-  /* New name must fit in allocated space */
-  if (newlen > oldlen)
+  if (newlen > CHANNELLEN)
     return -1;
 
   /* Check if new name already exists */
   if (FindChannel(newname))
     return -2;
 
-  /* Update hash table first (removes from old bucket, adds to new) */
-  hChangeChannel(chptr, newname);
+  oldlen = strlen(chptr->chname);
 
-  /* Copy new name into channel structure */
-  strcpy(chptr->chname, newname);
+  /* If new name fits in existing allocation, just update in place */
+  if (newlen <= oldlen) {
+    hChangeChannel(chptr, newname);
+    strcpy(chptr->chname, newname);
+    return 0;
+  }
+
+  /* New name is longer - need to reallocate */
+  newchptr = (struct Channel*) MyMalloc(sizeof(struct Channel) + newlen);
+  if (!newchptr)
+    return -1;
+
+  /* Copy all data from old to new */
+  memcpy(newchptr, chptr, sizeof(struct Channel));
+  strcpy(newchptr->chname, newname);
+
+  /* Update hash table */
+  hRemoveChannel(chptr);
+  hAddChannel(newchptr);
+
+  /* Update global linked list */
+  if (chptr->prev)
+    chptr->prev->next = newchptr;
+  else
+    GlobalChannelList = newchptr;
+  if (chptr->next)
+    chptr->next->prev = newchptr;
+
+  /* Update all membership pointers */
+  for (member = newchptr->members; member; member = member->next_member)
+    member->channel = newchptr;
+
+  /* Update user invite lists that point to this channel */
+  for (link = newchptr->invites; link; link = link->next) {
+    struct Client *cptr = link->value.cptr;
+    struct SLink *inv;
+    /* Find and update user's invite pointer to this channel */
+    for (inv = cli_user(cptr)->invited; inv; inv = inv->next) {
+      if (inv->value.chptr == chptr) {
+        inv->value.chptr = newchptr;
+        break;
+      }
+    }
+  }
+
+  /* Update destruct event if pending */
+  if (newchptr->destruct_event)
+    newchptr->destruct_event->chptr = newchptr;
+
+  /* Free old channel structure */
+  MyFree(chptr);
 
   return 0;
 }
