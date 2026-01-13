@@ -395,10 +395,11 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       }
     }
 
-    /* For registered channels, check LMDB cache if not in memory */
-    if (!found && is_channel && target_channel) {
+    /* For channels, check LMDB cache and X3 for registered channel metadata */
+    if (!found && is_channel) {
       char value_buf[METADATA_VALUE_LEN + 1];
 
+      /* First check LMDB cache (works for both existing and non-existent channels) */
       if (metadata_lmdb_is_available()) {
         if (metadata_account_get(target, key, value_buf) == 0) {
           /* Found in LMDB cache - load into channel memory */
@@ -429,9 +430,11 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
             send_keyvalue(sptr, target, key, val, vis_str);
             found = 1;
 
-            /* Load into channel's in-memory metadata */
-            metadata_set_channel(target_channel, key, val,
-                                 (vis_str[0] == 'p') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC);
+            /* Load into channel's in-memory metadata (if channel exists) */
+            if (target_channel) {
+              metadata_set_channel(target_channel, key, val,
+                                   (vis_str[0] == 'p') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC);
+            }
           }
         }
       }
