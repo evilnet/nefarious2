@@ -571,6 +571,7 @@ extern const struct Numeric* get_error_numeric(int err);
 /* IRCv3 - Metadata extension (760-774) */
 #define RPL_WHOISKEYVALUE    760	/* IRCv3 - Metadata (WHOIS integration) */
 #define RPL_KEYVALUE         761	/* IRCv3 - Metadata key-value pair */
+#define RPL_METADATAEND      762	/* IRCv3 - End of metadata list */
 #define RPL_KEYNOTSET        766	/* IRCv3 - Metadata key not set */
 #define RPL_METADATASUBOK    770	/* IRCv3 - Metadata subscription OK */
 #define RPL_METADATAUNSUBOK  771	/* IRCv3 - Metadata unsubscription OK */

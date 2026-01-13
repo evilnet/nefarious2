@@ -361,6 +361,18 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
             val = val + 2;
           }
 
+          /* Check visibility for private metadata from LMDB */
+          if (vis_str[0] == 'p') {
+            /* Private metadata - check if viewer is owner or oper */
+            int can_view = 0;
+            if (IsOper(sptr))
+              can_view = 1;
+            else if (IsAccount(sptr) && ircd_strcmp(cli_account(sptr), account) == 0)
+              can_view = 1;
+            if (!can_view)
+              continue;  /* Skip to next key, don't reveal private data */
+          }
+
           if (*val) {
             send_keyvalue(sptr, target, key, val, vis_str);
             found = 1;
@@ -396,6 +408,21 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
           if (val[0] == 'P' && val[1] == ':') {
             vis_str = "private";
             val = val + 2;
+          }
+
+          /* Check visibility for private channel metadata from LMDB */
+          if (vis_str[0] == 'p') {
+            /* Private channel metadata - visible to chanops and opers only */
+            int can_view = 0;
+            if (IsOper(sptr))
+              can_view = 1;
+            else if (target_channel) {
+              struct Membership *member = find_member_link(target_channel, sptr);
+              if (member && IsChanOp(member))
+                can_view = 1;
+            }
+            if (!can_view)
+              continue;  /* Skip, don't reveal private channel data */
           }
 
           if (*val) {
@@ -511,8 +538,8 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   max_value_bytes = feature_int(FEAT_METADATA_MAX_VALUE_BYTES);
 
   if (value && strlen(value) > max_value_bytes) {
-    send_fail(sptr, "METADATA", "VALUE_TOO_LONG", key,
-              "Value exceeds maximum length");
+    send_fail(sptr, "METADATA", "VALUE_INVALID", key,
+              "value is too long or not UTF8");
     return 0;
   }
 
@@ -611,7 +638,8 @@ static int metadata_cmd_list(struct Client *sptr, int parc, char *parv[])
     entry = entry->next;
   }
 
-  /* Send end of list (there's no specific numeric for this, use KEYVALUE with empty list) */
+  /* Send end of list */
+  send_reply(sptr, RPL_METADATAEND, target);
   return 0;
 }
 

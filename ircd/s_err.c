@@ -1555,8 +1555,8 @@ static Numeric replyTable[] = {
   { RPL_WHOISKEYVALUE, "%s %s %s * :%s", "760" },
 /* 761 - RPL_KEYVALUE (target, key, visibility, value) */
   { RPL_KEYVALUE, "%s %s %s :%s", "761" },
-/* 762 */
-  { 0 },
+/* 762 - RPL_METADATAEND (target) */
+  { RPL_METADATAEND, "%s :end of metadata", "762" },
 /* 763 */
   { 0 },
 /* 764 */

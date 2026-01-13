@@ -1803,6 +1803,20 @@ void metadata_handle_response(const char *target, const char *key,
       if (req->client && !IsDead(req->client) && MyUser(req->client)) {
         const char *vis_str = (visibility == METADATA_VIS_PRIVATE) ? "private" : "*";
 
+        /* Check visibility for private metadata */
+        if (visibility == METADATA_VIS_PRIVATE) {
+          int can_view = 0;
+          if (IsOper(req->client))
+            can_view = 1;
+          else if (IsAccount(req->client) && ircd_strcmp(cli_account(req->client), target) == 0)
+            can_view = 1;
+          if (!can_view) {
+            /* Don't reveal private metadata, treat as not set */
+            send_reply(req->client, RPL_KEYNOTSET, target, key);
+            goto remove_request;
+          }
+        }
+
         if (value && *value) {
           send_reply(req->client, RPL_KEYVALUE, target, key, vis_str, value);
         } else {
@@ -1825,6 +1839,7 @@ void metadata_handle_response(const char *target, const char *key,
         }
       }
 
+    remove_request:
       /* Remove this request */
       if (prev)
         prev->next = next;
