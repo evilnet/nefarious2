@@ -213,8 +213,15 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Find services for forwarding */
   services = find_services_server();
 
-  /* Check if timestamp is provided (SET operation) */
-  if (parc >= 3 && parse_timestamp_param(parv[2], timestamp, sizeof(timestamp))) {
+  /* Check if timestamp parameter is present */
+  if (parc >= 3 && parv[2] && ircd_strncmp(parv[2], "timestamp=", 10) == 0) {
+    /* Timestamp parameter provided - must be valid format for SET operation */
+    if (!parse_timestamp_param(parv[2], timestamp, sizeof(timestamp))) {
+      /* Invalid timestamp format */
+      send_fail(sptr, "MARKREAD", "INVALID_PARAMS", parv[2],
+                "Invalid timestamp format (expected ISO 8601)");
+      return 0;
+    }
     /* SET operation: send to X3 for storage and broadcast */
 
     if (services) {
