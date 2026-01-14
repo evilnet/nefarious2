@@ -210,33 +210,7 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   is_oper = IsOper(sptr);
   is_chanop = IsChanOp(member);
 
-  /* Parse timestamp from msgid for time window check */
-  msg_time = parse_msgid_timestamp(msgid);
-  if (msg_time == 0) {
-    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", msgid,
-              "Invalid message ID format");
-    return 0;
-  }
-
-  /* Check time window for non-opers */
-  if (!is_oper) {
-    window = (time_t)feature_int(FEAT_REDACT_WINDOW);
-    if (window > 0 && (CurrentTime - msg_time) > window) {
-      send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
-                "Redaction window has expired");
-      return 0;
-    }
-  } else {
-    /* Opers have their own window (0 = unlimited) */
-    window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
-    if (window > 0 && (CurrentTime - msg_time) > window) {
-      send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
-                "Redaction window has expired");
-      return 0;
-    }
-  }
-
-  /* If chathistory is available, validate ownership */
+  /* If chathistory is available, validate ownership and check time window */
   if (history_is_available()) {
     rc = history_lookup_message(target, msgid, &msg);
     if (rc == 1) {
@@ -248,9 +222,32 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       /* Database error - allow redaction anyway (trust client) */
       can_redact = 1;
     } else {
-      /* Found the message - check authorization */
+      /* Found the message - get actual timestamp for window check */
+      msg_time = (time_t)strtoul(msg->timestamp, NULL, 10);
+
+      /* Check time window */
+      if (!is_oper) {
+        window = (time_t)feature_int(FEAT_REDACT_WINDOW);
+        if (window > 0 && (CurrentTime - msg_time) > window) {
+          history_free_messages(msg);
+          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
+                    "Redaction window has expired");
+          return 0;
+        }
+      } else {
+        /* Opers have their own window (0 = unlimited) */
+        window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
+        if (window > 0 && (CurrentTime - msg_time) > window) {
+          history_free_messages(msg);
+          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
+                    "Redaction window has expired");
+          return 0;
+        }
+      }
+
+      /* Check authorization */
       if (sender_nick_matches(msg, cli_name(sptr))) {
-        /* Own message - always allowed within time window */
+        /* Own message - allowed within time window */
         can_redact = 1;
       } else if (is_oper) {
         /* Opers can redact anything */
@@ -272,17 +269,33 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       history_free_messages(msg);
     }
   } else {
-    /* No chathistory - trust the client claim
-     * Only allow own messages unless oper/chanop */
-    if (is_oper) {
-      can_redact = 1;
-    } else if (is_chanop && feature_bool(FEAT_REDACT_CHANOP_OTHERS)) {
-      can_redact = 1;
-    } else {
-      /* Regular user - we trust they're redacting their own message
-       * since we can't verify without history */
-      can_redact = 1;
+    /* No chathistory - parse msgid timestamp as fallback (less accurate) */
+    msg_time = parse_msgid_timestamp(msgid);
+    if (msg_time == 0) {
+      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", msgid,
+                "Invalid message ID format");
+      return 0;
     }
+
+    /* Check time window with msgid timestamp (server startup time - may be stale) */
+    if (!is_oper) {
+      window = (time_t)feature_int(FEAT_REDACT_WINDOW);
+      if (window > 0 && (CurrentTime - msg_time) > window) {
+        send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
+                  "Redaction window has expired");
+        return 0;
+      }
+    } else {
+      window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
+      if (window > 0 && (CurrentTime - msg_time) > window) {
+        send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
+                  "Redaction window has expired");
+        return 0;
+      }
+    }
+
+    /* Trust the client claim - allow if within time window */
+    can_redact = 1;
   }
 
   /* Propagate to channel members with capability */
