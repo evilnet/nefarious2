@@ -41,6 +41,7 @@
 #include "numnicks.h"
 #include "parse.h"
 #include "s_bsd.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "s_misc.h"
 #include "s_user.h"
@@ -51,6 +52,24 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+
+/** Check if a client is from a U-lined (services) server.
+ * @param[in] cptr Client to check.
+ * @return Non-zero if client is from a U-lined server.
+ */
+static int is_from_uline(struct Client *cptr)
+{
+  struct Client *server;
+
+  if (!cptr || !cli_user(cptr))
+    return 0;
+
+  server = cli_user(cptr)->server;
+  if (!server)
+    return 0;
+
+  return find_conf_byhost(cli_confs(server), cli_name(server), CONF_UWORLD) != NULL;
+}
 
 /** Last used marker value. */
 static int sentalong_marker;
@@ -673,8 +692,11 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
    * Also stops us from deliberately building a large sendQ and then
    * trying to flood that link with data (possible during the net
    * relinking done by servers with a large load).
+   *
+   * If prio is set (high priority / flush immediately), always flush
+   * to ensure interactive service responses are delivered promptly.
    */
-  if (MsgQLength(&(cli_sendQ(to))) / 1024 > cli_lastsq(to))
+  if (prio || MsgQLength(&(cli_sendQ(to))) / 1024 > cli_lastsq(to))
     send_queued(to);
 }
 
@@ -737,6 +759,7 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   struct MsgBuf *mb;
   struct Client *cptr;
   char s2s_tagbuf[128];
+  int prio;
 
   to = cli_from(to);
 
@@ -761,7 +784,10 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 
   va_end(vd.vd_args);
 
-  send_buffer(to, mb, 0);
+  /* Flush immediately for messages from U-lined servers (services) */
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+
+  send_buffer(to, mb, prio);
 
   msgq_clean(mb);
 }
@@ -784,6 +810,7 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
   char msgidbuf[64];
   char *tags;
   const char *msgid = NULL;
+  int prio;
 
   to = cli_from(to);
 
@@ -807,7 +834,10 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
 
   va_end(vd.vd_args);
 
-  send_buffer(to, mb, 0);
+  /* Flush immediately for messages from U-lined servers (services) */
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+
+  send_buffer(to, mb, prio);
 
   msgq_clean(mb);
 }
@@ -838,6 +868,7 @@ void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *
   const char *msgid = NULL;
   struct timeval tv;
   struct tm tm;
+  int prio;
 
   to = cli_from(to);
 
@@ -880,7 +911,10 @@ void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *
 
   va_end(vd.vd_args);
 
-  send_buffer(to, mb, 0);
+  /* Flush immediately for messages from U-lined servers (services) */
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+
+  send_buffer(to, mb, prio);
 
   msgq_clean(mb);
 }
@@ -902,6 +936,7 @@ void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
   struct MsgBuf *mb;
   char tagbuf[1024];
   char *tags;
+  int prio;
 
   to = cli_from(to);
 
@@ -917,7 +952,10 @@ void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
 
   va_end(vd.vd_args);
 
-  send_buffer(to, mb, 0);
+  /* Flush immediately for messages from U-lined servers (services) */
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+
+  send_buffer(to, mb, prio);
 
   msgq_clean(mb);
 }
