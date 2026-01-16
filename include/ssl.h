@@ -53,6 +53,7 @@ extern int ssl_accept(struct Client *cptr);
 extern IOResult ssl_recv(struct Socket *socket, struct Client *cptr, char* buf, unsigned int length, unsigned int* count_out);
 extern IOResult ssl_sendv(struct Socket *socket, struct Client *cptr, struct MsgQ* buf, unsigned int* count_in, unsigned int* count_out);
 extern int ssl_send(struct Client *cptr, const char *buf, unsigned int len);
+extern int ssl_pending(struct Socket *socket);
 
 extern char  *ssl_get_cipher(SSL *ssl);
 extern char* ssl_get_fingerprint(SSL *ssl);

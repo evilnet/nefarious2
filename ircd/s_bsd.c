@@ -846,6 +846,9 @@ static int read_packet(struct Client *cptr, int socket_ready)
   unsigned int dolen = 0;
   unsigned int length = 0;
 
+#ifdef USE_SSL
+ssl_read_again:
+#endif
   if (socket_ready &&
       !(IsUser(cptr) &&
 	DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr) +
@@ -874,14 +877,47 @@ static int read_packet(struct Client *cptr, int socket_ready)
     }
   }
 
+#ifdef USE_SSL
+  /*
+   * SSL can buffer decrypted data internally. After SSL_read() returns,
+   * there may be more data waiting that won't trigger epoll (since the
+   * kernel socket appears empty). For non-server connections, accumulate
+   * all SSL data in the receive queue before processing.
+   */
+  if (length > 0 && cli_socket(cptr).ssl && !IsServer(cptr) &&
+      !IsHandshake(cptr) && !IsConnecting(cptr)) {
+    if (ssl_pending(&cli_socket(cptr)) > 0) {
+      /* Buffer current data and read more */
+      if (dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
+        return exit_client(cptr, cptr, &me, "dbuf_put fail");
+      length = 0;
+      goto ssl_read_again;
+    }
+  }
+#endif
+
   /*
    * For server connections, we process as many as we can without
    * worrying about the time of day or anything :)
    */
-  if (length > 0 && IsServer(cptr))
-    return server_dopacket(cptr, readbuf, length);
-  else if (length > 0 && (IsHandshake(cptr) || IsConnecting(cptr)))
-    return connect_dopacket(cptr, readbuf, length);
+  if (length > 0 && IsServer(cptr)) {
+    int result = server_dopacket(cptr, readbuf, length);
+#ifdef USE_SSL
+    /* Check for more SSL-buffered data after processing */
+    if (result > 0 && cli_socket(cptr).ssl && ssl_pending(&cli_socket(cptr)) > 0)
+      goto ssl_read_again;
+#endif
+    return result;
+  }
+  else if (length > 0 && (IsHandshake(cptr) || IsConnecting(cptr))) {
+    int result = connect_dopacket(cptr, readbuf, length);
+#ifdef USE_SSL
+    /* Check for more SSL-buffered data after processing */
+    if (result > 0 && cli_socket(cptr).ssl && ssl_pending(&cli_socket(cptr)) > 0)
+      goto ssl_read_again;
+#endif
+    return result;
+  }
   else
   {
     /*

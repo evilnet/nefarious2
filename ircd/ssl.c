@@ -420,6 +420,24 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
 }
 
 /*
+ * ssl_pending - check if SSL layer has buffered data ready to read
+ *
+ * IMPORTANT: OpenSSL can decrypt multiple messages from a single TLS record
+ * into an internal buffer. After SSL_read() returns, there may be more data
+ * waiting that won't trigger epoll (since the kernel socket appears empty).
+ * Call this after ssl_recv() to check for buffered data.
+ *
+ * returns:
+ *   Number of bytes available in SSL buffer, 0 if none
+ */
+int ssl_pending(struct Socket *socketh)
+{
+  if (!socketh || !socketh->ssl)
+    return 0;
+  return SSL_pending(socketh->ssl);
+}
+
+/*
  * ssl_sendv - non blocking writev to a connection
  * returns:
  *  1  if data was written
