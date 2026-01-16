@@ -1680,6 +1680,42 @@ void metadata_burst_channel(struct Channel *chptr, struct Client *cptr)
 static struct MetadataRequest *mdq_pending_head = NULL;
 static int mdq_pending_count = 0;
 
+/** Freelist for MetadataRequest structures */
+static struct MetadataRequest *mdq_freelist = NULL;
+static unsigned int mdq_alloc_count = 0;
+static unsigned int mdq_free_count = 0;
+
+/** Allocate a MetadataRequest from the pool.
+ * @return Pointer to MetadataRequest or NULL on failure.
+ */
+static struct MetadataRequest *mdq_alloc(void)
+{
+  struct MetadataRequest *req;
+
+  if (mdq_freelist) {
+    req = mdq_freelist;
+    mdq_freelist = req->next;
+    mdq_free_count--;
+  } else {
+    req = (struct MetadataRequest *)MyMalloc(sizeof(struct MetadataRequest));
+    if (req)
+      mdq_alloc_count++;
+  }
+  if (req)
+    memset(req, 0, sizeof(struct MetadataRequest));
+  return req;
+}
+
+/** Return a MetadataRequest to the pool.
+ * @param[in] req MetadataRequest to free.
+ */
+static void mdq_free(struct MetadataRequest *req)
+{
+  req->next = mdq_freelist;
+  mdq_freelist = req;
+  mdq_free_count++;
+}
+
 /** Find the services server (X3).
  * @return Pointer to services server, or NULL if not connected.
  */
@@ -1745,7 +1781,7 @@ int metadata_send_query(struct Client *sptr, const char *target, const char *key
   }
 
   /* Create pending request entry */
-  req = (struct MetadataRequest *)MyMalloc(sizeof(struct MetadataRequest));
+  req = mdq_alloc();
   if (!req)
     return -1;
 
@@ -1862,7 +1898,7 @@ void metadata_handle_response(const char *target, const char *key,
       else
         mdq_pending_head = next;
 
-      MyFree(req);
+      mdq_free(req);
       mdq_pending_count--;
     } else {
       prev = req;
@@ -1903,7 +1939,7 @@ void metadata_expire_requests(void)
       else
         mdq_pending_head = next;
 
-      MyFree(req);
+      mdq_free(req);
       mdq_pending_count--;
       expired++;
     } else {
@@ -1940,7 +1976,7 @@ void metadata_cleanup_client_requests(struct Client *cptr)
       else
         mdq_pending_head = next;
 
-      MyFree(req);
+      mdq_free(req);
       mdq_pending_count--;
       cleaned++;
     } else {

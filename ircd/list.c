@@ -67,6 +67,13 @@ static struct Connection* connectionFreeList;
 /** Linked list of currently unused SLink structures. */
 static struct SLink* slinkFreeList;
 
+/** Linked list of currently unused DLink structures. */
+static struct DLink* dlinkFreeList;
+/** Number of DLink structures allocated. */
+static unsigned int dlinkAllocCount;
+/** Number of DLink structures in freelist. */
+static unsigned int dlinkFreeCount;
+
 /** Initialize the list manipulation support system.
  * Pre-allocate MAXCONNECTIONS Client and Connection structures.
  */
@@ -509,7 +516,17 @@ void free_link(struct SLink* lp)
  */
 struct DLink *add_dlink(struct DLink **lpp, struct Client *cp)
 {
-  struct DLink* lp = (struct DLink*) MyMalloc(sizeof(struct DLink));
+  struct DLink* lp;
+
+  /* Allocate from freelist or malloc */
+  if (dlinkFreeList) {
+    lp = dlinkFreeList;
+    dlinkFreeList = lp->next;
+    dlinkFreeCount--;
+  } else {
+    lp = (struct DLink*) MyMalloc(sizeof(struct DLink));
+    dlinkAllocCount++;
+  }
   assert(0 != lp);
   lp->value.cptr = cp;
   lp->prev = 0;
@@ -534,7 +551,11 @@ void remove_dlink(struct DLink **lpp, struct DLink *lp)
   }
   else if ((*lpp = lp->next))
     lp->next->prev = NULL;
-  MyFree(lp);
+
+  /* Return to freelist instead of freeing */
+  lp->next = dlinkFreeList;
+  dlinkFreeList = lp;
+  dlinkFreeCount++;
 }
 
 /** Report memory usage of a list to \a cptr.
