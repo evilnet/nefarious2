@@ -80,8 +80,10 @@ COPY tools/docker/linesync.conf /home/nefarious/ircd/linesync.conf
 # Run entrypoint (volume permissions fixed by init container in docker-compose)
 ENTRYPOINT ["/home/nefarious/dockerentrypoint.sh"]
 
-# Run with Valgrind for memory testing (logs to cores mount for easy access)
-CMD ["valgrind", "--leak-check=full", "--show-leak-kinds=all", "--track-origins=yes", "--log-file=/home/nefarious/ircd/cores/valgrind.log", "/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd-docker.conf"]
+# Run IRCd in foreground with debug logging
+# Set NEFARIOUS_VALGRIND=1 in environment to run under Valgrind
+# Uses ircd.conf which includes local.conf (bind-mount your config there)
+CMD ["/home/nefarious/bin/ircd", "-n", "-x", "5", "-f", "ircd.conf"]
 
 
 

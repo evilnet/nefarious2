@@ -54,5 +54,12 @@ if [ "$1" == "/home/nefarious/bin/ircd" ]; then
 fi
 
 # Run CMD from Dockerfile
-exec "$@"
+# Optionally wrap with valgrind if NEFARIOUS_VALGRIND=1
+if [ "${NEFARIOUS_VALGRIND:-0}" = "1" ]; then
+    echo "Running with Valgrind (NEFARIOUS_VALGRIND=1)"
+    exec valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes \
+        --log-file=/home/nefarious/ircd/cores/valgrind.log "$@"
+else
+    exec "$@"
+fi
 
