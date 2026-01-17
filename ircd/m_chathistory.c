@@ -1350,6 +1350,108 @@ struct ChunkEntry {
 /** Global array of pending chunks */
 static struct ChunkEntry *pending_chunks[MAX_PENDING_CHUNKS];
 
+/*
+ * ============================================================================
+ * Chathistory Federation Advertisement (CH A)
+ * ============================================================================
+ *
+ * Servers advertise their chathistory storage capabilities to enable
+ * intelligent federation routing. This avoids querying servers that
+ * don't store history or don't have relevant channels.
+ *
+ * Protocol:
+ *   CH A S <retention_days>  - Storage capability (sent at BURST)
+ *   CH A R <retention_days>  - Retention update (on REHASH)
+ *   CH A F :<channel> ...    - Full channel sync
+ *   CH A + :<channel>        - Add channel
+ *   CH A - :<channel>        - Remove channel (optional)
+ */
+
+/** Maximum servers we track advertisements for (matches NN_MAX_SERVER) */
+#define MAX_AD_SERVERS 4096
+
+/** Structure for chathistory storage advertisement from a server */
+struct ChathistoryAd {
+  int has_advertisement;           /**< Received any CH A? */
+  int retention_days;              /**< Retention policy (0 = unlimited) */
+  int is_storage_server;           /**< Does this server store history? */
+  time_t last_update;              /**< When we last received an update */
+  /* Channel presence tracking - deferred to Phase 3 (Layer 1) */
+};
+
+/** Global array of server advertisements, indexed by server numeric */
+static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
+
+/** Get server numeric index for array lookup.
+ * @param[in] server Server client.
+ * @return Numeric index (0-4095) or -1 if invalid.
+ */
+static int server_ad_index(struct Client *server)
+{
+  if (!server || !IsServer(server))
+    return -1;
+  /* Server numeric is 2 chars base64, giving 0-4095 range */
+  return base64toint(cli_yxx(server));
+}
+
+/** Find or create advertisement entry for a server.
+ * @param[in] server Server client.
+ * @return Pointer to ChathistoryAd or NULL on failure.
+ */
+static struct ChathistoryAd *get_server_ad(struct Client *server)
+{
+  int idx = server_ad_index(server);
+  if (idx < 0)
+    return NULL;
+
+  if (!server_ads[idx]) {
+    server_ads[idx] = (struct ChathistoryAd *)MyCalloc(1, sizeof(struct ChathistoryAd));
+  }
+  return server_ads[idx];
+}
+
+/** Check if a server has advertised storage capability.
+ * @param[in] server Server client.
+ * @return 1 if server stores history, 0 otherwise.
+ */
+int has_chathistory_advertisement(struct Client *server)
+{
+  int idx = server_ad_index(server);
+  if (idx < 0)
+    return 0;
+  if (!server_ads[idx])
+    return 0;
+  return server_ads[idx]->has_advertisement && server_ads[idx]->is_storage_server;
+}
+
+/** Get retention days for a server.
+ * @param[in] server Server client.
+ * @return Retention days (0 = unlimited), or -1 if no advertisement.
+ */
+int server_retention_days(struct Client *server)
+{
+  int idx = server_ad_index(server);
+  if (idx < 0)
+    return -1;
+  if (!server_ads[idx] || !server_ads[idx]->has_advertisement)
+    return -1;
+  return server_ads[idx]->retention_days;
+}
+
+/** Clear advertisement entry for a server (on SQUIT).
+ * @param[in] server Server client.
+ */
+void clear_server_ad(struct Client *server)
+{
+  int idx = server_ad_index(server);
+  if (idx < 0)
+    return;
+  if (server_ads[idx]) {
+    MyFree(server_ads[idx]);
+    server_ads[idx] = NULL;
+  }
+}
+
 /** Find a chunk entry by key */
 static struct ChunkEntry *find_chunk(const char *key)
 {
@@ -2055,6 +2157,93 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (req->servers_pending <= 0) {
       complete_fed_request(req);
     }
+  }
+  else if (strcmp(subcmd, "A") == 0) {
+    /* Advertisement: A <subtype> [params...]
+     * Subtypes:
+     *   S <retention_days>  - Storage capability
+     *   R <retention_days>  - Retention update
+     *   F :<channel> ...    - Full channel sync (future)
+     *   + :<channel>        - Add channel (future)
+     *   - :<channel>        - Remove channel (future)
+     */
+    char *subtype;
+    struct ChathistoryAd *ad;
+
+    if (parc < 3)
+      return 0;
+
+    subtype = parv[2];
+    ad = get_server_ad(sptr);
+    if (!ad)
+      return 0;
+
+    if (subtype[0] == 'S') {
+      /* Storage capability: S <retention_days> */
+      int retention;
+
+      if (parc < 4)
+        return 0;
+
+      retention = atoi(parv[3]);
+      ad->has_advertisement = 1;
+      ad->is_storage_server = 1;
+      ad->retention_days = retention;
+      ad->last_update = CurrentTime;
+
+      Debug((DEBUG_INFO, "CH A S: Server %s advertises storage with %d day retention",
+             cli_name(sptr), retention));
+
+      /* Propagate to other servers (except source) */
+      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A S %d", retention);
+    }
+    else if (subtype[0] == 'R') {
+      /* Retention update: R <retention_days> */
+      int retention;
+
+      if (parc < 4)
+        return 0;
+
+      retention = atoi(parv[3]);
+      ad->retention_days = retention;
+      ad->last_update = CurrentTime;
+
+      Debug((DEBUG_INFO, "CH A R: Server %s updated retention to %d days",
+             cli_name(sptr), retention));
+
+      /* Propagate to other servers (except source) */
+      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A R %d", retention);
+    }
+    else if (subtype[0] == 'F') {
+      /* Full channel sync: F :<channel> ... (Phase 3 - Layer 1) */
+      /* For now, just propagate */
+      Debug((DEBUG_INFO, "CH A F: Server %s sent full channel sync (not yet implemented)",
+             cli_name(sptr)));
+
+      /* Propagate - rebuild parameter list */
+      if (parc >= 4) {
+        sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A F :%s", parv[parc - 1]);
+      }
+    }
+    else if (subtype[0] == '+') {
+      /* Add channel: + :<channel> (Phase 3 - Layer 1) */
+      Debug((DEBUG_INFO, "CH A +: Server %s added channel %s (not yet implemented)",
+             cli_name(sptr), parc >= 4 ? parv[3] : "?"));
+
+      if (parc >= 4) {
+        sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A + :%s", parv[3]);
+      }
+    }
+    else if (subtype[0] == '-') {
+      /* Remove channel: - :<channel> (Phase 3 - Layer 1) */
+      Debug((DEBUG_INFO, "CH A -: Server %s removed channel %s (not yet implemented)",
+             cli_name(sptr), parc >= 4 ? parv[3] : "?"));
+
+      if (parc >= 4) {
+        sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A - :%s", parv[3]);
+      }
+    }
+    /* Unknown subtypes are silently ignored for forward compatibility */
   }
 
   return 0;

@@ -53,6 +53,7 @@
 #include "s_debug.h"
 #include "s_stats.h"
 #include "s_user.h"
+#include "handlers.h"
 #include "send.h"
 #include "struct.h"
 #include "sys.h"
@@ -252,8 +253,10 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   struct SLink *lp;
   struct Ban *bp;
 
-  if (cli_serv(bcptr) && cli_serv(bcptr)->client_list)  /* Was SetServerYXX called ? */
+  if (cli_serv(bcptr) && cli_serv(bcptr)->client_list) {  /* Was SetServerYXX called ? */
     ClearServerYXX(bcptr);      /* Removes server from server_list[] */
+    clear_server_ad(bcptr);     /* Clear chathistory advertisement */
+  }
   if (IsUser(bcptr)) {
     /*
      * clear out uping requests
