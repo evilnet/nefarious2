@@ -929,6 +929,10 @@ static struct FeatureDesc {
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
+  F_B(CAP_sts, 0, 0, 0),
+  F_I(STS_PORT, 0, 6697, 0),
+  F_I(STS_DURATION, 0, 2592000, 0),  /* 30 days in seconds */
+  F_B(STS_PRELOAD, 0, 0, 0),
 #endif
 
   F_B(UPING_ENABLE, FEAT_READ, 1, 0),

@@ -110,6 +110,7 @@ static struct capabilities {
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
+  _CAP(STS, CAPFL_PROHIBIT, "sts", FEAT_CAP_sts),
 #endif
 /*  CAPLIST */
 #undef _CAP
@@ -230,6 +231,12 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     if (capab_list[i].cap == CAP_SASL && is_ls && !sasl_server_available())
       continue;
 
+#ifdef USE_SSL
+    /* STS requires CAP 302+ for values to be meaningful */
+    if (capab_list[i].cap == CAP_STS && is_ls && cap_version < 302)
+      continue;
+#endif
+
     /* Build the prefix (space separator and any modifiers needed). */
     pfx_len = 0;
     if (loc)
@@ -279,6 +286,23 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d,retention=%dd",
                                   feature_int(FEAT_CHATHISTORY_MAX), retention_days);
         }
+#ifdef USE_SSL
+      } else if (capab_list[i].cap == CAP_STS) {
+        /* STS value depends on whether connection is secure or not */
+        if (IsSSL(sptr)) {
+          /* Secure connection: advertise duration (and optional preload) */
+          int duration = feature_int(FEAT_STS_DURATION);
+          if (feature_bool(FEAT_STS_PRELOAD)) {
+            val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=duration=%d,preload", duration);
+          } else {
+            val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=duration=%d", duration);
+          }
+        } else {
+          /* Insecure connection: advertise secure port to upgrade to */
+          int port = feature_int(FEAT_STS_PORT);
+          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=port=%d", port);
+        }
+#endif
       } else if (capab_list[i].value) {
         val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
       }

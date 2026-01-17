@@ -103,6 +103,7 @@ enum Capab {
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", 0),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", 0),
+  _CAP(STS, CAPFL_PROHIBIT, "sts", 0),
 #endif
 /*  CAPLIST, */
 #undef _CAP
