@@ -58,16 +58,32 @@
 #define IOV_MAX 1024
 #endif /* IOV_MAX */
 
+/** Maximum number of SNI hostname/certificate pairs */
+#define SNI_MAX_CERTS 2
+
 SSL_CTX *ssl_server_ctx;
 SSL_CTX *ssl_client_ctx;
 
+/** Structure for SNI hostname to SSL_CTX mapping */
+struct sni_cert {
+  char *hostname;       /**< Hostname to match (NULL for default) */
+  SSL_CTX *ctx;         /**< SSL context with this certificate */
+};
+
+/** Array of SNI certificates (index 0 and 1 for SNI_HOSTNAME1/2) */
+static struct sni_cert sni_certs[SNI_MAX_CERTS];
+
 SSL_CTX *ssl_init_server_ctx(void);
 SSL_CTX *ssl_init_client_ctx(void);
+SSL_CTX *ssl_create_ctx_for_cert(const char *certfile, const char *keyfile);
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert);
 void ssl_set_nonblocking(SSL *s);
 int ssl_smart_shutdown(SSL *ssl);
 void sslfail(char *txt);
 void binary_to_hex(unsigned char *bin, char *hex, int length);
+static int sni_callback(SSL *ssl, int *al, void *arg);
+static void sni_init_certs(void);
+static void sni_free_certs(void);
 
 int ssl_init(void)
 {
@@ -80,6 +96,10 @@ int ssl_init(void)
   ssl_server_ctx = ssl_init_server_ctx();
   if (!ssl_server_ctx)
     return -1;
+
+  /* Initialize SNI certificates after server context is ready */
+  sni_init_certs();
+
   ssl_client_ctx = ssl_init_client_ctx();
   if (!ssl_client_ctx)
     return -1;
@@ -99,10 +119,16 @@ int ssl_reinit(int sig)
   if (!temp_ctx)
     return -1;
 
+  /* Free old SNI certificates before freeing old server context */
+  sni_free_certs();
+
   /* Now reinitialize server context for real. */
   SSL_CTX_free(temp_ctx);
   SSL_CTX_free(ssl_server_ctx);
   ssl_server_ctx = ssl_init_server_ctx();
+
+  /* Reload SNI certificates with new server context */
+  sni_init_certs();
 
   /* Attempt to reinitialize client context, return on error */
   temp_ctx = ssl_init_client_ctx();
@@ -189,6 +215,9 @@ SSL_CTX *ssl_init_server_ctx(void)
 #endif
   SSL_CTX_set_options(server_ctx, SSL_OP_SINGLE_ECDH_USE|SSL_OP_SINGLE_DH_USE);
 
+  /* Register SNI callback for multi-certificate support */
+  SSL_CTX_set_tlsext_servername_callback(server_ctx, sni_callback);
+
   return server_ctx;
 }
 
@@ -253,6 +282,183 @@ int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
   }
 
   return 1;
+}
+
+/**
+ * SNI callback - called during TLS handshake when client sends SNI extension.
+ * Selects the appropriate SSL_CTX based on the requested hostname.
+ *
+ * @param ssl The SSL connection
+ * @param al Alert to send on error (unused)
+ * @param arg User data (unused)
+ * @return SSL_TLSEXT_ERR_OK if context switched, SSL_TLSEXT_ERR_NOACK otherwise
+ */
+static int sni_callback(SSL *ssl, int *al, void *arg)
+{
+  const char *hostname;
+  int i;
+
+  (void)al;   /* Unused */
+  (void)arg;  /* Unused */
+
+  hostname = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+  if (!hostname)
+    return SSL_TLSEXT_ERR_NOACK;  /* No SNI - use default cert */
+
+  Debug((DEBUG_DEBUG, "SNI: client requested hostname '%s'", hostname));
+
+  /* Search for matching hostname in SNI certificates */
+  for (i = 0; i < SNI_MAX_CERTS; i++) {
+    if (sni_certs[i].hostname && sni_certs[i].ctx) {
+      if (!strcasecmp(sni_certs[i].hostname, hostname)) {
+        Debug((DEBUG_DEBUG, "SNI: switching to certificate for '%s'", hostname));
+        SSL_set_SSL_CTX(ssl, sni_certs[i].ctx);
+        return SSL_TLSEXT_ERR_OK;
+      }
+    }
+  }
+
+  /* No match found - use default certificate */
+  Debug((DEBUG_DEBUG, "SNI: no matching cert for '%s', using default", hostname));
+  return SSL_TLSEXT_ERR_NOACK;
+}
+
+/**
+ * Create an SSL_CTX for a specific certificate/key pair.
+ * Used for SNI hostname-specific certificates.
+ *
+ * @param certfile Path to certificate file
+ * @param keyfile Path to private key file
+ * @return SSL_CTX on success, NULL on failure
+ */
+SSL_CTX *ssl_create_ctx_for_cert(const char *certfile, const char *keyfile)
+{
+  SSL_CTX *ctx = NULL;
+
+  ctx = SSL_CTX_new(SSLv23_server_method());
+  if (!ctx) {
+    sslfail("SNI: Error creating context");
+    return NULL;
+  }
+
+  /* Apply same options as main server context */
+  if (feature_bool(FEAT_SSL_NOSSLV2))
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2);
+  if (feature_bool(FEAT_SSL_NOSSLV3))
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv3);
+  if (feature_bool(FEAT_SSL_NOTLSV1))
+    SSL_CTX_set_options(ctx, SSL_OP_NO_TLSv1);
+
+  SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+
+  if (SSL_CTX_use_certificate_chain_file(ctx, certfile) <= 0) {
+    Debug((DEBUG_ERROR, "SNI: Error loading certificate '%s'", certfile));
+    sslfail("SNI: Error loading certificate");
+    SSL_CTX_free(ctx);
+    return NULL;
+  }
+
+  if (SSL_CTX_use_PrivateKey_file(ctx, keyfile, SSL_FILETYPE_PEM) <= 0) {
+    Debug((DEBUG_ERROR, "SNI: Error loading key '%s'", keyfile));
+    sslfail("SNI: Error loading key");
+    SSL_CTX_free(ctx);
+    return NULL;
+  }
+
+  if (!SSL_CTX_check_private_key(ctx)) {
+    sslfail("SNI: Certificate and key don't match");
+    SSL_CTX_free(ctx);
+    return NULL;
+  }
+
+  /* Apply ciphers if configured */
+  if (!EmptyString(feature_str(FEAT_SSL_CIPHERS))) {
+    if (SSL_CTX_set_cipher_list(ctx, feature_str(FEAT_SSL_CIPHERS)) == 0) {
+      sslfail("SNI: Error setting cipher list");
+      SSL_CTX_free(ctx);
+      return NULL;
+    }
+  }
+
+#if defined(SSL_CTX_set_ecdh_auto)
+  SSL_CTX_set_ecdh_auto(ctx, 1);
+#elif OPENSSL_VERSION_NUMBER < 0x10100000L
+  SSL_CTX_set_tmp_ecdh(ctx, EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
+#endif
+  SSL_CTX_set_options(ctx, SSL_OP_SINGLE_ECDH_USE|SSL_OP_SINGLE_DH_USE);
+
+  return ctx;
+}
+
+/**
+ * Initialize SNI certificates from feature configuration.
+ * Called from ssl_init() after the default context is created.
+ */
+static void sni_init_certs(void)
+{
+  const char *hostname, *certfile, *keyfile;
+  int i;
+
+  /* Clear existing SNI certs */
+  memset(sni_certs, 0, sizeof(sni_certs));
+
+  /* Load SNI certificate 1 */
+  hostname = feature_str(FEAT_SNI_HOSTNAME1);
+  certfile = feature_str(FEAT_SNI_CERTFILE1);
+  keyfile = feature_str(FEAT_SNI_KEYFILE1);
+
+  if (!EmptyString(hostname) && !EmptyString(certfile) && !EmptyString(keyfile)) {
+    sni_certs[0].ctx = ssl_create_ctx_for_cert(certfile, keyfile);
+    if (sni_certs[0].ctx) {
+      sni_certs[0].hostname = strdup(hostname);
+      Debug((DEBUG_NOTICE, "SNI: Loaded certificate for '%s'", hostname));
+    } else {
+      Debug((DEBUG_ERROR, "SNI: Failed to load certificate for '%s'", hostname));
+    }
+  }
+
+  /* Load SNI certificate 2 */
+  hostname = feature_str(FEAT_SNI_HOSTNAME2);
+  certfile = feature_str(FEAT_SNI_CERTFILE2);
+  keyfile = feature_str(FEAT_SNI_KEYFILE2);
+
+  if (!EmptyString(hostname) && !EmptyString(certfile) && !EmptyString(keyfile)) {
+    sni_certs[1].ctx = ssl_create_ctx_for_cert(certfile, keyfile);
+    if (sni_certs[1].ctx) {
+      sni_certs[1].hostname = strdup(hostname);
+      Debug((DEBUG_NOTICE, "SNI: Loaded certificate for '%s'", hostname));
+    } else {
+      Debug((DEBUG_ERROR, "SNI: Failed to load certificate for '%s'", hostname));
+    }
+  }
+
+  /* Log summary */
+  for (i = 0; i < SNI_MAX_CERTS; i++) {
+    if (sni_certs[i].hostname) {
+      sendto_opmask_butone(0, SNO_OLDSNO, "SNI: Certificate loaded for '%s'",
+                           sni_certs[i].hostname);
+    }
+  }
+}
+
+/**
+ * Free SNI certificates and their contexts.
+ * Called during ssl_reinit() to clean up before reloading.
+ */
+static void sni_free_certs(void)
+{
+  int i;
+
+  for (i = 0; i < SNI_MAX_CERTS; i++) {
+    if (sni_certs[i].ctx) {
+      SSL_CTX_free(sni_certs[i].ctx);
+      sni_certs[i].ctx = NULL;
+    }
+    if (sni_certs[i].hostname) {
+      free(sni_certs[i].hostname);
+      sni_certs[i].hostname = NULL;
+    }
+  }
 }
 
 void ssl_abort(struct Client *cptr)

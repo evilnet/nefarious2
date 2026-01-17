@@ -831,6 +831,14 @@ static struct FeatureDesc {
   F_S(SSL_CIPHERS, FEAT_NULL, 0, 0),
   F_B(CERT_EXPIRY_TRACKING, 0, 1, 0),
 
+  /* SNI (Server Name Indication) - additional hostname/cert pairs */
+  F_S(SNI_HOSTNAME1, FEAT_NULL, 0, 0),
+  F_S(SNI_CERTFILE1, FEAT_NULL, 0, 0),
+  F_S(SNI_KEYFILE1, FEAT_NULL, 0, 0),
+  F_S(SNI_HOSTNAME2, FEAT_NULL, 0, 0),
+  F_S(SNI_CERTFILE2, FEAT_NULL, 0, 0),
+  F_S(SNI_KEYFILE2, FEAT_NULL, 0, 0),
+
   /* ZLINE FEAT_'s */
   F_B(DISABLE_ZLINES, 0, 0, 0),
   F_B(HIS_ZLINE_REASON, 0, 0, 0),
