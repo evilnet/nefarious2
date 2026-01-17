@@ -547,6 +547,10 @@ static void history_purge_callback(struct Event* ev)
   if (!history_is_available())
     return;
 
+  /* Run storage management maintenance (eviction if needed)
+   * This has its own internal interval check. */
+  history_maintenance_tick();
+
   retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
   if (retention_days <= 0)
     return; /* Retention disabled */

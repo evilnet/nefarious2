@@ -36,6 +36,7 @@
 #include "history.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
@@ -1686,13 +1687,256 @@ size_t history_get_map_size(void)
   return history_map_size;
 }
 
+/*
+ * Storage Management
+ *
+ * Implements graceful degradation and automatic eviction to prevent
+ * database full conditions. Uses a watermark system:
+ * - HIGH_WATERMARK: Start background eviction (default 85%)
+ * - LOW_WATERMARK: Eviction target (default 75%)
+ * - 95%: Critical - aggressive eviction
+ * - 99%: Suspended - no new writes
+ */
+
+/** Last eviction statistics */
+static int last_eviction_count = 0;
+static time_t last_eviction_time = 0;
+static time_t last_maintenance_time = 0;
+
+int history_db_utilization(void)
+{
+  MDB_envinfo info;
+  MDB_stat envstat;
+  int rc;
+  size_t used_size;
+  int percent;
+
+  if (!history_available)
+    return -1;
+
+  /* Get environment info for map size */
+  rc = mdb_env_info(history_env, &info);
+  if (rc != 0)
+    return -1;
+
+  /* Get environment stats for page size */
+  rc = mdb_env_stat(history_env, &envstat);
+  if (rc != 0)
+    return -1;
+
+  /* Calculate used size: (last_pgno + 1) * page_size
+   * Note: me_last_pgno is 0-indexed, so add 1 for count */
+  used_size = (info.me_last_pgno + 1) * envstat.ms_psize;
+
+  /* Calculate percentage */
+  if (info.me_mapsize == 0)
+    return 0;
+
+  percent = (int)((used_size * 100) / info.me_mapsize);
+  if (percent > 100)
+    percent = 100;
+
+  return percent;
+}
+
+enum HistoryStorageState history_storage_state(void)
+{
+  int util;
+
+  if (!history_available)
+    return HISTORY_STORAGE_SUSPENDED;
+
+  util = history_db_utilization();
+  if (util < 0)
+    return HISTORY_STORAGE_SUSPENDED;
+
+  if (util >= 99)
+    return HISTORY_STORAGE_SUSPENDED;
+  if (util >= 95)
+    return HISTORY_STORAGE_CRITICAL;
+  if (util >= 85)  /* HIGH_WATERMARK default */
+    return HISTORY_STORAGE_WARNING;
+
+  return HISTORY_STORAGE_NORMAL;
+}
+
+int history_evict_to_target(int target_percent)
+{
+  MDB_txn *txn;
+  MDB_cursor *cursor;
+  MDB_val key, data;
+  char msg_target[CHANNELLEN + 1];
+  char msg_timestamp[HISTORY_TIMESTAMP_LEN];
+  char msg_msgid[HISTORY_MSGID_LEN];
+  int evicted = 0;
+  int current_util;
+  int rc;
+  int batch_count = 0;
+  int max_batch = 1000;  /* Limit per transaction */
+
+  if (!history_available)
+    return -1;
+
+  current_util = history_db_utilization();
+  if (current_util < 0)
+    return -1;
+
+  if (current_util <= target_percent)
+    return 0;  /* Already at target */
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "history: eviction starting, util=%d%% target=%d%%",
+            current_util, target_percent);
+
+  /* Evict oldest messages until we reach target */
+  while (current_util > target_percent) {
+    rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+    if (rc != 0)
+      break;
+
+    rc = mdb_cursor_open(txn, history_dbi, &cursor);
+    if (rc != 0) {
+      mdb_txn_abort(txn);
+      break;
+    }
+
+    batch_count = 0;
+
+    /* Iterate from beginning (oldest entries) */
+    rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
+    while (rc == 0 && batch_count < max_batch) {
+      /* Parse key to get msgid for index cleanup */
+      if (parse_key(key.mv_data, key.mv_size,
+                    msg_target, msg_timestamp, msg_msgid) == 0) {
+        /* Delete from msgid index if present */
+        if (msg_msgid[0] != '\0') {
+          MDB_val msgid_key;
+          msgid_key.mv_size = strlen(msg_msgid);
+          msgid_key.mv_data = msg_msgid;
+          mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+        }
+      }
+
+      /* Delete from main database */
+      rc = mdb_cursor_del(cursor, 0);
+      if (rc != 0)
+        break;
+
+      evicted++;
+      batch_count++;
+
+      /* Move to next */
+      rc = mdb_cursor_get(cursor, &key, &data, MDB_GET_CURRENT);
+      if (rc == MDB_NOTFOUND)
+        rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    }
+
+    mdb_cursor_close(cursor);
+
+    rc = mdb_txn_commit(txn);
+    if (rc != 0) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "history: eviction commit failed: %s", mdb_strerror(rc));
+      break;
+    }
+
+    /* Recheck utilization */
+    current_util = history_db_utilization();
+    if (current_util < 0)
+      break;
+
+    /* If we didn't evict anything, we're done */
+    if (batch_count == 0)
+      break;
+  }
+
+  /* Update eviction stats */
+  last_eviction_count = evicted;
+  last_eviction_time = time(NULL);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "history: eviction complete, evicted=%d new_util=%d%%",
+            evicted, current_util);
+
+  return evicted;
+}
+
+void history_maintenance_tick(void)
+{
+  int util;
+  int high_watermark;
+  int low_watermark;
+  time_t now;
+  int interval;
+
+  if (!history_available)
+    return;
+
+  now = time(NULL);
+
+  /* Check if maintenance interval has passed */
+  interval = feature_int(FEAT_CHATHISTORY_MAINTENANCE_INTERVAL);
+  if (interval > 0 && last_maintenance_time > 0 &&
+      (now - last_maintenance_time) < interval)
+    return;
+
+  last_maintenance_time = now;
+
+  util = history_db_utilization();
+  if (util < 0)
+    return;
+
+  high_watermark = feature_int(FEAT_CHATHISTORY_HIGH_WATERMARK);
+  low_watermark = feature_int(FEAT_CHATHISTORY_LOW_WATERMARK);
+
+  /* Sanity checks */
+  if (high_watermark <= 0)
+    high_watermark = 85;
+  if (low_watermark <= 0)
+    low_watermark = 75;
+  if (low_watermark >= high_watermark)
+    low_watermark = high_watermark - 10;
+
+  /* Check if eviction is needed */
+  if (util >= high_watermark) {
+    enum HistoryStorageState state = history_storage_state();
+    const char *state_name;
+
+    switch (state) {
+      case HISTORY_STORAGE_WARNING:  state_name = "WARNING"; break;
+      case HISTORY_STORAGE_CRITICAL: state_name = "CRITICAL"; break;
+      case HISTORY_STORAGE_SUSPENDED: state_name = "SUSPENDED"; break;
+      default: state_name = "NORMAL"; break;
+    }
+
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: storage at %d%% (state=%s), starting eviction",
+              util, state_name);
+
+    history_evict_to_target(low_watermark);
+  }
+}
+
+void history_last_eviction(int *count, time_t *timestamp)
+{
+  if (count)
+    *count = last_eviction_count;
+  if (timestamp)
+    *timestamp = last_eviction_time;
+}
+
 void
 history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 {
   MDB_stat stat;
+  MDB_stat envstat;
   MDB_envinfo info;
   MDB_txn *txn;
   int rc;
+  int util;
+  enum HistoryStorageState state;
+  const char *state_name;
+  size_t used_size;
 
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :CHATHISTORY Statistics");
@@ -1706,15 +1950,54 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     return;
   }
 
-  /* Get environment info */
+  /* Get environment info and stats */
   rc = mdb_env_info(history_env, &info);
-  if (rc == 0) {
+  if (rc != 0)
+    return;
+
+  rc = mdb_env_stat(history_env, &envstat);
+  if (rc != 0)
+    return;
+
+  /* Calculate storage utilization */
+  used_size = (info.me_last_pgno + 1) * envstat.ms_psize;
+  util = history_db_utilization();
+  state = history_storage_state();
+
+  switch (state) {
+    case HISTORY_STORAGE_WARNING:  state_name = "WARNING"; break;
+    case HISTORY_STORAGE_CRITICAL: state_name = "CRITICAL"; break;
+    case HISTORY_STORAGE_SUSPENDED: state_name = "SUSPENDED"; break;
+    default: state_name = "NORMAL"; break;
+  }
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  Size: %lu MB / %lu MB (%d%%)",
+             (unsigned long)(used_size / (1024 * 1024)),
+             (unsigned long)(info.me_mapsize / (1024 * 1024)),
+             util);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  State: %s", state_name);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  Retention: %d days",
+             feature_int(FEAT_CHATHISTORY_RETENTION));
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  Watermarks: high=%d%% low=%d%%",
+             feature_int(FEAT_CHATHISTORY_HIGH_WATERMARK),
+             feature_int(FEAT_CHATHISTORY_LOW_WATERMARK));
+
+  /* Last eviction info */
+  if (last_eviction_time > 0) {
+    char timebuf[32];
+    struct tm tm;
+    gmtime_r(&last_eviction_time, &tm);
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm);
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  Map size: %lu MB",
-               (unsigned long)(info.me_mapsize / (1024 * 1024)));
+               "H :  Last eviction: %s (%d messages)",
+               timebuf, last_eviction_count);
+  } else {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  Last transaction ID: %lu",
-               (unsigned long)info.me_last_txnid);
+               "H :  Last eviction: never");
   }
 
   /* Get per-database stats */
@@ -1724,8 +2007,16 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     rc = mdb_stat(txn, history_dbi, &stat);
     if (rc == 0) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  Messages DB: %lu entries, depth %u",
+                 "H :  Messages: %lu entries, depth %u",
                  (unsigned long)stat.ms_entries, stat.ms_depth);
+    }
+
+    /* Targets database */
+    rc = mdb_stat(txn, history_targets_dbi, &stat);
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  Channels: %lu",
+                 (unsigned long)stat.ms_entries);
     }
 
     /* Message ID index */
@@ -1733,14 +2024,6 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     if (rc == 0) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                  "H :  MsgID index: %lu entries",
-                 (unsigned long)stat.ms_entries);
-    }
-
-    /* Targets database */
-    rc = mdb_stat(txn, history_targets_dbi, &stat);
-    if (rc == 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  Targets DB: %lu entries",
                  (unsigned long)stat.ms_entries);
     }
 
@@ -1761,6 +2044,7 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 /* Stub implementations when LMDB is not available */
 #include "history.h"
 #include <stddef.h>
+#include <time.h>
 
 int history_init(const char *dbpath)
 {
@@ -1904,6 +2188,34 @@ void history_set_map_size(size_t size_mb)
 size_t history_get_map_size(void)
 {
   return 0;
+}
+
+int history_db_utilization(void)
+{
+  return -1;
+}
+
+enum HistoryStorageState history_storage_state(void)
+{
+  return HISTORY_STORAGE_SUSPENDED;
+}
+
+int history_evict_to_target(int target_percent)
+{
+  (void)target_percent;
+  return -1;
+}
+
+void history_maintenance_tick(void)
+{
+}
+
+void history_last_eviction(int *count, time_t *timestamp)
+{
+  if (count)
+    *count = 0;
+  if (timestamp)
+    *timestamp = 0;
 }
 
 void

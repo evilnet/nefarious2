@@ -88,6 +88,14 @@ enum HistoryDirection {
   HISTORY_DIR_LATEST = 3   /**< Most recent messages */
 };
 
+/** Storage state for graceful degradation. */
+enum HistoryStorageState {
+  HISTORY_STORAGE_NORMAL   = 0, /**< Normal operation (<HIGH_WATERMARK) */
+  HISTORY_STORAGE_WARNING  = 1, /**< Eviction active (HIGH-95%) */
+  HISTORY_STORAGE_CRITICAL = 2, /**< Aggressive eviction (95-99%) */
+  HISTORY_STORAGE_SUSPENDED= 3  /**< No new writes (>99%) */
+};
+
 /** Reference type for history queries. */
 enum HistoryRefType {
   HISTORY_REF_TIMESTAMP = 0,  /**< Reference by timestamp */
@@ -317,6 +325,34 @@ extern void history_set_map_size(size_t size_mb);
  * @return Current map size in bytes.
  */
 extern size_t history_get_map_size(void);
+
+/** Get current database utilization.
+ * @return Utilization as percentage (0-100), or -1 on error.
+ */
+extern int history_db_utilization(void);
+
+/** Get current storage state.
+ * @return Current storage state enum value.
+ */
+extern enum HistoryStorageState history_storage_state(void);
+
+/** Evict messages until target utilization is reached.
+ * @param[in] target_percent Target utilization percentage (e.g., 75).
+ * @return Number of messages evicted, or -1 on error.
+ */
+extern int history_evict_to_target(int target_percent);
+
+/** Periodic maintenance function.
+ * Checks utilization and evicts if necessary.
+ * Should be called from the main event loop.
+ */
+extern void history_maintenance_tick(void);
+
+/** Get last eviction statistics.
+ * @param[out] count Number of messages evicted in last run.
+ * @param[out] timestamp Unix timestamp of last eviction.
+ */
+extern void history_last_eviction(int *count, time_t *timestamp);
 
 struct StatDesc;
 
