@@ -200,8 +200,8 @@ static void store_quit_events(struct Client *sptr, const char *comment)
   if (!history_is_available())
     return;
 
-  /* Check if chathistory feature is enabled */
-  if (!feature_bool(FEAT_CAP_draft_chathistory))
+  /* Check if chathistory storage is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
   /* Only store for local users to avoid duplicates */

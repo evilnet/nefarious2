@@ -129,10 +129,11 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
     sendcmdto_one(&me, CMD_END_OF_BURST_ACK, sptr, "");
 
     /* Advertise chathistory storage capability (CH A S) to newly linked server.
-     * Only advertise if we have CHATHISTORY enabled (non-zero retention).
+     * Only advertise if we have CHATHISTORY_STORE enabled - this indicates we
+     * actually store messages locally, not just handle queries.
      * The retention value tells the remote server how far back our history goes.
      */
-    if (feature_bool(FEAT_CAP_draft_chathistory)) {
+    if (feature_bool(FEAT_CHATHISTORY_STORE)) {
       int retention = feature_int(FEAT_CHATHISTORY_RETENTION);
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "A S %d", retention);
     }

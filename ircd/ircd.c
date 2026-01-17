@@ -540,8 +540,8 @@ static void history_purge_callback(struct Event* ev)
 
   (void)ev; /* unused */
 
-  /* Only run if chathistory is enabled */
-  if (!feature_bool(FEAT_CAP_draft_chathistory))
+  /* Only run if chathistory storage is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
   if (!history_is_available())
@@ -933,8 +933,8 @@ int main(int argc, char **argv) {
   geoip_init();
 
 #ifdef USE_LMDB
-  /* Initialize chathistory database */
-  if (feature_bool(FEAT_CAP_draft_chathistory)) {
+  /* Initialize chathistory database (only if storage enabled) */
+  if (feature_bool(FEAT_CHATHISTORY_STORE)) {
     /* Set map size from feature before init */
     history_set_map_size((size_t)feature_int(FEAT_HISTORY_MAP_SIZE_MB));
 #ifdef USE_ZSTD

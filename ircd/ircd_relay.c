@@ -103,8 +103,8 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (!history_is_available())
     return;
 
-  /* Check if chathistory feature is enabled */
-  if (!feature_bool(FEAT_CAP_draft_chathistory))
+  /* Check if chathistory storage is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
   /* Build sender string: nick!user@host */
@@ -200,8 +200,8 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   if (!history_is_available())
     return;
 
-  /* Check if chathistory feature is enabled */
-  if (!feature_bool(FEAT_CAP_draft_chathistory))
+  /* Check if chathistory storage is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
   /* Check if private message history is enabled (separate feature) */

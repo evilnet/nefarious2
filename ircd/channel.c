@@ -102,8 +102,8 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (!history_is_available())
     return;
 
-  /* Check if chathistory feature is enabled */
-  if (!feature_bool(FEAT_CAP_draft_chathistory))
+  /* Check if chathistory storage is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
   /* Generate Unix timestamp for storage */
