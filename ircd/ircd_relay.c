@@ -100,6 +100,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
 {
   char sender[HISTORY_SENDER_LEN];
   const char *account;
+  int has_local_interest;
 
   if (!history_is_available())
     return;
@@ -110,6 +111,34 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
     if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
       forward_history_write(chptr, sptr, msgid, timestamp, type, text);
     }
+    return;
+  }
+
+  /* Determine if we have local interest in this channel:
+   * - Local sender: always interested (our user sent it)
+   * - Remote sender: only if we have local users in channel
+   * This prevents hub servers from storing messages they're just relaying.
+   */
+  if (MyConnect(sptr)) {
+    has_local_interest = 1;
+  } else {
+    struct Membership *member;
+    has_local_interest = 0;
+    for (member = chptr->members; member; member = member->next_member) {
+      if (MyConnect(member->user)) {
+        has_local_interest = 1;
+        break;
+      }
+    }
+  }
+
+  if (!has_local_interest) {
+    /* No local interest - don't store.
+     * STORE servers without users in a channel don't receive messages via P10
+     * relay anyway (P10 only sends to servers with channel members). They rely
+     * on CH W forwarding from non-STORE servers, which handles registered
+     * channel storage in process_write_forward().
+     */
     return;
   }
 
