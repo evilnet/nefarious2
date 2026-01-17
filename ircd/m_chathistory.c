@@ -1958,6 +1958,44 @@ static int add_server_channel_ad(struct Client *server, const char *channel)
   return 1;
 }
 
+/** Remove a channel from a server's advertisement set.
+ * @param[in] server Server client.
+ * @param[in] channel Channel name to remove.
+ * @return 1 if removed, 0 if not found.
+ */
+static int remove_server_channel_ad(struct Client *server, const char *channel)
+{
+  struct ChathistoryAd *ad;
+  char lowerchan[CHANNELLEN + 1];
+  int i;
+
+  ad = get_server_ad(server);
+  if (!ad || !ad->channels)
+    return 0;
+
+  /* Lowercase the channel name */
+  ircd_strncpy(lowerchan, channel, CHANNELLEN);
+  lowerchan[CHANNELLEN] = '\0';
+  for (i = 0; lowerchan[i]; i++)
+    lowerchan[i] = ToLower(lowerchan[i]);
+
+  /* Find and remove */
+  for (i = 0; i < ad->channel_count; i++) {
+    if (ad->channels[i] && strcmp(ad->channels[i], lowerchan) == 0) {
+      MyFree(ad->channels[i]);
+      /* Shift remaining entries down */
+      for (; i < ad->channel_count - 1; i++) {
+        ad->channels[i] = ad->channels[i + 1];
+      }
+      ad->channels[ad->channel_count - 1] = NULL;
+      ad->channel_count--;
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
 /** Clear all channel advertisements for a server (before CH A F).
  * @param[in] server Server client.
  */
@@ -2165,6 +2203,34 @@ void broadcast_channel_advertisement(const char *channel)
   Debug((DEBUG_DEBUG, "CH A +: Broadcasting new channel %s", channel));
 
   sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A + :%s", channel);
+}
+
+/** Broadcast a channel removal to all peer servers.
+ * Called when a channel's last message is evicted/purged.
+ * This is the callback function registered with history.c.
+ * @param[in] channel Channel name that was emptied.
+ */
+static void broadcast_channel_removal(const char *channel)
+{
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+    return;  /* Only storage servers advertise channels */
+
+  if (!channel || (channel[0] != '#' && channel[0] != '&'))
+    return;  /* Only advertise channels, not DMs */
+
+  Debug((DEBUG_DEBUG, "CH A -: Broadcasting channel removal %s", channel));
+
+  sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A - :%s", channel);
+}
+
+/** Initialize chathistory callbacks.
+ * Registers the channel removal callback with the history subsystem.
+ * Called after history_init() succeeds.
+ */
+void chathistory_init_callbacks(void)
+{
+  history_set_channel_removed_callback(broadcast_channel_removal);
+  Debug((DEBUG_DEBUG, "chathistory: registered channel removal callback"));
 }
 
 /** Check if a server's retention window covers a given timestamp.
@@ -3125,14 +3191,18 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A + :%s", parv[3]);
     }
     else if (subtype[0] == '-') {
-      /* Remove channel: - :<channel> (Layer 1) - rarely used */
-      /* For now, just propagate - full removal not implemented */
-      Debug((DEBUG_DEBUG, "CH A -: Server %s removed channel %s",
-             cli_name(sptr), parc >= 4 ? parv[3] : "?"));
+      /* Remove channel: - :<channel> (Layer 1) */
+      if (parc < 4)
+        return 0;
 
-      if (parc >= 4) {
-        sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A - :%s", parv[3]);
+      if (remove_server_channel_ad(sptr, parv[3])) {
+        Debug((DEBUG_DEBUG, "CH A -: Server %s removed channel %s",
+               cli_name(sptr), parv[3]));
       }
+      ad->last_update = CurrentTime;
+
+      /* Propagate to other servers (except source) */
+      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A - :%s", parv[3]);
     }
     /* Unknown subtypes are silently ignored for forward compatibility */
   }

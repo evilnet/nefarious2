@@ -362,6 +362,18 @@ extern void history_last_eviction(int *count, time_t *timestamp);
  */
 typedef int (*history_channel_callback)(const char *channel, void *data);
 
+/** Callback type for channel removal notification.
+ * Called when a channel's last message is evicted/purged.
+ * @param[in] channel Channel name that was removed.
+ */
+typedef void (*history_channel_removed_cb)(const char *channel);
+
+/** Set callback for channel removal notifications.
+ * Used by chathistory federation to broadcast CH A - when channels are emptied.
+ * @param[in] cb Callback function (or NULL to disable).
+ */
+extern void history_set_channel_removed_callback(history_channel_removed_cb cb);
+
 /** Enumerate all channels that have stored history.
  * Calls callback for each channel in the targets database.
  * @param[in] callback Function to call for each channel.
@@ -371,10 +383,18 @@ typedef int (*history_channel_callback)(const char *channel, void *data);
 extern int history_enumerate_channels(history_channel_callback callback, void *data);
 
 /** Check if a channel exists in history (has stored messages).
+ * Note: This checks targets_dbi which may be stale after eviction.
  * @param[in] target Channel name.
  * @return 1 if channel has history, 0 if not, -1 on error.
  */
 extern int history_has_channel(const char *target);
+
+/** Check if a channel has any actual messages in history_dbi.
+ * More accurate than history_has_channel() after eviction/purge.
+ * @param[in] target Channel name.
+ * @return 1 if channel has messages, 0 if empty, -1 on error.
+ */
+extern int history_channel_has_messages(const char *target);
 
 struct StatDesc;
 

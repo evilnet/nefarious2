@@ -72,6 +72,9 @@ static int history_available = 0;
 /** Maximum database size (1GB default, configurable) */
 static size_t history_map_size = 1UL * 1024 * 1024 * 1024;
 
+/** Callback for channel removal notifications (for CH A - broadcasts) */
+static history_channel_removed_cb channel_removed_callback = NULL;
+
 /** Maximum number of named databases */
 #define HISTORY_MAX_DBS 5
 
@@ -87,8 +90,9 @@ static const char *history_type_names[] = {
   "KICK", "MODE", "TOPIC", "TAGMSG"
 };
 
-/* Forward declaration for emergency eviction (used in history_store_message) */
+/* Forward declarations */
 static int history_emergency_evict(void);
+static int history_cleanup_empty_targets(void);
 
 /** Build a lookup key from target and timestamp.
  * @param[out] key Output buffer.
@@ -1302,6 +1306,62 @@ int history_has_channel(const char *target)
   return -1;   /* Error */
 }
 
+int history_channel_has_messages(const char *target)
+{
+  MDB_txn *txn;
+  MDB_cursor *cursor;
+  MDB_val key, val;
+  char prefix[CHANNELLEN + 2];
+  int prefix_len;
+  int rc;
+
+  if (!history_available || !target)
+    return -1;
+
+  /* Build prefix key: "target\0" */
+  prefix_len = strlen(target);
+  if (prefix_len > CHANNELLEN)
+    return -1;
+  memcpy(prefix, target, prefix_len);
+  prefix[prefix_len] = KEY_SEP;
+  prefix_len++;
+
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0)
+    return -1;
+
+  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Position at or after prefix */
+  key.mv_size = prefix_len;
+  key.mv_data = prefix;
+  rc = mdb_cursor_get(cursor, &key, &val, MDB_SET_RANGE);
+
+  if (rc == 0) {
+    /* Check if key starts with our prefix */
+    if (key.mv_size >= (size_t)prefix_len &&
+        memcmp(key.mv_data, prefix, prefix_len) == 0) {
+      /* Found at least one message for this channel */
+      mdb_cursor_close(cursor);
+      mdb_txn_abort(txn);
+      return 1;
+    }
+  }
+
+  mdb_cursor_close(cursor);
+  mdb_txn_abort(txn);
+  return 0;  /* No messages found */
+}
+
+void history_set_channel_removed_callback(history_channel_removed_cb cb)
+{
+  channel_removed_callback = cb;
+}
+
 int history_purge_old(unsigned long max_age_seconds)
 {
   MDB_txn *txn;
@@ -1395,9 +1455,131 @@ int history_purge_old(unsigned long max_age_seconds)
   if (deleted > 0) {
     log_write(LS_SYSTEM, L_INFO, 0, "history: purged %d old messages (cutoff: %s)",
               deleted, cutoff_ts);
+    /* Clean up empty targets and notify via callback */
+    history_cleanup_empty_targets();
   }
 
   return deleted;
+}
+
+/** Clean up targets_dbi entries for channels with no messages.
+ * Called after eviction/purge to maintain consistency and trigger CH A - broadcasts.
+ * @return Number of targets cleaned up, or -1 on error.
+ */
+static int history_cleanup_empty_targets(void)
+{
+  MDB_txn *txn;
+  MDB_cursor *cursor;
+  MDB_val key, val;
+  char target[CHANNELLEN + 1];
+  char *channels_to_remove[256];  /* Buffer for channel names to remove */
+  int remove_count = 0;
+  int removed = 0;
+  int rc, i;
+
+  if (!history_available)
+    return -1;
+
+  /* First pass: collect channels that have no more messages (read-only) */
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0)
+    return -1;
+
+  rc = mdb_cursor_open(txn, history_targets_dbi, &cursor);
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdb_cursor_get(cursor, &key, &val, MDB_FIRST);
+  while (rc == 0 && remove_count < 256) {
+    if (key.mv_size > 0 && key.mv_size <= CHANNELLEN) {
+      memcpy(target, key.mv_data, key.mv_size);
+      target[key.mv_size] = '\0';
+
+      /* Only process channels (start with # or &) */
+      if (target[0] == '#' || target[0] == '&') {
+        /* Check if this channel still has messages */
+        /* Need to abort current txn and check in a new one */
+        mdb_cursor_close(cursor);
+        mdb_txn_abort(txn);
+
+        if (history_channel_has_messages(target) == 0) {
+          /* No messages - add to removal list */
+          channels_to_remove[remove_count] = MyMalloc(strlen(target) + 1);
+          if (channels_to_remove[remove_count]) {
+            strcpy(channels_to_remove[remove_count], target);
+            remove_count++;
+          }
+        }
+
+        /* Re-open transaction and cursor to continue */
+        rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+        if (rc != 0)
+          goto cleanup_list;
+
+        rc = mdb_cursor_open(txn, history_targets_dbi, &cursor);
+        if (rc != 0) {
+          mdb_txn_abort(txn);
+          goto cleanup_list;
+        }
+
+        /* Position cursor after current key */
+        key.mv_size = strlen(target);
+        key.mv_data = target;
+        rc = mdb_cursor_get(cursor, &key, &val, MDB_SET_RANGE);
+        if (rc == 0) {
+          /* Skip if we landed on same key */
+          if (key.mv_size == strlen(target) &&
+              memcmp(key.mv_data, target, key.mv_size) == 0) {
+            rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT);
+          }
+        }
+        continue;
+      }
+    }
+    rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT);
+  }
+
+  mdb_cursor_close(cursor);
+  mdb_txn_abort(txn);
+
+cleanup_list:
+  /* Second pass: remove collected targets and call callback */
+  if (remove_count > 0) {
+    rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+    if (rc == 0) {
+      for (i = 0; i < remove_count; i++) {
+        key.mv_size = strlen(channels_to_remove[i]);
+        key.mv_data = channels_to_remove[i];
+        rc = mdb_del(txn, history_targets_dbi, &key, NULL);
+        if (rc == 0) {
+          removed++;
+          Debug((DEBUG_DEBUG, "history: removed empty target %s", channels_to_remove[i]));
+        }
+      }
+      mdb_txn_commit(txn);
+    }
+
+    /* Call callback for each removed channel (after DB commit) */
+    if (channel_removed_callback) {
+      for (i = 0; i < remove_count; i++) {
+        channel_removed_callback(channels_to_remove[i]);
+      }
+    }
+  }
+
+  /* Free allocated channel names */
+  for (i = 0; i < remove_count; i++) {
+    MyFree(channels_to_remove[i]);
+  }
+
+  if (removed > 0) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: cleaned up %d empty channel targets", removed);
+  }
+
+  return removed;
 }
 
 int history_msgid_to_timestamp(const char *msgid, char *timestamp)
@@ -2038,6 +2220,11 @@ int history_evict_to_target(int target_percent)
             "history: eviction complete, evicted=%d new_util=%d%%",
             evicted, current_util);
 
+  /* Clean up empty targets and notify via callback */
+  if (evicted > 0) {
+    history_cleanup_empty_targets();
+  }
+
   return evicted;
 }
 
@@ -2416,6 +2603,17 @@ int history_has_channel(const char *target)
 {
   (void)target;
   return -1;
+}
+
+int history_channel_has_messages(const char *target)
+{
+  (void)target;
+  return -1;
+}
+
+void history_set_channel_removed_callback(history_channel_removed_cb cb)
+{
+  (void)cb;
 }
 
 #endif /* USE_LMDB */

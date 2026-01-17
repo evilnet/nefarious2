@@ -949,6 +949,9 @@ int main(int argc, char **argv) {
     if (history_init(feature_str(FEAT_CHATHISTORY_DB)) != 0) {
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize chathistory database, feature disabled");
+    } else {
+      /* Register chathistory callbacks (for CH A - broadcasts on eviction) */
+      chathistory_init_callbacks();
     }
   }
 
