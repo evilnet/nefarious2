@@ -122,6 +122,13 @@ extern int history_store_message(const char *msgid, const char *timestamp,
                                   const char *account, enum HistoryMessageType type,
                                   const char *content);
 
+/** Check if a message ID already exists in the history database.
+ * Used for deduplication in CH W (write forwarding).
+ * @param[in] msgid Message ID to check.
+ * @return 1 if msgid exists, 0 if not found, -1 on error.
+ */
+extern int history_has_msgid(const char *msgid);
+
 /** Query messages before a reference point.
  * @param[in] target Channel or nick to query.
  * @param[in] ref_type Type of reference.

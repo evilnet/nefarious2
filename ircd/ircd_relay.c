@@ -67,6 +67,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "metadata.h"
+#include "handlers.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -104,8 +105,13 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
     return;
 
   /* Check if chathistory storage is enabled */
-  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+  if (!feature_bool(FEAT_CHATHISTORY_STORE)) {
+    /* If write forwarding is enabled, forward to a storage server */
+    if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
+      forward_history_write(chptr, sptr, msgid, timestamp, type, text);
+    }
     return;
+  }
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))

@@ -1352,6 +1352,369 @@ static struct ChunkEntry *pending_chunks[MAX_PENDING_CHUNKS];
 
 /*
  * ============================================================================
+ * Chathistory Write Forwarding (CH W / CH WB)
+ * ============================================================================
+ *
+ * Non-STORE servers forward channel messages to STORE servers via CH W/WB.
+ * CH W is for plain text (≤400 bytes, no newlines).
+ * CH WB is for base64 encoded content (multiline, >400 bytes).
+ *
+ * Protocol:
+ *   CH W <target> <msgid> <ts> <sender> <account> <type> :<content>
+ *   CH WB <target> <msgid> <ts> <sender> <account> <type> [+] :<b64>
+ *   CH WB <target> <msgid> [+] :<b64>  (continuation)
+ */
+
+/** Maximum number of pending write chunks */
+#define MAX_PENDING_WRITE_CHUNKS 64
+
+/** Structure for tracking CH WB chunked writes */
+struct WriteChunkEntry {
+  char key[CHANNELLEN + HISTORY_MSGID_LEN + 2];  /**< target:msgid */
+  char target[CHANNELLEN + 1];
+  char msgid[HISTORY_MSGID_LEN];
+  char timestamp[HISTORY_TIMESTAMP_LEN];
+  int type;
+  char sender[HISTORY_SENDER_LEN];
+  char account[ACCOUNTLEN + 1];
+  char *b64_data;          /**< Accumulated base64 */
+  size_t b64_len;
+  size_t b64_alloc;
+};
+
+/** Global array of pending write chunks */
+static struct WriteChunkEntry *pending_write_chunks[MAX_PENDING_WRITE_CHUNKS];
+
+/** Find a write chunk by key */
+static struct WriteChunkEntry *find_write_chunk(const char *key)
+{
+  int i;
+  for (i = 0; i < MAX_PENDING_WRITE_CHUNKS; i++) {
+    if (pending_write_chunks[i] && strcmp(pending_write_chunks[i]->key, key) == 0)
+      return pending_write_chunks[i];
+  }
+  return NULL;
+}
+
+/** Free a write chunk entry */
+static void free_write_chunk(struct WriteChunkEntry *chunk)
+{
+  int i;
+  if (!chunk)
+    return;
+  if (chunk->b64_data)
+    MyFree(chunk->b64_data);
+  for (i = 0; i < MAX_PENDING_WRITE_CHUNKS; i++) {
+    if (pending_write_chunks[i] == chunk) {
+      pending_write_chunks[i] = NULL;
+      break;
+    }
+  }
+  MyFree(chunk);
+}
+
+/** Create a new write chunk entry */
+static struct WriteChunkEntry *create_write_chunk(const char *target, const char *msgid,
+                                                   const char *timestamp, int type,
+                                                   const char *sender, const char *account)
+{
+  struct WriteChunkEntry *chunk;
+  int i;
+
+  for (i = 0; i < MAX_PENDING_WRITE_CHUNKS; i++) {
+    if (!pending_write_chunks[i])
+      break;
+  }
+  if (i >= MAX_PENDING_WRITE_CHUNKS)
+    return NULL;
+
+  chunk = (struct WriteChunkEntry *)MyCalloc(1, sizeof(struct WriteChunkEntry));
+  ircd_snprintf(0, chunk->key, sizeof(chunk->key), "%s:%s", target, msgid);
+  ircd_strncpy(chunk->target, target, sizeof(chunk->target) - 1);
+  ircd_strncpy(chunk->msgid, msgid, sizeof(chunk->msgid) - 1);
+  ircd_strncpy(chunk->timestamp, timestamp, sizeof(chunk->timestamp) - 1);
+  chunk->type = type;
+  ircd_strncpy(chunk->sender, sender, sizeof(chunk->sender) - 1);
+  ircd_strncpy(chunk->account, account, sizeof(chunk->account) - 1);
+  chunk->b64_alloc = 1024;
+  chunk->b64_data = MyMalloc(chunk->b64_alloc);
+  chunk->b64_data[0] = '\0';
+  chunk->b64_len = 0;
+
+  pending_write_chunks[i] = chunk;
+  return chunk;
+}
+
+/** Append base64 data to write chunk */
+static void append_write_chunk_data(struct WriteChunkEntry *chunk, const char *b64)
+{
+  size_t add_len = strlen(b64);
+  if (chunk->b64_len + add_len + 1 > chunk->b64_alloc) {
+    chunk->b64_alloc = (chunk->b64_len + add_len + 1) * 2;
+    chunk->b64_data = MyRealloc(chunk->b64_data, chunk->b64_alloc);
+  }
+  memcpy(chunk->b64_data + chunk->b64_len, b64, add_len + 1);
+  chunk->b64_len += add_len;
+}
+
+/** Process a completed write forward (store if appropriate).
+ * @param[in] target Channel name.
+ * @param[in] msgid Message ID.
+ * @param[in] timestamp Unix timestamp.
+ * @param[in] sender Full sender mask.
+ * @param[in] account Sender's account or "*".
+ * @param[in] type_char Type character (P, N, T).
+ * @param[in] content Message content.
+ */
+static void process_write_forward(const char *target, const char *msgid,
+                                  const char *timestamp, const char *sender,
+                                  const char *account, char type_char,
+                                  const char *content)
+{
+  struct Channel *chptr;
+  enum HistoryMessageType type;
+  int has_local_users;
+
+  /* Only process channels */
+  if (!IsChannelName(target))
+    return;
+
+  /* Check if we're a storage server */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+    return;
+
+  /* Deduplication: check if we already have this msgid */
+  if (history_has_msgid(msgid) == 1) {
+    Debug((DEBUG_INFO, "CH W: Duplicate msgid %s for %s, ignoring", msgid, target));
+    return;
+  }
+
+  /* Convert type char to enum */
+  switch (type_char) {
+    case 'P': type = HISTORY_PRIVMSG; break;
+    case 'N': type = HISTORY_NOTICE; break;
+    case 'T': type = HISTORY_TAGMSG; break;
+    default:
+      Debug((DEBUG_INFO, "CH W: Unknown type '%c' for %s", type_char, target));
+      return;
+  }
+
+  /* Find channel */
+  chptr = FindChannel(target);
+
+  /* Decide whether to store:
+   * - Registered channels (+r): Always store (if STORE_REGISTERED enabled)
+   * - Unregistered with local users: Store
+   * - Unregistered without local users: Don't store
+   */
+  if (chptr) {
+    has_local_users = (chptr->members != NULL);  /* Any local users? */
+
+    if (feature_bool(FEAT_CHATHISTORY_STORE_REGISTERED) &&
+        (chptr->mode.mode & MODE_REGISTERED)) {
+      /* Registered channel - always store */
+      Debug((DEBUG_INFO, "CH W: Storing registered channel message for %s", target));
+    } else if (has_local_users) {
+      /* Has local users - store */
+      Debug((DEBUG_INFO, "CH W: Storing message for %s (has local users)", target));
+    } else {
+      /* Unregistered without local users - don't store */
+      Debug((DEBUG_INFO, "CH W: Ignoring message for %s (unregistered, no local users)", target));
+      return;
+    }
+  } else {
+    /* Channel doesn't exist locally - don't store */
+    Debug((DEBUG_INFO, "CH W: Channel %s doesn't exist locally", target));
+    return;
+  }
+
+  /* Store the message */
+  history_store_message(msgid, timestamp, target, sender,
+                        (account[0] == '*') ? NULL : account,
+                        type, content);
+}
+
+/** Check if content needs encoding (same logic as ch_needs_encoding) */
+static int write_needs_encoding(const char *content)
+{
+  if (!content)
+    return 0;
+  if (strchr(content, '\n') != NULL)
+    return 1;
+  if (strlen(content) > 400)
+    return 1;
+  return 0;
+}
+
+/** Send CH W or CH WB to a target server.
+ * Handles chunking for large/multiline content.
+ * @param[in] server Target storage server.
+ * @param[in] target Channel name.
+ * @param[in] msgid Message ID.
+ * @param[in] timestamp Unix timestamp.
+ * @param[in] sender Full sender mask.
+ * @param[in] account Sender's account or "*".
+ * @param[in] type_char Type character (P, N, T).
+ * @param[in] content Message content.
+ */
+static void send_ch_write(struct Client *server, const char *target,
+                          const char *msgid, const char *timestamp,
+                          const char *sender, const char *account,
+                          char type_char, const char *content)
+{
+  /* Check if content needs base64 encoding */
+  if (!write_needs_encoding(content)) {
+    /* Simple case: send as CH W */
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "W %s %s %s %s %s %c :%s",
+                  target, msgid, timestamp, sender, account, type_char, content);
+    return;
+  }
+
+  /* Base64 encode the content */
+  size_t content_len = strlen(content);
+  size_t b64_len = ((content_len + 2) / 3) * 4 + 1;
+  char *b64 = MyMalloc(b64_len);
+  if (!b64) {
+    /* Fallback: truncate and send as plain */
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "W %s %s %s %s %s %c :[content too large]",
+                  target, msgid, timestamp, sender, account, type_char);
+    return;
+  }
+
+  ch_base64_encode(content, content_len, b64);
+  size_t b64_total = strlen(b64);
+
+  /* If it fits in one message, send complete WB message (no + marker) */
+  if (b64_total <= CH_CHUNK_B64_SIZE) {
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c :%s",
+                  target, msgid, timestamp, sender, account, type_char, b64);
+    MyFree(b64);
+    return;
+  }
+
+  /* Multi-chunk: send with chunking */
+  size_t offset = 0;
+  int first = 1;
+
+  while (offset < b64_total) {
+    size_t remaining = b64_total - offset;
+    size_t chunk_size = (remaining > CH_CHUNK_B64_SIZE) ? CH_CHUNK_B64_SIZE : remaining;
+    int more = (offset + chunk_size < b64_total);
+    char chunk[CH_CHUNK_B64_SIZE + 1];
+
+    memcpy(chunk, b64 + offset, chunk_size);
+    chunk[chunk_size] = '\0';
+
+    if (first) {
+      /* First chunk: include all metadata, + marker if more coming */
+      if (more) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c + :%s",
+                      target, msgid, timestamp, sender, account, type_char, chunk);
+      } else {
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c :%s",
+                      target, msgid, timestamp, sender, account, type_char, chunk);
+      }
+      first = 0;
+    } else {
+      /* Continuation chunk: just target, msgid, and marker */
+      if (more) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s + :%s",
+                      target, msgid, chunk);
+      } else {
+        /* Final chunk: no + marker */
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s :%s",
+                      target, msgid, chunk);
+      }
+    }
+
+    offset += chunk_size;
+  }
+
+  MyFree(b64);
+}
+
+/** Forward a channel message to the nearest storage server.
+ * Called by non-STORE servers when FEAT_CHATHISTORY_WRITE_FORWARD is enabled.
+ * @param[in] chptr Channel.
+ * @param[in] sptr Sender client.
+ * @param[in] msgid Message ID.
+ * @param[in] timestamp Unix timestamp.
+ * @param[in] type Message type (HISTORY_PRIVMSG, HISTORY_NOTICE, HISTORY_TAGMSG).
+ * @param[in] content Message content.
+ */
+void forward_history_write(struct Channel *chptr, struct Client *sptr,
+                           const char *msgid, const char *timestamp,
+                           enum HistoryMessageType type, const char *content)
+{
+  struct DLink *lp;
+  struct Client *nearest_storage = NULL;
+  char sender[HISTORY_SENDER_LEN];
+  const char *account;
+  char type_char;
+
+  /* Only forward if write forwarding is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD))
+    return;
+
+  /* Don't forward if we're a storage server (we handle it locally) */
+  if (feature_bool(FEAT_CHATHISTORY_STORE))
+    return;
+
+  /* Build sender string: nick!user@host */
+  if (cli_user(sptr))
+    ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                  cli_name(sptr),
+                  cli_user(sptr)->username,
+                  cli_user(sptr)->host);
+  else
+    ircd_strncpy(sender, cli_name(sptr), sizeof(sender) - 1);
+
+  /* Get account name if logged in, or "*" */
+  account = (cli_user(sptr) && cli_user(sptr)->account[0])
+            ? cli_user(sptr)->account : "*";
+
+  /* Convert type to char */
+  switch (type) {
+    case HISTORY_PRIVMSG: type_char = 'P'; break;
+    case HISTORY_NOTICE: type_char = 'N'; break;
+    case HISTORY_TAGMSG: type_char = 'T'; break;
+    default: type_char = 'P'; break;
+  }
+
+  /* Find nearest server with storage advertisement */
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *server = lp->value.cptr;
+
+    /* Skip U-lined servers (services) */
+    if (is_ulined_server(server))
+      continue;
+
+    /* Must have storage advertisement */
+    if (!has_chathistory_advertisement(server))
+      continue;
+
+    /* For now, just use the first one we find
+     * TODO: Could optimize to find nearest by hop count
+     */
+    nearest_storage = server;
+    break;
+  }
+
+  if (!nearest_storage) {
+    Debug((DEBUG_INFO, "forward_history_write: No storage server found for %s",
+           chptr->chname));
+    return;
+  }
+
+  Debug((DEBUG_INFO, "forward_history_write: Forwarding %s to %s via CH W",
+         chptr->chname, cli_name(nearest_storage)));
+
+  send_ch_write(nearest_storage, chptr->chname, msgid, timestamp,
+                sender, account, type_char, content);
+}
+
+/*
+ * ============================================================================
  * Chathistory Federation Advertisement (CH A)
  * ============================================================================
  *
@@ -2379,6 +2742,124 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
     }
     /* Unknown subtypes are silently ignored for forward compatibility */
+  }
+  else if (strcmp(subcmd, "W") == 0) {
+    /* Write Forward (plain text): W <target> <msgid> <ts> <sender> <account> <type> :<content> */
+    char *target, *msgid, *timestamp, *sender, *account, *type_str, *content;
+
+    if (parc < 9)
+      return 0;
+
+    target = parv[2];
+    msgid = parv[3];
+    timestamp = parv[4];
+    sender = parv[5];
+    account = parv[6];
+    type_str = parv[7];
+    content = parv[8];
+
+    Debug((DEBUG_INFO, "CH W: Received write forward for %s msgid=%s from %s",
+           target, msgid, cli_name(sptr)));
+
+    process_write_forward(target, msgid, timestamp, sender, account,
+                          type_str[0], content);
+  }
+  else if (strcmp(subcmd, "WB") == 0) {
+    /* Write Forward (base64): WB <target> <msgid> <ts> <sender> <account> <type> [+] :<b64>
+     * Or continuation:        WB <target> <msgid> [+] :<b64>
+     * + marker means more chunks coming. No + means final.
+     */
+    char *target, *msgid;
+    const char *b64_data;
+    struct WriteChunkEntry *chunk;
+    char chunk_key[CHANNELLEN + HISTORY_MSGID_LEN + 2];
+    int has_more = 0;
+    int is_continuation = 0;
+
+    if (parc < 4)
+      return 0;
+
+    target = parv[2];
+    msgid = parv[3];
+
+    /* Determine message format based on parc:
+     * parc=5: continuation "WB <target> <msgid> :<b64>" (final)
+     * parc=6: continuation "WB <target> <msgid> + :<b64>" (more)
+     * parc=9: full "WB <target> <msgid> <ts> <sender> <account> <type> :<b64>" (complete)
+     * parc=10: full "WB <target> <msgid> <ts> <sender> <account> <type> + :<b64>" (first)
+     */
+    if (parc <= 6) {
+      is_continuation = 1;
+      if (parc == 6 && strcmp(parv[4], "+") == 0) {
+        has_more = 1;
+        b64_data = parv[5];
+      } else {
+        has_more = 0;
+        b64_data = parv[4];
+      }
+    } else {
+      is_continuation = 0;
+      if (parc == 10 && strcmp(parv[8], "+") == 0) {
+        has_more = 1;
+        b64_data = parv[9];
+      } else {
+        has_more = 0;
+        b64_data = (parc > 8) ? parv[8] : "";
+      }
+    }
+
+    /* Create chunk key */
+    ircd_snprintf(0, chunk_key, sizeof(chunk_key), "%s:%s", target, msgid);
+
+    if (is_continuation) {
+      chunk = find_write_chunk(chunk_key);
+      if (!chunk) {
+        Debug((DEBUG_INFO, "CH WB: Continuation without start for %s", chunk_key));
+        return 0;
+      }
+    } else {
+      /* Parse type character */
+      char type_char = parv[7][0];
+      int type_int = 0;
+      switch (type_char) {
+        case 'P': type_int = HISTORY_PRIVMSG; break;
+        case 'N': type_int = HISTORY_NOTICE; break;
+        case 'T': type_int = HISTORY_TAGMSG; break;
+      }
+      chunk = create_write_chunk(target, msgid, parv[4], type_int, parv[5], parv[6]);
+      if (!chunk) {
+        Debug((DEBUG_INFO, "CH WB: No slots available for %s", chunk_key));
+        return 0;
+      }
+    }
+
+    /* Append base64 data */
+    append_write_chunk_data(chunk, b64_data);
+
+    if (!has_more) {
+      /* Final chunk - decode and process */
+      char *decoded;
+      size_t decoded_len;
+      char type_char;
+
+      /* Convert type enum back to char for process_write_forward */
+      switch (chunk->type) {
+        case HISTORY_PRIVMSG: type_char = 'P'; break;
+        case HISTORY_NOTICE: type_char = 'N'; break;
+        case HISTORY_TAGMSG: type_char = 'T'; break;
+        default: type_char = 'P'; break;
+      }
+
+      if (ch_base64_decode(chunk->b64_data, chunk->b64_len, &decoded, &decoded_len)) {
+        Debug((DEBUG_INFO, "CH WB: Decoded %zu bytes for %s", decoded_len, target));
+        process_write_forward(chunk->target, chunk->msgid, chunk->timestamp,
+                              chunk->sender, chunk->account, type_char, decoded);
+        MyFree(decoded);
+      } else {
+        Debug((DEBUG_INFO, "CH WB: Base64 decode failed for %s", target));
+      }
+      free_write_chunk(chunk);
+    }
   }
 
   return 0;

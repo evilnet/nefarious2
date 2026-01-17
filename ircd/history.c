@@ -611,6 +611,37 @@ int history_store_message(const char *msgid, const char *timestamp,
   return 0;
 }
 
+int history_has_msgid(const char *msgid)
+{
+  MDB_txn *txn;
+  MDB_val key, data;
+  int rc;
+
+  if (!history_available)
+    return -1;
+
+  if (!msgid || !msgid[0])
+    return 0;
+
+  /* Begin read transaction */
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0)
+    return -1;
+
+  /* Look up msgid in the msgid index */
+  key.mv_size = strlen(msgid);
+  key.mv_data = (void *)msgid;
+
+  rc = mdb_get(txn, history_msgid_dbi, &key, &data);
+  mdb_txn_abort(txn);
+
+  if (rc == 0)
+    return 1;  /* Found */
+  if (rc == MDB_NOTFOUND)
+    return 0;  /* Not found */
+  return -1;   /* Error */
+}
+
 /** Internal query implementation with direction support.
  * @param[in] target Channel or nick to query.
  * @param[in] start_key Starting key for cursor.
@@ -1748,6 +1779,12 @@ int history_store_message(const char *msgid, const char *timestamp,
 {
   (void)msgid; (void)timestamp; (void)target; (void)sender;
   (void)account; (void)type; (void)content;
+  return -1;
+}
+
+int history_has_msgid(const char *msgid)
+{
+  (void)msgid;
   return -1;
 }
 
