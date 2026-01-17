@@ -87,6 +87,9 @@ static const char *history_type_names[] = {
   "KICK", "MODE", "TOPIC", "TAGMSG"
 };
 
+/* Forward declaration for emergency eviction (used in history_store_message) */
+static int history_emergency_evict(void);
+
 /** Build a lookup key from target and timestamp.
  * @param[out] key Output buffer.
  * @param[in] keysize Size of output buffer.
@@ -513,6 +516,7 @@ int history_store_message(const char *msgid, const char *timestamp,
   char valbuf[HISTORY_VALUE_BUFSIZE];
   int keylen, vallen;
   int rc;
+  int retry = 0;
 #ifdef USE_ZSTD
   unsigned char compressed[HISTORY_VALUE_BUFSIZE + 64];
   size_t compressed_len;
@@ -544,6 +548,7 @@ int history_store_message(const char *msgid, const char *timestamp,
   if (vallen < 0)
     return -1;
 
+store_retry:
   /* Begin write transaction */
   rc = mdb_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0) {
@@ -572,6 +577,11 @@ int history_store_message(const char *msgid, const char *timestamp,
   if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: mdb_put failed: %s", mdb_strerror(rc)));
     mdb_txn_abort(txn);
+    if (rc == MDB_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_retry;
+    }
     return -1;
   }
 
@@ -579,14 +589,21 @@ int history_store_message(const char *msgid, const char *timestamp,
   key.mv_size = strlen(msgid);
   key.mv_data = (void *)msgid;
   /* Value is target\0timestamp */
-  keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, NULL);
-  data.mv_size = keylen;
-  data.mv_data = keybuf;
+  {
+    int idx_keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, NULL);
+    data.mv_size = idx_keylen;
+    data.mv_data = keybuf;
+  }
 
   rc = mdb_put(txn, history_msgid_dbi, &key, &data, 0);
   if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: mdb_put(msgid) failed: %s", mdb_strerror(rc)));
     mdb_txn_abort(txn);
+    if (rc == MDB_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_retry;
+    }
     return -1;
   }
 
@@ -600,12 +617,22 @@ int history_store_message(const char *msgid, const char *timestamp,
   if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: mdb_put(target) failed: %s", mdb_strerror(rc)));
     mdb_txn_abort(txn);
+    if (rc == MDB_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_retry;
+    }
     return -1;
   }
 
   rc = mdb_txn_commit(txn);
   if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: mdb_txn_commit failed: %s", mdb_strerror(rc)));
+    if (rc == MDB_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_retry;
+    }
     return -1;
   }
 
@@ -1702,6 +1729,88 @@ size_t history_get_map_size(void)
 static int last_eviction_count = 0;
 static time_t last_eviction_time = 0;
 static time_t last_maintenance_time = 0;
+
+/** Emergency eviction count (for inline MDB_MAP_FULL recovery) */
+#define EMERGENCY_EVICT_BATCH 500
+
+/** Emergency eviction for inline MDB_MAP_FULL recovery.
+ * Called when a write fails due to database full condition.
+ * Evicts a small batch of oldest messages to make room.
+ * @return Number of messages evicted, or -1 on error.
+ */
+static int history_emergency_evict(void)
+{
+  MDB_txn *txn;
+  MDB_cursor *cursor;
+  MDB_val key, data;
+  char msg_target[CHANNELLEN + 1];
+  char msg_timestamp[HISTORY_TIMESTAMP_LEN];
+  char msg_msgid[HISTORY_MSGID_LEN];
+  int evicted = 0;
+  int rc;
+
+  if (!history_available)
+    return -1;
+
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "history: emergency eviction triggered (MDB_MAP_FULL)");
+
+  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history: emergency eviction txn_begin failed: %s",
+              mdb_strerror(rc));
+    return -1;
+  }
+
+  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Evict oldest entries */
+  rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
+  while (rc == 0 && evicted < EMERGENCY_EVICT_BATCH) {
+    /* Parse key to get msgid for index cleanup */
+    if (parse_key(key.mv_data, key.mv_size,
+                  msg_target, msg_timestamp, msg_msgid) == 0) {
+      if (msg_msgid[0] != '\0') {
+        MDB_val msgid_key;
+        msgid_key.mv_size = strlen(msg_msgid);
+        msgid_key.mv_data = msg_msgid;
+        mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+      }
+    }
+
+    rc = mdb_cursor_del(cursor, 0);
+    if (rc != 0)
+      break;
+
+    evicted++;
+    rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+  }
+
+  mdb_cursor_close(cursor);
+
+  rc = mdb_txn_commit(txn);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history: emergency eviction commit failed: %s",
+              mdb_strerror(rc));
+    return -1;
+  }
+
+  /* Update stats */
+  last_eviction_count += evicted;
+  last_eviction_time = time(NULL);
+
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "history: emergency eviction complete, evicted %d messages",
+            evicted);
+
+  return evicted;
+}
 
 int history_db_utilization(void)
 {

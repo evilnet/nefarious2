@@ -450,6 +450,29 @@ feature_notify_compress_level(void)
 }
 #endif /* USE_ZSTD */
 
+/** Notify peer servers of chathistory retention change (CH A R).
+ * Called when CHATHISTORY_RETENTION is modified via SET or REHASH.
+ * Only sends if we're a storage server (CHATHISTORY_STORE enabled).
+ */
+static void
+feature_notify_chathistory_retention(void)
+{
+  int retention;
+
+  /* Only advertise retention changes if we're a storage server */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+    return;
+
+  retention = feature_int(FEAT_CHATHISTORY_RETENTION);
+
+  /* Send CH A R <retention> to all peer servers */
+  sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A R %d", retention);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "chathistory: retention changed to %d days, notified peers",
+            retention);
+}
+
 /** Sets a feature to the given value.
  * @param[in] from Client trying to set parameters.
  * @param[in] fields Array of parameters to set.
@@ -857,7 +880,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_ADVERTISE_PM, 0, 0, 0),
   F_B(CHATHISTORY_PM_NOTICE, 0, 0, 0),
   F_S(CHATHISTORY_DB, 0, "history", 0),
-  F_I(CHATHISTORY_RETENTION, 0, 7, 0),
+  F_I(CHATHISTORY_RETENTION, 0, 7, feature_notify_chathistory_retention),
   F_B(CHATHISTORY_FEDERATION, 0, 1, 0),
   F_I(CHATHISTORY_TIMEOUT, 0, 5, 0),
   F_B(CHATHISTORY_STRICT_TIMESTAMPS, 0, 0, 0),

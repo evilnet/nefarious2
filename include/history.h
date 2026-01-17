@@ -30,6 +30,7 @@
 
 #include "ircd_defs.h"
 #include <stddef.h>
+#include <time.h>
 
 struct Client;
 

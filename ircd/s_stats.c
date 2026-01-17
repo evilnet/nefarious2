@@ -56,6 +56,7 @@
 #include "struct.h"
 #include "userload.h"
 #include "zline.h"
+#include "handlers.h"
 #include "history.h"
 #include "metadata.h"
 
@@ -616,6 +617,9 @@ stats_help(struct Client* to, const struct StatDesc* sd, char* param)
 
 /** Contains information about all statistics. */
 struct StatDesc statsinfo[] = {
+  { 'A', "chathistoryads", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_LAST_F,
+    chathistory_report_ads, 0,
+    "Chathistory federation advertisements." },
   { 'a', "nameservers", STAT_FLAG_OPERFEAT|STAT_FLAG_LOCONLY, FEAT_HIS_STATS_a,
     report_dns_servers, 0,
     "DNS servers." },

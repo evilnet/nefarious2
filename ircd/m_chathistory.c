@@ -50,9 +50,14 @@
 #include "numnicks.h"
 #include "s_bsd.h"
 #include "s_conf.h"
+#include "s_debug.h"
 #include "send.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+
+/* Forward declarations for functions used before definition */
+static int is_ulined_server(struct Client *server);
+int has_chathistory_advertisement(struct Client *server);
 #include <string.h>
 #include <stdlib.h>
 #include <openssl/evp.h>
@@ -1485,7 +1490,7 @@ static void process_write_forward(const char *target, const char *msgid,
 
   /* Deduplication: check if we already have this msgid */
   if (history_has_msgid(msgid) == 1) {
-    Debug((DEBUG_INFO, "CH W: Duplicate msgid %s for %s, ignoring", msgid, target));
+    Debug((DEBUG_DEBUG, "CH W: Duplicate msgid %s for %s, ignoring", msgid, target));
     return;
   }
 
@@ -1495,7 +1500,7 @@ static void process_write_forward(const char *target, const char *msgid,
     case 'N': type = HISTORY_NOTICE; break;
     case 'T': type = HISTORY_TAGMSG; break;
     default:
-      Debug((DEBUG_INFO, "CH W: Unknown type '%c' for %s", type_char, target));
+      Debug((DEBUG_DEBUG, "CH W: Unknown type '%c' for %s", type_char, target));
       return;
   }
 
@@ -1504,28 +1509,46 @@ static void process_write_forward(const char *target, const char *msgid,
 
   /* Decide whether to store:
    * - Registered channels (+r): Always store (if STORE_REGISTERED enabled)
-   * - Unregistered with local users: Store
-   * - Unregistered without local users: Don't store
+   * - Channel with local users: Store (natural interest)
+   * - Channel doesn't exist or no local users: Check if forwarding is trusted
+   *
+   * For CH W, the sending server already decided the message was worth
+   * forwarding. If the channel doesn't exist locally, we still store it
+   * since we're the designated STORE server for this message.
    */
   if (chptr) {
-    has_local_users = (chptr->members != NULL);  /* Any local users? */
+    /* Check for local member interest (not just any members) */
+    struct Membership *member;
+    has_local_users = 0;
+    for (member = chptr->members; member; member = member->next_member) {
+      if (MyConnect(member->user)) {
+        has_local_users = 1;
+        break;
+      }
+    }
 
     if (feature_bool(FEAT_CHATHISTORY_STORE_REGISTERED) &&
         (chptr->mode.mode & MODE_REGISTERED)) {
       /* Registered channel - always store */
-      Debug((DEBUG_INFO, "CH W: Storing registered channel message for %s", target));
+      Debug((DEBUG_DEBUG, "CH W: Storing registered channel message for %s", target));
     } else if (has_local_users) {
       /* Has local users - store */
-      Debug((DEBUG_INFO, "CH W: Storing message for %s (has local users)", target));
+      Debug((DEBUG_DEBUG, "CH W: Storing message for %s (has local users)", target));
     } else {
-      /* Unregistered without local users - don't store */
-      Debug((DEBUG_INFO, "CH W: Ignoring message for %s (unregistered, no local users)", target));
-      return;
+      /* Unregistered without local users - but we received CH W, so store anyway.
+       * The forwarding server made the decision that this should be stored here.
+       * This handles edge cases like:
+       * - Registered channel where ChanServ JOIN hasn't propagated yet
+       * - Transient channels during netjoin
+       */
+      Debug((DEBUG_DEBUG, "CH W: Storing forwarded message for %s (trusting sender)", target));
     }
   } else {
-    /* Channel doesn't exist locally - don't store */
-    Debug((DEBUG_INFO, "CH W: Channel %s doesn't exist locally", target));
-    return;
+    /* Channel doesn't exist locally but we received CH W.
+     * Store anyway - the forwarding server believed this was worth storing.
+     * This enables storage for channels where we have no local presence.
+     */
+    Debug((DEBUG_DEBUG, "CH W: Channel %s doesn't exist locally, storing anyway (CH W trust)", target));
   }
 
   /* Store the message */
@@ -1701,12 +1724,12 @@ void forward_history_write(struct Channel *chptr, struct Client *sptr,
   }
 
   if (!nearest_storage) {
-    Debug((DEBUG_INFO, "forward_history_write: No storage server found for %s",
+    Debug((DEBUG_DEBUG, "forward_history_write: No storage server found for %s",
            chptr->chname));
     return;
   }
 
-  Debug((DEBUG_INFO, "forward_history_write: Forwarding %s to %s via CH W",
+  Debug((DEBUG_DEBUG, "forward_history_write: Forwarding %s to %s via CH W",
          chptr->chname, cli_name(nearest_storage)));
 
   send_ch_write(nearest_storage, chptr->chname, msgid, timestamp,
@@ -1812,6 +1835,91 @@ void clear_server_ad(struct Client *server)
   if (server_ads[idx]) {
     MyFree(server_ads[idx]);
     server_ads[idx] = NULL;
+  }
+}
+
+/** Convert numeric index back to base64 string (helper for stats).
+ * @param[in] n Numeric value.
+ * @return Pointer to static string.
+ */
+static const char *int_to_base64_str(unsigned int n)
+{
+  static char buf[8];
+  /* For server numerics (2 chars in base64), limited to 64*64 = 4096 */
+  if (n < 64) {
+    inttobase64(buf, n, 1);
+  } else {
+    inttobase64(buf, n, 2);
+  }
+  return buf;
+}
+
+/** Report chathistory advertisement state for STATS A.
+ * Shows which servers have advertised chathistory storage capability.
+ * @param[in] to Client requesting stats.
+ * @param[in] sd Stats descriptor.
+ * @param[in] param Extra parameter (unused).
+ */
+void chathistory_report_ads(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  int i;
+  int storage_count = 0;
+  int total_count = 0;
+
+  (void)sd;
+  (void)param;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "A :Chathistory Federation Advertisements");
+
+  /* Iterate through all server slots */
+  for (i = 0; i < MAX_AD_SERVERS; i++) {
+    struct Client *server;
+    struct ChathistoryAd *ad = server_ads[i];
+    char timebuf[32] = "never";
+
+    if (!ad)
+      continue;
+
+    total_count++;
+
+    /* Try to find the server by numeric index */
+    server = FindNServer(int_to_base64_str(i));
+    if (!server)
+      continue;  /* Server entry exists but server not connected */
+
+    if (ad->last_update > 0) {
+      struct tm tm;
+      gmtime_r(&ad->last_update, &tm);
+      strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M:%S", &tm);
+    }
+
+    if (ad->is_storage_server) {
+      storage_count++;
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "A :  %s: STORE retention=%d days (updated %s)",
+                 cli_name(server),
+                 ad->retention_days,
+                 timebuf);
+    } else if (ad->has_advertisement) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "A :  %s: advertisement present but not storage",
+                 cli_name(server));
+    }
+  }
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "A :Summary: %d storage server(s) of %d advertised",
+             storage_count, total_count);
+
+  /* Show our own status */
+  if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "A :Local: STORE enabled, retention=%d days",
+               feature_int(FEAT_CHATHISTORY_RETENTION));
+  } else {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "A :Local: STORE disabled (relay only)");
   }
 }
 
@@ -2689,7 +2797,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->retention_days = retention;
       ad->last_update = CurrentTime;
 
-      Debug((DEBUG_INFO, "CH A S: Server %s advertises storage with %d day retention",
+      Debug((DEBUG_DEBUG, "CH A S: Server %s advertises storage with %d day retention",
              cli_name(sptr), retention));
 
       /* Propagate to other servers (except source) */
@@ -2706,7 +2814,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->retention_days = retention;
       ad->last_update = CurrentTime;
 
-      Debug((DEBUG_INFO, "CH A R: Server %s updated retention to %d days",
+      Debug((DEBUG_DEBUG, "CH A R: Server %s updated retention to %d days",
              cli_name(sptr), retention));
 
       /* Propagate to other servers (except source) */
@@ -2715,7 +2823,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     else if (subtype[0] == 'F') {
       /* Full channel sync: F :<channel> ... (Phase 3 - Layer 1) */
       /* For now, just propagate */
-      Debug((DEBUG_INFO, "CH A F: Server %s sent full channel sync (not yet implemented)",
+      Debug((DEBUG_DEBUG, "CH A F: Server %s sent full channel sync (not yet implemented)",
              cli_name(sptr)));
 
       /* Propagate - rebuild parameter list */
@@ -2725,7 +2833,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
     else if (subtype[0] == '+') {
       /* Add channel: + :<channel> (Phase 3 - Layer 1) */
-      Debug((DEBUG_INFO, "CH A +: Server %s added channel %s (not yet implemented)",
+      Debug((DEBUG_DEBUG, "CH A +: Server %s added channel %s (not yet implemented)",
              cli_name(sptr), parc >= 4 ? parv[3] : "?"));
 
       if (parc >= 4) {
@@ -2734,7 +2842,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
     else if (subtype[0] == '-') {
       /* Remove channel: - :<channel> (Phase 3 - Layer 1) */
-      Debug((DEBUG_INFO, "CH A -: Server %s removed channel %s (not yet implemented)",
+      Debug((DEBUG_DEBUG, "CH A -: Server %s removed channel %s (not yet implemented)",
              cli_name(sptr), parc >= 4 ? parv[3] : "?"));
 
       if (parc >= 4) {
@@ -2758,7 +2866,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     type_str = parv[7];
     content = parv[8];
 
-    Debug((DEBUG_INFO, "CH W: Received write forward for %s msgid=%s from %s",
+    Debug((DEBUG_DEBUG, "CH W: Received write forward for %s msgid=%s from %s",
            target, msgid, cli_name(sptr)));
 
     process_write_forward(target, msgid, timestamp, sender, account,
@@ -2814,7 +2922,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (is_continuation) {
       chunk = find_write_chunk(chunk_key);
       if (!chunk) {
-        Debug((DEBUG_INFO, "CH WB: Continuation without start for %s", chunk_key));
+        Debug((DEBUG_DEBUG, "CH WB: Continuation without start for %s", chunk_key));
         return 0;
       }
     } else {
@@ -2828,7 +2936,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
       chunk = create_write_chunk(target, msgid, parv[4], type_int, parv[5], parv[6]);
       if (!chunk) {
-        Debug((DEBUG_INFO, "CH WB: No slots available for %s", chunk_key));
+        Debug((DEBUG_DEBUG, "CH WB: No slots available for %s", chunk_key));
         return 0;
       }
     }
@@ -2851,12 +2959,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
 
       if (ch_base64_decode(chunk->b64_data, chunk->b64_len, &decoded, &decoded_len)) {
-        Debug((DEBUG_INFO, "CH WB: Decoded %zu bytes for %s", decoded_len, target));
+        Debug((DEBUG_DEBUG, "CH WB: Decoded %zu bytes for %s", decoded_len, target));
         process_write_forward(chunk->target, chunk->msgid, chunk->timestamp,
                               chunk->sender, chunk->account, type_char, decoded);
         MyFree(decoded);
       } else {
-        Debug((DEBUG_INFO, "CH WB: Base64 decode failed for %s", target));
+        Debug((DEBUG_DEBUG, "CH WB: Base64 decode failed for %s", target));
       }
       free_write_chunk(chunk);
     }
