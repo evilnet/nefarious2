@@ -155,9 +155,17 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
+  /* Check if this is a new channel for Layer 1 advertisement */
+  int is_new_channel = (history_has_channel(chptr->chname) == 0);
+
   /* Store in database */
-  history_store_message(msgid, timestamp, chptr->chname, sender,
-                        account, type, text);
+  if (history_store_message(msgid, timestamp, chptr->chname, sender,
+                            account, type, text) == 0) {
+    /* Layer 1: Broadcast CH A + if this is the first message in the channel */
+    if (is_new_channel) {
+      broadcast_channel_advertisement(chptr->chname);
+    }
+  }
 }
 
 /** Get PM history preference for a client.

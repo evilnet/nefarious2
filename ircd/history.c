@@ -1231,6 +1231,77 @@ void history_free_targets(struct HistoryTarget *list)
   }
 }
 
+int history_enumerate_channels(history_channel_callback callback, void *data)
+{
+  MDB_txn *txn;
+  MDB_cursor *cursor;
+  MDB_val key, val;
+  char target[CHANNELLEN + 1];
+  int count = 0;
+  int rc;
+
+  if (!history_available || !callback)
+    return -1;
+
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0)
+    return -1;
+
+  rc = mdb_cursor_open(txn, history_targets_dbi, &cursor);
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  /* Iterate all targets */
+  rc = mdb_cursor_get(cursor, &key, &val, MDB_FIRST);
+  while (rc == 0) {
+    if (key.mv_size > 0 && key.mv_size <= CHANNELLEN) {
+      memcpy(target, key.mv_data, key.mv_size);
+      target[key.mv_size] = '\0';
+
+      /* Only call back for channels (start with # or &) */
+      if (target[0] == '#' || target[0] == '&') {
+        count++;
+        if (callback(target, data) != 0)
+          break;  /* Callback requested stop */
+      }
+    }
+    rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT);
+  }
+
+  mdb_cursor_close(cursor);
+  mdb_txn_abort(txn);
+
+  return count;
+}
+
+int history_has_channel(const char *target)
+{
+  MDB_txn *txn;
+  MDB_val key, val;
+  int rc;
+
+  if (!history_available || !target)
+    return -1;
+
+  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  if (rc != 0)
+    return -1;
+
+  key.mv_size = strlen(target);
+  key.mv_data = (void *)target;
+
+  rc = mdb_get(txn, history_targets_dbi, &key, &val);
+  mdb_txn_abort(txn);
+
+  if (rc == 0)
+    return 1;  /* Found */
+  if (rc == MDB_NOTFOUND)
+    return 0;  /* Not found */
+  return -1;   /* Error */
+}
+
 int history_purge_old(unsigned long max_age_seconds)
 {
   MDB_txn *txn;
@@ -2333,6 +2404,18 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   (void)sd; (void)param;
   /* For stub version, we need send_reply - include the headers */
   /* This function is only callable if stats are registered, which requires LMDB */
+}
+
+int history_enumerate_channels(history_channel_callback callback, void *data)
+{
+  (void)callback; (void)data;
+  return -1;
+}
+
+int history_has_channel(const char *target)
+{
+  (void)target;
+  return -1;
 }
 
 #endif /* USE_LMDB */

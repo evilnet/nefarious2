@@ -355,6 +355,27 @@ extern void history_maintenance_tick(void);
  */
 extern void history_last_eviction(int *count, time_t *timestamp);
 
+/** Callback type for channel enumeration.
+ * @param[in] channel Channel name.
+ * @param[in] data User data pointer.
+ * @return 0 to continue, non-zero to stop enumeration.
+ */
+typedef int (*history_channel_callback)(const char *channel, void *data);
+
+/** Enumerate all channels that have stored history.
+ * Calls callback for each channel in the targets database.
+ * @param[in] callback Function to call for each channel.
+ * @param[in] data User data to pass to callback.
+ * @return Number of channels enumerated, or -1 on error.
+ */
+extern int history_enumerate_channels(history_channel_callback callback, void *data);
+
+/** Check if a channel exists in history (has stored messages).
+ * @param[in] target Channel name.
+ * @return 1 if channel has history, 0 if not, -1 on error.
+ */
+extern int history_has_channel(const char *target);
+
 struct StatDesc;
 
 /** Report CHATHISTORY statistics for /STATS.

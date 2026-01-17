@@ -293,6 +293,8 @@ extern int server_retention_covers(struct Client*, time_t);
 extern void clear_server_ad(struct Client*);
 extern void chathistory_report_ads(struct Client*, const struct StatDesc*, char*);
 extern void forward_history_write(struct Channel*, struct Client*, const char*, const char*, int, const char*);
+extern int send_channel_advertisements(struct Client*);
+extern void broadcast_channel_advertisement(const char*);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
 extern int m_register(struct Client*, struct Client*, int, char*[]);

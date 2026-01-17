@@ -83,6 +83,7 @@
 
 #include "channel.h"
 #include "client.h"
+#include "handlers.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_log.h"
@@ -136,6 +137,9 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
     if (feature_bool(FEAT_CHATHISTORY_STORE)) {
       int retention = feature_int(FEAT_CHATHISTORY_RETENTION);
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "A S %d", retention);
+
+      /* Layer 1: Also send channel advertisements (CH A F) */
+      send_channel_advertisements(sptr);
     }
   }
 

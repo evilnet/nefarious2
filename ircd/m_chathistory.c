@@ -1551,10 +1551,18 @@ static void process_write_forward(const char *target, const char *msgid,
     Debug((DEBUG_DEBUG, "CH W: Channel %s doesn't exist locally, storing anyway (CH W trust)", target));
   }
 
+  /* Check if this is a new channel for Layer 1 advertisement */
+  int is_new_channel = (history_has_channel(target) == 0);
+
   /* Store the message */
-  history_store_message(msgid, timestamp, target, sender,
-                        (account[0] == '*') ? NULL : account,
-                        type, content);
+  if (history_store_message(msgid, timestamp, target, sender,
+                            (account[0] == '*') ? NULL : account,
+                            type, content) == 0) {
+    /* Layer 1: Broadcast CH A + if this is the first message in the channel */
+    if (is_new_channel) {
+      broadcast_channel_advertisement(target);
+    }
+  }
 }
 
 /** Check if content needs encoding (same logic as ch_needs_encoding) */
@@ -1756,13 +1764,19 @@ void forward_history_write(struct Channel *chptr, struct Client *sptr,
 /** Maximum servers we track advertisements for (matches NN_MAX_SERVER) */
 #define MAX_AD_SERVERS 4096
 
+/** Maximum channels to track per server in advertisement */
+#define MAX_AD_CHANNELS 8192
+
 /** Structure for chathistory storage advertisement from a server */
 struct ChathistoryAd {
   int has_advertisement;           /**< Received any CH A? */
   int retention_days;              /**< Retention policy (0 = unlimited) */
   int is_storage_server;           /**< Does this server store history? */
   time_t last_update;              /**< When we last received an update */
-  /* Channel presence tracking - deferred to Phase 3 (Layer 1) */
+  /* Layer 1: Channel presence tracking */
+  int has_channel_ads;             /**< Received CH A F? */
+  int channel_count;               /**< Number of channels in set */
+  char **channels;                 /**< Array of channel names (lowercase) */
 };
 
 /** Global array of server advertisements, indexed by server numeric */
@@ -1830,12 +1844,141 @@ int server_retention_days(struct Client *server)
 void clear_server_ad(struct Client *server)
 {
   int idx = server_ad_index(server);
+  int i;
   if (idx < 0)
     return;
   if (server_ads[idx]) {
+    /* Free channel array if present */
+    if (server_ads[idx]->channels) {
+      for (i = 0; i < server_ads[idx]->channel_count; i++) {
+        if (server_ads[idx]->channels[i])
+          MyFree(server_ads[idx]->channels[i]);
+      }
+      MyFree(server_ads[idx]->channels);
+    }
     MyFree(server_ads[idx]);
     server_ads[idx] = NULL;
   }
+}
+
+/** Check if a server has channel-level advertisements (Layer 1).
+ * @param[in] server Server client.
+ * @return 1 if server has channel ads, 0 otherwise.
+ */
+static int has_channel_advertisement(struct Client *server)
+{
+  int idx = server_ad_index(server);
+  if (idx < 0)
+    return 0;
+  if (!server_ads[idx])
+    return 0;
+  return server_ads[idx]->has_channel_ads;
+}
+
+/** Check if a server advertises a specific channel.
+ * @param[in] server Server client.
+ * @param[in] channel Channel name to check.
+ * @return 1 if server advertises the channel, 0 otherwise.
+ */
+static int server_advertises_channel(struct Client *server, const char *channel)
+{
+  struct ChathistoryAd *ad;
+  int idx = server_ad_index(server);
+  char lowerchan[CHANNELLEN + 1];
+  int i;
+
+  if (idx < 0 || !server_ads[idx])
+    return 0;
+
+  ad = server_ads[idx];
+  if (!ad->has_channel_ads || !ad->channels)
+    return 0;
+
+  /* Lowercase the channel name for comparison */
+  ircd_strncpy(lowerchan, channel, CHANNELLEN);
+  lowerchan[CHANNELLEN] = '\0';
+  for (i = 0; lowerchan[i]; i++)
+    lowerchan[i] = ToLower(lowerchan[i]);
+
+  /* Linear search - could use hash table for very large sets */
+  for (i = 0; i < ad->channel_count; i++) {
+    if (ad->channels[i] && strcmp(ad->channels[i], lowerchan) == 0)
+      return 1;
+  }
+
+  return 0;
+}
+
+/** Add a channel to a server's advertisement set.
+ * @param[in] server Server client.
+ * @param[in] channel Channel name to add.
+ * @return 1 if added (new), 0 if already present or error.
+ */
+static int add_server_channel_ad(struct Client *server, const char *channel)
+{
+  struct ChathistoryAd *ad;
+  char lowerchan[CHANNELLEN + 1];
+  int i;
+
+  ad = get_server_ad(server);
+  if (!ad)
+    return 0;
+
+  /* Lowercase the channel name */
+  ircd_strncpy(lowerchan, channel, CHANNELLEN);
+  lowerchan[CHANNELLEN] = '\0';
+  for (i = 0; lowerchan[i]; i++)
+    lowerchan[i] = ToLower(lowerchan[i]);
+
+  /* Allocate channels array if needed */
+  if (!ad->channels) {
+    ad->channels = (char **)MyCalloc(MAX_AD_CHANNELS, sizeof(char *));
+    if (!ad->channels)
+      return 0;
+    ad->channel_count = 0;
+  }
+
+  /* Check if already present */
+  for (i = 0; i < ad->channel_count; i++) {
+    if (ad->channels[i] && strcmp(ad->channels[i], lowerchan) == 0)
+      return 0;  /* Already present */
+  }
+
+  /* Add if room */
+  if (ad->channel_count >= MAX_AD_CHANNELS)
+    return 0;
+
+  ad->channels[ad->channel_count] = (char *)MyMalloc(strlen(lowerchan) + 1);
+  if (!ad->channels[ad->channel_count])
+    return 0;
+
+  strcpy(ad->channels[ad->channel_count], lowerchan);
+  ad->channel_count++;
+
+  return 1;
+}
+
+/** Clear all channel advertisements for a server (before CH A F).
+ * @param[in] server Server client.
+ */
+static void clear_server_channel_ads(struct Client *server)
+{
+  struct ChathistoryAd *ad;
+  int i;
+
+  ad = get_server_ad(server);
+  if (!ad)
+    return;
+
+  if (ad->channels) {
+    for (i = 0; i < ad->channel_count; i++) {
+      if (ad->channels[i])
+        MyFree(ad->channels[i]);
+      ad->channels[i] = NULL;
+    }
+    ad->channel_count = 0;
+  }
+  ad->has_channel_ads = 0;
 }
 
 /** Convert numeric index back to base64 string (helper for stats).
@@ -1921,6 +2064,107 @@ void chathistory_report_ads(struct Client *to, const struct StatDesc *sd, char *
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "A :Local: STORE disabled (relay only)");
   }
+}
+
+/*
+ * ============================================================================
+ * Channel Advertisement Sending (Layer 1)
+ * ============================================================================
+ */
+
+/** Maximum size for CH A F channel list (leave room for command overhead) */
+#define CH_A_F_MAX_SIZE 400
+
+/** Context for channel advertisement enumeration callback */
+struct ChannelAdCtx {
+  struct Client *target;      /**< Target server or NULL for broadcast */
+  char buffer[CH_A_F_MAX_SIZE + 1];
+  int buffer_len;
+  int total_sent;
+};
+
+/** Callback for building and sending CH A F messages.
+ * Accumulates channels until buffer is full, then sends.
+ */
+static int channel_ad_callback(const char *channel, void *data)
+{
+  struct ChannelAdCtx *ctx = (struct ChannelAdCtx *)data;
+  int chan_len = strlen(channel);
+
+  /* Check if adding this channel would overflow buffer */
+  if (ctx->buffer_len + chan_len + 1 > CH_A_F_MAX_SIZE) {
+    /* Send current buffer */
+    if (ctx->buffer_len > 0) {
+      if (ctx->target) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, ctx->target, "A F :%s", ctx->buffer);
+      } else {
+        sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A F :%s", ctx->buffer);
+      }
+    }
+    /* Reset buffer */
+    ctx->buffer[0] = '\0';
+    ctx->buffer_len = 0;
+  }
+
+  /* Add channel to buffer */
+  if (ctx->buffer_len > 0) {
+    ctx->buffer[ctx->buffer_len++] = ' ';
+  }
+  strcpy(ctx->buffer + ctx->buffer_len, channel);
+  ctx->buffer_len += chan_len;
+  ctx->total_sent++;
+
+  return 0;  /* Continue enumeration */
+}
+
+/** Send channel advertisements to a specific server.
+ * Called after END_OF_BURST_ACK to advertise our local history channels.
+ * @param[in] server Server to send advertisements to.
+ * @return Number of channels advertised, or -1 on error.
+ */
+int send_channel_advertisements(struct Client *server)
+{
+  struct ChannelAdCtx ctx;
+  int count;
+
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+    return 0;  /* Only storage servers advertise channels */
+
+  ctx.target = server;
+  ctx.buffer[0] = '\0';
+  ctx.buffer_len = 0;
+  ctx.total_sent = 0;
+
+  count = history_enumerate_channels(channel_ad_callback, &ctx);
+  if (count < 0)
+    return -1;
+
+  /* Send any remaining buffered channels */
+  if (ctx.buffer_len > 0) {
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "A F :%s", ctx.buffer);
+  }
+
+  Debug((DEBUG_DEBUG, "CH A F: Sent %d channel advertisements to %s",
+         ctx.total_sent, cli_name(server)));
+
+  return ctx.total_sent;
+}
+
+/** Broadcast a new channel advertisement to all peer servers.
+ * Called when first message is stored for a new channel.
+ * @param[in] channel Channel name to advertise.
+ */
+void broadcast_channel_advertisement(const char *channel)
+{
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+    return;  /* Only storage servers advertise channels */
+
+  if (!channel || (channel[0] != '#' && channel[0] != '&'))
+    return;  /* Only advertise channels, not DMs */
+
+  Debug((DEBUG_DEBUG, "CH A +: Broadcasting new channel %s", channel));
+
+  sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A + :%s", channel);
 }
 
 /** Check if a server's retention window covers a given timestamp.
@@ -2331,11 +2575,12 @@ static int count_servers(void)
 
 /** Count servers that have advertised chathistory storage capability.
  * Only servers that sent CH A S are counted - these actually store history.
- * Optionally filters by retention window.
+ * Optionally filters by retention window and channel advertisements.
+ * @param[in] target Target channel/nick for Layer 1 filtering.
  * @param[in] query_time Timestamp for retention filtering (0 = no filter).
  * @return Number of storage-capable servers.
  */
-static int count_storage_servers(time_t query_time)
+static int count_storage_servers(const char *target, time_t query_time)
 {
   int count = 0;
   struct DLink *lp;
@@ -2353,6 +2598,11 @@ static int count_storage_servers(time_t query_time)
 
     /* Skip servers whose retention doesn't cover query time */
     if (query_time != 0 && !server_retention_covers(server, query_time))
+      continue;
+
+    /* Layer 1: If server has channel-level ads, check if it has this target */
+    if (target && has_channel_advertisement(server) &&
+        !server_advertises_channel(server, target))
       continue;
 
     count++;
@@ -2416,8 +2666,9 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
 
   /* Count storage-capable servers that cover the query timeframe.
    * Only servers that have sent CH A S are counted.
+   * Layer 1: Also filters by channel advertisements if present.
    */
-  server_count = count_storage_servers(query_time);
+  server_count = count_storage_servers(target, query_time);
   if (server_count == 0)
     return NULL;  /* No storage servers to query */
 
@@ -2460,10 +2711,11 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   /* Send query to storage servers using efficient S2S format:
    * CH Q <target> <subcmd:1char> <ref:T/M prefix> <limit> <reqid>
    *
-   * Phase 3: Only query servers that:
+   * Only query servers that:
    * 1. Are not U-lined (services)
    * 2. Have advertised chathistory storage (CH A S)
    * 3. Have retention that covers the query timeframe
+   * 4. (Layer 1) If server has channel-level ads, target must be advertised
    */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     struct Client *server = lp->value.cptr;
@@ -2478,6 +2730,10 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
 
     /* Skip servers whose retention doesn't cover query time */
     if (query_time != 0 && !server_retention_covers(server, query_time))
+      continue;
+
+    /* Layer 1: If server has channel-level ads, check if it has this target */
+    if (has_channel_advertisement(server) && !server_advertises_channel(server, target))
       continue;
 
     sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s",
@@ -2821,28 +3077,57 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A R %d", retention);
     }
     else if (subtype[0] == 'F') {
-      /* Full channel sync: F :<channel> ... (Phase 3 - Layer 1) */
-      /* For now, just propagate */
-      Debug((DEBUG_DEBUG, "CH A F: Server %s sent full channel sync (not yet implemented)",
-             cli_name(sptr)));
+      /* Full channel sync: F :<channel> <channel> ... (Layer 1) */
+      char *chanlist;
+      char *chan;
+      char *saveptr = NULL;
+      int added = 0;
 
-      /* Propagate - rebuild parameter list */
-      if (parc >= 4) {
-        sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A F :%s", parv[parc - 1]);
+      if (parc < 4)
+        return 0;
+
+      chanlist = parv[3];
+
+      /* Clear existing channel ads before full sync */
+      clear_server_channel_ads(sptr);
+
+      /* Parse space-separated channel list */
+      chan = strtok_r(chanlist, " ", &saveptr);
+      while (chan) {
+        if (chan[0] == '#' || chan[0] == '&') {
+          add_server_channel_ad(sptr, chan);
+          added++;
+        }
+        chan = strtok_r(NULL, " ", &saveptr);
       }
+
+      ad->has_channel_ads = 1;
+      ad->last_update = CurrentTime;
+
+      Debug((DEBUG_DEBUG, "CH A F: Server %s advertises %d channels",
+             cli_name(sptr), added));
+
+      /* Propagate to other servers (except source) */
+      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A F :%s", parv[parc - 1]);
     }
     else if (subtype[0] == '+') {
-      /* Add channel: + :<channel> (Phase 3 - Layer 1) */
-      Debug((DEBUG_DEBUG, "CH A +: Server %s added channel %s (not yet implemented)",
-             cli_name(sptr), parc >= 4 ? parv[3] : "?"));
+      /* Add channel: + :<channel> (Layer 1) */
+      if (parc < 4)
+        return 0;
 
-      if (parc >= 4) {
-        sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A + :%s", parv[3]);
+      if (add_server_channel_ad(sptr, parv[3])) {
+        Debug((DEBUG_DEBUG, "CH A +: Server %s added channel %s",
+               cli_name(sptr), parv[3]));
       }
+      ad->last_update = CurrentTime;
+
+      /* Propagate to other servers (except source) */
+      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A + :%s", parv[3]);
     }
     else if (subtype[0] == '-') {
-      /* Remove channel: - :<channel> (Phase 3 - Layer 1) */
-      Debug((DEBUG_DEBUG, "CH A -: Server %s removed channel %s (not yet implemented)",
+      /* Remove channel: - :<channel> (Layer 1) - rarely used */
+      /* For now, just propagate - full removal not implemented */
+      Debug((DEBUG_DEBUG, "CH A -: Server %s removed channel %s",
              cli_name(sptr), parc >= 4 ? parv[3] : "?"));
 
       if (parc >= 4) {
