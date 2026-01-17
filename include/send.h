@@ -128,6 +128,14 @@ extern void sendcmdto_channel_butone(struct Client *from, const char *cmd,
 				     struct Client *one, unsigned int skip,
 				     unsigned char prefix, const char *pattern, ...);
 
+/* Same as above, but include client-only tags for message-tags capable clients */
+extern void sendcmdto_channel_butone_with_client_tags(struct Client *from,
+                                     const char *cmd, const char *tok,
+                                     struct Channel *to, struct Client *one,
+                                     unsigned int skip, unsigned char prefix,
+                                     const char *client_tags,
+                                     const char *pattern, ...);
+
 #define SKIP_DEAF	0x01	/**< skip users that are +d */
 #define SKIP_BURST	0x02	/**< skip users that are bursting */
 #define SKIP_NONOPS	0x04	/**< skip users that aren't chanops */

@@ -345,8 +345,19 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
   }
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
-  sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
-			   SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, mytext);
+
+  /* Use variant with client-only tags if sender has them */
+  {
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags) {
+      sendcmdto_channel_butone_with_client_tags(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+                         SKIP_DEAF | SKIP_BURST, text[0], client_tags,
+                         "%H :%s", chptr, mytext);
+    } else {
+      sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+                               SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, mytext);
+    }
+  }
 
 #ifdef USE_LMDB
   {
@@ -433,8 +444,19 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   }
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
-  sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
-			   SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, mytext);
+
+  /* Use variant with client-only tags if sender has them */
+  {
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags) {
+      sendcmdto_channel_butone_with_client_tags(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+                         SKIP_DEAF | SKIP_BURST, '\0', client_tags,
+                         "%H :%s", chptr, mytext);
+    } else {
+      sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+                               SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, mytext);
+    }
+  }
 
 #ifdef USE_LMDB
   {
@@ -492,8 +514,16 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
    * Servers may have channel services, need to check for it here
    */
   if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
-    sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
-                            SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
+    /* Use variant with client-only tags if sender has them */
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags) {
+      sendcmdto_channel_butone_with_client_tags(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+                         SKIP_DEAF | SKIP_BURST, text[0], client_tags,
+                         "%H :%s", chptr, text);
+    } else {
+      sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+                               SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
+    }
 #ifdef USE_LMDB
     /* Store server-relayed message in history database */
     if (feature_bool(FEAT_MSGID)) {
@@ -538,8 +568,16 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
    */
   if ((client_can_send_to_channel(sptr, chptr, 1) &&
        !(chptr->mode.exmode & EXMODE_NONOTICES)) || IsChannelService(sptr)) {
-    sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
-			     SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
+    /* Use variant with client-only tags if sender has them */
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags) {
+      sendcmdto_channel_butone_with_client_tags(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+                         SKIP_DEAF | SKIP_BURST, '\0', client_tags,
+                         "%H :%s", chptr, text);
+    } else {
+      sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+                               SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
+    }
 #ifdef USE_LMDB
     /* Store server-relayed notice in history database */
     if (feature_bool(FEAT_MSGID)) {
@@ -787,7 +825,16 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
-  sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+  /* Use variant with client-only tags if sender has them and recipient supports it */
+  {
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+      sendcmdto_one_client_tags(sptr, MSG_PRIVATE, acptr, client_tags,
+                                "%C :%s", acptr, text);
+    } else {
+      sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+    }
+  }
 
   /* Echo message back to sender if they have echo-message capability */
 #ifdef USE_LMDB
@@ -873,7 +920,16 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
-  sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+  /* Use variant with client-only tags if sender has them and recipient supports it */
+  {
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+      sendcmdto_one_client_tags(sptr, MSG_NOTICE, acptr, client_tags,
+                                "%C :%s", acptr, text);
+    } else {
+      sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+    }
+  }
 
 #ifdef USE_LMDB
   {
@@ -935,7 +991,16 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
-  sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+  /* Use variant with client-only tags if sender has them and recipient supports it */
+  {
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+      sendcmdto_one_client_tags(sptr, MSG_PRIVATE, acptr, client_tags,
+                                "%C :%s", acptr, text);
+    } else {
+      sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+    }
+  }
 
 #ifdef USE_LMDB
   /* Store server-relayed private message in history database (if enabled) */
@@ -981,7 +1046,16 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
-  sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+  /* Use variant with client-only tags if sender has them and recipient supports it */
+  {
+    const char *client_tags = cli_client_tags(sptr);
+    if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+      sendcmdto_one_client_tags(sptr, MSG_NOTICE, acptr, client_tags,
+                                "%C :%s", acptr, text);
+    } else {
+      sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+    }
+  }
 
 #ifdef USE_LMDB
   /* Store server-relayed private notice in history database (if enabled) */

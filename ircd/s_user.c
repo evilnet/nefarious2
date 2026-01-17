@@ -2633,6 +2633,17 @@ void init_isupport(void)
   add_isupport_s("MAXLIST", imaxlist);
   add_isupport_s("ELIST", "CT");
 
+  /* TARGMAX - per-command target limits (modern IRC docs)
+   * Format: TARGMAX=CMD:limit,CMD:limit,...
+   * Empty value means no limit for that command */
+  {
+    char targmaxbuf[128];
+    ircd_snprintf(0, targmaxbuf, sizeof(targmaxbuf),
+                  "PRIVMSG:%d,NOTICE:%d,JOIN:,PART:",
+                  MAXTARGETS, MAXTARGETS);
+    add_isupport_s("TARGMAX", targmaxbuf);
+  }
+
   /* IRCv3 draft/chathistory support */
   if (feature_bool(FEAT_CAP_draft_chathistory)) {
     add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));

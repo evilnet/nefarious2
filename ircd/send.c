@@ -1604,6 +1604,139 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   msgq_clean(serv_mb);
 }
 
+/** Send a (prefixed) command to all users on this channel, except for
+ * \a one and those matching \a skip. Includes client-only tags for
+ * clients with message-tags capability.
+ * @warning \a pattern must not contain %v.
+ * @param[in] from Client originating the command.
+ * @param[in] cmd Long name of command.
+ * @param[in] tok Short name of command.
+ * @param[in] to Destination channel.
+ * @param[in] one Client direction to skip (or NULL).
+ * @param[in] skip Bitmask of SKIP_NONOPS, SKIP_NONVOICES, SKIP_DEAF, SKIP_BURST.
+ * @param[in] prefix Prefix character for statusmsg (@, %, +).
+ * @param[in] client_tags Client-only tags string (e.g., "+typing=active;+reply=xxx").
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_channel_butone_with_client_tags(struct Client *from,
+                              const char *cmd, const char *tok,
+                              struct Channel *to, struct Client *one,
+                              unsigned int skip, unsigned char prefix,
+                              const char *client_tags,
+                              const char *pattern, ...)
+{
+  struct Membership *member;
+  struct VarData vd;
+  struct MsgBuf *user_mb;
+  struct MsgBuf *user_mb_tags = NULL;
+  struct MsgBuf *serv_mb;
+  struct MsgBuf *serv_mb_tags = NULL;
+  struct Client *service;
+  struct Client *cptr;
+  const char *userfmt;
+  const char *usercmd;
+  char tagbuf[1024];
+  char s2s_tagbuf[128];
+  char userfmt_tags[64];
+
+  vd.vd_format = pattern;
+
+  /* Get the server connection for S2S tag handling */
+  cptr = MyConnect(from) ? NULL : cli_from(from);
+
+  /* Build buffer to send to users */
+  usercmd = cmd;
+  userfmt = "%:#C %s %v";
+  if (skip & (SKIP_NONOPS | SKIP_NONHOPS | SKIP_NONVOICES)) {
+    usercmd = MSG_NOTICE;
+    if (skip & SKIP_NONVOICES)
+      userfmt = "%:#C %s +%v";
+    else if (skip & SKIP_NONHOPS)
+      userfmt = "%:#C %s %%%v";
+    else
+      userfmt = "%:#C %s @%v";
+  }
+
+  va_start(vd.vd_args, pattern);
+  user_mb = msgq_make(0, userfmt, from, usercmd, &vd);
+  va_end(vd.vd_args);
+
+  /* Prepare tagged format string */
+  ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
+
+  /* Build buffer to send to servers - with S2S tags if enabled */
+  if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
+    va_start(vd.vd_args, pattern);
+    serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+    va_end(vd.vd_args);
+    serv_mb = serv_mb_tags;
+  } else {
+    va_start(vd.vd_args, pattern);
+    serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+  }
+
+  /* send buffer along! */
+  bump_sentalong(one);
+  for (member = to->members; member; member = member->next_member) {
+    /* skip one, zombies, and deaf users... */
+    if (IsZombie(member) ||
+        (skip & SKIP_DEAF && IsDeaf(member->user)) ||
+        (skip & SKIP_NONOPS && !IsChanOp(member)) ||
+        (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member)) ||
+        (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
+        (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
+        (is_silenced(from, member->user, 1)) ||
+        cli_fd(cli_from(member->user)) < 0 ||
+        cli_sentalong(member->user) == sentalong_marker)
+      continue;
+    cli_sentalong(member->user) = sentalong_marker;
+
+    if (MyConnect(member->user)) {
+      /* For clients with message-tags, include client-only tags */
+      if (wants_message_tags(member->user) && client_tags && *client_tags) {
+        /* Build message with client-only tags + server tags for this recipient */
+        if (format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, member->user, client_tags)) {
+          va_start(vd.vd_args, pattern);
+          user_mb_tags = msgq_make(0, userfmt_tags, tagbuf, from, usercmd, &vd);
+          va_end(vd.vd_args);
+          send_buffer(member->user, user_mb_tags, 0);
+          msgq_clean(user_mb_tags);
+        } else {
+          send_buffer(member->user, user_mb, 0);
+        }
+      } else {
+        /* No message-tags or no client tags - send plain or with server tags only */
+        int tflags = get_client_tag_flags(member->user, from, 0);
+        if (tflags) {
+          if (format_message_tags_ex(tagbuf, sizeof(tagbuf), from, tflags)) {
+            va_start(vd.vd_args, pattern);
+            user_mb_tags = msgq_make(0, userfmt_tags, tagbuf, from, usercmd, &vd);
+            va_end(vd.vd_args);
+            send_buffer(member->user, user_mb_tags, 0);
+            msgq_clean(user_mb_tags);
+          } else {
+            send_buffer(member->user, user_mb, 0);
+          }
+        } else {
+          send_buffer(member->user, user_mb, 0);
+        }
+      }
+    } else
+      send_buffer(member->user, serv_mb, 0);
+  }
+  /* Consult service forwarding table. */
+  if(GlobalForwards[prefix]
+      && (service = FindServer(GlobalForwards[prefix]))
+      && cli_sentalong(service) != sentalong_marker) {
+      cli_sentalong(service) = sentalong_marker;
+      send_buffer(service, serv_mb, 0);
+  }
+
+  msgq_clean(user_mb);
+  msgq_clean(serv_mb);
+}
+
 /** Send a (prefixed) WALL of type \a type to all users except \a one.
  * @warning \a pattern must not contain %v.
  * @param[in] from Source of the command.
