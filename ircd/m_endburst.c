@@ -92,6 +92,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "ircd_features.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -124,8 +125,18 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
 
   ClearBurst(sptr);
   SetBurstAck(sptr);
-  if (MyConnect(sptr))
+  if (MyConnect(sptr)) {
     sendcmdto_one(&me, CMD_END_OF_BURST_ACK, sptr, "");
+
+    /* Advertise chathistory storage capability (CH A S) to newly linked server.
+     * Only advertise if we have CHATHISTORY enabled (non-zero retention).
+     * The retention value tells the remote server how far back our history goes.
+     */
+    if (feature_bool(FEAT_CAP_draft_chathistory)) {
+      int retention = feature_int(FEAT_CHATHISTORY_RETENTION);
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "A S %d", retention);
+    }
+  }
 
   /* Count through channels... */
   for (chan = GlobalChannelList; chan; chan = next_chan) {
