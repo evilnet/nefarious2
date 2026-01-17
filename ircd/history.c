@@ -802,8 +802,21 @@ static int history_query_internal(const char *target,
       continue;
     }
 
+#ifdef USE_ZSTD
+    /* Preserve raw compressed data for federation passthrough */
+    if (is_compressed((const unsigned char *)data.mv_data, data.mv_size)) {
+      msg->raw_content = (unsigned char *)MyMalloc(data.mv_size);
+      if (msg->raw_content) {
+        memcpy(msg->raw_content, data.mv_data, data.mv_size);
+        msg->raw_content_len = data.mv_size;
+      }
+    }
+#endif
+
     /* Parse value */
     if (deserialize_message(data.mv_data, data.mv_size, msg) != 0) {
+      if (msg->raw_content)
+        MyFree(msg->raw_content);
       MyFree(msg);
       rc = mdb_cursor_get(cursor, &key, &data, op);
       continue;
@@ -1221,6 +1234,8 @@ void history_free_messages(struct HistoryMessage *list)
 
   for (msg = list; msg; msg = next) {
     next = msg->next;
+    if (msg->raw_content)
+      MyFree(msg->raw_content);
     MyFree(msg);
   }
 }

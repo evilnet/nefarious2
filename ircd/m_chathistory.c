@@ -38,6 +38,7 @@
 #include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_compress.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -109,6 +110,7 @@ static int ch_base64_encode(const char *input, size_t inlen, char *output)
 /** Send a chathistory response with base64 chunking if needed.
  * Protocol:
  *   CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - normal
+ *   CH Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_compressed> - compressed passthrough
  *   CH B <reqid> <msgid> <ts> <type> <sender> <account> + :<b64>    - start/more
  *   CH B <reqid> <msgid> + :<b64>                                    - continue
  *   CH B <reqid> <msgid> :<b64>                                      - final
@@ -120,6 +122,26 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
                              struct HistoryMessage *msg)
 {
   const char *account = msg->account[0] ? msg->account : "*";
+
+  /* If we have raw compressed data, send with Z flag for bandwidth savings.
+   * Only use Z if the base64-encoded result fits in a single P10 message.
+   * Otherwise fall through to normal B chunking with decompressed content.
+   */
+  if (msg->raw_content && msg->raw_content_len > 0) {
+    size_t b64_len = ((msg->raw_content_len + 2) / 3) * 4 + 1;
+    if (b64_len <= CH_CHUNK_B64_SIZE) {
+      char *b64 = MyMalloc(b64_len);
+      if (b64) {
+        ch_base64_encode((const char *)msg->raw_content, msg->raw_content_len, b64);
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "Z %s %s %s %d %s %s :%s",
+                      reqid, msg->msgid, msg->timestamp, msg->type,
+                      msg->sender, account, b64);
+        MyFree(b64);
+        return;
+      }
+    }
+    /* Fall through to uncompressed if too large or malloc failed */
+  }
 
   /* Check if content needs base64 encoding */
   if (!ch_needs_encoding(msg->content)) {
@@ -1303,6 +1325,7 @@ int m_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv
  * Protocol:
  *   [SERVER] CH Q <target> <subcmd> <ref> <limit> <reqid>   - Query
  *   [SERVER] CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - Response
+ *   [SERVER] CH Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_zstd> - Compressed response
  *   [SERVER] CH E <reqid> <count>   - End response
  */
 
@@ -2815,13 +2838,14 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
  * P10 Format (optimized for efficiency):
  *   [SERVER] CH Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid>   - Query
  *   [SERVER] CH R <reqid> <msgid> <ts> <type> <sender> <account> :<content>  - Response
+ *   [SERVER] CH Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_zstd> - Compressed response
  *   [SERVER] CH E <reqid> <count>   - End response
  *
  * Subcmd codes: L=LATEST, B=BEFORE, A=AFTER, R=AROUND, W=BETWEEN, T=TARGETS
  * Ref format: T<timestamp>, M<msgid>, or * for none
  *
  * parv[0] = sender prefix
- * parv[1] = subcommand (Q, R, or E)
+ * parv[1] = subcommand (Q, R, Z, or E)
  * parv[2+] = parameters based on subcommand
  */
 int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
@@ -2981,6 +3005,54 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Add message to federated results */
     add_fed_message(req, msgid, timestamp, type, sender, account, content);
+  }
+  else if (strcmp(subcmd, "Z") == 0) {
+    /* Compressed Response: Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_compressed>
+     * Content is base64-encoded zstd-compressed data for bandwidth savings.
+     */
+    char *reqid, *msgid, *timestamp, *sender, *account, *b64_content;
+    int type;
+    struct FedRequest *req;
+
+    if (parc < 8)
+      return 0;
+
+    reqid = parv[2];
+    msgid = parv[3];
+    timestamp = parv[4];
+    type = atoi(parv[5]);
+    sender = parv[6];
+    account = parv[7];
+    b64_content = (parc > 8) ? parv[8] : "";
+
+    /* Find the request */
+    req = find_fed_request(reqid);
+    if (!req)
+      return 0;
+
+#ifdef USE_ZSTD
+    /* Decode base64 then decompress */
+    {
+      char *decoded;
+      size_t decoded_len;
+
+      if (ch_base64_decode(b64_content, strlen(b64_content), &decoded, &decoded_len)) {
+        char decompressed[HISTORY_CONTENT_LEN];
+        size_t decompressed_len;
+
+        if (decompress_data((unsigned char *)decoded, decoded_len,
+                            (unsigned char *)decompressed, sizeof(decompressed) - 1,
+                            &decompressed_len) >= 0) {
+          decompressed[decompressed_len] = '\0';
+          add_fed_message(req, msgid, timestamp, type, sender, account, decompressed);
+        }
+        MyFree(decoded);
+      }
+    }
+#else
+    /* No zstd support - can't decompress, skip this message */
+    Debug((DEBUG_DEBUG, "CH Z: Received compressed response but USE_ZSTD not enabled"));
+#endif
   }
   else if (strcmp(subcmd, "B") == 0) {
     /* Base64 Response: B <reqid> <msgid> <ts> <type> <sender> <account> [+] :<b64>

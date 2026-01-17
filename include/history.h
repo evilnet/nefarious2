@@ -71,6 +71,8 @@ struct HistoryMessage {
   char account[ACCOUNTLEN + 1];        /**< Sender's account name (or empty) */
   enum HistoryMessageType type;        /**< Message type */
   char content[HISTORY_CONTENT_LEN];   /**< Message content */
+  unsigned char *raw_content;          /**< Raw compressed content (for federation passthrough) */
+  size_t raw_content_len;              /**< Length of raw_content */
   struct HistoryMessage *next;         /**< Next in linked list (for results) */
 };
 
