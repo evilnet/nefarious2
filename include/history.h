@@ -364,17 +364,18 @@ extern void history_last_eviction(int *count, time_t *timestamp);
  */
 typedef int (*history_channel_callback)(const char *channel, void *data);
 
-/** Callback type for channel removal notification.
- * Called when a channel's last message is evicted/purged.
- * @param[in] channel Channel name that was removed.
+/** Callback type for channel removal notification (batch).
+ * Called when channels' last messages are evicted/purged.
+ * @param[in] channels Array of channel names that were removed.
+ * @param[in] count Number of channels in array.
  */
-typedef void (*history_channel_removed_cb)(const char *channel);
+typedef void (*history_channels_removed_cb)(const char **channels, int count);
 
 /** Set callback for channel removal notifications.
  * Used by chathistory federation to broadcast CH A - when channels are emptied.
  * @param[in] cb Callback function (or NULL to disable).
  */
-extern void history_set_channel_removed_callback(history_channel_removed_cb cb);
+extern void history_set_channel_removed_callback(history_channels_removed_cb cb);
 
 /** Enumerate all channels that have stored history.
  * Calls callback for each channel in the targets database.

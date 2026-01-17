@@ -73,7 +73,7 @@ static int history_available = 0;
 static size_t history_map_size = 1UL * 1024 * 1024 * 1024;
 
 /** Callback for channel removal notifications (for CH A - broadcasts) */
-static history_channel_removed_cb channel_removed_callback = NULL;
+static history_channels_removed_cb channel_removed_callback = NULL;
 
 /** Maximum number of named databases */
 #define HISTORY_MAX_DBS 5
@@ -1372,7 +1372,7 @@ int history_channel_has_messages(const char *target)
   return 0;  /* No messages found */
 }
 
-void history_set_channel_removed_callback(history_channel_removed_cb cb)
+void history_set_channel_removed_callback(history_channels_removed_cb cb)
 {
   channel_removed_callback = cb;
 }
@@ -1576,11 +1576,9 @@ cleanup_list:
       mdb_txn_commit(txn);
     }
 
-    /* Call callback for each removed channel (after DB commit) */
-    if (channel_removed_callback) {
-      for (i = 0; i < remove_count; i++) {
-        channel_removed_callback(channels_to_remove[i]);
-      }
+    /* Call callback with all removed channels at once (after DB commit) */
+    if (channel_removed_callback && remove_count > 0) {
+      channel_removed_callback((const char **)channels_to_remove, remove_count);
     }
   }
 
@@ -2626,7 +2624,7 @@ int history_channel_has_messages(const char *target)
   return -1;
 }
 
-void history_set_channel_removed_callback(history_channel_removed_cb cb)
+void history_set_channel_removed_callback(history_channels_removed_cb cb)
 {
   (void)cb;
 }

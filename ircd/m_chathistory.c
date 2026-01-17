@@ -1780,8 +1780,8 @@ void forward_history_write(struct Channel *chptr, struct Client *sptr,
  *   CH A S <retention_days>  - Storage capability (sent at BURST)
  *   CH A R <retention_days>  - Retention update (on REHASH)
  *   CH A F :<channel> ...    - Full channel sync
- *   CH A + :<channel>        - Add channel
- *   CH A - :<channel>        - Remove channel (optional)
+ *   CH A + :<channel> ...    - Add channel(s)
+ *   CH A - :<channel> ...    - Remove channel(s)
  */
 
 /** Maximum servers we track advertisements for (matches NN_MAX_SERVER) */
@@ -2228,22 +2228,60 @@ void broadcast_channel_advertisement(const char *channel)
   sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A + :%s", channel);
 }
 
-/** Broadcast a channel removal to all peer servers.
- * Called when a channel's last message is evicted/purged.
+/** Maximum size for CH A +/- channel list (leave room for command overhead) */
+#define CH_A_PM_MAX_SIZE 400
+
+/** Broadcast channel removals to all peer servers.
+ * Called when channels' last messages are evicted/purged.
  * This is the callback function registered with history.c.
- * @param[in] channel Channel name that was emptied.
+ * Batches multiple channels into single messages for efficiency.
+ * @param[in] channels Array of channel names that were emptied.
+ * @param[in] count Number of channels in array.
  */
-static void broadcast_channel_removal(const char *channel)
+static void broadcast_channel_removal(const char **channels, int count)
 {
+  char buffer[CH_A_PM_MAX_SIZE + 1];
+  int buffer_len = 0;
+  int i;
+
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;  /* Only storage servers advertise channels */
 
-  if (!channel || (channel[0] != '#' && channel[0] != '&'))
-    return;  /* Only advertise channels, not DMs */
+  if (!channels || count <= 0)
+    return;
 
-  Debug((DEBUG_DEBUG, "CH A -: Broadcasting channel removal %s", channel));
+  for (i = 0; i < count; i++) {
+    const char *channel = channels[i];
+    int chan_len;
 
-  sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A - :%s", channel);
+    if (!channel || (channel[0] != '#' && channel[0] != '&'))
+      continue;  /* Skip non-channels (DMs) */
+
+    chan_len = strlen(channel);
+
+    /* Check if adding this channel would overflow buffer */
+    if (buffer_len + chan_len + 1 > CH_A_PM_MAX_SIZE) {
+      /* Send current buffer */
+      if (buffer_len > 0) {
+        sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A - :%s", buffer);
+        Debug((DEBUG_DEBUG, "CH A -: Sent batch removal"));
+      }
+      buffer_len = 0;
+    }
+
+    /* Add channel to buffer (space-separated) */
+    if (buffer_len > 0) {
+      buffer[buffer_len++] = ' ';
+    }
+    strcpy(buffer + buffer_len, channel);
+    buffer_len += chan_len;
+  }
+
+  /* Send remaining buffered channels */
+  if (buffer_len > 0) {
+    sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A - :%s", buffer);
+    Debug((DEBUG_DEBUG, "CH A -: Broadcasting %d channel removals", count));
+  }
 }
 
 /** Initialize chathistory callbacks.
@@ -3249,13 +3287,31 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A F :%s", parv[parc - 1]);
     }
     else if (subtype[0] == '+') {
-      /* Add channel: + :<channel> (Layer 1) */
+      /* Add channel(s): + :<channel> [channel2] ... (Layer 1) */
+      char chanlist[512];
+      char *chan, *saveptr;
+      int added = 0;
+
       if (parc < 4)
         return 0;
 
-      if (add_server_channel_ad(sptr, parv[3])) {
-        Debug((DEBUG_DEBUG, "CH A +: Server %s added channel %s",
-               cli_name(sptr), parv[3]));
+      /* Copy to mutable buffer for tokenization */
+      ircd_strncpy(chanlist, parv[3], sizeof(chanlist) - 1);
+      chanlist[sizeof(chanlist) - 1] = '\0';
+
+      /* Parse space-separated channel list */
+      chan = strtok_r(chanlist, " ", &saveptr);
+      while (chan) {
+        if (chan[0] == '#' || chan[0] == '&') {
+          if (add_server_channel_ad(sptr, chan))
+            added++;
+        }
+        chan = strtok_r(NULL, " ", &saveptr);
+      }
+
+      if (added > 0) {
+        Debug((DEBUG_DEBUG, "CH A +: Server %s added %d channels",
+               cli_name(sptr), added));
       }
       ad->last_update = CurrentTime;
 
@@ -3263,13 +3319,31 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A + :%s", parv[3]);
     }
     else if (subtype[0] == '-') {
-      /* Remove channel: - :<channel> (Layer 1) */
+      /* Remove channel(s): - :<channel> [channel2] ... (Layer 1) */
+      char chanlist[512];
+      char *chan, *saveptr;
+      int removed = 0;
+
       if (parc < 4)
         return 0;
 
-      if (remove_server_channel_ad(sptr, parv[3])) {
-        Debug((DEBUG_DEBUG, "CH A -: Server %s removed channel %s",
-               cli_name(sptr), parv[3]));
+      /* Copy to mutable buffer for tokenization */
+      ircd_strncpy(chanlist, parv[3], sizeof(chanlist) - 1);
+      chanlist[sizeof(chanlist) - 1] = '\0';
+
+      /* Parse space-separated channel list */
+      chan = strtok_r(chanlist, " ", &saveptr);
+      while (chan) {
+        if (chan[0] == '#' || chan[0] == '&') {
+          if (remove_server_channel_ad(sptr, chan))
+            removed++;
+        }
+        chan = strtok_r(NULL, " ", &saveptr);
+      }
+
+      if (removed > 0) {
+        Debug((DEBUG_DEBUG, "CH A -: Server %s removed %d channels",
+               cli_name(sptr), removed));
       }
       ad->last_update = CurrentTime;
 
