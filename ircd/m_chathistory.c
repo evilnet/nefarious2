@@ -1452,6 +1452,38 @@ void clear_server_ad(struct Client *server)
   }
 }
 
+/** Check if a server's retention window covers a given timestamp.
+ * Used for federation query routing - skip servers whose retention
+ * doesn't cover the query timeframe.
+ * @param[in] server Server client.
+ * @param[in] query_time Timestamp to check (0 = current time / LATEST query).
+ * @return 1 if server's retention covers the timestamp, 0 otherwise.
+ */
+int server_retention_covers(struct Client *server, time_t query_time)
+{
+  int retention;
+
+  /* No advertisement = unknown, include by default for backward compatibility */
+  if (!has_chathistory_advertisement(server))
+    return 0;
+
+  retention = server_retention_days(server);
+
+  /* Unlimited retention (0) covers everything */
+  if (retention == 0 || retention == -1)
+    return 1;
+
+  /* No query time specified (e.g., LATEST query) = always covered */
+  if (query_time == 0)
+    return 1;
+
+  /* Check if query timestamp falls within retention window */
+  {
+    time_t oldest_covered = CurrentTime - (retention * 86400);
+    return (query_time >= oldest_covered);
+  }
+}
+
 /** Find a chunk entry by key */
 static struct ChunkEntry *find_chunk(const char *key)
 {
@@ -1810,6 +1842,7 @@ static int is_ulined_server(struct Client *server)
 
 /** Count connected non-U-lined servers (real IRC servers only).
  * U-lined servers (services like X3) don't store chat history.
+ * @deprecated Use count_storage_servers() for federation queries.
  */
 static int count_servers(void)
 {
@@ -1825,7 +1858,39 @@ static int count_servers(void)
   return count;
 }
 
-/** Send a federation query to all servers
+/** Count servers that have advertised chathistory storage capability.
+ * Only servers that sent CH A S are counted - these actually store history.
+ * Optionally filters by retention window.
+ * @param[in] query_time Timestamp for retention filtering (0 = no filter).
+ * @return Number of storage-capable servers.
+ */
+static int count_storage_servers(time_t query_time)
+{
+  int count = 0;
+  struct DLink *lp;
+
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *server = lp->value.cptr;
+
+    /* Skip U-lined servers (services) */
+    if (is_ulined_server(server))
+      continue;
+
+    /* Skip servers without storage advertisement */
+    if (!has_chathistory_advertisement(server))
+      continue;
+
+    /* Skip servers whose retention doesn't cover query time */
+    if (query_time != 0 && !server_retention_covers(server, query_time))
+      continue;
+
+    count++;
+  }
+
+  return count;
+}
+
+/** Send a federation query to storage servers
  * @param[in] sptr Client requesting history
  * @param[in] target Channel name
  * @param[in] subcmd Subcommand (LATEST, BEFORE, etc.)
@@ -1834,6 +1899,10 @@ static int count_servers(void)
  * @param[in] local_msgs Already-retrieved local messages
  * @param[in] local_count Number of local messages
  * @return Request ID or NULL on failure
+ *
+ * Phase 3: Advertisement-Based Routing
+ * Only queries servers that have advertised chathistory storage (CH A S)
+ * and whose retention window covers the query timeframe.
  */
 static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
                                            const char *subcmd, const char *ref,
@@ -1847,15 +1916,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   char s2s_subcmd;
   int i, server_count;
   struct DLink *lp;
+  time_t query_time = 0;
+  enum HistoryRefType ref_type;
+  const char *ref_value;
 
   /* Check if federation is enabled */
   if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
     return NULL;
-
-  /* Count connected servers */
-  server_count = count_servers();
-  if (server_count == 0)
-    return NULL;  /* No servers to query */
 
   /* Convert to efficient S2S format */
   s2s_subcmd = subcmd_to_s2s(subcmd);
@@ -1864,6 +1931,24 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
 
   if (!ref_to_s2s(ref, s2s_ref, sizeof(s2s_ref)))
     return NULL;  /* Invalid reference */
+
+  /* Extract timestamp from reference for retention filtering.
+   * For timestamp references, we can skip servers whose retention doesn't
+   * cover the query time. For msgid or * references, we query all storage servers.
+   */
+  if (parse_reference(ref, &ref_type, &ref_value) == 0) {
+    if (ref_type == HISTORY_REF_TIMESTAMP && ref_value) {
+      query_time = (time_t)strtoul(ref_value, NULL, 10);
+    }
+    /* For HISTORY_REF_MSGID or HISTORY_REF_NONE, query_time stays 0 (no filter) */
+  }
+
+  /* Count storage-capable servers that cover the query timeframe.
+   * Only servers that have sent CH A S are counted.
+   */
+  server_count = count_storage_servers(query_time);
+  if (server_count == 0)
+    return NULL;  /* No storage servers to query */
 
   /* Find empty slot */
   for (i = 0; i < MAX_FED_REQUESTS; i++) {
@@ -1901,14 +1986,29 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
             feature_int(FEAT_CHATHISTORY_TIMEOUT));
   req->timer_active = 1;
 
-  /* Send query to non-U-lined servers using efficient S2S format:
+  /* Send query to storage servers using efficient S2S format:
    * CH Q <target> <subcmd:1char> <ref:T/M prefix> <limit> <reqid>
-   * Skip U-lined servers (services) as they don't store chat history.
+   *
+   * Phase 3: Only query servers that:
+   * 1. Are not U-lined (services)
+   * 2. Have advertised chathistory storage (CH A S)
+   * 3. Have retention that covers the query timeframe
    */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     struct Client *server = lp->value.cptr;
+
+    /* Skip U-lined servers (services don't store history) */
     if (is_ulined_server(server))
-      continue;  /* Services don't store history */
+      continue;
+
+    /* Skip servers without storage advertisement */
+    if (!has_chathistory_advertisement(server))
+      continue;
+
+    /* Skip servers whose retention doesn't cover query time */
+    if (query_time != 0 && !server_retention_covers(server, query_time))
+      continue;
+
     sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s",
                   target, s2s_subcmd, s2s_ref, limit, reqid);
   }
@@ -1968,9 +2068,44 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     limit = atoi(parv[5]);
     reqid = parv[6];
 
-    /* Propagate query to other servers (except source) - keep efficient format */
-    sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "Q %s %s %s %d %s",
-                          target, query_subcmd_str, ref, limit, reqid);
+    /* Phase 3: Propagate query to storage servers only.
+     * Filter by advertisement (CH A S) and retention window.
+     */
+    {
+      struct DLink *lp;
+      time_t query_time = 0;
+
+      /* Extract timestamp from S2S reference for retention filtering.
+       * S2S format: T<timestamp>, M<msgid>, or * for none.
+       */
+      if (ref[0] == 'T' && ref[1] != '\0') {
+        query_time = (time_t)strtoul(ref + 1, NULL, 10);
+      }
+      /* For M<msgid> or *, query_time stays 0 (no retention filter) */
+
+      for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+        struct Client *server = lp->value.cptr;
+
+        /* Skip source server */
+        if (server == cptr)
+          continue;
+
+        /* Skip U-lined servers (services don't store history) */
+        if (is_ulined_server(server))
+          continue;
+
+        /* Skip servers without storage advertisement */
+        if (!has_chathistory_advertisement(server))
+          continue;
+
+        /* Skip servers whose retention doesn't cover query time */
+        if (query_time != 0 && !server_retention_covers(server, query_time))
+          continue;
+
+        sendcmdto_one(sptr, CMD_CHATHISTORY, server, "Q %s %s %s %d %s",
+                      target, query_subcmd_str, ref, limit, reqid);
+      }
+    }
 
     /* Only process for channels (not PMs) */
     if (!IsChannelName(target)) {

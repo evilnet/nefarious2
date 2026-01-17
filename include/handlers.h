@@ -285,6 +285,7 @@ extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int ms_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int has_chathistory_advertisement(struct Client*);
 extern int server_retention_days(struct Client*);
+extern int server_retention_covers(struct Client*, time_t);
 extern void clear_server_ad(struct Client*);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
