@@ -781,11 +781,10 @@ static int history_query_internal(const char *target,
       }
       log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: key='%s' outside target range, breaking",
                 key_preview);
-      if (direction == HISTORY_DIR_BEFORE || direction == HISTORY_DIR_LATEST)
-        break;
-      /* For AFTER, move to next */
-      rc = mdb_cursor_get(cursor, &key, &data, op);
-      continue;
+      /* For all directions, once outside target range we're done.
+       * LMDB keys are sorted, so if we've moved past the target prefix,
+       * we'll never find more messages for this target. */
+      break;
     }
 
     /* Allocate message */
