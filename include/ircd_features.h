@@ -334,6 +334,7 @@ enum Feature {
   FEAT_SETNAME_STRICT_LENGTH,
   FEAT_CAP_standard_replies,
   FEAT_CAP_message_tags,
+  FEAT_CLIENTTAGDENY,
   FEAT_CAP_draft_no_implicit_names,
   FEAT_CAP_draft_extended_isupport,
   FEAT_CAP_draft_pre_away,

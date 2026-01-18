@@ -235,6 +235,21 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   else
     comment = parv[0];
 
+  /* UTF8ONLY enforcement on kick reason (only if custom comment provided) */
+  if (parc > 3 && comment != parv[0] &&
+      feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(comment)) {
+    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+      send_fail(sptr, "KICK", "INVALID_UTF8", NULL,
+                "Kick reason contains invalid UTF-8 and was rejected");
+      return 0;
+    }
+    /* Warn mode: sanitize the kick reason */
+    string_sanitize_utf8(parv[parc - 1]);
+    comment = parv[parc - 1];  /* Re-assign after sanitization */
+    send_warn(sptr, "KICK", "INVALID_UTF8", NULL,
+              "Kick reason contained invalid UTF-8 and was sanitized");
+  }
+
   if (!IsLocalChannel(name))
     sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,
 			  comment);

@@ -212,6 +212,71 @@ const char* get_vapid_pubkey(void)
   return VapidPublicKey[0] ? VapidPublicKey : NULL;
 }
 
+/** Check if a client-only tag is denied by CLIENTTAGDENY config.
+ * The CLIENTTAGDENY feature is a comma-separated list of tag patterns.
+ * Patterns can use * as a wildcard suffix (e.g., "+custom/*" matches all +custom/ tags).
+ * @param[in] tag The tag name to check (including + prefix).
+ * @param[in] tag_len Length of the tag name (up to = or end).
+ * @return 1 if tag is denied, 0 if allowed.
+ */
+int is_client_tag_denied(const char *tag, size_t tag_len)
+{
+  const char *deny_list;
+  const char *p, *pattern_start;
+  size_t pattern_len;
+
+  /* Only client-only tags (starting with +) can be denied */
+  if (!tag || tag_len == 0 || tag[0] != '+')
+    return 0;
+
+  deny_list = feature_str(FEAT_CLIENTTAGDENY);
+  if (!deny_list || !*deny_list)
+    return 0;
+
+  /* Parse comma-separated deny list */
+  p = deny_list;
+  while (*p) {
+    /* Skip leading whitespace */
+    while (*p == ' ' || *p == ',')
+      p++;
+    if (!*p)
+      break;
+
+    pattern_start = p;
+
+    /* Find end of this pattern (comma or end) */
+    while (*p && *p != ',')
+      p++;
+    pattern_len = p - pattern_start;
+
+    /* Trim trailing whitespace from pattern */
+    while (pattern_len > 0 && pattern_start[pattern_len - 1] == ' ')
+      pattern_len--;
+
+    if (pattern_len == 0)
+      continue;
+
+    /* Check for wildcard suffix match (e.g., "+custom/*") */
+    if (pattern_len >= 2 && pattern_start[pattern_len - 1] == '*' &&
+        pattern_start[pattern_len - 2] == '/') {
+      /* Prefix match: pattern without trailing * */
+      size_t prefix_len = pattern_len - 1;  /* Include the / but not * */
+      if (tag_len >= prefix_len &&
+          ircd_strncmp(tag, pattern_start, prefix_len) == 0) {
+        return 1;  /* Tag is denied */
+      }
+    } else {
+      /* Exact match */
+      if (tag_len == pattern_len &&
+          ircd_strncmp(tag, pattern_start, pattern_len) == 0) {
+        return 1;  /* Tag is denied */
+      }
+    }
+  }
+
+  return 0;  /* Tag is allowed */
+}
+
 /*----------------------------------------------------------------------------
  * API: server_die
  *--------------------------------------------------------------------------*/

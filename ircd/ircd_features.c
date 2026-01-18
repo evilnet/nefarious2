@@ -858,6 +858,7 @@ static struct FeatureDesc {
   F_B(SETNAME_STRICT_LENGTH, 0, 0, 0),
   F_B(CAP_standard_replies, 0, 1, 0),
   F_B(CAP_message_tags, 0, 1, 0),
+  F_S(CLIENTTAGDENY, FEAT_NULL, 0, 0),
   F_B(CAP_draft_no_implicit_names, 0, 1, 0),
   F_B(CAP_draft_extended_isupport, 0, 1, 0),
   F_B(CAP_draft_pre_away, 0, 1, 0),

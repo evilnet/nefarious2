@@ -1404,18 +1404,23 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
         }
         /* Check for client-only tags (prefixed with +) */
         else if (*tag_name == '+') {
+          /* IRCv3 CLIENTTAGDENY: check if this tag is blocked by operator config */
+          if (is_client_tag_denied(tag_name, tag_len))
+            ; /* Tag is denied, silently drop it */
           /* Copy client-only tag to buffer for TAGMSG relay.
            * IRCv3 message-tags spec: 4094 bytes max for client-only tags.
            * Silently drop excess tags rather than rejecting the message.
            */
-          size_t needed = (client_tags_pos > 0) ? tag_len + 1 : tag_len;
-          if (client_tags_pos + needed <= 4094 &&
-              client_tags_pos + needed + 1 < sizeof(cli_client_tags(cptr))) {
-            if (client_tags_pos > 0)
-              cli_client_tags(cptr)[client_tags_pos++] = ';';
-            memcpy(cli_client_tags(cptr) + client_tags_pos, tag_name, tag_len);
-            client_tags_pos += tag_len;
-            cli_client_tags(cptr)[client_tags_pos] = '\0';
+          else {
+            size_t needed = (client_tags_pos > 0) ? tag_len + 1 : tag_len;
+            if (client_tags_pos + needed <= 4094 &&
+                client_tags_pos + needed + 1 < sizeof(cli_client_tags(cptr))) {
+              if (client_tags_pos > 0)
+                cli_client_tags(cptr)[client_tags_pos++] = ';';
+              memcpy(cli_client_tags(cptr) + client_tags_pos, tag_name, tag_len);
+              client_tags_pos += tag_len;
+              cli_client_tags(cptr)[client_tags_pos] = '\0';
+            }
           }
         }
 

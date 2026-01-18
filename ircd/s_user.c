@@ -2662,6 +2662,13 @@ void init_isupport(void)
     add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
     add_isupport_s("MSGREFTYPES", "timestamp,msgid");
   }
+
+  /* IRCv3 CLIENTTAGDENY - advertise blocked client-only tag patterns */
+  {
+    const char *deny_list = feature_str(FEAT_CLIENTTAGDENY);
+    if (deny_list && *deny_list)
+      add_isupport_s("CLIENTTAGDENY", deny_list);
+  }
 }
 
 /** Send RPL_ISUPPORT lines to \a cptr.

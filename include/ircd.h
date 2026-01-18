@@ -74,5 +74,8 @@ extern void set_vapid_pubkey(const char *key);
 /** Get the VAPID public key (for ISUPPORT and CAP value) */
 extern const char* get_vapid_pubkey(void);
 
+/** Check if a client-only tag is denied by CLIENTTAGDENY config */
+extern int is_client_tag_denied(const char *tag, size_t tag_len);
+
 #endif /* INCLUDED_ircd_h */
 
