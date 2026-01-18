@@ -141,7 +141,86 @@ int string_is_valid_utf8(const char * str)
     }
 
     return 1;
-}  
+}
+
+/**
+ * Sanitize a string by truncating at the first invalid UTF-8 sequence.
+ * The string is modified in place.
+ *
+ * @param str The string to sanitize (will be modified).
+ * @return Length of sanitized string, or -1 if no modification was needed.
+ */
+int string_sanitize_utf8(char *str)
+{
+    unsigned char *bytes;
+    unsigned char *start;
+
+    if (!str)
+        return -1;
+
+    start = (unsigned char *)str;
+    bytes = start;
+
+    while (*bytes)
+    {
+        /* ASCII printable and common control characters */
+        if (bytes[0] == 0x09 || bytes[0] == 0x0A || bytes[0] == 0x0D ||
+            (0x20 <= bytes[0] && bytes[0] <= 0x7E))
+        {
+            bytes += 1;
+            continue;
+        }
+
+        /* Non-overlong 2-byte */
+        if ((0xC2 <= bytes[0] && bytes[0] <= 0xDF) &&
+            (0x80 <= bytes[1] && bytes[1] <= 0xBF))
+        {
+            bytes += 2;
+            continue;
+        }
+
+        /* 3-byte sequences */
+        if ((bytes[0] == 0xE0 &&
+             (0xA0 <= bytes[1] && bytes[1] <= 0xBF) &&
+             (0x80 <= bytes[2] && bytes[2] <= 0xBF)) ||
+            (((0xE1 <= bytes[0] && bytes[0] <= 0xEC) ||
+              bytes[0] == 0xEE || bytes[0] == 0xEF) &&
+             (0x80 <= bytes[1] && bytes[1] <= 0xBF) &&
+             (0x80 <= bytes[2] && bytes[2] <= 0xBF)) ||
+            (bytes[0] == 0xED &&
+             (0x80 <= bytes[1] && bytes[1] <= 0x9F) &&
+             (0x80 <= bytes[2] && bytes[2] <= 0xBF)))
+        {
+            bytes += 3;
+            continue;
+        }
+
+        /* 4-byte sequences */
+        if ((bytes[0] == 0xF0 &&
+             (0x90 <= bytes[1] && bytes[1] <= 0xBF) &&
+             (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
+             (0x80 <= bytes[3] && bytes[3] <= 0xBF)) ||
+            ((0xF1 <= bytes[0] && bytes[0] <= 0xF3) &&
+             (0x80 <= bytes[1] && bytes[1] <= 0xBF) &&
+             (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
+             (0x80 <= bytes[3] && bytes[3] <= 0xBF)) ||
+            (bytes[0] == 0xF4 &&
+             (0x80 <= bytes[1] && bytes[1] <= 0x8F) &&
+             (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
+             (0x80 <= bytes[3] && bytes[3] <= 0xBF)))
+        {
+            bytes += 4;
+            continue;
+        }
+
+        /* Invalid sequence - truncate here */
+        *bytes = '\0';
+        return (int)(bytes - start);
+    }
+
+    /* String was already valid */
+    return -1;
+}
 
 /** Check whether \a str contains non-ASCII characters.
  * @param[in] str String that might contain such characters.

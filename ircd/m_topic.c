@@ -212,6 +212,23 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc > 2) {
     topic = parv[parc - 1];
 
+    /* UTF8ONLY enforcement */
+    if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(topic)) {
+      if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+        send_fail(sptr, "TOPIC", "INVALID_UTF8", NULL,
+                  "Topic contains invalid UTF-8 and was rejected");
+        return 0;
+      }
+      /* Warn mode: sanitize the topic */
+      string_sanitize_utf8(topic);
+      send_warn(sptr, "TOPIC", "INVALID_UTF8", NULL,
+                "Topic was truncated due to invalid UTF-8");
+      if (EmptyString(topic)) {
+        send_reply(sptr, ERR_NOTEXTTOSEND);
+        return 0;
+      }
+    }
+
     hascolor = HasColor(topic);
     if (hascolor)
       topicnocolor = StripColor(topic);

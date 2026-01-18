@@ -84,6 +84,43 @@
  * but not introduce any IsOper/IsUser/MyUser/IsServer etc. stuff.
  */
 
+/**
+ * Check and optionally sanitize text for UTF-8 validity (UTF8ONLY enforcement).
+ *
+ * When UTF8ONLY is enabled:
+ * - In strict mode: sends FAIL INVALID_UTF8 and returns 0 (reject message)
+ * - In warn mode: sanitizes text, sends WARN INVALID_UTF8, returns 1 (proceed)
+ *
+ * When UTF8ONLY is disabled, always returns 1.
+ *
+ * @param[in] sptr Client sending the message.
+ * @param[in,out] text Message text (may be modified in warn mode).
+ * @param[in] command Command name for standard reply (e.g., "PRIVMSG").
+ * @return 1 if message should proceed (possibly modified), 0 if rejected.
+ */
+static int check_utf8_text(struct Client *sptr, char *text, const char *command)
+{
+  if (!feature_bool(FEAT_UTF8ONLY))
+    return 1;
+
+  if (string_is_valid_utf8(text))
+    return 1;
+
+  /* Invalid UTF-8 detected */
+  if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+    /* Strict mode: reject the message */
+    send_fail(sptr, command, "INVALID_UTF8", NULL,
+              "Message contains invalid UTF-8 and was rejected");
+    return 0;
+  }
+
+  /* Warn mode: sanitize and proceed */
+  string_sanitize_utf8(text);
+  send_warn(sptr, command, "INVALID_UTF8", NULL,
+            "Message was truncated due to invalid UTF-8");
+  return 1;
+}
+
 #ifdef USE_LMDB
 /** Store a channel message in the history database.
  * Stores the message with the provided msgid and timestamp.
@@ -298,9 +335,30 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
   struct Channel* chptr;
   const char* mytext = text;
   const char* ch;
+  char utf8buf[BUFSIZE];
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
+
+  /* UTF8ONLY enforcement */
+  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
+    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+      send_fail(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
+                "Message contains invalid UTF-8 and was rejected");
+      return;
+    }
+    /* Warn mode: copy, sanitize, and use sanitized version */
+    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
+    utf8buf[sizeof(utf8buf) - 1] = '\0';
+    string_sanitize_utf8(utf8buf);
+    send_warn(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
+              "Message was truncated due to invalid UTF-8");
+    mytext = utf8buf;
+    if (EmptyString(mytext)) {
+      send_reply(sptr, ERR_NOTEXTTOSEND);
+      return;
+    }
+  }
 
   if (0 == (chptr = FindChannel(name))) {
     send_reply(sptr, ERR_NOSUCHCHANNEL, name);
@@ -406,9 +464,28 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   struct Channel* chptr;
   const char* mytext = text;
   const char* ch;
+  char utf8buf[BUFSIZE];
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
+
+  /* UTF8ONLY enforcement */
+  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
+    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+      send_fail(sptr, "NOTICE", "INVALID_UTF8", NULL,
+                "Message contains invalid UTF-8 and was rejected");
+      return;
+    }
+    /* Warn mode: copy, sanitize, and use sanitized version */
+    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
+    utf8buf[sizeof(utf8buf) - 1] = '\0';
+    string_sanitize_utf8(utf8buf);
+    send_warn(sptr, "NOTICE", "INVALID_UTF8", NULL,
+              "Message was truncated due to invalid UTF-8");
+    mytext = utf8buf;
+    if (EmptyString(mytext))
+      return;
+  }
 
   if (0 == (chptr = FindChannel(name)))
     return;
@@ -776,10 +853,32 @@ void relay_directed_notice(struct Client* sptr, char* name, char* server, const 
 void relay_private_message(struct Client* sptr, const char* name, const char* text)
 {
   struct Client* acptr;
+  const char* mytext = text;
+  char utf8buf[BUFSIZE];
 
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
+
+  /* UTF8ONLY enforcement */
+  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
+    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+      send_fail(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
+                "Message contains invalid UTF-8 and was rejected");
+      return;
+    }
+    /* Warn mode: copy, sanitize, and use sanitized version */
+    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
+    utf8buf[sizeof(utf8buf) - 1] = '\0';
+    string_sanitize_utf8(utf8buf);
+    send_warn(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
+              "Message was truncated due to invalid UTF-8");
+    mytext = utf8buf;
+    if (EmptyString(mytext)) {
+      send_reply(sptr, ERR_NOTEXTTOSEND);
+      return;
+    }
+  }
 
   if (0 == (acptr = FindUser(name))) {
     send_reply(sptr, ERR_NOSUCHNICK, name);
@@ -830,9 +929,9 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     const char *client_tags = cli_client_tags(sptr);
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       sendcmdto_one_client_tags(sptr, MSG_PRIVATE, acptr, client_tags,
-                                "%C :%s", acptr, text);
+                                "%C :%s", acptr, mytext);
     } else {
-      sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+      sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, mytext);
     }
   }
 
@@ -845,7 +944,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
       sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
-                               "%C :%s", acptr, text);
+                               "%C :%s", acptr, mytext);
     else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
@@ -860,11 +959,11 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
 
     /* Store private message in history database (if enabled) */
     if (msgid[0])
-      store_private_history(sptr, acptr, text, HISTORY_PRIVMSG, msgid, timestamp);
+      store_private_history(sptr, acptr, mytext, HISTORY_PRIVMSG, msgid, timestamp);
   }
 #else
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
-    sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
+    sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, mytext);
 #endif
 }
 
@@ -879,9 +978,30 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
 void relay_private_notice(struct Client* sptr, const char* name, const char* text)
 {
   struct Client* acptr;
+  const char* mytext = text;
+  char utf8buf[BUFSIZE];
+
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
+
+  /* UTF8ONLY enforcement */
+  if (feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(text)) {
+    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+      send_fail(sptr, "NOTICE", "INVALID_UTF8", NULL,
+                "Message contains invalid UTF-8 and was rejected");
+      return;
+    }
+    /* Warn mode: copy, sanitize, and use sanitized version */
+    ircd_strncpy(utf8buf, text, sizeof(utf8buf) - 1);
+    utf8buf[sizeof(utf8buf) - 1] = '\0';
+    string_sanitize_utf8(utf8buf);
+    send_warn(sptr, "NOTICE", "INVALID_UTF8", NULL,
+              "Message was truncated due to invalid UTF-8");
+    mytext = utf8buf;
+    if (EmptyString(mytext))
+      return;
+  }
 
   if (0 == (acptr = FindUser(name)))
     return;
@@ -925,9 +1045,9 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     const char *client_tags = cli_client_tags(sptr);
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       sendcmdto_one_client_tags(sptr, MSG_NOTICE, acptr, client_tags,
-                                "%C :%s", acptr, text);
+                                "%C :%s", acptr, mytext);
     } else {
-      sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+      sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, mytext);
     }
   }
 
@@ -940,7 +1060,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
       sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
-                               "%C :%s", acptr, text);
+                               "%C :%s", acptr, mytext);
     else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
@@ -955,12 +1075,12 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
     /* Store private notice in history database (if enabled) */
     if (msgid[0])
-      store_private_history(sptr, acptr, text, HISTORY_NOTICE, msgid, timestamp);
+      store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, msgid, timestamp);
   }
 #else
   /* Echo notice back to sender if they have echo-message capability */
   if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
-    sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, text);
+    sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, mytext);
 #endif
 }
 

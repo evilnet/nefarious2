@@ -687,6 +687,8 @@ static struct FeatureDesc {
   F_S(URL_CLIENTS, 0, "http://www.ircreviews.org/clients/", 0),
   F_S(URLREG, 0, "http://sourceforge.net/projects/evilnet/", 0),
   F_S(NETWORK_ICON, 0, "", 0),
+  F_B(UTF8ONLY, 0, 0, 0),
+  F_B(UTF8ONLY_STRICT, 0, 0, 0),
 
   /* Nefarious FEAT_'s */
   F_B(CHECK, 0, 1, 0),

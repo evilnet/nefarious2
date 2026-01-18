@@ -2639,6 +2639,10 @@ void init_isupport(void)
       add_isupport_s("draft/ICON", icon_url);
   }
 
+  /* IRCv3 UTF8ONLY - server enforces UTF-8 encoding */
+  if (feature_bool(FEAT_UTF8ONLY))
+    add_isupport("UTF8ONLY");
+
   add_isupport_s("MAXLIST", imaxlist);
   add_isupport_s("ELIST", "CT");
 
