@@ -58,20 +58,18 @@
 #define IOV_MAX 1024
 #endif /* IOV_MAX */
 
-/** Maximum number of SNI hostname/certificate pairs */
-#define SNI_MAX_CERTS 2
-
 SSL_CTX *ssl_server_ctx;
 SSL_CTX *ssl_client_ctx;
 
-/** Structure for SNI hostname to SSL_CTX mapping */
+/** Structure for SNI hostname to SSL_CTX mapping (linked list) */
 struct sni_cert {
-  char *hostname;       /**< Hostname to match (NULL for default) */
-  SSL_CTX *ctx;         /**< SSL context with this certificate */
+  char *hostname;         /**< Hostname to match */
+  SSL_CTX *ctx;           /**< SSL context with this certificate */
+  struct sni_cert *next;  /**< Next in linked list */
 };
 
-/** Array of SNI certificates (index 0 and 1 for SNI_HOSTNAME1/2) */
-static struct sni_cert sni_certs[SNI_MAX_CERTS];
+/** Linked list of SNI certificates (from SSL config block) */
+static struct sni_cert *sni_cert_list = NULL;
 
 SSL_CTX *ssl_init_server_ctx(void);
 SSL_CTX *ssl_init_client_ctx(void);
@@ -296,7 +294,7 @@ int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
 static int sni_callback(SSL *ssl, int *al, void *arg)
 {
   const char *hostname;
-  int i;
+  struct sni_cert *cert;
 
   (void)al;   /* Unused */
   (void)arg;  /* Unused */
@@ -308,11 +306,11 @@ static int sni_callback(SSL *ssl, int *al, void *arg)
   Debug((DEBUG_DEBUG, "SNI: client requested hostname '%s'", hostname));
 
   /* Search for matching hostname in SNI certificates */
-  for (i = 0; i < SNI_MAX_CERTS; i++) {
-    if (sni_certs[i].hostname && sni_certs[i].ctx) {
-      if (!strcasecmp(sni_certs[i].hostname, hostname)) {
+  for (cert = sni_cert_list; cert; cert = cert->next) {
+    if (cert->hostname && cert->ctx) {
+      if (!strcasecmp(cert->hostname, hostname)) {
         Debug((DEBUG_DEBUG, "SNI: switching to certificate for '%s'", hostname));
-        SSL_set_SSL_CTX(ssl, sni_certs[i].ctx);
+        SSL_set_SSL_CTX(ssl, cert->ctx);
         return SSL_TLSEXT_ERR_OK;
       }
     }
@@ -391,53 +389,41 @@ SSL_CTX *ssl_create_ctx_for_cert(const char *certfile, const char *keyfile)
 }
 
 /**
- * Initialize SNI certificates from feature configuration.
+ * Initialize SNI certificates from SSL config block.
  * Called from ssl_init() after the default context is created.
+ * Reads from sslCertConfList which is populated by the config parser.
  */
 static void sni_init_certs(void)
 {
-  const char *hostname, *certfile, *keyfile;
-  int i;
+  struct SSLCertConf *conf;
+  struct sni_cert *cert;
+  int count = 0;
 
-  /* Clear existing SNI certs */
-  memset(sni_certs, 0, sizeof(sni_certs));
+  /* Load SNI certificates from config list */
+  for (conf = sslCertConfList; conf; conf = conf->next) {
+    if (EmptyString(conf->hostname) || EmptyString(conf->certfile) || EmptyString(conf->keyfile))
+      continue;
 
-  /* Load SNI certificate 1 */
-  hostname = feature_str(FEAT_SNI_HOSTNAME1);
-  certfile = feature_str(FEAT_SNI_CERTFILE1);
-  keyfile = feature_str(FEAT_SNI_KEYFILE1);
-
-  if (!EmptyString(hostname) && !EmptyString(certfile) && !EmptyString(keyfile)) {
-    sni_certs[0].ctx = ssl_create_ctx_for_cert(certfile, keyfile);
-    if (sni_certs[0].ctx) {
-      sni_certs[0].hostname = strdup(hostname);
-      Debug((DEBUG_NOTICE, "SNI: Loaded certificate for '%s'", hostname));
-    } else {
-      Debug((DEBUG_ERROR, "SNI: Failed to load certificate for '%s'", hostname));
-    }
-  }
-
-  /* Load SNI certificate 2 */
-  hostname = feature_str(FEAT_SNI_HOSTNAME2);
-  certfile = feature_str(FEAT_SNI_CERTFILE2);
-  keyfile = feature_str(FEAT_SNI_KEYFILE2);
-
-  if (!EmptyString(hostname) && !EmptyString(certfile) && !EmptyString(keyfile)) {
-    sni_certs[1].ctx = ssl_create_ctx_for_cert(certfile, keyfile);
-    if (sni_certs[1].ctx) {
-      sni_certs[1].hostname = strdup(hostname);
-      Debug((DEBUG_NOTICE, "SNI: Loaded certificate for '%s'", hostname));
-    } else {
-      Debug((DEBUG_ERROR, "SNI: Failed to load certificate for '%s'", hostname));
-    }
-  }
-
-  /* Log summary */
-  for (i = 0; i < SNI_MAX_CERTS; i++) {
-    if (sni_certs[i].hostname) {
+    SSL_CTX *ctx = ssl_create_ctx_for_cert(conf->certfile, conf->keyfile);
+    if (ctx) {
+      cert = (struct sni_cert *)MyMalloc(sizeof(*cert));
+      cert->hostname = strdup(conf->hostname);
+      cert->ctx = ctx;
+      cert->next = sni_cert_list;
+      sni_cert_list = cert;
+      count++;
+      Debug((DEBUG_NOTICE, "SNI: Loaded certificate for '%s'", conf->hostname));
       sendto_opmask_butone(0, SNO_OLDSNO, "SNI: Certificate loaded for '%s'",
-                           sni_certs[i].hostname);
+                           conf->hostname);
+    } else {
+      Debug((DEBUG_ERROR, "SNI: Failed to load certificate for '%s'", conf->hostname));
+      sendto_opmask_butone(0, SNO_OLDSNO, "SNI: Failed to load certificate for '%s'",
+                           conf->hostname);
     }
+  }
+
+  if (count > 0) {
+    Debug((DEBUG_NOTICE, "SNI: Loaded %d certificate(s)", count));
   }
 }
 
@@ -447,18 +433,17 @@ static void sni_init_certs(void)
  */
 static void sni_free_certs(void)
 {
-  int i;
+  struct sni_cert *cert, *next;
 
-  for (i = 0; i < SNI_MAX_CERTS; i++) {
-    if (sni_certs[i].ctx) {
-      SSL_CTX_free(sni_certs[i].ctx);
-      sni_certs[i].ctx = NULL;
-    }
-    if (sni_certs[i].hostname) {
-      free(sni_certs[i].hostname);
-      sni_certs[i].hostname = NULL;
-    }
+  for (cert = sni_cert_list; cert; cert = next) {
+    next = cert->next;
+    if (cert->ctx)
+      SSL_CTX_free(cert->ctx);
+    if (cert->hostname)
+      free(cert->hostname);
+    MyFree(cert);
   }
+  sni_cert_list = NULL;
 }
 
 void ssl_abort(struct Client *cptr)

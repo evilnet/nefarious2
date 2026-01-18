@@ -234,6 +234,16 @@ struct ExceptConf {
 #define EFLAG_TARGLIMIT 0x080   /**< Matching users are exempt from target limiting */
 #define EFLAG_LISTDELAY 0x100   /**< Matching users are exempt from LISTDELAY */
 
+#ifdef USE_SSL
+/** SNI certificate configuration for multi-certificate TLS support. */
+struct SSLCertConf {
+  struct SSLCertConf* next;     /**< Next SSLCertConf in sslCertConfList. */
+  char*               hostname; /**< SNI hostname to match. */
+  char*               certfile; /**< Path to certificate file. */
+  char*               keyfile;  /**< Path to private key file. */
+};
+#endif /* USE_SSL */
+
 /*
  * GLOBALS
  */
@@ -242,6 +252,9 @@ extern int              GlobalConfCount;
 extern struct s_map*    GlobalServiceMapList;
 extern struct qline*    GlobalQuarantineList;
 extern char *           GlobalForwards[256];
+#ifdef USE_SSL
+extern struct SSLCertConf* sslCertConfList;
+#endif
 
 /*
  * Proto types
@@ -292,5 +305,9 @@ extern int find_mark(struct Client* sptr, const char* dnsbl);
 extern int find_mark_match(struct Client* sptr, const char* mask);
 extern int add_mark(struct Client* sptr, const char* dnsbl);
 extern int del_marks(struct Client* sptr);
+
+#ifdef USE_SSL
+extern void clear_sslcert_confs(void);
+#endif
 
 #endif /* INCLUDED_s_conf_h */

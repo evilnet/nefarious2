@@ -74,6 +74,9 @@ extern int init_lexer_file(char* file);
   extern struct WebIRCConf* webircConfList;
   extern struct SHostConf*  shostConfList;
   extern struct ExceptConf* exceptConfList;
+#ifdef USE_SSL
+  extern struct SSLCertConf* sslCertConfList;
+#endif
 
   int yylex(void);
   /* Now all the globals we need :/... */
@@ -235,6 +238,8 @@ static void free_slist(struct SLink **link) {
 %token ENABLEOPTIONS
 %token TRUSTACCOUNT
 %token WEBSOCKET
+%token CERTIFICATE
+%token KEY
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_DIE
@@ -267,7 +272,7 @@ block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
        pseudoblock | iauthblock | forwardsblock | webircblock | spoofhostblock |
-       exceptblock | include | error ';';
+       exceptblock | sslblock | include | error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -1912,3 +1917,53 @@ include: INCLUDE QSTRING ';'
 {
   init_lexer_file($2);
 }
+
+sslblock: SSLTOK '{' sslcertitems '}' ';';
+sslcertitems: sslcertitems sslcertitem | sslcertitem;
+sslcertitem: QSTRING
+{
+  MyFree(host);
+  host = $1;
+  MyFree(pass);
+  pass = NULL;
+  MyFree(origin);
+  origin = NULL;
+} '{' sslcertprops '}' ';'
+{
+#ifdef USE_SSL
+  struct SSLCertConf *conf;
+  if (host == NULL)
+    parse_error("Missing hostname in SSL block");
+  else if (pass == NULL)
+    parse_error("Missing certificate in SSL block for %s", host);
+  else if (origin == NULL)
+    parse_error("Missing key in SSL block for %s", host);
+  else {
+    conf = (struct SSLCertConf*) MyCalloc(1, sizeof(*conf));
+    conf->hostname = host;
+    conf->certfile = pass;
+    conf->keyfile = origin;
+    conf->next = sslCertConfList;
+    sslCertConfList = conf;
+    host = pass = origin = NULL;
+  }
+#else
+  parse_error("SSL block defined but SSL is not enabled");
+#endif
+  MyFree(host);
+  MyFree(pass);
+  MyFree(origin);
+  host = pass = origin = NULL;
+};
+sslcertprops: sslcertprops sslcertprop | sslcertprop;
+sslcertprop: sslcertfile | sslkeyfile;
+sslcertfile: CERTIFICATE '=' QSTRING ';'
+{
+  MyFree(pass);
+  pass = $3;
+};
+sslkeyfile: KEY '=' QSTRING ';'
+{
+  MyFree(origin);
+  origin = $3;
+};

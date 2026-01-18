@@ -98,6 +98,11 @@ struct SHostConf*  shostConfList;
 /** Global list of Except blocks. */
 struct ExceptConf* exceptConfList;
 
+#ifdef USE_SSL
+/** Global list of SNI certificate configurations. */
+struct SSLCertConf* sslCertConfList;
+#endif
+
 /** Tell a user that they are banned, dumping the message from a file.
  * @param sptr Client being rejected
  * @param filename Send this file's contents to \a sptr
@@ -1346,6 +1351,9 @@ int rehash(struct Client *cptr, int sig)
   conf_erase_webirc_list();
   conf_erase_shost_list();
   conf_erase_except_list();
+#ifdef USE_SSL
+  clear_sslcert_confs();
+#endif
   motd_clear();
 
   /*
@@ -1738,4 +1746,23 @@ get_client_conf(struct Client *acptr)
     }
   return NULL;
 }
+
+#ifdef USE_SSL
+/** Clear all SNI certificate configurations.
+ * Called during rehash before parsing new config.
+ */
+void clear_sslcert_confs(void)
+{
+  struct SSLCertConf *conf, *next;
+
+  for (conf = sslCertConfList; conf; conf = next) {
+    next = conf->next;
+    MyFree(conf->hostname);
+    MyFree(conf->certfile);
+    MyFree(conf->keyfile);
+    MyFree(conf);
+  }
+  sslCertConfList = NULL;
+}
+#endif /* USE_SSL */
 
