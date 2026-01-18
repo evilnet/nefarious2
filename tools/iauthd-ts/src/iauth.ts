@@ -656,7 +656,6 @@ export class IAuthDaemon {
         client.sasl.mechanism = undefined;
         client.sasl.certfp = undefined;
         client.sasl.hostInfo = undefined;
-        client.sasl.data = undefined;
       }
       return;
     }
