@@ -86,6 +86,7 @@
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_log.h"
+#include "ircd_features.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "numeric.h"
@@ -116,6 +117,20 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* check number of arguments */
   if (parc < 2 || parv[1][0] == '\0')
     return need_more_params(sptr, "PART");
+
+  /* UTF8ONLY enforcement on part message */
+  if (parc > 2 && !EmptyString(parv[parc - 1]) &&
+      feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(parv[parc - 1])) {
+    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+      send_fail(sptr, "PART", "INVALID_UTF8", NULL,
+                "Part message contains invalid UTF-8 and was rejected");
+      return 0;
+    }
+    /* Warn mode: sanitize the part message */
+    string_sanitize_utf8(parv[parc - 1]);
+    send_warn(sptr, "PART", "INVALID_UTF8", NULL,
+              "Part message contained invalid UTF-8 and was sanitized");
+  }
 
   /* init join/part buffer */
   joinbuf_init(&parts, sptr, cptr, JOINBUF_TYPE_PART,

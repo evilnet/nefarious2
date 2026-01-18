@@ -27,18 +27,24 @@
 #include "IPcheck.h"
 #include "class.h"
 #include "client.h"
+#include "handlers.h"
 #include "crule.h"
 #include "destruct_event.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd_alloc.h"
+#include "ircd_compress.h"
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_geoip.h"
 #include "ircd_log.h"
+#include "ircd_log_async.h"
 #include "ircd_reply.h"
 #include "ircd_signal.h"
 #include "ircd_string.h"
 #include "ircd_crypt.h"
+#include "capab.h"
+#include "thread_pool.h"
 #include "jupe.h"
 #include "list.h"
 #include "match.h"
@@ -64,6 +70,8 @@
 #include "userload.h"
 #include "version.h"
 #include "whowas.h"
+#include "metadata.h"
+#include "ml_storage.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -121,6 +129,9 @@ static char   *dbg_client;                /**< Client specifier for chkconf */
 static struct Timer connect_timer; /**< timer structure for try_connections() */
 static struct Timer ping_timer; /**< timer structure for check_pings() */
 static struct Timer destruct_event_timer; /**< timer structure for exec_expired_destruct_events() */
+static struct Timer history_purge_timer; /**< timer structure for history_purge_callback() */
+static struct Timer metadata_purge_timer; /**< timer structure for metadata_purge_callback() */
+static struct Timer ml_storage_timer; /**< timer structure for ml_storage_expire() */
 
 /** Daemon information. */
 static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
@@ -128,6 +139,143 @@ static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
 /** Non-zero until we want to exit. */
 int running = 1;
 
+/** Counter for generating unique message IDs. */
+unsigned long MsgIdCounter = 0;
+
+/** SASL mechanism list received from services. Empty means use default. */
+char SaslMechanisms[SASL_MECHS_LEN] = "";
+
+/** Set the SASL mechanism list (called when services announces mechanisms).
+ * Sends CAP NEW :sasl when SASL becomes available, CAP DEL :sasl when removed.
+ * @param[in] mechs Comma-separated list of mechanism names.
+ */
+void set_sasl_mechanisms(const char *mechs)
+{
+  int was_available = (SaslMechanisms[0] != '\0');
+
+  if (mechs && *mechs) {
+    ircd_strncpy(SaslMechanisms, mechs, SASL_MECHS_LEN - 1);
+    SaslMechanisms[SASL_MECHS_LEN - 1] = '\0';
+
+    /* Send CAP NEW if SASL just became available */
+    if (!was_available)
+      send_cap_notify("sasl", 1, SaslMechanisms);
+  } else {
+    /* Send CAP DEL if SASL was available and is now removed */
+    if (was_available)
+      send_cap_notify("sasl", 0, NULL);
+
+    SaslMechanisms[0] = '\0';
+  }
+}
+
+/** Get the SASL mechanism list for CAP LS.
+ * @return Mechanism list, or NULL if none set.
+ */
+const char* get_sasl_mechanisms(void)
+{
+  return SaslMechanisms[0] ? SaslMechanisms : NULL;
+}
+
+/** VAPID public key received from services. Empty means webpush unavailable. */
+char VapidPublicKey[VAPID_KEY_LEN] = "";
+
+/** Set the VAPID public key (called when services announces it).
+ * Sends CAP NEW when webpush becomes available, CAP DEL when removed.
+ * @param[in] key Base64url-encoded VAPID public key.
+ */
+void set_vapid_pubkey(const char *key)
+{
+  int was_available = (VapidPublicKey[0] != '\0');
+
+  if (key && *key) {
+    ircd_strncpy(VapidPublicKey, key, VAPID_KEY_LEN - 1);
+    VapidPublicKey[VAPID_KEY_LEN - 1] = '\0';
+
+    /* Send CAP NEW if webpush just became available */
+    if (!was_available)
+      send_cap_notify("draft/webpush", 1, NULL);
+  } else {
+    /* Send CAP DEL if webpush was available and is now removed */
+    if (was_available)
+      send_cap_notify("draft/webpush", 0, NULL);
+
+    VapidPublicKey[0] = '\0';
+  }
+}
+
+/** Get the VAPID public key for ISUPPORT/CAP.
+ * @return VAPID public key, or NULL if none set.
+ */
+const char* get_vapid_pubkey(void)
+{
+  return VapidPublicKey[0] ? VapidPublicKey : NULL;
+}
+
+/** Check if a client-only tag is denied by CLIENTTAGDENY config.
+ * The CLIENTTAGDENY feature is a comma-separated list of tag patterns.
+ * Patterns can use * as a wildcard suffix (e.g., "+custom/*" matches all +custom/ tags).
+ * @param[in] tag The tag name to check (including + prefix).
+ * @param[in] tag_len Length of the tag name (up to = or end).
+ * @return 1 if tag is denied, 0 if allowed.
+ */
+int is_client_tag_denied(const char *tag, size_t tag_len)
+{
+  const char *deny_list;
+  const char *p, *pattern_start;
+  size_t pattern_len;
+
+  /* Only client-only tags (starting with +) can be denied */
+  if (!tag || tag_len == 0 || tag[0] != '+')
+    return 0;
+
+  deny_list = feature_str(FEAT_CLIENTTAGDENY);
+  if (!deny_list || !*deny_list)
+    return 0;
+
+  /* Parse comma-separated deny list */
+  p = deny_list;
+  while (*p) {
+    /* Skip leading whitespace */
+    while (*p == ' ' || *p == ',')
+      p++;
+    if (!*p)
+      break;
+
+    pattern_start = p;
+
+    /* Find end of this pattern (comma or end) */
+    while (*p && *p != ',')
+      p++;
+    pattern_len = p - pattern_start;
+
+    /* Trim trailing whitespace from pattern */
+    while (pattern_len > 0 && pattern_start[pattern_len - 1] == ' ')
+      pattern_len--;
+
+    if (pattern_len == 0)
+      continue;
+
+    /* Check for wildcard suffix match (e.g., "+custom/*") */
+    if (pattern_len >= 2 && pattern_start[pattern_len - 1] == '*' &&
+        pattern_start[pattern_len - 2] == '/') {
+      /* Prefix match: pattern without trailing * */
+      size_t prefix_len = pattern_len - 1;  /* Include the / but not * */
+      if (tag_len >= prefix_len &&
+          ircd_strncmp(tag, pattern_start, prefix_len) == 0) {
+        return 1;  /* Tag is denied */
+      }
+    } else {
+      /* Exact match */
+      if (tag_len == pattern_len &&
+          ircd_strncmp(tag, pattern_start, pattern_len) == 0) {
+        return 1;  /* Tag is denied */
+      }
+    }
+  }
+
+  return 0;  /* Tag is allowed */
+}
 
 /*----------------------------------------------------------------------------
  * API: server_die
@@ -180,6 +328,8 @@ void server_restart(const char *message)
   Debug((DEBUG_NOTICE, "Restarting server..."));
   flush_connections(0);
 
+  log_async_shutdown();  /* Flush pending log entries before shutdown */
+  thread_pool_shutdown();
   log_close();
 
   close_connections(!(thisServer.bootopt & (BOOT_TTY | BOOT_DEBUG | BOOT_CHKCONF)));
@@ -352,6 +502,15 @@ static void check_pings(struct Event* ev) {
       continue;
     }
 
+    /* Check for client batch timeout (draft/multiline) */
+    check_client_batch_timeout(cptr);
+
+    /* Check X3 availability (only once per ping cycle for services servers) */
+    if (i == 0 && feature_bool(FEAT_METADATA_CACHE_ENABLED)) {
+      metadata_x3_check();
+      metadata_expire_requests();
+    }
+
     Debug((DEBUG_DEBUG, "check_pings(%s)=status:%s current: %d",
 	   cli_name(cptr),
 	   IsPingSent(cptr) ? "[Ping Sent]" : "[]", 
@@ -454,8 +613,75 @@ static void check_pings(struct Event* ev) {
   
   Debug((DEBUG_DEBUG, "[%i] check_pings() again in %is",
 	 CurrentTime, next_check-CurrentTime));
-  
+
   timer_add(&ping_timer, check_pings, 0, TT_ABSOLUTE, next_check);
+}
+
+/** Periodic callback to purge old history messages.
+ * Runs every hour to enforce CHATHISTORY_RETENTION policy.
+ * @param[in] ev Timer event (ignored).
+ */
+static void history_purge_callback(struct Event* ev)
+{
+  int retention_days;
+  unsigned long max_age_seconds;
+
+  (void)ev; /* unused */
+
+  /* Only run if chathistory storage is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_STORE))
+    return;
+
+  if (!history_is_available())
+    return;
+
+  /* Run storage management maintenance (eviction if needed)
+   * This has its own internal interval check. */
+  history_maintenance_tick();
+
+  retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
+  if (retention_days <= 0)
+    return; /* Retention disabled */
+
+  max_age_seconds = (unsigned long)retention_days * 24 * 60 * 60;
+  history_purge_old(max_age_seconds);
+}
+
+/** Periodic callback to purge expired metadata cache entries.
+ * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL.
+ * @param[in] ev Timer event (ignored).
+ */
+static void metadata_purge_callback(struct Event* ev)
+{
+  (void)ev; /* unused */
+
+  /* Only run if metadata caching is enabled */
+  if (!feature_bool(FEAT_METADATA_CACHE_ENABLED))
+    return;
+
+  if (!metadata_lmdb_is_available())
+    return;
+
+  /* TTL of 0 disables purging */
+  if (feature_int(FEAT_METADATA_CACHE_TTL) <= 0)
+    return;
+
+  metadata_account_purge_expired();
+}
+
+/** Periodic callback to expire old multiline storage entries.
+ * Runs every 5 minutes to enforce MULTILINE_STORAGE_TTL.
+ * @param[in] ev Timer event (ignored).
+ */
+static void ml_storage_callback(struct Event* ev)
+{
+  (void)ev; /* unused */
+
+  /* Only run if multiline storage is enabled */
+  if (!feature_bool(FEAT_MULTILINE_STORAGE_ENABLED))
+    return;
+
+  ml_storage_expire();
 }
 
 
@@ -694,6 +920,23 @@ int main(int argc, char **argv) {
 
   setup_signals();
   feature_init(); /* initialize features... */
+
+  /* Initialize thread pool for async operations (bcrypt, etc.)
+   * Must be after feature_init() to read THREAD_POOL_SIZE config */
+  if (thread_pool_init(feature_int(FEAT_THREAD_POOL_SIZE)) < 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "Thread pool init failed; password verification will be synchronous");
+  }
+
+  /* Initialize async logging if enabled
+   * Must be after feature_init() to read ASYNC_LOGGING config */
+  if (feature_bool(FEAT_ASYNC_LOGGING)) {
+    if (log_async_init(0) < 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Async logging init failed; logging will be synchronous");
+    }
+  }
+
   init_isupport(); /* initialize RPL_ISUPPORT... */
   log_init(*argv);
   set_nomem_handler(outofmemory);
@@ -748,6 +991,13 @@ int main(int argc, char **argv) {
   timer_add(timer_init(&connect_timer), try_connections, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&ping_timer), check_pings, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&destruct_event_timer), exec_expired_destruct_events, 0, TT_PERIODIC, 60);
+  timer_add(timer_init(&history_purge_timer), history_purge_callback, 0, TT_PERIODIC, 3600); /* Run every hour */
+  timer_add(timer_init(&metadata_purge_timer), metadata_purge_callback, 0, TT_PERIODIC,
+            feature_int(FEAT_METADATA_PURGE_FREQUENCY)); /* Default: hourly */
+  timer_add(timer_init(&ml_storage_timer), ml_storage_callback, 0, TT_PERIODIC, 300); /* Run every 5 minutes */
+
+  /* Initialize multiline storage */
+  ml_storage_init();
 
   CurrentTime = time(NULL);
 
@@ -773,6 +1023,39 @@ int main(int argc, char **argv) {
   init_counters();
   load_tunefile();
   geoip_init();
+
+#ifdef USE_LMDB
+  /* Initialize chathistory database (only if storage enabled) */
+  if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+    /* Set map size from feature before init */
+    history_set_map_size((size_t)feature_int(FEAT_HISTORY_MAP_SIZE_MB));
+#ifdef USE_ZSTD
+    /* Initialize compression with configured threshold and level */
+    compress_init((size_t)feature_int(FEAT_COMPRESS_THRESHOLD),
+                  feature_int(FEAT_COMPRESS_LEVEL));
+#endif
+    if (history_init(feature_str(FEAT_CHATHISTORY_DB)) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize chathistory database, feature disabled");
+    } else {
+      /* Register chathistory callbacks (for CH A - broadcasts on eviction) */
+      chathistory_init_callbacks();
+    }
+  }
+
+  /* Initialize metadata LMDB database */
+  if (feature_bool(FEAT_CAP_draft_metadata_2)) {
+    if (metadata_lmdb_init(feature_str(FEAT_METADATA_DB)) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize metadata database");
+    }
+  }
+#endif
+
+#ifdef USE_LIBGIT2
+  /* Start gitsync timer after config is loaded */
+  gitsync_start_timer();
+#endif
 
   Debug((DEBUG_NOTICE, "Server ready..."));
   log_write(LS_SYSTEM, L_NOTICE, 0, "Server Ready");

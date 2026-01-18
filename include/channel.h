@@ -36,6 +36,7 @@
 
 struct SLink;
 struct Client;
+struct MetadataEntry;
 
 /*
  * General defines
@@ -387,6 +388,7 @@ struct Channel {
   char               topic_nick[NICKLEN + USERLEN + HOSTLEN + 3]; /**< Nick of the person who set
 						*  The topic
 						*/
+  struct MetadataEntry* metadata;  /**< Channel metadata (draft/metadata-2) */
   char               chname[1];	   /**< Dynamically allocated string of the
 				     * channel name
 				     */
@@ -481,6 +483,15 @@ extern void send_hack_notice(struct Client *cptr, struct Client *sptr,
                              int parc, char *parv[], int badop, int mtype);
 extern struct Channel *get_channel(struct Client *cptr,
                                    char *chname, ChannelGetType flag);
+extern int rename_channel(struct Channel **chptr_p, const char *newname);
+
+/* Pending rename infrastructure (for services-authorized renames) */
+struct PendingRename;
+extern struct PendingRename *pending_rename_find(unsigned int cookie);
+extern void pending_rename_complete(struct PendingRename *pr);
+extern void pending_rename_deny(struct PendingRename *pr, const char *reason);
+extern void pending_rename_client_exit(struct Client *cptr);
+
 extern struct Membership* find_member_link(struct Channel * chptr,
                                            const struct Client* cptr);
 extern int sub1_from_channel(struct Channel* chptr);

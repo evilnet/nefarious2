@@ -46,6 +46,7 @@
 #include <sys/uio.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <openssl/bio.h>
@@ -60,13 +61,27 @@
 SSL_CTX *ssl_server_ctx;
 SSL_CTX *ssl_client_ctx;
 
+/** Structure for SNI hostname to SSL_CTX mapping (linked list) */
+struct sni_cert {
+  char *hostname;         /**< Hostname to match */
+  SSL_CTX *ctx;           /**< SSL context with this certificate */
+  struct sni_cert *next;  /**< Next in linked list */
+};
+
+/** Linked list of SNI certificates (from SSL config block) */
+static struct sni_cert *sni_cert_list = NULL;
+
 SSL_CTX *ssl_init_server_ctx(void);
 SSL_CTX *ssl_init_client_ctx(void);
+SSL_CTX *ssl_create_ctx_for_cert(const char *certfile, const char *keyfile);
 int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert);
 void ssl_set_nonblocking(SSL *s);
 int ssl_smart_shutdown(SSL *ssl);
 void sslfail(char *txt);
 void binary_to_hex(unsigned char *bin, char *hex, int length);
+static int sni_callback(SSL *ssl, int *al, void *arg);
+static void sni_init_certs(void);
+static void sni_free_certs(void);
 
 int ssl_init(void)
 {
@@ -79,6 +94,10 @@ int ssl_init(void)
   ssl_server_ctx = ssl_init_server_ctx();
   if (!ssl_server_ctx)
     return -1;
+
+  /* Initialize SNI certificates after server context is ready */
+  sni_init_certs();
+
   ssl_client_ctx = ssl_init_client_ctx();
   if (!ssl_client_ctx)
     return -1;
@@ -98,10 +117,16 @@ int ssl_reinit(int sig)
   if (!temp_ctx)
     return -1;
 
+  /* Free old SNI certificates before freeing old server context */
+  sni_free_certs();
+
   /* Now reinitialize server context for real. */
   SSL_CTX_free(temp_ctx);
   SSL_CTX_free(ssl_server_ctx);
   ssl_server_ctx = ssl_init_server_ctx();
+
+  /* Reload SNI certificates with new server context */
+  sni_init_certs();
 
   /* Attempt to reinitialize client context, return on error */
   temp_ctx = ssl_init_client_ctx();
@@ -188,6 +213,9 @@ SSL_CTX *ssl_init_server_ctx(void)
 #endif
   SSL_CTX_set_options(server_ctx, SSL_OP_SINGLE_ECDH_USE|SSL_OP_SINGLE_DH_USE);
 
+  /* Register SNI callback for multi-certificate support */
+  SSL_CTX_set_tlsext_servername_callback(server_ctx, sni_callback);
+
   return server_ctx;
 }
 
@@ -254,6 +282,170 @@ int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
   return 1;
 }
 
+/**
+ * SNI callback - called during TLS handshake when client sends SNI extension.
+ * Selects the appropriate SSL_CTX based on the requested hostname.
+ *
+ * @param ssl The SSL connection
+ * @param al Alert to send on error (unused)
+ * @param arg User data (unused)
+ * @return SSL_TLSEXT_ERR_OK if context switched, SSL_TLSEXT_ERR_NOACK otherwise
+ */
+static int sni_callback(SSL *ssl, int *al, void *arg)
+{
+  const char *hostname;
+  struct sni_cert *cert;
+
+  (void)al;   /* Unused */
+  (void)arg;  /* Unused */
+
+  hostname = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+  if (!hostname)
+    return SSL_TLSEXT_ERR_NOACK;  /* No SNI - use default cert */
+
+  Debug((DEBUG_DEBUG, "SNI: client requested hostname '%s'", hostname));
+
+  /* Search for matching hostname in SNI certificates */
+  for (cert = sni_cert_list; cert; cert = cert->next) {
+    if (cert->hostname && cert->ctx) {
+      if (!strcasecmp(cert->hostname, hostname)) {
+        Debug((DEBUG_DEBUG, "SNI: switching to certificate for '%s'", hostname));
+        SSL_set_SSL_CTX(ssl, cert->ctx);
+        return SSL_TLSEXT_ERR_OK;
+      }
+    }
+  }
+
+  /* No match found - use default certificate */
+  Debug((DEBUG_DEBUG, "SNI: no matching cert for '%s', using default", hostname));
+  return SSL_TLSEXT_ERR_NOACK;
+}
+
+/**
+ * Create an SSL_CTX for a specific certificate/key pair.
+ * Used for SNI hostname-specific certificates.
+ *
+ * @param certfile Path to certificate file
+ * @param keyfile Path to private key file
+ * @return SSL_CTX on success, NULL on failure
+ */
+SSL_CTX *ssl_create_ctx_for_cert(const char *certfile, const char *keyfile)
+{
+  SSL_CTX *ctx = NULL;
+
+  ctx = SSL_CTX_new(SSLv23_server_method());
+  if (!ctx) {
+    sslfail("SNI: Error creating context");
+    return NULL;
+  }
+
+  /* Apply same options as main server context */
+  if (feature_bool(FEAT_SSL_NOSSLV2))
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv2);
+  if (feature_bool(FEAT_SSL_NOSSLV3))
+    SSL_CTX_set_options(ctx, SSL_OP_NO_SSLv3);
+  if (feature_bool(FEAT_SSL_NOTLSV1))
+    SSL_CTX_set_options(ctx, SSL_OP_NO_TLSv1);
+
+  SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+
+  if (SSL_CTX_use_certificate_chain_file(ctx, certfile) <= 0) {
+    Debug((DEBUG_ERROR, "SNI: Error loading certificate '%s'", certfile));
+    sslfail("SNI: Error loading certificate");
+    SSL_CTX_free(ctx);
+    return NULL;
+  }
+
+  if (SSL_CTX_use_PrivateKey_file(ctx, keyfile, SSL_FILETYPE_PEM) <= 0) {
+    Debug((DEBUG_ERROR, "SNI: Error loading key '%s'", keyfile));
+    sslfail("SNI: Error loading key");
+    SSL_CTX_free(ctx);
+    return NULL;
+  }
+
+  if (!SSL_CTX_check_private_key(ctx)) {
+    sslfail("SNI: Certificate and key don't match");
+    SSL_CTX_free(ctx);
+    return NULL;
+  }
+
+  /* Apply ciphers if configured */
+  if (!EmptyString(feature_str(FEAT_SSL_CIPHERS))) {
+    if (SSL_CTX_set_cipher_list(ctx, feature_str(FEAT_SSL_CIPHERS)) == 0) {
+      sslfail("SNI: Error setting cipher list");
+      SSL_CTX_free(ctx);
+      return NULL;
+    }
+  }
+
+#if defined(SSL_CTX_set_ecdh_auto)
+  SSL_CTX_set_ecdh_auto(ctx, 1);
+#elif OPENSSL_VERSION_NUMBER < 0x10100000L
+  SSL_CTX_set_tmp_ecdh(ctx, EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
+#endif
+  SSL_CTX_set_options(ctx, SSL_OP_SINGLE_ECDH_USE|SSL_OP_SINGLE_DH_USE);
+
+  return ctx;
+}
+
+/**
+ * Initialize SNI certificates from SSL config block.
+ * Called from ssl_init() after the default context is created.
+ * Reads from sslCertConfList which is populated by the config parser.
+ */
+static void sni_init_certs(void)
+{
+  struct SSLCertConf *conf;
+  struct sni_cert *cert;
+  int count = 0;
+
+  /* Load SNI certificates from config list */
+  for (conf = sslCertConfList; conf; conf = conf->next) {
+    if (EmptyString(conf->hostname) || EmptyString(conf->certfile) || EmptyString(conf->keyfile))
+      continue;
+
+    SSL_CTX *ctx = ssl_create_ctx_for_cert(conf->certfile, conf->keyfile);
+    if (ctx) {
+      cert = (struct sni_cert *)MyMalloc(sizeof(*cert));
+      cert->hostname = strdup(conf->hostname);
+      cert->ctx = ctx;
+      cert->next = sni_cert_list;
+      sni_cert_list = cert;
+      count++;
+      Debug((DEBUG_NOTICE, "SNI: Loaded certificate for '%s'", conf->hostname));
+      sendto_opmask_butone(0, SNO_OLDSNO, "SNI: Certificate loaded for '%s'",
+                           conf->hostname);
+    } else {
+      Debug((DEBUG_ERROR, "SNI: Failed to load certificate for '%s'", conf->hostname));
+      sendto_opmask_butone(0, SNO_OLDSNO, "SNI: Failed to load certificate for '%s'",
+                           conf->hostname);
+    }
+  }
+
+  if (count > 0) {
+    Debug((DEBUG_NOTICE, "SNI: Loaded %d certificate(s)", count));
+  }
+}
+
+/**
+ * Free SNI certificates and their contexts.
+ * Called during ssl_reinit() to clean up before reloading.
+ */
+static void sni_free_certs(void)
+{
+  struct sni_cert *cert, *next;
+
+  for (cert = sni_cert_list; cert; cert = next) {
+    next = cert->next;
+    if (cert->ctx)
+      SSL_CTX_free(cert->ctx);
+    if (cert->hostname)
+      free(cert->hostname);
+    MyFree(cert);
+  }
+  sni_cert_list = NULL;
+}
+
 void ssl_abort(struct Client *cptr)
 {
   Debug((DEBUG_DEBUG, "SSL: aborted"));
@@ -303,8 +495,11 @@ int ssl_accept(struct Client *cptr)
   if (SSL_is_init_finished(cli_socket(cptr).ssl))
   {
     char *sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
-    if (sslfp)
+    if (sslfp) {
       ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
+      if (feature_bool(FEAT_CERT_EXPIRY_TRACKING))
+        cli_sslcliexp(cptr) = ssl_get_cert_expiry(cli_socket(cptr).ssl);
+    }
   }
 
   return -1;
@@ -413,6 +608,24 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
     ssl_doerror(cptr);
 
   return IO_FAILURE;
+}
+
+/*
+ * ssl_pending - check if SSL layer has buffered data ready to read
+ *
+ * IMPORTANT: OpenSSL can decrypt multiple messages from a single TLS record
+ * into an internal buffer. After SSL_read() returns, there may be more data
+ * waiting that won't trigger epoll (since the kernel socket appears empty).
+ * Call this after ssl_recv() to check for buffered data.
+ *
+ * returns:
+ *   Number of bytes available in SSL buffer, 0 if none
+ */
+int ssl_pending(struct Socket *socketh)
+{
+  if (!socketh || !socketh->ssl)
+    return 0;
+  return SSL_pending(socketh->ssl);
 }
 
 /*
@@ -625,6 +838,39 @@ char* ssl_get_fingerprint(SSL *ssl)
   X509_free(cert);
 
   return (hex);
+}
+
+/**
+ * Get the expiration time of the peer's SSL client certificate.
+ * @param ssl The SSL connection
+ * @return Unix timestamp of certificate expiration, or 0 if no certificate or error
+ */
+time_t ssl_get_cert_expiry(SSL *ssl)
+{
+  X509 *cert;
+  const ASN1_TIME *not_after;
+  struct tm tm_exp;
+  time_t exp_time = 0;
+
+  cert = SSL_get_peer_certificate(ssl);
+  if (!cert)
+    return 0;
+
+  not_after = X509_get0_notAfter(cert);
+  if (!not_after) {
+    X509_free(cert);
+    return 0;
+  }
+
+  /* Convert ASN1_TIME to struct tm */
+  memset(&tm_exp, 0, sizeof(tm_exp));
+  if (ASN1_TIME_to_tm(not_after, &tm_exp) == 1) {
+    /* Convert to time_t (timegm for UTC) */
+    exp_time = timegm(&tm_exp);
+  }
+
+  X509_free(cert);
+  return exp_time;
 }
 
 void ssl_set_nonblocking(SSL *s)

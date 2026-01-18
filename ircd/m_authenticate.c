@@ -82,6 +82,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_features.h"
@@ -115,11 +116,48 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   if (parc < 2) /* have enough parameters? */
     return need_more_params(cptr, "AUTHENTICATE");
 
-  if (strlen(parv[1]) > 400)
+  if (strlen(parv[1]) > 400) {
+    if (CapActive(cptr, CAP_STANDARDREPLIES))
+      send_fail(cptr, "AUTHENTICATE", "TOO_LONG", NULL, "SASL message too long");
     return send_reply(cptr, ERR_SASLTOOLONG);
+  }
 
-  if (IsSASLComplete(cptr))
-    return send_reply(cptr, ERR_SASLALREADY);
+  /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec) */
+  if (parv[1][0] == '*' && parv[1][1] == '\0') {
+    /* Only abort if there's an active session */
+    if (cli_saslcookie(cptr) && !IsSASLComplete(cptr)) {
+      /* Notify IAuth if applicable */
+      if (auth_iauth_handles_sasl())
+        auth_send_sasl_abort(cptr);
+      /* abort_sasl handles P10 notification and state cleanup */
+      abort_sasl(cptr, 0);
+    }
+    return 0;
+  }
+
+  /* For registered users, allow re-authentication only for token-based mechanisms.
+   * OAUTHBEARER supports token refresh, so re-auth is allowed.
+   * Other mechanisms (PLAIN, EXTERNAL, SCRAM-*) should get ERR_SASLALREADY per IRCv3 spec.
+   */
+  if (IsSASLComplete(cptr)) {
+    /* Only allow re-authentication for token-based mechanisms */
+    if (ircd_strcmp(parv[1], "OAUTHBEARER") != 0) {
+      if (CapActive(cptr, CAP_STANDARDREPLIES))
+        send_fail(cptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
+                  "You have already completed SASL authentication");
+      return send_reply(cptr, ERR_SASLALREADY);
+    }
+    /* Clear the SASLComplete flag to allow token refresh */
+    ClearSASLComplete(cptr);
+    /* Clear old SASL session state */
+    if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))
+      cli_saslagentref(cli_saslagent(cptr))--;
+    cli_saslagent(cptr) = NULL;
+    cli_saslcookie(cptr) = 0;
+    cli_saslstart(cptr) = 0;
+    if (t_active(&cli_sasltimeout(cptr)))
+      timer_del(&cli_sasltimeout(cptr));
+  }
 
   /* Check if IAuth handles SASL */
   if (auth_iauth_handles_sasl()) {
@@ -128,6 +166,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       do {
         cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
       } while (!cli_saslcookie(cptr));
+      cli_saslstart(cptr) = CurrentTime;
       first = 1;
     }
 
@@ -168,8 +207,26 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       acptr = NULL;
   }
 
-  if (!acptr && strcmp(feature_str(FEAT_SASL_SERVER), "*"))
+  /* Validate agent is still a valid, connected server */
+  if (acptr && (IsDead(acptr) || !IsServer(acptr))) {
+    /* Clear stale agent reference */
+    if (cli_saslagent(cptr) == acptr) {
+      if (cli_saslagentref(acptr))
+        cli_saslagentref(acptr)--;
+      cli_saslagent(cptr) = NULL;
+    }
+    /* Try to find a new agent */
+    if (strcmp(feature_str(FEAT_SASL_SERVER), "*"))
+      acptr = find_match_server((char *)feature_str(FEAT_SASL_SERVER));
+    else
+      acptr = NULL;
+  }
+
+  if (!acptr && strcmp(feature_str(FEAT_SASL_SERVER), "*")) {
+    if (CapActive(cptr, CAP_STANDARDREPLIES))
+      send_fail(cptr, "AUTHENTICATE", "SASL_FAIL", NULL, "SASL service unavailable");
     return send_reply(cptr, ERR_SASLFAIL, ": service unavailable");
+  }
 
   /* If it's to us, do nothing; otherwise, forward the query */
   if (acptr && IsMe(acptr))
@@ -180,6 +237,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     do {
       cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
     } while (!cli_saslcookie(cptr));
+    cli_saslstart(cptr) = CurrentTime;
     first = 1;
   }
 

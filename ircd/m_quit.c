@@ -85,10 +85,12 @@
 #include "client.h"
 #include "ircd.h"
 #include "ircd_log.h"
+#include "ircd_features.h"
 #include "ircd_string.h"
 #include "struct.h"
 #include "s_misc.h"
 #include "ircd_reply.h"
+#include "send.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -123,6 +125,18 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         return exit_client(cptr, sptr, sptr, "Signed off");
     }
   }
+
+  /* UTF8ONLY enforcement on quit message */
+  if (parc > 1 && !BadPtr(parv[parc - 1]) &&
+      feature_bool(FEAT_UTF8ONLY) && !string_is_valid_utf8(parv[parc - 1])) {
+    if (feature_bool(FEAT_UTF8ONLY_STRICT)) {
+      /* Strict mode: use default quit message instead of rejecting */
+      return exit_client(cptr, sptr, sptr, "Quit");
+    }
+    /* Warn mode: sanitize the quit message */
+    string_sanitize_utf8(parv[parc - 1]);
+  }
+
   if (parc > 1 && !BadPtr(parv[parc - 1]) && !stripquit)
     if (blockcolor && HasColor(parv[parc - 1]))
       return exit_client(cptr, sptr, sptr, "Quit");

@@ -80,6 +80,7 @@
  */
 #include "config.h"
 
+#include "account_conn.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -94,6 +95,8 @@
 #include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
+#include "metadata.h"
+#include "channel.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -163,6 +166,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                                     "(ACCOUNT Removal)", cli_name(acptr));
         assert(0 != cli_user(acptr)->account[0]);
 
+        /* Remove from presence aggregation registry before clearing account */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+          account_conn_remove(acptr);
+        }
+
         ClearAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
 
@@ -191,8 +199,20 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         if (ircd_strncmp(cli_user(acptr)->account, parv[3], ACCOUNTLEN) == 0)
           return 0;
 
+        /* Load account-linked metadata BEFORE setting account flag */
+        metadata_load_account(acptr, parv[3]);
+
         ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
+
+        /* Register with presence aggregation */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+          account_conn_add(acptr);
+          /* Set away state if user is already away */
+          if (cli_user(acptr)->away) {
+            account_conn_set_away(acptr, CONN_AWAY, cli_user(acptr)->away);
+          }
+        }
 
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
@@ -241,12 +261,39 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                       parv[1], parv[2], parv[3], parv[4], parv[5]);
       return 0;
     } else if (type == 'A' || type == 'D') {
-      /* LOC Replies (A=accept, D=deny) */
-      if (parc < 4)
+      /* LOC Replies (A=accept, D=deny) or Rename Permission Replies */
+      if (parc < 3)
         return need_more_params(sptr, "ACCOUNT");
 
-      if (!(acptr = FindNServer(parv[1])))
-        return 0; /* target not online, ignore */
+      /* First check if this is a server numeric (LOC reply) */
+      acptr = FindNServer(parv[1]);
+
+      if (!acptr) {
+        /* Not a server numeric - check for rename permission response */
+        unsigned int cookie = atoi(parv[1]);
+        struct PendingRename *pr = pending_rename_find(cookie);
+
+        if (pr) {
+          /* Found a pending rename with this cookie */
+          if (type == 'A') {
+            Debug((DEBUG_DEBUG, "ACCOUNT rename allow cookie=%u", cookie));
+            pending_rename_complete(pr);
+          } else {
+            /* Deny response: parv[3] contains the reason (trailing param) */
+            const char *reason = (parc > 3) ? parv[3] : "Permission denied";
+            Debug((DEBUG_DEBUG, "ACCOUNT rename deny cookie=%u reason=%s", cookie, reason));
+            pending_rename_deny(pr, reason);
+          }
+          return 0;
+        }
+
+        /* Neither LOC reply nor rename reply - ignore */
+        return 0;
+      }
+
+      /* LOC reply - need at least 4 params */
+      if (parc < 4)
+        return need_more_params(sptr, "ACCOUNT");
 
       if (!IsMe(acptr)) {
         /* in-transit message, forward it */
@@ -259,6 +306,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         return 0; /* most probably, user disconnected */
 
       if (type == 'A') {
+        /* Load account-linked metadata BEFORE setting account flag */
+        metadata_load_account(acptr, cli_loc(acptr)->account);
+
         SetAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, cli_loc(acptr)->account,
                         ACCOUNTLEN);
@@ -319,6 +369,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
       Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
              "timestamp %Tu", parv[2], cli_user(acptr)->acc_create));
     }
+
+    /* Load account-linked metadata BEFORE setting account flag */
+    metadata_load_account(acptr, parv[2]);
 
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);

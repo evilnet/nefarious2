@@ -54,6 +54,28 @@ extern char*          configfile;
 extern int            debuglevel;
 extern char*          debugmode;
 extern int	      running;
+extern unsigned long  MsgIdCounter;   /**< Counter for unique message IDs */
+
+/** SASL mechanism list received from services (dynamic, for CAP LS) */
+#define SASL_MECHS_LEN 128
+extern char           SaslMechanisms[SASL_MECHS_LEN];
+
+/** Set the SASL mechanism list (called when services announces mechanisms) */
+extern void set_sasl_mechanisms(const char *mechs);
+/** Get the SASL mechanism list (for CAP LS value) */
+extern const char* get_sasl_mechanisms(void);
+
+/** VAPID public key received from services (for webpush ISUPPORT) */
+#define VAPID_KEY_LEN 128
+extern char           VapidPublicKey[VAPID_KEY_LEN];
+
+/** Set the VAPID public key (called when services announces it) */
+extern void set_vapid_pubkey(const char *key);
+/** Get the VAPID public key (for ISUPPORT and CAP value) */
+extern const char* get_vapid_pubkey(void);
+
+/** Check if a client-only tag is denied by CLIENTTAGDENY config */
+extern int is_client_tag_denied(const char *tag, size_t tag_len);
 
 #endif /* INCLUDED_ircd_h */
 

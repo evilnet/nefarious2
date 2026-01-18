@@ -25,6 +25,7 @@
 
 #include "config.h"
 
+#include "capab.h"
 #include "channel.h"
 #include "class.h"
 #include "client.h"
@@ -43,6 +44,8 @@
 #include "s_user.h"
 #include "send.h"
 #include "sys.h"
+#include "handlers.h"
+#include "ml_storage.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -280,7 +283,12 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
                chptr->topic_time);
   }
 
-  do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
+  /* Send MARKREAD for draft/read-marker before NAMES (per spec: after JOIN, before 366) */
+  send_markread_on_join(sptr, chptr->chname);
+
+  /* Skip implicit NAMES if client has draft/no-implicit-names capability */
+  if (!HasCap(sptr, CAP_DRAFT_NOIMPLICITNAMES))
+    do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
 }
 
 /** Handle a JOIN message from a client connection.
@@ -337,6 +345,17 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY) && !string_character_structure_is_sane(name)) {
         send_reply(sptr, ERR_NOSUCHCHANNEL, name);
         continue;
+    }
+
+    /* Check for virtual &ml- channel (multiline message retrieval) */
+    if (ml_storage_is_virtual_channel(name)) {
+      if (!feature_bool(FEAT_MULTILINE_STORAGE_ENABLED)) {
+        send_reply(sptr, ERR_NOSUCHCHANNEL, name);
+        continue;
+      }
+      /* Deliver stored content and continue (no actual channel join) */
+      ml_storage_deliver(sptr, name + 4);  /* Skip "&ml-" prefix */
+      continue;
     }
 
     if (cli_user(sptr)->joined >= get_client_maxchans(sptr)

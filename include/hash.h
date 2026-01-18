@@ -86,6 +86,7 @@ extern int hAddWatch(struct Watch *wptr);
 extern int hRemClient(struct Client *cptr);
 extern int hChangeClient(struct Client *cptr, const char *newname);
 extern int hRemChannel(struct Channel *chptr);
+extern int hChangeChannel(struct Channel *chptr, const char *newname);
 extern int hRemWatch(struct Watch *wptr);
 extern struct Client *hSeekClient(const char *name, int TMask);
 extern struct Channel *hSeekChannel(const char *name);

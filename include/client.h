@@ -61,6 +61,8 @@ struct Whowas;
 struct hostent;
 struct Privs;
 struct AuthRequest;
+struct MetadataEntry;
+struct MetadataSub;
 
 /*
  * Structures
@@ -74,28 +76,42 @@ struct AuthRequest;
 typedef unsigned long flagpage_t;
 
 /** Number of bits in a flagpage_t. */
+#ifndef FLAGSET_NBITS
 #define FLAGSET_NBITS (8 * sizeof(flagpage_t))
+#endif
 /** Element number for flag \a flag. */
+#ifndef FLAGSET_INDEX
 #define FLAGSET_INDEX(flag) ((flag) / FLAGSET_NBITS)
+#endif
 /** Element bit for flag \a flag. */
+#ifndef FLAGSET_MASK
 #define FLAGSET_MASK(flag) (1ul<<((flag) % FLAGSET_NBITS))
+#endif
 
 /** Declare a flagset structure of a particular size. */
+#ifndef DECLARE_FLAGSET
 #define DECLARE_FLAGSET(name,max) \
   struct name \
   { \
     unsigned long bits[((max + FLAGSET_NBITS - 1) / FLAGSET_NBITS)]; \
   }
+#endif
 
 /** Test whether a flag is set in a flagset. */
+#ifndef FlagHas
 #define FlagHas(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] & FLAGSET_MASK(flag))
+#endif
 /** Set a flag in a flagset. */
+#ifndef FlagSet
 #define FlagSet(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] |= FLAGSET_MASK(flag))
+#endif
 /** Clear a flag in a flagset. */
+#ifndef FlagClr
 #define FlagClr(set,flag) ((set)->bits[FLAGSET_INDEX(flag)] &= ~FLAGSET_MASK(flag))
+#endif
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "adgiknoqswxzBDHLNORWX"
+#define infousermodes "adgiknoqswxzBDHLMNORWX"
 
 /** Operator privileges. */
 enum Priv
@@ -219,6 +235,10 @@ enum Flag
     FLAG_SSL,                       /**< User is connected via SSL (+z) */
     FLAG_STARTTLS,                  /**< User is connecting with StartTLS */
     FLAG_SSLNEEDACCEPT,             /**< Client needs SSL_accept() to be called again */
+    FLAG_WEBSOCKET,                 /**< Client is connected via WebSocket */
+    FLAG_WSNEEDHANDSHAKE,           /**< WebSocket client needs handshake */
+    FLAG_WSTEXT,                    /**< WebSocket uses text frames (not binary) */
+    FLAG_WSAUTODETECT,              /**< WebSocket mode pending autodetection from first frame */
 
     FLAG_IPCEXEMPT,                 /**< User is IPcheck exempt */
     FLAG_IPCNOTEXEMPT,              /**< User is not IPcheck exempt */
@@ -237,6 +257,12 @@ enum Flag
     FLAG_OPERED_REMOTE,             /**< Client /OPER'ed using a remote O:Line */
     FLAG_SERVER_NOOP,               /**< Server has been NOOP'ed */
     FLAG_SENT_CVERSION,             /**< Client's CTCP VERSION reply has been sent out */
+
+    FLAG_MULTILINE_EXPAND,          /**< User opts into full multiline expansion (+M) */
+
+    FLAG_OPER_PENDING,              /**< Async OPER password verification in progress */
+    FLAG_WEBIRC_PENDING,            /**< Async WEBIRC password verification in progress */
+    FLAG_SETHOST_PENDING,           /**< Async SETHOST password verification in progress */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -267,6 +293,7 @@ struct Connection
   unsigned int        con_snomask;   /**< mask for server messages */
   time_t              con_nextnick;  /**< Next time a nick change is allowed */
   time_t              con_nexttarget;/**< Next time a target change is allowed */
+  time_t              con_nextaway;  /**< Next time an AWAY change is allowed */
   time_t              con_lasttime;  /**< Last time data read from socket */
   time_t              con_since;     /**< Last time we accepted a command */
   struct MsgQ         con_sendQ;     /**< Outgoing message queue */
@@ -307,8 +334,42 @@ struct Connection
                                       client */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) */
+  unsigned short      con_capab_version; /**< CAP version (0, 301, 302) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
+  char                con_label[64]; /**< Current command label for labeled-response */
+  unsigned char       con_label_responded; /**< Whether a response was sent for current label */
+  char                con_batch_id[16]; /**< Current batch reference ID */
+  unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
+  char                con_client_tags[512]; /**< Client-only tags (+tag=value) for TAGMSG relay */
+  char                con_s2s_time[32];  /**< S2S @time tag from incoming message */
+  char                con_s2s_msgid[64]; /**< S2S @msgid tag from incoming message */
+  char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
+  char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
+  unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
+  char                con_pre_away_msg[AWAYLEN + 1]; /**< Pre-registration away message */
+  /* Multiline batch state (draft/multiline) */
+  char                con_ml_batch_id[65]; /**< Active multiline batch ID (IRCv3 allows up to 64 chars) */
+  char                con_ml_target[CHANNELLEN + 1]; /**< Multiline batch target (channel or nick) */
+  struct SLink*       con_ml_messages; /**< List of multiline messages */
+  int                 con_ml_msg_count; /**< Number of messages in batch */
+  int                 con_ml_total_bytes; /**< Total bytes in batch */
+  time_t              con_ml_batch_start; /**< When batch was started (for timeout) */
+  int                 con_ml_lag_accum;   /**< Accumulated fake lag during batch (applied at end) */
+  char                con_ml_label[64];   /**< Label from BATCH +id for labeled-response on WARN */
+  /* Batch rate limiting (FEAT_BATCH_RATE_LIMIT) */
+  time_t              con_batch_minute;   /**< Start of current rate limit window */
+  int                 con_batch_count;    /**< Number of batches in current window */
+  int                 con_ml_had_fallback; /**< Batch had recipients needing fallback (for recipient discount) */
+  /* Current message @batch tag for PRIVMSG interception */
+  char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
+  unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
+  /* WebSocket state for RFC 6455 compliance */
+  unsigned char       con_ws_frame_buf[BUFSIZE]; /**< Partial WebSocket frame buffer */
+  int                 con_ws_frame_len;   /**< Length of data in frame buffer */
+  char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
+  int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
+  int                 con_ws_frag_opcode; /**< Opcode of first fragment */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -353,6 +414,7 @@ struct Client {
   char cli_webirc[BUFSIZE + 1];     /**< webirc description */
   char cli_version[VERSIONLEN + 1]; /**< Free form client version information */
   char cli_sslclifp[BUFSIZE + 1];   /**< SSL client certificate fingerprint if available */
+  time_t cli_sslcliexp;             /**< SSL client certificate expiration timestamp */
   char cli_killmark[BUFSIZE + 1];   /**< Kill block mark */
 
   /* SASL */
@@ -361,7 +423,14 @@ struct Client {
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
+  time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
   struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
+
+  /* IRCv3 Metadata */
+  struct MetadataEntry* cli_metadata;    /**< Client metadata key-value pairs */
+  struct MetadataSub*   cli_metadatasub; /**< Client metadata subscriptions */
+  time_t                cli_metadata_lastcmd;  /**< Time of last metadata command */
+  int                   cli_metadata_cmdcnt;   /**< Metadata commands this second */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -415,6 +484,62 @@ struct Client {
 #define cli_capab(cli)		con_capab(cli_connect(cli))
 /** Get active client capabilities for client */
 #define cli_active(cli)		con_active(cli_connect(cli))
+/** Get CAP version for client (0, 301, 302) */
+#define cli_capab_version(cli)	con_capab_version(cli_connect(cli))
+/** Get current command label for labeled-response */
+#define cli_label(cli)		con_label(cli_connect(cli))
+/** Check if labeled response was sent for this command */
+#define cli_label_responded(cli)	con_label_responded(cli_connect(cli))
+/** Get current batch reference ID */
+#define cli_batch_id(cli)	con_batch_id(cli_connect(cli))
+/** Get batch sequence number */
+#define cli_batch_seq(cli)	con_batch_seq(cli_connect(cli))
+/** Get client-only tags buffer for TAGMSG relay */
+#define cli_client_tags(cli)	con_client_tags(cli_connect(cli))
+/** Get S2S @time tag from incoming message */
+#define cli_s2s_time(cli)	con_s2s_time(cli_connect(cli))
+/** Get S2S @msgid tag from incoming message */
+#define cli_s2s_msgid(cli)	con_s2s_msgid(cli_connect(cli))
+/** Get S2S batch ID from server */
+#define cli_s2s_batch_id(cli)	con_s2s_batch_id(cli_connect(cli))
+/** Get S2S batch type from server */
+#define cli_s2s_batch_type(cli)	con_s2s_batch_type(cli_connect(cli))
+/** Get active multiline batch ID. */
+#define cli_ml_batch_id(cli)	con_ml_batch_id(cli_connect(cli))
+/** Get multiline batch target. */
+#define cli_ml_target(cli)	con_ml_target(cli_connect(cli))
+/** Get multiline message list. */
+#define cli_ml_messages(cli)	con_ml_messages(cli_connect(cli))
+/** Get multiline message count. */
+#define cli_ml_msg_count(cli)	con_ml_msg_count(cli_connect(cli))
+/** Get multiline total bytes. */
+#define cli_ml_total_bytes(cli)	con_ml_total_bytes(cli_connect(cli))
+/** Get multiline batch start time. */
+#define cli_ml_batch_start(cli)	con_ml_batch_start(cli_connect(cli))
+/** Get accumulated lag during batch. */
+#define cli_ml_lag_accum(cli)	con_ml_lag_accum(cli_connect(cli))
+/** Get label from BATCH +id for labeled-response. */
+#define cli_ml_label(cli)	con_ml_label(cli_connect(cli))
+/** Get batch rate limit window start time. */
+#define cli_batch_minute(cli)	con_batch_minute(cli_connect(cli))
+/** Get batch count in current rate limit window. */
+#define cli_batch_count(cli)	con_batch_count(cli_connect(cli))
+/** Get whether batch had fallback recipients. */
+#define cli_ml_had_fallback(cli)	con_ml_had_fallback(cli_connect(cli))
+/** Get current message @batch tag. */
+#define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
+/** Get current message concat flag. */
+#define cli_msg_concat(cli)	con_msg_concat(cli_connect(cli))
+/** Get WebSocket partial frame buffer. */
+#define cli_ws_frame_buf(cli)	con_ws_frame_buf(cli_connect(cli))
+/** Get WebSocket partial frame buffer length. */
+#define cli_ws_frame_len(cli)	con_ws_frame_len(cli_connect(cli))
+/** Get WebSocket fragment reassembly buffer. */
+#define cli_ws_frag_buf(cli)	con_ws_frag_buf(cli_connect(cli))
+/** Get WebSocket fragment reassembly buffer length. */
+#define cli_ws_frag_len(cli)	con_ws_frag_len(cli_connect(cli))
+/** Get WebSocket first fragment opcode. */
+#define cli_ws_frag_opcode(cli)	con_ws_frag_opcode(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -423,6 +548,8 @@ struct Client {
 #define cli_info(cli)		((cli)->cli_info)
 /** Get client account string. */
 #define cli_account(cli)       (cli_user(cli) ? cli_user(cli)->account : "0")
+/** Get client account connection registry entry. */
+#define cli_account_conn(cli)  (cli_user(cli) ? cli_user(cli)->account_conn : NULL)
 /** Get client connection IP address. */
 #define cli_connectip(cli)      ((cli)->cli_connectip)
 /** Get client connection host name. */
@@ -433,6 +560,8 @@ struct Client {
 #define cli_version(cli)        ((cli)->cli_version)
 /** Get a clients SSL fingerprint string. */
 #define cli_sslclifp(cli)       ((cli)->cli_sslclifp)
+/** Get a clients SSL certificate expiration timestamp. */
+#define cli_sslcliexp(cli)      ((cli)->cli_sslcliexp)
 /** Get a clients Kill block exemption mark. */
 #define cli_killmark(cli)       ((cli)->cli_killmark)
 /** Get all marks set for client. */
@@ -455,8 +584,18 @@ struct Client {
 #define cli_saslacccreate(cli)  ((cli)->cli_saslacccreate)
 /** Get SASL session cookie. */
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
+/** Get SASL start timestamp. */
+#define cli_saslstart(cli)      ((cli)->cli_saslstart)
 /** Get Timer for SASL timeout. */
 #define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
+/** Get client metadata list. */
+#define cli_metadata(cli)        ((cli)->cli_metadata)
+/** Get client metadata subscriptions. */
+#define cli_metadatasub(cli)     ((cli)->cli_metadatasub)
+/** Get time of last metadata command. */
+#define cli_metadata_lastcmd(cli) ((cli)->cli_metadata_lastcmd)
+/** Get metadata command count for current second. */
+#define cli_metadata_cmdcnt(cli)  ((cli)->cli_metadata_cmdcnt)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))
@@ -474,6 +613,8 @@ struct Client {
 #define cli_nextnick(cli)	con_nextnick(cli_connect(cli))
 /** Get next time a target change is allowed for the client. */
 #define cli_nexttarget(cli)	con_nexttarget(cli_connect(cli))
+/** Get next time an AWAY change is allowed for the client. */
+#define cli_nextaway(cli)	con_nextaway(cli_connect(cli))
 /** Get SendQ for client. */
 #define cli_sendQ(cli)		con_sendQ(cli_connect(cli))
 /** Get RecvQ for client. */
@@ -557,6 +698,8 @@ struct Client {
 #define con_nextnick(con)	((con)->con_nextnick)
 /** Get next new target time for connection. */
 #define con_nexttarget(con)	((con)->con_nexttarget)
+/** Get next AWAY change time for connection. */
+#define con_nextaway(con)	((con)->con_nextaway)
 /** Get last time we read from the connection. */
 #define con_lasttime(con)       ((con)->con_lasttime)
 /** Get last time we accepted a command from the connection. */
@@ -611,8 +754,68 @@ struct Client {
 #define con_capab(con)          (&(con)->con_capab)
 /** Get the active capabilities for the connection. */
 #define con_active(con)         (&(con)->con_active)
+/** Get the CAP version for the connection (0, 301, 302). */
+#define con_capab_version(con)  ((con)->con_capab_version)
 /** Get the auth request for the connection. */
 #define con_auth(con)		((con)->con_auth)
+/** Get the current command label for labeled-response. */
+#define con_label(con)		((con)->con_label)
+/** Check if labeled response was sent for this command. */
+#define con_label_responded(con)	((con)->con_label_responded)
+/** Get the current batch reference ID. */
+#define con_batch_id(con)	((con)->con_batch_id)
+/** Get the batch sequence number. */
+#define con_batch_seq(con)	((con)->con_batch_seq)
+/** Get the client-only tags buffer for TAGMSG relay. */
+#define con_client_tags(con)	((con)->con_client_tags)
+/** Get the S2S @time tag from incoming message. */
+#define con_s2s_time(con)	((con)->con_s2s_time)
+/** Get the S2S @msgid tag from incoming message. */
+#define con_s2s_msgid(con)	((con)->con_s2s_msgid)
+/** Get the S2S batch ID from server. */
+#define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
+/** Get the S2S batch type from server. */
+#define con_s2s_batch_type(con)	((con)->con_s2s_batch_type)
+/** Get the pre-registration away state. */
+#define con_pre_away(con)	((con)->con_pre_away)
+/** Get the pre-registration away message. */
+#define con_pre_away_msg(con)	((con)->con_pre_away_msg)
+/** Get the multiline batch ID. */
+#define con_ml_batch_id(con)	((con)->con_ml_batch_id)
+/** Get the multiline batch target. */
+#define con_ml_target(con)	((con)->con_ml_target)
+/** Get the multiline message list. */
+#define con_ml_messages(con)	((con)->con_ml_messages)
+/** Get the multiline message count. */
+#define con_ml_msg_count(con)	((con)->con_ml_msg_count)
+/** Get the multiline total bytes. */
+#define con_ml_total_bytes(con)	((con)->con_ml_total_bytes)
+/** Get the multiline batch start time. */
+#define con_ml_batch_start(con)	((con)->con_ml_batch_start)
+/** Get the accumulated lag during batch (to apply at batch end). */
+#define con_ml_lag_accum(con)	((con)->con_ml_lag_accum)
+/** Get the label from BATCH +id for labeled-response on WARN. */
+#define con_ml_label(con)	((con)->con_ml_label)
+/** Get the batch rate limit window start time. */
+#define con_batch_minute(con)	((con)->con_batch_minute)
+/** Get the batch count in current rate limit window. */
+#define con_batch_count(con)	((con)->con_batch_count)
+/** Get whether batch had fallback recipients. */
+#define con_ml_had_fallback(con)	((con)->con_ml_had_fallback)
+/** Get the current message @batch tag. */
+#define con_msg_batch_tag(con)	((con)->con_msg_batch_tag)
+/** Get the current message draft/multiline-concat flag. */
+#define con_msg_concat(con)	((con)->con_msg_concat)
+/** Get WebSocket partial frame buffer. */
+#define con_ws_frame_buf(con)	((con)->con_ws_frame_buf)
+/** Get WebSocket partial frame buffer length. */
+#define con_ws_frame_len(con)	((con)->con_ws_frame_len)
+/** Get WebSocket fragment reassembly buffer. */
+#define con_ws_frag_buf(con)	((con)->con_ws_frag_buf)
+/** Get WebSocket fragment reassembly buffer length. */
+#define con_ws_frag_len(con)	((con)->con_ws_frag_len)
+/** Get WebSocket first fragment opcode. */
+#define con_ws_frag_opcode(con)	((con)->con_ws_frag_opcode)
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */
@@ -717,6 +920,12 @@ struct Client {
 #define IsLocOp(x)              (MyConnect(x) && HasFlag(x, FLAG_LOCOP))
 /** Return non-zero if the client has set mode +o (global operator). */
 #define IsOper(x)               HasFlag(x, FLAG_OPER)
+/** Return non-zero if the client has pending async OPER verification. */
+#define IsOperPending(x)        HasFlag(x, FLAG_OPER_PENDING)
+/** Return non-zero if the client has pending async WEBIRC verification. */
+#define IsWebIRCPending(x)      HasFlag(x, FLAG_WEBIRC_PENDING)
+/** Return non-zero if the client has pending async SETHOST verification. */
+#define IsSetHostPending(x)     HasFlag(x, FLAG_SETHOST_PENDING)
 /** Return non-zero if the client has an active UDP ping request. */
 #define IsUPing(x)              HasFlag(x, FLAG_UPING)
 /** Return non-zero if the client has no '\n' in its buffer. */
@@ -787,6 +996,14 @@ struct Client {
 #define IsStartTLS(x)           HasFlag(x, FLAG_STARTTLS)
 /** Return non-zero if the client still needs SSL_accept(). */
 #define IsSSLNeedAccept(x)      HasFlag(x, FLAG_SSLNEEDACCEPT)
+/** Return non-zero if the client is connected via WebSocket. */
+#define IsWebSocket(x)          HasFlag(x, FLAG_WEBSOCKET)
+/** Return non-zero if the client needs WebSocket handshake. */
+#define IsWSNeedHandshake(x)    HasFlag(x, FLAG_WSNEEDHANDSHAKE)
+/** Return non-zero if the WebSocket client uses text mode (vs binary). */
+#define IsWSText(x)             HasFlag(x, FLAG_WSTEXT)
+/** Return non-zero if the WebSocket client needs mode autodetection. */
+#define IsWSAutodetect(x)       HasFlag(x, FLAG_WSAUTODETECT)
 /** Return non-zero if the client is IPcheck exempt. */
 #define IsIPCheckExempt(x)      HasFlag(x, FLAG_IPCEXEMPT)
 /** Return non-zero if the client is not IPcheck exempt. */
@@ -841,6 +1058,12 @@ struct Client {
 #define SetLocOp(x)             SetFlag(x, FLAG_LOCOP)
 /** Mark a client as having mode +o (global operator). */
 #define SetOper(x)              SetFlag(x, FLAG_OPER)
+/** Mark a client as having pending async OPER verification. */
+#define SetOperPending(x)       SetFlag(x, FLAG_OPER_PENDING)
+/** Mark a client as having pending async WEBIRC verification. */
+#define SetWebIRCPending(x)     SetFlag(x, FLAG_WEBIRC_PENDING)
+/** Mark a client as having pending async SETHOST verification. */
+#define SetSetHostPending(x)    SetFlag(x, FLAG_SETHOST_PENDING)
 /** Mark a client as having a pending UDP ping. */
 #define SetUPing(x)             SetFlag(x, FLAG_UPING)
 /** Mark a client as having mode +w (wallops). */
@@ -907,6 +1130,14 @@ struct Client {
 #define SetStartTLS(x)          SetFlag(x, FLAG_STARTTLS)
 /** Mark a client as needing SSL_accept(). */
 #define SetSSLNeedAccept(x)     SetFlag(x, FLAG_SSLNEEDACCEPT)
+/** Mark a client as connected via WebSocket. */
+#define SetWebSocket(x)         SetFlag(x, FLAG_WEBSOCKET)
+/** Mark a client as needing WebSocket handshake. */
+#define SetWSNeedHandshake(x)   SetFlag(x, FLAG_WSNEEDHANDSHAKE)
+/** Mark a WebSocket client as using text mode. */
+#define SetWSText(x)            SetFlag(x, FLAG_WSTEXT)
+/** Mark a WebSocket client as needing mode autodetection. */
+#define SetWSAutodetect(x)      SetFlag(x, FLAG_WSAUTODETECT)
 /** Mark a client as IPcheck exempt. */
 #define SetIPCheckExempt(x)     SetFlag(x, FLAG_IPCEXEMPT)
 /** Mark a client as not IPcheck exempt. */
@@ -956,6 +1187,12 @@ struct Client {
 #define ClearLocOp(x)           ClrFlag(x, FLAG_LOCOP)
 /** Remove mode +o (global operator) from the client. */
 #define ClearOper(x)            ClrFlag(x, FLAG_OPER)
+/** Clear the client's pending async OPER verification flag. */
+#define ClearOperPending(x)     ClrFlag(x, FLAG_OPER_PENDING)
+/** Clear the client's pending async WEBIRC verification flag. */
+#define ClearWebIRCPending(x)   ClrFlag(x, FLAG_WEBIRC_PENDING)
+/** Clear the client's pending async SETHOST verification flag. */
+#define ClearSetHostPending(x)  ClrFlag(x, FLAG_SETHOST_PENDING)
 /** Clear the client's pending UDP ping flag. */
 #define ClearUPing(x)           ClrFlag(x, FLAG_UPING)
 /** Remove mode +w (wallops) from the client. */
@@ -1012,6 +1249,14 @@ struct Client {
 #define ClearStartTLS(x)        ClrFlag(x, FLAG_STARTTLS)
 /** Client no longer needs SSL_accept(). */
 #define ClearSSLNeedAccept(x)   ClrFlag(x, FLAG_SSLNEEDACCEPT)
+/** Client no longer connected via WebSocket. */
+#define ClearWebSocket(x)       ClrFlag(x, FLAG_WEBSOCKET)
+/** Client no longer needs WebSocket handshake. */
+#define ClearWSNeedHandshake(x) ClrFlag(x, FLAG_WSNEEDHANDSHAKE)
+/** Clear WebSocket text mode flag. */
+#define ClearWSText(x)          ClrFlag(x, FLAG_WSTEXT)
+/** Clear WebSocket autodetect flag. */
+#define ClearWSAutodetect(x)    ClrFlag(x, FLAG_WSAUTODETECT)
 /** Clear the client's join restriction. */
 #define ClearRestrictJoin(x)    ClrFlag(x, FLAG_RESTRICT_JOIN)
 /** Clear the client's PRIVMSG/NOTICE restriction. */
@@ -1034,6 +1279,8 @@ struct Client {
 #define ClearOpLevels(x)        ClrFlag(x, FLAG_OPLEVELS)
 /** Clear the client's account status. */
 #define ClearAccount(x)         ClrFlag(x, FLAG_ACCOUNT)
+/** Clear the client's SASL authentication complete flag. */
+#define ClearSASLComplete(x)    ClrFlag(x, FLAG_SASLCOMPLETE)
 
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */

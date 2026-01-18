@@ -84,11 +84,16 @@
  *                    non-NULL pointers.
  */
 
+#include <time.h>
+
+struct Channel;
 struct Client;
+struct StatDesc;
 
 extern int m_admin(struct Client*, struct Client*, int, char*[]);
 extern int m_authenticate(struct Client*, struct Client*, int, char*[]);
 extern int m_away(struct Client*, struct Client*, int, char*[]);
+extern int mu_away(struct Client*, struct Client*, int, char*[]);
 extern int m_cap(struct Client*, struct Client*, int, char*[]);
 extern int m_cnotice(struct Client*, struct Client*, int, char*[]);
 extern int m_cprivmsg(struct Client*, struct Client*, int, char*[]);
@@ -97,6 +102,7 @@ extern int m_gline(struct Client*, struct Client*, int, char*[]);
 extern int m_help(struct Client*, struct Client*, int, char*[]);
 extern int m_ignore(struct Client*, struct Client*, int, char*[]);
 extern int m_info(struct Client*, struct Client*, int, char*[]);
+extern int m_isupport(struct Client*, struct Client*, int, char*[]);
 extern int m_invite(struct Client*, struct Client*, int, char*[]);
 extern int m_ircops(struct Client*, struct Client*, int, char*[]);
 extern int m_isnef(struct Client*, struct Client*, int, char*[]);
@@ -133,6 +139,8 @@ extern int m_quit(struct Client*, struct Client*, int, char*[]);
 extern int m_registered(struct Client*, struct Client*, int, char*[]);
 extern int m_rules(struct Client*, struct Client*, int, char*[]);
 extern int m_sethost(struct Client*, struct Client*, int, char*[]);
+extern int m_setname(struct Client*, struct Client*, int, char*[]);
+extern int m_tagmsg(struct Client*, struct Client*, int, char*[]);
 extern int m_shun(struct Client*, struct Client*, int, char*[]);
 extern int m_silence(struct Client*, struct Client*, int, char*[]);
 extern int m_starttls(struct Client*, struct Client*, int, char*[]);
@@ -150,6 +158,7 @@ extern int m_wallchops(struct Client*, struct Client*, int, char*[]);
 extern int m_wallhops(struct Client*, struct Client*, int, char*[]);
 extern int m_wallvoices(struct Client*, struct Client*, int, char*[]);
 extern int m_watch(struct Client*, struct Client*, int, char*[]);
+extern int m_monitor(struct Client*, struct Client*, int, char*[]);
 extern int m_webirc(struct Client*, struct Client*, int, char*[]);
 extern int m_who(struct Client*, struct Client*, int, char*[]);
 extern int m_whois(struct Client*, struct Client*, int, char*[]);
@@ -241,6 +250,8 @@ extern int ms_rpong(struct Client*, struct Client*, int, char*[]);
 extern int ms_rules(struct Client*, struct Client*, int, char*[]);
 extern int ms_sasl(struct Client*, struct Client*, int, char*[]);
 extern int ms_server(struct Client*, struct Client*, int, char*[]);
+extern int ms_setname(struct Client*, struct Client*, int, char*[]);
+extern int ms_tagmsg(struct Client*, struct Client*, int, char*[]);
 extern int ms_settime(struct Client*, struct Client*, int, char*[]);
 extern int ms_shun(struct Client*, struct Client*, int, char*[]);
 extern int ms_silence(struct Client*, struct Client*, int, char*[]);
@@ -271,6 +282,36 @@ extern int ms_whois(struct Client*, struct Client*, int, char*[]);
 extern int ms_xquery(struct Client*, struct Client*, int, char*[]);
 extern int ms_xreply(struct Client*, struct Client*, int, char*[]);
 extern int ms_zline(struct Client*, struct Client*, int, char*[]);
+extern int ms_batch(struct Client*, struct Client*, int, char*[]);
+extern int m_batch(struct Client*, struct Client*, int, char*[]);
+extern int check_client_batch_timeout(struct Client*);
+extern int ms_multiline(struct Client*, struct Client*, int, char*[]);
+extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
+extern int ms_chathistory(struct Client*, struct Client*, int, char*[]);
+extern int has_chathistory_advertisement(struct Client*);
+extern int server_retention_days(struct Client*);
+extern int server_retention_covers(struct Client*, time_t);
+extern void clear_server_ad(struct Client*);
+extern void chathistory_report_ads(struct Client*, const struct StatDesc*, char*);
+extern void forward_history_write(struct Channel*, struct Client*, const char*, const char*, int, const char*);
+extern int send_channel_advertisements(struct Client*);
+extern void broadcast_channel_advertisement(const char*);
+extern void chathistory_init_callbacks(void);
+extern int m_redact(struct Client*, struct Client*, int, char*[]);
+extern int ms_redact(struct Client*, struct Client*, int, char*[]);
+extern int m_register(struct Client*, struct Client*, int, char*[]);
+extern int m_verify(struct Client*, struct Client*, int, char*[]);
+extern int ms_regreply(struct Client*, struct Client*, int, char*[]);
+extern int m_markread(struct Client*, struct Client*, int, char*[]);
+extern int ms_markread(struct Client*, struct Client*, int, char*[]);
+extern void send_markread_on_join(struct Client*, const char*);
+extern int m_rename(struct Client*, struct Client*, int, char*[]);
+extern int ms_rename(struct Client*, struct Client*, int, char*[]);
+extern int m_metadata(struct Client*, struct Client*, int, char*[]);
+extern int ms_metadata(struct Client*, struct Client*, int, char*[]);
+extern int ms_metadataquery(struct Client*, struct Client*, int, char*[]);
+extern int m_webpush(struct Client*, struct Client*, int, char*[]);
+extern int ms_webpush(struct Client*, struct Client*, int, char*[]);
 
 #endif /* INCLUDED_handlers_h */
 

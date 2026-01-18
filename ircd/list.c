@@ -28,6 +28,7 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_events.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -44,6 +45,7 @@
 #include "send.h"
 #include "struct.h"
 #include "whowas.h"
+#include "metadata.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stddef.h>  /* offsetof */
@@ -65,6 +67,13 @@ static struct Connection* connectionFreeList;
 
 /** Linked list of currently unused SLink structures. */
 static struct SLink* slinkFreeList;
+
+/** Linked list of currently unused DLink structures. */
+static struct DLink* dlinkFreeList;
+/** Number of DLink structures allocated. */
+static unsigned int dlinkAllocCount;
+/** Number of DLink structures in freelist. */
+static unsigned int dlinkFreeCount;
 
 /** Initialize the list manipulation support system.
  * Pre-allocate MAXCONNECTIONS Client and Connection structures.
@@ -216,6 +225,11 @@ struct Client* make_client(struct Client *from, int status)
     con_handler(con) = UNREGISTERED_HANDLER;
     con_client(con) = cptr;
 
+    /* Initialize WebSocket state for RFC 6455 compliance */
+    con_ws_frame_len(con) = 0;
+    con_ws_frag_len(con) = 0;
+    con_ws_frag_opcode(con) = 0;
+
     cli_connect(cptr) = con; /* set the connection and other fields */
     cli_since(cptr) = cli_lasttime(cptr) = cli_firsttime(cptr) = CurrentTime;
     cli_lastnick(cptr) = TStime();
@@ -278,19 +292,62 @@ void free_client(struct Client* cptr)
   if (cli_connect(cptr))
     MyFree(cli_loc(cptr));
 
-  /* Loop through local clients and clear cli_saslagent if it's cptr. */
+  /* Loop through local clients and abort SASL sessions if agent is cptr.
+   * This proactively notifies clients when the SASL services server disconnects
+   * instead of making them wait for SASL_TIMEOUT.
+   */
   if (cli_saslagentref(cptr) > 0) {
     struct Client *acptr;
     int fd = 0;
+    int aborted = 0;
 
     for (fd = HighestFd; fd >= 0; --fd) {
       if ((acptr = LocalClientArray[fd])) {
         if (cli_saslagent(acptr) == cptr) {
+          /* Abort the SASL session - this sends ERR_SASLFAIL to the client */
+          if (cli_saslcookie(acptr) && !IsSASLComplete(acptr)) {
+            /* Only log first few to avoid log spam during netsplit */
+            if (aborted < 5) {
+              log_write(LS_DEBUG, L_DEBUG, 0,
+                        "SASL: Aborting session for %C - agent %C disconnected",
+                        acptr, cptr);
+            }
+            abort_sasl(acptr, 0);  /* 0 = not a timeout, just abort */
+            aborted++;
+          }
           cli_saslagent(acptr) = NULL;
         }
       }
     }
+    if (aborted > 0) {
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "SASL: Aborted %d pending sessions due to agent %C disconnect",
+                aborted, cptr);
+    }
     cli_saslagentref(cptr) = 0;
+  }
+
+  /* If a server is disconnecting and it matches the SASL server pattern,
+   * clear global SASL/webpush state. This triggers CAP DEL notifications.
+   * Note: This check is separate from saslagentref because the services server
+   * might disconnect when no clients are actively authenticating.
+   */
+  if (IsServer(cptr)) {
+    const char *sasl_server = feature_str(FEAT_SASL_SERVER);
+    int is_services = (!strcmp(sasl_server, "*") || match(sasl_server, cli_name(cptr)) == 0);
+
+    if (is_services) {
+      if (get_sasl_mechanisms() != NULL) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "Services disconnect: clearing SASL mechanisms (%C)", cptr);
+        set_sasl_mechanisms(NULL);  /* Triggers CAP DEL :sasl */
+      }
+      if (get_vapid_pubkey() != NULL) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "Services disconnect: clearing VAPID key (%C)", cptr);
+        set_vapid_pubkey(NULL);  /* Triggers CAP DEL :draft/webpush */
+      }
+    }
   }
 
   if (cli_from(cptr) == cptr) { /* in other words, we're local */
@@ -307,6 +364,9 @@ void free_client(struct Client* cptr)
   }
 
   cli_connect(cptr) = 0;
+
+  /* Free metadata and subscriptions for this client */
+  metadata_free_client(cptr);
 
   dealloc_client(cptr); /* actually destroy the client */
 }
@@ -480,7 +540,17 @@ void free_link(struct SLink* lp)
  */
 struct DLink *add_dlink(struct DLink **lpp, struct Client *cp)
 {
-  struct DLink* lp = (struct DLink*) MyMalloc(sizeof(struct DLink));
+  struct DLink* lp;
+
+  /* Allocate from freelist or malloc */
+  if (dlinkFreeList) {
+    lp = dlinkFreeList;
+    dlinkFreeList = lp->next;
+    dlinkFreeCount--;
+  } else {
+    lp = (struct DLink*) MyMalloc(sizeof(struct DLink));
+    dlinkAllocCount++;
+  }
   assert(0 != lp);
   lp->value.cptr = cp;
   lp->prev = 0;
@@ -505,7 +575,11 @@ void remove_dlink(struct DLink **lpp, struct DLink *lp)
   }
   else if ((*lpp = lp->next))
     lp->next->prev = NULL;
-  MyFree(lp);
+
+  /* Return to freelist instead of freeing */
+  lp->next = dlinkFreeList;
+  dlinkFreeList = lp;
+  dlinkFreeCount++;
 }
 
 /** Report memory usage of a list to \a cptr.

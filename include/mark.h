@@ -29,6 +29,7 @@
 #define MARK_GEOIP              "GEOIP"                 /**< GEOIP mark. */
 #define MARK_CVERSION           "CVERSION"              /**< Client Version mark */
 #define MARK_SSLCLIFP           "SSLCLIFP"              /**< SSL client certificate fingerprint */
+#define MARK_SSLCLIEXP          "SSLCLIEXP"             /**< SSL client certificate expiration timestamp */
 #define MARK_DNSBL_DATA         "DNSBL_DATA"            /**< Alias to MARK */
 #define MARK_MARK               "MARK"                  /**< List of single word tags */
 #define MARK_KILL               "KILL"                  /**< KILL block exemption mark */

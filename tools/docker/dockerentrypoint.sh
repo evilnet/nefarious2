@@ -3,6 +3,7 @@
 # Nefarious IRCd Docker Entrypoint
 # Reads base.conf-dist, replaces all %VARIABLE% placeholders with environment
 # variable values, and writes out base.conf
+# Volume permissions are handled by init container in docker-compose
 
 BASECONFDIST=/home/nefarious/ircd/base.conf-dist
 BASECONF=/home/nefarious/ircd/base.conf
@@ -52,7 +53,13 @@ if [ "$1" == "/home/nefarious/bin/ircd" ]; then
     fi
 fi
 
-#Now run CMD from Dockerfile...
-
-exec "$@"
+# Run CMD from Dockerfile
+# Optionally wrap with valgrind if NEFARIOUS_VALGRIND=1
+if [ "${NEFARIOUS_VALGRIND:-0}" = "1" ]; then
+    echo "Running with Valgrind (NEFARIOUS_VALGRIND=1)"
+    exec valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes \
+        --log-file=/home/nefarious/ircd/cores/valgrind.log "$@"
+else
+    exec "$@"
+fi
 

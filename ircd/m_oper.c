@@ -101,11 +101,85 @@
 #include "s_debug.h"
 #include "s_user.h"
 #include "s_misc.h"
+#include "s_bsd.h"
 #include "send.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
 #include <string.h>
+
+/* Forward declarations */
+void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf);
+
+/**
+ * Context for async OPER password verification.
+ * This is passed to the thread pool callback.
+ */
+struct oper_verify_ctx {
+  int fd;                         /**< Client file descriptor */
+  unsigned int cookie;            /**< Unique cookie to verify client identity */
+  char name[NICKLEN + 1];         /**< Oper name for logging */
+  struct ConfItem *aconf;         /**< Oper config block */
+};
+
+/**
+ * Callback invoked when async OPER password verification completes.
+ * Called in main thread context via thread_pool_poll().
+ */
+static void oper_password_verified(int result, void *arg)
+{
+  struct oper_verify_ctx *ctx = arg;
+  struct Client *sptr;
+
+  /* Look up client by fd */
+  if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS) {
+    MyFree(ctx);
+    return;
+  }
+
+  sptr = LocalClientArray[ctx->fd];
+
+  /* Verify client still exists and matches our cookie */
+  if (!sptr || IsDead(sptr) || !IsOperPending(sptr)) {
+    Debug((DEBUG_DEBUG, "oper_password_verified: client gone or not pending "
+           "(fd %d)", ctx->fd));
+    MyFree(ctx);
+    return;
+  }
+
+  /* Clear pending flag */
+  ClearOperPending(sptr);
+
+  if (result == CRYPT_VERIFY_MATCH) {
+    /* Password matched - complete OPER */
+    if (MyUser(sptr)) {
+      int attach_result = attach_conf(sptr, ctx->aconf);
+      if ((ACR_OK != attach_result) && (ACR_ALREADY_AUTHORIZED != attach_result)) {
+        send_reply(sptr, ERR_NOOPERHOST);
+        sendto_opmask_butone_global(&me, SNO_OLDREALOP,
+            "Failed OPER attempt by %s (%s@%s) (attach failed after async)",
+            cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost);
+        MyFree(ctx);
+        return;
+      }
+    }
+    do_oper(sptr, sptr, ctx->aconf);
+    SetOperedLocal(sptr);
+    ClearOperedRemote(sptr);
+    Debug((DEBUG_INFO, "oper_password_verified: OPER success for %s",
+           cli_name(sptr)));
+  } else {
+    /* Password didn't match */
+    send_reply(sptr, ERR_PASSWDMISMATCH);
+    sendto_opmask_butone_global(&me, SNO_OLDREALOP,
+        "Failed OPER attempt by %s (%s@%s) (password mismatch)",
+        cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost);
+    Debug((DEBUG_INFO, "oper_password_verified: OPER failed for %s",
+           cli_name(sptr)));
+  }
+
+  MyFree(ctx);
+}
 
 void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
 {
@@ -288,6 +362,36 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     return 0;
   }
 
+  /*
+   * Try async password verification if available.
+   * This prevents blocking the event loop during bcrypt/PBKDF2 hashing.
+   * Falls back to synchronous verification if async is not available.
+   */
+  if (MyUser(sptr) && ircd_crypt_async_available() && !IsOperPending(sptr)) {
+    struct oper_verify_ctx *ctx;
+
+    ctx = (struct oper_verify_ctx *)MyMalloc(sizeof(struct oper_verify_ctx));
+    ctx->fd = cli_fd(sptr);
+    ctx->aconf = aconf;
+    ircd_strncpy(ctx->name, name, NICKLEN);
+
+    if (ircd_crypt_verify_async(password, aconf->passwd,
+                                 oper_password_verified, ctx) == 0) {
+      /* Async verification started */
+      SetOperPending(sptr);
+      Debug((DEBUG_INFO, "can_oper: started async verification for %s",
+             cli_name(sptr)));
+      *_aconf = aconf;
+      return 1; /* Return 1 = pending async */
+    }
+
+    /* Async failed to start, fall back to sync */
+    MyFree(ctx);
+    Debug((DEBUG_DEBUG, "can_oper: async failed, falling back to sync for %s",
+           cli_name(sptr)));
+  }
+
+  /* Synchronous password verification (blocking) */
   if (oper_password_match(password, aconf->passwd))
   {
     if (MyUser(sptr))
@@ -356,10 +460,23 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (EmptyString(name) || EmptyString(password))
     return need_more_params(sptr, "OPER");
 
-  if (can_oper(cptr, sptr, name, password, &aconf)) {
-    do_oper(cptr, sptr, aconf);
-    SetOperedLocal(sptr);
-    ClearOperedRemote(sptr);
+  /* Reject if async verification already in progress */
+  if (IsOperPending(sptr)) {
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :OPER authentication already in progress",
+                  sptr);
+    return 0;
+  }
+
+  {
+    int result = can_oper(cptr, sptr, name, password, &aconf);
+    if (result == -1) {
+      /* Sync verification succeeded */
+      do_oper(cptr, sptr, aconf);
+      SetOperedLocal(sptr);
+      ClearOperedRemote(sptr);
+    }
+    /* result == 1 means async pending, callback will handle it */
+    /* result == 0 means failed, error already sent */
   }
 
   return 0;

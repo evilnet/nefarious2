@@ -59,12 +59,15 @@ struct Watch {
 #define wt_nick(wt)		((wt)->wt_nick)
 #define wt_lasttime(wt)		((wt)->wt_lasttime)
 
+/** Watch entry was added via MONITOR command (use 730/731 numerics) */
+#define WATCH_FLAG_MONITOR	0x0001
+
 /*
  * Proto types
  */
 extern void check_status_watch(struct Client *sptr, int raw);
 extern void show_status_watch(struct Client *sptr, char *nick, int raw1, int raw2);
-extern int add_nick_watch(struct Client *sptr, char *nick);
+extern int add_nick_watch(struct Client *sptr, char *nick, unsigned int flags);
 extern int del_nick_watch(struct Client *sptr, char *nick);
 extern int del_list_watch(struct Client *sptr);
 extern void watch_count_memory(size_t* count_out, size_t* bytes_out);
