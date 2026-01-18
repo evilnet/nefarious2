@@ -1491,16 +1491,16 @@ static Numeric replyTable[] = {
   { 0 },
 /* 729 */
   { 0 },
-/* 730 */
-  { 0 },
-/* 731 */
-  { 0 },
-/* 732 */
-  { 0 },
-/* 733 */
-  { 0 },
-/* 734 */
-  { 0 },
+/* 730 - RPL_MONONLINE (MONITOR: targets online) */
+  { RPL_MONONLINE, ":%s", "730" },
+/* 731 - RPL_MONOFFLINE (MONITOR: targets offline) */
+  { RPL_MONOFFLINE, ":%s", "731" },
+/* 732 - RPL_MONLIST (MONITOR: list entry) */
+  { RPL_MONLIST, ":%s", "732" },
+/* 733 - RPL_ENDOFMONLIST (MONITOR: end of list) */
+  { RPL_ENDOFMONLIST, ":End of MONITOR list", "733" },
+/* 734 - ERR_MONLISTFULL (MONITOR: list full) */
+  { ERR_MONLISTFULL, "%d %s :Monitor list is full", "734" },
 /* 735 */
   { 0 },
 /* 736 */

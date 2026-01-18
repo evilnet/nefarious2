@@ -2587,6 +2587,7 @@ void init_isupport(void)
 
   add_isupport_i("SILENCE", feature_int(FEAT_MAXSILES));
   add_isupport_i("WATCH", feature_int(FEAT_MAXWATCHS));
+  add_isupport_i("MONITOR", feature_int(FEAT_MAXWATCHS));
   add_isupport_i("MODES", MAXMODEPARAMS);
   add_isupport_i("MAXCHANNELS", feature_int(FEAT_MAXCHANNELSPERUSER));
   add_isupport_i("MAXBANS", feature_int(FEAT_MAXBANS));

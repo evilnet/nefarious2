@@ -234,6 +234,7 @@ IRCD_SRC = \
 	m_wallusers.c \
 	m_wallvoices.c \
 	m_watch.c \
+	m_monitor.c \
 	m_webirc.c \
 	m_who.c \
 	m_whois.c \
@@ -1139,6 +1140,11 @@ m_wallvoices.o: m_wallvoices.c ../config.h ../include/channel.h \
   ../include/msg.h ../include/numeric.h ../include/numnicks.h \
   ../include/s_user.h ../include/send.h
 m_watch.o: m_watch.c ../config.h ../include/client.h ../include/hash.h \
+  ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
+  ../include/ircd_reply.h ../include/ircd_string.h ../include/list.h \
+  ../include/numeric.h ../include/s_user.h ../include/send.h \
+  ../include/watch.h
+m_monitor.o: m_monitor.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/ircd_reply.h ../include/ircd_string.h ../include/list.h \
   ../include/numeric.h ../include/s_user.h ../include/send.h \
