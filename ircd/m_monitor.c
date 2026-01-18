@@ -148,8 +148,8 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         return 0;
       }
 
-      /* Add to watch list (shared infrastructure) */
-      add_nick_watch(sptr, s);
+      /* Add to watch list (shared infrastructure) with MONITOR flag */
+      add_nick_watch(sptr, s, WATCH_FLAG_MONITOR);
 
       /* Check if nick is online */
       if ((acptr = FindUser(s)))

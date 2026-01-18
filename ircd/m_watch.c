@@ -108,7 +108,7 @@ int m_watch(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		  continue;
 		}
 	
-		add_nick_watch(sptr, nick);
+		add_nick_watch(sptr, nick, 0);
 		show_status_watch(sptr, nick, RPL_NOWON, RPL_NOWOFF);
 	
 	      }

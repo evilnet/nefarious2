@@ -117,7 +117,7 @@ static int check_utf8_text(struct Client *sptr, char *text, const char *command)
   /* Warn mode: sanitize and proceed */
   string_sanitize_utf8(text);
   send_warn(sptr, command, "INVALID_UTF8", NULL,
-            "Message was truncated due to invalid UTF-8");
+            "Message contained invalid UTF-8 and was sanitized");
   return 1;
 }
 
@@ -352,7 +352,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     utf8buf[sizeof(utf8buf) - 1] = '\0';
     string_sanitize_utf8(utf8buf);
     send_warn(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
-              "Message was truncated due to invalid UTF-8");
+              "Message contained invalid UTF-8 and was sanitized");
     mytext = utf8buf;
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -481,7 +481,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
     utf8buf[sizeof(utf8buf) - 1] = '\0';
     string_sanitize_utf8(utf8buf);
     send_warn(sptr, "NOTICE", "INVALID_UTF8", NULL,
-              "Message was truncated due to invalid UTF-8");
+              "Message contained invalid UTF-8 and was sanitized");
     mytext = utf8buf;
     if (EmptyString(mytext))
       return;
@@ -872,7 +872,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     utf8buf[sizeof(utf8buf) - 1] = '\0';
     string_sanitize_utf8(utf8buf);
     send_warn(sptr, "PRIVMSG", "INVALID_UTF8", NULL,
-              "Message was truncated due to invalid UTF-8");
+              "Message contained invalid UTF-8 and was sanitized");
     mytext = utf8buf;
     if (EmptyString(mytext)) {
       send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -997,7 +997,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     utf8buf[sizeof(utf8buf) - 1] = '\0';
     string_sanitize_utf8(utf8buf);
     send_warn(sptr, "NOTICE", "INVALID_UTF8", NULL,
-              "Message was truncated due to invalid UTF-8");
+              "Message contained invalid UTF-8 and was sanitized");
     mytext = utf8buf;
     if (EmptyString(mytext))
       return;

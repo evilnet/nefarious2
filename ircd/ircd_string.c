@@ -144,82 +144,116 @@ int string_is_valid_utf8(const char * str)
 }
 
 /**
- * Sanitize a string by truncating at the first invalid UTF-8 sequence.
- * The string is modified in place.
+ * Sanitize a string by replacing invalid UTF-8 sequences with U+FFFD.
+ *
+ * This function walks through the string and replaces any invalid UTF-8
+ * byte sequences with the Unicode replacement character U+FFFD (encoded
+ * as 0xEF 0xBF 0xBD in UTF-8).
+ *
+ * Since U+FFFD is 3 bytes and invalid sequences can be 1 byte, the output
+ * may be longer than input. The function uses a local buffer and copies
+ * back, truncating at a valid UTF-8 boundary if the result is too long.
+ *
+ * The string is modified in place. Caller should ensure str has at least
+ * BUFSIZE bytes available.
  *
  * @param str The string to sanitize (will be modified).
  * @return Length of sanitized string, or -1 if no modification was needed.
  */
 int string_sanitize_utf8(char *str)
 {
-    unsigned char *bytes;
-    unsigned char *start;
+    unsigned char *in;
+    unsigned char out[BUFSIZE];
+    unsigned char *outp;
+    size_t outlen;
+    int modified = 0;
+    int seq_len;
 
     if (!str)
         return -1;
 
-    start = (unsigned char *)str;
-    bytes = start;
+    in = (unsigned char *)str;
+    outp = out;
+    outlen = 0;
 
-    while (*bytes)
+    while (*in && outlen < sizeof(out) - 4)  /* Leave room for U+FFFD + NUL */
     {
+        seq_len = 0;
+
         /* ASCII printable and common control characters */
-        if (bytes[0] == 0x09 || bytes[0] == 0x0A || bytes[0] == 0x0D ||
-            (0x20 <= bytes[0] && bytes[0] <= 0x7E))
+        if (in[0] == 0x09 || in[0] == 0x0A || in[0] == 0x0D ||
+            (0x20 <= in[0] && in[0] <= 0x7E))
         {
-            bytes += 1;
-            continue;
+            seq_len = 1;
         }
-
         /* Non-overlong 2-byte */
-        if ((0xC2 <= bytes[0] && bytes[0] <= 0xDF) &&
-            (0x80 <= bytes[1] && bytes[1] <= 0xBF))
+        else if ((0xC2 <= in[0] && in[0] <= 0xDF) &&
+                 (0x80 <= in[1] && in[1] <= 0xBF))
         {
-            bytes += 2;
-            continue;
+            seq_len = 2;
         }
-
         /* 3-byte sequences */
-        if ((bytes[0] == 0xE0 &&
-             (0xA0 <= bytes[1] && bytes[1] <= 0xBF) &&
-             (0x80 <= bytes[2] && bytes[2] <= 0xBF)) ||
-            (((0xE1 <= bytes[0] && bytes[0] <= 0xEC) ||
-              bytes[0] == 0xEE || bytes[0] == 0xEF) &&
-             (0x80 <= bytes[1] && bytes[1] <= 0xBF) &&
-             (0x80 <= bytes[2] && bytes[2] <= 0xBF)) ||
-            (bytes[0] == 0xED &&
-             (0x80 <= bytes[1] && bytes[1] <= 0x9F) &&
-             (0x80 <= bytes[2] && bytes[2] <= 0xBF)))
+        else if ((in[0] == 0xE0 &&
+                  (0xA0 <= in[1] && in[1] <= 0xBF) &&
+                  (0x80 <= in[2] && in[2] <= 0xBF)) ||
+                 (((0xE1 <= in[0] && in[0] <= 0xEC) ||
+                   in[0] == 0xEE || in[0] == 0xEF) &&
+                  (0x80 <= in[1] && in[1] <= 0xBF) &&
+                  (0x80 <= in[2] && in[2] <= 0xBF)) ||
+                 (in[0] == 0xED &&
+                  (0x80 <= in[1] && in[1] <= 0x9F) &&
+                  (0x80 <= in[2] && in[2] <= 0xBF)))
         {
-            bytes += 3;
-            continue;
+            seq_len = 3;
         }
-
         /* 4-byte sequences */
-        if ((bytes[0] == 0xF0 &&
-             (0x90 <= bytes[1] && bytes[1] <= 0xBF) &&
-             (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
-             (0x80 <= bytes[3] && bytes[3] <= 0xBF)) ||
-            ((0xF1 <= bytes[0] && bytes[0] <= 0xF3) &&
-             (0x80 <= bytes[1] && bytes[1] <= 0xBF) &&
-             (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
-             (0x80 <= bytes[3] && bytes[3] <= 0xBF)) ||
-            (bytes[0] == 0xF4 &&
-             (0x80 <= bytes[1] && bytes[1] <= 0x8F) &&
-             (0x80 <= bytes[2] && bytes[2] <= 0xBF) &&
-             (0x80 <= bytes[3] && bytes[3] <= 0xBF)))
+        else if ((in[0] == 0xF0 &&
+                  (0x90 <= in[1] && in[1] <= 0xBF) &&
+                  (0x80 <= in[2] && in[2] <= 0xBF) &&
+                  (0x80 <= in[3] && in[3] <= 0xBF)) ||
+                 ((0xF1 <= in[0] && in[0] <= 0xF3) &&
+                  (0x80 <= in[1] && in[1] <= 0xBF) &&
+                  (0x80 <= in[2] && in[2] <= 0xBF) &&
+                  (0x80 <= in[3] && in[3] <= 0xBF)) ||
+                 (in[0] == 0xF4 &&
+                  (0x80 <= in[1] && in[1] <= 0x8F) &&
+                  (0x80 <= in[2] && in[2] <= 0xBF) &&
+                  (0x80 <= in[3] && in[3] <= 0xBF)))
         {
-            bytes += 4;
-            continue;
+            seq_len = 4;
         }
 
-        /* Invalid sequence - truncate here */
-        *bytes = '\0';
-        return (int)(bytes - start);
+        if (seq_len > 0)
+        {
+            /* Valid sequence - copy it */
+            memcpy(outp, in, seq_len);
+            outp += seq_len;
+            outlen += seq_len;
+            in += seq_len;
+        }
+        else
+        {
+            /* Invalid byte - replace with U+FFFD (0xEF 0xBF 0xBD) */
+            if (outlen + 3 < sizeof(out) - 1)
+            {
+                *outp++ = 0xEF;
+                *outp++ = 0xBF;
+                *outp++ = 0xBD;
+                outlen += 3;
+            }
+            in += 1;  /* Skip the invalid byte */
+            modified = 1;
+        }
     }
 
-    /* String was already valid */
-    return -1;
+    *outp = '\0';
+
+    if (!modified)
+        return -1;
+
+    /* Copy sanitized string back */
+    memcpy(str, out, outlen + 1);
+    return (int)outlen;
 }
 
 /** Check whether \a str contains non-ASCII characters.

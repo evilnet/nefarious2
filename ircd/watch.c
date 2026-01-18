@@ -32,6 +32,7 @@
 #include "ircd_alloc.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "list.h"
 #include "numeric.h"
@@ -122,12 +123,14 @@ void watch_count_memory(size_t* count_out, size_t* bytes_out)
 
 /** Notify the users the input/output of nick.
  * @param[in] cptr Client pointer.
- * @param[in] raw Raw reply code.
+ * @param[in] raw Raw reply code (WATCH numeric - 604/605).
  */
 void check_status_watch(struct Client *cptr, int raw)
 {
   struct Watch *wptr;
   struct SLink *lp;
+  char hostmask[NICKLEN + USERLEN + HOSTLEN + 3];
+  int monitor_raw;
 
   wptr = FindWatch(cli_name(cptr));
 
@@ -136,19 +139,42 @@ void check_status_watch(struct Client *cptr, int raw)
 
   wt_lasttime(wptr) = TStime();
 
+  /* Determine MONITOR equivalent numeric */
+  if (raw == RPL_NOWON)
+    monitor_raw = RPL_MONONLINE;
+  else if (raw == RPL_NOWOFF)
+    monitor_raw = RPL_MONOFFLINE;
+  else
+    monitor_raw = 0;  /* Unknown - use WATCH format */
+
   /*
    * Sent the warning to all the users who
    * have it in notify.
    */
   for (lp = wt_watch(wptr); lp; lp = lp->next)
   {
-    send_reply(lp->value.cptr, raw, cli_name(cptr),
-	IsUser(cptr) ? cli_user(cptr)->username : "<N/A>",
-	IsUser(cptr) ? 
- 	  (!IsAnOper(lp->value.cptr) ?
-	  cli_user(cptr)->host : cli_user(cptr)->realhost)
-	: "<N/A>",
-	wt_lasttime(wptr));
+    if ((lp->flags & WATCH_FLAG_MONITOR) && monitor_raw) {
+      /* MONITOR client - use 730/731 format: nick!user@host */
+      if (IsUser(cptr)) {
+        ircd_snprintf(0, hostmask, sizeof(hostmask), "%s!%s@%s",
+                      cli_name(cptr),
+                      cli_user(cptr)->username,
+                      !IsAnOper(lp->value.cptr) ?
+                        cli_user(cptr)->host : cli_user(cptr)->realhost);
+      } else {
+        ircd_strncpy(hostmask, cli_name(cptr), sizeof(hostmask) - 1);
+      }
+      send_reply(lp->value.cptr, monitor_raw, hostmask);
+    } else {
+      /* WATCH client - use 604/605 format: nick user host ts */
+      send_reply(lp->value.cptr, raw, cli_name(cptr),
+          IsUser(cptr) ? cli_user(cptr)->username : "<N/A>",
+          IsUser(cptr) ?
+            (!IsAnOper(lp->value.cptr) ?
+            cli_user(cptr)->host : cli_user(cptr)->realhost)
+          : "<N/A>",
+          wt_lasttime(wptr));
+    }
   }
 
 }
@@ -178,9 +204,10 @@ void show_status_watch(struct Client *cptr, char *nick, int raw1, int raw2)
 /** Add nick to the user watch list.
  * @param[in] cptr Client pointer of who is doing the watch.
  * @param[in] nick The nickname that the watch is being done on.
+ * @param[in] flags Flags for the watch entry (e.g., WATCH_FLAG_MONITOR).
  * @return 0
  */
-int add_nick_watch(struct Client *cptr, char *nick)
+int add_nick_watch(struct Client *cptr, char *nick, unsigned int flags)
 {
   struct Watch *wptr;
   struct SLink *lp;
@@ -217,6 +244,7 @@ int add_nick_watch(struct Client *cptr, char *nick)
     wt_watch(wptr) = make_link();
     memset(wt_watch(wptr), 0, sizeof(struct SLink));
     wt_watch(wptr)->value.cptr = cptr;
+    wt_watch(wptr)->flags = flags;
     wt_watch(wptr)->next = lp;
 
     /*

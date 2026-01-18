@@ -222,7 +222,7 @@ int m_topic(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Warn mode: sanitize the topic */
       string_sanitize_utf8(topic);
       send_warn(sptr, "TOPIC", "INVALID_UTF8", NULL,
-                "Topic was truncated due to invalid UTF-8");
+                "Topic contained invalid UTF-8 and was sanitized");
       if (EmptyString(topic)) {
         send_reply(sptr, ERR_NOTEXTTOSEND);
         return 0;
