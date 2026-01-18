@@ -2631,6 +2631,14 @@ void init_isupport(void)
 
   add_isupport_s("CASEMAPPING", "rfc1459");
   add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
+
+  /* IRCv3 draft/ICON - network icon URL */
+  {
+    const char *icon_url = feature_str(FEAT_NETWORK_ICON);
+    if (icon_url && *icon_url)
+      add_isupport_s("draft/ICON", icon_url);
+  }
+
   add_isupport_s("MAXLIST", imaxlist);
   add_isupport_s("ELIST", "CT");
 

@@ -162,6 +162,7 @@ enum Feature {
   FEAT_NETWORK,
   FEAT_URL_CLIENTS,
   FEAT_URLREG,
+  FEAT_NETWORK_ICON,
 
   /* Nefarious FEAT_'s */
   FEAT_CHECK,
