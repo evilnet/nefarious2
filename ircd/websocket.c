@@ -407,18 +407,24 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
   SetWebSocket(cptr);
   ClearWSNeedHandshake(cptr);
 
-  /* Apply WebSocket-specific recvq limit (typically higher than regular clients
-   * because WebSocket frames can bundle multiple IRC lines) */
-  {
-    unsigned int ws_recvq = feature_int(FEAT_WEBSOCKET_RECVQ);
-    if (ws_recvq > 0)
-      cli_max_recvq(cptr) = ws_recvq;
+  /* Store subprotocol preference for frame encoding:
+   * - text.ircv3.net: Set FLAG_WSTEXT, use text frames
+   * - binary.ircv3.net: Don't set FLAG_WSTEXT, use binary frames
+   * - No subprotocol: Set FLAG_WSAUTODETECT, detect from first incoming frame
+   */
+  if (subproto == WS_SUBPROTO_TEXT) {
+    SetWSText(cptr);
+  } else if (subproto == WS_SUBPROTO_NONE) {
+    /* Legacy client - autodetect mode from first incoming frame */
+    SetWSAutodetect(cptr);
   }
+  /* For WS_SUBPROTO_BINARY, we leave both flags unset (binary mode) */
 
-  Debug((DEBUG_DEBUG, "WebSocket: Handshake complete for %s (subproto=%s)",
+  Debug((DEBUG_DEBUG, "WebSocket: Handshake complete for %s (subproto=%s, text=%d, autodetect=%d)",
          cli_sockhost(cptr),
          subproto == WS_SUBPROTO_NONE ? "none" :
-         subproto == WS_SUBPROTO_TEXT ? "text" : "binary"));
+         subproto == WS_SUBPROTO_TEXT ? "text" : "binary",
+         IsWSText(cptr), IsWSAutodetect(cptr)));
 
   return 1;
 #else

@@ -191,13 +191,10 @@ static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *fro
                     tv.tv_usec / 1000);
   }
 
-  if (use_account && from && cli_user(from)) {
+  if (use_account && from && cli_user(from) && IsAccount(from)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    if (IsAccount(from))
-      pos += snprintf(buf + pos, buflen - pos, "account=%s", cli_user(from)->account);
-    else
-      pos += snprintf(buf + pos, buflen - pos, "account=*");
+    pos += snprintf(buf + pos, buflen - pos, "account=%s", cli_user(from)->account);
   }
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
@@ -369,15 +366,11 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
                     tv.tv_usec / 1000);
   }
 
-  if (use_account && from && cli_user(from)) {
+  if (use_account && from && cli_user(from) && IsAccount(from)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    if (IsAccount(from)) {
-      pos += snprintf(buf + pos, buflen - pos, "account=%s",
-                      cli_user(from)->account);
-    } else {
-      pos += snprintf(buf + pos, buflen - pos, "account=*");
-    }
+    pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                    cli_user(from)->account);
   }
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
@@ -465,15 +458,11 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
                     tv.tv_usec / 1000);
   }
 
-  if (use_account && from && cli_user(from)) {
+  if (use_account && from && cli_user(from) && IsAccount(from)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    if (IsAccount(from)) {
-      pos += snprintf(buf + pos, buflen - pos, "account=%s",
-                      cli_user(from)->account);
-    } else {
-      pos += snprintf(buf + pos, buflen - pos, "account=*");
-    }
+    pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                    cli_user(from)->account);
   }
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */

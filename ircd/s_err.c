@@ -1836,7 +1836,7 @@ static Numeric replyTable[] = {
 /* 901 */
   { RPL_LOGGEDOUT, "%s!%s@%s :You are now logged out", "901" },
 /* 902 */
-  { 0 },
+  { ERR_NICKLOCKED, ":You must use a nick assigned to you", "902" },
 /* 903 */
   { RPL_SASLSUCCESS, ":SASL authentication successful", "903" },
 /* 904 */

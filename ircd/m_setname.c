@@ -125,9 +125,17 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   newname = parv[1];
 
-  /* Truncate if necessary */
-  if (strlen(newname) > REALLEN)
+  /* Handle oversized realname */
+  if (strlen(newname) > REALLEN) {
+    if (feature_bool(FEAT_SETNAME_STRICT_LENGTH)) {
+      /* IRCv3 spec: reject with FAIL if too long */
+      if (CapActive(sptr, CAP_STANDARDREPLIES))
+        send_fail(sptr, "SETNAME", "INVALID_REALNAME", NULL, "Realname too long");
+      return 0;
+    }
+    /* Legacy behavior: truncate */
     newname[REALLEN] = '\0';
+  }
 
   /* Check if realname actually changed */
   if (ircd_strcmp(cli_info(sptr), newname) == 0)

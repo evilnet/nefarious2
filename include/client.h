@@ -237,6 +237,8 @@ enum Flag
     FLAG_SSLNEEDACCEPT,             /**< Client needs SSL_accept() to be called again */
     FLAG_WEBSOCKET,                 /**< Client is connected via WebSocket */
     FLAG_WSNEEDHANDSHAKE,           /**< WebSocket client needs handshake */
+    FLAG_WSTEXT,                    /**< WebSocket uses text frames (not binary) */
+    FLAG_WSAUTODETECT,              /**< WebSocket mode pending autodetection from first frame */
 
     FLAG_IPCEXEMPT,                 /**< User is IPcheck exempt */
     FLAG_IPCNOTEXEMPT,              /**< User is not IPcheck exempt */
@@ -993,6 +995,10 @@ struct Client {
 #define IsWebSocket(x)          HasFlag(x, FLAG_WEBSOCKET)
 /** Return non-zero if the client needs WebSocket handshake. */
 #define IsWSNeedHandshake(x)    HasFlag(x, FLAG_WSNEEDHANDSHAKE)
+/** Return non-zero if the WebSocket client uses text mode (vs binary). */
+#define IsWSText(x)             HasFlag(x, FLAG_WSTEXT)
+/** Return non-zero if the WebSocket client needs mode autodetection. */
+#define IsWSAutodetect(x)       HasFlag(x, FLAG_WSAUTODETECT)
 /** Return non-zero if the client is IPcheck exempt. */
 #define IsIPCheckExempt(x)      HasFlag(x, FLAG_IPCEXEMPT)
 /** Return non-zero if the client is not IPcheck exempt. */
@@ -1123,6 +1129,10 @@ struct Client {
 #define SetWebSocket(x)         SetFlag(x, FLAG_WEBSOCKET)
 /** Mark a client as needing WebSocket handshake. */
 #define SetWSNeedHandshake(x)   SetFlag(x, FLAG_WSNEEDHANDSHAKE)
+/** Mark a WebSocket client as using text mode. */
+#define SetWSText(x)            SetFlag(x, FLAG_WSTEXT)
+/** Mark a WebSocket client as needing mode autodetection. */
+#define SetWSAutodetect(x)      SetFlag(x, FLAG_WSAUTODETECT)
 /** Mark a client as IPcheck exempt. */
 #define SetIPCheckExempt(x)     SetFlag(x, FLAG_IPCEXEMPT)
 /** Mark a client as not IPcheck exempt. */
@@ -1238,6 +1248,10 @@ struct Client {
 #define ClearWebSocket(x)       ClrFlag(x, FLAG_WEBSOCKET)
 /** Client no longer needs WebSocket handshake. */
 #define ClearWSNeedHandshake(x) ClrFlag(x, FLAG_WSNEEDHANDSHAKE)
+/** Clear WebSocket text mode flag. */
+#define ClearWSText(x)          ClrFlag(x, FLAG_WSTEXT)
+/** Clear WebSocket autodetect flag. */
+#define ClearWSAutodetect(x)    ClrFlag(x, FLAG_WSAUTODETECT)
 /** Clear the client's join restriction. */
 #define ClearRestrictJoin(x)    ClrFlag(x, FLAG_RESTRICT_JOIN)
 /** Clear the client's PRIVMSG/NOTICE restriction. */

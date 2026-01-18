@@ -100,7 +100,7 @@ static int base64_decode(const char *input, unsigned char *output,
   return 1;
 }
 
-/** Check if key is valid per spec (letters, digits, hyphens, underscores, dots, colons, forward slashes)
+/** Check if key is valid per IRCv3 spec (letters, digits, hyphens, underscores, dots, forward slashes)
  * and doesn't start with a digit.
  */
 static int is_valid_key(const char *key)
@@ -116,7 +116,7 @@ static int is_valid_key(const char *key)
 
   /* Check all characters */
   for (p = key; *p; p++) {
-    if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '.' && *p != ':' && *p != '/')
+    if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '.' && *p != '/')
       return 0;
   }
 

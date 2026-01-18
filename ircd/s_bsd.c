@@ -352,9 +352,19 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
       irc_line[--line_len] = '\0';
 
     if (line_len > 0) {
-      /* Encode as WebSocket frame (text mode for IRC) */
+      int text_mode = IsWSText(cptr) ? 1 : 0;
+
+      /* For text mode, validate UTF-8 and sanitize if needed.
+       * RFC 6455: Servers MUST NOT relay non-UTF-8 content to clients
+       * using text messages. We replace invalid bytes with U+FFFD.
+       */
+      if (text_mode && !string_is_valid_utf8(irc_line)) {
+        line_len = string_sanitize_utf8(irc_line);
+      }
+
+      /* Encode as WebSocket frame using client's negotiated/detected mode */
       frame_len = websocket_encode_frame(irc_line, line_len,
-                                         (unsigned char *)ws_frame, 1);
+                                         (unsigned char *)ws_frame, text_mode);
 
       Debug((DEBUG_DEBUG, "WebSocket deliver: line_len=%d, frame_len=%d, msg='%.50s'",
              line_len, frame_len, irc_line));
@@ -1050,6 +1060,15 @@ ssl_read_again:
         }
         /* Handle data frames (TEXT or BINARY) */
         else if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
+          /* Autodetect mode for legacy clients based on first incoming frame */
+          if (IsWSAutodetect(cptr)) {
+            if (opcode == WS_OPCODE_TEXT)
+              SetWSText(cptr);
+            /* Binary mode is default (no flag set) */
+            ClearWSAutodetect(cptr);
+            Debug((DEBUG_DEBUG, "WebSocket: Autodetected mode from opcode %d, text=%d",
+                   opcode, IsWSText(cptr)));
+          }
           if (!is_fin) {
             /* First fragment - save to fragment buffer */
             cli_ws_frag_opcode(cptr) = opcode;

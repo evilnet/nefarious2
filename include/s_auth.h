@@ -66,6 +66,7 @@ extern int auth_iauth_handles_sasl(void);
 extern int auth_send_sasl_start(struct Client *cptr, const char *mechanism, const char *certfp);
 extern int auth_send_sasl_host(struct Client *cptr, const char *username, const char *host, const char *ip);
 extern int auth_send_sasl_data(struct Client *cptr, const char *data);
+extern int auth_send_sasl_abort(struct Client *cptr);
 
 #endif /* INCLUDED_s_auth_h */
 

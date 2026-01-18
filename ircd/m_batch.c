@@ -111,6 +111,8 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
   int sent = 0;
   for (lp = messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
     char *text = lp->value.cp + 1;
+    if (*text == '\0')
+      continue;  /* Skip blank lines in fallback per IRCv3 spec */
     if (is_channel) {
       sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
     } else {
@@ -414,6 +416,14 @@ multiline_add_message(struct Client *sptr, const char *text, int concat)
     return 0;  /* No active batch */
 
   len = strlen(text);
+
+  /* IRCv3 multiline spec: concat flag on blank line is invalid */
+  if (concat && len == 0) {
+    send_fail(sptr, "BATCH", "INVALID_MULTILINE",
+              con_ml_batch_id(con), "Cannot use concat tag on blank line");
+    clear_multiline_batch(con);
+    return -1;
+  }
 
   /* Check limits */
   if (con_ml_msg_count(con) >= feature_int(FEAT_MULTILINE_MAX_LINES)) {

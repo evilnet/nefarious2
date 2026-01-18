@@ -646,6 +646,21 @@ export class IAuthDaemon {
       client.sasl = { started: false };
     }
 
+    // Handle "A X" - SASL abort from client (AUTHENTICATE *)
+    // This has no space, so check it before the space-based parsing
+    if (args === 'X') {
+      this.debug(`SASL abort for ${id}`);
+      // Clean up any pending SASL state
+      if (client.sasl) {
+        client.sasl.started = false;
+        client.sasl.mechanism = undefined;
+        client.sasl.certfp = undefined;
+        client.sasl.hostInfo = undefined;
+        client.sasl.data = undefined;
+      }
+      return;
+    }
+
     // Parse: first character is type (S or H), rest is data
     // Format: "S :PLAIN" or "S PLAIN :certfp" or "H :user@host:ip"
     const spaceIdx = args.indexOf(' ');

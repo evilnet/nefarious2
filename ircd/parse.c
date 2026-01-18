@@ -1352,6 +1352,14 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     if (tag_end) {
       char *scan = tag_start;
       int client_tags_pos = 0;
+      size_t total_tags_len = tag_end - ch;  /* Include @ prefix */
+
+      /* IRCv3 message-tags spec: 8191 bytes max for all tags */
+      if (total_tags_len > 8191) {
+        Debug((DEBUG_DEBUG, "Rejecting message: tags exceed 8191 byte limit (%zu)", total_tags_len));
+        ServerStats->is_ref++;
+        return -1;
+      }
 
       while (scan < tag_end) {
         char *tag_name = scan;
@@ -1395,8 +1403,13 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
         }
         /* Check for client-only tags (prefixed with +) */
         else if (*tag_name == '+') {
-          /* Copy client-only tag to buffer for TAGMSG relay */
-          if (client_tags_pos + tag_len + 2 < sizeof(cli_client_tags(cptr))) {
+          /* Copy client-only tag to buffer for TAGMSG relay.
+           * IRCv3 message-tags spec: 4094 bytes max for client-only tags.
+           * Silently drop excess tags rather than rejecting the message.
+           */
+          size_t needed = (client_tags_pos > 0) ? tag_len + 1 : tag_len;
+          if (client_tags_pos + needed <= 4094 &&
+              client_tags_pos + needed + 1 < sizeof(cli_client_tags(cptr))) {
             if (client_tags_pos > 0)
               cli_client_tags(cptr)[client_tags_pos++] = ';';
             memcpy(cli_client_tags(cptr) + client_tags_pos, tag_name, tag_len);

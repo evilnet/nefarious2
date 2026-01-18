@@ -1521,6 +1521,18 @@ int auth_send_sasl_data(struct Client *cptr, const char *data)
   return sendto_iauth(cptr, "a :%s", data);
 }
 
+/** Send SASL abort to IAuth.
+ * @param[in] cptr Client aborting SASL.
+ * @return Non-zero on success, zero on failure.
+ */
+int auth_send_sasl_abort(struct Client *cptr)
+{
+  if (!IAuthHas(iauth, IAUTH_SASL))
+    return 0;
+
+  return sendto_iauth(cptr, "A X");
+}
+
 /** Attempt to spawn the process for an IAuth instance.
  * @param[in] iauth IAuth descriptor.
  * @param[in] automatic If non-zero, apply sanity checks against

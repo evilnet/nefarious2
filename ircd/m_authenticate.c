@@ -122,11 +122,32 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     return send_reply(cptr, ERR_SASLTOOLONG);
   }
 
-  /* For registered users, allow re-authentication (e.g., OAuth token refresh).
-   * Reset SASL state and start a new session instead of rejecting.
+  /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec) */
+  if (parv[1][0] == '*' && parv[1][1] == '\0') {
+    /* Only abort if there's an active session */
+    if (cli_saslcookie(cptr) && !IsSASLComplete(cptr)) {
+      /* Notify IAuth if applicable */
+      if (auth_iauth_handles_sasl())
+        auth_send_sasl_abort(cptr);
+      /* abort_sasl handles P10 notification and state cleanup */
+      abort_sasl(cptr, 0);
+    }
+    return 0;
+  }
+
+  /* For registered users, allow re-authentication only for token-based mechanisms.
+   * OAUTHBEARER supports token refresh, so re-auth is allowed.
+   * Other mechanisms (PLAIN, EXTERNAL, SCRAM-*) should get ERR_SASLALREADY per IRCv3 spec.
    */
   if (IsSASLComplete(cptr)) {
-    /* Clear the SASLComplete flag to allow new auth */
+    /* Only allow re-authentication for token-based mechanisms */
+    if (ircd_strcmp(parv[1], "OAUTHBEARER") != 0) {
+      if (CapActive(cptr, CAP_STANDARDREPLIES))
+        send_fail(cptr, "AUTHENTICATE", "ALREADY_AUTHENTICATED", NULL,
+                  "You have already completed SASL authentication");
+      return send_reply(cptr, ERR_SASLALREADY);
+    }
+    /* Clear the SASLComplete flag to allow token refresh */
     ClearSASLComplete(cptr);
     /* Clear old SASL session state */
     if ((cli_saslagent(cptr) != NULL) && cli_saslagentref(cli_saslagent(cptr)))

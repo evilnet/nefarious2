@@ -587,6 +587,7 @@ extern const struct Numeric* get_error_numeric(int err);
 
 #define RPL_LOGGEDIN         900	/* IRCv3 - SASL extension */
 #define RPL_LOGGEDOUT        901	/* IRCv3 - SASL extension */
+#define ERR_NICKLOCKED       902	/* IRCv3 - SASL extension */
 
 #define RPL_SASLSUCCESS      903	/* IRCv3 - SASL extension */
 #define ERR_SASLFAIL         904	/* IRCv3 - SASL extension */
