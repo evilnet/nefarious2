@@ -118,4 +118,7 @@ DECLARE_FLAGSET(CapSet, _CAP_LAST_CAP);
 
 extern void client_check_caps(struct Client *client, struct Client *replyto);
 
+/* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
+extern void send_cap_notify(const char *capname, int available, const char *value);
+
 #endif /* INCLUDED_capab_h */

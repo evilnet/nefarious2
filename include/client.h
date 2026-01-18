@@ -338,6 +338,7 @@ struct Connection
   struct AuthRequest* con_auth;      /**< Auth request for client */
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
   char                con_label[64]; /**< Current command label for labeled-response */
+  unsigned char       con_label_responded; /**< Whether a response was sent for current label */
   char                con_batch_id[16]; /**< Current batch reference ID */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
   char                con_client_tags[512]; /**< Client-only tags (+tag=value) for TAGMSG relay */
@@ -487,6 +488,8 @@ struct Client {
 #define cli_capab_version(cli)	con_capab_version(cli_connect(cli))
 /** Get current command label for labeled-response */
 #define cli_label(cli)		con_label(cli_connect(cli))
+/** Check if labeled response was sent for this command */
+#define cli_label_responded(cli)	con_label_responded(cli_connect(cli))
 /** Get current batch reference ID */
 #define cli_batch_id(cli)	con_batch_id(cli_connect(cli))
 /** Get batch sequence number */
@@ -757,6 +760,8 @@ struct Client {
 #define con_auth(con)		((con)->con_auth)
 /** Get the current command label for labeled-response. */
 #define con_label(con)		((con)->con_label)
+/** Check if labeled response was sent for this command. */
+#define con_label_responded(con)	((con)->con_label_responded)
 /** Get the current batch reference ID. */
 #define con_batch_id(con)	((con)->con_batch_id)
 /** Get the batch sequence number. */

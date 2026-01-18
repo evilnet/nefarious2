@@ -228,4 +228,7 @@ extern void send_warn_with_label(struct Client *to, const char *command, const c
 extern void send_note(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);
 
+/* IRCv3 labeled-response ACK (send when command produces no response) */
+extern void send_labeled_ack(struct Client *to);
+
 #endif /* INCLUDED_send_h */

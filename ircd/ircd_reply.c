@@ -125,6 +125,8 @@ int send_reply(struct Client *to, int reply, ...)
         pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "batch=%s", cli_batch_id(to));
       } else if (need_label) {
         pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
+        /* Mark that we've sent a labeled response (for ACK mechanism) */
+        cli_label_responded(to) = 1;
       }
 
       if (need_time) {

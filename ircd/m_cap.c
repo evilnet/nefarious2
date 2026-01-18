@@ -63,6 +63,39 @@ sasl_server_available(void)
   return (find_match_server((char *)sasl_server) != NULL);
 }
 
+/**
+ * Send CAP NEW or CAP DEL notification to all clients with cap-notify.
+ * Per IRCv3 spec, servers MUST send CAP NEW when a capability becomes
+ * available and CAP DEL when it becomes unavailable.
+ * @param[in] capname Name of the capability (e.g., "sasl").
+ * @param[in] available 1 if capability is now available, 0 if removed.
+ * @param[in] value Optional value for CAP NEW (e.g., mechanism list). NULL for no value.
+ */
+void send_cap_notify(const char *capname, int available, const char *value)
+{
+  struct Client *cptr;
+
+  /* Iterate all local clients with cap-notify enabled */
+  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+    if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
+      continue;
+    if (!CapActive(cptr, CAP_CAPNOTIFY))
+      continue;
+
+    if (available) {
+      /* CAP NEW with optional value */
+      if (value && *value)
+        sendrawto_one(cptr, "CAP %s NEW :%s=%s",
+                      cli_name(cptr), capname, value);
+      else
+        sendrawto_one(cptr, "CAP %s NEW :%s", cli_name(cptr), capname);
+    } else {
+      /* CAP DEL */
+      sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr), capname);
+    }
+  }
+}
+
 typedef int (*bqcmp)(const void *, const void *);
 
 static struct capabilities {

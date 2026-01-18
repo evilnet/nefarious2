@@ -43,6 +43,7 @@
 #include "ircd_signal.h"
 #include "ircd_string.h"
 #include "ircd_crypt.h"
+#include "capab.h"
 #include "thread_pool.h"
 #include "jupe.h"
 #include "list.h"
@@ -145,14 +146,25 @@ unsigned long MsgIdCounter = 0;
 char SaslMechanisms[SASL_MECHS_LEN] = "";
 
 /** Set the SASL mechanism list (called when services announces mechanisms).
+ * Sends CAP NEW :sasl when SASL becomes available, CAP DEL :sasl when removed.
  * @param[in] mechs Comma-separated list of mechanism names.
  */
 void set_sasl_mechanisms(const char *mechs)
 {
+  int was_available = (SaslMechanisms[0] != '\0');
+
   if (mechs && *mechs) {
     ircd_strncpy(SaslMechanisms, mechs, SASL_MECHS_LEN - 1);
     SaslMechanisms[SASL_MECHS_LEN - 1] = '\0';
+
+    /* Send CAP NEW if SASL just became available */
+    if (!was_available)
+      send_cap_notify("sasl", 1, SaslMechanisms);
   } else {
+    /* Send CAP DEL if SASL was available and is now removed */
+    if (was_available)
+      send_cap_notify("sasl", 0, NULL);
+
     SaslMechanisms[0] = '\0';
   }
 }
@@ -169,14 +181,25 @@ const char* get_sasl_mechanisms(void)
 char VapidPublicKey[VAPID_KEY_LEN] = "";
 
 /** Set the VAPID public key (called when services announces it).
+ * Sends CAP NEW when webpush becomes available, CAP DEL when removed.
  * @param[in] key Base64url-encoded VAPID public key.
  */
 void set_vapid_pubkey(const char *key)
 {
+  int was_available = (VapidPublicKey[0] != '\0');
+
   if (key && *key) {
     ircd_strncpy(VapidPublicKey, key, VAPID_KEY_LEN - 1);
     VapidPublicKey[VAPID_KEY_LEN - 1] = '\0';
+
+    /* Send CAP NEW if webpush just became available */
+    if (!was_available)
+      send_cap_notify("draft/webpush", 1, NULL);
   } else {
+    /* Send CAP DEL if webpush was available and is now removed */
+    if (was_available)
+      send_cap_notify("draft/webpush", 0, NULL);
+
     VapidPublicKey[0] = '\0';
   }
 }

@@ -1335,6 +1335,7 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
 
   /* Clear any previous label, client-only tags, and batch tags */
   cli_label(cptr)[0] = '\0';
+  cli_label_responded(cptr) = 0;  /* Reset labeled-response tracking for ACK */
   cli_client_tags(cptr)[0] = '\0';
   cli_msg_batch_tag(cptr)[0] = '\0';
   cli_msg_concat(cptr) = 0;
@@ -1577,7 +1578,13 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
       handler != m_ping && handler != m_ignore)
     cli_user(from)->last = CurrentTime;
 
-  return (*handler) (cptr, from, i, para);
+  {
+    int result = (*handler) (cptr, from, i, para);
+    /* IRCv3 labeled-response: send ACK if command produced no response */
+    if (result != CPTR_KILLED)
+      send_labeled_ack(cptr);
+    return result;
+  }
 }
 
 /** Parse a line of data from a server.

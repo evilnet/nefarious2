@@ -343,6 +343,8 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
     pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
   } else if (use_label) {
     pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+    /* Mark that we've sent a labeled response (for ACK mechanism) */
+    cli_label_responded(to) = 1;
   }
 
   /* Add @msgid for message tracking (IRCv3 message-ids) */
@@ -442,6 +444,8 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+    /* Mark that we've sent a labeled response (for ACK mechanism) */
+    cli_label_responded(to) = 1;
   }
 
   if (use_time) {
@@ -2074,6 +2078,8 @@ void send_batch_start(struct Client *to, const char *type)
       tagbuf[pos++] = ' ';
       tagbuf[pos] = '\0';
     }
+    /* Mark that batch start counts as labeled response (for ACK mechanism) */
+    cli_label_responded(to) = 1;
   }
 
   /* Send BATCH +refid type */
@@ -2446,6 +2452,8 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
       /* Use explicit label if provided, otherwise use cli_label */
       const char *lbl = (label && *label) ? label : cli_label(to);
       pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", lbl);
+      /* Mark that we've sent a labeled response (for ACK mechanism) */
+      cli_label_responded(to) = 1;
     }
 
     if (use_time) {
@@ -2557,5 +2565,60 @@ void send_note(struct Client *to, const char *command, const char *code,
                const char *context, const char *description)
 {
   send_standard_reply(to, "NOTE", command, code, context, description);
+}
+
+/**
+ * Send an ACK message for labeled-response when a command produces no output.
+ * Per IRCv3 labeled-response spec, server MUST send ACK if no response was sent.
+ * @param[in] to Client to send ACK to.
+ */
+void send_labeled_ack(struct Client *to)
+{
+  struct MsgBuf *mb;
+  char tagbuf[256];
+  int pos = 0;
+  int use_time;
+
+  /* Only send ACK if client has labeled-response capability and a pending label */
+  if (!to || !MyConnect(to))
+    return;
+  if (!feature_bool(FEAT_CAP_labeled_response) || !CapActive(to, CAP_LABELEDRESP))
+    return;
+  if (!cli_label(to)[0])
+    return;
+  /* Don't send ACK if we already sent a labeled response */
+  if (cli_label_responded(to))
+    return;
+
+  /* Build tags: @label=xxx;time=xxx */
+  tagbuf[0] = '@';
+  pos = 1;
+  pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
+
+  use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos < (int)sizeof(tagbuf) - 1)
+      tagbuf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    (long)(tv.tv_usec / 1000));
+  }
+
+  tagbuf[pos++] = ' ';
+  tagbuf[pos] = '\0';
+
+  /* Send: @label=xxx :server ACK */
+  mb = msgq_make(to, "%s:%s ACK", tagbuf, cli_name(&me));
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+
+  /* Mark as responded so we don't send duplicate ACKs */
+  cli_label_responded(to) = 1;
 }
 

@@ -28,6 +28,7 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_events.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -324,6 +325,29 @@ void free_client(struct Client* cptr)
                 aborted, cptr);
     }
     cli_saslagentref(cptr) = 0;
+  }
+
+  /* If a server is disconnecting and it matches the SASL server pattern,
+   * clear global SASL/webpush state. This triggers CAP DEL notifications.
+   * Note: This check is separate from saslagentref because the services server
+   * might disconnect when no clients are actively authenticating.
+   */
+  if (IsServer(cptr)) {
+    const char *sasl_server = feature_str(FEAT_SASL_SERVER);
+    int is_services = (!strcmp(sasl_server, "*") || match(sasl_server, cli_name(cptr)) == 0);
+
+    if (is_services) {
+      if (get_sasl_mechanisms() != NULL) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "Services disconnect: clearing SASL mechanisms (%C)", cptr);
+        set_sasl_mechanisms(NULL);  /* Triggers CAP DEL :sasl */
+      }
+      if (get_vapid_pubkey() != NULL) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "Services disconnect: clearing VAPID key (%C)", cptr);
+        set_vapid_pubkey(NULL);  /* Triggers CAP DEL :draft/webpush */
+      }
+    }
   }
 
   if (cli_from(cptr) == cptr) { /* in other words, we're local */
