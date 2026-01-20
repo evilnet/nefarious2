@@ -817,8 +817,19 @@ static int check_history_access(struct Client *sptr, const char *target,
     /* Check if user is on channel */
     member = find_member_link(chptr, sptr);
     if (!member) {
-      /* User not on channel - could check for invite, etc. */
-      return -1;
+      /* User not on channel - check if non-member access is allowed */
+      if (feature_bool(FEAT_CHATHISTORY_MEMBERSHIP_ONLY)) {
+        /* Strict mode: membership required */
+        return -1;
+      }
+      /* Less restrictive mode: allow non-members but enforce IRCv3 SHOULD:
+       * - Disallow if channel is secret (+s) or private (+p)
+       * - Disallow if user is banned from the channel
+       */
+      if (SecretChannel(chptr) || HiddenChannel(chptr))
+        return -1;
+      if (find_ban(sptr, chptr->banlist, EBAN_NONE, 0))
+        return -1;
     }
     /* For channels, normalized target is same as input */
     if (normalized_target && normalized_len > 0)
