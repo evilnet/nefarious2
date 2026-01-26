@@ -337,8 +337,10 @@ int account_conn_remove(struct Client *cptr)
             "account_conn_remove: removed %C from account %s (remaining: %u)",
             cptr, account, entry->conn_count);
 
-  /* If last connection, remove the entry */
+  /* If last connection, persist last_present and remove the entry */
   if (entry->conn_count == 0) {
+    /* Persist last_present timestamp before removing entry */
+    persist_last_present(entry->account, entry->last_present);
     remove_entry(entry);
     /* Effective state becomes undefined, but there's no one to broadcast to */
     return 0;

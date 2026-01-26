@@ -24,14 +24,11 @@
  * Client Protocol (ISO 8601 timestamps per IRCv3 spec):
  *   MARKREAD <target> [timestamp=YYYY-MM-DDThh:mm:ss.sssZ]
  *
- * This implementation routes read markers through X3 services for
- * authoritative storage and multi-device synchronization.
+ * Nefarious is authoritative for read markers. Storage is in LMDB,
+ * synchronized between IRCds via P10 MR token.
  *
  * P10 Protocol (Unix timestamps for S2S):
- *   SET: [SERVER] MR S <user_numeric> <target> <unix_timestamp>
- *   GET: [SERVER] MR G <user_numeric> <target>
- *   REPLY: [X3] MR R <target_server> <user_numeric> <target> <unix_timestamp>
- *   BROADCAST: [X3] MR <account> <target> <unix_timestamp>
+ *   MR <account> <target> <unix_timestamp>
  *
  * Timestamps are stored internally as Unix (seconds.milliseconds) and
  * converted to ISO 8601 only for client-facing protocol.
@@ -150,19 +147,7 @@ static void notify_local_clients(const char *account, const char *target, const 
   }
 }
 
-/** Find the services server.
- * @return Services server client or NULL if not found.
- */
-static struct Client *find_services_server(void)
-{
-  struct Client *acptr;
-
-  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-    if (IsServer(acptr) && IsService(acptr))
-      return acptr;
-  }
-  return NULL;
-}
+/* X3 dependency removed - Nefarious is authoritative for read markers */
 
 /** m_markread - Handle MARKREAD command from local client.
  *
@@ -170,8 +155,8 @@ static struct Client *find_services_server(void)
  * parv[1] = target (channel or nick)
  * parv[2] = timestamp=YYYY-MM-DDThh:mm:ss.sssZ (optional)
  *
- * If timestamp is provided: set read marker (send to X3)
- * If no timestamp: query current read marker (from local cache or X3)
+ * If timestamp is provided: set read marker
+ * If no timestamp: query current read marker
  *
  * @param[in] cptr Client that sent us the message.
  * @param[in] sptr Original source of message.
@@ -184,7 +169,6 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   const char *account;
   char timestamp[MARKREAD_TS_LEN];
   char stored_ts[MARKREAD_TS_LEN];
-  struct Client *services;
   int rc;
 
   /* Must have draft/read-marker capability */
@@ -210,9 +194,6 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   target = parv[1];
 
-  /* Find services for forwarding */
-  services = find_services_server();
-
   /* Check if timestamp parameter is present */
   if (parc >= 3 && parv[2] && ircd_strncmp(parv[2], "timestamp=", 10) == 0) {
     /* Timestamp parameter provided - must be valid format for SET operation */
@@ -222,68 +203,52 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                 "Invalid timestamp format (expected ISO 8601)");
       return 0;
     }
-    /* SET operation: send to X3 for storage and broadcast */
 
-    if (services) {
-      /* Forward to X3: MR S <user_numeric> <target> <timestamp>
-       * X3 will store and broadcast back to all servers
-       */
-      sendcmdto_one(&me, CMD_MARKREAD, services, "S %C %s %s",
-                    sptr, target, timestamp);
-    }
-
-    /* Also store locally in LMDB as cache (if available) */
-    if (history_is_available()) {
-      rc = readmarker_set(account, target, timestamp);
-      if (rc == 0) {
-        /* Successfully updated locally - notify local clients immediately */
-        notify_local_clients(account, target, timestamp);
-      } else if (rc == 1) {
-        /* Timestamp was not newer - respond with current stored value */
-        rc = readmarker_get(account, target, stored_ts);
-        if (rc == 0) {
-          send_markread(sptr, target, stored_ts);
-        } else {
-          send_markread(sptr, target, timestamp);
-        }
-      } else {
-        /* Error storing - still notify client of what they sent */
-        send_markread(sptr, target, timestamp);
-      }
-    } else if (!services) {
-      /* No services and no LMDB - cannot store */
+    /* SET operation: store in LMDB and broadcast to other servers */
+    if (!history_is_available()) {
       send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
                 "Read marker storage is not available");
-    } else {
-      /* No LMDB but have services - notify the sending client */
-      send_markread(sptr, target, timestamp);
+      return 0;
     }
-  } else {
-    /* GET operation: query current timestamp from local cache */
-    if (history_is_available()) {
+
+    rc = readmarker_set(account, target, timestamp);
+    if (rc == 0) {
+      /* Successfully updated - notify local clients and broadcast */
+      notify_local_clients(account, target, timestamp);
+
+      /* Broadcast to other servers: MR <account> <target> <timestamp> */
+      sendcmdto_serv_butone(&me, CMD_MARKREAD, cptr, "%s %s %s",
+                            account, target, timestamp);
+    } else if (rc == 1) {
+      /* Timestamp was not newer - respond with current stored value */
       rc = readmarker_get(account, target, stored_ts);
       if (rc == 0) {
         send_markread(sptr, target, stored_ts);
-      } else if (rc == 1) {
-        /* Not found locally */
-        if (services) {
-          /* Query X3: MR G <user_numeric> <target> */
-          sendcmdto_one(&me, CMD_MARKREAD, services, "G %C %s", sptr, target);
-          /* Response will come back via ms_markread */
-        } else {
-          /* No services, no local data - send "*" */
-          send_markread(sptr, target, "*");
-        }
       } else {
-        send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
-                  "Could not retrieve read marker");
+        send_markread(sptr, target, timestamp);
       }
-    } else if (services) {
-      /* No LMDB, query X3 */
-      sendcmdto_one(&me, CMD_MARKREAD, services, "G %C %s", sptr, target);
     } else {
+      /* Error storing */
+      send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
+                "Could not store read marker");
+    }
+  } else {
+    /* GET operation: query current timestamp from local LMDB */
+    if (!history_is_available()) {
       send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
                 "Read marker storage is not available");
+      return 0;
+    }
+
+    rc = readmarker_get(account, target, stored_ts);
+    if (rc == 0) {
+      send_markread(sptr, target, stored_ts);
+    } else if (rc == 1) {
+      /* Not found - send "*" */
+      send_markread(sptr, target, "*");
+    } else {
+      send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
+                "Could not retrieve read marker");
     }
   }
 
@@ -292,128 +257,20 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
 /** ms_markread - Handle MARKREAD command from server.
  *
- * P10 formats:
- *   Broadcast from X3: MR <account> <target> <timestamp>
- *   Reply to query:    MR R <target_server> <user_numeric> <target> <timestamp>
- *   Forward set:       MR S <user_numeric> <target> <timestamp>
- *   Forward get:       MR G <user_numeric> <target>
+ * P10 format: MR <account> <target> <timestamp>
  *
  * @param[in] cptr Client that sent us the message.
- * @param[in] sptr Original source of message (X3 or another server).
+ * @param[in] sptr Original source of message.
  * @param[in] parc Number of arguments.
  * @param[in] parv Argument vector.
  */
 int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
-  const char *subcmd;
   const char *account;
   const char *target;
   const char *timestamp;
-  struct Client *acptr;
-  struct Client *services;
-  int is_from_services = 0;
 
-  if (parc < 2)
-    return 0;
-
-  /* Check if this is from a services server */
-  if (IsServer(sptr) && IsService(sptr)) {
-    is_from_services = 1;
-  } else if (!IsServer(sptr) && cli_user(sptr) &&
-             cli_user(sptr)->server && IsService(cli_user(sptr)->server)) {
-    is_from_services = 1;
-  }
-
-  subcmd = parv[1];
-
-  /* Check for subcmd-style messages (S, G, R) */
-  if (subcmd[0] == 'S' && subcmd[1] == '\0') {
-    /* SET forward: MR S <user_numeric> <target> <timestamp> */
-    if (parc < 5)
-      return 0;
-
-    /* Find the user */
-    acptr = findNUser(parv[2]);
-    if (!acptr || !IsUser(acptr))
-      return 0;
-
-    target = parv[3];
-    timestamp = parv[4];
-    account = cli_user(acptr)->account;
-
-    if (!account || !*account)
-      return 0;
-
-    /* If not from services, forward toward X3 (multi-hop routing) */
-    services = find_services_server();
-    if (!is_from_services) {
-      if (services) {
-        /* Forward toward X3 - sendcmdto_one routes through intermediate servers */
-        sendcmdto_one(sptr, CMD_MARKREAD, services, "S %s %s %s",
-                      parv[2], target, timestamp);
-      }
-      /* Don't propagate further until X3 broadcasts */
-
-      /* Store locally if LMDB available (as cache) */
-      if (history_is_available()) {
-        readmarker_set(account, target, timestamp);
-      }
-    }
-    /* If from services, this was part of X3's processing - ignore S format from services */
-
-    return 0;
-  }
-
-  if (subcmd[0] == 'G' && subcmd[1] == '\0') {
-    /* GET forward: MR G <user_numeric> <target> */
-    if (parc < 4)
-      return 0;
-
-    /* Find the user - may not exist anymore */
-    acptr = findNUser(parv[2]);
-    target = parv[3];
-
-    /* If not from services, forward toward X3 (multi-hop routing) */
-    services = find_services_server();
-    if (!is_from_services && services) {
-      /* Forward toward X3 - sendcmdto_one routes through intermediate servers */
-      sendcmdto_one(sptr, CMD_MARKREAD, services, "G %s %s", parv[2], target);
-    }
-
-    return 0;
-  }
-
-  if (subcmd[0] == 'R' && subcmd[1] == '\0') {
-    /* Reply: MR R <target_server> <user_numeric> <target> <timestamp> */
-    if (parc < 6)
-      return 0;
-
-    /* Find the target user */
-    acptr = findNUser(parv[3]);
-    if (!acptr || !IsUser(acptr))
-      return 0;
-
-    target = parv[4];
-    timestamp = parv[5];
-
-    /* If user is local, send MARKREAD response */
-    if (MyUser(acptr) && CapActive(acptr, CAP_DRAFT_READMARKER)) {
-      send_markread(acptr, target, timestamp);
-    } else {
-      /* Forward toward the user's server */
-      sendcmdto_one(sptr, CMD_MARKREAD, cli_from(acptr), "R %s %s %s %s",
-                    parv[2], parv[3], target, timestamp);
-    }
-
-    /* Cache locally if available */
-    if (history_is_available() && cli_user(acptr) && cli_user(acptr)->account[0]) {
-      readmarker_set(cli_user(acptr)->account, target, timestamp);
-    }
-
-    return 0;
-  }
-
-  /* Broadcast format from X3: MR <account> <target> <timestamp> */
+  /* Format: MR <account> <target> <timestamp> */
   if (parc < 4)
     return 0;
 
@@ -421,7 +278,7 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   target = parv[2];
   timestamp = parv[3];
 
-  /* Cache locally if LMDB available */
+  /* Store locally in LMDB */
   if (history_is_available()) {
     readmarker_set(account, target, timestamp);
   }

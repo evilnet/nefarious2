@@ -505,11 +505,7 @@ static void check_pings(struct Event* ev) {
     /* Check for client batch timeout (draft/multiline) */
     check_client_batch_timeout(cptr);
 
-    /* Check X3 availability (only once per ping cycle for services servers) */
-    if (i == 0 && feature_bool(FEAT_METADATA_CACHE_ENABLED)) {
-      metadata_x3_check();
-      metadata_expire_requests();
-    }
+    /* Metadata TTL expiration is handled by metadata_account_purge_expired() */
 
     Debug((DEBUG_DEBUG, "check_pings(%s)=status:%s current: %d",
 	   cli_name(cptr),

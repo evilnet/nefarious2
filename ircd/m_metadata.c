@@ -386,13 +386,7 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
         }
       }
 
-      /* If still not found and we have an account, query X3 (authoritative source) */
-      if (!found && account) {
-        if (metadata_send_query(sptr, account, key) == 0) {
-          /* Query sent - response will be async, don't send NOT_SET yet */
-          continue;
-        }
-      }
+      /* Nefarious is authoritative - no X3 query, just report not set */
     }
 
     /* For channels, check LMDB cache and X3 for registered channel metadata */
@@ -439,12 +433,7 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
         }
       }
 
-      /* Query X3 for registered channel metadata if not cached */
-      if (!found) {
-        if (metadata_send_query(sptr, target, key) == 0) {
-          continue;
-        }
-      }
+      /* Nefarious is authoritative - no X3 query */
     }
 
     if (!found) {
@@ -1000,21 +989,10 @@ int ms_metadataquery(struct Client *cptr, struct Client *sptr, int parc, char *p
   const char *target;
   const char *key;
   int is_channel = 0;
-  int is_from_services = 0;
   struct MetadataEntry *entry = NULL;
   struct MetadataEntry *list = NULL;
   struct MetadataEntry *next;
   char value_buf[METADATA_VALUE_LEN + 1];
-
-  /* Check if this is from services */
-  if (IsServer(sptr) && IsService(sptr)) {
-    is_from_services = 1;
-    metadata_x3_heartbeat();
-  } else if (!IsServer(sptr) && cli_user(sptr) &&
-             cli_user(sptr)->server && IsService(cli_user(sptr)->server)) {
-    is_from_services = 1;
-    metadata_x3_heartbeat();
-  }
 
   if (parc < 3) {
     /* Need at least target and key */
@@ -1028,41 +1006,10 @@ int ms_metadataquery(struct Client *cptr, struct Client *sptr, int parc, char *p
     return 0;
 
   /* Log MDQ request for debugging */
-  log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: %s queries %s key=%s (from_services=%d)",
-            cli_name(sptr), target, key, is_from_services);
+  log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: %s queries %s key=%s",
+            cli_name(sptr), target, key);
 
-  /* If MDQ is from another IRCd (not services), we have two options:
-   * 1. If X3 is available, forward to X3 (authoritative source)
-   * 2. If X3 is unavailable, try to answer from local LMDB cache
-   *
-   * This handles multi-hop topologies: Client -> ServerA -> ServerB -> X3
-   */
-  if (!is_from_services) {
-    struct Client *services = NULL;
-    struct Client *acptr;
-
-    /* Find services server to forward to */
-    for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-      if (IsServer(acptr) && IsService(acptr)) {
-        services = acptr;
-        break;
-      }
-    }
-
-    if (services && metadata_x3_is_available()) {
-      /* X3 is available - forward to authoritative source */
-      sendcmdto_one(sptr, CMD_METADATAQUERY, services, "%s %s", target, key);
-      log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: Forwarding to %s", cli_name(services));
-      return 0;
-    }
-
-    /* X3 unavailable - try to answer from local LMDB cache.
-     * Fall through to the cache lookup code below, but send response
-     * back to the requesting server (cptr) instead of sptr.
-     */
-    log_write(LS_DEBUG, L_DEBUG, 0, "MDQ: X3 unavailable, checking local cache");
-    /* Fall through to process locally */
-  }
+  /* Nefarious is authoritative - answer from local LMDB/memory */
 
   /* Determine if channel or account */
   is_channel = IsChannelName(target);
@@ -1182,21 +1129,10 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   int is_compressed = 0;
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
-  int is_from_services = 0;
 
   /* Buffers for compressed data handling */
   unsigned char raw_data[METADATA_VALUE_LEN + 64];
   size_t raw_len = 0;
-
-  /* Check if this is from a services server (potential MDQ response) */
-  if (IsServer(sptr) && IsService(sptr)) {
-    is_from_services = 1;
-    metadata_x3_heartbeat();
-  } else if (!IsServer(sptr) && cli_user(sptr) &&
-             cli_user(sptr)->server && IsService(cli_user(sptr)->server)) {
-    is_from_services = 1;
-    metadata_x3_heartbeat();
-  }
 
   if (parc < 3)
     return 0;
@@ -1207,18 +1143,13 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   /* Parse visibility, Z flag, and value.
    * Compressed format: target key visibility Z :base64_data
    * Normal format: target key [visibility] [:value]
-   * Error format: target key ! :error_code (from services for NOTARGET)
    * Old format: target key [:value]
    */
   if (parc >= 4) {
     /* Check if parv[3] is a visibility token */
     if ((parv[3][0] == '*' && parv[3][1] == '\0') ||
-        (parv[3][0] == 'P' && parv[3][1] == '\0') ||
-        (parv[3][0] == '!' && parv[3][1] == '\0')) {
-      if (parv[3][0] == '!')
-        visibility = METADATA_VIS_ERROR;
-      else
-        visibility = (parv[3][0] == 'P') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC;
+        (parv[3][0] == 'P' && parv[3][1] == '\0')) {
+      visibility = (parv[3][0] == 'P') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC;
 
       /* Check for Z flag (compression passthrough) */
       if (parc >= 5 && parv[4][0] == 'Z' && parv[4][1] == '\0') {
@@ -1232,15 +1163,6 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       /* Old format or no visibility - parv[3] is value */
       value = parv[3];
     }
-  }
-
-  /* Handle error response from services (NOTARGET = no such account/channel) */
-  if (visibility == METADATA_VIS_ERROR && is_from_services) {
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "ms_metadata: Error response for %s: %s", target, value ? value : "(no value)");
-    /* Forward error to waiting MDQ clients */
-    metadata_handle_response(target, key, value, METADATA_VIS_ERROR);
-    return 0;  /* Don't cache or propagate error responses */
   }
 
   if (!is_valid_key(key))
@@ -1294,8 +1216,8 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 #endif
   }
 
-  /* If from services, cache in LMDB for registered users/channels */
-  if (is_from_services && value) {
+  /* Cache S2S metadata to LMDB (Nefarious is authoritative) */
+  if (value) {
     const char *cache_key = NULL;
 
     if (!is_channel) {
@@ -1303,12 +1225,9 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       if (target_client && IsAccount(target_client)) {
         /* Online registered user - cache under their account */
         cache_key = cli_account(target_client);
-      } else if (!target_client) {
-        /* Offline user - target is the account name */
-        cache_key = target;
       }
     } else if (target_channel) {
-      /* Registered channel - cache under channel name */
+      /* Channel - cache under channel name */
       cache_key = target;
     }
 
@@ -1326,7 +1245,7 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
           metadata_account_set_raw(cache_key, key, raw_data, raw_len);
         }
         log_write(LS_SYSTEM, L_DEBUG, 0,
-                  "ms_metadata: Stored compressed passthrough for %s/%s (%zu bytes)",
+                  "ms_metadata: Stored compressed metadata for %s/%s (%zu bytes)",
                   cache_key, key, raw_len);
       } else {
         /* Store with visibility prefix (will compress automatically) */
@@ -1339,26 +1258,7 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
         metadata_account_set(cache_key, key, stored_value);
       }
       log_write(LS_DEBUG, L_DEBUG, 0,
-                "ms_metadata: Cached X3 metadata %s/%s in LMDB", cache_key, key);
-    }
-
-    /* Forward to any clients waiting for this MDQ response (offline users only) */
-    if (!target_client && !is_channel) {
-      if (is_compressed && raw_len > 0) {
-        /* Decompress for the response */
-#ifdef USE_ZSTD
-        char decompressed[METADATA_VALUE_LEN];
-        size_t decompressed_len;
-        if (decompress_data(raw_data, raw_len,
-                            (unsigned char *)decompressed, sizeof(decompressed) - 1,
-                            &decompressed_len) >= 0) {
-          decompressed[decompressed_len] = '\0';
-          metadata_handle_response(target, key, decompressed, visibility);
-        }
-#endif
-      } else {
-        metadata_handle_response(target, key, value, visibility);
-      }
+                "ms_metadata: Cached metadata %s/%s in LMDB", cache_key, key);
     }
   }
 

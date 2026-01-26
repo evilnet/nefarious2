@@ -63,9 +63,12 @@
 /** Virtual $last_present metadata key */
 #define METADATA_KEY_LAST_PRESENT "$last_present"
 
+/** Virtual $away_message metadata key */
+#define METADATA_KEY_AWAY_MESSAGE "$away_message"
+
 /** Static buffer for virtual presence metadata entry */
 static struct MetadataEntry presence_entry;
-static char presence_value[64];
+static char presence_value[AWAYLEN + 1];
 
 #ifdef USE_LMDB
 #include <lmdb.h>
@@ -907,7 +910,7 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
 
   /* Handle virtual presence keys for presence aggregation */
   if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(cptr)) {
-    /* Handle $presence key */
+    /* Handle $presence key - returns state only (present/away/away-star) */
     if (ircd_strcmp(key, METADATA_KEY_PRESENCE) == 0) {
       struct AccountEntry *acc_entry = account_conn_find(cli_account(cptr));
       if (acc_entry) {
@@ -917,12 +920,7 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
             state_str = "present";
             break;
           case CONN_AWAY:
-            if (acc_entry->effective_away_msg[0])
-              ircd_snprintf(0, presence_value, sizeof(presence_value),
-                            "away:%s", acc_entry->effective_away_msg);
-            else
-              strcpy(presence_value, "away");
-            state_str = NULL;
+            state_str = "away";
             break;
           case CONN_AWAY_STAR:
             state_str = "away-star";
@@ -931,8 +929,7 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
             state_str = "unknown";
             break;
         }
-        if (state_str)
-          strcpy(presence_value, state_str);
+        strcpy(presence_value, state_str);
 
         memset(&presence_entry, 0, sizeof(presence_entry));
         ircd_strncpy(presence_entry.key, METADATA_KEY_PRESENCE, METADATA_KEY_LEN);
@@ -941,6 +938,24 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
         presence_entry.next = NULL;
         return &presence_entry;
       }
+    }
+
+    /* Handle $away_message key - returns effective away message */
+    if (ircd_strcmp(key, METADATA_KEY_AWAY_MESSAGE) == 0) {
+      struct AccountEntry *acc_entry = account_conn_find(cli_account(cptr));
+      if (acc_entry && acc_entry->effective_away_msg[0]) {
+        ircd_strncpy(presence_value, acc_entry->effective_away_msg, AWAYLEN);
+        presence_value[AWAYLEN] = '\0';
+
+        memset(&presence_entry, 0, sizeof(presence_entry));
+        ircd_strncpy(presence_entry.key, METADATA_KEY_AWAY_MESSAGE, METADATA_KEY_LEN);
+        presence_entry.value = presence_value;
+        presence_entry.visibility = METADATA_VIS_PUBLIC;
+        presence_entry.next = NULL;
+        return &presence_entry;
+      }
+      /* No away message - return NULL (key not found) */
+      return NULL;
     }
 
     /* Handle $last_present key */
@@ -1130,7 +1145,6 @@ void metadata_free_client(struct Client *cptr)
   free_entry_list(cli_metadata(cptr));
   cli_metadata(cptr) = NULL;
   metadata_sub_free(cptr);
-  metadata_cleanup_client_requests(cptr);
 }
 
 /** Get metadata for a channel.
@@ -1396,211 +1410,7 @@ void metadata_sub_free(struct Client *cptr)
   cli_metadatasub(cptr) = NULL;
 }
 
-/* ========== X3 Availability Tracking ========== */
-
-/** X3 availability flag */
-static int metadata_x3_available_flag = 0;
-
-/** Last time X3 sent us a message */
-static time_t metadata_x3_last_seen = 0;
-
-/** Check if X3 services are available. */
-int metadata_x3_is_available(void)
-{
-  return metadata_x3_available_flag;
-}
-
-/** Signal that X3 has sent a message (heartbeat). */
-void metadata_x3_heartbeat(void)
-{
-  int was_available = metadata_x3_available_flag;
-  metadata_x3_available_flag = 1;
-  metadata_x3_last_seen = CurrentTime;
-
-  /* If X3 just came back online, replay queued writes */
-  if (!was_available) {
-    log_write(LS_SYSTEM, L_INFO, 0, "metadata: X3 services detected as available");
-    metadata_replay_queue();
-  }
-}
-
-/** Check X3 availability status based on timeout. */
-void metadata_x3_check(void)
-{
-  int timeout = feature_int(FEAT_METADATA_X3_TIMEOUT);
-
-  if (timeout <= 0)
-    return;
-
-  if (CurrentTime - metadata_x3_last_seen > timeout) {
-    if (metadata_x3_available_flag) {
-      metadata_x3_available_flag = 0;
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "metadata: X3 services unavailable (no heartbeat for %d seconds), "
-                "switching to cache-only mode", timeout);
-    }
-  }
-}
-
-/** Handle X3 reconnection - replay queued writes. */
-void metadata_x3_reconnected(void)
-{
-  metadata_x3_heartbeat();
-}
-
-/** Check if metadata writes can be sent to X3. */
-int metadata_can_write_x3(void)
-{
-  return metadata_x3_available_flag && metadata_lmdb_is_available();
-}
-
-/* ========== Write Queue for X3 Unavailability ========== */
-
-/** Write queue entry */
-struct MetadataWriteQueue {
-  char account[ACCOUNTLEN + 1];
-  char key[METADATA_KEY_LEN];
-  char *value;
-  int visibility;
-  time_t timestamp;
-  struct MetadataWriteQueue *next;
-};
-
-/** Write queue head and tail */
-static struct MetadataWriteQueue *write_queue_head = NULL;
-static struct MetadataWriteQueue *write_queue_tail = NULL;
-static int write_queue_count_val = 0;
-
-/** Queue a metadata write for later replay. */
-int metadata_queue_write(const char *account, const char *key,
-                         const char *value, int visibility)
-{
-  struct MetadataWriteQueue *entry;
-  int max_queue = feature_int(FEAT_METADATA_QUEUE_SIZE);
-
-  if (!account || !key)
-    return -1;
-
-  /* Check if queue is full */
-  if (write_queue_count_val >= max_queue) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "metadata: write queue full (%d entries), dropping oldest entry",
-              max_queue);
-    /* Remove oldest entry */
-    if (write_queue_head) {
-      struct MetadataWriteQueue *old = write_queue_head;
-      write_queue_head = old->next;
-      if (!write_queue_head)
-        write_queue_tail = NULL;
-      if (old->value)
-        MyFree(old->value);
-      MyFree(old);
-      write_queue_count_val--;
-    }
-  }
-
-  /* Create new entry */
-  entry = (struct MetadataWriteQueue *)MyMalloc(sizeof(struct MetadataWriteQueue));
-  if (!entry)
-    return -1;
-
-  ircd_strncpy(entry->account, account, ACCOUNTLEN);
-  ircd_strncpy(entry->key, key, METADATA_KEY_LEN - 1);
-  entry->key[METADATA_KEY_LEN - 1] = '\0';
-
-  if (value) {
-    entry->value = (char *)MyMalloc(strlen(value) + 1);
-    if (!entry->value) {
-      MyFree(entry);
-      return -1;
-    }
-    strcpy(entry->value, value);
-  } else {
-    entry->value = NULL;
-  }
-
-  entry->visibility = visibility;
-  entry->timestamp = CurrentTime;
-  entry->next = NULL;
-
-  /* Add to queue */
-  if (write_queue_tail)
-    write_queue_tail->next = entry;
-  else
-    write_queue_head = entry;
-  write_queue_tail = entry;
-  write_queue_count_val++;
-
-  log_write(LS_SYSTEM, L_DEBUG, 0,
-            "metadata: queued write for %s key %s (queue size: %d)",
-            account, key, write_queue_count_val);
-
-  return 0;
-}
-
-/** Replay all queued metadata writes to X3.
- * Note: This sends P10 MD tokens to X3. We need to include the
- * necessary headers for send functions.
- */
-void metadata_replay_queue(void)
-{
-  struct MetadataWriteQueue *entry, *next;
-  int replayed = 0;
-
-  if (!write_queue_head) {
-    return;
-  }
-
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "metadata: replaying %d queued writes to X3",
-            write_queue_count_val);
-
-  for (entry = write_queue_head; entry; entry = next) {
-    next = entry->next;
-
-    /* The actual P10 send is done by the caller who has access to
-     * the services client. For now, we just update LMDB and clear
-     * the queue. The MD token propagation happens through normal
-     * means when X3 syncs on reconnect.
-     */
-    if (metadata_lmdb_is_available()) {
-      metadata_account_set(entry->account, entry->key, entry->value);
-    }
-
-    if (entry->value)
-      MyFree(entry->value);
-    MyFree(entry);
-    replayed++;
-  }
-
-  write_queue_head = write_queue_tail = NULL;
-  write_queue_count_val = 0;
-
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "metadata: replayed %d queued writes", replayed);
-}
-
-/** Clear the write queue without replaying. */
-void metadata_clear_queue(void)
-{
-  struct MetadataWriteQueue *entry, *next;
-
-  for (entry = write_queue_head; entry; entry = next) {
-    next = entry->next;
-    if (entry->value)
-      MyFree(entry->value);
-    MyFree(entry);
-  }
-
-  write_queue_head = write_queue_tail = NULL;
-  write_queue_count_val = 0;
-}
-
-/** Get the number of queued writes. */
-int metadata_queue_count(void)
-{
-  return write_queue_count_val;
-}
+/* X3 dependency removed - Nefarious is now authoritative for metadata */
 
 /* ========== Cache-Aware Metadata Operations ========== */
 
@@ -1674,322 +1484,7 @@ void metadata_burst_channel(struct Channel *chptr, struct Client *cptr)
   (void)cptr;
 }
 
-/* ========== MDQ Request Tracking ========== */
-
-/** Pending MDQ requests list */
-static struct MetadataRequest *mdq_pending_head = NULL;
-static int mdq_pending_count = 0;
-
-/** Freelist for MetadataRequest structures */
-static struct MetadataRequest *mdq_freelist = NULL;
-static unsigned int mdq_alloc_count = 0;
-static unsigned int mdq_free_count = 0;
-
-/** Allocate a MetadataRequest from the pool.
- * @return Pointer to MetadataRequest or NULL on failure.
- */
-static struct MetadataRequest *mdq_alloc(void)
-{
-  struct MetadataRequest *req;
-
-  if (mdq_freelist) {
-    req = mdq_freelist;
-    mdq_freelist = req->next;
-    mdq_free_count--;
-  } else {
-    req = (struct MetadataRequest *)MyMalloc(sizeof(struct MetadataRequest));
-    if (req)
-      mdq_alloc_count++;
-  }
-  if (req)
-    memset(req, 0, sizeof(struct MetadataRequest));
-  return req;
-}
-
-/** Return a MetadataRequest to the pool.
- * @param[in] req MetadataRequest to free.
- */
-static void mdq_free(struct MetadataRequest *req)
-{
-  req->next = mdq_freelist;
-  mdq_freelist = req;
-  mdq_free_count++;
-}
-
-/** Find the services server (X3).
- * @return Pointer to services server, or NULL if not connected.
- */
-static struct Client *find_services_server(void)
-{
-  struct Client *acptr;
-
-  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-    if (IsServer(acptr) && IsService(acptr))
-      return acptr;
-  }
-
-  return NULL;
-}
-
-/** Initialize MDQ request tracking. */
-void metadata_request_init(void)
-{
-  mdq_pending_head = NULL;
-  mdq_pending_count = 0;
-}
-
-/** Send an MDQ query to services for a target.
- * @param[in] sptr Client requesting metadata.
- * @param[in] target Target account or channel name.
- * @param[in] key Key to query (or "*" for all).
- * @return 0 on success, -1 on error.
- */
-int metadata_send_query(struct Client *sptr, const char *target, const char *key)
-{
-  struct Client *services;
-  struct MetadataRequest *req;
-
-  if (!sptr || !target || !key)
-    return -1;
-
-  /* Find services server - this is the authoritative check for X3 availability */
-  services = find_services_server();
-  if (!services) {
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "metadata_send_query: No services server found");
-    return -1;
-  }
-
-  /* Check if we've hit the pending request limit */
-  if (mdq_pending_count >= METADATA_MAX_PENDING) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "metadata_send_query: Too many pending requests (%d), rejecting",
-              mdq_pending_count);
-    return -1;
-  }
-
-  /* Check if there's already a pending request for this target/key from this client */
-  for (req = mdq_pending_head; req; req = req->next) {
-    if (req->client == sptr &&
-        ircd_strcmp(req->target, target) == 0 &&
-        ircd_strcmp(req->key, key) == 0) {
-      /* Already pending, don't send duplicate */
-      log_write(LS_DEBUG, L_DEBUG, 0,
-                "metadata_send_query: Duplicate request for %s key %s", target, key);
-      return 0;
-    }
-  }
-
-  /* Create pending request entry */
-  req = mdq_alloc();
-  if (!req)
-    return -1;
-
-  req->client = sptr;
-  ircd_strncpy(req->target, target, CHANNELLEN);
-  ircd_strncpy(req->key, key, METADATA_KEY_LEN - 1);
-  req->key[METADATA_KEY_LEN - 1] = '\0';
-  req->timestamp = CurrentTime;
-  req->next = mdq_pending_head;
-  mdq_pending_head = req;
-  mdq_pending_count++;
-
-  /* Send MDQ to services */
-  sendcmdto_one(&me, CMD_METADATAQUERY, services, "%s %s", target, key);
-
-  log_write(LS_DEBUG, L_DEBUG, 0,
-            "metadata_send_query: Sent MDQ for %s key %s (pending: %d)",
-            target, key, mdq_pending_count);
-
-  return 0;
-}
-
-/** Check if there are pending MDQ requests for a target/key.
- * Called when MD response is received to forward to waiting clients.
- * @param[in] target Target that metadata was received for.
- * @param[in] key Key that was received.
- * @param[in] value Value received.
- * @param[in] visibility Visibility level.
- */
-void metadata_handle_response(const char *target, const char *key,
-                              const char *value, int visibility)
-{
-  struct MetadataRequest *req, *prev, *next;
-  int matched = 0;
-
-  if (!target || !key)
-    return;
-
-  log_write(LS_DEBUG, L_DEBUG, 0,
-            "metadata_handle_response: target=%s key=%s vis=%d pending_count=%d",
-            target, key, visibility, mdq_pending_count);
-
-  prev = NULL;
-  for (req = mdq_pending_head; req; req = next) {
-    next = req->next;
-
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "metadata_handle_response: checking req target=%s key=%s client=%s",
-              req->target, req->key, req->client ? cli_name(req->client) : "(null)");
-
-    /* Check if this request matches the response */
-    if (ircd_strcmp(req->target, target) == 0 &&
-        (ircd_strcmp(req->key, "*") == 0 || ircd_strcmp(req->key, key) == 0)) {
-
-      /* Send response to waiting client if still connected */
-      log_write(LS_DEBUG, L_DEBUG, 0,
-                "metadata_handle_response: MATCHED! client=%p dead=%d myuser=%d",
-                (void *)req->client, req->client ? IsDead(req->client) : -1,
-                req->client ? MyUser(req->client) : -1);
-      if (req->client && !IsDead(req->client) && MyUser(req->client)) {
-        const char *vis_str = (visibility == METADATA_VIS_PRIVATE) ? "private" : "*";
-
-        /* Handle error response from services (no such target) */
-        if (visibility == METADATA_VIS_ERROR) {
-          send_fail(req->client, "METADATA", "TARGET_INVALID", target,
-                    "No such account or channel");
-          matched++;
-          log_write(LS_DEBUG, L_DEBUG, 0,
-                    "metadata_handle_response: Sent TARGET_INVALID for %s to %s",
-                    target, cli_name(req->client));
-          goto remove_request;
-        }
-
-        /* Check visibility for private metadata */
-        if (visibility == METADATA_VIS_PRIVATE) {
-          int can_view = 0;
-          if (IsOper(req->client))
-            can_view = 1;
-          else if (IsAccount(req->client) && ircd_strcmp(cli_account(req->client), target) == 0)
-            can_view = 1;
-          if (!can_view) {
-            /* Don't reveal private metadata, treat as not set */
-            send_reply(req->client, RPL_KEYNOTSET, target, key);
-            goto remove_request;
-          }
-        }
-
-        if (value && *value) {
-          send_reply(req->client, RPL_KEYVALUE, target, key, vis_str, value);
-        } else {
-          send_reply(req->client, RPL_KEYNOTSET, target, key);
-        }
-
-        matched++;
-        log_write(LS_DEBUG, L_DEBUG, 0,
-                  "metadata_handle_response: Forwarded %s.%s to %s",
-                  target, key, cli_name(req->client));
-      }
-
-      /* For wildcard requests, keep the request alive for more responses
-       * but mark timestamp to trigger timeout after a short period */
-      if (req->key[0] == '*') {
-        /* Set a shorter timeout for wildcard collection (5 seconds) */
-        if (CurrentTime - req->timestamp < 5) {
-          prev = req;
-          continue;
-        }
-      }
-
-    remove_request:
-      /* Remove this request */
-      if (prev)
-        prev->next = next;
-      else
-        mdq_pending_head = next;
-
-      mdq_free(req);
-      mdq_pending_count--;
-    } else {
-      prev = req;
-    }
-  }
-
-  if (matched > 0) {
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "metadata_handle_response: Matched %d requests for %s.%s",
-              matched, target, key);
-  }
-}
-
-/** Clean up expired MDQ requests.
- * Called periodically from the main loop.
- */
-void metadata_expire_requests(void)
-{
-  struct MetadataRequest *req, *prev, *next;
-  int expired = 0;
-
-  prev = NULL;
-  for (req = mdq_pending_head; req; req = next) {
-    next = req->next;
-
-    if (CurrentTime - req->timestamp > METADATA_REQUEST_TIMEOUT) {
-      /* Request has timed out - send error to client */
-      if (req->client && !IsDead(req->client) && MyUser(req->client)) {
-        send_reply(req->client, RPL_KEYNOTSET, req->target, req->key);
-        log_write(LS_DEBUG, L_DEBUG, 0,
-                  "metadata_expire_requests: Timed out request for %s.%s from %s",
-                  req->target, req->key, cli_name(req->client));
-      }
-
-      /* Remove this request */
-      if (prev)
-        prev->next = next;
-      else
-        mdq_pending_head = next;
-
-      mdq_free(req);
-      mdq_pending_count--;
-      expired++;
-    } else {
-      prev = req;
-    }
-  }
-
-  if (expired > 0) {
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "metadata_expire_requests: Expired %d requests (remaining: %d)",
-              expired, mdq_pending_count);
-  }
-}
-
-/** Clean up MDQ requests for a disconnecting client.
- * @param[in] cptr Client that is disconnecting.
- */
-void metadata_cleanup_client_requests(struct Client *cptr)
-{
-  struct MetadataRequest *req, *prev, *next;
-  int cleaned = 0;
-
-  if (!cptr)
-    return;
-
-  prev = NULL;
-  for (req = mdq_pending_head; req; req = next) {
-    next = req->next;
-
-    if (req->client == cptr) {
-      /* Remove this request */
-      if (prev)
-        prev->next = next;
-      else
-        mdq_pending_head = next;
-
-      mdq_free(req);
-      mdq_pending_count--;
-      cleaned++;
-    } else {
-      prev = req;
-    }
-  }
-
-  if (cleaned > 0) {
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "metadata_cleanup_client_requests: Cleaned %d requests for %s",
-              cleaned, cli_name(cptr));
-  }
-}
+/* MDQ removed - Nefarious answers GET from local LMDB only */
 
 void
 metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
@@ -2035,18 +1530,5 @@ metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
              "M :  LMDB Backend: Not compiled in");
 #endif
 
-  /* X3 availability status */
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "M :  X3 Services: %s",
-             metadata_x3_is_available() ? "Available" : "Unavailable");
-
-  /* Write queue status */
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "M :  Write queue: %d pending",
-             metadata_queue_count());
-
-  /* Pending MDQ requests */
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "M :  MDQ requests: %d pending",
-             mdq_pending_count);
+  /* Nefarious is now authoritative for metadata - no X3 dependency */
 }
