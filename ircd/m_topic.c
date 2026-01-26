@@ -74,6 +74,10 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   if (!MyUser(sptr))
     return;
 
+  /* Check if channel has +P (no storage) mode */
+  if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    return;
+
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",

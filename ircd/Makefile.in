@@ -148,6 +148,7 @@ IRCD_SRC = \
 	m_get.c \
 	m_gline.c \
 	m_help.c \
+	m_history.c \
 	m_info.c \
 	m_isupport.c \
 	m_invite.c \
@@ -738,6 +739,11 @@ m_help.o: m_help.c ../config.h ../include/client.h ../include/hash.h \
   ../include/ircd.h ../include/ircd_log.h ../include/ircd_reply.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/send.h
+m_history.o: m_history.c ../config.h ../include/channel.h ../include/client.h \
+  ../include/hash.h ../include/ircd.h ../include/ircd_features.h \
+  ../include/ircd_reply.h ../include/ircd_snprintf.h ../include/ircd_string.h \
+  ../include/metadata.h ../include/msg.h ../include/numeric.h \
+  ../include/send.h
 m_info.o: m_info.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_log.h ../include/ircd_reply.h ../include/ircd_string.h \
   ../include/msg.h ../include/numeric.h ../include/numnicks.h \

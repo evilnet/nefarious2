@@ -288,6 +288,7 @@ extern int check_client_batch_timeout(struct Client*);
 extern int ms_multiline(struct Client*, struct Client*, int, char*[]);
 extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int ms_chathistory(struct Client*, struct Client*, int, char*[]);
+extern int m_history(struct Client*, struct Client*, int, char*[]);
 extern int has_chathistory_advertisement(struct Client*);
 extern int server_retention_days(struct Client*);
 extern int server_retention_covers(struct Client*, time_t);

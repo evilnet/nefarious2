@@ -106,6 +106,10 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
+  /* Check if channel has +P (no storage) mode */
+  if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    return;
+
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -752,6 +756,13 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
     if (!IsSSL(who) && !IsChannelService(who))
       ++chptr->nonsslusers;
     ++((cli_user(who))->joined);
+
+    /* Record membership join for access control (only for logged-in users) */
+    if (history_is_available() && cli_user(who)->account[0]) {
+      char timestamp[HISTORY_TIMESTAMP_LEN];
+      history_format_timestamp(timestamp, sizeof(timestamp));
+      membership_record_join(cli_user(who)->account, chptr->chname, timestamp);
+    }
   }
 }
 
@@ -1195,6 +1206,10 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'c';
   if (chptr->mode.exmode & EXMODE_STRIPCOLOR)
     *mbuf++ = 'S';
+  if (chptr->mode.exmode & EXMODE_PUBLICHISTORY)
+    *mbuf++ = 'H';
+  if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    *mbuf++ = 'P';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     pbuf_pos = ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1815,6 +1830,8 @@ int SetAutoChanModes(struct Channel *chptr)
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY,	'H',
+    EXMODE_NOSTORAGE,	'P',
     0, 0
   };
   unsigned int *flag_p;
@@ -2298,6 +2315,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY, 'H',
+    EXMODE_NOSTORAGE,   'P',
     0x0, 0x0
   };
   static int local_flags[] = {
@@ -2839,7 +2858,8 @@ modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
   mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY |
            EXMODE_REGMODERATED | EXMODE_NONOTICES | EXMODE_PERSIST |
            EXMODE_SSLONLY | EXMODE_NOQUITPARTS | EXMODE_NOCTCPS |
-           EXMODE_NOMULTITARG | EXMODE_NOCOLOR | EXMODE_STRIPCOLOR);
+           EXMODE_NOMULTITARG | EXMODE_NOCOLOR | EXMODE_STRIPCOLOR |
+           EXMODE_PUBLICHISTORY | EXMODE_NOSTORAGE);
 
   if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
     return;
@@ -2994,6 +3014,8 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY, 'H',
+    EXMODE_NOSTORAGE,   'P',
     0x0, 0x0
   };
   unsigned int add;
@@ -4634,6 +4656,8 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY, 'H',
+    EXMODE_NOSTORAGE,   'P',
     0x0, 0x0
   };
 
@@ -5066,6 +5090,15 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       store_channel_event(jbuf->jb_source, chan,
                           (flags & CHFL_BANNED || !jbuf->jb_comment) ? "" : jbuf->jb_comment,
                           HISTORY_PART);
+
+    /* Record membership leave for access control (voluntary PART) */
+    if (history_is_available() && cli_user(jbuf->jb_source) &&
+        cli_user(jbuf->jb_source)->account[0]) {
+      char timestamp[HISTORY_TIMESTAMP_LEN];
+      history_format_timestamp(timestamp, sizeof(timestamp));
+      membership_record_leave(cli_user(jbuf->jb_source)->account,
+                               chan->chname, timestamp, MEMBERSHIP_LEAVE_PART);
+    }
 #endif
 
     /* XXX: Shouldn't we send a PART here anyway? */

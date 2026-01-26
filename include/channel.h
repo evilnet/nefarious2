@@ -146,13 +146,15 @@ struct MetadataEntry;
 #define EXMODE_NOMULTITARG  0x00000100  /**< +T Block messages with a list of targets */
 #define EXMODE_NOCOLOR      0x00000200  /**< +c Block messages containing color */
 #define EXMODE_STRIPCOLOR   0x00000400  /**< +S Strip color from messages */
+#define EXMODE_PUBLICHISTORY 0x00000800 /**< +H Public history (bypass membership checks) */
+#define EXMODE_NOSTORAGE    0x00001000  /**< +P No message storage in chathistory */
 
 /** mode flags which take another parameter (With PARAmeterS)
  */
 #define MODE_WPARAS     (MODE_CHANOP|MODE_HALFOP|MODE_VOICE|MODE_BAN|MODE_KEY|MODE_LIMIT|MODE_APASS|MODE_UPASS)
 
 /** Available Channel modes */
-#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabCcDdhikLlMmNnOopQRrSsTtUvZz" : "abCcDdhikLlMmNnOopQRrSsTtvZz"
+#define infochanmodes feature_bool(FEAT_OPLEVELS) ? "AabCcDdhHikLlMmNnOopPQRrSsTtUvZz" : "abCcDdhHikLlMmNnOopPQRrSsTtvZz"
 /** Available Channel modes that take parameters */
 #define infochanmodeswithparams feature_bool(FEAT_OPLEVELS) ? \
                                 (feature_bool(FEAT_HALFOPS) ? "AbhkLloUv" : "AbkLloUv") : \

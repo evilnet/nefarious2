@@ -43,6 +43,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "metadata.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "list.h"
@@ -671,23 +672,116 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
   }
 }
 
+/** Get the default history access mode from feature flags.
+ * @return Access mode based on FEAT_CHATHISTORY_DEFAULT_ACCESS.
+ */
+static enum HistoryAccessMode get_default_access_mode(void)
+{
+  int mode = feature_int(FEAT_CHATHISTORY_DEFAULT_ACCESS);
+  switch (mode) {
+    case 0:  return HISTORY_ACCESS_NONE;
+    case 2:  return HISTORY_ACCESS_MEMBERSHIP;
+    default: return HISTORY_ACCESS_KICK_GAP;  /* 1 or invalid */
+  }
+}
+
+/** Get the history access mode for a channel from metadata.
+ * @param[in] chptr Channel to check.
+ * @return Access mode (defaults to FEAT_CHATHISTORY_DEFAULT_ACCESS).
+ */
+static enum HistoryAccessMode get_channel_access_mode(struct Channel *chptr)
+{
+  struct MetadataEntry *entry;
+
+  if (!chptr)
+    return get_default_access_mode();
+
+  /* Check channel metadata for history.access setting */
+  entry = metadata_get_channel(chptr, "history.access");
+  if (entry && entry->value) {
+    if (ircd_strcmp(entry->value, "none") == 0)
+      return HISTORY_ACCESS_NONE;
+    if (ircd_strcmp(entry->value, "membership") == 0)
+      return HISTORY_ACCESS_MEMBERSHIP;
+    if (ircd_strcmp(entry->value, "kick-gap") == 0)
+      return HISTORY_ACCESS_KICK_GAP;
+    /* For unrecognized values, fall through to default */
+  }
+
+  return get_default_access_mode();
+}
+
+/** Check if user has ops override privilege for a channel.
+ * @param[in] sptr Client to check.
+ * @param[in] chptr Channel to check (NULL for non-channel targets).
+ * @return 1 if user has override, 0 otherwise.
+ */
+static int has_ops_override(struct Client *sptr, struct Channel *chptr)
+{
+  struct Membership *member;
+
+  /* Check if ops override feature is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_OPS_OVERRIDE))
+    return 0;
+
+  /* IRCops always have override */
+  if (IsOper(sptr) || IsAnOper(sptr))
+    return 1;
+
+  /* Check if user is channel op */
+  if (chptr) {
+    member = find_member_link(chptr, sptr);
+    if (member && IsChanOp(member))
+      return 1;
+  }
+
+  return 0;
+}
+
 /** Send history messages as a batch response.
  * @param[in] sptr Client to send to.
  * @param[in] target Target name for batch.
  * @param[in] messages List of messages to send.
  * @param[in] count Number of messages.
+ * @param[in] ops_override If non-zero, user requested :full override.
  */
 static void send_history_batch(struct Client *sptr, const char *target,
-                                struct HistoryMessage *messages, int count)
+                                struct HistoryMessage *messages, int count,
+                                int ops_override)
 {
   struct HistoryMessage *msg;
   char batchid[BATCH_ID_LEN];
   char iso_time[32];
   const char *cmd;
   const char *time_str;
+  struct Channel *chptr = NULL;
+  enum HistoryAccessMode access_mode = HISTORY_ACCESS_NONE;
+  const char *account = NULL;
+  int do_membership_filter = 0;
 
   if (count == 0)
     messages = NULL;
+
+  /* Check if membership-based filtering is needed for channels */
+  if (IsChannelName(target)) {
+    chptr = FindChannel(target);
+    if (chptr) {
+      /* If channel has +H (public history), no filtering */
+      if (chptr->mode.exmode & EXMODE_PUBLICHISTORY) {
+        do_membership_filter = 0;
+      } else if (ops_override && has_ops_override(sptr, chptr)) {
+        /* User has ops override privilege and requested :full */
+        do_membership_filter = 0;
+      } else if (cli_user(sptr) && cli_user(sptr)->account[0]) {
+        /* User is logged in - can do membership filtering */
+        access_mode = get_channel_access_mode(chptr);
+        account = cli_user(sptr)->account;
+        /* Only filter if access mode is not 'none' */
+        do_membership_filter = (access_mode != HISTORY_ACCESS_NONE);
+      }
+      /* If user is not logged in, no membership filtering possible */
+    }
+  }
 
   /* Generate batch ID */
   generate_batch_id(batchid, sizeof(batchid), sptr);
@@ -703,6 +797,14 @@ static void send_history_batch(struct Client *sptr, const char *target,
     /* Filter events based on event-playback capability */
     if (!should_send_message_type(sptr, msg->type))
       continue;
+
+    /* Apply membership-based filtering if enabled */
+    if (do_membership_filter && history_is_available()) {
+      int can_see = membership_can_see_message(account, target,
+                                                msg->timestamp, access_mode);
+      if (can_see <= 0)
+        continue;  /* User cannot see this message */
+    }
 
     cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
@@ -814,6 +916,13 @@ static int check_history_access(struct Client *sptr, const char *target,
     if (!chptr)
       return -1;
 
+    /* Check if channel has +H (public history) - bypass all access checks */
+    if (chptr->mode.exmode & EXMODE_PUBLICHISTORY) {
+      if (normalized_target && normalized_len > 0)
+        ircd_strncpy(normalized_target, target, normalized_len - 1);
+      return 0;  /* Public history - allow access */
+    }
+
     /* Check if user is on channel */
     member = find_member_link(chptr, sptr);
     if (!member) {
@@ -848,7 +957,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            const char *subcmd, const char *ref,
                                            int limit,
                                            struct HistoryMessage *local_msgs,
-                                           int local_count);
+                                           int local_count, int ops_override);
 
 /** Check if we should trigger federation query.
  * Returns 1 if we should federate, 0 otherwise.
@@ -886,10 +995,12 @@ static int should_federate(const char *target, int local_count, int limit)
  * @param[in] target Target channel or nick.
  * @param[in] ref_str Reference string.
  * @param[in] limit_str Limit string.
+ * @param[in] ops_override If non-zero, user requested :full override.
  * @return 0 on success.
  */
 static int chathistory_latest(struct Client *sptr, const char *target,
-                               const char *ref_str, const char *limit_str)
+                               const char *ref_str, const char *limit_str,
+                               int ops_override)
 {
   struct HistoryMessage *messages = NULL;
   enum HistoryRefType ref_type;
@@ -930,7 +1041,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "LATEST",
-                                              ref_str, limit, messages, count);
+                                              ref_str, limit, messages, count,
+                                              ops_override);
     if (req) {
       /* Federation started - response will be sent when complete */
       /* Note: messages ownership transferred to req */
@@ -940,7 +1052,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   }
 
   /* Send local-only response using normalized target */
-  send_history_batch(sptr, lookup_target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override);
 
   /* Free messages */
   history_free_messages(messages);
@@ -948,9 +1060,17 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   return 0;
 }
 
-/** Handle CHATHISTORY BEFORE subcommand. */
+/** Handle CHATHISTORY BEFORE subcommand.
+ * @param[in] sptr Client sending the command.
+ * @param[in] target Target channel or nick.
+ * @param[in] ref_str Reference string.
+ * @param[in] limit_str Limit string.
+ * @param[in] ops_override If non-zero, user requested :full override.
+ * @return 0 on success.
+ */
 static int chathistory_before(struct Client *sptr, const char *target,
-                               const char *ref_str, const char *limit_str)
+                               const char *ref_str, const char *limit_str,
+                               int ops_override)
 {
   struct HistoryMessage *messages = NULL;
   enum HistoryRefType ref_type;
@@ -988,20 +1108,29 @@ static int chathistory_before(struct Client *sptr, const char *target,
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "BEFORE",
-                                              ref_str, limit, messages, count);
+                                              ref_str, limit, messages, count,
+                                              ops_override);
     if (req)
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override);
   history_free_messages(messages);
 
   return 0;
 }
 
-/** Handle CHATHISTORY AFTER subcommand. */
+/** Handle CHATHISTORY AFTER subcommand.
+ * @param[in] sptr Client sending the command.
+ * @param[in] target Target channel or nick.
+ * @param[in] ref_str Reference string.
+ * @param[in] limit_str Limit string.
+ * @param[in] ops_override If non-zero, user requested :full override.
+ * @return 0 on success.
+ */
 static int chathistory_after(struct Client *sptr, const char *target,
-                              const char *ref_str, const char *limit_str)
+                              const char *ref_str, const char *limit_str,
+                              int ops_override)
 {
   struct HistoryMessage *messages = NULL;
   enum HistoryRefType ref_type;
@@ -1039,20 +1168,29 @@ static int chathistory_after(struct Client *sptr, const char *target,
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "AFTER",
-                                              ref_str, limit, messages, count);
+                                              ref_str, limit, messages, count,
+                                              ops_override);
     if (req)
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override);
   history_free_messages(messages);
 
   return 0;
 }
 
-/** Handle CHATHISTORY AROUND subcommand. */
+/** Handle CHATHISTORY AROUND subcommand.
+ * @param[in] sptr Client sending the command.
+ * @param[in] target Target channel or nick.
+ * @param[in] ref_str Reference string.
+ * @param[in] limit_str Limit string.
+ * @param[in] ops_override If non-zero, user requested :full override.
+ * @return 0 on success.
+ */
 static int chathistory_around(struct Client *sptr, const char *target,
-                               const char *ref_str, const char *limit_str)
+                               const char *ref_str, const char *limit_str,
+                               int ops_override)
 {
   struct HistoryMessage *messages = NULL;
   enum HistoryRefType ref_type;
@@ -1090,21 +1228,30 @@ static int chathistory_around(struct Client *sptr, const char *target,
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "AROUND",
-                                              ref_str, limit, messages, count);
+                                              ref_str, limit, messages, count,
+                                              ops_override);
     if (req)
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override);
   history_free_messages(messages);
 
   return 0;
 }
 
-/** Handle CHATHISTORY BETWEEN subcommand. */
+/** Handle CHATHISTORY BETWEEN subcommand.
+ * @param[in] sptr Client sending the command.
+ * @param[in] target Target channel or nick.
+ * @param[in] ref1_str First reference string.
+ * @param[in] ref2_str Second reference string.
+ * @param[in] limit_str Limit string.
+ * @param[in] ops_override If non-zero, user requested :full override.
+ * @return 0 on success.
+ */
 static int chathistory_between(struct Client *sptr, const char *target,
                                 const char *ref1_str, const char *ref2_str,
-                                const char *limit_str)
+                                const char *limit_str, int ops_override)
 {
   struct HistoryMessage *messages = NULL;
   enum HistoryRefType ref_type1, ref_type2;
@@ -1147,7 +1294,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
     return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override);
   history_free_messages(messages);
 
   return 0;
@@ -1235,6 +1382,18 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   return 0;
 }
 
+/** Check if a parameter is the :full override flag.
+ * @param[in] param Parameter to check.
+ * @return 1 if it's the :full flag, 0 otherwise.
+ */
+static int is_full_override(const char *param)
+{
+  if (!param)
+    return 0;
+  /* IRC parser strips leading : from trailing param, so we check for "full" */
+  return (ircd_strcmp(param, "full") == 0);
+}
+
 /** Handle CHATHISTORY command from a local client.
  * @param[in] cptr Connection that sent the command.
  * @param[in] sptr Client that sent the command.
@@ -1245,6 +1404,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
 int m_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *subcmd;
+  int ops_override = 0;
 
   assert(cptr == sptr);
 
@@ -1278,42 +1438,47 @@ int m_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv
   if (ircd_strcmp(subcmd, "LATEST") == 0) {
     if (parc < 5) {
       send_fail(sptr, "CHATHISTORY", "INVALID_PARAMS", "LATEST",
-                "Usage: CHATHISTORY LATEST <target> <reference|*> <limit>");
+                "Usage: CHATHISTORY LATEST <target> <reference|*> <limit> [:full]");
       return 0;
     }
-    return chathistory_latest(sptr, parv[2], parv[3], parv[4]);
+    ops_override = (parc > 5 && is_full_override(parv[5]));
+    return chathistory_latest(sptr, parv[2], parv[3], parv[4], ops_override);
   }
   else if (ircd_strcmp(subcmd, "BEFORE") == 0) {
     if (parc < 5) {
       send_fail(sptr, "CHATHISTORY", "INVALID_PARAMS", "BEFORE",
-                "Usage: CHATHISTORY BEFORE <target> <reference> <limit>");
+                "Usage: CHATHISTORY BEFORE <target> <reference> <limit> [:full]");
       return 0;
     }
-    return chathistory_before(sptr, parv[2], parv[3], parv[4]);
+    ops_override = (parc > 5 && is_full_override(parv[5]));
+    return chathistory_before(sptr, parv[2], parv[3], parv[4], ops_override);
   }
   else if (ircd_strcmp(subcmd, "AFTER") == 0) {
     if (parc < 5) {
       send_fail(sptr, "CHATHISTORY", "INVALID_PARAMS", "AFTER",
-                "Usage: CHATHISTORY AFTER <target> <reference> <limit>");
+                "Usage: CHATHISTORY AFTER <target> <reference> <limit> [:full]");
       return 0;
     }
-    return chathistory_after(sptr, parv[2], parv[3], parv[4]);
+    ops_override = (parc > 5 && is_full_override(parv[5]));
+    return chathistory_after(sptr, parv[2], parv[3], parv[4], ops_override);
   }
   else if (ircd_strcmp(subcmd, "AROUND") == 0) {
     if (parc < 5) {
       send_fail(sptr, "CHATHISTORY", "INVALID_PARAMS", "AROUND",
-                "Usage: CHATHISTORY AROUND <target> <reference> <limit>");
+                "Usage: CHATHISTORY AROUND <target> <reference> <limit> [:full]");
       return 0;
     }
-    return chathistory_around(sptr, parv[2], parv[3], parv[4]);
+    ops_override = (parc > 5 && is_full_override(parv[5]));
+    return chathistory_around(sptr, parv[2], parv[3], parv[4], ops_override);
   }
   else if (ircd_strcmp(subcmd, "BETWEEN") == 0) {
     if (parc < 6) {
       send_fail(sptr, "CHATHISTORY", "INVALID_PARAMS", "BETWEEN",
-                "Usage: CHATHISTORY BETWEEN <target> <ref1> <ref2> <limit>");
+                "Usage: CHATHISTORY BETWEEN <target> <ref1> <ref2> <limit> [:full]");
       return 0;
     }
-    return chathistory_between(sptr, parv[2], parv[3], parv[4], parv[5]);
+    ops_override = (parc > 6 && is_full_override(parv[6]));
+    return chathistory_between(sptr, parv[2], parv[3], parv[4], parv[5], ops_override);
   }
   else if (ircd_strcmp(subcmd, "TARGETS") == 0) {
     if (parc < 5) {
@@ -1358,6 +1523,7 @@ struct FedRequest {
   int servers_pending;                /**< Servers we're waiting for */
   time_t start_time;                  /**< When request started */
   int limit;                          /**< Original limit requested */
+  int ops_override;                   /**< Whether client requested :full override */
   struct Timer timer;                 /**< Timeout timer (embedded) */
   int timer_active;                   /**< Whether timer is active */
   int response_sent;                  /**< Whether response was already sent */
@@ -1540,6 +1706,10 @@ static void process_write_forward(const char *target, const char *msgid,
 
   /* Find channel */
   chptr = FindChannel(target);
+
+  /* Check if channel has +P (no storage) mode */
+  if (chptr && (chptr->mode.exmode & EXMODE_NOSTORAGE))
+    return;
 
   /* Decide whether to store:
    * - Registered channels (+r): Always store (if STORE_REGISTERED enabled)
@@ -2622,7 +2792,7 @@ static void send_fed_response(struct FedRequest *req)
     total++;
 
   /* Send to client */
-  send_history_batch(client, req->target, merged, total);
+  send_history_batch(client, req->target, merged, total, req->ops_override);
 
   /* Free merged list */
   history_free_messages(merged);
@@ -2767,7 +2937,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            const char *subcmd, const char *ref,
                                            int limit,
                                            struct HistoryMessage *local_msgs,
-                                           int local_count)
+                                           int local_count, int ops_override)
 {
   struct FedRequest *req;
   char reqid[32];
@@ -2837,6 +3007,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   req->servers_pending = server_count;
   req->start_time = CurrentTime;
   req->limit = limit;
+  req->ops_override = ops_override;
 
   fed_requests[i] = req;
 

@@ -192,6 +192,10 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
+  /* Check if channel has +P (no storage) mode */
+  if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    return;
+
   /* Check if this is a new channel for Layer 1 advertisement */
   int is_new_channel = (history_has_channel(chptr->chname) == 0);
 

@@ -229,6 +229,10 @@ static void store_quit_events(struct Client *sptr, const char *comment)
 
   /* Store QUIT event for each channel the user is on */
   for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
+    /* Skip channels with +P (no storage) mode */
+    if (member->channel->mode.exmode & EXMODE_NOSTORAGE)
+      continue;
+
     /* Generate unique msgid for each channel's QUIT event */
     ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
                   cli_yxx(&me),
@@ -237,6 +241,12 @@ static void store_quit_events(struct Client *sptr, const char *comment)
 
     history_store_message(msgid, timestamp, member->channel->chname, sender,
                           account, HISTORY_QUIT, comment ? comment : "");
+
+    /* Record membership leave for access control (QUIT treated as voluntary) */
+    if (history_is_available() && account) {
+      membership_record_leave(account, member->channel->chname,
+                               timestamp, MEMBERSHIP_LEAVE_QUIT);
+    }
   }
 }
 #endif /* USE_LMDB */

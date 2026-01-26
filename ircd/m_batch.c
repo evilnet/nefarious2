@@ -980,8 +980,11 @@ process_multiline_batch(struct Client *sptr)
     /* Get timestamp for storage */
     history_format_timestamp(timestamp, sizeof(timestamp));
 
-    /* Store with base msgid (no sub-IDs) for retrieval */
-    {
+    /* Check if channel has +P (no storage) mode */
+    if (is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) {
+      /* Skip storage but still clear batch */
+    } else {
+      /* Store with base msgid (no sub-IDs) for retrieval */
       int store_result = history_store_message(batch_base_msgid, timestamp,
                           is_channel ? chptr->chname : cli_name(acptr),
                           sender_mask,
@@ -1476,13 +1479,16 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     /* Get timestamp for storage */
     history_format_timestamp(timestamp, sizeof(timestamp));
 
-    /* Store with base msgid for retrieval */
-    history_store_message(batch_base_msgid, timestamp,
-                          is_channel ? chptr->chname : cli_name(acptr),
-                          sender_mask,
-                          cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
-                          HISTORY_PRIVMSG,
-                          history_content);
+    /* Check if channel has +P (no storage) mode */
+    if (!(is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE))) {
+      /* Store with base msgid for retrieval */
+      history_store_message(batch_base_msgid, timestamp,
+                            is_channel ? chptr->chname : cli_name(acptr),
+                            sender_mask,
+                            cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
+                            HISTORY_PRIVMSG,
+                            history_content);
+    }
   }
 }
 

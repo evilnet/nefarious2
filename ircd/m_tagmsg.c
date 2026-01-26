@@ -123,6 +123,10 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CAP_draft_event_playback))
     return;
 
+  /* Check if channel has +P (no storage) mode */
+  if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    return;
+
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",

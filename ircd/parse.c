@@ -942,6 +942,14 @@ struct Message msgtab[] = {
     "subcommand target ref [ref] limit - Query message history"
   },
   {
+    MSG_HISTORY,
+    TOK_HISTORY,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_history, m_ignore, m_history, m_ignore },
+    "SET|GET #channel <setting> [value] - Manage history settings"
+  },
+  {
     MSG_REDACT,
     TOK_REDACT,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
