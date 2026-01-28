@@ -348,6 +348,7 @@ enum Feature {
   FEAT_CAP_draft_channel_rename,
   FEAT_CAP_draft_metadata_2,
   FEAT_CAP_draft_webpush,
+  FEAT_WEBPUSH_DB,
   FEAT_METADATA_MAX_KEYS,
   FEAT_METADATA_MAX_VALUE_BYTES,
   FEAT_METADATA_MAX_SUBS,

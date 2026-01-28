@@ -72,6 +72,12 @@
 #include "whowas.h"
 #include "metadata.h"
 #include "ml_storage.h"
+#include "webpush.h"
+#include "webpush_store.h"
+#ifdef USE_LIBKC
+#include "ircd_kc_adapter.h"
+#include <kc/kc.h>
+#endif
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
@@ -1044,6 +1050,28 @@ int main(int argc, char **argv) {
     if (metadata_lmdb_init(feature_str(FEAT_METADATA_DB)) != 0) {
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize metadata database");
+    }
+  }
+
+  /* Initialize webpush LMDB storage */
+  if (feature_bool(FEAT_CAP_draft_webpush)) {
+    if (webpush_store_init(feature_str(FEAT_WEBPUSH_DB)) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize webpush database");
+    }
+  }
+#endif
+
+#ifdef USE_LIBKC
+  /* Initialize libkc HTTP transport (for webpush delivery) */
+  if (feature_bool(FEAT_CAP_draft_webpush)) {
+    ircd_kc_adapter_init();
+    if (kc_init(ircd_kc_get_event_ops(), ircd_kc_get_log_ops()) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize libkc HTTP transport");
+    } else {
+      /* Initialize VAPID key and webpush crypto */
+      webpush_setup();
     }
   }
 #endif

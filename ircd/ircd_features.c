@@ -872,6 +872,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_channel_rename, 0, 0, 0),
   F_B(CAP_draft_metadata_2, 0, 0, 0),
   F_B(CAP_draft_webpush, 0, 0, 0),
+  F_S(WEBPUSH_DB, 0, "webpush", 0),
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
   F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* Limited by 512-byte IRC message size */
   F_I(METADATA_MAX_SUBS, 0, 50, 0),
