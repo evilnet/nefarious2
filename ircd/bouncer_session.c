@@ -33,6 +33,7 @@
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -947,12 +948,19 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
 
   for (s = as->as_sessions; s; s = s->hs_anext) {
     if (s->hs_client == cptr && s->hs_state == BOUNCE_ACTIVE) {
-      /* Check hold preference */
+      /* Check hold preference: session override > account metadata > default */
       int should_hold;
-      if (s->hs_hold_override >= 0)
+      if (s->hs_hold_override >= 0) {
         should_hold = s->hs_hold_override;
-      else
-        should_hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+      } else {
+        /* Check account metadata */
+        struct MetadataEntry *md = metadata_get_client(cptr, "$bouncer/hold");
+        if (md && md->value) {
+          should_hold = (md->value[0] == '1');
+        } else {
+          should_hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+        }
+      }
 
       if (should_hold)
         return s;

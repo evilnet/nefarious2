@@ -37,6 +37,7 @@
 #include "hash.h"
 #include "history.h"
 #include "ircd.h"
+#include "metadata.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -92,6 +93,34 @@ static int bouncer_token(struct Client *sptr)
 /* Subcommand: RESUME                                                */
 /* ---------------------------------------------------------------- */
 
+/** Check if a PM target (nick1:nick2 format) involves the given client.
+ * @param[in] target PM target in nick1:nick2 format.
+ * @param[in] cptr Client to check.
+ * @return 1 if client's nick matches one of the nicks, 0 otherwise.
+ */
+static int is_pm_target_for_client(const char *target, struct Client *cptr)
+{
+  const char *colon = strchr(target, ':');
+  const char *mynick = cli_name(cptr);
+  size_t mynick_len, nick1_len;
+
+  if (!colon)
+    return 0;
+
+  mynick_len = strlen(mynick);
+  nick1_len = colon - target;
+
+  /* Check if first nick matches */
+  if (nick1_len == mynick_len && ircd_strncmp(target, mynick, nick1_len) == 0)
+    return 1;
+
+  /* Check if second nick matches */
+  if (ircd_strcmp(colon + 1, mynick) == 0)
+    return 1;
+
+  return 0;
+}
+
 /** Auto-replay chathistory to legacy clients after resume.
  * For clients that don't support draft/chathistory, this function
  * automatically replays missed messages since disconnection.
@@ -99,10 +128,14 @@ static int bouncer_token(struct Client *sptr)
 static void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session)
 {
   struct Membership *member;
+  struct HistoryTarget *targets = NULL;
+  struct HistoryTarget *tgt;
   int limit;
   int total_replayed = 0;
   int chan_count = 0;
+  int pm_count = 0;
   char timestamp[HISTORY_TIMESTAMP_LEN];
+  char now_timestamp[HISTORY_TIMESTAMP_LEN];
 
   /* Check if auto-replay is enabled */
   if (!feature_bool(FEAT_BOUNCER_AUTO_REPLAY))
@@ -116,6 +149,10 @@ static void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *sess
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.000",
                 (unsigned long)session->hs_disconnect_time);
 
+  /* Current timestamp for PM target query range */
+  ircd_snprintf(0, now_timestamp, sizeof(now_timestamp), "%lu.000",
+                (unsigned long)CurrentTime);
+
   limit = feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
   if (limit <= 0)
     limit = 100;
@@ -125,7 +162,6 @@ static void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *sess
     const char *channame = member->channel->chname;
     int count;
 
-    /* Skip channels without history enabled (e.g., +H) */
     count = chathistory_auto_replay(sptr, channame, timestamp, limit);
     if (count > 0) {
       total_replayed += count;
@@ -133,14 +169,45 @@ static void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *sess
     }
   }
 
-  /* TODO: Also replay PMs if PM history is enabled */
+  /* Replay PMs if PM history is enabled */
+  if (feature_bool(FEAT_CHATHISTORY_PRIVATE) && IsAccount(sptr)) {
+    int target_count;
 
+    /* Query all targets with activity since disconnect */
+    target_count = history_query_targets(timestamp, now_timestamp, 50, &targets);
+
+    if (target_count > 0 && targets) {
+      for (tgt = targets; tgt; tgt = tgt->next) {
+        /* Check if this is a PM target that involves us */
+        if (strchr(tgt->target, ':') && is_pm_target_for_client(tgt->target, sptr)) {
+          int count = chathistory_auto_replay(sptr, tgt->target, timestamp, limit);
+          if (count > 0) {
+            total_replayed += count;
+            pm_count++;
+          }
+        }
+      }
+      history_free_targets(targets);
+    }
+  }
+
+  /* Send summary to client */
   if (total_replayed > 0) {
-    sendcmdto_one(&me, CMD_NOTICE, sptr,
-                  "%C :Session resumed. Replayed %d message(s) from %d channel(s).",
-                  sptr, total_replayed, chan_count);
-  } else if (chan_count == 0) {
-    /* User has channels but no messages to replay - just confirm resume */
+    if (pm_count > 0 && chan_count > 0) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr,
+                    "%C :Session resumed. Replayed %d message(s) from %d channel(s) and %d PM(s).",
+                    sptr, total_replayed, chan_count, pm_count);
+    } else if (pm_count > 0) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr,
+                    "%C :Session resumed. Replayed %d message(s) from %d PM(s).",
+                    sptr, total_replayed, pm_count);
+    } else {
+      sendcmdto_one(&me, CMD_NOTICE, sptr,
+                    "%C :Session resumed. Replayed %d message(s) from %d channel(s).",
+                    sptr, total_replayed, chan_count);
+    }
+  } else {
+    /* No messages to replay - just confirm resume */
     int total_chans = 0;
     for (member = cli_user(sptr)->channel; member; member = member->next_channel)
       total_chans++;
@@ -374,13 +441,13 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
   }
 
   if (0 == ircd_strcmp(parv[2], "HOLD")) {
-    /* Account-wide hold preference */
-    /* TODO: Store in metadata when metadata is available.
-     * For now this is a session-level concept only. */
+    /* Account-wide hold preference - stored in metadata */
     if (0 == ircd_strcmp(parv[3], "on")) {
+      metadata_set_client(sptr, "$bouncer/hold", "1", METADATA_VIS_PRIVATE);
       send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
                 "Hold mode enabled");
     } else if (0 == ircd_strcmp(parv[3], "off")) {
+      metadata_set_client(sptr, "$bouncer/hold", "0", METADATA_VIS_PRIVATE);
       send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
                 "Hold mode disabled");
     } else {
@@ -442,6 +509,8 @@ static int bouncer_settings(struct Client *sptr)
 {
   int hold;
   int count;
+  struct MetadataEntry *md;
+  const char *hold_src = "default";
 
   if (!IsAccount(sptr)) {
     send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", NULL,
@@ -449,12 +518,20 @@ static int bouncer_settings(struct Client *sptr)
     return 0;
   }
 
-  hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+  /* Check account metadata for hold preference */
+  md = metadata_get_client(sptr, "$bouncer/hold");
+  if (md && md->value) {
+    hold = (md->value[0] == '1');
+    hold_src = "account";
+  } else {
+    hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+  }
+
   count = bounce_count(cli_account(sptr));
 
-  sendrawto_one(sptr, ":%s %d %s :hold=%s sessions=%d max=%d hold_time=%d",
+  sendrawto_one(sptr, ":%s %d %s :hold=%s(%s) sessions=%d max=%d hold_time=%d",
                 cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr),
-                hold ? "on" : "off",
+                hold ? "on" : "off", hold_src,
                 count,
                 feature_int(FEAT_BOUNCER_MAX_SESSIONS),
                 feature_int(FEAT_BOUNCER_SESSION_HOLD));
