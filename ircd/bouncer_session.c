@@ -32,6 +32,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
+#include "random.h"
 #include "ircd_string.h"
 #include "metadata.h"
 #include "msg.h"

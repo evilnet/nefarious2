@@ -420,7 +420,7 @@ int webpush_encrypt(const struct webpush_subscription *sub,
   size_t ecdh_secret_len = 0;
 
   /* RFC 8291 key derivation intermediates */
-  unsigned char auth_info[131];   /* "WebPush: info\0" + ua_pub(65) + as_pub(65) */
+  unsigned char auth_info[144];   /* "WebPush: info\0" (14) + ua_pub(65) + as_pub(65) */
   unsigned char ikm[32];
   unsigned char cek[16];
   unsigned char nonce[12];
