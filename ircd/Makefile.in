@@ -109,6 +109,7 @@ IRCD_SRC = \
 	ircd_events.c \
 	ircd_features.c \
 	ircd_geoip.c \
+	ircd_kc_adapter.c \
 	ircd_log.c \
 	ircd_log_async.c \
 	ircd_relay.c \
@@ -269,6 +270,8 @@ IRCD_SRC = \
 	shun.c \
 	ssl.c \
 	thread_pool.c \
+	webpush.c \
+	webpush_store.c \
 	websocket.c \
 	uping.c \
 	userload.c \

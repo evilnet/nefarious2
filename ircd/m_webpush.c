@@ -25,8 +25,16 @@
  *   REGISTER <endpoint> <keys>
  *   UNREGISTER <endpoint>
  *
- * This implementation uses X3 services for subscription storage and push
- * delivery. The IRCd relays commands to X3 via P10 WP token.
+ * This implementation handles webpush subscriptions locally using LMDB for
+ * persistent storage and the webpush crypto library for VAPID key management
+ * and push delivery. Subscriptions are synchronized across linked servers
+ * via P10 WP token.
+ *
+ * P10 server-to-server subcommands:
+ *   WP V :<vapid_pubkey>                               - VAPID key broadcast
+ *   WP R <account> <endpoint> <p256dh> <auth>          - Register subscription
+ *   WP U <account> <endpoint>                          - Unregister subscription
+ *   WP B <account> <endpoint> <p256dh> <auth>          - Burst subscription on link
  */
 #include "config.h"
 
@@ -44,12 +52,14 @@
 #include "numnicks.h"
 #include "s_user.h"
 #include "send.h"
+#include "webpush.h"
+#include "webpush_store.h"
 
 #include <string.h>
 #include <stdlib.h>
 
 /** Maximum endpoint URL length */
-#define WEBPUSH_MAX_ENDPOINT 512
+#define WEBPUSH_MAX_ENDPOINT_LEN 512
 
 /** Maximum p256dh key length (base64) */
 #define WEBPUSH_MAX_P256DH 128
@@ -81,7 +91,7 @@ static int is_valid_endpoint(const char *endpoint)
     return 0;
 
   /* Check length */
-  if (strlen(endpoint) > WEBPUSH_MAX_ENDPOINT)
+  if (strlen(endpoint) > WEBPUSH_MAX_ENDPOINT_LEN)
     return 0;
 
   /* Block localhost and private IPs */
@@ -161,6 +171,7 @@ static int parse_keys(const char *keys, char *p256dh, size_t p256dh_size,
 }
 
 /** Handle WEBPUSH REGISTER subcommand.
+ * Stores the subscription locally in LMDB and broadcasts to linked servers.
  * @param[in] sptr Source client.
  * @param[in] parc Parameter count.
  * @param[in] parv Parameters.
@@ -172,6 +183,7 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
   const char *keys;
   char p256dh[WEBPUSH_MAX_P256DH];
   char auth[WEBPUSH_MAX_AUTH];
+  char stored[4096];
 
   /* WEBPUSH REGISTER <endpoint> <keys> */
   if (parc < 4) {
@@ -204,11 +216,26 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Relay to services via P10 WP token
-   * Format: WP R <user_numeric> <endpoint> <p256dh> <auth>
-   */
-  sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "R %C %s %s %s",
-                        sptr, endpoint, p256dh, auth);
+  /* Check if store is available */
+  if (!webpush_store_available()) {
+    send_webpush_fail(sptr, "INTERNAL_ERROR", "REGISTER",
+                      "Push subscription storage is not available");
+    return 0;
+  }
+
+  /* Build stored format: "endpoint|p256dh|auth" */
+  snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth);
+
+  /* Store locally in LMDB */
+  if (webpush_store_add(cli_user(sptr)->account, stored) != 0) {
+    send_webpush_fail(sptr, "INTERNAL_ERROR", "REGISTER",
+                      "Failed to store push subscription");
+    return 0;
+  }
+
+  /* Broadcast to all linked servers */
+  sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "R %s %s %s %s",
+                        cli_user(sptr)->account, endpoint, p256dh, auth);
 
   /* Echo success to client per spec */
   sendrawto_one(sptr, "WEBPUSH REGISTER %s", endpoint);
@@ -222,6 +249,7 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
 }
 
 /** Handle WEBPUSH UNREGISTER subcommand.
+ * Removes the subscription from LMDB and broadcasts to linked servers.
  * @param[in] sptr Source client.
  * @param[in] parc Parameter count.
  * @param[in] parv Parameters.
@@ -247,11 +275,14 @@ static int webpush_cmd_unregister(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Relay to services via P10 WP token
-   * Format: WP U <user_numeric> <endpoint>
-   */
-  sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "U %C %s",
-                        sptr, endpoint);
+  /* Remove locally from LMDB */
+  if (webpush_store_available()) {
+    webpush_store_remove(cli_user(sptr)->account, endpoint);
+  }
+
+  /* Broadcast to all linked servers */
+  sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "U %s %s",
+                        cli_user(sptr)->account, endpoint);
 
   /* Echo success to client per spec (silently succeeds even if not registered) */
   sendrawto_one(sptr, "WEBPUSH UNREGISTER %s", endpoint);
@@ -301,15 +332,276 @@ int m_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Notification delivery
+ * ---------------------------------------------------------------------------*/
+
+/** Context for async push notification delivery callback. */
+struct notify_ctx {
+  char account[256];
+  char endpoint[WEBPUSH_MAX_ENDPOINT];
+};
+
+/** Callback for async webpush_notify completion.
+ * Handles expired subscriptions by removing them from store and
+ * broadcasting the removal to linked servers.
+ */
+static void notify_send_cb(int result, long http_code, void *data)
+{
+  struct notify_ctx *ctx = data;
+
+  if (!ctx)
+    return;
+
+  if (result == WEBPUSH_ERR_EXPIRED) {
+    /* Subscription expired (HTTP 410) — remove from store */
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBPUSH: subscription expired for %s endpoint %s (HTTP %ld)",
+              ctx->account, ctx->endpoint, http_code);
+
+    if (webpush_store_available()) {
+      webpush_store_remove(ctx->account, ctx->endpoint);
+    }
+
+    /* Broadcast removal to linked servers */
+    sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "U %s %s",
+                          ctx->account, ctx->endpoint);
+  }
+
+  free(ctx);
+}
+
+/** Iterator callback for webpush_notify_account — sends push to each subscription. */
+struct notify_iter_data {
+  const char *account;
+  const char *message;
+  size_t message_len;
+};
+
+static int notify_iter_cb(const char *stored, void *data)
+{
+  struct notify_iter_data *nid = data;
+  struct webpush_subscription sub;
+  struct notify_ctx *ctx;
+
+  /* Parse subscription from stored format */
+  if (webpush_parse_subscription(stored, &sub) != 0)
+    return 0; /* skip invalid, continue iteration */
+
+  /* Allocate callback context */
+  ctx = malloc(sizeof(*ctx));
+  if (!ctx)
+    return 0; /* skip on alloc failure, continue */
+
+  ircd_strncpy(ctx->account, nid->account, sizeof(ctx->account) - 1);
+  ctx->account[sizeof(ctx->account) - 1] = '\0';
+  ircd_strncpy(ctx->endpoint, sub.endpoint, sizeof(ctx->endpoint) - 1);
+  ctx->endpoint[sizeof(ctx->endpoint) - 1] = '\0';
+
+  /* Send push notification asynchronously */
+  if (webpush_notify(&sub, nid->message, nid->message_len,
+                     notify_send_cb, ctx) != 0) {
+    /* Delivery submission failed */
+    free(ctx);
+  }
+
+  return 0; /* continue iteration */
+}
+
+/** Send push notifications to all subscriptions for an account.
+ * Iterates all subscriptions in LMDB for the given account and sends
+ * a push notification to each one.
+ * @param[in] account IRC account name.
+ * @param[in] message Notification message payload.
+ * @param[in] message_len Length of message.
+ */
+void webpush_notify_account(const char *account, const char *message,
+                            size_t message_len)
+{
+  struct notify_iter_data nid;
+
+  if (!account || !message || !message_len)
+    return;
+
+  if (!webpush_store_available())
+    return;
+
+  nid.account = account;
+  nid.message = message;
+  nid.message_len = message_len;
+
+  webpush_store_foreach(account, notify_iter_cb, &nid);
+}
+
+/* ---------------------------------------------------------------------------
+ * Server burst
+ * ---------------------------------------------------------------------------*/
+
+/** Context for webpush_burst iteration. */
+struct burst_ctx {
+  struct Client *cptr;  /* target server to send burst data to */
+};
+
+/** Iterator callback for webpush_burst — sends each subscription to linking server. */
+static int burst_iter_cb(const char *account, const char *stored, void *data)
+{
+  struct burst_ctx *bctx = data;
+  const char *endpoint;
+  const char *p256dh;
+  const char *auth_secret;
+  const char *sep1, *sep2;
+  char ep_buf[WEBPUSH_MAX_ENDPOINT];
+  char p256dh_buf[WEBPUSH_MAX_P256DH];
+  char auth_buf[WEBPUSH_MAX_AUTH];
+  size_t len;
+
+  /* Parse stored format: "endpoint|p256dh|auth" */
+  sep1 = strchr(stored, '|');
+  if (!sep1)
+    return 0;
+  sep2 = strchr(sep1 + 1, '|');
+  if (!sep2)
+    return 0;
+
+  /* Extract endpoint */
+  len = (size_t)(sep1 - stored);
+  if (len == 0 || len >= sizeof(ep_buf))
+    return 0;
+  memcpy(ep_buf, stored, len);
+  ep_buf[len] = '\0';
+  endpoint = ep_buf;
+
+  /* Extract p256dh */
+  len = (size_t)(sep2 - sep1 - 1);
+  if (len == 0 || len >= sizeof(p256dh_buf))
+    return 0;
+  memcpy(p256dh_buf, sep1 + 1, len);
+  p256dh_buf[len] = '\0';
+  p256dh = p256dh_buf;
+
+  /* Extract auth */
+  auth_secret = sep2 + 1;
+  len = strlen(auth_secret);
+  if (len == 0 || len >= sizeof(auth_buf))
+    return 0;
+  memcpy(auth_buf, auth_secret, len);
+  auth_buf[len] = '\0';
+
+  /* Send burst entry to target server: WP B <account> <endpoint> <p256dh> <auth> */
+  sendcmdto_one(&me, CMD_WEBPUSH, bctx->cptr, "B %s %s %s %s",
+                account, endpoint, p256dh, auth_buf);
+
+  return 0; /* continue iteration */
+}
+
+/** Burst all webpush subscriptions to a newly linked server.
+ * Called during server link (e.g., from burst handling code).
+ * Iterates all subscriptions in LMDB and sends them via WP B.
+ * @param[in] cptr Target server to send burst data to.
+ */
+void webpush_burst(struct Client *cptr)
+{
+  struct burst_ctx bctx;
+
+  if (!cptr || !webpush_store_available())
+    return;
+
+  bctx.cptr = cptr;
+  webpush_store_foreach_all(burst_iter_cb, &bctx);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "WEBPUSH: burst subscriptions sent to %s",
+            cli_name(cptr));
+}
+
+/* ---------------------------------------------------------------------------
+ * VAPID key initialization and persistence
+ * ---------------------------------------------------------------------------*/
+
+/** Initialize the webpush subsystem with VAPID key persistence.
+ * Attempts to load VAPID key from LMDB store. If not found, generates
+ * a new keypair and persists it. Broadcasts the VAPID public key to
+ * linked servers.
+ * @return 0 on success, -1 on error.
+ */
+int webpush_setup(void)
+{
+  unsigned char privkey[32];
+  size_t privkey_len = sizeof(privkey);
+  const char *vapid_pubkey;
+
+  if (!webpush_store_available()) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "WEBPUSH: store not available, cannot initialize VAPID key");
+    return -1;
+  }
+
+  /* Try to load existing VAPID key from persistent store */
+  if (webpush_store_get_vapid_key(privkey, &privkey_len) == 0) {
+    /* Import the persisted key */
+    if (webpush_import_vapid_key(privkey, privkey_len, NULL, 0) != 0) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "WEBPUSH: failed to import persisted VAPID key");
+      return -1;
+    }
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBPUSH: loaded VAPID key from persistent store");
+  } else {
+    /* Generate new VAPID keypair */
+    if (webpush_init() != 0) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "WEBPUSH: failed to generate VAPID keypair");
+      return -1;
+    }
+
+    /* Export and persist the private key */
+    privkey_len = sizeof(privkey);
+    if (webpush_export_vapid_privkey(privkey, &privkey_len) != 0) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "WEBPUSH: failed to export VAPID private key");
+      return -1;
+    }
+
+    if (webpush_store_set_vapid_key(privkey, privkey_len) != 0) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "WEBPUSH: failed to persist VAPID key");
+      /* Continue anyway — key works in memory */
+    }
+
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBPUSH: generated and persisted new VAPID keypair");
+  }
+
+  /* Clear sensitive material from stack */
+  memset(privkey, 0, sizeof(privkey));
+
+  /* Set the VAPID public key for capability advertisement */
+  vapid_pubkey = webpush_get_vapid_pubkey();
+  if (vapid_pubkey) {
+    set_vapid_pubkey(vapid_pubkey);
+    add_isupport_s("VAPID", vapid_pubkey);
+
+    /* Broadcast to all linked servers */
+    sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "V :%s", vapid_pubkey);
+
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBPUSH: VAPID public key: %s", vapid_pubkey);
+  }
+
+  return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Server-to-server handler
+ * ---------------------------------------------------------------------------*/
+
 /** Handle WEBPUSH (WP) command from a server (P10).
  *
  * Incoming formats:
- *   WP V :<vapid_pubkey>                             - VAPID key broadcast
- *   WP R <user_numeric> <endpoint> <p256dh> <auth>  - Register subscription
- *   WP U <user_numeric> <endpoint>                   - Unregister subscription
- *   WP E <user_numeric> <code> :<message>           - Error from services
- *
- * This is primarily for receiving responses from X3 services.
+ *   WP V :<vapid_pubkey>                               - VAPID key from peer
+ *   WP R <account> <endpoint> <p256dh> <auth>          - Register subscription
+ *   WP U <account> <endpoint>                          - Unregister subscription
+ *   WP B <account> <endpoint> <p256dh> <auth>          - Burst subscription on link
  *
  * @param[in] cptr Client that sent us the message.
  * @param[in] sptr Original source of message.
@@ -319,7 +611,6 @@ int m_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  */
 int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
-  struct Client *acptr;
   const char *subcmd;
 
   if (parc < 2)
@@ -327,7 +618,7 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   subcmd = parv[1];
 
-  /* Handle VAPID key broadcast from services: WP V :<vapid_pubkey> */
+  /* Handle VAPID key broadcast from peer: WP V :<vapid_pubkey> */
   if (subcmd[0] == 'V') {
     const char *vapid_key;
 
@@ -335,16 +626,26 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
 
     vapid_key = parv[2];
-    set_vapid_pubkey(vapid_key);
 
-    log_write(LS_SYSTEM, L_INFO, 0, "WEBPUSH: VAPID public key set to: %s",
-              vapid_key);
+    /* Only accept VAPID key if we don't have one yet.
+     * Each server generates its own VAPID key; we don't overwrite ours
+     * with a peer's key. However if we haven't initialized yet (e.g.,
+     * store unavailable), we can use the peer's key as a fallback. */
+    if (!webpush_get_vapid_pubkey()) {
+      set_vapid_pubkey(vapid_key);
+      add_isupport_s("VAPID", vapid_key);
 
-    /* Propagate to other servers */
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "WEBPUSH: accepted VAPID key from peer %s: %s",
+                cli_name(sptr), vapid_key);
+    } else {
+      log_write(LS_SYSTEM, L_DEBUG, 0,
+                "WEBPUSH: ignoring VAPID key from peer %s (already have our own)",
+                cli_name(sptr));
+    }
+
+    /* Propagate to other servers regardless */
     sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "V :%s", vapid_key);
-
-    /* Update ISUPPORT with new VAPID key */
-    add_isupport_s("VAPID", vapid_key);
 
     return 0;
   }
@@ -352,39 +653,59 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (parc < 3)
     return 0;
 
-  /* Handle error response from services */
-  if (subcmd[0] == 'E') {
-    const char *code;
-    const char *message;
+  /* Handle subscription registration from peer: WP R <account> <endpoint> <p256dh> <auth> */
+  if (subcmd[0] == 'R' && parc >= 6) {
+    const char *account = parv[2];
+    const char *endpoint = parv[3];
+    const char *p256dh = parv[4];
+    const char *auth_secret = parv[5];
+    char stored[4096];
 
-    if (parc < 4)
-      return 0;
+    snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth_secret);
 
-    /* Find target client */
-    acptr = findNUser(parv[2]);
-    if (!acptr)
-      return 0;
-
-    code = parv[3];
-    message = (parc > 4) ? parv[4] : "Unknown error";
-
-    /* Forward error to local client */
-    if (MyUser(acptr)) {
-      send_webpush_fail(acptr, code, "*", message);
+    if (webpush_store_available()) {
+      webpush_store_add(account, stored);
     }
+
+    /* Propagate to other servers */
+    sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s",
+                          account, endpoint, p256dh, auth_secret);
+
     return 0;
   }
 
-  /* Forward to other servers if needed */
-  if (subcmd[0] == 'R' || subcmd[0] == 'U') {
-    /* Propagate to other servers */
-    if (subcmd[0] == 'R' && parc >= 6) {
-      sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s",
-                            parv[2], parv[3], parv[4], parv[5]);
-    } else if (subcmd[0] == 'U' && parc >= 4) {
-      sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "U %s %s",
-                            parv[2], parv[3]);
+  /* Handle subscription removal from peer: WP U <account> <endpoint> */
+  if (subcmd[0] == 'U' && parc >= 4) {
+    const char *account = parv[2];
+    const char *endpoint = parv[3];
+
+    if (webpush_store_available()) {
+      webpush_store_remove(account, endpoint);
     }
+
+    /* Propagate to other servers */
+    sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "U %s %s",
+                          account, endpoint);
+
+    return 0;
+  }
+
+  /* Handle burst subscription from linking server: WP B <account> <endpoint> <p256dh> <auth> */
+  if (subcmd[0] == 'B' && parc >= 6) {
+    const char *account = parv[2];
+    const char *endpoint = parv[3];
+    const char *p256dh = parv[4];
+    const char *auth_secret = parv[5];
+    char stored[4096];
+
+    snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth_secret);
+
+    if (webpush_store_available()) {
+      webpush_store_add(account, stored);
+    }
+
+    /* Don't propagate burst entries — they come from a single source during link */
+    return 0;
   }
 
   return 0;

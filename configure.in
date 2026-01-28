@@ -1013,6 +1013,52 @@ if test x"$unet_cv_enable_zstd" = xyes; then
   fi
 fi
 
+dnl **
+dnl **  Keycloak (libkc) checks
+dnl **
+AC_MSG_CHECKING([whether to enable Keycloak support])
+AC_ARG_ENABLE([keycloak],
+[  --disable-keycloak      Disable Keycloak (libkc) support],
+[unet_cv_enable_keycloak=$enable_keycloak],
+[AC_CACHE_VAL(unet_cv_enable_keycloak,
+[unet_cv_enable_keycloak=no])])
+AC_MSG_RESULT([$unet_cv_enable_keycloak])
+
+if test x"$unet_cv_enable_keycloak" = xyes; then
+  AC_ARG_WITH([keycloak],
+  AS_HELP_STRING([--with-keycloak=dir], [Specify the installation prefix of libkc]),
+  [base_keycloak_prefix=$withval],
+  [base_keycloak_prefix=])
+
+  AC_MSG_CHECKING([for Keycloak includes])
+  AC_ARG_WITH([keycloak-includes],
+  AS_HELP_STRING([--with-keycloak-includes=dir], [Specify location of libkc header files]),
+  [unet_cv_with_keycloak_inc_prefix=$withval],
+  [if test -n "$base_keycloak_prefix"; then
+    unet_cv_with_keycloak_inc_prefix=$base_keycloak_prefix/include
+  else
+    unet_cv_with_keycloak_inc_prefix=/usr/local/include
+  fi])
+  AC_MSG_RESULT([$unet_cv_with_keycloak_inc_prefix])
+
+  AC_MSG_CHECKING([for Keycloak libraries])
+  AC_ARG_WITH([keycloak-libs],
+  AS_HELP_STRING([--with-keycloak-libs=dir], [Specify location of libkc library]),
+  [unet_cv_with_keycloak_prefix=$withval],
+  [if test -n "$base_keycloak_prefix"; then
+    unet_cv_with_keycloak_prefix=$base_keycloak_prefix/lib
+  else
+    unet_cv_with_keycloak_prefix=/usr/local/lib
+  fi])
+  AC_MSG_RESULT([$unet_cv_with_keycloak_prefix])
+
+  AC_DEFINE([USE_LIBKC], , [Define if you are using Keycloak (libkc)])
+  LIBS="$LIBS -L$unet_cv_with_keycloak_prefix -lkc -lcurl -ljansson"
+  CFLAGS="$CFLAGS -I$unet_cv_with_keycloak_inc_prefix"
+
+  AC_MSG_NOTICE([Keycloak (libkc) support enabled])
+fi
+
 dnl --with-maxcon allows us to set the maximum connections
 unet_maxcon=`ulimit -Sn`
 if test x"$unet_maxcon" = xunlimited; then

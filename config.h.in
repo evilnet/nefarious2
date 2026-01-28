@@ -241,6 +241,9 @@
 /* Define if you are using OpenSSL */
 #undef USE_SSL
 
+/* Define if you are using Keycloak (libkc) */
+#undef USE_LIBKC
+
 /* Define if you are using zstd compression */
 #undef USE_ZSTD
 
