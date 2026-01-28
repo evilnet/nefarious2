@@ -266,6 +266,7 @@ enum Flag
 
     FLAG_NOSTORAGE,                 /**< User's messages not stored in chathistory (+Y) */
     FLAG_PM_OPTOUT,                 /**< User opted out of PM history storage (+y) */
+    FLAG_BNC_HOLDPREF,              /**< User prefers bouncer hold mode enabled (+b) */
 
     FLAG_BOUNCER_HOLD,              /**< Client is in bouncer HOLDING state (ghost) */
 
@@ -916,6 +917,10 @@ struct Client {
 /** Return non-zero if the client has set mode +Y (no history storage). */
 #define IsNoStorage(x)          HasFlag(x, FLAG_NOSTORAGE)
 #define IsPMOptout(x)           HasFlag(x, FLAG_PM_OPTOUT)
+/** Return non-zero if user prefers bouncer hold mode. */
+#define IsBncHoldPref(x)        HasFlag(x, FLAG_BNC_HOLDPREF)
+#define SetBncHoldPref(x)       SetFlag(x, FLAG_BNC_HOLDPREF)
+#define ClearBncHoldPref(x)     ClrFlag(x, FLAG_BNC_HOLDPREF)
 /** Return non-zero if client is a bouncer ghost (in HOLDING state). */
 #define IsBouncerHold(x)        HasFlag(x, FLAG_BOUNCER_HOLD)
 #define SetBouncerHold(x)       SetFlag(x, FLAG_BOUNCER_HOLD)

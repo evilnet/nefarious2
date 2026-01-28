@@ -518,13 +518,18 @@ static int bouncer_settings(struct Client *sptr)
     return 0;
   }
 
-  /* Check account metadata for hold preference */
-  md = metadata_get_client(sptr, "$bouncer/hold");
-  if (md && md->value) {
-    hold = (md->value[0] == '1');
-    hold_src = "account";
+  /* Check hold preference: user mode/metadata > default */
+  if (IsBncHoldPref(sptr)) {
+    hold = 1;
+    hold_src = "mode";
   } else {
-    hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+    md = metadata_get_client(sptr, "$bouncer/hold");
+    if (md && md->value) {
+      hold = 0;  /* Explicitly disabled */
+      hold_src = "mode";
+    } else {
+      hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+    }
   }
 
   count = bounce_count(cli_account(sptr));

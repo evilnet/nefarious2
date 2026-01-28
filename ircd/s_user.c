@@ -749,7 +749,8 @@ static const struct UserMode {
   { FLAG_CLOAKIP,      'c' },
   { FLAG_MULTILINE_EXPAND, 'M' },
   { FLAG_NOSTORAGE,    'Y' },
-  { FLAG_PM_OPTOUT,    'y' }
+  { FLAG_PM_OPTOUT,    'y' },
+  { FLAG_BNC_HOLDPREF, 'b' }
 };
 
 /** Length of #userModeList. */
@@ -1702,6 +1703,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         } else {
           ClearNoStorage(acptr);
           metadata_set_client(acptr, "chathistory.nostorage", NULL, 0);
+        }
+        break;
+      case 'b':
+        if (what == MODE_ADD) {
+          SetBncHoldPref(acptr);
+          metadata_set_client(acptr, "$bouncer/hold", "1", METADATA_VIS_PRIVATE);
+        } else {
+          ClearBncHoldPref(acptr);
+          metadata_set_client(acptr, "$bouncer/hold", NULL, 0);
         }
         break;
       case 'y':

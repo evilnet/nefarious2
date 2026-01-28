@@ -1000,6 +1000,7 @@ static const struct {
   { "umode.privdeaf",        FLAG_PRIVDEAF,          0 },
   { "chathistory.nostorage", FLAG_NOSTORAGE,        0 },
   { "chathistory.pm",        FLAG_PM_OPTOUT,        1 },
+  { "$bouncer/hold",         FLAG_BNC_HOLDPREF,     0 },
   { NULL, 0, 0 }
 };
 

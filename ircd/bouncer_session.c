@@ -948,15 +948,18 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
 
   for (s = as->as_sessions; s; s = s->hs_anext) {
     if (s->hs_client == cptr && s->hs_state == BOUNCE_ACTIVE) {
-      /* Check hold preference: session override > account metadata > default */
+      /* Check hold preference: session override > user mode/metadata > default */
       int should_hold;
       if (s->hs_hold_override >= 0) {
         should_hold = s->hs_hold_override;
+      } else if (IsBncHoldPref(cptr)) {
+        /* User has +b mode set (synced with $bouncer/hold metadata) */
+        should_hold = 1;
       } else {
-        /* Check account metadata */
+        /* Check if user explicitly disabled (metadata "0") vs no preference */
         struct MetadataEntry *md = metadata_get_client(cptr, "$bouncer/hold");
         if (md && md->value) {
-          should_hold = (md->value[0] == '1');
+          should_hold = 0;  /* Explicitly disabled */
         } else {
           should_hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
         }
