@@ -980,8 +980,8 @@ process_multiline_batch(struct Client *sptr)
     /* Get timestamp for storage */
     history_format_timestamp(timestamp, sizeof(timestamp));
 
-    /* Check if channel has +P (no storage) mode */
-    if (is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) {
+    /* Check if channel has +P (no storage) mode or sender has +Y */
+    if ((is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) || IsNoStorage(sptr)) {
       /* Skip storage but still clear batch */
     } else {
       /* Store with base msgid (no sub-IDs) for retrieval */
@@ -1479,8 +1479,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     /* Get timestamp for storage */
     history_format_timestamp(timestamp, sizeof(timestamp));
 
-    /* Check if channel has +P (no storage) mode */
-    if (!(is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE))) {
+    /* Check if channel has +P (no storage) mode or sender has +Y */
+    if (!((is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) || IsNoStorage(sptr))) {
       /* Store with base msgid for retrieval */
       history_store_message(batch_base_msgid, timestamp,
                             is_channel ? chptr->chname : cli_name(acptr),

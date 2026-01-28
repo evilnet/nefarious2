@@ -196,6 +196,10 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
+  /* Check if sender has +Y (no storage) user mode */
+  if (IsNoStorage(sptr))
+    return;
+
   /* Check if this is a new channel for Layer 1 advertisement */
   int is_new_channel = (history_has_channel(chptr->chname) == 0);
 
@@ -294,6 +298,10 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
 
   /* Check per-user consent based on configured mode */
   if (!pm_history_consent(sptr, acptr))
+    return;
+
+  /* Check if sender has +Y (no storage) user mode */
+  if (IsNoStorage(sptr))
     return;
 
   /* Build sender string: nick!user@host */

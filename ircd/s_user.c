@@ -773,7 +773,8 @@ static const struct UserMode {
   { FLAG_FAKEHOST,     'f' },
   { FLAG_CLOAKHOST,    'C' },
   { FLAG_CLOAKIP,      'c' },
-  { FLAG_MULTILINE_EXPAND, 'M' }
+  { FLAG_MULTILINE_EXPAND, 'M' },
+  { FLAG_NOSTORAGE,    'Y' }
 };
 
 /** Length of #userModeList. */
@@ -1703,6 +1704,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetFlag(acptr, FLAG_MULTILINE_EXPAND);
         else
           ClrFlag(acptr, FLAG_MULTILINE_EXPAND);
+        break;
+      case 'Y':
+        if (what == MODE_ADD)
+          SetNoStorage(acptr);
+        else
+          ClearNoStorage(acptr);
         break;
       case 'x':
         if (what == MODE_ADD) {

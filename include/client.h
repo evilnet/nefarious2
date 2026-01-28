@@ -111,7 +111,7 @@ typedef unsigned long flagpage_t;
 #endif
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "adgiknoqswxzBDHLMNORWX"
+#define infousermodes "adgiknoqswxzBDHLMNORWXY"
 
 /** Operator privileges. */
 enum Priv
@@ -263,6 +263,8 @@ enum Flag
     FLAG_OPER_PENDING,              /**< Async OPER password verification in progress */
     FLAG_WEBIRC_PENDING,            /**< Async WEBIRC password verification in progress */
     FLAG_SETHOST_PENDING,           /**< Async SETHOST password verification in progress */
+
+    FLAG_NOSTORAGE,                 /**< User's messages not stored in chathistory (+Y) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -908,6 +910,8 @@ struct Client {
 #define IsDead(x)               HasFlag(x, FLAG_DEADSOCKET)
 /** Return non-zero if the client has set mode +d (deaf). */
 #define IsDeaf(x)               HasFlag(x, FLAG_DEAF)
+/** Return non-zero if the client has set mode +Y (no history storage). */
+#define IsNoStorage(x)          HasFlag(x, FLAG_NOSTORAGE)
 /** Return non-zero if the client has been IP-checked for clones. */
 #define IsIPChecked(x)          HasFlag(x, FLAG_IPCHECK)
 /** Return non-zero if we have received an ident response for the client. */
@@ -1044,6 +1048,8 @@ struct Client {
 #define SetChannelService(x)    SetFlag(x, FLAG_CHSERV)
 /** Mark a client as having mode +d (deaf). */
 #define SetDeaf(x)              SetFlag(x, FLAG_DEAF)
+/** Mark a client as having mode +Y (no history storage). */
+#define SetNoStorage(x)         SetFlag(x, FLAG_NOSTORAGE)
 /** Mark a client as having mode +g (debugging). */
 #define SetDebug(x)             SetFlag(x, FLAG_DEBUG)
 /** Mark a client as having ident looked up. */
@@ -1177,6 +1183,8 @@ struct Client {
 #define ClearChannelService(x)  ClrFlag(x, FLAG_CHSERV)
 /** Remove mode +d (deaf) from the client. */
 #define ClearDeaf(x)            ClrFlag(x, FLAG_DEAF)
+/** Remove mode +Y (no history storage) from the client. */
+#define ClearNoStorage(x)       ClrFlag(x, FLAG_NOSTORAGE)
 /** Remove mode +g (debugging) from the client. */
 #define ClearDebug(x)           ClrFlag(x, FLAG_DEBUG)
 /** Remove the client's IP-checked flag. */
