@@ -409,104 +409,26 @@ struct StatDesc;
 extern void history_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
 
 /*
- * Membership Tracking API (for CHATHISTORY access control)
+ * Per-User Quota API (anti-flood protection)
  *
- * Tracks membership periods and ban periods per account+channel.
- * Used to filter history based on access mode:
- *   - 'none': No filtering (public history)
- *   - 'kick-gap': Block pre-join and kick periods
- *   - 'membership': Block all non-membership periods
- *
- * Key concern: Users who are banned AND not present should NEVER
- * see history from that period, regardless of access mode.
+ * Tracks message counts per user per channel to prevent a single user
+ * from dominating channel history. When a user exceeds their quota
+ * percentage, warnings are logged.
  */
 
-/** Leave types for membership tracking */
-enum MembershipLeaveType {
-  MEMBERSHIP_LEAVE_NONE = 0,  /**< Still a member */
-  MEMBERSHIP_LEAVE_PART = 1,  /**< Voluntary part */
-  MEMBERSHIP_LEAVE_KICK = 2,  /**< Kicked from channel */
-  MEMBERSHIP_LEAVE_QUIT = 3   /**< Connection lost (treated as part) */
-};
-
-/** Access control modes for history filtering */
-enum HistoryAccessMode {
-  HISTORY_ACCESS_NONE       = 0, /**< No filtering (public) */
-  HISTORY_ACCESS_KICK_GAP   = 1, /**< Block pre-join and kick periods */
-  HISTORY_ACCESS_MEMBERSHIP = 2  /**< Block all non-membership periods */
-};
-
-/** Record a JOIN event for membership tracking.
- * Creates or updates membership record for account+channel.
- * If there's an open period (after kick/ban), closes the gap.
- * @param[in] account Account name.
+/** Get the current message count for a user in a channel.
  * @param[in] channel Channel name.
- * @param[in] timestamp Unix timestamp of join.
- * @return 0 on success, -1 on error.
- */
-extern int membership_record_join(const char *account, const char *channel,
-                                   const char *timestamp);
-
-/** Record a LEAVE event (PART, KICK, or QUIT).
- * Updates the current period with leave time and type.
  * @param[in] account Account name.
- * @param[in] channel Channel name.
- * @param[in] timestamp Unix timestamp of leave.
- * @param[in] leave_type Type of leave.
- * @return 0 on success, -1 on error.
+ * @return Message count, or 0 if not found.
  */
-extern int membership_record_leave(const char *account, const char *channel,
-                                    const char *timestamp,
-                                    enum MembershipLeaveType leave_type);
+extern int history_quota_get_count(const char *channel, const char *account);
 
-/** Record that a ban was set on an account while not a member.
- * This creates a "banned while absent" period that ALWAYS blocks history.
- * @param[in] account Account name.
+/** Check if a user is over their quota for a channel.
  * @param[in] channel Channel name.
- * @param[in] timestamp Unix timestamp when banned.
- * @return 0 on success, -1 on error.
- */
-extern int membership_record_ban(const char *account, const char *channel,
-                                  const char *timestamp);
-
-/** Record that a ban was removed from an account.
- * Closes an open "banned while absent" period.
  * @param[in] account Account name.
- * @param[in] channel Channel name.
- * @param[in] timestamp Unix timestamp when unbanned.
- * @return 0 on success, -1 on error.
+ * @param[in] channel_limit Total messages allowed in channel.
+ * @return 1 if over quota, 0 if not.
  */
-extern int membership_record_unban(const char *account, const char *channel,
-                                    const char *timestamp);
-
-/** Check if an account can see a message at a given timestamp.
- * Takes into account the access mode and ban periods.
- * @param[in] account Account name.
- * @param[in] channel Channel name.
- * @param[in] msg_timestamp Timestamp of message to check.
- * @param[in] access_mode Access control mode for the channel.
- * @return 1 if visible, 0 if blocked, -1 on error.
- */
-extern int membership_can_see_message(const char *account, const char *channel,
-                                       const char *msg_timestamp,
-                                       enum HistoryAccessMode access_mode);
-
-/** Get membership record for debugging/stats.
- * @param[in] account Account name.
- * @param[in] channel Channel name.
- * @param[out] first_join Buffer for first join timestamp (may be NULL).
- * @param[out] is_member Set to 1 if currently a member.
- * @return 0 on success, 1 if no record, -1 on error.
- */
-extern int membership_get_info(const char *account, const char *channel,
-                                char *first_join, int *is_member);
-
-/** Clear membership record for an account+channel.
- * Used when account is deleted or channel is unregistered.
- * @param[in] account Account name.
- * @param[in] channel Channel name.
- * @return 0 on success, -1 on error.
- */
-extern int membership_clear(const char *account, const char *channel);
+extern int history_quota_check(const char *channel, const char *account, int channel_limit);
 
 #endif /* INCLUDED_history_h */

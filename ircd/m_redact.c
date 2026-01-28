@@ -81,28 +81,6 @@ static time_t parse_msgid_timestamp(const char *msgid)
   return (time_t)strtoul(timebuf, NULL, 10);
 }
 
-/** Check if a nick matches the sender in a history message.
- * The sender field is nick!user@host, we compare just the nick.
- * @param[in] msg History message with sender field.
- * @param[in] nick Nick to compare.
- * @return 1 if match, 0 otherwise.
- */
-static int sender_nick_matches(const struct HistoryMessage *msg, const char *nick)
-{
-  const char *bang;
-  size_t nicklen;
-
-  bang = strchr(msg->sender, '!');
-  if (!bang)
-    return 0;
-
-  nicklen = bang - msg->sender;
-  if (strlen(nick) != nicklen)
-    return 0;
-
-  return (ircd_strncmp(msg->sender, nick, nicklen) == 0);
-}
-
 /** Propagate REDACT to channel members with the capability.
  * @param[in] sptr Source client.
  * @param[in] chptr Channel.
@@ -198,6 +176,13 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* Must be authenticated to use REDACT */
+  if (!cli_user(sptr) || !cli_user(sptr)->account[0]) {
+    send_fail(sptr, "REDACT", "ACCOUNT_REQUIRED", NULL,
+              "You must be logged in to use REDACT");
+    return 0;
+  }
+
   /* Check if user is in channel */
   member = find_member_link(chptr, sptr);
   if (!member) {
@@ -245,9 +230,9 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         }
       }
 
-      /* Check authorization */
-      if (sender_nick_matches(msg, cli_name(sptr))) {
-        /* Own message - allowed within time window */
+      /* Check authorization - use account for ownership (nicks are not persistent) */
+      if (msg->account[0] && ircd_strcmp(msg->account, cli_user(sptr)->account) == 0) {
+        /* Own message (same account) - allowed within time window */
         can_redact = 1;
       } else if (is_oper) {
         /* Opers can redact anything */

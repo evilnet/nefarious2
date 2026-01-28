@@ -60,6 +60,7 @@
 /* Forward declarations for functions used before definition */
 static int is_ulined_server(struct Client *server);
 int has_chathistory_advertisement(struct Client *server);
+void broadcast_channel_advertisement(const char *channel);
 #include <string.h>
 #include <stdlib.h>
 #include <openssl/evp.h>
@@ -672,45 +673,6 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
   }
 }
 
-/** Get the default history access mode from feature flags.
- * @return Access mode based on FEAT_CHATHISTORY_DEFAULT_ACCESS.
- */
-static enum HistoryAccessMode get_default_access_mode(void)
-{
-  int mode = feature_int(FEAT_CHATHISTORY_DEFAULT_ACCESS);
-  switch (mode) {
-    case 0:  return HISTORY_ACCESS_NONE;
-    case 2:  return HISTORY_ACCESS_MEMBERSHIP;
-    default: return HISTORY_ACCESS_KICK_GAP;  /* 1 or invalid */
-  }
-}
-
-/** Get the history access mode for a channel from metadata.
- * @param[in] chptr Channel to check.
- * @return Access mode (defaults to FEAT_CHATHISTORY_DEFAULT_ACCESS).
- */
-static enum HistoryAccessMode get_channel_access_mode(struct Channel *chptr)
-{
-  struct MetadataEntry *entry;
-
-  if (!chptr)
-    return get_default_access_mode();
-
-  /* Check channel metadata for history.access setting */
-  entry = metadata_get_channel(chptr, "history.access");
-  if (entry && entry->value) {
-    if (ircd_strcmp(entry->value, "none") == 0)
-      return HISTORY_ACCESS_NONE;
-    if (ircd_strcmp(entry->value, "membership") == 0)
-      return HISTORY_ACCESS_MEMBERSHIP;
-    if (ircd_strcmp(entry->value, "kick-gap") == 0)
-      return HISTORY_ACCESS_KICK_GAP;
-    /* For unrecognized values, fall through to default */
-  }
-
-  return get_default_access_mode();
-}
-
 /** Check if user has ops override privilege for a channel.
  * @param[in] sptr Client to check.
  * @param[in] chptr Channel to check (NULL for non-channel targets).
@@ -754,34 +716,8 @@ static void send_history_batch(struct Client *sptr, const char *target,
   char iso_time[32];
   const char *cmd;
   const char *time_str;
-  struct Channel *chptr = NULL;
-  enum HistoryAccessMode access_mode = HISTORY_ACCESS_NONE;
-  const char *account = NULL;
-  int do_membership_filter = 0;
-
   if (count == 0)
     messages = NULL;
-
-  /* Check if membership-based filtering is needed for channels */
-  if (IsChannelName(target)) {
-    chptr = FindChannel(target);
-    if (chptr) {
-      /* If channel has +H (public history), no filtering */
-      if (chptr->mode.exmode & EXMODE_PUBLICHISTORY) {
-        do_membership_filter = 0;
-      } else if (ops_override && has_ops_override(sptr, chptr)) {
-        /* User has ops override privilege and requested :full */
-        do_membership_filter = 0;
-      } else if (cli_user(sptr) && cli_user(sptr)->account[0]) {
-        /* User is logged in - can do membership filtering */
-        access_mode = get_channel_access_mode(chptr);
-        account = cli_user(sptr)->account;
-        /* Only filter if access mode is not 'none' */
-        do_membership_filter = (access_mode != HISTORY_ACCESS_NONE);
-      }
-      /* If user is not logged in, no membership filtering possible */
-    }
-  }
 
   /* Generate batch ID */
   generate_batch_id(batchid, sizeof(batchid), sptr);
@@ -797,14 +733,6 @@ static void send_history_batch(struct Client *sptr, const char *target,
     /* Filter events based on event-playback capability */
     if (!should_send_message_type(sptr, msg->type))
       continue;
-
-    /* Apply membership-based filtering if enabled */
-    if (do_membership_filter && history_is_available()) {
-      int can_see = membership_can_see_message(account, target,
-                                                msg->timestamp, access_mode);
-      if (can_see <= 0)
-        continue;  /* User cannot see this message */
-    }
 
     cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
@@ -909,7 +837,6 @@ static int check_history_access(struct Client *sptr, const char *target,
                                  char *normalized_target, size_t normalized_len)
 {
   struct Channel *chptr;
-  struct Membership *member;
 
   if (IsChannelName(target)) {
     chptr = FindChannel(target);
@@ -923,23 +850,14 @@ static int check_history_access(struct Client *sptr, const char *target,
       return 0;  /* Public history - allow access */
     }
 
-    /* Check if user is on channel */
-    member = find_member_link(chptr, sptr);
-    if (!member) {
-      /* User not on channel - check if non-member access is allowed */
-      if (feature_bool(FEAT_CHATHISTORY_MEMBERSHIP_ONLY)) {
-        /* Strict mode: membership required */
-        return -1;
-      }
-      /* Less restrictive mode: allow non-members but enforce IRCv3 SHOULD:
-       * - Disallow if channel is secret (+s) or private (+p)
-       * - Disallow if user is banned from the channel
-       */
-      if (SecretChannel(chptr) || HiddenChannel(chptr))
-        return -1;
-      if (find_ban(sptr, chptr->banlist, EBAN_NONE, 0))
-        return -1;
-    }
+    /* Must be authenticated */
+    if (!IsAccount(sptr))
+      return -1;
+
+    /* Must be a current member of the channel */
+    if (!find_member_link(chptr, sptr))
+      return -1;
+
     /* For channels, normalized target is same as input */
     if (normalized_target && normalized_len > 0)
       ircd_strncpy(normalized_target, target, normalized_len - 1);

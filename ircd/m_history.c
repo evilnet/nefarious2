@@ -47,7 +47,7 @@
 #include "numeric.h"
 #include "send.h"
 
-/* #include <assert.h> -- Now using assert in ircd_log.h */
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -93,7 +93,7 @@ static int check_history_permission(struct Client *sptr, struct Channel *chptr,
 /** Handle HISTORY SET subcommand.
  * @param[in] sptr Client sending the command.
  * @param[in] chptr Target channel.
- * @param[in] setting Setting name (ACCESS, LIMIT, QUOTA).
+ * @param[in] setting Setting name (LIMIT, QUOTA).
  * @param[in] value New value.
  * @return 0 on success.
  */
@@ -112,21 +112,7 @@ static int history_set(struct Client *sptr, struct Channel *chptr,
   if (check_history_permission(sptr, chptr, setting) != 0)
     return 0;
 
-  if (ircd_strcmp(setting, "ACCESS") == 0) {
-    /* Validate access mode */
-    if (ircd_strcmp(value, "none") != 0 &&
-        ircd_strcmp(value, "kick-gap") != 0 &&
-        ircd_strcmp(value, "membership") != 0) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :HISTORY: Invalid ACCESS value. Use: none, kick-gap, or membership",
-                    sptr);
-      return 0;
-    }
-
-    ircd_strncpy(metadata_key, "history.access", sizeof(metadata_key) - 1);
-    ircd_strncpy(metadata_value, value, sizeof(metadata_value) - 1);
-  }
-  else if (ircd_strcmp(setting, "LIMIT") == 0) {
+  if (ircd_strcmp(setting, "LIMIT") == 0) {
     /* Validate limit (IRCops only - already checked in check_history_permission) */
     num_value = atoi(value);
     if (num_value <= 0 || num_value > 1000000) {
@@ -154,7 +140,7 @@ static int history_set(struct Client *sptr, struct Channel *chptr,
   }
   else {
     sendcmdto_one(&me, CMD_NOTICE, sptr,
-                  "%C :HISTORY: Unknown setting. Use: ACCESS, LIMIT, or QUOTA",
+                  "%C :HISTORY: Unknown setting. Use: LIMIT or QUOTA",
                   sptr);
     return 0;
   }
@@ -180,7 +166,7 @@ static int history_set(struct Client *sptr, struct Channel *chptr,
 /** Handle HISTORY GET subcommand.
  * @param[in] sptr Client sending the command.
  * @param[in] chptr Target channel.
- * @param[in] setting Setting name (ACCESS, LIMIT, QUOTA).
+ * @param[in] setting Setting name (LIMIT, QUOTA).
  * @return 0 on success.
  */
 static int history_get(struct Client *sptr, struct Channel *chptr,
@@ -196,16 +182,7 @@ static int history_get(struct Client *sptr, struct Channel *chptr,
     return 0;
   }
 
-  if (ircd_strcmp(setting, "ACCESS") == 0) {
-    ircd_strncpy(metadata_key, "history.access", sizeof(metadata_key) - 1);
-    /* Default based on feature flag */
-    switch (feature_int(FEAT_CHATHISTORY_DEFAULT_ACCESS)) {
-      case 0:  default_value = "none"; break;
-      case 2:  default_value = "membership"; break;
-      default: default_value = "kick-gap"; break;
-    }
-  }
-  else if (ircd_strcmp(setting, "LIMIT") == 0) {
+  if (ircd_strcmp(setting, "LIMIT") == 0) {
     ircd_strncpy(metadata_key, "history.limit", sizeof(metadata_key) - 1);
     default_value = "(server default)";
   }
@@ -215,7 +192,7 @@ static int history_get(struct Client *sptr, struct Channel *chptr,
   }
   else {
     sendcmdto_one(&me, CMD_NOTICE, sptr,
-                  "%C :HISTORY: Unknown setting. Use: ACCESS, LIMIT, or QUOTA",
+                  "%C :HISTORY: Unknown setting. Use: LIMIT or QUOTA",
                   sptr);
     return 0;
   }
@@ -280,7 +257,7 @@ int m_history(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (ircd_strcmp(subcmd, "SET") == 0) {
     if (parc < 5) {
       sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :Usage: HISTORY SET #channel <ACCESS|LIMIT|QUOTA> <value>",
+                    "%C :Usage: HISTORY SET #channel <LIMIT|QUOTA> <value>",
                     sptr);
       return 0;
     }
@@ -289,7 +266,7 @@ int m_history(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   else if (ircd_strcmp(subcmd, "GET") == 0) {
     if (parc < 4) {
       sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :Usage: HISTORY GET #channel <ACCESS|LIMIT|QUOTA>",
+                    "%C :Usage: HISTORY GET #channel <LIMIT|QUOTA>",
                     sptr);
       return 0;
     }

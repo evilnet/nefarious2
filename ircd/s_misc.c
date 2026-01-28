@@ -208,6 +208,9 @@ static void store_quit_events(struct Client *sptr, const char *comment)
   if (!MyUser(sptr))
     return;
 
+  /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
+   * not channel events (JOIN/PART/QUIT) which are metadata */
+
   /* Generate Unix timestamp (same for all channels) */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -242,11 +245,7 @@ static void store_quit_events(struct Client *sptr, const char *comment)
     history_store_message(msgid, timestamp, member->channel->chname, sender,
                           account, HISTORY_QUIT, comment ? comment : "");
 
-    /* Record membership leave for access control (QUIT treated as voluntary) */
-    if (history_is_available() && account) {
-      membership_record_leave(account, member->channel->chname,
-                               timestamp, MEMBERSHIP_LEAVE_QUIT);
-    }
+
   }
 }
 #endif /* USE_LMDB */

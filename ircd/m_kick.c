@@ -136,6 +136,9 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
+  /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
+   * not channel events (KICK) which are metadata */
+
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -277,13 +280,7 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Store KICK event in history */
   store_kick_event(sptr, chptr, who, comment);
 
-  /* Record membership leave for access control (KICK) */
-  if (history_is_available() && cli_user(who) && cli_user(who)->account[0]) {
-    char timestamp[HISTORY_TIMESTAMP_LEN];
-    history_format_timestamp(timestamp, sizeof(timestamp));
-    membership_record_leave(cli_user(who)->account, chptr->chname,
-                             timestamp, MEMBERSHIP_LEAVE_KICK);
-  }
+
 #endif
 
   make_zombie(member, who, cptr, sptr, chptr);
@@ -392,13 +389,7 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       }
 
 #ifdef USE_LMDB
-      /* Record membership leave for access control (KICK from server) */
-      if (history_is_available() && cli_user(who) && cli_user(who)->account[0]) {
-        char timestamp[HISTORY_TIMESTAMP_LEN];
-        history_format_timestamp(timestamp, sizeof(timestamp));
-        membership_record_leave(cli_user(who)->account, chptr->chname,
-                                 timestamp, MEMBERSHIP_LEAVE_KICK);
-      }
+
 #endif
 
       make_zombie(member, who, cptr, sptr, chptr);

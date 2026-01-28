@@ -1013,6 +1013,8 @@ struct Message msgtab[] = {
     { m_ignore, m_ignore, ms_metadataquery, m_ignore, m_ignore },
     "<target> [key|*] - Query metadata for account/channel (S2S only)"
   },
+
+
   {
     MSG_WEBPUSH,
     TOK_WEBPUSH,

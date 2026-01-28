@@ -110,6 +110,9 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
+  /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
+   * not channel events (JOIN/PART/etc) which are metadata */
+
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -757,12 +760,7 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
       ++chptr->nonsslusers;
     ++((cli_user(who))->joined);
 
-    /* Record membership join for access control (only for logged-in users) */
-    if (history_is_available() && cli_user(who)->account[0]) {
-      char timestamp[HISTORY_TIMESTAMP_LEN];
-      history_format_timestamp(timestamp, sizeof(timestamp));
-      membership_record_join(cli_user(who)->account, chptr->chname, timestamp);
-    }
+
   }
 }
 
@@ -5091,14 +5089,6 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                           (flags & CHFL_BANNED || !jbuf->jb_comment) ? "" : jbuf->jb_comment,
                           HISTORY_PART);
 
-    /* Record membership leave for access control (voluntary PART) */
-    if (history_is_available() && cli_user(jbuf->jb_source) &&
-        cli_user(jbuf->jb_source)->account[0]) {
-      char timestamp[HISTORY_TIMESTAMP_LEN];
-      history_format_timestamp(timestamp, sizeof(timestamp));
-      membership_record_leave(cli_user(jbuf->jb_source)->account,
-                               chan->chname, timestamp, MEMBERSHIP_LEAVE_PART);
-    }
 #endif
 
     /* XXX: Shouldn't we send a PART here anyway? */

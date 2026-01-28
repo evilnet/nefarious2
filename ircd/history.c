@@ -49,7 +49,12 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stdint.h>
 #include <sys/time.h>
+
+/* Forward declarations for quota functions */
+static int quota_increment(const char *channel, const char *account);
+static int quota_decrement(const char *channel, const char *account);
 
 /** LMDB environment */
 static MDB_env *history_env = NULL;
@@ -66,8 +71,10 @@ static MDB_dbi history_targets_dbi;
 /** Read markers database (IRCv3 draft/read-marker) */
 static MDB_dbi history_readmarkers_dbi;
 
-/** Membership tracking database (for CHATHISTORY access control) */
-static MDB_dbi history_membership_dbi;
+/** Per-user quota counter database
+ * Key: "channel\0account" -> count (uint32_t)
+ */
+static MDB_dbi history_quota_dbi;
 
 /** Flag indicating if history is available */
 static int history_available = 0;
@@ -79,7 +86,7 @@ static size_t history_map_size = 1UL * 1024 * 1024 * 1024;
 static history_channels_removed_cb channel_removed_callback = NULL;
 
 /** Maximum number of named databases */
-#define HISTORY_MAX_DBS 6
+#define HISTORY_MAX_DBS 7
 
 /** Key separator character */
 #define KEY_SEP '\0'
@@ -481,10 +488,10 @@ int history_init(const char *dbpath)
     return -1;
   }
 
-  /* Open membership tracking database */
-  rc = mdb_dbi_open(txn, "membership", MDB_CREATE, &history_membership_dbi);
+  /* Open per-user quota counter database */
+  rc = mdb_dbi_open(txn, "quotas", MDB_CREATE, &history_quota_dbi);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(membership) failed: %s",
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(quotas) failed: %s",
               mdb_strerror(rc));
     mdb_txn_abort(txn);
     mdb_env_close(history_env);
@@ -516,6 +523,7 @@ void history_shutdown(void)
   mdb_dbi_close(history_env, history_msgid_dbi);
   mdb_dbi_close(history_env, history_targets_dbi);
   mdb_dbi_close(history_env, history_readmarkers_dbi);
+  mdb_dbi_close(history_env, history_quota_dbi);
   mdb_env_close(history_env);
   history_env = NULL;
   history_available = 0;
@@ -652,6 +660,25 @@ store_retry:
         goto store_retry;
     }
     return -1;
+  }
+
+  /* Update quota counter for this user (if enabled and account is known) */
+  if (feature_bool(FEAT_CHATHISTORY_USER_QUOTA) && account && account[0]) {
+    int new_count = quota_increment(target, account);
+
+    /* Check if user just exceeded their quota and warn */
+    if (new_count > 0) {
+      int quota_pct = feature_int(FEAT_CHATHISTORY_USER_QUOTA_PCT);
+      int channel_limit = feature_int(FEAT_CHATHISTORY_MAX);
+      int max_allowed = (channel_limit * quota_pct) / 100;
+
+      /* Warn when first exceeding quota (at exactly max_allowed + 1) */
+      if (quota_pct > 0 && quota_pct < 100 && new_count == max_allowed + 1) {
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "history: user %s exceeded quota in %s (%d/%d messages, %d%%)",
+                  account, target, new_count, channel_limit, quota_pct);
+      }
+    }
   }
 
   return 0;
@@ -2025,8 +2052,17 @@ static int history_emergency_evict(void)
   char msg_target[CHANNELLEN + 1];
   char msg_timestamp[HISTORY_TIMESTAMP_LEN];
   char msg_msgid[HISTORY_MSGID_LEN];
+  struct HistoryMessage msg;
   int evicted = 0;
   int rc;
+  int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
+
+  /* Collect accounts to decrement quotas after commit (avoid nested txns) */
+  struct {
+    char target[CHANNELLEN + 1];
+    char account[ACCOUNTLEN + 1];
+  } quota_updates[EMERGENCY_EVICT_BATCH];
+  int quota_update_count = 0;
 
   if (!history_available)
     return -1;
@@ -2051,7 +2087,7 @@ static int history_emergency_evict(void)
   /* Evict oldest entries */
   rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
   while (rc == 0 && evicted < EMERGENCY_EVICT_BATCH) {
-    /* Parse key to get msgid for index cleanup */
+    /* Parse key to get target and msgid for index cleanup */
     if (parse_key(key.mv_data, key.mv_size,
                   msg_target, msg_timestamp, msg_msgid) == 0) {
       if (msg_msgid[0] != '\0') {
@@ -2059,6 +2095,19 @@ static int history_emergency_evict(void)
         msgid_key.mv_size = strlen(msg_msgid);
         msgid_key.mv_data = msg_msgid;
         mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+      }
+    }
+
+    /* Collect account info for quota decrement after commit */
+    if (quota_enabled && msg_target[0] != '\0' &&
+        quota_update_count < EMERGENCY_EVICT_BATCH) {
+      if (deserialize_message(data.mv_data, data.mv_size, &msg) == 0 &&
+          msg.account[0] != '\0') {
+        ircd_strncpy(quota_updates[quota_update_count].target, msg_target,
+                     CHANNELLEN);
+        ircd_strncpy(quota_updates[quota_update_count].account, msg.account,
+                     ACCOUNTLEN);
+        quota_update_count++;
       }
     }
 
@@ -2078,6 +2127,11 @@ static int history_emergency_evict(void)
               "history: emergency eviction commit failed: %s",
               mdb_strerror(rc));
     return -1;
+  }
+
+  /* Decrement quotas for evicted messages (now that main txn is committed) */
+  for (int i = 0; i < quota_update_count; i++) {
+    quota_decrement(quota_updates[i].target, quota_updates[i].account);
   }
 
   /* Update stats */
@@ -2156,11 +2210,21 @@ int history_evict_to_target(int target_percent)
   char msg_target[CHANNELLEN + 1];
   char msg_timestamp[HISTORY_TIMESTAMP_LEN];
   char msg_msgid[HISTORY_MSGID_LEN];
+  struct HistoryMessage msg;
   int evicted = 0;
   int current_util;
   int rc;
   int batch_count = 0;
   int max_batch = 1000;  /* Limit per transaction */
+  int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
+
+  /* Collect accounts to decrement quotas after commit (avoid nested txns) */
+  struct {
+    char target[CHANNELLEN + 1];
+    char account[ACCOUNTLEN + 1];
+  } *quota_updates = NULL;
+  int quota_update_count = 0;
+  int quota_update_capacity = 0;
 
   if (!history_available)
     return -1;
@@ -2176,6 +2240,12 @@ int history_evict_to_target(int target_percent)
             "history: eviction starting, util=%d%% target=%d%%",
             current_util, target_percent);
 
+  /* Allocate quota update buffer if enabled */
+  if (quota_enabled) {
+    quota_update_capacity = max_batch;
+    quota_updates = MyMalloc(quota_update_capacity * sizeof(*quota_updates));
+  }
+
   /* Evict oldest messages until we reach target */
   while (current_util > target_percent) {
     rc = mdb_txn_begin(history_env, NULL, 0, &txn);
@@ -2189,6 +2259,7 @@ int history_evict_to_target(int target_percent)
     }
 
     batch_count = 0;
+    quota_update_count = 0;
 
     /* Iterate from beginning (oldest entries) */
     rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
@@ -2202,6 +2273,19 @@ int history_evict_to_target(int target_percent)
           msgid_key.mv_size = strlen(msg_msgid);
           msgid_key.mv_data = msg_msgid;
           mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+        }
+      }
+
+      /* Collect account info for quota decrement after commit */
+      if (quota_enabled && quota_updates && msg_target[0] != '\0' &&
+          quota_update_count < quota_update_capacity) {
+        if (deserialize_message(data.mv_data, data.mv_size, &msg) == 0 &&
+            msg.account[0] != '\0') {
+          ircd_strncpy(quota_updates[quota_update_count].target, msg_target,
+                       CHANNELLEN);
+          ircd_strncpy(quota_updates[quota_update_count].account, msg.account,
+                       ACCOUNTLEN);
+          quota_update_count++;
         }
       }
 
@@ -2228,6 +2312,11 @@ int history_evict_to_target(int target_percent)
       break;
     }
 
+    /* Decrement quotas for evicted messages */
+    for (int i = 0; i < quota_update_count; i++) {
+      quota_decrement(quota_updates[i].target, quota_updates[i].account);
+    }
+
     /* Recheck utilization */
     current_util = history_db_utilization();
     if (current_util < 0)
@@ -2237,6 +2326,10 @@ int history_evict_to_target(int target_percent)
     if (batch_count == 0)
       break;
   }
+
+  /* Free quota update buffer */
+  if (quota_updates)
+    MyFree(quota_updates);
 
   /* Update eviction stats */
   last_eviction_count = evicted;
@@ -2432,283 +2525,32 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   }
 }
 
-/*
- * Membership Tracking Implementation
- *
- * Tracks membership periods and ban periods for CHATHISTORY access control.
- *
- * Storage format (simple text for easy debugging):
- *   first_join=TIMESTAMP
- *   current_join=TIMESTAMP (or 0 if not a member)
- *   gaps=leave_ts,rejoin_ts,type|leave_ts,rejoin_ts,type|...
- *   bans=ban_ts,unban_ts|ban_ts,unban_ts|...
- *
- * Key: "account\0channel"
+
+/* ========== Per-User Quota Tracking ========== */
+
+/** Increment quota counter for a user in a channel.
+ * @param[in] channel Channel name.
+ * @param[in] account Account name (NULL = anonymous, not tracked).
+ * @return New count, or -1 on error.
  */
-
-/** Maximum size of membership record value */
-#define MEMBERSHIP_MAX_VALUE 4096
-
-/** Maximum number of gaps to track per membership */
-#define MEMBERSHIP_MAX_GAPS 100
-
-/** Maximum number of ban periods to track */
-#define MEMBERSHIP_MAX_BANS 50
-
-/** Helper: build membership key from account and channel */
-static int build_membership_key(char *keybuf, size_t keylen,
-                                 const char *account, const char *channel)
-{
-  size_t account_len = strlen(account);
-  size_t channel_len = strlen(channel);
-
-  if (account_len + 1 + channel_len >= keylen)
-    return -1;
-
-  memcpy(keybuf, account, account_len);
-  keybuf[account_len] = '\0';
-  memcpy(keybuf + account_len + 1, channel, channel_len);
-
-  return account_len + 1 + channel_len;
-}
-
-/** Helper: parse membership value into components */
-static int parse_membership_value(const char *value, size_t vallen,
-                                   char *first_join, char *current_join,
-                                   char *gaps_buf, size_t gaps_len,
-                                   char *bans_buf, size_t bans_len)
-{
-  const char *line, *end, *eq;
-  size_t linelen;
-
-  if (first_join) first_join[0] = '\0';
-  if (current_join) current_join[0] = '\0';
-  if (gaps_buf) gaps_buf[0] = '\0';
-  if (bans_buf) bans_buf[0] = '\0';
-
-  line = value;
-  end = value + vallen;
-
-  while (line < end) {
-    /* Find end of line */
-    const char *nl = memchr(line, '\n', end - line);
-    linelen = nl ? (size_t)(nl - line) : (size_t)(end - line);
-
-    eq = memchr(line, '=', linelen);
-    if (eq) {
-      size_t keypart_len = eq - line;
-      const char *valpart = eq + 1;
-      size_t valpart_len = linelen - keypart_len - 1;
-
-      if (keypart_len == 10 && memcmp(line, "first_join", 10) == 0) {
-        if (first_join && valpart_len < HISTORY_TIMESTAMP_LEN) {
-          memcpy(first_join, valpart, valpart_len);
-          first_join[valpart_len] = '\0';
-        }
-      } else if (keypart_len == 12 && memcmp(line, "current_join", 12) == 0) {
-        if (current_join && valpart_len < HISTORY_TIMESTAMP_LEN) {
-          memcpy(current_join, valpart, valpart_len);
-          current_join[valpart_len] = '\0';
-        }
-      } else if (keypart_len == 4 && memcmp(line, "gaps", 4) == 0) {
-        if (gaps_buf && valpart_len < gaps_len) {
-          memcpy(gaps_buf, valpart, valpart_len);
-          gaps_buf[valpart_len] = '\0';
-        }
-      } else if (keypart_len == 4 && memcmp(line, "bans", 4) == 0) {
-        if (bans_buf && valpart_len < bans_len) {
-          memcpy(bans_buf, valpart, valpart_len);
-          bans_buf[valpart_len] = '\0';
-        }
-      }
-    }
-
-    line = nl ? nl + 1 : end;
-  }
-
-  return 0;
-}
-
-/** Helper: compare timestamps (returns -1, 0, or 1) */
-static int compare_timestamps(const char *ts1, const char *ts2)
-{
-  /* Timestamps are "seconds.milliseconds" format */
-  double t1 = strtod(ts1, NULL);
-  double t2 = strtod(ts2, NULL);
-
-  if (t1 < t2) return -1;
-  if (t1 > t2) return 1;
-  return 0;
-}
-
-int membership_record_join(const char *account, const char *channel,
-                            const char *timestamp)
+static int quota_increment(const char *channel, const char *account)
 {
   MDB_txn *txn;
   MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 2];
-  char valbuf[MEMBERSHIP_MAX_VALUE];
-  char first_join[HISTORY_TIMESTAMP_LEN] = "";
-  char current_join[HISTORY_TIMESTAMP_LEN] = "";
-  char gaps_buf[2048] = "";
-  char bans_buf[1024] = "";
+  char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
+  uint32_t count = 0;
 
-  if (!history_available || !account || !channel || !timestamp)
+  if (!history_available || !channel)
     return -1;
 
-  keylen = build_membership_key(keybuf, sizeof(keybuf), account, channel);
-  if (keylen < 0)
-    return -1;
-
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
-
-  /* Try to get existing record */
-  rc = mdb_get(txn, history_membership_dbi, &key, &data);
-  if (rc == 0 && data.mv_size > 0) {
-    /* Parse existing record */
-    parse_membership_value(data.mv_data, data.mv_size,
-                           first_join, current_join,
-                           gaps_buf, sizeof(gaps_buf),
-                           bans_buf, sizeof(bans_buf));
-
-    /* If already a member (current_join != 0), this is a no-op */
-    if (current_join[0] && strcmp(current_join, "0") != 0) {
-      mdb_txn_abort(txn);
-      return 0;
-    }
-  }
-
-  /* Set first_join if this is the first time */
-  if (!first_join[0]) {
-    ircd_strncpy(first_join, timestamp, sizeof(first_join) - 1);
-  }
-
-  /* Set current_join to now */
-  ircd_strncpy(current_join, timestamp, sizeof(current_join) - 1);
-
-  /* Build new value */
-  ircd_snprintf(0, valbuf, sizeof(valbuf),
-                "first_join=%s\ncurrent_join=%s\ngaps=%s\nbans=%s\n",
-                first_join, current_join, gaps_buf, bans_buf);
-
-  data.mv_data = valbuf;
-  data.mv_size = strlen(valbuf);
-
-  rc = mdb_put(txn, history_membership_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return -1;
-  }
-
-  rc = mdb_txn_commit(txn);
-  return rc == 0 ? 0 : -1;
-}
-
-int membership_record_leave(const char *account, const char *channel,
-                             const char *timestamp,
-                             enum MembershipLeaveType leave_type)
-{
-  MDB_txn *txn;
-  MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 2];
-  char valbuf[MEMBERSHIP_MAX_VALUE];
-  char first_join[HISTORY_TIMESTAMP_LEN] = "";
-  char current_join[HISTORY_TIMESTAMP_LEN] = "";
-  char gaps_buf[2048] = "";
-  char bans_buf[1024] = "";
-  char new_gap[64];
-  int keylen, rc;
-
-  if (!history_available || !account || !channel || !timestamp)
-    return -1;
-
-  keylen = build_membership_key(keybuf, sizeof(keybuf), account, channel);
-  if (keylen < 0)
-    return -1;
-
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
-
-  /* Get existing record - must exist for leave */
-  rc = mdb_get(txn, history_membership_dbi, &key, &data);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return rc == MDB_NOTFOUND ? 0 : -1;  /* No record = not a member, OK */
-  }
-
-  /* Parse existing record */
-  parse_membership_value(data.mv_data, data.mv_size,
-                         first_join, current_join,
-                         gaps_buf, sizeof(gaps_buf),
-                         bans_buf, sizeof(bans_buf));
-
-  /* If not currently a member (current_join == 0), this is a no-op */
-  if (!current_join[0] || strcmp(current_join, "0") == 0) {
-    mdb_txn_abort(txn);
+  /* Anonymous users not tracked for quotas */
+  if (!account || !account[0])
     return 0;
-  }
 
-  /* Add new gap: leave_ts,0,type (0 means not yet rejoined) */
-  ircd_snprintf(0, new_gap, sizeof(new_gap), "%s,0,%d", timestamp, leave_type);
-  if (gaps_buf[0]) {
-    /* Append to existing gaps */
-    strncat(gaps_buf, "|", sizeof(gaps_buf) - strlen(gaps_buf) - 1);
-    strncat(gaps_buf, new_gap, sizeof(gaps_buf) - strlen(gaps_buf) - 1);
-  } else {
-    ircd_strncpy(gaps_buf, new_gap, sizeof(gaps_buf) - 1);
-  }
-
-  /* Clear current_join (no longer a member) */
-  ircd_strncpy(current_join, "0", sizeof(current_join) - 1);
-
-  /* Build new value */
-  ircd_snprintf(0, valbuf, sizeof(valbuf),
-                "first_join=%s\ncurrent_join=%s\ngaps=%s\nbans=%s\n",
-                first_join, current_join, gaps_buf, bans_buf);
-
-  data.mv_data = valbuf;
-  data.mv_size = strlen(valbuf);
-
-  rc = mdb_put(txn, history_membership_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return -1;
-  }
-
-  rc = mdb_txn_commit(txn);
-  return rc == 0 ? 0 : -1;
-}
-
-int membership_record_ban(const char *account, const char *channel,
-                           const char *timestamp)
-{
-  MDB_txn *txn;
-  MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 2];
-  char valbuf[MEMBERSHIP_MAX_VALUE];
-  char first_join[HISTORY_TIMESTAMP_LEN] = "";
-  char current_join[HISTORY_TIMESTAMP_LEN] = "";
-  char gaps_buf[2048] = "";
-  char bans_buf[1024] = "";
-  char new_ban[48];
-  int keylen, rc;
-
-  if (!history_available || !account || !channel || !timestamp)
-    return -1;
-
-  keylen = build_membership_key(keybuf, sizeof(keybuf), account, channel);
-  if (keylen < 0)
-    return -1;
+  /* Build key: channel\0account */
+  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
+                          channel, KEY_SEP, account);
 
   rc = mdb_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0)
@@ -2717,342 +2559,145 @@ int membership_record_ban(const char *account, const char *channel,
   key.mv_data = keybuf;
   key.mv_size = keylen;
 
-  /* Try to get existing record */
-  rc = mdb_get(txn, history_membership_dbi, &key, &data);
-  if (rc == 0 && data.mv_size > 0) {
-    parse_membership_value(data.mv_data, data.mv_size,
-                           first_join, current_join,
-                           gaps_buf, sizeof(gaps_buf),
-                           bans_buf, sizeof(bans_buf));
+  /* Get current count */
+  rc = mdb_get(txn, history_quota_dbi, &key, &data);
+  if (rc == 0 && data.mv_size == sizeof(uint32_t)) {
+    memcpy(&count, data.mv_data, sizeof(uint32_t));
+  }
 
-    /* If currently a member, ban doesn't create a "banned while absent" period */
-    if (current_join[0] && strcmp(current_join, "0") != 0) {
+  /* Increment */
+  count++;
+
+  /* Store new count */
+  data.mv_data = &count;
+  data.mv_size = sizeof(uint32_t);
+
+  rc = mdb_put(txn, history_quota_dbi, &key, &data, 0);
+  if (rc != 0) {
+    mdb_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdb_txn_commit(txn);
+  if (rc != 0)
+    return -1;
+
+  return (int)count;
+}
+
+/** Decrement quota counter for a user in a channel.
+ * @param[in] channel Channel name.
+ * @param[in] account Account name.
+ * @return New count, or -1 on error.
+ */
+static int quota_decrement(const char *channel, const char *account)
+{
+  MDB_txn *txn;
+  MDB_val key, data;
+  char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
+  int keylen, rc;
+  uint32_t count = 0;
+
+  if (!history_available || !channel)
+    return -1;
+
+  if (!account || !account[0])
+    return 0;
+
+  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
+                          channel, KEY_SEP, account);
+
+  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  if (rc != 0)
+    return -1;
+
+  key.mv_data = keybuf;
+  key.mv_size = keylen;
+
+  rc = mdb_get(txn, history_quota_dbi, &key, &data);
+  if (rc == 0 && data.mv_size == sizeof(uint32_t)) {
+    memcpy(&count, data.mv_data, sizeof(uint32_t));
+    if (count > 0)
+      count--;
+
+    data.mv_data = &count;
+    data.mv_size = sizeof(uint32_t);
+
+    rc = mdb_put(txn, history_quota_dbi, &key, &data, 0);
+    if (rc != 0) {
       mdb_txn_abort(txn);
-      return 0;
+      return -1;
     }
-  } else if (rc == MDB_NOTFOUND) {
-    /* No record exists - user was never a member, so ban creates a period */
-    /* first_join stays empty, current_join is 0 */
-  }
-
-  /* Add new ban period: ban_ts,0 (0 means not yet unbanned) */
-  ircd_snprintf(0, new_ban, sizeof(new_ban), "%s,0", timestamp);
-  if (bans_buf[0]) {
-    /* Append to existing bans */
-    strncat(bans_buf, "|", sizeof(bans_buf) - strlen(bans_buf) - 1);
-    strncat(bans_buf, new_ban, sizeof(bans_buf) - strlen(bans_buf) - 1);
-  } else {
-    ircd_strncpy(bans_buf, new_ban, sizeof(bans_buf) - 1);
-  }
-
-  /* Build new value */
-  ircd_snprintf(0, valbuf, sizeof(valbuf),
-                "first_join=%s\ncurrent_join=%s\ngaps=%s\nbans=%s\n",
-                first_join[0] ? first_join : "",
-                current_join[0] ? current_join : "0",
-                gaps_buf, bans_buf);
-
-  data.mv_data = valbuf;
-  data.mv_size = strlen(valbuf);
-
-  rc = mdb_put(txn, history_membership_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return -1;
   }
 
   rc = mdb_txn_commit(txn);
-  return rc == 0 ? 0 : -1;
-}
-
-int membership_record_unban(const char *account, const char *channel,
-                             const char *timestamp)
-{
-  MDB_txn *txn;
-  MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 2];
-  char valbuf[MEMBERSHIP_MAX_VALUE];
-  char first_join[HISTORY_TIMESTAMP_LEN] = "";
-  char current_join[HISTORY_TIMESTAMP_LEN] = "";
-  char gaps_buf[2048] = "";
-  char bans_buf[1024] = "";
-  char new_bans[1024] = "";
-  char *ban, *saveptr;
-  int keylen, rc, found_open = 0;
-
-  if (!history_available || !account || !channel || !timestamp)
-    return -1;
-
-  keylen = build_membership_key(keybuf, sizeof(keybuf), account, channel);
-  if (keylen < 0)
-    return -1;
-
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
-
-  /* Get existing record */
-  rc = mdb_get(txn, history_membership_dbi, &key, &data);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return rc == MDB_NOTFOUND ? 0 : -1;  /* No record = nothing to unban */
-  }
-
-  parse_membership_value(data.mv_data, data.mv_size,
-                         first_join, current_join,
-                         gaps_buf, sizeof(gaps_buf),
-                         bans_buf, sizeof(bans_buf));
-
-  /* Find and close the most recent open ban (ends with ,0) */
-  ban = strtok_r(bans_buf, "|", &saveptr);
-  while (ban) {
-    char *comma = strchr(ban, ',');
-    if (comma && strcmp(comma + 1, "0") == 0 && !found_open) {
-      /* Close this open ban period */
-      found_open = 1;
-      if (new_bans[0])
-        strncat(new_bans, "|", sizeof(new_bans) - strlen(new_bans) - 1);
-      /* Replace the ,0 with ,unban_timestamp */
-      *comma = '\0';
-      strncat(new_bans, ban, sizeof(new_bans) - strlen(new_bans) - 1);
-      strncat(new_bans, ",", sizeof(new_bans) - strlen(new_bans) - 1);
-      strncat(new_bans, timestamp, sizeof(new_bans) - strlen(new_bans) - 1);
-    } else {
-      /* Keep as-is */
-      if (new_bans[0])
-        strncat(new_bans, "|", sizeof(new_bans) - strlen(new_bans) - 1);
-      strncat(new_bans, ban, sizeof(new_bans) - strlen(new_bans) - 1);
-    }
-    ban = strtok_r(NULL, "|", &saveptr);
-  }
-
-  /* Build new value */
-  ircd_snprintf(0, valbuf, sizeof(valbuf),
-                "first_join=%s\ncurrent_join=%s\ngaps=%s\nbans=%s\n",
-                first_join, current_join, gaps_buf, new_bans);
-
-  data.mv_data = valbuf;
-  data.mv_size = strlen(valbuf);
-
-  rc = mdb_put(txn, history_membership_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return -1;
-  }
-
-  rc = mdb_txn_commit(txn);
-  return rc == 0 ? 0 : -1;
+  return (int)count;
 }
 
-int membership_can_see_message(const char *account, const char *channel,
-                                const char *msg_timestamp,
-                                enum HistoryAccessMode access_mode)
+/** Get quota count for a user in a channel.
+ * @param[in] channel Channel name.
+ * @param[in] account Account name.
+ * @return Message count, or 0 if not found.
+ */
+int history_quota_get_count(const char *channel, const char *account)
 {
   MDB_txn *txn;
   MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 2];
-  char first_join[HISTORY_TIMESTAMP_LEN] = "";
-  char current_join[HISTORY_TIMESTAMP_LEN] = "";
-  char gaps_buf[2048] = "";
-  char bans_buf[1024] = "";
-  char *period, *saveptr;
+  char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
+  uint32_t count = 0;
 
-  if (!history_available || !account || !channel || !msg_timestamp)
-    return -1;
+  if (!history_available || !channel || !account || !account[0])
+    return 0;
 
-  /* Access mode NONE = always visible */
-  if (access_mode == HISTORY_ACCESS_NONE)
-    return 1;
-
-  keylen = build_membership_key(keybuf, sizeof(keybuf), account, channel);
-  if (keylen < 0)
-    return -1;
+  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
+                          channel, KEY_SEP, account);
 
   rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
   if (rc != 0)
-    return -1;
-
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
-
-  rc = mdb_get(txn, history_membership_dbi, &key, &data);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    /* No membership record = never was a member = always blocked */
-    return 0;
-  }
-
-  parse_membership_value(data.mv_data, data.mv_size,
-                         first_join, current_join,
-                         gaps_buf, sizeof(gaps_buf),
-                         bans_buf, sizeof(bans_buf));
-
-  mdb_txn_abort(txn);
-
-  /* Check 1: Message before first join is always blocked */
-  if (first_join[0] && compare_timestamps(msg_timestamp, first_join) < 0)
     return 0;
 
-  /* Check 2: Ban periods ALWAYS block (key concern) */
-  if (bans_buf[0]) {
-    char bans_copy[1024];
-    ircd_strncpy(bans_copy, bans_buf, sizeof(bans_copy) - 1);
-    period = strtok_r(bans_copy, "|", &saveptr);
-    while (period) {
-      char *comma = strchr(period, ',');
-      if (comma) {
-        char ban_start[HISTORY_TIMESTAMP_LEN];
-        char ban_end[HISTORY_TIMESTAMP_LEN];
-
-        *comma = '\0';
-        ircd_strncpy(ban_start, period, sizeof(ban_start) - 1);
-        ircd_strncpy(ban_end, comma + 1, sizeof(ban_end) - 1);
-
-        /* Check if message is within ban period */
-        if (compare_timestamps(msg_timestamp, ban_start) >= 0) {
-          /* After ban start - check if before unban (or still banned) */
-          if (ban_end[0] == '0' || compare_timestamps(msg_timestamp, ban_end) <= 0) {
-            return 0;  /* Blocked by ban period */
-          }
-        }
-      }
-      period = strtok_r(NULL, "|", &saveptr);
-    }
-  }
-
-  /* Check 3: Gap periods based on access mode */
-  if (gaps_buf[0]) {
-    char gaps_copy[2048];
-    ircd_strncpy(gaps_copy, gaps_buf, sizeof(gaps_copy) - 1);
-    period = strtok_r(gaps_copy, "|", &saveptr);
-    while (period) {
-      char *comma1 = strchr(period, ',');
-      if (comma1) {
-        char *comma2 = strchr(comma1 + 1, ',');
-        if (comma2) {
-          char leave_ts[HISTORY_TIMESTAMP_LEN];
-          char rejoin_ts[HISTORY_TIMESTAMP_LEN];
-          int leave_type;
-
-          *comma1 = '\0';
-          *comma2 = '\0';
-          ircd_strncpy(leave_ts, period, sizeof(leave_ts) - 1);
-          ircd_strncpy(rejoin_ts, comma1 + 1, sizeof(rejoin_ts) - 1);
-          leave_type = atoi(comma2 + 1);
-
-          /* Check if message is within this gap */
-          if (compare_timestamps(msg_timestamp, leave_ts) >= 0) {
-            /* After leave - check if before rejoin (or still not rejoined) */
-            if (rejoin_ts[0] == '0' || compare_timestamps(msg_timestamp, rejoin_ts) <= 0) {
-              /* Message is in a gap period */
-
-              /* KICK always blocks in both modes */
-              if (leave_type == MEMBERSHIP_LEAVE_KICK)
-                return 0;
-
-              /* PART only blocks in MEMBERSHIP mode (not kick-gap) */
-              if (leave_type == MEMBERSHIP_LEAVE_PART &&
-                  access_mode == HISTORY_ACCESS_MEMBERSHIP)
-                return 0;
-
-              /* QUIT treated as PART */
-              if (leave_type == MEMBERSHIP_LEAVE_QUIT &&
-                  access_mode == HISTORY_ACCESS_MEMBERSHIP)
-                return 0;
-            }
-          }
-        }
-      }
-      period = strtok_r(NULL, "|", &saveptr);
-    }
-  }
-
-  /* Passed all checks - message is visible */
-  return 1;
-}
-
-int membership_get_info(const char *account, const char *channel,
-                         char *first_join, int *is_member)
-{
-  MDB_txn *txn;
-  MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 2];
-  char stored_first_join[HISTORY_TIMESTAMP_LEN] = "";
-  char stored_current_join[HISTORY_TIMESTAMP_LEN] = "";
-  int keylen, rc;
-
-  if (first_join) first_join[0] = '\0';
-  if (is_member) *is_member = 0;
-
-  if (!history_available || !account || !channel)
-    return -1;
-
-  keylen = build_membership_key(keybuf, sizeof(keybuf), account, channel);
-  if (keylen < 0)
-    return -1;
-
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
-  if (rc != 0)
-    return -1;
-
   key.mv_data = keybuf;
   key.mv_size = keylen;
 
-  rc = mdb_get(txn, history_membership_dbi, &key, &data);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return rc == MDB_NOTFOUND ? 1 : -1;
+  rc = mdb_get(txn, history_quota_dbi, &key, &data);
+  if (rc == 0 && data.mv_size == sizeof(uint32_t)) {
+    memcpy(&count, data.mv_data, sizeof(uint32_t));
   }
-
-  parse_membership_value(data.mv_data, data.mv_size,
-                         stored_first_join, stored_current_join,
-                         NULL, 0, NULL, 0);
 
   mdb_txn_abort(txn);
-
-  if (first_join && stored_first_join[0])
-    ircd_strncpy(first_join, stored_first_join, HISTORY_TIMESTAMP_LEN - 1);
-
-  if (is_member)
-    *is_member = (stored_current_join[0] && strcmp(stored_current_join, "0") != 0);
-
-  return 0;
+  return (int)count;
 }
 
-int membership_clear(const char *account, const char *channel)
+/** Check if a user is over their quota for a channel.
+ * @param[in] channel Channel name.
+ * @param[in] account Account name.
+ * @param[in] channel_limit Total messages allowed in channel.
+ * @return 1 if over quota, 0 if not.
+ */
+int history_quota_check(const char *channel, const char *account, int channel_limit)
 {
-  MDB_txn *txn;
-  MDB_val key;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 2];
-  int keylen, rc;
+  int count, quota_pct, max_allowed;
 
-  if (!history_available || !account || !channel)
-    return -1;
+  if (!feature_bool(FEAT_CHATHISTORY_USER_QUOTA))
+    return 0;  /* Quotas disabled */
 
-  keylen = build_membership_key(keybuf, sizeof(keybuf), account, channel);
-  if (keylen < 0)
-    return -1;
+  if (!account || !account[0])
+    return 0;  /* Anonymous users not quota-limited */
 
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
+  quota_pct = feature_int(FEAT_CHATHISTORY_USER_QUOTA_PCT);
+  if (quota_pct <= 0 || quota_pct >= 100)
+    return 0;  /* Invalid or disabled quota */
 
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
+  count = history_quota_get_count(channel, account);
+  max_allowed = (channel_limit * quota_pct) / 100;
 
-  rc = mdb_del(txn, history_membership_dbi, &key, NULL);
-  if (rc != 0 && rc != MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
-    return -1;
-  }
-
-  rc = mdb_txn_commit(txn);
-  return rc == 0 ? 0 : -1;
+  return (count >= max_allowed) ? 1 : 0;
 }
+
 
 #else /* !USE_LMDB */
 
@@ -3264,57 +2909,17 @@ void history_set_channel_removed_callback(history_channels_removed_cb cb)
   (void)cb;
 }
 
-/* Membership tracking stubs */
-int membership_record_join(const char *account, const char *channel,
-                            const char *timestamp)
+/* Quota tracking stubs */
+int history_quota_get_count(const char *channel, const char *account)
 {
-  (void)account; (void)channel; (void)timestamp;
-  return -1;
+  (void)channel; (void)account;
+  return 0;
 }
 
-int membership_record_leave(const char *account, const char *channel,
-                             const char *timestamp,
-                             enum MembershipLeaveType leave_type)
+int history_quota_check(const char *channel, const char *account, int channel_limit)
 {
-  (void)account; (void)channel; (void)timestamp; (void)leave_type;
-  return -1;
-}
-
-int membership_record_ban(const char *account, const char *channel,
-                           const char *timestamp)
-{
-  (void)account; (void)channel; (void)timestamp;
-  return -1;
-}
-
-int membership_record_unban(const char *account, const char *channel,
-                             const char *timestamp)
-{
-  (void)account; (void)channel; (void)timestamp;
-  return -1;
-}
-
-int membership_can_see_message(const char *account, const char *channel,
-                                const char *msg_timestamp,
-                                enum HistoryAccessMode access_mode)
-{
-  (void)account; (void)channel; (void)msg_timestamp; (void)access_mode;
-  return 1;  /* Default to visible when no LMDB */
-}
-
-int membership_get_info(const char *account, const char *channel,
-                         char *first_join, int *is_member)
-{
-  (void)account; (void)channel;
-  if (first_join) first_join[0] = '\0';
-  if (is_member) *is_member = 0;
-  return -1;
-}
-
-int membership_clear(const char *account, const char *channel)
-{
-  (void)account; (void)channel;
-  return -1;
+  (void)channel; (void)account; (void)channel_limit;
+  return 0;  /* Never over quota when no LMDB */
 }
 
 #endif /* USE_LMDB */

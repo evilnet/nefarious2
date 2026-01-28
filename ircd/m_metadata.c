@@ -1186,8 +1186,7 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       return 0;
   } else {
     target_client = FindUser(target);
-    /* For MDQ responses from services, target might be offline account */
-    if (!target_client && !is_from_services)
+    if (!target_client)
       return 0;
   }
 
