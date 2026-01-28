@@ -983,6 +983,26 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
   return NULL;
 }
 
+/** Table mapping metadata keys to user mode flags for bidirectional sync.
+ * When metadata is set/cleared, the corresponding mode flag is updated.
+ * For normal keys: value present & non-"0" = set flag; absent = clear.
+ * For inverted keys: value "0"/empty/NULL = set flag; anything else = clear.
+ */
+static const struct {
+  const char *key;
+  enum Flag flag;
+  int invert;  /**< 1 = value "0"/empty means set flag (for chathistory.pm) */
+} metadata_mode_sync[] = {
+  { "umode.invisible",       FLAG_INVISIBLE,       0 },
+  { "umode.nochan",          FLAG_NOCHAN,           0 },
+  { "umode.commonchansonly", FLAG_COMMONCHANSONLY,  0 },
+  { "umode.accountonly",     FLAG_ACCOUNTONLY,       0 },
+  { "umode.privdeaf",        FLAG_PRIVDEAF,          0 },
+  { "chathistory.nostorage", FLAG_NOSTORAGE,        0 },
+  { "chathistory.pm",        FLAG_PM_OPTOUT,        1 },
+  { NULL, 0, 0 }
+};
+
 /** Set metadata for a client.
  * For logged-in users, also persists to LMDB.
  * @param[in] cptr Client to set metadata on.
@@ -1047,6 +1067,30 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
     /* Delete from LMDB for logged-in users */
     if (account && metadata_lmdb_is_available()) {
       metadata_account_set(account, key, NULL);
+    }
+  }
+
+  /* Sync metadata keys with user mode flags */
+  if (IsUser(cptr)) {
+    int i;
+    for (i = 0; metadata_mode_sync[i].key; i++) {
+      if (ircd_strcmp(key, metadata_mode_sync[i].key) == 0) {
+        if (metadata_mode_sync[i].invert) {
+          /* Inverted: value "0" or empty = set flag; NULL or truthy = clear flag.
+           * For chathistory.pm: "0" = opted out (flag set), deleted = not opted out (flag clear). */
+          if (value && (value[0] == '\0' || value[0] == '0'))
+            SetFlag(cptr, metadata_mode_sync[i].flag);
+          else
+            ClrFlag(cptr, metadata_mode_sync[i].flag);
+        } else {
+          /* Normal: value present & truthy = set flag; NULL/empty/"0" = clear flag */
+          if (value && value[0] != '\0' && value[0] != '0')
+            SetFlag(cptr, metadata_mode_sync[i].flag);
+          else
+            ClrFlag(cptr, metadata_mode_sync[i].flag);
+        }
+        break;
+      }
     }
   }
 

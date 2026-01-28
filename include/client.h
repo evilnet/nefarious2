@@ -265,6 +265,7 @@ enum Flag
     FLAG_SETHOST_PENDING,           /**< Async SETHOST password verification in progress */
 
     FLAG_NOSTORAGE,                 /**< User's messages not stored in chathistory (+Y) */
+    FLAG_PM_OPTOUT,                 /**< User opted out of PM history storage (+y) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -912,6 +913,7 @@ struct Client {
 #define IsDeaf(x)               HasFlag(x, FLAG_DEAF)
 /** Return non-zero if the client has set mode +Y (no history storage). */
 #define IsNoStorage(x)          HasFlag(x, FLAG_NOSTORAGE)
+#define IsPMOptout(x)           HasFlag(x, FLAG_PM_OPTOUT)
 /** Return non-zero if the client has been IP-checked for clones. */
 #define IsIPChecked(x)          HasFlag(x, FLAG_IPCHECK)
 /** Return non-zero if we have received an ident response for the client. */
@@ -1050,6 +1052,7 @@ struct Client {
 #define SetDeaf(x)              SetFlag(x, FLAG_DEAF)
 /** Mark a client as having mode +Y (no history storage). */
 #define SetNoStorage(x)         SetFlag(x, FLAG_NOSTORAGE)
+#define SetPMOptout(x)          SetFlag(x, FLAG_PM_OPTOUT)
 /** Mark a client as having mode +g (debugging). */
 #define SetDebug(x)             SetFlag(x, FLAG_DEBUG)
 /** Mark a client as having ident looked up. */
@@ -1185,6 +1188,7 @@ struct Client {
 #define ClearDeaf(x)            ClrFlag(x, FLAG_DEAF)
 /** Remove mode +Y (no history storage) from the client. */
 #define ClearNoStorage(x)       ClrFlag(x, FLAG_NOSTORAGE)
+#define ClearPMOptout(x)        ClrFlag(x, FLAG_PM_OPTOUT)
 /** Remove mode +g (debugging) from the client. */
 #define ClearDebug(x)           ClrFlag(x, FLAG_DEBUG)
 /** Remove the client's IP-checked flag. */

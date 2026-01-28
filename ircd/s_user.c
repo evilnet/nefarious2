@@ -46,6 +46,7 @@
 #include "list.h"
 #include "mark.h"
 #include "match.h"
+#include "metadata.h"
 #include "motd.h"
 #include "msg.h"
 #include "msgq.h"
@@ -466,33 +467,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
     update_load();
     motd_signon(sptr);
 
-    /* PM chathistory policy notification (feature-gated) */
-    if (feature_bool(FEAT_CHATHISTORY_PM_NOTICE) &&
-        feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
-      int consent = feature_int(FEAT_CHATHISTORY_PRIVATE_CONSENT);
-      const char *policy, *action;
-
-      if (consent == 0) {
-        policy = "private messages are stored by default";
-        action = "To opt-out: /METADATA * SET chathistory.pm * :0";
-      } else if (consent == 1) {
-        policy = "private messages are stored if either party opts in (opt-out overrides)";
-        action = "To opt-in: /METADATA * SET chathistory.pm * :1 | To opt-out: /METADATA * SET chathistory.pm * :0";
-      } else {
-        policy = "private messages are stored only if both parties opt in";
-        action = "To opt-in: /METADATA * SET chathistory.pm * :1";
-      }
-
-      if (CapActive(sptr, CAP_STANDARDREPLIES)) {
-        /* IRCv3 standard-replies NOTE */
-        send_note(sptr, "CHATHISTORY", "PM_POLICY", policy, action);
-      } else {
-        /* Fallback NOTICE for all clients */
-        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :PM history: %s. %s",
-                      sptr, policy, action);
-      }
-    }
-
     if (cli_snomask(sptr) & SNO_NOISY)
       set_snomask(sptr, cli_snomask(sptr) & SNO_NOISY, SNO_ADD);
     if (feature_bool(FEAT_CONNEXIT_NOTICES))
@@ -774,7 +748,8 @@ static const struct UserMode {
   { FLAG_CLOAKHOST,    'C' },
   { FLAG_CLOAKIP,      'c' },
   { FLAG_MULTILINE_EXPAND, 'M' },
-  { FLAG_NOSTORAGE,    'Y' }
+  { FLAG_NOSTORAGE,    'Y' },
+  { FLAG_PM_OPTOUT,    'y' }
 };
 
 /** Length of #userModeList. */
@@ -1610,10 +1585,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         }
         break;
       case 'i':
-        if (what == MODE_ADD)
+        if (what == MODE_ADD) {
           SetInvisible(acptr);
-        else
+          metadata_set_client(acptr, "umode.invisible", "1", METADATA_VIS_PRIVATE);
+        } else {
           ClearInvisible(acptr);
+          metadata_set_client(acptr, "umode.invisible", NULL, 0);
+        }
         break;
       case 'd':
         if (what == MODE_ADD)
@@ -1652,22 +1630,31 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClearNoIdle(acptr);
         break;
       case 'p':
-        if (what == MODE_ADD)
+        if (what == MODE_ADD) {
           SetNoChan(acptr);
-        else
+          metadata_set_client(acptr, "umode.nochan", "1", METADATA_VIS_PRIVATE);
+        } else {
           ClearNoChan(acptr);
+          metadata_set_client(acptr, "umode.nochan", NULL, 0);
+        }
         break;
       case 'q':
-        if (what == MODE_ADD)
+        if (what == MODE_ADD) {
           SetCommonChansOnly(acptr);
-        else
+          metadata_set_client(acptr, "umode.commonchansonly", "1", METADATA_VIS_PRIVATE);
+        } else {
           ClearCommonChansOnly(acptr);
+          metadata_set_client(acptr, "umode.commonchansonly", NULL, 0);
+        }
         break;
       case 'R':
-        if (what == MODE_ADD)
+        if (what == MODE_ADD) {
           SetAccountOnly(acptr);
-        else
+          metadata_set_client(acptr, "umode.accountonly", "1", METADATA_VIS_PUBLIC);
+        } else {
           ClearAccountOnly(acptr);
+          metadata_set_client(acptr, "umode.accountonly", NULL, 0);
+        }
         break;
       case 'B':
         if (what == MODE_ADD)
@@ -1676,10 +1663,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClearBot(acptr);
         break;
       case 'D':
-        if (what == MODE_ADD)
+        if (what == MODE_ADD) {
           SetPrivDeaf(acptr);
-        else
+          metadata_set_client(acptr, "umode.privdeaf", "1", METADATA_VIS_PUBLIC);
+        } else {
           ClearPrivDeaf(acptr);
+          metadata_set_client(acptr, "umode.privdeaf", NULL, 0);
+        }
         break;
       case 'a':
         if (what == MODE_ADD)
@@ -1706,10 +1696,22 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           ClrFlag(acptr, FLAG_MULTILINE_EXPAND);
         break;
       case 'Y':
-        if (what == MODE_ADD)
+        if (what == MODE_ADD) {
           SetNoStorage(acptr);
-        else
+          metadata_set_client(acptr, "chathistory.nostorage", "1", METADATA_VIS_PUBLIC);
+        } else {
           ClearNoStorage(acptr);
+          metadata_set_client(acptr, "chathistory.nostorage", NULL, 0);
+        }
+        break;
+      case 'y':
+        if (what == MODE_ADD) {
+          SetPMOptout(acptr);
+          metadata_set_client(acptr, "chathistory.pm", "0", METADATA_VIS_PUBLIC);
+        } else {
+          ClearPMOptout(acptr);
+          metadata_set_client(acptr, "chathistory.pm", NULL, 0);
+        }
         break;
       case 'x':
         if (what == MODE_ADD) {

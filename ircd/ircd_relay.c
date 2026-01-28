@@ -196,9 +196,12 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Check if sender has +Y (no storage) user mode */
-  if (IsNoStorage(sptr))
+  /* Check if sender has +Y (no storage) user mode — store gap marker */
+  if (IsNoStorage(sptr)) {
+    history_store_message(msgid, timestamp, chptr->chname, sender,
+                          account, HISTORY_GAP, "");
     return;
+  }
 
   /* Check if this is a new channel for Layer 1 advertisement */
   int is_new_channel = (history_has_channel(chptr->chname) == 0);
@@ -213,11 +216,11 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   }
 }
 
-/** Get PM history preference for a client.
+/** Check if client has opted out of PM history storage.
  * @param[in] cptr Client to check.
- * @return 1 if opted in, -1 if explicitly opted out, 0 if no preference.
+ * @return 1 if opted out, 0 otherwise.
  */
-static int get_pm_history_pref(struct Client *cptr)
+static int has_pm_optout(struct Client *cptr)
 {
   struct MetadataEntry *entry;
 
@@ -226,45 +229,29 @@ static int get_pm_history_pref(struct Client *cptr)
 
   entry = metadata_get_client(cptr, "chathistory.pm");
   if (!entry)
-    return 0;  /* No preference set */
+    return 0;
 
-  /* Empty value or "0" = explicit opt-out */
-  if (!entry->value || !entry->value[0] || entry->value[0] == '0')
-    return -1;
-
-  /* Any other value = opt-in */
-  return 1;
+  /* "0" or empty = opt-out */
+  return (!entry->value || !entry->value[0] || entry->value[0] == '0');
 }
 
-/** Check consent for PM history storage.
+/** Check if PM should be stored between two clients.
+ * Both must be authenticated. Either can opt out via metadata or +y mode.
  * @param[in] sender Message sender.
  * @param[in] recipient Message recipient.
- * @return 1 if consent granted, 0 otherwise.
+ * @return 1 if should store, 0 otherwise.
  */
-static int pm_history_consent(struct Client *sender, struct Client *recipient)
+static int should_store_pm(struct Client *sender, struct Client *recipient)
 {
-  int mode = feature_int(FEAT_CHATHISTORY_PRIVATE_CONSENT);
-  int sender_pref = get_pm_history_pref(sender);
-  int recipient_pref = get_pm_history_pref(recipient);
+  /* Both must have accounts */
+  if (!IsAccount(sender) || !IsAccount(recipient))
+    return 0;
 
-  if (mode == 0) {
-    /* Global mode - store unless either party explicitly opted out */
-    return (sender_pref != -1 && recipient_pref != -1);
-  }
+  /* Check opt-out */
+  if (has_pm_optout(sender) || has_pm_optout(recipient))
+    return 0;
 
-  if (mode == 1) {
-    /* Single-party - store if either opted in (and neither opted out) */
-    if (sender_pref == -1 || recipient_pref == -1)
-      return 0;
-    return (sender_pref == 1 || recipient_pref == 1);
-  }
-
-  if (mode == 2) {
-    /* Multi-party - store only if both explicitly opted in */
-    return (sender_pref == 1 && recipient_pref == 1);
-  }
-
-  return 0;
+  return 1;
 }
 
 /** Store a private (DM) message in the history database.
@@ -296,15 +283,11 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   if (!feature_bool(FEAT_CHATHISTORY_PRIVATE))
     return;
 
-  /* Check per-user consent based on configured mode */
-  if (!pm_history_consent(sptr, acptr))
+  /* Policy check: both must have accounts (no gap marker — not opt-out) */
+  if (!IsAccount(sptr) || !IsAccount(acptr))
     return;
 
-  /* Check if sender has +Y (no storage) user mode */
-  if (IsNoStorage(sptr))
-    return;
-
-  /* Build sender string: nick!user@host */
+  /* Build sender string: nick!user@host (needed for gap markers below) */
   if (cli_user(sptr))
     ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
                   cli_name(sptr),
@@ -328,6 +311,20 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
+
+  /* Check opt-out — store gap marker if either party opted out */
+  if (has_pm_optout(sptr) || has_pm_optout(acptr)) {
+    history_store_message(msgid, timestamp, target, sender,
+                          account, HISTORY_GAP, "");
+    return;
+  }
+
+  /* Check +Y no-storage — store gap marker */
+  if (IsNoStorage(sptr)) {
+    history_store_message(msgid, timestamp, target, sender,
+                          account, HISTORY_GAP, "");
+    return;
+  }
 
   /* Store in database */
   history_store_message(msgid, timestamp, target, sender,

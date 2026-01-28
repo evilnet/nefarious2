@@ -225,7 +225,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
 /** Message type names for formatting */
 static const char *msg_type_cmd[] = {
   "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
-  "KICK", "MODE", "TOPIC", "TAGMSG"
+  "KICK", "MODE", "TOPIC", "TAGMSG", "PRIVMSG" /* GAP rendered as PRIVMSG */
 };
 
 /** Validate a timestamp value.
@@ -484,8 +484,8 @@ static void generate_batch_id(char *buf, size_t buflen, struct Client *sptr)
  */
 static int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
 {
-  /* PRIVMSG and NOTICE are always sent */
-  if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE)
+  /* PRIVMSG, NOTICE, and GAP markers are always sent */
+  if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE || type == HISTORY_GAP)
     return 1;
 
   /* Other events require draft/event-playback capability */
@@ -700,6 +700,43 @@ static int has_ops_override(struct Client *sptr, struct Channel *chptr)
   return 0;
 }
 
+/** Send a gap marker as a PRIVMSG with +draft/chathistory-gap tag.
+ * For channels, the source is the server (sender identity hidden).
+ * For PMs, the source is the original sender.
+ * @param[in] sptr Client to send to.
+ * @param[in] target Target name.
+ * @param[in] batchid Batch ID (or NULL if no batch).
+ * @param[in] time_str ISO timestamp string.
+ * @param[in] msgid Message ID.
+ * @param[in] sender Original sender hostmask.
+ * @param[in] count Number of collapsed gap markers.
+ */
+static void send_gap_marker(struct Client *sptr, const char *target,
+                             const char *batchid, const char *time_str,
+                             const char *msgid, const char *sender,
+                             int count)
+{
+  char content[128];
+  int is_channel = IsChannelPrefix(*target);
+  const char *source;
+
+  if (count > 1)
+    ircd_snprintf(0, content, sizeof(content), "[%d messages not stored]", count);
+  else
+    ircd_strncpy(content, "[message not stored]", sizeof(content) - 1);
+
+  /* Channel gaps: from server (hide sender). PM gaps: from original sender. */
+  source = is_channel ? cli_name(&me) : sender;
+
+  if (batchid) {
+    sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;+draft/chathistory-gap :%s PRIVMSG %s :%s",
+                  batchid, time_str, msgid, source, target, content);
+  } else {
+    sendrawto_one(sptr, "@time=%s;msgid=%s;+draft/chathistory-gap :%s PRIVMSG %s :%s",
+                  time_str, msgid, source, target, content);
+  }
+}
+
 /** Send history messages as a batch response.
  * @param[in] sptr Client to send to.
  * @param[in] target Target name for batch.
@@ -734,13 +771,33 @@ static void send_history_batch(struct Client *sptr, const char *target,
     if (!should_send_message_type(sptr, msg->type))
       continue;
 
-    cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
-
     /* Convert Unix timestamp to ISO 8601 for @time= tag (IRCv3 requires ISO) */
     if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) == 0)
       time_str = iso_time;
     else
       time_str = msg->timestamp;  /* Fallback if conversion fails */
+
+    /* Handle gap markers: collapse consecutive gaps from the same sender */
+    if (msg->type == HISTORY_GAP) {
+      int gap_count = 1;
+      struct HistoryMessage *gap_start = msg;
+
+      /* Count consecutive gaps from the same sender */
+      while (msg->next && msg->next->type == HISTORY_GAP &&
+             ircd_strcmp(msg->sender, msg->next->sender) == 0) {
+        msg = msg->next;
+        gap_count++;
+      }
+
+      /* Send collapsed gap marker using timestamp/msgid from first gap */
+      send_gap_marker(sptr, target,
+                       CapActive(sptr, CAP_BATCH) ? batchid : NULL,
+                       time_str, gap_start->msgid, gap_start->sender,
+                       gap_count);
+      continue;
+    }
+
+    cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
     /* Send message, handling multiline content if present */
     send_history_message(sptr, msg, target,
@@ -863,7 +920,9 @@ static int check_history_access(struct Client *sptr, const char *target,
       ircd_strncpy(normalized_target, target, normalized_len - 1);
     return 0;
   } else {
-    /* Private message history */
+    /* Private message history - must be authenticated */
+    if (!IsAccount(sptr))
+      return -1;
     if (normalize_pm_target(sptr, target, normalized_target, normalized_len) != 0)
       return -1;
     return 0;

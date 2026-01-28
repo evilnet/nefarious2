@@ -306,15 +306,11 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
         if (vapid)
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=vapid=%s", vapid);
       } else if (capab_list[i].cap == CAP_DRAFT_CHATHISTORY) {
-        /* Build chathistory value with limit, retention, and optional pm policy */
+        /* Build chathistory value with limit, retention, and optional pm flag */
         int retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
-        if (feature_bool(FEAT_CHATHISTORY_ADVERTISE_PM) &&
-            feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
-          int consent = feature_int(FEAT_CHATHISTORY_PRIVATE_CONSENT);
-          const char *pm_mode = (consent == 0) ? "global" :
-                                (consent == 1) ? "single" : "multi";
-          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d,retention=%dd,pm=%s",
-                                  feature_int(FEAT_CHATHISTORY_MAX), retention_days, pm_mode);
+        if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
+          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d,retention=%dd,pm",
+                                  feature_int(FEAT_CHATHISTORY_MAX), retention_days);
         } else {
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d,retention=%dd",
                                   feature_int(FEAT_CHATHISTORY_MAX), retention_days);
