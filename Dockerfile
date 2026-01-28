@@ -4,7 +4,7 @@ ENV GID 1234
 ENV UID 1234
 
 RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get update
-RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host liblmdb-dev libzstd-dev libcmocka-dev valgrind
+RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential libssl-dev autoconf automake flex libpcre3-dev byacc gawk git vim procps net-tools iputils-ping bind9-host liblmdb-dev libzstd-dev libcmocka-dev valgrind libcurl4-openssl-dev libjansson-dev libtool
 #libgeoip-dev libmaxminddb-dev
 
 # Perl dependencies for iauthd.pl (commented out - using TypeScript version)
@@ -12,6 +12,12 @@ RUN DEBIAN_FRONTEND=noninteractive RUNLEVEL=1 apt-get -y install build-essential
 
 # Node.js for iauthd-ts
 RUN DEBIAN_FRONTEND=noninteractive apt-get -y install nodejs npm
+
+# Build and install libkc (shared Keycloak/HTTP library)
+COPY --from=libkc . /tmp/libkc
+WORKDIR /tmp/libkc
+RUN autoreconf -fi && ./configure --prefix=/usr && make && make install && ldconfig
+WORKDIR /
 
 RUN mkdir -p /home/nefarious/nefarious2
 RUN mkdir -p /home/nefarious/ircd
@@ -22,7 +28,7 @@ RUN groupadd -g ${GID} nefarious
 RUN useradd -u ${UID} -g ${GID} nefarious
 # Create LMDB directories for chathistory and metadata storage
 # Create cores directory for valgrind logs
-RUN mkdir -p /home/nefarious/ircd/history /home/nefarious/ircd/metadata /home/nefarious/ircd/cores
+RUN mkdir -p /home/nefarious/ircd/history /home/nefarious/ircd/metadata /home/nefarious/ircd/webpush /home/nefarious/ircd/cores
 RUN chown -R nefarious:nefarious /home/nefarious
 USER nefarious
 
@@ -35,7 +41,7 @@ WORKDIR  /home/nefarious/nefarious2
 # I cant get the maxminddb library to compile in at all in debian 12, give up on geoip for now
 # --with-geoip=/usr --with-mmdb=/usr \
 # Enable LMDB for chathistory and zstd for compression
-RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096 --with-lmdb=/usr --with-zstd=/usr
+RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096 --with-lmdb=/usr --with-zstd=/usr --enable-keycloak
 RUN make
 # Run unit tests during build (they require the built object files)
 RUN make test
@@ -59,7 +65,7 @@ RUN ln -sf /dev/stdout /home/nefarious/ircd/ircd.log
 
 USER root
 #Clean up build
-RUN rm -rf /home/nefarious/nefarious2
+RUN rm -rf /home/nefarious/nefarious2 /tmp/libkc
 RUN apt-get remove -y build-essential && apt-get autoremove -y && apt-get clean
 
 USER nefarious
