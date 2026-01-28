@@ -35,6 +35,7 @@
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -91,36 +92,63 @@ static int bouncer_token(struct Client *sptr)
 /* Subcommand: RESUME                                                */
 /* ---------------------------------------------------------------- */
 
-/** Send a hint to legacy clients about using chathistory after resume. */
-static void bouncer_resume_hint(struct Client *sptr, struct BouncerSession *session)
+/** Auto-replay chathistory to legacy clients after resume.
+ * For clients that don't support draft/chathistory, this function
+ * automatically replays missed messages since disconnection.
+ */
+static void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session)
 {
   struct Membership *member;
+  int limit;
+  int total_replayed = 0;
   int chan_count = 0;
-  char chanlist[512];
-  int pos = 0;
+  char timestamp[HISTORY_TIMESTAMP_LEN];
 
-  /* Build a list of channels the user is now in */
+  /* Check if auto-replay is enabled */
+  if (!feature_bool(FEAT_BOUNCER_AUTO_REPLAY))
+    return;
+
+  /* Need a valid disconnect time to know what to replay */
+  if (session->hs_disconnect_time == 0)
+    return;
+
+  /* Convert disconnect_time to timestamp string (seconds.000 format) */
+  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.000",
+                (unsigned long)session->hs_disconnect_time);
+
+  limit = feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
+  if (limit <= 0)
+    limit = 100;
+
+  /* Replay history for each channel the user is in */
   for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
-    const char *name = member->channel->chname;
-    int len = strlen(name);
+    const char *channame = member->channel->chname;
+    int count;
 
-    if (pos + len + 2 < (int)sizeof(chanlist)) {
-      if (pos > 0) {
-        chanlist[pos++] = ',';
-        chanlist[pos++] = ' ';
-      }
-      strcpy(chanlist + pos, name);
-      pos += len;
+    /* Skip channels without history enabled (e.g., +H) */
+    count = chathistory_auto_replay(sptr, channame, timestamp, limit);
+    if (count > 0) {
+      total_replayed += count;
       chan_count++;
     }
   }
-  chanlist[pos] = '\0';
 
-  if (chan_count > 0) {
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Session resumed. You are in %d channel(s): %s",
-                  sptr, chan_count, chanlist);
-    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Use CHATHISTORY LATEST <channel> * <count> to see missed messages.",
-                  sptr);
+  /* TODO: Also replay PMs if PM history is enabled */
+
+  if (total_replayed > 0) {
+    sendcmdto_one(&me, CMD_NOTICE, sptr,
+                  "%C :Session resumed. Replayed %d message(s) from %d channel(s).",
+                  sptr, total_replayed, chan_count);
+  } else if (chan_count == 0) {
+    /* User has channels but no messages to replay - just confirm resume */
+    int total_chans = 0;
+    for (member = cli_user(sptr)->channel; member; member = member->next_channel)
+      total_chans++;
+    if (total_chans > 0) {
+      sendcmdto_one(&me, CMD_NOTICE, sptr,
+                    "%C :Session resumed. You are in %d channel(s). No missed messages.",
+                    sptr, total_chans);
+    }
   }
 }
 
@@ -173,7 +201,7 @@ static int bouncer_resume(struct Client *sptr, const char *token)
    * missed messages. Full auto-replay could be added later.
    */
   if (!CapActive(sptr, CAP_DRAFT_CHATHISTORY)) {
-    bouncer_resume_hint(sptr, session);
+    bouncer_auto_replay(sptr, session);
   }
 
   return 0;

@@ -811,6 +811,40 @@ static void send_history_batch(struct Client *sptr, const char *target,
   }
 }
 
+/** Replay chathistory to a client since a given timestamp.
+ * Used by bouncer auto-replay for legacy clients without draft/chathistory.
+ * Queries history_query_after and sends messages using send_history_batch.
+ *
+ * @param[in] sptr Client to send history to.
+ * @param[in] target Channel or nick to replay.
+ * @param[in] since_timestamp Unix timestamp (seconds.milliseconds) to replay from.
+ * @param[in] limit Maximum messages to replay.
+ * @return Number of messages replayed, or -1 on error.
+ */
+int chathistory_auto_replay(struct Client *sptr, const char *target,
+                            const char *since_timestamp, int limit)
+{
+  struct HistoryMessage *messages = NULL;
+  int count;
+
+  if (!history_is_available())
+    return -1;
+
+  /* Query messages after the given timestamp */
+  count = history_query_after(target, HISTORY_REF_TIMESTAMP, since_timestamp,
+                              limit, &messages);
+  if (count < 0)
+    return -1;
+
+  if (count > 0 && messages) {
+    /* Send the messages as a chathistory batch (reusing internal logic) */
+    send_history_batch(sptr, target, messages, count, 0);
+    history_free_messages(messages);
+  }
+
+  return count;
+}
+
 /** Normalize a PM target to the canonical nick1:nick2 format.
  * Clients can query with just a nickname (per IRCv3 spec), but internally
  * PM history is stored with target key "lowerNick:higherNick" (sorted).

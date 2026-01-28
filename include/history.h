@@ -432,4 +432,22 @@ extern int history_quota_get_count(const char *channel, const char *account);
  */
 extern int history_quota_check(const char *channel, const char *account, int channel_limit);
 
+/*
+ * Auto-replay API (for bouncer resume)
+ *
+ * Used to automatically replay missed messages to clients that don't
+ * support draft/chathistory (legacy clients).
+ */
+
+/** Replay chathistory to a client since a given timestamp.
+ * Used by bouncer auto-replay for legacy clients without draft/chathistory.
+ * @param[in] sptr Client to send history to.
+ * @param[in] target Channel or nick to replay.
+ * @param[in] since_timestamp Unix timestamp (seconds.milliseconds) to replay from.
+ * @param[in] limit Maximum messages to replay.
+ * @return Number of messages replayed, or -1 on error.
+ */
+extern int chathistory_auto_replay(struct Client *sptr, const char *target,
+                                   const char *since_timestamp, int limit);
+
 #endif /* INCLUDED_history_h */
