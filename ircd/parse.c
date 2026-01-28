@@ -1040,6 +1040,14 @@ struct Message msgtab[] = {
     "C|A|D|X|U <account> <sessid> [args] - S2S bouncer session sync"
   },
   {
+    MSG_BOUNCER_TRANSFER,
+    TOK_BOUNCER_TRANSFER,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_bouncer_transfer, m_ignore, m_ignore },
+    "<old-numeric> <new-numeric> <sessid> - Cross-server ghost transfer"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

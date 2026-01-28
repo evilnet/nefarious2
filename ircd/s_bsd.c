@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "s_bsd.h"
+#include "bouncer_session.h"
 #include "capab.h"
 #include "client.h"
 #include "IPcheck.h"
@@ -1463,6 +1464,17 @@ static void client_sock_callback(struct Event* ev)
     msg = (cli_sslerror(cptr)) ? cli_sslerror(cptr) : msg;
     if (!msg)
       msg = "Unknown error";
+
+    /* Check if client should enter bouncer HOLD mode instead of exiting */
+    if (IsUser(cptr) && bounce_should_hold(cptr)) {
+      /* Transition to ghost/hold state - suppresses QUIT, keeps channels */
+      if (bounce_hold_client(cptr, msg) == 0) {
+        /* Successfully entered hold - don't exit_client */
+        return;
+      }
+      /* If hold failed, fall through to normal exit */
+    }
+
     exit_client_msg(cptr, cptr, &me, fmt, msg);
   }
 }

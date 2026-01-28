@@ -37,6 +37,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "s_bsd.h"
 #include "s_debug.h"
 #include "s_misc.h"
 #include "struct.h"
@@ -253,6 +254,7 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
 static void bounce_hold_expire(struct Event *ev)
 {
   struct BouncerSession *session;
+  struct Client *ghost;
 
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
@@ -265,11 +267,25 @@ static void bounce_hold_expire(struct Event *ev)
   Debug((DEBUG_INFO, "Bouncer: hold expired for %s session %s",
          session->hs_account, session->hs_sessid));
 
+  /* Get the ghost client before destroying session.
+   * Note: hs_client stores the ghost during HOLDING state.
+   */
+  ghost = session->hs_client;
+
   /* Broadcast destruction to all servers */
   bounce_broadcast(session, 'X', NULL);
 
-  /* Destroy locally */
+  /* Destroy session first (before exit_client) */
   bounce_destroy(session);
+
+  /* Now exit the ghost client - this sends QUIT to channels and cleans up.
+   * The ghost has FLAG_BOUNCER_HOLD set, but exit_one_client doesn't
+   * know about that - it will just remove from channels normally.
+   */
+  if (ghost && IsBouncerHold(ghost)) {
+    ClearBouncerHold(ghost);
+    exit_client(ghost, ghost, &me, "Session expired");
+  }
 }
 
 /* ---------------------------------------------------------------- */
@@ -377,9 +393,20 @@ struct AccountSessions *bounce_find_by_account(const char *account)
   return NULL;
 }
 
-/** Attach a client to an existing session (resume). */
+/** Attach a client to an existing session (resume).
+ *
+ * For same-server resume: if a ghost exists locally, transfer its channel
+ * memberships to the new client and destroy the ghost.
+ *
+ * For cross-server resume: the ghost is on another server, so initiate
+ * a P10 BT (Bouncer Transfer) to migrate channels across servers.
+ */
 int bounce_attach(struct BouncerSession *session, struct Client *cptr)
 {
+  struct Client *ghost;
+  struct Membership *member;
+  struct Membership *next_member;
+
   assert(0 != session);
   assert(0 != cptr);
 
@@ -389,6 +416,40 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   /* Cancel hold timer if running */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
+
+  ghost = session->hs_client;
+
+  /* Same-server resume: ghost exists locally, transfer channel memberships */
+  if (ghost && IsBouncerHold(ghost) && MyUser(ghost)) {
+    /* Transfer each channel membership from ghost to new client */
+    for (member = cli_user(ghost)->channel; member; member = next_member) {
+      next_member = member->next_channel;
+
+      /* Add new client to channel with ghost's modes (op, voice, etc.)
+       * but without the HOLDING flag */
+      unsigned int modes = member->status & ~CHFL_HOLDING;
+      add_user_to_channel(member->channel, cptr, modes, OpLevel(member));
+
+      /* Remove ghost from channel (silently - no PART message) */
+      remove_user_from_channel(ghost, member->channel);
+    }
+
+    /* Clean up the ghost client - it no longer has channels */
+    ClearBouncerHold(ghost);
+    /* Use exit_client to properly clean up the ghost.
+     * Pass a "silent" flag via FLAG_KILLED to suppress QUIT broadcast.
+     */
+    SetFlag(ghost, FLAG_KILLED);
+    exit_client(ghost, ghost, &me, "Session resumed");
+  }
+  /* Cross-server resume: ghost is on another server, initiate transfer */
+  else if (session->hs_state == BOUNCE_HOLDING &&
+           session->hs_ghost_numeric[0] != '\0') {
+    /* Broadcast BT to have all servers transfer the ghost's channels */
+    bounce_initiate_transfer(session, cptr, session->hs_ghost_numeric);
+    /* bounce_initiate_transfer updates session state, so return early */
+    return 0;
+  }
 
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_client = cptr;
@@ -572,8 +633,9 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
     build_channel_string(session, chanbuf, sizeof(chanbuf));
     sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION,
                           NULL,
-                          "D %s %s %Tu :%s",
+                          "D %s %s %s %Tu :%s",
                           session->hs_account, session->hs_sessid,
+                          session->hs_ghost_numeric,
                           session->hs_disconnect_time,
                           chanbuf);
     break;
@@ -733,20 +795,29 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
   case 'D': /* Detach */
   {
+    const char *ghost_numeric;
     time_t disc_time;
     const char *channels;
     int hold_time;
+
+    /* BS D <account> <sessid> <ghost-numeric> <disc-time> :<channels> */
+    if (parc < 6)
+      return 0;
 
     session = bounce_find_by_token_sessid(account, sessid);
     if (!session)
       return 0;
 
-    disc_time = (parc >= 5) ? (time_t)atol(parv[4]) : CurrentTime;
+    ghost_numeric = parv[4];
+    disc_time = (time_t)atol(parv[5]);
     channels = parv[parc - 1];
 
     session->hs_state = BOUNCE_HOLDING;
     session->hs_client = NULL;
     session->hs_disconnect_time = disc_time;
+    ircd_strncpy(session->hs_ghost_numeric, ghost_numeric,
+                 sizeof(session->hs_ghost_numeric) - 1);
+    session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
 
     /* Update channels if provided */
     if (channels && *channels) {
@@ -774,8 +845,8 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     /* Forward */
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
                           cptr,
-                          "D %s %s %Tu :%s",
-                          account, sessid, disc_time,
+                          "D %s %s %s %Tu :%s",
+                          account, sessid, ghost_numeric, disc_time,
                           channels ? channels : "");
     break;
   }
@@ -844,4 +915,220 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
       return s;
   }
   return NULL;
+}
+
+/* ---------------------------------------------------------------- */
+/* Phase 2: Hold mode                                                */
+/* ---------------------------------------------------------------- */
+
+/** Check if a client should enter bouncer hold mode on disconnect.
+ * Returns the session if:
+ * - Bouncer feature is enabled
+ * - Client has an account
+ * - Client has an active session attached
+ * - Hold is enabled (per-session, account, or default)
+ */
+struct BouncerSession *bounce_should_hold(struct Client *cptr)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+
+  if (!bounce_enabled())
+    return NULL;
+  if (!IsAccount(cptr))
+    return NULL;
+  if (!MyUser(cptr))
+    return NULL;  /* Only local clients can enter hold on this server */
+
+  /* Find an ACTIVE session attached to this client */
+  as = bounce_find_by_account(cli_account(cptr));
+  if (!as)
+    return NULL;
+
+  for (s = as->as_sessions; s; s = s->hs_anext) {
+    if (s->hs_client == cptr && s->hs_state == BOUNCE_ACTIVE) {
+      /* Check hold preference */
+      int should_hold;
+      if (s->hs_hold_override >= 0)
+        should_hold = s->hs_hold_override;
+      else
+        should_hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+
+      if (should_hold)
+        return s;
+      break;  /* Found client's session but hold disabled */
+    }
+  }
+
+  return NULL;
+}
+
+/** Transition a client to bouncer HOLDING state (ghost mode).
+ * This is called from s_bsd.c when a disconnect is detected and
+ * bounce_should_hold() returned a session.
+ */
+int bounce_hold_client(struct Client *cptr, const char *comment)
+{
+  struct BouncerSession *session;
+  struct Membership *member;
+  int hold_time;
+
+  session = bounce_should_hold(cptr);
+  if (!session)
+    return -1;
+
+  /* Mark client as a ghost */
+  SetBouncerHold(cptr);
+
+  /* Snapshot channel memberships into session */
+  bounce_snapshot_channels(session, cptr);
+
+  /* Mark all channel memberships as HOLDING */
+  for (member = cli_user(cptr)->channel; member; member = member->next_channel)
+    SetMemberHolding(member);
+
+  /* Transition session to HOLDING state.
+   * Keep hs_client pointing to the ghost for cleanup on expiry.
+   * Save ghost numeric for cross-server transfer.
+   */
+  session->hs_state = BOUNCE_HOLDING;
+  session->hs_disconnect_time = CurrentTime;
+  ircd_strncpy(session->hs_ghost_numeric, cli_yxx(cptr), sizeof(session->hs_ghost_numeric) - 1);
+  session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+  /* hs_client still points to cptr (now a ghost) */
+
+  /* Start hold timer */
+  hold_time = feature_int(FEAT_BOUNCER_SESSION_HOLD);
+  timer_init(&session->hs_hold_timer);
+  timer_add(&session->hs_hold_timer, bounce_hold_expire,
+            (void *)session, TT_RELATIVE, hold_time);
+
+  /* Broadcast detach to all servers (sends channel list for cross-server) */
+  bounce_broadcast(session, 'D', NULL);
+
+  /* Close the socket but keep the client structure alive.
+   * Note: We do NOT call exit_client() here - that would destroy the client.
+   * We only want to close the socket connection.
+   */
+  close_connection(cptr);
+
+  /* Log the hold */
+  log_write(LS_USER, L_TRACE, 0, "Bouncer HOLD: %s (%s@%s) session %s - %s",
+            cli_name(cptr), cli_user(cptr)->username,
+            cli_user(cptr)->realhost, session->hs_sessid, comment);
+
+  /* Note: The client structure remains in memory, in all channels,
+   * with FLAG_BOUNCER_HOLD set. It will not receive messages but
+   * is visible (as a ghost) in WHO/NAMES until resumed or expired.
+   */
+
+  return 0;
+}
+
+/** Revive a ghost client with a new socket (same-server resume).
+ *
+ * Note: The actual revival logic is now in bounce_attach(), which handles
+ * transferring channel memberships from ghost to new client.
+ * This function is kept for API completeness but delegates to bounce_attach().
+ */
+int bounce_revive(struct BouncerSession *session, struct Client *cptr)
+{
+  if (!session || session->hs_state != BOUNCE_HOLDING)
+    return -1;
+
+  return bounce_attach(session, cptr);
+}
+
+/* ---------------------------------------------------------------- */
+/* Cross-server transfer (BT token)                                  */
+/* ---------------------------------------------------------------- */
+
+/** Handle BT (Bouncer Transfer) P10 message.
+ * Format: BT <old-numeric> <new-numeric> <session-id>
+ *
+ * This message is broadcast when a user resumes their bouncer session
+ * on a different server than where the ghost exists. All servers
+ * receiving this message transfer channel memberships from the old
+ * client (ghost) to the new client.
+ */
+int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
+                     int parc, char *parv[])
+{
+  struct Client *old_client;
+  struct Client *new_client;
+  const char *old_numeric;
+  const char *new_numeric;
+  const char *sessid;
+  struct Membership *member;
+  struct Membership *next_member;
+
+  if (parc < 4)
+    return 0;
+
+  old_numeric = parv[1];
+  new_numeric = parv[2];
+  sessid = parv[3];
+
+  /* Find both clients by numeric */
+  old_client = findNUser(old_numeric);
+  new_client = findNUser(new_numeric);
+
+  if (!old_client || !new_client) {
+    Debug((DEBUG_INFO, "BT: client not found - old=%s new=%s",
+           old_numeric, new_numeric));
+    /* Forward anyway for other servers */
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "%s %s %s", old_numeric, new_numeric, sessid);
+    return 0;
+  }
+
+  /* Transfer channel memberships from old to new */
+  for (member = cli_user(old_client)->channel; member; member = next_member) {
+    next_member = member->next_channel;
+
+    /* Add new client with old client's modes */
+    unsigned int modes = member->status & ~CHFL_HOLDING;
+    add_user_to_channel(member->channel, new_client, modes, OpLevel(member));
+
+    /* Remove old client silently */
+    remove_user_from_channel(old_client, member->channel);
+  }
+
+  /* Clear bouncer flags from old client */
+  if (IsBouncerHold(old_client))
+    ClearBouncerHold(old_client);
+
+  /* Exit the old client silently (FLAG_KILLED suppresses QUIT broadcast) */
+  SetFlag(old_client, FLAG_KILLED);
+  exit_client(old_client, old_client, &me, "Session transferred");
+
+  /* Forward to other servers */
+  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                        "%s %s %s", old_numeric, new_numeric, sessid);
+
+  return 0;
+}
+
+/** Initiate a cross-server bouncer transfer.
+ * Called when BOUNCER RESUME is received and the ghost is on another server.
+ * Broadcasts BT to network to transfer the ghost's channels to the new client.
+ */
+void bounce_initiate_transfer(struct BouncerSession *session,
+                              struct Client *new_client,
+                              const char *old_numeric)
+{
+  /* Broadcast the transfer request */
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "%s %s %s",
+                        old_numeric, cli_yxx(new_client), session->hs_sessid);
+
+  /* Update session state */
+  session->hs_state = BOUNCE_ACTIVE;
+  session->hs_client = new_client;
+  session->hs_last_active = CurrentTime;
+  session->hs_disconnect_time = 0;
+
+  /* Cancel hold timer */
+  if (t_active(&session->hs_hold_timer))
+    timer_del(&session->hs_hold_timer);
 }

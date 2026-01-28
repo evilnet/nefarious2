@@ -81,8 +81,9 @@ struct BouncerSession {
   char hs_name[BOUNCER_NAME_LEN];     /**< User-assigned name */
 
   enum BouncerState hs_state;         /**< Current state */
-  struct Client *hs_client;           /**< Connected client (NULL if HOLDING) */
+  struct Client *hs_client;           /**< Connected client (ghost if HOLDING) */
   char hs_origin[NICKLEN + 1];        /**< Server numeric that created this */
+  char hs_ghost_numeric[6];           /**< Ghost client numeric during HOLDING */
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
 
@@ -180,6 +181,28 @@ extern void bounce_burst(struct Client *cptr);
 extern int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                             int parc, char *parv[]);
 
+/** Handle incoming BT (Bouncer Transfer) P10 message.
+ * Transfers channel memberships from old client to new client for
+ * cross-server resume.
+ * @param[in] cptr Connected server.
+ * @param[in] sptr Source server.
+ * @param[in] parc Parameter count.
+ * @param[in] parv Parameters.
+ * @return 0 on success.
+ */
+extern int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
+                            int parc, char *parv[]);
+
+/** Initiate a cross-server bouncer transfer.
+ * Broadcasts BT to network to transfer ghost channels to new client.
+ * @param[in] session The bouncer session.
+ * @param[in] new_client The new client that is resuming.
+ * @param[in] old_numeric The numeric of the ghost client to transfer from.
+ */
+extern void bounce_initiate_transfer(struct BouncerSession *session,
+                                     struct Client *new_client,
+                                     const char *old_numeric);
+
 /** Broadcast a session state change to all other servers.
  * @param[in] session The session that changed.
  * @param[in] subcmd BS subcommand character ('C', 'A', 'D', 'X', 'U').
@@ -187,6 +210,37 @@ extern int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
  */
 extern void bounce_broadcast(struct BouncerSession *session, char subcmd,
                              const char *extra);
+
+/*
+ * Hold mode API (Phase 2)
+ */
+
+/** Transition a client to bouncer HOLDING state.
+ * Called when a disconnection is detected for a client with an active session.
+ * - Sets client FLAG_BOUNCER_HOLD
+ * - Closes the socket but keeps client structure alive
+ * - Marks channel memberships as CHFL_HOLDING
+ * - Suppresses QUIT message to channels
+ * - Broadcasts BS D to other servers
+ * @param[in] cptr Client to transition to hold.
+ * @param[in] comment Disconnect reason (not sent to channels).
+ * @return 0 on success (client is now a ghost), -1 if should exit normally.
+ */
+extern int bounce_hold_client(struct Client *cptr, const char *comment);
+
+/** Check if a client has an active bouncer session and should enter hold.
+ * @param[in] cptr Client to check.
+ * @return Session pointer if should hold, NULL if should exit normally.
+ */
+extern struct BouncerSession *bounce_should_hold(struct Client *cptr);
+
+/** Revive a held ghost client with a new socket connection.
+ * For same-server resume only. Cross-server uses transfer protocol.
+ * @param[in] session Session to revive.
+ * @param[in] cptr New connection to attach to the ghost.
+ * @return 0 on success.
+ */
+extern int bounce_revive(struct BouncerSession *session, struct Client *cptr);
 
 /*
  * Utility

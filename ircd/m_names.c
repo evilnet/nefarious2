@@ -194,6 +194,12 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
         done_prefix = 1;
       }
     }
+    if (IsMemberHolding(member)) {
+      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
+        buf[idx++] = '~';  /* Bouncer hold (ghost) */
+        done_prefix = 1;
+      }
+    }
     strcpy(buf + idx, cli_name(c2ptr));
     idx += strlen(cli_name(c2ptr));
 

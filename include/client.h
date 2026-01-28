@@ -267,6 +267,8 @@ enum Flag
     FLAG_NOSTORAGE,                 /**< User's messages not stored in chathistory (+Y) */
     FLAG_PM_OPTOUT,                 /**< User opted out of PM history storage (+y) */
 
+    FLAG_BOUNCER_HOLD,              /**< Client is in bouncer HOLDING state (ghost) */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */
@@ -914,6 +916,10 @@ struct Client {
 /** Return non-zero if the client has set mode +Y (no history storage). */
 #define IsNoStorage(x)          HasFlag(x, FLAG_NOSTORAGE)
 #define IsPMOptout(x)           HasFlag(x, FLAG_PM_OPTOUT)
+/** Return non-zero if client is a bouncer ghost (in HOLDING state). */
+#define IsBouncerHold(x)        HasFlag(x, FLAG_BOUNCER_HOLD)
+#define SetBouncerHold(x)       SetFlag(x, FLAG_BOUNCER_HOLD)
+#define ClearBouncerHold(x)     ClrFlag(x, FLAG_BOUNCER_HOLD)
 /** Return non-zero if the client has been IP-checked for clones. */
 #define IsIPChecked(x)          HasFlag(x, FLAG_IPCHECK)
 /** Return non-zero if we have received an ident response for the client. */

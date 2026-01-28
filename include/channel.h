@@ -81,6 +81,7 @@ struct MetadataEntry;
 					 * channel 
 					 */
 #define CHFL_DELAYED            0x40000 /**< User's join message is delayed */
+#define CHFL_HOLDING            0x80000 /**< User membership held during bouncer disconnect */
 
 #define CHFL_BURST_ALREADY_HALFOPPED	0x400000
 					/**< In oob BURST, but was already
@@ -259,6 +260,9 @@ struct Membership {
 #define IsChannelManager(x) ((x)->status & CHFL_CHANNEL_MANAGER)
 #define IsUserParting(x)    ((x)->status & CHFL_USER_PARTING)
 #define IsDelayedJoin(x)    ((x)->status & CHFL_DELAYED)
+#define IsMemberHolding(x)  ((x)->status & CHFL_HOLDING)
+#define SetMemberHolding(x) ((x)->status |= CHFL_HOLDING)
+#define ClearMemberHolding(x) ((x)->status &= ~CHFL_HOLDING)
 #define IsExcepted(x)       ((x)->banflags & MBFL_EXCEPTED)
 #define IsExceptValid(x)    ((x)->banflags & MBFL_EXCEPTVALID)
 #define IsExceptedQuiet(x)  ((x)->banflags & MBFL_EXCEPTED_QUIET)

@@ -91,10 +91,44 @@ static int bouncer_token(struct Client *sptr)
 /* Subcommand: RESUME                                                */
 /* ---------------------------------------------------------------- */
 
+/** Send a hint to legacy clients about using chathistory after resume. */
+static void bouncer_resume_hint(struct Client *sptr, struct BouncerSession *session)
+{
+  struct Membership *member;
+  int chan_count = 0;
+  char chanlist[512];
+  int pos = 0;
+
+  /* Build a list of channels the user is now in */
+  for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
+    const char *name = member->channel->chname;
+    int len = strlen(name);
+
+    if (pos + len + 2 < (int)sizeof(chanlist)) {
+      if (pos > 0) {
+        chanlist[pos++] = ',';
+        chanlist[pos++] = ' ';
+      }
+      strcpy(chanlist + pos, name);
+      pos += len;
+      chan_count++;
+    }
+  }
+  chanlist[pos] = '\0';
+
+  if (chan_count > 0) {
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Session resumed. You are in %d channel(s): %s",
+                  sptr, chan_count, chanlist);
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Use CHATHISTORY LATEST <channel> * <count> to see missed messages.",
+                  sptr);
+  }
+}
+
 /** Handle BOUNCER RESUME <token> - resume an existing session. */
 static int bouncer_resume(struct Client *sptr, const char *token)
 {
   struct BouncerSession *session;
+  time_t disconnect_time;
   int ret;
 
   if (!token || !*token) {
@@ -118,6 +152,9 @@ static int bouncer_resume(struct Client *sptr, const char *token)
     return 0;
   }
 
+  /* Save disconnect time for potential auto-replay */
+  disconnect_time = session->hs_disconnect_time;
+
   /* Attach client to session */
   ret = bounce_attach(session, sptr);
   if (ret < 0) {
@@ -131,6 +168,13 @@ static int bouncer_resume(struct Client *sptr, const char *token)
 
   send_note(sptr, "BOUNCER", "SESSION_RESUMED", session->hs_sessid,
             "Session resumed");
+
+  /* For clients without draft/chathistory, send a hint about how to get
+   * missed messages. Full auto-replay could be added later.
+   */
+  if (!CapActive(sptr, CAP_DRAFT_CHATHISTORY)) {
+    bouncer_resume_hint(sptr, session);
+  }
 
   return 0;
 }
@@ -467,4 +511,17 @@ int ms_bouncer_session(struct Client *cptr, struct Client *sptr,
                        int parc, char *parv[])
 {
   return bounce_handle_bs(cptr, sptr, parc, parv);
+}
+
+/* ---------------------------------------------------------------- */
+/* S2S handler for BT token                                          */
+/* ---------------------------------------------------------------- */
+
+/** Handle BT (Bouncer Transfer) P10 token from server.
+ * Delegates to bounce_handle_bt() in bouncer_session.c.
+ */
+int ms_bouncer_transfer(struct Client *cptr, struct Client *sptr,
+                        int parc, char *parv[])
+{
+  return bounce_handle_bt(cptr, sptr, parc, parv);
 }

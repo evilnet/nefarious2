@@ -163,7 +163,9 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
   if (!fields || (fields & WHO_FIELD_FLA))
   {
     *(p1++) = ' ';
-    if (cli_user(acptr)->away)
+    if (IsBouncerHold(acptr))
+      *(p1++) = 'G';  /* Ghost: away from keyboard, session held */
+    else if (cli_user(acptr)->away)
       *(p1++) = 'G';
     else
       *(p1++) = 'H';
@@ -187,6 +189,8 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
         *(p1++) = '!';
       if (IsDelayedJoin(chan))
         *(p1++) = '<';
+      if (IsMemberHolding(chan))
+        *(p1++) = '~';  /* Bouncer hold (ghost) */
     }
     else {
       if (IsChanOp(chan))
@@ -199,6 +203,8 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
         *(p1++) = '!';
       else if (IsDelayedJoin(chan))
         *(p1++) = '<';
+      else if (IsMemberHolding(chan))
+        *(p1++) = '~';
     }
     if (IsDeaf(acptr))
       *(p1++) = 'd';
