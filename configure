@@ -761,6 +761,10 @@ enable_zstd
 with_zstd
 with_zstd_includes
 with_zstd_libs
+enable_keycloak
+with_keycloak
+with_keycloak_includes
+with_keycloak_libs
 with_maxcon
 '
       ac_precious_vars='build_alias
@@ -1409,6 +1413,7 @@ Optional Features:
   --disable-mmdb         Disable MaxMindDB support
   --disable-lmdb          Disable LMDB/chathistory support
   --disable-zstd          Disable zstd compression support
+  --disable-keycloak      Disable Keycloak (libkc) support
 
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
@@ -1457,6 +1462,11 @@ Optional Packages:
                           Specify location of zstd header files (default:
                           /usr/include)
   --with-zstd-libs=dir    Specify location of zstd libs (default: /usr/lib)
+  --with-keycloak=dir     Specify the installation prefix of libkc
+  --with-keycloak-includes=dir
+                          Specify location of libkc header files
+  --with-keycloak-libs=dir
+                          Specify location of libkc library
   --with-maxcon=maxcon    Maximum number of connections server will accept
 
 Some influential environment variables:
@@ -9229,6 +9239,87 @@ printf "%s\n" "#define USE_ZSTD /**/" >>confdefs.h
      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find zstd, compression features will not be available. Disabling zstd support." >&5
 printf "%s\n" "$as_me: WARNING: Unable to find zstd, compression features will not be available. Disabling zstd support." >&2;}
   fi
+fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable Keycloak support" >&5
+printf %s "checking whether to enable Keycloak support... " >&6; }
+# Check whether --enable-keycloak was given.
+if test ${enable_keycloak+y}
+then :
+  enableval=$enable_keycloak; unet_cv_enable_keycloak=$enable_keycloak
+else case e in #(
+  e) if test ${unet_cv_enable_keycloak+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) unet_cv_enable_keycloak=no ;;
+esac
+fi
+ ;;
+esac
+fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_keycloak" >&5
+printf "%s\n" "$unet_cv_enable_keycloak" >&6; }
+
+if test x"$unet_cv_enable_keycloak" = xyes; then
+
+# Check whether --with-keycloak was given.
+if test ${with_keycloak+y}
+then :
+  withval=$with_keycloak; base_keycloak_prefix=$withval
+else case e in #(
+  e) base_keycloak_prefix= ;;
+esac
+fi
+
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for Keycloak includes" >&5
+printf %s "checking for Keycloak includes... " >&6; }
+
+# Check whether --with-keycloak-includes was given.
+if test ${with_keycloak_includes+y}
+then :
+  withval=$with_keycloak_includes; unet_cv_with_keycloak_inc_prefix=$withval
+else case e in #(
+  e) if test -n "$base_keycloak_prefix"; then
+    unet_cv_with_keycloak_inc_prefix=$base_keycloak_prefix/include
+  else
+    unet_cv_with_keycloak_inc_prefix=/usr/local/include
+  fi ;;
+esac
+fi
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_keycloak_inc_prefix" >&5
+printf "%s\n" "$unet_cv_with_keycloak_inc_prefix" >&6; }
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for Keycloak libraries" >&5
+printf %s "checking for Keycloak libraries... " >&6; }
+
+# Check whether --with-keycloak-libs was given.
+if test ${with_keycloak_libs+y}
+then :
+  withval=$with_keycloak_libs; unet_cv_with_keycloak_prefix=$withval
+else case e in #(
+  e) if test -n "$base_keycloak_prefix"; then
+    unet_cv_with_keycloak_prefix=$base_keycloak_prefix/lib
+  else
+    unet_cv_with_keycloak_prefix=/usr/local/lib
+  fi ;;
+esac
+fi
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_keycloak_prefix" >&5
+printf "%s\n" "$unet_cv_with_keycloak_prefix" >&6; }
+
+
+printf "%s\n" "#define USE_LIBKC /**/" >>confdefs.h
+
+  LIBS="$LIBS -L$unet_cv_with_keycloak_prefix -lkc -lcurl -ljansson"
+  CFLAGS="$CFLAGS -I$unet_cv_with_keycloak_inc_prefix"
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: Keycloak (libkc) support enabled" >&5
+printf "%s\n" "$as_me: Keycloak (libkc) support enabled" >&6;}
 fi
 
 unet_maxcon=`ulimit -Sn`
