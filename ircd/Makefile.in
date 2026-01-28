@@ -90,6 +90,7 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 
 IRCD_SRC = \
 	account_conn.c \
+	bouncer_session.c \
 	IPcheck.c \
 	channel.c \
 	class.c \
@@ -129,6 +130,7 @@ IRCD_SRC = \
 	m_authenticate.c \
 	m_away.c \
 	m_batch.c \
+	m_bouncer.c \
 	m_burst.c \
 	m_cap.c \
 	m_chathistory.c \

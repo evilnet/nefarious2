@@ -313,6 +313,8 @@ extern int ms_metadata(struct Client*, struct Client*, int, char*[]);
 extern int ms_metadataquery(struct Client*, struct Client*, int, char*[]);
 extern int m_webpush(struct Client*, struct Client*, int, char*[]);
 extern int ms_webpush(struct Client*, struct Client*, int, char*[]);
+extern int m_bouncer(struct Client*, struct Client*, int, char*[]);
+extern int ms_bouncer_session(struct Client*, struct Client*, int, char*[]);
 
 #endif /* INCLUDED_handlers_h */
 

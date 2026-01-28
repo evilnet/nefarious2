@@ -930,6 +930,13 @@ static struct FeatureDesc {
   F_I(COMPRESS_THRESHOLD, 0, 256, feature_notify_compress_threshold),
   F_I(COMPRESS_LEVEL, 0, 3, feature_notify_compress_level),
 #endif
+  /* Bouncer */
+  F_B(BOUNCER_ENABLE, 0, 0, 0),
+  F_I(BOUNCER_MAX_SESSIONS, 0, 5, 0),
+  F_I(BOUNCER_SESSION_HOLD, 0, 14400, 0),    /* 4 hours */
+  F_I(BOUNCER_TOKEN_EXPIRY, 0, 86400, 0),    /* 24 hours */
+  F_B(BOUNCER_DEFAULT_HOLD, 0, 1, 0),
+  F_B(CAP_draft_bouncer, 0, 1, 0),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),

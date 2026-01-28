@@ -522,6 +522,11 @@ extern const struct Numeric* get_error_numeric(int err);
 #define ERR_UPASS_SAME_APASS 567        /* Undernet extension */
 #define ERR_NOOMOTD          568
 
+/* Bouncer numerics - Nefarious extension */
+#define RPL_BOUNCERSESSION   780	/* Nefarious bouncer */
+#define RPL_BOUNCETOKEN      781	/* Nefarious bouncer */
+#define RPL_BOUNCERSETTINGS  782	/* Nefarious bouncer */
+
 #define RPL_LOGON            600        /* Dalnet extension */
 #define RPL_LOGOFF           601        /* Dalnet extension */
 #define RPL_WATCHOFF         602        /* Dalnet extension */

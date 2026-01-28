@@ -1024,6 +1024,22 @@ struct Message msgtab[] = {
     "REGISTER|UNREGISTER <endpoint> [keys] - Manage web push subscriptions"
   },
   {
+    MSG_BOUNCER,
+    TOK_BOUNCER,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_bouncer, m_ignore, m_bouncer, m_ignore },
+    "TOKEN|RESUME|LISTSESSIONS|DISCONNECT|SETNAME|SET|SETTINGS - Bouncer session management"
+  },
+  {
+    MSG_BOUNCER_SESSION,
+    TOK_BOUNCER_SESSION,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_bouncer_session, m_ignore, m_ignore },
+    "C|A|D|X|U <account> <sessid> [args] - S2S bouncer session sync"
+  },
+  {
     MSG_FINGERPRINT,
     TOK_FINGERPRINT,
     0, MAXPARA,         0, 0, NULL,

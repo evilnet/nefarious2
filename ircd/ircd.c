@@ -31,6 +31,7 @@
 #include "crule.h"
 #include "destruct_event.h"
 #include "hash.h"
+#include "bouncer_session.h"
 #include "history.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
@@ -1061,6 +1062,10 @@ int main(int argc, char **argv) {
     }
   }
 #endif
+
+  /* Initialize bouncer session registry */
+  if (feature_bool(FEAT_BOUNCER_ENABLE))
+    bounce_init();
 
 #ifdef USE_LIBKC
   /* Initialize libkc HTTP transport (for webpush delivery) */

@@ -61,6 +61,7 @@
 #include "userload.h"
 #include "zline.h"
 #include "metadata.h"
+#include "bouncer_session.h"
 #include "webpush.h"
 #include "ircd_features.h"
 
@@ -211,6 +212,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   /* Burst webpush subscriptions to newly linked server */
   if (feature_bool(FEAT_CAP_draft_webpush))
     webpush_burst(cptr);
+
+  /* Burst bouncer sessions to newly linked server */
+  if (feature_bool(FEAT_BOUNCER_ENABLE))
+    bounce_burst(cptr);
 
   /*
    * Pass on my client information to the new server
