@@ -285,6 +285,8 @@ int webpush_import_vapid_key(const unsigned char *privkey, size_t privkey_len,
   EVP_PKEY_CTX *pctx = NULL;
   EVP_PKEY *pkey = NULL;
   BIGNUM *priv_bn = NULL;
+  unsigned char derived_pub[65];
+  size_t derived_pub_len = 0;
   int enc_len;
   int ret = -1;
 
@@ -298,6 +300,33 @@ int webpush_import_vapid_key(const unsigned char *privkey, size_t privkey_len,
   if (!priv_bn)
     goto cleanup;
 
+  /* If no public key provided, derive it from the private key.
+   * EVP_PKEY_fromdata() does not automatically compute the public point
+   * from just the private scalar in OpenSSL 3.x. */
+  if (!pubkey || pubkey_len != 65) {
+    EC_GROUP *group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_POINT *pub_point = NULL;
+    if (group) {
+      pub_point = EC_POINT_new(group);
+      if (pub_point &&
+          EC_POINT_mul(group, pub_point, priv_bn, NULL, NULL, NULL)) {
+        derived_pub_len = EC_POINT_point2oct(group, pub_point,
+                                              POINT_CONVERSION_UNCOMPRESSED,
+                                              derived_pub, sizeof(derived_pub),
+                                              NULL);
+      }
+      EC_POINT_free(pub_point);
+      EC_GROUP_free(group);
+    }
+    if (derived_pub_len != 65) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "WebPush: failed to derive public key from private key");
+      goto cleanup;
+    }
+    pubkey = derived_pub;
+    pubkey_len = derived_pub_len;
+  }
+
   bld = OSSL_PARAM_BLD_new();
   if (!bld)
     goto cleanup;
@@ -309,11 +338,9 @@ int webpush_import_vapid_key(const unsigned char *privkey, size_t privkey_len,
   if (!OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, priv_bn))
     goto cleanup;
 
-  if (pubkey && pubkey_len == 65) {
-    if (!OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY,
-                                           pubkey, pubkey_len))
-      goto cleanup;
-  }
+  if (!OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY,
+                                         pubkey, pubkey_len))
+    goto cleanup;
 
   params = OSSL_PARAM_BLD_to_param(bld);
   if (!params)
