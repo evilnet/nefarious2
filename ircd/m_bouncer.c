@@ -32,6 +32,7 @@
  */
 #include "config.h"
 
+#include "account_conn.h"
 #include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
@@ -456,6 +457,13 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
         struct BouncerSession *session = NULL;
         if (bounce_create(sptr, &session) == 0 && session) {
           bounce_broadcast(session, 'C', NULL);
+
+          /* Add this client to the presence aggregation registry.
+           * At registration time, bounce_has_sessions() was false so the
+           * client was skipped.  Now that a session exists, register it. */
+          if (feature_bool(FEAT_PRESENCE_AGGREGATION))
+            account_conn_add(sptr);
+
           send_note(sptr, "BOUNCER", "SESSION_CREATED", session->hs_sessid,
                     "Hold mode enabled, session created");
         } else {
