@@ -434,12 +434,16 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
     }
   }
 
-  /* No held session — auto-create one for future disconnects */
-  max_sessions = feature_int(FEAT_BOUNCER_MAX_SESSIONS);
-  if (max_sessions > 0 && bounce_count(account) < max_sessions) {
-    if (bounce_create(cptr, &session) == 0) {
-      bounce_broadcast(session, 'C', NULL);
-      *out_session = session;
+  /* No held session — auto-create only if account has NO sessions at all.
+   * If sessions already exist (all ACTIVE), this is just a second connection
+   * to the same account — don't create a duplicate session. */
+  if (bounce_count(account) == 0) {
+    max_sessions = feature_int(FEAT_BOUNCER_MAX_SESSIONS);
+    if (max_sessions > 0) {
+      if (bounce_create(cptr, &session) == 0) {
+        bounce_broadcast(session, 'C', NULL);
+        *out_session = session;
+      }
     }
   }
 
