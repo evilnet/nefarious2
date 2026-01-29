@@ -19,14 +19,16 @@
 /** @file
  * @brief BOUNCER command handler - client-facing bouncer management.
  *
- * Subcommands:
+ * User subcommands:
+ *   BOUNCER SET HOLD [on|off]   - Set hold preference
+ *   BOUNCER INFO                - Show session state and preferences
+ *
+ * Oper-only subcommands (for admin/testing):
  *   BOUNCER TOKEN          - Request a new session token
  *   BOUNCER RESUME <token> - Resume a session by token
  *   BOUNCER LISTSESSIONS   - List sessions for current account
  *   BOUNCER DISCONNECT <id>- Disconnect/destroy a session
  *   BOUNCER SETNAME <id> <name> - Name a session
- *   BOUNCER SET HOLD [on|off]   - Set hold preference
- *   BOUNCER SETTINGS       - Show current settings
  */
 #include "config.h"
 
@@ -447,8 +449,23 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
     /* Account-wide hold preference - stored in metadata */
     if (0 == ircd_strcmp(parv[3], "on")) {
       metadata_set_client(sptr, "$bouncer/hold", "1", METADATA_VIS_PRIVATE);
-      send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
-                "Hold mode enabled");
+
+      /* Auto-create session if none exists — turning hold on should be
+       * sufficient to get bouncer behavior without needing TOKEN. */
+      if (!bounce_has_sessions(cli_account(sptr))) {
+        struct BouncerSession *session = NULL;
+        if (bounce_create(sptr, &session) == 0 && session) {
+          bounce_broadcast(session, 'C', NULL);
+          send_note(sptr, "BOUNCER", "SESSION_CREATED", session->hs_sessid,
+                    "Hold mode enabled, session created");
+        } else {
+          send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
+                    "Hold mode enabled (session limit reached)");
+        }
+      } else {
+        send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
+                  "Hold mode enabled");
+      }
     } else if (0 == ircd_strcmp(parv[3], "off")) {
       metadata_set_client(sptr, "$bouncer/hold", "0", METADATA_VIS_PRIVATE);
       send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
@@ -548,10 +565,103 @@ static int bouncer_settings(struct Client *sptr)
 }
 
 /* ---------------------------------------------------------------- */
+/* Subcommand: INFO                                                  */
+/* ---------------------------------------------------------------- */
+
+/** Handle BOUNCER INFO - show session state and preferences.
+ * Combines session status and hold preferences in a single view.
+ * This is the primary user-facing read-only command.
+ */
+static int bouncer_info(struct Client *sptr)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+  int hold;
+  struct MetadataEntry *md;
+  const char *hold_src = "default";
+
+  if (!IsAccount(sptr)) {
+    send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", NULL,
+              "You must be logged in to use bouncer features");
+    return 0;
+  }
+
+  /* Determine hold preference */
+  if (IsBncHoldPref(sptr)) {
+    hold = 1;
+    hold_src = "account";
+  } else {
+    md = metadata_get_client(sptr, "$bouncer/hold");
+    if (md && md->value) {
+      hold = (md->value[0] == '1') ? 1 : 0;
+      hold_src = "account";
+    } else {
+      hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+    }
+  }
+
+  as = bounce_find_by_account(cli_account(sptr));
+
+  /* Session state */
+  if (as && as->as_count > 0) {
+    s = as->as_sessions;
+    if (s) {
+      const char *state_str = (s->hs_state == BOUNCE_ACTIVE)
+                              ? "active" : "holding";
+      char info[512];
+
+      if (s->hs_state == BOUNCE_HOLDING && s->hs_disconnect_time) {
+        time_t hold_time = bounce_compute_hold_time_ext(s);
+        time_t remaining = hold_time -
+                           (CurrentTime - s->hs_disconnect_time);
+        if (remaining < 0)
+          remaining = 0;
+        ircd_snprintf(0, info, sizeof(info),
+                      "state=%s hold=%s(%s) resumes=%u "
+                      "hold_time=%ldm session=%s",
+                      state_str,
+                      hold ? "on" : "off", hold_src,
+                      s->hs_attach_count,
+                      (long)(remaining / 60),
+                      s->hs_sessid);
+      } else {
+        time_t hold_time = bounce_compute_hold_time_ext(s);
+        ircd_snprintf(0, info, sizeof(info),
+                      "state=%s hold=%s(%s) resumes=%u "
+                      "hold_time=%lds session=%s",
+                      state_str,
+                      hold ? "on" : "off", hold_src,
+                      s->hs_attach_count,
+                      (long)hold_time,
+                      s->hs_sessid);
+      }
+
+      sendrawto_one(sptr, ":%s %d %s :%s",
+                    cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr),
+                    info);
+    }
+  } else {
+    /* No session */
+    char info[256];
+    ircd_snprintf(0, info, sizeof(info),
+                  "state=none hold=%s(%s)",
+                  hold ? "on" : "off", hold_src);
+    sendrawto_one(sptr, ":%s %d %s :%s",
+                  cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr),
+                  info);
+  }
+
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* Main command handler                                              */
 /* ---------------------------------------------------------------- */
 
 /** Handle BOUNCER command from a local client.
+ *
+ * User commands: SET, INFO
+ * Oper-only: TOKEN, RESUME, LISTSESSIONS, DISCONNECT, SETNAME, SETTINGS
  *
  * @param[in] cptr Connected client.
  * @param[in] sptr Source client.
@@ -577,10 +687,31 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   subcmd = parv[1];
 
-  if (0 == ircd_strcmp(subcmd, "TOKEN"))
+  /* --- User-facing commands --- */
+
+  if (0 == ircd_strcmp(subcmd, "SET"))
+    return bouncer_set(sptr, parc, parv);
+
+  if (0 == ircd_strcmp(subcmd, "INFO"))
+    return bouncer_info(sptr);
+
+  /* --- Oper-only commands (admin/testing) --- */
+
+  if (0 == ircd_strcmp(subcmd, "TOKEN")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "TOKEN",
+                "Insufficient privileges");
+      return 0;
+    }
     return bouncer_token(sptr);
+  }
 
   if (0 == ircd_strcmp(subcmd, "RESUME")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "RESUME",
+                "Insufficient privileges");
+      return 0;
+    }
     if (parc < 3) {
       send_fail(sptr, "BOUNCER", "NEED_PARAM", "RESUME",
                 "Missing token");
@@ -589,24 +720,43 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return bouncer_resume(sptr, parv[2]);
   }
 
-  if (0 == ircd_strcmp(subcmd, "LISTSESSIONS"))
+  if (0 == ircd_strcmp(subcmd, "LISTSESSIONS")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "LISTSESSIONS",
+                "Insufficient privileges");
+      return 0;
+    }
     return bouncer_listsessions(sptr);
+  }
 
   if (0 == ircd_strcmp(subcmd, "DISCONNECT")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "DISCONNECT",
+                "Insufficient privileges");
+      return 0;
+    }
     return bouncer_disconnect(sptr, (parc >= 3) ? parv[2] : NULL);
   }
 
   if (0 == ircd_strcmp(subcmd, "SETNAME")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "SETNAME",
+                "Insufficient privileges");
+      return 0;
+    }
     return bouncer_setname(sptr,
                            (parc >= 3) ? parv[2] : NULL,
                            (parc >= 4) ? parv[3] : NULL);
   }
 
-  if (0 == ircd_strcmp(subcmd, "SET"))
-    return bouncer_set(sptr, parc, parv);
-
-  if (0 == ircd_strcmp(subcmd, "SETTINGS"))
+  if (0 == ircd_strcmp(subcmd, "SETTINGS")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "SETTINGS",
+                "Insufficient privileges");
+      return 0;
+    }
     return bouncer_settings(sptr);
+  }
 
   send_fail(sptr, "BOUNCER", "NEED_PARAM", NULL,
             "Unknown subcommand");
