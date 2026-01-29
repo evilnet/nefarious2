@@ -196,6 +196,12 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
+  /* Skip storage if no authenticated members and channel isn't +H (public history).
+   * Only authed users can query CHATHISTORY (membership mode), so messages in
+   * channels with no authed members would never be retrieved. */
+  if (chptr->authusers == 0 && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+    return;
+
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {
     history_store_message(msgid, timestamp, chptr->chname, sender,

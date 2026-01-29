@@ -385,6 +385,7 @@ struct Channel {
   time_t             topic_time;   /**< Modification time of the topic */
   unsigned int       users;	   /**< Number of clients on this channel */
   unsigned int       nonsslusers;  /**< Number of clients without user mode +z */
+  unsigned int       authusers;    /**< Number of authenticated (logged-in) members */
   struct Membership* members;	   /**< Pointer to the clients on this channel*/
   struct SLink*      invites;	   /**< List of invites on this channel */
   struct Ban*        banlist;      /**< List of bans on this channel */

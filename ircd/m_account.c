@@ -81,6 +81,7 @@
 #include "config.h"
 
 #include "account_conn.h"
+#include "bouncer_session.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -167,8 +168,18 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         assert(0 != cli_user(acptr)->account[0]);
 
         /* Remove from presence aggregation registry before clearing account */
-        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)
+            && bounce_enabled() && bounce_has_sessions(cli_user(acptr)->account)) {
           account_conn_remove(acptr);
+        }
+
+        /* Decrement authusers for all channels this user is in */
+        {
+          struct Membership *chan;
+          for (chan = cli_user(acptr)->channel; chan; chan = chan->next_channel) {
+            if (chan->channel->authusers > 0)
+              --chan->channel->authusers;
+          }
         }
 
         ClearAccount(acptr);
@@ -205,8 +216,17 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
 
-        /* Register with presence aggregation */
-        if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+        /* Increment authusers for all channels this user is in */
+        {
+          struct Membership *chan;
+          for (chan = cli_user(acptr)->channel; chan; chan = chan->next_channel) {
+            ++chan->channel->authusers;
+          }
+        }
+
+        /* Register with presence aggregation — only when bouncer is active */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION)
+            && bounce_enabled() && bounce_has_sessions(parv[3])) {
           account_conn_add(acptr);
           /* Set away state if user is already away */
           if (cli_user(acptr)->away) {

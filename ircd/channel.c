@@ -110,6 +110,10 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
+  /* Skip storage if no authenticated members and channel isn't +H (public history) */
+  if (chptr->authusers == 0 && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+    return;
+
   /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
    * not channel events (JOIN/PART/etc) which are metadata */
 
@@ -758,6 +762,8 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
     ++chptr->users;
     if (!IsSSL(who) && !IsChannelService(who))
       ++chptr->nonsslusers;
+    if (IsAccount(who))
+      ++chptr->authusers;
     ++((cli_user(who))->joined);
 
 
@@ -808,6 +814,8 @@ static int remove_member_from_channel(struct Membership* member)
 
   if (!IsSSL(member->user) && !IsChannelService(member->user))
     --chptr->nonsslusers;
+  if (IsAccount(member->user) && chptr->authusers > 0)
+    --chptr->authusers;
 
   return sub1_from_channel(chptr);
 }
