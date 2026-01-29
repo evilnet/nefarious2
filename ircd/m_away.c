@@ -82,6 +82,7 @@
 #include "config.h"
 
 #include "account_conn.h"
+#include "bouncer_session.h"
 #include "capab.h"
 #include "client.h"
 #include "ircd.h"
@@ -188,8 +189,9 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   is_away = user_set_away(cli_user(sptr), away_message);
 
-  /* Presence aggregation path for logged-in users */
-  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+  /* Presence aggregation path — only when bouncer is active for this account */
+  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
+      && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
     enum ConnAwayState new_state;
     int effective_changed;
 
@@ -279,8 +281,9 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   is_away = user_set_away(cli_user(sptr), away_message);
 
-  /* Update presence aggregation state for logged-in users */
-  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+  /* Update presence aggregation state — only when bouncer is active */
+  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
+      && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
     enum ConnAwayState new_state;
     if (is_away_star)
       new_state = CONN_AWAY_STAR;

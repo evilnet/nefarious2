@@ -28,6 +28,7 @@
 
 #include "s_user.h"
 #include "account_conn.h"
+#include "bouncer_session.h"
 #include "capab.h"
 #include "IPcheck.h"
 #include "channel.h"
@@ -371,6 +372,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
   int              res = 0;
   struct SHostConf* sconf = NULL;
   struct Channel*  chptr;
+  struct BouncerSession* auto_session = NULL;
+  int              auto_resumed = 0;
 
   user->last = CurrentTime;
   parv[0] = cli_name(sptr);
@@ -400,6 +403,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     SetUser(sptr);
     cli_handler(sptr) = CLIENT_HANDLER;
+
+    /* SASL-triggered bouncer auto-resume — before network introduction */
+    auto_session = NULL;
+    auto_resumed = 0;
+    if (IsAccount(sptr) && bounce_enabled()) {
+      auto_resumed = bounce_auto_resume(sptr, &auto_session);
+    }
+
     SetLocalNumNick(sptr);
 
     if ((ashun = shun_lookup(sptr, 0))) {
@@ -504,16 +515,24 @@ int register_user(struct Client *cptr, struct Client *sptr)
         con_pre_away(cli_connect(sptr)) = 0;
         con_pre_away_msg(cli_connect(sptr))[0] = '\0';
 
-        /* Register with presence aggregation if feature enabled and logged in */
-        if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+        /* Register with presence aggregation — only when bouncer is active */
+        if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
+            && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
           enum ConnAwayState state = (pre_away_type == 2) ? CONN_AWAY_STAR : CONN_AWAY;
           account_conn_add(sptr);
           account_conn_set_away(sptr, state, user->away);
         }
-      } else if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)) {
+      } else if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
+                 && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
         /* No pre-away, just register as present */
         account_conn_add(sptr);
       }
+    }
+
+    /* Auto-replay for legacy clients after welcome (no chathistory CAP) */
+    if (auto_resumed && auto_session &&
+        !CapActive(sptr, CAP_DRAFT_CHATHISTORY)) {
+      bouncer_auto_replay(sptr, auto_session);
     }
   }
   else {

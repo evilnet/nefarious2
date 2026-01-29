@@ -24,7 +24,9 @@
  */
 #include "config.h"
 
+#include "account_conn.h"
 #include "bouncer_session.h"
+#include "capab.h"
 #include "channel.h"
 #include "client.h"
 #include "ircd.h"
@@ -315,6 +317,135 @@ int bounce_count(const char *account)
   return as ? as->as_count : 0;
 }
 
+/** Check if an account has any bouncer sessions. */
+int bounce_has_sessions(const char *account)
+{
+  struct AccountSessions *as = bounce_find_by_account(account);
+  return (as && as->as_count > 0) ? 1 : 0;
+}
+
+/** Find the best HOLDING session for an account.
+ * Selection priority:
+ *   1. HOLDING sessions only
+ *   2. Same-server preference (local ghost avoids cross-server transfer)
+ *   3. Most recent disconnect_time as tiebreaker
+ */
+struct BouncerSession *bounce_find_best_held(const char *account)
+{
+  struct AccountSessions *as = bounce_find_by_account(account);
+  struct BouncerSession *sess;
+  struct BouncerSession *best = NULL;
+
+  if (!as)
+    return NULL;
+
+  for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
+    if (sess->hs_state != BOUNCE_HOLDING)
+      continue;
+
+    if (!best) {
+      best = sess;
+      continue;
+    }
+
+    /* Prefer local ghost (same server) to avoid cross-server transfer */
+    if (sess->hs_client && MyUser(sess->hs_client) &&
+        !(best->hs_client && MyUser(best->hs_client))) {
+      best = sess;
+      continue;
+    }
+
+    /* Among same locality, prefer most recently disconnected */
+    if (sess->hs_disconnect_time > best->hs_disconnect_time)
+      best = sess;
+  }
+
+  return best;
+}
+
+/** SASL-triggered automatic resume.
+ * Called from register_user() after SASL auth sets the account
+ * but before the client is introduced to the network.
+ *
+ * If a held session exists for this account, resumes it.
+ * If no session exists and default hold is enabled, auto-creates one.
+ *
+ * @param[in] cptr Newly authenticated client.
+ * @param[out] out_session Set to the session if resumed or created.
+ * @return 1 if resumed a held session, 0 otherwise.
+ */
+int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
+{
+  struct BouncerSession *session;
+  const char *account;
+  char hold_val[64];
+  int max_sessions;
+
+  *out_session = NULL;
+
+  if (!bounce_enabled() || !feature_bool(FEAT_BOUNCER_AUTO_RESUME))
+    return 0;
+
+  if (!IsAccount(cptr))
+    return 0;
+
+  account = cli_account(cptr);
+
+  /* Check per-account hold preference via metadata */
+  if (metadata_account_get(account, "$bouncer/hold", hold_val) == 0) {
+    if (hold_val[0] == '0')
+      return 0; /* User opted out */
+  } else if (!feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)) {
+    return 0; /* No preference set and network default is no-hold */
+  }
+
+  /* Try to find a held session to resume */
+  session = bounce_find_best_held(account);
+  if (session) {
+    char original_nick[NICKLEN + 1];
+
+    /* Save original nick in case we need to swap */
+    ircd_strncpy(original_nick, cli_name(cptr), NICKLEN);
+
+    /* If the ghost has a different nick, swap to it before network introduction */
+    if (session->hs_client &&
+        ircd_strcmp(cli_name(cptr), cli_name(session->hs_client)) != 0) {
+      /* Adopt ghost's nick */
+      ircd_strncpy(cli_name(cptr), cli_name(session->hs_client), NICKLEN);
+    }
+
+    /* Attach to the session — transfers channels, exits ghost */
+    if (bounce_attach(session, cptr) == 0) {
+      /* Notify client of nick change if it happened */
+      if (ircd_strcmp(original_nick, cli_name(cptr)) != 0) {
+        sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
+      }
+
+      /* Ensure new client is in the presence aggregation registry.
+       * The ghost was removed by exit_client -> account_conn_remove,
+       * so we need to explicitly add the new client. */
+      if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
+        account_conn_add(cptr);
+      }
+
+      bounce_broadcast(session, 'A', cli_yxx(cptr));
+      *out_session = session;
+      return 1;
+    }
+  }
+
+  /* No held session — auto-create one for future disconnects */
+  max_sessions = feature_int(FEAT_BOUNCER_MAX_SESSIONS);
+  if (max_sessions > 0 && bounce_count(account) < max_sessions) {
+    if (bounce_create(cptr, &session) == 0) {
+      bounce_broadcast(session, 'C', NULL);
+      *out_session = session;
+    }
+  }
+
+  return 0;
+}
+
 /** Create a new session for an authenticated client. */
 int bounce_create(struct Client *cptr, struct BouncerSession **out)
 {
@@ -351,6 +482,8 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   session->hs_created = CurrentTime;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
+  session->hs_attach_count = 0;
+  session->hs_total_active = 0;
 
   /* Add to hash tables */
   token_hash_add(session);
@@ -455,18 +588,75 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
 
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_client = cptr;
+  session->hs_attach_count++;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
 
   return 0;
 }
 
+/** Compute adaptive hold time for a session based on usage history.
+ * Sessions that are frequently resumed earn longer hold times.
+ * Sessions that sit idle lose their earned hold via decay.
+ */
+static time_t bounce_compute_hold_time(struct BouncerSession *session)
+{
+  time_t base = feature_int(FEAT_BOUNCER_SESSION_HOLD);  /* default 4h */
+  time_t max  = feature_int(FEAT_BOUNCER_MAX_HOLD);      /* default 14d */
+  time_t computed;
+  int decay_pct;
+
+  /* Never-resumed sessions get base hold only */
+  if (session->hs_attach_count == 0)
+    return base;
+
+  /* Scale by attach count: each resume adds 25% of base, capped at max */
+  computed = base + (base * session->hs_attach_count / 4);
+
+  /* Additional bonus for cumulative active time: 1h per 24h active */
+  if (session->hs_total_active > 0)
+    computed += (session->hs_total_active / 86400) * 3600;
+
+  /* Idle decay: configurable via BOUNCER_HOLD_DECAY_PERCENT (0 = disabled) */
+  decay_pct = feature_int(FEAT_BOUNCER_HOLD_DECAY_PERCENT);
+  if (decay_pct > 0 && session->hs_disconnect_time > 0) {
+    time_t idle = CurrentTime - session->hs_disconnect_time;
+    time_t decay_start = computed * decay_pct / 100;
+    if (idle > decay_start) {
+      time_t over = idle - decay_start;
+      time_t decay_unit = computed / 4;
+      if (decay_unit > 0) {
+        int halvings = over / decay_unit;
+        if (halvings > 0) {
+          time_t remaining = computed - idle;
+          int i;
+          for (i = 0; i < halvings && remaining > base; i++)
+            remaining = remaining / 2;
+          computed = idle + ((remaining > base) ? remaining : base);
+        }
+      }
+    }
+  }
+
+  return (computed > max) ? max : computed;
+}
+
+/** Public wrapper for adaptive hold time computation. */
+time_t bounce_compute_hold_time_ext(struct BouncerSession *session)
+{
+  return bounce_compute_hold_time(session);
+}
+
 /** Detach a client from its session (disconnect). */
 int bounce_detach(struct BouncerSession *session)
 {
-  int hold_time;
+  time_t hold_time;
 
   assert(0 != session);
+
+  /* Update activity counters before detach */
+  if (session->hs_last_active > 0)
+    session->hs_total_active += CurrentTime - session->hs_last_active;
 
   session->hs_client = NULL;
   session->hs_disconnect_time = CurrentTime;
@@ -490,8 +680,8 @@ int bounce_detach(struct BouncerSession *session)
   /* Enter HOLDING state */
   session->hs_state = BOUNCE_HOLDING;
 
-  /* Start hold timer */
-  hold_time = feature_int(FEAT_BOUNCER_SESSION_HOLD);
+  /* Start hold timer with adaptive duration */
+  hold_time = bounce_compute_hold_time(session);
   timer_init(&session->hs_hold_timer);
   timer_add(&session->hs_hold_timer, bounce_hold_expire,
             (void *)session, TT_RELATIVE, hold_time);
@@ -590,16 +780,18 @@ void bounce_burst(struct Client *cptr)
       if (s->hs_state == BOUNCE_HOLDING) {
         sendcmdto_one(&me, CMD_BOUNCER_SESSION,
                       cptr,
-                      "C %s %s %s holding %Tu %Tu :%s",
+                      "C %s %s %s holding %Tu %Tu %u %Tu :%s",
                       s->hs_account, s->hs_sessid, s->hs_token,
                       s->hs_created, s->hs_disconnect_time,
+                      s->hs_attach_count, s->hs_total_active,
                       chanbuf);
       } else {
         sendcmdto_one(&me, CMD_BOUNCER_SESSION,
                       cptr,
-                      "C %s %s %s active %Tu :%s",
+                      "C %s %s %s active %Tu %u %Tu :%s",
                       s->hs_account, s->hs_sessid, s->hs_token,
                       s->hs_created,
+                      s->hs_attach_count, s->hs_total_active,
                       chanbuf);
       }
     }
@@ -617,9 +809,11 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
     build_channel_string(session, chanbuf, sizeof(chanbuf));
     sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION,
                           NULL,
-                          "C %s %s %s active %Tu :%s",
+                          "C %s %s %s active %Tu %u %Tu :%s",
                           session->hs_account, session->hs_sessid,
                           session->hs_token, session->hs_created,
+                          session->hs_attach_count,
+                          session->hs_total_active,
                           chanbuf);
     break;
 
@@ -692,7 +886,10 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     const char *channels;
     time_t created;
     time_t disconnect_time = 0;
-    int hold_time;
+    unsigned int attach_count = 0;
+    time_t total_active = 0;
+    time_t hold_time;
+    int is_holding;
 
     if (parc < 7)
       return 0;
@@ -700,10 +897,26 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     token = parv[4];
     state_str = parv[5];
     created = (time_t)atol(parv[6]);
+    is_holding = (0 == ircd_strcmp(state_str, "holding"));
 
-    /* Optional disconnect time for holding sessions */
-    if (parc >= 8 && parv[parc - 1][0] != ':')
-      disconnect_time = (time_t)atol(parv[7]);
+    /* Parse variable-position params depending on state.
+     * Trailing param (parv[parc-1]) is always channels.
+     * Holding: created disconnect_time [attach_count total_active] :channels
+     * Active:  created [attach_count total_active] :channels
+     */
+    if (is_holding) {
+      if (parc >= 8)
+        disconnect_time = (time_t)atol(parv[7]);
+      if (parc >= 10) {
+        attach_count = (unsigned int)atol(parv[8]);
+        total_active = (time_t)atol(parv[9]);
+      }
+    } else {
+      if (parc >= 9) {
+        attach_count = (unsigned int)atol(parv[7]);
+        total_active = (time_t)atol(parv[8]);
+      }
+    }
 
     /* Channel list is the trailing parameter */
     channels = parv[parc - 1];
@@ -724,13 +937,15 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     session->hs_hold_override = -1;
     session->hs_created = created;
     session->hs_last_active = created;
+    session->hs_attach_count = attach_count;
+    session->hs_total_active = total_active;
 
-    if (0 == ircd_strcmp(state_str, "holding")) {
+    if (is_holding) {
       session->hs_state = BOUNCE_HOLDING;
       session->hs_disconnect_time = disconnect_time;
 
-      /* Start local hold timer for remote holding session */
-      hold_time = feature_int(FEAT_BOUNCER_SESSION_HOLD);
+      /* Start local hold timer with adaptive duration */
+      hold_time = bounce_compute_hold_time(session);
       timer_init(&session->hs_hold_timer);
       timer_add(&session->hs_hold_timer, bounce_hold_expire,
                 (void *)session, TT_RELATIVE, hold_time);

@@ -125,7 +125,7 @@ static int is_pm_target_for_client(const char *target, struct Client *cptr)
  * For clients that don't support draft/chathistory, this function
  * automatically replays missed messages since disconnection.
  */
-static void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session)
+void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session)
 {
   struct Membership *member;
   struct HistoryTarget *targets = NULL;
@@ -304,20 +304,23 @@ static int bouncer_listsessions(struct Client *sptr)
     state_str = (s->hs_state == BOUNCE_ACTIVE) ? "active" : "holding";
 
     if (s->hs_state == BOUNCE_HOLDING && s->hs_disconnect_time) {
-      time_t remaining = feature_int(FEAT_BOUNCER_SESSION_HOLD) -
+      time_t hold_time = bounce_compute_hold_time_ext(s);
+      time_t remaining = hold_time -
                          (CurrentTime - s->hs_disconnect_time);
       if (remaining < 0)
         remaining = 0;
-      ircd_snprintf(0, info, sizeof(info), "%s %s %s %ldm",
+      ircd_snprintf(0, info, sizeof(info), "%s %s %s %ldm resumes:%u",
                     s->hs_sessid,
                     s->hs_name[0] ? s->hs_name : "*",
                     state_str,
-                    (long)(remaining / 60));
+                    (long)(remaining / 60),
+                    s->hs_attach_count);
     } else {
-      ircd_snprintf(0, info, sizeof(info), "%s %s %s",
+      ircd_snprintf(0, info, sizeof(info), "%s %s %s resumes:%u",
                     s->hs_sessid,
                     s->hs_name[0] ? s->hs_name : "*",
-                    state_str);
+                    state_str,
+                    s->hs_attach_count);
     }
 
     sendrawto_one(sptr, ":%s %d %s %s",

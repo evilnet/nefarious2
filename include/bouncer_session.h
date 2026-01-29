@@ -93,6 +93,8 @@ struct BouncerSession {
   time_t hs_created;                  /**< When session was created */
   time_t hs_last_active;              /**< Last activity timestamp */
   time_t hs_disconnect_time;          /**< When client disconnected (0=active) */
+  unsigned int hs_attach_count;       /**< Number of times resumed */
+  time_t hs_total_active;             /**< Cumulative active time (seconds) */
   struct Timer hs_hold_timer;         /**< Expiry timer for HOLDING state */
 };
 
@@ -246,10 +248,46 @@ extern int bounce_revive(struct BouncerSession *session, struct Client *cptr);
  * Utility
  */
 
+/** Replay missed messages for a resumed session (legacy clients).
+ * @param[in] sptr Client to replay to.
+ * @param[in] session Session with disconnect timestamp.
+ */
+extern void bouncer_auto_replay(struct Client *sptr,
+                                 struct BouncerSession *session);
+
+/** Compute adaptive hold time for a session.
+ * @param[in] session Session to compute for.
+ * @return Hold time in seconds.
+ */
+extern time_t bounce_compute_hold_time_ext(struct BouncerSession *session);
+
 /** Check if bouncer feature is enabled. */
 extern int bounce_enabled(void);
 
 /** Get the number of sessions for an account. */
 extern int bounce_count(const char *account);
+
+/** Check if an account has any bouncer sessions (ACTIVE or HOLDING).
+ * @param[in] account Account name.
+ * @return 1 if the account has sessions, 0 otherwise.
+ */
+extern int bounce_has_sessions(const char *account);
+
+/** Find the best HOLDING session for an account.
+ * Prefers local ghosts and most recently disconnected.
+ * @param[in] account Account name.
+ * @return Session pointer, or NULL if no held sessions.
+ */
+extern struct BouncerSession *bounce_find_best_held(const char *account);
+
+/** SASL-triggered automatic resume.
+ * If account has a held session, resumes it. Otherwise auto-creates one.
+ * Called from register_user() before network introduction.
+ * @param[in] cptr Newly authenticated client.
+ * @param[out] out_session Set to session if resumed or created.
+ * @return 1 if resumed, 0 otherwise.
+ */
+extern int bounce_auto_resume(struct Client *cptr,
+                               struct BouncerSession **out_session);
 
 #endif /* INCLUDED_bouncer_session_h */
