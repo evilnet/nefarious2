@@ -933,6 +933,7 @@ static struct FeatureDesc {
   /* Bouncer */
   F_B(BOUNCER_ENABLE, 0, 0, 0),
   F_I(BOUNCER_MAX_SESSIONS, 0, 5, 0),
+  F_I(BOUNCER_MAX_SHADOWS, 0, 4, 0),         /* Max shadow connections per session */
   F_I(BOUNCER_SESSION_HOLD, 0, 14400, 0),    /* 4 hours */
   F_I(BOUNCER_TOKEN_EXPIRY, 0, 86400, 0),    /* 24 hours */
   F_B(BOUNCER_DEFAULT_HOLD, 0, 1, 0),

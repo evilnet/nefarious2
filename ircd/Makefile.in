@@ -89,7 +89,6 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	umkpasswd.c
 
 IRCD_SRC = \
-	account_conn.c \
 	bouncer_session.c \
 	IPcheck.c \
 	channel.c \

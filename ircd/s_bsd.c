@@ -111,7 +111,7 @@ const char* const SOCKET_ERROR_MSG    = "error creating socket for %s: %s";
 const char* const TOS_ERROR_MSG	      = "error setting TOS for %s: %s";
 
 
-static void client_sock_callback(struct Event* ev);
+void client_sock_callback(struct Event* ev);
 static void client_timer_callback(struct Event* ev);
 
 
@@ -1334,7 +1334,7 @@ void init_server_identity(void)
  * @param ev Socket event structure that has a struct Connection as
  *   its associated data.
  */
-static void client_sock_callback(struct Event* ev)
+void client_sock_callback(struct Event* ev)
 {
   struct Client* cptr;
   struct Connection* con;
@@ -1464,6 +1464,20 @@ static void client_sock_callback(struct Event* ev)
     msg = (cli_sslerror(cptr)) ? cli_sslerror(cptr) : msg;
     if (!msg)
       msg = "Unknown error";
+
+    /* Check if primary has shadow connections — promote one instead of exiting */
+    if (IsUser(cptr) && bounce_enabled() && IsAccount(cptr)) {
+      struct BouncerSession *bsess = bounce_get_session(cptr);
+      if (bsess && bsess->hs_shadows) {
+        /* Close the old primary socket/sendQ, then promote shadow */
+        close_connection(cptr);
+        if (bounce_promote_shadow(bsess) == 0) {
+          /* Shadow promoted — client stays alive with new socket */
+          return;
+        }
+        /* Promotion failed — fall through to hold or exit */
+      }
+    }
 
     /* Check if client should enter bouncer HOLD mode instead of exiting */
     if (IsUser(cptr) && bounce_should_hold(cptr)) {

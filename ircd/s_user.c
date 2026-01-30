@@ -27,7 +27,6 @@
 #include "config.h"
 
 #include "s_user.h"
-#include "account_conn.h"
 #include "bouncer_session.h"
 #include "capab.h"
 #include "IPcheck.h"
@@ -411,6 +410,26 @@ int register_user(struct Client *cptr, struct Client *sptr)
       auto_resumed = bounce_auto_resume(sptr, &auto_session);
     }
 
+    /* If auto_resume converted this client to a shadow connection,
+     * the Client struct must be freed and we must NOT introduce it
+     * to the network. The shadow has already been attached to the
+     * existing session; bounce_send_shadow_welcome() sends the
+     * registration sequence on the shadow's socket.
+     */
+    if (auto_resumed == 2 && auto_session) {
+      /* Find the shadow that was just created (last one added = first in list) */
+      struct ShadowConnection *new_shadow = auto_session->hs_shadows;
+      if (new_shadow) {
+        bounce_send_shadow_welcome(new_shadow);
+      }
+      /* The Client's socket fd was already detached in bounce_auto_resume.
+       * Free the Client struct — it's no longer an IRC identity.
+       * Set FLAG_KILLED to suppress QUIT broadcast (shadow is invisible). */
+      SetFlag(sptr, FLAG_KILLED);
+      exit_client(cptr, sptr, &me, "Converted to bouncer shadow");
+      return 0; /* Client freed, do not continue registration */
+    }
+
     SetLocalNumNick(sptr);
 
     if ((ashun = shun_lookup(sptr, 0))) {
@@ -515,17 +534,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
         con_pre_away(cli_connect(sptr)) = 0;
         con_pre_away_msg(cli_connect(sptr))[0] = '\0';
 
-        /* Register with presence aggregation — only when bouncer is active */
-        if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
-            && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
-          enum ConnAwayState state = (pre_away_type == 2) ? CONN_AWAY_STAR : CONN_AWAY;
-          account_conn_add(sptr);
-          account_conn_set_away(sptr, state, user->away);
-        }
-      } else if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
-                 && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
-        /* No pre-away, just register as present */
-        account_conn_add(sptr);
       }
     }
 

@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "send.h"
+#include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
@@ -85,6 +86,12 @@ static struct Connection *send_queues;
  */
 static char active_network_batch_id[32] = "";
 char *GlobalForwards[256];
+
+/** Global shadow tag context for per-shadow CAP tag filtering.
+ * Set by channel send functions around their member loop, read by
+ * send_buffer()'s shadow duplication loop.
+ */
+struct ShadowTagContext shadow_tag_ctx;
 
 /** Format current time as ISO 8601 timestamp for server-time capability.
  * @param[out] buf Buffer to write timestamp to.
@@ -229,6 +236,30 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
   if (include_batch && CapActive(to, CAP_BATCH) && active_network_batch_id[0])
     flags |= TAGS_BATCH;
   /* Bot tag is sent to any client that gets any tags */
+  if (flags && from && IsBot(from))
+    flags |= TAGS_BOT;
+
+  return flags;
+}
+
+/** Get the tag flags appropriate for a shadow connection based on its capabilities.
+ * Mirrors get_client_tag_flags() but uses the shadow's sh_active CapSet.
+ * @param[in] sh Shadow connection.
+ * @param[in] from Source client (for bot detection).
+ * @param[in] include_batch Whether to include batch tag if network batch is active.
+ * @return TAGS_* flags for this shadow.
+ */
+static int get_shadow_tag_flags(struct ShadowConnection *sh, struct Client *from, int include_batch)
+{
+  int flags = 0;
+
+  if (feature_bool(FEAT_CAP_server_time) && CapHas(&sh->sh_active, CAP_SERVERTIME))
+    flags |= TAGS_TIME;
+  if (feature_bool(FEAT_CAP_account_tag) && CapHas(&sh->sh_active, CAP_ACCOUNTTAG))
+    flags |= TAGS_ACCOUNT;
+  if (include_batch && CapHas(&sh->sh_active, CAP_BATCH) && active_network_batch_id[0])
+    flags |= TAGS_BATCH;
+  /* Bot tag is sent to any recipient that gets any tags */
   if (flags && from && IsBot(from))
     flags |= TAGS_BOT;
 
@@ -667,6 +698,61 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
 
   Debug((DEBUG_SEND, "Sending [%p] to %s", buf, cli_name(to)));
 
+  /* Bouncer reply routing: when a shadow connection sent a command
+   * (current_shadow is set) and the reply is directed at the session's
+   * primary client, route it ONLY to the originating shadow.
+   *
+   * This prevents unsolicited numerics/replies from appearing on other
+   * connections, which confuses many IRC clients.
+   *
+   * Broadcast traffic (channel messages etc.) calls send_buffer() with
+   * different targets (channel members), so it naturally reaches the
+   * primary. The duplication loop below handles broadcasting to shadows.
+   */
+  if (current_shadow && MyUser(to) && !IsServer(to)) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_client == to) {
+      /* This is a reply to the session's primary — route to originating shadow only.
+       * Apply per-shadow tag filtering: strip tags the shadow hasn't negotiated. */
+      if (!(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)) {
+        struct MsgBuf *sh_buf = buf;
+        int sh_flags = get_shadow_tag_flags(current_shadow, NULL, 0);
+        if (sh_flags == 0) {
+          const char *data;
+          unsigned int len;
+          msgq_buf_data(buf, &data, &len);
+          if (len >= 2 && data[0] == '@') {
+            struct MsgBuf *stripped = msgq_strip_tags(buf);
+            if (stripped) {
+              msgq_add(&current_shadow->sh_sendQ, stripped, prio);
+              socket_state(&current_shadow->sh_socket, SS_CONNECTED);
+              msgq_clean(stripped);
+              return;
+            }
+          }
+        } else {
+          /* Shadow wants some tags — check if filtering needed */
+          const char *data;
+          unsigned int len;
+          msgq_buf_data(buf, &data, &len);
+          if (len >= 2 && data[0] == '@') {
+            struct MsgBuf *filtered = msgq_filter_tags(buf, &current_shadow->sh_active);
+            if (filtered) {
+              sh_buf = filtered;
+              msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
+              socket_state(&current_shadow->sh_socket, SS_CONNECTED);
+              msgq_clean(filtered);
+              return;
+            }
+          }
+        }
+        msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
+        socket_state(&current_shadow->sh_socket, SS_CONNECTED);
+      }
+      return; /* Do NOT send to primary or other shadows */
+    }
+  }
+
   msgq_add(&(cli_sendQ(to)), buf, prio);
   client_add_sendq(cli_connect(to), &send_queues);
   update_write(to);
@@ -691,6 +777,105 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
    */
   if (prio || MsgQLength(&(cli_sendQ(to))) / 1024 > cli_lastsq(to))
     send_queued(to);
+
+  /* Duplicate to bouncer shadow connections (multi-client support).
+   * If this client has an active bouncer session with shadows, queue
+   * a MsgBuf to each shadow's sendQ. Per-shadow CAP tag filtering
+   * ensures each shadow only receives tags it negotiated.
+   *
+   * Two-tier approach:
+   *  - Tier 1: If shadow_tag_ctx is active (channel send function),
+   *    pick the correct cached MsgBuf from mb_cache by shadow's tag flags.
+   *  - Tier 2: Otherwise (non-channel sends), strip or filter tags
+   *    when the shadow's caps differ from the primary's.
+   */
+  if (MyUser(to) && !IsServer(to)) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_shadow_count > 0) {
+      struct ShadowConnection *sh;
+      int primary_flags;
+      struct MsgBuf *stripped = NULL;    /* cached stripped MsgBuf for no-tag shadows */
+      struct MsgBuf *filtered_list[8];   /* track filtered MsgBufs for cleanup */
+      int filtered_count = 0;
+
+      /* Compute primary's tag flags if context is available */
+      if (shadow_tag_ctx.stc_active)
+        primary_flags = get_client_tag_flags(to, shadow_tag_ctx.stc_from,
+                                              shadow_tag_ctx.stc_include_batch);
+      else
+        primary_flags = -1; /* unknown — no context available */
+
+      for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
+        struct MsgBuf *sh_buf;
+        int sh_flags;
+
+        if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+          continue;
+
+        if (primary_flags < 0) {
+          /* No context — check if shadow needs tags stripped entirely.
+           * For non-channel sends without context, detect if the message
+           * has tags and the shadow doesn't want any. */
+          sh_flags = get_shadow_tag_flags(sh, NULL, 0);
+          if (sh_flags == 0) {
+            const char *data;
+            unsigned int len;
+            msgq_buf_data(buf, &data, &len);
+            if (len >= 2 && data[0] == '@') {
+              /* Message has tags, shadow wants none — strip */
+              if (!stripped)
+                stripped = msgq_strip_tags(buf);
+              sh_buf = stripped ? stripped : buf;
+            } else {
+              sh_buf = buf; /* no tags to strip */
+            }
+          } else {
+            sh_buf = buf; /* shadow wants some tags, no context to filter — passthrough */
+          }
+        } else {
+          sh_flags = get_shadow_tag_flags(sh, shadow_tag_ctx.stc_from,
+                                           shadow_tag_ctx.stc_include_batch);
+          if (sh_flags == primary_flags) {
+            /* Same caps as primary — zero overhead */
+            sh_buf = buf;
+          } else if (shadow_tag_ctx.stc_cache && shadow_tag_ctx.stc_cache[sh_flags]) {
+            /* Exact match from channel mb_cache — zero allocation */
+            sh_buf = shadow_tag_ctx.stc_cache[sh_flags];
+          } else if (sh_flags == 0 && shadow_tag_ctx.stc_notags) {
+            /* No-tags version from channel cache */
+            sh_buf = shadow_tag_ctx.stc_notags;
+          } else if (sh_flags == 0) {
+            /* Strip all tags (fallback for non-channel sends) */
+            if (!stripped)
+              stripped = msgq_strip_tags(buf);
+            sh_buf = stripped ? stripped : buf;
+          } else {
+            /* Different tags, no cache — exact per-tag filtering */
+            struct MsgBuf *filt = msgq_filter_tags(buf, &sh->sh_active);
+            if (filt) {
+              sh_buf = filt;
+              if (filtered_count < 8)
+                filtered_list[filtered_count++] = filt;
+            } else {
+              sh_buf = buf;
+            }
+          }
+        }
+
+        msgq_add(&sh->sh_sendQ, sh_buf, prio);
+        socket_state(&sh->sh_socket, SS_CONNECTED);
+      }
+
+      /* Clean up any MsgBufs we allocated for this send_buffer call */
+      if (stripped)
+        msgq_clean(stripped);
+      {
+        int fi;
+        for (fi = 0; fi < filtered_count; fi++)
+          msgq_clean(filtered_list[fi]);
+      }
+    }
+  }
 }
 
 /*
@@ -1112,6 +1297,14 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   va_end(vd.vd_args);
 
   bump_sentalong(from);
+
+  /* Set shadow tag context for per-shadow CAP filtering */
+  shadow_tag_ctx.stc_cache = mb_cache;
+  shadow_tag_ctx.stc_notags = mb;
+  shadow_tag_ctx.stc_from = from;
+  shadow_tag_ctx.stc_active = 1;
+  shadow_tag_ctx.stc_include_batch = 1;
+
   /*
    * loop through from's channels, and the members on their channels
    */
@@ -1152,6 +1345,9 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
     else
       send_buffer(from, mb, 0);
   }
+
+  /* Clear shadow tag context */
+  shadow_tag_ctx.stc_active = 0;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -1195,6 +1391,14 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   va_end(vd.vd_args);
 
   bump_sentalong(from);
+
+  /* Set shadow tag context for per-shadow CAP filtering */
+  shadow_tag_ctx.stc_cache = mb_cache;
+  shadow_tag_ctx.stc_notags = mb;
+  shadow_tag_ctx.stc_from = from;
+  shadow_tag_ctx.stc_active = 1;
+  shadow_tag_ctx.stc_include_batch = 0;
+
   /*
    * loop through from's channels, and the members on their channels
    */
@@ -1238,6 +1442,9 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
       send_buffer(from, mb, 0);
   }
 
+  /* Clear shadow tag context */
+  shadow_tag_ctx.stc_active = 0;
+
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
     if (mb_cache[flags])
@@ -1274,6 +1481,13 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
+  /* Set shadow tag context for per-shadow CAP filtering */
+  shadow_tag_ctx.stc_cache = mb_cache;
+  shadow_tag_ctx.stc_notags = mb;
+  shadow_tag_ctx.stc_from = from;
+  shadow_tag_ctx.stc_active = 1;
+  shadow_tag_ctx.stc_include_batch = 0;
+
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
     if (!MyConnect(member->user)
@@ -1303,6 +1517,9 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
       send_buffer(member->user, mb, 0);
     }
   }
+
+  /* Clear shadow tag context */
+  shadow_tag_ctx.stc_active = 0;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -1344,6 +1561,13 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
+  /* Set shadow tag context for per-shadow CAP filtering */
+  shadow_tag_ctx.stc_cache = mb_cache;
+  shadow_tag_ctx.stc_notags = mb;
+  shadow_tag_ctx.stc_from = from;
+  shadow_tag_ctx.stc_active = 1;
+  shadow_tag_ctx.stc_include_batch = 0;
+
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
     if (!MyConnect(member->user)
@@ -1375,6 +1599,9 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
       send_buffer(member->user, mb, 0);
     }
   }
+
+  /* Clear shadow tag context */
+  shadow_tag_ctx.stc_active = 0;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -1544,6 +1771,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     va_end(vd.vd_args);
   }
 
+  /* Set shadow tag context for per-shadow CAP filtering */
+  shadow_tag_ctx.stc_cache = user_mb_cache;
+  shadow_tag_ctx.stc_notags = user_mb;
+  shadow_tag_ctx.stc_from = from;
+  shadow_tag_ctx.stc_active = 1;
+  shadow_tag_ctx.stc_include_batch = 0;
+
   /* send buffer along! */
   bump_sentalong(one);
   for (member = to->members; member; member = member->next_member) {
@@ -1588,6 +1822,9 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       cli_sentalong(service) = sentalong_marker;
       send_buffer(service, serv_mb, 0);
   }
+
+  /* Clear shadow tag context */
+  shadow_tag_ctx.stc_active = 0;
 
   msgq_clean(user_mb);
   for (tflags = 0; tflags < 16; tflags++) {

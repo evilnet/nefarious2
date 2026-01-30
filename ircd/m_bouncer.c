@@ -22,6 +22,7 @@
  * User subcommands:
  *   BOUNCER SET HOLD [on|off]   - Set hold preference
  *   BOUNCER INFO                - Show session state and preferences
+ *   BOUNCER LISTCLIENTS         - List all connections for the session
  *
  * Oper-only subcommands (for admin/testing):
  *   BOUNCER TOKEN          - Request a new session token
@@ -32,7 +33,6 @@
  */
 #include "config.h"
 
-#include "account_conn.h"
 #include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
@@ -458,12 +458,6 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
         if (bounce_create(sptr, &session) == 0 && session) {
           bounce_broadcast(session, 'C', NULL);
 
-          /* Add this client to the presence aggregation registry.
-           * At registration time, bounce_has_sessions() was false so the
-           * client was skipped.  Now that a session exists, register it. */
-          if (feature_bool(FEAT_PRESENCE_AGGREGATION))
-            account_conn_add(sptr);
-
           send_note(sptr, "BOUNCER", "SESSION_CREATED", session->hs_sessid,
                     "Hold mode enabled, session created");
         } else {
@@ -576,6 +570,83 @@ static int bouncer_settings(struct Client *sptr)
 /* Subcommand: INFO                                                  */
 /* ---------------------------------------------------------------- */
 
+/** Handle BOUNCER LISTCLIENTS - list all connections for the session.
+ * Shows primary + shadow connections with client IDs, away state,
+ * connect time, and IP address.
+ *
+ * Reply format uses NOTE:
+ *   :server NOTE BOUNCER CLIENT id=N type=primary|shadow state=present|away|away-star since=TIMESTAMP ip=ADDR
+ *   :server NOTE BOUNCER LISTCLIENTS_END :End of client list
+ */
+static int bouncer_listclients(struct Client *sptr)
+{
+  struct BouncerSession *session;
+  struct ShadowConnection *sh;
+  const char *state_str;
+  char info[512];
+
+  if (!IsAccount(sptr)) {
+    send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", "LISTCLIENTS",
+              "You must be logged in to use bouncer features");
+    return 0;
+  }
+
+  session = bounce_get_session(sptr);
+  if (!session) {
+    send_fail(sptr, "BOUNCER", "NO_SESSION", "LISTCLIENTS",
+              "No active bouncer session");
+    return 0;
+  }
+
+  /* Primary connection */
+  if (session->hs_client && session->hs_state == BOUNCE_ACTIVE) {
+    int away_state = 0;
+    if (cli_user(session->hs_client)->away) {
+      away_state = 1;
+    }
+    switch (away_state) {
+      case 1:  state_str = "away"; break;
+      case 2:  state_str = "away-star"; break;
+      default: state_str = "present"; break;
+    }
+    ircd_snprintf(0, info, sizeof(info),
+                  "id=%u type=primary state=%s since=%lu ip=%s",
+                  session->hs_primary_id,
+                  state_str,
+                  (unsigned long)cli_firsttime(session->hs_client),
+                  cli_sock_ip(session->hs_client));
+    send_note(sptr, "BOUNCER", "CLIENT", session->hs_sessid, info);
+  }
+
+  /* Shadow connections */
+  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
+    switch (sh->sh_away_state) {
+      case 1:  state_str = "away"; break;
+      case 2:  state_str = "away-star"; break;
+      default: state_str = "present"; break;
+    }
+    ircd_snprintf(0, info, sizeof(info),
+                  "id=%u type=shadow state=%s since=%lu ip=%s",
+                  sh->sh_id,
+                  state_str,
+                  (unsigned long)sh->sh_connected,
+                  sh->sh_sock_ip);
+    send_note(sptr, "BOUNCER", "CLIENT", session->hs_sessid, info);
+  }
+
+  {
+    char end_msg[128];
+    ircd_snprintf(0, end_msg, sizeof(end_msg),
+                  "End of client list (%d connections)",
+                  bounce_connection_count(session));
+    send_note(sptr, "BOUNCER", "LISTCLIENTS_END", session->hs_sessid, end_msg);
+  }
+
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+
 /** Handle BOUNCER INFO - show session state and preferences.
  * Combines session status and hold preferences in a single view.
  * This is the primary user-facing read-only command.
@@ -636,11 +707,12 @@ static int bouncer_info(struct Client *sptr)
         time_t hold_time = bounce_compute_hold_time_ext(s);
         ircd_snprintf(0, info, sizeof(info),
                       "state=%s hold=%s(%s) resumes=%u "
-                      "hold_time=%lds session=%s",
+                      "hold_time=%lds connections=%d session=%s",
                       state_str,
                       hold ? "on" : "off", hold_src,
                       s->hs_attach_count,
                       (long)hold_time,
+                      bounce_connection_count(s),
                       s->hs_sessid);
       }
 
@@ -702,6 +774,9 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   if (0 == ircd_strcmp(subcmd, "INFO"))
     return bouncer_info(sptr);
+
+  if (0 == ircd_strcmp(subcmd, "LISTCLIENTS"))
+    return bouncer_listclients(sptr);
 
   /* --- Oper-only commands (admin/testing) --- */
 

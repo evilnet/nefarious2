@@ -32,6 +32,15 @@
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
 #endif
+#ifndef INCLUDED_capab_h
+#include "capab.h"
+#endif
+#ifndef INCLUDED_dbuf_h
+#include "dbuf.h"
+#endif
+#ifndef INCLUDED_msgq_h
+#include "msgq.h"
+#endif
 #ifndef INCLUDED_sys_types_h
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
@@ -47,6 +56,8 @@ struct Client;
 #define BOUNCER_NAME_LEN        32
 /** Maximum channels tracked per session. */
 #define BOUNCER_MAX_CHANNELS    50
+/** Maximum shadow connections per bouncer session. */
+#define BOUNCER_MAX_SHADOWS     4
 
 /** Hash table sizes for session lookups. */
 #define BOUNCE_TOKEN_HASHSIZE   1024
@@ -56,6 +67,44 @@ struct Client;
 enum BouncerState {
   BOUNCE_ACTIVE,    /**< Client is connected */
   BOUNCE_HOLDING    /**< Client disconnected, session preserved */
+};
+
+/** Shadow connection flags. */
+#define SHADOW_FLAGS_DEAD     0x0001  /**< Marked for cleanup */
+#define SHADOW_FLAGS_BLOCKED  0x0002  /**< Write blocked (sendQ full) */
+
+/** Shadow connection — a secondary TCP connection sharing a bouncer session's identity.
+ *
+ * Shadows piggyback on the "real" Client (the primary connection). They have
+ * their own socket, sendQ, recvQ, and CAP state, but are NOT in the nick hash,
+ * NOT in channel lists, and have NO P10 numeric.
+ *
+ * Outbound messages to the primary are duplicated to all shadows (respecting
+ * per-shadow CAP filtering). Inbound commands from shadows are forwarded
+ * through the primary's handler chain.
+ */
+struct ShadowConnection {
+  struct ShadowConnection *sh_next;     /**< Next shadow in session list */
+  unsigned int             sh_id;       /**< Client ID (unique within session) */
+  int                      sh_fd;       /**< File descriptor */
+  struct Socket            sh_socket;   /**< Physical socket */
+  struct MsgQ              sh_sendQ;    /**< Outgoing message queue */
+  struct DBuf              sh_recvQ;    /**< Incoming data buffer */
+  unsigned int             sh_count;    /**< Bytes in parse buffer */
+  char                     sh_buffer[BUFSIZE]; /**< Parse buffer */
+  struct CapSet            sh_capab;    /**< Negotiated capabilities (from us) */
+  struct CapSet            sh_active;   /**< Active capabilities (to us) */
+  unsigned short           sh_capab_version; /**< CAP version */
+  char                     sh_label[64]; /**< Current labeled-response label */
+  unsigned char            sh_label_responded; /**< Whether response sent for label */
+  struct BouncerSession   *sh_session;  /**< Back-pointer to owning session */
+  time_t                   sh_lasttime; /**< Last data read from socket */
+  time_t                   sh_since;    /**< Last command accepted */
+  time_t                   sh_connected; /**< When this shadow connected */
+  unsigned char            sh_away_state; /**< Per-connection away: 0=present, 1=away, 2=away-star */
+  char                     sh_away_msg[AWAYLEN + 1]; /**< Per-connection away message */
+  unsigned int             sh_flags;    /**< Shadow-specific flags */
+  char                     sh_sock_ip[SOCKIPLEN + 1]; /**< Remote IP as string */
 };
 
 /** Channel membership preserved in a held session. */
@@ -87,8 +136,17 @@ struct BouncerSession {
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
 
+  /** Shadow connection list (secondary TCP connections sharing this session). */
+  struct ShadowConnection *hs_shadows; /**< Linked list of shadow connections */
+  int hs_shadow_count;                 /**< Number of attached shadows */
+  unsigned int hs_client_id_seq;       /**< Monotonic counter for client IDs */
+  unsigned int hs_primary_id;          /**< Client ID of the primary connection */
+
   struct BounceChannel hs_channels[BOUNCER_MAX_CHANNELS];
   int hs_chancount;
+
+  int hs_effective_away;               /**< Last computed effective away: 0=present, 1=away, 2=all-star */
+  char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */
 
   time_t hs_created;                  /**< When session was created */
   time_t hs_last_active;              /**< Last activity timestamp */
@@ -163,6 +221,77 @@ extern void bounce_setname(struct BouncerSession *session, const char *name);
  */
 extern void bounce_snapshot_channels(struct BouncerSession *session,
                                      struct Client *cptr);
+
+/*
+ * Shadow connection API (multi-client support)
+ */
+
+/** Add a shadow connection to a bouncer session.
+ * The shadow gets its own socket/sendQ/CAP state but shares the session's
+ * IRC identity (nick, channels, modes).
+ * @param[in] session Active bouncer session.
+ * @param[in] fd File descriptor of the new connection.
+ * @param[in] sock_ip Remote IP address as string.
+ * @return Pointer to new ShadowConnection, or NULL on error.
+ */
+extern struct ShadowConnection *bounce_add_shadow(struct BouncerSession *session,
+                                                   int fd,
+                                                   const char *sock_ip);
+
+/** Remove a shadow connection from its session.
+ * Cleans up the shadow's sendQ, recvQ, socket, and removes it from the list.
+ * @param[in] shadow Shadow connection to remove.
+ */
+extern void bounce_remove_shadow(struct ShadowConnection *shadow);
+
+/** Promote the first shadow to primary connection.
+ * Called when the primary connection disconnects but shadows remain.
+ * Transplants the shadow's socket into the Client's Connection struct.
+ * @param[in] session Session whose primary disconnected.
+ * @return 0 on success, -1 if no shadows available.
+ */
+extern int bounce_promote_shadow(struct BouncerSession *session);
+
+/** Find the bouncer session for a client (if any).
+ * @param[in] cptr Client to look up.
+ * @return Session pointer, or NULL if client has no bouncer session.
+ */
+extern struct BouncerSession *bounce_get_session(struct Client *cptr);
+
+/** Find any session for an account (ACTIVE or HOLDING).
+ * Unlike bounce_find_best_held(), this returns any session.
+ * @param[in] account Account name.
+ * @return Session pointer, or NULL if no sessions.
+ */
+extern struct BouncerSession *bounce_find_any_session(const char *account);
+
+/** Get the total number of connections (primary + shadows) for a session.
+ * @param[in] session Session to query.
+ * @return Number of connections (0 if HOLDING, 1+ if ACTIVE).
+ */
+extern int bounce_connection_count(struct BouncerSession *session);
+
+/** Compute effective away state across all session connections.
+ * @param[in] session Bouncer session.
+ * @param[out] effective_state 0=present, 1=away, 2=away-star-only.
+ * @param[out] effective_msg Effective away message buffer (AWAYLEN+1).
+ * @return 1 if effective state changed, 0 if unchanged.
+ */
+extern int bounce_compute_effective_away(struct BouncerSession *session,
+                                          int *effective_state,
+                                          char *effective_msg);
+
+/** Send IRC registration welcome sequence to a newly attached shadow.
+ * @param[in] shadow The newly created shadow connection.
+ */
+extern void bounce_send_shadow_welcome(struct ShadowConnection *shadow);
+
+/** Global pointer to the shadow connection that originated the current command.
+ * Single-threaded IRCd, so a global is safe. Used for reply routing:
+ * when a shadow sends a command, replies should go to the shadow, not the primary.
+ * NULL when the primary (or no shadow) is the source.
+ */
+extern struct ShadowConnection *current_shadow;
 
 /*
  * P10 BURST / sync API

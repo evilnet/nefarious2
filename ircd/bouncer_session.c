@@ -24,13 +24,13 @@
  */
 #include "config.h"
 
-#include "account_conn.h"
 #include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_osdep.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
@@ -42,14 +42,19 @@
 #include "numnicks.h"
 #include "send.h"
 #include "s_bsd.h"
+#include "parse.h"
 #include "s_debug.h"
 #include "s_misc.h"
 #include "struct.h"
+#include "version.h"
 
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 #ifdef USE_SSL
 #include <openssl/rand.h>
@@ -367,12 +372,14 @@ struct BouncerSession *bounce_find_best_held(const char *account)
  * Called from register_user() after SASL auth sets the account
  * but before the client is introduced to the network.
  *
- * If a held session exists for this account, resumes it.
- * If no session exists and default hold is enabled, auto-creates one.
+ * Three outcomes:
+ *   1. Held session found → resume it (return 1)
+ *   2. Active session found → convert cptr to shadow connection (return 2)
+ *   3. No session → auto-create one (return 0)
  *
  * @param[in] cptr Newly authenticated client.
  * @param[out] out_session Set to the session if resumed or created.
- * @return 1 if resumed a held session, 0 otherwise.
+ * @return 1 if resumed a held session, 2 if converted to shadow, 0 otherwise.
  */
 int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
 {
@@ -421,16 +428,60 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
         sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
       }
 
-      /* Ensure new client is in the presence aggregation registry.
-       * The ghost was removed by exit_client -> account_conn_remove,
-       * so we need to explicitly add the new client. */
-      if (feature_bool(FEAT_PRESENCE_AGGREGATION)) {
-        account_conn_add(cptr);
-      }
-
       bounce_broadcast(session, 'A', cli_yxx(cptr));
       *out_session = session;
       return 1;
+    }
+  }
+
+  /* Check for an ACTIVE session — attach as shadow connection */
+  session = bounce_find_any_session(account);
+  if (session && session->hs_state == BOUNCE_ACTIVE && session->hs_client) {
+    /* Convert this registering client into a shadow connection.
+     * The Client struct will be freed; only the socket fd survives. */
+    struct ShadowConnection *shadow;
+    int fd;
+    char sock_ip[SOCKIPLEN + 1];
+
+    /* Extract fd and IP from the client's connection before we free it */
+    fd = cli_fd(cptr);
+    ircd_strncpy(sock_ip, cli_sock_ip(cptr), SOCKIPLEN);
+
+    /* Detach the fd from the client so close_connection() won't close it.
+     * We do this by setting the fd to -1 in the socket structure. */
+    s_fd(&cli_socket(cptr)) = -1;
+
+    /* Create the shadow connection on the active session */
+    shadow = bounce_add_shadow(session, fd, sock_ip);
+    if (shadow) {
+      /* Copy CAP state from the registering client to the shadow.
+       * con_capab() and con_active() return pointers to CapSet structs. */
+      memcpy(&shadow->sh_capab, con_capab(cli_connect(cptr)),
+             sizeof(struct CapSet));
+      memcpy(&shadow->sh_active, con_active(cli_connect(cptr)),
+             sizeof(struct CapSet));
+      shadow->sh_capab_version = con_capab_version(cli_connect(cptr));
+
+      /* Copy pre-away state if any */
+      shadow->sh_away_state = con_pre_away(cli_connect(cptr));
+      if (shadow->sh_away_state == 1) {
+        ircd_strncpy(shadow->sh_away_msg,
+                     con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
+      }
+
+      Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
+             cli_name(cptr), shadow->sh_id, session->hs_sessid));
+
+      *out_session = session;
+
+      /* Send registration sequence to the shadow.
+       * This happens AFTER the Client is freed in register_user(),
+       * so we queue it via bounce_send_shadow_welcome(). */
+
+      return 2; /* Signal: converted to shadow, do not introduce to network */
+    } else {
+      /* Failed to create shadow — restore fd and continue as normal client */
+      s_fd(&cli_socket(cptr)) = fd;
     }
   }
 
@@ -482,6 +533,12 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   session->hs_client = cptr;
   ircd_strncpy(session->hs_origin, cli_yxx(&me), sizeof(session->hs_origin) - 1);
   session->hs_hold_override = -1; /* Use default */
+  session->hs_shadows = NULL;
+  session->hs_shadow_count = 0;
+  session->hs_client_id_seq = 1; /* Primary gets ID 1 */
+  session->hs_primary_id = 1;
+  session->hs_effective_away = 0;
+  session->hs_effective_away_msg[0] = '\0';
   session->hs_chancount = 0;
   session->hs_created = CurrentTime;
   session->hs_last_active = CurrentTime;
@@ -696,11 +753,30 @@ int bounce_detach(struct BouncerSession *session)
 /** Destroy a session entirely. */
 void bounce_destroy(struct BouncerSession *session)
 {
+  struct ShadowConnection *shadow, *next;
+
   assert(0 != session);
 
   /* Cancel timer if active */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
+
+  /* Clean up all shadow connections */
+  for (shadow = session->hs_shadows; shadow; shadow = next) {
+    next = shadow->sh_next;
+    if (current_shadow == shadow)
+      current_shadow = NULL;
+    socket_del(&shadow->sh_socket);
+    if (shadow->sh_fd >= 0) {
+      close(shadow->sh_fd);
+      shadow->sh_fd = -1;
+    }
+    MsgQClear(&shadow->sh_sendQ);
+    dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
+    MyFree(shadow);
+  }
+  session->hs_shadows = NULL;
+  session->hs_shadow_count = 0;
 
   /* Remove from hash tables */
   token_hash_remove(session);
@@ -939,6 +1015,12 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     ircd_strncpy(session->hs_origin, cli_yxx(sptr),
                  sizeof(session->hs_origin) - 1);
     session->hs_hold_override = -1;
+    session->hs_shadows = NULL;
+    session->hs_shadow_count = 0;
+    session->hs_client_id_seq = 0;
+    session->hs_primary_id = 0;
+    session->hs_effective_away = 0;
+    session->hs_effective_away_msg[0] = '\0';
     session->hs_created = created;
     session->hs_last_active = created;
     session->hs_attach_count = attach_count;
@@ -1362,4 +1444,682 @@ void bounce_initiate_transfer(struct BouncerSession *session,
   /* Cancel hold timer */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
+}
+
+/* ---------------------------------------------------------------- */
+/* Shadow connection management (multi-client support)               */
+/* ---------------------------------------------------------------- */
+
+/** Global pointer to the shadow that originated the current command.
+ * Used for reply routing in send.c — when a shadow sends a command,
+ * replies are directed to the shadow instead of (or in addition to)
+ * the primary connection. NULL when the primary is the source.
+ */
+struct ShadowConnection *current_shadow = NULL;
+
+/** Flush a shadow connection's sendQ to its socket.
+ * Analogous to deliver_it() for normal clients, but operates directly
+ * on a ShadowConnection's fd and MsgQ.
+ */
+static void shadow_flush_sendq(struct ShadowConnection *shadow)
+{
+  unsigned int bytes_written = 0;
+  unsigned int bytes_count = 0;
+  IOResult result;
+
+  if (shadow->sh_flags & SHADOW_FLAGS_DEAD)
+    return;
+
+  if (MsgQLength(&shadow->sh_sendQ) == 0)
+    return;
+
+  result = os_sendv_nonb(shadow->sh_fd, &shadow->sh_sendQ,
+                         &bytes_count, &bytes_written);
+
+  switch (result) {
+  case IO_SUCCESS:
+    shadow->sh_flags &= ~SHADOW_FLAGS_BLOCKED;
+    if (bytes_written > 0)
+      msgq_delete(&shadow->sh_sendQ, bytes_written);
+    if (bytes_written < bytes_count)
+      shadow->sh_flags |= SHADOW_FLAGS_BLOCKED;
+    break;
+  case IO_BLOCKED:
+    shadow->sh_flags |= SHADOW_FLAGS_BLOCKED;
+    break;
+  case IO_FAILURE:
+    shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+    break;
+  }
+}
+
+/** Read data from a shadow connection and forward commands to primary.
+ *
+ * Reads bytes from the shadow's socket, buffers them, extracts complete
+ * lines (terminated by \r\n), and dispatches each line through
+ * parse_client() with the primary Client as cptr.
+ *
+ * The global current_shadow is set before dispatch so that reply routing
+ * can direct responses to this shadow.
+ *
+ * @param[in] shadow Shadow connection to read from.
+ * @return 0 on success, -1 if shadow should be removed.
+ */
+static int shadow_read_packet(struct ShadowConnection *shadow)
+{
+  struct BouncerSession *session = shadow->sh_session;
+  struct Client *primary;
+  char readbuf[BUFSIZE];
+  int length;
+  IOResult result;
+  char *s, *end;
+
+  if (!session || session->hs_state != BOUNCE_ACTIVE || !session->hs_client)
+    return -1;
+
+  primary = session->hs_client;
+
+  /* Read from shadow's socket */
+  result = os_recv_nonb(shadow->sh_fd, readbuf, sizeof(readbuf) - 1,
+                        (unsigned int *)&length);
+
+  switch (result) {
+  case IO_SUCCESS:
+    if (length <= 0)
+      return -1; /* EOF */
+    break;
+  case IO_BLOCKED:
+    return 0; /* Nothing to read right now */
+  case IO_FAILURE:
+    return -1; /* Socket error */
+  }
+
+  shadow->sh_lasttime = CurrentTime;
+
+  /* Append to shadow's parse buffer */
+  if (shadow->sh_count + length >= BUFSIZE) {
+    /* Buffer overflow — discard excess */
+    length = BUFSIZE - shadow->sh_count - 1;
+    if (length <= 0)
+      return 0;
+  }
+  memcpy(shadow->sh_buffer + shadow->sh_count, readbuf, length);
+  shadow->sh_count += length;
+  shadow->sh_buffer[shadow->sh_count] = '\0';
+
+  /* Extract and process complete lines */
+  s = shadow->sh_buffer;
+  while ((end = strchr(s, '\n')) != NULL) {
+    /* Null-terminate this line (strip \r\n) */
+    *end = '\0';
+    if (end > s && *(end - 1) == '\r')
+      *(end - 1) = '\0';
+
+    if (*s != '\0') {
+      int line_len = strlen(s);
+
+      /* Handle QUIT from shadow — disconnect this shadow only */
+      if (line_len >= 4 && 0 == ircd_strncmp(s, "QUIT", 4) &&
+          (s[4] == '\0' || s[4] == ' ')) {
+        shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+        return -1;
+      }
+
+      /* Handle PING/PONG locally for the shadow */
+      if (line_len >= 4 && 0 == ircd_strncmp(s, "PING", 4)) {
+        /* Respond directly to the shadow with PONG */
+        char pong[BUFSIZE];
+        int pong_len;
+        struct MsgBuf *mb;
+        const char *param = (s[4] == ' ') ? s + 5 : cli_name(&me);
+        pong_len = ircd_snprintf(0, pong, sizeof(pong),
+                                 ":%s PONG %s :%s\r\n",
+                                 cli_name(&me), cli_name(&me), param);
+        /* Write directly to shadow sendQ */
+        mb = msgq_make(primary, "%s", pong);
+        if (mb) {
+          msgq_add(&shadow->sh_sendQ, mb, 0);
+          msgq_clean(mb);
+        }
+        s = end + 1;
+        continue;
+      }
+
+      /* Forward command to primary Client.
+       * Set current_shadow so reply routing directs responses to this shadow.
+       */
+      current_shadow = shadow;
+      {
+        char line_copy[BUFSIZE];
+        ircd_strncpy(line_copy, s, sizeof(line_copy) - 1);
+        line_copy[sizeof(line_copy) - 1] = '\0';
+        parse_client(primary, line_copy, line_copy + strlen(line_copy));
+      }
+      current_shadow = NULL;
+
+      /* Check if primary was killed by the command */
+      if (IsDead(primary)) {
+        return -1;
+      }
+    }
+
+    s = end + 1;
+  }
+
+  /* Compact remaining partial data to start of buffer */
+  if (s > shadow->sh_buffer) {
+    unsigned int remaining = shadow->sh_count - (s - shadow->sh_buffer);
+    if (remaining > 0)
+      memmove(shadow->sh_buffer, s, remaining);
+    shadow->sh_count = remaining;
+    shadow->sh_buffer[remaining] = '\0';
+  }
+
+  return 0;
+}
+
+/** Socket event callback for shadow connections.
+ * Handles readable/writable/error events on shadow sockets.
+ */
+static void shadow_sock_callback(struct Event *ev)
+{
+  struct ShadowConnection *shadow;
+
+  assert(0 != ev_socket(ev));
+  assert(0 != s_data(ev_socket(ev)));
+
+  shadow = (struct ShadowConnection *)s_data(ev_socket(ev));
+
+  switch (ev_type(ev)) {
+  case ET_DESTROY:
+    /* Socket is being destroyed, nothing to do */
+    break;
+
+  case ET_READ:
+    /* Read and forward commands from shadow to primary */
+    if (shadow_read_packet(shadow) < 0) {
+      shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+      bounce_remove_shadow(shadow);
+      return;
+    }
+    break;
+
+  case ET_WRITE:
+    /* Flush shadow sendQ to its socket */
+    shadow_flush_sendq(shadow);
+    /* If sendQ still has data and we're not blocked, request more writes */
+    if (MsgQLength(&shadow->sh_sendQ) > 0 &&
+        !(shadow->sh_flags & SHADOW_FLAGS_BLOCKED)) {
+      socket_state(&shadow->sh_socket, SS_CONNECTED);
+    }
+    break;
+
+  case ET_ERROR:
+    /* Shadow connection error — remove it */
+    shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+    bounce_remove_shadow(shadow);
+    break;
+
+  case ET_EOF:
+    /* Shadow disconnected */
+    shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+    bounce_remove_shadow(shadow);
+    break;
+
+  default:
+    break;
+  }
+}
+
+/** Add a shadow connection to a bouncer session.
+ *
+ * Creates a new ShadowConnection with its own socket, sendQ, recvQ,
+ * and CAP state. The shadow is NOT added to the nick hash or channel
+ * lists — it piggybacks on the primary Client's identity.
+ */
+struct ShadowConnection *bounce_add_shadow(struct BouncerSession *session,
+                                            int fd,
+                                            const char *sock_ip)
+{
+  struct ShadowConnection *shadow;
+  int max_shadows;
+
+  assert(0 != session);
+  assert(session->hs_state == BOUNCE_ACTIVE);
+
+  /* Enforce per-session shadow limit */
+  max_shadows = feature_int(FEAT_BOUNCER_MAX_SHADOWS);
+  if (max_shadows > 0 && session->hs_shadow_count >= max_shadows)
+    return NULL;
+
+  /* Allocate and initialize */
+  shadow = (struct ShadowConnection *)MyCalloc(1, sizeof(*shadow));
+  shadow->sh_id = ++session->hs_client_id_seq;
+  shadow->sh_fd = fd;
+  shadow->sh_session = session;
+  shadow->sh_lasttime = CurrentTime;
+  shadow->sh_since = CurrentTime;
+  shadow->sh_connected = CurrentTime;
+  shadow->sh_away_state = 0;  /* Present by default */
+  shadow->sh_away_msg[0] = '\0';
+  shadow->sh_flags = 0;
+  shadow->sh_count = 0;
+  shadow->sh_buffer[0] = '\0';
+  shadow->sh_label[0] = '\0';
+  shadow->sh_label_responded = 0;
+  shadow->sh_capab_version = 0;
+
+  /* Copy remote IP */
+  if (sock_ip)
+    ircd_strncpy(shadow->sh_sock_ip, sock_ip, SOCKIPLEN);
+  else
+    shadow->sh_sock_ip[0] = '\0';
+
+  /* Initialize sendQ and recvQ */
+  msgq_init(&shadow->sh_sendQ);
+  /* DBuf is zero-initialized by MyCalloc */
+
+  /* Initialize CAP sets to zero (no caps negotiated yet) */
+  memset(&shadow->sh_capab, 0, sizeof(shadow->sh_capab));
+  memset(&shadow->sh_active, 0, sizeof(shadow->sh_active));
+
+  /* Register shadow socket with event engine */
+  if (!socket_add(&shadow->sh_socket, shadow_sock_callback,
+                  (void *)shadow, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
+    Debug((DEBUG_ERROR, "Bouncer: failed to add shadow socket fd=%d", fd));
+    MyFree(shadow);
+    close(fd);
+    return NULL;
+  }
+
+  /* Add to session's shadow list (prepend) */
+  shadow->sh_next = session->hs_shadows;
+  session->hs_shadows = shadow;
+  session->hs_shadow_count++;
+
+  Debug((DEBUG_INFO, "Bouncer: added shadow #%u to session %s (fd=%d, ip=%s, total=%d)",
+         shadow->sh_id, session->hs_sessid, fd,
+         sock_ip ? sock_ip : "?", session->hs_shadow_count));
+
+  return shadow;
+}
+
+/** Remove a shadow connection from its session.
+ * Cleans up the shadow's sendQ, recvQ, socket, and frees the struct.
+ */
+void bounce_remove_shadow(struct ShadowConnection *shadow)
+{
+  struct BouncerSession *session;
+  struct ShadowConnection **pp;
+
+  assert(0 != shadow);
+  session = shadow->sh_session;
+  assert(0 != session);
+
+  /* Unlink from session's shadow list */
+  for (pp = &session->hs_shadows; *pp; pp = &(*pp)->sh_next) {
+    if (*pp == shadow) {
+      *pp = shadow->sh_next;
+      session->hs_shadow_count--;
+      break;
+    }
+  }
+
+  Debug((DEBUG_INFO, "Bouncer: removing shadow #%u from session %s (remaining=%d)",
+         shadow->sh_id, session->hs_sessid, session->hs_shadow_count));
+
+  /* Clear current_shadow if this shadow is the active command source */
+  if (current_shadow == shadow)
+    current_shadow = NULL;
+
+  /* Close socket */
+  socket_del(&shadow->sh_socket);
+  if (shadow->sh_fd >= 0) {
+    close(shadow->sh_fd);
+    shadow->sh_fd = -1;
+  }
+
+  /* Clean up sendQ and recvQ */
+  MsgQClear(&shadow->sh_sendQ);
+  dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
+
+  MyFree(shadow);
+
+  /* If session has no more connections (primary gone + no shadows),
+   * the session may need to enter HOLDING. This is handled by the
+   * caller (Phase F: bounce_promote_shadow or exit_one_client). */
+}
+
+/** Promote the first shadow to primary connection.
+ *
+ * When the primary disconnects but shadows remain, we transplant the
+ * first shadow's socket into the Client's Connection struct so the
+ * Client stays alive with the shadow's socket driving it.
+ *
+ * The caller must have already closed/cleaned up the primary's old socket
+ * (e.g. via close_connection or equivalent cleanup).  This function:
+ *  1. Removes the first shadow from the list
+ *  2. Transfers its fd into the Client's Connection
+ *  3. Re-registers the socket with the event engine (client callback)
+ *  4. Copies CAP state from shadow to Connection
+ *  5. Frees the shadow struct
+ *
+ * Returns 0 on success, -1 if no shadows available.
+ */
+int bounce_promote_shadow(struct BouncerSession *session)
+{
+  struct ShadowConnection *shadow;
+  struct Client *cptr;
+  struct Connection *con;
+  int fd;
+
+  assert(0 != session);
+
+  shadow = session->hs_shadows;
+  if (!shadow)
+    return -1; /* No shadows to promote */
+
+  cptr = session->hs_client;
+  assert(0 != cptr);
+  con = cli_connect(cptr);
+  assert(0 != con);
+
+  /* Remove from shadow list (it's becoming the primary) */
+  session->hs_shadows = shadow->sh_next;
+  session->hs_shadow_count--;
+  shadow->sh_next = NULL;
+
+  fd = shadow->sh_fd;
+
+  Debug((DEBUG_INFO, "Bouncer: promoting shadow #%u (fd %d) to primary for session %s",
+         shadow->sh_id, fd, session->hs_sessid));
+
+  /* Step 1: Remove shadow's socket from the event engine.
+   * We need to re-register it under the Client's socket struct. */
+  socket_del(&shadow->sh_socket);
+
+  /* Step 2: Transplant fd into the Client's Connection.
+   * The old primary socket was already cleaned up by the caller. */
+  s_fd(&con_socket(con)) = fd;
+  ClrFlag(cptr, FLAG_DEADSOCKET);
+
+  /* Step 3: Transfer sendQ/recvQ contents.
+   * Move any pending data from shadow's queues to the Connection. */
+  MsgQClear(&con_sendQ(con));
+  /* Swap the MsgQ — move shadow's queued data to connection */
+  con_sendQ(con) = shadow->sh_sendQ;
+  /* Zero out shadow's sendQ so cleanup doesn't free the moved data */
+  msgq_init(&shadow->sh_sendQ);
+
+  /* Transfer recvQ (struct copy moves buffer pointers) */
+  DBufClear(&con_recvQ(con));
+  con_recvQ(con) = shadow->sh_recvQ;
+  memset(&shadow->sh_recvQ, 0, sizeof(shadow->sh_recvQ));
+
+  /* Step 4: Copy CAP state from shadow to Connection */
+  memcpy(con_capab(con), &shadow->sh_capab, sizeof(struct CapSet));
+  memcpy(con_active(con), &shadow->sh_active, sizeof(struct CapSet));
+  con_capab_version(con) = shadow->sh_capab_version;
+
+  /* Step 5: Update LocalClientArray */
+  LocalClientArray[fd] = cptr;
+
+  /* Step 6: Re-register socket with event engine using client callback */
+  if (!socket_add(&cli_socket(cptr), client_sock_callback,
+                  (void *)con, SS_CONNECTED,
+                  SOCK_EVENT_READABLE, fd)) {
+    Debug((DEBUG_ERROR, "Bouncer: socket_add failed during shadow promotion for %s",
+           cli_name(cptr)));
+    /* Socket registration failed — this is bad. Close fd and let it fall through. */
+    close(fd);
+    s_fd(&con_socket(con)) = -1;
+    SetFlag(cptr, FLAG_DEADSOCKET);
+    MyFree(shadow);
+    return -1;
+  }
+
+  /* Step 7: Update timing */
+  con_lasttime(con) = shadow->sh_lasttime;
+  con_since(con) = shadow->sh_since;
+
+  /* Step 8: Update session primary ID */
+  session->hs_primary_id = shadow->sh_id;
+
+  /* Step 9: Clean up the shadow struct (queues already moved) */
+  MyFree(shadow);
+
+  log_write(LS_USER, L_TRACE, 0, "Bouncer: shadow promoted to primary for %s session %s",
+            cli_name(cptr), session->hs_sessid);
+
+  return 0;
+}
+
+/** Find the bouncer session for a client. */
+struct BouncerSession *bounce_get_session(struct Client *cptr)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+
+  if (!cptr || !IsAccount(cptr))
+    return NULL;
+
+  as = bounce_find_by_account(cli_account(cptr));
+  if (!as)
+    return NULL;
+
+  for (s = as->as_sessions; s; s = s->hs_anext) {
+    if (s->hs_client == cptr)
+      return s;
+  }
+  return NULL;
+}
+
+/** Find any session for an account (ACTIVE or HOLDING). */
+struct BouncerSession *bounce_find_any_session(const char *account)
+{
+  struct AccountSessions *as = bounce_find_by_account(account);
+  if (!as)
+    return NULL;
+  return as->as_sessions; /* Return first session, regardless of state */
+}
+
+/** Compute effective away state across all session connections.
+ *
+ * Implements the draft/pre-away aggregation rules:
+ * 1. Filter out AWAY * connections (they "don't exist")
+ * 2. Of remaining:
+ *    - ANY present → effective state is PRESENT (no AWAY broadcast)
+ *    - ALL have explicit AWAY messages → effective is AWAY (most recent msg)
+ *    - NO connections remain → effective is AWAY (empty message)
+ *
+ * @param[in] session Bouncer session to compute for.
+ * @param[out] effective_state Set to 0 (present), 1 (away), 2 (away-star-only).
+ * @param[out] effective_msg Buffer for the effective away message (AWAYLEN+1).
+ * @return 1 if effective state changed from previous, 0 if unchanged.
+ */
+int bounce_compute_effective_away(struct BouncerSession *session,
+                                   int *effective_state,
+                                   char *effective_msg)
+{
+  struct Client *primary;
+  struct ShadowConnection *sh;
+  int has_present = 0;
+  int has_away = 0;
+  int old_effective;
+  const char *latest_away_msg = NULL;
+  time_t latest_away_time = 0;
+
+  assert(0 != session);
+  assert(0 != effective_state);
+  assert(0 != effective_msg);
+
+  primary = session->hs_client;
+  effective_msg[0] = '\0';
+
+  /* Remember old state for change detection.
+   * We store the effective state in hs_hold_override's upper bits.
+   * Actually, let's use a simpler approach: just compute and let caller compare. */
+
+  /* Check primary connection's away state */
+  if (primary && MyUser(primary)) {
+    if (cli_user(primary)->away) {
+      if (cli_user(primary)->away[0] == '\0' ||
+          (con_pre_away(cli_connect(primary)) == 2)) {
+        /* AWAY * — invisible to aggregation */
+      } else {
+        /* Explicit away message */
+        has_away = 1;
+        latest_away_msg = cli_user(primary)->away;
+      }
+    } else {
+      /* Present */
+      has_present = 1;
+    }
+  }
+
+  /* Check all shadow connections */
+  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
+    if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+      continue;
+    if (sh->sh_away_state == 2) {
+      /* AWAY * — invisible to aggregation */
+      continue;
+    } else if (sh->sh_away_state == 1) {
+      /* Explicit away */
+      has_away = 1;
+      /* Use most recently set away message */
+      if (sh->sh_away_msg[0] && sh->sh_since > latest_away_time) {
+        latest_away_msg = sh->sh_away_msg;
+        latest_away_time = sh->sh_since;
+      }
+    } else {
+      /* Present */
+      has_present = 1;
+    }
+  }
+
+  /* Apply aggregation rules */
+  if (has_present) {
+    *effective_state = 0; /* PRESENT — at least one non-AWAY* connection is present */
+    effective_msg[0] = '\0';
+  } else if (has_away) {
+    *effective_state = 1; /* AWAY — all non-AWAY* connections are away */
+    if (latest_away_msg)
+      ircd_strncpy(effective_msg, latest_away_msg, AWAYLEN);
+  } else {
+    *effective_state = 2; /* All connections are AWAY * — effectively hidden */
+    effective_msg[0] = '\0';
+  }
+
+  return 1; /* Always return 1; caller tracks change detection */
+}
+
+/** Get the total number of connections for a session. */
+int bounce_connection_count(struct BouncerSession *session)
+{
+  if (!session)
+    return 0;
+  if (session->hs_state != BOUNCE_ACTIVE || !session->hs_client)
+    return 0;
+  /* Primary (1) + shadows */
+  return 1 + session->hs_shadow_count;
+}
+
+/** Helper: write a raw IRC line to a shadow's sendQ.
+ * Uses the primary client as the msgq_make dest (for formatting),
+ * then queues to the shadow's sendQ.
+ */
+static void shadow_send_raw(struct ShadowConnection *shadow,
+                             struct Client *primary,
+                             const char *fmt, ...)
+{
+  char buf[BUFSIZE];
+  struct MsgBuf *mb;
+  va_list ap;
+  int len;
+
+  va_start(ap, fmt);
+  len = vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+
+  if (len <= 0 || len >= (int)sizeof(buf))
+    return;
+
+  /* Ensure \r\n termination */
+  if (len >= 2 && buf[len - 2] == '\r' && buf[len - 1] == '\n') {
+    /* Already terminated */
+  } else {
+    if (len < (int)sizeof(buf) - 2) {
+      buf[len++] = '\r';
+      buf[len++] = '\n';
+      buf[len] = '\0';
+    }
+  }
+
+  mb = msgq_make(primary, "%s", buf);
+  if (mb) {
+    msgq_add(&shadow->sh_sendQ, mb, 0);
+    msgq_clean(mb);
+  }
+}
+
+/** Send IRC registration welcome sequence to a newly attached shadow.
+ *
+ * This gives the shadow connection a full registration sequence so that
+ * standard IRC client libraries work without modification. The shadow
+ * receives RPL_WELCOME through MOTD, appearing as a normal connection
+ * to the session's nick.
+ *
+ * @param[in] shadow The newly created shadow connection.
+ */
+void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
+{
+  struct BouncerSession *session;
+  struct Client *primary;
+  const char *nick;
+
+  assert(0 != shadow);
+  session = shadow->sh_session;
+  assert(0 != session);
+  primary = session->hs_client;
+  assert(0 != primary);
+
+  nick = cli_name(primary);
+
+  /* 001 RPL_WELCOME */
+  shadow_send_raw(shadow, primary,
+    ":%s 001 %s :Welcome to the %s IRC Network %s\r\n",
+    cli_name(&me), nick, feature_str(FEAT_NETWORK), nick);
+
+  /* 002 RPL_YOURHOST */
+  shadow_send_raw(shadow, primary,
+    ":%s 002 %s :Your host is %s, running version %s\r\n",
+    cli_name(&me), nick, cli_name(&me), version);
+
+  /* 003 RPL_CREATED */
+  shadow_send_raw(shadow, primary,
+    ":%s 003 %s :This server was created %s\r\n",
+    cli_name(&me), nick, creation);
+
+  /* 004 RPL_MYINFO */
+  shadow_send_raw(shadow, primary,
+    ":%s 004 %s %s %s %s %s %s\r\n",
+    cli_name(&me), nick, cli_name(&me), version,
+    infousermodes, infochanmodes, infochanmodeswithparams);
+
+  /* 375 RPL_MOTDSTART + 376 RPL_ENDOFMOTD (minimal) */
+  shadow_send_raw(shadow, primary,
+    ":%s 375 %s :- %s Message of the Day -\r\n",
+    cli_name(&me), nick, cli_name(&me));
+  shadow_send_raw(shadow, primary,
+    ":%s 376 %s :End of /MOTD command.\r\n",
+    cli_name(&me), nick);
+
+  /* NOTE: bouncer shadow attached (informational) */
+  shadow_send_raw(shadow, primary,
+    ":%s NOTE BOUNCER SHADOW_ATTACHED :Attached to session %s as connection #%u\r\n",
+    cli_name(&me), session->hs_sessid, shadow->sh_id);
+
+  /* Request writable notification to flush the welcome */
+  socket_state(&shadow->sh_socket, SS_CONNECTED);
 }

@@ -87,4 +87,30 @@ extern void msgq_histogram(struct Client *cptr, const struct StatDesc *sd,
                            char *param);
 extern unsigned int msgq_bufleft(struct MsgBuf *mb);
 
+struct CapSet;
+
+/** Strip all IRCv3 tags from a message buffer.
+ * Creates a new MsgBuf with the @...  prefix removed.
+ * @param[in] mb Message buffer to strip tags from.
+ * @return New MsgBuf without tags (ref=1), or NULL if no tags present.
+ */
+extern struct MsgBuf *msgq_strip_tags(struct MsgBuf *mb);
+
+/** Filter IRCv3 tags in a message buffer to only those matching a CapSet.
+ * Parses the @tag1=val;tag2=val prefix, checks each tag against
+ * a tag-name-to-CAP mapping, and rebuilds with only wanted tags.
+ * @param[in] mb Message buffer to filter.
+ * @param[in] active CapSet of active capabilities for the recipient.
+ * @return New MsgBuf with filtered tags (ref=1), or NULL if no tags present.
+ */
+extern struct MsgBuf *msgq_filter_tags(struct MsgBuf *mb, struct CapSet *active);
+
+/** Expose a MsgBuf's raw message data and length.
+ * @param[in] mb Message buffer to inspect.
+ * @param[out] data Set to pointer to the message data.
+ * @param[out] len Set to the message length.
+ */
+extern void msgq_buf_data(struct MsgBuf *mb, const char **data,
+                           unsigned int *len);
+
 #endif /* INCLUDED_msgq_h */

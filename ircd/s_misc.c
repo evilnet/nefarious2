@@ -27,7 +27,6 @@
 #include "config.h"
 
 #include "s_misc.h"
-#include "account_conn.h"
 #include "bouncer_session.h"
 #include "IPcheck.h"
 #include "channel.h"
@@ -288,11 +287,6 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      */
     sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
 
-    /* Remove from presence aggregation registry before channel cleanup */
-    if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(bcptr)
-        && bounce_enabled() && bounce_has_sessions(cli_account(bcptr))) {
-      account_conn_remove(bcptr);
-    }
 
 #ifdef USE_LMDB
     /* Store QUIT events in history before removing from channels */

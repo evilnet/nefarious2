@@ -32,7 +32,7 @@
  */
 #include "config.h"
 
-#include "account_conn.h"
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
@@ -910,19 +910,20 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
 
   /* Handle virtual presence keys for presence aggregation */
   if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(cptr)) {
+    struct BouncerSession *session = bounce_get_session(cptr);
+
     /* Handle $presence key - returns state only (present/away/away-star) */
     if (ircd_strcmp(key, METADATA_KEY_PRESENCE) == 0) {
-      struct AccountEntry *acc_entry = account_conn_find(cli_account(cptr));
-      if (acc_entry) {
+      if (session) {
         const char *state_str;
-        switch (acc_entry->effective_state) {
-          case CONN_PRESENT:
+        switch (session->hs_effective_away) {
+          case 0:
             state_str = "present";
             break;
-          case CONN_AWAY:
+          case 1:
             state_str = "away";
             break;
-          case CONN_AWAY_STAR:
+          case 2:
             state_str = "away-star";
             break;
           default:
@@ -942,9 +943,8 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
 
     /* Handle $away_message key - returns effective away message */
     if (ircd_strcmp(key, METADATA_KEY_AWAY_MESSAGE) == 0) {
-      struct AccountEntry *acc_entry = account_conn_find(cli_account(cptr));
-      if (acc_entry && acc_entry->effective_away_msg[0]) {
-        ircd_strncpy(presence_value, acc_entry->effective_away_msg, AWAYLEN);
+      if (session && session->hs_effective_away_msg[0]) {
+        ircd_strncpy(presence_value, session->hs_effective_away_msg, AWAYLEN);
         presence_value[AWAYLEN] = '\0';
 
         memset(&presence_entry, 0, sizeof(presence_entry));
@@ -960,10 +960,9 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
 
     /* Handle $last_present key */
     if (ircd_strcmp(key, METADATA_KEY_LAST_PRESENT) == 0) {
-      time_t last = account_conn_last_present(cli_account(cptr));
-      if (last > 0) {
+      if (session && session->hs_last_active > 0) {
         ircd_snprintf(0, presence_value, sizeof(presence_value), "%lu",
-                      (unsigned long)last);
+                      (unsigned long)session->hs_last_active);
         memset(&presence_entry, 0, sizeof(presence_entry));
         ircd_strncpy(presence_entry.key, METADATA_KEY_LAST_PRESENT, METADATA_KEY_LEN);
         presence_entry.value = presence_value;

@@ -80,7 +80,6 @@
  */
 #include "config.h"
 
-#include "account_conn.h"
 #include "bouncer_session.h"
 #include "client.h"
 #include "ircd.h"
@@ -167,12 +166,6 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                                     "(ACCOUNT Removal)", cli_name(acptr));
         assert(0 != cli_user(acptr)->account[0]);
 
-        /* Remove from presence aggregation registry before clearing account */
-        if (feature_bool(FEAT_PRESENCE_AGGREGATION)
-            && bounce_enabled() && bounce_has_sessions(cli_user(acptr)->account)) {
-          account_conn_remove(acptr);
-        }
-
         /* Decrement authusers for all channels this user is in */
         {
           struct Membership *chan;
@@ -221,16 +214,6 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           struct Membership *chan;
           for (chan = cli_user(acptr)->channel; chan; chan = chan->next_channel) {
             ++chan->channel->authusers;
-          }
-        }
-
-        /* Register with presence aggregation — only when bouncer is active */
-        if (feature_bool(FEAT_PRESENCE_AGGREGATION)
-            && bounce_enabled() && bounce_has_sessions(parv[3])) {
-          account_conn_add(acptr);
-          /* Set away state if user is already away */
-          if (cli_user(acptr)->away) {
-            account_conn_set_away(acptr, CONN_AWAY, cli_user(acptr)->away);
           }
         }
 

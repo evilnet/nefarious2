@@ -81,7 +81,6 @@
  */
 #include "config.h"
 
-#include "account_conn.h"
 #include "bouncer_session.h"
 #include "capab.h"
 #include "client.h"
@@ -189,45 +188,64 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   is_away = user_set_away(cli_user(sptr), away_message);
 
-  /* Presence aggregation path — only when bouncer is active for this account */
+  /* Presence aggregation path — only when bouncer is active for this account.
+   * Uses the bouncer session's connection list (primary + shadows) as the
+   * authoritative aggregation path.
+   */
   if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
       && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
-    enum ConnAwayState new_state;
-    int effective_changed;
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int new_effective = 0;
+    char new_msg[AWAYLEN + 1];
 
-    if (is_away_star) {
-      new_state = CONN_AWAY_STAR;
-      send_reply(sptr, RPL_NOWAWAY);
-    } else if (is_away) {
-      new_state = CONN_AWAY;
+    /* Send the appropriate reply to the user */
+    if (is_away || is_away_star) {
       send_reply(sptr, RPL_NOWAWAY);
     } else {
-      new_state = CONN_PRESENT;
       send_reply(sptr, RPL_UNAWAY);
     }
 
-    /* Update this connection's state in the registry */
-    effective_changed = account_conn_set_away(sptr, new_state, away_message);
+    /* Update shadow away state if this command came from a shadow */
+    if (current_shadow) {
+      if (is_away_star) {
+        current_shadow->sh_away_state = 2;
+        current_shadow->sh_away_msg[0] = '\0';
+      } else if (is_away) {
+        current_shadow->sh_away_state = 1;
+        ircd_strncpy(current_shadow->sh_away_msg, away_message, AWAYLEN);
+      } else {
+        current_shadow->sh_away_state = 0;
+        current_shadow->sh_away_msg[0] = '\0';
+      }
+      current_shadow->sh_since = CurrentTime;
+    }
 
-    /* Only broadcast when effective presence changes */
-    if (effective_changed) {
-      struct AccountEntry *entry = account_conn_find(cli_account(sptr));
-      if (entry) {
-        if (entry->effective_state == CONN_PRESENT) {
-          /* Became present - broadcast unaway */
+    /* Compute effective state across all connections */
+    if (bsess) {
+      int prev_effective = bsess->hs_effective_away;
+      bounce_compute_effective_away(bsess, &new_effective, new_msg);
+
+      /* Only broadcast if effective state changed */
+      if (new_effective != prev_effective) {
+        if (new_effective == 0) {
+          /* Became present — broadcast unaway */
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE, "");
-        } else {
-          /* Became away - broadcast with effective message */
-          const char *msg = entry->effective_away_msg[0] ?
-                            entry->effective_away_msg : away_message;
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", msg);
+        } else if (new_effective == 1) {
+          /* Became away — broadcast with effective message */
+          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s",
+                               new_msg[0] ? new_msg : away_message);
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE,
-                                                 ":%s", msg);
+                                                 ":%s",
+                                                 new_msg[0] ? new_msg : away_message);
         }
+        /* new_effective == 2 (all AWAY *): no broadcast — hidden */
+        bsess->hs_effective_away = new_effective;
+        ircd_strncpy(bsess->hs_effective_away_msg, new_msg, AWAYLEN);
       }
+      /* If effective state unchanged: suppress broadcast */
     }
     return 0;
   }
@@ -280,20 +298,6 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   is_away = user_set_away(cli_user(sptr), away_message);
-
-  /* Update presence aggregation state — only when bouncer is active */
-  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
-      && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
-    enum ConnAwayState new_state;
-    if (is_away_star)
-      new_state = CONN_AWAY_STAR;
-    else if (is_away)
-      new_state = CONN_AWAY;
-    else
-      new_state = CONN_PRESENT;
-    account_conn_set_away(sptr, new_state, away_message);
-    /* Aggregation already happened; just propagate */
-  }
 
   if (is_away)
     sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);

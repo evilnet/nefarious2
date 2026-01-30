@@ -37,7 +37,6 @@ struct Client;
 struct User;
 struct Membership;
 struct SLink;
-struct AccountConn;
 
 /** Describes a server on the network. */
 struct Server {
@@ -72,7 +71,6 @@ struct User {
   struct SLink*      invited;        /**< chain of invite pointer blocks */
   struct SLink*      watch;          /**< chain of watch pointer blocks */
   struct Ban*        silence;        /**< chain of silence pointer blocks */
-  struct AccountConn* account_conn;  /**< link to presence aggregation registry */
   char*              away;           /**< pointer to away message */
   char*              opername;       /**< pointer to /OPER user name */
   time_t             last;           /**< last time user sent a message */

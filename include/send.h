@@ -18,6 +18,28 @@ struct Client;
 struct DBuf;
 struct MsgBuf;
 
+/** Context for passing mb_cache from channel send functions down to
+ * send_buffer() for per-shadow tag filtering.
+ *
+ * Channel send functions build mb_cache[16] — one MsgBuf per tag flag
+ * combination. This context lets the shadow duplication loop in
+ * send_buffer() pick the correct cached MsgBuf for each shadow's
+ * CAP state, avoiding extra allocations.
+ */
+struct ShadowTagContext {
+  struct MsgBuf **stc_cache;     /**< Pointer to mb_cache[16] array */
+  struct MsgBuf  *stc_notags;    /**< Pointer to no-tags MsgBuf (base mb) */
+  struct Client  *stc_from;      /**< Source client (for tag flag computation) */
+  int             stc_active;    /**< Non-zero when context is valid */
+  int             stc_include_batch; /**< Whether to include batch tag */
+};
+
+/** Global shadow tag context — set by channel send functions around
+ * their member loops, read by send_buffer() shadow duplication.
+ * Single-threaded IRCd makes a global safe.
+ */
+extern struct ShadowTagContext shadow_tag_ctx;
+
 /*
  * Prototypes
  */
