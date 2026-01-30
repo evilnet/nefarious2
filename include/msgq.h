@@ -113,4 +113,13 @@ extern struct MsgBuf *msgq_filter_tags(struct MsgBuf *mb, struct CapSet *active)
 extern void msgq_buf_data(struct MsgBuf *mb, const char **data,
                            unsigned int *len);
 
+/** Create a new MsgBuf by prepending a tag string to a base (no-tags) MsgBuf.
+ * Used when a shadow connection needs tags that weren't in the mb_cache
+ * because no other channel member had the same capability set.
+ * @param[in] tags Tag string to prepend (e.g., "@time=...;account=... ").
+ * @param[in] base Base MsgBuf without tags (the body to prepend to).
+ * @return New MsgBuf with tags + body (ref=1), or NULL on error.
+ */
+extern struct MsgBuf *msgq_prepend_tags(const char *tags, struct MsgBuf *base);
+
 #endif /* INCLUDED_msgq_h */

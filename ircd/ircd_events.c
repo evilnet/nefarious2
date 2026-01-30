@@ -656,6 +656,40 @@ socket_del(struct Socket* sock)
   }
 }
 
+/** Reattach a socket to a new file descriptor without reinitializing
+ * the generator header.  This preserves gh_ref and gh_flags, which is
+ * critical when the socket is being reattached during an event callback
+ * (e.g., bouncer shadow promotion).  Calling socket_del + socket_add
+ * would reset gh_ref via gen_init, corrupting the reference count held
+ * by the currently executing event.
+ * @param[in] sock Socket to reattach.
+ * @param[in] fd New file descriptor (must already be valid/open).
+ * @return Non-zero on success, zero on error.
+ */
+int
+socket_reattach(struct Socket* sock, int fd)
+{
+  assert(0 != sock);
+  assert(fd >= 0);
+  assert(sock->s_header.gh_flags & GEN_ACTIVE);
+  assert(0 != evInfo.engine);
+  assert(0 != evInfo.engine->eng_closing);
+  assert(0 != evInfo.engine->eng_add);
+
+  /* Tell the engine the old socket is going away.  For epoll, this
+   * removes any stale events from the pending events array.  The old
+   * fd should already be closed by the caller (kernel removes it from
+   * the epoll set automatically). */
+  (*evInfo.engine->eng_closing)(sock);
+
+  /* Update the fd */
+  sock->s_fd = fd;
+
+  /* Re-register with the engine under the new fd.  gh_ref, gh_flags,
+   * gh_call, gh_data, and list linkage are all preserved. */
+  return (*evInfo.engine->eng_add)(sock);
+}
+
 /** Sets the socket state to something else.
  * @param[in] sock Socket generator to update.
  * @param[in] state New socket state.

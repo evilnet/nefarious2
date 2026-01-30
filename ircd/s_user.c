@@ -422,15 +422,40 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (new_shadow) {
         bounce_send_shadow_welcome(new_shadow);
       }
-      /* The Client's socket fd was already detached in bounce_auto_resume.
-       * Free the Client struct — it's no longer an IRC identity.
-       * Set FLAG_KILLED to suppress QUIT broadcast (shadow is invisible). */
+      /* The shadow uses a dup()'d fd; the original stays with this Client.
+       * exit_client() will close the original fd and remove it from epoll.
+       * Set FLAG_KILLED to suppress QUIT broadcast (shadow is invisible).
+       *
+       * Detach auth request's client pointer BEFORE exit_client() frees
+       * the Client struct, so destroy_auth_request() (called by our
+       * caller check_auth_finished) won't dereference freed memory.
+       *
+       * Fix #22: Also NULL cli_auth(sptr) so that free_client() (called
+       * by exit_client) does NOT call destroy_auth_request() again.
+       * Without this, the auth struct gets put on the freelist twice —
+       * once by free_client and once by check_auth_finished line 617 —
+       * creating a cycle that causes two new clients to share the same
+       * auth struct, leading to empty cli_name on registration. */
+      auth_detach_client(cli_auth(sptr));
+      cli_auth(sptr) = NULL;
       SetFlag(sptr, FLAG_KILLED);
       exit_client(cptr, sptr, &me, "Converted to bouncer shadow");
       return 0; /* Client freed, do not continue registration */
     }
 
     SetLocalNumNick(sptr);
+
+    /* Sanity check: cli_name must be set by the NICK command before
+     * registration can proceed.  If it's empty, something went wrong
+     * during auth — log and reject the client. */
+    if (!*(cli_name(sptr))) {
+      log_write(LS_SYSTEM, L_CRIT, 0,
+                "register_user: cli_name is empty for client %p (fd %d, account %s)",
+                (void*)sptr, cli_fd(sptr),
+                (cli_user(sptr) && cli_user(sptr)->account[0])
+                  ? cli_user(sptr)->account : "<none>");
+      return exit_client(cptr, sptr, &me, "Registration failed: no nickname");
+    }
 
     if ((ashun = shun_lookup(sptr, 0))) {
        sendto_opmask_butone_global(&me, SNO_GLINE, "Shun active for %s%s",
@@ -939,6 +964,8 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
   }
   else {
     /* Local client setting NICK the first time */
+    Debug((DEBUG_INFO, "set_nick_name: first NICK for %p (fd %d): setting cli_name to '%s'",
+           (void*)sptr, cli_fd(sptr), nick));
     strcpy(cli_name(sptr), nick);
     hAddClient(sptr);
     return auth_set_nick(cli_auth(sptr), nick);
@@ -1735,10 +1762,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'b':
         if (what == MODE_ADD) {
           SetBncHoldPref(acptr);
-          metadata_set_client(acptr, "$bouncer/hold", "1", METADATA_VIS_PRIVATE);
+          metadata_set_client(acptr, "bouncer/hold", "1", METADATA_VIS_PRIVATE);
         } else {
           ClearBncHoldPref(acptr);
-          metadata_set_client(acptr, "$bouncer/hold", NULL, 0);
+          metadata_set_client(acptr, "bouncer/hold", NULL, 0);
         }
         break;
       case 'y':
@@ -2201,7 +2228,7 @@ void send_umode(struct Client *cptr, struct Client *sptr, struct Flags *old,
     ircd_snprintf(0, m, USERLEN + HOSTLEN + 1, " %s", cli_user(sptr)->sethost);
   else
     *m = '\0';
-  if (*umodeBuf && cptr)
+  if (*umodeBuf && cptr && *(cli_name(sptr)))
     sendcmdto_one(sptr, CMD_MODE, cptr, "%s %s", cli_name(sptr), umodeBuf);
 }
 

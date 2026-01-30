@@ -433,6 +433,96 @@ static char *format_message_tags_for(char *buf, size_t buflen, struct Client *fr
   return format_message_tags_for_ex(buf, buflen, from, to, NULL);
 }
 
+/** Format message tags using an explicit CapSet for capability checks.
+ *
+ * Like format_message_tags_for_ex(), but checks capabilities against the
+ * provided CapSet instead of the recipient's active caps. Used when the
+ * recipient has a bouncer session with shadows — the union of all
+ * connections' caps is passed so the MsgBuf includes all tags any
+ * connection might need. send_buffer() then strips per-connection.
+ *
+ * Label and batch state still come from \a to (they are per-connection
+ * state, not capability-dependent).
+ *
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client (for account tag).
+ * @param[in] to Recipient client (for label/batch state).
+ * @param[in] msgid Message ID to include, or NULL for none.
+ * @param[in] caps CapSet to check for tag capabilities.
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_for_caps(char *buf, size_t buflen,
+                                           struct Client *from,
+                                           struct Client *to,
+                                           const char *msgid,
+                                           struct CapSet *caps)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapHas(caps, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapHas(caps, CAP_ACCOUNTTAG);
+  int use_label = feature_bool(FEAT_CAP_labeled_response) &&
+                  CapHas(caps, CAP_LABELEDRESP) &&
+                  to && MyConnect(to) && cli_label(to)[0];
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapHas(caps, CAP_BATCH) &&
+                  to && MyConnect(to) && cli_batch_id(to)[0];
+  int use_msgid = msgid && *msgid;
+  int pos = 0;
+
+  if (!use_time && !use_account && !use_label && !use_batch && !use_msgid)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  /* When in a batch, use @batch instead of @label */
+  if (use_batch) {
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
+  } else if (use_label) {
+    pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+    cli_label_responded(to) = 1;
+  }
+
+  if (use_msgid) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "msgid=%s", msgid);
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from) && IsAccount(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                    cli_user(from)->account);
+  }
+
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
 /** Format message tags including client-only tags for TAGMSG relay.
  * @param[out] buf Buffer for tag string.
  * @param[in] buflen Size of buffer.
@@ -501,6 +591,90 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   }
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
+  if (from && IsBot(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "bot");
+  }
+
+  if (pos < (int)buflen - 1) {
+    buf[pos++] = ' ';
+    buf[pos] = '\0';
+  }
+
+  return buf;
+}
+
+/** Format message tags including client-only tags, using an explicit CapSet.
+ * Like format_message_tags_with_client(), but checks capabilities against
+ * the provided CapSet instead of the recipient's active caps. Used for
+ * bouncer union caps.
+ * @param[out] buf Buffer for tag string.
+ * @param[in] buflen Size of buffer.
+ * @param[in] from Source client.
+ * @param[in] to Recipient client (for label/batch state).
+ * @param[in] client_tags Client-only tags string.
+ * @param[in] caps CapSet to check for tag capabilities.
+ * @return Pointer to buf, or NULL if no tags to add.
+ */
+static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
+                                                    struct Client *from,
+                                                    struct Client *to,
+                                                    const char *client_tags,
+                                                    struct CapSet *caps)
+{
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapHas(caps, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapHas(caps, CAP_ACCOUNTTAG);
+  int use_label = feature_bool(FEAT_CAP_labeled_response) &&
+                  CapHas(caps, CAP_LABELEDRESP) &&
+                  to && MyConnect(to) && cli_label(to)[0];
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapHas(caps, CAP_BATCH) &&
+                  to && MyConnect(to) && cli_batch_id(to)[0];
+  int use_client_tags = client_tags && *client_tags;
+  int pos = 0;
+
+  if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch)
+    return NULL;
+
+  buf[0] = '@';
+  pos = 1;
+
+  if (use_client_tags) {
+    pos += snprintf(buf + pos, buflen - pos, "%s", client_tags);
+  }
+
+  if (use_batch) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
+  } else if (use_label) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
+    cli_label_responded(to) = 1;
+  }
+
+  if (use_time) {
+    struct timeval tv;
+    struct tm tm;
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    gettimeofday(&tv, NULL);
+    gmtime_r(&tv.tv_sec, &tm);
+    pos += snprintf(buf + pos, buflen - pos,
+                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                    tm.tm_hour, tm.tm_min, tm.tm_sec,
+                    tv.tv_usec / 1000);
+  }
+
+  if (use_account && from && cli_user(from) && IsAccount(from)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "account=%s",
+                    cli_user(from)->account);
+  }
+
   if (from && IsBot(from)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
@@ -725,7 +899,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
             struct MsgBuf *stripped = msgq_strip_tags(buf);
             if (stripped) {
               msgq_add(&current_shadow->sh_sendQ, stripped, prio);
-              socket_state(&current_shadow->sh_socket, SS_CONNECTED);
+              socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
               msgq_clean(stripped);
               return;
             }
@@ -740,14 +914,14 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
             if (filtered) {
               sh_buf = filtered;
               msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
-              socket_state(&current_shadow->sh_socket, SS_CONNECTED);
+              socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
               msgq_clean(filtered);
               return;
             }
           }
         }
         msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
-        socket_state(&current_shadow->sh_socket, SS_CONNECTED);
+        socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
       }
       return; /* Do NOT send to primary or other shadows */
     }
@@ -813,9 +987,8 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
           continue;
 
         if (primary_flags < 0) {
-          /* No context — check if shadow needs tags stripped entirely.
-           * For non-channel sends without context, detect if the message
-           * has tags and the shadow doesn't want any. */
+          /* No context (non-channel send). With union caps, buf may have
+           * more tags than this shadow needs. Filter appropriately. */
           sh_flags = get_shadow_tag_flags(sh, NULL, 0);
           if (sh_flags == 0) {
             const char *data;
@@ -830,7 +1003,24 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
               sh_buf = buf; /* no tags to strip */
             }
           } else {
-            sh_buf = buf; /* shadow wants some tags, no context to filter — passthrough */
+            /* Shadow wants some tags — filter to only what it negotiated.
+             * With union caps formatting, buf may contain tags the shadow
+             * didn't negotiate, so we must filter rather than passthrough. */
+            const char *data;
+            unsigned int len;
+            msgq_buf_data(buf, &data, &len);
+            if (len >= 2 && data[0] == '@') {
+              struct MsgBuf *filt = msgq_filter_tags(buf, &sh->sh_active);
+              if (filt) {
+                sh_buf = filt;
+                if (filtered_count < 8)
+                  filtered_list[filtered_count++] = filt;
+              } else {
+                sh_buf = buf;
+              }
+            } else {
+              sh_buf = buf; /* no tags in message */
+            }
           }
         } else {
           sh_flags = get_shadow_tag_flags(sh, shadow_tag_ctx.stc_from,
@@ -849,8 +1039,29 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
             if (!stripped)
               stripped = msgq_strip_tags(buf);
             sh_buf = stripped ? stripped : buf;
+          } else if (shadow_tag_ctx.stc_notags) {
+            /* Shadow wants tags not in cache — build from base no-tags MsgBuf.
+             * This handles CAP state divergence: the shadow has caps that no
+             * channel member (including the primary) has, so no mb_cache entry
+             * was built. We generate the tag prefix from the shadow's flags
+             * and prepend it to the untagged message body. */
+            char sh_tagbuf[128];
+            if (format_message_tags_ex(sh_tagbuf, sizeof(sh_tagbuf),
+                                        shadow_tag_ctx.stc_from, sh_flags)) {
+              struct MsgBuf *tagged = msgq_prepend_tags(sh_tagbuf,
+                                                         shadow_tag_ctx.stc_notags);
+              if (tagged) {
+                sh_buf = tagged;
+                if (filtered_count < 8)
+                  filtered_list[filtered_count++] = tagged;
+              } else {
+                sh_buf = buf;
+              }
+            } else {
+              sh_buf = buf;
+            }
           } else {
-            /* Different tags, no cache — exact per-tag filtering */
+            /* No base MsgBuf available — fallback to tag filtering */
             struct MsgBuf *filt = msgq_filter_tags(buf, &sh->sh_active);
             if (filt) {
               sh_buf = filt;
@@ -863,7 +1074,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
         }
 
         msgq_add(&sh->sh_sendQ, sh_buf, prio);
-        socket_state(&sh->sh_socket, SS_CONNECTED);
+        socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
       }
 
       /* Clean up any MsgBufs we allocated for this send_buffer call */
@@ -1001,7 +1212,23 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
     msgid = generate_msgid(msgidbuf, sizeof(msgidbuf));
   }
 
-  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+  /* Union caps: if target has a bouncer session with shadows, format tags
+   * using the union of all connections' capabilities. This ensures the
+   * MsgBuf includes all tags any connection (primary or shadow) might need.
+   * send_buffer() then strips per-connection via the shadow duplication loop. */
+  if (MyUser(to) && !IsServer(to)) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_shadow_count > 0) {
+      struct CapSet union_caps;
+      bounce_build_union_caps(bsess, &union_caps);
+      tags = format_message_tags_for_caps(tagbuf, sizeof(tagbuf), from, to,
+                                           msgid, &union_caps);
+    } else {
+      tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+    }
+  } else {
+    tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+  }
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
@@ -1078,7 +1305,21 @@ void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *
              (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
   }
 
-  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+  /* Union caps: if target has a bouncer session with shadows, format tags
+   * using the union of all connections' capabilities. */
+  if (MyUser(to) && !IsServer(to)) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_shadow_count > 0) {
+      struct CapSet union_caps;
+      bounce_build_union_caps(bsess, &union_caps);
+      tags = format_message_tags_for_caps(tagbuf, sizeof(tagbuf), from, to,
+                                           msgid, &union_caps);
+    } else {
+      tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+    }
+  } else {
+    tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
+  }
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
@@ -1121,7 +1362,20 @@ void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
 
-  tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
+  /* Union caps for bouncer sessions with shadows */
+  if (MyUser(to) && !IsServer(to)) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_shadow_count > 0) {
+      struct CapSet union_caps;
+      bounce_build_union_caps(bsess, &union_caps);
+      tags = format_message_tags_with_client_caps(tagbuf, sizeof(tagbuf), from, to,
+                                                    client_tags, &union_caps);
+    } else {
+      tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
+    }
+  } else {
+    tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
+  }
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
@@ -1288,6 +1542,12 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   assert(0 != pattern);
   assert(!IsServer(from) && !IsMe(from));
 
+  /* If the client has no channels, there are no common-channel recipients.
+   * Return early to avoid formatting a message buffer that would never be
+   * delivered. */
+  if (!cli_user(from) || !cli_user(from)->channel)
+    return;
+
   vd.vd_format = pattern; /* set up the struct VarData for %v */
 
   va_start(vd.vd_args, pattern);
@@ -1381,6 +1641,13 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   assert(0 != cli_from(from));
   assert(0 != pattern);
   assert(!IsServer(from) && !IsMe(from));
+
+  /* If the client has no channels, there are no common-channel recipients.
+   * Return early to avoid formatting a message buffer that would never be
+   * delivered (and to prevent the %:#C assertion firing during early
+   * registration when cli_name may still be empty). */
+  if (!cli_user(from) || !cli_user(from)->channel)
+    return;
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
 

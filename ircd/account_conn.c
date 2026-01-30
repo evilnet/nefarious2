@@ -442,7 +442,7 @@ time_t account_conn_last_present(const char *account)
   /* Try to load from LMDB if account not in memory */
   if (metadata_lmdb_is_available()) {
     char value[32];
-    if (metadata_account_get(account, "$last_present", value) == 0) {
+    if (metadata_account_get(account, "last_present", value) == 0) {
       return (time_t)strtoul(value, NULL, 10);
     }
   }
@@ -462,7 +462,7 @@ static void persist_last_present(const char *account, time_t when)
     return;
 
   ircd_snprintf(0, value, sizeof(value), "%lu", (unsigned long)when);
-  metadata_account_set(account, "$last_present", value);
+  metadata_account_set(account, "last_present", value);
 }
 
 /** Load last_present timestamp from LMDB.
@@ -476,7 +476,7 @@ static time_t load_last_present(const char *account)
   if (!metadata_lmdb_is_available())
     return 0;
 
-  if (metadata_account_get(account, "$last_present", value) == 0) {
+  if (metadata_account_get(account, "last_present", value) == 0) {
     return (time_t)strtoul(value, NULL, 10);
   }
 

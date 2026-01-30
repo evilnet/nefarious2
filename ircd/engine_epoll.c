@@ -246,6 +246,15 @@ engine_delete(struct Socket *sock)
   assert(0 != sock);
   Debug((DEBUG_ENGINE, "epoll: Deleting socket %d [%p], state %s",
 	 s_fd(sock), sock, state_to_name(s_state(sock))));
+
+  /* Explicitly remove fd from the epoll interest list.  This is
+   * necessary when dup() has been used: closing the original fd does
+   * NOT remove the epoll registration if a dup'd fd still references
+   * the same underlying open file description.  Ignore errors — the
+   * fd may already be closed or not registered. */
+  if (s_fd(sock) >= 0)
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, s_fd(sock), NULL);
+
   /* Drop any unprocessed events citing this socket. */
   for (ii = 0; ii < events_used; ii++) {
     if (events[ii].data.ptr == sock) {

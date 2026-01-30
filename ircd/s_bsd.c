@@ -1469,8 +1469,11 @@ void client_sock_callback(struct Event* ev)
     if (IsUser(cptr) && bounce_enabled() && IsAccount(cptr)) {
       struct BouncerSession *bsess = bounce_get_session(cptr);
       if (bsess && bsess->hs_shadows) {
-        /* Close the old primary socket/sendQ, then promote shadow */
-        close_connection(cptr);
+        /* Do NOT call close_connection() here — it calls socket_del()
+         * which corrupts gh_ref when the event engine still holds
+         * references from the current event callback.  Instead,
+         * bounce_promote_shadow() closes the old fd directly and uses
+         * socket_reattach() to swap in the shadow's fd. */
         if (bounce_promote_shadow(bsess) == 0) {
           /* Shadow promoted — client stays alive with new socket */
           return;

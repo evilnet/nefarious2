@@ -114,7 +114,7 @@ static int is_valid_key(const char *key)
   if (isdigit((unsigned char)key[0]))
     return 0;
 
-  /* Check all characters */
+  /* Check all characters — spec allows a-z 0-9 _ . / - */
   for (p = key; *p; p++) {
     if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_' && *p != '.' && *p != '/')
       return 0;
@@ -459,6 +459,12 @@ static int parse_visibility(const char *vis)
  * METADATA SET <target> <key> [<visibility>] [<value>]
  * If no value, deletes the key.
  * Visibility is "*" for public (default) or "private" for private.
+ *
+ * Target may be:
+ *   <nick>          - online user (own or any if oper)
+ *   *               - self
+ *   *<accountname>  - account in LMDB (oper only, works offline)
+ *   #channel        - channel
  */
 static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
 {
@@ -510,6 +516,57 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   if (!is_valid_key(key)) {
     send_fail(sptr, "METADATA", "KEY_INVALID", key,
               "Invalid key name");
+    return 0;
+  }
+
+  /* Account target: *accountname — oper-only, writes directly to LMDB.
+   * Works for offline accounts (e.g., clearing bouncer metadata during cleanup).
+   * Bare "*" is self-reference and falls through to normal path. */
+  if (target[0] == '*' && target[1] != '\0') {
+    const char *account_name = target + 1;
+
+    if (!IsOper(sptr)) {
+      send_fail(sptr, "METADATA", "KEY_NO_PERMISSION", key,
+                "Account targets require oper privileges");
+      return 0;
+    }
+
+    if (!metadata_lmdb_is_available()) {
+      send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
+                "Metadata storage not available");
+      return 0;
+    }
+
+    /* If the account has online connections, update via metadata_set_client
+     * which handles both in-memory and LMDB persistence.  Otherwise write
+     * directly to LMDB for the offline case. */
+    {
+      struct Client *acptr;
+      int fd, found_online = 0;
+
+      for (fd = HighestFd; fd >= 0; --fd) {
+        if (!(acptr = LocalClientArray[fd]))
+          continue;
+        if (!IsAccount(acptr))
+          continue;
+        if (ircd_strcmp(cli_account(acptr), account_name) == 0) {
+          metadata_set_client(acptr, key, value, visibility);
+          found_online = 1;
+        }
+      }
+
+      if (!found_online) {
+        int rc = metadata_account_set(account_name, key, value);
+        if (rc < 0) {
+          send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
+                    "Failed to set account metadata");
+          return 0;
+        }
+      }
+    }
+
+    send_keyvalue(sptr, target, key, value,
+                  visibility == METADATA_VIS_PRIVATE ? "private" : "*");
     return 0;
   }
 

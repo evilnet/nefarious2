@@ -41,6 +41,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "hash.h"
 #include "s_bsd.h"
 #include "parse.h"
 #include "s_debug.h"
@@ -49,6 +50,7 @@
 #include "version.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -73,6 +75,49 @@ static struct AccountSessions *accountHash[BOUNCE_ACCOUNT_HASHSIZE];
 
 /** Per-server sequence counter for session IDs. */
 static unsigned int sessionSeq = 0;
+
+/* ---------------------------------------------------------------- */
+/* Deferred shadow free list                                         */
+/* ---------------------------------------------------------------- */
+
+/** List of shadow structs pending deferred free.
+ *
+ * When bounce_promote_shadow() runs inside an engine_loop event callback,
+ * epoll may have returned events for BOTH the primary and shadow sockets
+ * in the same batch.  Freeing the shadow immediately would leave a dangling
+ * pointer in the events array — engine_loop would read freed memory when
+ * processing the shadow's stale event.
+ *
+ * Instead, shadows are queued here and freed during timer_run(), which
+ * runs AFTER all events in the current batch are processed.
+ */
+static struct ShadowConnection *deferred_free_head;
+static struct Timer deferred_free_timer;
+static int deferred_free_timer_active;
+
+/** Timer callback: free all deferred shadow structs. */
+static void deferred_shadow_free_cb(struct Event *ev)
+{
+  struct ShadowConnection *s, *next;
+  for (s = deferred_free_head; s; s = next) {
+    next = s->sh_next;
+    MyFree(s);
+  }
+  deferred_free_head = NULL;
+  deferred_free_timer_active = 0;
+}
+
+/** Queue a shadow struct for deferred free (after current event batch). */
+static void bounce_defer_shadow_free(struct ShadowConnection *shadow)
+{
+  shadow->sh_next = deferred_free_head;
+  deferred_free_head = shadow;
+  if (!deferred_free_timer_active) {
+    timer_add(timer_init(&deferred_free_timer), deferred_shadow_free_cb,
+              NULL, TT_ABSOLUTE, CurrentTime);
+    deferred_free_timer_active = 1;
+  }
+}
 
 /* ---------------------------------------------------------------- */
 /* Hash functions                                                    */
@@ -268,6 +313,15 @@ static void bounce_hold_expire(struct Event *ev)
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
 
+  /* ET_DESTROY is sent when timer_del() cancels the timer (e.g., during
+   * bounce_attach).  Only the real expiry (ET_EXPIRE) should destroy
+   * the session and exit the ghost.  Ignoring ET_DESTROY prevents a
+   * use-after-free where bounce_attach → timer_del → ET_DESTROY →
+   * bounce_hold_expire destroys the ghost that bounce_attach still
+   * needs to transfer channels from. */
+  if (ev_type(ev) == ET_DESTROY)
+    return;
+
   session = (struct BouncerSession *)t_data(ev_timer(ev));
 
   if (session->hs_state != BOUNCE_HOLDING)
@@ -399,7 +453,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
   account = cli_account(cptr);
 
   /* Check per-account hold preference via metadata */
-  if (metadata_account_get(account, "$bouncer/hold", hold_val) == 0) {
+  if (metadata_account_get(account, "bouncer/hold", hold_val) == 0) {
     if (hold_val[0] == '0')
       return 0; /* User opted out */
   } else if (!feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)) {
@@ -417,7 +471,12 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
     /* If the ghost has a different nick, swap to it before network introduction */
     if (session->hs_client &&
         ircd_strcmp(cli_name(cptr), cli_name(session->hs_client)) != 0) {
-      /* Adopt ghost's nick */
+      /* Adopt ghost's nick — must update hash table BEFORE changing cli_name,
+       * since hChangeClient uses the current cli_name to remove from the
+       * old hash bucket.  Without this, the client stays in the hash table
+       * under its original nick while cli_name holds the ghost's nick,
+       * causing hRemClient to fail when the ghost is later exit'd. */
+      hChangeClient(cptr, cli_name(session->hs_client));
       ircd_strncpy(cli_name(cptr), cli_name(session->hs_client), NICKLEN);
     }
 
@@ -441,47 +500,54 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
      * The Client struct will be freed; only the socket fd survives. */
     struct ShadowConnection *shadow;
     int fd;
+    int new_fd;
     char sock_ip[SOCKIPLEN + 1];
 
-    /* Extract fd and IP from the client's connection before we free it */
+    /* Extract fd and IP from the client's connection */
     fd = cli_fd(cptr);
     ircd_strncpy(sock_ip, cli_sock_ip(cptr), SOCKIPLEN);
 
-    /* Detach the fd from the client so close_connection() won't close it.
-     * We do this by setting the fd to -1 in the socket structure. */
-    s_fd(&cli_socket(cptr)) = -1;
-
-    /* Create the shadow connection on the active session */
-    shadow = bounce_add_shadow(session, fd, sock_ip);
-    if (shadow) {
-      /* Copy CAP state from the registering client to the shadow.
-       * con_capab() and con_active() return pointers to CapSet structs. */
-      memcpy(&shadow->sh_capab, con_capab(cli_connect(cptr)),
-             sizeof(struct CapSet));
-      memcpy(&shadow->sh_active, con_active(cli_connect(cptr)),
-             sizeof(struct CapSet));
-      shadow->sh_capab_version = con_capab_version(cli_connect(cptr));
-
-      /* Copy pre-away state if any */
-      shadow->sh_away_state = con_pre_away(cli_connect(cptr));
-      if (shadow->sh_away_state == 1) {
-        ircd_strncpy(shadow->sh_away_msg,
-                     con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
-      }
-
-      Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
-             cli_name(cptr), shadow->sh_id, session->hs_sessid));
-
-      *out_session = session;
-
-      /* Send registration sequence to the shadow.
-       * This happens AFTER the Client is freed in register_user(),
-       * so we queue it via bounce_send_shadow_welcome(). */
-
-      return 2; /* Signal: converted to shadow, do not introduce to network */
+    /* dup() the fd so the shadow gets a clean fd not registered with the
+     * event engine.  The original fd stays with the client's socket and
+     * will be closed normally by exit_client() → close_connection(), which
+     * also removes it from epoll.  Both fds share the underlying TCP
+     * socket, so it stays alive as long as either fd is open. */
+    new_fd = dup(fd);
+    if (new_fd < 0) {
+      Debug((DEBUG_ERROR, "Bouncer: dup(%d) failed for shadow conversion: %m", fd));
     } else {
-      /* Failed to create shadow — restore fd and continue as normal client */
-      s_fd(&cli_socket(cptr)) = fd;
+      /* Create the shadow connection with the dup'd fd */
+      shadow = bounce_add_shadow(session, new_fd, sock_ip);
+      if (shadow) {
+        /* Copy CAP state from the registering client to the shadow.
+         * con_capab() and con_active() return pointers to CapSet structs. */
+        memcpy(&shadow->sh_capab, con_capab(cli_connect(cptr)),
+               sizeof(struct CapSet));
+        memcpy(&shadow->sh_active, con_active(cli_connect(cptr)),
+               sizeof(struct CapSet));
+        shadow->sh_capab_version = con_capab_version(cli_connect(cptr));
+
+        /* Copy pre-away state if any */
+        shadow->sh_away_state = con_pre_away(cli_connect(cptr));
+        if (shadow->sh_away_state == 1) {
+          ircd_strncpy(shadow->sh_away_msg,
+                       con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
+        }
+
+        Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
+               cli_name(cptr), shadow->sh_id, session->hs_sessid));
+
+        *out_session = session;
+
+        /* Send registration sequence to the shadow.
+         * This happens AFTER the Client is freed in register_user(),
+         * so we queue it via bounce_send_shadow_welcome(). */
+
+        return 2; /* Signal: converted to shadow, do not introduce to network */
+      } else {
+        /* Failed to create shadow — close the dup'd fd */
+        close(new_fd);
+      }
     }
   }
 
@@ -766,6 +832,10 @@ void bounce_destroy(struct BouncerSession *session)
     next = shadow->sh_next;
     if (current_shadow == shadow)
       current_shadow = NULL;
+    /* Clear s_data BEFORE socket_del to prevent the synchronous
+     * ET_DESTROY handler from freeing the shadow (which would make
+     * the MsgQClear/dbuf_delete below use-after-free). */
+    s_data(&shadow->sh_socket) = NULL;
     socket_del(&shadow->sh_socket);
     if (shadow->sh_fd >= 0) {
       close(shadow->sh_fd);
@@ -773,7 +843,9 @@ void bounce_destroy(struct BouncerSession *session)
     }
     MsgQClear(&shadow->sh_sendQ);
     dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
-    MyFree(shadow);
+    /* Defer free: a stale epoll event may still reference
+     * &shadow->sh_socket in the current engine_loop batch. */
+    bounce_defer_shadow_free(shadow);
   }
   session->hs_shadows = NULL;
   session->hs_shadow_count = 0;
@@ -1259,7 +1331,7 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
         should_hold = 1;
       } else {
         /* Check if user explicitly disabled (metadata "0") vs no preference */
-        struct MetadataEntry *md = metadata_get_client(cptr, "$bouncer/hold");
+        struct MetadataEntry *md = metadata_get_client(cptr, "bouncer/hold");
         if (md && md->value) {
           should_hold = 0;  /* Explicitly disabled */
         } else {
@@ -1626,20 +1698,37 @@ static void shadow_sock_callback(struct Event *ev)
   struct ShadowConnection *shadow;
 
   assert(0 != ev_socket(ev));
-  assert(0 != s_data(ev_socket(ev)));
+  assert(0 != s_data(ev_socket(ev)) || ev_type(ev) == ET_DESTROY);
 
   shadow = (struct ShadowConnection *)s_data(ev_socket(ev));
 
   switch (ev_type(ev)) {
   case ET_DESTROY:
-    /* Socket is being destroyed, nothing to do */
-    break;
+    /* Socket is being destroyed — free the shadow struct if still valid.
+     * bounce_remove_shadow() defers the free to here so the event engine
+     * never accesses freed memory in the epoll dispatch loop.
+     * bounce_promote_shadow() and bounce_destroy() clear s_data before
+     * socket_del() and use bounce_defer_shadow_free() instead. */
+    if (shadow)
+      MyFree(shadow);
+    return;
 
   case ET_READ:
     /* Read and forward commands from shadow to primary */
     if (shadow_read_packet(shadow) < 0) {
+      struct BouncerSession *sess = shadow->sh_session;
       shadow->sh_flags |= SHADOW_FLAGS_DEAD;
       bounce_remove_shadow(shadow);
+      /* Fix #23: If removing this shadow leaves the session orphaned
+       * (no primary client and no remaining shadows), destroy it.
+       * This happens when the primary QUITs while shadows are still
+       * connected — exit_one_client NULLs hs_client but can't destroy
+       * because shadows exist.  When the last shadow disconnects,
+       * nobody was destroying the orphaned session. */
+      if (sess && !sess->hs_client && !sess->hs_shadows) {
+        bounce_broadcast(sess, 'X', NULL);
+        bounce_destroy(sess);
+      }
       return;
     }
     break;
@@ -1650,21 +1739,40 @@ static void shadow_sock_callback(struct Event *ev)
     /* If sendQ still has data and we're not blocked, request more writes */
     if (MsgQLength(&shadow->sh_sendQ) > 0 &&
         !(shadow->sh_flags & SHADOW_FLAGS_BLOCKED)) {
-      socket_state(&shadow->sh_socket, SS_CONNECTED);
+      socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+    } else {
+      /* sendQ drained — stop requesting writable events */
+      socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE);
     }
     break;
 
   case ET_ERROR:
+  {
     /* Shadow connection error — remove it */
+    struct BouncerSession *sess = shadow->sh_session;
     shadow->sh_flags |= SHADOW_FLAGS_DEAD;
     bounce_remove_shadow(shadow);
+    /* Fix #23: destroy orphaned session (see ET_READ comment) */
+    if (sess && !sess->hs_client && !sess->hs_shadows) {
+      bounce_broadcast(sess, 'X', NULL);
+      bounce_destroy(sess);
+    }
     break;
+  }
 
   case ET_EOF:
+  {
     /* Shadow disconnected */
+    struct BouncerSession *sess = shadow->sh_session;
     shadow->sh_flags |= SHADOW_FLAGS_DEAD;
     bounce_remove_shadow(shadow);
+    /* Fix #23: destroy orphaned session (see ET_READ comment) */
+    if (sess && !sess->hs_client && !sess->hs_shadows) {
+      bounce_broadcast(sess, 'X', NULL);
+      bounce_destroy(sess);
+    }
     break;
+  }
 
   default:
     break;
@@ -1772,18 +1880,25 @@ void bounce_remove_shadow(struct ShadowConnection *shadow)
   if (current_shadow == shadow)
     current_shadow = NULL;
 
-  /* Close socket */
-  socket_del(&shadow->sh_socket);
-  if (shadow->sh_fd >= 0) {
-    close(shadow->sh_fd);
-    shadow->sh_fd = -1;
-  }
+  /* Mark dead, clean up queues, and trigger socket destruction.
+   * socket_del() marks the socket GEN_DESTROY; the event system will
+   * deliver ET_DESTROY to shadow_sock_callback later.  We defer the
+   * actual free(shadow) to that ET_DESTROY handler so the event engine
+   * never touches freed memory.  Clean up sendQ/recvQ here since they
+   * are no longer needed, but leave the shadow struct alive. */
+  shadow->sh_flags |= SHADOW_FLAGS_DEAD;
 
   /* Clean up sendQ and recvQ */
   MsgQClear(&shadow->sh_sendQ);
   dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
 
-  MyFree(shadow);
+  /* socket_del clears pending events; close fd after so the fd isn't
+   * reused before the engine stops tracking it. */
+  socket_del(&shadow->sh_socket);
+  if (shadow->sh_fd >= 0) {
+    close(shadow->sh_fd);
+    shadow->sh_fd = -1;
+  }
 
   /* If session has no more connections (primary gone + no shadows),
    * the session may need to enter HOLDING. This is handled by the
@@ -1811,7 +1926,7 @@ int bounce_promote_shadow(struct BouncerSession *session)
   struct ShadowConnection *shadow;
   struct Client *cptr;
   struct Connection *con;
-  int fd;
+  int old_fd, fd;
 
   assert(0 != session);
 
@@ -1829,21 +1944,44 @@ int bounce_promote_shadow(struct BouncerSession *session)
   session->hs_shadow_count--;
   shadow->sh_next = NULL;
 
-  fd = shadow->sh_fd;
-
   Debug((DEBUG_INFO, "Bouncer: promoting shadow #%u (fd %d) to primary for session %s",
-         shadow->sh_id, fd, session->hs_sessid));
+         shadow->sh_id, shadow->sh_fd, session->hs_sessid));
 
-  /* Step 1: Remove shadow's socket from the event engine.
-   * We need to re-register it under the Client's socket struct. */
+  /* Step 1: Remove shadow's socket from the event engine WHILE the fd
+   * is still valid.  engine_delete calls epoll_ctl(EPOLL_CTL_DEL) to
+   * explicitly remove the fd from the epoll interest list, preventing
+   * stale epoll events from referencing the freed shadow struct.
+   *
+   * Clear s_data BEFORE socket_del() because in non-threaded mode,
+   * socket_del() synchronously fires ET_DESTROY → shadow_sock_callback.
+   * If s_data is still set, the callback will MyFree(shadow) and we'd
+   * access freed memory. */
+  s_data(&shadow->sh_socket) = NULL;
   socket_del(&shadow->sh_socket);
 
-  /* Step 2: Transplant fd into the Client's Connection.
-   * The old primary socket was already cleaned up by the caller. */
+  /* Step 2: Steal the shadow's fd — no dup() needed since engine_delete
+   * already removed it from the epoll interest list.  The fd transfers
+   * directly to the primary's Connection. */
+  fd = shadow->sh_fd;
+  shadow->sh_fd = -1; /* prevent cleanup from closing the transferred fd */
+
+  /* Step 3: Close the primary's old fd.  The caller has NOT called
+   * close_connection() — doing so would call socket_del() on the
+   * primary's socket, which corrupts gh_ref when the event engine
+   * still holds references from the current event callback.  Instead,
+   * we close the fd directly (kernel removes it from epoll) and use
+   * socket_reattach() below to swap in the new fd. */
+  old_fd = cli_fd(cptr);
+  if (old_fd >= 0) {
+    LocalClientArray[old_fd] = 0;
+    close(old_fd);
+  }
+
+  /* Step 4: Transplant the stolen fd into the Client's Connection. */
   s_fd(&con_socket(con)) = fd;
   ClrFlag(cptr, FLAG_DEADSOCKET);
 
-  /* Step 3: Transfer sendQ/recvQ contents.
+  /* Step 5: Transfer sendQ/recvQ contents.
    * Move any pending data from shadow's queues to the Connection. */
   MsgQClear(&con_sendQ(con));
   /* Swap the MsgQ — move shadow's queued data to connection */
@@ -1856,37 +1994,55 @@ int bounce_promote_shadow(struct BouncerSession *session)
   con_recvQ(con) = shadow->sh_recvQ;
   memset(&shadow->sh_recvQ, 0, sizeof(shadow->sh_recvQ));
 
-  /* Step 4: Copy CAP state from shadow to Connection */
+  /* Step 6: Copy CAP state from shadow to Connection */
   memcpy(con_capab(con), &shadow->sh_capab, sizeof(struct CapSet));
   memcpy(con_active(con), &shadow->sh_active, sizeof(struct CapSet));
   con_capab_version(con) = shadow->sh_capab_version;
 
-  /* Step 5: Update LocalClientArray */
+  /* Step 7: Update LocalClientArray */
   LocalClientArray[fd] = cptr;
 
-  /* Step 6: Re-register socket with event engine using client callback */
-  if (!socket_add(&cli_socket(cptr), client_sock_callback,
-                  (void *)con, SS_CONNECTED,
-                  SOCK_EVENT_READABLE, fd)) {
-    Debug((DEBUG_ERROR, "Bouncer: socket_add failed during shadow promotion for %s",
+  /* Step 8: Re-register socket with event engine using socket_reattach.
+   * This preserves the socket's GenHeader (gh_ref, gh_flags, list linkage)
+   * which is critical — the event engine currently holds references to
+   * this socket from the in-progress event callback.  socket_reattach
+   * only updates the fd and re-registers with the epoll engine. */
+  if (!socket_reattach(&cli_socket(cptr), fd)) {
+    Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during shadow promotion for %s",
            cli_name(cptr)));
-    /* Socket registration failed — this is bad. Close fd and let it fall through. */
+    /* Socket registration failed — close fd and let caller handle it. */
     close(fd);
     s_fd(&con_socket(con)) = -1;
+    LocalClientArray[fd] = 0;
     SetFlag(cptr, FLAG_DEADSOCKET);
-    MyFree(shadow);
+    bounce_defer_shadow_free(shadow);
     return -1;
   }
 
-  /* Step 7: Update timing */
+  /* Step 9: Reset socket interest to readable only (we may have been
+   * writable from the old connection's pending sendQ). */
+  socket_events(&cli_socket(cptr), SOCK_EVENT_READABLE);
+
+  /* Step 10: Update timing */
   con_lasttime(con) = shadow->sh_lasttime;
   con_since(con) = shadow->sh_since;
 
-  /* Step 8: Update session primary ID */
+  /* Step 11: Update session primary ID */
   session->hs_primary_id = shadow->sh_id;
 
-  /* Step 9: Clean up the shadow struct (queues already moved) */
-  MyFree(shadow);
+  /* Step 12: Clean up the shadow struct (queues already moved).
+   * s_data was already cleared before socket_del() in step 2 to prevent
+   * the synchronous ET_DESTROY handler from freeing the shadow.
+   *
+   * IMPORTANT: Do NOT MyFree(shadow) here.  We are inside an engine_loop
+   * event callback (processing the primary's disconnect).  If epoll_wait
+   * returned events for both the primary and shadow sockets in the same
+   * batch, the shadow's event is still in the events array with
+   * evt->data.ptr pointing to &shadow->sh_socket.  Freeing the shadow
+   * now would cause engine_loop to read freed memory when it processes
+   * that stale event.  Instead, defer the free to timer_run() which
+   * executes after all events in the current batch are processed. */
+  bounce_defer_shadow_free(shadow);
 
   log_write(LS_USER, L_TRACE, 0, "Bouncer: shadow promoted to primary for %s session %s",
             cli_name(cptr), session->hs_sessid);
@@ -1960,17 +2116,19 @@ int bounce_compute_effective_away(struct BouncerSession *session,
    * We store the effective state in hs_hold_override's upper bits.
    * Actually, let's use a simpler approach: just compute and let caller compare. */
 
-  /* Check primary connection's away state */
+  /* Check primary connection's per-connection away state.
+   * con_pre_away tracks the primary's own away state (0=present, 1=away, 2=away-star),
+   * independent of shadow commands.  con_pre_away_msg stores the primary's per-connection
+   * away message.  cli_user(primary)->away reflects the EFFECTIVE state and is updated
+   * by the caller after this computation. */
   if (primary && MyUser(primary)) {
-    if (cli_user(primary)->away) {
-      if (cli_user(primary)->away[0] == '\0' ||
-          (con_pre_away(cli_connect(primary)) == 2)) {
-        /* AWAY * — invisible to aggregation */
-      } else {
-        /* Explicit away message */
-        has_away = 1;
-        latest_away_msg = cli_user(primary)->away;
-      }
+    int primary_state = con_pre_away(cli_connect(primary));
+    if (primary_state == 2) {
+      /* AWAY * — invisible to aggregation */
+    } else if (primary_state == 1) {
+      has_away = 1;
+      if (con_pre_away_msg(cli_connect(primary))[0])
+        latest_away_msg = con_pre_away_msg(cli_connect(primary));
     } else {
       /* Present */
       has_present = 1;
@@ -2063,6 +2221,49 @@ static void shadow_send_raw(struct ShadowConnection *shadow,
   }
 }
 
+/** Build a union CapSet from the primary connection and all shadow
+ * connections' active capabilities.
+ *
+ * Used for formatting outbound messages with the maximal set of tags
+ * that any connection (primary or shadow) might need. The send_buffer()
+ * shadow duplication loop then strips tags per-connection, ensuring
+ * each connection only receives tags it negotiated.
+ *
+ * This solves the CAP state divergence problem: when the primary has
+ * fewer caps than a shadow, the message would otherwise be formatted
+ * without tags the shadow needs (since tag filtering is subtractive).
+ *
+ * @param[in] session Bouncer session.
+ * @param[out] out CapSet to populate with the union of all connections' caps.
+ */
+void bounce_build_union_caps(struct BouncerSession *session, struct CapSet *out)
+{
+  struct ShadowConnection *sh;
+  unsigned int i;
+  unsigned int nwords = sizeof(out->bits) / sizeof(out->bits[0]);
+
+  assert(0 != session);
+  assert(0 != out);
+
+  /* Start with primary's active caps */
+  if (session->hs_client && MyConnect(session->hs_client)) {
+    struct CapSet *primary_caps = cli_active(session->hs_client);
+    for (i = 0; i < nwords; i++)
+      out->bits[i] = primary_caps->bits[i];
+  } else {
+    for (i = 0; i < nwords; i++)
+      out->bits[i] = 0;
+  }
+
+  /* OR in each shadow's active caps */
+  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
+    if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+      continue;
+    for (i = 0; i < nwords; i++)
+      out->bits[i] |= sh->sh_active.bits[i];
+  }
+}
+
 /** Send IRC registration welcome sequence to a newly attached shadow.
  *
  * This gives the shadow connection a full registration sequence so that
@@ -2121,5 +2322,5 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
     cli_name(&me), session->hs_sessid, shadow->sh_id);
 
   /* Request writable notification to flush the welcome */
-  socket_state(&shadow->sh_socket, SS_CONNECTED);
+  socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
 }

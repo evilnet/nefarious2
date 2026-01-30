@@ -822,3 +822,34 @@ msgq_filter_tags(struct MsgBuf *mb, struct CapSet *active)
 
   return msgq_make(0, "%s%.*s", filtered, (int)body_len, body);
 }
+
+/** Create a new MsgBuf by prepending a tag string to a base (no-tags) MsgBuf.
+ *
+ * Used when a shadow connection needs tags that weren't in the mb_cache
+ * because no other channel member had the same capability set. The tag
+ * string should already be formatted (e.g., "@time=...;account=... ")
+ * with a trailing space.
+ *
+ * @param[in] tags Tag string to prepend (must include trailing space).
+ * @param[in] base Base MsgBuf without tags (the body to prepend to).
+ * @return New MsgBuf with tags + body (ref=1), or NULL on error.
+ */
+struct MsgBuf *
+msgq_prepend_tags(const char *tags, struct MsgBuf *base)
+{
+  struct MsgBuf *real;
+  unsigned int body_len;
+
+  assert(0 != tags);
+  assert(0 != base);
+
+  real = base->real ? base->real : base;
+  body_len = real->length;
+  /* body includes \r\n which msgq_make will add again, so strip it */
+  if (body_len >= 2)
+    body_len -= 2;
+  if (body_len == 0)
+    return NULL;
+
+  return msgq_make(0, "%s%.*s", tags, (int)body_len, real->msg);
+}

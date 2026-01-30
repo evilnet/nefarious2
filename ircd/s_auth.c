@@ -606,6 +606,8 @@ static int check_auth_finished(struct AuthRequest *auth)
 
   if (IsUserPort(auth->client))
   {
+    Debug((DEBUG_INFO, "check_auth_finished: completing auth for %p (fd %d), cli_name='%s'",
+           (void*)auth->client, cli_fd(auth->client), cli_name(auth->client)));
     memset(cli_passwd(auth->client), 0, sizeof(cli_passwd(auth->client)));
     res = auth_set_username(auth);
     if (res == 0)
@@ -936,9 +938,23 @@ void destroy_auth_request(struct AuthRequest* auth)
   if (t_active(&auth->loctimeout))
     timer_del(&auth->loctimeout);
 
-  cli_auth(auth->client) = NULL;
+  if (auth->client)
+    cli_auth(auth->client) = NULL;
   auth->next = auth_freelist;
   auth_freelist = auth;
+}
+
+/** Detach a client from its auth request.
+ * Sets the auth request's client pointer to NULL so that
+ * destroy_auth_request() won't dereference freed memory.
+ * Used when the Client is freed before auth cleanup (e.g.,
+ * bouncer shadow conversion).
+ * @param[in] auth The auth request to detach from its client.
+ */
+void auth_detach_client(struct AuthRequest *auth)
+{
+  if (auth)
+    auth->client = NULL;
 }
 
 /** Handle a 'ping' (authorization) timeout for a client.
@@ -2415,6 +2431,9 @@ static int iauth_cmd_done_client(struct IAuth *iauth, struct Client *cli,
 {
   static time_t warn_time;
 
+  Debug((DEBUG_INFO, "iauth_cmd_done_client: cli=%p fd=%d cli_name='%s'",
+         (void*)cli, cli_fd(cli), cli_name(cli)));
+
   /* Clear iauth pending flag. */
   assert(cli_auth(cli) != NULL);
   FlagClr(&cli_auth(cli)->flags, AR_IAUTH_PENDING);
@@ -2841,11 +2860,12 @@ static void iauth_parse(struct IAuth *iauth, char *message)
     else if (errno == ERANGE || endptr == params[0] || (*endptr && !IsSpace(*endptr)))
       /* Invalid client ID format. */
       sendto_iauth(NULL, "E BadId :[%s] is not a valid client id", params[0]);
-    else if (id < 0 || id > HighestFd || !(cli = LocalClientArray[id]))
+    else if (id < 0 || id > HighestFd || !(cli = LocalClientArray[id])) {
       /* Client no longer exists (or never existed). */
+      Debug((DEBUG_INFO, "iauth_parse: Gone fd=%d (no client)", id));
       sendto_iauth(NULL, "E Gone :[%s %s %s]", params[0], params[1],
 		   params[2]);
-    else if ((!(auth = cli_auth(cli)) ||
+    } else if ((!(auth = cli_auth(cli)) ||
 	      !FlagHas(&auth->flags, AR_IAUTH_PENDING)) &&
 	     has_cli == 1)
       /* Client is done with IAuth checks. */
@@ -2872,11 +2892,15 @@ static void iauth_parse(struct IAuth *iauth, char *message)
         if (0 == res ||
             (irc_in_addr_cmp(&addr.addr, &cli_ip(cli)) &&
              irc_in_addr_cmp(&addr.addr, &cli_connectip(cli))) ||
-            (auth && addr.port != auth->port))
+            (auth && addr.port != auth->port)) {
           /* Report mismatch to iauth. */
+          Debug((DEBUG_INFO, "iauth_parse: MISMATCH for fd %d cli=%p cli_name='%s' "
+                 "iauth_port=%hu auth_port=%hu",
+                 cli_fd(cli), (void*)cli, cli_name(cli),
+                 addr.port, auth ? auth->port : 0));
           sendto_iauth(cli, "E Mismatch :[%s] != [%s]", params[1],
                        ircd_ntoa(&cli_ip(cli)));
-        else if (handler(iauth, cli, parc - 3, params + 3) > 0)
+        } else if (handler(iauth, cli, parc - 3, params + 3) > 0)
           /* Handler indicated a possible state change. */
           check_auth_finished(auth);
       }

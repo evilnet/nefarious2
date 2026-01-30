@@ -166,9 +166,14 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(0 != cptr);
   assert(cptr == sptr);
 
-  /* Check AWAY throttle - silently drop if too soon after last change */
+  /* Check AWAY throttle - silently drop if too soon after last change.
+   * Skip throttle in the presence aggregation path: multiple connections
+   * (primary + shadows) share cli_nextaway, so a shadow's AWAY would be
+   * incorrectly throttled by the primary's.  The aggregation path's
+   * effective-state change detection already suppresses redundant broadcasts. */
   throttle = feature_int(FEAT_AWAY_THROTTLE);
-  if (throttle > 0) {
+  if (throttle > 0 && !current_shadow &&
+      !(feature_bool(FEAT_PRESENCE_AGGREGATION) && bounce_enabled())) {
     if (CurrentTime < cli_nextaway(cptr)) {
       /* Too soon - silently ignore (no error to avoid spam) */
       return 0;
@@ -186,27 +191,26 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
-  is_away = user_set_away(cli_user(sptr), away_message);
-
   /* Presence aggregation path — only when bouncer is active for this account.
    * Uses the bouncer session's connection list (primary + shadows) as the
    * authoritative aggregation path.
+   *
+   * IMPORTANT: Do NOT call user_set_away() before this check.  Shadow commands
+   * are dispatched through the primary Client (parse_client(primary, ...)), so
+   * user_set_away would corrupt the primary's away state with the shadow's.
+   * Instead, update per-connection state independently, compute the effective
+   * state, then set cli_user->away from the effective result.
    */
   if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
       && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int new_effective = 0;
     char new_msg[AWAYLEN + 1];
+    int is_away = !EmptyString(away_message);
 
-    /* Send the appropriate reply to the user */
-    if (is_away || is_away_star) {
-      send_reply(sptr, RPL_NOWAWAY);
-    } else {
-      send_reply(sptr, RPL_UNAWAY);
-    }
-
-    /* Update shadow away state if this command came from a shadow */
+    /* Update per-connection away state */
     if (current_shadow) {
+      /* Shadow sent AWAY — update shadow state only, do NOT touch primary */
       if (is_away_star) {
         current_shadow->sh_away_state = 2;
         current_shadow->sh_away_msg[0] = '\0';
@@ -218,12 +222,48 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         current_shadow->sh_away_msg[0] = '\0';
       }
       current_shadow->sh_since = CurrentTime;
+    } else {
+      /* Primary sent AWAY — update primary's per-connection state.
+       * Store both the state and the message in con_pre_away/con_pre_away_msg
+       * so they survive effective-state updates to cli_user->away. */
+      if (is_away_star) {
+        con_pre_away(cli_connect(sptr)) = 2;
+        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+      } else if (is_away) {
+        con_pre_away(cli_connect(sptr)) = 1;
+        ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN);
+      } else {
+        con_pre_away(cli_connect(sptr)) = 0;
+        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+      }
+    }
+
+    /* Send the appropriate reply to the user */
+    if (is_away || is_away_star) {
+      send_reply(sptr, RPL_NOWAWAY);
+    } else {
+      send_reply(sptr, RPL_UNAWAY);
     }
 
     /* Compute effective state across all connections */
     if (bsess) {
       int prev_effective = bsess->hs_effective_away;
       bounce_compute_effective_away(bsess, &new_effective, new_msg);
+
+      /* Update cli_user(primary)->away to reflect the effective state.
+       * This ensures WHOIS, PRIVMSG auto-reply, and other lookups
+       * see the aggregated state, not a single connection's state. */
+      if (new_effective == 0) {
+        user_set_away(cli_user(sptr), NULL);
+      } else if (new_effective == 1) {
+        user_set_away(cli_user(sptr), new_msg[0] ? new_msg : (char *)away_message);
+      } else {
+        /* All AWAY * — set away with star message for WHOIS consistency */
+        user_set_away(cli_user(sptr),
+                      feature_str(FEAT_AWAY_STAR_MSG)
+                        ? (char *)feature_str(FEAT_AWAY_STAR_MSG)
+                        : (char *)"*");
+      }
 
       /* Only broadcast if effective state changed */
       if (new_effective != prev_effective) {
@@ -240,8 +280,18 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                  CAP_AWAYNOTIFY, CAP_NONE,
                                                  ":%s",
                                                  new_msg[0] ? new_msg : away_message);
+        } else {
+          /* All connections AWAY * — user is effectively away.
+           * Broadcast with the AWAY_STAR_MSG fallback.  "Hidden" means
+           * these connections don't count as present for aggregation,
+           * NOT that the user becomes invisible to the network. */
+          const char *star_msg = feature_str(FEAT_AWAY_STAR_MSG);
+          if (!star_msg) star_msg = "*";
+          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", star_msg);
+          sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+                                                 CAP_AWAYNOTIFY, CAP_NONE,
+                                                 ":%s", star_msg);
         }
-        /* new_effective == 2 (all AWAY *): no broadcast — hidden */
         bsess->hs_effective_away = new_effective;
         ircd_strncpy(bsess->hs_effective_away_msg, new_msg, AWAYLEN);
       }
@@ -251,6 +301,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* Original non-aggregated path */
+  is_away = user_set_away(cli_user(sptr), away_message);
   if (is_away)
   {
     if (!was_away)

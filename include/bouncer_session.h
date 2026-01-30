@@ -286,6 +286,15 @@ extern int bounce_compute_effective_away(struct BouncerSession *session,
  */
 extern void bounce_send_shadow_welcome(struct ShadowConnection *shadow);
 
+/** Build a union CapSet from primary + all shadow active capabilities.
+ * Used to format outbound messages with the maximal set of tags any
+ * connection might need. send_buffer() then strips per-connection.
+ * @param[in] session Bouncer session.
+ * @param[out] out CapSet to populate with the union of all connections' caps.
+ */
+extern void bounce_build_union_caps(struct BouncerSession *session,
+                                     struct CapSet *out);
+
 /** Global pointer to the shadow connection that originated the current command.
  * Single-threaded IRCd, so a global is safe. Used for reply routing:
  * when a shadow sends a command, replies should go to the shadow, not the primary.

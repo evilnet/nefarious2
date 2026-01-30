@@ -351,13 +351,33 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   else if (IsUnknown(bcptr) || IsConnecting(bcptr) || IsHandshake(bcptr))
     Count_unknowndisconnects(UserStats);
 
+  /* Clean up bouncer session if this client is the primary.
+   * If the session is ACTIVE and hs_client points to this client,
+   * either destroy the session (no shadows) or null hs_client to
+   * prevent a dangling pointer.  This handles the case where
+   * bounce_should_hold() returned NULL (hold disabled) but the
+   * session still exists from a previous BOUNCER SET HOLD on. */
+  if (IsUser(bcptr) && MyUser(bcptr) && bounce_enabled() && IsAccount(bcptr)) {
+    struct BouncerSession *bsess = bounce_get_session(bcptr);
+    if (bsess && bsess->hs_client == bcptr && bsess->hs_state == BOUNCE_ACTIVE) {
+      bsess->hs_client = NULL;
+      if (!bsess->hs_shadows) {
+        /* No shadows — session is orphaned, destroy it */
+        bounce_broadcast(bsess, 'X', NULL);
+        bounce_destroy(bsess);
+      }
+      /* If shadows exist, they'll notice the primary is gone
+       * and get cleaned up via shadow socket errors. */
+    }
+  }
+
   /*
    * Update IPregistry
    */
   if (IsIPChecked(bcptr))
     IPcheck_disconnect(bcptr);
 
-  /* 
+  /*
    * Remove from serv->client_list
    * NOTE: user is *always* NULL if this is a server
    */

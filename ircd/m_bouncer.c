@@ -449,11 +449,14 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
   if (0 == ircd_strcmp(parv[2], "HOLD")) {
     /* Account-wide hold preference - stored in metadata */
     if (0 == ircd_strcmp(parv[3], "on")) {
-      metadata_set_client(sptr, "$bouncer/hold", "1", METADATA_VIS_PRIVATE);
+      metadata_set_client(sptr, "bouncer/hold", "1", METADATA_VIS_PRIVATE);
 
-      /* Auto-create session if none exists — turning hold on should be
-       * sufficient to get bouncer behavior without needing TOKEN. */
-      if (!bounce_has_sessions(cli_account(sptr))) {
+      /* Auto-create session if this client doesn't own one — turning hold on
+       * should be sufficient to get bouncer behavior without needing TOKEN.
+       * Use bounce_get_session(sptr) instead of bounce_has_sessions() so that
+       * stale sessions (whose primaries haven't been cleaned up yet) don't
+       * prevent this client from getting its own session. */
+      if (!bounce_get_session(sptr)) {
         struct BouncerSession *session = NULL;
         if (bounce_create(sptr, &session) == 0 && session) {
           bounce_broadcast(session, 'C', NULL);
@@ -469,7 +472,22 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
                   "Hold mode enabled");
       }
     } else if (0 == ircd_strcmp(parv[3], "off")) {
-      metadata_set_client(sptr, "$bouncer/hold", "0", METADATA_VIS_PRIVATE);
+      metadata_set_client(sptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+
+      /* Fix #24: Active teardown — user no longer wants bouncer behavior.
+       * Destroy the session (disconnects all shadows) so the primary
+       * continues as a normal non-bounced IRC client. */
+      {
+        struct BouncerSession *session = bounce_get_session(sptr);
+        if (session) {
+          /* Detach primary before destroy so exit_one_client doesn't
+           * try to clean up a destroyed session later. */
+          session->hs_client = NULL;
+          bounce_broadcast(session, 'X', NULL);
+          bounce_destroy(session);
+        }
+      }
+
       send_note(sptr, "BOUNCER", "SETTINGS_UPDATED", NULL,
                 "Hold mode disabled");
     } else {
@@ -545,7 +563,7 @@ static int bouncer_settings(struct Client *sptr)
     hold = 1;
     hold_src = "mode";
   } else {
-    md = metadata_get_client(sptr, "$bouncer/hold");
+    md = metadata_get_client(sptr, "bouncer/hold");
     if (md && md->value) {
       hold = 0;  /* Explicitly disabled */
       hold_src = "mode";
@@ -670,7 +688,7 @@ static int bouncer_info(struct Client *sptr)
     hold = 1;
     hold_src = "account";
   } else {
-    md = metadata_get_client(sptr, "$bouncer/hold");
+    md = metadata_get_client(sptr, "bouncer/hold");
     if (md && md->value) {
       hold = (md->value[0] == '1') ? 1 : 0;
       hold_src = "account";

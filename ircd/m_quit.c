@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "ircd.h"
@@ -111,6 +112,17 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(0 != cptr);
   assert(0 != sptr);
   assert(cptr == sptr);
+
+  /* Fix #25: Check if client should enter bouncer HOLD mode instead of
+   * quitting.  Clients routinely send QUIT on disconnect — the whole
+   * purpose of hold is to survive that and keep channels alive. */
+  if (IsUser(sptr) && bounce_should_hold(sptr)) {
+    const char *comment = (parc > 1 && !BadPtr(parv[parc - 1]))
+                          ? parv[parc - 1] : "Quit";
+    if (bounce_hold_client(sptr, comment) == 0)
+      return 0; /* Entered hold — don't exit */
+    /* If hold failed, fall through to normal quit */
+  }
 
   if (cli_user(sptr)) {
     struct Membership* chan;

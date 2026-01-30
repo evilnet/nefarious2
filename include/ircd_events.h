@@ -300,6 +300,7 @@ void signal_add(struct Signal* signal, EventCallBack call, void* data,
 int socket_add(struct Socket* sock, EventCallBack call, void* data,
 	       enum SocketState state, unsigned int events, int fd);
 void socket_del(struct Socket* sock);
+int socket_reattach(struct Socket* sock, int fd);
 void socket_state(struct Socket* sock, enum SocketState state);
 void socket_events(struct Socket* sock, unsigned int events);
 

@@ -166,6 +166,20 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                                     "(ACCOUNT Removal)", cli_name(acptr));
         assert(0 != cli_user(acptr)->account[0]);
 
+        /* Destroy all bouncer sessions for this account before clearing it.
+         * Re-lookup each iteration because bounce_destroy() may free the
+         * AccountSessions struct when the last session is removed. */
+        {
+          struct BouncerSession *sess;
+          while ((sess = bounce_find_any_session(cli_user(acptr)->account)) != NULL)
+            bounce_destroy(sess);
+        }
+
+        /* Clear all persisted metadata for this account from LMDB and
+         * free in-memory metadata entries.  Must happen while the account
+         * string is still set so the LMDB lookup key is valid. */
+        metadata_clear_client(acptr);
+
         /* Decrement authusers for all channels this user is in */
         {
           struct Membership *chan;

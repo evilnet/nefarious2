@@ -57,14 +57,14 @@
 
 #include "ircd_compress.h"
 
-/** Virtual $presence metadata key */
-#define METADATA_KEY_PRESENCE "$presence"
+/** Virtual presence metadata key */
+#define METADATA_KEY_PRESENCE "presence"
 
-/** Virtual $last_present metadata key */
-#define METADATA_KEY_LAST_PRESENT "$last_present"
+/** Virtual last_present metadata key */
+#define METADATA_KEY_LAST_PRESENT "last_present"
 
 /** Virtual $away_message metadata key */
-#define METADATA_KEY_AWAY_MESSAGE "$away_message"
+#define METADATA_KEY_AWAY_MESSAGE "away_message"
 
 /** Static buffer for virtual presence metadata entry */
 static struct MetadataEntry presence_entry;
@@ -912,7 +912,7 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
   if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(cptr)) {
     struct BouncerSession *session = bounce_get_session(cptr);
 
-    /* Handle $presence key - returns state only (present/away/away-star) */
+    /* Handle presence key - returns state only (present/away/away-star) */
     if (ircd_strcmp(key, METADATA_KEY_PRESENCE) == 0) {
       if (session) {
         const char *state_str;
@@ -958,7 +958,7 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
       return NULL;
     }
 
-    /* Handle $last_present key */
+    /* Handle last_present key */
     if (ircd_strcmp(key, METADATA_KEY_LAST_PRESENT) == 0) {
       if (session && session->hs_last_active > 0) {
         ircd_snprintf(0, presence_value, sizeof(presence_value), "%lu",
@@ -999,7 +999,7 @@ static const struct {
   { "umode.privdeaf",        FLAG_PRIVDEAF,          0 },
   { "chathistory.nostorage", FLAG_NOSTORAGE,        0 },
   { "chathistory.pm",        FLAG_PM_OPTOUT,        1 },
-  { "$bouncer/hold",         FLAG_BNC_HOLDPREF,     0 },
+  { "bouncer/hold",         FLAG_BNC_HOLDPREF,     0 },
   { NULL, 0, 0 }
 };
 
@@ -1476,7 +1476,7 @@ struct MetadataEntry *metadata_get_client_cached(struct Client *cptr, const char
     return metadata_get_client(cptr, key);
   }
 
-  /* First check in-memory (includes virtual keys like $presence) */
+  /* First check in-memory (includes virtual keys like presence) */
   entry = metadata_get_client(cptr, key);
   if (entry)
     return entry;
