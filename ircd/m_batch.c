@@ -125,9 +125,17 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
 
   int remaining = total_lines - sent;
 
+  /* History-based fallback (tiers 2+3) requires:
+   * - Recipient is authenticated (only authed users can query history)
+   * - Sender is NOT +Y (no-storage users produce gap markers, not content)
+   * Otherwise fall through to virtual channel storage (tier 4). */
+  int history_usable = IsAccount(to) && !IsNoStorage(sptr)
+                       && !(is_channel && chptr &&
+                            (chptr->mode.exmode & EXMODE_NOSTORAGE));
+
   /* Fallback chain: chathistory -> HistServ -> &ml- storage */
-  if (CapActive(to, CAP_DRAFT_CHATHISTORY)) {
-    /* Tier 2: Client has native chathistory capability */
+  if (history_usable && CapActive(to, CAP_DRAFT_CHATHISTORY)) {
+    /* Tier 2: Client has native chathistory capability + can use it */
     if (is_channel) {
       if (remaining <= 15) {
         sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
@@ -145,8 +153,8 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
                       to, total_lines, target, msgid, total_lines);
       }
     }
-  } else if (FindClient("HistServ")) {
-    /* Tier 3: HistServ available - queries server's history via P10 */
+  } else if (history_usable && FindClient("HistServ")) {
+    /* Tier 3: HistServ available + recipient can use it */
     if (is_channel) {
       if (remaining <= 15) {
         sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
