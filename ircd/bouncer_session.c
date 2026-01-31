@@ -33,6 +33,7 @@
 #include "ircd_osdep.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "random.h"
 #include "ircd_string.h"
@@ -2349,16 +2350,15 @@ static void shadow_send_raw(struct ShadowConnection *shadow,
   if (len <= 0 || len >= (int)sizeof(buf))
     return;
 
-  /* Ensure \r\n termination */
-  if (len >= 2 && buf[len - 2] == '\r' && buf[len - 1] == '\n') {
-    /* Already terminated */
-  } else {
-    if (len < (int)sizeof(buf) - 2) {
-      buf[len++] = '\r';
-      buf[len++] = '\n';
-      buf[len] = '\0';
-    }
+  /* Strip trailing \r\n — msgq_make adds its own \r\n termination.
+   * Callers may include \r\n in their format strings; without stripping,
+   * the MsgBuf would contain double \r\n. */
+  while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) {
+    buf[--len] = '\0';
   }
+
+  if (len == 0)
+    return;
 
   mb = msgq_make(primary, "%s", buf);
   if (mb) {

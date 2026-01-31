@@ -32,6 +32,8 @@ struct ShadowTagContext {
   struct Client  *stc_from;      /**< Source client (for tag flag computation) */
   int             stc_active;    /**< Non-zero when context is valid */
   int             stc_include_batch; /**< Whether to include batch tag */
+  int             stc_withcap;   /**< Cap routing: deliver only to connections WITH this cap (CAP_NONE=disabled) */
+  int             stc_skipcap;   /**< Cap routing: skip connections WITH this cap (CAP_NONE=disabled) */
 };
 
 /** Global shadow tag context — set by channel send functions around

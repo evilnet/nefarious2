@@ -931,30 +931,31 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
     }
   }
 
-  msgq_add(&(cli_sendQ(to)), buf, prio);
-  client_add_sendq(cli_connect(to), &send_queues);
-  update_write(to);
-
-  /*
-   * Update statistics. The following is slightly incorrect
-   * because it counts messages even if queued, but bytes
-   * only really sent. Queued bytes get updated in SendQueued.
-   */
-  ++(cli_sendM(to));
-  ++(cli_sendM(&me));
-  /*
-   * This little bit is to stop the sendQ from growing too large when
-   * there is no need for it to. Thus we call send_queued() every time
-   * 2k has been added to the queue since the last non-fatal write.
-   * Also stops us from deliberately building a large sendQ and then
-   * trying to flood that link with data (possible during the net
-   * relinking done by servers with a large load).
-   *
-   * If prio is set (high priority / flush immediately), always flush
-   * to ensure interactive service responses are delivered promptly.
-   */
-  if (prio || MsgQLength(&(cli_sendQ(to))) / 1024 > cli_lastsq(to))
-    send_queued(to);
+  /* Per-connection cap routing for dual-call broadcasts.
+   * When stc_withcap/skipcap are set and this is a bouncer primary,
+   * check the primary's OWN caps (not union) to decide delivery. */
+  {
+    int suppress_primary = 0;
+    if (shadow_tag_ctx.stc_active && MyUser(to) && !IsServer(to)
+        && (shadow_tag_ctx.stc_withcap != CAP_NONE
+            || shadow_tag_ctx.stc_skipcap != CAP_NONE)) {
+      if (shadow_tag_ctx.stc_withcap != CAP_NONE
+          && !CapOwnHas(to, shadow_tag_ctx.stc_withcap))
+        suppress_primary = 1;
+      if (shadow_tag_ctx.stc_skipcap != CAP_NONE
+          && CapOwnHas(to, shadow_tag_ctx.stc_skipcap))
+        suppress_primary = 1;
+    }
+    if (!suppress_primary) {
+      msgq_add(&(cli_sendQ(to)), buf, prio);
+      client_add_sendq(cli_connect(to), &send_queues);
+      update_write(to);
+      ++(cli_sendM(to));
+      ++(cli_sendM(&me));
+      if (prio || MsgQLength(&(cli_sendQ(to))) / 1024 > cli_lastsq(to))
+        send_queued(to);
+    }
+  }
 
   /* Duplicate to bouncer shadow connections (multi-client support).
    * If this client has an active bouncer session with shadows, queue
@@ -988,6 +989,15 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
         int sh_flags;
 
         if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+          continue;
+
+        /* Per-shadow cap routing: skip shadows that don't match the
+         * withcap/skipcap criteria for this broadcast variant. */
+        if (shadow_tag_ctx.stc_withcap != CAP_NONE
+            && !CapHas(&sh->sh_active, shadow_tag_ctx.stc_withcap))
+          continue;
+        if (shadow_tag_ctx.stc_skipcap != CAP_NONE
+            && CapHas(&sh->sh_active, shadow_tag_ctx.stc_skipcap))
           continue;
 
         if (primary_flags < 0) {
@@ -1663,12 +1673,14 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 
   bump_sentalong(from);
 
-  /* Set shadow tag context for per-shadow CAP filtering */
+  /* Set shadow tag context for per-shadow CAP filtering and cap routing */
   shadow_tag_ctx.stc_cache = mb_cache;
   shadow_tag_ctx.stc_notags = mb;
   shadow_tag_ctx.stc_from = from;
   shadow_tag_ctx.stc_active = 1;
   shadow_tag_ctx.stc_include_batch = 0;
+  shadow_tag_ctx.stc_withcap = withcap;
+  shadow_tag_ctx.stc_skipcap = skipcap;
 
   /*
    * loop through from's channels, and the members on their channels
@@ -1677,13 +1689,26 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
     if (IsZombie(chan) || IsDelayedJoin(chan))
       continue;
     for (member = chan->channel->members; member;
-         member = member->next_member)
-      if (MyConnect(member->user)
-          && -1 < cli_fd(cli_from(member->user))
-          && member->user != one
-          && cli_sentalong(member->user) != sentalong_marker
-          && ((withcap == CAP_NONE) || CapActive(member->user, withcap))
-          && ((skipcap == CAP_NONE) || !CapActive(member->user, skipcap))) {
+         member = member->next_member) {
+      struct BouncerSession *bsess;
+      int has_shadows;
+      if (!MyConnect(member->user)
+          || -1 >= cli_fd(cli_from(member->user))
+          || member->user == one
+          || cli_sentalong(member->user) == sentalong_marker)
+        continue;
+      /* Bouncer primaries with shadows bypass cap routing — send_buffer
+       * handles per-connection delivery. */
+      bsess = bounce_get_session(member->user);
+      has_shadows = (bsess && bsess->hs_client == member->user
+                     && bsess->hs_shadow_count > 0);
+      if (!has_shadows
+          && ((withcap != CAP_NONE) && !CapActive(member->user, withcap)))
+        continue;
+      if (!has_shadows
+          && ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
+        continue;
+      {
         cli_sentalong(member->user) = sentalong_marker;
         flags = get_client_tag_flags(member->user, from, 0);
         if (flags) {
@@ -1703,6 +1728,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
           send_buffer(member->user, mb, 0);
         }
       }
+    }
   }
 
   if (MyConnect(from) && from != one) {
@@ -1715,6 +1741,8 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 
   /* Clear shadow tag context */
   shadow_tag_ctx.stc_active = 0;
+  shadow_tag_ctx.stc_withcap = CAP_NONE;
+  shadow_tag_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -1832,15 +1860,19 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
-  /* Set shadow tag context for per-shadow CAP filtering */
+  /* Set shadow tag context for per-shadow CAP filtering and cap routing */
   shadow_tag_ctx.stc_cache = mb_cache;
   shadow_tag_ctx.stc_notags = mb;
   shadow_tag_ctx.stc_from = from;
   shadow_tag_ctx.stc_active = 1;
   shadow_tag_ctx.stc_include_batch = 0;
+  shadow_tag_ctx.stc_withcap = withcap;
+  shadow_tag_ctx.stc_skipcap = skipcap;
 
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
+    struct BouncerSession *bsess;
+    int has_shadows;
     if (!MyConnect(member->user)
         || member->user == one
         || IsZombie(member)
@@ -1848,9 +1880,19 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
-        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
-        || ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
-        || ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
+        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST)))
+        continue;
+    /* For bouncer primaries with shadows, both dual-call variants must
+     * reach send_buffer() so per-connection routing can deliver the
+     * correct format to each connection (primary + each shadow). */
+    bsess = bounce_get_session(member->user);
+    has_shadows = (bsess && bsess->hs_client == member->user
+                   && bsess->hs_shadow_count > 0);
+    if (!has_shadows
+        && ((withcap != CAP_NONE) && !CapActive(member->user, withcap)))
+        continue;
+    if (!has_shadows
+        && ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
         continue;
     flags = get_client_tag_flags(member->user, from, 0);
     if (flags) {
@@ -1873,6 +1915,8 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
 
   /* Clear shadow tag context */
   shadow_tag_ctx.stc_active = 0;
+  shadow_tag_ctx.stc_withcap = CAP_NONE;
+  shadow_tag_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
