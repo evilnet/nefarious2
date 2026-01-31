@@ -207,6 +207,7 @@ struct IAuth {
   struct SLink *i_stats;                /**< statistics string list */
   struct SLink *i_stats_tail;           /**< tail of stats list for O(1) append */
   unsigned int i_stats_count;           /**< number of stats entries */
+  char i_sasl_mechs[128];               /**< SASL mechanisms supported by IAuth */
   char **i_argv;                        /**< argument list */
   int i_argc;                           /**< number of arguments in argument list */
   unsigned int i_timeout_count;         /**< consecutive auth timeout counter for circuit breaker */
@@ -1492,6 +1493,18 @@ int auth_iauth_handles_sasl(void)
   return IAuthHas(iauth, IAUTH_SASL);
 }
 
+/** Get the SASL mechanisms advertised by IAuth.
+ * @return Comma-separated mechanism list, or NULL if none.
+ */
+const char *auth_iauth_sasl_mechs(void)
+{
+  if (!iauth || !IAuthHas(iauth, IAUTH_SASL))
+    return NULL;
+  if (iauth->i_sasl_mechs[0] == '\0')
+    return NULL;
+  return iauth->i_sasl_mechs;
+}
+
 /** Send SASL authentication start to IAuth.
  * @param[in] cptr Client starting SASL.
  * @param[in] mechanism SASL mechanism name.
@@ -2749,6 +2762,48 @@ static int iauth_cmd_sasl_mechs(struct IAuth *iauth, struct Client *cli,
   return 0;
 }
 
+/** Handle global SASL mechanism broadcast from IAuth.
+ * Stores the mechanism list for use in CAP LS when services is unavailable.
+ * @param[in] iauth IAuth connection context.
+ * @param[in] cli Ignored (no client context).
+ * @param[in] parc Number of parameters (1).
+ * @param[in] params Comma-separated mechanism list (e.g. "PLAIN").
+ * @return Zero.
+ */
+static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
+                                        int parc, char **params)
+{
+  const char *old_mechs = iauth->i_sasl_mechs[0] ? iauth->i_sasl_mechs : NULL;
+
+  if (EmptyString(params[0])) {
+    iauth->i_sasl_mechs[0] = '\0';
+
+    /* If IAUTH was the active mechanism source, clear global mechs.
+     * Compare against what's currently advertised to avoid clearing
+     * mechanisms that services set. */
+    if (old_mechs) {
+      const char *current = get_sasl_mechanisms();
+      if (current && strcmp(current, old_mechs) == 0) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "IAuth SASL mechanisms withdrawn (no healthy providers)");
+        set_sasl_mechanisms(NULL);
+      }
+    }
+    return 0;
+  }
+
+  ircd_strncpy(iauth->i_sasl_mechs, params[0], sizeof(iauth->i_sasl_mechs) - 1);
+  iauth->i_sasl_mechs[sizeof(iauth->i_sasl_mechs) - 1] = '\0';
+
+  log_write(LS_SYSTEM, L_INFO, 0, "IAuth SASL mechanisms: %s", iauth->i_sasl_mechs);
+
+  /* If services hasn't set mechanisms yet, use IAUTH's list for CAP LS */
+  if (!get_sasl_mechanisms())
+    set_sasl_mechanisms(iauth->i_sasl_mechs);
+
+  return 0;
+}
+
 /** Handle SASL authentication success (done) from IAuth.
  * @param[in] iauth Active IAuth session.
  * @param[in] cli Client referenced by command.
@@ -2796,6 +2851,7 @@ static void iauth_parse(struct IAuth *iauth, char *message)
   case 'A': handler = iauth_cmd_config; has_cli = 0; break;
   case 's': handler = iauth_cmd_newstats; has_cli = 0; break;
   case 'S': handler = iauth_cmd_stats; has_cli = 0; break;
+  case 'W': handler = iauth_cmd_sasl_global_mechs; has_cli = 0; break;
   case 'X': handler = iauth_cmd_xquery; has_cli = 0; break;
   case 'o': handler = iauth_cmd_username_forced; has_cli = 1; break;
   case 'U': handler = iauth_cmd_username_good; has_cli = 1; break;

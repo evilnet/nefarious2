@@ -37,6 +37,7 @@ export class IAuthDaemon {
   private rl: Interface | null = null;
   private authManager: AuthManager | null = null;
   private authInitialized = false;
+  private saslMechsBroadcast: string | null = null; // tracks what we last sent via W
 
   constructor(options: CLIOptions) {
     this.options = options;
@@ -64,6 +65,8 @@ export class IAuthDaemon {
         this.authInitialized = true;
         const info = this.authManager.getProviderInfo();
         this.debug(`Initialized ${info.length} auth provider(s): ${info.map(p => p.name).join(', ')}`);
+        // Broadcast mechanisms now that we know provider health
+        this.updateSaslMechsBroadcast();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.debug(`Failed to initialize auth manager: ${message}`);
@@ -76,6 +79,36 @@ export class IAuthDaemon {
    */
   private saslEnabled(): boolean {
     return this.authManager !== null && this.authManager.hasProviders();
+  }
+
+  /**
+   * Broadcast or withdraw SASL mechanisms based on provider health.
+   * Sends 'W :PLAIN' when healthy providers exist, 'W :' to clear.
+   * Only sends when the state actually changes.
+   */
+  private updateSaslMechsBroadcast(): void {
+    if (!this.saslEnabled()) {
+      if (this.saslMechsBroadcast !== null) {
+        this.send('W :');
+        this.saslMechsBroadcast = null;
+        this.debug('SASL mechanisms withdrawn (no providers)');
+      }
+      return;
+    }
+
+    const healthy = this.authManager!.hasHealthyProviders();
+    const mechs = healthy ? getSupportedMechanisms().join(',') : null;
+
+    if (mechs !== this.saslMechsBroadcast) {
+      if (mechs) {
+        this.send(`W :${mechs}`);
+        this.debug(`SASL mechanisms broadcast: ${mechs}`);
+      } else {
+        this.send('W :');
+        this.debug('SASL mechanisms withdrawn (no healthy providers)');
+      }
+      this.saslMechsBroadcast = mechs;
+    }
   }
 
   /**
@@ -125,6 +158,9 @@ export class IAuthDaemon {
 
     // Set policy options
     this.send(`O ${this.config.policy}`);
+
+    // Broadcast SASL mechanisms if auth providers are ready and healthy
+    this.updateSaslMechsBroadcast();
 
     // Send configuration
     this.sendNewConfig();
@@ -796,6 +832,9 @@ export class IAuthDaemon {
       this.sendSASLFail(client.id);
       this.countSaslFail++;
     }
+
+    // Re-evaluate mechanism broadcast (provider health may have changed)
+    this.updateSaslMechsBroadcast();
   }
 
   /**

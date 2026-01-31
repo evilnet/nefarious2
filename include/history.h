@@ -32,6 +32,7 @@
 #include <stddef.h>
 #include <time.h>
 
+struct Channel;
 struct Client;
 
 /** Maximum size of a message ID */

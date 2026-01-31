@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "list.h"
+#include "capab.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -328,9 +329,11 @@ void free_client(struct Client* cptr)
   }
 
   /* If a server is disconnecting and it matches the SASL server pattern,
-   * clear global SASL/webpush state. This triggers CAP DEL notifications.
-   * Note: This check is separate from saslagentref because the services server
-   * might disconnect when no clients are actively authenticating.
+   * clear the services-provided SASL mechanism list.
+   * However, don't send CAP DEL if IAUTH is also providing SASL -
+   * clients can still authenticate via IAUTH even without services.
+   * WEBPUSH/VAPID is NOT cleared here - it is managed locally by Nefarious
+   * (keypair generated and persisted in webpush LMDB store), not by services.
    */
   if (IsServer(cptr)) {
     const char *sasl_server = feature_str(FEAT_SASL_SERVER);
@@ -338,14 +341,24 @@ void free_client(struct Client* cptr)
 
     if (is_services) {
       if (get_sasl_mechanisms() != NULL) {
-        log_write(LS_SYSTEM, L_INFO, 0,
-                  "Services disconnect: clearing SASL mechanisms (%C)", cptr);
-        set_sasl_mechanisms(NULL);  /* Triggers CAP DEL :sasl */
-      }
-      if (get_vapid_pubkey() != NULL) {
-        log_write(LS_SYSTEM, L_INFO, 0,
-                  "Services disconnect: clearing VAPID key (%C)", cptr);
-        set_vapid_pubkey(NULL);  /* Triggers CAP DEL :draft/webpush */
+        if (auth_iauth_handles_sasl()) {
+          /* IAUTH still provides SASL - clear the services mechanism list
+           * and fall back to IAUTH's advertised mechanisms for CAP LS. */
+          const char *iauth_mechs = auth_iauth_sasl_mechs();
+          log_write(LS_SYSTEM, L_INFO, 0,
+                    "Services disconnect: falling back to IAUTH SASL%s%s (%C)",
+                    iauth_mechs ? ", mechanisms: " : "",
+                    iauth_mechs ? iauth_mechs : "", cptr);
+          set_sasl_mechanisms(NULL);  /* Clear services mechs (triggers CAP DEL) */
+          if (iauth_mechs)
+            set_sasl_mechanisms(iauth_mechs);  /* Set IAUTH mechs (triggers CAP NEW :sasl=PLAIN) */
+          else
+            send_cap_notify("sasl", 1, NULL);  /* Re-advertise without mechanism list */
+        } else {
+          log_write(LS_SYSTEM, L_INFO, 0,
+                    "Services disconnect: clearing SASL mechanisms (%C)", cptr);
+          set_sasl_mechanisms(NULL);  /* Triggers CAP DEL :sasl */
+        }
       }
     }
   }
