@@ -229,11 +229,15 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
 {
   int flags = 0;
 
-  if (feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME))
+  /* Use cli_active_own (per-connection caps) instead of cli_active (union).
+   * For non-bouncer clients these are identical.  For bouncer primaries,
+   * cli_active is the union of all session connections' caps — using it
+   * here would add tags the primary's own connection didn't negotiate. */
+  if (feature_bool(FEAT_CAP_server_time) && CapOwnHas(to, CAP_SERVERTIME))
     flags |= TAGS_TIME;
-  if (feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG))
+  if (feature_bool(FEAT_CAP_account_tag) && CapOwnHas(to, CAP_ACCOUNTTAG))
     flags |= TAGS_ACCOUNT;
-  if (include_batch && CapActive(to, CAP_BATCH) && active_network_batch_id[0])
+  if (include_batch && CapOwnHas(to, CAP_BATCH) && active_network_batch_id[0])
     flags |= TAGS_BATCH;
   /* Bot tag is sent to any client that gets any tags */
   if (flags && from && IsBot(from))

@@ -26,6 +26,7 @@
 
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "capab.h"
 #include "client.h"
 #include "ircd.h"
@@ -226,6 +227,26 @@ find_cap(const char **caplist_p, int *neg_p)
   return cap; /* and return the capability (if any) */
 }
 
+/** Look up a capability by name from the capability list.
+ * Initializes the sorted capability table on first call.
+ * @param[in,out] caplist_p Pointer into capability name list string.
+ *                          Advanced past the found cap (or past unknown caps).
+ * @param[out] neg_p Set to 1 if prefixed with '-', 0 otherwise.
+ * @param[out] cap_out Set to the capability enum value if found.
+ * @param[out] flags_out Set to the capability flags if found.
+ * @return 1 if a capability was found, 0 if not (end of list or unknown cap).
+ */
+int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned long *flags_out)
+{
+  struct capabilities *cap = find_cap(caplist_p, neg_p);
+  if (cap) {
+    *cap_out = cap->cap;
+    *flags_out = cap->flags;
+    return 1;
+  }
+  return 0;
+}
+
 /** Send a CAP \a subcmd list of capability changes to \a sptr.
  * If more than one line is necessary, each line before the last has
  * an added "*" parameter before that line's capability list (CAP 302).
@@ -420,7 +441,8 @@ cap_req(struct Client *sptr, const char *caplist)
   /* Notify client of accepted changes and copy over results. */
   send_caplist(sptr, &set, &rem, "ACK");
   *cli_capab(sptr) = cs;
-  *cli_active(sptr) = as;
+  *cli_active_own(sptr) = as;
+  bounce_recompute_session_caps(sptr);
 
   return 0;
 }
@@ -444,7 +466,7 @@ cap_ack(struct Client *sptr, const char *caplist)
     if (neg) { /* set or clear the active capability... */
       if (cap->flags & CAPFL_STICKY)
         continue; /* but don't clear sticky capabilities */
-      CapClr(cli_active(sptr), cap->cap);
+      CapClr(cli_active_own(sptr), cap->cap);
 
       /* Clean up metadata subscriptions when metadata-2 is disabled */
       if (cap->cap == CAP_DRAFT_METADATA2) {
@@ -453,10 +475,11 @@ cap_ack(struct Client *sptr, const char *caplist)
     } else {
       if (cap->flags & CAPFL_PROHIBIT)
         continue; /* and don't set prohibited ones */
-      CapSet(cli_active(sptr), cap->cap);
+      CapSet(cli_active_own(sptr), cap->cap);
     }
   }
 
+  bounce_recompute_session_caps(sptr);
   return 0;
 }
 
@@ -478,7 +501,7 @@ cap_clear(struct Client *sptr, const char *caplist)
     CapSet(&cleared, cap->cap);
     CapClr(cli_capab(sptr), cap->cap);
     if (!(cap->flags & CAPFL_PROTO))
-      CapClr(cli_active(sptr), cap->cap);
+      CapClr(cli_active_own(sptr), cap->cap);
 
     /* Clean up metadata subscriptions when metadata-2 is cleared */
     if (cap->cap == CAP_DRAFT_METADATA2) {
@@ -486,6 +509,7 @@ cap_clear(struct Client *sptr, const char *caplist)
     }
   }
   send_caplist(sptr, 0, &cleared, "ACK");
+  bounce_recompute_session_caps(sptr);
 
   return 0;
 }

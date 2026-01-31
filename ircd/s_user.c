@@ -562,9 +562,18 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
     }
 
-    /* Auto-replay for legacy clients after welcome (no chathistory CAP) */
+    /* Replay channel state after held session resume — the client has
+     * channel memberships (transferred from ghost) but hasn't received
+     * JOIN/TOPIC/NAMES for them yet. */
+    if (auto_resumed == 1 && auto_session) {
+      bounce_send_channel_state(sptr);
+    }
+
+    /* Auto-replay for legacy clients after welcome (no chathistory CAP).
+     * Use CapOwnHas (not CapActive/union) — if only a shadow has chathistory,
+     * the primary still needs auto-replay since it can't fetch history itself. */
     if (auto_resumed && auto_session &&
-        !CapActive(sptr, CAP_DRAFT_CHATHISTORY)) {
+        !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
       bouncer_auto_replay(sptr, auto_session);
     }
   }

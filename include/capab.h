@@ -117,7 +117,16 @@ DECLARE_FLAGSET(CapSet, _CAP_LAST_CAP);
 #define CapSet(cs, cap)	FlagSet(cs, cap)
 #define CapClr(cs, cap)	FlagClr(cs, cap)
 
+/** Bitwise OR two CapSets: dst |= src. */
+#define CapSetOR(dst, src) \
+  do { \
+    unsigned int _i; \
+    for (_i = 0; _i < sizeof((dst)->bits)/sizeof((dst)->bits[0]); _i++) \
+      (dst)->bits[_i] |= (src)->bits[_i]; \
+  } while (0)
+
 extern void client_check_caps(struct Client *client, struct Client *replyto);
+extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned long *flags_out);
 
 /* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
 extern void send_cap_notify(const char *capname, int available, const char *value);

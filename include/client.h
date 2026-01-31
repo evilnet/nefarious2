@@ -339,7 +339,13 @@ struct Connection
   struct Timer        con_proc;      /**< process latent messages from
                                       client */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
-  struct CapSet       con_active;    /**< Active capabilities (to us) */
+  struct CapSet       con_active;    /**< Active capabilities (to us) — for bouncer
+                                        sessions this becomes the union of all
+                                        connections' caps (primary + shadows) */
+  struct CapSet       con_active_own; /**< This connection's own negotiated caps.
+                                        For non-bouncer clients, identical to con_active.
+                                        For bouncer primaries, tracks only this connection's
+                                        own CAP REQ/ACK state (not the session union). */
   unsigned short      con_capab_version; /**< CAP version (0, 301, 302) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
   struct LOCInfo*     con_loc;       /**< Login-on-connect information */
@@ -488,8 +494,10 @@ struct Client {
 #define cli_privs(cli)		((cli)->cli_privs)
 /** Get client capabilities for client */
 #define cli_capab(cli)		con_capab(cli_connect(cli))
-/** Get active client capabilities for client */
+/** Get active client capabilities for client (union for bouncer sessions) */
 #define cli_active(cli)		con_active(cli_connect(cli))
+/** Get this client's own negotiated caps (not the session union) */
+#define cli_active_own(cli)	con_active_own(cli_connect(cli))
 /** Get CAP version for client (0, 301, 302) */
 #define cli_capab_version(cli)	con_capab_version(cli_connect(cli))
 /** Get current command label for labeled-response */
@@ -756,8 +764,10 @@ struct Client {
 #define con_proc(con)		((con)->con_proc)
 /** Get the peer's capabilities for the connection. */
 #define con_capab(con)          (&(con)->con_capab)
-/** Get the active capabilities for the connection. */
+/** Get the active capabilities for the connection (union for bouncer sessions). */
 #define con_active(con)         (&(con)->con_active)
+/** Get this connection's own negotiated caps (not the session union). */
+#define con_active_own(con)     (&(con)->con_active_own)
 /** Get the CAP version for the connection (0, 301, 302). */
 #define con_capab_version(con)  ((con)->con_capab_version)
 /** Get the auth request for the connection. */
@@ -1368,8 +1378,10 @@ struct Client {
 
 /** Test whether a client has a capability */
 #define HasCap(cli, cap)    CapHas(cli_capab(cli), (cap))
-/** Test whether a client has the capability active */
+/** Test whether a client has the capability active (union for bouncer sessions) */
 #define CapActive(cli, cap) CapHas(cli_active(cli), (cap))
+/** Test whether this specific connection has the capability (not the session union) */
+#define CapOwnHas(cli, cap) CapHas(cli_active_own(cli), (cap))
 
 #define HIDE_IP 0 /**< Do not show IP address in get_client_name() */
 #define SHOW_IP 1 /**< Show ident and IP address in get_client_name() */

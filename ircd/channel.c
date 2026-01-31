@@ -23,6 +23,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "channel.h"
 #include "class.h"
 #include "client.h"
@@ -5150,7 +5151,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                                          CMD_MODE, chan, NULL, 0, "%H +o %C",
 					 chan, jbuf->jb_source);
     } else if (MyUser(jbuf->jb_source)) {
-      if (CapActive(jbuf->jb_source, CAP_EXTJOIN))
+      if (CapRecipientHas(jbuf->jb_source, CAP_EXTJOIN))
         sendcmdto_one(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, "%H %s :%s", chan,
                       IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
                       cli_info(jbuf->jb_source));

@@ -286,6 +286,11 @@ extern int bounce_compute_effective_away(struct BouncerSession *session,
  */
 extern void bounce_send_shadow_welcome(struct ShadowConnection *shadow);
 
+/** Replay channel state (JOIN/TOPIC/NAMES) to a client after held session resume.
+ * @param[in] cptr Client that just resumed a held session.
+ */
+extern void bounce_send_channel_state(struct Client *cptr);
+
 /** Build a union CapSet from primary + all shadow active capabilities.
  * Used to format outbound messages with the maximal set of tags any
  * connection might need. send_buffer() then strips per-connection.
@@ -301,6 +306,26 @@ extern void bounce_build_union_caps(struct BouncerSession *session,
  * NULL when the primary (or no shadow) is the source.
  */
 extern struct ShadowConnection *current_shadow;
+
+/** Check if the *receiving* connection has a capability.
+ * When current_shadow is set, checks the shadow's caps.
+ * Otherwise checks the primary's own caps (not the session union).
+ * Use this for format-sensitive decisions where the wire format must
+ * match the actual recipient's negotiated capabilities.
+ * @param[in] cli The primary client.
+ * @param[in] cap The capability to check.
+ * @return Non-zero if the receiving connection has the capability.
+ */
+#define CapRecipientHas(cli, cap) \
+  (current_shadow ? CapHas(&current_shadow->sh_active, (cap)) \
+                  : CapHas(cli_active_own(cli), (cap)))
+
+/** Recompute cli_active as the union of all session connections' caps.
+ * Called after any cap change on primary or shadow, and on shadow
+ * attach/detach.  For non-bouncer clients this is a no-op.
+ * @param[in] primary The primary client.
+ */
+extern void bounce_recompute_session_caps(struct Client *primary);
 
 /*
  * P10 BURST / sync API

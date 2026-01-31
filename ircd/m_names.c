@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
@@ -171,31 +172,31 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
       buf[idx++] = ' ';
     needs_space=1;
     if (IsZombie(member)) {
-      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapRecipientHas(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '!';
         done_prefix = 1;
       }
     }
     if (IsChanOp(member)) {
-      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapRecipientHas(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '@';
         done_prefix = 1;
       }
     }
     if (IsHalfOp(member)) {
-      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapRecipientHas(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '%';
         done_prefix = 1;
       }
     }
     if (HasVoice(member)) {
-      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapRecipientHas(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '+';
         done_prefix = 1;
       }
     }
     if (IsMemberHolding(member)) {
-      if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || !done_prefix) {
+      if ((IsNamesX(sptr) || CapRecipientHas(sptr, CAP_NAMESX)) || !done_prefix) {
         buf[idx++] = '~';  /* Bouncer hold (ghost) */
         done_prefix = 1;
       }
@@ -204,7 +205,7 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
     idx += strlen(cli_name(c2ptr));
 
     if ((feature_bool(FEAT_UHNAMES) && IsUHNames(sptr)) ||
-        CapActive(sptr, CAP_UHNAMES)) {
+        CapRecipientHas(sptr, CAP_UHNAMES)) {
       strcpy(buf + idx, "!");
       idx += 1;
       strcpy(buf + idx, cli_user(c2ptr)->username);

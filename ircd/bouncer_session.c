@@ -45,7 +45,9 @@
 #include "s_bsd.h"
 #include "parse.h"
 #include "s_debug.h"
+#include "handlers.h"
 #include "s_misc.h"
+#include "s_user.h"
 #include "struct.h"
 #include "version.h"
 
@@ -534,6 +536,9 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
                        con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
         }
 
+        /* Recompute session union caps now that this shadow's caps are in play */
+        bounce_recompute_session_caps(session->hs_client);
+
         Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
                cli_name(cptr), shadow->sh_id, session->hs_sessid));
 
@@ -718,6 +723,9 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   session->hs_attach_count++;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
+
+  /* Recompute session union caps for the new primary + existing shadows */
+  bounce_recompute_session_caps(cptr);
 
   return 0;
 }
@@ -1565,6 +1573,123 @@ static void shadow_flush_sendq(struct ShadowConnection *shadow)
   }
 }
 
+/** Handle a CAP command from a shadow connection locally.
+ *
+ * Shadow CAP commands must be processed here rather than forwarded to
+ * parse_client(primary), because CAP modifies per-connection state.
+ * Forwarding would modify the primary's caps instead of the shadow's.
+ *
+ * Supports the REQ and LIST subcommands. LS is not meaningful post-
+ * registration but is handled for completeness. END is a no-op.
+ *
+ * @param[in] shadow The shadow connection that sent CAP.
+ * @param[in] primary The session's primary client.
+ * @param[in] args The CAP arguments (everything after "CAP ").
+ */
+static void
+shadow_handle_cap(struct ShadowConnection *shadow, struct Client *primary,
+                  const char *args)
+{
+  char buf[BUFSIZE];
+  struct MsgBuf *mb;
+  const char *subcmd;
+  const char *caplist;
+
+  if (!args || !*args)
+    return;
+
+  /* Parse subcmd */
+  ircd_strncpy(buf, args, sizeof(buf) - 1);
+  buf[sizeof(buf) - 1] = '\0';
+  subcmd = buf;
+
+  /* Skip to end of subcmd */
+  caplist = subcmd;
+  while (*caplist && !IsSpace(*caplist))
+    caplist++;
+  if (*caplist) {
+    /* Null-terminate subcmd, advance caplist past space */
+    buf[caplist - buf] = '\0';
+    caplist++;
+    /* Skip leading colon if present */
+    if (*caplist == ':')
+      caplist++;
+  } else {
+    caplist = NULL;
+  }
+
+  if (0 == ircd_strcmp(subcmd, "REQ") && caplist && *caplist) {
+    /* Process CAP REQ for the shadow */
+    const char *cl = caplist;
+    struct CapSet set, rem;
+    int neg, cap_id;
+    unsigned long flags;
+    int any_unknown = 0;
+
+    memset(&set, 0, sizeof(set));
+    memset(&rem, 0, sizeof(rem));
+
+    while (cl) {
+      if (!cap_lookup(&cl, &neg, &cap_id, &flags)) {
+        any_unknown = 1;
+        continue;
+      }
+
+      if (neg) {
+        if (flags & CAPFL_STICKY)
+          continue;
+        CapSet(&rem, cap_id);
+      } else {
+        if (flags & CAPFL_PROHIBIT)
+          continue;
+        CapSet(&set, cap_id);
+      }
+    }
+
+    if (any_unknown) {
+      /* NAK the entire request per CAP spec */
+      mb = msgq_make(primary, ":%s CAP %s NAK :%s\r\n",
+                     cli_name(&me), cli_name(primary), caplist);
+    } else {
+      /* Apply changes to shadow's caps */
+      unsigned int i;
+      unsigned int nwords = sizeof(shadow->sh_active.bits) / sizeof(shadow->sh_active.bits[0]);
+      for (i = 0; i < nwords; i++) {
+        shadow->sh_active.bits[i] |= set.bits[i];
+        shadow->sh_active.bits[i] &= ~rem.bits[i];
+        shadow->sh_capab.bits[i] |= set.bits[i];
+        shadow->sh_capab.bits[i] &= ~rem.bits[i];
+      }
+
+      /* Recompute session union */
+      bounce_recompute_session_caps(primary);
+
+      /* ACK to shadow */
+      mb = msgq_make(primary, ":%s CAP %s ACK :%s\r\n",
+                     cli_name(&me), cli_name(primary), caplist);
+    }
+
+    if (mb) {
+      msgq_add(&shadow->sh_sendQ, mb, 0);
+      msgq_clean(mb);
+    }
+  }
+  else if (0 == ircd_strcmp(subcmd, "LIST")) {
+    /* Send shadow's active caps back */
+    /* For simplicity, just ACK with empty list — shadow already knows its caps */
+    mb = msgq_make(primary, ":%s CAP %s LIST :\r\n",
+                   cli_name(&me), cli_name(primary));
+    if (mb) {
+      msgq_add(&shadow->sh_sendQ, mb, 0);
+      msgq_clean(mb);
+    }
+  }
+  else if (0 == ircd_strcmp(subcmd, "END")) {
+    /* No-op for post-registration shadow */
+  }
+  /* LS, other subcmds: silently ignore for shadows */
+}
+
 /** Read data from a shadow connection and forward commands to primary.
  *
  * Reads bytes from the shadow's socket, buffers them, extracts complete
@@ -1653,6 +1778,17 @@ static int shadow_read_packet(struct ShadowConnection *shadow)
           msgq_add(&shadow->sh_sendQ, mb, 0);
           msgq_clean(mb);
         }
+        s = end + 1;
+        continue;
+      }
+
+      /* Handle CAP from shadow — process locally instead of forwarding
+       * to primary, since CAP modifies the *connection's* capabilities.
+       * If forwarded via parse_client(primary), it would modify the
+       * primary's caps instead of the shadow's. */
+      if (line_len >= 3 && 0 == ircd_strncmp(s, "CAP", 3) &&
+          (s[3] == '\0' || s[3] == ' ')) {
+        shadow_handle_cap(shadow, primary, s + (s[3] == ' ' ? 4 : 3));
         s = end + 1;
         continue;
       }
@@ -1876,6 +2012,10 @@ void bounce_remove_shadow(struct ShadowConnection *shadow)
   Debug((DEBUG_INFO, "Bouncer: removing shadow #%u from session %s (remaining=%d)",
          shadow->sh_id, session->hs_sessid, session->hs_shadow_count));
 
+  /* Recompute session union caps — this shadow's caps are no longer part of the session */
+  if (session->hs_client && MyConnect(session->hs_client))
+    bounce_recompute_session_caps(session->hs_client);
+
   /* Clear current_shadow if this shadow is the active command source */
   if (current_shadow == shadow)
     current_shadow = NULL;
@@ -1994,8 +2134,11 @@ int bounce_promote_shadow(struct BouncerSession *session)
   con_recvQ(con) = shadow->sh_recvQ;
   memset(&shadow->sh_recvQ, 0, sizeof(shadow->sh_recvQ));
 
-  /* Step 6: Copy CAP state from shadow to Connection */
+  /* Step 6: Copy CAP state from shadow to Connection.
+   * The shadow's caps become this connection's own negotiated caps.
+   * cli_active (the union) will be recomputed after promotion. */
   memcpy(con_capab(con), &shadow->sh_capab, sizeof(struct CapSet));
+  memcpy(con_active_own(con), &shadow->sh_active, sizeof(struct CapSet));
   memcpy(con_active(con), &shadow->sh_active, sizeof(struct CapSet));
   con_capab_version(con) = shadow->sh_capab_version;
 
@@ -2043,6 +2186,9 @@ int bounce_promote_shadow(struct BouncerSession *session)
    * that stale event.  Instead, defer the free to timer_run() which
    * executes after all events in the current batch are processed. */
   bounce_defer_shadow_free(shadow);
+
+  /* Recompute session union caps for the new primary + remaining shadows */
+  bounce_recompute_session_caps(cptr);
 
   log_write(LS_USER, L_TRACE, 0, "Bouncer: shadow promoted to primary for %s session %s",
             cli_name(cptr), session->hs_sessid);
@@ -2221,6 +2367,38 @@ static void shadow_send_raw(struct ShadowConnection *shadow,
   }
 }
 
+/** Recompute cli_active as the union of all session connections' caps.
+ * For bouncer sessions: cli_active = con_active_own | sh1.sh_active | sh2.sh_active | ...
+ * For non-bouncer clients: cli_active = con_active_own (no shadows to merge).
+ *
+ * Called after any cap change on primary (CAP REQ/ACK/CLEAR) or shadow
+ * (CAP intercept in shadow_read_packet), and on shadow attach/detach.
+ *
+ * @param[in] primary The primary client.
+ */
+void bounce_recompute_session_caps(struct Client *primary)
+{
+  struct BouncerSession *session;
+  struct ShadowConnection *sh;
+
+  if (!primary || !MyConnect(primary))
+    return;
+
+  /* Start with this connection's own negotiated caps */
+  *cli_active(primary) = *cli_active_own(primary);
+
+  /* If no bouncer session, we're done — cli_active == cli_active_own */
+  session = bounce_get_session(primary);
+  if (!session)
+    return;
+
+  /* OR in each shadow's caps */
+  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
+    if (!(sh->sh_flags & SHADOW_FLAGS_DEAD))
+      CapSetOR(cli_active(primary), &sh->sh_active);
+  }
+}
+
 /** Build a union CapSet from the primary connection and all shadow
  * connections' active capabilities.
  *
@@ -2321,6 +2499,103 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
     ":%s NOTE BOUNCER SHADOW_ATTACHED :Attached to session %s as connection #%u\r\n",
     cli_name(&me), session->hs_sessid, shadow->sh_id);
 
+  /* Replay channel state: the shadow needs to know which channels
+   * the primary is in so the client can display them.  For each
+   * channel, send JOIN + TOPIC (if set) + NAMES. */
+  if (cli_user(primary)) {
+    struct Membership *member;
+    for (member = cli_user(primary)->channel; member; member = member->next_channel) {
+      struct Channel *chptr = member->channel;
+
+      /* Skip invisible memberships */
+      if (IsZombie(member) || IsDelayedJoin(member))
+        continue;
+
+      /* Send JOIN — use extended-join format if shadow negotiated it */
+      if (CapHas(&shadow->sh_active, CAP_EXTJOIN))
+        shadow_send_raw(shadow, primary,
+          ":%s!%s@%s JOIN %s %s :%s\r\n",
+          nick, cli_user(primary)->username, cli_user(primary)->host,
+          chptr->chname,
+          IsAccount(primary) ? cli_account(primary) : "*",
+          cli_info(primary));
+      else
+        shadow_send_raw(shadow, primary,
+          ":%s!%s@%s JOIN :%s\r\n",
+          nick, cli_user(primary)->username, cli_user(primary)->host,
+          chptr->chname);
+
+      /* Route TOPIC and NAMES replies to this shadow via current_shadow.
+       * send_reply() / do_names() use sendto_one() which checks
+       * current_shadow and routes to the shadow's sendQ. */
+      current_shadow = shadow;
+
+      if (chptr->topic[0]) {
+        send_reply(primary, RPL_TOPIC, chptr->chname, chptr->topic);
+        send_reply(primary, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
+                   chptr->topic_time);
+      }
+
+      /* Send MARKREAD — CapActive now returns the union, so if this
+       * shadow has read-marker, the check inside send_markread_on_join
+       * will pass.  current_shadow routes the output to the shadow. */
+      send_markread_on_join(primary, chptr->chname);
+
+      /* Send NAMES — do_names uses CapRecipientHas for format decisions,
+       * which checks current_shadow's caps when current_shadow is set.
+       * CapRecipientHas checks current_shadow->sh_active for us. */
+      if (!CapRecipientHas(primary, CAP_DRAFT_NOIMPLICITNAMES))
+        do_names(primary, chptr, NAMES_ALL|NAMES_EON);
+
+      current_shadow = NULL;
+    }
+  }
+
   /* Request writable notification to flush the welcome */
   socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+}
+
+/** Replay channel state to a client after held session resume.
+ *
+ * After bounce_attach() transfers memberships from ghost to the new
+ * client, the client has channels in its membership list but has
+ * never received JOIN/TOPIC/NAMES for them.  This function sends
+ * the state the client needs to display the channels.
+ *
+ * @param[in] cptr  The client that just resumed a held session.
+ */
+void bounce_send_channel_state(struct Client *cptr)
+{
+  struct Membership *member;
+
+  assert(0 != cptr);
+  if (!cli_user(cptr))
+    return;
+
+  for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
+    struct Channel *chptr = member->channel;
+
+    if (IsZombie(member) || IsDelayedJoin(member))
+      continue;
+
+    /* Send JOIN to the client — use CapRecipientHas for format decisions
+     * so the wire format matches the actual recipient's caps (not the union). */
+    if (CapRecipientHas(cptr, CAP_EXTJOIN))
+      sendcmdto_one(cptr, CMD_JOIN, cptr, "%H %s :%s", chptr,
+                    IsAccount(cptr) ? cli_account(cptr) : "*",
+                    cli_info(cptr));
+    else
+      sendcmdto_one(cptr, CMD_JOIN, cptr, ":%H", chptr);
+
+    if (chptr->topic[0]) {
+      send_reply(cptr, RPL_TOPIC, chptr->chname, chptr->topic);
+      send_reply(cptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
+                 chptr->topic_time);
+    }
+
+    send_markread_on_join(cptr, chptr->chname);
+
+    if (!CapRecipientHas(cptr, CAP_DRAFT_NOIMPLICITNAMES))
+      do_names(cptr, chptr, NAMES_ALL|NAMES_EON);
+  }
 }
