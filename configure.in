@@ -902,58 +902,58 @@ if test x"$unet_cv_enable_mmdb" = xyes; then
 fi
 
 dnl **
-dnl **  LMDB checks (for chathistory)
+dnl **  libmdbx checks (for chathistory, metadata, webpush storage)
 dnl **
-AC_MSG_CHECKING([whether to enable LMDB/chathistory support])
-AC_ARG_ENABLE([lmdb],
-[  --disable-lmdb          Disable LMDB/chathistory support],
-[unet_cv_enable_lmdb=$enable_lmdb],
-[AC_CACHE_VAL(unet_cv_enable_lmdb,
-[unet_cv_enable_lmdb=yes])])
-AC_MSG_RESULT([$unet_cv_enable_lmdb])
+AC_MSG_CHECKING([whether to enable libmdbx storage support])
+AC_ARG_ENABLE([mdbx],
+[  --disable-mdbx          Disable libmdbx storage support],
+[unet_cv_enable_mdbx=$enable_mdbx],
+[AC_CACHE_VAL(unet_cv_enable_mdbx,
+[unet_cv_enable_mdbx=yes])])
+AC_MSG_RESULT([$unet_cv_enable_mdbx])
 
-if test x"$unet_cv_enable_lmdb" = xyes; then
-  AC_ARG_WITH([lmdb],
-  AS_HELP_STRING([--with-lmdb=dir], [Specify the installation prefix of LMDB (default: /usr)]),
-  [base_lmdb_prefix=$withval],
-  [base_lmdb_prefix=/usr])
+if test x"$unet_cv_enable_mdbx" = xyes; then
+  AC_ARG_WITH([mdbx],
+  AS_HELP_STRING([--with-mdbx=dir], [Specify the installation prefix of libmdbx (default: /usr)]),
+  [base_mdbx_prefix=$withval],
+  [base_mdbx_prefix=/usr])
 
-  AC_MSG_CHECKING([for LMDB includes])
-  AC_ARG_WITH([lmdb-includes],
-  AS_HELP_STRING([--with-lmdb-includes=dir], [Specify location of LMDB header files (default: /usr/include)]),
-  [unet_cv_with_lmdb_inc_prefix=$withval],
-  [unet_cv_with_lmdb_inc_prefix=$base_lmdb_prefix/include])
-  AC_MSG_RESULT([$unet_cv_with_lmdb_inc_prefix])
+  AC_MSG_CHECKING([for libmdbx includes])
+  AC_ARG_WITH([mdbx-includes],
+  AS_HELP_STRING([--with-mdbx-includes=dir], [Specify location of libmdbx header files (default: /usr/include)]),
+  [unet_cv_with_mdbx_inc_prefix=$withval],
+  [unet_cv_with_mdbx_inc_prefix=$base_mdbx_prefix/include])
+  AC_MSG_RESULT([$unet_cv_with_mdbx_inc_prefix])
 
-  AC_MSG_CHECKING([for LMDB libraries])
-  AC_ARG_WITH([lmdb-libs],
-  AS_HELP_STRING([--with-lmdb-libs=dir], [Specify location of LMDB libs (default: /usr/lib)]),
-  [unet_cv_with_lmdb_prefix=$withval],
-  [unet_cv_with_lmdb_prefix=$base_lmdb_prefix/lib])
-  AC_MSG_RESULT([$unet_cv_with_lmdb_prefix])
+  AC_MSG_CHECKING([for libmdbx libraries])
+  AC_ARG_WITH([mdbx-libs],
+  AS_HELP_STRING([--with-mdbx-libs=dir], [Specify location of libmdbx libs (default: /usr/lib)]),
+  [unet_cv_with_mdbx_prefix=$withval],
+  [unet_cv_with_mdbx_prefix=$base_mdbx_prefix/lib])
+  AC_MSG_RESULT([$unet_cv_with_mdbx_prefix])
 
   save_CFLAGS=$CFLAGS
   save_LIBS=$LIBS
 
-  CFLAGS="-I$unet_cv_with_lmdb_inc_prefix"
-  LIBS="-L$unet_cv_with_lmdb_prefix -llmdb"
+  CFLAGS="-I$unet_cv_with_mdbx_inc_prefix"
+  LIBS="-L$unet_cv_with_mdbx_prefix -lmdbx"
 
-  AC_CHECK_LIB(lmdb, mdb_env_create, [
-    AC_CHECK_HEADERS($unet_cv_with_lmdb_inc_prefix/lmdb.h, [
-      enable_lmdb="yes";
-      LMDB_LDFLAGS="-llmdb"
+  AC_CHECK_LIB(mdbx, mdbx_env_create, [
+    AC_CHECK_HEADERS($unet_cv_with_mdbx_inc_prefix/mdbx.h, [
+      enable_mdbx="yes";
+      MDBX_LDFLAGS="-lmdbx"
     ])
   ])
 
   LIBS=$save_LIBS
   CFLAGS=$save_CFLAGS
 
-  if test "x$enable_lmdb" = xyes; then
-    AC_DEFINE([USE_LMDB], , [Define if you are using LMDB for chathistory])
-    LIBS="$LIBS -L$unet_cv_with_lmdb_prefix $LMDB_LDFLAGS"
-    CFLAGS="$CFLAGS -I$unet_cv_with_lmdb_inc_prefix"
+  if test "x$enable_mdbx" = xyes; then
+    AC_DEFINE([USE_MDBX], , [Define if you are using libmdbx for storage])
+    LIBS="$LIBS -L$unet_cv_with_mdbx_prefix $MDBX_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_mdbx_inc_prefix"
   else
-     AC_MSG_WARN([Unable to find LMDB, chathistory features will not work without liblmdb. Disabling LMDB support.])
+     AC_MSG_WARN([Unable to find libmdbx, chathistory/metadata/webpush features will not work without libmdbx. Disabling libmdbx support.])
   fi
 fi
 

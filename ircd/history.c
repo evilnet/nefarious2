@@ -31,7 +31,7 @@
  */
 #include "config.h"
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 
 #include "history.h"
 #include "ircd_alloc.h"
@@ -45,7 +45,7 @@
 #include "s_debug.h"
 #include "s_stats.h"
 
-#include <lmdb.h>
+#include <mdbx.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
@@ -57,24 +57,21 @@ static int quota_increment(const char *channel, const char *account);
 static int quota_decrement(const char *channel, const char *account);
 
 /** LMDB environment */
-static MDB_env *history_env = NULL;
+static MDBX_env *history_env = NULL;
 
 /** Main message database */
-static MDB_dbi history_dbi;
+static MDBX_dbi history_dbi;
 
 /** Secondary index: msgid -> timestamp (for msgid lookups) */
-static MDB_dbi history_msgid_dbi;
+static MDBX_dbi history_msgid_dbi;
 
 /** Target tracking database for TARGETS query */
-static MDB_dbi history_targets_dbi;
-
-/** Read markers database (IRCv3 draft/read-marker) */
-static MDB_dbi history_readmarkers_dbi;
+static MDBX_dbi history_targets_dbi;
 
 /** Per-user quota counter database
  * Key: "channel\0account" -> count (uint32_t)
  */
-static MDB_dbi history_quota_dbi;
+static MDBX_dbi history_quota_dbi;
 
 /** Flag indicating if history is available */
 static int history_available = 0;
@@ -390,120 +387,116 @@ int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
 
 int history_init(const char *dbpath)
 {
-  MDB_txn *txn;
+  MDBX_txn *txn;
   int rc;
 
   if (history_available)
     return 0; /* Already initialized */
 
   /* Create LMDB environment */
-  rc = mdb_env_create(&history_env);
+  rc = mdbx_env_create(&history_env);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_env_create failed: %s",
-              mdb_strerror(rc));
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_create failed: %s",
+              mdbx_strerror(rc));
     return -1;
   }
 
   /* Set maximum number of databases */
-  rc = mdb_env_set_maxdbs(history_env, HISTORY_MAX_DBS);
+  rc = mdbx_env_set_maxdbs(history_env, HISTORY_MAX_DBS);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_env_set_maxdbs failed: %s",
-              mdb_strerror(rc));
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_set_maxdbs failed: %s",
+              mdbx_strerror(rc));
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
-  /* Set map size (configurable, default 1GB) */
-  rc = mdb_env_set_mapsize(history_env, history_map_size);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_env_set_mapsize failed: %s",
-              mdb_strerror(rc));
-    mdb_env_close(history_env);
+  /* Set database geometry (configurable, default 1GB upper limit) */
+  if (feature_bool(FEAT_CHATHISTORY_DB_AUTOGROW)) {
+    intptr_t growth_step = feature_int(FEAT_CHATHISTORY_DB_GROWTH_STEP);
+    rc = mdbx_env_set_geometry(history_env, -1, -1, history_map_size,
+                               growth_step, growth_step, -1);
+  } else {
+    rc = mdbx_env_set_geometry(history_env, history_map_size, history_map_size,
+                               history_map_size, 0, 0, -1);
+  }
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_set_geometry failed: %s",
+              mdbx_strerror(rc));
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
   /* Open environment */
-  rc = mdb_env_open(history_env, dbpath, 0, 0644);
+  rc = mdbx_env_open(history_env, dbpath, 0, 0644);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_env_open(%s) failed: %s",
-              dbpath, mdb_strerror(rc));
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_open(%s) failed: %s",
+              dbpath, mdbx_strerror(rc));
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
   /* Open databases in a transaction */
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_txn_begin failed: %s",
-              mdb_strerror(rc));
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_txn_begin failed: %s",
+              mdbx_strerror(rc));
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
   /* Open main message database */
-  rc = mdb_dbi_open(txn, "messages", MDB_CREATE, &history_dbi);
+  rc = mdbx_dbi_open(txn, "messages", MDBX_CREATE, &history_dbi);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(messages) failed: %s",
-              mdb_strerror(rc));
-    mdb_txn_abort(txn);
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(messages) failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
   /* Open msgid index database */
-  rc = mdb_dbi_open(txn, "msgid_index", MDB_CREATE, &history_msgid_dbi);
+  rc = mdbx_dbi_open(txn, "msgid_index", MDBX_CREATE, &history_msgid_dbi);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(msgid_index) failed: %s",
-              mdb_strerror(rc));
-    mdb_txn_abort(txn);
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(msgid_index) failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
   /* Open targets database */
-  rc = mdb_dbi_open(txn, "targets", MDB_CREATE, &history_targets_dbi);
+  rc = mdbx_dbi_open(txn, "targets", MDBX_CREATE, &history_targets_dbi);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(targets) failed: %s",
-              mdb_strerror(rc));
-    mdb_txn_abort(txn);
-    mdb_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
-  /* Open readmarkers database */
-  rc = mdb_dbi_open(txn, "readmarkers", MDB_CREATE, &history_readmarkers_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(readmarkers) failed: %s",
-              mdb_strerror(rc));
-    mdb_txn_abort(txn);
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(targets) failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
   /* Open per-user quota counter database */
-  rc = mdb_dbi_open(txn, "quotas", MDB_CREATE, &history_quota_dbi);
+  rc = mdbx_dbi_open(txn, "quotas", MDBX_CREATE, &history_quota_dbi);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_dbi_open(quotas) failed: %s",
-              mdb_strerror(rc));
-    mdb_txn_abort(txn);
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(quotas) failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdb_txn_commit failed: %s",
-              mdb_strerror(rc));
-    mdb_env_close(history_env);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_txn_commit failed: %s",
+              mdbx_strerror(rc));
+    mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
   }
@@ -519,12 +512,11 @@ void history_shutdown(void)
   if (!history_available)
     return;
 
-  mdb_dbi_close(history_env, history_dbi);
-  mdb_dbi_close(history_env, history_msgid_dbi);
-  mdb_dbi_close(history_env, history_targets_dbi);
-  mdb_dbi_close(history_env, history_readmarkers_dbi);
-  mdb_dbi_close(history_env, history_quota_dbi);
-  mdb_env_close(history_env);
+  mdbx_dbi_close(history_env, history_dbi);
+  mdbx_dbi_close(history_env, history_msgid_dbi);
+  mdbx_dbi_close(history_env, history_targets_dbi);
+  mdbx_dbi_close(history_env, history_quota_dbi);
+  mdbx_env_close(history_env);
   history_env = NULL;
   history_available = 0;
 
@@ -536,8 +528,8 @@ int history_store_message(const char *msgid, const char *timestamp,
                           const char *account, enum HistoryMessageType type,
                           const char *content)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char valbuf[HISTORY_VALUE_BUFSIZE];
   int keylen, vallen;
@@ -576,34 +568,34 @@ int history_store_message(const char *msgid, const char *timestamp,
 
 store_retry:
   /* Begin write transaction */
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdb_txn_begin failed: %s", mdb_strerror(rc)));
+    Debug((DEBUG_DEBUG, "history: mdbx_txn_begin failed: %s", mdbx_strerror(rc)));
     return -1;
   }
 
   /* Store message (with optional compression) */
-  key.mv_size = keylen;
-  key.mv_data = keybuf;
+  key.iov_len = keylen;
+  key.iov_base = keybuf;
 #ifdef USE_ZSTD
   if (compress_data((unsigned char *)valbuf, vallen,
                     compressed, sizeof(compressed), &compressed_len) >= 0) {
-    data.mv_size = compressed_len;
-    data.mv_data = compressed;
+    data.iov_len = compressed_len;
+    data.iov_base = compressed;
   } else {
-    data.mv_size = vallen;
-    data.mv_data = valbuf;
+    data.iov_len = vallen;
+    data.iov_base = valbuf;
   }
 #else
-  data.mv_size = vallen;
-  data.mv_data = valbuf;
+  data.iov_len = vallen;
+  data.iov_base = valbuf;
 #endif
 
-  rc = mdb_put(txn, history_dbi, &key, &data, 0);
+  rc = mdbx_put(txn, history_dbi, &key, &data, 0);
   if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdb_put failed: %s", mdb_strerror(rc)));
-    mdb_txn_abort(txn);
-    if (rc == MDB_MAP_FULL && retry == 0) {
+    Debug((DEBUG_DEBUG, "history: mdbx_put failed: %s", mdbx_strerror(rc)));
+    mdbx_txn_abort(txn);
+    if (rc == MDBX_MAP_FULL && retry == 0) {
       retry = 1;
       if (history_emergency_evict() > 0)
         goto store_retry;
@@ -612,20 +604,20 @@ store_retry:
   }
 
   /* Store msgid -> target\0timestamp index */
-  key.mv_size = strlen(msgid);
-  key.mv_data = (void *)msgid;
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
   /* Value is target\0timestamp */
   {
     int idx_keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, NULL);
-    data.mv_size = idx_keylen;
-    data.mv_data = keybuf;
+    data.iov_len = idx_keylen;
+    data.iov_base = keybuf;
   }
 
-  rc = mdb_put(txn, history_msgid_dbi, &key, &data, 0);
+  rc = mdbx_put(txn, history_msgid_dbi, &key, &data, 0);
   if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdb_put(msgid) failed: %s", mdb_strerror(rc)));
-    mdb_txn_abort(txn);
-    if (rc == MDB_MAP_FULL && retry == 0) {
+    Debug((DEBUG_DEBUG, "history: mdbx_put(msgid) failed: %s", mdbx_strerror(rc)));
+    mdbx_txn_abort(txn);
+    if (rc == MDBX_MAP_FULL && retry == 0) {
       retry = 1;
       if (history_emergency_evict() > 0)
         goto store_retry;
@@ -634,16 +626,16 @@ store_retry:
   }
 
   /* Update target's last message timestamp */
-  key.mv_size = strlen(target);
-  key.mv_data = (void *)target;
-  data.mv_size = strlen(timestamp);
-  data.mv_data = (void *)timestamp;
+  key.iov_len = strlen(target);
+  key.iov_base = (void *)target;
+  data.iov_len = strlen(timestamp);
+  data.iov_base = (void *)timestamp;
 
-  rc = mdb_put(txn, history_targets_dbi, &key, &data, 0);
+  rc = mdbx_put(txn, history_targets_dbi, &key, &data, 0);
   if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdb_put(target) failed: %s", mdb_strerror(rc)));
-    mdb_txn_abort(txn);
-    if (rc == MDB_MAP_FULL && retry == 0) {
+    Debug((DEBUG_DEBUG, "history: mdbx_put(target) failed: %s", mdbx_strerror(rc)));
+    mdbx_txn_abort(txn);
+    if (rc == MDBX_MAP_FULL && retry == 0) {
       retry = 1;
       if (history_emergency_evict() > 0)
         goto store_retry;
@@ -651,10 +643,10 @@ store_retry:
     return -1;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdb_txn_commit failed: %s", mdb_strerror(rc)));
-    if (rc == MDB_MAP_FULL && retry == 0) {
+    Debug((DEBUG_DEBUG, "history: mdbx_txn_commit failed: %s", mdbx_strerror(rc)));
+    if (rc == MDBX_MAP_FULL && retry == 0) {
       retry = 1;
       if (history_emergency_evict() > 0)
         goto store_retry;
@@ -686,8 +678,8 @@ store_retry:
 
 int history_has_msgid(const char *msgid)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   int rc;
 
   if (!history_available)
@@ -697,20 +689,20 @@ int history_has_msgid(const char *msgid)
     return 0;
 
   /* Begin read transaction */
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
   /* Look up msgid in the msgid index */
-  key.mv_size = strlen(msgid);
-  key.mv_data = (void *)msgid;
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
 
-  rc = mdb_get(txn, history_msgid_dbi, &key, &data);
-  mdb_txn_abort(txn);
+  rc = mdbx_get(txn, history_msgid_dbi, &key, &data);
+  mdbx_txn_abort(txn);
 
   if (rc == 0)
     return 1;  /* Found */
-  if (rc == MDB_NOTFOUND)
+  if (rc == MDBX_NOTFOUND)
     return 0;  /* Not found */
   return -1;   /* Error */
 }
@@ -729,15 +721,15 @@ static int history_query_internal(const char *target,
                                   enum HistoryDirection direction,
                                   int limit, struct HistoryMessage **result)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
   struct HistoryMessage *head = NULL, *tail = NULL, *msg;
   char target_prefix[CHANNELLEN + 2];
   int target_prefix_len;
   int count = 0;
   int rc;
-  MDB_cursor_op op;
+  MDBX_cursor_op op;
 
   *result = NULL;
 
@@ -749,60 +741,60 @@ static int history_query_internal(const char *target,
                                     "%s%c", target, KEY_SEP);
 
   /* Begin read transaction */
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Position cursor */
-  key.mv_size = start_keylen;
-  key.mv_data = (void *)start_key;
+  key.iov_len = start_keylen;
+  key.iov_base = (void *)start_key;
 
   if (direction == HISTORY_DIR_BEFORE || direction == HISTORY_DIR_LATEST) {
     /* For BEFORE/LATEST, we want to go backwards from the reference */
-    rc = mdb_cursor_get(cursor, &key, &data, MDB_SET_RANGE);
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
     log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: SET_RANGE rc=%d (%s)",
-              rc, rc == 0 ? "found" : (rc == MDB_NOTFOUND ? "not found" : mdb_strerror(rc)));
-    if (rc == MDB_NOTFOUND) {
+              rc, rc == 0 ? "found" : (rc == MDBX_NOTFOUND ? "not found" : mdbx_strerror(rc)));
+    if (rc == MDBX_NOTFOUND) {
       /* Position at last entry */
-      rc = mdb_cursor_get(cursor, &key, &data, MDB_LAST);
-      log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: MDB_LAST rc=%d", rc);
+      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
+      log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: MDBX_LAST rc=%d", rc);
     } else if (rc == 0) {
       /* Move back one since SET_RANGE gives us >= */
-      rc = mdb_cursor_get(cursor, &key, &data, MDB_PREV);
-      log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: MDB_PREV rc=%d", rc);
+      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+      log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: MDBX_PREV rc=%d", rc);
     }
-    op = MDB_PREV;
+    op = MDBX_PREV;
   } else {
     /* For AFTER, go forwards from AFTER the reference */
-    rc = mdb_cursor_get(cursor, &key, &data, MDB_SET_RANGE);
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
     log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: AFTER SET_RANGE rc=%d", rc);
     /* Skip any messages that match the reference timestamp prefix
      * (AFTER means strictly after, not including the reference) */
-    while (rc == 0 && key.mv_size >= (size_t)start_keylen &&
-           memcmp(key.mv_data, start_key, start_keylen) == 0) {
-      rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    while (rc == 0 && key.iov_len >= (size_t)start_keylen &&
+           memcmp(key.iov_base, start_key, start_keylen) == 0) {
+      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
     }
-    op = MDB_NEXT;
+    op = MDBX_NEXT;
   }
 
   /* Log cursor position after positioning */
   if (rc == 0) {
     char key_preview[64];
-    size_t preview_len = key.mv_size < 60 ? key.mv_size : 60;
-    memcpy(key_preview, key.mv_data, preview_len);
+    size_t preview_len = key.iov_len < 60 ? key.iov_len : 60;
+    memcpy(key_preview, key.iov_base, preview_len);
     key_preview[preview_len] = '\0';
     /* Replace null bytes with dots for display */
     for (size_t i = 0; i < preview_len; i++) {
       if (key_preview[i] == '\0') key_preview[i] = '.';
     }
     log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: positioned at key='%s' (len=%zu)",
-              key_preview, key.mv_size);
+              key_preview, key.iov_len);
   } else {
     log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: no position, rc=%d", rc);
   }
@@ -810,12 +802,12 @@ static int history_query_internal(const char *target,
   /* Iterate and collect messages */
   while (rc == 0 && count < limit) {
     /* Check if still in target's range */
-    if (key.mv_size < (size_t)target_prefix_len ||
-        memcmp(key.mv_data, target_prefix, target_prefix_len) != 0) {
+    if (key.iov_len < (size_t)target_prefix_len ||
+        memcmp(key.iov_base, target_prefix, target_prefix_len) != 0) {
       /* Outside target range */
       char key_preview[64];
-      size_t preview_len = key.mv_size < 60 ? key.mv_size : 60;
-      memcpy(key_preview, key.mv_data, preview_len);
+      size_t preview_len = key.iov_len < 60 ? key.iov_len : 60;
+      memcpy(key_preview, key.iov_base, preview_len);
       key_preview[preview_len] = '\0';
       for (size_t i = 0; i < preview_len; i++) {
         if (key_preview[i] == '\0') key_preview[i] = '.';
@@ -835,30 +827,30 @@ static int history_query_internal(const char *target,
     memset(msg, 0, sizeof(*msg));
 
     /* Parse key to get target, timestamp, msgid */
-    if (parse_key(key.mv_data, key.mv_size,
+    if (parse_key(key.iov_base, key.iov_len,
                   msg->target, msg->timestamp, msg->msgid) != 0) {
       MyFree(msg);
-      rc = mdb_cursor_get(cursor, &key, &data, op);
+      rc = mdbx_cursor_get(cursor, &key, &data, op);
       continue;
     }
 
 #ifdef USE_ZSTD
     /* Preserve raw compressed data for federation passthrough */
-    if (is_compressed((const unsigned char *)data.mv_data, data.mv_size)) {
-      msg->raw_content = (unsigned char *)MyMalloc(data.mv_size);
+    if (is_compressed((const unsigned char *)data.iov_base, data.iov_len)) {
+      msg->raw_content = (unsigned char *)MyMalloc(data.iov_len);
       if (msg->raw_content) {
-        memcpy(msg->raw_content, data.mv_data, data.mv_size);
-        msg->raw_content_len = data.mv_size;
+        memcpy(msg->raw_content, data.iov_base, data.iov_len);
+        msg->raw_content_len = data.iov_len;
       }
     }
 #endif
 
     /* Parse value */
-    if (deserialize_message(data.mv_data, data.mv_size, msg) != 0) {
+    if (deserialize_message(data.iov_base, data.iov_len, msg) != 0) {
       if (msg->raw_content)
         MyFree(msg->raw_content);
       MyFree(msg);
-      rc = mdb_cursor_get(cursor, &key, &data, op);
+      rc = mdbx_cursor_get(cursor, &key, &data, op);
       continue;
     }
 
@@ -880,11 +872,11 @@ static int history_query_internal(const char *target,
     }
     count++;
 
-    rc = mdb_cursor_get(cursor, &key, &data, op);
+    rc = mdbx_cursor_get(cursor, &key, &data, op);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
   log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: returning count=%d for target='%s'",
             count, target);
@@ -1066,9 +1058,9 @@ int history_query_between(const char *target,
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   char end_prefix[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   int keylen, end_prefix_len;
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
   struct HistoryMessage *head = NULL, *tail = NULL, *msg;
   int count = 0;
   int rc;
@@ -1124,24 +1116,24 @@ int history_query_between(const char *target,
     return -1;
 
   /* Query */
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  key.mv_size = keylen;
-  key.mv_data = keybuf;
-  rc = mdb_cursor_get(cursor, &key, &data, MDB_SET_RANGE);
+  key.iov_len = keylen;
+  key.iov_base = keybuf;
+  rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
 
   while (rc == 0 && count < limit) {
     /* Check if past end */
-    if (key.mv_size >= (size_t)end_prefix_len &&
-        memcmp(key.mv_data, end_prefix, end_prefix_len) >= 0)
+    if (key.iov_len >= (size_t)end_prefix_len &&
+        memcmp(key.iov_base, end_prefix, end_prefix_len) >= 0)
       break;
 
     /* Parse and add message */
@@ -1150,11 +1142,11 @@ int history_query_between(const char *target,
       break;
     memset(msg, 0, sizeof(*msg));
 
-    if (parse_key(key.mv_data, key.mv_size,
+    if (parse_key(key.iov_base, key.iov_len,
                   msg->target, msg->timestamp, msg->msgid) != 0 ||
-        deserialize_message(data.mv_data, data.mv_size, msg) != 0) {
+        deserialize_message(data.iov_base, data.iov_len, msg) != 0) {
       MyFree(msg);
-      rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
       continue;
     }
 
@@ -1166,11 +1158,11 @@ int history_query_between(const char *target,
     tail = msg;
     count++;
 
-    rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
   *result = head;
   return count;
@@ -1179,9 +1171,9 @@ int history_query_between(const char *target,
 int history_query_targets(const char *timestamp1, const char *timestamp2,
                           int limit, struct HistoryTarget **result)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
   struct HistoryTarget *head = NULL, *tail = NULL, *tgt;
   char unix_ts1[HISTORY_TIMESTAMP_LEN];
   char unix_ts2[HISTORY_TIMESTAMP_LEN];
@@ -1212,27 +1204,27 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
     ts2 = tmp;
   }
 
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, history_targets_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_targets_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Iterate all targets */
-  rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
+  rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
   while (rc == 0 && count < limit) {
     /* Check if target's last message is in range */
     char last_ts[HISTORY_TIMESTAMP_LEN];
-    if (data.mv_size >= sizeof(last_ts)) {
-      rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    if (data.iov_len >= sizeof(last_ts)) {
+      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
       continue;
     }
-    memcpy(last_ts, data.mv_data, data.mv_size);
-    last_ts[data.mv_size] = '\0';
+    memcpy(last_ts, data.iov_base, data.iov_len);
+    last_ts[data.iov_len] = '\0';
 
     if (strcmp(last_ts, ts1) >= 0 && strcmp(last_ts, ts2) <= 0) {
       tgt = (struct HistoryTarget *)MyMalloc(sizeof(struct HistoryTarget));
@@ -1240,13 +1232,13 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
         break;
       memset(tgt, 0, sizeof(*tgt));
 
-      if (key.mv_size > CHANNELLEN) {
+      if (key.iov_len > CHANNELLEN) {
         MyFree(tgt);
-        rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
         continue;
       }
-      memcpy(tgt->target, key.mv_data, key.mv_size);
-      tgt->target[key.mv_size] = '\0';
+      memcpy(tgt->target, key.iov_base, key.iov_len);
+      tgt->target[key.iov_len] = '\0';
       ircd_strncpy(tgt->last_timestamp, last_ts, sizeof(tgt->last_timestamp) - 1);
       tgt->next = NULL;
 
@@ -1258,11 +1250,11 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
       count++;
     }
 
-    rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
   *result = head;
   return count;
@@ -1292,9 +1284,9 @@ void history_free_targets(struct HistoryTarget *list)
 
 int history_enumerate_channels(history_channel_callback callback, void *data)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, val;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, val;
   char target[CHANNELLEN + 1];
   int count = 0;
   int rc;
@@ -1302,22 +1294,22 @@ int history_enumerate_channels(history_channel_callback callback, void *data)
   if (!history_available || !callback)
     return -1;
 
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, history_targets_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_targets_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Iterate all targets */
-  rc = mdb_cursor_get(cursor, &key, &val, MDB_FIRST);
+  rc = mdbx_cursor_get(cursor, &key, &val, MDBX_FIRST);
   while (rc == 0) {
-    if (key.mv_size > 0 && key.mv_size <= CHANNELLEN) {
-      memcpy(target, key.mv_data, key.mv_size);
-      target[key.mv_size] = '\0';
+    if (key.iov_len > 0 && key.iov_len <= CHANNELLEN) {
+      memcpy(target, key.iov_base, key.iov_len);
+      target[key.iov_len] = '\0';
 
       /* Only call back for channels (start with # or &) */
       if (target[0] == '#' || target[0] == '&') {
@@ -1326,46 +1318,46 @@ int history_enumerate_channels(history_channel_callback callback, void *data)
           break;  /* Callback requested stop */
       }
     }
-    rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &key, &val, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
   return count;
 }
 
 int history_has_channel(const char *target)
 {
-  MDB_txn *txn;
-  MDB_val key, val;
+  MDBX_txn *txn;
+  MDBX_val key, val;
   int rc;
 
   if (!history_available || !target)
     return -1;
 
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  key.mv_size = strlen(target);
-  key.mv_data = (void *)target;
+  key.iov_len = strlen(target);
+  key.iov_base = (void *)target;
 
-  rc = mdb_get(txn, history_targets_dbi, &key, &val);
-  mdb_txn_abort(txn);
+  rc = mdbx_get(txn, history_targets_dbi, &key, &val);
+  mdbx_txn_abort(txn);
 
   if (rc == 0)
     return 1;  /* Found */
-  if (rc == MDB_NOTFOUND)
+  if (rc == MDBX_NOTFOUND)
     return 0;  /* Not found */
   return -1;   /* Error */
 }
 
 int history_channel_has_messages(const char *target)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, val;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, val;
   char prefix[CHANNELLEN + 2];
   int prefix_len;
   int rc;
@@ -1381,34 +1373,34 @@ int history_channel_has_messages(const char *target)
   prefix[prefix_len] = KEY_SEP;
   prefix_len++;
 
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Position at or after prefix */
-  key.mv_size = prefix_len;
-  key.mv_data = prefix;
-  rc = mdb_cursor_get(cursor, &key, &val, MDB_SET_RANGE);
+  key.iov_len = prefix_len;
+  key.iov_base = prefix;
+  rc = mdbx_cursor_get(cursor, &key, &val, MDBX_SET_RANGE);
 
   if (rc == 0) {
     /* Check if key starts with our prefix */
-    if (key.mv_size >= (size_t)prefix_len &&
-        memcmp(key.mv_data, prefix, prefix_len) == 0) {
+    if (key.iov_len >= (size_t)prefix_len &&
+        memcmp(key.iov_base, prefix, prefix_len) == 0) {
       /* Found at least one message for this channel */
-      mdb_cursor_close(cursor);
-      mdb_txn_abort(txn);
+      mdbx_cursor_close(cursor);
+      mdbx_txn_abort(txn);
       return 1;
     }
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
   return 0;  /* No messages found */
 }
 
@@ -1419,9 +1411,9 @@ void history_set_channel_removed_callback(history_channels_removed_cb cb)
 
 int history_purge_old(unsigned long max_age_seconds)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
   time_t cutoff_time;
   char cutoff_ts[HISTORY_TIMESTAMP_LEN];
   char msg_target[CHANNELLEN + 1];
@@ -1444,27 +1436,27 @@ int history_purge_old(unsigned long max_age_seconds)
   Debug((DEBUG_DEBUG, "history: purging messages older than %s", cutoff_ts));
 
   /* Begin write transaction */
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdb_txn_begin failed: %s",
-              mdb_strerror(rc));
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdbx_txn_begin failed: %s",
+              mdbx_strerror(rc));
     return -1;
   }
 
   /* Open cursor on messages database */
-  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_dbi, &cursor);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdb_cursor_open failed: %s",
-              mdb_strerror(rc));
-    mdb_txn_abort(txn);
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdbx_cursor_open failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Iterate from the beginning (oldest messages first due to key structure) */
-  rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
+  rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
   while (rc == 0) {
     /* Parse the key to get timestamp */
-    if (parse_key(key.mv_data, key.mv_size,
+    if (parse_key(key.iov_base, key.iov_len,
                   msg_target, msg_timestamp, msg_msgid) == 0) {
       /* Compare timestamp with cutoff */
       if (strcmp(msg_timestamp, cutoff_ts) < 0) {
@@ -1472,38 +1464,38 @@ int history_purge_old(unsigned long max_age_seconds)
 
         /* First delete from msgid index if we have a msgid */
         if (msg_msgid[0] != '\0') {
-          MDB_val msgid_key;
-          msgid_key.mv_size = strlen(msg_msgid);
-          msgid_key.mv_data = msg_msgid;
-          mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+          MDBX_val msgid_key;
+          msgid_key.iov_len = strlen(msg_msgid);
+          msgid_key.iov_base = msg_msgid;
+          mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
         }
 
         /* Delete the message using cursor */
-        rc = mdb_cursor_del(cursor, 0);
+        rc = mdbx_cursor_del(cursor, 0);
         if (rc == 0) {
           deleted++;
         }
 
         /* Move to next (cursor position is already at next after del) */
-        rc = mdb_cursor_get(cursor, &key, &data, MDB_GET_CURRENT);
-        if (rc == MDB_NOTFOUND) {
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_GET_CURRENT);
+        if (rc == MDBX_NOTFOUND) {
           /* Deleted last entry, try to get next */
-          rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+          rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
         }
         continue;
       }
     }
 
-    rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
+  mdbx_cursor_close(cursor);
 
   /* Commit the transaction */
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdb_txn_commit failed: %s",
-              mdb_strerror(rc));
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: purge mdbx_txn_commit failed: %s",
+              mdbx_strerror(rc));
     return -1;
   }
 
@@ -1523,9 +1515,9 @@ int history_purge_old(unsigned long max_age_seconds)
  */
 static int history_cleanup_empty_targets(void)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, val;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, val;
   char target[CHANNELLEN + 1];
   char *channels_to_remove[256];  /* Buffer for channel names to remove */
   int remove_count = 0;
@@ -1536,28 +1528,28 @@ static int history_cleanup_empty_targets(void)
     return -1;
 
   /* First pass: collect channels that have no more messages (read-only) */
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, history_targets_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_targets_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  rc = mdb_cursor_get(cursor, &key, &val, MDB_FIRST);
+  rc = mdbx_cursor_get(cursor, &key, &val, MDBX_FIRST);
   while (rc == 0 && remove_count < 256) {
-    if (key.mv_size > 0 && key.mv_size <= CHANNELLEN) {
-      memcpy(target, key.mv_data, key.mv_size);
-      target[key.mv_size] = '\0';
+    if (key.iov_len > 0 && key.iov_len <= CHANNELLEN) {
+      memcpy(target, key.iov_base, key.iov_len);
+      target[key.iov_len] = '\0';
 
       /* Only process channels (start with # or &) */
       if (target[0] == '#' || target[0] == '&') {
         /* Check if this channel still has messages */
         /* Need to abort current txn and check in a new one */
-        mdb_cursor_close(cursor);
-        mdb_txn_abort(txn);
+        mdbx_cursor_close(cursor);
+        mdbx_txn_abort(txn);
 
         if (history_channel_has_messages(target) == 0) {
           /* No messages - add to removal list */
@@ -1569,51 +1561,51 @@ static int history_cleanup_empty_targets(void)
         }
 
         /* Re-open transaction and cursor to continue */
-        rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+        rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
         if (rc != 0)
           goto cleanup_list;
 
-        rc = mdb_cursor_open(txn, history_targets_dbi, &cursor);
+        rc = mdbx_cursor_open(txn, history_targets_dbi, &cursor);
         if (rc != 0) {
-          mdb_txn_abort(txn);
+          mdbx_txn_abort(txn);
           goto cleanup_list;
         }
 
         /* Position cursor after current key */
-        key.mv_size = strlen(target);
-        key.mv_data = target;
-        rc = mdb_cursor_get(cursor, &key, &val, MDB_SET_RANGE);
+        key.iov_len = strlen(target);
+        key.iov_base = target;
+        rc = mdbx_cursor_get(cursor, &key, &val, MDBX_SET_RANGE);
         if (rc == 0) {
           /* Skip if we landed on same key */
-          if (key.mv_size == strlen(target) &&
-              memcmp(key.mv_data, target, key.mv_size) == 0) {
-            rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT);
+          if (key.iov_len == strlen(target) &&
+              memcmp(key.iov_base, target, key.iov_len) == 0) {
+            rc = mdbx_cursor_get(cursor, &key, &val, MDBX_NEXT);
           }
         }
         continue;
       }
     }
-    rc = mdb_cursor_get(cursor, &key, &val, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &key, &val, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
 cleanup_list:
   /* Second pass: remove collected targets and call callback */
   if (remove_count > 0) {
-    rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+    rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
     if (rc == 0) {
       for (i = 0; i < remove_count; i++) {
-        key.mv_size = strlen(channels_to_remove[i]);
-        key.mv_data = channels_to_remove[i];
-        rc = mdb_del(txn, history_targets_dbi, &key, NULL);
+        key.iov_len = strlen(channels_to_remove[i]);
+        key.iov_base = channels_to_remove[i];
+        rc = mdbx_del(txn, history_targets_dbi, &key, NULL);
         if (rc == 0) {
           removed++;
           Debug((DEBUG_DEBUG, "history: removed empty target %s", channels_to_remove[i]));
         }
       }
-      mdb_txn_commit(txn);
+      mdbx_txn_commit(txn);
     }
 
     /* Call callback with all removed channels at once (after DB commit) */
@@ -1637,8 +1629,8 @@ cleanup_list:
 
 int history_msgid_to_timestamp(const char *msgid, char *timestamp)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   const char *sep;
   int rc;
 
@@ -1649,25 +1641,25 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
     return -1;
   }
 
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: txn_begin failed: %s", mdb_strerror(rc));
+    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: txn_begin failed: %s", mdbx_strerror(rc));
     return -1;
   }
 
-  key.mv_size = strlen(msgid);
-  key.mv_data = (void *)msgid;
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
 
-  rc = mdb_get(txn, history_msgid_dbi, &key, &data);
-  mdb_txn_abort(txn);
+  rc = mdbx_get(txn, history_msgid_dbi, &key, &data);
+  mdbx_txn_abort(txn);
 
   if (rc != 0) {
-    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: mdb_get failed for msgid=%s: %s", msgid, mdb_strerror(rc));
+    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: mdbx_get failed for msgid=%s: %s", msgid, mdbx_strerror(rc));
     return -1;
   }
 
   /* Value is target\0timestamp\0 - extract timestamp (exclude trailing separator) */
-  sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
+  sep = memchr(data.iov_base, KEY_SEP, data.iov_len);
   if (!sep)
     return -1;
 
@@ -1675,7 +1667,7 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
 
   /* Calculate copy length - exclude trailing KEY_SEP if present */
   {
-    size_t copy_len = (char *)data.mv_data + data.mv_size - sep;
+    size_t copy_len = (char *)data.iov_base + data.iov_len - sep;
     /* build_key adds trailing KEY_SEP, exclude it */
     if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
       copy_len--;
@@ -1692,8 +1684,8 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
 int history_lookup_message(const char *target, const char *msgid,
                             struct HistoryMessage **msg)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   struct HistoryMessage *m;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
@@ -1706,20 +1698,20 @@ int history_lookup_message(const char *target, const char *msgid,
     return -1;
 
   /* First, look up the msgid to get target and timestamp */
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  key.mv_size = strlen(msgid);
-  key.mv_data = (void *)msgid;
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
 
-  rc = mdb_get(txn, history_msgid_dbi, &key, &data);
-  if (rc == MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
+  rc = mdbx_get(txn, history_msgid_dbi, &key, &data);
+  if (rc == MDBX_NOTFOUND) {
+    mdbx_txn_abort(txn);
     return 1; /* Not found */
   }
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
@@ -1727,18 +1719,18 @@ int history_lookup_message(const char *target, const char *msgid,
   {
     const char *sep;
     size_t copy_len;
-    sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
+    sep = memchr(data.iov_base, KEY_SEP, data.iov_len);
     if (!sep) {
-      mdb_txn_abort(txn);
+      mdbx_txn_abort(txn);
       return -1;
     }
     sep++; /* Skip separator after target */
-    copy_len = (char *)data.mv_data + data.mv_size - sep;
+    copy_len = (char *)data.iov_base + data.iov_len - sep;
     /* build_key adds trailing KEY_SEP, exclude it */
     if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
       copy_len--;
     if (copy_len >= HISTORY_TIMESTAMP_LEN) {
-      mdb_txn_abort(txn);
+      mdbx_txn_abort(txn);
       return -1;
     }
     memcpy(timestamp, sep, copy_len);
@@ -1748,35 +1740,35 @@ int history_lookup_message(const char *target, const char *msgid,
   /* Build key for main database lookup: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
   if (keylen < 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  key.mv_size = keylen;
-  key.mv_data = keybuf;
+  key.iov_len = keylen;
+  key.iov_base = keybuf;
 
-  rc = mdb_get(txn, history_dbi, &key, &data);
-  if (rc == MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
+  rc = mdbx_get(txn, history_dbi, &key, &data);
+  if (rc == MDBX_NOTFOUND) {
+    mdbx_txn_abort(txn);
     return 1; /* Not found */
   }
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Allocate and populate message structure */
   m = (struct HistoryMessage *)MyMalloc(sizeof(struct HistoryMessage));
   if (!m) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
   memset(m, 0, sizeof(*m));
 
   /* Parse the message */
-  if (deserialize_message(data.mv_data, data.mv_size, m) != 0) {
+  if (deserialize_message(data.iov_base, data.iov_len, m) != 0) {
     MyFree(m);
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
@@ -1786,15 +1778,15 @@ int history_lookup_message(const char *target, const char *msgid,
   ircd_strncpy(m->timestamp, timestamp, sizeof(m->timestamp) - 1);
   m->next = NULL;
 
-  mdb_txn_abort(txn);
+  mdbx_txn_abort(txn);
   *msg = m;
   return 0;
 }
 
 int history_delete_message(const char *target, const char *msgid)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
   int keylen;
@@ -1804,66 +1796,66 @@ int history_delete_message(const char *target, const char *msgid)
     return -1;
 
   /* First, look up the msgid to get the timestamp */
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  key.mv_size = strlen(msgid);
-  key.mv_data = (void *)msgid;
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
 
-  rc = mdb_get(txn, history_msgid_dbi, &key, &data);
-  if (rc == MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
+  rc = mdbx_get(txn, history_msgid_dbi, &key, &data);
+  if (rc == MDBX_NOTFOUND) {
+    mdbx_txn_abort(txn);
     return 1; /* Not found */
   }
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Extract timestamp from value (target\0timestamp) */
   {
     const char *sep;
-    sep = memchr(data.mv_data, KEY_SEP, data.mv_size);
+    sep = memchr(data.iov_base, KEY_SEP, data.iov_len);
     if (!sep) {
-      mdb_txn_abort(txn);
+      mdbx_txn_abort(txn);
       return -1;
     }
     sep++; /* Skip separator */
-    if ((size_t)((char *)data.mv_data + data.mv_size - sep) >= HISTORY_TIMESTAMP_LEN) {
-      mdb_txn_abort(txn);
+    if ((size_t)((char *)data.iov_base + data.iov_len - sep) >= HISTORY_TIMESTAMP_LEN) {
+      mdbx_txn_abort(txn);
       return -1;
     }
-    memcpy(timestamp, sep, (char *)data.mv_data + data.mv_size - sep);
-    timestamp[(char *)data.mv_data + data.mv_size - sep] = '\0';
+    memcpy(timestamp, sep, (char *)data.iov_base + data.iov_len - sep);
+    timestamp[(char *)data.iov_base + data.iov_len - sep] = '\0';
   }
 
   /* Delete from msgid index */
-  key.mv_size = strlen(msgid);
-  key.mv_data = (void *)msgid;
-  rc = mdb_del(txn, history_msgid_dbi, &key, NULL);
-  if (rc != 0 && rc != MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
+  rc = mdbx_del(txn, history_msgid_dbi, &key, NULL);
+  if (rc != 0 && rc != MDBX_NOTFOUND) {
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Build key for main database: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
   if (keylen < 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Delete from main message database */
-  key.mv_size = keylen;
-  key.mv_data = keybuf;
-  rc = mdb_del(txn, history_dbi, &key, NULL);
-  if (rc != 0 && rc != MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
+  key.iov_len = keylen;
+  key.iov_base = keybuf;
+  rc = mdbx_del(txn, history_dbi, &key, NULL);
+  if (rc != 0 && rc != MDBX_NOTFOUND) {
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0)
     return -1;
 
@@ -1882,125 +1874,7 @@ int history_is_available(void)
  * @param[in] target Channel or nick.
  * @return Length of key, or -1 on error.
  */
-static int build_readmarker_key(char *key, int keysize,
-                                const char *account, const char *target)
-{
-  int pos = 0;
-  int len;
-
-  /* Copy account */
-  len = strlen(account);
-  if (pos + len + 1 >= keysize) return -1;
-  memcpy(key + pos, account, len);
-  pos += len;
-  key[pos++] = KEY_SEP;
-
-  /* Copy target */
-  len = strlen(target);
-  if (pos + len >= keysize) return -1;
-  memcpy(key + pos, target, len);
-  pos += len;
-
-  return pos;
-}
-
-int readmarker_get(const char *account, const char *target, char *timestamp)
-{
-  MDB_txn *txn;
-  MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 4];
-  int keylen;
-  int rc;
-
-  if (!history_available)
-    return -1;
-
-  keylen = build_readmarker_key(keybuf, sizeof(keybuf), account, target);
-  if (keylen < 0)
-    return -1;
-
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.mv_size = keylen;
-  key.mv_data = keybuf;
-
-  rc = mdb_get(txn, history_readmarkers_dbi, &key, &data);
-  mdb_txn_abort(txn);
-
-  if (rc == MDB_NOTFOUND)
-    return 1; /* Not found */
-  if (rc != 0)
-    return -1;
-
-  /* Copy timestamp to output */
-  if (data.mv_size >= HISTORY_TIMESTAMP_LEN)
-    return -1;
-  memcpy(timestamp, data.mv_data, data.mv_size);
-  timestamp[data.mv_size] = '\0';
-
-  return 0;
-}
-
-int readmarker_set(const char *account, const char *target, const char *timestamp)
-{
-  MDB_txn *txn;
-  MDB_val key, data;
-  char keybuf[ACCOUNTLEN + CHANNELLEN + 4];
-  char existing_ts[HISTORY_TIMESTAMP_LEN];
-  int keylen;
-  int rc;
-
-  if (!history_available)
-    return -1;
-
-  keylen = build_readmarker_key(keybuf, sizeof(keybuf), account, target);
-  if (keylen < 0)
-    return -1;
-
-  /* Begin write transaction */
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.mv_size = keylen;
-  key.mv_data = keybuf;
-
-  /* Check existing value */
-  rc = mdb_get(txn, history_readmarkers_dbi, &key, &data);
-  if (rc == 0) {
-    /* Existing timestamp found - only update if new is greater */
-    if (data.mv_size < sizeof(existing_ts)) {
-      memcpy(existing_ts, data.mv_data, data.mv_size);
-      existing_ts[data.mv_size] = '\0';
-      if (strcmp(timestamp, existing_ts) <= 0) {
-        /* New timestamp is not greater, don't update */
-        mdb_txn_abort(txn);
-        return 1;
-      }
-    }
-  } else if (rc != MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
-    return -1;
-  }
-
-  /* Store new timestamp */
-  data.mv_size = strlen(timestamp);
-  data.mv_data = (void *)timestamp;
-
-  rc = mdb_put(txn, history_readmarkers_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdb_txn_abort(txn);
-    return -1;
-  }
-
-  rc = mdb_txn_commit(txn);
-  if (rc != 0)
-    return -1;
-
-  return 0;
-}
+/* Read marker functions removed - now in metadata.c (metadata_readmarker_get/set) */
 
 /** Set history database map size.
  * Must be called before history_init().
@@ -2036,19 +1910,19 @@ static int last_eviction_count = 0;
 static time_t last_eviction_time = 0;
 static time_t last_maintenance_time = 0;
 
-/** Emergency eviction count (for inline MDB_MAP_FULL recovery) */
+/** Emergency eviction count (for inline MDBX_MAP_FULL recovery) */
 #define EMERGENCY_EVICT_BATCH 500
 
-/** Emergency eviction for inline MDB_MAP_FULL recovery.
+/** Emergency eviction for inline MDBX_MAP_FULL recovery.
  * Called when a write fails due to database full condition.
  * Evicts a small batch of oldest messages to make room.
  * @return Number of messages evicted, or -1 on error.
  */
 static int history_emergency_evict(void)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
   char msg_target[CHANNELLEN + 1];
   char msg_timestamp[HISTORY_TIMESTAMP_LEN];
   char msg_msgid[HISTORY_MSGID_LEN];
@@ -2068,40 +1942,40 @@ static int history_emergency_evict(void)
     return -1;
 
   log_write(LS_SYSTEM, L_WARNING, 0,
-            "history: emergency eviction triggered (MDB_MAP_FULL)");
+            "history: emergency eviction triggered (MDBX_MAP_FULL)");
 
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "history: emergency eviction txn_begin failed: %s",
-              mdb_strerror(rc));
+              mdbx_strerror(rc));
     return -1;
   }
 
-  rc = mdb_cursor_open(txn, history_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, history_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Evict oldest entries */
-  rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
+  rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
   while (rc == 0 && evicted < EMERGENCY_EVICT_BATCH) {
     /* Parse key to get target and msgid for index cleanup */
-    if (parse_key(key.mv_data, key.mv_size,
+    if (parse_key(key.iov_base, key.iov_len,
                   msg_target, msg_timestamp, msg_msgid) == 0) {
       if (msg_msgid[0] != '\0') {
-        MDB_val msgid_key;
-        msgid_key.mv_size = strlen(msg_msgid);
-        msgid_key.mv_data = msg_msgid;
-        mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+        MDBX_val msgid_key;
+        msgid_key.iov_len = strlen(msg_msgid);
+        msgid_key.iov_base = msg_msgid;
+        mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
       }
     }
 
     /* Collect account info for quota decrement after commit */
     if (quota_enabled && msg_target[0] != '\0' &&
         quota_update_count < EMERGENCY_EVICT_BATCH) {
-      if (deserialize_message(data.mv_data, data.mv_size, &msg) == 0 &&
+      if (deserialize_message(data.iov_base, data.iov_len, &msg) == 0 &&
           msg.account[0] != '\0') {
         ircd_strncpy(quota_updates[quota_update_count].target, msg_target,
                      CHANNELLEN);
@@ -2111,21 +1985,21 @@ static int history_emergency_evict(void)
       }
     }
 
-    rc = mdb_cursor_del(cursor, 0);
+    rc = mdbx_cursor_del(cursor, 0);
     if (rc != 0)
       break;
 
     evicted++;
-    rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
+  mdbx_cursor_close(cursor);
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "history: emergency eviction commit failed: %s",
-              mdb_strerror(rc));
+              mdbx_strerror(rc));
     return -1;
   }
 
@@ -2147,8 +2021,8 @@ static int history_emergency_evict(void)
 
 int history_db_utilization(void)
 {
-  MDB_envinfo info;
-  MDB_stat envstat;
+  MDBX_envinfo info;
+  MDBX_stat envstat;
   int rc;
   size_t used_size;
   int percent;
@@ -2157,24 +2031,24 @@ int history_db_utilization(void)
     return -1;
 
   /* Get environment info for map size */
-  rc = mdb_env_info(history_env, &info);
-  if (rc != 0)
+  rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
+  if (rc != MDBX_SUCCESS)
     return -1;
 
   /* Get environment stats for page size */
-  rc = mdb_env_stat(history_env, &envstat);
-  if (rc != 0)
+  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
+  if (rc != MDBX_SUCCESS)
     return -1;
 
   /* Calculate used size: (last_pgno + 1) * page_size
-   * Note: me_last_pgno is 0-indexed, so add 1 for count */
-  used_size = (info.me_last_pgno + 1) * envstat.ms_psize;
+   * Note: mi_last_pgno is 0-indexed, so add 1 for count */
+  used_size = (info.mi_last_pgno + 1) * envstat.ms_psize;
 
   /* Calculate percentage */
-  if (info.me_mapsize == 0)
+  if (info.mi_geo.upper == 0)
     return 0;
 
-  percent = (int)((used_size * 100) / info.me_mapsize);
+  percent = (int)((used_size * 100) / info.mi_geo.upper);
   if (percent > 100)
     percent = 100;
 
@@ -2204,9 +2078,9 @@ enum HistoryStorageState history_storage_state(void)
 
 int history_evict_to_target(int target_percent)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
   char msg_target[CHANNELLEN + 1];
   char msg_timestamp[HISTORY_TIMESTAMP_LEN];
   char msg_msgid[HISTORY_MSGID_LEN];
@@ -2248,13 +2122,13 @@ int history_evict_to_target(int target_percent)
 
   /* Evict oldest messages until we reach target */
   while (current_util > target_percent) {
-    rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+    rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
     if (rc != 0)
       break;
 
-    rc = mdb_cursor_open(txn, history_dbi, &cursor);
+    rc = mdbx_cursor_open(txn, history_dbi, &cursor);
     if (rc != 0) {
-      mdb_txn_abort(txn);
+      mdbx_txn_abort(txn);
       break;
     }
 
@@ -2262,24 +2136,24 @@ int history_evict_to_target(int target_percent)
     quota_update_count = 0;
 
     /* Iterate from beginning (oldest entries) */
-    rc = mdb_cursor_get(cursor, &key, &data, MDB_FIRST);
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
     while (rc == 0 && batch_count < max_batch) {
       /* Parse key to get msgid for index cleanup */
-      if (parse_key(key.mv_data, key.mv_size,
+      if (parse_key(key.iov_base, key.iov_len,
                     msg_target, msg_timestamp, msg_msgid) == 0) {
         /* Delete from msgid index if present */
         if (msg_msgid[0] != '\0') {
-          MDB_val msgid_key;
-          msgid_key.mv_size = strlen(msg_msgid);
-          msgid_key.mv_data = msg_msgid;
-          mdb_del(txn, history_msgid_dbi, &msgid_key, NULL);
+          MDBX_val msgid_key;
+          msgid_key.iov_len = strlen(msg_msgid);
+          msgid_key.iov_base = msg_msgid;
+          mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
         }
       }
 
       /* Collect account info for quota decrement after commit */
       if (quota_enabled && quota_updates && msg_target[0] != '\0' &&
           quota_update_count < quota_update_capacity) {
-        if (deserialize_message(data.mv_data, data.mv_size, &msg) == 0 &&
+        if (deserialize_message(data.iov_base, data.iov_len, &msg) == 0 &&
             msg.account[0] != '\0') {
           ircd_strncpy(quota_updates[quota_update_count].target, msg_target,
                        CHANNELLEN);
@@ -2290,7 +2164,7 @@ int history_evict_to_target(int target_percent)
       }
 
       /* Delete from main database */
-      rc = mdb_cursor_del(cursor, 0);
+      rc = mdbx_cursor_del(cursor, 0);
       if (rc != 0)
         break;
 
@@ -2298,17 +2172,17 @@ int history_evict_to_target(int target_percent)
       batch_count++;
 
       /* Move to next */
-      rc = mdb_cursor_get(cursor, &key, &data, MDB_GET_CURRENT);
-      if (rc == MDB_NOTFOUND)
-        rc = mdb_cursor_get(cursor, &key, &data, MDB_NEXT);
+      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_GET_CURRENT);
+      if (rc == MDBX_NOTFOUND)
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
     }
 
-    mdb_cursor_close(cursor);
+    mdbx_cursor_close(cursor);
 
-    rc = mdb_txn_commit(txn);
+    rc = mdbx_txn_commit(txn);
     if (rc != 0) {
       log_write(LS_SYSTEM, L_ERROR, 0,
-                "history: eviction commit failed: %s", mdb_strerror(rc));
+                "history: eviction commit failed: %s", mdbx_strerror(rc));
       break;
     }
 
@@ -2414,10 +2288,10 @@ void history_last_eviction(int *count, time_t *timestamp)
 void
 history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 {
-  MDB_stat stat;
-  MDB_stat envstat;
-  MDB_envinfo info;
-  MDB_txn *txn;
+  MDBX_stat stat;
+  MDBX_stat envstat;
+  MDBX_envinfo info;
+  MDBX_txn *txn;
   int rc;
   int util;
   enum HistoryStorageState state;
@@ -2437,16 +2311,16 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   }
 
   /* Get environment info and stats */
-  rc = mdb_env_info(history_env, &info);
-  if (rc != 0)
+  rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
+  if (rc != MDBX_SUCCESS)
     return;
 
-  rc = mdb_env_stat(history_env, &envstat);
-  if (rc != 0)
+  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
+  if (rc != MDBX_SUCCESS)
     return;
 
   /* Calculate storage utilization */
-  used_size = (info.me_last_pgno + 1) * envstat.ms_psize;
+  used_size = (info.mi_last_pgno + 1) * envstat.ms_psize;
   util = history_db_utilization();
   state = history_storage_state();
 
@@ -2460,7 +2334,7 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Size: %lu MB / %lu MB (%d%%)",
              (unsigned long)(used_size / (1024 * 1024)),
-             (unsigned long)(info.me_mapsize / (1024 * 1024)),
+             (unsigned long)(info.mi_geo.upper / (1024 * 1024)),
              util);
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  State: %s", state_name);
@@ -2487,10 +2361,10 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   }
 
   /* Get per-database stats */
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc == 0) {
     /* Main message database */
-    rc = mdb_stat(txn, history_dbi, &stat);
+    rc = mdbx_dbi_stat(txn, history_dbi, &stat, sizeof(stat));
     if (rc == 0) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                  "H :  Messages: %lu entries, depth %u",
@@ -2498,7 +2372,7 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     }
 
     /* Targets database */
-    rc = mdb_stat(txn, history_targets_dbi, &stat);
+    rc = mdbx_dbi_stat(txn, history_targets_dbi, &stat, sizeof(stat));
     if (rc == 0) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                  "H :  Channels: %lu",
@@ -2506,22 +2380,14 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     }
 
     /* Message ID index */
-    rc = mdb_stat(txn, history_msgid_dbi, &stat);
+    rc = mdbx_dbi_stat(txn, history_msgid_dbi, &stat, sizeof(stat));
     if (rc == 0) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                  "H :  MsgID index: %lu entries",
                  (unsigned long)stat.ms_entries);
     }
 
-    /* Read markers database */
-    rc = mdb_stat(txn, history_readmarkers_dbi, &stat);
-    if (rc == 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  Read markers: %lu entries",
-                 (unsigned long)stat.ms_entries);
-    }
-
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
   }
 }
 
@@ -2535,8 +2401,8 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
  */
 static int quota_increment(const char *channel, const char *account)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
   uint32_t count = 0;
@@ -2552,33 +2418,33 @@ static int quota_increment(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
+  key.iov_base = keybuf;
+  key.iov_len = keylen;
 
   /* Get current count */
-  rc = mdb_get(txn, history_quota_dbi, &key, &data);
-  if (rc == 0 && data.mv_size == sizeof(uint32_t)) {
-    memcpy(&count, data.mv_data, sizeof(uint32_t));
+  rc = mdbx_get(txn, history_quota_dbi, &key, &data);
+  if (rc == 0 && data.iov_len == sizeof(uint32_t)) {
+    memcpy(&count, data.iov_base, sizeof(uint32_t));
   }
 
   /* Increment */
   count++;
 
   /* Store new count */
-  data.mv_data = &count;
-  data.mv_size = sizeof(uint32_t);
+  data.iov_base = &count;
+  data.iov_len = sizeof(uint32_t);
 
-  rc = mdb_put(txn, history_quota_dbi, &key, &data, 0);
+  rc = mdbx_put(txn, history_quota_dbi, &key, &data, 0);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0)
     return -1;
 
@@ -2592,8 +2458,8 @@ static int quota_increment(const char *channel, const char *account)
  */
 static int quota_decrement(const char *channel, const char *account)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
   uint32_t count = 0;
@@ -2607,30 +2473,30 @@ static int quota_decrement(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = mdb_txn_begin(history_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
+  key.iov_base = keybuf;
+  key.iov_len = keylen;
 
-  rc = mdb_get(txn, history_quota_dbi, &key, &data);
-  if (rc == 0 && data.mv_size == sizeof(uint32_t)) {
-    memcpy(&count, data.mv_data, sizeof(uint32_t));
+  rc = mdbx_get(txn, history_quota_dbi, &key, &data);
+  if (rc == 0 && data.iov_len == sizeof(uint32_t)) {
+    memcpy(&count, data.iov_base, sizeof(uint32_t));
     if (count > 0)
       count--;
 
-    data.mv_data = &count;
-    data.mv_size = sizeof(uint32_t);
+    data.iov_base = &count;
+    data.iov_len = sizeof(uint32_t);
 
-    rc = mdb_put(txn, history_quota_dbi, &key, &data, 0);
+    rc = mdbx_put(txn, history_quota_dbi, &key, &data, 0);
     if (rc != 0) {
-      mdb_txn_abort(txn);
+      mdbx_txn_abort(txn);
       return -1;
     }
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0)
     return -1;
 
@@ -2644,8 +2510,8 @@ static int quota_decrement(const char *channel, const char *account)
  */
 int history_quota_get_count(const char *channel, const char *account)
 {
-  MDB_txn *txn;
-  MDB_val key, data;
+  MDBX_txn *txn;
+  MDBX_val key, data;
   char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
   uint32_t count = 0;
@@ -2656,19 +2522,19 @@ int history_quota_get_count(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = mdb_txn_begin(history_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return 0;
 
-  key.mv_data = keybuf;
-  key.mv_size = keylen;
+  key.iov_base = keybuf;
+  key.iov_len = keylen;
 
-  rc = mdb_get(txn, history_quota_dbi, &key, &data);
-  if (rc == 0 && data.mv_size == sizeof(uint32_t)) {
-    memcpy(&count, data.mv_data, sizeof(uint32_t));
+  rc = mdbx_get(txn, history_quota_dbi, &key, &data);
+  if (rc == 0 && data.iov_len == sizeof(uint32_t)) {
+    memcpy(&count, data.iov_base, sizeof(uint32_t));
   }
 
-  mdb_txn_abort(txn);
+  mdbx_txn_abort(txn);
   return (int)count;
 }
 
@@ -2699,7 +2565,7 @@ int history_quota_check(const char *channel, const char *account, int channel_li
 }
 
 
-#else /* !USE_LMDB */
+#else /* !USE_MDBX */
 
 /* Stub implementations when LMDB is not available */
 #include "history.h"
@@ -2828,18 +2694,6 @@ int history_is_available(void)
   return 0;
 }
 
-int readmarker_get(const char *account, const char *target, char *timestamp)
-{
-  (void)account; (void)target; (void)timestamp;
-  return -1;
-}
-
-int readmarker_set(const char *account, const char *target, const char *timestamp)
-{
-  (void)account; (void)target; (void)timestamp;
-  return -1;
-}
-
 void history_set_map_size(size_t size_mb)
 {
   (void)size_mb;
@@ -2922,4 +2776,4 @@ int history_quota_check(const char *channel, const char *account, int channel_li
   return 0;  /* Never over quota when no LMDB */
 }
 
-#endif /* USE_LMDB */
+#endif /* USE_MDBX */

@@ -50,36 +50,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-/** Extract timestamp from a message ID.
- * Message IDs have format: SERVER-TIMESTAMP-COUNTER
- * @param[in] msgid Message ID string.
- * @return Unix timestamp, or 0 on parse error.
- */
-static time_t parse_msgid_timestamp(const char *msgid)
-{
-  const char *dash1, *dash2;
-  char timebuf[32];
-  size_t len;
-
-  /* Find first dash (after server prefix) */
-  dash1 = strchr(msgid, '-');
-  if (!dash1)
-    return 0;
-
-  /* Find second dash (end of timestamp) */
-  dash2 = strchr(dash1 + 1, '-');
-  if (!dash2)
-    return 0;
-
-  len = dash2 - (dash1 + 1);
-  if (len >= sizeof(timebuf))
-    return 0;
-
-  memcpy(timebuf, dash1 + 1, len);
-  timebuf[len] = '\0';
-
-  return (time_t)strtoul(timebuf, NULL, 10);
-}
 
 /** Propagate REDACT to channel members with the capability.
  * @param[in] sptr Source client.
@@ -176,7 +146,10 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Must be authenticated to use REDACT */
+  /* Must be authenticated to use REDACT.
+   * Self-redaction requires account match; chanop redaction requires
+   * identifiable users. When X3 is integrated into the IRCd, chanop
+   * redaction can additionally check the ChanServ access list. */
   if (!cli_user(sptr) || !cli_user(sptr)->account[0]) {
     send_fail(sptr, "REDACT", "ACCOUNT_REQUIRED", NULL,
               "You must be logged in to use REDACT");
@@ -210,17 +183,8 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       /* Found the message - get actual timestamp for window check */
       msg_time = (time_t)strtoul(msg->timestamp, NULL, 10);
 
-      /* Check time window */
-      if (!is_oper) {
-        window = (time_t)feature_int(FEAT_REDACT_WINDOW);
-        if (window > 0 && (CurrentTime - msg_time) > window) {
-          history_free_messages(msg);
-          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
-                    "Redaction window has expired");
-          return 0;
-        }
-      } else {
-        /* Opers have their own window (0 = unlimited) */
+      if (is_oper) {
+        /* Opers: oper-specific window (0 = unlimited), can redact anything */
         window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
         if (window > 0 && (CurrentTime - msg_time) > window) {
           history_free_messages(msg);
@@ -228,18 +192,26 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                     "Redaction window has expired");
           return 0;
         }
-      }
+        can_redact = 1;
+      } else if (msg->account[0] && cli_user(sptr)
+                 && cli_user(sptr)->account[0]
+                 && ircd_strcmp(msg->account, cli_user(sptr)->account) == 0) {
+        /* Authenticated owner: account match, no time window */
+        can_redact = 1;
+      } else {
+        /* Everyone else: regular time window applies */
+        window = (time_t)feature_int(FEAT_REDACT_WINDOW);
+        if (window > 0 && (CurrentTime - msg_time) > window) {
+          history_free_messages(msg);
+          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
+                    "Redaction window has expired");
+          return 0;
+        }
 
-      /* Check authorization - use account for ownership (nicks are not persistent) */
-      if (msg->account[0] && ircd_strcmp(msg->account, cli_user(sptr)->account) == 0) {
-        /* Own message (same account) - allowed within time window */
-        can_redact = 1;
-      } else if (is_oper) {
-        /* Opers can redact anything */
-        can_redact = 1;
-      } else if (is_chanop && feature_bool(FEAT_REDACT_CHANOP_OTHERS)) {
-        /* Chanops can redact others if enabled */
-        can_redact = 1;
+        /* Chanops can redact others' messages */
+        if (!can_redact && is_chanop && feature_bool(FEAT_REDACT_CHANOP_OTHERS)) {
+          can_redact = 1;
+        }
       }
 
       if (!can_redact) {
@@ -254,33 +226,13 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       history_free_messages(msg);
     }
   } else {
-    /* No chathistory - parse msgid timestamp as fallback (less accurate) */
-    msg_time = parse_msgid_timestamp(msgid);
-    if (msg_time == 0) {
-      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", msgid,
-                "Invalid message ID format");
-      return 0;
-    }
-
-    /* Check time window with msgid timestamp (server startup time - may be stale) */
-    if (!is_oper) {
-      window = (time_t)feature_int(FEAT_REDACT_WINDOW);
-      if (window > 0 && (CurrentTime - msg_time) > window) {
-        send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
-                  "Redaction window has expired");
-        return 0;
-      }
-    } else {
-      window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
-      if (window > 0 && (CurrentTime - msg_time) > window) {
-        send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
-                  "Redaction window has expired");
-        return 0;
-      }
-    }
-
-    /* Trust the client claim - allow if within time window */
-    can_redact = 1;
+    /* No local history - cannot verify message ownership.
+     * Reject locally; the client should be connected to a server
+     * that stores history. Federation (ms_redact) handles deletion
+     * on remote servers that do have history. */
+    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", msgid,
+              "Message history is not available on this server");
+    return 0;
   }
 
   /* Propagate to channel members with capability */

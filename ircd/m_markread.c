@@ -24,8 +24,8 @@
  * Client Protocol (ISO 8601 timestamps per IRCv3 spec):
  *   MARKREAD <target> [timestamp=YYYY-MM-DDThh:mm:ss.sssZ]
  *
- * Nefarious is authoritative for read markers. Storage is in LMDB,
- * synchronized between IRCds via P10 MR token.
+ * Nefarious is authoritative for read markers. Storage is in the metadata
+ * LMDB environment (available on all servers), synchronized via P10 MR token.
  *
  * P10 Protocol (Unix timestamps for S2S):
  *   MR <account> <target> <unix_timestamp>
@@ -39,6 +39,7 @@
 #include "client.h"
 #include "hash.h"
 #include "history.h"
+#include "metadata.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -204,14 +205,14 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    /* SET operation: store in LMDB and broadcast to other servers */
-    if (!history_is_available()) {
+    /* SET operation: store in metadata LMDB and broadcast to other servers */
+    if (!metadata_lmdb_is_available()) {
       send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
                 "Read marker storage is not available");
       return 0;
     }
 
-    rc = readmarker_set(account, target, timestamp);
+    rc = metadata_readmarker_set(account, target, timestamp);
     if (rc == 0) {
       /* Successfully updated - notify local clients and broadcast */
       notify_local_clients(account, target, timestamp);
@@ -221,7 +222,7 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                             account, target, timestamp);
     } else if (rc == 1) {
       /* Timestamp was not newer - respond with current stored value */
-      rc = readmarker_get(account, target, stored_ts);
+      rc = metadata_readmarker_get(account, target, stored_ts);
       if (rc == 0) {
         send_markread(sptr, target, stored_ts);
       } else {
@@ -233,14 +234,14 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                 "Could not store read marker");
     }
   } else {
-    /* GET operation: query current timestamp from local LMDB */
-    if (!history_is_available()) {
+    /* GET operation: query current timestamp from metadata LMDB */
+    if (!metadata_lmdb_is_available()) {
       send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
                 "Read marker storage is not available");
       return 0;
     }
 
-    rc = readmarker_get(account, target, stored_ts);
+    rc = metadata_readmarker_get(account, target, stored_ts);
     if (rc == 0) {
       send_markread(sptr, target, stored_ts);
     } else if (rc == 1) {
@@ -278,9 +279,9 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   target = parv[2];
   timestamp = parv[3];
 
-  /* Store locally in LMDB */
-  if (history_is_available()) {
-    readmarker_set(account, target, timestamp);
+  /* Store locally in metadata LMDB */
+  if (metadata_lmdb_is_available()) {
+    metadata_readmarker_set(account, target, timestamp);
   }
 
   /* Notify local clients with this account */
@@ -312,13 +313,13 @@ void send_markread_on_join(struct Client *sptr, const char *target)
   if (!cli_user(sptr) || !cli_user(sptr)->account[0])
     return;
 
-  /* Check if readmarker subsystem is available */
-  if (!history_is_available())
+  /* Check if readmarker storage is available (metadata LMDB) */
+  if (!metadata_lmdb_is_available())
     return;
 
   account = cli_user(sptr)->account;
 
-  rc = readmarker_get(account, target, stored_ts);
+  rc = metadata_readmarker_get(account, target, stored_ts);
   if (rc == 0) {
     send_markread(sptr, target, stored_ts);
   } else {

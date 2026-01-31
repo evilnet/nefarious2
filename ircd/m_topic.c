@@ -45,7 +45,7 @@
 #include <sys/time.h>
 #include <time.h>
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 /** Counter for generating unique message IDs for TOPIC event history storage */
 static unsigned long topic_history_msgid_counter = 0;
 
@@ -111,7 +111,7 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   history_store_message(msgid, timestamp, chptr->chname, sender,
                         account, HISTORY_TOPIC, topic ? topic : "");
 }
-#endif /* USE_LMDB */
+#endif /* USE_MDBX */
 
 /** Set a channel topic or report an error.
  * @param[in] sptr Original topic setter.
@@ -182,7 +182,7 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
       				       (setter ? "%H :%s (%s)" : "%H :%s%s"),
                                        chptr, chptr->topic, (setter ? nick : ""));
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
      /* Store TOPIC event in history */
      store_topic_event(sptr, chptr, chptr->topic);
 #endif

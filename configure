@@ -753,10 +753,10 @@ enable_mmdb
 with_mmdb
 with_mmdb_includes
 with_mmdb_libs
-enable_lmdb
-with_lmdb
-with_lmdb_includes
-with_lmdb_libs
+enable_mdbx
+with_mdbx
+with_mdbx_includes
+with_mdbx_libs
 enable_zstd
 with_zstd
 with_zstd_includes
@@ -1411,7 +1411,7 @@ Optional Features:
   --disable-ssl           Disable Secure Sockets Layer support
   --disable-geoip         Disable GeoIP support
   --disable-mmdb         Disable MaxMindDB support
-  --disable-lmdb          Disable LMDB/chathistory support
+  --disable-mdbx          Disable libmdbx for storage support
   --disable-zstd          Disable zstd compression support
   --disable-keycloak      Disable Keycloak (libkc) support
 
@@ -1450,12 +1450,12 @@ Optional Packages:
                           /usr/local/include)
   --with-mmdb-libs=dir    Specify location of MaxMindDB libs (default:
                           /usr/local/lib)
-  --with-lmdb=dir         Specify the installation prefix of LMDB (default:
+  --with-mdbx=dir         Specify the installation prefix of libmdbx (default:
                           /usr)
-  --with-lmdb-includes=dir
-                          Specify location of LMDB header files (default:
+  --with-mdbx-includes=dir
+                          Specify location of libmdbx header files (default:
                           /usr/include)
-  --with-lmdb-libs=dir    Specify location of LMDB libs (default: /usr/lib)
+  --with-mdbx-libs=dir    Specify location of libmdbx libs (default: /usr/lib)
   --with-zstd=dir         Specify the installation prefix of zstd (default:
                           /usr)
   --with-zstd-includes=dir
@@ -8941,83 +8941,83 @@ printf "%s\n" "$as_me: WARNING: Unable to find MaxMindDB, MaxMindDB features wil
   fi
 fi
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable LMDB/chathistory support" >&5
-printf %s "checking whether to enable LMDB/chathistory support... " >&6; }
-# Check whether --enable-lmdb was given.
-if test ${enable_lmdb+y}
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable libmdbx for storage support" >&5
+printf %s "checking whether to enable libmdbx for storage support... " >&6; }
+# Check whether --enable-mdbx was given.
+if test ${enable_mdbx+y}
 then :
-  enableval=$enable_lmdb; unet_cv_enable_lmdb=$enable_lmdb
+  enableval=$enable_mdbx; unet_cv_enable_mdbx=$enable_mdbx
 else case e in #(
-  e) if test ${unet_cv_enable_lmdb+y}
+  e) if test ${unet_cv_enable_mdbx+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
-  e) unet_cv_enable_lmdb=yes ;;
+  e) unet_cv_enable_mdbx=yes ;;
 esac
 fi
  ;;
 esac
 fi
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_lmdb" >&5
-printf "%s\n" "$unet_cv_enable_lmdb" >&6; }
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_mdbx" >&5
+printf "%s\n" "$unet_cv_enable_mdbx" >&6; }
 
-if test x"$unet_cv_enable_lmdb" = xyes; then
+if test x"$unet_cv_enable_mdbx" = xyes; then
 
-# Check whether --with-lmdb was given.
-if test ${with_lmdb+y}
+# Check whether --with-mdbx was given.
+if test ${with_mdbx+y}
 then :
-  withval=$with_lmdb; base_lmdb_prefix=$withval
+  withval=$with_mdbx; base_mdbx_prefix=$withval
 else case e in #(
-  e) base_lmdb_prefix=/usr ;;
+  e) base_mdbx_prefix=/usr ;;
 esac
 fi
 
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for LMDB includes" >&5
-printf %s "checking for LMDB includes... " >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for libmdbx includes" >&5
+printf %s "checking for libmdbx includes... " >&6; }
 
-# Check whether --with-lmdb-includes was given.
-if test ${with_lmdb_includes+y}
+# Check whether --with-mdbx-includes was given.
+if test ${with_mdbx_includes+y}
 then :
-  withval=$with_lmdb_includes; unet_cv_with_lmdb_inc_prefix=$withval
+  withval=$with_mdbx_includes; unet_cv_with_mdbx_inc_prefix=$withval
 else case e in #(
-  e) unet_cv_with_lmdb_inc_prefix=$base_lmdb_prefix/include ;;
+  e) unet_cv_with_mdbx_inc_prefix=$base_mdbx_prefix/include ;;
 esac
 fi
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_lmdb_inc_prefix" >&5
-printf "%s\n" "$unet_cv_with_lmdb_inc_prefix" >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mdbx_inc_prefix" >&5
+printf "%s\n" "$unet_cv_with_mdbx_inc_prefix" >&6; }
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for LMDB libraries" >&5
-printf %s "checking for LMDB libraries... " >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for libmdbx libraries" >&5
+printf %s "checking for libmdbx libraries... " >&6; }
 
-# Check whether --with-lmdb-libs was given.
-if test ${with_lmdb_libs+y}
+# Check whether --with-mdbx-libs was given.
+if test ${with_mdbx_libs+y}
 then :
-  withval=$with_lmdb_libs; unet_cv_with_lmdb_prefix=$withval
+  withval=$with_mdbx_libs; unet_cv_with_mdbx_prefix=$withval
 else case e in #(
-  e) unet_cv_with_lmdb_prefix=$base_lmdb_prefix/lib ;;
+  e) unet_cv_with_mdbx_prefix=$base_mdbx_prefix/lib ;;
 esac
 fi
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_lmdb_prefix" >&5
-printf "%s\n" "$unet_cv_with_lmdb_prefix" >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mdbx_prefix" >&5
+printf "%s\n" "$unet_cv_with_mdbx_prefix" >&6; }
 
   save_CFLAGS=$CFLAGS
   save_LIBS=$LIBS
 
-  CFLAGS="-I$unet_cv_with_lmdb_inc_prefix"
-  LIBS="-L$unet_cv_with_lmdb_prefix -llmdb"
+  CFLAGS="-I$unet_cv_with_mdbx_inc_prefix"
+  LIBS="-L$unet_cv_with_mdbx_prefix -lmdbx"
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for mdb_env_create in -llmdb" >&5
-printf %s "checking for mdb_env_create in -llmdb... " >&6; }
-if test ${ac_cv_lib_lmdb_mdb_env_create+y}
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for mdbx_env_create in -lmdbx" >&5
+printf %s "checking for mdbx_env_create in -lmdbx... " >&6; }
+if test ${ac_cv_lib_mdbx_mdbx_env_create+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
   e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-llmdb  $LIBS"
+LIBS="-lmdbx  $LIBS"
 cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -9030,20 +9030,20 @@ cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 #ifdef __cplusplus
 extern "C"
 #endif
-char mdb_env_create (void);
+char mdbx_env_create (void);
 int
 main (void)
 {
-return mdb_env_create ();
+return mdbx_env_create ();
   ;
   return 0;
 }
 _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
-  ac_cv_lib_lmdb_mdb_env_create=yes
+  ac_cv_lib_mdbx_mdbx_env_create=yes
 else case e in #(
-  e) ac_cv_lib_lmdb_mdb_env_create=no ;;
+  e) ac_cv_lib_mdbx_mdbx_env_create=no ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
@@ -9051,12 +9051,12 @@ rm -f core conftest.err conftest.$ac_objext conftest.beam \
 LIBS=$ac_check_lib_save_LIBS ;;
 esac
 fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_lmdb_mdb_env_create" >&5
-printf "%s\n" "$ac_cv_lib_lmdb_mdb_env_create" >&6; }
-if test "x$ac_cv_lib_lmdb_mdb_env_create" = xyes
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_mdbx_mdbx_env_create" >&5
+printf "%s\n" "$ac_cv_lib_mdbx_mdbx_env_create" >&6; }
+if test "x$ac_cv_lib_mdbx_mdbx_env_create" = xyes
 then :
 
-           for ac_header in $unet_cv_with_lmdb_inc_prefix/lmdb.h
+           for ac_header in $unet_cv_with_mdbx_inc_prefix/mdbx.h
 do :
   as_ac_Header=`printf "%s\n" "ac_cv_header_$ac_header" | sed "$as_sed_sh"`
 ac_fn_c_check_header_compile "$LINENO" "$ac_header" "$as_ac_Header" "$ac_includes_default"
@@ -9066,8 +9066,8 @@ then :
 #define `printf "%s\n" "HAVE_$ac_header" | sed "$as_sed_cpp"` 1
 _ACEOF
 
-      enable_lmdb="yes";
-      LMDB_LDFLAGS="-llmdb"
+      enable_mdbx="yes";
+      MDBX_LDFLAGS="-lmdbx"
 
 fi
 
@@ -9079,15 +9079,15 @@ fi
   LIBS=$save_LIBS
   CFLAGS=$save_CFLAGS
 
-  if test "x$enable_lmdb" = xyes; then
+  if test "x$enable_mdbx" = xyes; then
 
-printf "%s\n" "#define USE_LMDB /**/" >>confdefs.h
+printf "%s\n" "#define USE_MDBX /**/" >>confdefs.h
 
-    LIBS="$LIBS -L$unet_cv_with_lmdb_prefix $LMDB_LDFLAGS"
-    CFLAGS="$CFLAGS -I$unet_cv_with_lmdb_inc_prefix"
+    LIBS="$LIBS -L$unet_cv_with_mdbx_prefix $MDBX_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_mdbx_inc_prefix"
   else
-     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find LMDB, chathistory features will not work without liblmdb. Disabling LMDB support." >&5
-printf "%s\n" "$as_me: WARNING: Unable to find LMDB, chathistory features will not work without liblmdb. Disabling LMDB support." >&2;}
+     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find libmdbx, chathistory features will not work without libmdbx. Disabling libmdbx support." >&5
+printf "%s\n" "$as_me: WARNING: Unable to find libmdbx, chathistory features will not work without libmdbx. Disabling libmdbx support." >&2;}
   fi
 fi
 

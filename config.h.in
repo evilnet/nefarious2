@@ -229,8 +229,8 @@
 /* Define to enable the kqueue engine */
 #undef USE_KQUEUE
 
-/* Define if you are using LMDB for chathistory */
-#undef USE_LMDB
+/* Define if you are using libmdbx for storage */
+#undef USE_MDBX
 
 /* Define if you are using MaxMindDB */
 #undef USE_MMDB

@@ -101,7 +101,7 @@
 #include <sys/time.h>
 #include <time.h>
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 /** Counter for generating unique message IDs for KICK event history storage */
 static unsigned long kick_history_msgid_counter = 0;
 
@@ -173,7 +173,7 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
   history_store_message(msgid, timestamp, chptr->chname, sender,
                         account, HISTORY_KICK, kick_text);
 }
-#endif /* USE_LMDB */
+#endif /* USE_MDBX */
 
 /*
  * m_kick - generic message handler
@@ -277,7 +277,7 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     sendcmdto_channel_butserv_butone(sptr, CMD_KICK, chptr, NULL, 0, "%H %C :%s", chptr, who,
                                      comment);
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
   /* Store KICK event in history */
   store_kick_event(sptr, chptr, who, comment);
 
@@ -389,7 +389,7 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                                          comment);
       }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 
 #endif
 

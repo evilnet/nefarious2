@@ -121,7 +121,7 @@ static int check_utf8_text(struct Client *sptr, char *text, const char *command)
   return 1;
 }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 /** Store a channel message in the history database.
  * Stores the message with the provided msgid and timestamp.
  * @param[in] sptr Client that sent the message.
@@ -336,7 +336,7 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   history_store_message(msgid, timestamp, target, sender,
                         account, type, text);
 }
-#endif /* USE_LMDB */
+#endif /* USE_MDBX */
 
 /** Relay a local user's message to a channel.
  * Generates an error if the client cannot send to the channel.
@@ -432,7 +432,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     }
   }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
   {
     char msgid[64] = "";
     char timestamp[32] = "";
@@ -550,7 +550,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
     }
   }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
   {
     char msgid[64] = "";
     char timestamp[32] = "";
@@ -616,7 +616,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
                                SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
     }
-#ifdef USE_LMDB
+#ifdef USE_MDBX
     /* Store server-relayed message in history database */
     if (feature_bool(FEAT_MSGID)) {
       char msgid[64];
@@ -670,7 +670,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
                                SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
     }
-#ifdef USE_LMDB
+#ifdef USE_MDBX
     /* Store server-relayed notice in history database */
     if (feature_bool(FEAT_MSGID)) {
       char msgid[64];
@@ -951,7 +951,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   }
 
   /* Echo message back to sender if they have echo-message capability */
-#ifdef USE_LMDB
+#ifdef USE_MDBX
   {
     char msgid[64] = "";
     char timestamp[32] = "";
@@ -1066,7 +1066,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     }
   }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
   {
     char msgid[64] = "";
     char timestamp[32] = "";
@@ -1137,7 +1137,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
     }
   }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
   /* Store server-relayed private message in history database (if enabled) */
   if (feature_bool(FEAT_MSGID)) {
     char msgid[64];
@@ -1192,7 +1192,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
     }
   }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
   /* Store server-relayed private notice in history database (if enabled) */
   if (feature_bool(FEAT_MSGID)) {
     char msgid[64];

@@ -80,7 +80,7 @@ static size_t bans_inuse;
 
 int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix);
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 /** Counter for generating unique message IDs for channel event history storage */
 static unsigned long channel_history_msgid_counter = 0;
 
@@ -147,7 +147,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   history_store_message(msgid, timestamp, chptr->chname, sender,
                         account, type, text ? text : "");
 }
-#endif /* USE_LMDB */
+#endif /* USE_MDBX */
 
 #if !defined(NDEBUG)
 /** return the length (>=0) of a chain of links.
@@ -2612,7 +2612,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                        addbuf, addbuf_local,
                                        remstr, addstr);
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
       /* Store MODE event in history (only from local users) */
       if (MyUser(mbuf->mb_source)) {
         char mode_text[512];
@@ -5091,7 +5091,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 		    (flags & CHFL_BANNED || !jbuf->jb_comment) ?
 		    ":%H" : "%H :%s", chan, jbuf->jb_comment);
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
     /* Store PART event in history (only from local users to avoid duplicates) */
     if (MyUser(jbuf->jb_source) && !(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
       store_channel_event(jbuf->jb_source, chan,
@@ -5134,7 +5134,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                                              IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
                                              cli_info(jbuf->jb_source));
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
       /* Store JOIN event in history (only from local users to avoid duplicates) */
       if (MyUser(jbuf->jb_source))
         store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN);

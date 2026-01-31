@@ -276,30 +276,7 @@ extern int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_bu
  */
 extern int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen);
 
-/*
- * Read Marker API (IRCv3 draft/read-marker)
- *
- * Read markers are stored per account+target in the same LMDB environment.
- * Key: "account\0target"
- * Value: Unix timestamp (seconds.milliseconds as string)
- */
-
-/** Get the read marker timestamp for an account and target.
- * @param[in] account Account name.
- * @param[in] target Channel name or nick.
- * @param[out] timestamp Buffer for timestamp (at least HISTORY_TIMESTAMP_LEN).
- * @return 0 on success, 1 if not found, -1 on error.
- */
-extern int readmarker_get(const char *account, const char *target, char *timestamp);
-
-/** Set the read marker timestamp for an account and target.
- * Only updates if the new timestamp is greater than the stored one.
- * @param[in] account Account name.
- * @param[in] target Channel name or nick.
- * @param[in] timestamp Unix timestamp (seconds.milliseconds as string).
- * @return 0 on success (updated), 1 if not updated (older timestamp), -1 on error.
- */
-extern int readmarker_set(const char *account, const char *target, const char *timestamp);
+/* Read Marker API moved to metadata.h (metadata_readmarker_get/set) */
 
 /** Delete a message from the history database.
  * Used by message-redaction to remove redacted messages.

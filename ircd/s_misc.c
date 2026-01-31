@@ -178,7 +178,7 @@ const char* get_client_name(const struct Client* sptr, int showip)
   return nbuf;
 }
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 /** Counter for generating unique message IDs for QUIT event history storage */
 static unsigned long quit_history_msgid_counter = 0;
 
@@ -248,7 +248,7 @@ static void store_quit_events(struct Client *sptr, const char *comment)
 
   }
 }
-#endif /* USE_LMDB */
+#endif /* USE_MDBX */
 
 /**
  * Exit one client, local or remote. Assuming for local client that
@@ -288,7 +288,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
 
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
     /* Store QUIT events in history before removing from channels */
     store_quit_events(bcptr, comment);
 #endif

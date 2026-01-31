@@ -873,6 +873,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_metadata_2, 0, 0, 0),
   F_B(CAP_draft_webpush, 0, 0, 0),
   F_S(WEBPUSH_DB, 0, "webpush", 0),
+  F_B(WEBPUSH_DB_AUTOGROW, 0, 1, 0),
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
   F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* Limited by 512-byte IRC message size */
   F_I(METADATA_MAX_SUBS, 0, 50, 0),
@@ -883,6 +884,8 @@ static struct FeatureDesc {
   F_I(CHATHISTORY_MAX, 0, 100, 0),
   F_B(CHATHISTORY_PRIVATE, 0, 0, 0),
   F_S(CHATHISTORY_DB, 0, "history", 0),
+  F_B(CHATHISTORY_DB_AUTOGROW, 0, 1, 0),
+  F_I(CHATHISTORY_DB_GROWTH_STEP, 0, 16777216, 0),  /* 16MB default growth step */
   F_I(CHATHISTORY_RETENTION, 0, 7, feature_notify_chathistory_retention),
   F_B(CHATHISTORY_FEDERATION, 0, 1, 0),
   F_I(CHATHISTORY_TIMEOUT, 0, 5, 0),
@@ -924,6 +927,7 @@ static struct FeatureDesc {
   F_B(METADATA_CACHE_ENABLED, 0, 1, 0),
   F_B(METADATA_BURST, 0, 1, 0),
   F_S(METADATA_DB, 0, "metadata", 0),
+  F_B(METADATA_DB_AUTOGROW, 0, 1, 0),
   F_I(METADATA_CACHE_TTL, 0, 14400, 0),
   F_I(METADATA_PURGE_FREQUENCY, 0, 3600, 0),
 #ifdef USE_ZSTD

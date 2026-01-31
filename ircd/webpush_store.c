@@ -12,12 +12,13 @@
 
 #include "config.h"
 
-#ifdef USE_LMDB
+#ifdef USE_MDBX
 
 #include "webpush_store.h"
+#include "ircd_features.h"
 #include "ircd_log.h"
 
-#include <lmdb.h>
+#include <mdbx.h>
 
 #include <openssl/evp.h>   /* EVP_Digest for SHA-256 hash of endpoint */
 #include <openssl/sha.h>
@@ -30,9 +31,9 @@
  * LMDB environment and databases
  * ---------------------------------------------------------------------------*/
 
-static MDB_env *webpush_env = NULL;
-static MDB_dbi webpush_sub_dbi;     /* subscriptions */
-static MDB_dbi webpush_cfg_dbi;     /* config (VAPID key) */
+static MDBX_env *webpush_env = NULL;
+static MDBX_dbi webpush_sub_dbi;     /* subscriptions */
+static MDBX_dbi webpush_cfg_dbi;     /* config (VAPID key) */
 static int webpush_db_available = 0;
 
 #define WEBPUSH_MAX_DBS     2
@@ -119,7 +120,7 @@ static int build_prefix_key(char *key, int keysize, const char *account)
 
 int webpush_store_init(const char *dbpath)
 {
-  MDB_txn *txn;
+  MDBX_txn *txn;
   int rc;
 
   if (webpush_db_available)
@@ -131,62 +132,68 @@ int webpush_store_init(const char *dbpath)
     return -1;
   }
 
-  rc = mdb_env_create(&webpush_env);
+  rc = mdbx_env_create(&webpush_env);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: mdb_env_create: %s", mdb_strerror(rc));
+              "WebPush store: mdbx_env_create: %s", mdbx_strerror(rc));
     return -1;
   }
 
-  rc = mdb_env_set_maxdbs(webpush_env, WEBPUSH_MAX_DBS);
+  rc = mdbx_env_set_maxdbs(webpush_env, WEBPUSH_MAX_DBS);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: mdb_env_set_maxdbs: %s", mdb_strerror(rc));
+              "WebPush store: mdbx_env_set_maxdbs: %s", mdbx_strerror(rc));
     goto fail;
   }
 
-  rc = mdb_env_set_mapsize(webpush_env, WEBPUSH_MAP_SIZE);
-  if (rc != 0) {
+  if (feature_bool(FEAT_WEBPUSH_DB_AUTOGROW)) {
+    rc = mdbx_env_set_geometry(webpush_env, -1, -1, WEBPUSH_MAP_SIZE,
+                               1 * 1024 * 1024, 1 * 1024 * 1024, -1);
+  } else {
+    rc = mdbx_env_set_geometry(webpush_env, WEBPUSH_MAP_SIZE, WEBPUSH_MAP_SIZE,
+                               WEBPUSH_MAP_SIZE, 0, 0, -1);
+  }
+  if (rc != MDBX_SUCCESS) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: mdb_env_set_mapsize: %s", mdb_strerror(rc));
+              "WebPush store: mdbx_env_set_geometry: %s", mdbx_strerror(rc));
     goto fail;
   }
 
-  rc = mdb_env_open(webpush_env, dbpath, 0, 0644);
+  rc = mdbx_env_open(webpush_env, dbpath, 0, 0644);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: mdb_env_open(%s): %s", dbpath, mdb_strerror(rc));
+              "WebPush store: mdbx_env_open(%s): %s", dbpath, mdbx_strerror(rc));
     goto fail;
   }
 
   /* Open named databases */
-  rc = mdb_txn_begin(webpush_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, 0, &txn);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: mdb_txn_begin: %s", mdb_strerror(rc));
+              "WebPush store: mdbx_txn_begin: %s", mdbx_strerror(rc));
     goto fail;
   }
 
-  rc = mdb_dbi_open(txn, "subscriptions", MDB_CREATE, &webpush_sub_dbi);
+  rc = mdbx_dbi_open(txn, "subscriptions", MDBX_CREATE, &webpush_sub_dbi);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: open subscriptions DBI: %s", mdb_strerror(rc));
-    mdb_txn_abort(txn);
+              "WebPush store: open subscriptions DBI: %s", mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
     goto fail;
   }
 
-  rc = mdb_dbi_open(txn, "config", MDB_CREATE, &webpush_cfg_dbi);
+  rc = mdbx_dbi_open(txn, "config", MDBX_CREATE, &webpush_cfg_dbi);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: open config DBI: %s", mdb_strerror(rc));
-    mdb_txn_abort(txn);
+              "WebPush store: open config DBI: %s", mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
     goto fail;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: mdb_txn_commit: %s", mdb_strerror(rc));
+              "WebPush store: mdbx_txn_commit: %s", mdbx_strerror(rc));
     goto fail;
   }
 
@@ -196,7 +203,7 @@ int webpush_store_init(const char *dbpath)
   return 0;
 
 fail:
-  mdb_env_close(webpush_env);
+  mdbx_env_close(webpush_env);
   webpush_env = NULL;
   return -1;
 }
@@ -206,9 +213,9 @@ void webpush_store_shutdown(void)
   if (!webpush_db_available)
     return;
 
-  mdb_dbi_close(webpush_env, webpush_sub_dbi);
-  mdb_dbi_close(webpush_env, webpush_cfg_dbi);
-  mdb_env_close(webpush_env);
+  mdbx_dbi_close(webpush_env, webpush_sub_dbi);
+  mdbx_dbi_close(webpush_env, webpush_cfg_dbi);
+  mdbx_env_close(webpush_env);
   webpush_env = NULL;
   webpush_db_available = 0;
 
@@ -222,8 +229,8 @@ int webpush_store_available(void)
 
 int webpush_store_add(const char *account, const char *stored)
 {
-  MDB_txn *txn;
-  MDB_val mkey, mval;
+  MDBX_txn *txn;
+  MDBX_val mkey, mval;
   char keybuf[WEBPUSH_KEY_MAX];
   int keylen;
   const char *endpoint_end;
@@ -249,31 +256,31 @@ int webpush_store_add(const char *account, const char *stored)
   if (keylen < 0)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  mkey.mv_data = keybuf;
-  mkey.mv_size = (size_t)keylen;
-  mval.mv_data = (void *)stored;
-  mval.mv_size = strlen(stored);
+  mkey.iov_base = keybuf;
+  mkey.iov_len = (size_t)keylen;
+  mval.iov_base = (void *)stored;
+  mval.iov_len = strlen(stored);
 
-  rc = mdb_put(txn, webpush_sub_dbi, &mkey, &mval, 0);
+  rc = mdbx_put(txn, webpush_sub_dbi, &mkey, &mval, 0);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: add failed for %s: %s", account, mdb_strerror(rc));
-    mdb_txn_abort(txn);
+              "WebPush store: add failed for %s: %s", account, mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   return (rc == 0) ? 0 : -1;
 }
 
 int webpush_store_remove(const char *account, const char *endpoint)
 {
-  MDB_txn *txn;
-  MDB_val mkey;
+  MDBX_txn *txn;
+  MDBX_val mkey;
   char keybuf[WEBPUSH_KEY_MAX];
   int keylen;
   int rc;
@@ -285,34 +292,34 @@ int webpush_store_remove(const char *account, const char *endpoint)
   if (keylen < 0)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  mkey.mv_data = keybuf;
-  mkey.mv_size = (size_t)keylen;
+  mkey.iov_base = keybuf;
+  mkey.iov_len = (size_t)keylen;
 
-  rc = mdb_del(txn, webpush_sub_dbi, &mkey, NULL);
-  if (rc == MDB_NOTFOUND)
+  rc = mdbx_del(txn, webpush_sub_dbi, &mkey, NULL);
+  if (rc == MDBX_NOTFOUND)
     rc = 0;  /* not found is fine */
 
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "WebPush store: remove failed for %s: %s",
-              account, mdb_strerror(rc));
-    mdb_txn_abort(txn);
+              account, mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   return (rc == 0) ? 0 : -1;
 }
 
 int webpush_store_clear(const char *account)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val mkey, mval;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val mkey, mval;
   char prefix[WEBPUSH_KEY_MAX];
   int prefix_len;
   int count = 0;
@@ -325,36 +332,36 @@ int webpush_store_clear(const char *account)
   if (prefix_len < 0)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, webpush_sub_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, webpush_sub_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Position at first key >= prefix */
-  mkey.mv_data = prefix;
-  mkey.mv_size = (size_t)prefix_len;
+  mkey.iov_base = prefix;
+  mkey.iov_len = (size_t)prefix_len;
 
-  rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_SET_RANGE);
+  rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_SET_RANGE);
   while (rc == 0) {
     /* Check if key still starts with our prefix */
-    if (mkey.mv_size < (size_t)prefix_len ||
-        memcmp(mkey.mv_data, prefix, (size_t)prefix_len) != 0)
+    if (mkey.iov_len < (size_t)prefix_len ||
+        memcmp(mkey.iov_base, prefix, (size_t)prefix_len) != 0)
       break;
 
-    mdb_cursor_del(cursor, 0);
+    mdbx_cursor_del(cursor, 0);
     count++;
 
-    rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
+  mdbx_cursor_close(cursor);
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0)
     return -1;
 
@@ -363,9 +370,9 @@ int webpush_store_clear(const char *account)
 
 int webpush_store_count(const char *account)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val mkey, mval;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val mkey, mval;
   char prefix[WEBPUSH_KEY_MAX];
   int prefix_len;
   int count = 0;
@@ -378,31 +385,31 @@ int webpush_store_count(const char *account)
   if (prefix_len < 0)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, webpush_sub_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, webpush_sub_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  mkey.mv_data = prefix;
-  mkey.mv_size = (size_t)prefix_len;
+  mkey.iov_base = prefix;
+  mkey.iov_len = (size_t)prefix_len;
 
-  rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_SET_RANGE);
+  rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_SET_RANGE);
   while (rc == 0) {
-    if (mkey.mv_size < (size_t)prefix_len ||
-        memcmp(mkey.mv_data, prefix, (size_t)prefix_len) != 0)
+    if (mkey.iov_len < (size_t)prefix_len ||
+        memcmp(mkey.iov_base, prefix, (size_t)prefix_len) != 0)
       break;
 
     count++;
-    rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
   return count;
 }
@@ -410,9 +417,9 @@ int webpush_store_count(const char *account)
 int webpush_store_foreach(const char *account, webpush_store_iter_cb cb,
                           void *data)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val mkey, mval;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val mkey, mval;
   char prefix[WEBPUSH_KEY_MAX];
   int prefix_len;
   int count = 0;
@@ -425,32 +432,32 @@ int webpush_store_foreach(const char *account, webpush_store_iter_cb cb,
   if (prefix_len < 0)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, webpush_sub_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, webpush_sub_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  mkey.mv_data = prefix;
-  mkey.mv_size = (size_t)prefix_len;
+  mkey.iov_base = prefix;
+  mkey.iov_len = (size_t)prefix_len;
 
-  rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_SET_RANGE);
+  rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_SET_RANGE);
   while (rc == 0) {
-    if (mkey.mv_size < (size_t)prefix_len ||
-        memcmp(mkey.mv_data, prefix, (size_t)prefix_len) != 0)
+    if (mkey.iov_len < (size_t)prefix_len ||
+        memcmp(mkey.iov_base, prefix, (size_t)prefix_len) != 0)
       break;
 
-    /* mval.mv_data is the stored subscription string (not NUL-terminated) */
+    /* mval.iov_base is the stored subscription string (not NUL-terminated) */
     {
       char stored[4096];
-      size_t slen = mval.mv_size;
+      size_t slen = mval.iov_len;
       if (slen >= sizeof(stored))
         slen = sizeof(stored) - 1;
-      memcpy(stored, mval.mv_data, slen);
+      memcpy(stored, mval.iov_base, slen);
       stored[slen] = '\0';
 
       if (cb(stored, data) != 0)
@@ -458,56 +465,56 @@ int webpush_store_foreach(const char *account, webpush_store_iter_cb cb,
     }
 
     count++;
-    rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
   return count;
 }
 
 int webpush_store_foreach_all(webpush_store_iter_all_cb cb, void *data)
 {
-  MDB_txn *txn;
-  MDB_cursor *cursor;
-  MDB_val mkey, mval;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val mkey, mval;
   int count = 0;
   int rc;
 
   if (!webpush_db_available || !cb)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_cursor_open(txn, webpush_sub_dbi, &cursor);
+  rc = mdbx_cursor_open(txn, webpush_sub_dbi, &cursor);
   if (rc != 0) {
-    mdb_txn_abort(txn);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
   /* Iterate all entries in the subscriptions database */
-  rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_FIRST);
+  rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_FIRST);
   while (rc == 0) {
     /*
      * Key format: account\0<hash_hex>
      * The account name is the portion before the embedded NUL byte.
-     * We can pass mkey.mv_data directly as the account string since
+     * We can pass mkey.iov_base directly as the account string since
      * it starts with the account name followed by a NUL separator.
      */
-    const char *account = (const char *)mkey.mv_data;
+    const char *account = (const char *)mkey.iov_base;
 
     /* Safety: verify there's a NUL within the key (separating account from hash) */
-    size_t acct_len = strnlen(account, mkey.mv_size);
-    if (acct_len < mkey.mv_size) {
+    size_t acct_len = strnlen(account, mkey.iov_len);
+    if (acct_len < mkey.iov_len) {
       /* Valid key format — extract stored value */
       char stored[4096];
-      size_t slen = mval.mv_size;
+      size_t slen = mval.iov_len;
       if (slen >= sizeof(stored))
         slen = sizeof(stored) - 1;
-      memcpy(stored, mval.mv_data, slen);
+      memcpy(stored, mval.iov_base, slen);
       stored[slen] = '\0';
 
       if (cb(account, stored, data) != 0)
@@ -516,11 +523,11 @@ int webpush_store_foreach_all(webpush_store_iter_all_cb cb, void *data)
       count++;
     }
 
-    rc = mdb_cursor_get(cursor, &mkey, &mval, MDB_NEXT);
+    rc = mdbx_cursor_get(cursor, &mkey, &mval, MDBX_NEXT);
   }
 
-  mdb_cursor_close(cursor);
-  mdb_txn_abort(txn);
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
 
   return count;
 }
@@ -533,31 +540,31 @@ static const char vapid_key_name[] = "vapid_privkey";
 
 int webpush_store_set_vapid_key(const unsigned char *privkey, size_t privkey_len)
 {
-  MDB_txn *txn;
-  MDB_val mkey, mval;
+  MDBX_txn *txn;
+  MDBX_val mkey, mval;
   int rc;
 
   if (!webpush_db_available || !privkey || privkey_len != 32)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, 0, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, 0, &txn);
   if (rc != 0)
     return -1;
 
-  mkey.mv_data = (void *)vapid_key_name;
-  mkey.mv_size = sizeof(vapid_key_name) - 1;
-  mval.mv_data = (void *)privkey;
-  mval.mv_size = privkey_len;
+  mkey.iov_base = (void *)vapid_key_name;
+  mkey.iov_len = sizeof(vapid_key_name) - 1;
+  mval.iov_base = (void *)privkey;
+  mval.iov_len = privkey_len;
 
-  rc = mdb_put(txn, webpush_cfg_dbi, &mkey, &mval, 0);
+  rc = mdbx_put(txn, webpush_cfg_dbi, &mkey, &mval, 0);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: set VAPID key failed: %s", mdb_strerror(rc));
-    mdb_txn_abort(txn);
+              "WebPush store: set VAPID key failed: %s", mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  rc = mdb_txn_commit(txn);
+  rc = mdbx_txn_commit(txn);
   if (rc != 0)
     return -1;
 
@@ -567,43 +574,43 @@ int webpush_store_set_vapid_key(const unsigned char *privkey, size_t privkey_len
 
 int webpush_store_get_vapid_key(unsigned char *privkey, size_t *privkey_len)
 {
-  MDB_txn *txn;
-  MDB_val mkey, mval;
+  MDBX_txn *txn;
+  MDBX_val mkey, mval;
   int rc;
 
   if (!webpush_db_available || !privkey || !privkey_len || *privkey_len < 32)
     return -1;
 
-  rc = mdb_txn_begin(webpush_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  mkey.mv_data = (void *)vapid_key_name;
-  mkey.mv_size = sizeof(vapid_key_name) - 1;
+  mkey.iov_base = (void *)vapid_key_name;
+  mkey.iov_len = sizeof(vapid_key_name) - 1;
 
-  rc = mdb_get(txn, webpush_cfg_dbi, &mkey, &mval);
-  if (rc == MDB_NOTFOUND) {
-    mdb_txn_abort(txn);
+  rc = mdbx_get(txn, webpush_cfg_dbi, &mkey, &mval);
+  if (rc == MDBX_NOTFOUND) {
+    mdbx_txn_abort(txn);
     return -1;  /* no key stored */
   }
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: get VAPID key failed: %s", mdb_strerror(rc));
-    mdb_txn_abort(txn);
+              "WebPush store: get VAPID key failed: %s", mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  if (mval.mv_size != 32) {
+  if (mval.iov_len != 32) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "WebPush store: stored VAPID key has wrong size (%zu)",
-              mval.mv_size);
-    mdb_txn_abort(txn);
+              mval.iov_len);
+    mdbx_txn_abort(txn);
     return -1;
   }
 
-  memcpy(privkey, mval.mv_data, 32);
+  memcpy(privkey, mval.iov_base, 32);
   *privkey_len = 32;
-  mdb_txn_abort(txn);
+  mdbx_txn_abort(txn);
 
   return 0;
 }
@@ -614,9 +621,9 @@ int webpush_store_get_vapid_key(unsigned char *privkey, size_t *privkey_len)
 
 int webpush_store_get_stats(struct webpush_store_stats *stats)
 {
-  MDB_txn *txn;
-  MDB_stat mst;
-  MDB_envinfo mei;
+  MDBX_txn *txn;
+  MDBX_stat mst;
+  MDBX_envinfo mei;
   int rc;
 
   if (!webpush_db_available || !stats)
@@ -624,27 +631,27 @@ int webpush_store_get_stats(struct webpush_store_stats *stats)
 
   memset(stats, 0, sizeof(*stats));
 
-  rc = mdb_txn_begin(webpush_env, NULL, MDB_RDONLY, &txn);
+  rc = mdbx_txn_begin(webpush_env, NULL, MDBX_RDONLY, &txn);
   if (rc != 0)
     return -1;
 
-  rc = mdb_stat(txn, webpush_sub_dbi, &mst);
+  rc = mdbx_dbi_stat(txn, webpush_sub_dbi, &mst, sizeof(mst));
   if (rc == 0) {
     stats->total_subscriptions = (unsigned long)mst.ms_entries;
   }
 
-  mdb_txn_abort(txn);
+  mdbx_txn_abort(txn);
 
-  rc = mdb_env_info(webpush_env, &mei);
+  rc = mdbx_env_info_ex(webpush_env, NULL, &mei, sizeof(mei));
   if (rc == 0) {
-    stats->db_size_bytes = (unsigned long)mei.me_mapsize;
+    stats->db_size_bytes = (unsigned long)mei.mi_geo.upper;
   }
 
   /* total_accounts requires a full scan — skip for now */
   return 0;
 }
 
-#else /* !USE_LMDB */
+#else /* !USE_MDBX */
 
 /* Stub implementations when LMDB is not available */
 #include "webpush_store.h"
@@ -713,4 +720,4 @@ int webpush_store_get_stats(struct webpush_store_stats *stats)
   return -1;
 }
 
-#endif /* USE_LMDB */
+#endif /* USE_MDBX */
