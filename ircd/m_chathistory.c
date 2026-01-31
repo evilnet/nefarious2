@@ -368,6 +368,7 @@ static char subcmd_to_s2s(const char *subcmd)
   if (ircd_strcmp(subcmd, "AROUND") == 0)  return 'R';
   if (ircd_strcmp(subcmd, "BETWEEN") == 0) return 'W';
   if (ircd_strcmp(subcmd, "TARGETS") == 0) return 'T';
+  if (ircd_strcmp(subcmd, "EXACT") == 0)   return 'X';
   return '?';
 }
 
@@ -381,6 +382,7 @@ static const char *s2s_to_subcmd(char c)
     case 'R': return "AROUND";
     case 'W': return "BETWEEN";
     case 'T': return "TARGETS";
+    case 'X': return "EXACT";
     default:  return NULL;
   }
 }
@@ -1538,6 +1540,8 @@ struct FedRequest {
   struct Timer timer;                 /**< Timeout timer (embedded) */
   int timer_active;                   /**< Whether timer is active */
   int response_sent;                  /**< Whether response was already sent */
+  void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
+  void *cb_data;                      /**< Custom data for completion callback */
 };
 
 /** Global array of pending federation requests */
@@ -2647,6 +2651,10 @@ static void free_fed_request(struct FedRequest *req)
   if (req->fed_msgs)
     history_free_messages(req->fed_msgs);
 
+  /* Free custom callback data */
+  if (req->cb_data)
+    MyFree(req->cb_data);
+
   /* Remove timer if active */
   if (req->timer_active)
     timer_del(&req->timer);
@@ -2818,8 +2826,11 @@ static void complete_fed_request(struct FedRequest *req)
   if (!req)
     return;
 
-  /* Send response to client */
-  send_fed_response(req);
+  /* Use custom completion if set, otherwise default to send_fed_response */
+  if (req->completion_cb)
+    req->completion_cb(req);
+  else
+    send_fed_response(req);
 
   /* If timer is still active (early completion), delete it.
    * timer_del will trigger ET_DESTROY callback which frees the request.
@@ -3064,6 +3075,234 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
 }
 
 /*
+ * ============================================================================
+ * Federated REDACT Support
+ *
+ * When a non-storing server receives a REDACT, it cannot look up the message
+ * locally. Instead, it sends a CH Q X (exact msgid lookup) federation query
+ * to storage servers. On completion, the callback validates authorization
+ * and propagates the REDACT if permitted.
+ * ============================================================================
+ */
+
+/** Context for a federated REDACT operation */
+struct RedactContext {
+  char msgid[HISTORY_MSGID_LEN];       /**< Message ID to redact */
+  char reason[TOPICLEN + 1];           /**< Redaction reason */
+  int is_chanop;                       /**< Whether requester is chanop */
+  int is_oper;                         /**< Whether requester is oper */
+};
+
+/** Completion callback for federated REDACT.
+ * Runs authorization logic on the looked-up message and propagates if permitted.
+ */
+static void complete_redact_fed(struct FedRequest *req)
+{
+  struct RedactContext *ctx;
+  struct Client *sptr;
+  struct Channel *chptr;
+  struct HistoryMessage *msg;
+  time_t msg_time, window;
+  int can_redact = 0;
+
+  if (!req || req->response_sent)
+    return;
+
+  req->response_sent = 1;
+
+  ctx = (struct RedactContext *)req->cb_data;
+  if (!ctx)
+    return;
+
+  /* Look up the client — may have disconnected during federation */
+  sptr = findNUser(req->client_yxx);
+  if (!sptr)
+    return;
+
+  /* Look up the channel */
+  chptr = FindChannel(req->target);
+  if (!chptr) {
+    send_fail(sptr, "REDACT", "INVALID_TARGET", req->target,
+              "No such channel");
+    return;
+  }
+
+  /* Check if we got a message back from federation */
+  msg = req->fed_msgs;
+  if (!msg) {
+    /* No storage server had this message */
+    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", ctx->msgid,
+              "Message not found");
+    return;
+  }
+
+  /* Run the same authorization logic as the synchronous path in m_redact.c */
+  msg_time = (time_t)strtoul(msg->timestamp, NULL, 10);
+
+  if (ctx->is_oper) {
+    /* Opers: oper-specific window (0 = unlimited) */
+    window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
+    if (window > 0 && (CurrentTime - msg_time) > window) {
+      send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", ctx->msgid,
+                "Redaction window has expired");
+      return;
+    }
+    can_redact = 1;
+  } else if (msg->account[0] && cli_user(sptr)
+             && cli_user(sptr)->account[0]
+             && ircd_strcmp(msg->account, cli_user(sptr)->account) == 0) {
+    /* Authenticated owner: account match, no time window */
+    can_redact = 1;
+  } else {
+    /* Everyone else: regular time window applies */
+    window = (time_t)feature_int(FEAT_REDACT_WINDOW);
+    if (window > 0 && (CurrentTime - msg_time) > window) {
+      send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", ctx->msgid,
+                "Redaction window has expired");
+      return;
+    }
+
+    /* Chanops can redact others' messages */
+    if (ctx->is_chanop && feature_bool(FEAT_REDACT_CHANOP_OTHERS)) {
+      can_redact = 1;
+    }
+  }
+
+  if (!can_redact) {
+    send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", ctx->msgid,
+              "You are not authorized to redact this message");
+    return;
+  }
+
+  /* Authorization passed — propagate REDACT to channel members */
+  {
+    struct Membership *member;
+    const char *reason = ctx->reason[0] ? ctx->reason : NULL;
+
+    for (member = chptr->members; member; member = member->next_member) {
+      struct Client *acptr = member->user;
+
+      if (!MyUser(acptr))
+        continue;
+      if (!CapActive(acptr, CAP_DRAFT_REDACT))
+        continue;
+      if (acptr == sptr && !CapActive(acptr, CAP_ECHOMSG))
+        continue;
+
+      if (reason) {
+        sendcmdto_one(sptr, CMD_REDACT, acptr, "%s %s :%s",
+                      req->target, ctx->msgid, reason);
+      } else {
+        sendcmdto_one(sptr, CMD_REDACT, acptr, "%s %s",
+                      req->target, ctx->msgid);
+      }
+    }
+
+    /* Propagate to other servers (ms_redact on storage servers will delete).
+     * Pass sptr as 'one' — sendcmdto_serv_butone skips cli_from(one),
+     * and for local clients cli_from(sptr) is the local connection,
+     * so all servers receive the REDACT. */
+    sendcmdto_serv_butone(sptr, CMD_REDACT, sptr, "%s %s :%s",
+                          req->target, ctx->msgid, reason ? reason : "");
+  }
+}
+
+/** Start a federated REDACT query (exact message lookup).
+ * Sends CH Q X to storage servers and sets up async completion.
+ * @param[in] sptr Client requesting the redaction.
+ * @param[in] chptr Channel containing the message.
+ * @param[in] target Channel name.
+ * @param[in] msgid Message ID to look up.
+ * @param[in] reason Redaction reason (may be NULL).
+ * @param[in] is_chanop Whether requester is chanop.
+ * @param[in] is_oper Whether requester is oper.
+ * @return 0 on success (query started), -1 on failure.
+ */
+int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
+                           const char *target, const char *msgid,
+                           const char *reason, int is_chanop, int is_oper)
+{
+  struct FedRequest *req;
+  struct RedactContext *ctx;
+  char reqid[32];
+  char s2s_ref[HISTORY_MSGID_LEN + 2];  /* M<msgid>\0 */
+  int i, server_count;
+  struct DLink *lp;
+
+  /* Check if federation is enabled */
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return -1;
+
+  /* Build S2S reference: M<msgid> */
+  ircd_snprintf(0, s2s_ref, sizeof(s2s_ref), "M%s", msgid);
+
+  /* Count storage servers (no time filter for msgid lookups) */
+  server_count = count_storage_servers(target, 0);
+  if (server_count == 0)
+    return -1;
+
+  /* Find empty slot */
+  for (i = 0; i < MAX_FED_REQUESTS; i++) {
+    if (!fed_requests[i])
+      break;
+  }
+  if (i >= MAX_FED_REQUESTS)
+    return -1;
+
+  /* Generate request ID */
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu",
+                cli_yxx(&me), ++fed_reqid_counter);
+
+  /* Create REDACT context */
+  ctx = (struct RedactContext *)MyCalloc(1, sizeof(struct RedactContext));
+  ircd_strncpy(ctx->msgid, msgid, sizeof(ctx->msgid) - 1);
+  if (reason)
+    ircd_strncpy(ctx->reason, reason, sizeof(ctx->reason) - 1);
+  ctx->is_chanop = is_chanop;
+  ctx->is_oper = is_oper;
+
+  /* Create federation request with custom completion */
+  req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+  ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+  ircd_strncpy(req->target, target, sizeof(req->target) - 1);
+  ircd_snprintf(0, req->client_yxx, sizeof(req->client_yxx), "%s%s",
+                cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+  req->local_msgs = NULL;
+  req->local_count = 0;
+  req->fed_msgs = NULL;
+  req->fed_count = 0;
+  req->servers_pending = server_count;
+  req->start_time = CurrentTime;
+  req->limit = 1;
+  req->ops_override = 0;
+  req->completion_cb = complete_redact_fed;
+  req->cb_data = ctx;
+
+  fed_requests[i] = req;
+
+  /* Set timeout timer */
+  timer_add(timer_init(&req->timer), fed_timeout_callback,
+            (void *)req, TT_RELATIVE,
+            feature_int(FEAT_CHATHISTORY_TIMEOUT));
+  req->timer_active = 1;
+
+  /* Send CH Q X to storage servers */
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *server = lp->value.cptr;
+
+    if (is_ulined_server(server))
+      continue;
+    if (!has_chathistory_advertisement(server))
+      continue;
+
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s X %s 1 %s",
+                  target, s2s_ref, reqid);
+  }
+
+  return 0;
+}
+
+/*
  * ms_chathistory - server message handler for S2S chathistory federation
  *
  * P10 Format (optimized for efficiency):
@@ -3187,6 +3426,26 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       count = history_query_after(target, ref_type, ref_value, limit, &messages);
     } else if (query_subcmd_char == 'R') {
       count = history_query_around(target, ref_type, ref_value, limit, &messages);
+    } else if (query_subcmd_char == 'X') {
+      /* Exact message lookup by msgid — used for federated REDACT.
+       * ref is M<msgid> format from S2S. ref_value is the msgid.
+       */
+      if (ref_type == HISTORY_REF_MSGID && ref_value) {
+        struct HistoryMessage *single_msg = NULL;
+        int lrc = history_lookup_message(target, ref_value, &single_msg);
+        if (lrc == 0 && single_msg) {
+          send_ch_response(sptr, reqid, single_msg);
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 1", reqid);
+          history_free_messages(single_msg);
+        } else {
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+          if (single_msg)
+            history_free_messages(single_msg);
+        }
+      } else {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+      }
+      return 0;
     } else {
       /* Unsupported subcommand for federation */
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);

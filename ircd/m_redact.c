@@ -226,10 +226,15 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       history_free_messages(msg);
     }
   } else {
-    /* No local history - cannot verify message ownership.
-     * Reject locally; the client should be connected to a server
-     * that stores history. Federation (ms_redact) handles deletion
-     * on remote servers that do have history. */
+    /* No local history — try federated lookup via CH Q X.
+     * Storage servers will return the message metadata so we can
+     * validate authorization before propagating the REDACT. */
+    if (start_redact_fed_query(sptr, chptr, target, msgid, reason,
+                               is_chanop, is_oper) == 0) {
+      /* Federation query started — completion callback handles the rest */
+      return 0;
+    }
+    /* Federation not available or failed to start */
     send_fail(sptr, "REDACT", "UNKNOWN_MSGID", msgid,
               "Message history is not available on this server");
     return 0;

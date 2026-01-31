@@ -427,4 +427,20 @@ extern int history_quota_check(const char *channel, const char *account, int cha
 extern int chathistory_auto_replay(struct Client *sptr, const char *target,
                                    const char *since_timestamp, int limit);
 
+/** Start a federated REDACT query (exact message lookup via CH Q X).
+ * Used by m_redact on non-storing servers to look up message metadata
+ * from storage servers for authorization before propagating REDACT.
+ * @param[in] sptr Client requesting the redaction.
+ * @param[in] chptr Channel containing the message.
+ * @param[in] target Channel name.
+ * @param[in] msgid Message ID to look up.
+ * @param[in] reason Redaction reason (may be NULL).
+ * @param[in] is_chanop Whether requester is chanop.
+ * @param[in] is_oper Whether requester is oper.
+ * @return 0 on success (query started), -1 on failure.
+ */
+extern int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
+                                  const char *target, const char *msgid,
+                                  const char *reason, int is_chanop, int is_oper);
+
 #endif /* INCLUDED_history_h */
