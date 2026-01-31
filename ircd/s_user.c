@@ -445,9 +445,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     SetLocalNumNick(sptr);
 
-    /* Sanity check: cli_name must be set by the NICK command before
-     * registration can proceed.  If it's empty, something went wrong
-     * during auth — log and reject the client. */
+    /* cli_name must be set by NICK before registration proceeds.
+     * Assert in debug builds to get a core dump revealing the cause;
+     * guard in release builds to prevent corrupted state propagation. */
+    assert(*(cli_name(sptr)));
     if (!*(cli_name(sptr))) {
       log_write(LS_SYSTEM, L_CRIT, 0,
                 "register_user: cli_name is empty for client %p (fd %d, account %s)",

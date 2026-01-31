@@ -1556,12 +1556,6 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   assert(0 != pattern);
   assert(!IsServer(from) && !IsMe(from));
 
-  /* If the client has no channels, there are no common-channel recipients.
-   * Return early to avoid formatting a message buffer that would never be
-   * delivered. */
-  if (!cli_user(from) || !cli_user(from)->channel)
-    return;
-
   vd.vd_format = pattern; /* set up the struct VarData for %v */
 
   va_start(vd.vd_args, pattern);
@@ -1655,13 +1649,6 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   assert(0 != cli_from(from));
   assert(0 != pattern);
   assert(!IsServer(from) && !IsMe(from));
-
-  /* If the client has no channels, there are no common-channel recipients.
-   * Return early to avoid formatting a message buffer that would never be
-   * delivered (and to prevent the %:#C assertion firing during early
-   * registration when cli_name may still be empty). */
-  if (!cli_user(from) || !cli_user(from)->channel)
-    return;
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
 

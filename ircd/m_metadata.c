@@ -306,6 +306,38 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
   /* Check if target exists online */
   target_found = can_see_target(sptr, target, &is_channel, &target_client, &target_channel);
 
+  /* Validate target existence before processing keys.
+   * Per IRCv3 metadata spec, non-existent targets get TARGET_INVALID. */
+  if (!target_found) {
+    if (is_channel) {
+      /* Channels must exist in memory to be valid metadata targets */
+      send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+                "No such channel");
+      return 0;
+    }
+    /* For offline users, check if account has any metadata in LMDB */
+    if (metadata_lmdb_is_available()) {
+      struct MetadataEntry *entries = metadata_account_list(target);
+      if (entries) {
+        /* Account has LMDB data — valid offline target, proceed */
+        struct MetadataEntry *e = entries;
+        while (e) {
+          struct MetadataEntry *n = e->next;
+          metadata_free_entry(e);
+          e = n;
+        }
+      } else {
+        send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+                  "No such target");
+        return 0;
+      }
+    } else {
+      send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+                "No such target");
+      return 0;
+    }
+  }
+
   /* Process each key */
   for (i = 3; i < parc; i++) {
     const char *key = parv[i];
