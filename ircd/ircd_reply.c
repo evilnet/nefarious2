@@ -39,6 +39,7 @@
 #include "s_conf.h"
 #include "s_debug.h"
 #include "send.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -159,8 +160,20 @@ int send_reply(struct Client *to, int reply, ...)
 
   va_end(vd.vd_args);
 
-  /* send it to the user */
-  send_buffer(to, mb, 0);
+  /* Numeric replies are direct responses to whoever sent the command.
+   * When current_shadow is NULL (primary processing its own input),
+   * suppress duplication to shadows — they didn't ask for this reply.
+   * mirror_to_shadows overrides this for cases like JOIN TOPIC/NAMES
+   * where all bouncer connections need the response. */
+  {
+    int saved_suppress = suppress_shadow_dup;
+    if (!current_shadow && !mirror_to_shadows)
+      suppress_shadow_dup = 1;
+
+    send_buffer(to, mb, 0);
+
+    suppress_shadow_dup = saved_suppress;
+  }
 
   msgq_clean(mb);
 

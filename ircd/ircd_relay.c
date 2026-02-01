@@ -68,6 +68,7 @@
 #include "send.h"
 #include "metadata.h"
 #include "handlers.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -436,14 +437,32 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
   {
     char msgid[64] = "";
     char timestamp[32] = "";
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
-    /* Echo message back to sender if they have echo-message capability */
-    /* Use the variant that returns msgid/timestamp so we can store them in history */
-    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
+    /* Echo/mirror message back to sender's connections.
+     * - current_shadow: shadow sent this → mirror to primary + other shadows
+     *   (skip originating shadow unless it has echo-message)
+     * - need_echo: sender has echo-message → echo to sender + dup to shadows
+     * - has_shadows: primary sent this without echo-message → shadows only
+     *   (skip_primary_echo prevents unwanted echo to primary) */
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      /* Skip originating shadow if it doesn't have echo-message —
+       * the client already displayed the message locally. */
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
       sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
                                "%H :%s", chptr, mytext);
-    else if (feature_bool(FEAT_MSGID)) {
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    } else if (feature_bool(FEAT_MSGID)) {
       /* Generate msgid and timestamp even if not echoing, for history storage */
       struct timeval tv;
       gettimeofday(&tv, NULL);
@@ -461,9 +480,23 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
       store_channel_history(sptr, chptr, mytext, HISTORY_PRIVMSG, msgid, timestamp);
   }
 #else
-  /* Echo message back to sender if they have echo-message capability */
-  if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
-    sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
+  {
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
+      sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    }
+  }
 #endif
 }
 
@@ -554,13 +587,26 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   {
     char msgid[64] = "";
     char timestamp[32] = "";
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
-    /* Echo notice back to sender if they have echo-message capability */
-    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
+    /* Echo/mirror notice back to sender's connections.
+     * Same bouncer mirror logic as PRIVMSG above. */
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
       sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
                                "%H :%s", chptr, mytext);
-    else if (feature_bool(FEAT_MSGID)) {
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    } else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -577,9 +623,23 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
       store_channel_history(sptr, chptr, mytext, HISTORY_NOTICE, msgid, timestamp);
   }
 #else
-  /* Echo notice back to sender if they have echo-message capability */
-  if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG))
-    sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
+  {
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
+      sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    }
+  }
 #endif
 }
 
@@ -950,17 +1010,30 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     }
   }
 
-  /* Echo message back to sender if they have echo-message capability */
+  /* Echo/mirror private message back to sender's connections.
+   * Same bouncer mirror logic as channel messages. */
 #ifdef USE_MDBX
   {
     char msgid[64] = "";
     char timestamp[32] = "";
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
-    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
       sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
                                "%C :%s", acptr, mytext);
-    else if (feature_bool(FEAT_MSGID)) {
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    } else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -977,8 +1050,23 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
       store_private_history(sptr, acptr, mytext, HISTORY_PRIVMSG, msgid, timestamp);
   }
 #else
-  if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
-    sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, mytext);
+  {
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
+      sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, mytext);
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    }
+  }
 #endif
 }
 
@@ -1070,13 +1158,26 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   {
     char msgid[64] = "";
     char timestamp[32] = "";
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
-    /* Echo notice back to sender if they have echo-message capability */
-    if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
+    /* Echo/mirror private notice back to sender's connections.
+     * Same bouncer mirror logic as channel messages. */
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
       sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
                                "%C :%s", acptr, mytext);
-    else if (feature_bool(FEAT_MSGID)) {
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    } else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -1093,9 +1194,23 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, msgid, timestamp);
   }
 #else
-  /* Echo notice back to sender if they have echo-message capability */
-  if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr)
-    sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, mytext);
+  {
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int has_shadows = bsess && bsess->hs_shadow_count > 0;
+    if (need_echo || current_shadow || has_shadows) {
+      struct ShadowConnection *saved_shadow = current_shadow;
+      current_shadow = NULL;
+      if (has_shadows && !need_echo && !saved_shadow)
+        skip_primary_echo = 1;
+      if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
+        skip_shadow_dup = saved_shadow;
+      sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, mytext);
+      skip_primary_echo = 0;
+      skip_shadow_dup = NULL;
+      current_shadow = saved_shadow;
+    }
+  }
 #endif
 }
 

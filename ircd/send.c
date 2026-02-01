@@ -93,6 +93,29 @@ char *GlobalForwards[256];
  */
 struct ShadowTagContext shadow_tag_ctx;
 
+/** When non-zero, send_buffer() skips shadow duplication.
+ * Used by check_pings() to prevent server PINGs from reaching shadows;
+ * each shadow has its own independent PING cycle.
+ */
+int suppress_shadow_dup = 0;
+
+/** When non-zero, numeric replies bypass the default suppression and
+ * are duplicated to all shadows.  Set during JOIN post-join replies.
+ */
+int mirror_to_shadows = 0;
+
+/** When non-zero, send_buffer() skips the primary's sendQ but still
+ * runs the shadow duplication loop.  Delivers echoes to shadows
+ * without sending an unwanted echo to the primary connection.
+ */
+int skip_primary_echo = 0;
+
+/** When set, the shadow duplication loop skips this specific shadow.
+ * Prevents echoing a message back to the originating shadow when it
+ * hasn't negotiated echo-message (client displayed it locally).
+ */
+struct ShadowConnection *skip_shadow_dup = NULL;
+
 /** Format current time as ISO 8601 timestamp for server-time capability.
  * @param[out] buf Buffer to write timestamp to.
  * @param[in] buflen Size of buffer.
@@ -883,14 +906,20 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
    * This prevents unsolicited numerics/replies from appearing on other
    * connections, which confuses many IRC clients.
    *
-   * Broadcast traffic (channel messages etc.) calls send_buffer() with
-   * different targets (channel members), so it naturally reaches the
-   * primary. The duplication loop below handles broadcasting to shadows.
+   * IMPORTANT: This intercept is SKIPPED when shadow_tag_ctx.stc_active
+   * is set, indicating we are inside a channel broadcast function
+   * (sendcmdto_channel_*).  Channel messages (JOIN, PART, PRIVMSG, MODE,
+   * etc.) are state changes that ALL connections need as mirrors.  They
+   * flow normally to the primary sendQ and the duplication loop below
+   * delivers them to all shadows.
    */
-  if (current_shadow && MyUser(to) && !IsServer(to)) {
+  if (current_shadow && MyUser(to) && !IsServer(to) && !shadow_tag_ctx.stc_active) {
     struct BouncerSession *bsess = bounce_get_session(to);
     if (bsess && bsess->hs_client == to) {
-      /* This is a reply to the session's primary — route to originating shadow only.
+      /* This is a direct reply to the session's primary — route to originating
+       * shadow only.  Skip this intercept when stc_active is set (channel
+       * broadcast): channel messages (JOIN, PART, PRIVMSG, etc.) must reach
+       * ALL connections since shadows are mirrors of the primary.
        * Apply per-shadow tag filtering: strip tags the shadow hasn't negotiated. */
       if (!(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)) {
         struct MsgBuf *sh_buf = buf;
@@ -946,7 +975,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
           && CapOwnHas(to, shadow_tag_ctx.stc_skipcap))
         suppress_primary = 1;
     }
-    if (!suppress_primary) {
+    if (!suppress_primary && !skip_primary_echo) {
       msgq_add(&(cli_sendQ(to)), buf, prio);
       client_add_sendq(cli_connect(to), &send_queues);
       update_write(to);
@@ -968,7 +997,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
    *  - Tier 2: Otherwise (non-channel sends), strip or filter tags
    *    when the shadow's caps differ from the primary's.
    */
-  if (MyUser(to) && !IsServer(to)) {
+  if (MyUser(to) && !IsServer(to) && !suppress_shadow_dup) {
     struct BouncerSession *bsess = bounce_get_session(to);
     if (bsess && bsess->hs_shadow_count > 0) {
       struct ShadowConnection *sh;
@@ -989,6 +1018,11 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
         int sh_flags;
 
         if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+          continue;
+
+        /* Skip the originating shadow when it hasn't negotiated
+         * echo-message — the client already displayed it locally. */
+        if (sh == skip_shadow_dup)
           continue;
 
         /* Per-shadow cap routing: skip shadows that don't match the

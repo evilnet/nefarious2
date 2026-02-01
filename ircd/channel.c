@@ -1021,9 +1021,26 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
   if (member->channel->mode.exmode & EXMODE_OPERONLY && !IsAnOper(member->user))
     return 0;
 
-  /* If only SSL users may join and you're not one, you can't speak. */
-  if (member->channel->mode.exmode & EXMODE_SSLONLY && !IsSSL(member->user))
+  /* If only SSL users may join and you're not one, you can't speak.
+   * For bouncer sessions: if ANY connection is non-TLS, the session
+   * is treated as non-TLS.  If this invariant is violated (user is
+   * somehow in a +Z channel with a plaintext session), kick them
+   * rather than silently muting — makes the bug visible. */
+  if ((member->channel->mode.exmode & EXMODE_SSLONLY) &&
+      (!IsSSL(member->user) || bounce_session_has_plaintext(member->user))) {
+    if (IsSSL(member->user) && bounce_session_has_plaintext(member->user)) {
+      /* Invariant violation: TLS primary in +Z but session has plaintext.
+       * Kick from channel — this shouldn't happen with gates A/B working. */
+      sendcmdto_serv_butone(&me, CMD_KICK, NULL,
+                            "%H %C :SSL-only channel (insecure session)",
+                            member->channel, member->user);
+      sendcmdto_channel_butserv_butone(&me, CMD_KICK, member->channel, NULL, 0,
+                                       "%H %C :SSL-only channel (insecure session)",
+                                       member->channel, member->user);
+      make_zombie(member, member->user, &me, &me, member->channel);
+    }
     return 0;
+  }
 
   /* If only logged in users may join and you're not one, you can't speak. */
   if (member->channel->mode.mode & MODE_REGONLY && !IsAccount(member->user))

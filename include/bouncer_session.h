@@ -72,6 +72,7 @@ enum BouncerState {
 /** Shadow connection flags. */
 #define SHADOW_FLAGS_DEAD     0x0001  /**< Marked for cleanup */
 #define SHADOW_FLAGS_BLOCKED  0x0002  /**< Write blocked (sendQ full) */
+#define SHADOW_FLAGS_PINGSENT 0x0004  /**< PING sent, awaiting PONG */
 
 /** Shadow connection — a secondary TCP connection sharing a bouncer session's identity.
  *
@@ -426,6 +427,19 @@ extern time_t bounce_compute_hold_time_ext(struct BouncerSession *session);
 
 /** Check if bouncer feature is enabled. */
 extern int bounce_enabled(void);
+
+/** Check if a bouncer session has any non-TLS connection.
+ * Returns 1 if any connection (primary or shadow) lacks TLS.
+ * Returns 0 for non-bouncer clients or if all connections are TLS.
+ */
+extern int bounce_session_has_plaintext(struct Client *cptr);
+
+/** Check shadow liveness — send PINGs and timeout dead shadows.
+ * Called from check_pings() for bouncer primaries.
+ * @param[in] cptr Primary client of bouncer session.
+ * @param[in] max_ping Ping interval in seconds.
+ */
+extern void bounce_check_shadow_pings(struct Client *cptr, int max_ping);
 
 /** Get the number of sessions for an account. */
 extern int bounce_count(const char *account);

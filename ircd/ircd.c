@@ -545,6 +545,12 @@ static void check_pings(struct Event* ev) {
 
     max_ping = client_get_ping(cptr);
 
+    /* Check shadow liveness for bouncer primaries.
+     * Done here (before active-client skip) so shadows are checked
+     * even when the primary itself is active. */
+    if (IsUser(cptr))
+      bounce_check_shadow_pings(cptr, max_ping);
+
     /* If it's a server and we have not sent an AsLL lately, do so. */
     if (IsServer(cptr)) {
       if (CurrentTime - cli_serv(cptr)->asll_last >= max_ping) {
@@ -601,9 +607,13 @@ static void check_pings(struct Event* ev) {
       /* If we're late in noticing don't hold it against them :) */
       cli_lasttime(cptr) = CurrentTime - max_ping;
       
-      if (IsUser(cptr))
+      if (IsUser(cptr)) {
+        /* Suppress shadow duplication — shadows have their own PING cycle
+         * via bounce_check_shadow_pings(), not duplicated from primary. */
+        suppress_shadow_dup = 1;
         sendrawto_one(cptr, MSG_PING " :%s", cli_name(&me));
-      else
+        suppress_shadow_dup = 0;
+      } else
         sendcmdto_prio_one(&me, CMD_PING, cptr, ":%s", cli_name(&me));
     }
     

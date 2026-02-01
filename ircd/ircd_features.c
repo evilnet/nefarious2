@@ -944,6 +944,7 @@ static struct FeatureDesc {
   F_B(BOUNCER_AUTO_RESUME, 0, 1, 0),
   F_B(BOUNCER_AUTO_REPLAY, 0, 1, 0),
   F_I(BOUNCER_AUTO_REPLAY_LIMIT, 0, 100, 0),
+  F_B(BOUNCER_REQUIRE_TLS, 0, 1, 0),
   F_I(BOUNCER_MAX_HOLD, 0, 1209600, 0),      /* 14 days */
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */
   F_B(CAP_draft_bouncer, 0, 1, 0),

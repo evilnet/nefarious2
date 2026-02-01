@@ -62,6 +62,7 @@
 #include <unistd.h>
 
 #ifdef USE_SSL
+#include "ssl.h"
 #include <openssl/rand.h>
 #include <openssl/evp.h>
 #endif
@@ -425,6 +426,85 @@ struct BouncerSession *bounce_find_best_held(const char *account)
   return best;
 }
 
+/** Check if a bouncer session has any non-TLS connection.
+ * Used for session-wide TLS enforcement: one plaintext connection
+ * means the entire session is treated as non-TLS for +Z purposes.
+ * @param[in] cptr Client to check (must be the primary).
+ * @return 1 if any connection (primary or shadow) lacks TLS, 0 otherwise.
+ */
+int bounce_session_has_plaintext(struct Client *cptr)
+{
+#ifdef USE_SSL
+  struct BouncerSession *session;
+  struct ShadowConnection *shadow;
+
+  session = bounce_get_session(cptr);
+  if (!session || session->hs_state != BOUNCE_ACTIVE)
+    return 0;
+
+  /* Check primary */
+  if (session->hs_client && !cli_socket(session->hs_client).ssl)
+    return 1;
+
+  /* Check all live shadows */
+  for (shadow = session->hs_shadows; shadow; shadow = shadow->sh_next) {
+    if (!(shadow->sh_flags & SHADOW_FLAGS_DEAD) && !shadow->sh_socket.ssl)
+      return 1;
+  }
+
+  return 0;
+#else
+  return 0;
+#endif
+}
+
+/** Check shadow liveness — send PINGs to idle shadows, timeout dead ones.
+ * Called from check_pings() for bouncer primaries.  Each shadow has its
+ * own independent PING cycle so clients can detect server unreachability.
+ * @param[in] cptr Primary client of bouncer session.
+ * @param[in] max_ping Ping interval in seconds.
+ */
+void bounce_check_shadow_pings(struct Client *cptr, int max_ping)
+{
+  struct BouncerSession *session;
+  struct ShadowConnection *shadow;
+
+  session = bounce_get_session(cptr);
+  if (!session || session->hs_state != BOUNCE_ACTIVE || !session->hs_shadows)
+    return;
+
+  for (shadow = session->hs_shadows; shadow; shadow = shadow->sh_next) {
+    if (shadow->sh_flags & SHADOW_FLAGS_DEAD)
+      continue;
+
+    /* Timeout: no data in max_ping*2 — mark dead */
+    if (CurrentTime - shadow->sh_lasttime >= (time_t)(max_ping * 2)) {
+      Debug((DEBUG_INFO, "Bouncer: shadow #%u for %s ping timeout (%ld seconds)",
+             shadow->sh_id, cli_name(cptr),
+             (long)(CurrentTime - shadow->sh_lasttime)));
+      shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+      continue;
+    }
+
+    /* Idle: no data in max_ping — send PING if not already sent */
+    if (CurrentTime - shadow->sh_lasttime >= (time_t)max_ping &&
+        !(shadow->sh_flags & SHADOW_FLAGS_PINGSENT)) {
+      struct MsgBuf *mb;
+      mb = msgq_make(cptr, MSG_PING " :%s", cli_name(&me));
+      if (mb) {
+        msgq_add(&shadow->sh_sendQ, mb, 0);
+        socket_events(&shadow->sh_socket,
+                      SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+        msgq_clean(mb);
+      }
+      shadow->sh_flags |= SHADOW_FLAGS_PINGSENT;
+      /* Reset lasttime like check_pings does for primaries — don't penalize
+       * the shadow for the time we were late in noticing. */
+      shadow->sh_lasttime = CurrentTime - max_ping;
+    }
+  }
+}
+
 /** SASL-triggered automatic resume.
  * Called from register_user() after SASL auth sets the account
  * but before the client is introduced to the network.
@@ -499,6 +579,33 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
   /* Check for an ACTIVE session — attach as shadow connection */
   session = bounce_find_any_session(account);
   if (session && session->hs_state == BOUNCE_ACTIVE && session->hs_client) {
+#ifdef USE_SSL
+    /* If BOUNCER_REQUIRE_TLS is set, skip shadow for plaintext clients */
+    if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
+      Debug((DEBUG_INFO, "Bouncer: skipping shadow for plaintext client %s (REQUIRE_TLS)",
+             cli_name(cptr)));
+      goto skip_shadow;
+    }
+    /* Gate A: Block plaintext shadow if primary is in any +Z channel.
+     * One non-TLS connection compromises the entire session's +Z access.
+     * The client falls through to normal registration with a NOTE. */
+    if (!cli_socket(cptr).ssl && cli_user(session->hs_client)) {
+      struct Membership *m;
+      for (m = cli_user(session->hs_client)->channel; m; m = m->next_channel) {
+        if (m->channel->mode.exmode & EXMODE_SSLONLY) {
+          Debug((DEBUG_INFO,
+                 "Bouncer: blocking plaintext shadow for %s (session in +Z channel %s)",
+                 cli_name(cptr), m->channel->chname));
+          sendrawto_one(cptr,
+            ":%s NOTE BOUNCER TLS_REQUIRED "
+            ":Cannot attach to session - active session is in SSL-only (+Z) "
+            "channels. Connect with TLS to attach.",
+            cli_name(&me));
+          goto skip_shadow;
+        }
+      }
+    }
+#endif
     /* Convert this registering client into a shadow connection.
      * The Client struct will be freed; only the socket fd survives. */
     struct ShadowConnection *shadow;
@@ -537,25 +644,52 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
                        con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
         }
 
-        /* Recompute session union caps now that this shadow's caps are in play */
-        bounce_recompute_session_caps(session->hs_client);
+#ifdef USE_SSL
+        /* Transfer TLS state: steal SSL object from client, rebind to dup'd fd.
+         * SSL_set_fd() creates a new BIO for the new fd; the old fd's BIO is
+         * replaced.  After this, the SSL object operates on new_fd exclusively. */
+        if (cli_socket(cptr).ssl) {
+          shadow->sh_socket.ssl = cli_socket(cptr).ssl;
+          if (SSL_set_fd(shadow->sh_socket.ssl, new_fd) != 1) {
+            Debug((DEBUG_ERROR, "Bouncer: SSL_set_fd(%d) failed for shadow #%u",
+                   new_fd, shadow->sh_id));
+            /* SSL_set_fd failed — return SSL to client, remove broken shadow */
+            shadow->sh_socket.ssl = NULL;
+            bounce_remove_shadow(shadow);
+            shadow = NULL;
+            /* Fall through — shadow creation failed */
+          } else {
+            cli_socket(cptr).ssl = NULL;  /* Prevent exit_client from freeing */
+            Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
+                   shadow->sh_id, new_fd));
+          }
+        }
+#endif
 
-        Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
-               cli_name(cptr), shadow->sh_id, session->hs_sessid));
+        if (shadow) {
+          /* Recompute session union caps now that this shadow's caps are in play */
+          bounce_recompute_session_caps(session->hs_client);
 
-        *out_session = session;
+          Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
+                 cli_name(cptr), shadow->sh_id, session->hs_sessid));
 
-        /* Send registration sequence to the shadow.
-         * This happens AFTER the Client is freed in register_user(),
-         * so we queue it via bounce_send_shadow_welcome(). */
+          *out_session = session;
 
-        return 2; /* Signal: converted to shadow, do not introduce to network */
+          /* Send registration sequence to the shadow.
+           * This happens AFTER the Client is freed in register_user(),
+           * so we queue it via bounce_send_shadow_welcome(). */
+
+          return 2; /* Signal: converted to shadow, do not introduce to network */
+        }
       } else {
         /* Failed to create shadow — close the dup'd fd */
         close(new_fd);
       }
     }
   }
+#ifdef USE_SSL
+skip_shadow:
+#endif
 
   /* No held session — auto-create only if account has NO sessions at all.
    * If sessions already exist (all ACTIVE), this is just a second connection
@@ -845,6 +979,10 @@ void bounce_destroy(struct BouncerSession *session)
      * ET_DESTROY handler from freeing the shadow (which would make
      * the MsgQClear/dbuf_delete below use-after-free). */
     s_data(&shadow->sh_socket) = NULL;
+#ifdef USE_SSL
+    ssl_free(&shadow->sh_socket);
+    shadow->sh_socket.ssl = NULL;
+#endif
     socket_del(&shadow->sh_socket);
     if (shadow->sh_fd >= 0) {
       close(shadow->sh_fd);
@@ -1554,8 +1692,19 @@ static void shadow_flush_sendq(struct ShadowConnection *shadow)
   if (MsgQLength(&shadow->sh_sendQ) == 0)
     return;
 
-  result = os_sendv_nonb(shadow->sh_fd, &shadow->sh_sendQ,
-                         &bytes_count, &bytes_written);
+#ifdef USE_SSL
+  if (shadow->sh_socket.ssl) {
+    struct Client *primary = (shadow->sh_session && shadow->sh_session->hs_client)
+                             ? shadow->sh_session->hs_client : NULL;
+    if (!primary) { shadow->sh_flags |= SHADOW_FLAGS_DEAD; return; }
+    result = ssl_sendv(&shadow->sh_socket, primary,
+                       &shadow->sh_sendQ, &bytes_count, &bytes_written);
+  } else
+#endif
+  {
+    result = os_sendv_nonb(shadow->sh_fd, &shadow->sh_sendQ,
+                           &bytes_count, &bytes_written);
+  }
 
   switch (result) {
   case IO_SUCCESS:
@@ -1717,9 +1866,18 @@ static int shadow_read_packet(struct ShadowConnection *shadow)
 
   primary = session->hs_client;
 
+#ifdef USE_SSL
+shadow_ssl_read_again:
+#endif
   /* Read from shadow's socket */
-  result = os_recv_nonb(shadow->sh_fd, readbuf, sizeof(readbuf) - 1,
-                        (unsigned int *)&length);
+#ifdef USE_SSL
+  if (shadow->sh_socket.ssl)
+    result = ssl_recv(&shadow->sh_socket, primary, readbuf,
+                      sizeof(readbuf) - 1, (unsigned int *)&length);
+  else
+#endif
+    result = os_recv_nonb(shadow->sh_fd, readbuf, sizeof(readbuf) - 1,
+                          (unsigned int *)&length);
 
   switch (result) {
   case IO_SUCCESS:
@@ -1733,6 +1891,7 @@ static int shadow_read_packet(struct ShadowConnection *shadow)
   }
 
   shadow->sh_lasttime = CurrentTime;
+  shadow->sh_flags &= ~SHADOW_FLAGS_PINGSENT;
 
   /* Append to shadow's parse buffer */
   if (shadow->sh_count + length >= BUFSIZE) {
@@ -1763,22 +1922,28 @@ static int shadow_read_packet(struct ShadowConnection *shadow)
         return -1;
       }
 
-      /* Handle PING/PONG locally for the shadow */
+      /* Handle PING locally for the shadow — respond with PONG */
       if (line_len >= 4 && 0 == ircd_strncmp(s, "PING", 4)) {
-        /* Respond directly to the shadow with PONG */
-        char pong[BUFSIZE];
-        int pong_len;
         struct MsgBuf *mb;
         const char *param = (s[4] == ' ') ? s + 5 : cli_name(&me);
-        pong_len = ircd_snprintf(0, pong, sizeof(pong),
-                                 ":%s PONG %s :%s\r\n",
-                                 cli_name(&me), cli_name(&me), param);
-        /* Write directly to shadow sendQ */
-        mb = msgq_make(primary, "%s", pong);
+        /* msgq_make appends \r\n, so don't include it in the format */
+        mb = msgq_make(primary, ":%s PONG %s :%s",
+                       cli_name(&me), cli_name(&me), param);
         if (mb) {
           msgq_add(&shadow->sh_sendQ, mb, 0);
+          socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
           msgq_clean(mb);
         }
+        shadow->sh_lasttime = CurrentTime;
+        shadow->sh_flags &= ~SHADOW_FLAGS_PINGSENT;
+        s = end + 1;
+        continue;
+      }
+
+      /* Handle PONG locally — update shadow liveness, don't forward to primary */
+      if (line_len >= 4 && 0 == ircd_strncmp(s, "PONG", 4)) {
+        shadow->sh_lasttime = CurrentTime;
+        shadow->sh_flags &= ~SHADOW_FLAGS_PINGSENT;
         s = end + 1;
         continue;
       }
@@ -1824,6 +1989,14 @@ static int shadow_read_packet(struct ShadowConnection *shadow)
     shadow->sh_buffer[remaining] = '\0';
   }
 
+#ifdef USE_SSL
+  /* Drain SSL internal buffer — OpenSSL may have decrypted multiple IRC
+   * commands from a single TLS record.  Without this, commands buffered
+   * inside OpenSSL stall until the next network read triggers epoll. */
+  if (shadow->sh_socket.ssl && ssl_pending(&shadow->sh_socket) > 0)
+    goto shadow_ssl_read_again;
+#endif
+
   return 0;
 }
 
@@ -1846,6 +2019,10 @@ static void shadow_sock_callback(struct Event *ev)
      * never accesses freed memory in the epoll dispatch loop.
      * bounce_promote_shadow() and bounce_destroy() clear s_data before
      * socket_del() and use bounce_defer_shadow_free() instead. */
+#ifdef USE_SSL
+    if (shadow)
+      ssl_free(&shadow->sh_socket);
+#endif
     if (shadow)
       MyFree(shadow);
     return;
@@ -2033,6 +2210,12 @@ void bounce_remove_shadow(struct ShadowConnection *shadow)
   MsgQClear(&shadow->sh_sendQ);
   dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
 
+  /* Free SSL before closing fd — SSL_free sends close_notify on the socket */
+#ifdef USE_SSL
+  ssl_free(&shadow->sh_socket);
+  shadow->sh_socket.ssl = NULL;
+#endif
+
   /* socket_del clears pending events; close fd after so the fd isn't
    * reused before the engine stops tracking it. */
   socket_del(&shadow->sh_socket);
@@ -2080,8 +2263,43 @@ int bounce_promote_shadow(struct BouncerSession *session)
   con = cli_connect(cptr);
   assert(0 != con);
 
-  /* Remove from shadow list (it's becoming the primary) */
-  session->hs_shadows = shadow->sh_next;
+#ifdef USE_SSL
+  /* Prefer a TLS shadow if the primary had TLS, to preserve +z usermode
+   * and +Z (SSL-only) channel access.  Falls back to first shadow if
+   * no TLS shadow exists. */
+  if (IsSSL(cptr)) {
+    struct ShadowConnection *s;
+    for (s = session->hs_shadows; s; s = s->sh_next) {
+      if (s->sh_socket.ssl) { shadow = s; break; }
+    }
+  }
+
+  /* Refuse promotion if it would put a non-TLS connection in +Z channels.
+   * Primary was TLS, best shadow is plaintext, user is in +Z → HOLDING. */
+  if (IsSSL(cptr) && !shadow->sh_socket.ssl && cli_user(cptr)) {
+    struct Membership *m;
+    for (m = cli_user(cptr)->channel; m; m = m->next_channel) {
+      if (m->channel->mode.exmode & EXMODE_SSLONLY) {
+        Debug((DEBUG_INFO,
+               "Bouncer: refusing promotion for %s - no TLS shadow, in +Z channel %s",
+               cli_name(cptr), m->channel->chname));
+        return -1;  /* Session goes to HOLDING */
+      }
+    }
+  }
+#endif
+
+  /* Unlink chosen shadow from list (may not be the first element
+   * when TLS preference selected a different shadow). */
+  {
+    struct ShadowConnection **pp;
+    for (pp = &session->hs_shadows; *pp; pp = &(*pp)->sh_next) {
+      if (*pp == shadow) {
+        *pp = shadow->sh_next;
+        break;
+      }
+    }
+  }
   session->hs_shadow_count--;
   shadow->sh_next = NULL;
 
@@ -2117,6 +2335,20 @@ int bounce_promote_shadow(struct BouncerSession *session)
     LocalClientArray[old_fd] = 0;
     close(old_fd);
   }
+
+#ifdef USE_SSL
+  /* Free the primary's old SSL object (if any).  This must happen AFTER
+   * close(old_fd) — SSL_free implicitly calls SSL_shutdown which needs
+   * the fd to be gone so the close_notify isn't actually sent. */
+  if (con_socket(con).ssl) {
+    SSL_free(con_socket(con).ssl);
+    con_socket(con).ssl = NULL;
+  }
+  /* Transfer shadow's SSL object to the primary's Connection.
+   * NULL out shadow's copy so deferred free doesn't double-free. */
+  con_socket(con).ssl = shadow->sh_socket.ssl;
+  shadow->sh_socket.ssl = NULL;
+#endif
 
   /* Step 4: Transplant the stolen fd into the Client's Connection. */
   s_fd(&con_socket(con)) = fd;
@@ -2166,6 +2398,33 @@ int bounce_promote_shadow(struct BouncerSession *session)
   /* Step 9: Reset socket interest to readable only (we may have been
    * writable from the old connection's pending sendQ). */
   socket_events(&cli_socket(cptr), SOCK_EVENT_READABLE);
+
+#ifdef USE_SSL
+  /* Step 9b: Update FLAG_SSL and channel nonsslusers counters.
+   * A TLS→plaintext promotion clears +z and increments nonsslusers.
+   * A plaintext→TLS promotion sets +z and decrements nonsslusers.
+   * This ensures +Z (SSL-only) channel enforcement stays correct. */
+  {
+    int was_ssl = IsSSL(cptr);
+    int now_ssl = (con_socket(con).ssl != NULL);
+    if (now_ssl && !was_ssl) {
+      SetSSL(cptr);
+      if (cli_user(cptr)) {
+        struct Membership *m;
+        for (m = cli_user(cptr)->channel; m; m = m->next_channel)
+          if (m->channel->nonsslusers > 0)
+            m->channel->nonsslusers--;
+      }
+    } else if (!now_ssl && was_ssl) {
+      ClearSSL(cptr);
+      if (cli_user(cptr)) {
+        struct Membership *m;
+        for (m = cli_user(cptr)->channel; m; m = m->next_channel)
+          m->channel->nonsslusers++;
+      }
+    }
+  }
+#endif
 
   /* Step 10: Update timing */
   con_lasttime(con) = shadow->sh_lasttime;
@@ -2485,6 +2744,13 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
     ":%s 004 %s %s %s %s %s %s\r\n",
     cli_name(&me), nick, cli_name(&me), version,
     infousermodes, infochanmodes, infochanmodeswithparams);
+
+  /* 005 RPL_ISUPPORT — required for clients to know channel modes,
+   * PREFIX, CHANMODES, etc.  Route via current_shadow so send_reply()
+   * delivers to the shadow's sendQ through the intercept path. */
+  current_shadow = shadow;
+  send_supported(primary);
+  current_shadow = NULL;
 
   /* 375 RPL_MOTDSTART + 376 RPL_ENDOFMOTD (minimal) */
   shadow_send_raw(shadow, primary,

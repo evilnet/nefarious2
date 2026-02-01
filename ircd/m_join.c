@@ -46,6 +46,7 @@
 #include "sys.h"
 #include "handlers.h"
 #include "ml_storage.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -174,7 +175,8 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
 
     /* Check Apass/Upass -- since we only ever look at a single
      * "key" per channel now, this hampers brute force attacks. */
-    if (feature_bool(FEAT_CHMODE_Z_STRICT) && (chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
+    if (feature_bool(FEAT_CHMODE_Z_STRICT) && (chptr->mode.exmode & EXMODE_SSLONLY) &&
+        (!IsSSL(sptr) || bounce_session_has_plaintext(sptr)))
       err = ERR_SSLONLYCHAN;
     else if (key && !strcmp(key, chptr->mode.apass))
       flags = CHFL_CHANOP | CHFL_CHANNEL_MANAGER;
@@ -186,7 +188,8 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
       chptr->creationtime++;
     } else if (IsXtraOp(sptr)) {
       /* XtraOp bypasses all other checks. */
-    } else if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr))
+    } else if ((chptr->mode.exmode & EXMODE_SSLONLY) &&
+               (!IsSSL(sptr) || bounce_session_has_plaintext(sptr)))
       err = ERR_SSLONLYCHAN;
     else if (IsInvited(sptr, chptr)) {
       /* Invites bypass these other checks. */
@@ -277,18 +280,31 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
 
   del_invite(sptr, chptr);
 
-  if (chptr->topic[0]) {
-    send_reply(sptr, RPL_TOPIC, chptr->chname, chptr->topic);
-    send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
-               chptr->topic_time);
+  /* Post-JOIN replies (TOPIC, MARKREAD, NAMES) must reach ALL bouncer
+   * connections, not just the originating shadow.  Clear current_shadow
+   * so replies go to the primary's sendQ + shadow duplication loop, and
+   * set mirror_to_shadows to override the default numeric suppression. */
+  {
+    struct ShadowConnection *saved_shadow = current_shadow;
+    current_shadow = NULL;
+    mirror_to_shadows = 1;
+
+    if (chptr->topic[0]) {
+      send_reply(sptr, RPL_TOPIC, chptr->chname, chptr->topic);
+      send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
+                 chptr->topic_time);
+    }
+
+    /* Send MARKREAD for draft/read-marker before NAMES (per spec: after JOIN, before 366) */
+    send_markread_on_join(sptr, chptr->chname);
+
+    /* Skip implicit NAMES if client has draft/no-implicit-names capability */
+    if (!HasCap(sptr, CAP_DRAFT_NOIMPLICITNAMES))
+      do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
+
+    mirror_to_shadows = 0;
+    current_shadow = saved_shadow;
   }
-
-  /* Send MARKREAD for draft/read-marker before NAMES (per spec: after JOIN, before 366) */
-  send_markread_on_join(sptr, chptr->chname);
-
-  /* Skip implicit NAMES if client has draft/no-implicit-names capability */
-  if (!HasCap(sptr, CAP_DRAFT_NOIMPLICITNAMES))
-    do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
 }
 
 /** Handle a JOIN message from a client connection.

@@ -438,6 +438,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
        * auth struct, leading to empty cli_name on registration. */
       auth_detach_client(cli_auth(sptr));
       cli_auth(sptr) = NULL;
+      SetFlag(sptr, FLAG_DEADSOCKET);  /* Suppress ERROR on shared socket */
       SetFlag(sptr, FLAG_KILLED);
       exit_client(cptr, sptr, &me, "Converted to bouncer shadow");
       return 0; /* Client freed, do not continue registration */

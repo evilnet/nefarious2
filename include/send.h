@@ -58,6 +58,32 @@ extern void send_queued(struct Client *to);
  */
 extern void sendrawto_one(struct Client *to, const char *pattern, ...);
 
+/** When set, send_buffer() skips the shadow duplication loop.
+ * Used by check_pings() to prevent server PINGs from being duplicated
+ * to shadows — each shadow has its own independent PING cycle.
+ */
+extern int suppress_shadow_dup;
+
+/** When set, numeric replies (send_reply) are duplicated to shadows
+ * even when current_shadow is NULL.  Used by JOIN to mirror TOPIC,
+ * NAMES, and MARKREAD to all bouncer connections.
+ */
+extern int mirror_to_shadows;
+
+/** When set, send_buffer() skips the primary's sendQ but still runs
+ * the shadow duplication loop.  Used to deliver echoes to shadows
+ * without sending an unwanted echo to the primary.
+ */
+extern int skip_primary_echo;
+
+/** When set, the shadow duplication loop skips this specific shadow.
+ * Used to avoid echoing a message back to the shadow that sent it
+ * when that shadow hasn't negotiated echo-message (the client already
+ * displayed it locally).
+ */
+struct ShadowConnection;
+extern struct ShadowConnection *skip_shadow_dup;
+
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,
 			  const char *tok, struct Client *to,

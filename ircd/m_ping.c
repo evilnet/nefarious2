@@ -164,7 +164,11 @@ int m_ping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NOORIGIN);
 
+  /* Suppress shadow duplication — each shadow has its own PING/PONG
+   * cycle, so the primary's PONG must not leak to shadows. */
+  suppress_shadow_dup = 1;
   sendcmdto_one(&me, CMD_PONG, sptr, "%C :%s", &me, parv[1]);
+  suppress_shadow_dup = 0;
   return 0;
 }
 
