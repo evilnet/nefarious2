@@ -886,6 +886,9 @@ static struct FeatureDesc {
   F_S(CHATHISTORY_DB, 0, "history", 0),
   F_B(CHATHISTORY_DB_AUTOGROW, 0, 1, 0),
   F_I(CHATHISTORY_DB_GROWTH_STEP, 0, 16777216, 0),  /* 16MB default growth step */
+  F_B(CHATHISTORY_DB_NOSYNC, 0, 1, 0),
+  F_I(CHATHISTORY_DB_SYNC_INTERVAL, 0, 10, 0),      /* seconds between syncs when nosync enabled */
+  F_I(CHATHISTORY_DB_PARK_INTERVAL, 0, 50, 0),      /* park read txn every N messages; 0 = disable */
   F_I(CHATHISTORY_RETENTION, 0, 7, feature_notify_chathistory_retention),
   F_B(CHATHISTORY_FEDERATION, 0, 1, 0),
   F_I(CHATHISTORY_TIMEOUT, 0, 5, 0),
@@ -928,6 +931,7 @@ static struct FeatureDesc {
   F_B(METADATA_BURST, 0, 1, 0),
   F_S(METADATA_DB, 0, "metadata", 0),
   F_B(METADATA_DB_AUTOGROW, 0, 1, 0),
+  F_B(METADATA_DB_NORDAHEAD, 0, 1, 0),
   F_I(METADATA_CACHE_TTL, 0, 14400, 0),
   F_I(METADATA_PURGE_FREQUENCY, 0, 3600, 0),
 #ifdef USE_ZSTD

@@ -549,7 +549,6 @@ static int bouncer_settings(struct Client *sptr)
 {
   int hold;
   int count;
-  struct MetadataEntry *md;
   const char *hold_src = "default";
 
   if (!IsAccount(sptr)) {
@@ -558,15 +557,15 @@ static int bouncer_settings(struct Client *sptr)
     return 0;
   }
 
-  /* Check hold preference: user mode/metadata > default */
+  /* Check hold preference — read from persistent (mdbx) store */
   if (IsBncHoldPref(sptr)) {
     hold = 1;
     hold_src = "mode";
   } else {
-    md = metadata_get_client(sptr, "bouncer/hold");
-    if (md && md->value) {
-      hold = 0;  /* Explicitly disabled */
-      hold_src = "mode";
+    char hold_val[64];
+    if (metadata_account_get(cli_account(sptr), "bouncer/hold", hold_val) == 0) {
+      hold = (hold_val[0] == '1') ? 1 : 0;
+      hold_src = "account";
     } else {
       hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
     }
@@ -674,7 +673,6 @@ static int bouncer_info(struct Client *sptr)
   struct AccountSessions *as;
   struct BouncerSession *s;
   int hold;
-  struct MetadataEntry *md;
   const char *hold_src = "default";
 
   if (!IsAccount(sptr)) {
@@ -683,14 +681,15 @@ static int bouncer_info(struct Client *sptr)
     return 0;
   }
 
-  /* Determine hold preference */
+  /* Determine hold preference — read from persistent (mdbx) store,
+   * not cli_metadata which may not be populated after a restart. */
   if (IsBncHoldPref(sptr)) {
     hold = 1;
     hold_src = "account";
   } else {
-    md = metadata_get_client(sptr, "bouncer/hold");
-    if (md && md->value) {
-      hold = (md->value[0] == '1') ? 1 : 0;
+    char hold_val[64];
+    if (metadata_account_get(cli_account(sptr), "bouncer/hold", hold_val) == 0) {
+      hold = (hold_val[0] == '1') ? 1 : 0;
       hold_src = "account";
     } else {
       hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);

@@ -259,7 +259,14 @@ int metadata_lmdb_init(const char *dbpath)
     return -1;
   }
 
-  rc = mdbx_env_open(metadata_env, dbpath, 0, 0644);
+  {
+    unsigned int env_flags = 0;
+    if (feature_bool(FEAT_METADATA_DB_NORDAHEAD)) {
+      env_flags |= MDBX_NORDAHEAD;
+      log_write(LS_SYSTEM, L_INFO, 0, "metadata: using MDBX_NORDAHEAD for random-access pattern");
+    }
+    rc = mdbx_env_open(metadata_env, dbpath, env_flags, 0644);
+  }
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_env_open(%s) failed: %s",
               dbpath, mdbx_strerror(rc));
@@ -309,6 +316,13 @@ int metadata_lmdb_init(const char *dbpath)
 
   metadata_lmdb_available = 1;
   log_write(LS_SYSTEM, L_INFO, 0, "metadata: LMDB initialized at %s", dbpath);
+
+  /* Pre-fault database pages into OS page cache */
+  rc = mdbx_env_warmup(metadata_env, NULL, MDBX_warmup_default, 0);
+  if (rc != MDBX_SUCCESS && rc != MDBX_RESULT_TRUE)
+    log_write(LS_SYSTEM, L_WARNING, 0, "metadata: mdbx_env_warmup failed: %s",
+              mdbx_strerror(rc));
+
   return 0;
 }
 
@@ -1145,6 +1159,23 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
       return entry;
   }
 
+  /* Fall through to persistent store for logged-in users.
+   * metadata_set_client persists to mdbx, but after a restart
+   * the client struct is fresh — load the value on first access. */
+  if (cli_user(cptr) && cli_user(cptr)->account[0] && key[0] != '$'
+      && metadata_lmdb_is_available()) {
+    char value[METADATA_VALUE_LEN];
+    if (metadata_account_get(cli_user(cptr)->account, key, value) == 0) {
+      if (metadata_set_client(cptr, key, value, METADATA_VIS_PRIVATE) == 0) {
+        /* Re-scan — entry is now in the list */
+        for (entry = cli_metadata(cptr); entry; entry = entry->next) {
+          if (ircd_strcmp(entry->key, key) == 0)
+            return entry;
+        }
+      }
+    }
+  }
+
   return NULL;
 }
 
@@ -1714,12 +1745,31 @@ metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                metadata_lmdb_available ? "Available" : "Unavailable");
 
     if (metadata_lmdb_available && metadata_env) {
+      MDBX_stat envstat;
+
       /* Get environment info */
       rc = mdbx_env_info_ex(metadata_env, NULL, &info, sizeof(info));
       if (rc == MDBX_SUCCESS) {
         send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                   "M :  Map size: %lu MB",
+                   "M :  Geometry: %lu / %lu MB (current/max)",
+                   (unsigned long)(info.mi_geo.current / (1024 * 1024)),
                    (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
+        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                   "M :  Readers: %u active",
+                   info.mi_numreaders);
+      }
+
+      rc = mdbx_env_stat_ex(metadata_env, NULL, &envstat, sizeof(envstat));
+      if (rc == MDBX_SUCCESS) {
+        size_t total_pages = (info.mi_last_pgno + 1);
+        size_t data_pages = envstat.ms_branch_pages + envstat.ms_leaf_pages + envstat.ms_overflow_pages;
+        size_t free_pages = total_pages > data_pages ? total_pages - data_pages : 0;
+        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                   "M :  Pages: branch=%lu leaf=%lu overflow=%lu free=%lu",
+                   (unsigned long)envstat.ms_branch_pages,
+                   (unsigned long)envstat.ms_leaf_pages,
+                   (unsigned long)envstat.ms_overflow_pages,
+                   (unsigned long)free_pages);
       }
 
       /* Get database stats */
@@ -1728,7 +1778,13 @@ metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
         rc = mdbx_dbi_stat(txn, metadata_dbi, &stat, sizeof(stat));
         if (rc == 0) {
           send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                     "M :  Account metadata DB: %lu entries",
+                     "M :  Account metadata DB: %lu entries, depth %u",
+                     (unsigned long)stat.ms_entries, stat.ms_depth);
+        }
+        rc = mdbx_dbi_stat(txn, readmarkers_dbi, &stat, sizeof(stat));
+        if (rc == 0) {
+          send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                     "M :  Read markers DB: %lu entries",
                      (unsigned long)stat.ms_entries);
         }
         mdbx_txn_abort(txn);

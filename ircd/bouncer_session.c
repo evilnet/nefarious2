@@ -1477,10 +1477,11 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
         /* User has +b mode set (synced with $bouncer/hold metadata) */
         should_hold = 1;
       } else {
-        /* Check if user explicitly disabled (metadata "0") vs no preference */
-        struct MetadataEntry *md = metadata_get_client(cptr, "bouncer/hold");
-        if (md && md->value) {
-          should_hold = 0;  /* Explicitly disabled */
+        /* Check persistent metadata — cli_metadata may not be populated
+         * after a restart; metadata_account_get reads from mdbx. */
+        char hold_val[64];
+        if (metadata_account_get(cli_account(cptr), "bouncer/hold", hold_val) == 0) {
+          should_hold = (hold_val[0] != '0');
         } else {
           should_hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
         }

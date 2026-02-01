@@ -429,13 +429,34 @@ int history_init(const char *dbpath)
   }
 
   /* Open environment */
-  rc = mdbx_env_open(history_env, dbpath, 0, 0644);
+  {
+    unsigned int env_flags = 0;
+    if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
+      env_flags |= MDBX_SAFE_NOSYNC;
+      log_write(LS_SYSTEM, L_INFO, 0, "history: using MDBX_SAFE_NOSYNC with %d second sync interval",
+                feature_int(FEAT_CHATHISTORY_DB_SYNC_INTERVAL));
+    }
+    rc = mdbx_env_open(history_env, dbpath, env_flags, 0644);
+  }
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_open(%s) failed: %s",
               dbpath, mdbx_strerror(rc));
     mdbx_env_close(history_env);
     history_env = NULL;
     return -1;
+  }
+
+  /* Configure built-in periodic sync when NOSYNC is enabled */
+  if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
+    int sync_interval = feature_int(FEAT_CHATHISTORY_DB_SYNC_INTERVAL);
+    if (sync_interval > 0) {
+      /* MDBX_opt_sync_period uses 16.16 fixed-point seconds */
+      rc = mdbx_env_set_option(history_env, MDBX_opt_sync_period,
+                               (uint64_t)sync_interval * 65536);
+      if (rc != MDBX_SUCCESS)
+        log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_env_set_option(sync_period) failed: %s",
+                  mdbx_strerror(rc));
+    }
   }
 
   /* Open databases in a transaction */
@@ -504,6 +525,12 @@ int history_init(const char *dbpath)
   history_available = 1;
   log_write(LS_SYSTEM, L_INFO, 0, "history: LMDB initialized at %s", dbpath);
 
+  /* Pre-fault database pages into OS page cache for faster initial queries */
+  rc = mdbx_env_warmup(history_env, NULL, MDBX_warmup_default, 0);
+  if (rc != MDBX_SUCCESS && rc != MDBX_RESULT_TRUE)
+    log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_env_warmup failed: %s",
+              mdbx_strerror(rc));
+
   return 0;
 }
 
@@ -511,6 +538,12 @@ void history_shutdown(void)
 {
   if (!history_available)
     return;
+
+  /* Force sync before shutdown if NOSYNC mode was used */
+  if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
+    log_write(LS_SYSTEM, L_INFO, 0, "history: final sync before shutdown");
+    mdbx_env_sync_ex(history_env, true, false);
+  }
 
   mdbx_dbi_close(history_env, history_dbi);
   mdbx_dbi_close(history_env, history_msgid_dbi);
@@ -591,7 +624,12 @@ store_retry:
   data.iov_base = valbuf;
 #endif
 
-  rc = mdbx_put(txn, history_dbi, &key, &data, 0);
+  /* Try MDBX_APPEND first — skips B-tree traversal when key is the global max.
+   * Messages arrive chronologically per-channel, so for the most active channel
+   * this often succeeds. Falls back to normal put on key mismatch. */
+  rc = mdbx_put(txn, history_dbi, &key, &data, MDBX_APPEND);
+  if (rc == MDBX_EKEYMISMATCH)
+    rc = mdbx_put(txn, history_dbi, &key, &data, 0);
   if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: mdbx_put failed: %s", mdbx_strerror(rc)));
     mdbx_txn_abort(txn);
@@ -872,10 +910,69 @@ static int history_query_internal(const char *target,
     }
     count++;
 
+    /* Periodically park/unpark the read transaction to release the snapshot.
+     * This prevents long-running reads from blocking GC page reclamation
+     * by writers. The park interval is feature-controlled; 0 disables. */
+    {
+      int park_interval = feature_int(FEAT_CHATHISTORY_DB_PARK_INTERVAL);
+      if (park_interval > 0 && count % park_interval == 0) {
+        /* Save current key for cursor re-positioning */
+        char saved_key[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+        size_t saved_keylen = key.iov_len < sizeof(saved_key) ? key.iov_len : sizeof(saved_key) - 1;
+        memcpy(saved_key, key.iov_base, saved_keylen);
+
+        mdbx_cursor_close(cursor);
+        cursor = NULL;
+
+        rc = mdbx_txn_park(txn, 0);
+        if (rc != MDBX_SUCCESS) {
+          log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_txn_park failed: %s", mdbx_strerror(rc));
+          break;
+        }
+
+        rc = mdbx_txn_unpark(txn, 0);
+        if (rc != MDBX_SUCCESS) {
+          log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_txn_unpark failed: %s", mdbx_strerror(rc));
+          break;
+        }
+
+        rc = mdbx_cursor_open(txn, history_dbi, &cursor);
+        if (rc != MDBX_SUCCESS)
+          break;
+
+        /* Re-position cursor at saved key */
+        key.iov_base = saved_key;
+        key.iov_len = saved_keylen;
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
+
+        if (rc != 0)
+          break;
+
+        /* For backwards iteration, the saved key was the last one we processed.
+         * SET_RANGE lands on >= saved_key, so step back to continue. */
+        if (op == MDBX_PREV) {
+          rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+          if (rc != 0)
+            break;
+        }
+        /* For forward iteration, SET_RANGE lands on >= saved_key. If it lands
+         * on the exact same key we already processed, advance past it. */
+        else if (key.iov_len == saved_keylen &&
+                 memcmp(key.iov_base, saved_key, saved_keylen) == 0) {
+          rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+          if (rc != 0)
+            break;
+        }
+
+        continue;  /* Re-check target prefix boundary before processing */
+      }
+    }
+
     rc = mdbx_cursor_get(cursor, &key, &data, op);
   }
 
-  mdbx_cursor_close(cursor);
+  if (cursor)
+    mdbx_cursor_close(cursor);
   mdbx_txn_abort(txn);
 
   log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: returning count=%d for target='%s'",
@@ -2232,6 +2329,14 @@ void history_maintenance_tick(void)
   if (!history_available)
     return;
 
+  /* Clean up stale reader slots to prevent GC blockage */
+  {
+    int dead = 0;
+    mdbx_reader_check(history_env, &dead);
+    if (dead > 0)
+      log_write(LS_SYSTEM, L_WARNING, 0, "history: cleared %d stale reader(s)", dead);
+  }
+
   now = time(NULL);
 
   /* Check if maintenance interval has passed */
@@ -2358,6 +2463,30 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   } else {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "H :  Last eviction: never");
+  }
+
+  /* Environment-level mdbx diagnostics */
+  {
+    size_t total_pages = (info.mi_last_pgno + 1);
+    size_t data_pages = envstat.ms_branch_pages + envstat.ms_leaf_pages + envstat.ms_overflow_pages;
+    size_t free_pages = total_pages > data_pages ? total_pages - data_pages : 0;
+
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Geometry: %lu / %lu / %lu MB (current/grow-to/max)",
+               (unsigned long)(info.mi_geo.current / (1024 * 1024)),
+               (unsigned long)(info.mi_geo.grow / (1024 * 1024)),
+               (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Pages: branch=%lu leaf=%lu overflow=%lu free=%lu (psize=%u)",
+               (unsigned long)envstat.ms_branch_pages,
+               (unsigned long)envstat.ms_leaf_pages,
+               (unsigned long)envstat.ms_overflow_pages,
+               (unsigned long)free_pages,
+               envstat.ms_psize);
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Readers: %u active, nosync=%s",
+               info.mi_numreaders,
+               feature_bool(FEAT_CHATHISTORY_DB_NOSYNC) ? "yes" : "no");
   }
 
   /* Get per-database stats */
