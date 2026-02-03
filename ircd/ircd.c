@@ -294,6 +294,7 @@ void server_die(const char *message)
 {
   /* log_write will send out message to both log file and as server notice */
   log_write(LS_SYSTEM, L_CRIT, 0, "Server terminating: %s", message);
+  bounce_db_shutdown();  /* Persist bouncer sessions before closing connections */
   flush_connections(0);
   close_connections(1);
   running = 0;
@@ -333,6 +334,7 @@ void server_restart(const char *message)
 
   sendto_opmask_butone(0, SNO_OLDSNO, "Restarting server: %s", message);
   Debug((DEBUG_NOTICE, "Restarting server..."));
+  bounce_db_shutdown();  /* Persist bouncer sessions before closing connections */
   flush_connections(0);
 
   log_async_shutdown();  /* Flush pending log entries before shutdown */
@@ -1076,6 +1078,15 @@ int main(int argc, char **argv) {
   /* Initialize bouncer session registry */
   if (feature_bool(FEAT_BOUNCER_ENABLE))
     bounce_init();
+
+  /* Restore persisted bouncer sessions (ghosts + channels) from MDBX.
+   * Must run after bounce_init() and metadata_lmdb_init(), before event_loop().
+   */
+  if (feature_bool(FEAT_BOUNCER_ENABLE)) {
+    int restored = bounce_db_restore();
+    if (restored > 0)
+      log_write(LS_SYSTEM, L_NOTICE, 0, "Bouncer: restored %d sessions from MDBX", restored);
+  }
 
 #ifdef USE_LIBKC
   /* Initialize libkc HTTP transport (for webpush delivery) */

@@ -441,7 +441,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
       SetFlag(sptr, FLAG_DEADSOCKET);  /* Suppress ERROR on shared socket */
       SetFlag(sptr, FLAG_KILLED);
       exit_client(cptr, sptr, &me, "Converted to bouncer shadow");
-      return 0; /* Client freed, do not continue registration */
+      return CPTR_KILLED; /* Client freed — callers must not dereference cptr */
     }
 
     SetLocalNumNick(sptr);
@@ -1939,10 +1939,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * will cause servers to update correctly.
    */
   if (!FlagHas(&setflags, FLAG_ACCOUNT) && IsAccount(acptr)) {
-      int len = ACCOUNTLEN;
+      int len = ACCOUNTLEN + 1;
       char *ts;
       if ((ts = strchr(account, ':'))) {
-	len = (ts++) - account;
+	len = (ts++) - account + 1; /* +1: ircd_strncpy copies len-1 chars */
 	cli_user(acptr)->acc_create = atoi(ts);
 	Debug((DEBUG_DEBUG, "Received timestamped account in user mode; "
 	      "account \"%s\", timestamp %Tu", account,

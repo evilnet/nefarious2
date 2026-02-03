@@ -312,18 +312,18 @@ static int bouncer_listsessions(struct Client *sptr)
                          (CurrentTime - s->hs_disconnect_time);
       if (remaining < 0)
         remaining = 0;
-      ircd_snprintf(0, info, sizeof(info), "%s %s %s %ldm resumes:%u",
+      ircd_snprintf(0, info, sizeof(info), "%s %s %s %ldm connects:%u",
                     s->hs_sessid,
                     s->hs_name[0] ? s->hs_name : "*",
                     state_str,
                     (long)(remaining / 60),
-                    s->hs_attach_count);
+                    s->hs_connect_count);
     } else {
-      ircd_snprintf(0, info, sizeof(info), "%s %s %s resumes:%u",
+      ircd_snprintf(0, info, sizeof(info), "%s %s %s connects:%u",
                     s->hs_sessid,
                     s->hs_name[0] ? s->hs_name : "*",
                     state_str,
-                    s->hs_attach_count);
+                    s->hs_connect_count);
     }
 
     sendrawto_one(sptr, ":%s %d %s %s",
@@ -713,21 +713,21 @@ static int bouncer_info(struct Client *sptr)
         if (remaining < 0)
           remaining = 0;
         ircd_snprintf(0, info, sizeof(info),
-                      "state=%s hold=%s(%s) resumes=%u "
+                      "state=%s hold=%s(%s) connects=%u "
                       "hold_time=%ldm session=%s",
                       state_str,
                       hold ? "on" : "off", hold_src,
-                      s->hs_attach_count,
+                      s->hs_connect_count,
                       (long)(remaining / 60),
                       s->hs_sessid);
       } else {
         time_t hold_time = bounce_compute_hold_time_ext(s);
         ircd_snprintf(0, info, sizeof(info),
-                      "state=%s hold=%s(%s) resumes=%u "
-                      "hold_time=%lds connections=%d session=%s",
+                      "state=%s hold=%s(%s) connects=%u "
+                      "hold_time=%lds live=%d session=%s",
                       state_str,
                       hold ? "on" : "off", hold_src,
-                      s->hs_attach_count,
+                      s->hs_connect_count,
                       (long)hold_time,
                       bounce_connection_count(s),
                       s->hs_sessid);

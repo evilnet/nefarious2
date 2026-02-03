@@ -259,6 +259,7 @@ engine_delete(struct Socket *sock)
   for (ii = 0; ii < events_used; ii++) {
     if (events[ii].data.ptr == sock) {
       events[ii] = events[--events_used];
+      ii--; /* re-check the swapped-in event */
     }
   }
 }

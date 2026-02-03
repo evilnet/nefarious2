@@ -422,7 +422,7 @@ int ms_regreply(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
        * When registration completes (NICK/USER done), auth_complete_sasl()
        * will copy saslaccount to cli_user(acptr)->account and SetAccount().
        */
-      ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN);
+      ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN + 1);
       SetSASLComplete(acptr);  /* Mark SASL as complete so auth_complete_sasl applies account */
       if (cli_auth(acptr))
         auth_set_account(cli_auth(acptr), account);

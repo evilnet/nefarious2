@@ -2,3 +2,12 @@
 **/.sw?
 **/*.o
 **/*.a
+**/*.so
+**/*.lo
+**/*.la
+**/.deps/
+**/.libs/
+**/autom4te.cache/
+.vscode/
+.idea/
+*~

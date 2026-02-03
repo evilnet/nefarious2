@@ -407,6 +407,7 @@ enum Feature {
   FEAT_METADATA_DB,
   FEAT_METADATA_DB_AUTOGROW,
   FEAT_METADATA_DB_NORDAHEAD,
+  FEAT_METADATA_CACHE_SLOTS,  /* B-tree traversal cache slots (0=disable, power of 2) */
   FEAT_METADATA_CACHE_TTL,  /* Now expiration TTL - data deleted when expired */
   FEAT_METADATA_PURGE_FREQUENCY,
 #ifdef USE_ZSTD
@@ -425,6 +426,7 @@ enum Feature {
   FEAT_BOUNCER_REQUIRE_TLS,
   FEAT_BOUNCER_MAX_HOLD,
   FEAT_BOUNCER_HOLD_DECAY_PERCENT,
+  FEAT_BOUNCER_PERSIST,
   FEAT_CAP_draft_bouncer,
   FEAT_HISTORY_MAP_SIZE_MB,
 #ifdef USE_SSL

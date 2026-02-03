@@ -932,6 +932,7 @@ static struct FeatureDesc {
   F_S(METADATA_DB, 0, "metadata", 0),
   F_B(METADATA_DB_AUTOGROW, 0, 1, 0),
   F_B(METADATA_DB_NORDAHEAD, 0, 1, 0),
+  F_I(METADATA_CACHE_SLOTS, 0, 128, 0),
   F_I(METADATA_CACHE_TTL, 0, 14400, 0),
   F_I(METADATA_PURGE_FREQUENCY, 0, 3600, 0),
 #ifdef USE_ZSTD
@@ -951,6 +952,7 @@ static struct FeatureDesc {
   F_B(BOUNCER_REQUIRE_TLS, 0, 1, 0),
   F_I(BOUNCER_MAX_HOLD, 0, 1209600, 0),      /* 14 days */
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */
+  F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
   F_B(CAP_draft_bouncer, 0, 1, 0),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL

@@ -270,7 +270,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
            */
           metadata_load_account(acptr, cli_saslaccount(acptr));
 
-          ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN);
+          ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN + 1);
           SetAccount(acptr);
 
           if (cli_saslacccreate(acptr))

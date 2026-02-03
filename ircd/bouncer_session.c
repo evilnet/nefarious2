@@ -33,6 +33,7 @@
 #include "ircd_osdep.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "list.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "random.h"
@@ -54,6 +55,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <mdbx.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -80,6 +82,10 @@ static struct AccountSessions *accountHash[BOUNCE_ACCOUNT_HASHSIZE];
 /** Per-server sequence counter for session IDs. */
 static unsigned int sessionSeq = 0;
 
+/* Forward declarations for MDBX persistence (defined after bounce_snapshot_channels) */
+static int bounce_db_put(struct BouncerSession *session);
+static int bounce_db_del(const char *sessid);
+
 /* ---------------------------------------------------------------- */
 /* Deferred shadow free list                                         */
 /* ---------------------------------------------------------------- */
@@ -95,6 +101,9 @@ static unsigned int sessionSeq = 0;
  * Instead, shadows are queued here and freed during timer_run(), which
  * runs AFTER all events in the current batch are processed.
  */
+/* Forward declarations */
+static void shadow_flush_sendq(struct ShadowConnection *shadow);
+
 static struct ShadowConnection *deferred_free_head;
 static struct Timer deferred_free_timer;
 static int deferred_free_timer_active;
@@ -216,7 +225,7 @@ static struct AccountSessions *account_sessions_get(const char *account,
     return NULL;
 
   as = (struct AccountSessions *)MyCalloc(1, sizeof(*as));
-  ircd_strncpy(as->as_account, account, ACCOUNTLEN);
+  ircd_strncpy(as->as_account, account, ACCOUNTLEN + 1);
   as->as_sessions = NULL;
   as->as_count = 0;
   as->as_hnext = accountHash[h];
@@ -731,7 +740,7 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
 
   /* Allocate and initialize */
   session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
-  ircd_strncpy(session->hs_account, cli_account(cptr), ACCOUNTLEN);
+  ircd_strncpy(session->hs_account, cli_account(cptr), ACCOUNTLEN + 1);
   generate_sessid(session->hs_sessid);
   generate_token(session->hs_token);
   session->hs_name[0] = '\0';
@@ -750,12 +759,16 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
   session->hs_attach_count = 0;
+  session->hs_connect_count = 1; /* Initial connection counts */
   session->hs_total_active = 0;
 
   /* Add to hash tables */
   token_hash_add(session);
   as = account_sessions_get(session->hs_account, 1);
   account_add_session(as, session);
+
+  /* Persist to MDBX (session created but no channels yet) */
+  bounce_db_put(session);
 
   *out = session;
   return 0;
@@ -856,8 +869,12 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_client = cptr;
   session->hs_attach_count++;
+  session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
+
+  /* Session is live again — remove persisted state (re-persisted at next hold or shutdown) */
+  bounce_db_del(session->hs_sessid);
 
   /* Recompute session union caps for the new primary + existing shadows */
   bounce_recompute_session_caps(cptr);
@@ -866,8 +883,9 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
 }
 
 /** Compute adaptive hold time for a session based on usage history.
- * Sessions that are frequently resumed earn longer hold times.
- * Sessions that sit idle lose their earned hold via decay.
+ * Sessions with more connections (resumes + shadow attaches) earn longer
+ * hold times.  This rewards active use — a mobile device connecting as a
+ * shadow counts the same as a full resume from HOLDING.
  */
 static time_t bounce_compute_hold_time(struct BouncerSession *session)
 {
@@ -876,12 +894,12 @@ static time_t bounce_compute_hold_time(struct BouncerSession *session)
   time_t computed;
   int decay_pct;
 
-  /* Never-resumed sessions get base hold only */
-  if (session->hs_attach_count == 0)
+  /* Never-used sessions get base hold only */
+  if (session->hs_connect_count == 0)
     return base;
 
-  /* Scale by attach count: each resume adds 25% of base, capped at max */
-  computed = base + (base * session->hs_attach_count / 4);
+  /* Scale by connection count: each connection adds 25% of base, capped at max */
+  computed = base + (base * session->hs_connect_count / 4);
 
   /* Additional bonus for cumulative active time: 1h per 24h active */
   if (session->hs_total_active > 0)
@@ -975,6 +993,9 @@ void bounce_destroy(struct BouncerSession *session)
     next = shadow->sh_next;
     if (current_shadow == shadow)
       current_shadow = NULL;
+    /* Best-effort flush of pending data (KILL/ERROR/etc.) before closing */
+    if (MsgQLength(&shadow->sh_sendQ) > 0 && shadow->sh_fd >= 0)
+      shadow_flush_sendq(shadow);
     /* Clear s_data BEFORE socket_del to prevent the synchronous
      * ET_DESTROY handler from freeing the shadow (which would make
      * the MsgQClear/dbuf_delete below use-after-free). */
@@ -1000,6 +1021,9 @@ void bounce_destroy(struct BouncerSession *session)
   /* Remove from hash tables */
   token_hash_remove(session);
   account_remove_session(session);
+
+  /* Remove persisted state */
+  bounce_db_del(session->hs_sessid);
 
   Debug((DEBUG_INFO, "Bouncer: destroyed session %s for %s",
          session->hs_sessid, session->hs_account));
@@ -1036,6 +1060,471 @@ void bounce_snapshot_channels(struct BouncerSession *session,
     i++;
   }
   session->hs_chancount = i;
+}
+
+/* ---------------------------------------------------------------- */
+/* MDBX persistence (FEAT_BOUNCER_PERSIST)                            */
+/* ---------------------------------------------------------------- */
+
+/** Check if a session is local (originated on this server). */
+static int is_local_session(struct BouncerSession *session)
+{
+  return (0 == strcmp(session->hs_origin, cli_yxx(&me)));
+}
+
+/** Persist a bouncer session to MDBX.
+ * Only persists local sessions. Guarded by FEAT_BOUNCER_PERSIST.
+ * @param[in] session Session to persist.
+ * @return 0 on success, -1 on error.
+ */
+static int bounce_db_put(struct BouncerSession *session)
+{
+  MDBX_env *env;
+  MDBX_dbi dbi;
+  MDBX_txn *txn;
+  MDBX_val key, data;
+  struct BounceSessionRecord rec;
+  struct Client *ghost;
+  int rc;
+
+  if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
+    return 0;
+
+  if (!is_local_session(session))
+    return 0;
+
+  env = metadata_get_env();
+  dbi = metadata_get_bouncer_dbi();
+  if (!env)
+    return -1;
+
+  /* Build record */
+  memset(&rec, 0, sizeof(rec));
+  rec.bsr_version = BOUNCER_DB_VERSION;
+  ircd_strncpy(rec.bsr_account, session->hs_account, ACCOUNTLEN);
+  ircd_strncpy(rec.bsr_sessid, session->hs_sessid, BOUNCER_SESSID_LEN - 1);
+  ircd_strncpy(rec.bsr_token, session->hs_token, BOUNCER_TOKEN_LEN);
+  ircd_strncpy(rec.bsr_name, session->hs_name, BOUNCER_NAME_LEN - 1);
+  ircd_strncpy(rec.bsr_origin, session->hs_origin, NICKLEN);
+  rec.bsr_hold_override = session->hs_hold_override;
+  rec.bsr_created = (int64_t)session->hs_created;
+  rec.bsr_disconnect_time = (int64_t)session->hs_disconnect_time;
+  rec.bsr_last_active = (int64_t)session->hs_last_active;
+  rec.bsr_total_active = (int64_t)session->hs_total_active;
+  rec.bsr_attach_count = session->hs_attach_count;
+  rec.bsr_connect_count = session->hs_connect_count;
+
+  /* Ghost client identity (if client exists) */
+  ghost = session->hs_client;
+  if (ghost) {
+    ircd_strncpy(rec.bsr_nick, cli_name(ghost), NICKLEN);
+    if (cli_user(ghost)) {
+      ircd_strncpy(rec.bsr_username, cli_user(ghost)->username, USERLEN);
+      ircd_strncpy(rec.bsr_realhost, cli_user(ghost)->realhost, HOSTLEN);
+      ircd_strncpy(rec.bsr_host, cli_user(ghost)->host, HOSTLEN);
+      ircd_strncpy(rec.bsr_realname, cli_info(ghost), REALLEN);
+    }
+    if (IsAccount(ghost)) {
+      ircd_strncpy(rec.bsr_account_name, cli_account(ghost), ACCOUNTLEN);
+      rec.bsr_acc_create = (int64_t)cli_user(ghost)->acc_create;
+    }
+  }
+
+  /* Channel memberships (from session snapshot) */
+  rec.bsr_chancount = (uint16_t)session->hs_chancount;
+  {
+    int i;
+    for (i = 0; i < session->hs_chancount && i < BOUNCER_MAX_CHANNELS; i++) {
+      ircd_strncpy(rec.bsr_channels[i].name,
+                   session->hs_channels[i].name, CHANNELLEN);
+      rec.bsr_channels[i].modes = session->hs_channels[i].modes;
+    }
+  }
+
+  /* Write to MDBX */
+  rc = mdbx_txn_begin(env, NULL, 0, &txn);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: txn_begin failed: %s",
+              mdbx_strerror(rc));
+    return -1;
+  }
+
+  key.iov_base = session->hs_sessid;
+  key.iov_len = strlen(session->hs_sessid);
+  data.iov_base = &rec;
+  data.iov_len = sizeof(rec);
+
+  rc = mdbx_put(txn, dbi, &key, &data, 0);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: put(%s) failed: %s",
+              session->hs_sessid, mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdbx_txn_commit(txn);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: commit failed: %s",
+              mdbx_strerror(rc));
+    return -1;
+  }
+
+  Debug((DEBUG_INFO, "Bouncer: persisted session %s for %s",
+         session->hs_sessid, session->hs_account));
+  return 0;
+}
+
+/** Delete a bouncer session from MDBX.
+ * @param[in] sessid Session ID to delete.
+ * @return 0 on success, -1 on error.
+ */
+static int bounce_db_del(const char *sessid)
+{
+  MDBX_env *env;
+  MDBX_dbi dbi;
+  MDBX_txn *txn;
+  MDBX_val key;
+  int rc;
+
+  if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
+    return 0;
+
+  env = metadata_get_env();
+  dbi = metadata_get_bouncer_dbi();
+  if (!env)
+    return -1;
+
+  rc = mdbx_txn_begin(env, NULL, 0, &txn);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: txn_begin failed: %s",
+              mdbx_strerror(rc));
+    return -1;
+  }
+
+  key.iov_base = (void *)sessid;
+  key.iov_len = strlen(sessid);
+
+  rc = mdbx_del(txn, dbi, &key, NULL);
+  if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: del(%s) failed: %s",
+              sessid, mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    return -1;
+  }
+
+  rc = mdbx_txn_commit(txn);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: commit failed: %s",
+              mdbx_strerror(rc));
+    return -1;
+  }
+
+  Debug((DEBUG_INFO, "Bouncer: deleted persisted session %s", sessid));
+  return 0;
+}
+
+/** Persist all local bouncer sessions to MDBX before shutdown.
+ * ACTIVE sessions are snapshotted (channels from live client) first.
+ * Called from server_die()/server_restart() before flush_connections().
+ */
+void bounce_db_shutdown(void)
+{
+  int i;
+  struct BouncerSession *s;
+  int count = 0;
+
+  if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
+    return;
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (s = tokenHash[i]; s; s = s->hs_tnext) {
+      if (!is_local_session(s))
+        continue;
+
+      /* Snapshot ACTIVE sessions — they have a live client with channels */
+      if (s->hs_state == BOUNCE_ACTIVE && s->hs_client) {
+        bounce_snapshot_channels(s, s->hs_client);
+        s->hs_disconnect_time = CurrentTime;
+      }
+
+      bounce_db_put(s);
+      count++;
+    }
+  }
+
+  log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: shutdown — persisted %d sessions", count);
+}
+
+/** Create a ghost client from a persisted session record.
+ * The ghost has no socket (fd=-1), is registered in global structures,
+ * and is flagged as BOUNCER_HOLD.
+ * @param[in] rec Persisted session record.
+ * @return Ghost client, or NULL on failure.
+ */
+static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
+{
+  struct Client *ghost;
+  struct User *user;
+
+  /* Allocate local client (NULL from = local, gets its own Connection with fd=-1) */
+  ghost = make_client(NULL, STAT_UNKNOWN);
+  if (!ghost)
+    return NULL;
+
+  /* Create User struct */
+  user = make_user(ghost);
+  if (!user) {
+    /* make_user shouldn't fail, but guard anyway */
+    return NULL;
+  }
+
+  /* Set identity from record */
+  ircd_strncpy(cli_name(ghost), rec->bsr_nick, NICKLEN);
+  ircd_strncpy(user->username, rec->bsr_username, USERLEN);
+  ircd_strncpy(user->realhost, rec->bsr_realhost, HOSTLEN);
+  ircd_strncpy(user->host, rec->bsr_host, HOSTLEN);
+  ircd_strncpy(cli_info(ghost), rec->bsr_realname, REALLEN);
+
+  /* Set account */
+  ircd_strncpy(user->account, rec->bsr_account_name, ACCOUNTLEN);
+  user->acc_create = (time_t)rec->bsr_acc_create;
+  user->server = &me;
+
+  /* Assign local numeric */
+  if (!SetLocalNumNick(ghost)) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: no numerics for ghost %s",
+              rec->bsr_nick);
+    /* Can't properly free a half-initialized client here — just return NULL.
+     * The Connection and User will leak but this is a startup-only edge case
+     * that indicates the server is at capacity anyway. */
+    return NULL;
+  }
+
+  /* Set as registered user */
+  SetUser(ghost);
+  SetAccount(ghost);
+  SetHiddenHost(ghost);
+  SetBouncerHold(ghost);
+
+  /* Set creation timestamp to original time (wins nick collisions: older wins) */
+  cli_lastnick(ghost) = (time_t)rec->bsr_created;
+
+  /* Register in global structures */
+  add_client_to_list(ghost);
+  hAddClient(ghost);
+
+  return ghost;
+}
+
+/** Restore channel memberships for a ghost client from a persisted record.
+ * @param[in] ghost Ghost client.
+ * @param[in] rec Session record with channel data.
+ */
+static void bounce_restore_channels(struct Client *ghost,
+                                    struct BounceSessionRecord *rec)
+{
+  int i;
+
+  for (i = 0; i < rec->bsr_chancount && i < BOUNCER_MAX_CHANNELS; i++) {
+    struct Channel *chptr;
+    unsigned int modes;
+
+    if (rec->bsr_channels[i].name[0] == '\0')
+      continue;
+
+    chptr = get_channel(ghost, rec->bsr_channels[i].name, CGT_CREATE);
+    if (!chptr)
+      continue;
+
+    modes = rec->bsr_channels[i].modes | CHFL_HOLDING;
+    add_user_to_channel(chptr, ghost, modes, 0);
+  }
+}
+
+/** Restore bouncer sessions from MDBX after restart.
+ * Creates ghost clients, joins them to channels, registers sessions
+ * in hash tables. Runs before listeners open, so no collision possible.
+ * @return Number of sessions restored, or -1 on error.
+ */
+int bounce_db_restore(void)
+{
+  MDBX_env *env;
+  MDBX_dbi dbi;
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
+  int rc;
+  int restored = 0;
+  int expired = 0;
+  unsigned int max_seq = 0;
+  time_t max_hold;
+
+  if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
+    return 0;
+
+  env = metadata_get_env();
+  dbi = metadata_get_bouncer_dbi();
+  if (!env)
+    return -1;
+
+  max_hold = feature_int(FEAT_BOUNCER_MAX_HOLD);
+
+  /* Read-only txn to scan all records */
+  rc = mdbx_txn_begin(env, NULL, MDBX_RDONLY, &txn);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: restore txn_begin failed: %s",
+              mdbx_strerror(rc));
+    return -1;
+  }
+
+  rc = mdbx_cursor_open(txn, dbi, &cursor);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: cursor_open failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    return -1;
+  }
+
+  while ((rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT)) == MDBX_SUCCESS) {
+    struct BounceSessionRecord *rec;
+    struct BouncerSession *session;
+    struct Client *ghost;
+    struct AccountSessions *as;
+    time_t elapsed;
+    time_t remaining;
+    unsigned int seq;
+    const char *dash;
+
+    if (data.iov_len != sizeof(struct BounceSessionRecord))
+      continue; /* wrong size, skip */
+
+    rec = (struct BounceSessionRecord *)data.iov_base;
+
+    if (rec->bsr_version != BOUNCER_DB_VERSION)
+      continue; /* version mismatch, skip */
+
+    /* Check expiry */
+    elapsed = CurrentTime - (time_t)rec->bsr_disconnect_time;
+    if (elapsed > max_hold) {
+      expired++;
+      continue;
+    }
+
+    /* Track max session sequence number */
+    dash = strchr(rec->bsr_sessid, '-');
+    if (dash) {
+      seq = (unsigned int)strtoul(dash + 1, NULL, 10);
+      if (seq > max_seq)
+        max_seq = seq;
+    }
+
+    /* Create ghost client */
+    ghost = bounce_create_ghost(rec);
+    if (!ghost) {
+      log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: failed to create ghost for %s",
+                rec->bsr_sessid);
+      continue;
+    }
+
+    /* Restore channel memberships */
+    bounce_restore_channels(ghost, rec);
+
+    /* Allocate and populate BouncerSession */
+    session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
+    ircd_strncpy(session->hs_account, rec->bsr_account, ACCOUNTLEN);
+    ircd_strncpy(session->hs_sessid, rec->bsr_sessid, BOUNCER_SESSID_LEN - 1);
+    ircd_strncpy(session->hs_token, rec->bsr_token, BOUNCER_TOKEN_LEN);
+    ircd_strncpy(session->hs_name, rec->bsr_name, BOUNCER_NAME_LEN - 1);
+    ircd_strncpy(session->hs_origin, rec->bsr_origin, NICKLEN);
+    session->hs_hold_override = rec->bsr_hold_override;
+    session->hs_state = BOUNCE_HOLDING;
+    session->hs_client = ghost;
+    ircd_strncpy(session->hs_ghost_numeric, cli_yxx(ghost),
+                 sizeof(session->hs_ghost_numeric) - 1);
+    session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+    session->hs_shadows = NULL;
+    session->hs_shadow_count = 0;
+    session->hs_client_id_seq = 1;
+    session->hs_primary_id = 0;
+    session->hs_effective_away = 0;
+    session->hs_effective_away_msg[0] = '\0';
+    session->hs_created = (time_t)rec->bsr_created;
+    session->hs_last_active = (time_t)rec->bsr_last_active;
+    session->hs_disconnect_time = (time_t)rec->bsr_disconnect_time;
+    session->hs_attach_count = rec->bsr_attach_count;
+    session->hs_connect_count = rec->bsr_connect_count;
+    session->hs_total_active = (time_t)rec->bsr_total_active;
+
+    /* Copy channel snapshot for consistency */
+    session->hs_chancount = rec->bsr_chancount;
+    {
+      int i;
+      for (i = 0; i < rec->bsr_chancount && i < BOUNCER_MAX_CHANNELS; i++) {
+        ircd_strncpy(session->hs_channels[i].name,
+                     rec->bsr_channels[i].name, CHANNELLEN);
+        session->hs_channels[i].modes = rec->bsr_channels[i].modes;
+      }
+    }
+
+    /* Register in hash tables */
+    token_hash_add(session);
+    as = account_sessions_get(session->hs_account, 1);
+    account_add_session(as, session);
+
+    /* Start hold timer with remaining time.
+     * Use adaptive hold (based on attach_count/total_active), not MAX_HOLD.
+     * MAX_HOLD is the absolute ceiling for the expiry check above;
+     * the actual timer should match what bounce_hold_client() would use.
+     */
+    {
+      time_t adaptive_hold = bounce_compute_hold_time(session);
+      remaining = adaptive_hold - elapsed;
+      if (remaining < 10)
+        remaining = 10; /* minimum 10s grace period */
+    }
+    timer_init(&session->hs_hold_timer);
+    timer_add(&session->hs_hold_timer, bounce_hold_expire,
+              (void *)session, TT_RELATIVE, remaining);
+
+    restored++;
+    log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: restored session %s (%s) ghost=%s remaining=%Tu",
+              session->hs_sessid, session->hs_account, cli_name(ghost), remaining);
+  }
+
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
+
+  /* Update sessionSeq to avoid collision */
+  if (max_seq >= sessionSeq)
+    sessionSeq = max_seq + 1;
+
+  /* Clean up expired records in a write txn */
+  if (expired > 0) {
+    MDBX_txn *wtxn;
+    MDBX_cursor *wcursor;
+
+    rc = mdbx_txn_begin(env, NULL, 0, &wtxn);
+    if (rc == MDBX_SUCCESS) {
+      rc = mdbx_cursor_open(wtxn, dbi, &wcursor);
+      if (rc == MDBX_SUCCESS) {
+        while ((rc = mdbx_cursor_get(wcursor, &key, &data, MDBX_NEXT)) == MDBX_SUCCESS) {
+          struct BounceSessionRecord *rec = (struct BounceSessionRecord *)data.iov_base;
+          if (data.iov_len != sizeof(struct BounceSessionRecord) ||
+              rec->bsr_version != BOUNCER_DB_VERSION ||
+              CurrentTime - (time_t)rec->bsr_disconnect_time > max_hold) {
+            mdbx_cursor_del(wcursor, 0);
+          }
+        }
+        mdbx_cursor_close(wcursor);
+      }
+      mdbx_txn_commit(wtxn);
+    }
+    log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: cleaned up %d expired records", expired);
+  }
+
+  log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: restored %d sessions, sessionSeq=%u",
+            restored, sessionSeq);
+  return restored;
 }
 
 /* ---------------------------------------------------------------- */
@@ -1226,7 +1715,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
     /* Create session from remote data */
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
-    ircd_strncpy(session->hs_account, account, ACCOUNTLEN);
+    ircd_strncpy(session->hs_account, account, ACCOUNTLEN + 1);
     ircd_strncpy(session->hs_sessid, sessid, BOUNCER_SESSID_LEN - 1);
     ircd_strncpy(session->hs_token, token, BOUNCER_TOKEN_LEN);
     session->hs_name[0] = '\0';
@@ -1554,6 +2043,9 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    * with FLAG_BOUNCER_HOLD set. It will not receive messages but
    * is visible (as a ghost) in WHO/NAMES until resumed or expired.
    */
+
+  /* Persist with full ghost identity + channels */
+  bounce_db_put(session);
 
   return 0;
 }
@@ -2009,9 +2501,18 @@ static void shadow_sock_callback(struct Event *ev)
   struct ShadowConnection *shadow;
 
   assert(0 != ev_socket(ev));
-  assert(0 != s_data(ev_socket(ev)) || ev_type(ev) == ET_DESTROY);
 
   shadow = (struct ShadowConnection *)s_data(ev_socket(ev));
+
+  /* Guard against stale events for already-promoted/removed shadows.
+   * bounce_promote_shadow() clears s_data before socket_del(); if a stale
+   * event slips through (e.g. same epoll_wait batch), shadow will be NULL. */
+  if (!shadow) {
+    if (ev_type(ev) != ET_DESTROY)
+      Debug((DEBUG_INFO, "Bouncer: ignoring stale shadow event (type=%d, s_data=NULL)",
+             ev_type(ev)));
+    return;
+  }
 
   switch (ev_type(ev)) {
   case ET_DESTROY:
@@ -2032,6 +2533,11 @@ static void shadow_sock_callback(struct Event *ev)
     /* Read and forward commands from shadow to primary */
     if (shadow_read_packet(shadow) < 0) {
       struct BouncerSession *sess = shadow->sh_session;
+      /* Flush any pending data (e.g. KILL/ERROR messages) before
+       * closing — the shadow's sendQ may have been populated by
+       * send_buffer's dup loop but never written to the fd yet. */
+      if (MsgQLength(&shadow->sh_sendQ) > 0)
+        shadow_flush_sendq(shadow);
       shadow->sh_flags |= SHADOW_FLAGS_DEAD;
       bounce_remove_shadow(shadow);
       /* Fix #23: If removing this shadow leaves the session orphaned
@@ -2065,6 +2571,9 @@ static void shadow_sock_callback(struct Event *ev)
   {
     /* Shadow connection error — remove it */
     struct BouncerSession *sess = shadow->sh_session;
+    /* Best-effort flush of pending data before closing */
+    if (MsgQLength(&shadow->sh_sendQ) > 0)
+      shadow_flush_sendq(shadow);
     shadow->sh_flags |= SHADOW_FLAGS_DEAD;
     bounce_remove_shadow(shadow);
     /* Fix #23: destroy orphaned session (see ET_READ comment) */
@@ -2159,6 +2668,7 @@ struct ShadowConnection *bounce_add_shadow(struct BouncerSession *session,
   shadow->sh_next = session->hs_shadows;
   session->hs_shadows = shadow;
   session->hs_shadow_count++;
+  session->hs_connect_count++;
 
   Debug((DEBUG_INFO, "Bouncer: added shadow #%u to session %s (fd=%d, ip=%s, total=%d)",
          shadow->sh_id, session->hs_sessid, fd,

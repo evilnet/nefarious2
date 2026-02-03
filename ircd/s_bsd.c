@@ -1482,6 +1482,11 @@ void client_sock_callback(struct Event* ev)
       }
     }
 
+    /* If client is already in bouncer HOLD (e.g., QUIT handler ran hold
+     * before EOF arrived), don't exit — the ghost is already set up. */
+    if (IsUser(cptr) && IsBouncerHold(cptr))
+      return;
+
     /* Check if client should enter bouncer HOLD mode instead of exiting */
     if (IsUser(cptr) && bounce_should_hold(cptr)) {
       /* Transition to ghost/hold state - suppresses QUIT, keeps channels */

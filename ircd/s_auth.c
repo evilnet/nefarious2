@@ -1043,6 +1043,12 @@ static void auth_timeout_callback(struct Event* ev)
   auth = (struct AuthRequest*) t_data(ev_timer(ev));
 
   if (ev_type(ev) == ET_EXPIRE) {
+    /* Client was freed (e.g. bouncer shadow conversion) — just clean up */
+    if (!auth->client) {
+      destroy_auth_request(auth);
+      return;
+    }
+
     /* Report the timeout in the log. */
     log_write(LS_RESOLVER, L_INFO, 0, "Registration timeout %s",
               get_client_name(auth->client, HIDE_IP));
@@ -3035,10 +3041,13 @@ static void iauth_sock_callback(struct Event *ev)
     iauth_write(iauth);
     break;
   case ET_ERROR:
+    if (s_fd(ev_socket(ev)) == -1)
+      break; /* already disconnected */
     log_write(LS_IAUTH, L_ERROR, 0, "IAuth socket error: %s", strerror(ev_data(ev)));
     /* and fall through to the ET_EOF case */
   case ET_EOF:
-    iauth_disconnect(iauth);
+    if (s_fd(ev_socket(ev)) != -1)
+      iauth_disconnect(iauth);
     break;
   default:
     assert(0 && "Unrecognized event type");
@@ -3108,10 +3117,13 @@ static void iauth_stderr_callback(struct Event *ev)
     iauth_read_stderr(iauth);
     break;
   case ET_ERROR:
+    if (s_fd(ev_socket(ev)) == -1)
+      break; /* already disconnected */
     log_write(LS_IAUTH, L_ERROR, 0, "IAuth stderr error: %s", strerror(ev_data(ev)));
     /* and fall through to the ET_EOF case */
   case ET_EOF:
-    iauth_disconnect(iauth);
+    if (s_fd(ev_socket(ev)) != -1)
+      iauth_disconnect(iauth);
     break;
   default:
     assert(0 && "Unrecognized event type");

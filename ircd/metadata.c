@@ -83,6 +83,9 @@ static MDBX_dbi metadata_dbi;
 /** Read markers database handle (IRCv3 draft/read-marker) */
 static MDBX_dbi readmarkers_dbi;
 
+/** Bouncer sessions database handle (persistent bouncer state) */
+static MDBX_dbi bouncer_dbi;
+
 /** Flag indicating if LMDB is available */
 static int metadata_lmdb_available = 0;
 
@@ -91,6 +94,44 @@ static int metadata_lmdb_available = 0;
 
 /** Key separator */
 #define KEY_SEP '\0'
+
+/** Default number of B-tree cache slots for metadata lookups */
+#define METADATA_CACHE_SLOTS_DEFAULT 128
+
+/** B-tree traversal cache for metadata lookups */
+static MDBX_cache_entry_t *metadata_cache = NULL;
+static uint32_t *metadata_cache_hash = NULL;
+static unsigned int metadata_cache_slots = 0;
+
+/** FNV-1a 32-bit hash for cache slot selection */
+static uint32_t cache_fnv1a(const void *data, size_t len)
+{
+  const unsigned char *p = (const unsigned char *)data;
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < len; i++) {
+    h ^= p[i];
+    h *= 16777619u;
+  }
+  return h ? h : 1; /* avoid 0 so we can use 0 as "empty" */
+}
+
+/** Get cache entry for a key, re-initializing on hash collision */
+static MDBX_cache_entry_t *metadata_cache_slot(const MDBX_val *key)
+{
+  uint32_t h;
+  unsigned int slot;
+
+  if (!metadata_cache)
+    return NULL;
+
+  h = cache_fnv1a(key->iov_base, key->iov_len);
+  slot = h & (metadata_cache_slots - 1);
+  if (metadata_cache_hash[slot] != h) {
+    mdbx_cache_init(&metadata_cache[slot]);
+    metadata_cache_hash[slot] = h;
+  }
+  return &metadata_cache[slot];
+}
 
 /** Build a lookup key for LMDB.
  * @param[out] key Output buffer.
@@ -235,7 +276,7 @@ int metadata_lmdb_init(const char *dbpath)
     return -1;
   }
 
-  rc = mdbx_env_set_maxdbs(metadata_env, 2);
+  rc = mdbx_env_set_maxdbs(metadata_env, 3);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_env_set_maxdbs failed: %s",
               mdbx_strerror(rc));
@@ -305,6 +346,16 @@ int metadata_lmdb_init(const char *dbpath)
     return -1;
   }
 
+  rc = mdbx_dbi_open(txn, "bouncer_sessions", MDBX_CREATE, &bouncer_dbi);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_dbi_open(bouncer_sessions) failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    mdbx_env_close(metadata_env);
+    metadata_env = NULL;
+    return -1;
+  }
+
   rc = mdbx_txn_commit(txn);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_txn_commit failed: %s",
@@ -315,6 +366,23 @@ int metadata_lmdb_init(const char *dbpath)
   }
 
   metadata_lmdb_available = 1;
+
+  /* Initialize B-tree traversal cache */
+  {
+    unsigned int slots = feature_int(FEAT_METADATA_CACHE_SLOTS);
+    if (slots > 0) {
+      /* Round up to next power of 2 */
+      unsigned int s = 1;
+      while (s < slots) s <<= 1;
+      metadata_cache_slots = s;
+      metadata_cache = (MDBX_cache_entry_t *)MyCalloc(s, sizeof(MDBX_cache_entry_t));
+      metadata_cache_hash = (uint32_t *)MyCalloc(s, sizeof(uint32_t));
+      for (unsigned int i = 0; i < s; i++)
+        mdbx_cache_init(&metadata_cache[i]);
+      log_write(LS_SYSTEM, L_INFO, 0, "metadata: B-tree cache initialized (%u slots)", s);
+    }
+  }
+
   log_write(LS_SYSTEM, L_INFO, 0, "metadata: LMDB initialized at %s", dbpath);
 
   /* Pre-fault database pages into OS page cache */
@@ -326,10 +394,23 @@ int metadata_lmdb_init(const char *dbpath)
   return 0;
 }
 
+/** Get the MDBX environment handle (for bouncer persistence). */
+MDBX_env *metadata_get_env(void)
+{
+  return metadata_env;
+}
+
+/** Get the bouncer sessions DBI handle. */
+MDBX_dbi metadata_get_bouncer_dbi(void)
+{
+  return bouncer_dbi;
+}
+
 /** Shutdown LMDB metadata storage. */
 void metadata_lmdb_shutdown(void)
 {
   if (metadata_env) {
+    mdbx_dbi_close(metadata_env, bouncer_dbi);
     mdbx_dbi_close(metadata_env, readmarkers_dbi);
     mdbx_dbi_close(metadata_env, metadata_dbi);
     mdbx_env_close(metadata_env);
@@ -379,7 +460,15 @@ int metadata_account_get(const char *account, const char *key, char *value)
   mkey.iov_base = keybuf;
   mkey.iov_len = keylen;
 
-  rc = mdbx_get(txn, metadata_dbi, &mkey, &mdata);
+  {
+    MDBX_cache_entry_t *ce = metadata_cache_slot(&mkey);
+    if (ce) {
+      MDBX_cache_result_t cr = mdbx_cache_get_SingleThreaded(txn, metadata_dbi, &mkey, &mdata, ce);
+      rc = cr.errcode;
+    } else {
+      rc = mdbx_get(txn, metadata_dbi, &mkey, &mdata);
+    }
+  }
   mdbx_txn_abort(txn);
 
   if (rc == MDBX_NOTFOUND)
@@ -439,7 +528,11 @@ int metadata_account_get(const char *account, const char *key, char *value)
  * @param[in] value Value to set (NULL to delete).
  * @return 0 on success, -1 on error.
  */
-int metadata_account_set(const char *account, const char *key, const char *value)
+/** Internal helper for metadata_account_set with explicit timestamp.
+ * Pass timestamp=0 for permanent values (no TTL expiry).
+ */
+static int metadata_account_set_ts(const char *account, const char *key,
+                                    const char *value, time_t timestamp)
 {
   MDBX_txn *txn;
   MDBX_val mkey, mdata;
@@ -468,8 +561,8 @@ int metadata_account_set(const char *account, const char *key, const char *value
   mkey.iov_len = keylen;
 
   if (value) {
-    /* Encode value with current timestamp for TTL tracking */
-    encoded_len = encode_ttl_value(encoded, sizeof(encoded), value, CurrentTime);
+    /* Encode value with timestamp for TTL tracking (0 = permanent) */
+    encoded_len = encode_ttl_value(encoded, sizeof(encoded), value, timestamp);
     if (encoded_len < 0) {
       mdbx_txn_abort(txn);
       return -1;
@@ -502,6 +595,23 @@ int metadata_account_set(const char *account, const char *key, const char *value
 
   rc = mdbx_txn_commit(txn);
   return (rc == 0) ? 0 : -1;
+}
+
+/** Set account metadata in LMDB with TTL timestamp (CurrentTime).
+ * Values will expire after METADATA_CACHE_TTL seconds.
+ * For permanent values (user preferences), use metadata_account_set_permanent().
+ */
+int metadata_account_set(const char *account, const char *key, const char *value)
+{
+  return metadata_account_set_ts(account, key, value, CurrentTime);
+}
+
+/** Set account metadata in LMDB with no TTL (timestamp 0 = permanent).
+ * Used for user preferences that should survive indefinitely.
+ */
+int metadata_account_set_permanent(const char *account, const char *key, const char *value)
+{
+  return metadata_account_set_ts(account, key, value, 0);
 }
 
 /** Set account metadata in LMDB without compression (raw passthrough).
@@ -967,6 +1077,7 @@ void metadata_lmdb_shutdown(void) { }
 int metadata_lmdb_is_available(void) { return 0; }
 int metadata_account_get(const char *account, const char *key, char *value) { return -1; }
 int metadata_account_set(const char *account, const char *key, const char *value) { return -1; }
+int metadata_account_set_permanent(const char *account, const char *key, const char *value) { return -1; }
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_purge_expired(void) { return -1; }
@@ -1160,18 +1271,19 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
   }
 
   /* Fall through to persistent store for logged-in users.
-   * metadata_set_client persists to mdbx, but after a restart
-   * the client struct is fresh — load the value on first access. */
+   * After a restart the client struct is fresh — load the value
+   * from mdbx on first access.  Create the in-memory entry directly
+   * (don't call metadata_set_client which would re-persist to mdbx). */
   if (cli_user(cptr) && cli_user(cptr)->account[0] && key[0] != '$'
       && metadata_lmdb_is_available()) {
     char value[METADATA_VALUE_LEN];
     if (metadata_account_get(cli_user(cptr)->account, key, value) == 0) {
-      if (metadata_set_client(cptr, key, value, METADATA_VIS_PRIVATE) == 0) {
-        /* Re-scan — entry is now in the list */
-        for (entry = cli_metadata(cptr); entry; entry = entry->next) {
-          if (ircd_strcmp(entry->key, key) == 0)
-            return entry;
-        }
+      entry = create_entry(key, value);
+      if (entry) {
+        entry->visibility = METADATA_VIS_PRIVATE;
+        entry->next = cli_metadata(cptr);
+        cli_metadata(cptr) = entry;
+        return entry;
       }
     }
   }
@@ -1247,9 +1359,11 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
       cli_metadata(cptr) = entry;
     }
 
-    /* Persist to LMDB for logged-in users */
+    /* Persist to LMDB for logged-in users — store permanently (no TTL).
+     * Values set via metadata_set_client are user preferences, not cache
+     * entries, and should not expire after METADATA_CACHE_TTL. */
     if (account && metadata_lmdb_is_available()) {
-      metadata_account_set(account, key, value);
+      metadata_account_set_permanent(account, key, value);
     }
   } else {
     /* Delete */

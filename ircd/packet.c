@@ -185,9 +185,12 @@ int connect_dopacket(struct Client *cptr, const char *buffer, int length)
 
       if (parse_client(cptr, cli_buffer(cptr), endp) == CPTR_KILLED)
         return CPTR_KILLED;
-      /* Socket is dead so exit */
-      if (IsDead(cptr))
+      /* Socket is dead so exit (unless bouncer hold already claimed it) */
+      if (IsDead(cptr)) {
+        if (IsBouncerHold(cptr))
+          return 1;  /* Ghost set up — stop processing, don't exit */
         return exit_client(cptr, cptr, &me, cli_info(cptr));
+      }
       else if (IsServer(cptr))
       {
         cli_count(cptr) = 0;
@@ -217,8 +220,11 @@ int client_dopacket(struct Client *cptr, unsigned int length)
 
   if (CPTR_KILLED == parse_client(cptr, cli_buffer(cptr), cli_buffer(cptr) + length))
     return CPTR_KILLED;
-  else if (IsDead(cptr))
+  else if (IsDead(cptr)) {
+    if (IsBouncerHold(cptr))
+      return 1;  /* Ghost set up — stop processing, don't exit */
     return exit_client(cptr, cptr, &me, cli_info(cptr));
+  }
 
   return 1;
 }

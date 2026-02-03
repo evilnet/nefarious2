@@ -103,7 +103,7 @@ static struct AccountEntry *create_entry(const char *account)
   if (!entry)
     return NULL;
 
-  ircd_strncpy(entry->account, account, ACCOUNTLEN);
+  ircd_strncpy(entry->account, account, ACCOUNTLEN + 1);
   entry->effective_state = CONN_PRESENT; /* Default to present */
 
   /* Load persisted last_present from LMDB, or use current time */

@@ -45,6 +45,10 @@
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
 #endif
+#ifndef INCLUDED_stdint_h
+#include <stdint.h>
+#define INCLUDED_stdint_h
+#endif
 
 struct Client;
 
@@ -67,6 +71,44 @@ struct Client;
 enum BouncerState {
   BOUNCE_ACTIVE,    /**< Client is connected */
   BOUNCE_HOLDING    /**< Client disconnected, session preserved */
+};
+
+/** Current version of the on-disk bouncer session record. */
+#define BOUNCER_DB_VERSION 2
+
+/** On-disk representation of a bouncer session for MDBX persistence.
+ * Fixed-width, versioned. All IRC identifiers have known max lengths.
+ */
+struct BounceSessionRecord {
+  uint32_t bsr_version;
+  /* Session identity */
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];        /**< Server numeric that created this */
+  int32_t  bsr_hold_override;
+  /* Timestamps */
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  /* Ghost client identity */
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];          /**< Displayed/hidden host */
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  /* Channel memberships */
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+  } bsr_channels[BOUNCER_MAX_CHANNELS];
 };
 
 /** Shadow connection flags. */
@@ -152,7 +194,8 @@ struct BouncerSession {
   time_t hs_created;                  /**< When session was created */
   time_t hs_last_active;              /**< Last activity timestamp */
   time_t hs_disconnect_time;          /**< When client disconnected (0=active) */
-  unsigned int hs_attach_count;       /**< Number of times resumed */
+  unsigned int hs_attach_count;       /**< Number of times resumed from HOLDING */
+  unsigned int hs_connect_count;      /**< Total connections (resumes + shadow attaches) */
   time_t hs_total_active;             /**< Cumulative active time (seconds) */
   struct Timer hs_hold_timer;         /**< Expiry timer for HOLDING state */
 };
@@ -466,5 +509,22 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  */
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session);
+
+/*
+ * MDBX persistence API (FEAT_BOUNCER_PERSIST)
+ */
+
+/** Restore bouncer sessions from MDBX after restart.
+ * Creates ghost clients, joins them to channels, registers sessions in hash tables.
+ * Called from ircd.c after bounce_init() and metadata_lmdb_init().
+ * @return Number of sessions restored, or -1 on error.
+ */
+extern int bounce_db_restore(void);
+
+/** Persist all local bouncer sessions to MDBX before shutdown.
+ * Snapshots ACTIVE sessions and writes all local sessions.
+ * Called from server_die()/server_restart() before flush_connections().
+ */
+extern void bounce_db_shutdown(void);
 
 #endif /* INCLUDED_bouncer_session_h */

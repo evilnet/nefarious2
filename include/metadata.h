@@ -96,6 +96,7 @@ extern int metadata_account_get(const char *account, const char *key, char *valu
  * @return 0 on success, -1 on error.
  */
 extern int metadata_account_set(const char *account, const char *key, const char *value);
+extern int metadata_account_set_permanent(const char *account, const char *key, const char *value);
 
 /** Set account metadata in LMDB without compression (raw passthrough).
  * Used for compression passthrough when data is already compressed.
@@ -320,5 +321,17 @@ struct StatDesc;
  * @param[in] param Extra parameter (unused).
  */
 extern void metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
+
+/* ========== Bouncer Persistence Accessors ========== */
+
+/** Get the MDBX environment handle (for bouncer session persistence).
+ * @return MDBX_env pointer, or NULL if LMDB not initialized.
+ */
+extern struct MDBX_env *metadata_get_env(void);
+
+/** Get the bouncer_sessions DBI handle.
+ * @return MDBX_dbi handle for the bouncer_sessions database.
+ */
+extern unsigned int metadata_get_bouncer_dbi(void);
 
 #endif /* INCLUDED_metadata_h */
