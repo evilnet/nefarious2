@@ -1774,9 +1774,24 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         if (what == MODE_ADD) {
           SetBncHoldPref(acptr);
           metadata_set_client(acptr, "bouncer/hold", "1", METADATA_VIS_PRIVATE);
+          /* Auto-create bouncer session if local client doesn't have one */
+          if (MyUser(acptr) && IsAccount(acptr) && !bounce_get_session(acptr)) {
+            struct BouncerSession *session = NULL;
+            if (bounce_create(acptr, &session) == 0 && session)
+              bounce_broadcast(session, 'C', NULL);
+          }
         } else {
           ClearBncHoldPref(acptr);
-          metadata_set_client(acptr, "bouncer/hold", NULL, 0);
+          metadata_set_client(acptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+          /* Destroy bouncer session if local client has one */
+          if (MyUser(acptr)) {
+            struct BouncerSession *session = bounce_get_session(acptr);
+            if (session) {
+              session->hs_client = NULL;
+              bounce_broadcast(session, 'X', NULL);
+              bounce_destroy(session);
+            }
+          }
         }
         break;
       case 'y':
