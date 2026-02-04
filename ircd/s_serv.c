@@ -217,6 +217,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   if (feature_bool(FEAT_BOUNCER_ENABLE))
     bounce_burst(cptr);
 
+  /* Advertise multiline capability - legacy servers ignore, modern sets flag */
+  if (feature_bool(FEAT_CAP_draft_multiline))
+    sendcmdto_one(&me, CMD_MULTILINE, cptr, "");
+
   /*
    * Pass on my client information to the new server
    *

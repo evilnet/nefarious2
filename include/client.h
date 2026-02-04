@@ -187,6 +187,7 @@ enum Flag
     FLAG_IPV6,                      /**< server understands P10 IPv6 addrs */
     FLAG_SERVICE,                   /**< server is a service */
     FLAG_OPLEVELS,                  /**< server has oplevels support */
+    FLAG_MULTILINE,                 /**< server supports P10 multiline batches */
     FLAG_GOTID,                     /**< successful ident lookup achieved */
     FLAG_DOID,                      /**< I-lines say must use ident return */
     FLAG_NONL,                      /**< No \n in buffer */
@@ -969,6 +970,8 @@ struct Client {
 #define IsService(x)            HasFlag(x, FLAG_SERVICE)
 /** Return non-zero if the client has oplevels support. */
 #define IsOpLevels(x)           HasFlag(x, FLAG_OPLEVELS)
+/** Return non-zero if the server supports P10 multiline batches. */
+#define IsMultiline(x)          HasFlag(x, FLAG_MULTILINE)
 /** Return non-zero if the client has an account stamp. */
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
@@ -1106,6 +1109,8 @@ struct Client {
 #define SetService(x)           SetFlag(x, FLAG_SERVICE)
 /** Mark a client as having oplevels support. */
 #define SetOpLevels(x)          SetFlag(x, FLAG_OPLEVELS)
+/** Mark a server as supporting P10 multiline batches. */
+#define SetMultiline(x)         SetFlag(x, FLAG_MULTILINE)
 /** Mark a client as having an account stamp. */
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */
@@ -1308,6 +1313,8 @@ struct Client {
 #define ClearHub(x)             ClrFlag(x, FLAG_HUB)
 /** Clear the client's OPLEVELS flag. */
 #define ClearOpLevels(x)        ClrFlag(x, FLAG_OPLEVELS)
+/** Clear the server's MULTILINE flag. */
+#define ClearMultiline(x)       ClrFlag(x, FLAG_MULTILINE)
 /** Clear the client's account status. */
 #define ClearAccount(x)         ClrFlag(x, FLAG_ACCOUNT)
 /** Clear the client's SASL authentication complete flag. */

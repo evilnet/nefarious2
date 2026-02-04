@@ -563,6 +563,9 @@ process_multiline_batch(struct Client *sptr)
       if (to == sptr)
         continue;  /* Skip sender (handle echo-message separately) */
 
+      if (!MyConnect(to))
+        continue;  /* Skip remote users - handled by S2S relay */
+
       if (CapActive(to, CAP_DRAFT_MULTILINE) && CapActive(to, CAP_BATCH)) {
         /* Send as batch to supporting clients */
         char batchid[16];
@@ -862,67 +865,132 @@ process_multiline_batch(struct Client *sptr)
       }
     }
 
-    /* S2S relay for private messages to remote users */
+    /* Capability-aware S2S relay for private messages to remote users */
     if (!MyConnect(acptr)) {
+      struct Client *target_server = cli_from(acptr);
       char s2s_batch_id[16];
       ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
                     cli_yxx(sptr), (unsigned long)CurrentTime);
 
-      first = 1;
-      for (lp = con_ml_messages(con); lp; lp = lp->next) {
-        int concat = lp->value.cp[0];
-        char *text = lp->value.cp + 1;
+      if (IsServer(target_server) && IsMultiline(target_server)) {
+        /* Send ML tokens to capable server */
+        first = 1;
+        for (lp = con_ml_messages(con); lp; lp = lp->next) {
+          int concat = lp->value.cp[0];
+          char *text = lp->value.cp + 1;
 
-        if (first) {
-          /* Start batch with first line */
-          sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "+%s %s :%s",
-                                s2s_batch_id, cli_name(acptr), text);
-          first = 0;
-        } else if (concat) {
-          /* Concat line */
-          sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "c%s %s :%s",
-                                s2s_batch_id, cli_name(acptr), text);
-        } else {
-          /* Normal continuation */
-          sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "%s %s :%s",
-                                s2s_batch_id, cli_name(acptr), text);
+          if (first) {
+            sendcmdto_one(sptr, CMD_MULTILINE, target_server, "+%s %s :%s",
+                          s2s_batch_id, cli_name(acptr), text);
+            first = 0;
+          } else if (concat) {
+            sendcmdto_one(sptr, CMD_MULTILINE, target_server, "c%s %s :%s",
+                          s2s_batch_id, cli_name(acptr), text);
+          } else {
+            sendcmdto_one(sptr, CMD_MULTILINE, target_server, "%s %s :%s",
+                          s2s_batch_id, cli_name(acptr), text);
+          }
+        }
+        sendcmdto_one(sptr, CMD_MULTILINE, target_server, "-%s %s :",
+                      s2s_batch_id, cli_name(acptr));
+      } else {
+        /* Send fallback PRIVMSGs to legacy server */
+        int sent = 0;
+        int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+        int total_lines = con_ml_msg_count(con);
+        int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
+
+        for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
+          char *text = lp->value.cp + 1;
+          if (*text == '\0')
+            continue;
+          sendcmdto_one(sptr, CMD_PRIVATE, target_server, "%C :%s", acptr, text);
+          sent++;
+        }
+
+        if (total_lines > max_preview) {
+          int remaining = total_lines - sent;
+          sendcmdto_one(&me, CMD_NOTICE, target_server,
+              "%C :[%d more lines - connect to a multiline-capable server to view]",
+              acptr, remaining);
         }
       }
-      /* End batch */
-      sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "-%s %s :",
-                            s2s_batch_id, cli_name(acptr));
     }
   }
 
-  /* S2S relay for channel messages */
+  /* Capability-aware S2S relay for channel messages.
+   * Send ML tokens to servers that support multiline, fallback PRIVMSGs to legacy.
+   * This fixes N² duplication bug: previously we sent fallback per remote user,
+   * now we send once per server with appropriate format.
+   */
   if (is_channel && chptr) {
+    static unsigned long s2s_relay_marker = 0;
     char s2s_batch_id[16];
+    int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+    int total_lines = con_ml_msg_count(con);
+
     ircd_snprintf(0, s2s_batch_id, sizeof(s2s_batch_id), "%s%lu",
                   cli_yxx(sptr), (unsigned long)CurrentTime);
 
-    first = 1;
-    for (lp = con_ml_messages(con); lp; lp = lp->next) {
-      int concat = lp->value.cp[0];
-      char *text = lp->value.cp + 1;
+    /* Increment marker for this send cycle */
+    s2s_relay_marker++;
 
-      if (first) {
-        /* Start batch with first line */
-        sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "+%s %s :%s",
-                              s2s_batch_id, chptr->chname, text);
-        first = 0;
-      } else if (concat) {
-        /* Concat line */
-        sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "c%s %s :%s",
-                              s2s_batch_id, chptr->chname, text);
+    /* Iterate channel members to find servers that need the message */
+    for (member = chptr->members; member; member = member->next_member) {
+      struct Client *server;
+
+      if (MyConnect(member->user))
+        continue;  /* Local users already handled above */
+
+      server = cli_from(member->user);
+      if (!IsServer(server) || cli_sentalong(server) == s2s_relay_marker)
+        continue;  /* Already sent to this server */
+
+      cli_sentalong(server) = s2s_relay_marker;
+
+      if (IsMultiline(server)) {
+        /* Send ML tokens to capable servers */
+        first = 1;
+        for (lp = con_ml_messages(con); lp; lp = lp->next) {
+          int concat = lp->value.cp[0];
+          char *text = lp->value.cp + 1;
+
+          if (first) {
+            sendcmdto_one(sptr, CMD_MULTILINE, server, "+%s %s :%s",
+                          s2s_batch_id, chptr->chname, text);
+            first = 0;
+          } else if (concat) {
+            sendcmdto_one(sptr, CMD_MULTILINE, server, "c%s %s :%s",
+                          s2s_batch_id, chptr->chname, text);
+          } else {
+            sendcmdto_one(sptr, CMD_MULTILINE, server, "%s %s :%s",
+                          s2s_batch_id, chptr->chname, text);
+          }
+        }
+        sendcmdto_one(sptr, CMD_MULTILINE, server, "-%s %s :",
+                      s2s_batch_id, chptr->chname);
       } else {
-        /* Normal continuation */
-        sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "%s %s :%s",
-                              s2s_batch_id, chptr->chname, text);
+        /* Send fallback PRIVMSGs to legacy servers (once per server, not per user) */
+        int sent = 0;
+        int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
+
+        for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
+          char *text = lp->value.cp + 1;
+          if (*text == '\0')
+            continue;
+          sendcmdto_one(sptr, CMD_PRIVATE, server, "%H :%s", chptr, text);
+          sent++;
+        }
+
+        /* Send truncation notice if needed */
+        if (total_lines > max_preview) {
+          int remaining = total_lines - sent;
+          sendcmdto_one(&me, CMD_NOTICE, server,
+              "%H :[%d more lines - connect to a multiline-capable server to view]",
+              chptr, remaining);
+        }
       }
     }
-    /* End batch */
-    sendcmdto_serv_butone(sptr, CMD_MULTILINE, NULL, "-%s %s :",
-                          s2s_batch_id, chptr->chname);
   }
 
   /* Notify sender about fallback if they support standard-replies */
@@ -1525,7 +1593,15 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   assert(0 != cptr);
   assert(0 != sptr);
 
-  /* Sender must be a user */
+  /* Empty ML from server = capability advertisement during BURST */
+  if (IsServer(sptr) && (parc < 2 || EmptyString(parv[1]))) {
+    SetMultiline(sptr);
+    /* Propagate to other servers */
+    sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "");
+    return 0;
+  }
+
+  /* Sender must be a user for actual multiline messages */
   if (!IsUser(sptr))
     return protocol_violation(cptr, "Non-user sending MULTILINE");
 
