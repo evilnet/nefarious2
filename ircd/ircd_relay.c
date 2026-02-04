@@ -503,7 +503,17 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
         skip_primary_echo = 1;
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
+      /* Filter shadows without echo-message */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
@@ -612,9 +622,19 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
         skip_primary_echo = 1;
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
+      /* Filter shadows without echo-message */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
                                "%H :%s", chptr, mytext);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
@@ -646,7 +666,17 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
         skip_primary_echo = 1;
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
+      /* Filter shadows without echo-message */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
@@ -1039,9 +1069,19 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         skip_primary_echo = 1;
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
+      /* Filter shadows without echo-message */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
                                "%C :%s", acptr, mytext);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
@@ -1073,7 +1113,17 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         skip_primary_echo = 1;
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
+      /* Filter shadows without echo-message */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, mytext);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
@@ -1183,9 +1233,19 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
         skip_primary_echo = 1;
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
+      /* Filter shadows without echo-message */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
                                msgid, sizeof(msgid), timestamp, sizeof(timestamp),
                                "%C :%s", acptr, mytext);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
@@ -1217,7 +1277,17 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
         skip_primary_echo = 1;
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
+      /* Filter shadows without echo-message */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, mytext);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
