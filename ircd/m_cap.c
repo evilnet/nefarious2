@@ -76,9 +76,12 @@ sasl_server_available(void)
 
   /* IAUTH can provide SASL independently of P10 services (supports fallback
    * when services disconnects). But we still require mechanisms - if IAUTH
-   * announces SASL capability without providing mechanisms, don't advertise. */
+   * announces SASL capability without providing mechanisms, don't advertise.
+   * Note: IAUTH runs locally and supports dynamic mechanisms, so we check
+   * IAUTH's own mechanism list directly - SASL_DEFAULT_MECHANISMS is only
+   * for legacy X3 that can't advertise mechanisms dynamically. */
   if (auth_iauth_handles_sasl()) {
-    return (get_effective_sasl_mechanisms() != NULL);
+    return (auth_iauth_sasl_mechs() != NULL);
   }
 
   /* No mechanisms = no SASL, regardless of server connectivity */
