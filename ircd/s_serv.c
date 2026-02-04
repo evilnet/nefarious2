@@ -217,9 +217,19 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   if (feature_bool(FEAT_BOUNCER_ENABLE))
     bounce_burst(cptr);
 
-  /* Advertise multiline capability - legacy servers ignore, modern sets flag */
-  if (feature_bool(FEAT_CAP_draft_multiline))
+  /* Advertise multiline capability - legacy servers ignore, modern sets flag.
+   * Also burst ML capability for all known ML-capable servers so that when
+   * server C links to B after A already linked to B, C learns about A's
+   * capability (not just B's).
+   */
+  if (feature_bool(FEAT_CAP_draft_multiline)) {
+    struct Client *srv;
     sendcmdto_one(&me, CMD_MULTILINE, cptr, "");
+    for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
+      if (IsServer(srv) && !IsMe(srv) && srv != cptr && IsMultiline(srv))
+        sendcmdto_one(srv, CMD_MULTILINE, cptr, "");
+    }
+  }
 
   /*
    * Pass on my client information to the new server
