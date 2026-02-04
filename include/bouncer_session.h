@@ -443,13 +443,30 @@ extern int bounce_hold_client(struct Client *cptr, const char *comment);
  */
 extern struct BouncerSession *bounce_should_hold(struct Client *cptr);
 
-/** Revive a held ghost client with a new socket connection.
+/** Revive a held ghost client by transplanting a socket from a temp client.
+ *
+ * Instead of creating a new client and transferring channels, this
+ * transplants the temp client's socket directly onto the ghost Client.
+ * The ghost "wakes up" with no network visibility — no NICK, no QUIT.
+ *
  * For same-server resume only. Cross-server uses transfer protocol.
- * @param[in] session Session to revive.
- * @param[in] cptr New connection to attach to the ghost.
- * @return 0 on success.
+ *
+ * @param[in] session Session to revive (must be HOLDING with local ghost).
+ * @param[in] temp Temp client whose socket will be transplanted.
+ *                 Socket is stolen; call bounce_free_temp_client() after.
+ * @return 0 on success, -1 on error.
  */
-extern int bounce_revive(struct BouncerSession *session, struct Client *cptr);
+extern int bounce_revive(struct BouncerSession *session, struct Client *temp);
+
+/** Free a temporary client after socket transplant.
+ *
+ * Called after bounce_revive() succeeds. Frees the temp client without
+ * sending network messages (it was never introduced) or closing the fd
+ * (it was stolen by bounce_revive).
+ *
+ * @param[in] temp Temporary client to free.
+ */
+extern void bounce_free_temp_client(struct Client *temp);
 
 /*
  * Utility

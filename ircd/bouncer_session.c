@@ -44,6 +44,7 @@
 #include "numnicks.h"
 #include "send.h"
 #include "hash.h"
+#include "s_auth.h"
 #include "s_bsd.h"
 #include "parse.h"
 #include "s_debug.h"
@@ -572,6 +573,25 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
       ircd_strncpy(cli_name(cptr), cli_name(session->hs_client), NICKLEN);
     }
 
+    /* Adopt ghost's nick timestamp so we win nick collisions.
+     *
+     * Note: This code path is only used for cross-server resume (ghost on
+     * remote server) or when socket transplant fails. For local ghosts,
+     * register_user() uses bounce_revive() for seamless socket transplant.
+     *
+     * With same user@host, older timestamp wins — without this, the ghost
+     * (with original session timestamp) beats the new client (with fresh
+     * connection timestamp), causing the new client to be killed and
+     * channel memberships to be lost.
+     *
+     * Use ghost's timestamp if available, otherwise use session creation time
+     * (for cross-server resume where ghost is on a remote server). */
+    if (session->hs_client) {
+      cli_lastnick(cptr) = cli_lastnick(session->hs_client);
+    } else {
+      cli_lastnick(cptr) = session->hs_created;
+    }
+
     /* Attach to the session — transfers channels, exits ghost */
     if (bounce_attach(session, cptr) == 0) {
       /* Notify client of nick change if it happened */
@@ -833,6 +853,21 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
     timer_del(&session->hs_hold_timer);
 
   ghost = session->hs_client;
+
+#ifdef USE_SSL
+  /* Gate: Refuse attach if ghost is in +Z channels and new client is plaintext.
+   * Transferring +Z channel membership to a non-TLS client would violate +Z. */
+  if (ghost && cli_user(ghost) && !IsSSL(cptr)) {
+    for (member = cli_user(ghost)->channel; member; member = member->next_channel) {
+      if (member->channel->mode.exmode & EXMODE_SSLONLY) {
+        Debug((DEBUG_INFO,
+               "Bouncer: refusing attach for %s - plaintext client, ghost in +Z channel %s",
+               cli_name(cptr), member->channel->chname));
+        return -1;  /* Caller handles fallback to normal registration */
+      }
+    }
+  }
+#endif
 
   /* Same-server resume: ghost exists locally, transfer channel memberships */
   if (ghost && IsBouncerHold(ghost) && MyUser(ghost)) {
@@ -2050,18 +2085,239 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   return 0;
 }
 
-/** Revive a ghost client with a new socket (same-server resume).
+/** Revive a ghost client by transplanting a socket from a temp client.
  *
- * Note: The actual revival logic is now in bounce_attach(), which handles
- * transferring channel memberships from ghost to new client.
- * This function is kept for API completeness but delegates to bounce_attach().
+ * Instead of creating a new client and transferring channels from ghost,
+ * this transplants the temp client's socket directly onto the ghost Client
+ * struct, keeping the ghost's nick, numeric, and channel memberships.
+ *
+ * This avoids nick collisions on legacy networks because no new client
+ * is introduced to the network — the ghost simply "wakes up" with the
+ * new socket attached.
+ *
+ * @param[in] session The HOLDING session to revive.
+ * @param[in] temp The temporary client whose socket will be transplanted.
+ *                 This client will be freed (locally, no network messages).
+ * @return 0 on success, -1 on error.
  */
-int bounce_revive(struct BouncerSession *session, struct Client *cptr)
+int bounce_revive(struct BouncerSession *session, struct Client *temp)
 {
+  struct Client *ghost;
+  struct Connection *ghost_con;
+  struct Connection *temp_con;
+  struct Membership *member;
+  int fd;
+
   if (!session || session->hs_state != BOUNCE_HOLDING)
     return -1;
 
-  return bounce_attach(session, cptr);
+  ghost = session->hs_client;
+  if (!ghost || !MyUser(ghost) || !IsBouncerHold(ghost))
+    return -1;
+
+  if (!temp || !MyConnect(temp))
+    return -1;
+
+  ghost_con = cli_connect(ghost);
+  temp_con = cli_connect(temp);
+
+  if (!ghost_con || !temp_con)
+    return -1;
+
+#ifdef USE_SSL
+  /* Gate: Refuse revival if ghost is in +Z channels and temp is plaintext.
+   * A non-TLS connection cannot be in SSL-only channels. */
+  if (!con_socket(temp_con).ssl && cli_user(ghost)) {
+    for (member = cli_user(ghost)->channel; member; member = member->next_channel) {
+      if (member->channel->mode.exmode & EXMODE_SSLONLY) {
+        Debug((DEBUG_INFO,
+               "Bouncer: refusing revival for %s - plaintext connection, ghost in +Z channel %s",
+               cli_name(ghost), member->channel->chname));
+        /* Send a helpful error to the temp client */
+        sendrawto_one(temp,
+          ":%s NOTE BOUNCER TLS_REQUIRED "
+          ":Cannot resume session - session is in SSL-only (+Z) channels. "
+          "Connect with TLS to resume.",
+          cli_name(&me));
+        return -1;  /* Fall back to normal registration */
+      }
+    }
+  }
+#endif
+
+  Debug((DEBUG_INFO, "Bouncer: reviving ghost %s with socket from temp %s (fd %d)",
+         cli_name(ghost), cli_name(temp), cli_fd(temp)));
+
+  /* Cancel hold timer if running */
+  if (t_active(&session->hs_hold_timer))
+    timer_del(&session->hs_hold_timer);
+
+  /* Step 1: Steal the temp client's fd.
+   * Clear s_data BEFORE socket_del to prevent stale callbacks. */
+  fd = cli_fd(temp);
+  s_data(&cli_socket(temp)) = NULL;
+  socket_del(&cli_socket(temp));
+  cli_fd(temp) = -1;
+
+  /* Step 2: Ghost's old fd should be -1 from close_connection() during hold.
+   * Just verify and update LocalClientArray if somehow it wasn't. */
+  if (cli_fd(ghost) >= 0) {
+    LocalClientArray[cli_fd(ghost)] = 0;
+    close(cli_fd(ghost));
+  }
+
+#ifdef USE_SSL
+  /* Free ghost's old SSL object (should be NULL from close_connection) */
+  if (con_socket(ghost_con).ssl) {
+    SSL_free(con_socket(ghost_con).ssl);
+    con_socket(ghost_con).ssl = NULL;
+  }
+  /* Transfer temp's SSL object to ghost */
+  con_socket(ghost_con).ssl = con_socket(temp_con).ssl;
+  con_socket(temp_con).ssl = NULL;
+#endif
+
+  /* Step 3: Transplant the fd into the ghost's Connection */
+  s_fd(&con_socket(ghost_con)) = fd;
+
+  /* Step 4: Update LocalClientArray */
+  LocalClientArray[fd] = ghost;
+
+  /* Step 5: Re-register socket with event engine.
+   * socket_reattach preserves GenHeader state. */
+  if (!socket_reattach(&cli_socket(ghost), fd)) {
+    Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during ghost revival for %s",
+           cli_name(ghost)));
+    close(fd);
+    s_fd(&con_socket(ghost_con)) = -1;
+    LocalClientArray[fd] = 0;
+    return -1;
+  }
+
+  /* Step 6: Reset socket interest to readable */
+  socket_events(&cli_socket(ghost), SOCK_EVENT_READABLE);
+
+  /* Step 7: Transfer sendQ/recvQ from temp to ghost */
+  MsgQClear(&con_sendQ(ghost_con));
+  con_sendQ(ghost_con) = con_sendQ(temp_con);
+  msgq_init(&con_sendQ(temp_con));
+
+  DBufClear(&con_recvQ(ghost_con));
+  con_recvQ(ghost_con) = con_recvQ(temp_con);
+  memset(&con_recvQ(temp_con), 0, sizeof(con_recvQ(temp_con)));
+
+  /* Step 8: Copy CAP state from temp to ghost */
+  memcpy(con_capab(ghost_con), con_capab(temp_con), sizeof(struct CapSet));
+  memcpy(con_active_own(ghost_con), con_active_own(temp_con), sizeof(struct CapSet));
+  memcpy(con_active(ghost_con), con_active_own(temp_con), sizeof(struct CapSet));
+  con_capab_version(ghost_con) = con_capab_version(temp_con);
+
+  /* Step 9: Update timing */
+  con_lasttime(ghost_con) = con_lasttime(temp_con);
+  con_since(ghost_con) = con_since(temp_con);
+
+#ifdef USE_SSL
+  /* Step 10: Update FLAG_SSL and channel nonsslusers counters */
+  {
+    int was_ssl = IsSSL(ghost);
+    int now_ssl = (con_socket(ghost_con).ssl != NULL);
+    if (now_ssl && !was_ssl) {
+      SetSSL(ghost);
+      if (cli_user(ghost)) {
+        for (member = cli_user(ghost)->channel; member; member = member->next_channel)
+          if (member->channel->nonsslusers > 0)
+            member->channel->nonsslusers--;
+      }
+    } else if (!now_ssl && was_ssl) {
+      ClearSSL(ghost);
+      if (cli_user(ghost)) {
+        for (member = cli_user(ghost)->channel; member; member = member->next_channel)
+          member->channel->nonsslusers++;
+      }
+    }
+  }
+#endif
+
+  /* Step 11: Clear holding flags on ghost */
+  ClearBouncerHold(ghost);
+  ClrFlag(ghost, FLAG_DEADSOCKET);
+
+  /* Step 12: Clear CHFL_HOLDING on all channel memberships */
+  if (cli_user(ghost)) {
+    for (member = cli_user(ghost)->channel; member; member = member->next_channel) {
+      ClearMemberHolding(member);
+    }
+  }
+
+  /* Step 13: Update session state */
+  session->hs_state = BOUNCE_ACTIVE;
+  session->hs_client = ghost;
+  session->hs_attach_count++;
+  session->hs_connect_count++;
+  session->hs_last_active = CurrentTime;
+  session->hs_disconnect_time = 0;
+
+  /* Session is live again — remove persisted state */
+  bounce_db_del(session->hs_sessid);
+
+  /* Recompute session union caps */
+  bounce_recompute_session_caps(ghost);
+
+  /* Broadcast session attach to other servers */
+  bounce_broadcast(session, 'A', cli_yxx(ghost));
+
+  log_write(LS_USER, L_TRACE, 0,
+            "Bouncer: ghost %s revived via socket transplant for session %s",
+            cli_name(ghost), session->hs_sessid);
+
+  return 0;
+}
+
+/** Free a temporary client after socket transplant.
+ *
+ * The temp client's socket has been stolen by bounce_revive().
+ * This function frees the temp client WITHOUT:
+ * - Sending QUIT to network (it was never introduced)
+ * - Closing the fd (it was stolen)
+ * - Double-freeing auth request
+ *
+ * @param[in] temp Temporary client to free.
+ */
+void bounce_free_temp_client(struct Client *temp)
+{
+  if (!temp)
+    return;
+
+  Debug((DEBUG_INFO, "Bouncer: freeing temp client %s after socket transplant",
+         cli_name(temp)));
+
+  /* Detach auth request to prevent double-free.
+   * check_auth_finished() will try to destroy it later otherwise. */
+  if (cli_auth(temp)) {
+    auth_detach_client(cli_auth(temp));
+    cli_auth(temp) = NULL;
+  }
+
+  /* fd should already be -1 from bounce_revive() */
+  assert(cli_fd(temp) == -1);
+  SetFlag(temp, FLAG_DEADSOCKET);
+
+  /* Remove from nick hash if present.
+   * Temp client was added by m_nick during registration. */
+  if (cli_name(temp)[0])
+    hRemClient(temp);
+
+  /* Remove from global client list */
+  remove_client_from_list(temp);
+
+  /* Free user struct if allocated */
+  if (cli_user(temp)) {
+    /* Don't broadcast QUIT - client was never introduced */
+    cli_user(temp)->server = NULL;
+  }
+
+  /* Free the client */
+  free_client(temp);
 }
 
 /* ---------------------------------------------------------------- */

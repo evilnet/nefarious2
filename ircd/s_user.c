@@ -403,10 +403,78 @@ int register_user(struct Client *cptr, struct Client *sptr)
     SetUser(sptr);
     cli_handler(sptr) = CLIENT_HANDLER;
 
-    /* SASL-triggered bouncer auto-resume — before network introduction */
+    /* SASL-triggered bouncer resume — BEFORE network introduction.
+     *
+     * Priority order:
+     * 1. Socket transplant: If there's a local HOLDING ghost, transplant
+     *    this client's socket onto it. The ghost "wakes up" with no
+     *    network visibility — no new NICK, no QUIT, no collision.
+     * 2. Shadow attach: If there's an ACTIVE session, become a shadow.
+     * 3. Fall back to auto_resume for remote ghosts or new sessions.
+     */
     auto_session = NULL;
     auto_resumed = 0;
     if (IsAccount(sptr) && bounce_enabled()) {
+      /* Try socket transplant for local HOLDING ghost first */
+      struct BouncerSession *held = bounce_find_best_held(cli_account(sptr));
+      if (held && held->hs_client && MyUser(held->hs_client)) {
+        /* Local ghost found — do socket transplant */
+        if (bounce_revive(held, sptr) == 0) {
+          /* Success! Ghost is now alive with our socket.
+           * sptr is now a husk with fd=-1. Free it silently. */
+          struct Client *ghost = held->hs_client;
+          char original_nick[NICKLEN + 1];
+
+          /* Save temp client's nick in case ghost has different nick */
+          ircd_strncpy(original_nick, cli_name(sptr), NICKLEN);
+
+          /* Free the temp client (no network messages) */
+          bounce_free_temp_client(sptr);
+
+          /* Send welcome sequence to the revived ghost.
+           * Note: We can't use the normal register_user flow because
+           * the ghost is already on the network with a numeric. */
+          send_reply(ghost, RPL_WELCOME, feature_str(FEAT_NETWORK),
+                     feature_str(FEAT_PROVIDER) ? " via " : "",
+                     feature_str(FEAT_PROVIDER) ? feature_str(FEAT_PROVIDER) : "",
+                     cli_name(ghost));
+          send_reply(ghost, RPL_YOURHOST, cli_name(&me), version);
+          send_reply(ghost, RPL_CREATED, creation);
+          send_reply(ghost, RPL_MYINFO, cli_name(&me), version, infousermodes,
+                     infochanmodes, infochanmodeswithparams);
+          send_supported(ghost);
+
+#ifdef USE_SSL
+          if (cli_socket(ghost).ssl) {
+            sendcmdto_one(&me, CMD_NOTICE, ghost,
+                          "%C :You are connected to %s with %s", ghost,
+                          cli_name(&me), ssl_get_cipher(cli_socket(ghost).ssl));
+          }
+#endif
+
+          m_lusers(ghost, ghost, 1, parv);
+          motd_signon(ghost);
+
+          /* Notify client if their nick changed (ghost had different nick) */
+          if (ircd_strcmp(original_nick, cli_name(ghost)) != 0) {
+            sendcmdto_one(ghost, CMD_NICK, ghost, "%s", cli_name(ghost));
+          }
+
+          /* Replay channel state */
+          bounce_send_channel_state(ghost);
+
+          /* Auto-replay missed messages for legacy clients */
+          if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)) {
+            bouncer_auto_replay(ghost, held);
+          }
+
+          /* Return special code — caller must not dereference sptr */
+          return CPTR_KILLED;
+        }
+        /* Socket transplant failed — fall through to auto_resume */
+      }
+
+      /* Fall back to existing auto_resume (handles shadows, remote ghosts, etc.) */
       auto_resumed = bounce_auto_resume(sptr, &auto_session);
     }
 

@@ -908,9 +908,10 @@ process_multiline_batch(struct Client *sptr)
           sent++;
         }
 
+        /* Send truncation notice from user (consistent with preview PRIVMSGs) */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
-          sendcmdto_one(&me, CMD_NOTICE, target_server,
+          sendcmdto_one(sptr, CMD_NOTICE, target_server,
               "%C :[%d more lines - connect to a multiline-capable server to view]",
               acptr, remaining);
         }
@@ -982,10 +983,14 @@ process_multiline_batch(struct Client *sptr)
           sent++;
         }
 
-        /* Send truncation notice if needed */
+        /* Send truncation notice if needed.
+         * Use sptr (user) as source to be consistent with preview PRIVMSGs.
+         * This also ensures legacy servers properly relay it to channel members,
+         * as some may not handle server-originated channel messages correctly.
+         */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
-          sendcmdto_one(&me, CMD_NOTICE, server,
+          sendcmdto_one(sptr, CMD_NOTICE, server,
               "%H :[%d more lines - connect to a multiline-capable server to view]",
               chptr, remaining);
         }
