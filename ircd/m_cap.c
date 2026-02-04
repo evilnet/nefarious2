@@ -74,6 +74,13 @@ sasl_server_available(void)
 {
   const char *sasl_server = feature_str(FEAT_SASL_SERVER);
 
+  /* IAUTH can provide SASL independently of P10 services (supports fallback
+   * when services disconnects). But we still require mechanisms - if IAUTH
+   * announces SASL capability without providing mechanisms, don't advertise. */
+  if (auth_iauth_handles_sasl()) {
+    return (get_effective_sasl_mechanisms() != NULL);
+  }
+
   /* No mechanisms = no SASL, regardless of server connectivity */
   if (!get_effective_sasl_mechanisms())
     return 0;
