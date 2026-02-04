@@ -2183,15 +2183,39 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   /* Step 4: Update LocalClientArray */
   LocalClientArray[fd] = ghost;
 
-  /* Step 5: Re-register socket with event engine.
-   * socket_reattach preserves GenHeader state. */
-  if (!socket_reattach(&cli_socket(ghost), fd)) {
-    Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during ghost revival for %s",
-           cli_name(ghost)));
-    close(fd);
-    s_fd(&con_socket(ghost_con)) = -1;
-    LocalClientArray[fd] = 0;
-    return -1;
+  /* Step 5: Initialize ghost socket if not already active.
+   * For persisted ghosts (restored from MDBX on startup), socket_add was
+   * never called, so the socket lacks s_data/s_func/GEN_ACTIVE.
+   * For normal ghosts that went into holding, the socket is already
+   * initialized from when they originally connected.
+   * Use socket_add for uninitialized sockets, socket_reattach for active ones. */
+  Debug((DEBUG_INFO, "Bouncer: ghost %s socket gh_flags=0x%x GEN_ACTIVE=%d s_data=%p",
+         cli_name(ghost), cli_socket(ghost).s_header.gh_flags,
+         !!(cli_socket(ghost).s_header.gh_flags & GEN_ACTIVE),
+         s_data(&cli_socket(ghost))));
+  if (!(cli_socket(ghost).s_header.gh_flags & GEN_ACTIVE)) {
+    /* Persisted ghost: socket never initialized, use socket_add */
+    Debug((DEBUG_INFO, "Bouncer: using socket_add for uninitialized ghost socket"));
+    if (!socket_add(&cli_socket(ghost), client_sock_callback,
+                    (void *)ghost_con, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
+      Debug((DEBUG_ERROR, "Bouncer: socket_add failed during ghost revival for %s",
+             cli_name(ghost)));
+      close(fd);
+      s_fd(&con_socket(ghost_con)) = -1;
+      LocalClientArray[fd] = 0;
+      return -1;
+    }
+  } else {
+    /* Normal ghost: socket was active, just reattach fd */
+    Debug((DEBUG_INFO, "Bouncer: using socket_reattach for active ghost socket"));
+    if (!socket_reattach(&cli_socket(ghost), fd)) {
+      Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during ghost revival for %s",
+             cli_name(ghost)));
+      close(fd);
+      s_fd(&con_socket(ghost_con)) = -1;
+      LocalClientArray[fd] = 0;
+      return -1;
+    }
   }
 
   /* Step 6: Reset socket interest to readable */
@@ -2307,17 +2331,15 @@ void bounce_free_temp_client(struct Client *temp)
   if (cli_name(temp)[0])
     hRemClient(temp);
 
-  /* Remove from global client list */
-  remove_client_from_list(temp);
-
-  /* Free user struct if allocated */
+  /* Prevent QUIT broadcast - client was never introduced to network.
+   * Must be done before remove_client_from_list which frees cli_user. */
   if (cli_user(temp)) {
-    /* Don't broadcast QUIT - client was never introduced */
     cli_user(temp)->server = NULL;
   }
 
-  /* Free the client */
-  free_client(temp);
+  /* Remove from global client list and free client.
+   * Note: remove_client_from_list calls free_client internally. */
+  remove_client_from_list(temp);
 }
 
 /* ---------------------------------------------------------------- */

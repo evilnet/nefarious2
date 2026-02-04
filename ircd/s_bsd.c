@@ -1342,9 +1342,24 @@ void client_sock_callback(struct Event* ev)
   char *fallback = 0;
 
   assert(0 != ev_socket(ev));
-  assert(0 != s_data(ev_socket(ev)));
 
   con = (struct Connection*) s_data(ev_socket(ev));
+
+  /* Allow s_data == NULL for ET_DESTROY events.  This happens when
+   * bounce_revive() clears s_data before socket_del() to prevent stale
+   * callbacks during socket transplant.  The socket is being intentionally
+   * destroyed; there's no connection to process. */
+  if (!con) {
+    if (ev_type(ev) == ET_DESTROY) {
+#ifdef USE_SSL
+      ssl_free(ev_socket(ev));
+#endif
+      return;  /* Nothing more to do */
+    }
+    /* Non-destroy event with NULL s_data is a bug */
+    assert(0 && "client_sock_callback: s_data is NULL for non-destroy event");
+    return;
+  }
 
   assert(0 != con_client(con) || ev_type(ev) == ET_DESTROY);
 
