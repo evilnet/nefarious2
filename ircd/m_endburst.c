@@ -148,6 +148,7 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
   /* Check if the linking server is the SASL server (for legacy X3 support).
    * If SASL_DEFAULT_MECHANISMS is set and no dynamic mechanisms have been
    * received yet, enable SASL with the default mechanisms.
+   * Only send CAP NEW if the advertised state actually changes.
    */
   {
     const char *sasl_server = feature_str(FEAT_SASL_SERVER);
@@ -157,10 +158,17 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
     if (is_sasl_server && !get_sasl_mechanisms()) {
       const char *default_mechs = feature_str(FEAT_SASL_DEFAULT_MECHANISMS);
       if (default_mechs && *default_mechs) {
-        log_write(LS_SYSTEM, L_INFO, 0,
-                  "SASL server linked (%C), enabling SASL with default mechanisms: %s",
-                  sptr, default_mechs);
-        send_cap_notify("sasl", 1, default_mechs);
+        /* In wildcard mode, SASL was already being advertised (UserStats.servers > 0
+         * is always true due to local server), using these same default mechanisms.
+         * In specific server mode, SASL wasn't advertised before, so send CAP NEW. */
+        int was_already_advertised = !strcmp(sasl_server, "*");
+
+        if (!was_already_advertised) {
+          log_write(LS_SYSTEM, L_INFO, 0,
+                    "SASL server linked (%C), enabling SASL with default mechanisms: %s",
+                    sptr, default_mechs);
+          send_cap_notify("sasl", 1, default_mechs);
+        }
       }
     }
   }

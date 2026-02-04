@@ -80,9 +80,8 @@ sasl_server_available(void)
    * Note: IAUTH runs locally and supports dynamic mechanisms, so we check
    * IAUTH's own mechanism list directly - SASL_DEFAULT_MECHANISMS is only
    * for legacy X3 that can't advertise mechanisms dynamically. */
-  if (auth_iauth_handles_sasl()) {
+  if (auth_iauth_handles_sasl())
     return (auth_iauth_sasl_mechs() != NULL);
-  }
 
   /* No mechanisms = no SASL, regardless of server connectivity */
   if (!get_effective_sasl_mechanisms())
