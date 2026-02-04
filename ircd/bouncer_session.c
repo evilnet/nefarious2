@@ -2331,11 +2331,14 @@ void bounce_free_temp_client(struct Client *temp)
   if (cli_name(temp)[0])
     hRemClient(temp);
 
-  /* Prevent QUIT broadcast - client was never introduced to network.
-   * Must be done before remove_client_from_list which frees cli_user. */
+  /* Prevent QUIT broadcast and WHOWAS history - client was never introduced
+   * to network. Must be done before remove_client_from_list.
+   * - server = NULL prevents sendcmdto_serv_butone in free_user
+   * - Clearing STAT_USER prevents add_history call which crashes on NULL server */
   if (cli_user(temp)) {
     cli_user(temp)->server = NULL;
   }
+  cli_status(temp) = STAT_UNKNOWN;
 
   /* Remove from global client list and free client.
    * Note: remove_client_from_list calls free_client internally. */

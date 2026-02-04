@@ -211,7 +211,11 @@ int mo_ping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     
     if (strlen(origin) > 64)
       origin[64] = '\0';
+    /* Suppress shadow duplication — each shadow has its own PING/PONG
+     * cycle, so the oper's PONG must not leak to shadows. */
+    suppress_shadow_dup = 1;
     sendcmdto_one(&me, CMD_PONG, sptr, "%C :%s", &me, origin);
+    suppress_shadow_dup = 0;
   }
   return 0;
 }
