@@ -340,7 +340,12 @@ void free_client(struct Client* cptr)
     int is_services = (!strcmp(sasl_server, "*") || match(sasl_server, cli_name(cptr)) == 0);
 
     if (is_services) {
-      if (get_sasl_mechanisms() != NULL) {
+      /* Check if SASL was available (either dynamic or default mechanisms) */
+      const char *default_mechs = feature_str(FEAT_SASL_DEFAULT_MECHANISMS);
+      int had_dynamic = (get_sasl_mechanisms() != NULL);
+      int had_default = (default_mechs && *default_mechs);
+
+      if (had_dynamic || had_default) {
         if (auth_iauth_handles_sasl()) {
           /* IAUTH still provides SASL - clear the services mechanism list
            * and fall back to IAUTH's advertised mechanisms for CAP LS. */
@@ -349,15 +354,21 @@ void free_client(struct Client* cptr)
                     "Services disconnect: falling back to IAUTH SASL%s%s (%C)",
                     iauth_mechs ? ", mechanisms: " : "",
                     iauth_mechs ? iauth_mechs : "", cptr);
-          set_sasl_mechanisms(NULL);  /* Clear services mechs (triggers CAP DEL) */
+          if (had_dynamic)
+            set_sasl_mechanisms(NULL);  /* Triggers CAP DEL */
+          else
+            send_cap_notify("sasl", 0, NULL);  /* CAP DEL for default-only */
           if (iauth_mechs)
-            set_sasl_mechanisms(iauth_mechs);  /* Set IAUTH mechs (triggers CAP NEW :sasl=PLAIN) */
+            set_sasl_mechanisms(iauth_mechs);  /* Triggers CAP NEW :sasl=PLAIN */
           else
             send_cap_notify("sasl", 1, NULL);  /* Re-advertise without mechanism list */
         } else {
           log_write(LS_SYSTEM, L_INFO, 0,
-                    "Services disconnect: clearing SASL mechanisms (%C)", cptr);
-          set_sasl_mechanisms(NULL);  /* Triggers CAP DEL :sasl */
+                    "Services disconnect: clearing SASL (%C)", cptr);
+          if (had_dynamic)
+            set_sasl_mechanisms(NULL);  /* Triggers CAP DEL */
+          else
+            send_cap_notify("sasl", 0, NULL);  /* CAP DEL for default-only */
         }
       }
     }

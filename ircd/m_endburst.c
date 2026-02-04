@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "capab.h"
 #include "channel.h"
 #include "client.h"
 #include "handlers.h"
@@ -89,6 +90,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "match.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -140,6 +142,26 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
 
       /* Layer 1: Also send channel advertisements (CH A F) */
       send_channel_advertisements(sptr);
+    }
+  }
+
+  /* Check if the linking server is the SASL server (for legacy X3 support).
+   * If SASL_DEFAULT_MECHANISMS is set and no dynamic mechanisms have been
+   * received yet, enable SASL with the default mechanisms.
+   */
+  {
+    const char *sasl_server = feature_str(FEAT_SASL_SERVER);
+    int is_sasl_server = (!strcmp(sasl_server, "*") ||
+                          match(sasl_server, cli_name(sptr)) == 0);
+
+    if (is_sasl_server && !get_sasl_mechanisms()) {
+      const char *default_mechs = feature_str(FEAT_SASL_DEFAULT_MECHANISMS);
+      if (default_mechs && *default_mechs) {
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "SASL server linked (%C), enabling SASL with default mechanisms: %s",
+                  sptr, default_mechs);
+        send_cap_notify("sasl", 1, default_mechs);
+      }
     }
   }
 

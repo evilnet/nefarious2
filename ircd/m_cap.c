@@ -48,13 +48,35 @@
 #include <stdlib.h>
 #include <string.h>
 
+/** Get effective SASL mechanisms (dynamic or default fallback).
+ * @return Mechanism string, or NULL if none available.
+ */
+static const char *
+get_effective_sasl_mechanisms(void)
+{
+  const char *mechs = get_sasl_mechanisms();
+  if (mechs)
+    return mechs;
+
+  /* Fall back to configured default mechanisms (for legacy X3) */
+  const char *default_mechs = feature_str(FEAT_SASL_DEFAULT_MECHANISMS);
+  if (default_mechs && *default_mechs)
+    return default_mechs;
+
+  return NULL;
+}
+
 /** Check if the SASL server is available.
- * @return 1 if SASL server is connected, 0 otherwise.
+ * @return 1 if SASL server is connected and mechanisms available, 0 otherwise.
  */
 static int
 sasl_server_available(void)
 {
   const char *sasl_server = feature_str(FEAT_SASL_SERVER);
+
+  /* No mechanisms = no SASL, regardless of server connectivity */
+  if (!get_effective_sasl_mechanisms())
+    return 0;
 
   /* If set to "*", SASL is broadcast to all servers - check if any exist */
   if (!strcmp(sasl_server, "*"))
@@ -118,7 +140,7 @@ static struct capabilities {
   _CAP(EXTJOIN, 0, "extended-join", FEAT_CAP_extended_join),
   _CAP(AWAYNOTIFY, 0, "away-notify", FEAT_CAP_away_notify),
   _CAP(ACCNOTIFY, 0, "account-notify", FEAT_CAP_account_notify),
-  _CAP_V(SASL, 0, "sasl", FEAT_CAP_sasl, "PLAIN,EXTERNAL,OAUTHBEARER"),
+  _CAP(SASL, 0, "sasl", FEAT_CAP_sasl),
   _CAP(CAPNOTIFY, 0, "cap-notify", FEAT_CAP_cap_notify),
   _CAP(SERVERTIME, 0, "server-time", FEAT_CAP_server_time),
   _CAP(ECHOMSG, 0, "echo-message", FEAT_CAP_echo_message),
@@ -310,13 +332,11 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     valbuf[0] = '\0';
     val_len = 0;
     if (is_ls && cap_version >= 302) {
-      /* For SASL, use dynamic mechanism list if available */
+      /* For SASL, use effective mechanism list (dynamic or default fallback) */
       if (capab_list[i].cap == CAP_SASL) {
-        const char *mechs = get_sasl_mechanisms();
+        const char *mechs = get_effective_sasl_mechanisms();
         if (mechs)
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", mechs);
-        else if (capab_list[i].value)
-          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%s", capab_list[i].value);
       } else if (capab_list[i].cap == CAP_DRAFT_MULTILINE) {
         /* Build dynamic multiline value from features */
         val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=max-bytes=%d,max-lines=%d",
