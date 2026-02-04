@@ -111,7 +111,7 @@ typedef unsigned long flagpage_t;
 #endif
 
 /** String containing valid user modes, in no particular order. */
-#define infousermodes "adgiknoqswxzBDHLMNORWXY"
+#define infousermodes "abdgiknoqswxyzBDHLMNORWXY"
 
 /** Operator privileges. */
 enum Priv
