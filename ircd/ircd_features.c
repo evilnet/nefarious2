@@ -236,9 +236,7 @@ feature_notify_oplevels(void)
   else
    ClearOpLevels(&me);
 
-  /* "be,AkU,Ll,aCcDdiMmNnOpQRrSsTtZz" */
-
-  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,Ll,aCcDdiMmNnOpQRrSsTtZz",
+  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,Ll,aCcDdHiMmNnOPpQRrSsTtZz",
                 feature_bool(FEAT_EXCEPTS) ? "e" : "",
                 feature_bool(FEAT_OPLEVELS) ? "A" : "",
                 feature_bool(FEAT_OPLEVELS) ? "U" : "");
@@ -269,9 +267,7 @@ feature_notify_excepts(void)
     del_isupport("MAXEXCEPTS");
   }
 
-  /* "be,AkU,Ll,aCcDdiMmNnOpQRrSsTtZz" */
-
-  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,Ll,aCcDdiMmNnOpQRrSsTtZz",
+  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,Ll,aCcDdHiMmNnOPpQRrSsTtZz",
                 feature_bool(FEAT_EXCEPTS) ? "e" : "",
                 feature_bool(FEAT_OPLEVELS) ? "A" : "",
                 feature_bool(FEAT_OPLEVELS) ? "U" : "");
