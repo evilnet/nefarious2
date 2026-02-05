@@ -1969,6 +1969,17 @@ void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
 
+  /* Set up shadow context to filter out shadows without message-tags capability.
+   * TAGMSG is meaningless without tags, so shadows that don't support message-tags
+   * must not receive these messages (they'd see "TAGMSG #channel" with no body). */
+  shadow_tag_ctx.stc_active = 1;
+  shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
+  shadow_tag_ctx.stc_skipcap = CAP_NONE;
+  shadow_tag_ctx.stc_from = from;
+  shadow_tag_ctx.stc_cache = NULL;
+  shadow_tag_ctx.stc_notags = NULL;
+  shadow_tag_ctx.stc_include_batch = 0;
+
   /* Send to each local channel member with message-tags capability */
   for (member = to->members; member; member = member->next_member) {
     if (!MyConnect(member->user)
@@ -1990,6 +2001,10 @@ void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
       msgq_clean(mb);
     }
   }
+
+  /* Reset shadow context */
+  shadow_tag_ctx.stc_active = 0;
+  shadow_tag_ctx.stc_withcap = CAP_NONE;
 
   va_end(vd.vd_args);
 }

@@ -222,8 +222,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     /* Echo TAGMSG back to sender if they have echo-message capability */
     if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG)) {
+      /* Filter shadows without message-tags capability */
+      shadow_tag_ctx.stc_active = 1;
+      shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
+      shadow_tag_ctx.stc_skipcap = CAP_NONE;
+      shadow_tag_ctx.stc_from = sptr;
+      shadow_tag_ctx.stc_cache = NULL;
+      shadow_tag_ctx.stc_notags = NULL;
+      shadow_tag_ctx.stc_include_batch = 0;
       sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
                                 "%H", chptr);
+      shadow_tag_ctx.stc_active = 0;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
     }
 
     /* Store for chathistory event-playback */
@@ -247,8 +257,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags if they support message-tags */
       if (CapActive(acptr, CAP_MSGTAGS)) {
+        /* Filter shadows without message-tags capability */
+        shadow_tag_ctx.stc_active = 1;
+        shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
+        shadow_tag_ctx.stc_skipcap = CAP_NONE;
+        shadow_tag_ctx.stc_from = sptr;
+        shadow_tag_ctx.stc_cache = NULL;
+        shadow_tag_ctx.stc_notags = NULL;
+        shadow_tag_ctx.stc_include_batch = 0;
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
+        shadow_tag_ctx.stc_active = 0;
+        shadow_tag_ctx.stc_withcap = CAP_NONE;
       }
       /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
        * per the IRCv3 spec - there's no message body to send as fallback */
@@ -256,8 +276,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Echo TAGMSG back to sender if they have echo-message capability
        * (but not if they're messaging themselves) */
       if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr) {
+        /* Filter shadows without message-tags capability */
+        shadow_tag_ctx.stc_active = 1;
+        shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
+        shadow_tag_ctx.stc_skipcap = CAP_NONE;
+        shadow_tag_ctx.stc_from = sptr;
+        shadow_tag_ctx.stc_cache = NULL;
+        shadow_tag_ctx.stc_notags = NULL;
+        shadow_tag_ctx.stc_include_batch = 0;
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
                                   "%C", acptr);
+        shadow_tag_ctx.stc_active = 0;
+        shadow_tag_ctx.stc_withcap = CAP_NONE;
       }
     }
     else {
@@ -267,8 +297,18 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       /* Echo TAGMSG back to sender if they have echo-message capability */
       if (feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG)) {
+        /* Filter shadows without message-tags capability */
+        shadow_tag_ctx.stc_active = 1;
+        shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
+        shadow_tag_ctx.stc_skipcap = CAP_NONE;
+        shadow_tag_ctx.stc_from = sptr;
+        shadow_tag_ctx.stc_cache = NULL;
+        shadow_tag_ctx.stc_notags = NULL;
+        shadow_tag_ctx.stc_include_batch = 0;
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
                                   "%C", acptr);
+        shadow_tag_ctx.stc_active = 0;
+        shadow_tag_ctx.stc_withcap = CAP_NONE;
       }
     }
   }
@@ -346,8 +386,18 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags if they support message-tags */
       if (CapActive(acptr, CAP_MSGTAGS)) {
+        /* Filter shadows without message-tags capability */
+        shadow_tag_ctx.stc_active = 1;
+        shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
+        shadow_tag_ctx.stc_skipcap = CAP_NONE;
+        shadow_tag_ctx.stc_from = sptr;
+        shadow_tag_ctx.stc_cache = NULL;
+        shadow_tag_ctx.stc_notags = NULL;
+        shadow_tag_ctx.stc_include_batch = 0;
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
+        shadow_tag_ctx.stc_active = 0;
+        shadow_tag_ctx.stc_withcap = CAP_NONE;
       }
       /* Note: If client doesn't support message-tags, TAGMSG is silently dropped */
     }
