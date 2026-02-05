@@ -377,17 +377,28 @@ void free_client(struct Client* cptr)
   if (cli_from(cptr) == cptr) { /* in other words, we're local */
     cli_from(cptr) = 0;
     /* timer must be marked as not active */
-    if (!cli_freeflag(cptr) && !t_active(&(cli_proc(cptr))))
+    if (!cli_freeflag(cptr) && !t_active(&(cli_proc(cptr)))) {
+      /* No pending socket/timer events - safe to deallocate immediately */
       dealloc_connection(cli_connect(cptr)); /* connection not open anymore */
-    else {
+      cli_connect(cptr) = 0;
+    } else {
+      /* Socket or timer event pending - connection must survive until
+       * ET_DESTROY fires.  Clear the back-pointer BEFORE socket_del so
+       * client_sock_callback sees con_client==NULL and knows the client
+       * is gone.  Keep cli_connect valid for socket_del/timer_del macros. */
+      con_client(cli_connect(cptr)) = 0;
+
       if (-1 < cli_fd(cptr) && cli_freeflag(cptr) & FREEFLAG_SOCKET)
 	socket_del(&(cli_socket(cptr))); /* queue a socket delete */
       if (cli_freeflag(cptr) & FREEFLAG_TIMER)
 	timer_del(&(cli_proc(cptr))); /* queue a timer delete */
-    }
-  }
 
-  cli_connect(cptr) = 0;
+      cli_connect(cptr) = 0;
+    }
+  } else if (cli_connect(cptr)) {
+    /* Remote client - just clear the connection pointer */
+    cli_connect(cptr) = 0;
+  }
 
   /* Free metadata and subscriptions for this client */
   metadata_free_client(cptr);
