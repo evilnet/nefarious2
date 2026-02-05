@@ -761,6 +761,7 @@ void ssl_free(struct Socket *socketh)
   if (!socketh->ssl)
     return;
   SSL_free(socketh->ssl);
+  socketh->ssl = NULL;
 }
 
 char *ssl_get_cipher(SSL *ssl)

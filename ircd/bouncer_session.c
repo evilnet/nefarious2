@@ -2152,6 +2152,13 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   Debug((DEBUG_INFO, "Bouncer: reviving ghost %s with socket from temp %s (fd %d)",
          cli_name(ghost), cli_name(temp), cli_fd(temp)));
 
+  /* Mark session as ACTIVE before canceling timer.
+   * This prevents a race where an already-queued ET_EXPIRE event
+   * (processed after timer_del but before we reach the state update
+   * at the end of this function) could trigger bounce_hold_expire
+   * to destroy the session while we're still reviving it. */
+  session->hs_state = BOUNCE_ACTIVE;
+
   /* Cancel hold timer if running */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
@@ -2294,8 +2301,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     }
   }
 
-  /* Step 13: Update session state */
-  session->hs_state = BOUNCE_ACTIVE;
+  /* Step 13: Update session state (hs_state already set to ACTIVE earlier) */
   session->hs_client = ghost;
   session->hs_attach_count++;
   session->hs_connect_count++;
