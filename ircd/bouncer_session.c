@@ -148,11 +148,10 @@ static int is_local_session(struct BouncerSession *session);
  * Iterates all sessions, snapshots and persists those marked dirty,
  * then clears the dirty flag and reschedules the timer.
  *
- * IMPORTANT: Must check event type! When the callback reschedules itself
- * with timer_init() + timer_add(), it clears GEN_MARKED/GEN_READD flags.
- * This causes timer_run() to generate ET_DESTROY after ET_EXPIRE returns.
- * If we don't check the event type, we'd try to re-add an already-enqueued
- * timer, causing a self-cycle that hangs the server (CVE-style bug).
+ * IMPORTANT: Use timer_chg() to reschedule, NOT timer_init() + timer_add().
+ * timer_init() clears GEN_MARKED which corrupts the event system state.
+ * timer_chg() properly handles reschedule during callback by setting
+ * GEN_READD and letting timer_run() re-enqueue after callback returns.
  */
 static void bounce_dirty_persist_cb(struct Event *ev)
 {
@@ -161,15 +160,10 @@ static void bounce_dirty_persist_cb(struct Event *ev)
   int count = 0;
   int interval;
 
-  /* Only handle timer expiration, not destruction.
-   * See comment above for why this check is critical. */
+  /* ET_DESTROY is sent when the timer is being shut down (e.g., during
+   * server shutdown or feature disable). Just mark inactive and return. */
   if (ev_type(ev) == ET_DESTROY) {
-    /* Only mark inactive if the timer wasn't rescheduled.
-     * After ET_EXPIRE reschedules the timer with timer_add(), it's active
-     * again. The subsequent ET_DESTROY is for the "old" expiration, not
-     * a real shutdown. */
-    if (!t_active(&dirty_persist_timer))
-      dirty_persist_timer_active = 0;
+    dirty_persist_timer_active = 0;
     return;
   }
 
@@ -203,11 +197,11 @@ static void bounce_dirty_persist_cb(struct Event *ev)
     Debug((DEBUG_INFO, "bouncer_persist: periodic — persisted %d dirty sessions", count));
   }
 
-  /* Reschedule timer */
+  /* Reschedule timer using timer_chg() which properly handles
+   * reschedule during callback (sets GEN_READD flag). */
   interval = feature_int(FEAT_BOUNCER_PERSIST_INTERVAL);
   if (interval > 0) {
-    timer_add(timer_init(&dirty_persist_timer), bounce_dirty_persist_cb,
-              NULL, TT_RELATIVE, interval);
+    timer_chg(&dirty_persist_timer, TT_RELATIVE, interval);
   } else {
     dirty_persist_timer_active = 0;
   }
