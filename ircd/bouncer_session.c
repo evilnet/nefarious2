@@ -2216,13 +2216,22 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * never called, so the socket lacks s_data/s_func/GEN_ACTIVE.
    * For normal ghosts that went into holding, the socket is already
    * initialized from when they originally connected.
-   * Use socket_add for uninitialized sockets, socket_reattach for active ones. */
+   * Use socket_add for uninitialized sockets, socket_reattach for active ones.
+   *
+   * NOTE: If GEN_DESTROY is set, there may be pending ET_DESTROY event(s)
+   * queued from previous socket_del calls (e.g., from prior revival cycles
+   * where the user disconnected and re-entered HOLD mode). These stale events
+   * are safely handled by atomic s_data claiming in client_sock_callback -
+   * the first ET_DESTROY atomically claims s_data, subsequent events see NULL
+   * and return early, preventing double-free. */
   Debug((DEBUG_INFO, "Bouncer: ghost %s socket gh_flags=0x%x GEN_ACTIVE=%d s_data=%p",
          cli_name(ghost), cli_socket(ghost).s_header.gh_flags,
          !!(cli_socket(ghost).s_header.gh_flags & GEN_ACTIVE),
          s_data(&cli_socket(ghost))));
   if (!(cli_socket(ghost).s_header.gh_flags & GEN_ACTIVE)) {
-    /* Persisted ghost: socket never initialized, use socket_add */
+    /* Persisted or re-held ghost: socket not active, use socket_add.
+     * Note: Any pending stale ET_DESTROY events from previous socket_del
+     * calls are handled by the atomic s_data claiming in client_sock_callback. */
     Debug((DEBUG_INFO, "Bouncer: using socket_add for uninitialized ghost socket"));
     if (!socket_add(&cli_socket(ghost), client_sock_callback,
                     (void *)ghost_con, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
@@ -2233,6 +2242,13 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
       LocalClientArray[fd] = 0;
       return -1;
     }
+    /* CRITICAL: Restore FREEFLAG_SOCKET on the connection.  A previous stale
+     * ET_DESTROY may have cleared it.  Without this flag, free_client will go
+     * the immediate deallocation path and free the connection, but there could
+     * still be pending stale ET_DESTROY events that will then access freed
+     * memory.  With FREEFLAG_SOCKET set, free_client properly queues socket_del
+     * and waits for ET_DESTROY to free the connection. */
+    con_freeflag(ghost_con) |= FREEFLAG_SOCKET;
   } else {
     /* Normal ghost: socket was active, just reattach fd */
     Debug((DEBUG_INFO, "Bouncer: using socket_reattach for active ghost socket"));

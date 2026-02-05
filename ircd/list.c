@@ -385,7 +385,9 @@ void free_client(struct Client* cptr)
       /* Socket or timer event pending - connection must survive until
        * ET_DESTROY fires.  Clear the back-pointer BEFORE socket_del so
        * client_sock_callback sees con_client==NULL and knows the client
-       * is gone.  Keep cli_connect valid for socket_del/timer_del macros. */
+       * is gone.  The ET_DESTROY handler uses atomic s_data claiming to
+       * handle stale events from previous socket_del calls (e.g., bouncer
+       * revival cycles). */
       con_client(cli_connect(cptr)) = 0;
 
       if (-1 < cli_fd(cptr) && cli_freeflag(cptr) & FREEFLAG_SOCKET)
