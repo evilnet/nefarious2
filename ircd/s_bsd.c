@@ -1343,22 +1343,27 @@ void client_sock_callback(struct Event* ev)
 
   assert(0 != ev_socket(ev));
 
-  con = (struct Connection*) s_data(ev_socket(ev));
-
-  /* Allow s_data == NULL for ET_DESTROY events.  This happens when
-   * bounce_revive() clears s_data before socket_del() to prevent stale
-   * callbacks during socket transplant.  The socket is being intentionally
-   * destroyed; there's no connection to process. */
-  if (!con) {
-    if (ev_type(ev) == ET_DESTROY) {
+  /* For ET_DESTROY, atomically claim s_data to handle multiple queued events.
+   * When a socket goes through delete/add cycles (e.g., bouncer revival),
+   * stale ET_DESTROY events may be pending.  By atomically swapping s_data
+   * to NULL, only the FIRST ET_DESTROY processes the connection; subsequent
+   * events see NULL and return early.  This prevents double-free. */
+  if (ev_type(ev) == ET_DESTROY) {
+    con = (struct Connection*) s_data(ev_socket(ev));
+    s_data(ev_socket(ev)) = NULL;  /* Claim it - subsequent events see NULL */
+    if (!con) {
 #ifdef USE_SSL
       ssl_free(ev_socket(ev));
 #endif
-      return;  /* Nothing more to do */
+      return;  /* Already claimed by earlier event or intentionally NULL */
     }
-    /* Non-destroy event with NULL s_data is a bug */
-    assert(0 && "client_sock_callback: s_data is NULL for non-destroy event");
-    return;
+  } else {
+    con = (struct Connection*) s_data(ev_socket(ev));
+    if (!con) {
+      /* Non-destroy event with NULL s_data is a bug */
+      assert(0 && "client_sock_callback: s_data is NULL for non-destroy event");
+      return;
+    }
   }
 
   assert(0 != con_client(con) || ev_type(ev) == ET_DESTROY);
