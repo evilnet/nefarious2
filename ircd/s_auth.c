@@ -432,6 +432,12 @@ static void auth_loc_timeout_callback(struct Event* ev)
     auth = (struct AuthRequest*) t_data(ev_timer(ev));
     cptr = auth->client;
 
+    /* Client was freed (e.g. bouncer shadow conversion) - clean up orphaned auth */
+    if (!cptr) {
+      destroy_auth_request(auth);
+      return;
+    }
+
     if (!cli_loc(cptr))
       return;
 
@@ -941,8 +947,22 @@ void destroy_auth_request(struct AuthRequest* auth)
 
   if (auth->client)
     cli_auth(auth->client) = NULL;
+
+  /* Defensive check: detect double-free using prev as a "on freelist" marker.
+   * We set prev to a magic value when adding to freelist, and clear it when
+   * allocating. If prev already has the magic value, this is a double-free. */
+#define AUTH_FREELIST_MARKER ((struct AuthRequest*)0xDEADBEEF)
+  if (auth->prev == AUTH_FREELIST_MARKER) {
+    log_write(LS_SYSTEM, L_CRIT, 0,
+              "BUG: Double-free of auth %p detected! Already on freelist.",
+              (void*)auth);
+    return; /* Don't corrupt the freelist further */
+  }
+  auth->prev = AUTH_FREELIST_MARKER;
+
   auth->next = auth_freelist;
   auth_freelist = auth;
+#undef AUTH_FREELIST_MARKER
 }
 
 /** Detach a client from its auth request.
@@ -1238,13 +1258,38 @@ void start_auth(struct Client* client)
   socket_events(&(cli_socket(client)), SOCK_ACTION_SET | SOCK_EVENT_READABLE);
 
   /* Allocate the AuthRequest. */
+#define AUTH_FREELIST_MARKER ((struct AuthRequest*)0xDEADBEEF)
   auth = auth_freelist;
-  if (auth)
-      auth_freelist = auth->next;
-  else
+  if (auth) {
+      /* Defensive check: detect freelist corruption */
+      if (auth->next == auth) {
+        log_write(LS_SYSTEM, L_CRIT, 0,
+                  "BUG: Auth freelist has self-cycle! Allocating fresh auth.");
+        auth = MyMalloc(sizeof(*auth));
+        /* Don't touch auth_freelist - it's corrupted */
+      } else if (auth->prev != AUTH_FREELIST_MARKER) {
+        log_write(LS_SYSTEM, L_CRIT, 0,
+                  "BUG: Auth %p from freelist missing marker (prev=%p)! "
+                  "Possible corruption. Allocating fresh auth.",
+                  (void*)auth, (void*)auth->prev);
+        auth = MyMalloc(sizeof(*auth));
+        /* Don't touch auth_freelist - it's corrupted */
+      } else if (t_active(&auth->timeout) || t_active(&auth->loctimeout)) {
+        log_write(LS_SYSTEM, L_CRIT, 0,
+                  "BUG: Auth from freelist has active timer! timeout=%d loc=%d. "
+                  "Allocating fresh auth.",
+                  t_active(&auth->timeout), t_active(&auth->loctimeout));
+        auth = MyMalloc(sizeof(*auth));
+        /* Don't touch auth_freelist - it's corrupted */
+      } else {
+        auth_freelist = auth->next;
+      }
+  } else {
       auth = MyMalloc(sizeof(*auth));
+  }
+#undef AUTH_FREELIST_MARKER
   assert(0 != auth);
-  memset(auth, 0, sizeof(*auth));
+  memset(auth, 0, sizeof(*auth));  /* Clears prev, removing freelist marker */
   auth->client = client;
   cli_auth(client) = auth;
   s_fd(&auth->socket) = -1;

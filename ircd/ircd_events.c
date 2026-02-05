@@ -247,6 +247,8 @@ static void
 timer_enqueue(struct Timer* timer)
 {
   struct GenHeader** ptr_p;
+  unsigned int traversal_count = 0;
+  const unsigned int max_traversal = 1000000; /* Safety limit */
 
   assert(0 != timer);
   assert(0 == timer->t_header.gh_prev_p); /* not already on queue */
@@ -265,9 +267,25 @@ timer_enqueue(struct Timer* timer)
 
   /* Find a slot to insert timer */
   for (ptr_p = &evInfo.gens.g_timer; ;
-       ptr_p = &(*ptr_p)->gh_next)
+       ptr_p = &(*ptr_p)->gh_next) {
     if (!*ptr_p || timer->t_expire < ((struct Timer*)*ptr_p)->t_expire)
       break;
+    /* Safety check: detect cycle or infinite loop */
+    if (++traversal_count > max_traversal) {
+      log_write(LS_SYSTEM, L_CRIT, 0,
+                "BUG: Timer list cycle detected after %u iterations! "
+                "Aborting to prevent hang. Timer %p, current node %p.",
+                traversal_count, (void*)timer, (void*)*ptr_p);
+      abort(); /* Crash with core dump rather than hang forever */
+    }
+    /* Also detect self-cycle */
+    if ((*ptr_p)->gh_next == *ptr_p) {
+      log_write(LS_SYSTEM, L_CRIT, 0,
+                "BUG: Timer list node %p has self-cycle (gh_next == self)! Aborting.",
+                (void*)*ptr_p);
+      abort();
+    }
+  }
 
   /* link it in the right place */
   timer->t_header.gh_next = *ptr_p;
