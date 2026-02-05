@@ -75,6 +75,8 @@
 #include "ml_storage.h"
 #include "webpush.h"
 #include "webpush_store.h"
+#include "paste_store.h"
+#include "paste_listener.h"
 #ifdef USE_LIBKC
 #include "ircd_kc_adapter.h"
 #include <kc/kc.h>
@@ -1074,6 +1076,19 @@ int main(int argc, char **argv) {
     }
   }
 #endif
+
+  /* Initialize paste service (multiline HTTP fallback) */
+  if (feature_bool(FEAT_PASTE_ENABLED)) {
+    if (paste_store_init(feature_str(FEAT_PASTE_DB)) == 0) {
+      if (paste_listener_init() != 0) {
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "Failed to initialize paste listener");
+      }
+    } else {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "Failed to initialize paste database");
+    }
+  }
 
   /* Initialize bouncer session registry */
   if (feature_bool(FEAT_BOUNCER_ENABLE))

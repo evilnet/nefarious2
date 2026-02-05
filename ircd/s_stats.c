@@ -59,6 +59,7 @@
 #include "handlers.h"
 #include "history.h"
 #include "metadata.h"
+#include "paste_store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -738,6 +739,9 @@ struct StatDesc statsinfo[] = {
   { ' ', "metadata", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     metadata_report_stats, 0,
     "METADATA storage and queue statistics." },
+  { ' ', "paste", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
+    paste_report_stats, 0,
+    "Paste store statistics (multiline HTTP fallback)." },
   { ' ', "iauthconf", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_IAUTH,
     report_iauth_conf, 0,
     "IAuth configuration." },

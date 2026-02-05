@@ -62,10 +62,91 @@
 #include "ml_storage.h"
 #include "history.h"
 #include "bouncer_session.h"
+#include "paste_store.h"
+#include "paste_listener.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
 #include <sys/time.h>
+
+/*
+ * generate_paste_url - Create a paste from message list and return URL
+ *
+ * Helper function to generate a paste URL for multiline fallback scenarios.
+ * Called by all fallback paths (client, bouncer shadow, server relay).
+ *
+ * Parameters:
+ *   msgid    - base msgid for the batch
+ *   sender   - sender nick
+ *   target   - target channel/nick
+ *   messages - linked list of message lines (value.cp + 1 = text)
+ *
+ * Returns: paste URL string (static buffer, do not free) or NULL if unavailable
+ */
+static const char *generate_paste_url(const char *msgid, const char *sender,
+                                       const char *target, struct SLink *messages)
+{
+  char secret[12];
+  char paste_id[PASTE_ID_MAX];
+  char filename[PASTE_FILENAME_MAX] = "";
+  size_t total_len = 0;
+  char *content = NULL;
+  char *p;
+  struct SLink *lp;
+  const char *result = NULL;
+
+  if (!feature_bool(FEAT_PASTE_ENABLED) || !paste_store_available())
+    return NULL;
+
+  /* Calculate total content length */
+  for (lp = messages; lp; lp = lp->next) {
+    if (lp->value.cp) {
+      const char *text = lp->value.cp + 1;
+      total_len += strlen(text) + 1;  /* +1 for newline */
+    }
+  }
+
+  if (total_len == 0)
+    return NULL;
+
+  content = (char *)MyMalloc(total_len);
+  if (!content)
+    return NULL;
+
+  /* Concatenate all lines */
+  p = content;
+  for (lp = messages; lp; lp = lp->next) {
+    if (lp->value.cp) {
+      const char *text = lp->value.cp + 1;
+      size_t len = strlen(text);
+      memcpy(p, text, len);
+      p += len;
+      if (lp->next)
+        *p++ = '\n';
+    }
+  }
+  *p = '\0';
+
+  /* Generate secret and paste_id */
+  paste_generate_secret(secret, sizeof(secret));
+  ircd_snprintf(0, paste_id, sizeof(paste_id), "%s-%s", msgid, secret);
+
+  /* Parse optional filename hint from first line */
+  const char *store_content = content;
+  size_t store_len = strlen(content);
+  paste_parse_filename_hint(content, store_len, filename, sizeof(filename),
+                            &store_content, &store_len);
+
+  /* Store the paste */
+  if (paste_store_add(paste_id, sender, target, filename,
+                      store_content, store_len,
+                      feature_int(FEAT_PASTE_TTL)) == 0) {
+    result = paste_url(paste_id);
+  }
+
+  MyFree(content);
+  return result;
+}
 
 /*
  * send_multiline_fallback - Send truncated multiline with retrieval hints
@@ -98,6 +179,7 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
   int lines_to_send;
   int send_notice;
   int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
+  const char *paste_url_str = NULL;
 
   /* Configurable preview budget */
   if (total_lines <= max_preview) {
@@ -126,6 +208,9 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
 
   int remaining = total_lines - sent;
 
+  /* Generate paste URL if service available */
+  paste_url_str = generate_paste_url(msgid, cli_name(sptr), target, messages);
+
   /* History-based fallback (tiers 2+3) requires:
    * - Recipient is authenticated (only authed users can query history)
    * - Sender is NOT +Y (no-storage users produce gap markers, not content)
@@ -134,63 +219,64 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
                        && !(is_channel && chptr &&
                             (chptr->mode.exmode & EXMODE_NOSTORAGE));
 
-  /* Fallback chain: chathistory -> HistServ -> &ml- storage */
+  /* Fallback chain: chathistory -> HistServ -> &ml- storage
+   * Paste URL included as additional retrieval option when available */
   if (history_usable && CapActive(to, CAP_DRAFT_CHATHISTORY)) {
     /* Tier 2: Client has native chathistory capability + can use it */
     if (is_channel) {
-      if (remaining <= 15) {
+      if (paste_url_str) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d or %s]",
+                      chptr, remaining, target, msgid, remaining + sent, paste_url_str);
+      } else {
         sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
                       chptr, remaining, target, msgid, remaining + sent);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Message continues (%d lines total) - CHATHISTORY AROUND %s msgid=%s %d]",
-                      chptr, total_lines, target, msgid, total_lines);
       }
     } else {
-      if (remaining <= 15) {
+      if (paste_url_str) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d or %s]",
+                      to, remaining, target, msgid, remaining + sent, paste_url_str);
+      } else {
         sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
                       to, remaining, target, msgid, remaining + sent);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[Message continues (%d lines total) - CHATHISTORY AROUND %s msgid=%s %d]",
-                      to, total_lines, target, msgid, total_lines);
       }
     }
   } else if (history_usable && FindClient("HistServ")) {
     /* Tier 3: HistServ available + recipient can use it */
     if (is_channel) {
-      if (remaining <= 15) {
+      if (paste_url_str) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s or %s]",
+                      chptr, remaining, target, msgid, paste_url_str);
+      } else {
         sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
                       chptr, remaining, target, msgid);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Message continues (%d lines total) - /msg HistServ FETCH %s %s]",
-                      chptr, total_lines, target, msgid);
       }
     } else {
-      if (remaining <= 15) {
+      if (paste_url_str) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /msg HistServ FETCH %s %s or %s]",
+                      to, remaining, target, msgid, paste_url_str);
+      } else {
         sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /msg HistServ FETCH %s %s]",
                       to, remaining, target, msgid);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[Message continues (%d lines total) - /msg HistServ FETCH %s %s]",
-                      to, total_lines, target, msgid);
       }
     }
   } else {
     /* Tier 4: Ultimate fallback - local &ml- storage (zero dependencies) */
     ml_storage_store(msgid, cli_name(sptr), target, messages, total_lines);
     if (is_channel) {
-      if (remaining <= 15) {
+      if (paste_url_str) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s or %s]",
+                      chptr, remaining, msgid, paste_url_str);
+      } else {
         sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s to view full message]",
                       chptr, remaining, msgid);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[Message continues (%d lines total) - /join &ml-%s to view]",
-                      chptr, total_lines, msgid);
       }
     } else {
-      if (remaining <= 15) {
+      if (paste_url_str) {
+        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /join &ml-%s or %s]",
+                      to, remaining, msgid, paste_url_str);
+      } else {
         sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /join &ml-%s to view full message]",
                       to, remaining, msgid);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[Message continues (%d lines total) - /join &ml-%s to view]",
-                      to, total_lines, msgid);
       }
     }
   }
@@ -762,8 +848,16 @@ process_multiline_batch(struct Client *sptr)
             /* Send truncation notice if needed */
             if (total_lines > max_preview) {
               int remaining = total_lines - sent;
-              mb = msgq_make(to, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
-                             cli_name(&me), chptr->chname, remaining);
+              const char *sh_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                            chptr->chname, con_ml_messages(con));
+
+              if (sh_paste_url) {
+                mb = msgq_make(to, ":%s NOTICE %s :[%d more lines - %s]",
+                               cli_name(&me), chptr->chname, remaining, sh_paste_url);
+              } else {
+                mb = msgq_make(to, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
+                               cli_name(&me), chptr->chname, remaining);
+              }
               if (mb) {
                 msgq_add(&sh->sh_sendQ, mb, 0);
                 socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
@@ -1243,8 +1337,16 @@ process_multiline_batch(struct Client *sptr)
           /* Send truncation notice if needed */
           if (total_lines > max_preview) {
             int remaining = total_lines - sent;
-            mb = msgq_make(acptr, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
-                           cli_name(&me), cli_name(acptr), remaining);
+            const char *sh_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                          cli_name(acptr), con_ml_messages(con));
+
+            if (sh_paste_url) {
+              mb = msgq_make(acptr, ":%s NOTICE %s :[%d more lines - %s]",
+                             cli_name(&me), cli_name(acptr), remaining, sh_paste_url);
+            } else {
+              mb = msgq_make(acptr, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
+                             cli_name(&me), cli_name(acptr), remaining);
+            }
             if (mb) {
               msgq_add(&sh->sh_sendQ, mb, 0);
               socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
@@ -1404,9 +1506,18 @@ process_multiline_batch(struct Client *sptr)
         /* Send truncation notice from user (consistent with preview PRIVMSGs) */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
-          sendcmdto_one(sptr, CMD_NOTICE, target_server,
-              "%C :[%d more lines - connect to a multiline-capable server to view]",
-              acptr, remaining);
+          const char *relay_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                           cli_name(acptr), con_ml_messages(con));
+
+          if (relay_paste_url) {
+            sendcmdto_one(sptr, CMD_NOTICE, target_server,
+                "%C :[%d more lines - %s]",
+                acptr, remaining, relay_paste_url);
+          } else {
+            sendcmdto_one(sptr, CMD_NOTICE, target_server,
+                "%C :[%d more lines - connect to a multiline-capable server to view]",
+                acptr, remaining);
+          }
         }
       }
     }
@@ -1483,9 +1594,18 @@ process_multiline_batch(struct Client *sptr)
          */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
-          sendcmdto_one(sptr, CMD_NOTICE, server,
-              "%H :[%d more lines - connect to a multiline-capable server to view]",
-              chptr, remaining);
+          const char *relay_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                           chptr->chname, con_ml_messages(con));
+
+          if (relay_paste_url) {
+            sendcmdto_one(sptr, CMD_NOTICE, server,
+                "%H :[%d more lines - %s]",
+                chptr, remaining, relay_paste_url);
+          } else {
+            sendcmdto_one(sptr, CMD_NOTICE, server,
+                "%H :[%d more lines - connect to a multiline-capable server to view]",
+                chptr, remaining);
+          }
         }
       }
     }

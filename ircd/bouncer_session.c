@@ -134,6 +134,109 @@ static void bounce_defer_shadow_free(struct ShadowConnection *shadow)
 }
 
 /* ---------------------------------------------------------------- */
+/* Periodic dirty session persistence                                 */
+/* ---------------------------------------------------------------- */
+
+static struct Timer dirty_persist_timer;
+static int dirty_persist_timer_active;
+
+/* Forward declarations for persistence functions */
+static int bounce_db_put(struct BouncerSession *session);
+static int is_local_session(struct BouncerSession *session);
+
+/** Timer callback: persist all dirty ACTIVE sessions.
+ * Iterates all sessions, snapshots and persists those marked dirty,
+ * then clears the dirty flag and reschedules the timer.
+ */
+static void bounce_dirty_persist_cb(struct Event *ev)
+{
+  int i;
+  struct BouncerSession *s;
+  int count = 0;
+  int interval;
+
+  if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available()) {
+    dirty_persist_timer_active = 0;
+    return;
+  }
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (s = tokenHash[i]; s; s = s->hs_tnext) {
+      if (!is_local_session(s))
+        continue;
+
+      /* Only persist ACTIVE sessions that are dirty */
+      if (s->hs_state != BOUNCE_ACTIVE || !s->hs_dirty || !s->hs_client)
+        continue;
+
+      /* Snapshot current channel state from live client */
+      bounce_snapshot_channels(s, s->hs_client);
+
+      /* Persist to MDBX */
+      if (bounce_db_put(s) == 0) {
+        s->hs_dirty = 0;
+        count++;
+      }
+      /* On failure, leave dirty flag set to retry next interval */
+    }
+  }
+
+  if (count > 0) {
+    Debug((DEBUG_INFO, "bouncer_persist: periodic — persisted %d dirty sessions", count));
+  }
+
+  /* Reschedule timer */
+  interval = feature_int(FEAT_BOUNCER_PERSIST_INTERVAL);
+  if (interval > 0) {
+    timer_add(timer_init(&dirty_persist_timer), bounce_dirty_persist_cb,
+              NULL, TT_RELATIVE, interval);
+  } else {
+    dirty_persist_timer_active = 0;
+  }
+}
+
+/** Start the periodic dirty persist timer if not already running. */
+static void bounce_start_dirty_persist_timer(void)
+{
+  int interval;
+
+  if (dirty_persist_timer_active)
+    return;
+
+  if (!feature_bool(FEAT_BOUNCER_PERSIST))
+    return;
+
+  interval = feature_int(FEAT_BOUNCER_PERSIST_INTERVAL);
+  if (interval <= 0)
+    return;
+
+  timer_add(timer_init(&dirty_persist_timer), bounce_dirty_persist_cb,
+            NULL, TT_RELATIVE, interval);
+  dirty_persist_timer_active = 1;
+}
+
+/** Mark a bouncer session as dirty (needs periodic persist).
+ * Called from channel.c on JOIN/PART/KICK and MODE changes.
+ * @param[in] cptr Client whose session to mark dirty.
+ */
+void bounce_mark_dirty(struct Client *cptr)
+{
+  struct BouncerSession *session;
+
+  if (!cptr)
+    return;
+
+  session = bounce_get_session(cptr);
+  if (!session || session->hs_state != BOUNCE_ACTIVE)
+    return;
+
+  session->hs_dirty = 1;
+
+  /* Ensure the persist timer is running */
+  bounce_start_dirty_persist_timer();
+}
+
+/* ---------------------------------------------------------------- */
 /* Hash functions                                                    */
 /* ---------------------------------------------------------------- */
 

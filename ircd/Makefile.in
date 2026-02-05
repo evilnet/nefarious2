@@ -273,6 +273,8 @@ IRCD_SRC = \
 	thread_pool.c \
 	webpush.c \
 	webpush_store.c \
+	paste_store.c \
+	paste_listener.c \
 	websocket.c \
 	uping.c \
 	userload.c \

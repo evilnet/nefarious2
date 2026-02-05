@@ -191,6 +191,8 @@ struct BouncerSession {
   int hs_effective_away;               /**< Last computed effective away: 0=present, 1=away, 2=all-star */
   char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */
 
+  int hs_dirty;                       /**< Session state changed, needs periodic persist */
+
   time_t hs_created;                  /**< When session was created */
   time_t hs_last_active;              /**< Last activity timestamp */
   time_t hs_disconnect_time;          /**< When client disconnected (0=active) */
@@ -543,5 +545,13 @@ extern int bounce_db_restore(void);
  * Called from server_die()/server_restart() before flush_connections().
  */
 extern void bounce_db_shutdown(void);
+
+/** Mark a bouncer session as dirty (needs periodic persist).
+ * Called from channel.c on JOIN/PART/KICK and MODE changes that affect
+ * channel membership state. The periodic persist timer will snapshot
+ * and persist dirty sessions.
+ * @param[in] cptr Client whose session to mark dirty.
+ */
+extern void bounce_mark_dirty(struct Client *cptr);
 
 #endif /* INCLUDED_bouncer_session_h */

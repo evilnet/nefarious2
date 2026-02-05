@@ -950,6 +950,7 @@ static struct FeatureDesc {
   F_I(BOUNCER_MAX_HOLD, 0, 1209600, 0),      /* 14 days */
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
+  F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, 0),    /* periodic persist interval (seconds) */
   F_B(CAP_draft_bouncer, 0, 1, 0),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
@@ -962,6 +963,23 @@ static struct FeatureDesc {
 
   F_B(UPING_ENABLE, FEAT_READ, 1, 0),
   F_I(UPING_PORT, FEAT_READ, UDP_PORT, 0),
+
+  /* Paste service (multiline HTTP fallback) */
+  F_B(PASTE_ENABLED, 0, 0, 0),
+  F_I(PASTE_PORT, 0, 8444, 0),
+  F_S(PASTE_BIND, 0, "*", 0),
+  F_S(PASTE_DB, 0, "paste", 0),
+  F_B(PASTE_DB_AUTOGROW, 0, 1, 0),
+  F_I(PASTE_TTL, 0, 14400, 0),              /* 4 hours - ephemeral */
+  F_I(PASTE_MAX_SIZE, 0, 65536, 0),         /* 64KB max paste */
+  F_I(PASTE_MAX_ENTRIES, 0, 100000, 0),
+  F_S(PASTE_URL_BASE, 0, "", 0),            /* empty = use server name + port */
+  F_I(PASTE_MAX_CONNECTIONS, 0, 64, 0),     /* concurrent HTTP connections */
+  F_I(PASTE_REQUEST_TIMEOUT, 0, 30, 0),     /* seconds before killing slow clients */
+  F_I(PASTE_MAX_REQUEST_SIZE, 0, 4096, 0),  /* max HTTP request size */
+  F_I(PASTE_RATE_LIMIT, 0, 60, 0),          /* max requests per IP per minute */
+  F_I(PASTE_COMPRESS_THRESHOLD, 0, 128, 0), /* min bytes before compressing */
+  F_I(PASTE_COMPRESS_LEVEL, 0, 3, 0),       /* zstd level (1-19, default 3) */
 
 #undef F_S
 #undef F_B

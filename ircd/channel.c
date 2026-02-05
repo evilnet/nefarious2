@@ -2182,13 +2182,16 @@ void del_invite(struct Client *cptr, struct Channel *chptr)
  * @param sptr    The client that is doing the kicking.
  * @param chptr	  The channel the user is being kicked from.
  */
-void make_zombie(struct Membership* member, struct Client* who, 
+void make_zombie(struct Membership* member, struct Client* who,
 		struct Client* cptr, struct Client* sptr, struct Channel* chptr)
 {
   assert(0 != member);
   assert(0 != who);
   assert(0 != cptr);
   assert(0 != chptr);
+
+  /* Mark bouncer session dirty for periodic persistence (before removal) */
+  bounce_mark_dirty(who);
 
   /* Default for case a): */
   SetZombie(member);
@@ -4544,6 +4547,9 @@ mode_process_clients(struct ParseState *state)
       } else
 	member->status &= ~(state->cli_change[i].flag &
 			    (MODE_CHANOP | MODE_HALFOP | MODE_VOICE));
+
+      /* Mark bouncer session dirty for periodic persistence (mode change) */
+      bounce_mark_dirty(state->cli_change[i].client);
     }
 
     /* accumulate the change */
@@ -5117,6 +5123,9 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 
 #endif
 
+    /* Mark bouncer session dirty for periodic persistence */
+    bounce_mark_dirty(jbuf->jb_source);
+
     /* XXX: Shouldn't we send a PART here anyway? */
     /* to users on the channel?  Why?  From their POV, the user isn't on
      * the channel anymore anyway.  We don't send to servers until below,
@@ -5136,6 +5145,9 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       add_user_to_channel(chan, jbuf->jb_source, flags | CHFL_DELAYED, oplevel);
     else
       add_user_to_channel(chan, jbuf->jb_source, flags, oplevel);
+
+    /* Mark bouncer session dirty for periodic persistence */
+    bounce_mark_dirty(jbuf->jb_source);
 
     /* send JOIN notification to all servers (CREATE is sent later). */
     if (jbuf->jb_type != JOINBUF_TYPE_CREATE && !is_local)
