@@ -1335,8 +1335,12 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
     return NULL;
   }
 
-  /* Set as registered user */
+  /* Set as registered user.
+   * Must set both cli_status (via SetUser) AND cli_handler (via con_handler).
+   * cli_status determines IsUser/IsRegistered checks.
+   * cli_handler determines which message handler is used (UNREG vs CLIENT). */
   SetUser(ghost);
+  cli_handler(ghost) = CLIENT_HANDLER;
   SetAccount(ghost);
   SetHiddenHost(ghost);
   SetBouncerHold(ghost);
@@ -2152,10 +2156,37 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
 
-  /* Step 1: Steal the temp client's fd.
-   * Clear s_data BEFORE socket_del to prevent stale callbacks. */
+  /* Step 1: Steal the temp client's fd and SSL.
+   * Clear s_data BEFORE socket_del to prevent stale callbacks.
+   * IMPORTANT: Also save and NULL the SSL pointer BEFORE socket_del,
+   * because socket_del triggers ET_DESTROY which calls ssl_free().
+   * If we don't NULL it first, the SSL context gets freed before we
+   * can transfer it to the ghost. */
   fd = cli_fd(temp);
   s_data(&cli_socket(temp)) = NULL;
+#ifdef USE_SSL
+  {
+    SSL *temp_ssl = con_socket(temp_con).ssl;
+    con_socket(temp_con).ssl = NULL;  /* Prevent ssl_free from freeing it */
+    socket_del(&cli_socket(temp));
+    cli_fd(temp) = -1;
+
+    /* Step 2: Ghost's old fd should be -1 from close_connection() during hold.
+     * Just verify and update LocalClientArray if somehow it wasn't. */
+    if (cli_fd(ghost) >= 0) {
+      LocalClientArray[cli_fd(ghost)] = 0;
+      close(cli_fd(ghost));
+    }
+
+    /* Free ghost's old SSL object (should be NULL from close_connection) */
+    if (con_socket(ghost_con).ssl) {
+      SSL_free(con_socket(ghost_con).ssl);
+      con_socket(ghost_con).ssl = NULL;
+    }
+    /* Transfer temp's SSL object to ghost */
+    con_socket(ghost_con).ssl = temp_ssl;
+  }
+#else
   socket_del(&cli_socket(temp));
   cli_fd(temp) = -1;
 
@@ -2165,16 +2196,6 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     LocalClientArray[cli_fd(ghost)] = 0;
     close(cli_fd(ghost));
   }
-
-#ifdef USE_SSL
-  /* Free ghost's old SSL object (should be NULL from close_connection) */
-  if (con_socket(ghost_con).ssl) {
-    SSL_free(con_socket(ghost_con).ssl);
-    con_socket(ghost_con).ssl = NULL;
-  }
-  /* Transfer temp's SSL object to ghost */
-  con_socket(ghost_con).ssl = con_socket(temp_con).ssl;
-  con_socket(temp_con).ssl = NULL;
 #endif
 
   /* Step 3: Transplant the fd into the ghost's Connection */
@@ -3609,8 +3630,16 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
     }
   }
 
-  /* Request writable notification to flush the welcome */
-  socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+  /* Flush the welcome messages immediately.
+   * Previously we relied on socket_events to trigger ET_WRITE, but there
+   * seems to be a race or ordering issue that delays the flush by ~60s
+   * (until check_pings sends a PING and triggers socket_events again).
+   * Calling shadow_flush_sendq directly ensures the welcome is sent now. */
+  shadow_flush_sendq(shadow);
+
+  /* Request writable notification for any remaining data (if blocked) */
+  if (MsgQLength(&shadow->sh_sendQ) > 0)
+    socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
 }
 
 /** Replay channel state to a client after held session resume.
