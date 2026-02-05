@@ -22,6 +22,7 @@
 #include "ircd_compress.h"
 #include "ircd_string.h"
 #include "numeric.h"       /* RPL_STATSDEBUG */
+#include "ircd_reply.h"    /* SND_EXPLICIT */
 #include "s_stats.h"       /* StatDesc */
 #include "send.h"          /* send_reply */
 

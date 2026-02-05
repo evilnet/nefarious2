@@ -350,65 +350,151 @@ static char *paste_html_escape(const char *content, size_t len, size_t *out_len)
  * HTTP response generation
  * ---------------------------------------------------------------------------*/
 
-/* HTML template for paste viewing */
-static const char html_template_start[] =
+/* HTML template for paste viewing - supports system light/dark theme */
+static const char html_template_head[] =
   "<!DOCTYPE html>\n"
   "<html>\n"
   "<head>\n"
   "  <meta charset=\"utf-8\">\n"
   "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-  "  <title>Paste</title>\n"
-  "  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css\">\n"
+  "  <title>%s</title>\n"  /* filename or "Paste" */
+  "  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github.min.css\" media=\"(prefers-color-scheme: light), (prefers-color-scheme: no-preference)\">\n"
+  "  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css\" media=\"(prefers-color-scheme: dark)\">\n"
   "  <style>\n"
-  "    body { margin: 0; padding: 20px; font-family: monospace; background: #f5f5f5; }\n"
-  "    pre { margin: 0; padding: 20px; background: white; border-radius: 8px; overflow-x: auto; }\n"
-  "    code { font-size: 14px; }\n"
+  "    body { margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #24292e; }\n"
+  "    .container { max-width: 1200px; margin: 0 auto; }\n"
+  "    header { display: flex; align-items: center; margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid #d0d7de; }\n"
+  "    header h1 { margin: 0; font-size: 20px; font-weight: 600; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace; }\n"
+  "    pre { margin: 0; padding: 16px; background: white; border: 1px solid #d0d7de; border-radius: 6px; overflow-x: auto; }\n"
+  "    code { font-size: 13px; font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace; }\n"
+  "    footer { margin-top: 16px; padding-top: 16px; border-top: 1px solid #d0d7de; font-size: 12px; color: #57606a; }\n"
+  "    footer span { margin-right: 16px; }\n"
+  "    @media (prefers-color-scheme: dark) {\n"
+  "      body { background: #0d1117; color: #c9d1d9; }\n"
+  "      header, footer { border-color: #30363d; }\n"
+  "      pre { background: #161b22; border-color: #30363d; }\n"
+  "      footer { color: #8b949e; }\n"
+  "    }\n"
   "  </style>\n"
   "</head>\n"
   "<body>\n"
-  "<pre><code class=\"language-";
+  "<div class=\"container\">\n"
+  "<header><h1>%s</h1></header>\n"  /* filename or "Paste" */
+  "<pre><code class=\"language-%s\">";  /* language */
 
-static const char html_template_mid[] =
-  "\">";
-
-static const char html_template_end[] =
+static const char html_template_foot[] =
   "</code></pre>\n"
+  "<footer><span>%lu lines</span><span>%lu chars</span><span>%s</span></footer>\n"  /* lines, chars, size */
+  "</div>\n"
   "<script src=\"https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js\"></script>\n"
   "<script>hljs.highlightAll();</script>\n"
   "</body>\n"
   "</html>\n";
+
+/* Format byte size for human readability (no floats - ircd_snprintf doesn't support them) */
+static void format_size(size_t bytes, char *buf, size_t buf_len)
+{
+  if (bytes >= 1024 * 1024) {
+    /* Calculate MB with one decimal place using integer math */
+    unsigned long mb_int = bytes / (1024 * 1024);
+    unsigned long mb_frac = (bytes % (1024 * 1024)) * 10 / (1024 * 1024);
+    ircd_snprintf(0, buf, buf_len, "%lu.%lu MB", mb_int, mb_frac);
+  } else if (bytes >= 1024) {
+    /* Calculate KB with one decimal place using integer math */
+    unsigned long kb_int = bytes / 1024;
+    unsigned long kb_frac = (bytes % 1024) * 10 / 1024;
+    ircd_snprintf(0, buf, buf_len, "%lu.%lu KB", kb_int, kb_frac);
+  } else {
+    ircd_snprintf(0, buf, buf_len, "%lu bytes", (unsigned long)bytes);
+  }
+}
+
+/* Count lines in content */
+static unsigned long count_lines(const char *content, size_t len)
+{
+  unsigned long lines = 0;
+  size_t i;
+
+  if (!content || len == 0)
+    return 0;
+
+  for (i = 0; i < len; i++) {
+    if (content[i] == '\n')
+      lines++;
+  }
+
+  /* Count last line if it doesn't end with newline */
+  if (len > 0 && content[len - 1] != '\n')
+    lines++;
+
+  return lines > 0 ? lines : 1;
+}
 
 static int paste_build_html_response(const char *content, size_t content_len,
                                      const char *filename, char **out,
                                      size_t *out_len)
 {
   const char *lang;
+  const char *title;
   char *escaped;
   size_t escaped_len;
   size_t total_len;
+  unsigned long lines;
+  char size_buf[32];
+  char *head_buf;
+  char *foot_buf;
+  int head_len, foot_len;
 
   lang = paste_ext_to_lang(filename);
+  title = (filename && filename[0]) ? filename : "Paste";
 
+  /* Calculate stats */
+  lines = count_lines(content, content_len);
+  format_size(content_len, size_buf, sizeof(size_buf));
+
+  /* Escape content for HTML */
   escaped = paste_html_escape(content, content_len, &escaped_len);
   if (!escaped)
     return -1;
 
-  total_len = sizeof(html_template_start) - 1 +
-              strlen(lang) +
-              sizeof(html_template_mid) - 1 +
-              escaped_len +
-              sizeof(html_template_end) - 1;
+  /* Build head section (title appears twice - in <title> and <h1>) */
+  head_len = strlen(html_template_head) + strlen(title) * 2 + strlen(lang) + 32;
+  head_buf = MyMalloc(head_len);
+  if (!head_buf) {
+    MyFree(escaped);
+    return -1;
+  }
+  head_len = ircd_snprintf(0, head_buf, head_len, html_template_head, title, title, lang);
 
+  /* Build foot section */
+  foot_len = strlen(html_template_foot) + 64;
+  foot_buf = MyMalloc(foot_len);
+  if (!foot_buf) {
+    MyFree(head_buf);
+    MyFree(escaped);
+    return -1;
+  }
+  foot_len = ircd_snprintf(0, foot_buf, foot_len, html_template_foot,
+                           lines, (unsigned long)content_len, size_buf);
+
+  /* Combine everything */
+  total_len = head_len + escaped_len + foot_len;
   *out = MyMalloc(total_len + 1);
   if (!*out) {
+    MyFree(foot_buf);
+    MyFree(head_buf);
     MyFree(escaped);
     return -1;
   }
 
-  *out_len = ircd_snprintf(0, *out, total_len + 1, "%s%s%s%s%s",
-                           html_template_start, lang, html_template_mid,
-                           escaped, html_template_end);
+  memcpy(*out, head_buf, head_len);
+  memcpy(*out + head_len, escaped, escaped_len);
+  memcpy(*out + head_len + escaped_len, foot_buf, foot_len);
+  (*out)[total_len] = '\0';
+  *out_len = total_len;
 
+  MyFree(foot_buf);
+  MyFree(head_buf);
   MyFree(escaped);
   return 0;
 }
@@ -440,7 +526,7 @@ static int paste_send_response(struct paste_conn *conn, int status,
     "X-Content-Type-Options: nosniff\r\n"
     "X-Frame-Options: DENY\r\n"
     "Referrer-Policy: no-referrer\r\n"
-    "Content-Security-Policy: default-src 'none'; script-src cdn.jsdelivr.net; style-src cdn.jsdelivr.net 'unsafe-inline'\r\n"
+    "Content-Security-Policy: default-src 'none'; script-src cdn.jsdelivr.net 'unsafe-inline'; style-src cdn.jsdelivr.net 'unsafe-inline'\r\n"
     "\r\n",
     status, status_text, content_type, body_len);
 
