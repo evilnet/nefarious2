@@ -147,6 +147,12 @@ static int is_local_session(struct BouncerSession *session);
 /** Timer callback: persist all dirty ACTIVE sessions.
  * Iterates all sessions, snapshots and persists those marked dirty,
  * then clears the dirty flag and reschedules the timer.
+ *
+ * IMPORTANT: Must check event type! When the callback reschedules itself
+ * with timer_init() + timer_add(), it clears GEN_MARKED/GEN_READD flags.
+ * This causes timer_run() to generate ET_DESTROY after ET_EXPIRE returns.
+ * If we don't check the event type, we'd try to re-add an already-enqueued
+ * timer, causing a self-cycle that hangs the server (CVE-style bug).
  */
 static void bounce_dirty_persist_cb(struct Event *ev)
 {
@@ -154,6 +160,18 @@ static void bounce_dirty_persist_cb(struct Event *ev)
   struct BouncerSession *s;
   int count = 0;
   int interval;
+
+  /* Only handle timer expiration, not destruction.
+   * See comment above for why this check is critical. */
+  if (ev_type(ev) == ET_DESTROY) {
+    /* Only mark inactive if the timer wasn't rescheduled.
+     * After ET_EXPIRE reschedules the timer with timer_add(), it's active
+     * again. The subsequent ET_DESTROY is for the "old" expiration, not
+     * a real shutdown. */
+    if (!t_active(&dirty_persist_timer))
+      dirty_persist_timer_active = 0;
+    return;
+  }
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available()) {
     dirty_persist_timer_active = 0;
