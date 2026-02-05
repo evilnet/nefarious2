@@ -1120,15 +1120,23 @@ process_multiline_batch(struct Client *sptr)
                                    cli_name(&me), chptr->chname, total_lines, chptr->chname, batch_base_msgid);
                   }
                 } else {
-                  /* Fallback: &ml- storage */
-                  ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
-                                   con_ml_messages(con), total_lines);
-                  if (remaining <= 15) {
-                    mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /join &ml-%s to view full message]",
-                                   cli_name(&me), chptr->chname, remaining, batch_base_msgid);
+                  /* Fallback: paste URL (preferred) or &ml- storage */
+                  const char *echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                                  chptr->chname, con_ml_messages(con));
+                  if (echo_paste_url) {
+                    mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
+                                   cli_name(&me), chptr->chname, remaining, echo_paste_url);
                   } else {
-                    mb = msgq_make(sptr, ":%s NOTICE %s :[Message continues (%d lines total) - /join &ml-%s to view]",
-                                   cli_name(&me), chptr->chname, total_lines, batch_base_msgid);
+                    /* Paste unavailable - use &ml- storage */
+                    ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
+                                     con_ml_messages(con), total_lines);
+                    if (remaining <= 15) {
+                      mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /join &ml-%s to view full message]",
+                                     cli_name(&me), chptr->chname, remaining, batch_base_msgid);
+                    } else {
+                      mb = msgq_make(sptr, ":%s NOTICE %s :[Message continues (%d lines total) - /join &ml-%s to view]",
+                                     cli_name(&me), chptr->chname, total_lines, batch_base_msgid);
+                    }
                   }
                 }
                 if (mb) {
@@ -1442,10 +1450,18 @@ process_multiline_batch(struct Client *sptr)
                 mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /msg HistServ FETCH %s %s]",
                                cli_name(&me), cli_name(acptr), remaining, cli_name(acptr), batch_base_msgid);
               } else {
-                ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
-                                 con_ml_messages(con), total_lines);
-                mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /join &ml-%s to view full message]",
-                               cli_name(&me), cli_name(acptr), remaining, batch_base_msgid);
+                /* Fallback: paste URL (preferred) or &ml- storage */
+                const char *dm_echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                                   cli_name(acptr), con_ml_messages(con));
+                if (dm_echo_paste_url) {
+                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
+                                 cli_name(&me), cli_name(acptr), remaining, dm_echo_paste_url);
+                } else {
+                  ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
+                                   con_ml_messages(con), total_lines);
+                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /join &ml-%s to view full message]",
+                                 cli_name(&me), cli_name(acptr), remaining, batch_base_msgid);
+                }
               }
               if (mb) {
                 msgq_add(&sh->sh_sendQ, mb, 0);
