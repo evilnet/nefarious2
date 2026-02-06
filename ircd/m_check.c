@@ -611,10 +611,11 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    /* If local user.. */
 
    if (MyUser(acptr)) {
+      struct Listener *listener = cli_listener(acptr);
       send_reply(sptr, RPL_DATASTR, " ");
-      if (cli_listener(acptr)) {
+      if (listener) {
         ircd_snprintf(0, outbuf, sizeof(outbuf), "          Ports:: %d -> %d (client -> server)",
-           cli_port(acptr), cli_listener(acptr)->addr.port);
+           cli_port(acptr), listener->addr.port);
       } else {
         ircd_snprintf(0, outbuf, sizeof(outbuf), "          Ports:: %d -> ? (client -> server, no listener)",
            cli_port(acptr));
