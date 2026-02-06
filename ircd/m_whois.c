@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
@@ -88,6 +89,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "list.h"
 #include "match.h"
@@ -285,6 +287,28 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
 
     if (cli_webirc(acptr) && !EmptyString(cli_webirc(acptr)))
       send_reply(sptr, RPL_WHOISWEBIRC, name, cli_webirc(acptr));
+
+    /* Bouncer session info - visible to opers and the user themselves */
+    if (IsAnOper(sptr) || acptr == sptr) {
+      struct BouncerSession *session = bounce_get_session(acptr);
+      if (session) {
+        int conn_count = bounce_connection_count(session);
+        char bouncer_buf[128];
+
+        if (session->hs_state == BOUNCE_ACTIVE) {
+          if (conn_count > 1)
+            ircd_snprintf(0, bouncer_buf, sizeof(bouncer_buf),
+                          "has a bouncer session with %d connections", conn_count);
+          else
+            ircd_snprintf(0, bouncer_buf, sizeof(bouncer_buf),
+                          "has a bouncer session");
+        } else {
+          ircd_snprintf(0, bouncer_buf, sizeof(bouncer_buf),
+                        "has a bouncer session (holding)");
+        }
+        send_reply(sptr, RPL_WHOISSPECIAL, name, bouncer_buf);
+      }
+    }
 
     if (MyConnect(acptr) && (IsAnOper(sptr) || (!IsNoIdle(acptr) &&
           (!feature_bool(FEAT_HIS_WHOIS_IDLETIME) || sptr == acptr ||

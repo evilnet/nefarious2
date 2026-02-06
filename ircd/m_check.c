@@ -21,6 +21,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include "bouncer_session.h"
 #include "channel.h"
 #include "class.h"
 #include "client.h"
@@ -611,8 +612,13 @@ void checkClient(struct Client *sptr, struct Client *acptr)
 
    if (MyUser(acptr)) {
       send_reply(sptr, RPL_DATASTR, " ");
-      ircd_snprintf(0, outbuf, sizeof(outbuf), "          Ports:: %d -> %d (client -> server)",
-         cli_port(acptr), cli_listener(acptr)->addr.port);
+      if (cli_listener(acptr)) {
+        ircd_snprintf(0, outbuf, sizeof(outbuf), "          Ports:: %d -> %d (client -> server)",
+           cli_port(acptr), cli_listener(acptr)->addr.port);
+      } else {
+        ircd_snprintf(0, outbuf, sizeof(outbuf), "          Ports:: %d -> ? (client -> server, no listener)",
+           cli_port(acptr));
+      }
       send_reply(sptr, RPL_DATASTR, outbuf);
       if (feature_bool(FEAT_CHECK_EXTENDED)) {
         /* Note: sendq = receiveq for a client (it makes sense really) */
@@ -630,7 +636,134 @@ void checkClient(struct Client *sptr, struct Client *acptr)
         send_reply(sptr, RPL_DATASTR, outbuf);                
       }
    }
-   
+
+   /* Bouncer session info (if applicable) */
+   {
+      struct BouncerSession *session = bounce_get_session(acptr);
+      if (session) {
+         struct ShadowConnection *sh;
+         int conn_count = bounce_connection_count(session);
+         const char *state_str = (session->hs_state == BOUNCE_ACTIVE) ? "ACTIVE" : "HOLDING";
+         const char *hold_str;
+         time_t elapsed;
+
+         send_reply(sptr, RPL_DATASTR, " ");
+         send_reply(sptr, RPL_DATASTR, "Bouncer Session::");
+
+         ircd_snprintf(0, outbuf, sizeof(outbuf), "  Session state:: %s", state_str);
+         send_reply(sptr, RPL_DATASTR, outbuf);
+
+         ircd_snprintf(0, outbuf, sizeof(outbuf), "     Session ID:: %s", session->hs_sessid);
+         send_reply(sptr, RPL_DATASTR, outbuf);
+
+         if (session->hs_name[0]) {
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "   Session name:: %s", session->hs_name);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+         }
+
+         ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: %d (1 primary + %d shadows)",
+                       conn_count, session->hs_shadow_count);
+         send_reply(sptr, RPL_DATASTR, outbuf);
+
+         if (session->hs_hold_override == -1)
+            hold_str = "default";
+         else if (session->hs_hold_override == 0)
+            hold_str = "disabled";
+         else
+            hold_str = "enabled";
+         ircd_snprintf(0, outbuf, sizeof(outbuf), "  Hold override:: %s", hold_str);
+         send_reply(sptr, RPL_DATASTR, outbuf);
+
+         ircd_snprintf(0, outbuf, sizeof(outbuf), "  Session since:: %s", myctime(session->hs_created));
+         send_reply(sptr, RPL_DATASTR, outbuf);
+
+         ircd_snprintf(0, outbuf, sizeof(outbuf), "   Resume count:: %u", session->hs_attach_count);
+         send_reply(sptr, RPL_DATASTR, outbuf);
+
+         /* Primary connection info */
+         if (session->hs_state == BOUNCE_ACTIVE && MyConnect(acptr)) {
+            const char *away_str;
+            send_reply(sptr, RPL_DATASTR, " ");
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "  Primary [id=%u]::", session->hs_primary_id);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "             IP:: %s", ircd_ntoa(&cli_ip(acptr)));
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "      Connected:: %s", myctime(cli_firsttime(acptr)));
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            if (cli_listener(acptr)) {
+               ircd_snprintf(0, outbuf, sizeof(outbuf), "           Port:: %d -> %d",
+                             cli_port(acptr), cli_listener(acptr)->addr.port);
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
+
+#ifdef USE_SSL
+            if (cli_socket(acptr).ssl)
+               send_reply(sptr, RPL_DATASTR, "            TLS:: yes");
+            else
+               send_reply(sptr, RPL_DATASTR, "            TLS:: no");
+#endif
+
+            /* Per-connection away state (from cli_user, represents primary's state) */
+            if (acptr->cli_user->away)
+               away_str = "away";
+            else
+               away_str = "present";
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "     Away state:: %s", away_str);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+         }
+
+         /* Shadow connections */
+         for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
+            const char *away_str;
+
+            if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+               continue;
+
+            send_reply(sptr, RPL_DATASTR, " ");
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "  Shadow [id=%u]::", sh->sh_id);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "             IP:: %s", sh->sh_sock_ip);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "      Connected:: %s", myctime(sh->sh_connected));
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            elapsed = CurrentTime - sh->sh_connected;
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "       Duration:: %ld days, %02ld:%02ld:%02ld",
+                          elapsed / 86400, (elapsed / 3600) % 24, (elapsed / 60) % 60, elapsed % 60);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "             FD:: %d", sh->sh_fd);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            /* Per-shadow away state */
+            switch (sh->sh_away_state) {
+               case 0: away_str = "present"; break;
+               case 1: away_str = "away"; break;
+               case 2: away_str = "away*"; break;
+               default: away_str = "unknown"; break;
+            }
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "     Away state:: %s", away_str);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            /* Shadow flags */
+            if (sh->sh_flags & (SHADOW_FLAGS_BLOCKED | SHADOW_FLAGS_PINGSENT)) {
+               char flags_buf[64] = "";
+               if (sh->sh_flags & SHADOW_FLAGS_BLOCKED)
+                  strcat(flags_buf, "blocked ");
+               if (sh->sh_flags & SHADOW_FLAGS_PINGSENT)
+                  strcat(flags_buf, "ping-sent ");
+               ircd_snprintf(0, outbuf, sizeof(outbuf), "          Flags:: %s", flags_buf);
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
+         }
+      }
+   }
+
    /* Send 'END OF CHECK' message */
    send_reply(sptr, RPL_ENDOFCHECK, " ");
 }
