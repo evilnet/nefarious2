@@ -400,6 +400,15 @@ int register_user(struct Client *cptr, struct Client *sptr)
       set_user_mode(cptr, sptr, 3, umodev, ALLOWMODES_ANY);
     }
 
+    /* Check if connection class requires SASL authentication */
+    connclass = get_client_class_conf(sptr);
+    if (connclass && FlagHas(&connclass->restrictflags, CRFLAG_REQUIRE_SASL) &&
+        !IsAccount(sptr)) {
+      ++ServerStats->is_ref;
+      return exit_client(cptr, sptr, &me,
+                         "SASL authentication required for this connection class");
+    }
+
     SetUser(sptr);
     cli_handler(sptr) = CLIENT_HANDLER;
 

@@ -160,7 +160,8 @@ enum AuthorizationCheckResult {
   ACR_TOO_MANY_IN_CLASS,  /**< Connection class was already full. */
   ACR_TOO_MANY_FROM_IP,   /**< User's IP already has max connections. */
   ACR_ALREADY_AUTHORIZED, /**< User already had an attached ConfItem. */
-  ACR_BAD_SOCKET          /**< Client has bad file descriptor. */
+  ACR_BAD_SOCKET,         /**< Client has bad file descriptor. */
+  ACR_SASL_UNAVAILABLE    /**< Class requires SASL but SASL service is unavailable. */
 };
 
 /** Target description for service commands. */

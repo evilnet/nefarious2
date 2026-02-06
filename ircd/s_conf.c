@@ -404,6 +404,11 @@ enum AuthorizationCheckResult attach_iline(struct Client* cptr)
       send_reply(cptr, RPL_BOUNCE, aconf->redirserver, aconf->redirport);
       return ACR_NO_AUTHORIZATION;
     }
+    /* Check if class requires SASL and SASL is unavailable from all sources */
+    if (aconf->conn_class &&
+        FlagHas(&aconf->conn_class->restrictflags, CRFLAG_REQUIRE_SASL) &&
+        !get_sasl_mechanisms() && !auth_iauth_handles_sasl())
+      return ACR_SASL_UNAVAILABLE;
     if (aconf->username && !IsWebIRCUserIdent(cptr) && (aconf->flags & CONF_NOIDENTTILDE))
       SetFlag(cptr, FLAG_DOID);
     return attach_conf(cptr, aconf);

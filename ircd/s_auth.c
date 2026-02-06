@@ -719,6 +719,14 @@ static int preregister_user(struct Client *cptr)
     if (IsIPChecked(cptr))
       IPcheck_connect_fail(cptr, 0);
     return exit_client(cptr, cptr, &me, "Unknown error -- Try again");
+  case ACR_SASL_UNAVAILABLE:
+    sendto_opmask_butone_ratelimited(0, SNO_UNAUTH, &last_too_many1,
+                                     "Connection from %s rejected: class %s requires SASL but services unavailable.",
+                                     get_client_name(cptr, SHOW_IP),
+                                     get_client_class(cptr));
+    ++ServerStats->is_ref;
+    return exit_client(cptr, cptr, &me,
+                       "SASL authentication required but temporarily unavailable - try again later");
   }
   return 0;
 }
@@ -2533,6 +2541,10 @@ static int iauth_cmd_done_client(struct IAuth *iauth, struct Client *cli,
         return exit_client(cli, cli, &me,
                            "Sorry, your connection class is full - try "
                            "again later or try another server");
+      case ACR_SASL_UNAVAILABLE:
+        ++ServerStats->is_ref;
+        return exit_client(cli, cli, &me,
+                           "SASL authentication required but temporarily unavailable - try again later");
       default:
         log_write(LS_IAUTH, L_ERROR, 0, "IAuth: Unexpected AuthorizationCheckResult %d from attach_conf()", acr);
         break;

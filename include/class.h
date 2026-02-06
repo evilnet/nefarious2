@@ -38,6 +38,7 @@ enum ClassRestrictFlag {
   CRFLAG_JOIN,          /**< User cannot join channerls. */
   CRFLAG_PRIVMSG,       /**< User cannot send PRIVMSG/NOTICE to users not on common channels. */
   CRFLAG_UMODE,         /**< User cannot change his/her own user modes. */
+  CRFLAG_REQUIRE_SASL,  /**< User must authenticate via SASL; connection refused if SASL unavailable. */
   CRFLAG_LAST_FLAG
 };
 
