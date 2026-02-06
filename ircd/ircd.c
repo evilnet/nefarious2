@@ -597,6 +597,16 @@ static void check_pings(struct Event* ev) {
         sendto_opmask_butone(0, SNO_OLDSNO,
                              "No response from %s, closing link",
                              cli_name(cptr));
+
+      /* Check if client should enter bouncer HOLD mode instead of exiting */
+      if (IsUser(cptr) && bounce_should_hold(cptr)) {
+        if (bounce_hold_client(cptr, "Ping timeout") == 0) {
+          /* Successfully entered hold - don't exit_client */
+          continue;
+        }
+        /* If hold failed, fall through to normal exit */
+      }
+
       exit_client_msg(cptr, cptr, &me, "Ping timeout");
       continue;
     }
