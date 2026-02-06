@@ -131,4 +131,8 @@ extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned
 /* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
 extern void send_cap_notify(const char *capname, int available, const char *value);
 
+/* CAP notify batching for rehash - aggregates multiple CAP NEW/DEL into single messages */
+extern void cap_notify_begin_batch(void);
+extern void cap_notify_flush(void);
+
 #endif /* INCLUDED_capab_h */

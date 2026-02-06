@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include "ircd_features.h"
+#include "capab.h"	/* send_cap_notify */
 #include "channel.h"	/* list_set_default */
 #include "class.h"
 #include "client.h"
@@ -446,6 +447,121 @@ feature_notify_compress_level(void)
 }
 #endif /* USE_ZSTD */
 
+/* Forward declarations for mutual dependency */
+static void feature_notify_chathistory_caps(void);
+static void feature_notify_multiline(void);
+
+/** Notify clients when CAP_draft_multiline feature flag changes.
+ * Sends CAP NEW with parameters when enabled, CAP DEL when disabled.
+ */
+static void
+feature_notify_cap_multiline(void)
+{
+  if (feature_bool(FEAT_CAP_draft_multiline)) {
+    /* Cap enabled - send CAP NEW with current parameters */
+    feature_notify_multiline();
+  } else {
+    /* Cap disabled - send CAP DEL */
+    send_cap_notify("draft/multiline", 0, NULL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "multiline: capability disabled, sent CAP DEL to cap-notify clients");
+  }
+}
+
+/** Notify clients when CAP_draft_chathistory feature flag changes.
+ * Sends CAP NEW with parameters when enabled, CAP DEL when disabled.
+ */
+static void
+feature_notify_cap_chathistory(void)
+{
+  if (feature_bool(FEAT_CAP_draft_chathistory)) {
+    /* Cap enabled - send CAP NEW with current parameters */
+    feature_notify_chathistory_caps();
+  } else {
+    /* Cap disabled - send CAP DEL */
+    send_cap_notify("draft/chathistory", 0, NULL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "chathistory: capability disabled, sent CAP DEL to cap-notify clients");
+  }
+}
+
+/** Notify clients when a simple CAP feature flag changes (no parameters).
+ * Helper macro to generate callbacks for caps without parameters.
+ * Uses featname for C identifier (function name) and capname for the CAP string.
+ */
+#define DEFINE_CAP_NOTIFY(capname, featname) \
+static void feature_notify_cap_##featname(void) { \
+  if (feature_bool(FEAT_CAP_##featname)) { \
+    send_cap_notify(capname, 1, NULL); \
+    log_write(LS_SYSTEM, L_INFO, 0, \
+              capname ": capability enabled, sent CAP NEW to cap-notify clients"); \
+  } else { \
+    send_cap_notify(capname, 0, NULL); \
+    log_write(LS_SYSTEM, L_INFO, 0, \
+              capname ": capability disabled, sent CAP DEL to cap-notify clients"); \
+  } \
+}
+
+/* Generate notify functions for simple caps (no parameters) */
+DEFINE_CAP_NOTIFY("multi-prefix", multi_prefix)
+DEFINE_CAP_NOTIFY("userhost-in-names", userhost_in_names)
+DEFINE_CAP_NOTIFY("extended-join", extended_join)
+DEFINE_CAP_NOTIFY("away-notify", away_notify)
+DEFINE_CAP_NOTIFY("account-notify", account_notify)
+DEFINE_CAP_NOTIFY("cap-notify", cap_notify)
+DEFINE_CAP_NOTIFY("server-time", server_time)
+DEFINE_CAP_NOTIFY("echo-message", echo_message)
+DEFINE_CAP_NOTIFY("account-tag", account_tag)
+DEFINE_CAP_NOTIFY("chghost", chghost)
+DEFINE_CAP_NOTIFY("invite-notify", invite_notify)
+DEFINE_CAP_NOTIFY("labeled-response", labeled_response)
+DEFINE_CAP_NOTIFY("batch", batch)
+DEFINE_CAP_NOTIFY("setname", setname)
+DEFINE_CAP_NOTIFY("standard-replies", standard_replies)
+DEFINE_CAP_NOTIFY("message-tags", message_tags)
+DEFINE_CAP_NOTIFY("draft/no-implicit-names", draft_no_implicit_names)
+DEFINE_CAP_NOTIFY("draft/extended-isupport", draft_extended_isupport)
+DEFINE_CAP_NOTIFY("draft/pre-away", draft_pre_away)
+DEFINE_CAP_NOTIFY("draft/event-playback", draft_event_playback)
+DEFINE_CAP_NOTIFY("draft/message-redaction", draft_message_redaction)
+DEFINE_CAP_NOTIFY("draft/account-registration", draft_account_registration)
+DEFINE_CAP_NOTIFY("draft/read-marker", draft_read_marker)
+DEFINE_CAP_NOTIFY("draft/channel-rename", draft_channel_rename)
+DEFINE_CAP_NOTIFY("draft/metadata-2", draft_metadata_2)
+DEFINE_CAP_NOTIFY("draft/bouncer", draft_bouncer)
+DEFINE_CAP_NOTIFY("tls", tls)
+
+/** Notify clients when STS feature flag changes.
+ * STS has parameters: port, duration, and optionally preload.
+ */
+static void
+feature_notify_cap_sts(void)
+{
+  char valbuf[64];
+
+  if (feature_bool(FEAT_CAP_sts)) {
+    /* Cap enabled - send CAP NEW with STS parameters */
+    if (feature_bool(FEAT_STS_PRELOAD)) {
+      ircd_snprintf(0, valbuf, sizeof(valbuf), "port=%d,duration=%d,preload",
+                    feature_int(FEAT_STS_PORT),
+                    feature_int(FEAT_STS_DURATION));
+    } else {
+      ircd_snprintf(0, valbuf, sizeof(valbuf), "port=%d,duration=%d",
+                    feature_int(FEAT_STS_PORT),
+                    feature_int(FEAT_STS_DURATION));
+    }
+    send_cap_notify("sts", 1, valbuf);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "sts: capability enabled (%s), sent CAP NEW to cap-notify clients",
+              valbuf);
+  } else {
+    /* Cap disabled - send CAP DEL */
+    send_cap_notify("sts", 0, NULL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "sts: capability disabled, sent CAP DEL to cap-notify clients");
+  }
+}
+
 /** Notify peer servers of chathistory retention change (CH A R).
  * Called when CHATHISTORY_RETENTION is modified via SET or REHASH.
  * Only sends if we're a storage server (CHATHISTORY_STORE enabled).
@@ -467,6 +583,64 @@ feature_notify_chathistory_retention(void)
   log_write(LS_SYSTEM, L_INFO, 0,
             "chathistory: retention changed to %d days, notified peers",
             retention);
+
+  /* Also notify clients via cap-notify */
+  feature_notify_chathistory_caps();
+}
+
+/** Notify clients with cap-notify of multiline parameter changes.
+ * Called when MULTILINE_MAX_BYTES or MULTILINE_MAX_LINES is modified.
+ * Sends CAP NEW draft/multiline=max-bytes=X,max-lines=Y to all clients
+ * that have negotiated cap-notify.
+ */
+static void
+feature_notify_multiline(void)
+{
+  char valbuf[64];
+
+  /* Only notify if multiline capability is enabled */
+  if (!feature_bool(FEAT_CAP_draft_multiline))
+    return;
+
+  ircd_snprintf(0, valbuf, sizeof(valbuf), "max-bytes=%d,max-lines=%d",
+                feature_int(FEAT_MULTILINE_MAX_BYTES),
+                feature_int(FEAT_MULTILINE_MAX_LINES));
+
+  send_cap_notify("draft/multiline", 1, valbuf);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "multiline: parameters changed to %s, notified cap-notify clients",
+            valbuf);
+}
+
+/** Notify clients with cap-notify of chathistory parameter changes.
+ * Called when CHATHISTORY_MAX, CHATHISTORY_RETENTION, or CHATHISTORY_PRIVATE
+ * is modified. Sends CAP NEW draft/chathistory=limit=X,retention=Xd[,pm].
+ */
+static void
+feature_notify_chathistory_caps(void)
+{
+  char valbuf[64];
+  int retention_days;
+
+  /* Only notify if chathistory capability is enabled */
+  if (!feature_bool(FEAT_CAP_draft_chathistory))
+    return;
+
+  retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
+  if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
+    ircd_snprintf(0, valbuf, sizeof(valbuf), "limit=%d,retention=%dd,pm",
+                  feature_int(FEAT_CHATHISTORY_MAX), retention_days);
+  } else {
+    ircd_snprintf(0, valbuf, sizeof(valbuf), "limit=%d,retention=%dd",
+                  feature_int(FEAT_CHATHISTORY_MAX), retention_days);
+  }
+
+  send_cap_notify("draft/chathistory", 1, valbuf);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "chathistory: parameters changed to %s, notified cap-notify clients",
+            valbuf);
 }
 
 /** Sets a feature to the given value.
@@ -836,39 +1010,39 @@ static struct FeatureDesc {
   F_B(HIS_ZLINE_REASON, 0, 0, 0),
   F_I(ZLINEMAXUSERCOUNT, 0, 20, 0),
 
-  /* CAP FEAT_'s */
-  F_B(CAP_multi_prefix, 0, 1, 0),
-  F_B(CAP_userhost_in_names, 0, 1, 0),
-  F_B(CAP_extended_join, 0, 1, 0),
-  F_B(CAP_away_notify, 0, 1, 0),
-  F_B(CAP_account_notify, 0, 1, 0),
-  F_B(CAP_sasl, 0, 1, 0),
-  F_B(CAP_cap_notify, 0, 1, 0),
-  F_B(CAP_server_time, 0, 1, 0),
-  F_B(CAP_echo_message, 0, 1, 0),
-  F_B(CAP_account_tag, 0, 1, 0),
-  F_B(CAP_chghost, 0, 1, 0),
-  F_B(CAP_invite_notify, 0, 1, 0),
-  F_B(CAP_labeled_response, 0, 1, 0),
-  F_B(CAP_batch, 0, 1, 0),
-  F_B(CAP_setname, 0, 1, 0),
+  /* CAP FEAT_'s - notify callbacks send CAP NEW/DEL on rehash */
+  F_B(CAP_multi_prefix, 0, 1, feature_notify_cap_multi_prefix),
+  F_B(CAP_userhost_in_names, 0, 1, feature_notify_cap_userhost_in_names),
+  F_B(CAP_extended_join, 0, 1, feature_notify_cap_extended_join),
+  F_B(CAP_away_notify, 0, 1, feature_notify_cap_away_notify),
+  F_B(CAP_account_notify, 0, 1, feature_notify_cap_account_notify),
+  F_B(CAP_sasl, 0, 1, 0),  /* SASL has special handling via services link */
+  F_B(CAP_cap_notify, 0, 1, feature_notify_cap_cap_notify),
+  F_B(CAP_server_time, 0, 1, feature_notify_cap_server_time),
+  F_B(CAP_echo_message, 0, 1, feature_notify_cap_echo_message),
+  F_B(CAP_account_tag, 0, 1, feature_notify_cap_account_tag),
+  F_B(CAP_chghost, 0, 1, feature_notify_cap_chghost),
+  F_B(CAP_invite_notify, 0, 1, feature_notify_cap_invite_notify),
+  F_B(CAP_labeled_response, 0, 1, feature_notify_cap_labeled_response),
+  F_B(CAP_batch, 0, 1, feature_notify_cap_batch),
+  F_B(CAP_setname, 0, 1, feature_notify_cap_setname),
   F_B(SETNAME_STRICT_LENGTH, 0, 0, 0),
-  F_B(CAP_standard_replies, 0, 1, 0),
-  F_B(CAP_message_tags, 0, 1, 0),
+  F_B(CAP_standard_replies, 0, 1, feature_notify_cap_standard_replies),
+  F_B(CAP_message_tags, 0, 1, feature_notify_cap_message_tags),
   F_S(CLIENTTAGDENY, FEAT_NULL, 0, 0),
-  F_B(CAP_draft_no_implicit_names, 0, 1, 0),
-  F_B(CAP_draft_extended_isupport, 0, 1, 0),
-  F_B(CAP_draft_pre_away, 0, 1, 0),
-  F_B(CAP_draft_multiline, 0, 1, 0),
-  F_B(CAP_draft_chathistory, 0, 1, 0),
-  F_B(CAP_draft_event_playback, 0, 0, 0),
-  F_B(CAP_draft_message_redaction, 0, 0, 0),
-  F_B(CAP_draft_account_registration, 0, 0, 0),
+  F_B(CAP_draft_no_implicit_names, 0, 1, feature_notify_cap_draft_no_implicit_names),
+  F_B(CAP_draft_extended_isupport, 0, 1, feature_notify_cap_draft_extended_isupport),
+  F_B(CAP_draft_pre_away, 0, 1, feature_notify_cap_draft_pre_away),
+  F_B(CAP_draft_multiline, 0, 1, feature_notify_cap_multiline),
+  F_B(CAP_draft_chathistory, 0, 1, feature_notify_cap_chathistory),
+  F_B(CAP_draft_event_playback, 0, 0, feature_notify_cap_draft_event_playback),
+  F_B(CAP_draft_message_redaction, 0, 0, feature_notify_cap_draft_message_redaction),
+  F_B(CAP_draft_account_registration, 0, 0, feature_notify_cap_draft_account_registration),
   F_S(REGISTER_SERVER, 0, "*", 0),
-  F_B(CAP_draft_read_marker, 0, 0, 0),
-  F_B(CAP_draft_channel_rename, 0, 0, 0),
-  F_B(CAP_draft_metadata_2, 0, 0, 0),
-  F_B(CAP_draft_webpush, 0, 0, 0),
+  F_B(CAP_draft_read_marker, 0, 0, feature_notify_cap_draft_read_marker),
+  F_B(CAP_draft_channel_rename, 0, 0, feature_notify_cap_draft_channel_rename),
+  F_B(CAP_draft_metadata_2, 0, 0, feature_notify_cap_draft_metadata_2),
+  F_B(CAP_draft_webpush, 0, 0, 0),  /* webpush has special handling via VAPID key */
   F_S(WEBPUSH_DB, 0, "webpush", 0),
   F_B(WEBPUSH_DB_AUTOGROW, 0, 1, 0),
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
@@ -878,8 +1052,8 @@ static struct FeatureDesc {
   F_I(REDACT_WINDOW, 0, 300, 0),
   F_I(REDACT_OPER_WINDOW, 0, 0, 0),
   F_B(REDACT_CHANOP_OTHERS, 0, 1, 0),
-  F_I(CHATHISTORY_MAX, 0, 100, 0),
-  F_B(CHATHISTORY_PRIVATE, 0, 0, 0),
+  F_I(CHATHISTORY_MAX, 0, 100, feature_notify_chathistory_caps),
+  F_B(CHATHISTORY_PRIVATE, 0, 0, feature_notify_chathistory_caps),
   F_S(CHATHISTORY_DB, 0, "history", 0),
   F_B(CHATHISTORY_DB_AUTOGROW, 0, 1, 0),
   F_I(CHATHISTORY_DB_GROWTH_STEP, 0, 16777216, 0),  /* 16MB default growth step */
@@ -901,8 +1075,8 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_OPS_OVERRIDE, 0, 1, 0),
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
-  F_I(MULTILINE_MAX_BYTES, 0, 4096, 0),
-  F_I(MULTILINE_MAX_LINES, 0, 24, 0),
+  F_I(MULTILINE_MAX_BYTES, 0, 4096, feature_notify_multiline),
+  F_I(MULTILINE_MAX_LINES, 0, 24, feature_notify_multiline),
   F_I(MULTILINE_LAG_DISCOUNT, 0, 50, 0),
   F_I(MULTILINE_CHANNEL_LAG_DISCOUNT, 0, 75, 0),
   F_I(MULTILINE_MAX_LAG, 0, 30, 0),
@@ -938,7 +1112,7 @@ static struct FeatureDesc {
 #endif
   /* Bouncer */
   F_B(BOUNCER_ENABLE, 0, 0, 0),
-  F_I(BOUNCER_MAX_SESSIONS, 0, 5, 0),
+  F_I(BOUNCER_MAX_SESSIONS, 0, 1, 0),         /* 1 session per account (single-server) */
   F_I(BOUNCER_MAX_SHADOWS, 0, 4, 0),         /* Max shadow connections per session */
   F_I(BOUNCER_SESSION_HOLD, 0, 14400, 0),    /* 4 hours */
   F_I(BOUNCER_TOKEN_EXPIRY, 0, 86400, 0),    /* 24 hours */
@@ -951,14 +1125,14 @@ static struct FeatureDesc {
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
   F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, 0),    /* periodic persist interval (seconds) */
-  F_B(CAP_draft_bouncer, 0, 1, 0),
+  F_B(CAP_draft_bouncer, 0, 1, feature_notify_cap_draft_bouncer),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
-  F_B(CAP_tls, 0, 1, 0),
-  F_B(CAP_sts, 0, 0, 0),
-  F_I(STS_PORT, 0, 6697, 0),
-  F_I(STS_DURATION, 0, 2592000, 0),  /* 30 days in seconds */
-  F_B(STS_PRELOAD, 0, 0, 0),
+  F_B(CAP_tls, 0, 1, feature_notify_cap_tls),
+  F_B(CAP_sts, 0, 0, feature_notify_cap_sts),
+  F_I(STS_PORT, 0, 6697, feature_notify_cap_sts),
+  F_I(STS_DURATION, 0, 2592000, feature_notify_cap_sts),  /* 30 days in seconds */
+  F_B(STS_PRELOAD, 0, 0, feature_notify_cap_sts),
 #endif
 
   F_B(UPING_ENABLE, FEAT_READ, 1, 0),
@@ -1312,6 +1486,9 @@ feature_unmark(void)
 {
   int i;
 
+  /* Start batching CAP notify calls for aggregation */
+  cap_notify_begin_batch();
+
   for (i = 0; features[i].type; i++) {
     features[i].flags &= ~FEAT_MARK; /* clear the marks... */
     if (features[i].unmark) /* call the unmark callback if necessary */
@@ -1359,6 +1536,9 @@ feature_mark(void)
     if (change && features[i].notify)
       (*features[i].notify)(); /* call change notify function */
   }
+
+  /* Flush aggregated CAP notify messages */
+  cap_notify_flush();
 }
 
 /** Initialize the features subsystem. */

@@ -48,6 +48,154 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ---------------------------------------------------------------------------
+ * CAP notify batching for rehash
+ *
+ * During rehash, multiple feature flags may change, each triggering
+ * send_cap_notify(). Instead of sending individual CAP NEW/DEL messages,
+ * we buffer them and send aggregated messages at the end.
+ * ---------------------------------------------------------------------------*/
+
+/** Maximum number of CAP changes to buffer */
+#define CAP_BATCH_MAX 64
+
+/** Maximum length of aggregated CAP string */
+#define CAP_BATCH_BUFSIZE 1024
+
+/** Pending CAP change entry */
+struct cap_batch_entry {
+  char capname[64];    /**< CAP name (e.g., "draft/multiline") */
+  char value[256];     /**< Optional value (e.g., "max-bytes=4096") */
+  int available;       /**< 1 for NEW, 0 for DEL */
+};
+
+/** CAP notify batch state */
+static struct {
+  int active;                                 /**< Batching in progress */
+  int count;                                  /**< Number of pending entries */
+  struct cap_batch_entry entries[CAP_BATCH_MAX];
+} cap_batch = { 0, 0, {{0}} };
+
+/** Begin batching CAP notify calls.
+ * Called at start of rehash/config reload.
+ */
+void cap_notify_begin_batch(void)
+{
+  cap_batch.active = 1;
+  cap_batch.count = 0;
+}
+
+/** Add a CAP change to the batch buffer.
+ * @return 1 if buffered, 0 if buffer full (should send immediately)
+ */
+static int cap_batch_add(const char *capname, int available, const char *value)
+{
+  struct cap_batch_entry *entry;
+  int i;
+
+  if (!cap_batch.active || cap_batch.count >= CAP_BATCH_MAX)
+    return 0;
+
+  /* Check if we already have an entry for this cap - update it */
+  for (i = 0; i < cap_batch.count; i++) {
+    if (!strcmp(cap_batch.entries[i].capname, capname)) {
+      cap_batch.entries[i].available = available;
+      if (value && *value)
+        ircd_strncpy(cap_batch.entries[i].value, value, sizeof(cap_batch.entries[i].value) - 1);
+      else
+        cap_batch.entries[i].value[0] = '\0';
+      return 1;
+    }
+  }
+
+  /* Add new entry */
+  entry = &cap_batch.entries[cap_batch.count++];
+  ircd_strncpy(entry->capname, capname, sizeof(entry->capname) - 1);
+  entry->capname[sizeof(entry->capname) - 1] = '\0';
+  entry->available = available;
+  if (value && *value)
+    ircd_strncpy(entry->value, value, sizeof(entry->value) - 1);
+  else
+    entry->value[0] = '\0';
+
+  return 1;
+}
+
+/** Flush batched CAP notifications.
+ * Sends aggregated CAP NEW and CAP DEL messages to all clients with cap-notify.
+ * Called at end of rehash/config reload.
+ */
+void cap_notify_flush(void)
+{
+  struct Client *cptr;
+  char new_buf[CAP_BATCH_BUFSIZE];
+  char del_buf[CAP_BATCH_BUFSIZE];
+  int new_len = 0, del_len = 0;
+  int i;
+
+  if (!cap_batch.active) {
+    cap_batch.count = 0;
+    return;
+  }
+
+  cap_batch.active = 0;
+
+  if (cap_batch.count == 0)
+    return;
+
+  /* Build aggregated NEW and DEL strings */
+  new_buf[0] = '\0';
+  del_buf[0] = '\0';
+
+  for (i = 0; i < cap_batch.count; i++) {
+    struct cap_batch_entry *entry = &cap_batch.entries[i];
+
+    if (entry->available) {
+      /* CAP NEW - include value if present */
+      if (new_len > 0 && new_len < (int)sizeof(new_buf) - 1) {
+        new_buf[new_len++] = ' ';
+        new_buf[new_len] = '\0';
+      }
+      if (entry->value[0]) {
+        new_len += ircd_snprintf(0, new_buf + new_len, sizeof(new_buf) - new_len,
+                                  "%s=%s", entry->capname, entry->value);
+      } else {
+        new_len += ircd_snprintf(0, new_buf + new_len, sizeof(new_buf) - new_len,
+                                  "%s", entry->capname);
+      }
+    } else {
+      /* CAP DEL - just cap name */
+      if (del_len > 0 && del_len < (int)sizeof(del_buf) - 1) {
+        del_buf[del_len++] = ' ';
+        del_buf[del_len] = '\0';
+      }
+      del_len += ircd_snprintf(0, del_buf + del_len, sizeof(del_buf) - del_len,
+                                "%s", entry->capname);
+    }
+  }
+
+  /* Send to all clients with cap-notify */
+  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+    if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
+      continue;
+    if (!CapActive(cptr, CAP_CAPNOTIFY))
+      continue;
+
+    if (new_buf[0])
+      sendrawto_one(cptr, "CAP %s NEW :%s", cli_name(cptr), new_buf);
+    if (del_buf[0])
+      sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr), del_buf);
+  }
+
+  /* Log the aggregated changes */
+  if (new_buf[0])
+    log_write(LS_SYSTEM, L_INFO, 0, "CAP notify: NEW %s", new_buf);
+  if (del_buf[0])
+    log_write(LS_SYSTEM, L_INFO, 0, "CAP notify: DEL %s", del_buf);
+
+  cap_batch.count = 0;
+}
+
 /** Get effective SASL mechanisms (dynamic or default fallback).
  * @return Mechanism string, or NULL if none available.
  */
@@ -99,6 +247,10 @@ sasl_server_available(void)
  * Send CAP NEW or CAP DEL notification to all clients with cap-notify.
  * Per IRCv3 spec, servers MUST send CAP NEW when a capability becomes
  * available and CAP DEL when it becomes unavailable.
+ *
+ * If batching is active (during rehash), changes are buffered and sent
+ * as aggregated messages when cap_notify_flush() is called.
+ *
  * @param[in] capname Name of the capability (e.g., "sasl").
  * @param[in] available 1 if capability is now available, 0 if removed.
  * @param[in] value Optional value for CAP NEW (e.g., mechanism list). NULL for no value.
@@ -106,6 +258,13 @@ sasl_server_available(void)
 void send_cap_notify(const char *capname, int available, const char *value)
 {
   struct Client *cptr;
+
+  /* If batching is active, buffer instead of sending immediately */
+  if (cap_batch.active) {
+    if (cap_batch_add(capname, available, value))
+      return;
+    /* Buffer full - fall through to send immediately */
+  }
 
   /* Iterate all local clients with cap-notify enabled */
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
