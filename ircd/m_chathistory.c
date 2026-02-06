@@ -872,7 +872,7 @@ static int normalize_pm_target(struct Client *sptr, const char *target,
 
     memcpy(n1, target, len1);
     n1[len1] = '\0';
-    ircd_strncpy(n2, colon + 1, NICKLEN);
+    ircd_strncpy(n2, colon + 1, NICKLEN + 1);
     if (!n2[0])
       return -1;
 
@@ -2114,8 +2114,7 @@ static int server_advertises_channel(struct Client *server, const char *channel)
     return 0;
 
   /* Lowercase the channel name for comparison */
-  ircd_strncpy(lowerchan, channel, CHANNELLEN);
-  lowerchan[CHANNELLEN] = '\0';
+  ircd_strncpy(lowerchan, channel, CHANNELLEN + 1);
   for (i = 0; lowerchan[i]; i++)
     lowerchan[i] = ToLower(lowerchan[i]);
 
@@ -2144,8 +2143,7 @@ static int add_server_channel_ad(struct Client *server, const char *channel)
     return 0;
 
   /* Lowercase the channel name */
-  ircd_strncpy(lowerchan, channel, CHANNELLEN);
-  lowerchan[CHANNELLEN] = '\0';
+  ircd_strncpy(lowerchan, channel, CHANNELLEN + 1);
   for (i = 0; lowerchan[i]; i++)
     lowerchan[i] = ToLower(lowerchan[i]);
 
@@ -2193,8 +2191,7 @@ static int remove_server_channel_ad(struct Client *server, const char *channel)
     return 0;
 
   /* Lowercase the channel name */
-  ircd_strncpy(lowerchan, channel, CHANNELLEN);
-  lowerchan[CHANNELLEN] = '\0';
+  ircd_strncpy(lowerchan, channel, CHANNELLEN + 1);
   for (i = 0; lowerchan[i]; i++)
     lowerchan[i] = ToLower(lowerchan[i]);
 

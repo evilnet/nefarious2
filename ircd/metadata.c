@@ -1235,8 +1235,7 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
     /* Handle $away_message key - returns effective away message */
     if (ircd_strcmp(key, METADATA_KEY_AWAY_MESSAGE) == 0) {
       if (session && session->hs_effective_away_msg[0]) {
-        ircd_strncpy(presence_value, session->hs_effective_away_msg, AWAYLEN);
-        presence_value[AWAYLEN] = '\0';
+        ircd_strncpy(presence_value, session->hs_effective_away_msg, AWAYLEN + 1);
 
         memset(&presence_entry, 0, sizeof(presence_entry));
         ircd_strncpy(presence_entry.key, METADATA_KEY_AWAY_MESSAGE, METADATA_KEY_LEN);

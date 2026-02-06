@@ -193,7 +193,7 @@ static int compute_effective_presence(struct AccountEntry *entry)
   if (new_state == CONN_AWAY && best_msg) {
     if (ircd_strcmp(entry->effective_away_msg, best_msg) != 0) {
       changed = 1;
-      ircd_strncpy(entry->effective_away_msg, best_msg, AWAYLEN);
+      ircd_strncpy(entry->effective_away_msg, best_msg, AWAYLEN + 1);
     }
   } else if (new_state == CONN_PRESENT || new_state == CONN_AWAY_STAR) {
     if (entry->effective_away_msg[0]) {
@@ -261,7 +261,7 @@ struct AccountConn *account_conn_add(struct Client *cptr)
   /* Check if client already has away state from pre-away */
   if (cli_user(cptr) && cli_user(cptr)->away) {
     conn->away_state = CONN_AWAY;
-    ircd_strncpy(conn->away_msg, cli_user(cptr)->away, AWAYLEN);
+    ircd_strncpy(conn->away_msg, cli_user(cptr)->away, AWAYLEN + 1);
   }
 
   /* Add to head of connection list */
@@ -402,7 +402,7 @@ int account_conn_set_away(struct Client *cptr,
   /* Update this connection's state */
   conn->away_state = state;
   if (message && message[0]) {
-    ircd_strncpy(conn->away_msg, message, AWAYLEN);
+    ircd_strncpy(conn->away_msg, message, AWAYLEN + 1);
   } else {
     conn->away_msg[0] = '\0';
   }

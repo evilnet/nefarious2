@@ -78,11 +78,8 @@ static struct ml_stored_msg *ml_entry_alloc(const char *msgid,
   ircd_strncpy(entry->msgid, msgid, ML_STORAGE_MSGID_LEN - 1);
   entry->msgid[ML_STORAGE_MSGID_LEN - 1] = '\0';
 
-  ircd_strncpy(entry->sender, sender, NICKLEN);
-  entry->sender[NICKLEN] = '\0';
-
-  ircd_strncpy(entry->target, target, CHANNELLEN);
-  entry->target[CHANNELLEN] = '\0';
+  ircd_strncpy(entry->sender, sender, NICKLEN + 1);
+  ircd_strncpy(entry->target, target, CHANNELLEN + 1);
 
   DupString(entry->lines, lines_data);
   entry->line_count = line_count;

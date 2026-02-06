@@ -216,7 +216,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         current_shadow->sh_away_msg[0] = '\0';
       } else if (is_away) {
         current_shadow->sh_away_state = 1;
-        ircd_strncpy(current_shadow->sh_away_msg, away_message, AWAYLEN);
+        ircd_strncpy(current_shadow->sh_away_msg, away_message, AWAYLEN + 1);
       } else {
         current_shadow->sh_away_state = 0;
         current_shadow->sh_away_msg[0] = '\0';
@@ -231,7 +231,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         con_pre_away_msg(cli_connect(sptr))[0] = '\0';
       } else if (is_away) {
         con_pre_away(cli_connect(sptr)) = 1;
-        ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN);
+        ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN + 1);
       } else {
         con_pre_away(cli_connect(sptr)) = 0;
         con_pre_away_msg(cli_connect(sptr))[0] = '\0';
@@ -293,7 +293,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                  ":%s", star_msg);
         }
         bsess->hs_effective_away = new_effective;
-        ircd_strncpy(bsess->hs_effective_away_msg, new_msg, AWAYLEN);
+        ircd_strncpy(bsess->hs_effective_away_msg, new_msg, AWAYLEN + 1);
       }
       /* If effective state unchanged: suppress broadcast */
     }
@@ -389,16 +389,14 @@ int mu_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_pre_away(con) = 2;
     /* Use configured away-star message as fallback */
     if (feature_str(FEAT_AWAY_STAR_MSG)) {
-      ircd_strncpy(con_pre_away_msg(con), feature_str(FEAT_AWAY_STAR_MSG), AWAYLEN);
-      con_pre_away_msg(con)[AWAYLEN] = '\0';
+      ircd_strncpy(con_pre_away_msg(con), feature_str(FEAT_AWAY_STAR_MSG), AWAYLEN + 1);
     } else {
       con_pre_away_msg(con)[0] = '\0';
     }
   } else {
     /* AWAY :message = normal away */
     con_pre_away(con) = 1;
-    ircd_strncpy(con_pre_away_msg(con), away_message, AWAYLEN);
-    con_pre_away_msg(con)[AWAYLEN] = '\0';
+    ircd_strncpy(con_pre_away_msg(con), away_message, AWAYLEN + 1);
   }
 
   return 0;

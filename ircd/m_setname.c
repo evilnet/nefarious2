@@ -142,7 +142,7 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
 
   /* Update the realname */
-  ircd_strncpy(cli_info(sptr), newname, REALLEN);
+  ircd_strncpy(cli_info(sptr), newname, REALLEN + 1);
 
   /* Propagate to other servers */
   sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
@@ -192,7 +192,7 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return 0;
 
   /* Update the realname */
-  ircd_strncpy(cli_info(sptr), newname, REALLEN);
+  ircd_strncpy(cli_info(sptr), newname, REALLEN + 1);
 
   /* Propagate to other servers */
   sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));

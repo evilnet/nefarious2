@@ -373,7 +373,7 @@ int can_oper(struct Client *cptr, struct Client *sptr, char *name,
     ctx = (struct oper_verify_ctx *)MyMalloc(sizeof(struct oper_verify_ctx));
     ctx->fd = cli_fd(sptr);
     ctx->aconf = aconf;
-    ircd_strncpy(ctx->name, name, NICKLEN);
+    ircd_strncpy(ctx->name, name, NICKLEN + 1);
 
     if (ircd_crypt_verify_async(password, aconf->passwd,
                                  oper_password_verified, ctx) == 0) {

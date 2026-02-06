@@ -411,9 +411,9 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ctx->fd = cli_fd(cptr);
     ctx->wconf = wconf;
     memcpy(&ctx->addr, &addr, sizeof(ctx->addr));
-    ircd_strncpy(ctx->username, username, USERLEN);
-    ircd_strncpy(ctx->hostname, hostname, HOSTLEN);
-    ircd_strncpy(ctx->ipaddr, ipaddr, SOCKIPLEN);
+    ircd_strncpy(ctx->username, username, USERLEN + 1);
+    ircd_strncpy(ctx->hostname, hostname, HOSTLEN + 1);
+    ircd_strncpy(ctx->ipaddr, ipaddr, SOCKIPLEN + 1);
     ircd_strncpy(ctx->options, options ? options : "", sizeof(ctx->options) - 1);
 
     if (ircd_crypt_verify_async(password, wconf->passwd,

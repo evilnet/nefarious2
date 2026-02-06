@@ -1341,7 +1341,7 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
         if (visibility == METADATA_VIS_PRIVATE) {
           ircd_snprintf(0, stored_value, sizeof(stored_value), "P:%s", value);
         } else {
-          ircd_strncpy(stored_value, value, METADATA_VALUE_LEN);
+          ircd_strncpy(stored_value, value, METADATA_VALUE_LEN + 1);
         }
         metadata_account_set(cache_key, key, stored_value);
       }

@@ -426,7 +426,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
           char original_nick[NICKLEN + 1];
 
           /* Save temp client's nick in case ghost has different nick */
-          ircd_strncpy(original_nick, cli_name(sptr), NICKLEN);
+          ircd_strncpy(original_nick, cli_name(sptr), NICKLEN + 1);
 
           /* Free the temp client (no network messages) */
           bounce_free_temp_client(sptr);
@@ -1344,10 +1344,10 @@ hide_hostmask(struct Client *cptr)
   } else if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
       ((feature_int(FEAT_HOST_HIDING_STYLE) == 3) && IsAccount(cptr))) {
     if (IsAnOper(cptr) && !IsHideOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
-      ircd_snprintf(0, newhost, HOSTLEN, "%s.%s",
+      ircd_snprintf(0, newhost, HOSTLEN + 1, "%s.%s",
                     cli_user(cptr)->account, feature_str(FEAT_HIDDEN_OPERHOST));
     else
-      ircd_snprintf(0, newhost, HOSTLEN, "%s.%s",
+      ircd_snprintf(0, newhost, HOSTLEN + 1, "%s.%s",
                     cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
   } else if (IsCloakHost(cptr) && ((feature_int(FEAT_HOST_HIDING_STYLE) == 2) ||
              (feature_int(FEAT_HOST_HIDING_STYLE) == 3))) {
@@ -1372,8 +1372,8 @@ hide_hostmask(struct Client *cptr)
   }
 
   /* Save old user/host for CHGHOST notification */
-  ircd_strncpy(oldhost, cli_user(cptr)->host, HOSTLEN);
-  ircd_strncpy(olduser, cli_user(cptr)->username, USERLEN);
+  ircd_strncpy(oldhost, cli_user(cptr)->host, HOSTLEN + 1);
+  ircd_strncpy(olduser, cli_user(cptr)->username, USERLEN + 1);
 
   /* For clients without chghost capability, use QUIT+JOIN if enabled */
   if (feature_bool(FEAT_HIDDEN_HOST_QUIT))

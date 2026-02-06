@@ -117,13 +117,10 @@ static struct PendingRename *pending_rename_add(struct Client *client,
   memset(pr, 0, sizeof(*pr));
   pr->client = client;
   pr->channel = channel;
-  ircd_strncpy(pr->oldname, channel->chname, CHANNELLEN);
-  pr->oldname[CHANNELLEN] = '\0';
-  ircd_strncpy(pr->newname, newname, CHANNELLEN);
-  pr->newname[CHANNELLEN] = '\0';
+  ircd_strncpy(pr->oldname, channel->chname, CHANNELLEN + 1);
+  ircd_strncpy(pr->newname, newname, CHANNELLEN + 1);
   if (reason && *reason) {
-    ircd_strncpy(pr->reason, reason, TOPICLEN);
-    pr->reason[TOPICLEN] = '\0';
+    ircd_strncpy(pr->reason, reason, TOPICLEN + 1);
   }
   pr->cookie = rename_cookie_counter++;
 
@@ -453,8 +450,7 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Unregistered channel - proceed with rename immediately */
 
   /* Store old name before rename */
-  ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN);
-  oldname_buf[CHANNELLEN] = '\0';
+  ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
 
   /* Perform the rename (updates chptr if reallocated) */
   rc = rename_channel(&chptr, newname);
@@ -515,8 +511,7 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 
   /* Store old name before rename */
-  ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN);
-  oldname_buf[CHANNELLEN] = '\0';
+  ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
 
   /* Perform the rename (updates chptr if reallocated) */
   rc = rename_channel(&chptr, newname);

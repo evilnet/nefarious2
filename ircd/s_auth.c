@@ -1209,7 +1209,7 @@ static void start_dns_query(struct AuthRequest *auth)
   }
 
   if (irc_in_addr_is_loopback(&cli_ip(auth->client))) {
-    ircd_strncpy(cli_sockhost(auth->client), cli_name(&me), HOSTLEN);
+    ircd_strncpy(cli_sockhost(auth->client), cli_name(&me), HOSTLEN + 1);
     sendto_iauth(auth->client, "N %s", cli_sockhost(auth->client));
     return;
   }
