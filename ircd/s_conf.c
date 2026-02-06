@@ -49,6 +49,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "opercmds.h"
+#include "querycmds.h"
 #include "parse.h"
 #include "res.h"
 #include "s_auth.h"
@@ -404,11 +405,28 @@ enum AuthorizationCheckResult attach_iline(struct Client* cptr)
       send_reply(cptr, RPL_BOUNCE, aconf->redirserver, aconf->redirport);
       return ACR_NO_AUTHORIZATION;
     }
-    /* Check if class requires SASL and SASL is unavailable from all sources */
+    /* Check if class requires SASL and SASL is unavailable from all sources.
+     * Must consider both dynamic mechanisms (from P10 SASL M broadcast) and
+     * default mechanisms (FEAT_SASL_DEFAULT_MECHANISMS for legacy X3 that
+     * cannot advertise mechanisms dynamically). */
     if (aconf->conn_class &&
         FlagHas(&aconf->conn_class->restrictflags, CRFLAG_REQUIRE_SASL) &&
-        !get_sasl_mechanisms() && !auth_iauth_handles_sasl())
-      return ACR_SASL_UNAVAILABLE;
+        !auth_iauth_handles_sasl()) {
+      if (!get_sasl_mechanisms()) {
+        /* No dynamic mechanisms — check for legacy fallback */
+        const char *default_mechs = feature_str(FEAT_SASL_DEFAULT_MECHANISMS);
+        if (!default_mechs || !*default_mechs)
+          return ACR_SASL_UNAVAILABLE;
+        /* Default mechanisms configured — verify a SASL server is reachable */
+        const char *sasl_server = feature_str(FEAT_SASL_SERVER);
+        if (!strcmp(sasl_server, "*")) {
+          if (UserStats.servers == 0)
+            return ACR_SASL_UNAVAILABLE;
+        } else if (!find_match_server((char *)sasl_server)) {
+          return ACR_SASL_UNAVAILABLE;
+        }
+      }
+    }
     if (aconf->username && !IsWebIRCUserIdent(cptr) && (aconf->flags & CONF_NOIDENTTILDE))
       SetFlag(cptr, FLAG_DOID);
     return attach_conf(cptr, aconf);
