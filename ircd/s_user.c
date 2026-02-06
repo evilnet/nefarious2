@@ -1161,10 +1161,10 @@ hide_hostmask(struct Client *cptr)
   } else if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
       ((feature_int(FEAT_HOST_HIDING_STYLE) == 3) && IsAccount(cptr))) {
     if (IsAnOper(cptr) && !IsHideOper(cptr) && feature_bool(FEAT_OPERHOST_HIDING))
-      ircd_snprintf(0, newhost, HOSTLEN, "%s.%s",
+      ircd_snprintf(0, newhost, HOSTLEN + 1, "%s.%s",
                     cli_user(cptr)->account, feature_str(FEAT_HIDDEN_OPERHOST));
     else
-      ircd_snprintf(0, newhost, HOSTLEN, "%s.%s",
+      ircd_snprintf(0, newhost, HOSTLEN + 1, "%s.%s",
                     cli_user(cptr)->account, feature_str(FEAT_HIDDEN_HOST));
   } else if (IsCloakHost(cptr) && ((feature_int(FEAT_HOST_HIDING_STYLE) == 2) ||
              (feature_int(FEAT_HOST_HIDING_STYLE) == 3))) {
@@ -1753,10 +1753,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * will cause servers to update correctly.
    */
   if (!FlagHas(&setflags, FLAG_ACCOUNT) && IsAccount(acptr)) {
-      int len = ACCOUNTLEN;
+      int len = ACCOUNTLEN + 1;
       char *ts;
       if ((ts = strchr(account, ':'))) {
-	len = (ts++) - account;
+	len = (ts++) - account + 1; /* +1: ircd_strncpy copies len-1 chars */
+	if (len > ACCOUNTLEN + 1)
+	  len = ACCOUNTLEN + 1;
 	cli_user(acptr)->acc_create = atoi(ts);
 	Debug((DEBUG_DEBUG, "Received timestamped account in user mode; "
 	      "account \"%s\", timestamp %Tu", account,
