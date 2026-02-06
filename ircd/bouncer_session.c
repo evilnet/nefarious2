@@ -674,7 +674,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
     char original_nick[NICKLEN + 1];
 
     /* Save original nick in case we need to swap */
-    ircd_strncpy(original_nick, cli_name(cptr), NICKLEN);
+    ircd_strncpy(original_nick, cli_name(cptr), NICKLEN + 1);
 
     /* If the ghost has a different nick, swap to it before network introduction */
     if (session->hs_client &&
@@ -685,7 +685,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
        * under its original nick while cli_name holds the ghost's nick,
        * causing hRemClient to fail when the ghost is later exit'd. */
       hChangeClient(cptr, cli_name(session->hs_client));
-      ircd_strncpy(cli_name(cptr), cli_name(session->hs_client), NICKLEN);
+      ircd_strncpy(cli_name(cptr), cli_name(session->hs_client), NICKLEN + 1);
     }
 
     /* Adopt ghost's nick timestamp so we win nick collisions.
@@ -720,114 +720,131 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
     }
   }
 
-  /* Check for an ACTIVE session — attach as shadow connection */
+  /* Check for ACTIVE session — either orphaned (reclaim as primary) or
+   * with an existing primary (attach as shadow connection).
+   * An orphaned session is ACTIVE but has no primary (hs_client == NULL).
+   * This can happen after server restart or when primary exits before
+   * shadows and the session persists.  These sessions count toward the
+   * per-account limit, so we must reclaim them rather than creating new ones. */
   session = bounce_find_any_session(account);
-  if (session && session->hs_state == BOUNCE_ACTIVE && session->hs_client) {
-#ifdef USE_SSL
-    /* If BOUNCER_REQUIRE_TLS is set, skip shadow for plaintext clients */
-    if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
-      Debug((DEBUG_INFO, "Bouncer: skipping shadow for plaintext client %s (REQUIRE_TLS)",
-             cli_name(cptr)));
-      goto skip_shadow;
-    }
-    /* Gate A: Block plaintext shadow if primary is in any +Z channel.
-     * One non-TLS connection compromises the entire session's +Z access.
-     * The client falls through to normal registration with a NOTE. */
-    if (!cli_socket(cptr).ssl && cli_user(session->hs_client)) {
-      struct Membership *m;
-      for (m = cli_user(session->hs_client)->channel; m; m = m->next_channel) {
-        if (m->channel->mode.exmode & EXMODE_SSLONLY) {
-          Debug((DEBUG_INFO,
-                 "Bouncer: blocking plaintext shadow for %s (session in +Z channel %s)",
-                 cli_name(cptr), m->channel->chname));
-          sendrawto_one(cptr,
-            ":%s NOTE BOUNCER TLS_REQUIRED "
-            ":Cannot attach to session - active session is in SSL-only (+Z) "
-            "channels. Connect with TLS to attach.",
-            cli_name(&me));
-          goto skip_shadow;
-        }
+  if (session && session->hs_state == BOUNCE_ACTIVE) {
+    if (!session->hs_client) {
+      /* Orphaned ACTIVE session — reclaim as primary */
+      Debug((DEBUG_INFO, "Bouncer: reclaiming orphaned ACTIVE session %s for %s",
+             session->hs_sessid, cli_name(cptr)));
+      if (bounce_attach(session, cptr) == 0) {
+        bounce_broadcast(session, 'A', cli_yxx(cptr));
+        *out_session = session;
+        return 1;
       }
-    }
-#endif
-    /* Convert this registering client into a shadow connection.
-     * The Client struct will be freed; only the socket fd survives. */
-    struct ShadowConnection *shadow;
-    int fd;
-    int new_fd;
-    char sock_ip[SOCKIPLEN + 1];
-
-    /* Extract fd and IP from the client's connection */
-    fd = cli_fd(cptr);
-    ircd_strncpy(sock_ip, cli_sock_ip(cptr), SOCKIPLEN);
-
-    /* dup() the fd so the shadow gets a clean fd not registered with the
-     * event engine.  The original fd stays with the client's socket and
-     * will be closed normally by exit_client() → close_connection(), which
-     * also removes it from epoll.  Both fds share the underlying TCP
-     * socket, so it stays alive as long as either fd is open. */
-    new_fd = dup(fd);
-    if (new_fd < 0) {
-      Debug((DEBUG_ERROR, "Bouncer: dup(%d) failed for shadow conversion: %m", fd));
     } else {
-      /* Create the shadow connection with the dup'd fd */
-      shadow = bounce_add_shadow(session, new_fd, sock_ip);
-      if (shadow) {
-        /* Copy CAP state from the registering client to the shadow.
-         * con_capab() and con_active() return pointers to CapSet structs. */
-        memcpy(&shadow->sh_capab, con_capab(cli_connect(cptr)),
-               sizeof(struct CapSet));
-        memcpy(&shadow->sh_active, con_active(cli_connect(cptr)),
-               sizeof(struct CapSet));
-        shadow->sh_capab_version = con_capab_version(cli_connect(cptr));
-
-        /* Copy pre-away state if any */
-        shadow->sh_away_state = con_pre_away(cli_connect(cptr));
-        if (shadow->sh_away_state == 1) {
-          ircd_strncpy(shadow->sh_away_msg,
-                       con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
-        }
-
+      /* ACTIVE session with primary — attach as shadow connection */
 #ifdef USE_SSL
-        /* Transfer TLS state: steal SSL object from client, rebind to dup'd fd.
-         * SSL_set_fd() creates a new BIO for the new fd; the old fd's BIO is
-         * replaced.  After this, the SSL object operates on new_fd exclusively. */
-        if (cli_socket(cptr).ssl) {
-          shadow->sh_socket.ssl = cli_socket(cptr).ssl;
-          if (SSL_set_fd(shadow->sh_socket.ssl, new_fd) != 1) {
-            Debug((DEBUG_ERROR, "Bouncer: SSL_set_fd(%d) failed for shadow #%u",
-                   new_fd, shadow->sh_id));
-            /* SSL_set_fd failed — return SSL to client, remove broken shadow */
-            shadow->sh_socket.ssl = NULL;
-            bounce_remove_shadow(shadow);
-            shadow = NULL;
-            /* Fall through — shadow creation failed */
-          } else {
-            cli_socket(cptr).ssl = NULL;  /* Prevent exit_client from freeing */
-            Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
-                   shadow->sh_id, new_fd));
+      /* If BOUNCER_REQUIRE_TLS is set, skip shadow for plaintext clients */
+      if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
+        Debug((DEBUG_INFO, "Bouncer: skipping shadow for plaintext client %s (REQUIRE_TLS)",
+               cli_name(cptr)));
+        goto skip_shadow;
+      }
+      /* Gate A: Block plaintext shadow if primary is in any +Z channel.
+       * One non-TLS connection compromises the entire session's +Z access.
+       * The client falls through to normal registration with a NOTE. */
+      if (!cli_socket(cptr).ssl && cli_user(session->hs_client)) {
+        struct Membership *m;
+        for (m = cli_user(session->hs_client)->channel; m; m = m->next_channel) {
+          if (m->channel->mode.exmode & EXMODE_SSLONLY) {
+            Debug((DEBUG_INFO,
+                   "Bouncer: blocking plaintext shadow for %s (session in +Z channel %s)",
+                   cli_name(cptr), m->channel->chname));
+            sendrawto_one(cptr,
+              ":%s NOTE BOUNCER TLS_REQUIRED "
+              ":Cannot attach to session - active session is in SSL-only (+Z) "
+              "channels. Connect with TLS to attach.",
+              cli_name(&me));
+            goto skip_shadow;
           }
         }
+      }
+#endif
+      /* Convert this registering client into a shadow connection.
+       * The Client struct will be freed; only the socket fd survives. */
+      struct ShadowConnection *shadow;
+      int fd;
+      int new_fd;
+      char sock_ip[SOCKIPLEN + 1];
+
+      /* Extract fd and IP from the client's connection */
+      fd = cli_fd(cptr);
+      ircd_strncpy(sock_ip, cli_sock_ip(cptr), SOCKIPLEN + 1);
+
+      /* dup() the fd so the shadow gets a clean fd not registered with the
+       * event engine.  The original fd stays with the client's socket and
+       * will be closed normally by exit_client() → close_connection(), which
+       * also removes it from epoll.  Both fds share the underlying TCP
+       * socket, so it stays alive as long as either fd is open. */
+      new_fd = dup(fd);
+      if (new_fd < 0) {
+        Debug((DEBUG_ERROR, "Bouncer: dup(%d) failed for shadow conversion: %m", fd));
+      } else {
+        /* Create the shadow connection with the dup'd fd */
+        shadow = bounce_add_shadow(session, new_fd, sock_ip);
+        if (shadow) {
+          /* Copy CAP state from the registering client to the shadow.
+           * con_capab() and con_active() return pointers to CapSet structs. */
+          memcpy(&shadow->sh_capab, con_capab(cli_connect(cptr)),
+                 sizeof(struct CapSet));
+          memcpy(&shadow->sh_active, con_active(cli_connect(cptr)),
+                 sizeof(struct CapSet));
+          shadow->sh_capab_version = con_capab_version(cli_connect(cptr));
+
+          /* Copy pre-away state if any */
+          shadow->sh_away_state = con_pre_away(cli_connect(cptr));
+          if (shadow->sh_away_state == 1) {
+            ircd_strncpy(shadow->sh_away_msg,
+                         con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
+          }
+
+#ifdef USE_SSL
+          /* Transfer TLS state: steal SSL object from client, rebind to dup'd fd.
+           * SSL_set_fd() creates a new BIO for the new fd; the old fd's BIO is
+           * replaced.  After this, the SSL object operates on new_fd exclusively. */
+          if (cli_socket(cptr).ssl) {
+            shadow->sh_socket.ssl = cli_socket(cptr).ssl;
+            if (SSL_set_fd(shadow->sh_socket.ssl, new_fd) != 1) {
+              Debug((DEBUG_ERROR, "Bouncer: SSL_set_fd(%d) failed for shadow #%u",
+                     new_fd, shadow->sh_id));
+              /* SSL_set_fd failed — return SSL to client, remove broken shadow */
+              shadow->sh_socket.ssl = NULL;
+              bounce_remove_shadow(shadow);
+              shadow = NULL;
+              /* Fall through — shadow creation failed */
+            } else {
+              cli_socket(cptr).ssl = NULL;  /* Prevent exit_client from freeing */
+              Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
+                     shadow->sh_id, new_fd));
+            }
+          }
 #endif
 
-        if (shadow) {
-          /* Recompute session union caps now that this shadow's caps are in play */
-          bounce_recompute_session_caps(session->hs_client);
+          if (shadow) {
+            /* Recompute session union caps now that this shadow's caps are in play */
+            bounce_recompute_session_caps(session->hs_client);
 
-          Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
-                 cli_name(cptr), shadow->sh_id, session->hs_sessid));
+            Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
+                   cli_name(cptr), shadow->sh_id, session->hs_sessid));
 
-          *out_session = session;
+            *out_session = session;
 
-          /* Send registration sequence to the shadow.
-           * This happens AFTER the Client is freed in register_user(),
-           * so we queue it via bounce_send_shadow_welcome(). */
+            /* Send registration sequence to the shadow.
+             * This happens AFTER the Client is freed in register_user(),
+             * so we queue it via bounce_send_shadow_welcome(). */
 
-          return 2; /* Signal: converted to shadow, do not introduce to network */
+            return 2; /* Signal: converted to shadow, do not introduce to network */
+          }
+        } else {
+          /* Failed to create shadow — close the dup'd fd */
+          close(new_fd);
         }
-      } else {
-        /* Failed to create shadow — close the dup'd fd */
-        close(new_fd);
       }
     }
   }
@@ -1251,11 +1268,11 @@ static int bounce_db_put(struct BouncerSession *session)
   /* Build record */
   memset(&rec, 0, sizeof(rec));
   rec.bsr_version = BOUNCER_DB_VERSION;
-  ircd_strncpy(rec.bsr_account, session->hs_account, ACCOUNTLEN);
-  ircd_strncpy(rec.bsr_sessid, session->hs_sessid, BOUNCER_SESSID_LEN - 1);
-  ircd_strncpy(rec.bsr_token, session->hs_token, BOUNCER_TOKEN_LEN);
-  ircd_strncpy(rec.bsr_name, session->hs_name, BOUNCER_NAME_LEN - 1);
-  ircd_strncpy(rec.bsr_origin, session->hs_origin, NICKLEN);
+  ircd_strncpy(rec.bsr_account, session->hs_account, ACCOUNTLEN + 1);
+  ircd_strncpy(rec.bsr_sessid, session->hs_sessid, BOUNCER_SESSID_LEN);
+  ircd_strncpy(rec.bsr_token, session->hs_token, BOUNCER_TOKEN_LEN + 1);
+  ircd_strncpy(rec.bsr_name, session->hs_name, BOUNCER_NAME_LEN);
+  ircd_strncpy(rec.bsr_origin, session->hs_origin, NICKLEN + 1);
   rec.bsr_hold_override = session->hs_hold_override;
   rec.bsr_created = (int64_t)session->hs_created;
   rec.bsr_disconnect_time = (int64_t)session->hs_disconnect_time;
@@ -1267,15 +1284,15 @@ static int bounce_db_put(struct BouncerSession *session)
   /* Ghost client identity (if client exists) */
   ghost = session->hs_client;
   if (ghost) {
-    ircd_strncpy(rec.bsr_nick, cli_name(ghost), NICKLEN);
+    ircd_strncpy(rec.bsr_nick, cli_name(ghost), NICKLEN + 1);
     if (cli_user(ghost)) {
-      ircd_strncpy(rec.bsr_username, cli_user(ghost)->username, USERLEN);
-      ircd_strncpy(rec.bsr_realhost, cli_user(ghost)->realhost, HOSTLEN);
-      ircd_strncpy(rec.bsr_host, cli_user(ghost)->host, HOSTLEN);
-      ircd_strncpy(rec.bsr_realname, cli_info(ghost), REALLEN);
+      ircd_strncpy(rec.bsr_username, cli_user(ghost)->username, USERLEN + 1);
+      ircd_strncpy(rec.bsr_realhost, cli_user(ghost)->realhost, HOSTLEN + 1);
+      ircd_strncpy(rec.bsr_host, cli_user(ghost)->host, HOSTLEN + 1);
+      ircd_strncpy(rec.bsr_realname, cli_info(ghost), REALLEN + 1);
     }
     if (IsAccount(ghost)) {
-      ircd_strncpy(rec.bsr_account_name, cli_account(ghost), ACCOUNTLEN);
+      ircd_strncpy(rec.bsr_account_name, cli_account(ghost), ACCOUNTLEN + 1);
       rec.bsr_acc_create = (int64_t)cli_user(ghost)->acc_create;
     }
   }
@@ -1286,7 +1303,7 @@ static int bounce_db_put(struct BouncerSession *session)
     int i;
     for (i = 0; i < session->hs_chancount && i < BOUNCER_MAX_CHANNELS; i++) {
       ircd_strncpy(rec.bsr_channels[i].name,
-                   session->hs_channels[i].name, CHANNELLEN);
+                   session->hs_channels[i].name, CHANNELLEN + 1);
       rec.bsr_channels[i].modes = session->hs_channels[i].modes;
     }
   }
@@ -1429,14 +1446,14 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
   }
 
   /* Set identity from record */
-  ircd_strncpy(cli_name(ghost), rec->bsr_nick, NICKLEN);
-  ircd_strncpy(user->username, rec->bsr_username, USERLEN);
-  ircd_strncpy(user->realhost, rec->bsr_realhost, HOSTLEN);
-  ircd_strncpy(user->host, rec->bsr_host, HOSTLEN);
-  ircd_strncpy(cli_info(ghost), rec->bsr_realname, REALLEN);
+  ircd_strncpy(cli_name(ghost), rec->bsr_nick, NICKLEN + 1);
+  ircd_strncpy(user->username, rec->bsr_username, USERLEN + 1);
+  ircd_strncpy(user->realhost, rec->bsr_realhost, HOSTLEN + 1);
+  ircd_strncpy(user->host, rec->bsr_host, HOSTLEN + 1);
+  ircd_strncpy(cli_info(ghost), rec->bsr_realname, REALLEN + 1);
 
   /* Set account */
-  ircd_strncpy(user->account, rec->bsr_account_name, ACCOUNTLEN);
+  ircd_strncpy(user->account, rec->bsr_account_name, ACCOUNTLEN + 1);
   user->acc_create = (time_t)rec->bsr_acc_create;
   user->server = &me;
 
@@ -1585,11 +1602,11 @@ int bounce_db_restore(void)
 
     /* Allocate and populate BouncerSession */
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
-    ircd_strncpy(session->hs_account, rec->bsr_account, ACCOUNTLEN);
-    ircd_strncpy(session->hs_sessid, rec->bsr_sessid, BOUNCER_SESSID_LEN - 1);
-    ircd_strncpy(session->hs_token, rec->bsr_token, BOUNCER_TOKEN_LEN);
-    ircd_strncpy(session->hs_name, rec->bsr_name, BOUNCER_NAME_LEN - 1);
-    ircd_strncpy(session->hs_origin, rec->bsr_origin, NICKLEN);
+    ircd_strncpy(session->hs_account, rec->bsr_account, ACCOUNTLEN + 1);
+    ircd_strncpy(session->hs_sessid, rec->bsr_sessid, BOUNCER_SESSID_LEN);
+    ircd_strncpy(session->hs_token, rec->bsr_token, BOUNCER_TOKEN_LEN + 1);
+    ircd_strncpy(session->hs_name, rec->bsr_name, BOUNCER_NAME_LEN);
+    ircd_strncpy(session->hs_origin, rec->bsr_origin, NICKLEN + 1);
     session->hs_hold_override = rec->bsr_hold_override;
     session->hs_state = BOUNCE_HOLDING;
     session->hs_client = ghost;
@@ -1871,7 +1888,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
     ircd_strncpy(session->hs_account, account, ACCOUNTLEN + 1);
     ircd_strncpy(session->hs_sessid, sessid, BOUNCER_SESSID_LEN - 1);
-    ircd_strncpy(session->hs_token, token, BOUNCER_TOKEN_LEN);
+    ircd_strncpy(session->hs_token, token, BOUNCER_TOKEN_LEN + 1);
     session->hs_name[0] = '\0';
     session->hs_client = NULL; /* Remote session */
     ircd_strncpy(session->hs_origin, cli_yxx(sptr),
@@ -1912,7 +1929,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       for (tok = strtok_r(chanlist, ",", &saveptr);
            tok && i < BOUNCER_MAX_CHANNELS;
            tok = strtok_r(NULL, ",", &saveptr)) {
-        ircd_strncpy(session->hs_channels[i].name, tok, CHANNELLEN);
+        ircd_strncpy(session->hs_channels[i].name, tok, CHANNELLEN + 1);
         session->hs_channels[i].modes = 0;
         i++;
       }
@@ -1994,7 +2011,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       for (tok = strtok_r(chanlist, ",", &saveptr);
            tok && i < BOUNCER_MAX_CHANNELS;
            tok = strtok_r(NULL, ",", &saveptr)) {
-        ircd_strncpy(session->hs_channels[i].name, tok, CHANNELLEN);
+        ircd_strncpy(session->hs_channels[i].name, tok, CHANNELLEN + 1);
         session->hs_channels[i].modes = 0;
         i++;
       }
@@ -3082,7 +3099,7 @@ struct ShadowConnection *bounce_add_shadow(struct BouncerSession *session,
 
   /* Copy remote IP */
   if (sock_ip)
-    ircd_strncpy(shadow->sh_sock_ip, sock_ip, SOCKIPLEN);
+    ircd_strncpy(shadow->sh_sock_ip, sock_ip, SOCKIPLEN + 1);
   else
     shadow->sh_sock_ip[0] = '\0';
 
@@ -3519,7 +3536,7 @@ int bounce_compute_effective_away(struct BouncerSession *session,
   } else if (has_away) {
     *effective_state = 1; /* AWAY — all non-AWAY* connections are away */
     if (latest_away_msg)
-      ircd_strncpy(effective_msg, latest_away_msg, AWAYLEN);
+      ircd_strncpy(effective_msg, latest_away_msg, AWAYLEN + 1);
   } else {
     *effective_state = 2; /* All connections are AWAY * — effectively hidden */
     effective_msg[0] = '\0';
