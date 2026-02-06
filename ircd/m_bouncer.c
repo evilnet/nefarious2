@@ -36,6 +36,7 @@
 #include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
+#include "class.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"
@@ -567,7 +568,14 @@ static int bouncer_settings(struct Client *sptr)
       hold = (hold_val[0] == '1') ? 1 : 0;
       hold_src = "account";
     } else {
-      hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+      /* Bouncer class defaults to hold; normal class follows feature flag */
+      struct ConnectionClass *cls = get_client_class_conf(sptr);
+      if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER)) {
+        hold = 1;
+        hold_src = "class";
+      } else {
+        hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+      }
     }
   }
 
@@ -692,7 +700,14 @@ static int bouncer_info(struct Client *sptr)
       hold = (hold_val[0] == '1') ? 1 : 0;
       hold_src = "account";
     } else {
-      hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+      /* Bouncer class defaults to hold; normal class follows feature flag */
+      struct ConnectionClass *cls = get_client_class_conf(sptr);
+      if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER)) {
+        hold = 1;
+        hold_src = "class";
+      } else {
+        hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+      }
     }
   }
 
@@ -770,7 +785,7 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *subcmd;
 
-  if (!bounce_enabled()) {
+  if (!bounce_enabled_for(sptr)) {
     send_fail(sptr, "BOUNCER", "DISABLED", NULL,
               "Bouncer feature is not enabled");
     return 0;

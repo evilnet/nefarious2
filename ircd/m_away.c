@@ -173,7 +173,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * effective-state change detection already suppresses redundant broadcasts. */
   throttle = feature_int(FEAT_AWAY_THROTTLE);
   if (throttle > 0 && !current_shadow &&
-      !(feature_bool(FEAT_PRESENCE_AGGREGATION) && bounce_enabled())) {
+      !(feature_bool(FEAT_PRESENCE_AGGREGATION) && bounce_enabled_for(cptr))) {
     if (CurrentTime < cli_nextaway(cptr)) {
       /* Too soon - silently ignore (no error to avoid spam) */
       return 0;
@@ -202,7 +202,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * state, then set cli_user->away from the effective result.
    */
   if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
-      && bounce_enabled() && bounce_has_sessions(cli_account(sptr))) {
+      && bounce_enabled_for(sptr) && bounce_has_sessions(cli_account(sptr))) {
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int new_effective = 0;
     char new_msg[AWAYLEN + 1];

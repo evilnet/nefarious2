@@ -1100,14 +1100,16 @@ int main(int argc, char **argv) {
     }
   }
 
-  /* Initialize bouncer session registry */
-  if (feature_bool(FEAT_BOUNCER_ENABLE))
-    bounce_init();
+  /* Initialize bouncer session registry.
+   * Always init even when FEAT_BOUNCER_ENABLE is off — connection classes
+   * with CRFLAG_BOUNCER can create sessions independently of the global flag.
+   * The init is cheap (zeroes hash tables). */
+  bounce_init();
 
   /* Restore persisted bouncer sessions (ghosts + channels) from MDBX.
    * Must run after bounce_init() and metadata_lmdb_init(), before event_loop().
    */
-  if (feature_bool(FEAT_BOUNCER_ENABLE)) {
+  {
     int restored = bounce_db_restore();
     if (restored > 0)
       log_write(LS_SYSTEM, L_NOTICE, 0, "Bouncer: restored %d sessions from MDBX", restored);

@@ -357,7 +357,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
    * prevent a dangling pointer.  This handles the case where
    * bounce_should_hold() returned NULL (hold disabled) but the
    * session still exists from a previous BOUNCER SET HOLD on. */
-  if (IsUser(bcptr) && MyUser(bcptr) && bounce_enabled() && IsAccount(bcptr)) {
+  if (IsUser(bcptr) && MyUser(bcptr) && bounce_enabled_for(bcptr) && IsAccount(bcptr)) {
     struct BouncerSession *bsess = bounce_get_session(bcptr);
     if (bsess && bsess->hs_client == bcptr && bsess->hs_state == BOUNCE_ACTIVE) {
       bsess->hs_client = NULL;

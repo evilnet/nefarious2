@@ -26,6 +26,7 @@
 
 #include "bouncer_session.h"
 #include "capab.h"
+#include "class.h"
 #include "channel.h"
 #include "client.h"
 #include "ircd.h"
@@ -498,6 +499,20 @@ int bounce_enabled(void)
   return feature_bool(FEAT_BOUNCER_ENABLE);
 }
 
+/** Check if bouncer is enabled for a specific client.
+ * Returns 1 if the client's connection class has CRFLAG_BOUNCER set,
+ * or if the global bouncer feature is enabled.
+ */
+int bounce_enabled_for(struct Client *cptr)
+{
+  if (cptr) {
+    struct ConnectionClass *cls = get_client_class_conf(cptr);
+    if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+      return 1;
+  }
+  return bounce_enabled();
+}
+
 /** Get number of sessions for an account. */
 int bounce_count(const char *account)
 {
@@ -649,10 +664,17 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
   const char *account;
   char hold_val[64];
   int max_sessions;
+  int class_bouncer = 0;
+  struct ConnectionClass *cls;
 
   *out_session = NULL;
 
-  if (!bounce_enabled() || !feature_bool(FEAT_BOUNCER_AUTO_RESUME))
+  /* Check if client's connection class forces bouncer behavior */
+  cls = get_client_class_conf(cptr);
+  if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+    class_bouncer = 1;
+
+  if (!class_bouncer && (!bounce_enabled() || !feature_bool(FEAT_BOUNCER_AUTO_RESUME)))
     return 0;
 
   if (!IsAccount(cptr))
@@ -660,11 +682,13 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
 
   account = cli_account(cptr);
 
-  /* Check per-account hold preference via metadata */
+  /* Check per-account hold preference via metadata.
+   * Explicit opt-out (bouncer/hold=0) is always respected, even on
+   * bouncer-class ports — no session will be created or resumed. */
   if (metadata_account_get(account, "bouncer/hold", hold_val) == 0) {
     if (hold_val[0] == '0')
       return 0; /* User opted out */
-  } else if (!feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)) {
+  } else if (!class_bouncer && !feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)) {
     return 0; /* No preference set and network default is no-hold */
   }
 
@@ -879,7 +903,7 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   assert(0 != out);
   *out = NULL;
 
-  if (!bounce_enabled())
+  if (!bounce_enabled_for(cptr))
     return -1;
 
   if (!IsAccount(cptr))
@@ -1729,8 +1753,8 @@ void bounce_burst(struct Client *cptr)
   struct BouncerSession *s;
   char chanbuf[512];
 
-  if (!bounce_enabled())
-    return;
+  /* No gate check — sessions may exist via CRFLAG_BOUNCER class even when
+   * the global bouncer feature is off.  Empty hash = no-op loop. */
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (s = tokenHash[i]; s; s = s->hs_tnext) {
@@ -2114,13 +2138,20 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
 {
   struct AccountSessions *as;
   struct BouncerSession *s;
+  int class_bouncer = 0;
+  struct ConnectionClass *cls;
 
-  if (!bounce_enabled())
+  if (!bounce_enabled_for(cptr))
     return NULL;
   if (!IsAccount(cptr))
     return NULL;
   if (!MyUser(cptr))
     return NULL;  /* Only local clients can enter hold on this server */
+
+  /* Check if client's connection class forces bouncer behavior */
+  cls = get_client_class_conf(cptr);
+  if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+    class_bouncer = 1;
 
   /* Find an ACTIVE session attached to this client */
   as = bounce_find_by_account(cli_account(cptr));
@@ -2143,7 +2174,8 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
         if (metadata_account_get(cli_account(cptr), "bouncer/hold", hold_val) == 0) {
           should_hold = (hold_val[0] != '0');
         } else {
-          should_hold = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+          /* Bouncer class defaults to hold; normal class follows feature flag */
+          should_hold = class_bouncer || feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
         }
       }
 

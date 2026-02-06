@@ -490,6 +490,9 @@ extern time_t bounce_compute_hold_time_ext(struct BouncerSession *session);
 /** Check if bouncer feature is enabled. */
 extern int bounce_enabled(void);
 
+/** Check if bouncer is enabled for a specific client (class flag or global). */
+extern int bounce_enabled_for(struct Client *cptr);
+
 /** Check if a bouncer session has any non-TLS connection.
  * Returns 1 if any connection (primary or shadow) lacks TLS.
  * Returns 0 for non-bouncer clients or if all connections are TLS.

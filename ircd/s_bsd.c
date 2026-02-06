@@ -1486,7 +1486,7 @@ void client_sock_callback(struct Event* ev)
       msg = "Unknown error";
 
     /* Check if primary has shadow connections — promote one instead of exiting */
-    if (IsUser(cptr) && bounce_enabled() && IsAccount(cptr)) {
+    if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
       struct BouncerSession *bsess = bounce_get_session(cptr);
       if (bsess && bsess->hs_shadows) {
         /* Do NOT call close_connection() here — it calls socket_del()

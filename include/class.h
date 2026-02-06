@@ -39,6 +39,7 @@ enum ClassRestrictFlag {
   CRFLAG_PRIVMSG,       /**< User cannot send PRIVMSG/NOTICE to users not on common channels. */
   CRFLAG_UMODE,         /**< User cannot change his/her own user modes. */
   CRFLAG_REQUIRE_SASL,  /**< User must authenticate via SASL; connection refused if SASL unavailable. */
+  CRFLAG_BOUNCER,       /**< Force bouncer auto-create/resume for this class regardless of global flags. */
   CRFLAG_LAST_FLAG
 };
 

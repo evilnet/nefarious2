@@ -423,7 +423,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
      */
     auto_session = NULL;
     auto_resumed = 0;
-    if (IsAccount(sptr) && bounce_enabled()) {
+    if (IsAccount(sptr) && bounce_enabled_for(sptr)) {
       /* Try socket transplant for local HOLDING ghost first */
       struct BouncerSession *held = bounce_find_best_held(cli_account(sptr));
       if (held && held->hs_client && MyUser(held->hs_client)) {

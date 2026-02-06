@@ -525,7 +525,7 @@ classitem: classname | classpingfreq | classconnfreq | classmaxlinks |
            classsendq | classrecvq | classusermode | classmaxchans | priv |
            classsnomask | classajoinchan | classajoinnotice | classrestrictjoin |
            classrestrictpm | classrestrictumode | classrequiresasl |
-           classfakelagmin | classfakelagfactor;
+           classbouncer | classfakelagmin | classfakelagfactor;
 classname: NAME '=' QSTRING ';'
 {
   MyFree(name);
@@ -609,6 +609,13 @@ classrequiresasl: REQUIRE_SASL '=' YES ';'
 } | REQUIRE_SASL '=' NO ';'
 {
   FlagClr(&crestrict, CRFLAG_REQUIRE_SASL);
+};
+classbouncer: BOUNCER '=' YES ';'
+{
+  FlagSet(&crestrict, CRFLAG_BOUNCER);
+} | BOUNCER '=' NO ';'
+{
+  FlagClr(&crestrict, CRFLAG_BOUNCER);
 };
 
 connectblock: CONNECT
