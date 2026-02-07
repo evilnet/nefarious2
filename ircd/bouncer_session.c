@@ -4063,6 +4063,23 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
     }
   }
 
+  /* Auto-replay recent history for the new shadow connection.
+   * Use the primary's idle time as the "since" timestamp — replay
+   * messages that arrived while the session was idle.
+   * For active sessions there is no disconnect_time; the idle time
+   * (user->last = last PRIVMSG from any connection) is a reasonable
+   * proxy.  If no message was ever sent, fall back to signon time. */
+  if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY) && cli_user(primary)) {
+    time_t since = cli_user(primary)->last;
+    if (since == 0)
+      since = cli_firsttime(primary);
+    if (since > 0 && since < CurrentTime) {
+      current_shadow = shadow;
+      bouncer_auto_replay(primary, session, since);
+      current_shadow = NULL;
+    }
+  }
+
   /* Flush the welcome messages immediately.
    * Previously we relied on socket_events to trigger ET_WRITE, but there
    * seems to be a race or ordering issue that delays the flush by ~60s
