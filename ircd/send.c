@@ -932,6 +932,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
             struct MsgBuf *stripped = msgq_strip_tags(buf);
             if (stripped) {
               msgq_add(&current_shadow->sh_sendQ, stripped, prio);
+              current_shadow->sh_sendM++;
               socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
               msgq_clean(stripped);
               return;
@@ -947,6 +948,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
             if (filtered) {
               sh_buf = filtered;
               msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
+              current_shadow->sh_sendM++;
               socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
               msgq_clean(filtered);
               return;
@@ -954,6 +956,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
           }
         }
         msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
+        current_shadow->sh_sendM++;
         socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
       }
       return; /* Do NOT send to primary or other shadows */
@@ -1122,6 +1125,7 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
         }
 
         msgq_add(&sh->sh_sendQ, sh_buf, prio);
+        sh->sh_sendM++;
         socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
       }
 

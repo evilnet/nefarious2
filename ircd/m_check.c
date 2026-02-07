@@ -681,6 +681,38 @@ void checkClient(struct Client *sptr, struct Client *acptr)
          ircd_snprintf(0, outbuf, sizeof(outbuf), "   Resume count:: %u", session->hs_attach_count);
          send_reply(sptr, RPL_DATASTR, outbuf);
 
+         /* Session aggregate data totals (dead connections + all live connections) */
+         {
+            uint64_t tot_sendB = session->hs_agg_sendB;
+            uint64_t tot_recvB = session->hs_agg_receiveB;
+            unsigned int tot_sendM = session->hs_agg_sendM;
+            unsigned int tot_recvM = session->hs_agg_receiveM;
+            struct ShadowConnection *s;
+
+            /* Add live primary counters */
+            if (session->hs_state == BOUNCE_ACTIVE && MyConnect(acptr)) {
+               tot_sendB += cli_receiveB(acptr);
+               tot_recvB += cli_sendB(acptr);
+               tot_sendM += cli_receiveM(acptr);
+               tot_recvM += cli_sendM(acptr);
+            }
+            /* Add live shadow counters */
+            for (s = session->hs_shadows; s; s = s->sh_next) {
+               if (!(s->sh_flags & SHADOW_FLAGS_DEAD)) {
+                  tot_sendB += s->sh_sendB;
+                  tot_recvB += s->sh_receiveB;
+                  tot_sendM += s->sh_sendM;
+                  tot_recvM += s->sh_receiveM;
+               }
+            }
+            ircd_snprintf(0, outbuf, sizeof(outbuf),
+                          " Session totals:: %lu.%03lu Kb sent / %lu.%03lu Kb recv (%u msgs sent / %u recv)",
+                          (unsigned long)(tot_sendB / 1024), (unsigned long)(tot_sendB % 1024),
+                          (unsigned long)(tot_recvB / 1024), (unsigned long)(tot_recvB % 1024),
+                          tot_sendM, tot_recvM);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+         }
+
          /* Primary connection info */
          if (session->hs_state == BOUNCE_ACTIVE && MyConnect(acptr)) {
             const char *away_str;
@@ -759,6 +791,46 @@ void checkClient(struct Client *sptr, struct Client *acptr)
                if (sh->sh_flags & SHADOW_FLAGS_PINGSENT)
                   strcat(flags_buf, "ping-sent ");
                ircd_snprintf(0, outbuf, sizeof(outbuf), "          Flags:: %s", flags_buf);
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
+
+            /* Per-shadow data counters */
+            ircd_snprintf(0, outbuf, sizeof(outbuf),
+                          "      Data sent:: %lu.%03lu Kb (%u msgs)",
+                          (unsigned long)(sh->sh_sendB / 1024),
+                          (unsigned long)(sh->sh_sendB % 1024),
+                          sh->sh_sendM);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+            ircd_snprintf(0, outbuf, sizeof(outbuf),
+                          "  Data received:: %lu.%03lu Kb (%u msgs)",
+                          (unsigned long)(sh->sh_receiveB / 1024),
+                          (unsigned long)(sh->sh_receiveB % 1024),
+                          sh->sh_receiveM);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+         }
+
+         /* Connection history */
+         if (session->hs_histcount > 0) {
+            int hi;
+            send_reply(sptr, RPL_DATASTR, " ");
+            ircd_snprintf(0, outbuf, sizeof(outbuf),
+                          "Connection History:: (%d unique hosts)", session->hs_histcount);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+            for (hi = 0; hi < session->hs_histcount; hi++) {
+               struct BounceConnHistory *h = &session->hs_history[hi];
+               time_t conn_t = (time_t)h->bch_last_connect;
+               if (h->bch_last_disconnect) {
+                  time_t disc_t = (time_t)h->bch_last_disconnect;
+                  ircd_snprintf(0, outbuf, sizeof(outbuf),
+                                "  [%d] %s (%s) :: %ux, last: %s -> %s",
+                                hi + 1, h->bch_ip, h->bch_host, h->bch_count,
+                                myctime(conn_t), myctime(disc_t));
+               } else {
+                  ircd_snprintf(0, outbuf, sizeof(outbuf),
+                                "  [%d] %s (%s) :: %ux, last: %s -> connected",
+                                hi + 1, h->bch_ip, h->bch_host, h->bch_count,
+                                myctime(conn_t));
+               }
                send_reply(sptr, RPL_DATASTR, outbuf);
             }
          }

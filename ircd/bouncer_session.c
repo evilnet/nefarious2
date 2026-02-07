@@ -34,6 +34,7 @@
 #include "ircd_osdep.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "listener.h"
 #include "list.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
@@ -48,6 +49,7 @@
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "parse.h"
+#include "s_conf.h"
 #include "s_debug.h"
 #include "handlers.h"
 #include "s_misc.h"
@@ -87,6 +89,108 @@ static unsigned int sessionSeq = 0;
 /* Forward declarations for MDBX persistence (defined after bounce_snapshot_channels) */
 static int bounce_db_put(struct BouncerSession *session);
 static int bounce_db_del(const char *sessid);
+
+/* ---------------------------------------------------------------- */
+/* Connection stats accumulation helpers                              */
+/* ---------------------------------------------------------------- */
+
+/** Aggregate ghost's Connection counters into session totals and zero them.
+ * Called when the primary connection is truly gone (hold, dying primary). */
+static void bounce_accumulate_and_reset_primary(struct BouncerSession *session,
+                                                 struct Client *ghost)
+{
+  struct Connection *con = cli_connect(ghost);
+  session->hs_agg_sendB    += con_sendB(con);
+  session->hs_agg_receiveB += con_receiveB(con);
+  session->hs_agg_sendM    += con_sendM(con);
+  session->hs_agg_receiveM += con_receiveM(con);
+  con_sendB(con) = con_receiveB(con) = 0;
+  con_sendM(con) = con_receiveM(con) = 0;
+}
+
+/** Aggregate a shadow's lifetime counters into session totals.
+ * Called when a shadow is removed (disconnect). */
+static void bounce_accumulate_shadow(struct BouncerSession *session,
+                                      struct ShadowConnection *shadow)
+{
+  session->hs_agg_sendB    += shadow->sh_sendB;
+  session->hs_agg_receiveB += shadow->sh_receiveB;
+  session->hs_agg_sendM    += shadow->sh_sendM;
+  session->hs_agg_receiveM += shadow->sh_receiveM;
+}
+
+/* ---------------------------------------------------------------- */
+/* Connection history helpers                                        */
+/* ---------------------------------------------------------------- */
+
+/** Record a connect event in the session's connection history.
+ * Deduplicates by IP — if the IP already exists, updates its last_connect
+ * time and increments the count. Otherwise adds a new entry (evicting
+ * the oldest if the history is full).
+ * @param[in] session Bouncer session.
+ * @param[in] ip Remote IP string.
+ * @param[in] host Resolved hostname (may be same as ip).
+ */
+static void bounce_history_connect(struct BouncerSession *session,
+                                    const char *ip, const char *host)
+{
+  struct BounceConnHistory *h;
+  int i;
+
+  /* Look for existing entry with same IP */
+  for (i = 0; i < session->hs_histcount; i++) {
+    h = &session->hs_history[i];
+    if (0 == strcmp(h->bch_ip, ip)) {
+      h->bch_last_connect = (int64_t)CurrentTime;
+      h->bch_last_disconnect = 0;
+      h->bch_count++;
+      /* Update hostname in case it changed */
+      ircd_strncpy(h->bch_host, host, HOSTLEN + 1);
+      /* Move to front (most recent first) */
+      if (i > 0) {
+        struct BounceConnHistory tmp = *h;
+        memmove(&session->hs_history[1], &session->hs_history[0],
+                i * sizeof(struct BounceConnHistory));
+        session->hs_history[0] = tmp;
+      }
+      return;
+    }
+  }
+
+  /* New IP — make room at front */
+  if (session->hs_histcount < BOUNCER_MAX_CONN_HISTORY)
+    session->hs_histcount++;
+  /* Shift existing entries down (drop oldest if full) */
+  if (session->hs_histcount > 1)
+    memmove(&session->hs_history[1], &session->hs_history[0],
+            (session->hs_histcount - 1) * sizeof(struct BounceConnHistory));
+
+  /* Fill in new entry at front */
+  h = &session->hs_history[0];
+  memset(h, 0, sizeof(*h));
+  ircd_strncpy(h->bch_ip, ip, SOCKIPLEN + 1);
+  ircd_strncpy(h->bch_host, host, HOSTLEN + 1);
+  h->bch_last_connect = (int64_t)CurrentTime;
+  h->bch_last_disconnect = 0;
+  h->bch_count = 1;
+}
+
+/** Record a disconnect event for the given IP in connection history.
+ * Sets last_disconnect timestamp on the matching entry.
+ * @param[in] session Bouncer session.
+ * @param[in] ip Remote IP string.
+ */
+static void bounce_history_disconnect(struct BouncerSession *session,
+                                       const char *ip)
+{
+  int i;
+  for (i = 0; i < session->hs_histcount; i++) {
+    if (0 == strcmp(session->hs_history[i].bch_ip, ip)) {
+      session->hs_history[i].bch_last_disconnect = (int64_t)CurrentTime;
+      return;
+    }
+  }
+}
 
 /* ---------------------------------------------------------------- */
 /* Deferred shadow free list                                         */
@@ -851,6 +955,9 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
 #endif
 
           if (shadow) {
+            /* Record connect event in connection history */
+            bounce_history_connect(session, sock_ip, cli_sockhost(cptr));
+
             /* Recompute session union caps now that this shadow's caps are in play */
             bounce_recompute_session_caps(session->hs_client);
 
@@ -942,6 +1049,9 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   token_hash_add(session);
   as = account_sessions_get(session->hs_account, 1);
   account_add_session(as, session);
+
+  /* Record initial connect event in connection history */
+  bounce_history_connect(session, cli_sock_ip(cptr), cli_sockhost(cptr));
 
   /* Persist to MDBX (session created but no channels yet) */
   bounce_db_put(session);
@@ -1063,6 +1173,9 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
+
+  /* Record connect event in connection history */
+  bounce_history_connect(session, cli_sock_ip(cptr), cli_sockhost(cptr));
 
   /* Session is live again — remove persisted state (re-persisted at next hold or shutdown) */
   bounce_db_del(session->hs_sessid);
@@ -1319,6 +1432,13 @@ static int bounce_db_put(struct BouncerSession *session)
       ircd_strncpy(rec.bsr_account_name, cli_account(ghost), ACCOUNTLEN + 1);
       rec.bsr_acc_create = (int64_t)cli_user(ghost)->acc_create;
     }
+
+    /* Last connection metadata (for historical display on restored ghosts) */
+    memcpy(&rec.bsr_ip, &cli_ip(ghost), sizeof(rec.bsr_ip));
+    ircd_strncpy(rec.bsr_sock_ip, cli_sock_ip(ghost), SOCKIPLEN + 1);
+    ircd_strncpy(rec.bsr_sockhost, cli_sockhost(ghost), HOSTLEN + 1);
+    if (cli_listener(ghost))
+      rec.bsr_listener_port = cli_listener(ghost)->addr.port;
   }
 
   /* Channel memberships (from session snapshot) */
@@ -1331,6 +1451,17 @@ static int bounce_db_put(struct BouncerSession *session)
       rec.bsr_channels[i].modes = session->hs_channels[i].modes;
     }
   }
+
+  /* Session-level aggregate counters */
+  rec.bsr_agg_sendB    = session->hs_agg_sendB;
+  rec.bsr_agg_receiveB = session->hs_agg_receiveB;
+  rec.bsr_agg_sendM    = session->hs_agg_sendM;
+  rec.bsr_agg_receiveM = session->hs_agg_receiveM;
+
+  /* Connection history */
+  rec.bsr_histcount = (uint16_t)session->hs_histcount;
+  memcpy(rec.bsr_history, session->hs_history,
+         session->hs_histcount * sizeof(struct BounceConnHistory));
 
   /* Write to MDBX */
   rc = mdbx_txn_begin(env, NULL, 0, &txn);
@@ -1480,6 +1611,11 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
   ircd_strncpy(user->account, rec->bsr_account_name, ACCOUNTLEN + 1);
   user->acc_create = (time_t)rec->bsr_acc_create;
   user->server = &me;
+
+  /* Restore last connection metadata (historical, reconciled on revive) */
+  memcpy(&cli_ip(ghost), &rec->bsr_ip, sizeof(cli_ip(ghost)));
+  ircd_strncpy(cli_sock_ip(ghost), rec->bsr_sock_ip, SOCKIPLEN + 1);
+  ircd_strncpy(cli_sockhost(ghost), rec->bsr_sockhost, HOSTLEN + 1);
 
   /* Assign local numeric */
   if (!SetLocalNumNick(ghost)) {
@@ -1649,6 +1785,19 @@ int bounce_db_restore(void)
     session->hs_attach_count = rec->bsr_attach_count;
     session->hs_connect_count = rec->bsr_connect_count;
     session->hs_total_active = (time_t)rec->bsr_total_active;
+
+    /* Session-level aggregate counters */
+    session->hs_agg_sendB    = rec->bsr_agg_sendB;
+    session->hs_agg_receiveB = rec->bsr_agg_receiveB;
+    session->hs_agg_sendM    = rec->bsr_agg_sendM;
+    session->hs_agg_receiveM = rec->bsr_agg_receiveM;
+
+    /* Connection history */
+    session->hs_histcount = rec->bsr_histcount;
+    if (session->hs_histcount > BOUNCER_MAX_CONN_HISTORY)
+      session->hs_histcount = BOUNCER_MAX_CONN_HISTORY;
+    memcpy(session->hs_history, rec->bsr_history,
+           session->hs_histcount * sizeof(struct BounceConnHistory));
 
     /* Copy channel snapshot for consistency */
     session->hs_chancount = rec->bsr_chancount;
@@ -2247,6 +2396,14 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    * is visible (as a ghost) in WHO/NAMES until resumed or expired.
    */
 
+  /* Roll primary connection's data counters into session aggregates.
+   * The ghost's counters become stale once the socket is gone; zero
+   * them so a future revive starts fresh. */
+  bounce_accumulate_and_reset_primary(session, cptr);
+
+  /* Record disconnect event in connection history */
+  bounce_history_disconnect(session, cli_sock_ip(cptr));
+
   /* Persist with full ghost identity + channels */
   bounce_db_put(session);
 
@@ -2428,6 +2585,43 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
 
   /* Step 6: Reset socket interest to readable */
   socket_events(&cli_socket(ghost), SOCK_EVENT_READABLE);
+
+  /* Step 6a: Transfer connection identity from temp to ghost.
+   * The ghost's IP, sockhost, port, listener, and confs may be stale
+   * (from the original connection) or zeroed (MDBX-restored ghost).
+   * Update them to reflect the actual reconnecting client's socket. */
+  memcpy(&cli_ip(ghost), &cli_ip(temp), sizeof(cli_ip(ghost)));
+  ircd_strncpy(con_sock_ip(ghost_con), con_sock_ip(temp_con), SOCKIPLEN + 1);
+  ircd_strncpy(cli_sockhost(ghost), cli_sockhost(temp), HOSTLEN + 1);
+  cli_port(ghost) = cli_port(temp);
+  memcpy(&cli_connectip(ghost), &cli_connectip(temp), sizeof(cli_connectip(ghost)));
+  ircd_strncpy(cli_connecthost(ghost), cli_connecthost(temp), HOSTLEN + 1);
+
+  /* Transfer listener reference (temp's ref count transfers to ghost) */
+  if (con_listener(ghost_con))
+    release_listener(con_listener(ghost_con));
+  con_listener(ghost_con) = con_listener(temp_con);
+  con_listener(temp_con) = NULL;
+
+  /* Transfer I-line confs from temp to ghost.
+   * Ghost may have stale confs (from original connection) or none
+   * (MDBX-restored). Detach ghost's old confs, then move temp's. */
+  det_confs_butmask(ghost, 0);
+  con_confs(ghost_con) = con_confs(temp_con);
+  con_confs(temp_con) = NULL;
+
+  /* Step 6b: Reset data counters and update connection identity.
+   * Ghost's data counters may be stale from a prior connection (or from
+   * MDBX restore). Roll them into session aggregates, then zero so the
+   * new connection starts fresh. Also update the primary connection
+   * timestamp and ID to reflect this new connection. */
+  bounce_accumulate_and_reset_primary(session, ghost);
+  cli_firsttime(ghost) = cli_firsttime(temp);
+  session->hs_primary_id = ++session->hs_client_id_seq;
+
+  /* Record connect event in connection history */
+  bounce_history_connect(session, con_sock_ip(ghost_con),
+                         cli_sockhost(ghost));
 
   /* Step 7: Transfer sendQ/recvQ from temp to ghost */
   MsgQClear(&con_sendQ(ghost_con));
@@ -2690,8 +2884,10 @@ static void shadow_flush_sendq(struct ShadowConnection *shadow)
   switch (result) {
   case IO_SUCCESS:
     shadow->sh_flags &= ~SHADOW_FLAGS_BLOCKED;
-    if (bytes_written > 0)
+    if (bytes_written > 0) {
       msgq_delete(&shadow->sh_sendQ, bytes_written);
+      shadow->sh_sendB += bytes_written;
+    }
     if (bytes_written < bytes_count)
       shadow->sh_flags |= SHADOW_FLAGS_BLOCKED;
     break;
@@ -2873,6 +3069,7 @@ shadow_ssl_read_again:
 
   shadow->sh_lasttime = CurrentTime;
   shadow->sh_flags &= ~SHADOW_FLAGS_PINGSENT;
+  shadow->sh_receiveB += length;
 
   /* Append to shadow's parse buffer */
   if (shadow->sh_count + length >= BUFSIZE) {
@@ -2895,6 +3092,7 @@ shadow_ssl_read_again:
 
     if (*s != '\0') {
       int line_len = strlen(s);
+      shadow->sh_receiveM++;
 
       /* Handle QUIT from shadow — disconnect this shadow only */
       if (line_len >= 4 && 0 == ircd_strncmp(s, "QUIT", 4) &&
@@ -3189,6 +3387,12 @@ void bounce_remove_shadow(struct ShadowConnection *shadow)
   Debug((DEBUG_INFO, "Bouncer: removing shadow #%u from session %s (remaining=%d)",
          shadow->sh_id, session->hs_sessid, session->hs_shadow_count));
 
+  /* Roll shadow's lifetime data counters into session aggregates */
+  bounce_accumulate_shadow(session, shadow);
+
+  /* Record disconnect event in connection history */
+  bounce_history_disconnect(session, shadow->sh_sock_ip);
+
   /* Recompute session union caps — this shadow's caps are no longer part of the session */
   if (session->hs_client && MyConnect(session->hs_client))
     bounce_recompute_session_caps(session->hs_client);
@@ -3428,6 +3632,17 @@ int bounce_promote_shadow(struct BouncerSession *session)
   /* Step 10: Update timing */
   con_lasttime(con) = shadow->sh_lasttime;
   con_since(con) = shadow->sh_since;
+
+  /* Step 10b: Accumulate the dying primary's data counters into session
+   * aggregates, then set the ghost's counters FROM the promoted shadow's
+   * lifetime total.  The promoted connection carries its full history
+   * (accumulated while it was a shadow) into the primary role. */
+  bounce_accumulate_and_reset_primary(session, cptr);
+  con_sendB(con) = shadow->sh_sendB;
+  con_receiveB(con) = shadow->sh_receiveB;
+  con_sendM(con) = shadow->sh_sendM;
+  con_receiveM(con) = shadow->sh_receiveM;
+  cli_firsttime(cptr) = shadow->sh_connected;
 
   /* Step 11: Update session primary ID */
   session->hs_primary_id = shadow->sh_id;

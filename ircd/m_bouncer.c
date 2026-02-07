@@ -767,12 +767,100 @@ static int bouncer_info(struct Client *sptr)
 }
 
 /* ---------------------------------------------------------------- */
+/* Subcommand: HISTORY                                               */
+/* ---------------------------------------------------------------- */
+
+/** Handle BOUNCER HISTORY - show connection history for the session.
+ * Available to the session owner and opers.
+ *
+ * Reply format uses NOTE:
+ *   :server NOTE BOUNCER CONN_HISTORY sessid :ip=ADDR host=HOST connects=N last_connect=TS last_disconnect=TS
+ *   :server NOTE BOUNCER HISTORY_END sessid :End of connection history
+ */
+static int bouncer_history(struct Client *sptr, int parc, char *parv[])
+{
+  struct BouncerSession *session = NULL;
+  int i;
+  char info[512];
+
+  if (!IsAccount(sptr)) {
+    send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", "HISTORY",
+              "You must be logged in to use bouncer features");
+    return 0;
+  }
+
+  /* Opers can specify a nick as parv[2] to view another user's history */
+  if (parc >= 3 && (IsOper(sptr) || IsAnOper(sptr))) {
+    struct Client *target = FindUser(parv[2]);
+    if (!target) {
+      send_fail(sptr, "BOUNCER", "NO_SUCH_NICK", parv[2],
+                "No such nick");
+      return 0;
+    }
+    session = bounce_get_session(target);
+    if (!session && IsAccount(target)) {
+      struct AccountSessions *as = bounce_find_by_account(cli_account(target));
+      if (as && as->as_sessions)
+        session = as->as_sessions;
+    }
+    if (!session) {
+      send_fail(sptr, "BOUNCER", "NO_SESSION", parv[2],
+                "No bouncer session for that user");
+      return 0;
+    }
+  } else {
+    /* Find own session */
+    session = bounce_get_session(sptr);
+    if (!session) {
+      /* Check if we have a HOLDING session for this account */
+      struct AccountSessions *as = bounce_find_by_account(cli_account(sptr));
+      if (as && as->as_sessions)
+        session = as->as_sessions;
+    }
+    if (!session) {
+      send_fail(sptr, "BOUNCER", "NO_SESSION", "HISTORY",
+                "No active bouncer session");
+      return 0;
+    }
+  }
+
+  for (i = 0; i < session->hs_histcount; i++) {
+    struct BounceConnHistory *h = &session->hs_history[i];
+    if (h->bch_last_disconnect) {
+      ircd_snprintf(0, info, sizeof(info),
+                    "ip=%s host=%s connects=%u last_connect=%lu last_disconnect=%lu",
+                    h->bch_ip, h->bch_host, h->bch_count,
+                    (unsigned long)h->bch_last_connect,
+                    (unsigned long)h->bch_last_disconnect);
+    } else {
+      ircd_snprintf(0, info, sizeof(info),
+                    "ip=%s host=%s connects=%u last_connect=%lu status=connected",
+                    h->bch_ip, h->bch_host, h->bch_count,
+                    (unsigned long)h->bch_last_connect);
+    }
+    send_note(sptr, "BOUNCER", "CONN_HISTORY", session->hs_sessid, info);
+  }
+
+  if (session->hs_histcount == 0) {
+    send_note(sptr, "BOUNCER", "HISTORY_END", session->hs_sessid,
+              "No connection history");
+  } else {
+    ircd_snprintf(0, info, sizeof(info),
+                  "End of connection history (%d hosts)",
+                  session->hs_histcount);
+    send_note(sptr, "BOUNCER", "HISTORY_END", session->hs_sessid, info);
+  }
+
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* Main command handler                                              */
 /* ---------------------------------------------------------------- */
 
 /** Handle BOUNCER command from a local client.
  *
- * User commands: SET, INFO
+ * User commands: SET, INFO, LISTCLIENTS, HISTORY
  * Oper-only: TOKEN, RESUME, LISTSESSIONS, DISCONNECT, SETNAME, SETTINGS
  *
  * @param[in] cptr Connected client.
@@ -809,6 +897,9 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   if (0 == ircd_strcmp(subcmd, "LISTCLIENTS"))
     return bouncer_listclients(sptr);
+
+  if (0 == ircd_strcmp(subcmd, "HISTORY"))
+    return bouncer_history(sptr, parc, parv);
 
   /* --- Oper-only commands (admin/testing) --- */
 

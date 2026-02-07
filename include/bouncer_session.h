@@ -41,6 +41,9 @@
 #ifndef INCLUDED_msgq_h
 #include "msgq.h"
 #endif
+#ifndef INCLUDED_res_h
+#include "res.h"
+#endif
 #ifndef INCLUDED_sys_types_h
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
@@ -62,6 +65,8 @@ struct Client;
 #define BOUNCER_MAX_CHANNELS    50
 /** Maximum shadow connections per bouncer session. */
 #define BOUNCER_MAX_SHADOWS     4
+/** Maximum connection history entries per session (unique hosts). */
+#define BOUNCER_MAX_CONN_HISTORY 10
 
 /** Hash table sizes for session lookups. */
 #define BOUNCE_TOKEN_HASHSIZE   1024
@@ -73,8 +78,17 @@ enum BouncerState {
   BOUNCE_HOLDING    /**< Client disconnected, session preserved */
 };
 
+/** A single connection history entry (deduped by IP). */
+struct BounceConnHistory {
+  char     bch_ip[SOCKIPLEN + 1];    /**< Remote IP as string */
+  char     bch_host[HOSTLEN + 1];    /**< Resolved hostname */
+  int64_t  bch_last_connect;         /**< Last connect timestamp */
+  int64_t  bch_last_disconnect;      /**< Last disconnect timestamp (0=still connected) */
+  uint32_t bch_count;                /**< Number of connections from this host */
+};
+
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 2
+#define BOUNCER_DB_VERSION 5
 
 /** On-disk representation of a bouncer session for MDBX persistence.
  * Fixed-width, versioned. All IRC identifiers have known max lengths.
@@ -103,6 +117,19 @@ struct BounceSessionRecord {
   char     bsr_realname[REALLEN + 1];
   char     bsr_account_name[ACCOUNTLEN + 1];
   int64_t  bsr_acc_create;
+  /* Last connection metadata (historical, reconciled on revive) */
+  struct irc_in_addr bsr_ip;                /**< Last connection IP (binary) */
+  char     bsr_sock_ip[SOCKIPLEN + 1];      /**< Last connection IP (string) */
+  char     bsr_sockhost[HOSTLEN + 1];       /**< Last resolved hostname */
+  uint16_t bsr_listener_port;               /**< Server listener port */
+  /* Session-level aggregate counters (lifetime totals from dead connections) */
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  /* Connection history (unique hosts, most recent first) */
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[BOUNCER_MAX_CONN_HISTORY];
   /* Channel memberships */
   uint16_t bsr_chancount;
   struct {
@@ -148,6 +175,11 @@ struct ShadowConnection {
   char                     sh_away_msg[AWAYLEN + 1]; /**< Per-connection away message */
   unsigned int             sh_flags;    /**< Shadow-specific flags */
   char                     sh_sock_ip[SOCKIPLEN + 1]; /**< Remote IP as string */
+  /* Per-connection lifetime data counters (carried across primary/shadow phases) */
+  uint64_t                 sh_sendB;    /**< Connection lifetime bytes sent */
+  uint64_t                 sh_receiveB; /**< Connection lifetime bytes received */
+  unsigned int             sh_sendM;    /**< Connection lifetime messages sent */
+  unsigned int             sh_receiveM; /**< Connection lifetime messages received */
 };
 
 /** Channel membership preserved in a held session. */
@@ -200,6 +232,16 @@ struct BouncerSession {
   unsigned int hs_connect_count;      /**< Total connections (resumes + shadow attaches) */
   time_t hs_total_active;             /**< Cumulative active time (seconds) */
   struct Timer hs_hold_timer;         /**< Expiry timer for HOLDING state */
+
+  /* Session-level aggregate counters (lifetime totals from dead connections) */
+  uint64_t     hs_agg_sendB;         /**< Lifetime bytes sent (dead connections) */
+  uint64_t     hs_agg_receiveB;      /**< Lifetime bytes received (dead connections) */
+  unsigned int hs_agg_sendM;         /**< Lifetime messages sent (dead connections) */
+  unsigned int hs_agg_receiveM;      /**< Lifetime messages received (dead connections) */
+
+  /* Connection history (unique hosts, most recent first) */
+  int hs_histcount;
+  struct BounceConnHistory hs_history[BOUNCER_MAX_CONN_HISTORY];
 };
 
 /** Per-account session list for enumeration and limit enforcement. */
