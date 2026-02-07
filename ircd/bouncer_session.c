@@ -209,6 +209,9 @@ static void bounce_history_disconnect(struct BouncerSession *session,
  */
 /* Forward declarations */
 static void shadow_flush_sendq(struct ShadowConnection *shadow);
+static void shadow_send_raw(struct ShadowConnection *shadow,
+                             struct Client *primary,
+                             const char *fmt, ...);
 
 static struct ShadowConnection *deferred_free_head;
 static struct Timer deferred_free_timer;
@@ -957,6 +960,27 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
           if (shadow) {
             /* Record connect event in connection history */
             bounce_history_connect(session, sock_ip, cli_sockhost(cptr));
+
+            /* Notify existing connections about the new shadow.
+             * Mirrors X3/AuthServ's "authed to your account" warning. */
+            {
+              struct Client *primary = session->hs_client;
+              struct ShadowConnection *s;
+
+              /* Notify primary */
+              sendrawto_one(primary, ":%s NOTICE %s :Warning: %s (%s@%s) connected to your session.",
+                            cli_name(&me), cli_name(primary),
+                            cli_name(cptr), cli_user(cptr)->username, sock_ip);
+
+              /* Notify existing shadows (skip the newly added one) */
+              for (s = session->hs_shadows; s; s = s->sh_next) {
+                if (s != shadow && !(s->sh_flags & SHADOW_FLAGS_DEAD))
+                  shadow_send_raw(s, primary,
+                                  ":%s NOTICE %s :Warning: %s (%s@%s) connected to your session.",
+                                  cli_name(&me), cli_name(primary),
+                                  cli_name(cptr), cli_user(cptr)->username, sock_ip);
+              }
+            }
 
             /* Recompute session union caps now that this shadow's caps are in play */
             bounce_recompute_session_caps(session->hs_client);
