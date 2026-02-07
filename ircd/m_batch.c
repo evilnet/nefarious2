@@ -906,13 +906,18 @@ process_multiline_batch(struct Client *sptr)
         }
       }
 
-      if (!skip_echo && (need_echo || has_shadows)) {
+      /* Also need to deliver to primary when a shadow originated the message,
+       * even if primary doesn't have echo-message — the primary didn't type it. */
+      int from_shadow = (current_shadow != NULL);
+
+      if (!skip_echo && (need_echo || has_shadows || from_shadow)) {
         /* Suppress automatic shadow duplication - we handle shadows manually
          * to send the appropriate format based on each shadow's capabilities. */
         suppress_shadow_dup = 1;
 
-        /* Send to primary if it has echo-message */
-        if (need_echo) {
+        /* Send to primary if it has echo-message, OR if message came from a
+         * shadow (primary didn't type it, so it needs to see it regardless). */
+        if (need_echo || from_shadow) {
           if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
             /* Primary has multiline - send batch echo */
             char batchid[16];
@@ -993,6 +998,10 @@ process_multiline_batch(struct Client *sptr)
           struct ShadowConnection *sh;
           for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
             if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+              continue;
+            /* Skip originating shadow if it doesn't have echo-message —
+             * the client already displayed the message locally. */
+            if (sh == current_shadow && !CapHas(&sh->sh_active, CAP_ECHOMSG))
               continue;
 
             if (CapHas(&sh->sh_active, CAP_DRAFT_MULTILINE) && CapHas(&sh->sh_active, CAP_BATCH)) {
@@ -1393,11 +1402,14 @@ process_multiline_batch(struct Client *sptr)
         }
       }
 
-      if (!skip_dm_echo && (need_echo || has_shadows)) {
+      /* Also deliver to primary when shadow originated the message. */
+      int from_shadow = (current_shadow != NULL);
+
+      if (!skip_dm_echo && (need_echo || has_shadows || from_shadow)) {
         suppress_shadow_dup = 1;
 
-        /* Send to primary if it has echo-message */
-        if (need_echo) {
+        /* Send to primary if it has echo-message, OR if a shadow sent it. */
+        if (need_echo || from_shadow) {
           for (lp = con_ml_messages(con); lp; lp = lp->next) {
             char *text = lp->value.cp + 1;
             sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
@@ -1413,6 +1425,9 @@ process_multiline_batch(struct Client *sptr)
             struct MsgBuf *mb;
 
             if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+              continue;
+            /* Skip originating shadow if it doesn't have echo-message. */
+            if (sh == current_shadow && !CapHas(&sh->sh_active, CAP_ECHOMSG))
               continue;
 
             /* For DM echo, send truncated fallback to avoid flooding */
