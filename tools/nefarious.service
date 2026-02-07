@@ -1,0 +1,54 @@
+# Nefarious IRCd — systemd user service
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp nefarious.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable nefarious
+#
+# Usage:
+#   systemctl --user start nefarious
+#   systemctl --user stop nefarious
+#   systemctl --user status nefarious
+#   journalctl --user -u nefarious -f
+#
+# Rehash (reload config):
+#   systemctl --user reload nefarious
+#
+# Valgrind mode:
+#   Create an override: systemctl --user edit nefarious
+#   Add:
+#     [Service]
+#     ExecStart=
+#     ExecStart=%h/ircd/valgrind --tool=memcheck --leak-check=full \
+#               --show-reachable=no --track-fds=yes \
+#               --log-file=%h/ircd/valgrind.%p.log \
+#               %h/ircd/ircd -n -f ircd.conf
+#
+# Assumes standard AfterNET layout:
+#   ./configure --libdir=$HOME/ircd --mandir=$HOME/ircd --bindir=$HOME/ircd
+#
+# Requires lingering for the service to survive logout:
+#   loginctl enable-linger $USER
+
+[Unit]
+Description=Nefarious IRCd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/ircd
+ExecStart=%h/ircd/ircd -n -f ircd.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Core dumps
+LimitCORE=infinity
+
+# Raise fd limit for large networks
+LimitNOFILE=8192
+
+[Install]
+WantedBy=default.target

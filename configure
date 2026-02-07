@@ -642,6 +642,7 @@ ac_includes_default="\
 ac_header_c_list=
 ac_subst_vars='LTLIBOBJS
 LIBOBJS
+PKG_CONFIG
 DPATH
 IRCDGRP
 IRCDOWN
@@ -753,14 +754,18 @@ enable_mmdb
 with_mmdb
 with_mmdb_includes
 with_mmdb_libs
-enable_lmdb
-with_lmdb
-with_lmdb_includes
-with_lmdb_libs
+enable_mdbx
+with_mdbx
+with_mdbx_includes
+with_mdbx_libs
 enable_zstd
 with_zstd
 with_zstd_includes
 with_zstd_libs
+enable_keycloak
+with_keycloak
+with_keycloak_includes
+with_keycloak_libs
 with_libgit2
 with_libgit2_includes
 with_libgit2_libs
@@ -1410,8 +1415,9 @@ Optional Features:
   --disable-ssl           Disable Secure Sockets Layer support
   --disable-geoip         Disable GeoIP support
   --disable-mmdb         Disable MaxMindDB support
-  --disable-lmdb          Disable LMDB/chathistory support
+  --disable-mdbx          Disable libmdbx storage support
   --disable-zstd          Disable zstd compression support
+  --disable-keycloak      Disable Keycloak (libkc) support
 
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
@@ -1448,18 +1454,23 @@ Optional Packages:
                           /usr/local/include)
   --with-mmdb-libs=dir    Specify location of MaxMindDB libs (default:
                           /usr/local/lib)
-  --with-lmdb=dir         Specify the installation prefix of LMDB (default:
+  --with-mdbx=dir         Specify the installation prefix of libmdbx (default:
                           /usr)
-  --with-lmdb-includes=dir
-                          Specify location of LMDB header files (default:
+  --with-mdbx-includes=dir
+                          Specify location of libmdbx header files (default:
                           /usr/include)
-  --with-lmdb-libs=dir    Specify location of LMDB libs (default: /usr/lib)
+  --with-mdbx-libs=dir    Specify location of libmdbx libs (default: /usr/lib)
   --with-zstd=dir         Specify the installation prefix of zstd (default:
                           /usr)
   --with-zstd-includes=dir
                           Specify location of zstd header files (default:
                           /usr/include)
   --with-zstd-libs=dir    Specify location of zstd libs (default: /usr/lib)
+  --with-keycloak=dir     Specify the installation prefix of libkc
+  --with-keycloak-includes=dir
+                          Specify location of libkc header files
+  --with-keycloak-libs=dir
+                          Specify location of libkc library
   --with-libgit2          Enable libgit2 for gitsync feature
   --with-libgit2-includes=dir
                           Specify location of libgit2 header files
@@ -5171,6 +5182,91 @@ then :
 printf "%s\n" "#define STDC_HEADERS 1" >>confdefs.h
 
 fi
+ac_fn_c_check_header_compile "$LINENO" "pthread.h" "ac_cv_header_pthread_h" "$ac_includes_default"
+if test "x$ac_cv_header_pthread_h" = xyes
+then :
+  printf "%s\n" "#define HAVE_PTHREAD_H 1" >>confdefs.h
+
+fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for library containing pthread_create" >&5
+printf %s "checking for library containing pthread_create... " >&6; }
+if test ${ac_cv_search_pthread_create+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_func_search_save_LIBS=$LIBS
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char pthread_create (void);
+int
+main (void)
+{
+return pthread_create ();
+  ;
+  return 0;
+}
+_ACEOF
+for ac_lib in '' pthread
+do
+  if test -z "$ac_lib"; then
+    ac_res="none required"
+  else
+    ac_res=-l$ac_lib
+    LIBS="-l$ac_lib  $ac_func_search_save_LIBS"
+  fi
+  if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_search_pthread_create=$ac_res
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext
+  if test ${ac_cv_search_pthread_create+y}
+then :
+  break
+fi
+done
+if test ${ac_cv_search_pthread_create+y}
+then :
+
+else case e in #(
+  e) ac_cv_search_pthread_create=no ;;
+esac
+fi
+rm conftest.$ac_ext
+LIBS=$ac_func_search_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_search_pthread_create" >&5
+printf "%s\n" "$ac_cv_search_pthread_create" >&6; }
+ac_res=$ac_cv_search_pthread_create
+if test "$ac_res" != no
+then :
+  test "$ac_res" = "none required" || LIBS="$ac_res $LIBS"
+
+
+printf "%s\n" "#define HAVE_PTHREAD 1" >>confdefs.h
+
+
+else case e in #(
+  e)
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: pthreads not found; async password verification disabled" >&5
+printf "%s\n" "$as_me: WARNING: pthreads not found; async password verification disabled" >&2;}
+ ;;
+esac
+fi
+
+
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for grep that handles long lines and -e" >&5
 printf %s "checking for grep that handles long lines and -e... " >&6; }
 if test ${ac_cv_path_GREP+y}
@@ -8668,6 +8764,98 @@ fi
 printf "%s\n" "$unet_cv_enable_mmdb" >&6; }
 
 if test x"$unet_cv_enable_mmdb" = xyes; then
+    if test "x$PKG_CONFIG" = x; then
+    # Extract the first word of "pkg-config", so it can be a program name with args.
+set dummy pkg-config; ac_word=$2
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for $ac_word" >&5
+printf %s "checking for $ac_word... " >&6; }
+if test ${ac_cv_path_PKG_CONFIG+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) case $PKG_CONFIG in
+  [\\/]* | ?:[\\/]*)
+  ac_cv_path_PKG_CONFIG="$PKG_CONFIG" # Let the user override the test with a path.
+  ;;
+  *)
+  as_save_IFS=$IFS; IFS=$PATH_SEPARATOR
+for as_dir in $PATH
+do
+  IFS=$as_save_IFS
+  case $as_dir in #(((
+    '') as_dir=./ ;;
+    */) ;;
+    *) as_dir=$as_dir/ ;;
+  esac
+    for ac_exec_ext in '' $ac_executable_extensions; do
+  if as_fn_executable_p "$as_dir$ac_word$ac_exec_ext"; then
+    ac_cv_path_PKG_CONFIG="$as_dir$ac_word$ac_exec_ext"
+    printf "%s\n" "$as_me:${as_lineno-$LINENO}: found $as_dir$ac_word$ac_exec_ext" >&5
+    break 2
+  fi
+done
+  done
+IFS=$as_save_IFS
+
+  ;;
+esac ;;
+esac
+fi
+PKG_CONFIG=$ac_cv_path_PKG_CONFIG
+if test -n "$PKG_CONFIG"; then
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $PKG_CONFIG" >&5
+printf "%s\n" "$PKG_CONFIG" >&6; }
+else
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; }
+fi
+
+
+  fi
+
+  mmdb_found_pkg_config=no
+  if test "x$PKG_CONFIG" != x; then
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MaxMindDB via pkg-config" >&5
+printf %s "checking for MaxMindDB via pkg-config... " >&6; }
+    if $PKG_CONFIG --exists libmaxminddb 2>/dev/null; then
+      MMDB_CFLAGS=`$PKG_CONFIG --cflags libmaxminddb`
+      MMDB_LDFLAGS=`$PKG_CONFIG --libs libmaxminddb`
+      mmdb_found_pkg_config=yes
+      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: yes ($MMDB_CFLAGS $MMDB_LDFLAGS)" >&5
+printf "%s\n" "yes ($MMDB_CFLAGS $MMDB_LDFLAGS)" >&6; }
+    else
+      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; }
+    fi
+  fi
+
+  if test "x$mmdb_found_pkg_config" = xyes; then
+        save_CFLAGS=$CFLAGS
+    save_LIBS=$LIBS
+    CFLAGS="$CFLAGS $MMDB_CFLAGS"
+    LIBS="$LIBS $MMDB_LDFLAGS"
+
+    ac_fn_c_check_func "$LINENO" "MMDB_lookup_string" "ac_cv_func_MMDB_lookup_string"
+if test "x$ac_cv_func_MMDB_lookup_string" = xyes
+then :
+
+      ac_fn_c_check_func "$LINENO" "MMDB_get_value" "ac_cv_func_MMDB_get_value"
+if test "x$ac_cv_func_MMDB_get_value" = xyes
+then :
+
+        enable_mmdb="yes"
+
+fi
+
+
+fi
+
+
+    LIBS=$save_LIBS
+    CFLAGS=$save_CFLAGS
+  fi
+
+  if test "x$enable_mmdb" != xyes; then
 
 # Check whether --with-mmdb was given.
 if test ${with_mmdb+y}
@@ -8679,7 +8867,7 @@ esac
 fi
 
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MaxMindDB includes" >&5
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MaxMindDB includes" >&5
 printf %s "checking for MaxMindDB includes... " >&6; }
 
 # Check whether --with-mmdb-includes was given.
@@ -8691,14 +8879,14 @@ else case e in #(
 esac
 fi
 
-  unet_cv_with_mmdb_inc_prefix=$base_mmdb_inc
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mmdb_inc_prefix" >&5
+    unet_cv_with_mmdb_inc_prefix=$base_mmdb_inc
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mmdb_inc_prefix" >&5
 printf "%s\n" "$unet_cv_with_mmdb_inc_prefix" >&6; }
 
 printf "%s\n" "#define MMDB_INCLUDES_PATH \"$base_mmdb_inc\"" >>confdefs.h
 
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MaxMindDB libraries" >&5
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MaxMindDB libraries" >&5
 printf %s "checking for MaxMindDB libraries... " >&6; }
 
 # Check whether --with-mmdb-libs was given.
@@ -8710,20 +8898,20 @@ else case e in #(
 esac
 fi
 
-  unet_cv_with_mmdb_prefix=$base_mmdb_lib
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mmdb_prefix" >&5
+    unet_cv_with_mmdb_prefix=$base_mmdb_lib
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mmdb_prefix" >&5
 printf "%s\n" "$unet_cv_with_mmdb_prefix" >&6; }
 
 printf "%s\n" "#define MMDB_LIBS_PATH \"$unet_cv_with_mmdb_prefix\"" >>confdefs.h
 
 
-  save_CFLAGS=$CFLAGS
-  save_LIBS=$LIBS
+    save_CFLAGS=$CFLAGS
+    save_LIBS=$LIBS
 
-  CFLAGS="-I$unet_cv_with_mmdb_inc_prefix"
-  LIBS="-L$unet_cv_with_mmdb_prefix"
+    CFLAGS="-I$unet_cv_with_mmdb_inc_prefix"
+    LIBS="-L$unet_cv_with_mmdb_prefix"
 
-         for ac_header in $unet_cv_with_mmdb_inc_prefix/maxminddb.h
+           for ac_header in $unet_cv_with_mmdb_inc_prefix/maxminddb.h
 do :
   as_ac_Header=`printf "%s\n" "ac_cv_header_$ac_header" | sed "$as_sed_sh"`
 ac_fn_c_check_header_compile "$LINENO" "$ac_header" "$as_ac_Header" "$ac_includes_default"
@@ -8733,7 +8921,7 @@ then :
 #define `printf "%s\n" "HAVE_$ac_header" | sed "$as_sed_cpp"` 1
 _ACEOF
 
-    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MMDB_lookup_string in -lmaxminddb" >&5
+      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MMDB_lookup_string in -lmaxminddb" >&5
 printf %s "checking for MMDB_lookup_string in -lmaxminddb... " >&6; }
 if test ${ac_cv_lib_maxminddb_MMDB_lookup_string+y}
 then :
@@ -8779,7 +8967,7 @@ printf "%s\n" "$ac_cv_lib_maxminddb_MMDB_lookup_string" >&6; }
 if test "x$ac_cv_lib_maxminddb_MMDB_lookup_string" = xyes
 then :
 
-      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MMDB_get_value in -lmaxminddb" >&5
+        { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for MMDB_get_value in -lmaxminddb" >&5
 printf %s "checking for MMDB_get_value in -lmaxminddb... " >&6; }
 if test ${ac_cv_lib_maxminddb_MMDB_get_value+y}
 then :
@@ -8825,8 +9013,9 @@ printf "%s\n" "$ac_cv_lib_maxminddb_MMDB_get_value" >&6; }
 if test "x$ac_cv_lib_maxminddb_MMDB_get_value" = xyes
 then :
 
-        enable_mmdb="yes";
-        MMDB_LDFLAGS="-lmaxminddb"
+          enable_mmdb="yes";
+          MMDB_CFLAGS="-I$unet_cv_with_mmdb_inc_prefix"
+          MMDB_LDFLAGS="-L$unet_cv_with_mmdb_prefix -lmaxminddb"
 
 fi
 
@@ -8838,98 +9027,99 @@ fi
 
 done
 
-  LIBS=$save_LIBS
-  CFLAGS=$save_CFLAGS
+    LIBS=$save_LIBS
+    CFLAGS=$save_CFLAGS
+  fi
 
   if test "x$enable_mmdb" = xyes; then
 
 printf "%s\n" "#define USE_MMDB /**/" >>confdefs.h
 
-    LIBS="$LIBS -L$unet_cv_with_mmdb_prefix $MMDB_LDFLAGS"
-    CFLAGS="$CFLAGS -I$unet_cv_with_mmdb_inc_prefix"
+    LIBS="$LIBS $MMDB_LDFLAGS"
+    CFLAGS="$CFLAGS $MMDB_CFLAGS"
   else
      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find MaxMindDB, MaxMindDB features will not work without libmaxminddb. Disabling MaxMindDB support." >&5
 printf "%s\n" "$as_me: WARNING: Unable to find MaxMindDB, MaxMindDB features will not work without libmaxminddb. Disabling MaxMindDB support." >&2;}
   fi
 fi
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable LMDB/chathistory support" >&5
-printf %s "checking whether to enable LMDB/chathistory support... " >&6; }
-# Check whether --enable-lmdb was given.
-if test ${enable_lmdb+y}
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable libmdbx storage support" >&5
+printf %s "checking whether to enable libmdbx storage support... " >&6; }
+# Check whether --enable-mdbx was given.
+if test ${enable_mdbx+y}
 then :
-  enableval=$enable_lmdb; unet_cv_enable_lmdb=$enable_lmdb
+  enableval=$enable_mdbx; unet_cv_enable_mdbx=$enable_mdbx
 else case e in #(
-  e) if test ${unet_cv_enable_lmdb+y}
+  e) if test ${unet_cv_enable_mdbx+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
-  e) unet_cv_enable_lmdb=yes ;;
+  e) unet_cv_enable_mdbx=yes ;;
 esac
 fi
  ;;
 esac
 fi
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_lmdb" >&5
-printf "%s\n" "$unet_cv_enable_lmdb" >&6; }
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_mdbx" >&5
+printf "%s\n" "$unet_cv_enable_mdbx" >&6; }
 
-if test x"$unet_cv_enable_lmdb" = xyes; then
+if test x"$unet_cv_enable_mdbx" = xyes; then
 
-# Check whether --with-lmdb was given.
-if test ${with_lmdb+y}
+# Check whether --with-mdbx was given.
+if test ${with_mdbx+y}
 then :
-  withval=$with_lmdb; base_lmdb_prefix=$withval
+  withval=$with_mdbx; base_mdbx_prefix=$withval
 else case e in #(
-  e) base_lmdb_prefix=/usr ;;
+  e) base_mdbx_prefix=/usr ;;
 esac
 fi
 
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for LMDB includes" >&5
-printf %s "checking for LMDB includes... " >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for libmdbx includes" >&5
+printf %s "checking for libmdbx includes... " >&6; }
 
-# Check whether --with-lmdb-includes was given.
-if test ${with_lmdb_includes+y}
+# Check whether --with-mdbx-includes was given.
+if test ${with_mdbx_includes+y}
 then :
-  withval=$with_lmdb_includes; unet_cv_with_lmdb_inc_prefix=$withval
+  withval=$with_mdbx_includes; unet_cv_with_mdbx_inc_prefix=$withval
 else case e in #(
-  e) unet_cv_with_lmdb_inc_prefix=$base_lmdb_prefix/include ;;
+  e) unet_cv_with_mdbx_inc_prefix=$base_mdbx_prefix/include ;;
 esac
 fi
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_lmdb_inc_prefix" >&5
-printf "%s\n" "$unet_cv_with_lmdb_inc_prefix" >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mdbx_inc_prefix" >&5
+printf "%s\n" "$unet_cv_with_mdbx_inc_prefix" >&6; }
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for LMDB libraries" >&5
-printf %s "checking for LMDB libraries... " >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for libmdbx libraries" >&5
+printf %s "checking for libmdbx libraries... " >&6; }
 
-# Check whether --with-lmdb-libs was given.
-if test ${with_lmdb_libs+y}
+# Check whether --with-mdbx-libs was given.
+if test ${with_mdbx_libs+y}
 then :
-  withval=$with_lmdb_libs; unet_cv_with_lmdb_prefix=$withval
+  withval=$with_mdbx_libs; unet_cv_with_mdbx_prefix=$withval
 else case e in #(
-  e) unet_cv_with_lmdb_prefix=$base_lmdb_prefix/lib ;;
+  e) unet_cv_with_mdbx_prefix=$base_mdbx_prefix/lib ;;
 esac
 fi
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_lmdb_prefix" >&5
-printf "%s\n" "$unet_cv_with_lmdb_prefix" >&6; }
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mdbx_prefix" >&5
+printf "%s\n" "$unet_cv_with_mdbx_prefix" >&6; }
 
   save_CFLAGS=$CFLAGS
   save_LIBS=$LIBS
 
-  CFLAGS="-I$unet_cv_with_lmdb_inc_prefix"
-  LIBS="-L$unet_cv_with_lmdb_prefix -llmdb"
+  CFLAGS="-I$unet_cv_with_mdbx_inc_prefix"
+  LIBS="-L$unet_cv_with_mdbx_prefix -lmdbx"
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for mdb_env_create in -llmdb" >&5
-printf %s "checking for mdb_env_create in -llmdb... " >&6; }
-if test ${ac_cv_lib_lmdb_mdb_env_create+y}
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for mdbx_env_create in -lmdbx" >&5
+printf %s "checking for mdbx_env_create in -lmdbx... " >&6; }
+if test ${ac_cv_lib_mdbx_mdbx_env_create+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
   e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-llmdb  $LIBS"
+LIBS="-lmdbx  $LIBS"
 cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -8942,20 +9132,20 @@ cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 #ifdef __cplusplus
 extern "C"
 #endif
-char mdb_env_create (void);
+char mdbx_env_create (void);
 int
 main (void)
 {
-return mdb_env_create ();
+return mdbx_env_create ();
   ;
   return 0;
 }
 _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
-  ac_cv_lib_lmdb_mdb_env_create=yes
+  ac_cv_lib_mdbx_mdbx_env_create=yes
 else case e in #(
-  e) ac_cv_lib_lmdb_mdb_env_create=no ;;
+  e) ac_cv_lib_mdbx_mdbx_env_create=no ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
@@ -8963,12 +9153,12 @@ rm -f core conftest.err conftest.$ac_objext conftest.beam \
 LIBS=$ac_check_lib_save_LIBS ;;
 esac
 fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_lmdb_mdb_env_create" >&5
-printf "%s\n" "$ac_cv_lib_lmdb_mdb_env_create" >&6; }
-if test "x$ac_cv_lib_lmdb_mdb_env_create" = xyes
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_mdbx_mdbx_env_create" >&5
+printf "%s\n" "$ac_cv_lib_mdbx_mdbx_env_create" >&6; }
+if test "x$ac_cv_lib_mdbx_mdbx_env_create" = xyes
 then :
 
-           for ac_header in $unet_cv_with_lmdb_inc_prefix/lmdb.h
+           for ac_header in $unet_cv_with_mdbx_inc_prefix/mdbx.h
 do :
   as_ac_Header=`printf "%s\n" "ac_cv_header_$ac_header" | sed "$as_sed_sh"`
 ac_fn_c_check_header_compile "$LINENO" "$ac_header" "$as_ac_Header" "$ac_includes_default"
@@ -8978,8 +9168,8 @@ then :
 #define `printf "%s\n" "HAVE_$ac_header" | sed "$as_sed_cpp"` 1
 _ACEOF
 
-      enable_lmdb="yes";
-      LMDB_LDFLAGS="-llmdb"
+      enable_mdbx="yes";
+      MDBX_LDFLAGS="-lmdbx"
 
 fi
 
@@ -8991,15 +9181,15 @@ fi
   LIBS=$save_LIBS
   CFLAGS=$save_CFLAGS
 
-  if test "x$enable_lmdb" = xyes; then
+  if test "x$enable_mdbx" = xyes; then
 
-printf "%s\n" "#define USE_LMDB /**/" >>confdefs.h
+printf "%s\n" "#define USE_MDBX /**/" >>confdefs.h
 
-    LIBS="$LIBS -L$unet_cv_with_lmdb_prefix $LMDB_LDFLAGS"
-    CFLAGS="$CFLAGS -I$unet_cv_with_lmdb_inc_prefix"
+    LIBS="$LIBS -L$unet_cv_with_mdbx_prefix $MDBX_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_mdbx_inc_prefix"
   else
-     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find LMDB, chathistory features will not work without liblmdb. Disabling LMDB support." >&5
-printf "%s\n" "$as_me: WARNING: Unable to find LMDB, chathistory features will not work without liblmdb. Disabling LMDB support." >&2;}
+     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find libmdbx, chathistory/metadata/webpush features will not work without libmdbx. Disabling libmdbx support." >&5
+printf "%s\n" "$as_me: WARNING: Unable to find libmdbx, chathistory/metadata/webpush features will not work without libmdbx. Disabling libmdbx support." >&2;}
   fi
 fi
 
@@ -9151,6 +9341,87 @@ printf "%s\n" "#define USE_ZSTD /**/" >>confdefs.h
      { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find zstd, compression features will not be available. Disabling zstd support." >&5
 printf "%s\n" "$as_me: WARNING: Unable to find zstd, compression features will not be available. Disabling zstd support." >&2;}
   fi
+fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable Keycloak support" >&5
+printf %s "checking whether to enable Keycloak support... " >&6; }
+# Check whether --enable-keycloak was given.
+if test ${enable_keycloak+y}
+then :
+  enableval=$enable_keycloak; unet_cv_enable_keycloak=$enable_keycloak
+else case e in #(
+  e) if test ${unet_cv_enable_keycloak+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) unet_cv_enable_keycloak=no ;;
+esac
+fi
+ ;;
+esac
+fi
+
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_keycloak" >&5
+printf "%s\n" "$unet_cv_enable_keycloak" >&6; }
+
+if test x"$unet_cv_enable_keycloak" = xyes; then
+
+# Check whether --with-keycloak was given.
+if test ${with_keycloak+y}
+then :
+  withval=$with_keycloak; base_keycloak_prefix=$withval
+else case e in #(
+  e) base_keycloak_prefix= ;;
+esac
+fi
+
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for Keycloak includes" >&5
+printf %s "checking for Keycloak includes... " >&6; }
+
+# Check whether --with-keycloak-includes was given.
+if test ${with_keycloak_includes+y}
+then :
+  withval=$with_keycloak_includes; unet_cv_with_keycloak_inc_prefix=$withval
+else case e in #(
+  e) if test -n "$base_keycloak_prefix"; then
+    unet_cv_with_keycloak_inc_prefix=$base_keycloak_prefix/include
+  else
+    unet_cv_with_keycloak_inc_prefix=/usr/local/include
+  fi ;;
+esac
+fi
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_keycloak_inc_prefix" >&5
+printf "%s\n" "$unet_cv_with_keycloak_inc_prefix" >&6; }
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for Keycloak libraries" >&5
+printf %s "checking for Keycloak libraries... " >&6; }
+
+# Check whether --with-keycloak-libs was given.
+if test ${with_keycloak_libs+y}
+then :
+  withval=$with_keycloak_libs; unet_cv_with_keycloak_prefix=$withval
+else case e in #(
+  e) if test -n "$base_keycloak_prefix"; then
+    unet_cv_with_keycloak_prefix=$base_keycloak_prefix/lib
+  else
+    unet_cv_with_keycloak_prefix=/usr/local/lib
+  fi ;;
+esac
+fi
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_keycloak_prefix" >&5
+printf "%s\n" "$unet_cv_with_keycloak_prefix" >&6; }
+
+
+printf "%s\n" "#define USE_LIBKC /**/" >>confdefs.h
+
+  LIBS="$LIBS -L$unet_cv_with_keycloak_prefix -lkc -lcurl -ljansson"
+  CFLAGS="$CFLAGS -I$unet_cv_with_keycloak_inc_prefix"
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: Keycloak (libkc) support enabled" >&5
+printf "%s\n" "$as_me: Keycloak (libkc) support enabled" >&6;}
 fi
 
 enable_libgit2="no"

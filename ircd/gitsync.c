@@ -841,9 +841,161 @@ gitsync_apply(const char *content, size_t len)
 }
 
 #ifdef USE_SSL
-/** Update TLS certificate from git tag
+/** Validate that content looks like a PEM certificate.
+ * Checks for BEGIN/END markers and reasonable size.
+ * Does NOT do full X.509 parsing — that's OpenSSL's job during ssl_reinit().
+ * @param content Certificate content to validate
+ * @param size Size of content in bytes
+ * @return 1 if content appears to be valid PEM, 0 otherwise
+ */
+static int
+gitsync_validate_pem(const char *content, size_t size)
+{
+  const char *p;
+
+  if (!content || size < 100 || size > GITSYNC_MAX_SIZE)
+    return 0;
+
+  /* Skip leading whitespace */
+  p = content;
+  while (p < content + size && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
+    p++;
+
+  /* Must start with -----BEGIN */
+  if (p + 10 > content + size || memcmp(p, "-----BEGIN", 10) != 0)
+    return 0;
+
+  /* Must contain at least one -----END marker */
+  {
+    size_t i;
+    int found_end = 0;
+    for (i = 0; i + 8 <= size; i++) {
+      if (memcmp(content + i, "-----END", 8) == 0) {
+        found_end = 1;
+        break;
+      }
+    }
+    if (!found_end)
+      return 0;
+  }
+
+  return 1;
+}
+
+/** Install a certificate to disk atomically.
+ * Writes to a temp file, preserves permissions, renames atomically.
+ * Shared by both blob-tag and file-based cert update paths.
+ * @param content Certificate PEM content
+ * @param size Size of content in bytes
+ * @param source_desc Human-readable description of cert source (for snomask)
+ * @return 1 if certificate was updated, 0 if unchanged, -1 on error
+ */
+static int
+gitsync_install_cert(const char *content, size_t size, const char *source_desc)
+{
+  const char *cert_file;
+  char new_file[512];
+  char bak_file[512];
+  char *old_content = NULL;
+  size_t old_size = 0;
+  struct stat st;
+  FILE *fp;
+  int had_backup = 0;
+  mode_t old_mode = 0600;
+
+  /* Validate PEM content */
+  if (!gitsync_validate_pem(content, size)) {
+    sendto_opmask_butone(0, SNO_OLDSNO,
+                         "GitSync: Rejected invalid PEM certificate from %s", source_desc);
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Certificate from %s failed PEM validation", source_desc);
+    return -1;
+  }
+
+  /* Resolve destination path */
+  cert_file = feature_str(FEAT_GITSYNC_CERT_FILE);
+  if (!cert_file || !*cert_file)
+    cert_file = feature_str(FEAT_SSL_CERTFILE);
+
+  /* Read existing cert for comparison */
+  if (stat(cert_file, &st) == 0 && st.st_size > 0) {
+    old_mode = st.st_mode & 0777;
+    fp = fopen(cert_file, "r");
+    if (fp) {
+      old_content = (char *)MyMalloc(st.st_size + 1);
+      if (old_content) {
+        old_size = fread(old_content, 1, st.st_size, fp);
+        old_content[old_size] = '\0';
+      }
+      fclose(fp);
+    }
+  }
+
+  /* Check if content changed */
+  if (old_content && old_size == size &&
+      memcmp(old_content, content, size) == 0) {
+    MyFree(old_content);
+    return 0;  /* Unchanged */
+  }
+
+  if (old_content)
+    MyFree(old_content);
+
+  /* Build temp and backup filenames */
+  ircd_snprintf(0, new_file, sizeof(new_file), "%s.new", cert_file);
+  ircd_snprintf(0, bak_file, sizeof(bak_file), "%s.backup", cert_file);
+
+  /* Write to temp file */
+  fp = fopen(new_file, "w");
+  if (!fp) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Cannot open %s for writing: %s", new_file, strerror(errno));
+    return -1;
+  }
+
+  if (fwrite(content, 1, size, fp) != size) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Short write to %s", new_file);
+    fclose(fp);
+    unlink(new_file);
+    return -1;
+  }
+  fclose(fp);
+
+  /* Preserve permissions from existing cert (or 0600 default) */
+  chmod(new_file, old_mode);
+
+  /* Backup existing cert */
+  if (stat(cert_file, &st) == 0) {
+    unlink(bak_file);
+    if (rename(cert_file, bak_file) == 0)
+      had_backup = 1;
+  }
+
+  /* Atomic rename */
+  if (rename(new_file, cert_file) != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Cannot rename %s to %s: %s", new_file, cert_file, strerror(errno));
+    if (had_backup)
+      rename(bak_file, cert_file);
+    return -1;
+  }
+
+  sendto_opmask_butone(0, SNO_OLDSNO,
+                       "GitSync: Updated TLS certificate from %s", source_desc);
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "GitSync: Updated TLS certificate from %s", source_desc);
+
+  /* Reload SSL certificates (0 = no extra snomask from ssl_reinit) */
+  ssl_reinit(0);
+
+  return 1;
+}
+
+/** Update TLS certificate from git blob tag (legacy mode).
+ * Resolves a git tag to a blob object and installs the cert atomically.
  * @param repo Repository
- * @param tag_name Name of tag containing certificate
+ * @param tag_name Name of tag containing certificate blob
  * @return 1 if certificate was updated, 0 otherwise
  */
 static int
@@ -853,24 +1005,15 @@ gitsync_update_cert(git_repository *repo, const char *tag_name)
   const git_blob *blob = NULL;
   const char *cert_content;
   size_t cert_size;
-  const char *cert_file;
-  FILE *fp;
-  char *old_content = NULL;
-  size_t old_size = 0;
-  struct stat st;
-  int changed = 0;
+  int result;
   int error;
   char refspec[256];
-
-  cert_file = feature_str(FEAT_GITSYNC_CERT_FILE);
-  if (!cert_file || !*cert_file)
-    cert_file = feature_str(FEAT_SSL_CERTFILE);  /* Use IRCd's SSL cert file */
+  char source_desc[128];
 
   /* Look up the tag */
   ircd_snprintf(0, refspec, sizeof(refspec), "refs/tags/%s", tag_name);
   error = git_revparse_single(&obj, repo, refspec);
   if (error < 0) {
-    /* Try without refs/tags prefix */
     error = git_revparse_single(&obj, repo, tag_name);
     if (error < 0) {
       Debug((DEBUG_INFO, "GitSync: Tag %s not found", tag_name));
@@ -890,7 +1033,7 @@ gitsync_update_cert(git_repository *repo, const char *tag_name)
     obj = target;
   }
 
-  /* Check if it's a blob */
+  /* Must be a blob */
   if (git_object_type(obj) != GIT_OBJECT_BLOB) {
     Debug((DEBUG_INFO, "GitSync: Tag %s is not a blob (type %d)",
            tag_name, git_object_type(obj)));
@@ -902,60 +1045,65 @@ gitsync_update_cert(git_repository *repo, const char *tag_name)
   cert_content = (const char *)git_blob_rawcontent(blob);
   cert_size = git_blob_rawsize(blob);
 
-  /* Read existing cert file for comparison */
-  if (stat(cert_file, &st) == 0 && st.st_size > 0) {
-    fp = fopen(cert_file, "r");
-    if (fp) {
-      old_content = (char *)MyMalloc(st.st_size + 1);
-      if (old_content) {
-        old_size = fread(old_content, 1, st.st_size, fp);
-        old_content[old_size] = '\0';
-      }
-      fclose(fp);
-    }
-  }
+  ircd_snprintf(0, source_desc, sizeof(source_desc), "tag %s", tag_name);
+  result = gitsync_install_cert(cert_content, cert_size, source_desc);
 
-  /* Check if content changed */
-  if (old_content == NULL || old_size != cert_size ||
-      memcmp(old_content, cert_content, cert_size) != 0) {
-    /* Backup old cert */
-    if (stat(cert_file, &st) == 0) {
-      char backup_path[512];
-      ircd_snprintf(0, backup_path, sizeof(backup_path), "%s.backup", cert_file);
-      rename(cert_file, backup_path);
-    }
-
-    /* Write new cert */
-    fp = fopen(cert_file, "w");
-    if (fp) {
-      if (fwrite(cert_content, 1, cert_size, fp) == cert_size) {
-        changed = 1;
-        sendto_opmask_butone(0, SNO_OLDSNO,
-                             "GitSync: Updated TLS certificate from tag %s", tag_name);
-        log_write(LS_SYSTEM, L_INFO, 0,
-                  "GitSync: Updated TLS certificate from tag %s", tag_name);
-      } else {
-        log_write(LS_SYSTEM, L_ERROR, 0,
-                  "GitSync: Failed to write certificate to %s", cert_file);
-      }
-      fclose(fp);
-
-      /* Reload SSL certificates */
-      if (changed) {
-        ssl_reinit(1);
-      }
-    } else {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "GitSync: Cannot open %s for writing: %s",
-                cert_file, strerror(errno));
-    }
-  }
-
-  if (old_content)
-    MyFree(old_content);
   git_object_free(obj);
+  return (result > 0) ? 1 : 0;
+}
 
-  return changed;
+/** Update TLS certificate from a file in the repository working tree.
+ * Reads the cert from <repo_path>/<cert_path> after fetch+reset.
+ * @param repo_path Path to the local git repository
+ * @param cert_path Relative path to cert file within the repository
+ * @return 1 if certificate was updated, 0 otherwise
+ */
+static int
+gitsync_update_cert_from_file(const char *repo_path, const char *cert_path)
+{
+  char full_path[512];
+  FILE *fp;
+  struct stat st;
+  char *content;
+  size_t nread;
+  char source_desc[128];
+  int result;
+
+  ircd_snprintf(0, full_path, sizeof(full_path), "%s/%s", repo_path, cert_path);
+
+  if (stat(full_path, &st) != 0 || st.st_size == 0) {
+    Debug((DEBUG_INFO, "GitSync: Cert file %s not found in repo", cert_path));
+    return 0;
+  }
+
+  if ((size_t)st.st_size > GITSYNC_MAX_SIZE) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Cert file %s too large (%ld bytes)", cert_path, (long)st.st_size);
+    return 0;
+  }
+
+  fp = fopen(full_path, "r");
+  if (!fp) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "GitSync: Cannot open cert file %s: %s", full_path, strerror(errno));
+    return 0;
+  }
+
+  content = (char *)MyMalloc(st.st_size + 1);
+  if (!content) {
+    fclose(fp);
+    return 0;
+  }
+
+  nread = fread(content, 1, st.st_size, fp);
+  fclose(fp);
+  content[nread] = '\0';
+
+  ircd_snprintf(0, source_desc, sizeof(source_desc), "file %s", cert_path);
+  result = gitsync_install_cert(content, nread, source_desc);
+
+  MyFree(content);
+  return (result > 0) ? 1 : 0;
 }
 #endif /* USE_SSL */
 
@@ -1133,12 +1281,15 @@ gitsync_trigger(struct Client *sptr, int force)
     }
   }
 
-  /* Check for certificate update from git tag */
+  /* Check for certificate update */
 #ifdef USE_SSL
   {
     const char *cert_tag = feature_str(FEAT_GITSYNC_CERT_TAG);
+    const char *cert_path = feature_str(FEAT_GITSYNC_CERT_PATH);
     if (cert_tag && *cert_tag) {
-      gitsync_update_cert(repo, cert_tag);
+      gitsync_update_cert(repo, cert_tag);           /* Legacy blob-tag mode */
+    } else if (cert_path && *cert_path) {
+      gitsync_update_cert_from_file(repo_path, cert_path);  /* File-based mode */
     }
   }
 #endif
