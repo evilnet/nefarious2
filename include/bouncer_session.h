@@ -516,15 +516,17 @@ extern void bounce_free_temp_client(struct Client *temp);
  * Utility
  */
 
-/** Replay missed messages for a resumed session (legacy clients).
+/** Replay missed messages for a resumed/attached session (legacy clients).
  * @param[in] sptr Client to replay to.
- * @param[in] session Session being resumed.
- * @param[in] disconnect_time When the session disconnected (must be saved
- *            before revive/attach, which clears hs_disconnect_time).
+ * @param[in] session Session being resumed or attached.
+ * @param[in] since_time Replay messages since this time.  Callers should
+ *            pass the user's idle time (user->last) so messages the user
+ *            may not have read are replayed.  Fall back to disconnect_time
+ *            or signon time if idle time is unavailable.
  */
 extern void bouncer_auto_replay(struct Client *sptr,
                                  struct BouncerSession *session,
-                                 time_t disconnect_time);
+                                 time_t since_time);
 
 /** Compute adaptive hold time for a session.
  * @param[in] session Session to compute for.
@@ -572,11 +574,13 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * Called from register_user() before network introduction.
  * @param[in] cptr Newly authenticated client.
  * @param[out] out_session Set to session if resumed or created.
- * @return 1 if resumed, 0 otherwise.
+ * @param[out] out_since_time Set to the user's idle time (user->last) for
+ *             replay, falling back to disconnect time if unavailable.
+ * @return 1 if resumed, 2 if converted to shadow, 0 otherwise.
  */
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
-                               time_t *out_disconnect_time);
+                               time_t *out_since_time);
 
 /*
  * MDBX persistence API (FEAT_BOUNCER_PERSIST)

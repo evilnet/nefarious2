@@ -766,7 +766,7 @@ void bounce_check_shadow_pings(struct Client *cptr, int max_ping)
  * @return 1 if resumed a held session, 2 if converted to shadow, 0 otherwise.
  */
 int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
-                       time_t *out_disconnect_time)
+                       time_t *out_since_time)
 {
   struct BouncerSession *session;
   const char *account;
@@ -775,8 +775,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
   int class_bouncer = 0;
   struct ConnectionClass *cls;
 
-  if (out_disconnect_time)
-    *out_disconnect_time = 0;
+  if (out_since_time)
+    *out_since_time = 0;
 
   *out_session = NULL;
 
@@ -842,9 +842,16 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       cli_lastnick(cptr) = session->hs_created;
     }
 
-    /* Save disconnect_time before bounce_attach clears it */
-    if (out_disconnect_time)
-      *out_disconnect_time = session->hs_disconnect_time;
+    /* Compute the replay "since" time from the ghost's idle time.
+     * Messages arriving after the user's last activity may not have been
+     * read, even if they were delivered to the connected client.
+     * Fall back to disconnect time if idle time is unavailable. */
+    if (out_since_time) {
+      time_t idle = 0;
+      if (session->hs_client && cli_user(session->hs_client))
+        idle = cli_user(session->hs_client)->last;
+      *out_since_time = (idle > 0) ? idle : session->hs_disconnect_time;
+    }
 
     /* Attach to the session — transfers channels, exits ghost */
     if (bounce_attach(session, cptr) == 0) {

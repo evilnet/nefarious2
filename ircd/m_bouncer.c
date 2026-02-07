@@ -130,7 +130,7 @@ static int is_pm_target_for_client(const char *target, struct Client *cptr)
  * automatically replays missed messages since disconnection.
  */
 void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session,
-                         time_t disconnect_time)
+                         time_t since_time)
 {
   struct Membership *member;
   struct HistoryTarget *targets = NULL;
@@ -146,15 +146,17 @@ void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session,
   if (!feature_bool(FEAT_BOUNCER_AUTO_REPLAY))
     return;
 
-  /* Need a valid disconnect time to know what to replay.
-   * The caller must pass the disconnect_time saved BEFORE revive/attach,
-   * since those functions clear session->hs_disconnect_time. */
-  if (disconnect_time == 0)
+  /* Need a valid since time to know what to replay.
+   * Callers pass the user's idle time (user->last) — the last time any
+   * connection sent a message.  Messages arriving after that may not
+   * have been seen by the user even if they were delivered to a client
+   * that was connected at the time. */
+  if (since_time == 0)
     return;
 
-  /* Convert disconnect_time to timestamp string (seconds.000 format) */
+  /* Convert since_time to timestamp string (seconds.000 format) */
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.000",
-                (unsigned long)disconnect_time);
+                (unsigned long)since_time);
 
   /* Current timestamp for PM target query range */
   ircd_snprintf(0, now_timestamp, sizeof(now_timestamp), "%lu.000",
@@ -230,7 +232,7 @@ void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session,
 static int bouncer_resume(struct Client *sptr, const char *token)
 {
   struct BouncerSession *session;
-  time_t disconnect_time;
+  time_t since_time;
   int ret;
 
   if (!token || !*token) {
@@ -254,8 +256,15 @@ static int bouncer_resume(struct Client *sptr, const char *token)
     return 0;
   }
 
-  /* Save disconnect time for potential auto-replay */
-  disconnect_time = session->hs_disconnect_time;
+  /* Compute replay "since" time from the ghost's idle time — messages
+   * arriving after the user's last activity may not have been read.
+   * Fall back to disconnect time if idle time is unavailable. */
+  {
+    time_t idle = 0;
+    if (session->hs_client && cli_user(session->hs_client))
+      idle = cli_user(session->hs_client)->last;
+    since_time = (idle > 0) ? idle : session->hs_disconnect_time;
+  }
 
   /* Attach client to session */
   ret = bounce_attach(session, sptr);
@@ -275,7 +284,7 @@ static int bouncer_resume(struct Client *sptr, const char *token)
    * missed messages. Full auto-replay could be added later.
    */
   if (!CapActive(sptr, CAP_DRAFT_CHATHISTORY)) {
-    bouncer_auto_replay(sptr, session, disconnect_time);
+    bouncer_auto_replay(sptr, session, since_time);
   }
 
   return 0;
