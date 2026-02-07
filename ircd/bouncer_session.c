@@ -1453,6 +1453,12 @@ static int bounce_db_put(struct BouncerSession *session)
   rec.bsr_created = (int64_t)session->hs_created;
   rec.bsr_disconnect_time = (int64_t)session->hs_disconnect_time;
   rec.bsr_last_active = (int64_t)session->hs_last_active;
+  /* Persist the user's idle time (last PRIVMSG).  Prefer the live client's
+   * value; fall back to the session-level copy for HOLDING ghosts. */
+  if (ghost && cli_user(ghost) && cli_user(ghost)->last > 0)
+    rec.bsr_last_msg_time = (int64_t)cli_user(ghost)->last;
+  else
+    rec.bsr_last_msg_time = (int64_t)session->hs_last_msg_time;
   rec.bsr_total_active = (int64_t)session->hs_total_active;
   rec.bsr_attach_count = session->hs_attach_count;
   rec.bsr_connect_count = session->hs_connect_count;
@@ -1820,7 +1826,11 @@ int bounce_db_restore(void)
     session->hs_effective_away_msg[0] = '\0';
     session->hs_created = (time_t)rec->bsr_created;
     session->hs_last_active = (time_t)rec->bsr_last_active;
+    session->hs_last_msg_time = (time_t)rec->bsr_last_msg_time;
     session->hs_disconnect_time = (time_t)rec->bsr_disconnect_time;
+    /* Restore ghost's idle time so auto-replay works after restart */
+    if (ghost && cli_user(ghost) && session->hs_last_msg_time > 0)
+      cli_user(ghost)->last = session->hs_last_msg_time;
     session->hs_attach_count = rec->bsr_attach_count;
     session->hs_connect_count = rec->bsr_connect_count;
     session->hs_total_active = (time_t)rec->bsr_total_active;
@@ -2399,6 +2409,12 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   /* Mark all channel memberships as HOLDING */
   for (member = cli_user(cptr)->channel; member; member = member->next_channel)
     SetMemberHolding(member);
+
+  /* Save the user's idle time (last PRIVMSG) for auto-replay and persistence.
+   * After a restart, the ghost's user->last is lost; this session-level
+   * copy survives via MDBX so replay knows how far back to go. */
+  if (cli_user(cptr) && cli_user(cptr)->last > 0)
+    session->hs_last_msg_time = cli_user(cptr)->last;
 
   /* Transition session to HOLDING state.
    * Keep hs_client pointing to the ghost for cleanup on expiry.

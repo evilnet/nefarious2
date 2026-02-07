@@ -88,7 +88,7 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 5
+#define BOUNCER_DB_VERSION 6
 
 /** On-disk representation of a bouncer session for MDBX persistence.
  * Fixed-width, versioned. All IRC identifiers have known max lengths.
@@ -106,6 +106,7 @@ struct BounceSessionRecord {
   int64_t  bsr_created;
   int64_t  bsr_disconnect_time;
   int64_t  bsr_last_active;
+  int64_t  bsr_last_msg_time;              /**< Last PRIVMSG time (user idle) */
   int64_t  bsr_total_active;
   uint32_t bsr_attach_count;
   uint32_t bsr_connect_count;
@@ -227,6 +228,7 @@ struct BouncerSession {
 
   time_t hs_created;                  /**< When session was created */
   time_t hs_last_active;              /**< Last activity timestamp */
+  time_t hs_last_msg_time;            /**< Last PRIVMSG time (user idle baseline) */
   time_t hs_disconnect_time;          /**< When client disconnected (0=active) */
   unsigned int hs_attach_count;       /**< Number of times resumed from HOLDING */
   unsigned int hs_connect_count;      /**< Total connections (resumes + shadow attaches) */
