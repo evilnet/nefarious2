@@ -1098,6 +1098,53 @@ if test x"$unet_cv_enable_keycloak" = xyes; then
   AC_MSG_NOTICE([Keycloak (libkc) support enabled])
 fi
 
+dnl Check for libgit2 (for gitsync feature)
+enable_libgit2="no"
+AC_ARG_WITH([libgit2],
+AS_HELP_STRING([--with-libgit2], [Enable libgit2 for gitsync feature]),
+[with_libgit2=$withval],
+[with_libgit2=check])
+
+if test "x$with_libgit2" != xno; then
+  AC_ARG_WITH([libgit2-includes],
+  AS_HELP_STRING([--with-libgit2-includes=dir], [Specify location of libgit2 header files]),
+  [unet_cv_with_libgit2_inc_prefix=$withval],
+  [unet_cv_with_libgit2_inc_prefix=/usr/include])
+
+  AC_ARG_WITH([libgit2-libs],
+  AS_HELP_STRING([--with-libgit2-libs=dir], [Specify location of libgit2 libs]),
+  [unet_cv_with_libgit2_prefix=$withval],
+  [unet_cv_with_libgit2_prefix=/usr/lib])
+
+  save_CFLAGS=$CFLAGS
+  save_LIBS=$LIBS
+
+  CFLAGS="-I$unet_cv_with_libgit2_inc_prefix"
+  LIBS="-L$unet_cv_with_libgit2_prefix -lgit2"
+
+  AC_CHECK_LIB(git2, git_libgit2_init, [
+    AC_CHECK_HEADERS(git2.h, [
+      enable_libgit2="yes"
+      LIBGIT2_LDFLAGS="-lgit2"
+    ])
+  ])
+
+  LIBS=$save_LIBS
+  CFLAGS=$save_CFLAGS
+
+  if test "x$enable_libgit2" = xyes; then
+    AC_DEFINE([USE_LIBGIT2], , [Define if you are using libgit2 for gitsync])
+    LIBS="$LIBS -L$unet_cv_with_libgit2_prefix $LIBGIT2_LDFLAGS"
+    CFLAGS="$CFLAGS -I$unet_cv_with_libgit2_inc_prefix"
+  else
+    if test "x$with_libgit2" = xyes; then
+      AC_MSG_ERROR([libgit2 requested but not found])
+    else
+      AC_MSG_WARN([libgit2 not found, gitsync feature will not be available])
+    fi
+  fi
+fi
+
 dnl --with-maxcon allows us to set the maximum connections
 unet_maxcon=`ulimit -Sn`
 if test x"$unet_maxcon" = xunlimited; then
@@ -1151,4 +1198,6 @@ ircu is now hopefully configured for your system.
   kqueue() engine:     $unet_cv_enable_kqueue
   /dev/poll engine:    $unet_cv_enable_devpoll
   epoll() engine:      $unet_cv_enable_epoll
+
+  libgit2 (gitsync):   $enable_libgit2
 "])

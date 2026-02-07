@@ -10,7 +10,8 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
       byacc gawk git vim procps net-tools iputils-ping bind9-host \
       libzstd-dev libcmocka-dev valgrind libcurl4-openssl-dev libjansson-dev \
       libmaxminddb-dev libgeoip-dev pkg-config \
-      libtool cmake nodejs npm && \
+      libtool cmake nodejs npm \
+      libgit2-dev openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 # --- Build libraries in parallel using multi-stage ---

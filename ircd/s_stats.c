@@ -60,6 +60,8 @@
 #include "history.h"
 #include "metadata.h"
 #include "paste_store.h"
+#include "dnsbl.h"
+#include "gitsync.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -742,6 +744,14 @@ struct StatDesc statsinfo[] = {
   { ' ', "paste", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     paste_report_stats, 0,
     "Paste store statistics (multiline HTTP fallback)." },
+  { ' ', "dnsbl", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
+    dnsbl_report_stats, 0,
+    "DNSBL statistics and configuration." },
+#ifdef USE_LIBGIT2
+  { ' ', "gitsync", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
+    gitsync_report_stats, 0,
+    "GitSync statistics and configuration." },
+#endif
   { ' ', "iauthconf", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_IAUTH,
     report_iauth_conf, 0,
     "IAuth configuration." },

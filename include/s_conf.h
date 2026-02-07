@@ -311,4 +311,6 @@ extern int del_marks(struct Client* sptr);
 extern void clear_sslcert_confs(void);
 #endif
 
+extern int conf_get_error_flag(void);
+
 #endif /* INCLUDED_s_conf_h */

@@ -36,6 +36,9 @@
 /* Define to 1 if you have the 'getrusage' function. */
 #undef HAVE_GETRUSAGE
 
+/* Define to 1 if you have the <git2.h> header file. */
+#undef HAVE_GIT2_H
+
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
 
@@ -231,6 +234,9 @@
 
 /* Define if you are using libmdbx for storage */
 #undef USE_MDBX
+
+/* Define if you are using libgit2 for gitsync */
+#undef USE_LIBGIT2
 
 /* Define if you are using MaxMindDB */
 #undef USE_MMDB

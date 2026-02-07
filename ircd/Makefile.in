@@ -97,8 +97,10 @@ IRCD_SRC = \
 	crule.c \
 	dbuf.c \
 	destruct_event.c \
+	dnsbl.c \
 	fileio.c \
 	gline.c \
+	gitsync.c \
 	hash.c \
 	history.c \
 	ircd.c \
@@ -149,6 +151,7 @@ IRCD_SRC = \
 	m_fingerprint.c \
 	m_get.c \
 	m_gline.c \
+	m_gitsync.c \
 	m_help.c \
 	m_history.c \
 	m_info.c \

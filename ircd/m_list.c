@@ -320,7 +320,7 @@ param_parse(struct Client *sptr, const char *param, struct ListingArgs *args,
         if (tmp1)
           *tmp1++ = 0;
 
-        ircd_strncpy(args->wildcard, param, sizeof(args->wildcard));
+        ircd_strncpy(args->wildcard, param, CHANNELLEN + 1);
 
         if (tmp1 == NULL)
           return LPARAM_SUCCESS;
