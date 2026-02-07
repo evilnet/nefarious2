@@ -423,10 +423,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
      */
     auto_session = NULL;
     auto_resumed = 0;
+    time_t saved_disconnect_time = 0;
     if (IsAccount(sptr) && bounce_enabled_for(sptr)) {
       /* Try socket transplant for local HOLDING ghost first */
       struct BouncerSession *held = bounce_find_best_held(cli_account(sptr));
       if (held && held->hs_client && MyUser(held->hs_client)) {
+        /* Save disconnect_time before revive clears it */
+        saved_disconnect_time = held->hs_disconnect_time;
         /* Local ghost found — do socket transplant */
         if (bounce_revive(held, sptr) == 0) {
           /* Success! Ghost is now alive with our socket.
@@ -474,7 +477,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
           /* Auto-replay missed messages for legacy clients */
           if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)) {
-            bouncer_auto_replay(ghost, held);
+            bouncer_auto_replay(ghost, held, saved_disconnect_time);
           }
 
           /* Return special code — caller must not dereference sptr */
@@ -484,7 +487,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
 
       /* Fall back to existing auto_resume (handles shadows, remote ghosts, etc.) */
-      auto_resumed = bounce_auto_resume(sptr, &auto_session);
+      auto_resumed = bounce_auto_resume(sptr, &auto_session, &saved_disconnect_time);
     }
 
     /* If auto_resume converted this client to a shadow connection,
@@ -653,7 +656,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * the primary still needs auto-replay since it can't fetch history itself. */
     if (auto_resumed && auto_session &&
         !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
-      bouncer_auto_replay(sptr, auto_session);
+      bouncer_auto_replay(sptr, auto_session, saved_disconnect_time);
     }
   }
   else {

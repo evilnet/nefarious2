@@ -129,7 +129,8 @@ static int is_pm_target_for_client(const char *target, struct Client *cptr)
  * For clients that don't support draft/chathistory, this function
  * automatically replays missed messages since disconnection.
  */
-void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session)
+void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session,
+                         time_t disconnect_time)
 {
   struct Membership *member;
   struct HistoryTarget *targets = NULL;
@@ -145,13 +146,15 @@ void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session)
   if (!feature_bool(FEAT_BOUNCER_AUTO_REPLAY))
     return;
 
-  /* Need a valid disconnect time to know what to replay */
-  if (session->hs_disconnect_time == 0)
+  /* Need a valid disconnect time to know what to replay.
+   * The caller must pass the disconnect_time saved BEFORE revive/attach,
+   * since those functions clear session->hs_disconnect_time. */
+  if (disconnect_time == 0)
     return;
 
   /* Convert disconnect_time to timestamp string (seconds.000 format) */
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.000",
-                (unsigned long)session->hs_disconnect_time);
+                (unsigned long)disconnect_time);
 
   /* Current timestamp for PM target query range */
   ircd_snprintf(0, now_timestamp, sizeof(now_timestamp), "%lu.000",
@@ -272,7 +275,7 @@ static int bouncer_resume(struct Client *sptr, const char *token)
    * missed messages. Full auto-replay could be added later.
    */
   if (!CapActive(sptr, CAP_DRAFT_CHATHISTORY)) {
-    bouncer_auto_replay(sptr, session);
+    bouncer_auto_replay(sptr, session, disconnect_time);
   }
 
   return 0;

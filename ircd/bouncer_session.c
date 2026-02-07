@@ -765,7 +765,8 @@ void bounce_check_shadow_pings(struct Client *cptr, int max_ping)
  * @param[out] out_session Set to the session if resumed or created.
  * @return 1 if resumed a held session, 2 if converted to shadow, 0 otherwise.
  */
-int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
+int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
+                       time_t *out_disconnect_time)
 {
   struct BouncerSession *session;
   const char *account;
@@ -773,6 +774,9 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
   int max_sessions;
   int class_bouncer = 0;
   struct ConnectionClass *cls;
+
+  if (out_disconnect_time)
+    *out_disconnect_time = 0;
 
   *out_session = NULL;
 
@@ -837,6 +841,10 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session)
     } else {
       cli_lastnick(cptr) = session->hs_created;
     }
+
+    /* Save disconnect_time before bounce_attach clears it */
+    if (out_disconnect_time)
+      *out_disconnect_time = session->hs_disconnect_time;
 
     /* Attach to the session — transfers channels, exits ghost */
     if (bounce_attach(session, cptr) == 0) {

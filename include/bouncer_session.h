@@ -518,10 +518,13 @@ extern void bounce_free_temp_client(struct Client *temp);
 
 /** Replay missed messages for a resumed session (legacy clients).
  * @param[in] sptr Client to replay to.
- * @param[in] session Session with disconnect timestamp.
+ * @param[in] session Session being resumed.
+ * @param[in] disconnect_time When the session disconnected (must be saved
+ *            before revive/attach, which clears hs_disconnect_time).
  */
 extern void bouncer_auto_replay(struct Client *sptr,
-                                 struct BouncerSession *session);
+                                 struct BouncerSession *session,
+                                 time_t disconnect_time);
 
 /** Compute adaptive hold time for a session.
  * @param[in] session Session to compute for.
@@ -572,7 +575,8 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * @return 1 if resumed, 0 otherwise.
  */
 extern int bounce_auto_resume(struct Client *cptr,
-                               struct BouncerSession **out_session);
+                               struct BouncerSession **out_session,
+                               time_t *out_disconnect_time);
 
 /*
  * MDBX persistence API (FEAT_BOUNCER_PERSIST)
