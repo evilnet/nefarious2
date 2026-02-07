@@ -169,9 +169,19 @@ void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session,
   /* Replay history for each channel the user is in */
   for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
     const char *channame = member->channel->chname;
+    const char *chan_since = timestamp;
+    char marker_ts[32];
     int count;
 
-    count = chathistory_auto_replay(sptr, channame, timestamp, limit);
+    /* If this channel has a read marker ahead of idle time, use it —
+     * the user already read up to that point (possibly on another device). */
+    if (IsAccount(sptr) &&
+        metadata_readmarker_get(cli_account(sptr), channame, marker_ts) == 0 &&
+        strcmp(marker_ts, timestamp) > 0) {
+      chan_since = marker_ts;
+    }
+
+    count = chathistory_auto_replay(sptr, channame, chan_since, limit);
     if (count > 0) {
       total_replayed += count;
       chan_count++;
