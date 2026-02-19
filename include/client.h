@@ -241,6 +241,7 @@ enum Flag
     FLAG_WSNEEDHANDSHAKE,           /**< WebSocket client needs handshake */
     FLAG_WSTEXT,                    /**< WebSocket uses text frames (not binary) */
     FLAG_WSAUTODETECT,              /**< WebSocket mode pending autodetection from first frame */
+    FLAG_WSSNIFF,                   /**< Protocol sniffing pending - WebSocket or plain IRC */
 
     FLAG_IPCEXEMPT,                 /**< User is IPcheck exempt */
     FLAG_IPCNOTEXEMPT,              /**< User is not IPcheck exempt */
@@ -1035,6 +1036,7 @@ struct Client {
 #define IsWSText(x)             HasFlag(x, FLAG_WSTEXT)
 /** Return non-zero if the WebSocket client needs mode autodetection. */
 #define IsWSAutodetect(x)       HasFlag(x, FLAG_WSAUTODETECT)
+#define IsWSSniff(x)            HasFlag(x, FLAG_WSSNIFF)
 /** Return non-zero if the client is IPcheck exempt. */
 #define IsIPCheckExempt(x)      HasFlag(x, FLAG_IPCEXEMPT)
 /** Return non-zero if the client is not IPcheck exempt. */
@@ -1176,6 +1178,7 @@ struct Client {
 #define SetWSText(x)            SetFlag(x, FLAG_WSTEXT)
 /** Mark a WebSocket client as needing mode autodetection. */
 #define SetWSAutodetect(x)      SetFlag(x, FLAG_WSAUTODETECT)
+#define SetWSSniff(x)           SetFlag(x, FLAG_WSSNIFF)
 /** Mark a client as IPcheck exempt. */
 #define SetIPCheckExempt(x)     SetFlag(x, FLAG_IPCEXEMPT)
 /** Mark a client as not IPcheck exempt. */
@@ -1300,6 +1303,7 @@ struct Client {
 #define ClearWSText(x)          ClrFlag(x, FLAG_WSTEXT)
 /** Clear WebSocket autodetect flag. */
 #define ClearWSAutodetect(x)    ClrFlag(x, FLAG_WSAUTODETECT)
+#define ClearWSSniff(x)         ClrFlag(x, FLAG_WSSNIFF)
 /** Clear the client's join restriction. */
 #define ClearRestrictJoin(x)    ClrFlag(x, FLAG_RESTRICT_JOIN)
 /** Clear the client's PRIVMSG/NOTICE restriction. */

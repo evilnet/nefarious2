@@ -131,7 +131,7 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
                 char* param)
 {
   struct Listener *listener = 0;
-  char flags[9];
+  char flags[12];
   char bindip[SOCKIPLEN];
   int show_hidden = IsOper(sptr);
   int count = (IsOper(sptr) || MyUser(sptr)) ? 100 : 8;
@@ -170,6 +170,10 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
       if (listener->fd_v6 < 0)
         flags[len++] = '-';
     }
+    if (FlagHas(&listener->flags, LISTEN_WEBSOCKET))
+      flags[len++] = 'W';
+    if (FlagHas(&listener->flags, LISTEN_WEBSOCKET_AUTO))
+      flags[len++] = 'A';
     flags[len] = '\0';
 
     if (irc_in_addr_unspec(&listener->addr.addr))

@@ -81,6 +81,7 @@ static struct lexer_token {
   TOKEN(SERVER),
   TOKEN(YES),
   TOKEN(NO),
+  TOKEN(AUTO),
   TOKEN(HUB),
   TOKEN(LEAF),
   TOKEN(UWORLD),

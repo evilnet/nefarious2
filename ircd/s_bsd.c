@@ -313,10 +313,11 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
   assert(0 != cptr);
 
   /*
-   * For WebSocket clients awaiting handshake, don't send any IRC data yet.
-   * Data will be queued and delivered after handshake completes.
+   * For WebSocket clients awaiting handshake or protocol sniffing,
+   * don't send any IRC data yet. Data will be queued and delivered
+   * after handshake/sniff completes.
    */
-  if (IsWSNeedHandshake(cptr)) {
+  if (IsWSNeedHandshake(cptr) || IsWSSniff(cptr)) {
     SetFlag(cptr, FLAG_BLOCKED);
     return 0;
   }
@@ -815,11 +816,18 @@ void add_connection(struct Listener* listener, int fd) {
 #endif
 
   /* Mark WebSocket connections - they need handshake before IRC protocol */
-  Debug((DEBUG_DEBUG, "WebSocket check: listener_websocket=%d, FEAT_DRAFT_WEBSOCKET=%d, listener_port=%d",
-         listener_websocket(listener), feature_bool(FEAT_DRAFT_WEBSOCKET), listener->addr.port));
-  if (listener_websocket(listener) && feature_bool(FEAT_DRAFT_WEBSOCKET)) {
-    Debug((DEBUG_DEBUG, "Setting WSNeedHandshake for new client"));
-    SetWSNeedHandshake(new_client);
+  Debug((DEBUG_DEBUG, "WebSocket check: listener_websocket=%d, listener_websocket_auto=%d, FEAT_DRAFT_WEBSOCKET=%d, listener_port=%d",
+         listener_websocket(listener), listener_websocket_auto(listener),
+         feature_bool(FEAT_DRAFT_WEBSOCKET), listener->addr.port));
+  if (feature_bool(FEAT_DRAFT_WEBSOCKET)) {
+    if (listener_websocket(listener)) {
+      Debug((DEBUG_DEBUG, "Setting WSNeedHandshake for new client"));
+      SetWSNeedHandshake(new_client);
+    } else if (listener_websocket_auto(listener)) {
+      Debug((DEBUG_DEBUG, "Setting WSSniff for new client (auto-detect)"));
+      SetWSSniff(new_client);
+      SetFlag(new_client, FLAG_BLOCKED);
+    }
   }
 
   Count_newunknown(UserStats);
@@ -931,6 +939,50 @@ ssl_read_again:
   }
   else
   {
+    /*
+     * Protocol sniffing for auto-detect WebSocket ports.
+     * Peek at first 4 bytes to distinguish "GET " (WebSocket) from IRC commands.
+     */
+    if (IsWSSniff(cptr)) {
+      char *client_buffer = cli_buffer(cptr);
+      int buffered = cli_count(cptr);
+
+      /* Accumulate if we don't have 4 bytes total yet */
+      if (buffered + length < 4) {
+        memcpy(client_buffer + buffered, readbuf, length);
+        cli_count(cptr) = buffered + length;
+        return 1; /* Need more data */
+      }
+
+      /* Build 4-byte peek from buffered + new data */
+      char peek[4];
+      int from_buffer = (buffered < 4) ? buffered : 4;
+      memcpy(peek, client_buffer, from_buffer);
+      if (from_buffer < 4)
+        memcpy(peek + from_buffer, readbuf, 4 - from_buffer);
+
+      ClearWSSniff(cptr);
+
+      if (peek[0] == 'G' && peek[1] == 'E' && peek[2] == 'T' && peek[3] == ' ') {
+        /* WebSocket — transition to handshake state */
+        Debug((DEBUG_DEBUG, "WSSniff: detected WebSocket (GET), switching to handshake"));
+        SetWSNeedHandshake(cptr);
+        /* Fall through to WSNeedHandshake handler which accumulates cli_buffer + readbuf */
+      } else {
+        /* Plain IRC — unblock and process normally */
+        Debug((DEBUG_DEBUG, "WSSniff: detected plain IRC, unblocking"));
+        ClrFlag(cptr, FLAG_BLOCKED);
+        send_queued(cptr);
+        /* Flush any previously buffered bytes into recvQ */
+        if (buffered > 0) {
+          if (dbuf_put(&(cli_recvQ(cptr)), client_buffer, buffered) == 0)
+            return exit_client(cptr, cptr, &me, "dbuf_put fail");
+          cli_count(cptr) = 0;
+        }
+        /* readbuf falls through to normal dbuf_put below */
+      }
+    }
+
     /*
      * Handle WebSocket handshake for client connections.
      * This must happen before normal client data processing.
@@ -1376,11 +1428,14 @@ void client_sock_callback(struct Event* ev)
   case ET_DESTROY:
     con_freeflag(con) &= ~FREEFLAG_SOCKET;
 
-    if (!con_freeflag(con) && !cptr)
-      free_connection(con);
 #ifdef USE_SSL
+    /* Free SSL BEFORE potentially freeing the Connection, because the
+     * Socket struct is embedded inside Connection.  Reversing the order
+     * would read/write freed memory (use-after-free). */
     ssl_free(ev_socket(ev));
 #endif /* USE_SSL */
+    if (!con_freeflag(con) && !cptr)
+      free_connection(con);
     break;
 
   case ET_CONNECT: /* socket connection completed */

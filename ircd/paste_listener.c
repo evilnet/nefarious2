@@ -117,6 +117,7 @@ struct paste_conn {
   int fd;
   SSL *ssl;
   enum paste_conn_state state;
+  int dying;              /**< set by paste_conn_free; awaiting ET_DESTROY */
   struct Socket socket;
   struct Timer timeout;
   char request[PASTE_MAX_REQUEST_SIZE];
@@ -772,8 +773,14 @@ static struct paste_conn *paste_conn_new(int fd)
 
 static void paste_conn_free(struct paste_conn *conn)
 {
-  if (!conn)
+  if (!conn || conn->dying)
     return;
+
+  /* Mark dying — the struct must survive until ET_DESTROY because
+   * the Socket is embedded inside it.  If we MyFree(conn) now while
+   * the event engine holds a reference (gh_ref > 0), the deferred
+   * ET_DESTROY writes to freed memory → heap corruption. */
+  conn->dying = 1;
 
   /* Remove from list */
   if (conn->prev)
@@ -788,24 +795,32 @@ static void paste_conn_free(struct paste_conn *conn)
   if (t_active(&conn->timeout))
     timer_del(&conn->timeout);
 
-  /* Clean up socket event */
-  socket_del(&conn->socket);
-
-  /* Clean up SSL */
+  /* Clean up SSL — do this before socket_del/close */
   if (conn->ssl) {
     SSL_shutdown(conn->ssl);
     SSL_free(conn->ssl);
+    conn->ssl = NULL;
   }
 
   /* Close fd */
-  if (conn->fd >= 0)
+  if (conn->fd >= 0) {
     close(conn->fd);
+    conn->fd = -1;
+  }
 
   /* Free response buffer */
-  if (conn->response)
+  if (conn->response) {
     MyFree(conn->response);
+    conn->response = NULL;
+  }
 
-  MyFree(conn);
+  /* socket_del marks the socket GEN_DESTROY.  If gh_ref > 0 (we're
+   * inside an event callback), ET_DESTROY is deferred until the
+   * engine decrements gh_ref to 0.  The conn struct stays alive
+   * until then — ET_DESTROY in paste_conn_callback calls MyFree.
+   * If gh_ref == 0 (shutdown path), ET_DESTROY fires synchronously
+   * from within socket_del and MyFree happens immediately. */
+  socket_del(&conn->socket);
 }
 
 static void paste_timeout_callback(struct Event *ev)
@@ -828,6 +843,16 @@ static void paste_conn_callback(struct Event *ev)
 {
   struct paste_conn *conn = (struct paste_conn *)s_data(ev_socket(ev));
   int rc;
+
+  if (!conn)
+    return;
+
+  /* After paste_conn_free marks dying, ignore all events except ET_DESTROY */
+  if (conn->dying) {
+    if (ev_type(ev) == ET_DESTROY)
+      MyFree(conn);
+    return;
+  }
 
   switch (ev_type(ev)) {
     case ET_READ:

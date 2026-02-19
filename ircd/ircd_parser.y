@@ -250,6 +250,7 @@ static void free_slist(struct SLink **link) {
 %token ENABLEOPTIONS
 %token TRUSTACCOUNT
 %token WEBSOCKET
+%token AUTO
 %token CERTIFICATE
 %token KEY
 %token REQUIRE_SASL
@@ -1087,8 +1088,14 @@ portssl: SSLTOK '=' YES ';'
 portwebsocket: WEBSOCKET '=' YES ';'
 {
   FlagSet(&listen_flags, LISTEN_WEBSOCKET);
+  FlagClr(&listen_flags, LISTEN_WEBSOCKET_AUTO);
 } | WEBSOCKET '=' NO ';'
 {
+  FlagClr(&listen_flags, LISTEN_WEBSOCKET);
+  FlagClr(&listen_flags, LISTEN_WEBSOCKET_AUTO);
+} | WEBSOCKET '=' AUTO ';'
+{
+  FlagSet(&listen_flags, LISTEN_WEBSOCKET_AUTO);
   FlagClr(&listen_flags, LISTEN_WEBSOCKET);
 }
 
