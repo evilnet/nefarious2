@@ -293,7 +293,7 @@ static int bouncer_resume(struct Client *sptr, const char *token)
   /* For clients without draft/chathistory, send a hint about how to get
    * missed messages. Full auto-replay could be added later.
    */
-  if (!CapActive(sptr, CAP_DRAFT_CHATHISTORY)) {
+  if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
     bouncer_auto_replay(sptr, session, since_time);
   }
 

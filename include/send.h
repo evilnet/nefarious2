@@ -64,6 +64,16 @@ extern void sendrawto_one(struct Client *to, const char *pattern, ...);
  */
 extern int suppress_shadow_dup;
 
+/** Send a BATCH command to the correct connections in a bouncer session.
+ * Checks per-connection caps (CapOwnHas/sh_active) instead of the union,
+ * and sends directly to each qualifying connection's sendQ.
+ * For non-bouncer clients, simply checks the client's own caps.
+ * @param[in] acptr  Local user client.
+ * @param[in] fmt    Format string for BATCH arguments (e.g., "+%s netsplit %s %s").
+ */
+extern void send_batch_perconn(struct Client *acptr, const char *fmt, ...);
+
+
 /** When set, numeric replies (send_reply) are duplicated to shadows
  * even when current_shadow is NULL.  Used by JOIN to mirror TOPIC,
  * NAMES, and MARKREAD to all bouncer connections.

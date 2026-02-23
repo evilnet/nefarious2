@@ -926,13 +926,32 @@ static int history_query_internal(const char *target,
 
         rc = mdbx_txn_park(txn, 0);
         if (rc != MDBX_SUCCESS) {
-          log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_txn_park failed: %s", mdbx_strerror(rc));
-          break;
+          /* Park failed — reopen cursor on the existing snapshot and
+           * continue without parking.  The snapshot stays held longer
+           * but the query still completes. */
+          rc = mdbx_cursor_open(txn, history_dbi, &cursor);
+          if (rc != MDBX_SUCCESS)
+            break;
+          /* Re-position and advance past the key we already processed */
+          key.iov_base = saved_key;
+          key.iov_len = saved_keylen;
+          rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
+          if (rc != 0)
+            break;
+          if (op == MDBX_PREV) {
+            rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+          } else if (key.iov_len == saved_keylen &&
+                     memcmp(key.iov_base, saved_key, saved_keylen) == 0) {
+            rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
+          }
+          if (rc != 0)
+            break;
+          continue;
         }
 
         rc = mdbx_txn_unpark(txn, 0);
         if (rc != MDBX_SUCCESS) {
-          log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_txn_unpark failed: %s", mdbx_strerror(rc));
+          /* Unpark failed — transaction is no longer usable. */
           break;
         }
 

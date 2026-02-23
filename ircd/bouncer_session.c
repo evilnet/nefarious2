@@ -4092,7 +4092,8 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
    * For active sessions there is no disconnect_time; the idle time
    * (user->last = last PRIVMSG from any connection) is a reasonable
    * proxy.  If no message was ever sent, fall back to signon time. */
-  if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY) && cli_user(primary)) {
+  if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY) && cli_user(primary)
+      && !CapHas(&shadow->sh_active, CAP_DRAFT_CHATHISTORY)) {
     time_t since = cli_user(primary)->last;
     if (since == 0)
       since = cli_firsttime(primary);

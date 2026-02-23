@@ -437,7 +437,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
   {
     char msgid[64] = "";
     char timestamp[32] = "";
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
@@ -456,11 +456,11 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
        * the client already displayed the message locally. */
       if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
         skip_shadow_dup = saved_shadow;
-      /* Set up shadow context to filter out shadows without echo-message.
-       * Without this, all shadows receive the echo regardless of their
-       * echo-message capability. */
+      /* Set up shadow context for tag filtering during echo/mirror.
+       * skip_primary_echo and skip_shadow_dup handle sender suppression;
+       * all OTHER shadows receive the mirror unconditionally. */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;
@@ -493,7 +493,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
   }
 #else
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
     if (need_echo || current_shadow || has_shadows) {
@@ -505,7 +505,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
         skip_shadow_dup = saved_shadow;
       /* Filter shadows without echo-message */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;
@@ -609,7 +609,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   {
     char msgid[64] = "";
     char timestamp[32] = "";
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
@@ -624,7 +624,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
         skip_shadow_dup = saved_shadow;
       /* Filter shadows without echo-message */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;
@@ -656,7 +656,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
   }
 #else
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
     if (need_echo || current_shadow || has_shadows) {
@@ -668,7 +668,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
         skip_shadow_dup = saved_shadow;
       /* Filter shadows without echo-message */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;
@@ -1058,7 +1058,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   {
     char msgid[64] = "";
     char timestamp[32] = "";
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
@@ -1071,7 +1071,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         skip_shadow_dup = saved_shadow;
       /* Filter shadows without echo-message */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;
@@ -1103,7 +1103,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   }
 #else
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
     if (need_echo || current_shadow || has_shadows) {
@@ -1115,7 +1115,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         skip_shadow_dup = saved_shadow;
       /* Filter shadows without echo-message */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;
@@ -1220,7 +1220,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   {
     char msgid[64] = "";
     char timestamp[32] = "";
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
@@ -1235,7 +1235,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
         skip_shadow_dup = saved_shadow;
       /* Filter shadows without echo-message */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;
@@ -1267,7 +1267,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   }
 #else
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
     if (need_echo || current_shadow || has_shadows) {
@@ -1279,7 +1279,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
         skip_shadow_dup = saved_shadow;
       /* Filter shadows without echo-message */
       shadow_tag_ctx.stc_active = 1;
-      shadow_tag_ctx.stc_withcap = CAP_ECHOMSG;
+      shadow_tag_ctx.stc_withcap = CAP_NONE;
       shadow_tag_ctx.stc_skipcap = CAP_NONE;
       shadow_tag_ctx.stc_from = sptr;
       shadow_tag_ctx.stc_cache = NULL;

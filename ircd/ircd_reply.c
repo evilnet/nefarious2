@@ -111,11 +111,11 @@ int send_reply(struct Client *to, int reply, ...)
   if (MyConnect(to)) {
     int pos = 0;
     int need_batch = feature_bool(FEAT_CAP_batch) &&
-                     CapActive(to, CAP_BATCH) && cli_batch_id(to)[0];
+                     CapRecipientHas(to, CAP_BATCH) && cli_batch_id(to)[0];
     int need_label = !need_batch && feature_bool(FEAT_CAP_labeled_response) &&
-                     CapActive(to, CAP_LABELEDRESP) && cli_label(to)[0];
+                     CapRecipientHas(to, CAP_LABELEDRESP) && cli_label(to)[0];
     int need_time = feature_bool(FEAT_CAP_server_time) &&
-                    CapActive(to, CAP_SERVERTIME);
+                    CapRecipientHas(to, CAP_SERVERTIME);
 
     if (need_batch || need_label || need_time) {
       tagbuf[0] = '@';

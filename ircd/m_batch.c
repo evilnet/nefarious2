@@ -59,7 +59,6 @@
 #include "s_user.h"
 #include "msgq.h"
 #include "class.h"
-#include "ml_storage.h"
 #include "history.h"
 #include "bouncer_session.h"
 #include "paste_store.h"
@@ -149,16 +148,14 @@ static const char *generate_paste_url(const char *msgid, const char *sender,
 }
 
 /*
- * send_multiline_fallback - Send truncated multiline with retrieval hints
+ * send_multiline_fallback - Send truncated multiline with paste URL
  *
- * Implements the graceful fallback chain for legacy clients:
- * 1. Native chathistory (client can retrieve via CHATHISTORY AROUND)
- * 2. HistServ available (client can /msg HistServ FETCH)
- * 3. Local &ml- storage (ultimate fallback, zero dependencies)
+ * Sends preview lines to legacy clients, with a paste URL for the full
+ * message when the paste service is available.
  *
  * Uses configurable preview budget (FEAT_MULTILINE_LEGACY_MAX_LINES):
  * - ≤max_preview lines: send all, no notice
- * - >max_preview lines: send max_preview lines + retrieval notice
+ * - >max_preview lines: send max_preview lines + paste URL notice
  *
  * Parameters:
  *   sptr        - sender client
@@ -211,73 +208,21 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
   /* Generate paste URL if service available */
   paste_url_str = generate_paste_url(msgid, cli_name(sptr), target, messages);
 
-  /* History-based fallback (tiers 2+3) requires:
-   * - Recipient is authenticated (only authed users can query history)
-   * - Sender is NOT +Y (no-storage users produce gap markers, not content)
-   * Otherwise fall through to virtual channel storage (tier 4). */
-  int history_usable = IsAccount(to) && !IsNoStorage(sptr)
-                       && !(is_channel && chptr &&
-                            (chptr->mode.exmode & EXMODE_NOSTORAGE));
-
-  /* Fallback chain: chathistory -> HistServ -> &ml- storage
-   * Paste URL included as additional retrieval option when available */
-  if (history_usable && CapActive(to, CAP_DRAFT_CHATHISTORY)) {
-    /* Tier 2: Client has native chathistory capability + can use it */
+  if (paste_url_str) {
     if (is_channel) {
-      if (paste_url_str) {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d or %s]",
-                      chptr, remaining, target, msgid, remaining + sent, paste_url_str);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
-                      chptr, remaining, target, msgid, remaining + sent);
-      }
+      sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - %s]",
+                    chptr, remaining, paste_url_str);
     } else {
-      if (paste_url_str) {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d or %s]",
-                      to, remaining, target, msgid, remaining + sent, paste_url_str);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
-                      to, remaining, target, msgid, remaining + sent);
-      }
-    }
-  } else if (history_usable && FindClient("HistServ")) {
-    /* Tier 3: HistServ available + recipient can use it */
-    if (is_channel) {
-      if (paste_url_str) {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s or %s]",
-                      chptr, remaining, target, msgid, paste_url_str);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /msg HistServ FETCH %s %s]",
-                      chptr, remaining, target, msgid);
-      }
-    } else {
-      if (paste_url_str) {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /msg HistServ FETCH %s %s or %s]",
-                      to, remaining, target, msgid, paste_url_str);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /msg HistServ FETCH %s %s]",
-                      to, remaining, target, msgid);
-      }
+      sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - %s]",
+                    to, remaining, paste_url_str);
     }
   } else {
-    /* Tier 4: Ultimate fallback - local &ml- storage (zero dependencies) */
-    ml_storage_store(msgid, cli_name(sptr), target, messages, total_lines);
     if (is_channel) {
-      if (paste_url_str) {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s or %s]",
-                      chptr, remaining, msgid, paste_url_str);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - /join &ml-%s to view full message]",
-                      chptr, remaining, msgid);
-      }
+      sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines]",
+                    chptr, remaining);
     } else {
-      if (paste_url_str) {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /join &ml-%s or %s]",
-                      to, remaining, msgid, paste_url_str);
-      } else {
-        sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - /join &ml-%s to view full message]",
-                      to, remaining, msgid);
-      }
+      sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines]",
+                    to, remaining);
     }
   }
 }
@@ -356,10 +301,12 @@ int ms_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                         batch_type ? " " : "",
                         batch_type ? batch_type : "");
 
-  /* For netjoin/netsplit batches, notify local clients with batch capability */
+  /* For netjoin/netsplit batches, notify local clients with batch capability.
+   * Uses send_batch_perconn to respect per-connection caps in bouncer
+   * sessions — CapActive() checks the union, which would incorrectly
+   * deliver BATCH to connections that never negotiated it. */
   if (batch_type && (strcmp(batch_type, "netjoin") == 0 ||
                      strcmp(batch_type, "netsplit") == 0)) {
-    /* Send batch markers to all local clients with batch capability */
     for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
       if (!MyConnect(acptr) || !IsUser(acptr))
         continue;
@@ -367,25 +314,21 @@ int ms_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         continue;
 
       if (is_start) {
-        /* Start batch for this client */
-        /* For netjoin: BATCH +refid netjoin server1 server2 */
-        /* For netsplit: BATCH +refid netsplit server1 server2 */
         if (parc >= 5 && !EmptyString(parv[3]) && !EmptyString(parv[4])) {
-          sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s %s",
-                        batch_ref, batch_type, parv[3], parv[4]);
+          send_batch_perconn(acptr, "+%s %s %s %s",
+                             batch_ref, batch_type, parv[3], parv[4]);
         }
         else if (parc >= 4 && !EmptyString(parv[3])) {
-          sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s",
-                        batch_ref, batch_type, parv[3]);
+          send_batch_perconn(acptr, "+%s %s %s",
+                             batch_ref, batch_type, parv[3]);
         }
         else {
-          sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s",
-                        batch_ref, batch_type);
+          send_batch_perconn(acptr, "+%s %s",
+                             batch_ref, batch_type);
         }
       }
       else {
-        /* End batch for this client */
-        sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batch_ref);
+        send_batch_perconn(acptr, "-%s", batch_ref);
       }
     }
   }
@@ -737,7 +680,7 @@ process_multiline_batch(struct Client *sptr)
             sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
           }
         } else {
-          /* Graceful fallback: chathistory -> HistServ -> &ml- storage */
+          /* Preview + paste URL fallback for legacy clients */
           send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
                                    con_ml_messages(con), total_lines, 1, chptr);
         }
@@ -882,7 +825,7 @@ process_multiline_batch(struct Client *sptr)
      * (sendq_limit + input_bytes * ECHO_MAX_FACTOR).
      */
     {
-      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
       struct BouncerSession *bsess = bounce_get_session(sptr);
       int has_shadows = bsess && bsess->hs_shadow_count > 0;
       int skip_echo = 0;
@@ -918,12 +861,12 @@ process_multiline_batch(struct Client *sptr)
         /* Send to primary if it has echo-message, OR if message came from a
          * shadow (primary didn't type it, so it needs to see it regardless). */
         if (need_echo || from_shadow) {
-          if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+          if (CapOwnHas(sptr, CAP_DRAFT_MULTILINE) && CapOwnHas(sptr, CAP_BATCH)) {
             /* Primary has multiline - send batch echo */
             char batchid[16];
             char timebuf[32];
-            int use_tags = CapActive(sptr, CAP_MSGTAGS);
-            int use_label = con_ml_label(con)[0] && CapActive(sptr, CAP_LABELEDRESP);
+            int use_tags = CapOwnHas(sptr, CAP_MSGTAGS);
+            int use_label = con_ml_label(con)[0] && CapOwnHas(sptr, CAP_LABELEDRESP);
 
             ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                           NumNick(sptr), con_batch_seq(con)++);
@@ -981,11 +924,10 @@ process_multiline_batch(struct Client *sptr)
 
             sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
           } else {
-            /* Primary doesn't have multiline - send fallback echo */
-            for (lp = con_ml_messages(con); lp; lp = lp->next) {
-              char *text = lp->value.cp + 1;
-              sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, text);
-            }
+            /* Primary doesn't have multiline - preview + truncation fallback */
+            send_multiline_fallback(sptr, sptr, chptr->chname, batch_base_msgid,
+                                     con_ml_messages(con), con_ml_msg_count(con),
+                                     1, chptr);
           }
         }
 
@@ -1101,52 +1043,17 @@ process_multiline_batch(struct Client *sptr)
                 sent++;
               }
 
-              /* Send truncation notice with retrieval hints if needed */
+              /* Send truncation notice if needed */
               if (total_lines > max_preview) {
                 int remaining = total_lines - sent;
-                /* Check retrieval options for this shadow */
-                int history_usable = IsAccount(sptr) && !IsNoStorage(sptr)
-                                     && !(chptr->mode.exmode & EXMODE_NOSTORAGE);
-
-                if (history_usable && CapHas(&sh->sh_active, CAP_DRAFT_CHATHISTORY)) {
-                  /* Shadow has chathistory - provide CHATHISTORY hint */
-                  if (remaining <= 15) {
-                    mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
-                                   cli_name(&me), chptr->chname, remaining, chptr->chname,
-                                   batch_base_msgid, remaining + sent);
-                  } else {
-                    mb = msgq_make(sptr, ":%s NOTICE %s :[Message continues (%d lines total) - CHATHISTORY AROUND %s msgid=%s %d]",
-                                   cli_name(&me), chptr->chname, total_lines, chptr->chname,
-                                   batch_base_msgid, total_lines);
-                  }
-                } else if (history_usable && FindClient("HistServ")) {
-                  /* HistServ available */
-                  if (remaining <= 15) {
-                    mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /msg HistServ FETCH %s %s]",
-                                   cli_name(&me), chptr->chname, remaining, chptr->chname, batch_base_msgid);
-                  } else {
-                    mb = msgq_make(sptr, ":%s NOTICE %s :[Message continues (%d lines total) - /msg HistServ FETCH %s %s]",
-                                   cli_name(&me), chptr->chname, total_lines, chptr->chname, batch_base_msgid);
-                  }
+                const char *echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                                chptr->chname, con_ml_messages(con));
+                if (echo_paste_url) {
+                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
+                                 cli_name(&me), chptr->chname, remaining, echo_paste_url);
                 } else {
-                  /* Fallback: paste URL (preferred) or &ml- storage */
-                  const char *echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                                  chptr->chname, con_ml_messages(con));
-                  if (echo_paste_url) {
-                    mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
-                                   cli_name(&me), chptr->chname, remaining, echo_paste_url);
-                  } else {
-                    /* Paste unavailable - use &ml- storage */
-                    ml_storage_store(batch_base_msgid, cli_name(sptr), chptr->chname,
-                                     con_ml_messages(con), total_lines);
-                    if (remaining <= 15) {
-                      mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /join &ml-%s to view full message]",
-                                     cli_name(&me), chptr->chname, remaining, batch_base_msgid);
-                    } else {
-                      mb = msgq_make(sptr, ":%s NOTICE %s :[Message continues (%d lines total) - /join &ml-%s to view]",
-                                     cli_name(&me), chptr->chname, total_lines, batch_base_msgid);
-                    }
-                  }
+                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines]",
+                                 cli_name(&me), chptr->chname, remaining);
                 }
                 if (mb) {
                   msgq_add(&sh->sh_sendQ, mb, 0);
@@ -1243,7 +1150,7 @@ process_multiline_batch(struct Client *sptr)
           sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
         }
       } else {
-        /* Graceful fallback: chathistory -> HistServ -> &ml- storage */
+        /* Preview + paste URL fallback for legacy clients */
         send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
                                  con_ml_messages(con), total_lines, 0, NULL);
       }
@@ -1379,7 +1286,7 @@ process_multiline_batch(struct Client *sptr)
     /* Echo to sender and bouncer shadows with per-connection capability awareness.
      * Same logic as channel echo above. */
     {
-      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
+      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
       struct BouncerSession *bsess = bounce_get_session(sptr);
       int has_shadows = bsess && bsess->hs_shadow_count > 0;
       int skip_dm_echo = 0;
@@ -1410,10 +1317,10 @@ process_multiline_batch(struct Client *sptr)
 
         /* Send to primary if it has echo-message, OR if a shadow sent it. */
         if (need_echo || from_shadow) {
-          for (lp = con_ml_messages(con); lp; lp = lp->next) {
-            char *text = lp->value.cp + 1;
-            sendcmdto_one(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, text);
-          }
+          /* Preview + truncation fallback for DM echo */
+          send_multiline_fallback(sptr, sptr, cli_name(acptr), batch_base_msgid,
+                                   con_ml_messages(con), con_ml_msg_count(con),
+                                   0, NULL);
         }
 
         /* Send to each shadow based on its capabilities.
@@ -1451,32 +1358,17 @@ process_multiline_batch(struct Client *sptr)
               sent++;
             }
 
-            /* Send truncation notice with retrieval hints if needed */
+            /* Send truncation notice if needed */
             if (total_lines > max_preview) {
               int remaining = total_lines - sent;
-              /* For PM echo to sender's shadow, check if PM history is available */
-              int history_usable = IsAccount(sptr);
-
-              if (history_usable && CapHas(&sh->sh_active, CAP_DRAFT_CHATHISTORY)) {
-                mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - CHATHISTORY AROUND %s msgid=%s %d]",
-                               cli_name(&me), cli_name(acptr), remaining, cli_name(acptr),
-                               batch_base_msgid, remaining + sent);
-              } else if (history_usable && FindClient("HistServ")) {
-                mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /msg HistServ FETCH %s %s]",
-                               cli_name(&me), cli_name(acptr), remaining, cli_name(acptr), batch_base_msgid);
+              const char *dm_echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
+                                                                 cli_name(acptr), con_ml_messages(con));
+              if (dm_echo_paste_url) {
+                mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
+                               cli_name(&me), cli_name(acptr), remaining, dm_echo_paste_url);
               } else {
-                /* Fallback: paste URL (preferred) or &ml- storage */
-                const char *dm_echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                                   cli_name(acptr), con_ml_messages(con));
-                if (dm_echo_paste_url) {
-                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
-                                 cli_name(&me), cli_name(acptr), remaining, dm_echo_paste_url);
-                } else {
-                  ml_storage_store(batch_base_msgid, cli_name(sptr), cli_name(acptr),
-                                   con_ml_messages(con), total_lines);
-                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - /join &ml-%s to view full message]",
-                                 cli_name(&me), cli_name(acptr), remaining, batch_base_msgid);
-                }
+                mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines]",
+                               cli_name(&me), cli_name(acptr), remaining);
               }
               if (mb) {
                 msgq_add(&sh->sh_sendQ, mb, 0);

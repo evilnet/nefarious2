@@ -413,7 +413,7 @@ int markMatchexServer(const char *cmask, int minlen)
  * @param[in,out] mask %Server name mask (collapse()d in-place).
  * @return Matching server with lowest numnick value (or NULL).
  */
-struct Client* find_match_server(const char *mask)
+struct Client* find_match_server(char *mask)
 {
   struct Client *acptr;
   int i;

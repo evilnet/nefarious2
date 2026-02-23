@@ -2653,7 +2653,7 @@ void send_batch_start(struct Client *to, const char *type)
   char tagbuf[256];
   int pos = 0;
 
-  if (!feature_bool(FEAT_CAP_batch) || !CapActive(to, CAP_BATCH) || !MyConnect(to))
+  if (!feature_bool(FEAT_CAP_batch) || !CapRecipientHas(to, CAP_BATCH) || !MyConnect(to))
     return;
 
   /* Generate a new batch ID */
@@ -2662,7 +2662,7 @@ void send_batch_start(struct Client *to, const char *type)
   /* Build message tags - include label if this is for labeled-response */
   tagbuf[0] = '\0';
   if (feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(to, CAP_LABELEDRESP) && cli_label(to)[0]) {
+      CapRecipientHas(to, CAP_LABELEDRESP) && cli_label(to)[0]) {
     tagbuf[0] = '@';
     pos = 1;
     pos += ircd_snprintf(NULL, tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
@@ -2695,7 +2695,7 @@ void send_batch_end(struct Client *to)
 {
   struct MsgBuf *mb;
 
-  if (!feature_bool(FEAT_CAP_batch) || !CapActive(to, CAP_BATCH) || !MyConnect(to))
+  if (!feature_bool(FEAT_CAP_batch) || !CapRecipientHas(to, CAP_BATCH) || !MyConnect(to))
     return;
 
   /* Only end if there's an active batch */
@@ -2765,7 +2765,7 @@ void send_s2s_batch_start(struct Client *sptr, const char *type,
   ircd_strncpy(cli_s2s_batch_type(sptr), type, sizeof(con_s2s_batch_type(cli_connect(sptr))) - 1);
   cli_s2s_batch_type(sptr)[sizeof(con_s2s_batch_type(cli_connect(sptr))) - 1] = '\0';
 
-  /* Send batch start to local clients with batch capability */
+  /* Send batch start to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!MyConnect(acptr) || !IsUser(acptr))
       continue;
@@ -2773,16 +2773,16 @@ void send_s2s_batch_start(struct Client *sptr, const char *type,
       continue;
 
     if (server1 && server2) {
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s %s",
-                    batch_id, type, server1, server2);
+      send_batch_perconn(acptr, "+%s %s %s %s",
+                         batch_id, type, server1, server2);
     }
     else if (server1) {
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s %s",
-                    batch_id, type, server1);
+      send_batch_perconn(acptr, "+%s %s %s",
+                         batch_id, type, server1);
     }
     else {
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s %s",
-                    batch_id, type);
+      send_batch_perconn(acptr, "+%s %s",
+                         batch_id, type);
     }
   }
 }
@@ -2808,19 +2808,83 @@ void send_s2s_batch_end(struct Client *sptr, const char *batch_id)
   /* Send to all servers */
   sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "-%s", id);
 
-  /* Send batch end to local clients with batch capability */
+  /* Send batch end to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!MyConnect(acptr) || !IsUser(acptr))
       continue;
     if (!CapActive(acptr, CAP_BATCH))
       continue;
 
-    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", id);
+    send_batch_perconn(acptr, "-%s", id);
   }
 
   /* Clear stored batch ID */
   cli_s2s_batch_id(sptr)[0] = '\0';
   cli_s2s_batch_type(sptr)[0] = '\0';
+}
+
+/** Send a BATCH command to the correct connections within a bouncer
+ * session, respecting per-connection CAP_BATCH negotiation.
+ *
+ * For non-bouncer clients: sends to the client if it has CAP_BATCH.
+ * For bouncer sessions: sends to primary (if it has CAP_BATCH on its own)
+ * and directly to each shadow that has CAP_BATCH.
+ *
+ * This avoids the problem where CapActive() (union caps) causes the primary
+ * to receive BATCH commands it never negotiated, and where send_buffer()
+ * auto-duplication sends BATCH to all shadows regardless of their caps.
+ *
+ * @param[in] acptr  Local user client to consider.
+ * @param[in] fmt    printf-style format string for the BATCH command body.
+ */
+void
+send_batch_perconn(struct Client *acptr, const char *fmt, ...)
+{
+  struct BouncerSession *bsess;
+  struct MsgBuf *mb;
+  struct VarData vd;
+  va_list ap;
+
+  va_start(ap, fmt);
+  vd.vd_format = fmt;
+  va_copy(vd.vd_args, ap);
+  mb = msgq_make(acptr, "%:#C %s %v", &me, MSG_BATCH_CMD, &vd);
+  va_end(vd.vd_args);
+  va_end(ap);
+
+  if (!mb)
+    return;
+
+  bsess = bounce_get_session(acptr);
+
+  if (bsess && bsess->hs_shadow_count > 0) {
+    /* Bouncer session with shadows: deliver per-connection */
+    struct ShadowConnection *sh;
+
+    /* Primary gets it only if its own caps include batch */
+    if (CapOwnHas(acptr, CAP_BATCH)) {
+      suppress_shadow_dup = 1;
+      send_buffer(acptr, mb, 0);
+      suppress_shadow_dup = 0;
+    }
+
+    /* Send directly to each shadow that has batch */
+    for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
+      if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+        continue;
+      if (!CapHas(&sh->sh_active, CAP_BATCH))
+        continue;
+      msgq_add(&sh->sh_sendQ, mb, 0);
+      sh->sh_sendM++;
+      socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+    }
+  } else {
+    /* Non-bouncer or no shadows: simple check */
+    if (CapOwnHas(acptr, CAP_BATCH))
+      send_buffer(acptr, mb, 0);
+  }
+
+  msgq_clean(mb);
 }
 
 /**
@@ -2854,7 +2918,10 @@ void send_netjoin_batch_start(struct Client *server, struct Client *uplink)
   /* Set active network batch so JOIN messages include @batch tag */
   set_active_network_batch(batch_id);
 
-  /* Send batch start to local clients with batch capability */
+  /* Send batch start to each connection that has batch capability.
+   * Uses send_batch_perconn to respect per-connection caps in bouncer
+   * sessions — CapActive() would check the union, incorrectly sending
+   * BATCH to connections that never negotiated it. */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!MyConnect(acptr) || !IsUser(acptr))
       continue;
@@ -2862,11 +2929,11 @@ void send_netjoin_batch_start(struct Client *server, struct Client *uplink)
       continue;
 
     if (uplink) {
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netjoin %s %s",
-                    batch_id, cli_name(uplink), cli_name(server));
+      send_batch_perconn(acptr, "+%s netjoin %s %s",
+                         batch_id, cli_name(uplink), cli_name(server));
     } else {
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netjoin %s",
-                    batch_id, cli_name(server));
+      send_batch_perconn(acptr, "+%s netjoin %s",
+                         batch_id, cli_name(server));
     }
   }
 }
@@ -2893,14 +2960,14 @@ void send_netjoin_batch_end(struct Client *server)
   /* Clear active network batch */
   set_active_network_batch(NULL);
 
-  /* Send batch end to local clients with batch capability */
+  /* Send batch end to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!MyConnect(acptr) || !IsUser(acptr))
       continue;
     if (!CapActive(acptr, CAP_BATCH))
       continue;
 
-    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batch_id);
+    send_batch_perconn(acptr, "-%s", batch_id);
   }
 
   /* Clear stored batch ID */
@@ -2929,7 +2996,7 @@ void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
   ircd_snprintf(NULL, batch_id_out, batch_id_len, "NS%s%lu",
                 cli_yxx(&me), netsplit_seq++);
 
-  /* Send batch start to local clients with batch capability */
+  /* Send batch start to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!MyConnect(acptr) || !IsUser(acptr))
       continue;
@@ -2937,11 +3004,11 @@ void send_netsplit_batch_start(struct Client *server, struct Client *uplink,
       continue;
 
     if (uplink && server) {
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netsplit %s %s",
-                    batch_id_out, cli_name(uplink), cli_name(server));
+      send_batch_perconn(acptr, "+%s netsplit %s %s",
+                         batch_id_out, cli_name(uplink), cli_name(server));
     } else if (server) {
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s netsplit %s",
-                    batch_id_out, cli_name(server));
+      send_batch_perconn(acptr, "+%s netsplit %s",
+                         batch_id_out, cli_name(server));
     }
   }
 }
@@ -2960,14 +3027,14 @@ void send_netsplit_batch_end(const char *batch_id)
   if (!batch_id || !*batch_id)
     return;
 
-  /* Send batch end to local clients with batch capability */
+  /* Send batch end to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!MyConnect(acptr) || !IsUser(acptr))
       continue;
     if (!CapActive(acptr, CAP_BATCH))
       continue;
 
-    sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batch_id);
+    send_batch_perconn(acptr, "-%s", batch_id);
   }
 }
 
@@ -2995,8 +3062,8 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
   if (!MyConnect(to))
     return;
 
-  /* If client doesn't have standard-replies, fall back to numerics or NOTICE */
-  if (!feature_bool(FEAT_CAP_standard_replies) || !CapActive(to, CAP_STANDARDREPLIES)) {
+  /* If recipient doesn't have standard-replies, fall back to numerics or NOTICE */
+  if (!feature_bool(FEAT_CAP_standard_replies) || !CapRecipientHas(to, CAP_STANDARDREPLIES)) {
     /* Map known error codes to traditional numerics where applicable */
     if (strcmp(type, "FAIL") == 0) {
       if (strcmp(code, "NEED_MORE_PARAMS") == 0) {
@@ -3031,9 +3098,9 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
   }
 
   /* Format tags with explicit label override if provided */
-  use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  use_time = feature_bool(FEAT_CAP_server_time) && CapRecipientHas(to, CAP_SERVERTIME);
   use_label = feature_bool(FEAT_CAP_labeled_response) &&
-              CapActive(to, CAP_LABELEDRESP) &&
+              CapRecipientHas(to, CAP_LABELEDRESP) &&
               ((label && *label) || cli_label(to)[0]);
 
   if (use_time || use_label) {
@@ -3174,7 +3241,7 @@ void send_labeled_ack(struct Client *to)
   /* Only send ACK if client has labeled-response capability and a pending label */
   if (!to || !MyConnect(to))
     return;
-  if (!feature_bool(FEAT_CAP_labeled_response) || !CapActive(to, CAP_LABELEDRESP))
+  if (!feature_bool(FEAT_CAP_labeled_response) || !CapRecipientHas(to, CAP_LABELEDRESP))
     return;
   if (!cli_label(to)[0])
     return;
@@ -3187,7 +3254,7 @@ void send_labeled_ack(struct Client *to)
   pos = 1;
   pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "label=%s", cli_label(to));
 
-  use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
+  use_time = feature_bool(FEAT_CAP_server_time) && CapRecipientHas(to, CAP_SERVERTIME);
   if (use_time) {
     struct timeval tv;
     struct tm tm;

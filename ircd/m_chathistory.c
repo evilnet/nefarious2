@@ -54,6 +54,7 @@
 #include "s_conf.h"
 #include "s_debug.h"
 #include "send.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -516,7 +517,7 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
   /* Check if content contains Unit Separator (multiline) */
   separator = strchr(content, '\x1F');
 
-  if (separator && CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+  if (separator && CapRecipientHas(sptr, CAP_DRAFT_MULTILINE) && CapRecipientHas(sptr, CAP_BATCH)) {
     /* Re-batch as draft/multiline nested inside chathistory batch */
     static unsigned long ml_counter = 0;
     char ml_batchid[BATCH_ID_LEN];
@@ -762,7 +763,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
   generate_batch_id(batchid, sizeof(batchid), sptr);
 
   /* Start batch */
-  if (CapActive(sptr, CAP_BATCH)) {
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
     sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s chathistory %s",
                   batchid, target);
   }
@@ -793,7 +794,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
 
       /* Send collapsed gap marker using timestamp/msgid from first gap */
       send_gap_marker(sptr, target,
-                       CapActive(sptr, CAP_BATCH) ? batchid : NULL,
+                       CapRecipientHas(sptr, CAP_BATCH) ? batchid : NULL,
                        time_str, gap_start->msgid, gap_start->sender,
                        gap_count);
       continue;
@@ -803,12 +804,12 @@ static void send_history_batch(struct Client *sptr, const char *target,
 
     /* Send message, handling multiline content if present */
     send_history_message(sptr, msg, target,
-                         CapActive(sptr, CAP_BATCH) ? batchid : NULL,
+                         CapRecipientHas(sptr, CAP_BATCH) ? batchid : NULL,
                          time_str, cmd);
   }
 
   /* End batch */
-  if (CapActive(sptr, CAP_BATCH)) {
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
     sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
   }
 }
@@ -1358,7 +1359,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   /* Send targets in a batch */
   generate_batch_id(batchid, sizeof(batchid), sptr);
 
-  if (CapActive(sptr, CAP_BATCH)) {
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
     sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/chathistory-targets",
                   batchid);
   }
@@ -1374,7 +1375,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
       else
         time_str = tgt->last_timestamp;  /* Fallback if conversion fails */
 
-      if (CapActive(sptr, CAP_BATCH)) {
+      if (CapRecipientHas(sptr, CAP_BATCH)) {
         sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
                       batchid, cli_name(&me), "chathistory", cli_name(&me),
                       tgt->target, time_str);
@@ -1386,7 +1387,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
     }
   }
 
-  if (CapActive(sptr, CAP_BATCH)) {
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
     sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
   }
 

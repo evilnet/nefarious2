@@ -47,6 +47,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "send.h"
+#include "bouncer_session.h"
 #include "struct.h"
 #include "sys.h"
 #include "userload.h"
@@ -174,7 +175,7 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
     if (!chan) {
       /* No flags possible for the channel, so skip them all. */
     }
-    else if ((IsNamesX(sptr) || CapActive(sptr, CAP_NAMESX)) || fields) {
+    else if ((IsNamesX(sptr) || CapRecipientHas(sptr, CAP_NAMESX)) || fields) {
       /* If you specified flags then we assume you know how to parse
        * multiple channel status flags, as this is currently the only
        * way to know if someone has @'s *and* is +'d.

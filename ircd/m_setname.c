@@ -148,7 +148,7 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
   /* Echo SETNAME back to the sender per IRCv3 spec */
-  if (CapActive(sptr, CAP_SETNAME))
+  if (CapOwnHas(sptr, CAP_SETNAME))
     sendcmdto_one(sptr, CMD_SETNAME, sptr, ":%s", cli_info(sptr));
 
   /* Notify channel members with setname capability (excluding sender who already got echo) */
