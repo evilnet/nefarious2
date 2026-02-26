@@ -54,6 +54,7 @@
 #endif
 
 struct Client;
+struct Listener;
 
 /** Maximum length of a bouncer session token (base64). */
 #define BOUNCER_TOKEN_LEN       64
@@ -176,6 +177,12 @@ struct ShadowConnection {
   char                     sh_away_msg[AWAYLEN + 1]; /**< Per-connection away message */
   unsigned int             sh_flags;    /**< Shadow-specific flags */
   char                     sh_sock_ip[SOCKIPLEN + 1]; /**< Remote IP as string */
+  unsigned short           sh_port;            /**< Remote port number */
+  char                     sh_sockhost[HOSTLEN + 1]; /**< Remote hostname */
+  struct irc_in_addr       sh_ip;              /**< Remote IP (struct) */
+  struct irc_in_addr       sh_connectip;       /**< Connection IP */
+  char                     sh_connecthost[HOSTLEN + 1]; /**< Connection hostname */
+  struct Listener         *sh_listener;        /**< Listener reference (ref-counted) */
   /* Per-connection lifetime data counters (carried across primary/shadow phases) */
   uint64_t                 sh_sendB;    /**< Connection lifetime bytes sent */
   uint64_t                 sh_receiveB; /**< Connection lifetime bytes received */

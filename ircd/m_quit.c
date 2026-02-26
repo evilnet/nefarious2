@@ -113,6 +113,20 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(0 != sptr);
   assert(cptr == sptr);
 
+  /* Try shadow promotion first — if the session has shadows, promote
+   * one to primary rather than going HOLDING.  This mirrors the
+   * s_bsd.c disconnect handler which also tries promotion first.
+   * Clients routinely send QUIT on disconnect, so this is the
+   * primary path for graceful disconnects with shadows attached. */
+  if (IsUser(sptr) && bounce_enabled_for(sptr) && IsAccount(sptr)) {
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    if (bsess && bsess->hs_shadows) {
+      if (bounce_promote_shadow(bsess) == 0)
+        return 0; /* Shadow promoted — client stays alive */
+      /* Promotion failed — fall through to hold or exit */
+    }
+  }
+
   /* Fix #25: Check if client should enter bouncer HOLD mode instead of
    * quitting.  Clients routinely send QUIT on disconnect — the whole
    * purpose of hold is to survive that and keep channels alive. */

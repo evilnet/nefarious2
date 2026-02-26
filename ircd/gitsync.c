@@ -240,6 +240,11 @@ gitsync_generate_ssh_key(const char *key_path)
  * @param payload User payload (unused)
  * @return 0 on success, negative on error
  */
+/** Track credential callback attempts to prevent infinite retry loops.
+ * libgit2 calls the callback again after auth failure — if we already
+ * provided credentials, there's no point retrying with the same key. */
+static int gitsync_cred_attempts;
+
 static int
 gitsync_cred_callback(git_credential **out, const char *url,
                       const char *username_from_url,
@@ -254,6 +259,13 @@ gitsync_cred_callback(git_credential **out, const char *url,
 
   if (!(allowed_types & GIT_CREDENTIAL_SSH_KEY))
     return GIT_PASSTHROUGH;
+
+  /* If we already provided credentials and they failed, stop retrying */
+  if (gitsync_cred_attempts > 0) {
+    Debug((DEBUG_INFO, "GitSync: SSH auth failed, not retrying"));
+    return GIT_EUSER;
+  }
+  gitsync_cred_attempts++;
 
   ssh_key = feature_str(FEAT_GITSYNC_SSH_KEY);
   if (ssh_key && *ssh_key) {
@@ -448,6 +460,7 @@ gitsync_clone(const char *repo_url, const char *local_path, git_repository **rep
 
   Debug((DEBUG_INFO, "GitSync: Cloning %s to %s", repo_url, local_path));
 
+  gitsync_cred_attempts = 0;
   error = git_clone(repo, repo_url, local_path, &clone_opts);
   if (error < 0) {
     const git_error *e = git_error_last();
@@ -499,6 +512,7 @@ gitsync_fetch_and_reset(git_repository *repo, const char *branch)
 
   /* Fetch from origin with tags */
   Debug((DEBUG_INFO, "GitSync: Fetching from origin (with tags)"));
+  gitsync_cred_attempts = 0;
   error = git_remote_fetch(remote, NULL, &fetch_opts, "gitsync fetch");
   git_remote_free(remote);
 

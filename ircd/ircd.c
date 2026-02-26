@@ -600,6 +600,15 @@ static void check_pings(struct Event* ev) {
                              "No response from %s, closing link",
                              cli_name(cptr));
 
+      /* Try shadow promotion first — if shadows exist, promote one */
+      if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
+        struct BouncerSession *bsess = bounce_get_session(cptr);
+        if (bsess && bsess->hs_shadows) {
+          if (bounce_promote_shadow(bsess) == 0)
+            continue; /* Shadow promoted — client stays alive */
+        }
+      }
+
       /* Check if client should enter bouncer HOLD mode instead of exiting */
       if (IsUser(cptr) && bounce_should_hold(cptr)) {
         if (bounce_hold_client(cptr, "Ping timeout") == 0) {

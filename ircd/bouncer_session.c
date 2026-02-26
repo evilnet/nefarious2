@@ -223,6 +223,10 @@ static void deferred_shadow_free_cb(struct Event *ev)
   struct ShadowConnection *s, *next;
   for (s = deferred_free_head; s; s = next) {
     next = s->sh_next;
+    if (s->sh_listener) {
+      release_listener(s->sh_listener);
+      s->sh_listener = NULL;
+    }
     MyFree(s);
   }
   deferred_free_head = NULL;
@@ -973,6 +977,19 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
 #endif
 
           if (shadow) {
+            /* Capture connection metadata for later promotion.
+             * The Client struct will be freed by exit_client after we
+             * return, so copy everything we'll need to restore the
+             * primary's identity if this shadow gets promoted. */
+            shadow->sh_port = cli_port(cptr);
+            ircd_strncpy(shadow->sh_sockhost, cli_sockhost(cptr), HOSTLEN + 1);
+            memcpy(&shadow->sh_ip, &cli_ip(cptr), sizeof(struct irc_in_addr));
+            memcpy(&shadow->sh_connectip, &cli_connectip(cptr), sizeof(struct irc_in_addr));
+            ircd_strncpy(shadow->sh_connecthost, cli_connecthost(cptr), HOSTLEN + 1);
+            shadow->sh_listener = con_listener(cli_connect(cptr));
+            if (shadow->sh_listener)
+              shadow->sh_listener->ref_count++;  /* Own ref; exit_client releases cptr's */
+
             /* Record connect event in connection history */
             bounce_history_connect(session, sock_ip, cli_sockhost(cptr));
 
@@ -1343,6 +1360,10 @@ void bounce_destroy(struct BouncerSession *session)
      * ET_DESTROY handler from freeing the shadow (which would make
      * the MsgQClear/dbuf_delete below use-after-free). */
     s_data(&shadow->sh_socket) = NULL;
+    if (shadow->sh_listener) {
+      release_listener(shadow->sh_listener);
+      shadow->sh_listener = NULL;
+    }
 #ifdef USE_SSL
     ssl_free(&shadow->sh_socket);
     shadow->sh_socket.ssl = NULL;
@@ -2638,7 +2659,12 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     }
   }
 
-  /* Step 6: Reset socket interest to readable */
+  /* Step 6: Reset socket interest and clear stale flags.
+   * FLAG_BLOCKED may be left over from the previous connection (before
+   * HOLDING). If not cleared, send_queued() returns immediately and
+   * the welcome sequence never gets written — the client hangs. */
+  ClrFlag(ghost, FLAG_BLOCKED);
+  ClrFlag(ghost, FLAG_DEADSOCKET);
   socket_events(&cli_socket(ghost), SOCK_EVENT_READABLE);
 
   /* Step 6a: Transfer connection identity from temp to ghost.
@@ -3262,12 +3288,16 @@ static void shadow_sock_callback(struct Event *ev)
      * never accesses freed memory in the epoll dispatch loop.
      * bounce_promote_shadow() and bounce_destroy() clear s_data before
      * socket_del() and use bounce_defer_shadow_free() instead. */
+    if (shadow) {
 #ifdef USE_SSL
-    if (shadow)
       ssl_free(&shadow->sh_socket);
 #endif
-    if (shadow)
+      if (shadow->sh_listener) {
+        release_listener(shadow->sh_listener);
+        shadow->sh_listener = NULL;
+      }
       MyFree(shadow);
+    }
     return;
 
   case ET_READ:
@@ -3298,9 +3328,9 @@ static void shadow_sock_callback(struct Event *ev)
   case ET_WRITE:
     /* Flush shadow sendQ to its socket */
     shadow_flush_sendq(shadow);
-    /* If sendQ still has data and we're not blocked, request more writes */
-    if (MsgQLength(&shadow->sh_sendQ) > 0 &&
-        !(shadow->sh_flags & SHADOW_FLAGS_BLOCKED)) {
+    /* Keep requesting writes if data remains (even if blocked — we need
+     * the write event to know when the OS buffer drains). */
+    if (MsgQLength(&shadow->sh_sendQ) > 0) {
       socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
     } else {
       /* sendQ drained — stop requesting writable events */
@@ -3455,6 +3485,12 @@ void bounce_remove_shadow(struct ShadowConnection *shadow)
   /* Clear current_shadow if this shadow is the active command source */
   if (current_shadow == shadow)
     current_shadow = NULL;
+
+  /* Release listener reference before cleanup */
+  if (shadow->sh_listener) {
+    release_listener(shadow->sh_listener);
+    shadow->sh_listener = NULL;
+  }
 
   /* Mark dead, clean up queues, and trigger socket destruction.
    * socket_del() marks the socket GEN_DESTROY; the event system will
@@ -3611,6 +3647,7 @@ int bounce_promote_shadow(struct BouncerSession *session)
   /* Step 4: Transplant the stolen fd into the Client's Connection. */
   s_fd(&con_socket(con)) = fd;
   ClrFlag(cptr, FLAG_DEADSOCKET);
+  ClrFlag(cptr, FLAG_BLOCKED);
 
   /* Step 5: Transfer sendQ/recvQ contents.
    * Move any pending data from shadow's queues to the Connection. */
@@ -3632,6 +3669,23 @@ int bounce_promote_shadow(struct BouncerSession *session)
   memcpy(con_active_own(con), &shadow->sh_active, sizeof(struct CapSet));
   memcpy(con_active(con), &shadow->sh_active, sizeof(struct CapSet));
   con_capab_version(con) = shadow->sh_capab_version;
+
+  /* Step 6b: Transfer connection identity from shadow to primary.
+   * The primary's IP, sockhost, port, listener may be stale (from the
+   * old primary connection). Update them to reflect the promoted shadow's
+   * actual connection properties. Mirrors bounce_revive() Step 6a. */
+  memcpy(&cli_ip(cptr), &shadow->sh_ip, sizeof(struct irc_in_addr));
+  ircd_strncpy(con_sock_ip(con), shadow->sh_sock_ip, SOCKIPLEN + 1);
+  ircd_strncpy(con_sockhost(con), shadow->sh_sockhost, HOSTLEN + 1);
+  con->con_port = shadow->sh_port;
+  memcpy(&cli_connectip(cptr), &shadow->sh_connectip, sizeof(struct irc_in_addr));
+  ircd_strncpy(cli_connecthost(cptr), shadow->sh_connecthost, HOSTLEN + 1);
+
+  /* Transfer listener reference (shadow's ref transfers to primary) */
+  if (con_listener(con))
+    release_listener(con_listener(con));
+  con_listener(con) = shadow->sh_listener;
+  shadow->sh_listener = NULL; /* Prevent deferred free from releasing */
 
   /* Step 7: Update LocalClientArray */
   LocalClientArray[fd] = cptr;
