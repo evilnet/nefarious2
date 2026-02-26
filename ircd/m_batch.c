@@ -852,11 +852,16 @@ process_multiline_batch(struct Client *sptr)
       /* Also need to deliver to primary when a shadow originated the message,
        * even if primary doesn't have echo-message — the primary didn't type it. */
       int from_shadow = (current_shadow != NULL);
+      struct ShadowConnection *saved_shadow = current_shadow;
 
       if (!skip_echo && (need_echo || has_shadows || from_shadow)) {
         /* Suppress automatic shadow duplication - we handle shadows manually
          * to send the appropriate format based on each shadow's capabilities. */
         suppress_shadow_dup = 1;
+
+        /* Clear current_shadow so send_buffer() delivers to the primary's
+         * sendQ, not the shadow's.  The shadow loop below handles shadows. */
+        current_shadow = NULL;
 
         /* Send to primary if it has echo-message, OR if message came from a
          * shadow (primary didn't type it, so it needs to see it regardless). */
@@ -930,6 +935,9 @@ process_multiline_batch(struct Client *sptr)
                                      1, chptr);
           }
         }
+
+        /* Restore current_shadow before the shadow loop */
+        current_shadow = saved_shadow;
 
         /* Send to each shadow based on its capabilities.
          * Unlike the primary, shadows ALWAYS receive the message regardless of
@@ -1311,9 +1319,14 @@ process_multiline_batch(struct Client *sptr)
 
       /* Also deliver to primary when shadow originated the message. */
       int from_shadow = (current_shadow != NULL);
+      struct ShadowConnection *saved_dm_shadow = current_shadow;
 
       if (!skip_dm_echo && (need_echo || has_shadows || from_shadow)) {
         suppress_shadow_dup = 1;
+
+        /* Clear current_shadow so send_buffer() delivers to the primary's
+         * sendQ, not the shadow's.  The shadow loop below handles shadows. */
+        current_shadow = NULL;
 
         /* Send to primary if it has echo-message, OR if a shadow sent it. */
         if (need_echo || from_shadow) {
@@ -1322,6 +1335,9 @@ process_multiline_batch(struct Client *sptr)
                                    con_ml_messages(con), con_ml_msg_count(con),
                                    0, NULL);
         }
+
+        /* Restore current_shadow before the shadow loop */
+        current_shadow = saved_dm_shadow;
 
         /* Send to each shadow based on its capabilities.
          * Shadows ALWAYS receive the message regardless of echo-message cap -
