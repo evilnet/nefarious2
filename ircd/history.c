@@ -757,7 +757,8 @@ int history_has_msgid(const char *msgid)
 static int history_query_internal(const char *target,
                                   const char *start_key, int start_keylen,
                                   enum HistoryDirection direction,
-                                  int limit, struct HistoryMessage **result)
+                                  int limit, struct HistoryMessage **result,
+                                  const char *floor_key, int floor_keylen)
 {
   MDBX_txn *txn;
   MDBX_cursor *cursor;
@@ -856,6 +857,16 @@ static int history_query_internal(const char *target,
        * LMDB keys are sorted, so if we've moved past the target prefix,
        * we'll never find more messages for this target. */
       break;
+    }
+
+    /* Floor check for backward iteration: stop if we've walked past
+     * the floor timestamp (used by auto-replay to get the most recent
+     * N messages but no older than the since-timestamp). */
+    if (floor_key && floor_keylen > 0 &&
+        (direction == HISTORY_DIR_BEFORE || direction == HISTORY_DIR_LATEST)) {
+      if (key.iov_len >= (size_t)floor_keylen &&
+          memcmp(key.iov_base, floor_key, floor_keylen) <= 0)
+        break;
     }
 
     /* Allocate message */
@@ -1032,7 +1043,8 @@ int history_query_before(const char *target, enum HistoryRefType ref_type,
             target, reference, keylen);
 
   return history_query_internal(target, keybuf, keylen,
-                                HISTORY_DIR_BEFORE, limit, result);
+                                HISTORY_DIR_BEFORE, limit, result,
+                                NULL, 0);
 }
 
 int history_query_after(const char *target, enum HistoryRefType ref_type,
@@ -1062,7 +1074,8 @@ int history_query_after(const char *target, enum HistoryRefType ref_type,
     return -1;
 
   return history_query_internal(target, keybuf, keylen,
-                                HISTORY_DIR_AFTER, limit, result);
+                                HISTORY_DIR_AFTER, limit, result,
+                                NULL, 0);
 }
 
 int history_query_latest(const char *target, enum HistoryRefType ref_type,
@@ -1098,7 +1111,41 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
     return -1;
 
   return history_query_internal(target, keybuf, keylen,
-                                HISTORY_DIR_LATEST, limit, result);
+                                HISTORY_DIR_LATEST, limit, result,
+                                NULL, 0);
+}
+
+int history_query_latest_after(const char *target, int limit,
+                               const char *after_timestamp,
+                               struct HistoryMessage **result)
+{
+  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+  char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+  char timestamp[HISTORY_TIMESTAMP_LEN];
+  const char *floor_ts;
+  int keylen, floorlen;
+
+  *result = NULL;
+
+  /* Convert after_timestamp if ISO 8601 */
+  if (history_iso_to_unix(after_timestamp, timestamp, sizeof(timestamp)) == 0)
+    floor_ts = timestamp;
+  else
+    floor_ts = after_timestamp;
+
+  /* Start key: far future (scan backward from end of target's range) */
+  keylen = build_key(keybuf, sizeof(keybuf), target, "32503680000.000", NULL);
+  if (keylen < 0)
+    return -1;
+
+  /* Floor key: stop backward walk at (or before) the since-timestamp */
+  floorlen = build_key(floorbuf, sizeof(floorbuf), target, floor_ts, NULL);
+  if (floorlen < 0)
+    return -1;
+
+  return history_query_internal(target, keybuf, keylen,
+                                HISTORY_DIR_LATEST, limit, result,
+                                floorbuf, floorlen);
 }
 
 int history_query_around(const char *target, enum HistoryRefType ref_type,
@@ -2769,6 +2816,15 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
                          struct HistoryMessage **result)
 {
   (void)target; (void)ref_type; (void)reference; (void)limit;
+  *result = NULL;
+  return -1;
+}
+
+int history_query_latest_after(const char *target, int limit,
+                               const char *after_timestamp,
+                               struct HistoryMessage **result)
+{
+  (void)target; (void)limit; (void)after_timestamp;
   *result = NULL;
   return -1;
 }

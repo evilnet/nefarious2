@@ -178,6 +178,21 @@ extern int history_query_latest(const char *target, enum HistoryRefType ref_type
                                  const char *reference, int limit,
                                  struct HistoryMessage **result);
 
+/** Query the most recent messages, but no older than a floor timestamp.
+ * Walks backward from the end of the target's history, collecting up to
+ * \a limit messages, stopping if it reaches \a after_timestamp.
+ * Returns results in chronological order (oldest first).
+ * @param[in] target Channel or nick to query.
+ * @param[in] limit Maximum messages to return.
+ * @param[in] after_timestamp Floor timestamp (Unix or ISO 8601); messages
+ *            at or before this time are excluded.
+ * @param[out] result Pointer to result list head (caller must free).
+ * @return Number of messages returned, or -1 on error.
+ */
+extern int history_query_latest_after(const char *target, int limit,
+                                       const char *after_timestamp,
+                                       struct HistoryMessage **result);
+
 /** Query messages around a reference point.
  * Returns limit/2 messages before and limit/2 messages after.
  * @param[in] target Channel or nick to query.

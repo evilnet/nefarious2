@@ -833,9 +833,10 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
   if (!history_is_available())
     return -1;
 
-  /* Query messages after the given timestamp */
-  count = history_query_after(target, HISTORY_REF_TIMESTAMP, since_timestamp,
-                              limit, &messages);
+  /* Query the most recent messages, but no older than the since-timestamp.
+   * Uses LATEST with a floor rather than AFTER so that when there are more
+   * messages than the limit, we get the newest ones (not the oldest). */
+  count = history_query_latest_after(target, limit, since_timestamp, &messages);
   if (count < 0)
     return -1;
 
