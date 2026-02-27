@@ -344,7 +344,7 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
 #ifdef USE_LIBGIT2
   const char *action;
-  const char *target = NULL;
+  char *target = NULL;
   struct Client *acptr;
   int is_force = 0;
   int is_status = 0;
@@ -686,7 +686,7 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
 #ifdef USE_LIBGIT2
-  const char *target;
+  char *target;
   const char *action;
   const char *subarg = NULL;
   struct Client *acptr;
