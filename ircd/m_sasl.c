@@ -322,6 +322,10 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     cli_saslstart(acptr) = 0;
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
+
+    /* Unblock registration if SASL was holding it */
+    if (cli_auth(acptr))
+      return auth_sasl_done(cli_auth(acptr));
   } else if (reply[0] == 'M')
     return send_reply(acptr, ERR_SASLMECHS, data);
 
@@ -369,6 +373,10 @@ int abort_sasl(struct Client* cptr, int timeout) {
   cli_saslagent(cptr) = NULL;
   cli_saslcookie(cptr) = 0;
   cli_saslstart(cptr) = 0;
+
+  /* Unblock registration if SASL was holding it */
+  if (cli_auth(cptr))
+    return auth_sasl_done(cli_auth(cptr));
 
   return 0;
 }

@@ -91,7 +91,8 @@ enum AuthRequestFlag {
     AR_NEEDS_PONG,      /**< user has not PONGed */
     AR_NEEDS_USER,      /**< user must send USER command */
     AR_NEEDS_NICK,      /**< user must send NICK command */
-    AR_LAST_SCAN = AR_NEEDS_NICK, /**< maximum flag to scan through */
+    AR_SASL_PENDING,    /**< SASL authentication in progress */
+    AR_LAST_SCAN = AR_SASL_PENDING, /**< maximum flag to scan through */
     AR_IAUTH_PENDING,   /**< iauth request sent, waiting for response */
     AR_IAUTH_HURRY,     /**< we told iauth to hurry up */
     AR_IAUTH_USERNAME,  /**< iauth sent a username (preferred or forced) */
@@ -1626,6 +1627,28 @@ int auth_cap_done(struct AuthRequest *auth)
   return check_auth_finished(auth);
 }
 
+/** Mark that SASL authentication has started.
+ * This blocks authorization until auth_sasl_done() is called.
+ * @param[in] auth Authorization request for client.
+ */
+void auth_sasl_start(struct AuthRequest *auth)
+{
+  assert(auth != NULL);
+  FlagSet(&auth->flags, AR_SASL_PENDING);
+}
+
+/** Mark that SASL authentication has completed (success, fail, or abort).
+ * This unblocks authorization if auth_sasl_start() was called.
+ * @param[in] auth Authorization request for client.
+ * @return Zero if client should be kept, CPTR_KILLED if rejected.
+ */
+int auth_sasl_done(struct AuthRequest *auth)
+{
+  assert(auth != NULL);
+  FlagClr(&auth->flags, AR_SASL_PENDING);
+  return check_auth_finished(auth);
+}
+
 /** Check if IAuth is configured to handle SASL authentication.
  * @return Non-zero if IAuth handles SASL, zero otherwise.
  */
@@ -2900,6 +2923,11 @@ static int iauth_cmd_sasl_fail(struct IAuth *iauth, struct Client *cli,
                                int parc, char **params)
 {
   send_reply(cli, ERR_SASLFAIL, EmptyString(params[0]) ? "" : params[0]);
+
+  /* Unblock registration if SASL was holding it */
+  if (cli_auth(cli))
+    return auth_sasl_done(cli_auth(cli));
+
   return 0;
 }
 
@@ -2981,6 +3009,10 @@ static int iauth_cmd_sasl_done(struct IAuth *iauth, struct Client *cli,
   /* Cancel SASL timeout */
   if (t_active(&cli_sasltimeout(cli)))
     timer_del(&cli_sasltimeout(cli));
+
+  /* Unblock registration if SASL was holding it */
+  if (cli_auth(cli))
+    return auth_sasl_done(cli_auth(cli));
 
   return 0;
 }
