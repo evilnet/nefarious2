@@ -969,6 +969,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
               shadow = NULL;
               /* Fall through — shadow creation failed */
             } else {
+              ssl_set_nonblocking(shadow->sh_socket.ssl);
               cli_socket(cptr).ssl = NULL;  /* Prevent exit_client from freeing */
               Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
                      shadow->sh_id, new_fd));
