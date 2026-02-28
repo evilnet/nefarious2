@@ -917,28 +917,76 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       }
 #endif
       /* Convert this registering client into a shadow connection.
-       * The Client struct will be freed; only the socket fd survives. */
+       * The Client struct will be freed; only the socket fd survives.
+       *
+       * Socket transfer follows the same pattern as bounce_revive():
+       * steal fd+SSL from the client via socket_del, then give the
+       * original fd to the shadow.  This avoids SSL_set_fd() which
+       * would create new BIOs on the dup'd fd. */
       struct ShadowConnection *shadow;
       int fd;
-      int new_fd;
       char sock_ip[SOCKIPLEN + 1];
+#ifdef USE_SSL
+      SSL *saved_ssl;
+#endif
+      int max_sh;
+
+      /* Early max-shadows check — must happen BEFORE we steal the fd,
+       * because stealing is not easily reversible. */
+      max_sh = feature_int(FEAT_BOUNCER_MAX_SHADOWS);
+      if (max_sh > 0 && session->hs_shadow_count >= max_sh)
+        goto skip_shadow;
+
+      /* Flush any pending writes before stealing the SSL object.
+       *
+       * With pipelining clients (e.g. goguma sends 21 individual CAP REQ
+       * commands + AUTHENTICATE + CAP END in one burst), the auth phase
+       * generates many responses that may not all flush in one shot.
+       * If the P10 SASL callback fires before the event loop processes
+       * the client's write-ready event, FLAG_BLOCKED is still set and
+       * the client's MsgQ has queued data with corresponding SSL pending
+       * write state (wpend_tot/wpend_buf).  Transferring the SSL in that
+       * state causes "bad write retry" when the shadow's first SSL_write
+       * uses a different buffer.
+       *
+       * Clear FLAG_BLOCKED and flush here.  If the socket is writable
+       * (which it almost certainly is — the TCP send buffer has been
+       * draining while we processed the P10 event), the pending writes
+       * complete and wpend clears.  If the flush can't fully drain the
+       * MsgQ, skip shadow creation — the client registers normally and
+       * the event loop flushes later. */
+      ClrFlag(cptr, FLAG_BLOCKED);
+      send_queued(cptr);
+      if (MsgQLength(&(cli_sendQ(cptr))) > 0 || IsDead(cptr)) {
+        Debug((DEBUG_INFO, "Bouncer: skipping shadow for %s — %u bytes "
+               "unflushed in sendQ", cli_name(cptr),
+               MsgQLength(&(cli_sendQ(cptr)))));
+        goto skip_shadow;
+      }
 
       /* Extract fd and IP from the client's connection */
       fd = cli_fd(cptr);
       ircd_strncpy(sock_ip, cli_sock_ip(cptr), SOCKIPLEN + 1);
 
-      /* dup() the fd so the shadow gets a clean fd not registered with the
-       * event engine.  The original fd stays with the client's socket and
-       * will be closed normally by exit_client() → close_connection(), which
-       * also removes it from epoll.  Both fds share the underlying TCP
-       * socket, so it stays alive as long as either fd is open. */
-      new_fd = dup(fd);
-      if (new_fd < 0) {
-        Debug((DEBUG_ERROR, "Bouncer: dup(%d) failed for shadow conversion: %m", fd));
-      } else {
-        /* Create the shadow connection with the dup'd fd */
-        shadow = bounce_add_shadow(session, new_fd, sock_ip);
-        if (shadow) {
+      /* Step 1: Steal fd and SSL from client (same pattern as bounce_revive).
+       * Save and NULL the SSL pointer BEFORE socket_del, because
+       * socket_del triggers ET_DESTROY which calls ssl_free(). */
+#ifdef USE_SSL
+      saved_ssl = cli_socket(cptr).ssl;
+      cli_socket(cptr).ssl = NULL;
+#endif
+      s_data(&cli_socket(cptr)) = NULL;  /* Prevent stale callbacks */
+      socket_del(&cli_socket(cptr));
+      LocalClientArray[fd] = 0;
+      cli_fd(cptr) = -1;  /* Mark client as fd-less (like bounce_revive) */
+
+      /* Step 2: Create shadow with the original fd.
+       * socket_add inside bounce_add_shadow registers fd with the
+       * event engine (safe because socket_del above deregistered it).
+       * After the max_shadows check above, failure here means OOM or
+       * socket_add failure — both catastrophic.  The connection is lost. */
+      shadow = bounce_add_shadow(session, fd, sock_ip);
+      if (shadow) {
           /* Copy CAP state from the registering client to the shadow.
            * con_capab() and con_active() return pointers to CapSet structs. */
           memcpy(&shadow->sh_capab, con_capab(cli_connect(cptr)),
@@ -955,33 +1003,21 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
           }
 
 #ifdef USE_SSL
-          /* Transfer TLS state: steal SSL object from client, rebind to dup'd fd.
-           * SSL_set_fd() creates a new BIO for the new fd; the old fd's BIO is
-           * replaced.  After this, the SSL object operates on new_fd exclusively. */
-          if (cli_socket(cptr).ssl) {
-            shadow->sh_socket.ssl = cli_socket(cptr).ssl;
-            if (SSL_set_fd(shadow->sh_socket.ssl, new_fd) != 1) {
-              Debug((DEBUG_ERROR, "Bouncer: SSL_set_fd(%d) failed for shadow #%u",
-                     new_fd, shadow->sh_id));
-              /* SSL_set_fd failed — return SSL to client, remove broken shadow */
-              shadow->sh_socket.ssl = NULL;
-              bounce_remove_shadow(shadow);
-              shadow = NULL;
-              /* Fall through — shadow creation failed */
-            } else {
-              ssl_set_nonblocking(shadow->sh_socket.ssl);
-              cli_socket(cptr).ssl = NULL;  /* Prevent exit_client from freeing */
-              Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
-                     shadow->sh_id, new_fd));
-            }
+          /* Transfer SSL — no SSL_set_fd needed since the SSL's BIOs
+           * already reference fd, and the shadow now owns fd. */
+          if (saved_ssl) {
+            shadow->sh_socket.ssl = saved_ssl;
+            saved_ssl = NULL;  /* Shadow owns it now */
+            Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
+                   shadow->sh_id, fd));
           }
 #endif
 
-          if (shadow) {
+          {
             /* Capture connection metadata for later promotion.
-             * The Client struct will be freed by exit_client after we
-             * return, so copy everything we'll need to restore the
-             * primary's identity if this shadow gets promoted. */
+             * The Client struct will be freed after we return, so copy
+             * everything we'll need to restore the primary's identity
+             * if this shadow gets promoted. */
             shadow->sh_port = cli_port(cptr);
             ircd_strncpy(shadow->sh_sockhost, cli_sockhost(cptr), HOSTLEN + 1);
             memcpy(&shadow->sh_ip, &cli_ip(cptr), sizeof(struct irc_in_addr));
@@ -1029,10 +1065,13 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
 
             return 2; /* Signal: converted to shadow, do not introduce to network */
           }
-        } else {
-          /* Failed to create shadow — close the dup'd fd */
-          close(new_fd);
-        }
+      } else {
+        /* Shadow creation failed — fd and SSL are orphaned, clean up */
+#ifdef USE_SSL
+        if (saved_ssl)
+          SSL_free(saved_ssl);
+#endif
+        close(fd);
       }
     }
   }

@@ -507,25 +507,24 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (new_shadow) {
         bounce_send_shadow_welcome(new_shadow);
       }
-      /* The shadow uses a dup()'d fd; the original stays with this Client.
-       * exit_client() will close the original fd and remove it from epoll.
-       * Set FLAG_KILLED to suppress QUIT broadcast (shadow is invisible).
+      /* Client's fd+SSL were stolen by bounce_auto_resume (same pattern
+       * as bounce_revive).  Use bounce_free_temp_client for silent
+       * teardown — the client was never introduced to the network.
        *
-       * Detach auth request's client pointer BEFORE exit_client() frees
-       * the Client struct, so destroy_auth_request() (called by our
-       * caller check_auth_finished) won't dereference freed memory.
+       * Detach auth request's client pointer BEFORE freeing the Client
+       * struct, so destroy_auth_request() (called by our caller
+       * check_auth_finished) won't dereference freed memory.
        *
        * Fix #22: Also NULL cli_auth(sptr) so that free_client() (called
-       * by exit_client) does NOT call destroy_auth_request() again.
-       * Without this, the auth struct gets put on the freelist twice —
-       * once by free_client and once by check_auth_finished line 617 —
-       * creating a cycle that causes two new clients to share the same
-       * auth struct, leading to empty cli_name on registration. */
+       * by bounce_free_temp_client → remove_client_from_list) does NOT
+       * call destroy_auth_request() again.  Without this, the auth
+       * struct gets put on the freelist twice — once by free_client and
+       * once by check_auth_finished line 617 — creating a cycle that
+       * causes two new clients to share the same auth struct, leading
+       * to empty cli_name on registration. */
       auth_detach_client(cli_auth(sptr));
       cli_auth(sptr) = NULL;
-      SetFlag(sptr, FLAG_DEADSOCKET);  /* Suppress ERROR on shared socket */
-      SetFlag(sptr, FLAG_KILLED);
-      exit_client(cptr, sptr, &me, "Converted to bouncer shadow");
+      bounce_free_temp_client(sptr);
       return CPTR_KILLED; /* Client freed — callers must not dereference cptr */
     }
 
