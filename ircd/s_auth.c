@@ -36,6 +36,7 @@
 #include "config.h"
 
 #include "s_auth.h"
+#include "bouncer_session.h"
 #include "class.h"
 #include "dnsbl.h"
 #include "client.h"
@@ -120,6 +121,7 @@ struct AuthRequest {
   unsigned int        cookie;     /**< cookie the user must PONG */
   unsigned short      port;       /**< client's remote port number */
   struct DNSBLRequest *dnsbl_request; /**< native DNSBL check request */
+  char deferred_nick[NICKLEN + 1]; /**< nick deferred due to bouncer ghost collision */
 };
 
 /** Array of message text (with length) pairs for AUTH status
@@ -554,6 +556,33 @@ static int check_auth_finished(struct AuthRequest *auth)
   /* Finish off SASL. */
   if (IsUserPort(auth->client))
     auth_complete_sasl(auth->client);
+
+  /* Resolve deferred bouncer nick collision.
+   * If SASL set an account matching the nick holder's account, accept
+   * the nick (register_user will do ghost revive or shadow attach).
+   * Otherwise send ERR_NICKNAMEINUSE and wait for a new NICK. */
+  if (auth->deferred_nick[0]) {
+    struct Client *holder = FindClient(auth->deferred_nick);
+    if (holder && IsAccount(auth->client)
+        && (IsBouncerHold(holder) || bounce_get_session(holder))
+        && 0 == ircd_strcmp(cli_user(holder)->account,
+                            cli_user(auth->client)->account)) {
+      /* Same account — set cli_name but don't add to hash (holder owns it).
+       * register_user() will do ghost revive or shadow attach. */
+      strcpy(cli_name(auth->client), auth->deferred_nick);
+    } else if (!holder) {
+      /* Nick holder gone during auth — nick is free, claim it */
+      strcpy(cli_name(auth->client), auth->deferred_nick);
+      hAddClient(auth->client);
+    } else {
+      /* Different account, no SASL, or nick now held by non-bouncer */
+      send_reply(auth->client, ERR_NICKNAMEINUSE, auth->deferred_nick);
+      FlagSet(&auth->flags, AR_NEEDS_NICK);
+      auth->deferred_nick[0] = '\0';
+      return 0;
+    }
+    auth->deferred_nick[0] = '\0';
+  }
 
   /* If appropriate, do preliminary assignment to connection class. */
   if (IsUserPort(auth->client)
@@ -1481,6 +1510,7 @@ int auth_set_user(struct AuthRequest *auth, const char *username, const char *ho
 int auth_set_nick(struct AuthRequest *auth, const char *nickname)
 {
   assert(auth != NULL);
+  auth->deferred_nick[0] = '\0';
   FlagClr(&auth->flags, AR_NEEDS_NICK);
   /*
    * If the client hasn't gotten a cookie-ping yet,
@@ -1495,6 +1525,34 @@ int auth_set_nick(struct AuthRequest *auth, const char *nickname)
   }
   if (IAuthHas(iauth, IAUTH_UNDERNET))
     sendto_iauth(auth->client, "n %s", nickname);
+  return check_auth_finished(auth);
+}
+
+/** Defer a nick that collides with a bouncer ghost.
+ * Instead of rejecting immediately with ERR_NICKNAMEINUSE, store the
+ * nick and clear AR_NEEDS_NICK so registration can proceed after SASL.
+ * Resolution happens in check_auth_finished() before register_user().
+ * @param[in] auth Authorization request for client.
+ * @param[in] nickname Client's requested nickname (collides with ghost).
+ * @return Zero if client should be kept, CPTR_KILLED if rejected.
+ */
+int auth_defer_nick(struct AuthRequest *auth, const char *nickname)
+{
+  assert(auth != NULL);
+  ircd_strncpy(auth->deferred_nick, nickname, NICKLEN);
+  FlagClr(&auth->flags, AR_NEEDS_NICK);
+
+  if (!auth->cookie) {
+    do {
+      auth->cookie = ircrandom();
+    } while (!auth->cookie);
+    sendrawto_one(auth->client, "PING :%u", auth->cookie);
+    FlagSet(&auth->flags, AR_NEEDS_PONG);
+  }
+
+  if (IAuthHas(iauth, IAUTH_UNDERNET))
+    sendto_iauth(auth->client, "n %s", nickname);
+
   return check_auth_finished(auth);
 }
 

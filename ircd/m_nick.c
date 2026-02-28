@@ -98,6 +98,8 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "send.h"
+#include "s_auth.h"
+#include "bouncer_session.h"
 #include "shun.h"
 #include "sys.h"
 
@@ -263,6 +265,13 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       IPcheck_connect_fail(acptr, 0);
     exit_client(cptr, acptr, &me, "Overridden by other sign on");
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+  }
+  /* Defer collision with bouncer ghost or live bouncer session user.
+   * After SASL, if accounts match, the bounce system handles it
+   * (ghost revive or shadow attach). Otherwise send late 433. */
+  if (!IsRegistered(sptr) && cli_auth(sptr)
+      && (IsBouncerHold(acptr) || bounce_get_session(acptr))) {
+    return auth_defer_nick(cli_auth(sptr), nick);
   }
   /*
    * NICK is coming from local client connection. Just
