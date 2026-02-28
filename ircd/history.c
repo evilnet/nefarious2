@@ -34,6 +34,7 @@
 #ifdef USE_MDBX
 
 #include "history.h"
+#include "ml_content.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
 #include "ircd_features.h"
@@ -47,6 +48,9 @@
 
 #include <mdbx.h>
 #include <string.h>
+#ifdef USE_ZSTD
+#include <zstd.h>
+#endif
 #include <stdlib.h>
 #include <time.h>
 #include <stdint.h>
@@ -83,13 +87,10 @@ static size_t history_map_size = 1UL * 1024 * 1024 * 1024;
 static history_channels_removed_cb channel_removed_callback = NULL;
 
 /** Maximum number of named databases */
-#define HISTORY_MAX_DBS 7
+#define HISTORY_MAX_DBS 9
 
 /** Key separator character */
 #define KEY_SEP '\0'
-
-/** Maximum value buffer size for serialization */
-#define HISTORY_VALUE_BUFSIZE 1024
 
 /** Message type names for serialization */
 static const char *history_type_names[] = {
@@ -176,16 +177,37 @@ static int deserialize_message(const char *data, int datalen,
   const char *p, *end;
   char *field;
   int type;
+  int ret = -1;
 #ifdef USE_ZSTD
-  char decompressed[HISTORY_VALUE_BUFSIZE];
+  char decomp_stack[HISTORY_VALUE_BUFSIZE];
+  char *decompressed = NULL;
+  int decomp_dynamic = 0;
   size_t decompressed_len;
 
   /* Check if data is compressed and decompress if needed */
   if (is_compressed((const unsigned char *)data, datalen)) {
+    /* Determine decompressed size for buffer allocation */
+    unsigned long long frame_size = ZSTD_getFrameContentSize(
+        (const unsigned char *)data + 1, datalen - 1);
+    size_t out_size;
+
+    if (frame_size != ZSTD_CONTENTSIZE_ERROR
+        && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
+        && frame_size > sizeof(decomp_stack)) {
+      if (frame_size > COMPRESS_MAX_UNCOMPRESSED)
+        goto deser_cleanup;
+      decompressed = (char *)MyMalloc(frame_size + 1);
+      decomp_dynamic = 1;
+      out_size = frame_size + 1;
+    } else {
+      decompressed = decomp_stack;
+      out_size = sizeof(decomp_stack);
+    }
+
     if (decompress_data((const unsigned char *)data, datalen,
-                        (unsigned char *)decompressed, sizeof(decompressed),
+                        (unsigned char *)decompressed, out_size,
                         &decompressed_len) < 0) {
-      return -1;
+      goto deser_cleanup;
     }
     data = decompressed;
     datalen = decompressed_len;
@@ -197,34 +219,45 @@ static int deserialize_message(const char *data, int datalen,
 
   /* Parse type */
   field = strchr(p, '|');
-  if (!field || field >= end) return -1;
+  if (!field || field >= end) goto deser_cleanup;
   type = atoi(p);
-  if (type < 0 || type > HISTORY_TAGMSG) return -1;
+  if (type < 0 || type > HISTORY_TAGMSG) goto deser_cleanup;
   msg->type = (enum HistoryMessageType)type;
   p = field + 1;
 
   /* Parse sender */
   field = strchr(p, '|');
-  if (!field || field >= end) return -1;
-  if ((size_t)(field - p) >= sizeof(msg->sender)) return -1;
+  if (!field || field >= end) goto deser_cleanup;
+  if ((size_t)(field - p) >= sizeof(msg->sender)) goto deser_cleanup;
   memcpy(msg->sender, p, field - p);
   msg->sender[field - p] = '\0';
   p = field + 1;
 
   /* Parse account */
   field = strchr(p, '|');
-  if (!field || field >= end) return -1;
-  if ((size_t)(field - p) >= sizeof(msg->account)) return -1;
+  if (!field || field >= end) goto deser_cleanup;
+  if ((size_t)(field - p) >= sizeof(msg->account)) goto deser_cleanup;
   memcpy(msg->account, p, field - p);
   msg->account[field - p] = '\0';
   p = field + 1;
 
-  /* Parse content (rest of string) */
-  if ((size_t)(end - p) >= sizeof(msg->content)) return -1;
-  memcpy(msg->content, p, end - p);
-  msg->content[end - p] = '\0';
+  /* Parse content (rest of string) — truncate if exceeds struct field */
+  {
+    size_t content_len = end - p;
+    if (content_len >= sizeof(msg->content))
+      content_len = sizeof(msg->content) - 1;
+    memcpy(msg->content, p, content_len);
+    msg->content[content_len] = '\0';
+  }
 
-  return 0;
+  ret = 0;
+
+deser_cleanup:
+#ifdef USE_ZSTD
+  if (decomp_dynamic && decompressed)
+    MyFree(decompressed);
+#endif
+  return ret;
 }
 
 /** Parse target and timestamp from a key.
@@ -513,6 +546,13 @@ int history_init(const char *dbpath)
     return -1;
   }
 
+  /* Open multiline content databases (ml_content + ml_paste_secrets) */
+  if (ml_content_init(history_env, txn) != 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "history: ml_content_init failed, multiline content store unavailable");
+    /* Non-fatal — history still works, just without separate multiline storage */
+  }
+
   rc = mdbx_txn_commit(txn);
   if (rc != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_txn_commit failed: %s",
@@ -545,6 +585,7 @@ void history_shutdown(void)
     mdbx_env_sync_ex(history_env, true, false);
   }
 
+  ml_content_shutdown(history_env);
   mdbx_dbi_close(history_env, history_dbi);
   mdbx_dbi_close(history_env, history_msgid_dbi);
   mdbx_dbi_close(history_env, history_targets_dbi);
@@ -556,6 +597,11 @@ void history_shutdown(void)
   log_write(LS_SYSTEM, L_INFO, 0, "history: LMDB shutdown complete");
 }
 
+MDBX_env *history_get_env(void)
+{
+  return history_env;
+}
+
 int history_store_message(const char *msgid, const char *timestamp,
                           const char *target, const char *sender,
                           const char *account, enum HistoryMessageType type,
@@ -564,22 +610,41 @@ int history_store_message(const char *msgid, const char *timestamp,
   MDBX_txn *txn;
   MDBX_val key, data;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-  char valbuf[HISTORY_VALUE_BUFSIZE];
   int keylen, vallen;
   int rc;
   int retry = 0;
+
+  /* Dynamic buffer sizing based on actual content length.
+   * Stack fast-path for common single-line messages (<=HISTORY_VALUE_BUFSIZE),
+   * heap allocation for multiline content that exceeds it.
+   */
+  size_t content_len = content ? strlen(content) : 0;
+  size_t bufsize = content_len + HISTORY_SENDER_LEN + ACCOUNTLEN + 32;
+  if (bufsize < HISTORY_VALUE_BUFSIZE)
+    bufsize = HISTORY_VALUE_BUFSIZE;
+
+  char valbuf_stack[HISTORY_VALUE_BUFSIZE];
+  char *valbuf = (bufsize > sizeof(valbuf_stack))
+      ? (char *)MyMalloc(bufsize) : valbuf_stack;
 #ifdef USE_ZSTD
-  unsigned char compressed[HISTORY_VALUE_BUFSIZE + 64];
+  unsigned char comp_stack[HISTORY_VALUE_BUFSIZE + 64];
+  size_t comp_bufsize = bufsize + 64;
+  unsigned char *compressed = (comp_bufsize > sizeof(comp_stack))
+      ? (unsigned char *)MyMalloc(comp_bufsize) : comp_stack;
   size_t compressed_len;
 #endif
 
-  if (!history_available)
-    return -1;
+  if (!history_available) {
+    rc = -1;
+    goto store_cleanup;
+  }
 
   /* Build key: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
-  if (keylen < 0)
-    return -1;
+  if (keylen < 0) {
+    rc = -1;
+    goto store_cleanup;
+  }
 
   /* Log the key being stored (with nulls as dots) */
   {
@@ -595,16 +660,22 @@ int history_store_message(const char *msgid, const char *timestamp,
   }
 
   /* Serialize value */
-  vallen = serialize_message(valbuf, sizeof(valbuf), type, sender, account, content);
-  if (vallen < 0)
-    return -1;
+  vallen = serialize_message(valbuf, bufsize, type, sender, account, content);
+  if (vallen < 0) {
+    rc = -1;
+    goto store_cleanup;
+  }
+  /* Cap vallen — ircd_snprintf returns would-have-been length including overflow */
+  if ((size_t)vallen >= bufsize)
+    vallen = bufsize - 1;
 
 store_retry:
   /* Begin write transaction */
   rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
   if (rc != 0) {
     Debug((DEBUG_DEBUG, "history: mdbx_txn_begin failed: %s", mdbx_strerror(rc)));
-    return -1;
+    rc = -1;
+    goto store_cleanup;
   }
 
   /* Store message (with optional compression) */
@@ -612,7 +683,7 @@ store_retry:
   key.iov_base = keybuf;
 #ifdef USE_ZSTD
   if (compress_data((unsigned char *)valbuf, vallen,
-                    compressed, sizeof(compressed), &compressed_len) >= 0) {
+                    compressed, comp_bufsize, &compressed_len) >= 0) {
     data.iov_len = compressed_len;
     data.iov_base = compressed;
   } else {
@@ -638,7 +709,8 @@ store_retry:
       if (history_emergency_evict() > 0)
         goto store_retry;
     }
-    return -1;
+    rc = -1;
+    goto store_cleanup;
   }
 
   /* Store msgid -> target\0timestamp index */
@@ -660,7 +732,8 @@ store_retry:
       if (history_emergency_evict() > 0)
         goto store_retry;
     }
-    return -1;
+    rc = -1;
+    goto store_cleanup;
   }
 
   /* Update target's last message timestamp */
@@ -678,7 +751,8 @@ store_retry:
       if (history_emergency_evict() > 0)
         goto store_retry;
     }
-    return -1;
+    rc = -1;
+    goto store_cleanup;
   }
 
   rc = mdbx_txn_commit(txn);
@@ -689,7 +763,8 @@ store_retry:
       if (history_emergency_evict() > 0)
         goto store_retry;
     }
-    return -1;
+    rc = -1;
+    goto store_cleanup;
   }
 
   /* Update quota counter for this user (if enabled and account is known) */
@@ -709,6 +784,145 @@ store_retry:
                   account, target, new_count, channel_limit, quota_pct);
       }
     }
+  }
+
+  rc = 0;
+
+store_cleanup:
+  if (valbuf != valbuf_stack) MyFree(valbuf);
+#ifdef USE_ZSTD
+  if (compressed != comp_stack) MyFree(compressed);
+#endif
+  return rc;
+}
+
+int history_store_multiline(const char *msgid, const char *timestamp,
+                            const char *target, const char *sender,
+                            const char *account, const char *content,
+                            size_t content_len, const char *paste_secret)
+{
+  MDBX_txn *txn;
+  MDBX_val key, data;
+  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  int keylen, vallen;
+  int rc;
+  int retry = 0;
+
+  /* Serialize the history entry with the \x1Eml sentinel as content.
+   * The actual multiline content goes in ml_content, not inline.
+   */
+  char valbuf[HISTORY_VALUE_BUFSIZE];
+#ifdef USE_ZSTD
+  unsigned char comp_buf[HISTORY_VALUE_BUFSIZE + 64];
+  size_t compressed_len;
+#endif
+
+  if (!history_available)
+    return -1;
+
+  /* Build key: target\0timestamp\0msgid */
+  keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
+  if (keylen < 0)
+    return -1;
+
+  /* Serialize with sentinel content */
+  vallen = serialize_message(valbuf, sizeof(valbuf), HISTORY_PRIVMSG,
+                             sender, account, ML_CONTENT_SENTINEL);
+  if (vallen < 0)
+    return -1;
+  if ((size_t)vallen >= sizeof(valbuf))
+    vallen = sizeof(valbuf) - 1;
+
+store_ml_retry:
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
+  if (rc != 0)
+    return -1;
+
+  /* Store multiline content in ml_content DBI */
+  if (ml_content_store(txn, msgid, sender, target,
+                       content, content_len, paste_secret) != 0) {
+    mdbx_txn_abort(txn);
+    return -1;
+  }
+
+  /* Store history entry with sentinel */
+  key.iov_len = keylen;
+  key.iov_base = keybuf;
+#ifdef USE_ZSTD
+  if (compress_data((unsigned char *)valbuf, vallen,
+                    comp_buf, sizeof(comp_buf), &compressed_len) >= 0) {
+    data.iov_len = compressed_len;
+    data.iov_base = comp_buf;
+  } else {
+    data.iov_len = vallen;
+    data.iov_base = valbuf;
+  }
+#else
+  data.iov_len = vallen;
+  data.iov_base = valbuf;
+#endif
+
+  rc = mdbx_put(txn, history_dbi, &key, &data, MDBX_APPEND);
+  if (rc == MDBX_EKEYMISMATCH)
+    rc = mdbx_put(txn, history_dbi, &key, &data, 0);
+  if (rc != 0) {
+    mdbx_txn_abort(txn);
+    if (rc == MDBX_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_ml_retry;
+    }
+    return -1;
+  }
+
+  /* Store msgid index */
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
+  {
+    int idx_keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, NULL);
+    data.iov_len = idx_keylen;
+    data.iov_base = keybuf;
+  }
+  rc = mdbx_put(txn, history_msgid_dbi, &key, &data, 0);
+  if (rc != 0) {
+    mdbx_txn_abort(txn);
+    if (rc == MDBX_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_ml_retry;
+    }
+    return -1;
+  }
+
+  /* Update target timestamp */
+  key.iov_len = strlen(target);
+  key.iov_base = (void *)target;
+  data.iov_len = strlen(timestamp);
+  data.iov_base = (void *)timestamp;
+  rc = mdbx_put(txn, history_targets_dbi, &key, &data, 0);
+  if (rc != 0) {
+    mdbx_txn_abort(txn);
+    if (rc == MDBX_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_ml_retry;
+    }
+    return -1;
+  }
+
+  rc = mdbx_txn_commit(txn);
+  if (rc != 0) {
+    if (rc == MDBX_MAP_FULL && retry == 0) {
+      retry = 1;
+      if (history_emergency_evict() > 0)
+        goto store_ml_retry;
+    }
+    return -1;
+  }
+
+  /* Update quota */
+  if (feature_bool(FEAT_CHATHISTORY_USER_QUOTA) && account && account[0]) {
+    quota_increment(target, account);
   }
 
   return 0;
@@ -902,6 +1116,9 @@ static int history_query_internal(const char *target,
       rc = mdbx_cursor_get(cursor, &key, &data, op);
       continue;
     }
+
+    /* Resolve multiline content from ml_content store if needed */
+    ml_content_resolve(txn, msg);
 
     /* Add to list */
     msg->next = NULL;
@@ -1313,6 +1530,9 @@ int history_query_between(const char *target,
       continue;
     }
 
+    /* Resolve multiline content from ml_content store if needed */
+    ml_content_resolve(txn, msg);
+
     msg->next = NULL;
     if (tail)
       tail->next = msg;
@@ -1429,6 +1649,8 @@ void history_free_messages(struct HistoryMessage *list)
 
   for (msg = list; msg; msg = next) {
     next = msg->next;
+    if (msg->dyn_content)
+      MyFree(msg->dyn_content);
     if (msg->raw_content)
       MyFree(msg->raw_content);
     MyFree(msg);
@@ -1625,12 +1847,13 @@ int history_purge_old(unsigned long max_age_seconds)
       if (strcmp(msg_timestamp, cutoff_ts) < 0) {
         /* Message is older than cutoff - delete it */
 
-        /* First delete from msgid index if we have a msgid */
+        /* First delete from msgid index and ml_content if we have a msgid */
         if (msg_msgid[0] != '\0') {
           MDBX_val msgid_key;
           msgid_key.iov_len = strlen(msg_msgid);
           msgid_key.iov_base = msg_msgid;
           mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
+          ml_content_delete(txn, msg_msgid);
         }
 
         /* Delete the message using cursor */
@@ -1941,6 +2164,9 @@ int history_lookup_message(const char *target, const char *msgid,
   ircd_strncpy(m->timestamp, timestamp, sizeof(m->timestamp) - 1);
   m->next = NULL;
 
+  /* Resolve multiline content from ml_content store if needed */
+  ml_content_resolve(txn, m);
+
   mdbx_txn_abort(txn);
   *msg = m;
   return 0;
@@ -1993,7 +2219,7 @@ int history_delete_message(const char *target, const char *msgid)
     timestamp[(char *)data.iov_base + data.iov_len - sep] = '\0';
   }
 
-  /* Delete from msgid index */
+  /* Delete from msgid index and ml_content */
   key.iov_len = strlen(msgid);
   key.iov_base = (void *)msgid;
   rc = mdbx_del(txn, history_msgid_dbi, &key, NULL);
@@ -2001,6 +2227,7 @@ int history_delete_message(const char *target, const char *msgid)
     mdbx_txn_abort(txn);
     return -1;
   }
+  ml_content_delete(txn, msgid);
 
   /* Build key for main database: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
@@ -2132,6 +2359,7 @@ static int history_emergency_evict(void)
         msgid_key.iov_len = strlen(msg_msgid);
         msgid_key.iov_base = msg_msgid;
         mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
+        ml_content_delete(txn, msg_msgid);
       }
     }
 
@@ -2304,12 +2532,13 @@ int history_evict_to_target(int target_percent)
       /* Parse key to get msgid for index cleanup */
       if (parse_key(key.iov_base, key.iov_len,
                     msg_target, msg_timestamp, msg_msgid) == 0) {
-        /* Delete from msgid index if present */
+        /* Delete from msgid index and ml_content if present */
         if (msg_msgid[0] != '\0') {
           MDBX_val msgid_key;
           msgid_key.iov_len = strlen(msg_msgid);
           msgid_key.iov_base = msg_msgid;
           mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
+          ml_content_delete(txn, msg_msgid);
         }
       }
 

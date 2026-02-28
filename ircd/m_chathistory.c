@@ -65,6 +65,9 @@ void broadcast_channel_advertisement(const char *channel);
 #include <string.h>
 #include <stdlib.h>
 #include <openssl/evp.h>
+#ifdef USE_ZSTD
+#include <zstd.h>
+#endif
 
 /** Maximum batch ID length */
 #define BATCH_ID_LEN 16
@@ -3526,15 +3529,41 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       size_t decoded_len;
 
       if (ch_base64_decode(b64_content, strlen(b64_content), &decoded, &decoded_len)) {
-        char decompressed[HISTORY_CONTENT_LEN];
+        char decomp_stack[HISTORY_VALUE_BUFSIZE];
+        char *decompressed = NULL;
+        int decomp_dynamic = 0;
         size_t decompressed_len;
+        size_t out_size;
 
-        if (decompress_data((unsigned char *)decoded, decoded_len,
-                            (unsigned char *)decompressed, sizeof(decompressed) - 1,
+        /* Determine decompressed size for buffer allocation */
+        if (is_compressed((const unsigned char *)decoded, decoded_len)) {
+          unsigned long long frame_size = ZSTD_getFrameContentSize(
+              (const unsigned char *)decoded + 1, decoded_len - 1);
+          if (frame_size != ZSTD_CONTENTSIZE_ERROR
+              && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
+              && frame_size > sizeof(decomp_stack)) {
+            if (frame_size <= COMPRESS_MAX_UNCOMPRESSED) {
+              decompressed = (char *)MyMalloc(frame_size + 1);
+              decomp_dynamic = 1;
+              out_size = frame_size + 1;
+            }
+          } else {
+            decompressed = decomp_stack;
+            out_size = sizeof(decomp_stack);
+          }
+        } else {
+          decompressed = decomp_stack;
+          out_size = sizeof(decomp_stack);
+        }
+
+        if (decompressed && decompress_data((unsigned char *)decoded, decoded_len,
+                            (unsigned char *)decompressed, out_size - 1,
                             &decompressed_len) >= 0) {
           decompressed[decompressed_len] = '\0';
           add_fed_message(req, msgid, timestamp, type, sender, account, decompressed);
         }
+        if (decomp_dynamic && decompressed)
+          MyFree(decompressed);
         MyFree(decoded);
       }
     }

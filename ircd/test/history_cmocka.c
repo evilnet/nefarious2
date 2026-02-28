@@ -24,12 +24,12 @@
 
 /* Define constants from history.c */
 #define KEY_SEP '\0'
-#define HISTORY_VALUE_BUFSIZE 1024
+/* HISTORY_VALUE_BUFSIZE now defined in history.h */
 
 #define HISTORY_MSGID_LEN 64
 #define HISTORY_TIMESTAMP_LEN 32
 #define HISTORY_SENDER_LEN (NICKLEN + USERLEN + HOSTLEN + 3)
-#define HISTORY_CONTENT_LEN 512
+#define HISTORY_CONTENT_LEN 4096
 
 /* Message types from history.h */
 enum HistoryMessageType {

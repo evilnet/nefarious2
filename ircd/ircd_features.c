@@ -1086,9 +1086,6 @@ static struct FeatureDesc {
   F_I(MULTILINE_LEGACY_THRESHOLD, 0, 3, 0),
   F_I(MULTILINE_LEGACY_MAX_LINES, 0, 5, 0),
   F_B(MULTILINE_FALLBACK_NOTIFY, 0, 1, 0),
-  F_B(MULTILINE_STORAGE_ENABLED, 0, 0, 0),
-  F_I(MULTILINE_STORAGE_TTL, 0, 3600, 0),
-  F_I(MULTILINE_STORAGE_MAX, 0, 10000, 0),
   F_I(BATCH_RATE_LIMIT, 0, 10, 0),
   F_I(CLIENT_BATCH_TIMEOUT, 0, 30, 0),
   F_B(DRAFT_WEBSOCKET, 0, 1, 0),
@@ -1142,8 +1139,6 @@ static struct FeatureDesc {
   F_B(PASTE_ENABLED, 0, 0, 0),
   F_I(PASTE_PORT, 0, 8444, 0),
   F_S(PASTE_BIND, 0, "*", 0),
-  F_S(PASTE_DB, 0, "paste", 0),
-  F_B(PASTE_DB_AUTOGROW, 0, 1, 0),
   F_I(PASTE_TTL, 0, 14400, 0),              /* 4 hours - ephemeral */
   F_I(PASTE_MAX_SIZE, 0, 65536, 0),         /* 64KB max paste */
   F_I(PASTE_MAX_ENTRIES, 0, 100000, 0),

@@ -108,6 +108,20 @@ int decompress_data(const unsigned char *input, size_t input_len,
     return 0;
   }
 
+  /* Pre-check: determine decompressed size from frame header.
+   * Catches buffer-too-small before ZSTD_decompress, with a descriptive message.
+   */
+  {
+    unsigned long long frame_size = ZSTD_getFrameContentSize(input + 1, input_len - 1);
+    if (frame_size != ZSTD_CONTENTSIZE_ERROR && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
+        && frame_size > output_size) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "decompress_data: frame size %llu exceeds buffer %zu",
+                (unsigned long long)frame_size, output_size);
+      return -1;
+    }
+  }
+
   /* Decompress (skip magic byte) */
   decompressed_size = ZSTD_decompress(output, output_size,
                                        input + 1, input_len - 1);

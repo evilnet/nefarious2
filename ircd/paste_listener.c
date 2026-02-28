@@ -10,7 +10,7 @@
 #ifdef USE_SSL
 
 #include "paste_listener.h"
-#include "paste_store.h"
+#include "ml_content.h"
 #include "client.h"       /* cli_name, me */
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -646,8 +646,12 @@ static void paste_handle_request(struct paste_conn *conn)
   char path[256];
   int want_html;
   const char *paste_id;
-  struct paste_entry entry;
-  int rc;
+  const char *msgid;
+  const char *sender;
+  const char *target;
+  size_t content_len;
+  char *buf;
+  size_t i;
 
   /* Parse request */
   if (paste_parse_request(conn, method, sizeof(method),
@@ -678,21 +682,52 @@ static void paste_handle_request(struct paste_conn *conn)
     return;
   }
 
-  /* Look up paste */
-  rc = paste_store_get(paste_id, &entry);
-  if (rc != 0) {
+  /* Look up paste_id -> msgid via ml_content */
+  msgid = ml_content_paste_lookup(paste_id);
+  if (!msgid) {
     paste_send_error(conn, 404, "Paste not found or expired");
     return;
   }
+
+  /* Look up content by msgid */
+  buf = ml_content_get(msgid, &content_len, &sender, &target);
+  if (!buf) {
+    paste_send_error(conn, 404, "Paste not found or expired");
+    return;
+  }
+
+  /* Content starts after sender\0target\0 — ml_content_get returns the
+   * full buffer with sender/target pointers into it. The actual content
+   * portion starts at (target + strlen(target) + 1). */
+  const char *content = target + strlen(target) + 1;
+
+  /* Make a mutable copy of just the content for \x1F -> \n conversion */
+  char *display = (char *)MyMalloc(content_len + 1);
+  memcpy(display, content, content_len);
+  display[content_len] = '\0';
+
+  /* Convert \x1F (Unit Separator) to \n for HTTP display */
+  for (i = 0; i < content_len; i++) {
+    if (display[i] == '\x1F')
+      display[i] = '\n';
+  }
+
+  /* Parse filename hint from content */
+  char filename[PASTE_FILENAME_MAX];
+  const char *display_content;
+  size_t display_len;
+  paste_parse_filename_hint(display, content_len, filename, sizeof(filename),
+                            &display_content, &display_len);
 
   /* Send response */
   if (want_html) {
     char *html;
     size_t html_len;
 
-    if (paste_build_html_response(entry.content, entry.content_len,
-                                  entry.filename, &html, &html_len) < 0) {
-      paste_entry_free(&entry);
+    if (paste_build_html_response(display_content, display_len,
+                                  filename, &html, &html_len) < 0) {
+      MyFree(display);
+      MyFree(buf);
       paste_send_error(conn, 500, "Internal Server Error");
       return;
     }
@@ -702,10 +737,11 @@ static void paste_handle_request(struct paste_conn *conn)
     MyFree(html);
   } else {
     paste_send_response(conn, 200, "text/plain; charset=utf-8",
-                        entry.content, entry.content_len);
+                        display_content, display_len);
   }
 
-  paste_entry_free(&entry);
+  MyFree(display);
+  MyFree(buf);
 }
 
 /* ---------------------------------------------------------------------------

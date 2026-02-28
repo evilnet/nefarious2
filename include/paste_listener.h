@@ -10,6 +10,12 @@
 
 #include <stddef.h>
 
+/** Maximum length of paste_id (msgid + "-" + secret) */
+#define PASTE_ID_MAX 80
+
+/** Maximum length of filename hint */
+#define PASTE_FILENAME_MAX 64
+
 /**
  * Initialize the paste HTTP listener.
  * Creates a TLS listener on the configured port.

@@ -44,8 +44,17 @@ struct Client;
 /** Maximum size of sender string (nick!user@host) */
 #define HISTORY_SENDER_LEN (NICKLEN + USERLEN + HOSTLEN + 3)
 
-/** Maximum size of message content */
-#define HISTORY_CONTENT_LEN 512
+/** Maximum size of message content in HistoryMessage struct.
+ * Matches default FEAT_MULTILINE_MAX_BYTES; content exceeding this
+ * is truncated on deserialization (not dropped).
+ */
+#define HISTORY_CONTENT_LEN 4096
+
+/** Stack buffer size for serialized history values.
+ * Used as fast-path for common single-line messages.
+ * Larger content (multiline) uses dynamic allocation.
+ */
+#define HISTORY_VALUE_BUFSIZE 1024
 
 /** Message types for history storage */
 enum HistoryMessageType {
@@ -72,7 +81,9 @@ struct HistoryMessage {
   char sender[HISTORY_SENDER_LEN];     /**< nick!user@host of sender */
   char account[ACCOUNTLEN + 1];        /**< Sender's account name (or empty) */
   enum HistoryMessageType type;        /**< Message type */
-  char content[HISTORY_CONTENT_LEN];   /**< Message content */
+  char content[HISTORY_CONTENT_LEN];   /**< Message content (inline, single-line) */
+  char *dyn_content;                   /**< Resolved multiline content (MyMalloc'd, caller frees) */
+  size_t dyn_content_len;              /**< Length of dyn_content */
   unsigned char *raw_content;          /**< Raw compressed content (for federation passthrough) */
   size_t raw_content_len;              /**< Length of raw_content */
   struct HistoryMessage *next;         /**< Next in linked list (for results) */
@@ -134,6 +145,30 @@ extern int history_store_message(const char *msgid, const char *timestamp,
                                   const char *target, const char *sender,
                                   const char *account, enum HistoryMessageType type,
                                   const char *content);
+
+/** Store a multiline message with content in the unified content store.
+ * Content is stored separately in ml_content, and the history entry stores
+ * a compact reference (\x1Eml sentinel). Both are written atomically.
+ * @param[in] msgid        Base message ID.
+ * @param[in] timestamp    Unix timestamp string.
+ * @param[in] target       Channel or nick.
+ * @param[in] sender       Full sender mask (nick!user@host).
+ * @param[in] account      Sender's account name (may be NULL).
+ * @param[in] content      Multiline content (\x1F-separated lines).
+ * @param[in] content_len  Length of content.
+ * @param[in] paste_secret Paste secret for URL access (NULL to skip).
+ * @return 0 on success, -1 on error.
+ */
+extern int history_store_multiline(const char *msgid, const char *timestamp,
+                                   const char *target, const char *sender,
+                                   const char *account, const char *content,
+                                   size_t content_len, const char *paste_secret);
+
+#ifdef USE_MDBX
+#include <mdbx.h>
+/** Get the history MDBX environment (for subsystems that share it). */
+extern MDBX_env *history_get_env(void);
+#endif
 
 /** Check if a message ID already exists in the history database.
  * Used for deduplication in CH W (write forwarding).

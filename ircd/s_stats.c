@@ -59,7 +59,6 @@
 #include "handlers.h"
 #include "history.h"
 #include "metadata.h"
-#include "paste_store.h"
 #include "dnsbl.h"
 #include "gitsync.h"
 
@@ -741,9 +740,6 @@ struct StatDesc statsinfo[] = {
   { ' ', "metadata", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     metadata_report_stats, 0,
     "METADATA storage and queue statistics." },
-  { ' ', "paste", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
-    paste_report_stats, 0,
-    "Paste store statistics (multiline HTTP fallback)." },
   { ' ', "dnsbl", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     dnsbl_report_stats, 0,
     "DNSBL statistics and configuration." },

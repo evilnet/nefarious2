@@ -62,6 +62,9 @@ struct Server {
   char *last_error_msg;         /**< Allocated memory with last message receive with an ERROR */
   char by[NICKLEN + 1];         /**< Numnick of client who requested the link */
   char batch_id[32];            /**< IRCv3 batch ID for netjoin/netsplit */
+
+  unsigned int ml_max_bytes;    /**< Remote server's MULTILINE_MAX_BYTES (0 = unknown/legacy) */
+  unsigned int ml_max_lines;    /**< Remote server's MULTILINE_MAX_LINES (0 = unknown/legacy) */
 };
 
 /** Describes a user on the network. */

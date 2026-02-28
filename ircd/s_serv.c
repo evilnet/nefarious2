@@ -224,10 +224,14 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
    */
   if (feature_bool(FEAT_CAP_draft_multiline)) {
     struct Client *srv;
-    sendcmdto_one(&me, CMD_MULTILINE, cptr, "");
+    sendcmdto_one(&me, CMD_MULTILINE, cptr, "%d %d",
+                  feature_int(FEAT_MULTILINE_MAX_BYTES),
+                  feature_int(FEAT_MULTILINE_MAX_LINES));
     for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
       if (IsServer(srv) && !IsMe(srv) && srv != cptr && IsMultiline(srv))
-        sendcmdto_one(srv, CMD_MULTILINE, cptr, "");
+        sendcmdto_one(srv, CMD_MULTILINE, cptr, "%u %u",
+                      cli_serv(srv)->ml_max_bytes,
+                      cli_serv(srv)->ml_max_lines);
     }
   }
 

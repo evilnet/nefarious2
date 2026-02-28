@@ -60,8 +60,8 @@
 #include "msgq.h"
 #include "class.h"
 #include "history.h"
+#include "ml_content.h"
 #include "bouncer_session.h"
-#include "paste_store.h"
 #include "paste_listener.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -69,82 +69,29 @@
 #include <sys/time.h>
 
 /*
- * generate_paste_url - Create a paste from message list and return URL
+ * generate_paste_url - Generate a paste secret and URL for multiline fallback.
  *
- * Helper function to generate a paste URL for multiline fallback scenarios.
- * Called by all fallback paths (client, bouncer shadow, server relay).
+ * The actual content storage happens atomically in history_store_multiline().
+ * This function just generates the secret and returns the URL.
  *
  * Parameters:
- *   msgid    - base msgid for the batch
- *   sender   - sender nick
- *   target   - target channel/nick
- *   messages - linked list of message lines (value.cp + 1 = text)
+ *   msgid      - base msgid for the batch
+ *   secret_out - buffer to receive the generated secret
+ *   secret_size - size of secret_out buffer
  *
  * Returns: paste URL string (static buffer, do not free) or NULL if unavailable
  */
-static const char *generate_paste_url(const char *msgid, const char *sender,
-                                       const char *target, struct SLink *messages)
+static const char *generate_paste_url(const char *msgid,
+                                       char *secret_out, size_t secret_size)
 {
-  char secret[12];
   char paste_id[PASTE_ID_MAX];
-  char filename[PASTE_FILENAME_MAX] = "";
-  size_t total_len = 0;
-  char *content = NULL;
-  char *p;
-  struct SLink *lp;
-  const char *result = NULL;
 
-  if (!feature_bool(FEAT_PASTE_ENABLED) || !paste_store_available())
+  if (!feature_bool(FEAT_PASTE_ENABLED))
     return NULL;
 
-  /* Calculate total content length */
-  for (lp = messages; lp; lp = lp->next) {
-    if (lp->value.cp) {
-      const char *text = lp->value.cp + 1;
-      total_len += strlen(text) + 1;  /* +1 for newline */
-    }
-  }
-
-  if (total_len == 0)
-    return NULL;
-
-  content = (char *)MyMalloc(total_len);
-  if (!content)
-    return NULL;
-
-  /* Concatenate all lines */
-  p = content;
-  for (lp = messages; lp; lp = lp->next) {
-    if (lp->value.cp) {
-      const char *text = lp->value.cp + 1;
-      size_t len = strlen(text);
-      memcpy(p, text, len);
-      p += len;
-      if (lp->next)
-        *p++ = '\n';
-    }
-  }
-  *p = '\0';
-
-  /* Generate secret and paste_id */
-  paste_generate_secret(secret, sizeof(secret));
-  ircd_snprintf(0, paste_id, sizeof(paste_id), "%s-%s", msgid, secret);
-
-  /* Parse optional filename hint from first line */
-  const char *store_content = content;
-  size_t store_len = strlen(content);
-  paste_parse_filename_hint(content, store_len, filename, sizeof(filename),
-                            &store_content, &store_len);
-
-  /* Store the paste */
-  if (paste_store_add(paste_id, sender, target, filename,
-                      store_content, store_len,
-                      feature_int(FEAT_PASTE_TTL)) == 0) {
-    result = paste_url(paste_id);
-  }
-
-  MyFree(content);
-  return result;
+  paste_generate_secret(secret_out, secret_size);
+  ircd_snprintf(0, paste_id, sizeof(paste_id), "%s-%s", msgid, secret_out);
+  return paste_url(paste_id);
 }
 
 /*
@@ -158,25 +105,26 @@ static const char *generate_paste_url(const char *msgid, const char *sender,
  * - >max_preview lines: send max_preview lines + paste URL notice
  *
  * Parameters:
- *   sptr        - sender client
- *   to          - recipient client
- *   target      - channel name or nick (for retrieval hint)
- *   msgid       - base msgid for retrieval
- *   messages    - linked list of message lines
- *   total_lines - total line count
- *   is_channel  - 1 if channel, 0 if DM
- *   chptr       - channel pointer (NULL for DMs)
+ *   sptr          - sender client
+ *   to            - recipient client
+ *   target        - channel name or nick (for retrieval hint)
+ *   msgid         - base msgid for retrieval
+ *   messages      - linked list of message lines
+ *   total_lines   - total line count
+ *   is_channel    - 1 if channel, 0 if DM
+ *   chptr         - channel pointer (NULL for DMs)
+ *   paste_url_str - pre-computed paste URL (NULL if unavailable)
  */
 static void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                      const char *target, const char *msgid,
                                      struct SLink *messages, int total_lines,
-                                     int is_channel, struct Channel *chptr)
+                                     int is_channel, struct Channel *chptr,
+                                     const char *paste_url_str)
 {
   struct SLink *lp;
   int lines_to_send;
   int send_notice;
   int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-  const char *paste_url_str = NULL;
 
   /* Configurable preview budget */
   if (total_lines <= max_preview) {
@@ -204,9 +152,6 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
     return;
 
   int remaining = total_lines - sent;
-
-  /* Generate paste URL if service available */
-  paste_url_str = generate_paste_url(msgid, cli_name(sptr), target, messages);
 
   if (paste_url_str) {
     if (is_channel) {
@@ -584,6 +529,21 @@ process_multiline_batch(struct Client *sptr)
    */
   generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
+  /* Pre-compute paste URL once for all fallback paths.
+   * The paste secret is captured for later atomic storage in history_store_multiline.
+   */
+  char batch_paste_secret[12] = "";
+  const char *batch_paste_url = NULL;
+  static char batch_paste_url_buf[256];
+  {
+    const char *url = generate_paste_url(batch_base_msgid,
+                                         batch_paste_secret, sizeof(batch_paste_secret));
+    if (url) {
+      ircd_strncpy(batch_paste_url_buf, url, sizeof(batch_paste_url_buf) - 1);
+      batch_paste_url = batch_paste_url_buf;
+    }
+  }
+
   /* Deliver to recipients */
   if (is_channel) {
     /* Suppress automatic shadow duplication - we handle shadows explicitly
@@ -682,7 +642,8 @@ process_multiline_batch(struct Client *sptr)
         } else {
           /* Preview + paste URL fallback for legacy clients */
           send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
-                                   con_ml_messages(con), total_lines, 1, chptr);
+                                   con_ml_messages(con), total_lines, 1, chptr,
+                                   batch_paste_url);
         }
       }
 
@@ -791,12 +752,9 @@ process_multiline_batch(struct Client *sptr)
             /* Send truncation notice if needed */
             if (total_lines > max_preview) {
               int remaining = total_lines - sent;
-              const char *sh_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                            chptr->chname, con_ml_messages(con));
-
-              if (sh_paste_url) {
+              if (batch_paste_url) {
                 mb = msgq_make(to, ":%s NOTICE %s :[%d more lines - %s]",
-                               cli_name(&me), chptr->chname, remaining, sh_paste_url);
+                               cli_name(&me), chptr->chname, remaining, batch_paste_url);
               } else {
                 mb = msgq_make(to, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
                                cli_name(&me), chptr->chname, remaining);
@@ -932,7 +890,7 @@ process_multiline_batch(struct Client *sptr)
             /* Primary doesn't have multiline - preview + truncation fallback */
             send_multiline_fallback(sptr, sptr, chptr->chname, batch_base_msgid,
                                      con_ml_messages(con), con_ml_msg_count(con),
-                                     1, chptr);
+                                     1, chptr, batch_paste_url);
           }
         }
 
@@ -1054,11 +1012,9 @@ process_multiline_batch(struct Client *sptr)
               /* Send truncation notice if needed */
               if (total_lines > max_preview) {
                 int remaining = total_lines - sent;
-                const char *echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                                chptr->chname, con_ml_messages(con));
-                if (echo_paste_url) {
+                if (batch_paste_url) {
                   mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
-                                 cli_name(&me), chptr->chname, remaining, echo_paste_url);
+                                 cli_name(&me), chptr->chname, remaining, batch_paste_url);
                 } else {
                   mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines]",
                                  cli_name(&me), chptr->chname, remaining);
@@ -1160,7 +1116,8 @@ process_multiline_batch(struct Client *sptr)
       } else {
         /* Preview + paste URL fallback for legacy clients */
         send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
-                                 con_ml_messages(con), total_lines, 0, NULL);
+                                 con_ml_messages(con), total_lines, 0, NULL,
+                                 batch_paste_url);
       }
     }
 
@@ -1269,12 +1226,9 @@ process_multiline_batch(struct Client *sptr)
           /* Send truncation notice if needed */
           if (total_lines > max_preview) {
             int remaining = total_lines - sent;
-            const char *sh_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                          cli_name(acptr), con_ml_messages(con));
-
-            if (sh_paste_url) {
+            if (batch_paste_url) {
               mb = msgq_make(acptr, ":%s NOTICE %s :[%d more lines - %s]",
-                             cli_name(&me), cli_name(acptr), remaining, sh_paste_url);
+                             cli_name(&me), cli_name(acptr), remaining, batch_paste_url);
             } else {
               mb = msgq_make(acptr, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
                              cli_name(&me), cli_name(acptr), remaining);
@@ -1333,7 +1287,7 @@ process_multiline_batch(struct Client *sptr)
           /* Preview + truncation fallback for DM echo */
           send_multiline_fallback(sptr, sptr, cli_name(acptr), batch_base_msgid,
                                    con_ml_messages(con), con_ml_msg_count(con),
-                                   0, NULL);
+                                   0, NULL, batch_paste_url);
         }
 
         /* Restore current_shadow before the shadow loop */
@@ -1377,11 +1331,9 @@ process_multiline_batch(struct Client *sptr)
             /* Send truncation notice if needed */
             if (total_lines > max_preview) {
               int remaining = total_lines - sent;
-              const char *dm_echo_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                                 cli_name(acptr), con_ml_messages(con));
-              if (dm_echo_paste_url) {
+              if (batch_paste_url) {
                 mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
-                               cli_name(&me), cli_name(acptr), remaining, dm_echo_paste_url);
+                               cli_name(&me), cli_name(acptr), remaining, batch_paste_url);
               } else {
                 mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines]",
                                cli_name(&me), cli_name(acptr), remaining);
@@ -1445,13 +1397,10 @@ process_multiline_batch(struct Client *sptr)
         /* Send truncation notice from user (consistent with preview PRIVMSGs) */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
-          const char *relay_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                           cli_name(acptr), con_ml_messages(con));
-
-          if (relay_paste_url) {
+          if (batch_paste_url) {
             sendcmdto_one(sptr, CMD_NOTICE, target_server,
                 "%C :[%d more lines - %s]",
-                acptr, remaining, relay_paste_url);
+                acptr, remaining, batch_paste_url);
           } else {
             sendcmdto_one(sptr, CMD_NOTICE, target_server,
                 "%C :[%d more lines - connect to a multiline-capable server to view]",
@@ -1533,13 +1482,10 @@ process_multiline_batch(struct Client *sptr)
          */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
-          const char *relay_paste_url = generate_paste_url(batch_base_msgid, cli_name(sptr),
-                                                           chptr->chname, con_ml_messages(con));
-
-          if (relay_paste_url) {
+          if (batch_paste_url) {
             sendcmdto_one(sptr, CMD_NOTICE, server,
                 "%H :[%d more lines - %s]",
-                chptr, remaining, relay_paste_url);
+                chptr, remaining, batch_paste_url);
           } else {
             sendcmdto_one(sptr, CMD_NOTICE, server,
                 "%H :[%d more lines - connect to a multiline-capable server to view]",
@@ -1570,10 +1516,16 @@ process_multiline_batch(struct Client *sptr)
             history_is_available(), is_channel ? chptr->chname : cli_name(acptr),
             batch_base_msgid);
   if (history_is_available()) {
-    char history_content[4096];  /* Reasonable max for multiline concatenated */
+    /* Compute total content size from batch messages for dynamic allocation */
+    size_t total_content = 0;
+    char *history_content;
     size_t content_len = 0;
     char sender_mask[256];
     char timestamp[HISTORY_TIMESTAMP_LEN];
+
+    for (lp = con_ml_messages(con); lp; lp = lp->next)
+      total_content += strlen(lp->value.cp + 1) + 1;  /* text + separator */
+    history_content = (char *)MyMalloc(total_content + 1);
 
     /* Build sender mask nick!user@host */
     ircd_snprintf(0, sender_mask, sizeof(sender_mask), "%s!%s@%s",
@@ -1592,21 +1544,11 @@ process_multiline_batch(struct Client *sptr)
        * HistServ/chathistory converts \x1F back to newlines when displaying.
        */
       if (content_len > 0 && !concat) {
-        if (content_len < sizeof(history_content) - 1) {
-          history_content[content_len++] = '\x1F';
-        }
+        history_content[content_len++] = '\x1F';
       }
 
-      /* Append text (truncate if exceeds buffer) */
-      if (content_len + text_len < sizeof(history_content) - 1) {
-        memcpy(history_content + content_len, text, text_len);
-        content_len += text_len;
-      } else if (content_len < sizeof(history_content) - 1) {
-        /* Partial fit - copy what we can */
-        size_t remaining = sizeof(history_content) - 1 - content_len;
-        memcpy(history_content + content_len, text, remaining);
-        content_len += remaining;
-      }
+      memcpy(history_content + content_len, text, text_len);
+      content_len += text_len;
     }
     history_content[content_len] = '\0';
 
@@ -1617,16 +1559,17 @@ process_multiline_batch(struct Client *sptr)
     if ((is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) || IsNoStorage(sptr)) {
       /* Skip storage but still clear batch */
     } else {
-      /* Store with base msgid (no sub-IDs) for retrieval */
-      int store_result = history_store_message(batch_base_msgid, timestamp,
+      /* Store content in unified ml_content + history sentinel atomically */
+      int store_result = history_store_multiline(batch_base_msgid, timestamp,
                           is_channel ? chptr->chname : cli_name(acptr),
                           sender_mask,
                           cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
-                          HISTORY_PRIVMSG,
-                          history_content);
-      log_write(LS_SYSTEM, L_INFO, 0, "multiline: history_store_message returned %d for msgid=%s target=%s",
+                          history_content, content_len,
+                          batch_paste_secret[0] ? batch_paste_secret : NULL);
+      log_write(LS_SYSTEM, L_INFO, 0, "multiline: history_store_multiline returned %d for msgid=%s target=%s",
                 store_result, batch_base_msgid, is_channel ? chptr->chname : cli_name(acptr));
     }
+    MyFree(history_content);
   }
 
   clear_multiline_batch(con);
@@ -1913,6 +1856,19 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
   /* Generate ONE base msgid for the entire S2S multiline batch */
   generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
+  /* Pre-compute paste URL for fallback paths */
+  char s2s_paste_secret[12] = "";
+  const char *s2s_paste_url = NULL;
+  static char s2s_paste_url_buf[256];
+  {
+    const char *url = generate_paste_url(batch_base_msgid,
+                                         s2s_paste_secret, sizeof(s2s_paste_secret));
+    if (url) {
+      ircd_strncpy(s2s_paste_url_buf, url, sizeof(s2s_paste_url_buf) - 1);
+      s2s_paste_url = s2s_paste_url_buf;
+    }
+  }
+
   is_channel = IsChannelName(batch->target);
 
   /* Validate target */
@@ -1997,7 +1953,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       } else {
         /* Graceful fallback for S2S channel delivery */
         send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
-                                 batch->messages, batch->msg_count, 1, chptr);
+                                 batch->messages, batch->msg_count, 1, chptr,
+                                 s2s_paste_url);
       }
     }
   } else if (acptr && MyConnect(acptr)) {
@@ -2061,7 +2018,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     } else {
       /* Graceful fallback for S2S DM delivery */
       send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
-                               batch->messages, batch->msg_count, 0, NULL);
+                               batch->messages, batch->msg_count, 0, NULL,
+                               s2s_paste_url);
     }
   }
 
@@ -2070,10 +2028,16 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
    * to ensure history is available for local clients.
    */
   if (history_is_available() && sptr) {
-    char history_content[4096];
+    /* Compute total content size from batch messages for dynamic allocation */
+    size_t total_content = 0;
+    char *history_content;
     size_t content_len = 0;
     char sender_mask[256];
     char timestamp[HISTORY_TIMESTAMP_LEN];
+
+    for (lp = batch->messages; lp; lp = lp->next)
+      total_content += strlen(lp->value.cp + 1) + 1;  /* text + separator */
+    history_content = (char *)MyMalloc(total_content + 1);
 
     /* Build sender mask nick!user@host */
     ircd_snprintf(0, sender_mask, sizeof(sender_mask), "%s!%s@%s",
@@ -2086,26 +2050,13 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       char *text = lp->value.cp + 1;
       size_t text_len = strlen(text);
 
-      /* Add Unit Separator (\x1F) if not concat and not first line.
-       * Using \x1F instead of \n avoids base64 encoding overhead in P10 federation
-       * while still allowing multiline content to be stored and retrieved.
-       * HistServ/chathistory converts \x1F back to newlines when displaying.
-       */
+      /* Add Unit Separator (\x1F) if not concat and not first line */
       if (content_len > 0 && !concat) {
-        if (content_len < sizeof(history_content) - 1) {
-          history_content[content_len++] = '\x1F';
-        }
+        history_content[content_len++] = '\x1F';
       }
 
-      /* Append text (truncate if exceeds buffer) */
-      if (content_len + text_len < sizeof(history_content) - 1) {
-        memcpy(history_content + content_len, text, text_len);
-        content_len += text_len;
-      } else if (content_len < sizeof(history_content) - 1) {
-        size_t remaining = sizeof(history_content) - 1 - content_len;
-        memcpy(history_content + content_len, text, remaining);
-        content_len += remaining;
-      }
+      memcpy(history_content + content_len, text, text_len);
+      content_len += text_len;
     }
     history_content[content_len] = '\0';
 
@@ -2114,14 +2065,15 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
     /* Check if channel has +P (no storage) mode or sender has +Y */
     if (!((is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) || IsNoStorage(sptr))) {
-      /* Store with base msgid for retrieval */
-      history_store_message(batch_base_msgid, timestamp,
-                            is_channel ? chptr->chname : cli_name(acptr),
-                            sender_mask,
-                            cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
-                            HISTORY_PRIVMSG,
-                            history_content);
+      /* Store content in unified ml_content + history sentinel atomically */
+      history_store_multiline(batch_base_msgid, timestamp,
+                              is_channel ? chptr->chname : cli_name(acptr),
+                              sender_mask,
+                              cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
+                              history_content, content_len,
+                              s2s_paste_secret[0] ? s2s_paste_secret : NULL);
     }
+    MyFree(history_content);
   }
 }
 
@@ -2150,11 +2102,20 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   assert(0 != cptr);
   assert(0 != sptr);
 
-  /* Empty ML from server = capability advertisement during BURST */
-  if (IsServer(sptr) && (parc < 2 || EmptyString(parv[1]))) {
+  /* ML from server = capability advertisement during BURST.
+   * Format: AB ML [max-bytes max-lines]
+   * Legacy servers send bare ML with no params (ml_max_bytes=0).
+   */
+  if (IsServer(sptr)) {
     SetMultiline(sptr);
-    /* Propagate to other servers */
-    sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "");
+    if (parc >= 2 && !EmptyString(parv[1]))
+      cli_serv(sptr)->ml_max_bytes = atoi(parv[1]);
+    if (parc >= 3 && !EmptyString(parv[2]))
+      cli_serv(sptr)->ml_max_lines = atoi(parv[2]);
+    /* Propagate with parameters */
+    sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "%u %u",
+                          cli_serv(sptr)->ml_max_bytes,
+                          cli_serv(sptr)->ml_max_lines);
     return 0;
   }
 
