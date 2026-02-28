@@ -144,6 +144,7 @@ struct BounceSessionRecord {
 #define SHADOW_FLAGS_DEAD     0x0001  /**< Marked for cleanup */
 #define SHADOW_FLAGS_BLOCKED  0x0002  /**< Write blocked (sendQ full) */
 #define SHADOW_FLAGS_PINGSENT 0x0004  /**< PING sent, awaiting PONG */
+#define SHADOW_FLAGS_SSL_PENDING 0x0008 /**< SSL has pending auth-phase write */
 
 /** Shadow connection — a secondary TCP connection sharing a bouncer session's identity.
  *
@@ -188,6 +189,20 @@ struct ShadowConnection {
   uint64_t                 sh_receiveB; /**< Connection lifetime bytes received */
   unsigned int             sh_sendM;    /**< Connection lifetime messages sent */
   unsigned int             sh_receiveM; /**< Connection lifetime messages received */
+#ifdef USE_SSL
+  /** SSL pending auth-phase flush state.
+   * When a pipelining client (e.g. goguma) generates auth responses that
+   * don't fully flush before shadow creation, the SSL object carries
+   * pending write state (wpend_tot/wpend_buf).  We save the unflushed
+   * auth data here and coalesce it with the welcome messages into a single
+   * SSL_write that satisfies the wpend_tot <= len check.  After the pending
+   * TLS record flushes from wbuf, OpenSSL continues writing from
+   * buf + wpend_ret, which correctly contains the remaining auth data
+   * followed by welcome messages. */
+  char                    *sh_ssl_flush;     /**< Coalesced flush buffer (heap) */
+  unsigned int             sh_ssl_flush_len; /**< Total bytes in flush buffer */
+  unsigned int             sh_ssl_flush_auth;/**< Auth prefix bytes in flush buffer */
+#endif
 };
 
 /** Channel membership preserved in a held session. */

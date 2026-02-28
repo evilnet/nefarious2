@@ -54,6 +54,7 @@
 #include "handlers.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "msgq.h"
 #include "struct.h"
 #include "version.h"
 
@@ -65,6 +66,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #ifdef USE_SSL
@@ -227,6 +229,12 @@ static void deferred_shadow_free_cb(struct Event *ev)
       release_listener(s->sh_listener);
       s->sh_listener = NULL;
     }
+#ifdef USE_SSL
+    if (s->sh_ssl_flush) {
+      MyFree(s->sh_ssl_flush);
+      s->sh_ssl_flush = NULL;
+    }
+#endif
     MyFree(s);
   }
   deferred_free_head = NULL;
@@ -928,6 +936,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       char sock_ip[SOCKIPLEN + 1];
 #ifdef USE_SSL
       SSL *saved_ssl;
+      char *auth_flush_data = NULL;
+      unsigned int auth_flush_len = 0;
 #endif
       int max_sh;
 
@@ -949,20 +959,46 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * state causes "bad write retry" when the shadow's first SSL_write
        * uses a different buffer.
        *
-       * Clear FLAG_BLOCKED and flush here.  If the socket is writable
-       * (which it almost certainly is — the TCP send buffer has been
-       * draining while we processed the P10 event), the pending writes
-       * complete and wpend clears.  If the flush can't fully drain the
-       * MsgQ, skip shadow creation — the client registers normally and
-       * the event loop flushes later. */
+       * Clear FLAG_BLOCKED and flush here.  If the socket is writable,
+       * the pending writes complete and wpend clears.  If not, set
+       * SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER so the pending write can
+       * complete even with a different buffer pointer — the SSL record
+       * layer writes from its internal wbuf (already-encrypted data),
+       * not from the application buffer.  We then flush the pending
+       * state after transferring the SSL to the shadow. */
       ClrFlag(cptr, FLAG_BLOCKED);
       send_queued(cptr);
-      if (MsgQLength(&(cli_sendQ(cptr))) > 0 || IsDead(cptr)) {
-        Debug((DEBUG_INFO, "Bouncer: skipping shadow for %s — %u bytes "
-               "unflushed in sendQ", cli_name(cptr),
-               MsgQLength(&(cli_sendQ(cptr)))));
+      if (IsDead(cptr))
         goto skip_shadow;
+#ifdef USE_SSL
+      if (MsgQLength(&(cli_sendQ(cptr))) > 0 && cli_socket(cptr).ssl) {
+        /* Snapshot the unflushed sendQ data.  We need this to build a
+         * coalesced buffer later (auth prefix + welcome messages) so
+         * the shadow's first SSL_write satisfies wpend_tot <= len.
+         * Must happen BEFORE stealing the SSL/fd. */
+        struct iovec snap_iov[128];
+        unsigned int snap_bytes = 0;
+        int snap_count = msgq_mapiov(&cli_sendQ(cptr), snap_iov, 128, &snap_bytes);
+        if (snap_count > 0 && snap_bytes > 0) {
+          auth_flush_data = (char *)MyMalloc(snap_bytes);
+          if (auth_flush_data) {
+            unsigned int off = 0;
+            int i;
+            for (i = 0; i < snap_count && off < snap_bytes; i++) {
+              unsigned int n = snap_iov[i].iov_len;
+              if (off + n > snap_bytes) n = snap_bytes - off;
+              memcpy(auth_flush_data + off, snap_iov[i].iov_base, n);
+              off += n;
+            }
+            auth_flush_len = off;
+          }
+        }
+        SSL_set_mode(cli_socket(cptr).ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+        Debug((DEBUG_INFO, "Bouncer: %u bytes unflushed for %s, "
+               "set ACCEPT_MOVING_WRITE_BUFFER",
+               snap_bytes, cli_name(cptr)));
       }
+#endif
 
       /* Extract fd and IP from the client's connection */
       fd = cli_fd(cptr);
@@ -1008,6 +1044,22 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
           if (saved_ssl) {
             shadow->sh_socket.ssl = saved_ssl;
             saved_ssl = NULL;  /* Shadow owns it now */
+
+            /* If we saved unflushed auth data, store it on the shadow.
+             * shadow_flush_sendq will coalesce this with the welcome
+             * messages and do a single large SSL_write that satisfies
+             * the wpend_tot <= len check for the pending TLS record. */
+            if (auth_flush_data) {
+              shadow->sh_ssl_flush = auth_flush_data;
+              shadow->sh_ssl_flush_len = auth_flush_len;
+              shadow->sh_ssl_flush_auth = auth_flush_len;
+              shadow->sh_flags |= SHADOW_FLAGS_SSL_PENDING;
+              auth_flush_data = NULL;  /* Shadow owns it now */
+              Debug((DEBUG_INFO, "Bouncer: saved %u bytes auth data for "
+                     "shadow #%u SSL pending flush",
+                     auth_flush_len, shadow->sh_id));
+            }
+
             Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
                    shadow->sh_id, fd));
           }
@@ -1070,6 +1122,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
 #ifdef USE_SSL
         if (saved_ssl)
           SSL_free(saved_ssl);
+        if (auth_flush_data)
+          MyFree(auth_flush_data);
 #endif
         close(fd);
       }
@@ -1405,6 +1459,10 @@ void bounce_destroy(struct BouncerSession *session)
       shadow->sh_listener = NULL;
     }
 #ifdef USE_SSL
+    if (shadow->sh_ssl_flush) {
+      MyFree(shadow->sh_ssl_flush);
+      shadow->sh_ssl_flush = NULL;
+    }
     ssl_free(&shadow->sh_socket);
     shadow->sh_socket.ssl = NULL;
 #endif
@@ -2989,6 +3047,118 @@ static void shadow_flush_sendq(struct ShadowConnection *shadow)
     return;
 
 #ifdef USE_SSL
+  /* Coalesced flush path for SSL pending auth-phase writes.
+   *
+   * When a pipelining client had unflushed auth responses, the SSL object
+   * carries pending write state (wpend_tot/wpend_buf in wbuf).  The
+   * pending TLS record is already encrypted in wbuf — ssl3_write_pending
+   * writes from wbuf, not from the application buffer.
+   *
+   * After ssl3_write_pending completes, OpenSSL continues writing from
+   * buf + wpend_ret for (len - wpend_ret) bytes.  By placing the original
+   * auth data first in the coalesced buffer, buf[wpend_ret..] correctly
+   * contains the remaining auth data + welcome messages.  The client
+   * receives: pending TLS record (auth) + new records (remaining auth +
+   * welcome) = complete auth responses + welcome sequence. */
+  if ((shadow->sh_flags & SHADOW_FLAGS_SSL_PENDING) && shadow->sh_ssl_flush) {
+    /* Build the coalesced buffer on first attempt.  On retries (after
+     * WANT_WRITE), reuse the same heap buffer — OpenSSL expects the
+     * same len for wnum-based progress tracking.  ACCEPT_MOVING_WRITE_BUFFER
+     * allows the buf pointer to differ between retries. */
+    if (shadow->sh_ssl_flush_len == shadow->sh_ssl_flush_auth) {
+      /* Phase 1 → Phase 2: coalesce auth prefix with sendQ welcome data */
+      unsigned int sendq_len = MsgQLength(&shadow->sh_sendQ);
+      unsigned int new_len = shadow->sh_ssl_flush_auth + sendq_len;
+      char *new_buf;
+      struct iovec ciov[128];
+      unsigned int ciov_bytes = 0;
+      int ciov_count;
+      unsigned int off;
+      int i;
+
+      new_buf = (char *)MyMalloc(new_len);
+      if (!new_buf) {
+        shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+        return;
+      }
+
+      /* Copy auth prefix */
+      memcpy(new_buf, shadow->sh_ssl_flush, shadow->sh_ssl_flush_auth);
+
+      /* Copy sendQ iovecs (welcome messages) */
+      ciov_count = msgq_mapiov(&shadow->sh_sendQ, ciov, 128, &ciov_bytes);
+      off = shadow->sh_ssl_flush_auth;
+      for (i = 0; i < ciov_count && off < new_len; i++) {
+        unsigned int n = ciov[i].iov_len;
+        if (off + n > new_len) n = new_len - off;
+        memcpy(new_buf + off, ciov[i].iov_base, n);
+        off += n;
+      }
+
+      MyFree(shadow->sh_ssl_flush);
+      shadow->sh_ssl_flush = new_buf;
+      shadow->sh_ssl_flush_len = new_len;
+      /* sh_ssl_flush_auth unchanged — marks the auth/sendQ boundary */
+
+      Debug((DEBUG_INFO, "Bouncer: built coalesced flush buf for shadow #%u: "
+             "%u auth + %u sendQ = %u total",
+             shadow->sh_id, shadow->sh_ssl_flush_auth, sendq_len, new_len));
+    }
+
+    /* Attempt the coalesced SSL_write */
+    {
+      int res = SSL_write(shadow->sh_socket.ssl, shadow->sh_ssl_flush,
+                          shadow->sh_ssl_flush_len);
+      if (res > 0) {
+        /* Success: pending TLS record flushed + new data written.
+         * Delete the sendQ portion (welcome messages) that was included
+         * in the coalesced buffer.  Any messages added to the sendQ
+         * after the coalesced buffer was built remain untouched. */
+        unsigned int sendq_consumed = shadow->sh_ssl_flush_len
+                                      - shadow->sh_ssl_flush_auth;
+        if (sendq_consumed > 0)
+          msgq_delete(&shadow->sh_sendQ, sendq_consumed);
+        shadow->sh_sendB += res;
+
+        /* Clean up flush state */
+        MyFree(shadow->sh_ssl_flush);
+        shadow->sh_ssl_flush = NULL;
+        shadow->sh_ssl_flush_len = 0;
+        shadow->sh_ssl_flush_auth = 0;
+        shadow->sh_flags &= ~SHADOW_FLAGS_SSL_PENDING;
+        shadow->sh_flags &= ~SHADOW_FLAGS_BLOCKED;
+
+        Debug((DEBUG_INFO, "Bouncer: SSL coalesced flush OK for shadow #%u "
+               "(%d bytes)", shadow->sh_id, res));
+
+        /* If more data remains (added after coalesced build), flush normally */
+        if (MsgQLength(&shadow->sh_sendQ) > 0)
+          goto normal_flush;
+        return;
+      } else {
+        int err = SSL_get_error(shadow->sh_socket.ssl, res);
+        if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+          shadow->sh_flags |= SHADOW_FLAGS_BLOCKED;
+          Debug((DEBUG_INFO, "Bouncer: SSL coalesced flush blocked for "
+                 "shadow #%u (err=%d)", shadow->sh_id, err));
+          return;
+        } else {
+          /* Fatal SSL error */
+          Debug((DEBUG_ERROR, "Bouncer: SSL coalesced flush failed for "
+                 "shadow #%u (res=%d err=%d)", shadow->sh_id, res, err));
+          MyFree(shadow->sh_ssl_flush);
+          shadow->sh_ssl_flush = NULL;
+          shadow->sh_flags |= SHADOW_FLAGS_DEAD;
+          return;
+        }
+      }
+    }
+  }
+
+normal_flush:
+#endif
+
+#ifdef USE_SSL
   if (shadow->sh_socket.ssl) {
     struct Client *primary = (shadow->sh_session && shadow->sh_session->hs_client)
                              ? shadow->sh_session->hs_client : NULL;
@@ -3331,6 +3501,10 @@ static void shadow_sock_callback(struct Event *ev)
     if (shadow) {
 #ifdef USE_SSL
       ssl_free(&shadow->sh_socket);
+      if (shadow->sh_ssl_flush) {
+        MyFree(shadow->sh_ssl_flush);
+        shadow->sh_ssl_flush = NULL;
+      }
 #endif
       if (shadow->sh_listener) {
         release_listener(shadow->sh_listener);
@@ -3544,8 +3718,12 @@ void bounce_remove_shadow(struct ShadowConnection *shadow)
   MsgQClear(&shadow->sh_sendQ);
   dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
 
-  /* Free SSL before closing fd — SSL_free sends close_notify on the socket */
+  /* Free SSL and pending flush state */
 #ifdef USE_SSL
+  if (shadow->sh_ssl_flush) {
+    MyFree(shadow->sh_ssl_flush);
+    shadow->sh_ssl_flush = NULL;
+  }
   ssl_free(&shadow->sh_socket);
   shadow->sh_socket.ssl = NULL;
 #endif
