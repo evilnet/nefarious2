@@ -4348,9 +4348,6 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
        * will pass.  current_shadow routes the output to the shadow. */
       send_markread_on_join(primary, chptr->chname);
 
-      /* Send NAMES — do_names uses CapRecipientHas for format decisions,
-       * which checks current_shadow's caps when current_shadow is set.
-       * CapRecipientHas checks current_shadow->sh_active for us. */
       if (!CapRecipientHas(primary, CAP_DRAFT_NOIMPLICITNAMES))
         do_names(primary, chptr, NAMES_ALL|NAMES_EON);
 

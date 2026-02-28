@@ -128,6 +128,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
                              struct HistoryMessage *msg)
 {
   const char *account = msg->account[0] ? msg->account : "*";
+  const char *content = msg->dyn_content ? msg->dyn_content : msg->content;
 
   /* If we have raw compressed data, send with Z flag for bandwidth savings.
    * Only use Z if the base64-encoded result fits in a single P10 message.
@@ -150,16 +151,16 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
   }
 
   /* Check if content needs base64 encoding */
-  if (!ch_needs_encoding(msg->content)) {
+  if (!ch_needs_encoding(content)) {
     /* Simple case: send as-is */
     sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
                   reqid, msg->msgid, msg->timestamp, msg->type,
-                  msg->sender, account, msg->content);
+                  msg->sender, account, content);
     return;
   }
 
   /* Base64 encode the content */
-  size_t content_len = strlen(msg->content);
+  size_t content_len = strlen(content);
   size_t b64_len = ((content_len + 2) / 3) * 4 + 1;
   char *b64 = MyMalloc(b64_len);
   if (!b64) {
@@ -170,7 +171,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
     return;
   }
 
-  ch_base64_encode(msg->content, content_len, b64);
+  ch_base64_encode(content, content_len, b64);
   size_t b64_total = strlen(b64);
 
   /* If it fits in one message, send complete B message (no + marker) */
@@ -515,7 +516,7 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
 {
   char *separator;
   char first_line[512];
-  char *content = msg->content;
+  char *content = msg->dyn_content ? msg->dyn_content : msg->content;
 
   /* Check if content contains Unit Separator (multiline) */
   separator = strchr(content, '\x1F');
@@ -629,14 +630,17 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
         }
         first = 0;
       } else {
-        /* Subsequent lines - same msgid indicates they're part of same logical message */
+        /* Subsequent lines - same msgid indicates they're part of same logical message.
+         * Include time= on every line since these are standalone PRIVMSGs,
+         * not inside a multiline batch. Clients without multiline support
+         * treat each line independently and need the timestamp. */
         if (msg->account[0]) {
-          sendrawto_one(sptr, "@batch=%s;msgid=%s;account=%s :%s %s %s :%s",
-                        outer_batchid, msg->msgid, msg->account,
+          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
+                        outer_batchid, time_str, msg->msgid, msg->account,
                         msg->sender, cmd, target, first_line);
         } else {
-          sendrawto_one(sptr, "@batch=%s;msgid=%s :%s %s %s :%s",
-                        outer_batchid, msg->msgid,
+          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s :%s",
+                        outer_batchid, time_str, msg->msgid,
                         msg->sender, cmd, target, first_line);
         }
       }
