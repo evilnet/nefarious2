@@ -290,11 +290,12 @@ static int bouncer_resume(struct Client *sptr, const char *token)
   send_note(sptr, "BOUNCER", "SESSION_RESUMED", session->hs_sessid,
             "Session resumed");
 
-  /* For clients without draft/chathistory, send a hint about how to get
-   * missed messages. Full auto-replay could be added later.
-   */
+  /* Auto-replay for clients without draft/chathistory.
+   * Suppress shadow duplication — this is per-connection welcome output. */
   if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
+    suppress_shadow_dup = 1;
     bouncer_auto_replay(sptr, session, since_time);
+    suppress_shadow_dup = 0;
   }
 
   return 0;

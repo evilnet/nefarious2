@@ -918,7 +918,63 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
     /* Socket is dead or has no fd.  Normally we drop the message.
      * Exception: relay-only ghosts (held→revive via remote server) have
      * cli_fd == -1 but may have REMOTE shadows that need channel messages.
-     * Route to those shadows via BS O, then return. */
+     * Route to those shadows via BS O, then return.
+     *
+     * IMPORTANT: When current_shadow is set, we're routing output for a
+     * specific shadow (e.g., shadow welcome in bounce_send_shadow_welcome).
+     * Route to that shadow only — do NOT broadcast to all remote shadows,
+     * which would leak per-connection welcome state to the relay. */
+    if (current_shadow && !IsServer(to) && !shadow_tag_ctx.stc_active) {
+      struct BouncerSession *bsess = bounce_get_session(to);
+      if (bsess && bsess->hs_client == to
+          && !(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)) {
+        if (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE) {
+          /* Remote shadow: route via BS O */
+          if (current_shadow->sh_relay_server && current_shadow->sh_session) {
+            const char *data;
+            unsigned int data_len;
+            char linebuf[BUFSIZE];
+            msgq_buf_data(buf, &data, &data_len);
+            if (data_len > 0 && data_len < sizeof(linebuf)) {
+              memcpy(linebuf, data, data_len);
+              while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
+                data_len--;
+              linebuf[data_len] = '\0';
+              sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                            current_shadow->sh_relay_server,
+                            "O %s %s %s M :%s",
+                            current_shadow->sh_session->hs_account,
+                            current_shadow->sh_session->hs_sessid,
+                            current_shadow->sh_relay_id, linebuf);
+            }
+            current_shadow->sh_sendM++;
+          }
+        } else {
+          /* Local shadow: add to shadow's sendQ */
+          struct MsgBuf *sh_buf = buf;
+          int sh_flags = get_shadow_tag_flags(current_shadow, NULL, 0);
+          if (sh_flags == 0) {
+            const char *data;
+            unsigned int len;
+            msgq_buf_data(buf, &data, &len);
+            if (len >= 2 && data[0] == '@') {
+              struct MsgBuf *stripped = msgq_strip_tags(buf);
+              if (stripped) {
+                msgq_add(&current_shadow->sh_sendQ, stripped, 0);
+                current_shadow->sh_sendM++;
+                socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+                msgq_clean(stripped);
+                return;
+              }
+            }
+          }
+          msgq_add(&current_shadow->sh_sendQ, sh_buf, 0);
+          current_shadow->sh_sendM++;
+          socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+        }
+      }
+      return;
+    }
     if (!IsServer(to) && !suppress_shadow_dup && IsUser(to) && IsAccount(to)) {
       struct BouncerSession *bsess = bounce_get_session(to);
       if (bsess && bsess->hs_client == to && bsess->hs_shadow_count > 0) {
@@ -1799,7 +1855,6 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
     for (member = chan->channel->members; member;
 	 member = member->next_member)
       if (MyConnect(member->user)
-          && -1 < cli_fd(cli_from(member->user))
           && member->user != one
           && cli_sentalong(member->user) != sentalong_marker) {
 	cli_sentalong(member->user) = sentalong_marker;
@@ -1897,7 +1952,6 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
       struct BouncerSession *bsess;
       int has_shadows;
       if (!MyConnect(member->user)
-          || -1 >= cli_fd(cli_from(member->user))
           || member->user == one
           || cli_sentalong(member->user) == sentalong_marker)
         continue;
@@ -2323,7 +2377,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
         (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
         (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
         (is_silenced(from, member->user, 1)) ||
-        cli_fd(cli_from(member->user)) < 0 ||
+        (cli_fd(cli_from(member->user)) < 0 && !MyConnect(member->user)) ||
         cli_sentalong(member->user) == sentalong_marker)
       continue;
     cli_sentalong(member->user) = sentalong_marker;
@@ -2451,7 +2505,7 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
         (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member)) ||
         (skip & SKIP_BURST && IsBurstOrBurstAck(cli_from(member->user))) ||
         (is_silenced(from, member->user, 1)) ||
-        cli_fd(cli_from(member->user)) < 0 ||
+        (cli_fd(cli_from(member->user)) < 0 && !MyConnect(member->user)) ||
         cli_sentalong(member->user) == sentalong_marker)
       continue;
     cli_sentalong(member->user) = sentalong_marker;

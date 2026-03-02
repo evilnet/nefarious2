@@ -4087,7 +4087,13 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
  * is introduced to the network — the ghost simply "wakes up" with the
  * new socket attached.
  *
- * @param[in] session The HOLDING session to revive.
+ * Handles two cases:
+ * 1. HOLDING session: Ghost disconnected and holding. Normal revive.
+ * 2. ACTIVE relay-only: Ghost has no local socket (cli_fd == -1), only
+ *    remote shadows provide connectivity. A local client connecting
+ *    to the managing server becomes the primary via socket transplant.
+ *
+ * @param[in] session The HOLDING or ACTIVE relay-only session.
  * @param[in] temp The temporary client whose socket will be transplanted.
  *                 This client will be freed (locally, no network messages).
  * @return 0 on success, -1 on error.
@@ -4099,13 +4105,29 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   struct Connection *temp_con;
   struct Membership *member;
   int fd;
+  int was_holding;
 
-  if (!session || session->hs_state != BOUNCE_HOLDING)
+  if (!session)
     return -1;
 
   ghost = session->hs_client;
-  if (!ghost || !MyUser(ghost) || !IsBouncerHold(ghost))
+  if (!ghost || !MyUser(ghost))
     return -1;
+
+  if (session->hs_state == BOUNCE_HOLDING) {
+    /* Normal revive from hold state */
+    if (!IsBouncerHold(ghost))
+      return -1;
+    was_holding = 1;
+  } else if (session->hs_state == BOUNCE_ACTIVE) {
+    /* Relay-only promotion: ghost has no local socket, remote shadow(s)
+     * provide connectivity. Local client should become primary. */
+    if (cli_fd(ghost) >= 0)
+      return -1;  /* Ghost has a local socket — use shadow-attach instead */
+    was_holding = 0;
+  } else {
+    return -1;
+  }
 
   if (!temp || !MyConnect(temp))
     return -1;
@@ -4140,16 +4162,18 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   Debug((DEBUG_INFO, "Bouncer: reviving ghost %s with socket from temp %s (fd %d)",
          cli_name(ghost), cli_name(temp), cli_fd(temp)));
 
-  /* Mark session as ACTIVE before canceling timer.
-   * This prevents a race where an already-queued ET_EXPIRE event
-   * (processed after timer_del but before we reach the state update
-   * at the end of this function) could trigger bounce_hold_expire
-   * to destroy the session while we're still reviving it. */
-  session->hs_state = BOUNCE_ACTIVE;
+  if (was_holding) {
+    /* Mark session as ACTIVE before canceling timer.
+     * This prevents a race where an already-queued ET_EXPIRE event
+     * (processed after timer_del but before we reach the state update
+     * at the end of this function) could trigger bounce_hold_expire
+     * to destroy the session while we're still reviving it. */
+    session->hs_state = BOUNCE_ACTIVE;
 
-  /* Cancel hold timer if running */
-  if (t_active(&session->hs_hold_timer))
-    timer_del(&session->hs_hold_timer);
+    /* Cancel hold timer if running */
+    if (t_active(&session->hs_hold_timer))
+      timer_del(&session->hs_hold_timer);
+  }
 
   /* Step 1: Steal the temp client's fd and SSL.
    * Clear s_data BEFORE socket_del to prevent stale callbacks.
@@ -4337,15 +4361,16 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
 #endif
 
   /* Step 11: Clear holding flags on ghost */
-  ClearBouncerHold(ghost);
-  ClrFlag(ghost, FLAG_DEADSOCKET);
-
-  /* Step 12: Clear CHFL_HOLDING on all channel memberships */
-  if (cli_user(ghost)) {
-    for (member = cli_user(ghost)->channel; member; member = member->next_channel) {
-      ClearMemberHolding(member);
+  if (was_holding) {
+    ClearBouncerHold(ghost);
+    /* Step 12: Clear CHFL_HOLDING on all channel memberships */
+    if (cli_user(ghost)) {
+      for (member = cli_user(ghost)->channel; member; member = member->next_channel) {
+        ClearMemberHolding(member);
+      }
     }
   }
+  ClrFlag(ghost, FLAG_DEADSOCKET);
 
   /* Step 13: Update session state (hs_state already set to ACTIVE earlier) */
   session->hs_client = ghost;
@@ -4354,8 +4379,9 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
 
-  /* Session is live again — remove persisted state */
-  bounce_db_del(session->hs_sessid);
+  /* Session is live again — remove persisted state (only HOLDING sessions persist) */
+  if (was_holding)
+    bounce_db_del(session->hs_sessid);
 
   /* Recompute session union caps */
   bounce_recompute_session_caps(ghost);
@@ -4364,8 +4390,10 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   bounce_broadcast(session, 'A', cli_yxx(ghost));
 
   log_write(LS_USER, L_TRACE, 0,
-            "Bouncer: ghost %s revived via socket transplant for session %s",
-            cli_name(ghost), session->hs_sessid);
+            "Bouncer: ghost %s %s via socket transplant for session %s",
+            cli_name(ghost),
+            was_holding ? "revived" : "promoted to primary",
+            session->hs_sessid);
 
   return 0;
 }
@@ -5465,21 +5493,39 @@ int bounce_promote_shadow(struct BouncerSession *session)
   /* Step 7: Update LocalClientArray */
   LocalClientArray[fd] = cptr;
 
-  /* Step 8: Re-register socket with event engine using socket_reattach.
-   * This preserves the socket's GenHeader (gh_ref, gh_flags, list linkage)
-   * which is critical — the event engine currently holds references to
-   * this socket from the in-progress event callback.  socket_reattach
-   * only updates the fd and re-registers with the epoll engine. */
-  if (!socket_reattach(&cli_socket(cptr), fd)) {
-    Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during shadow promotion for %s",
-           cli_name(cptr)));
-    /* Socket registration failed — close fd and let caller handle it. */
-    close(fd);
-    s_fd(&con_socket(con)) = -1;
-    LocalClientArray[fd] = 0;
-    SetFlag(cptr, FLAG_DEADSOCKET);
-    bounce_defer_shadow_free(shadow);
-    return -1;
+  /* Step 8: Re-register socket with event engine.
+   * For relay-only ghosts (revived from HOLDING via BS S without a local
+   * socket), the primary's socket was socket_del'd during hold entry and
+   * never re-initialized — GEN_ACTIVE is not set.  Use socket_add in that
+   * case.  For normal ghosts with an active socket, use socket_reattach
+   * which preserves the GenHeader (gh_ref, gh_flags, list linkage). */
+  if (!(cli_socket(cptr).s_header.gh_flags & GEN_ACTIVE)) {
+    /* Ghost socket was inactive (relay-only) — use socket_add */
+    Debug((DEBUG_INFO, "Bouncer: using socket_add for inactive ghost socket in shadow promotion"));
+    if (!socket_add(&cli_socket(cptr), client_sock_callback,
+                    (void *)con, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
+      Debug((DEBUG_ERROR, "Bouncer: socket_add failed during shadow promotion for %s",
+             cli_name(cptr)));
+      close(fd);
+      s_fd(&con_socket(con)) = -1;
+      LocalClientArray[fd] = 0;
+      SetFlag(cptr, FLAG_DEADSOCKET);
+      bounce_defer_shadow_free(shadow);
+      return -1;
+    }
+    con_freeflag(con) |= FREEFLAG_SOCKET;
+  } else {
+    /* Normal ghost with active socket — use socket_reattach */
+    if (!socket_reattach(&cli_socket(cptr), fd)) {
+      Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during shadow promotion for %s",
+             cli_name(cptr)));
+      close(fd);
+      s_fd(&con_socket(con)) = -1;
+      LocalClientArray[fd] = 0;
+      SetFlag(cptr, FLAG_DEADSOCKET);
+      bounce_defer_shadow_free(shadow);
+      return -1;
+    }
   }
 
   /* Step 9: Reset socket interest to readable only (we may have been

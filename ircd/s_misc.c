@@ -365,15 +365,27 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
    * (the managing server handles session lifecycle). */
   if (IsUser(bcptr) && IsAccount(bcptr)) {
     struct BouncerSession *bsess = bounce_get_session(bcptr);
-    if (bsess && bsess->hs_client == bcptr && bsess->hs_state == BOUNCE_ACTIVE) {
-      bsess->hs_client = NULL;
-      if (MyUser(bcptr) && bounce_enabled_for(bcptr) && !bsess->hs_shadows) {
-        /* Local client, no shadows — session is orphaned, destroy it */
+    if (bsess && bsess->hs_client == bcptr) {
+      if (bsess->hs_state == BOUNCE_HOLDING) {
+        /* HOLDING ghost destroyed (e.g., /KILL).  The ghost is the only
+         * thing keeping the session alive — no shadows, no socket.
+         * Destroy the session to prevent a dangling hs_client pointer
+         * and stale replica sessions on other servers. */
+        if (t_active(&bsess->hs_hold_timer))
+          timer_del(&bsess->hs_hold_timer);
+        bsess->hs_client = NULL;
         bounce_broadcast(bsess, 'X', NULL);
         bounce_destroy(bsess);
+      } else if (bsess->hs_state == BOUNCE_ACTIVE) {
+        bsess->hs_client = NULL;
+        if (MyUser(bcptr) && bounce_enabled_for(bcptr) && !bsess->hs_shadows) {
+          /* Local client, no shadows — session is orphaned, destroy it */
+          bounce_broadcast(bsess, 'X', NULL);
+          bounce_destroy(bsess);
+        }
+        /* Remote clients or local with shadows: managing server or
+         * shadow promotion handles the session lifecycle. */
       }
-      /* Remote clients or local with shadows: managing server or
-       * shadow promotion handles the session lifecycle. */
     }
   }
 

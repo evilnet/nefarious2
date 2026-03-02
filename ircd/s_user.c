@@ -416,80 +416,107 @@ int register_user(struct Client *cptr, struct Client *sptr)
     /* SASL-triggered bouncer resume — BEFORE network introduction.
      *
      * Priority order:
-     * 1. Socket transplant: If there's a local HOLDING ghost, transplant
-     *    this client's socket onto it. The ghost "wakes up" with no
-     *    network visibility — no new NICK, no QUIT, no collision.
-     * 2. Shadow attach: If there's an ACTIVE session, become a shadow.
+     * 1. Socket transplant: If there's a local HOLDING ghost or a local
+     *    relay-only ACTIVE ghost, transplant this client's socket onto it.
+     *    The ghost "wakes up" with no network visibility.
+     * 2. Shadow attach: If there's an ACTIVE session with a local primary
+     *    socket, become a shadow.
      * 3. Fall back to auto_resume for remote ghosts or new sessions.
      */
     auto_session = NULL;
     auto_resumed = 0;
     time_t saved_since_time = 0;
     if (IsAccount(sptr) && bounce_enabled_for(sptr)) {
-      /* Try socket transplant for local HOLDING ghost first */
-      struct BouncerSession *held = bounce_find_best_held(cli_account(sptr));
-      if (held && held->hs_client && MyUser(held->hs_client)) {
-        /* Save the ghost's idle time for replay — messages arriving after
-         * the user's last activity may not have been read even if they
-         * were delivered.  Fall back to disconnect time if never active. */
-        {
-          time_t idle = cli_user(held->hs_client) ? cli_user(held->hs_client)->last : 0;
-          saved_since_time = (idle > 0) ? idle : held->hs_disconnect_time;
+      struct BouncerSession *revive_target = NULL;
+
+      /* Try 1: Local HOLDING ghost — highest priority */
+      revive_target = bounce_find_best_held(cli_account(sptr));
+      if (revive_target && revive_target->hs_client
+          && MyUser(revive_target->hs_client)) {
+        time_t idle = cli_user(revive_target->hs_client)
+                    ? cli_user(revive_target->hs_client)->last : 0;
+        saved_since_time = (idle > 0) ? idle : revive_target->hs_disconnect_time;
+      } else {
+        revive_target = NULL;
+      }
+
+      /* Try 2: Local relay-only ACTIVE ghost (no local socket, remote
+       * shadows only). When a user reconnects to the managing server,
+       * they should become the primary instead of another shadow. */
+      if (!revive_target) {
+        struct BouncerSession *active = bounce_find_any_session(cli_account(sptr));
+        if (active && active->hs_state == BOUNCE_ACTIVE
+            && active->hs_client && MyUser(active->hs_client)
+            && cli_fd(active->hs_client) == -1
+            && 0 == strcmp(active->hs_origin, cli_yxx(&me))) {
+          time_t idle = cli_user(active->hs_client)
+                      ? cli_user(active->hs_client)->last : 0;
+          saved_since_time = (idle > 0) ? idle : active->hs_last_active;
+          revive_target = active;
         }
-        /* Local ghost found — do socket transplant */
-        if (bounce_revive(held, sptr) == 0) {
-          /* Success! Ghost is now alive with our socket.
-           * sptr is now a husk with fd=-1. Free it silently. */
-          struct Client *ghost = held->hs_client;
-          char original_nick[NICKLEN + 1];
+      }
 
-          /* Save temp client's nick in case ghost has different nick */
-          ircd_strncpy(original_nick, cli_name(sptr), NICKLEN + 1);
+      if (revive_target && bounce_revive(revive_target, sptr) == 0) {
+        /* Success! Ghost is now alive with our socket.
+         * sptr is now a husk with fd=-1. Free it silently. */
+        struct Client *ghost = revive_target->hs_client;
+        char original_nick[NICKLEN + 1];
 
-          /* Free the temp client (no network messages) */
-          bounce_free_temp_client(sptr);
+        /* Save temp client's nick in case ghost has different nick */
+        ircd_strncpy(original_nick, cli_name(sptr), NICKLEN + 1);
 
-          /* Send welcome sequence to the revived ghost.
-           * Note: We can't use the normal register_user flow because
-           * the ghost is already on the network with a numeric. */
-          send_reply(ghost, RPL_WELCOME, feature_str(FEAT_NETWORK),
-                     feature_str(FEAT_PROVIDER) ? " via " : "",
-                     feature_str(FEAT_PROVIDER) ? feature_str(FEAT_PROVIDER) : "",
-                     cli_name(ghost));
-          send_reply(ghost, RPL_YOURHOST, cli_name(&me), version);
-          send_reply(ghost, RPL_CREATED, creation);
-          send_reply(ghost, RPL_MYINFO, cli_name(&me), version, infousermodes,
-                     infochanmodes, infochanmodeswithparams);
-          send_supported(ghost);
+        /* Free the temp client (no network messages) */
+        bounce_free_temp_client(sptr);
+
+        /* Send welcome sequence to the revived ghost.
+         * Note: We can't use the normal register_user flow because
+         * the ghost is already on the network with a numeric.
+         *
+         * Suppress shadow duplication for the entire welcome block.
+         * This is per-connection state (ISUPPORT, LUSERS, MOTD,
+         * channel state, chathistory replay) that only the new
+         * primary needs.  Shadows already received their own welcome
+         * when they attached via bounce_send_shadow_welcome(). */
+        suppress_shadow_dup = 1;
+
+        send_reply(ghost, RPL_WELCOME, feature_str(FEAT_NETWORK),
+                   feature_str(FEAT_PROVIDER) ? " via " : "",
+                   feature_str(FEAT_PROVIDER) ? feature_str(FEAT_PROVIDER) : "",
+                   cli_name(ghost));
+        send_reply(ghost, RPL_YOURHOST, cli_name(&me), version);
+        send_reply(ghost, RPL_CREATED, creation);
+        send_reply(ghost, RPL_MYINFO, cli_name(&me), version, infousermodes,
+                   infochanmodes, infochanmodeswithparams);
+        send_supported(ghost);
 
 #ifdef USE_SSL
-          if (cli_socket(ghost).ssl) {
-            sendcmdto_one(&me, CMD_NOTICE, ghost,
-                          "%C :You are connected to %s with %s", ghost,
-                          cli_name(&me), ssl_get_cipher(cli_socket(ghost).ssl));
-          }
+        if (cli_socket(ghost).ssl) {
+          sendcmdto_one(&me, CMD_NOTICE, ghost,
+                        "%C :You are connected to %s with %s", ghost,
+                        cli_name(&me), ssl_get_cipher(cli_socket(ghost).ssl));
+        }
 #endif
 
-          m_lusers(ghost, ghost, 1, parv);
-          motd_signon(ghost);
+        m_lusers(ghost, ghost, 1, parv);
+        motd_signon(ghost);
 
-          /* Notify client if their nick changed (ghost had different nick) */
-          if (ircd_strcmp(original_nick, cli_name(ghost)) != 0) {
-            sendcmdto_one(ghost, CMD_NICK, ghost, "%s", cli_name(ghost));
-          }
-
-          /* Replay channel state */
-          bounce_send_channel_state(ghost);
-
-          /* Auto-replay missed messages for legacy clients */
-          if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)) {
-            bouncer_auto_replay(ghost, held, saved_since_time);
-          }
-
-          /* Return special code — caller must not dereference sptr */
-          return CPTR_KILLED;
+        /* Notify client if their nick changed (ghost had different nick) */
+        if (ircd_strcmp(original_nick, cli_name(ghost)) != 0) {
+          sendcmdto_one(ghost, CMD_NICK, ghost, "%s", cli_name(ghost));
         }
-        /* Socket transplant failed — fall through to auto_resume */
+
+        /* Replay channel state */
+        bounce_send_channel_state(ghost);
+
+        /* Auto-replay missed messages for legacy clients */
+        if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)) {
+          bouncer_auto_replay(ghost, revive_target, saved_since_time);
+        }
+
+        suppress_shadow_dup = 0;
+
+        /* Return special code — caller must not dereference sptr */
+        return CPTR_KILLED;
       }
 
       /* Fall back to existing auto_resume (handles shadows, remote ghosts, etc.) */
@@ -733,19 +760,22 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
     }
 
-    /* Replay channel state after held session resume — the client has
-     * channel memberships (transferred from ghost) but hasn't received
-     * JOIN/TOPIC/NAMES for them yet. */
-    if (auto_resumed == 1 && auto_session) {
-      bounce_send_channel_state(sptr);
-    }
+    /* Replay channel state and chathistory after session resume.
+     * Suppress shadow duplication — this is per-connection welcome output;
+     * existing shadows already got their own via bounce_send_shadow_welcome(). */
+    if (auto_resumed && auto_session) {
+      suppress_shadow_dup = 1;
 
-    /* Auto-replay for legacy clients after welcome (no chathistory CAP).
-     * Use CapOwnHas (not CapActive/union) — if only a shadow has chathistory,
-     * the primary still needs auto-replay since it can't fetch history itself. */
-    if (auto_resumed && auto_session &&
-        !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
-      bouncer_auto_replay(sptr, auto_session, saved_since_time);
+      if (auto_resumed == 1)
+        bounce_send_channel_state(sptr);
+
+      /* Auto-replay for legacy clients (no chathistory CAP).
+       * Use CapOwnHas (not CapActive/union) — if only a shadow has chathistory,
+       * the primary still needs auto-replay since it can't fetch history itself. */
+      if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY))
+        bouncer_auto_replay(sptr, auto_session, saved_since_time);
+
+      suppress_shadow_dup = 0;
     }
   }
   else {
