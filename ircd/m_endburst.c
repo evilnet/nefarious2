@@ -143,6 +143,25 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
       /* Layer 1: Also send channel advertisements (CH A F) */
       send_channel_advertisements(sptr);
     }
+
+    /* Forward cached SASL mechanism list to newly linked server.
+     * The SASL M broadcast from services only fires once when services
+     * first links.  Servers that link later miss it, so we re-send
+     * the cached mechanisms from the SASL server.
+     */
+    {
+      const char *mechs = get_sasl_mechanisms();
+      if (mechs) {
+        const char *sasl_server_name = feature_str(FEAT_SASL_SERVER);
+        struct Client *sasl_server = NULL;
+        if (strcmp(sasl_server_name, "*"))
+          sasl_server = find_match_server((char *)sasl_server_name);
+        else
+          sasl_server = &me;
+        if (sasl_server)
+          sendcmdto_one(sasl_server, CMD_SASL, sptr, "* * M :%s", mechs);
+      }
+    }
   }
 
   /* Check if the linking server is the SASL server (for legacy X3 support).

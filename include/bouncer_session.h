@@ -145,6 +145,8 @@ struct BounceSessionRecord {
 #define SHADOW_FLAGS_BLOCKED  0x0002  /**< Write blocked (sendQ full) */
 #define SHADOW_FLAGS_PINGSENT 0x0004  /**< PING sent, awaiting PONG */
 #define SHADOW_FLAGS_SSL_PENDING 0x0008 /**< SSL has pending auth-phase write */
+#define SHADOW_FLAGS_REMOTE   0x0010  /**< Remote shadow on managing server (A-side, I/O via BS R/O) */
+#define SHADOW_FLAGS_RELAY_LOCAL 0x0020 /**< Relay socket on relay server (B-side, local fd + BS R/O) */
 
 /** Shadow connection — a secondary TCP connection sharing a bouncer session's identity.
  *
@@ -189,6 +191,10 @@ struct ShadowConnection {
   uint64_t                 sh_receiveB; /**< Connection lifetime bytes received */
   unsigned int             sh_sendM;    /**< Connection lifetime messages sent */
   unsigned int             sh_receiveM; /**< Connection lifetime messages received */
+  /* Cross-server relay fields (Phase 1) */
+  struct Client           *sh_relay_server; /**< Remote: relay server (B). Local: managing server (A). */
+  char                     sh_relay_id[16]; /**< Relay ID assigned by managing server in BS W */
+  unsigned int             sh_is_ssl;       /**< 1 if relay socket is TLS, 0 if plaintext */
 #ifdef USE_SSL
   /** SSL pending auth-phase flush state.
    * When a pipelining client (e.g. goguma) generates auth responses that
@@ -204,6 +210,27 @@ struct ShadowConnection {
   unsigned int             sh_ssl_flush_auth;/**< Auth prefix bytes in flush buffer */
 #endif
 };
+
+/** Cross-server relay entry on the relay server (B-side).
+ *
+ * Maps a relay_id to a local ShadowConnection that holds the user's TCP socket.
+ * Not attached to a local BouncerSession — the session lives on the managing
+ * server (A). This entry is created during BS W processing and destroyed when
+ * the relay socket disconnects or BS X_SHADOW arrives.
+ */
+struct RelayShadowEntry {
+  struct RelayShadowEntry *rs_next;    /**< Hash chain */
+  char                     rs_relay_id[16]; /**< Relay ID (from BS W) */
+  char                     rs_account[ACCOUNTLEN + 1]; /**< Session owner account */
+  char                     rs_sessid[BOUNCER_SESSID_LEN]; /**< Remote session ID */
+  struct Client           *rs_server;  /**< Managing server (A) */
+  struct ShadowConnection *rs_shadow;  /**< Local relay ShadowConnection (owns the fd) */
+  char                     rs_nick[NICKLEN + 1]; /**< Session nick (for welcome) */
+  unsigned int             rs_is_ssl;  /**< 1 if relay socket is TLS */
+};
+
+/** Maximum relay shadow entries per server. */
+#define RELAY_SHADOW_HASHSIZE 64
 
 /** Channel membership preserved in a held session. */
 struct BounceChannel {
@@ -363,6 +390,80 @@ extern void bounce_remove_shadow(struct ShadowConnection *shadow);
  * @return 0 on success, -1 if no shadows available.
  */
 extern int bounce_promote_shadow(struct BouncerSession *session);
+
+/*
+ * Cross-server shadow relay API (Phase 1)
+ */
+
+/** Add a remote shadow to a session on the managing server (A-side).
+ * Called when BS S arrives from a relay server. Creates a ShadowConnection
+ * with SHADOW_FLAGS_REMOTE — no local fd, I/O via BS R/O.
+ * @param[in] session Session to add remote shadow to.
+ * @param[in] relay_server The relay server (B).
+ * @param[in] capab_hex Client's negotiated capabilities as hex.
+ * @param[in] is_ssl 1 if relay socket is TLS, 0 if plaintext.
+ * @param[in] sock_ip Remote client IP string.
+ * @return Pointer to new ShadowConnection, or NULL on error.
+ */
+extern struct ShadowConnection *bounce_add_remote_shadow(
+    struct BouncerSession *session, struct Client *relay_server,
+    unsigned long capab_hex, int is_ssl, const char *sock_ip);
+
+/** Find a relay shadow entry by relay_id on this server (B-side).
+ * @param[in] relay_id Relay ID string.
+ * @return RelayShadowEntry pointer, or NULL if not found.
+ */
+extern struct RelayShadowEntry *bounce_find_relay(const char *relay_id);
+
+/** Create a relay shadow entry on the relay server (B-side).
+ * Called during BS W processing. Creates a local ShadowConnection
+ * with SHADOW_FLAGS_RELAY_LOCAL that owns the dup'd user socket fd.
+ * @param[in] fd Dup'd file descriptor of user's TCP socket.
+ * @param[in] account Session owner account.
+ * @param[in] sessid Remote session ID.
+ * @param[in] relay_id Relay ID assigned by managing server.
+ * @param[in] server Managing server (A).
+ * @param[in] nick Session nick.
+ * @param[in] is_ssl 1 if fd is TLS, 0 if plaintext.
+ * @param[in] sock_ip Remote client IP string.
+ * @return RelayShadowEntry pointer, or NULL on error.
+ */
+extern struct RelayShadowEntry *bounce_create_relay(
+    int fd, const char *account, const char *sessid,
+    const char *relay_id, struct Client *server,
+    const char *nick, int is_ssl, const char *sock_ip);
+
+/** Create a pending relay entry on the relay server (B-side).
+ * Called from register_user() when a cross-server session is detected.
+ * The entry goes on the pending list until BS W arrives with the relay_id.
+ * @param[in] fd Dup'd file descriptor of user's TCP socket.
+ * @param[in] account Session owner account.
+ * @param[in] sessid Remote session ID.
+ * @param[in] server Managing server (A).
+ * @param[in] is_ssl 1 if fd is TLS, 0 if plaintext.
+ * @param[in] sock_ip Remote client IP string.
+ * @param[in] ssl SSL context (transferred ownership), or NULL for plaintext.
+ * @return RelayShadowEntry pointer, or NULL on error.
+ */
+extern struct RelayShadowEntry *bounce_add_pending_relay(
+    int fd, const char *account, const char *sessid,
+    struct Client *server, int is_ssl, const char *sock_ip,
+    void *ssl);
+
+/** Destroy a relay shadow entry and its ShadowConnection (B-side).
+ * Closes the relay socket and sends BS X_SHADOW to managing server.
+ * @param[in] entry Relay entry to destroy.
+ * @param[in] notify 1 to send BS X_SHADOW to managing server, 0 to skip.
+ */
+extern void bounce_destroy_relay(struct RelayShadowEntry *entry, int notify);
+
+/** Clean up all bouncer state referencing a departing server.
+ * Called from exit_client() when a server SQUITs.
+ * A-side: removes remote shadows whose relay server is departing.
+ * B-side: destroys relay entries whose managing server is departing.
+ * @param[in] server The departing server.
+ */
+extern void bounce_cleanup_server(struct Client *server);
 
 /** Find the bouncer session for a client (if any).
  * @param[in] cptr Client to look up.
@@ -600,8 +701,13 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * @param[out] out_session Set to session if resumed or created.
  * @param[out] out_since_time Set to the user's idle time (user->last) for
  *             replay, falling back to disconnect time if unavailable.
- * @return 1 if resumed, 2 if converted to shadow, 0 otherwise.
+ * @return 1 if resumed, 2 if converted to shadow, 3 if cross-server relay
+ *         established (caller must not introduce client), 0 otherwise.
  */
+#define BOUNCE_RESUME_NONE           0
+#define BOUNCE_RESUME_HELD           1
+#define BOUNCE_RESUME_SHADOW         2
+#define BOUNCE_RESUME_RELAY_REMOTE   3
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
                                time_t *out_since_time);

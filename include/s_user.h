@@ -107,6 +107,7 @@ extern unsigned int umode_make_snomask(unsigned int oldmask, char *arg,
                                        int what);
 extern int send_supported(struct Client *cptr);
 extern int send_supported_batched(struct Client *cptr);
+extern struct SLink *get_isupport_lines(void);
 extern int do_nick_name(char* nick);
 
 extern void user_setcloaked(struct Client *cptr);

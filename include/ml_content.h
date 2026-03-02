@@ -99,6 +99,10 @@ extern int ml_content_available(void);
 #else /* !USE_MDBX — stubs */
 
 #define ml_content_available() 0
+static inline const char *ml_content_paste_lookup(const char *paste_id) { (void)paste_id; return NULL; }
+static inline char *ml_content_get(const char *msgid, size_t *content_len_out,
+                                   const char **sender_out, const char **target_out)
+{ (void)msgid; (void)content_len_out; (void)sender_out; (void)target_out; return NULL; }
 
 #endif /* USE_MDBX */
 

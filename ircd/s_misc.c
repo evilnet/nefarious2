@@ -356,18 +356,24 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
    * either destroy the session (no shadows) or null hs_client to
    * prevent a dangling pointer.  This handles the case where
    * bounce_should_hold() returned NULL (hold disabled) but the
-   * session still exists from a previous BOUNCER SET HOLD on. */
-  if (IsUser(bcptr) && MyUser(bcptr) && bounce_enabled_for(bcptr) && IsAccount(bcptr)) {
+   * session still exists from a previous BOUNCER SET HOLD on.
+   *
+   * No MyUser gate — remote clients exiting via SQUIT also need
+   * cleanup to prevent dangling hs_client pointers.  For local clients
+   * we also check bounce_enabled_for() and may broadcast 'X' to destroy
+   * orphaned sessions.  For remote clients we just clear the pointer
+   * (the managing server handles session lifecycle). */
+  if (IsUser(bcptr) && IsAccount(bcptr)) {
     struct BouncerSession *bsess = bounce_get_session(bcptr);
     if (bsess && bsess->hs_client == bcptr && bsess->hs_state == BOUNCE_ACTIVE) {
       bsess->hs_client = NULL;
-      if (!bsess->hs_shadows) {
-        /* No shadows — session is orphaned, destroy it */
+      if (MyUser(bcptr) && bounce_enabled_for(bcptr) && !bsess->hs_shadows) {
+        /* Local client, no shadows — session is orphaned, destroy it */
         bounce_broadcast(bsess, 'X', NULL);
         bounce_destroy(bsess);
       }
-      /* If shadows exist, they'll notice the primary is gone
-       * and get cleaned up via shadow socket errors. */
+      /* Remote clients or local with shadows: managing server or
+       * shadow promotion handles the session lifecycle. */
     }
   }
 
@@ -588,6 +594,10 @@ int exit_client(struct Client *cptr,
 			   get_client_name(killer, HIDE_IP));
     sendto_opmask_butone(0, SNO_NETWORK, "Net break: %C %C (%s)",
 			 cli_serv(victim)->up, victim, comment);
+
+    /* Clean up bouncer relay state referencing this server.
+     * Must happen before the server's Client struct is freed. */
+    bounce_cleanup_server(victim);
   }
 
   /*

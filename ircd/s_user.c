@@ -80,6 +80,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 /** Sends response \a m of length \a l to client \a c. */
 #ifdef USE_SSL
@@ -526,6 +527,90 @@ int register_user(struct Client *cptr, struct Client *sptr)
       cli_auth(sptr) = NULL;
       bounce_free_temp_client(sptr);
       return CPTR_KILLED; /* Client freed — callers must not dereference cptr */
+    }
+
+    /* Cross-server relay: session is on a remote server.
+     * dup(fd) for the relay socket, send BS S to managing server,
+     * and free the temp client — it was never introduced to the network. */
+    if (auto_resumed == BOUNCE_RESUME_RELAY_REMOTE && auto_session) {
+      struct Client *managing_server = FindNServer(auto_session->hs_origin);
+      if (managing_server) {
+        int relay_fd;
+        int is_ssl = 0;
+        void *saved_ssl = NULL;
+#ifdef USE_SSL
+        is_ssl = (cli_socket(sptr).ssl != NULL) ? 1 : 0;
+#endif
+
+        /* dup the fd — the original fd will be closed below */
+        relay_fd = dup(cli_fd(sptr));
+        if (relay_fd >= 0) {
+#ifdef USE_SSL
+          /* Transfer the SSL context to the relay shadow.  Redirect the
+           * SSL BIO to the dup'd fd so it survives socket_del + close of
+           * the original.  NULL out the temp client's copy so ET_DESTROY
+           * (from socket_del) doesn't call ssl_free on it. */
+          if (cli_socket(sptr).ssl) {
+            saved_ssl = cli_socket(sptr).ssl;
+            cli_socket(sptr).ssl = NULL;
+            SSL_set_fd((SSL *)saved_ssl, relay_fd);
+          }
+#endif
+
+          /* Create pending relay entry on this server (B-side) */
+          struct RelayShadowEntry *relay_entry;
+          relay_entry = bounce_add_pending_relay(
+              relay_fd, auto_session->hs_account, auto_session->hs_sessid,
+              managing_server, is_ssl, cli_sock_ip(sptr), saved_ssl);
+
+          if (relay_entry) {
+            /* Send BS S to managing server:
+             * BS S <account> <sessid> <capab_hex> <is_ssl> <sock_ip> */
+            sendcmdto_one(&me, CMD_BOUNCER_SESSION, managing_server,
+                          "S %s %s %lx %d %s",
+                          auto_session->hs_account,
+                          auto_session->hs_sessid,
+                          0UL, /* TODO: encode cli_capab as hex */
+                          is_ssl,
+                          cli_sock_ip(sptr));
+
+            Debug((DEBUG_INFO, "register_user: cross-server relay for %s session %s via %s",
+                   cli_name(sptr), auto_session->hs_sessid,
+                   cli_name(managing_server)));
+          } else {
+            /* Failed to create relay entry — clean up */
+#ifdef USE_SSL
+            if (saved_ssl) {
+              SSL_shutdown((SSL *)saved_ssl);
+              SSL_free((SSL *)saved_ssl);
+              saved_ssl = NULL;
+            }
+#endif
+            close(relay_fd);
+          }
+        }
+      }
+
+      /* Detach the temp client's socket from the event engine and close
+       * the original fd.  The relay shadow owns the dup'd copy.
+       * SSL context was already transferred to relay (or cleaned up on
+       * failure), so ET_DESTROY won't call ssl_free.
+       * bounce_free_temp_client() asserts cli_fd == -1. */
+      s_data(&cli_socket(sptr)) = NULL;
+      LocalClientArray[cli_fd(sptr)] = 0;
+      socket_del(&cli_socket(sptr));
+      close(cli_fd(sptr));
+      cli_fd(sptr) = -1;
+      for ( ; HighestFd > 0; --HighestFd) {
+        if (LocalClientArray[HighestFd])
+          break;
+      }
+
+      /* Free the temp client — never introduced to network */
+      auth_detach_client(cli_auth(sptr));
+      cli_auth(sptr) = NULL;
+      bounce_free_temp_client(sptr);
+      return CPTR_KILLED;
     }
 
     SetLocalNumNick(sptr);
@@ -2870,6 +2955,18 @@ send_supported(struct Client *cptr)
     send_reply(cptr, RPL_ISUPPORT, line->value.cp);
 
   return 0; /* convenience return, if it's ever needed */
+}
+
+/** Return the head of the ISUPPORT lines list.
+ * Builds the list if necessary.  Each SLink's value.cp is one 005 line
+ * (the tokens portion, without the leading ":server 005 nick " prefix
+ * or trailing ":are supported by this server").
+ */
+struct SLink *get_isupport_lines(void)
+{
+  if (isupport && !isupport_lines)
+    build_isupport_lines();
+  return isupport_lines;
 }
 
 /** Send RPL_ISUPPORT lines to \a cptr wrapped in a batch.

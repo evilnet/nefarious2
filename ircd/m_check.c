@@ -759,6 +759,19 @@ void checkClient(struct Client *sptr, struct Client *acptr)
             ircd_snprintf(0, outbuf, sizeof(outbuf), "  Shadow [id=%u]::", sh->sh_id);
             send_reply(sptr, RPL_DATASTR, outbuf);
 
+            if (sh->sh_flags & SHADOW_FLAGS_REMOTE) {
+               ircd_snprintf(0, outbuf, sizeof(outbuf), "           Type:: remote (relay via %s)",
+                             sh->sh_relay_server ? cli_name(sh->sh_relay_server) : "?");
+               send_reply(sptr, RPL_DATASTR, outbuf);
+               if (sh->sh_relay_id[0]) {
+                  ircd_snprintf(0, outbuf, sizeof(outbuf), "       Relay ID:: %s", sh->sh_relay_id);
+                  send_reply(sptr, RPL_DATASTR, outbuf);
+               }
+            } else {
+               ircd_snprintf(0, outbuf, sizeof(outbuf), "           Type:: local");
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
+
             ircd_snprintf(0, outbuf, sizeof(outbuf), "             IP:: %s", sh->sh_sock_ip);
             send_reply(sptr, RPL_DATASTR, outbuf);
 

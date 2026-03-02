@@ -922,6 +922,30 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
        * ALL connections since shadows are mirrors of the primary.
        * Apply per-shadow tag filtering: strip tags the shadow hasn't negotiated. */
       if (!(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)) {
+        /* Remote shadow: route via BS O to relay server, not local socket */
+        if (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE) {
+          if (current_shadow->sh_relay_server && current_shadow->sh_session) {
+            const char *data;
+            unsigned int data_len;
+            char linebuf[BUFSIZE];
+            msgq_buf_data(buf, &data, &data_len);
+            if (data_len > 0 && data_len < sizeof(linebuf)) {
+              memcpy(linebuf, data, data_len);
+              while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
+                data_len--;
+              linebuf[data_len] = '\0';
+              sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                            current_shadow->sh_relay_server,
+                            "O %s %s %s M :%s",
+                            current_shadow->sh_session->hs_account,
+                            current_shadow->sh_session->hs_sessid,
+                            current_shadow->sh_relay_id, linebuf);
+            }
+            current_shadow->sh_sendM++;
+          }
+          return;
+        }
+
         struct MsgBuf *sh_buf = buf;
         int sh_flags = get_shadow_tag_flags(current_shadow, NULL, 0);
         if (sh_flags == 0) {
@@ -1124,9 +1148,86 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
           }
         }
 
-        msgq_add(&sh->sh_sendQ, sh_buf, prio);
-        sh->sh_sendM++;
-        socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+        if (sh->sh_flags & SHADOW_FLAGS_REMOTE) {
+          /* Remote shadow: send via BS O to relay server.
+           * Extract the formatted message data and determine the mode:
+           * N (numeric — B reconstructs with own server name) or
+           * M (message — B forwards verbatim to relay socket). */
+          if (sh->sh_relay_server && sh->sh_session) {
+            const char *data;
+            unsigned int len;
+            char linebuf[BUFSIZE];
+
+            msgq_buf_data(sh_buf, &data, &len);
+            if (len > 0 && len < sizeof(linebuf)) {
+              memcpy(linebuf, data, len);
+              /* Strip trailing \r\n if present */
+              while (len > 0 && (linebuf[len-1] == '\r' || linebuf[len-1] == '\n'))
+                len--;
+              linebuf[len] = '\0';
+
+              /* Check if this is a server-sourced numeric (starts with
+               * :<servername> <3-digit-number> <nick>) */
+              {
+                int is_numeric = 0;
+                const char *p = linebuf;
+                if (*p == '@') {
+                  /* Skip message tags */
+                  p = strchr(p, ' ');
+                  if (p) p++; else p = linebuf;
+                }
+                if (*p == ':') {
+                  const char *space = strchr(p + 1, ' ');
+                  if (space && space[1] >= '0' && space[1] <= '9' &&
+                      space[2] >= '0' && space[2] <= '9' &&
+                      space[3] >= '0' && space[3] <= '9' &&
+                      (space[4] == ' ' || space[4] == '\0')) {
+                    /* Check if source is our server name */
+                    size_t sname_len = space - (p + 1);
+                    if (sname_len == strlen(cli_name(&me)) &&
+                        0 == memcmp(p + 1, cli_name(&me), sname_len)) {
+                      is_numeric = 1;
+                    }
+                  }
+                }
+
+                if (is_numeric) {
+                  /* Numeric mode: send code + params, B reconstructs
+                   * with its own server name */
+                  const char *p2 = linebuf;
+                  /* Skip tags */
+                  if (*p2 == '@') {
+                    p2 = strchr(p2, ' ');
+                    if (p2) p2++; else p2 = linebuf;
+                  }
+                  /* Skip :<servername> */
+                  p2 = strchr(p2 + 1, ' ');
+                  if (p2) p2++; /* now at <numeric> <nick> <params> */
+
+                  sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                                sh->sh_relay_server,
+                                "O %s %s %s N %s",
+                                sh->sh_session->hs_account,
+                                sh->sh_session->hs_sessid,
+                                sh->sh_relay_id, p2);
+                } else {
+                  /* Message mode: fully formatted, B forwards verbatim */
+                  sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                                sh->sh_relay_server,
+                                "O %s %s %s M :%s",
+                                sh->sh_session->hs_account,
+                                sh->sh_session->hs_sessid,
+                                sh->sh_relay_id, linebuf);
+                }
+              }
+            }
+          }
+          sh->sh_sendM++;
+        } else {
+          msgq_add(&sh->sh_sendQ, sh_buf, prio);
+          sh->sh_sendM++;
+          socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
+        }
       }
 
       /* Clean up any MsgBufs we allocated for this send_buffer call */
