@@ -1553,7 +1553,11 @@ void client_sock_callback(struct Event* ev)
           /* Shadow promoted — client stays alive with new socket */
           return;
         }
-        /* Promotion failed — fall through to hold or exit */
+        /* Promotion failed — try relay-only mode (remote shadows with no
+         * local fd).  Session stays ACTIVE with ghost fd-less. */
+        if (bounce_relay_only_transition(bsess, cptr) == 0)
+          return;
+        /* No local or remote shadows — fall through to hold or exit */
       }
     }
 

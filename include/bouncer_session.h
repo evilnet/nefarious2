@@ -391,6 +391,13 @@ extern void bounce_remove_shadow(struct ShadowConnection *shadow);
  */
 extern int bounce_promote_shadow(struct BouncerSession *session);
 
+/** Transition to relay-only mode when primary disconnects but remote
+ * shadows still exist.  Closes primary socket, clears caps, keeps ACTIVE.
+ * @return 0 on success, -1 if no remote shadows found.
+ */
+extern int bounce_relay_only_transition(struct BouncerSession *session,
+                                         struct Client *cptr);
+
 /*
  * Cross-server shadow relay API (Phase 1)
  */

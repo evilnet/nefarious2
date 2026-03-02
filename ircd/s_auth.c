@@ -564,7 +564,8 @@ static int check_auth_finished(struct AuthRequest *auth)
   if (auth->deferred_nick[0]) {
     struct Client *holder = FindClient(auth->deferred_nick);
     if (holder && IsAccount(auth->client)
-        && (IsBouncerHold(holder) || bounce_get_session(holder))
+        && (IsBouncerHold(holder) || bounce_get_session(holder)
+            || (IsAccount(holder) && bounce_has_sessions(cli_account(holder))))
         && 0 == ircd_strcmp(cli_user(holder)->account,
                             cli_user(auth->client)->account)) {
       /* Same account — set cli_name but don't add to hash (holder owns it).

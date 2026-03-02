@@ -603,6 +603,9 @@ static void check_pings(struct Event* ev) {
         if (bsess && bsess->hs_shadows) {
           if (bounce_promote_shadow(bsess) == 0)
             continue; /* Shadow promoted — client stays alive */
+          /* Promotion failed — try relay-only mode */
+          if (bounce_relay_only_transition(bsess, cptr) == 0)
+            continue;
         }
       }
 

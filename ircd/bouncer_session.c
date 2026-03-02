@@ -2535,6 +2535,41 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
         }
       }
 
+      /* If the last shadow was removed from a relay-only ghost (no local
+       * fd, no remaining shadows), transition back to HOLDING.  The ghost
+       * was revived from HOLDING by BS S and has been relay-only since;
+       * now that the relay is gone, it returns to holding state with a
+       * fresh hold timer. */
+      if (session->hs_client && !session->hs_shadows
+          && cli_fd(session->hs_client) == -1
+          && session->hs_state == BOUNCE_ACTIVE) {
+        int hold_time = feature_int(FEAT_BOUNCER_SESSION_HOLD);
+
+        SetBouncerHold(session->hs_client);
+
+        /* Re-mark channel memberships as HOLDING */
+        if (cli_user(session->hs_client)) {
+          struct Membership *member;
+          for (member = cli_user(session->hs_client)->channel;
+               member; member = member->next_channel)
+            SetMemberHolding(member);
+        }
+
+        session->hs_state = BOUNCE_HOLDING;
+        session->hs_disconnect_time = CurrentTime;
+        session->hs_last_active = CurrentTime;
+
+        timer_init(&session->hs_hold_timer);
+        timer_add(&session->hs_hold_timer, bounce_hold_expire,
+                  (void *)session, TT_RELATIVE, hold_time);
+
+        bounce_broadcast(session, 'D', NULL);
+        bounce_db_put(session);
+
+        Debug((DEBUG_INFO, "Bouncer: relay-only session %s back to HOLDING "
+               "(last remote shadow removed)", session->hs_sessid));
+      }
+
       /* Forward */
       sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
                             cptr,
@@ -2618,6 +2653,14 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       ClearBouncerHold(session->hs_client);
       ClrFlag(session->hs_client, FLAG_DEADSOCKET);
 
+      /* Clear stale caps from the ghost's previous connection.
+       * The ghost has no primary socket — only remote shadows provide
+       * capabilities.  Without this, CapOwnHas(ghost, CAP_ECHOMSG)
+       * returns true from the old connection's caps, causing spurious
+       * echo-message delivery. */
+      memset(cli_active_own(session->hs_client), 0, sizeof(struct CapSet));
+      memset(cli_active(session->hs_client), 0, sizeof(struct CapSet));
+
       /* Clear CHFL_HOLDING on channel memberships */
       if (cli_user(session->hs_client)) {
         struct Membership *member;
@@ -2640,6 +2683,10 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       /* Broadcast attach to network */
       bounce_broadcast(session, 'A', cli_yxx(session->hs_client));
     }
+
+    /* Recompute union caps with the new remote shadow included */
+    if (session->hs_client)
+      bounce_recompute_session_caps(session->hs_client);
 
     /* Send BS W (acknowledge) + BS N (channel state) to relay server.
      * The relay server (B) generates the full welcome (001-005, MOTD)
@@ -3214,6 +3261,9 @@ static void bounce_remove_remote_shadow(struct ShadowConnection *shadow)
   session = shadow->sh_session;
   if (!session)
     return;
+
+  /* Roll shadow's lifetime data counters into session aggregates */
+  bounce_accumulate_shadow(session, shadow);
 
   /* Unlink from session's shadow list */
   for (pp = &session->hs_shadows; *pp; pp = &(*pp)->sh_next) {
@@ -5190,6 +5240,58 @@ void bounce_remove_shadow(struct ShadowConnection *shadow)
  * first shadow's socket into the Client's Connection struct so the
  * Client stays alive with the shadow's socket driving it.
  *
+/** Transition a session to relay-only mode when the primary disconnects
+ * but remote shadows still exist.  Closes the primary's socket, clears
+ * stale caps, and keeps the session ACTIVE without a local fd.
+ * The ghost continues to function via BS R/O through the relay server.
+ *
+ * Returns 0 on success, -1 if no remote shadows found.
+ */
+int bounce_relay_only_transition(struct BouncerSession *session, struct Client *cptr)
+{
+  struct ShadowConnection *sh;
+  int found_remote = 0;
+
+  if (!session || !cptr)
+    return -1;
+
+  /* Verify a non-dead remote shadow exists */
+  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
+    if ((sh->sh_flags & SHADOW_FLAGS_REMOTE) && !(sh->sh_flags & SHADOW_FLAGS_DEAD)) {
+      found_remote = 1;
+      break;
+    }
+  }
+  if (!found_remote)
+    return -1;
+
+  Debug((DEBUG_INFO,
+         "Bouncer: primary disconnect, relay-only mode for %s session %s",
+         cli_name(cptr), session->hs_sessid));
+
+  /* Close the primary's socket (fd, confs, listener, queues) */
+  close_connection(cptr);
+  ClrFlag(cptr, FLAG_DEADSOCKET);
+
+  /* Clear stale caps from the dead primary connection.
+   * The ghost has no local socket — only remote shadow caps matter. */
+  memset(cli_active_own(cptr), 0, sizeof(struct CapSet));
+  memset(cli_active(cptr), 0, sizeof(struct CapSet));
+
+  /* Roll primary counters into session aggregates */
+  bounce_accumulate_and_reset_primary(session, cptr);
+  bounce_history_disconnect(session, cli_sock_ip(cptr));
+
+  session->hs_last_active = CurrentTime;
+
+  /* Recompute union caps with only the remote shadow(s) */
+  bounce_recompute_session_caps(cptr);
+
+  return 0;
+}
+
+/** Promote the first eligible (non-remote) shadow to primary.
+ *
  * The caller must have already closed/cleaned up the primary's old socket
  * (e.g. via close_connection or equivalent cleanup).  This function:
  *  1. Removes the first shadow from the list
@@ -5209,9 +5311,21 @@ int bounce_promote_shadow(struct BouncerSession *session)
 
   assert(0 != session);
 
-  shadow = session->hs_shadows;
+  /* Find a LOCAL shadow to promote.  Remote shadows (SHADOW_FLAGS_REMOTE)
+   * have no local fd or socket — they use BS R/O through the relay server
+   * and cannot be promoted to primary. */
+  shadow = NULL;
+  {
+    struct ShadowConnection *s;
+    for (s = session->hs_shadows; s; s = s->sh_next) {
+      if (!(s->sh_flags & SHADOW_FLAGS_REMOTE) && !(s->sh_flags & SHADOW_FLAGS_DEAD)) {
+        shadow = s;
+        break;
+      }
+    }
+  }
   if (!shadow)
-    return -1; /* No shadows to promote */
+    return -1; /* No local shadows to promote (may still have remote shadows) */
 
   cptr = session->hs_client;
   assert(0 != cptr);
@@ -5220,12 +5334,12 @@ int bounce_promote_shadow(struct BouncerSession *session)
 
 #ifdef USE_SSL
   /* Prefer a TLS shadow if the primary had TLS, to preserve +z usermode
-   * and +Z (SSL-only) channel access.  Falls back to first shadow if
+   * and +Z (SSL-only) channel access.  Falls back to first local shadow if
    * no TLS shadow exists. */
   if (IsSSL(cptr)) {
     struct ShadowConnection *s;
     for (s = session->hs_shadows; s; s = s->sh_next) {
-      if (s->sh_socket.ssl) { shadow = s; break; }
+      if (!(s->sh_flags & SHADOW_FLAGS_REMOTE) && s->sh_socket.ssl) { shadow = s; break; }
     }
   }
 

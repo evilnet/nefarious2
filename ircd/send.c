@@ -882,11 +882,88 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
   if (cli_from(to))
     to = cli_from(to);
 
-  if (!can_send(to))
-    /*
-     * This socket has already been marked as dead
-     */
+  /* Remote relay shadow routing — must be checked BEFORE can_send().
+   * For relay-only ghosts (held→revive via remote server), cli_fd == -1
+   * and can_send() returns 0.  But output for these ghosts goes via BS O
+   * to the relay server, not to a local socket, so we don't need a valid fd.
+   * Handle this case early and return. */
+  if (current_shadow && (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE)
+      && !IsServer(to) && !shadow_tag_ctx.stc_active) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_client == to
+        && !(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)
+        && current_shadow->sh_relay_server && current_shadow->sh_session) {
+      const char *data;
+      unsigned int data_len;
+      char linebuf[BUFSIZE];
+      msgq_buf_data(buf, &data, &data_len);
+      if (data_len > 0 && data_len < sizeof(linebuf)) {
+        memcpy(linebuf, data, data_len);
+        while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
+          data_len--;
+        linebuf[data_len] = '\0';
+        sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                      current_shadow->sh_relay_server,
+                      "O %s %s %s M :%s",
+                      current_shadow->sh_session->hs_account,
+                      current_shadow->sh_session->hs_sessid,
+                      current_shadow->sh_relay_id, linebuf);
+      }
+      current_shadow->sh_sendM++;
+    }
     return;
+  }
+
+  if (!can_send(to)) {
+    /* Socket is dead or has no fd.  Normally we drop the message.
+     * Exception: relay-only ghosts (held→revive via remote server) have
+     * cli_fd == -1 but may have REMOTE shadows that need channel messages.
+     * Route to those shadows via BS O, then return. */
+    if (!IsServer(to) && !suppress_shadow_dup && IsUser(to) && IsAccount(to)) {
+      struct BouncerSession *bsess = bounce_get_session(to);
+      if (bsess && bsess->hs_client == to && bsess->hs_shadow_count > 0) {
+        struct ShadowConnection *sh;
+        for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
+          if ((sh->sh_flags & SHADOW_FLAGS_DEAD) || !(sh->sh_flags & SHADOW_FLAGS_REMOTE))
+            continue;
+          if (!sh->sh_relay_server || !sh->sh_session)
+            continue;
+          /* Respect skip_shadow_dup — the originating shadow that lacks
+           * echo-message should not see its own channel messages back. */
+          if (sh == skip_shadow_dup)
+            continue;
+          /* Per-shadow cap routing for dual-call broadcasts */
+          if (shadow_tag_ctx.stc_withcap != CAP_NONE
+              && !CapHas(&sh->sh_active, shadow_tag_ctx.stc_withcap))
+            continue;
+          if (shadow_tag_ctx.stc_skipcap != CAP_NONE
+              && CapHas(&sh->sh_active, shadow_tag_ctx.stc_skipcap))
+            continue;
+          /* Route to remote shadow via BS O */
+          {
+            const char *data;
+            unsigned int data_len;
+            char linebuf[BUFSIZE];
+            msgq_buf_data(buf, &data, &data_len);
+            if (data_len > 0 && data_len < sizeof(linebuf)) {
+              memcpy(linebuf, data, data_len);
+              while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
+                data_len--;
+              linebuf[data_len] = '\0';
+              sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                            sh->sh_relay_server,
+                            "O %s %s %s M :%s",
+                            sh->sh_session->hs_account,
+                            sh->sh_session->hs_sessid,
+                            sh->sh_relay_id, linebuf);
+            }
+            sh->sh_sendM++;
+          }
+        }
+      }
+    }
+    return;
+  }
 
   if (MsgQLength(&(cli_sendQ(to))) > get_sendq(to)) {
     if (IsServer(to))
@@ -913,7 +990,8 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
    * flow normally to the primary sendQ and the duplication loop below
    * delivers them to all shadows.
    */
-  if (current_shadow && MyUser(to) && !IsServer(to) && !shadow_tag_ctx.stc_active) {
+  if (current_shadow && !IsServer(to) && !shadow_tag_ctx.stc_active
+      && (MyUser(to) || (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE))) {
     struct BouncerSession *bsess = bounce_get_session(to);
     if (bsess && bsess->hs_client == to) {
       /* This is a direct reply to the session's primary — route to originating

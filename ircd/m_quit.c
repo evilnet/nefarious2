@@ -123,7 +123,10 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (bsess && bsess->hs_shadows) {
       if (bounce_promote_shadow(bsess) == 0)
         return 0; /* Shadow promoted — client stays alive */
-      /* Promotion failed — fall through to hold or exit */
+      /* Promotion failed — try relay-only mode */
+      if (bounce_relay_only_transition(bsess, sptr) == 0)
+        return 0;
+      /* No local or remote shadows — fall through to hold or exit */
     }
   }
 
