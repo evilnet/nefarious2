@@ -778,15 +778,30 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * @param[out] out_since_time Set to the user's idle time (user->last) for
  *             replay, falling back to disconnect time if unavailable.
  * @return 1 if resumed, 2 if converted to shadow, 3 if cross-server relay
- *         established (caller must not introduce client), 0 otherwise.
+ *         established (caller must not introduce client),
+ *         4 if alias path selected (caller must call bounce_setup_local_alias),
+ *         0 otherwise.
  */
 #define BOUNCE_RESUME_NONE           0
 #define BOUNCE_RESUME_HELD           1
 #define BOUNCE_RESUME_SHADOW         2
 #define BOUNCE_RESUME_RELAY_REMOTE   3
+#define BOUNCE_RESUME_ALIAS_REMOTE   4
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
                                time_t *out_since_time);
+
+/** Set up a local alias for a remote bouncer session.
+ * Called from register_user() when bounce_auto_resume() returns
+ * BOUNCE_RESUME_ALIAS_REMOTE.  Converts the registering client into
+ * a first-class alias: own numeric, channels mirrored from primary
+ * with CHFL_ALIAS, BX C broadcast to network.
+ * @param[in] sptr The registering client (will be converted in place).
+ * @param[in] session The remote session to alias into.
+ * @return 0 on success, -1 on failure (caller should fall through to normal registration).
+ */
+extern int bounce_setup_local_alias(struct Client *sptr,
+                                     struct BouncerSession *session);
 
 /*
  * MDBX persistence API (FEAT_BOUNCER_PERSIST)

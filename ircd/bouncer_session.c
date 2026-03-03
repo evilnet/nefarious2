@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "IPcheck.h"
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
@@ -58,6 +59,7 @@
 #include "s_user.h"
 #include "msgq.h"
 #include "struct.h"
+#include "motd.h"
 #include "version.h"
 
 #include <assert.h>
@@ -853,13 +855,21 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
   /* Try to find a held session to resume */
   session = bounce_find_best_held(account);
   if (session) {
-    /* Check if session is on a remote server — establish relay instead */
+    /* Check if session is on a remote server */
     if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
       struct Client *managing_server = FindNServer(session->hs_origin);
       if (managing_server) {
-        Debug((DEBUG_INFO, "Bouncer: session %s for %s is on %s — establishing relay",
-               session->hs_sessid, account, cli_name(managing_server)));
         *out_session = session;
+        /* Prefer alias path if enabled — gives first-class multi-server presence.
+         * Requires session replica with primary info and alias slots available. */
+        if (feature_bool(FEAT_BOUNCER_ALIASES) && session->hs_client
+            && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+          Debug((DEBUG_INFO, "Bouncer: alias path for %s session %s (primary on %s)",
+                 account, session->hs_sessid, cli_name(managing_server)));
+          return BOUNCE_RESUME_ALIAS_REMOTE;
+        }
+        Debug((DEBUG_INFO, "Bouncer: relay path for %s session %s via %s",
+               account, session->hs_sessid, cli_name(managing_server)));
         return BOUNCE_RESUME_RELAY_REMOTE;
       }
       /* Managing server not found — fall through to try other sessions */
@@ -934,13 +944,20 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
    * per-account limit, so we must reclaim them rather than creating new ones. */
   session = bounce_find_any_session(account);
   if (session && session->hs_state == BOUNCE_ACTIVE) {
-    /* Check if session is on a remote server — establish relay */
+    /* Check if session is on a remote server */
     if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
       struct Client *managing_server = FindNServer(session->hs_origin);
       if (managing_server) {
-        Debug((DEBUG_INFO, "Bouncer: active session %s for %s is on %s — establishing relay",
-               session->hs_sessid, account, cli_name(managing_server)));
         *out_session = session;
+        /* Prefer alias path for active sessions with known primary */
+        if (feature_bool(FEAT_BOUNCER_ALIASES) && session->hs_client
+            && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+          Debug((DEBUG_INFO, "Bouncer: alias path for %s active session %s (primary on %s)",
+                 account, session->hs_sessid, cli_name(managing_server)));
+          return BOUNCE_RESUME_ALIAS_REMOTE;
+        }
+        Debug((DEBUG_INFO, "Bouncer: relay path for %s active session %s via %s",
+               account, session->hs_sessid, cli_name(managing_server)));
         return BOUNCE_RESUME_RELAY_REMOTE;
       }
     }
@@ -1199,6 +1216,9 @@ skip_shadow:
     if (max_sessions > 0) {
       if (bounce_create(cptr, &session) == 0) {
         bounce_broadcast(session, 'C', NULL);
+        /* BS A is sent later from register_user() after SetLocalNumNick()
+         * allocates the primary's P10 numeric.  At this point cli_yxx(cptr)
+         * is still empty because the numeric hasn't been assigned yet. */
         *out_session = session;
       }
     }
@@ -2225,6 +2245,15 @@ void bounce_burst(struct Client *cptr)
                       s->hs_created,
                       s->hs_attach_count, s->hs_total_active,
                       chanbuf);
+        /* Follow with BS A so the receiver can resolve hs_client
+         * for alias support.  Only for local sessions with a live
+         * primary — remote replicas have hs_client=NULL. */
+        if (s->hs_client)
+          sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                        cptr,
+                        "A %s %s %s",
+                        s->hs_account, s->hs_sessid,
+                        cli_yxx(s->hs_client));
       }
     }
   }
@@ -2447,6 +2476,20 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     session->hs_state = BOUNCE_ACTIVE;
     session->hs_last_active = CurrentTime;
     session->hs_disconnect_time = 0;
+
+    /* Resolve primary client from numeric so remote servers can use
+     * session->hs_client for alias creation.
+     * BS A sends the 3-char client numeric (XXX); combine with the
+     * session origin (YY) to get the full YYXXX for findNUser(). */
+    if (parc >= 5 && parv[4][0]) {
+      char full_numeric[6];
+      struct Client *primary;
+      ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                    session->hs_origin, parv[4]);
+      primary = findNUser(full_numeric);
+      if (primary && IsUser(primary))
+        session->hs_client = primary;
+    }
 
     /* Forward */
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
@@ -2975,6 +3018,12 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       Debug((DEBUG_INFO, "BS R: relay %s not found in session %s", relay_id, sessid));
       return 0;
     }
+
+    /* Filter out QUIT — relay client disconnect is handled by BS XS.
+     * Feeding QUIT to the parser would kill the primary client. */
+    if (0 == ircd_strncmp(raw_line, "QUIT", 4) &&
+        (raw_line[4] == '\0' || raw_line[4] == ' ' || raw_line[4] == '\r'))
+      break;
 
     /* Set current_shadow so reply routing sends output to this shadow via BS O */
     current_shadow = sh;
@@ -3716,10 +3765,6 @@ void bounce_destroy_relay(struct RelayShadowEntry *entry, int notify)
   if (shadow) {
     MsgQClear(&shadow->sh_sendQ);
     DBufClear(&shadow->sh_recvQ);
-#ifdef USE_SSL
-    ssl_free(&shadow->sh_socket);
-    shadow->sh_socket.ssl = NULL;
-#endif
 
     if (shadow->sh_fd >= 0) {
       /* Socket is registered with the event engine.  socket_del() marks
@@ -3731,14 +3776,27 @@ void bounce_destroy_relay(struct RelayShadowEntry *entry, int notify)
        *
        * If gh_ref == 0, socket_del fires ET_DESTROY synchronously, which
        * frees shadow+entry via the callback before returning here.  Save
-       * the fd first so close() doesn't touch freed memory. */
+       * the fd and SSL pointer first so we don't touch freed memory. */
       int saved_fd = shadow->sh_fd;
+#ifdef USE_SSL
+      SSL *saved_ssl = shadow->sh_socket.ssl;
+      shadow->sh_socket.ssl = NULL;
+#endif
       shadow->sh_fd = -1;
       socket_del(&shadow->sh_socket);
       close(saved_fd);
+#ifdef USE_SSL
+      /* SSL_free after close — SSL_shutdown inside SSL_free won't send
+       * close_notify over a dead fd (same pattern as bounce_promote_shadow). */
+      if (saved_ssl)
+        SSL_free(saved_ssl);
+#endif
       return; /* Memory freed by ET_DESTROY (now or deferred) */
     }
 
+#ifdef USE_SSL
+    ssl_free(&shadow->sh_socket);
+#endif
     MyFree(shadow);
   }
 
@@ -4967,6 +5025,185 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
 }
 
 /* ---------------------------------------------------------------- */
+/* Local alias setup (trigger for BX C)                              */
+/* ---------------------------------------------------------------- */
+
+/** Set up a local alias for a remote bouncer session.
+ *
+ * Called from register_user() when bounce_auto_resume() returns
+ * BOUNCE_RESUME_ALIAS_REMOTE.  Converts the registering client in place
+ * into a first-class alias: removes from nick hash, copies identity from
+ * the primary, allocates a local P10 numeric, adds to primary's channels
+ * with CHFL_ALIAS, broadcasts BX C, and sends the welcome sequence.
+ *
+ * The alias is NOT introduced via N token — other servers learn about it
+ * through the BX C message.
+ *
+ * @param[in] sptr    The registering client to convert into an alias.
+ * @param[in] session The remote bouncer session (replica on this server).
+ * @return 0 on success, -1 on failure.
+ */
+int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session)
+{
+  struct Client *primary;
+  struct User *user;
+  struct Membership *member;
+  struct BounceAlias *ba;
+  char chanlist_buf[512];
+  int chanlist_len = 0;
+  char *parv[2] = { NULL, NULL };
+
+  assert(sptr != NULL);
+  assert(session != NULL);
+
+  /* The primary must exist on the network (remote Client from N token) */
+  primary = session->hs_client;
+  if (!primary || !IsUser(primary)) {
+    Debug((DEBUG_INFO, "bounce_setup_local_alias: no primary for session %s",
+           session->hs_sessid));
+    return -1;
+  }
+
+  user = cli_user(sptr);
+  if (!user)
+    return -1;
+
+  Debug((DEBUG_INFO, "bounce_setup_local_alias: converting %s to alias of %s (session %s)",
+         cli_name(sptr), cli_name(primary), session->hs_sessid));
+
+  /* --- Step 1: Remove from nick hash ---
+   * The client was added during NICK registration.  Aliases must NOT be
+   * in the nick hash — FindUser() should return the primary, not the alias. */
+  hRemClient(sptr);
+
+  /* --- Step 2: Overwrite identity from primary ---
+   * Same pattern as bounce_alias_create() for remote aliases. */
+  ircd_strncpy(cli_name(sptr), cli_name(primary), NICKLEN);
+  ircd_strncpy(user->username, cli_user(primary)->username, USERLEN);
+  ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN);
+  ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN);
+  ircd_strncpy(cli_info(sptr), cli_info(primary), REALLEN);
+  ircd_strncpy(user->account, cli_user(primary)->account, ACCOUNTLEN);
+  user->acc_create = cli_user(primary)->acc_create;
+
+  /* Copy IP and cloaked/fake host */
+  memcpy(&cli_ip(sptr), &cli_ip(primary), sizeof(cli_ip(sptr)));
+  ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
+  ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
+  ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+
+  /* --- Step 3: Set alias flags --- */
+  SetBouncerAlias(sptr);
+  SetUser(sptr);
+  SetAccount(sptr);
+  if (IsHiddenHost(primary))
+    SetHiddenHost(sptr);
+  user->alias_primary = primary;
+  user->server = &me;  /* Required before SetLocalNumNick (asserts this) */
+  cli_lastnick(sptr) = cli_lastnick(primary);
+  cli_handler(sptr) = CLIENT_HANDLER;
+
+  /* --- Step 4: Allocate local P10 numeric --- */
+  if (!SetLocalNumNick(sptr)) {
+    Debug((DEBUG_INFO, "bounce_setup_local_alias: no numerics available for alias"));
+    /* Restore nick hash entry since we removed it in step 1 */
+    hAddClient(sptr);
+    return -1;
+  }
+
+  /* --- Step 5: User cloaking --- */
+  user_setcloaked(sptr);
+  if (IsHiddenHost(sptr))
+    hide_hostmask(sptr);
+
+  /* --- Step 6: Track alias in session replica ---
+   * Construct full YYXXX numerics: server YY + client XXX. */
+  {
+    char alias_full[6];   /* YYXXX + NUL */
+    char primary_full[6];
+    ircd_snprintf(0, alias_full, sizeof(alias_full), "%s%s",
+                  cli_yxx(&me), cli_yxx(sptr));
+    ircd_snprintf(0, primary_full, sizeof(primary_full), "%s%s",
+                  cli_yxx(cli_user(primary)->server), cli_yxx(primary));
+
+    if (session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+      ba = &session->hs_aliases[session->hs_alias_count++];
+      ircd_strncpy(ba->ba_numeric, alias_full, sizeof(ba->ba_numeric));
+      ircd_strncpy(ba->ba_server, cli_yxx(&me), sizeof(ba->ba_server));
+    }
+
+    /* --- Step 7: Add to primary's channels with CHFL_ALIAS ---
+     * Also build the channel list string for the BX C message. */
+    chanlist_buf[0] = '\0';
+    for (member = cli_user(primary)->channel; member; member = member->next_channel) {
+      struct Channel *chptr = member->channel;
+
+      if (IsZombie(member) || IsDelayedJoin(member))
+        continue;
+
+      if (!find_member_link(chptr, sptr))
+        add_user_to_channel(chptr, sptr, CHFL_ALIAS, MAXOPLEVEL);
+
+      /* Append to channel list for BX C */
+      if (chanlist_len > 0 && chanlist_len < (int)sizeof(chanlist_buf) - 1)
+        chanlist_buf[chanlist_len++] = ' ';
+      chanlist_len += ircd_snprintf(0, chanlist_buf + chanlist_len,
+                                    sizeof(chanlist_buf) - chanlist_len,
+                                    "%s", chptr->chname);
+    }
+
+    /* --- Step 8: Broadcast BX C to network --- */
+    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                           "C %s %s %s %s :%s",
+                           primary_full,
+                           alias_full,
+                           session->hs_account,
+                           session->hs_sessid,
+                           chanlist_buf);
+  } /* end YYXXX numeric scope */
+
+  /* --- Step 9: Send welcome sequence to the alias client ---
+   * The client expects 001-005 + MOTD on connect. */
+  send_reply(sptr, RPL_WELCOME,
+             feature_str(FEAT_NETWORK),
+             feature_str(FEAT_PROVIDER) ? " via " : "",
+             feature_str(FEAT_PROVIDER) ? feature_str(FEAT_PROVIDER) : "",
+             cli_name(sptr));
+  send_reply(sptr, RPL_YOURHOST, cli_name(&me), version);
+  send_reply(sptr, RPL_CREATED, creation);
+  send_reply(sptr, RPL_MYINFO, cli_name(&me), version, infousermodes,
+             infochanmodes, infochanmodeswithparams);
+  send_supported(sptr);
+
+#ifdef USE_SSL
+  if (cli_socket(sptr).ssl)
+    sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :You are connected to %s with %s",
+                  sptr, cli_name(&me), ssl_get_cipher(cli_socket(sptr).ssl));
+#endif
+
+  m_lusers(sptr, sptr, 1, parv);
+  motd_signon(sptr);
+
+  /* Informational NOTE */
+  sendrawto_one(sptr,
+    ":%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s as alias on %s",
+    cli_name(&me), session->hs_sessid, cli_name(&me));
+
+  /* --- Step 10: Send channel state (JOINs, TOPICs, NAMES) --- */
+  bounce_send_channel_state(sptr);
+
+  if (IsIPChecked(sptr))
+    IPcheck_connect_succeeded(sptr);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "Bouncer: alias %s (%s@%s) created for session %s on %s [%s]",
+            cli_name(sptr), user->username, user->realhost,
+            session->hs_sessid, cli_name(&me), cli_sock_ip(sptr));
+
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* BX C: Create alias                                                */
 /* ---------------------------------------------------------------- */
 
@@ -5024,10 +5261,40 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     goto forward;
   }
 
-  /* Don't create if alias numeric already exists (duplicate BX C) */
-  if (findNUser(alias_numeric)) {
-    Debug((DEBUG_INFO, "BX C: alias %s already exists", alias_numeric));
-    goto forward;
+  /* Check if alias numeric already exists */
+  alias = findNUser(alias_numeric);
+  if (alias) {
+    if (IsBouncerAlias(alias)) {
+      /* Already an alias — duplicate BX C, skip creation */
+      Debug((DEBUG_INFO, "BX C: alias %s already exists as alias", alias_numeric));
+      goto forward;
+    }
+    /* Existing non-alias client — convert to alias in place.
+     * This happens when BX C arrives for a client that was introduced
+     * via N token (e.g., local alias setup already done, or burst ordering). */
+    Debug((DEBUG_INFO, "BX C: converting existing client %s (%s) to alias of %s",
+           alias_numeric, cli_name(alias), cli_name(primary)));
+    user = cli_user(alias);
+    if (!user)
+      goto forward;
+    hRemClient(alias);
+    ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN);
+    ircd_strncpy(user->username, cli_user(primary)->username, USERLEN);
+    ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN);
+    ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN);
+    ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN);
+    ircd_strncpy(user->account, account, ACCOUNTLEN);
+    user->acc_create = cli_user(primary)->acc_create;
+    user->alias_primary = primary;
+    memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
+    ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
+    ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
+    ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+    SetBouncerAlias(alias);
+    if (IsHiddenHost(primary))
+      SetHiddenHost(alias);
+    cli_lastnick(alias) = cli_lastnick(primary);
+    goto track_alias;
   }
 
   /* Create a remote client sharing the alias server's connection */
@@ -5059,9 +5326,13 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   /* Register in P10 numeric space — NOT in nick hash */
   SetRemoteNumNick(alias, alias_numeric);
 
-  /* Set client state */
+  /* Set client state.
+   * Do NOT set cli_handler here — the remote alias shares the server
+   * link's Connection, so cli_handler(alias) would overwrite
+   * con_handler on the server link (SERVER_HANDLER → CLIENT_HANDLER),
+   * causing all subsequent S2S messages to dispatch through CLIENT
+   * handlers (crash: m_privmsg asserts cptr==sptr). */
   SetUser(alias);
-  cli_handler(alias) = CLIENT_HANDLER;
   SetAccount(alias);
   if (IsHiddenHost(primary))
     SetHiddenHost(alias);
@@ -5071,14 +5342,14 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   /* Add to global client list */
   add_client_to_list(alias);
 
+track_alias:
+
   /* Track alias in session replica */
   session = bounce_find_by_token_sessid(account, sessid);
   if (session && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
     struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
-    ircd_strncpy(ba->ba_numeric, alias_numeric, 5);
-    ba->ba_numeric[5] = '\0';
-    ircd_strncpy(ba->ba_server, alias_numeric, 2);
-    ba->ba_server[2] = '\0';
+    ircd_strncpy(ba->ba_numeric, alias_numeric, sizeof(ba->ba_numeric));
+    ircd_strncpy(ba->ba_server, alias_numeric, sizeof(ba->ba_server));
   }
 
   /* Add alias to each of the primary's channels with CHFL_ALIAS */

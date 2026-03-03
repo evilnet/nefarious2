@@ -349,7 +349,7 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                     || ((member->status & CHFL_DELAYED)
                         && !(bitsel & WHOSELECT_DELAY))))
               continue;
-            if (IsMemberAlias(member) && acptr != sptr)
+            if (IsMemberAlias(member))
               continue;
             if (!(isthere || (SEE_USER(sptr, acptr, bitsel))))
               continue;

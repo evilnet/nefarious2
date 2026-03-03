@@ -1540,6 +1540,13 @@ void client_sock_callback(struct Event* ev)
     if (!msg)
       msg = "Unknown error";
 
+    /* Bouncer alias: skip shadow/hold logic — just clean up.
+     * exit_client_msg() → exit_client() sends BX X to other servers. */
+    if (IsUser(cptr) && IsBouncerAlias(cptr)) {
+      exit_client_msg(cptr, cptr, &me, fmt, msg);
+      return;
+    }
+
     /* Check if primary has shadow connections — promote one instead of exiting */
     if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
       struct BouncerSession *bsess = bounce_get_session(cptr);

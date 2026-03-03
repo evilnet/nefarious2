@@ -631,13 +631,26 @@ int exit_client(struct Client *cptr,
    * First generate the needed protocol for the other server links
    * except the source:
    */
+
+  /* Bouncer alias: send BX X instead of QUIT.  Aliases are introduced
+   * via BX C (not N token), so other servers don't have a nick-hash
+   * entry for them and must not receive a Q token. */
+  if (IsUser(victim) && IsBouncerAlias(victim)) {
+    char alias_full[6];
+    ircd_snprintf(0, alias_full, sizeof(alias_full), "%s%s",
+                  cli_yxx(cli_user(victim)->server), cli_yxx(victim));
+    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cli_from(killer),
+                          "X %s", alias_full);
+  }
+
   for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
     if (dlp->value.cptr != cli_from(killer) && dlp->value.cptr != victim)
     {
       if (IsServer(victim))
 	sendcmdto_one(killer, CMD_SQUIT, dlp->value.cptr, "%s %Tu :%s",
 		      cli_name(victim), cli_serv(victim)->timestamp, comment);
-      else if (IsUser(victim) && !HasFlag(victim, FLAG_KILLED))
+      else if (IsUser(victim) && !HasFlag(victim, FLAG_KILLED)
+               && !IsBouncerAlias(victim))
 	sendcmdto_one(victim, CMD_QUIT, dlp->value.cptr, ":%s", comment);
     }
   }

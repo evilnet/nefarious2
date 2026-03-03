@@ -2711,12 +2711,25 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
 }
 
 /** Check if message already exists in a list (by msgid) */
-static int message_exists(struct HistoryMessage *list, const char *msgid)
+static int message_exists(struct HistoryMessage *list, struct HistoryMessage *check)
 {
   struct HistoryMessage *m;
+  const char *check_content = check->dyn_content ? check->dyn_content : check->content;
+
   for (m = list; m; m = m->next) {
-    if (strcmp(m->msgid, msgid) == 0)
+    /* Exact msgid match */
+    if (strcmp(m->msgid, check->msgid) == 0)
       return 1;
+    /* Semantic duplicate: same timestamp + sender + type + content.
+     * Catches the same message stored on different servers with
+     * different msgids (e.g. Bj-* on hub vs AC-* on leaf). */
+    if (m->type == check->type
+        && strcmp(m->timestamp, check->timestamp) == 0
+        && strcmp(m->sender, check->sender) == 0) {
+      const char *m_content = m->dyn_content ? m->dyn_content : m->content;
+      if (strcmp(m_content, check_content) == 0)
+        return 1;
+    }
   }
   return 0;
 }
@@ -2748,7 +2761,7 @@ static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
 
   /* Add unique messages from list2 */
   for (m = list2; m && count < limit; m = m->next) {
-    if (!message_exists(result, m->msgid)) {
+    if (!message_exists(result, m)) {
       struct HistoryMessage *copy = (struct HistoryMessage *)MyCalloc(1, sizeof(*copy));
       memcpy(copy, m, sizeof(*copy));
       copy->next = NULL;

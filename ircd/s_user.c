@@ -640,6 +640,19 @@ int register_user(struct Client *cptr, struct Client *sptr)
       return CPTR_KILLED;
     }
 
+    /* Alias path: session is on a remote server, create local alias.
+     * The client becomes a first-class alias — own numeric, own connection,
+     * channels mirrored from primary with CHFL_ALIAS.  Not introduced via
+     * N token; other servers learn about it through BX C. */
+    if (auto_resumed == BOUNCE_RESUME_ALIAS_REMOTE && auto_session) {
+      int alias_result = bounce_setup_local_alias(sptr, auto_session);
+      if (alias_result == 0)
+        return 0;  /* Alias setup complete — client is alive */
+      /* Alias setup failed — fall through to normal registration */
+      Debug((DEBUG_INFO, "register_user: alias setup failed for %s, falling through",
+             cli_name(sptr)));
+    }
+
     SetLocalNumNick(sptr);
 
     /* cli_name must be set by NICK before registration proceeds.
@@ -850,6 +863,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
                              *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
                              iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 0),
                              NumNick(sptr), cli_info(sptr));
+
+  /* Broadcast BS A for a newly created bouncer session.  Must come AFTER
+   * the N token above so that receiving servers can findNUser() the
+   * primary when resolving hs_client. */
+  if (auto_session && auto_session->hs_client == sptr)
+    bounce_broadcast(auto_session, 'A', cli_yxx(sptr));
 
   clear_privs(sptr);
 

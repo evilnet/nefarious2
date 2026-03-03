@@ -99,6 +99,19 @@ struct ShadowTagContext shadow_tag_ctx;
  */
 int suppress_shadow_dup = 0;
 
+/** Override for S2S tag source connection.
+ * When alias source rewriting substitutes a local primary for a remote alias,
+ * the cptr computation (MyConnect(from) ? NULL : cli_from(from)) would yield
+ * NULL, losing the incoming S2S tags. This preserves the alias's connection
+ * so @time and ;msgid are correctly forwarded. Auto-cleared after use.
+ */
+static struct Client *s2s_cptr_override = NULL;
+
+void sendcmdto_set_s2s_cptr(struct Client *cptr)
+{
+  s2s_cptr_override = cptr;
+}
+
 /** When non-zero, numeric replies bypass the default suppression and
  * are duplicated to all shadows.  Set during JOIN post-join replies.
  */
@@ -1446,14 +1459,18 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   if ((IsServer(to) || IsMe(to)) &&
       (strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0) &&
       feature_bool(FEAT_P10_MESSAGE_TAGS)) {
-    /* Get incoming server connection for tag preservation */
-    cptr = MyConnect(from) ? NULL : cli_from(from);
+    /* Get incoming server connection for tag preservation.
+     * s2s_cptr_override preserves tags during alias source rewriting. */
+    cptr = s2s_cptr_override ? s2s_cptr_override
+         : (MyConnect(from) ? NULL : cli_from(from));
+    s2s_cptr_override = NULL;
     if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
       mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
     } else {
       mb = msgq_make(to, "%:#C %s %v", from, tok, &vd);
     }
   } else {
+    s2s_cptr_override = NULL;  /* Clear even if not used */
     mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
                    &vd);
   }
@@ -2381,8 +2398,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
 
   vd.vd_format = pattern;
 
-  /* Get the server connection for S2S tag handling */
-  cptr = MyConnect(from) ? NULL : cli_from(from);
+  /* Get the server connection for S2S tag handling.
+   * s2s_cptr_override is set by alias source rewriting — when the primary
+   * is substituted for the alias as 'from', the cptr would be NULL (primary
+   * is local), losing incoming S2S tags.  The override preserves them. */
+  cptr = s2s_cptr_override ? s2s_cptr_override
+       : (MyConnect(from) ? NULL : cli_from(from));
+  s2s_cptr_override = NULL;
 
   /* Build buffer to send to users */
   usercmd = cmd;
@@ -2516,8 +2538,13 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
 
   vd.vd_format = pattern;
 
-  /* Get the server connection for S2S tag handling */
-  cptr = MyConnect(from) ? NULL : cli_from(from);
+  /* Get the server connection for S2S tag handling.
+   * s2s_cptr_override is set by alias source rewriting — when the primary
+   * is substituted for the alias as 'from', the cptr would be NULL (primary
+   * is local), losing incoming S2S tags.  The override preserves them. */
+  cptr = s2s_cptr_override ? s2s_cptr_override
+       : (MyConnect(from) ? NULL : cli_from(from));
+  s2s_cptr_override = NULL;
 
   /* Build buffer to send to users */
   usercmd = cmd;

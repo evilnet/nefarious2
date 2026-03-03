@@ -346,6 +346,15 @@ int sub1_from_channel(struct Channel* chptr)
 
   chptr->users = 0;
 
+  /* Bouncer aliases keep the channel alive even with 0 real users.
+   * During SQUIT, alias members stay in the channel (hs_promoting
+   * suppresses bounce_sync_alias_part) so that
+   * bounce_execute_squit_promotions() can promote them to real users.
+   * Without this guard, destruct_channel() would assert-fail on
+   * non-empty chptr->members. */
+  if (chptr->aliases > 0)
+    return 0;
+
   if (chptr->mode.exmode & EXMODE_PERSIST)
     return 0;
 
@@ -819,10 +828,13 @@ static int remove_member_from_channel(struct Membership* member)
 
   if (IsMemberAlias(member)) {
     /* Alias removal: decrement alias counter only.
-     * Skip joined/nonssl/auth decrements.
-     * Skip sub1_from_channel — alias removal never destroys a channel. */
+     * Skip joined/nonssl/auth decrements. */
     if (chptr->aliases > 0)
       --chptr->aliases;
+    /* If this was the last alias and no real users remain,
+     * the channel is truly empty — destroy it. */
+    if (chptr->aliases == 0 && chptr->users == 0)
+      return sub1_from_channel(chptr);
     return 1;
   }
 

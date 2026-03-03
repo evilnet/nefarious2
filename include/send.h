@@ -94,6 +94,9 @@ extern int skip_primary_echo;
 struct ShadowConnection;
 extern struct ShadowConnection *skip_shadow_dup;
 
+/* Override S2S tag source connection for alias source rewriting */
+extern void sendcmdto_set_s2s_cptr(struct Client *cptr);
+
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,
 			  const char *tok, struct Client *to,

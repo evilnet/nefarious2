@@ -168,7 +168,7 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
     if ((!IsDelayedJoin(member) || (member->user == sptr)) && (filter & NAMES_DEL))
         continue;
 
-    if (IsMemberAlias(member) && member->user != sptr)
+    if (IsMemberAlias(member))
         continue;
 
     if (needs_space)

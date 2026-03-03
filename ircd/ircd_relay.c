@@ -695,6 +695,9 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 void server_relay_channel_message(struct Client* sptr, const char* name, const char* text)
 {
   struct Channel* chptr;
+  struct Client *one;
+  const char *client_tags;
+
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
@@ -703,19 +706,31 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
     send_reply(sptr, ERR_NOSUCHCHANNEL, name);
     return;
   }
+
+  /* Save alias's server link and client tags before potential rewrite */
+  one = cli_from(sptr);
+  client_tags = cli_client_tags(sptr);
+
+  /* Alias source rewriting: use primary's P10 numeric for S2S.
+   * The alias numeric (from BX C) is only known to BX-aware servers.
+   * The primary numeric (from N token) is universally known.
+   * Keep 'one' = alias's server link for echo suppression. */
+  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+    sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
+    sptr = cli_user(sptr)->alias_primary;
+  }
+
   /*
    * This first: Almost never a server/service
    * Servers may have channel services, need to check for it here
    */
   if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
-    /* Use variant with client-only tags if sender has them */
-    const char *client_tags = cli_client_tags(sptr);
     if (client_tags && *client_tags) {
-      sendcmdto_channel_butone_with_client_tags(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone_with_client_tags(sptr, CMD_PRIVATE, chptr, one,
                          SKIP_DEAF | SKIP_BURST, text[0], client_tags,
                          "%H :%s", chptr, text);
     } else {
-      sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, one,
                                SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
     }
 #ifdef USE_MDBX
@@ -750,26 +765,38 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
 void server_relay_channel_notice(struct Client* sptr, const char* name, const char* text)
 {
   struct Channel* chptr;
+  struct Client *one;
+  const char *client_tags;
+
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
 
   if (IsLocalChannel(name) || 0 == (chptr = FindChannel(name)))
     return;
+
+  /* Save alias's server link and client tags before potential rewrite */
+  one = cli_from(sptr);
+  client_tags = cli_client_tags(sptr);
+
+  /* Alias source rewriting (see server_relay_channel_message) */
+  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+    sendcmdto_set_s2s_cptr(one);
+    sptr = cli_user(sptr)->alias_primary;
+  }
+
   /*
    * This first: Almost never a server/service
    * Servers may have channel services, need to check for it here
    */
   if ((client_can_send_to_channel(sptr, chptr, 1) &&
        !(chptr->mode.exmode & EXMODE_NONOTICES)) || IsChannelService(sptr)) {
-    /* Use variant with client-only tags if sender has them */
-    const char *client_tags = cli_client_tags(sptr);
     if (client_tags && *client_tags) {
-      sendcmdto_channel_butone_with_client_tags(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone_with_client_tags(sptr, CMD_NOTICE, chptr, one,
                          SKIP_DEAF | SKIP_BURST, '\0', client_tags,
                          "%H :%s", chptr, text);
     } else {
-      sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, one,
                                SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
     }
 #ifdef USE_MDBX
@@ -1315,12 +1342,24 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 void server_relay_private_message(struct Client* sptr, const char* name, const char* text)
 {
   struct Client* acptr;
+  struct Client* from;
+  const char *client_tags;
   char pm_msgid[64];
   char pm_timestamp[32];
 
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
+
+  /* Save alias context before potential rewrite */
+  client_tags = cli_client_tags(sptr);
+  from = sptr;
+
+  /* Alias source rewriting: use primary's numeric for S2S.
+   * The recipient's server may not understand BX C alias numerics. */
+  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary)
+    from = cli_user(sptr)->alias_primary;
+
   /*
    * nickname addressed?
    */
@@ -1330,11 +1369,11 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
                text);
     return;
   }
-  if (is_silenced(sptr, acptr, 0))
+  if (is_silenced(from, acptr, 0))
     return;
 
   if (MyUser(acptr))
-    add_target(acptr, sptr);
+    add_target(acptr, from);
 
   /* Generate shared msgid + timestamp for alias forwarding and history */
   pm_msgid[0] = '\0';
@@ -1348,24 +1387,27 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
                   (unsigned long)(tv.tv_usec / 1000));
   }
 
-  /* Use variant with client-only tags if sender has them and recipient supports it */
+  /* Use variant with client-only tags if sender has them and recipient supports it.
+   * Set s2s_cptr_override only before sendcmdto_one (which consumes it);
+   * sendcmdto_one_client_tags is for local recipients and doesn't need it. */
   {
-    const char *client_tags = cli_client_tags(sptr);
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
-      sendcmdto_one_client_tags(sptr, MSG_PRIVATE, acptr, client_tags,
+      sendcmdto_one_client_tags(from, MSG_PRIVATE, acptr, client_tags,
                                 "%C :%s", acptr, text);
     } else {
-      sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+      if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
+        sendcmdto_set_s2s_cptr(cli_from(sptr));
+      sendcmdto_one(from, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
     }
   }
 
   /* Forward PM to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(sptr, acptr, CMD_PRIVATE, text, pm_msgid);
+  bounce_forward_pm_to_aliases(from, acptr, CMD_PRIVATE, text, pm_msgid);
 
 #ifdef USE_MDBX
   /* Store server-relayed private message in history database (if enabled) */
   if (pm_msgid[0])
-    store_private_history(sptr, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp);
+    store_private_history(from, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp);
 #endif
 }
 
@@ -1379,23 +1421,34 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
 void server_relay_private_notice(struct Client* sptr, const char* name, const char* text)
 {
   struct Client* acptr;
+  struct Client* from;
+  const char *client_tags;
   char pm_msgid[64];
   char pm_timestamp[32];
 
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
+
+  /* Save alias context before potential rewrite */
+  client_tags = cli_client_tags(sptr);
+  from = sptr;
+
+  /* Alias source rewriting (see server_relay_private_message) */
+  if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary)
+    from = cli_user(sptr)->alias_primary;
+
   /*
    * nickname addressed?
    */
   if (0 == (acptr = findNUser(name)) || !IsUser(acptr))
     return;
 
-  if (is_silenced(sptr, acptr, 0))
+  if (is_silenced(from, acptr, 0))
     return;
 
   if (MyUser(acptr))
-    add_target(acptr, sptr);
+    add_target(acptr, from);
 
   /* Generate shared msgid + timestamp for alias forwarding and history */
   pm_msgid[0] = '\0';
@@ -1411,22 +1464,23 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
 
   /* Use variant with client-only tags if sender has them and recipient supports it */
   {
-    const char *client_tags = cli_client_tags(sptr);
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
-      sendcmdto_one_client_tags(sptr, MSG_NOTICE, acptr, client_tags,
+      sendcmdto_one_client_tags(from, MSG_NOTICE, acptr, client_tags,
                                 "%C :%s", acptr, text);
     } else {
-      sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+      if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
+        sendcmdto_set_s2s_cptr(cli_from(sptr));
+      sendcmdto_one(from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
     }
   }
 
   /* Forward notice to all aliases of the target bouncer primary */
-  bounce_forward_pm_to_aliases(sptr, acptr, CMD_NOTICE, text, pm_msgid);
+  bounce_forward_pm_to_aliases(from, acptr, CMD_NOTICE, text, pm_msgid);
 
 #ifdef USE_MDBX
   /* Store server-relayed private notice in history database (if enabled) */
   if (pm_msgid[0])
-    store_private_history(sptr, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp);
+    store_private_history(from, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp);
 #endif
 }
 

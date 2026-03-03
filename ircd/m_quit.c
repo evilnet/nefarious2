@@ -113,6 +113,11 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(0 != sptr);
   assert(cptr == sptr);
 
+  /* Bouncer alias: skip all shadow/hold logic — just clean up.
+   * exit_client() sends BX X to notify other servers. */
+  if (IsBouncerAlias(sptr))
+    return exit_client(cptr, sptr, sptr, "Quit");
+
   /* Try shadow promotion first — if the session has shadows, promote
    * one to primary rather than going HOLDING.  This mirrors the
    * s_bsd.c disconnect handler which also tries promotion first.
