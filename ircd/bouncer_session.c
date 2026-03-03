@@ -743,6 +743,17 @@ int bounce_session_has_plaintext(struct Client *cptr)
       return 1;
   }
 
+  /* Check aliases — remote clients, so check FLAG_SSL (set from their
+   * actual socket on the remote server) rather than a local socket. */
+  if (session->hs_alias_count > 0) {
+    int i;
+    for (i = 0; i < session->hs_alias_count; i++) {
+      struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+      if (alias && IsBouncerAlias(alias) && !IsSSL(alias))
+        return 1;
+    }
+  }
+
   return 0;
 #else
   return 0;
@@ -4765,6 +4776,14 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
       if (alias && IsBouncerAlias(alias)
           && cli_alias_primary(alias) == who
           && !find_member_link(chptr, alias)) {
+        /* Skip +Z channels for non-TLS aliases */
+        if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
+          sendcmdto_one(&me, CMD_NOTICE, alias,
+            "%C :Not joining %s \xe2\x80\x94 channel requires TLS (+Z) "
+            "but your connection is plaintext. Reconnect with TLS to join.",
+            alias, chptr->chname);
+          continue;
+        }
         add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
       }
     }
@@ -4866,6 +4885,60 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
     sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                           "U %s %s=%s",
                           sess->hs_aliases[i].ba_numeric, field, value);
+  }
+}
+
+/** User mode flags that should be synchronized between primary and aliases.
+ * These are the user-visible mode flags (o, w, i, g, etc.) plus internal
+ * oper tracking flags.  Internal state flags like FLAG_BOUNCER_ALIAS,
+ * FLAG_IPCHECK, etc. are NOT synchronized.
+ */
+static const int umode_sync_flags[] = {
+  FLAG_OPER, FLAG_LOCOP, FLAG_INVISIBLE, FLAG_WALLOP,
+  FLAG_DEAF, FLAG_CHSERV, FLAG_DEBUG, FLAG_WHOIS_NOTICE,
+  FLAG_HIDE_OPER, FLAG_NOIDLE, FLAG_NOCHAN, FLAG_COMMONCHANSONLY,
+  FLAG_ACCOUNTONLY, FLAG_BOT, FLAG_PRIVDEAF, FLAG_ADMIN,
+  FLAG_XTRAOP, FLAG_NOLINK, FLAG_MULTILINE_EXPAND, FLAG_NOSTORAGE,
+  FLAG_OPERED_LOCAL, FLAG_OPERED_REMOTE,
+  -1
+};
+
+/** Copy user mode flags from one client to another.
+ * Only copies the flags listed in umode_sync_flags[].
+ * @param[in]  from Source client (usually the primary).
+ * @param[out] to   Destination client (usually an alias).
+ */
+static void bounce_copy_umodes(struct Client *from, struct Client *to)
+{
+  int i;
+  for (i = 0; umode_sync_flags[i] >= 0; i++) {
+    if (HasFlag(from, umode_sync_flags[i]))
+      SetFlag(to, umode_sync_flags[i]);
+    else
+      ClrFlag(to, umode_sync_flags[i]);
+  }
+}
+
+/** Synchronize user mode flags from the primary to all its aliases.
+ * Call after any mode change on the primary.
+ * @param[in] primary The primary client whose modes changed.
+ */
+void bounce_sync_alias_umodes(struct Client *primary)
+{
+  struct BouncerSession *sess;
+  int i;
+
+  if (!IsUser(primary) || IsBouncerAlias(primary))
+    return;
+
+  sess = bounce_get_session(primary);
+  if (!sess || sess->hs_alias_count <= 0)
+    return;
+
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+    if (alias && IsBouncerAlias(alias))
+      bounce_copy_umodes(primary, alias);
   }
 }
 
@@ -5103,6 +5176,9 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   cli_lastnick(sptr) = cli_lastnick(primary);
   cli_handler(sptr) = CLIENT_HANDLER;
 
+  /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
+  bounce_copy_umodes(primary, sptr);
+
   /* --- Step 4: Allocate local P10 numeric --- */
   if (!SetLocalNumNick(sptr)) {
     Debug((DEBUG_INFO, "bounce_setup_local_alias: no numerics available for alias"));
@@ -5141,10 +5217,19 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
       if (IsZombie(member) || IsDelayedJoin(member))
         continue;
 
+      /* Skip +Z channels for non-TLS aliases */
+      if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(sptr)) {
+        sendcmdto_one(&me, CMD_NOTICE, sptr,
+          "%C :Not joining %s \xe2\x80\x94 channel requires TLS (+Z) "
+          "but your connection is plaintext. Reconnect with TLS to join.",
+          sptr, chptr->chname);
+        continue;
+      }
+
       if (!find_member_link(chptr, sptr))
         add_user_to_channel(chptr, sptr, CHFL_ALIAS, MAXOPLEVEL);
 
-      /* Append to channel list for BX C */
+      /* Append to channel list for BX C (only joined channels) */
       if (chanlist_len > 0 && chanlist_len < (int)sizeof(chanlist_buf) - 1)
         chanlist_buf[chanlist_len++] = ' ';
       chanlist_len += ircd_snprintf(0, chanlist_buf + chanlist_len,
@@ -5294,6 +5379,8 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     if (IsHiddenHost(primary))
       SetHiddenHost(alias);
     cli_lastnick(alias) = cli_lastnick(primary);
+    /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
+    bounce_copy_umodes(primary, alias);
     goto track_alias;
   }
 
@@ -5338,6 +5425,8 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     SetHiddenHost(alias);
   SetBouncerAlias(alias);
   cli_lastnick(alias) = cli_lastnick(primary);
+  /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
+  bounce_copy_umodes(primary, alias);
 
   /* Add to global client list */
   add_client_to_list(alias);
@@ -5361,6 +5450,9 @@ track_alias:
          chan_name = ircd_strtok(&chan_tok, NULL, " ")) {
       struct Channel *chptr = FindChannel(chan_name);
       if (chptr && find_member_link(chptr, primary)) {
+        /* Skip +Z channels for non-TLS aliases */
+        if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias))
+          continue;
         add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
       }
     }

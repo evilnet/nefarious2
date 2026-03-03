@@ -109,7 +109,7 @@
 #include <string.h>
 
 /* Forward declarations */
-void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf);
+void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, int flags);
 
 /**
  * Context for async OPER password verification.
@@ -163,7 +163,7 @@ static void oper_password_verified(int result, void *arg)
         return;
       }
     }
-    do_oper(sptr, sptr, ctx->aconf);
+    do_oper(sptr, sptr, ctx->aconf, 0);
     SetOperedLocal(sptr);
     ClearOperedRemote(sptr);
     Debug((DEBUG_INFO, "oper_password_verified: OPER success for %s",
@@ -181,7 +181,7 @@ static void oper_password_verified(int result, void *arg)
   MyFree(ctx);
 }
 
-void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
+void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, int flags)
 {
   struct Flags old_mode = cli_flags(sptr);
   char*        modes;
@@ -312,16 +312,18 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf)
     sendcmdto_serv_butone(&me, CMD_SWHOIS, NULL, "%C :%s", sptr, aconf->swhois);
   }
 
-  sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
-     "%s (%s@%s) is now a %s operator (%c)",
-     cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost,
-     HasPriv(sptr, PRIV_PROPAGATE) ? "global" : "local",
-     HasPriv(sptr, PRIV_PROPAGATE) ? 'O' : 'o');
+  if (!(flags & OPER_FLAG_SILENT)) {
+    sendto_opmask_butone_global((MyUser(sptr) ? &me : NULL), SNO_OLDSNO,
+       "%s (%s@%s) is now a %s operator (%c)",
+       cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->realhost,
+       HasPriv(sptr, PRIV_PROPAGATE) ? "global" : "local",
+       HasPriv(sptr, PRIV_PROPAGATE) ? 'O' : 'o');
 
-  if (feature_bool(FEAT_OPERMOTD))
-    m_opermotd(sptr, sptr, 1, parv);
+    if (feature_bool(FEAT_OPERMOTD))
+      m_opermotd(sptr, sptr, 1, parv);
 
-  log_write(LS_OPER, L_INFO, 0, "OPER (%s) by (%#C)", aconf->name, sptr);
+    log_write(LS_OPER, L_INFO, 0, "OPER (%s) by (%#C)", aconf->name, sptr);
+  }
 }
 
 int can_oper(struct Client *cptr, struct Client *sptr, char *name,
@@ -471,7 +473,7 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     int result = can_oper(cptr, sptr, name, password, &aconf);
     if (result == -1) {
       /* Sync verification succeeded */
-      do_oper(cptr, sptr, aconf);
+      do_oper(cptr, sptr, aconf, 0);
       SetOperedLocal(sptr);
       ClearOperedRemote(sptr);
     }
@@ -509,7 +511,7 @@ int ms_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
 
     if (can_oper(cptr, sptr, parv[2], parv[3], &aconf))
-      do_oper(cptr, sptr, aconf);
+      do_oper(cptr, sptr, aconf, 0);
   } else if (!IsServer(sptr))
     send_reply(sptr, RPL_YOUREOPER);
 

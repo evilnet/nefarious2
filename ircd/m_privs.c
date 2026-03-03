@@ -142,6 +142,15 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr) && modified)
       sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :Your privileges were modified", acptr);
 
+    /* Alias→primary privilege sync: the PRIVS message targets the alias
+     * numeric, but the primary needs the same privileges so oper
+     * capabilities (CHECK, KILL, etc.) work from the primary too. */
+    if (IsBouncerAlias(acptr) && cli_user(acptr)
+        && cli_user(acptr)->alias_primary) {
+      memcpy(&cli_privs(cli_user(acptr)->alias_primary),
+             &cli_privs(acptr), sizeof(struct Privs));
+    }
+
     sendcmdto_serv_butone(sptr, CMD_PRIVS, cptr, "%C %s", acptr, buf);
   } else {
     if (parc < 2)

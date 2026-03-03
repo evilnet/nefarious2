@@ -1769,6 +1769,36 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           strcat(bufh, parv[i]);
         }
         sendcmdto_serv_butone(sptr, CMD_MODE, cptr, "%s", bufh);
+
+        /* If this remote primary has local aliases, parse the mode
+         * string and apply flag changes to the primary's Client struct,
+         * then sync to aliases so they stay in mode-sync. */
+        if (!IsBouncerAlias(acptr)) {
+          struct BouncerSession *sess = bounce_get_session(acptr);
+          if (sess && sess->hs_alias_count > 0) {
+            char **pp;
+            char *mm;
+            int mwhat = MODE_ADD;
+            unsigned int mi;
+            for (pp = &parv[2]; *pp && pp < &parv[parc]; pp++) {
+              for (mm = *pp; *mm; mm++) {
+                if (*mm == '+') { mwhat = MODE_ADD; continue; }
+                if (*mm == '-') { mwhat = MODE_DEL; continue; }
+                for (mi = 0; mi < USERMODELIST_SIZE; mi++) {
+                  if (userModeList[mi].c == *mm) {
+                    if (mwhat == MODE_ADD)
+                      SetFlag(acptr, userModeList[mi].flag);
+                    else
+                      ClrFlag(acptr, userModeList[mi].flag);
+                    break;
+                  }
+                }
+              }
+            }
+            bounce_sync_alias_umodes(acptr);
+          }
+        }
+
         return 0;
       }
       force = 1;
@@ -2233,6 +2263,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (HasPriv(acptr, PRIV_PROPAGATE)) {
       prop = 1;
     }
+    /* Alias->primary sync: the alias has PRIV_PROPAGATE from the leaf's
+     * Oper block (via PRIVS message), but the primary doesn't.  Force
+     * propagation so +o is included in the S2S mode string. */
+    if (allow_modes & ALLOWMODES_ALIAS_SYNC) {
+      prop = 1;
+    }
     if (FlagHas(&setflags, FLAG_OPER) && !IsOper(acptr)) {
       /* user no longer oper */
       if (!FlagHas(&setflags, FLAG_HIDE_OPER) && !FlagHas(&setflags, FLAG_CHSERV) && !FlagHas(&setflags, FLAG_BOT)) {
@@ -2314,6 +2350,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       bounce_emit_alias_update(acptr, "host", cli_user(acptr)->host);
     }
   }
+
+  /* Sync user mode flags to all aliases of this primary.
+   * Must be after mode application so aliases reflect the new state. */
+  bounce_sync_alias_umodes(acptr);
 
   return 0;
 }

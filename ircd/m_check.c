@@ -195,9 +195,9 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
 
    if (flags & CHECK_SHOWUSERS) {
      if (feature_bool(FEAT_HALFOPS))
-       send_reply(sptr, RPL_DATASTR, "Users (@ = op, % = halfop, + = voice, < = delayed)");
+       send_reply(sptr, RPL_DATASTR, "Users (@ = op, % = halfop, + = voice, < = delayed, ~ = alias)");
      else
-       send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, < = delayed)");
+       send_reply(sptr, RPL_DATASTR, "Users (@ = op, + = voice, < = delayed, ~ = alias)");
    }
 
    for (lp = chptr->members; lp; lp = lp->next_member)
@@ -221,7 +221,12 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
       else
          strcat(ustat, " ");
 
-      if (chptr && IsDelayedJoin(lp))
+      if (chptr && IsMemberAlias(lp))
+      {
+         strcat(ustat, "~");
+      }
+
+      else if (chptr && IsDelayedJoin(lp))
       {
          strcat(ustat, "<");
          delayed++;
@@ -269,12 +274,12 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
 
    if (feature_bool(FEAT_HALFOPS))
      ircd_snprintf(0, outbuf, sizeof(outbuf),
-        "Total users:: %d (%d ops, %d halfops, %d voiced, %d clones, %d authed, %d delayed)",
-        cntr, opcntr, hopcntr, vcntr, clones, authed, delayed);
+        "Total users:: %d (%d ops, %d halfops, %d voiced, %d clones, %d authed, %d delayed, %u aliases)",
+        cntr, opcntr, hopcntr, vcntr, clones, authed, delayed, chptr->aliases);
    else
      ircd_snprintf(0, outbuf, sizeof(outbuf),
-        "Total users:: %d (%d ops, %d voiced, %d clones, %d authed, %d delayed)",
-        cntr, opcntr, vcntr, clones, authed, delayed);
+        "Total users:: %d (%d ops, %d voiced, %d clones, %d authed, %d delayed, %u aliases)",
+        cntr, opcntr, vcntr, clones, authed, delayed, chptr->aliases);
 
    send_reply(sptr, RPL_DATASTR, outbuf);
 
@@ -439,6 +444,22 @@ void checkClient(struct Client *sptr, struct Client *acptr)
      send_reply(sptr, RPL_DATASTR, "         Status:: Local IRC Operator");
    } else {
      send_reply(sptr, RPL_DATASTR, "         Status:: Client");
+   }
+
+   /* Bouncer alias identification */
+   if (IsBouncerAlias(acptr)) {
+     struct Client *primary = cli_alias_primary(acptr);
+     if (primary) {
+       ircd_snprintf(0, outbuf, sizeof(outbuf), " Bouncer Alias:: of %s (%s%s)",
+                     cli_name(primary), cli_yxx(cli_user(primary)->server),
+                     cli_yxx(primary));
+     } else {
+       ircd_snprintf(0, outbuf, sizeof(outbuf), " Bouncer Alias:: yes (primary unknown)");
+     }
+     send_reply(sptr, RPL_DATASTR, outbuf);
+     ircd_snprintf(0, outbuf, sizeof(outbuf), " Alias Numeric:: %s%s",
+                   cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
+     send_reply(sptr, RPL_DATASTR, outbuf);
    }
 
    if (MyUser(acptr)) {
@@ -649,6 +670,8 @@ void checkClient(struct Client *sptr, struct Client *acptr)
          int local_shadows = 0, remote_shadows = 0;
          int has_primary = (session->hs_state == BOUNCE_ACTIVE && MyConnect(acptr)
                             && cli_fd(acptr) >= 0);
+         int has_remote_primary = (!has_primary && session->hs_state == BOUNCE_ACTIVE
+                                   && IsUser(acptr) && !MyConnect(acptr));
 
          /* Count local vs remote shadows */
          for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
@@ -664,6 +687,8 @@ void checkClient(struct Client *sptr, struct Client *acptr)
          if (session->hs_state == BOUNCE_ACTIVE) {
             if (has_primary)
                state_str = "ACTIVE";
+            else if (has_remote_primary)
+               state_str = "ACTIVE (remote primary)";
             else if (remote_shadows > 0)
                state_str = "ACTIVE (relay-only)";
             else
@@ -705,13 +730,21 @@ void checkClient(struct Client *sptr, struct Client *acptr)
 
             if (session->hs_state != BOUNCE_ACTIVE) {
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: 0 (holding)");
+            } else if (has_remote_primary && local_shadows == 0 && remote_shadows == 0) {
+               struct Client *mgr = FindNServer(session->hs_origin);
+               ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: primary on %s",
+                             mgr ? cli_name(mgr) : session->hs_origin);
             } else if (has_primary && local_shadows == 0 && remote_shadows == 0) {
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: 1 (primary only)");
             } else {
                char *p = detail;
                if (has_primary)
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "1 primary");
-               else
+               else if (has_remote_primary) {
+                  struct Client *mgr = FindNServer(session->hs_origin);
+                  p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "primary on %s",
+                                     mgr ? cli_name(mgr) : session->hs_origin);
+               } else
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "no primary");
                if (local_shadows > 0)
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), ", %d local shadow%s",
@@ -822,6 +855,24 @@ void checkClient(struct Client *sptr, struct Client *acptr)
                away_str = "present";
             ircd_snprintf(0, outbuf, sizeof(outbuf), "     Away state:: %s", away_str);
             send_reply(sptr, RPL_DATASTR, outbuf);
+         } else if (has_remote_primary) {
+            struct Client *mgr;
+            send_reply(sptr, RPL_DATASTR, " ");
+            mgr = FindNServer(session->hs_origin);
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "  Primary (remote)::");
+            send_reply(sptr, RPL_DATASTR, outbuf);
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "         Numeric:: %s%s",
+                          cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
+            send_reply(sptr, RPL_DATASTR, outbuf);
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "          Server:: %s",
+                          mgr ? cli_name(mgr) : session->hs_origin);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "              IP:: %s",
+                          ircd_ntoa(&cli_ip(acptr)));
+            send_reply(sptr, RPL_DATASTR, outbuf);
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "       Connected:: %s",
+                          myctime(cli_firsttime(acptr) ? cli_firsttime(acptr) : cli_lastnick(acptr)));
+            send_reply(sptr, RPL_DATASTR, outbuf);
          } else if (session->hs_state == BOUNCE_ACTIVE && remote_shadows > 0) {
             send_reply(sptr, RPL_DATASTR, " ");
             send_reply(sptr, RPL_DATASTR, "        Primary:: (relay-only, no local socket)");
@@ -901,6 +952,37 @@ void checkClient(struct Client *sptr, struct Client *acptr)
                           (unsigned long)(sh->sh_receiveB % 1024),
                           sh->sh_receiveM);
             send_reply(sptr, RPL_DATASTR, outbuf);
+         }
+
+         /* Aliases (multi-server bouncer presence) */
+         if (session->hs_alias_count > 0) {
+            int ai;
+            send_reply(sptr, RPL_DATASTR, " ");
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "Aliases:: (%d)", session->hs_alias_count);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            for (ai = 0; ai < session->hs_alias_count; ai++) {
+               struct BounceAlias *ba = &session->hs_aliases[ai];
+               struct Client *alias = findNUser(ba->ba_numeric);
+               struct Client *asvr = FindNServer(ba->ba_server);
+
+               if (alias && IsBouncerAlias(alias)) {
+                  char *amodes = umode_str(alias);
+                  ircd_snprintf(0, outbuf, sizeof(outbuf),
+                                "  [%d] %s on %s :: +%s%s",
+                                ai + 1, ba->ba_numeric,
+                                asvr ? cli_name(asvr) : ba->ba_server,
+                                *amodes ? amodes : "(none)",
+                                MyConnect(alias) ? " (local)" : "");
+               } else {
+                  ircd_snprintf(0, outbuf, sizeof(outbuf),
+                                "  [%d] %s on %s :: %s",
+                                ai + 1, ba->ba_numeric,
+                                asvr ? cli_name(asvr) : ba->ba_server,
+                                alias ? "not an alias" : "not found");
+               }
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
          }
 
          /* Connection history */

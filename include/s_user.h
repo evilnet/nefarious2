@@ -54,6 +54,10 @@ struct Flags;
 #define ALLOWMODES_ANY	0 /**< Allow any user mode */
 #define ALLOWMODES_DEFAULT  1 /**< Only allow the subset of modes that are legit defaults */
 #define ALLOWMODES_SVSMODE 2 /**< Allow any user mode to be changed ignoring restrictions */
+#define ALLOWMODES_ALIAS_SYNC 4 /**< Alias->primary mode sync: force +o propagation */
+
+/* flags for do_oper() */
+#define OPER_FLAG_SILENT 1 /**< Suppress oper announcement, OPERMOTD, and log */
 
 /** Formatter function for send_user_info().
  * @param who Client being displayed.
@@ -85,6 +89,8 @@ extern int hide_hostmask(struct Client *cptr);
 extern int unhide_hostmask(struct Client *cptr);
 extern int set_user_mode(struct Client *cptr, struct Client *sptr,
                          int parc, char *parv[], int allow_modes);
+extern void do_oper(struct Client* cptr, struct Client* sptr,
+                    struct ConfItem* aconf, int flags);
 extern int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg);
 extern int hunt_server_cmd(struct Client *from, const char *cmd,
 			   const char *tok, struct Client *one,

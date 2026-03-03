@@ -384,6 +384,12 @@ extern void bounce_alias_untrack(struct Client *alias);
 extern void bounce_emit_alias_update(struct Client *primary,
     const char *field, const char *value);
 
+/** Synchronize user mode flags from a primary to all its aliases.
+ * Call after mode changes on the primary so aliases stay in sync.
+ * @param[in] primary The primary client whose modes changed.
+ */
+extern void bounce_sync_alias_umodes(struct Client *primary);
+
 /** Prepare bouncer sessions for SQUIT promotion.
  * Called BEFORE exit_downlinks(). Marks sessions needing promotion,
  * removes departing server's alias entries from session replicas.
