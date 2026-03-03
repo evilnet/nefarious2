@@ -200,6 +200,7 @@ extern int ms_account(struct Client*, struct Client*, int, char*[]);
 extern int ms_admin(struct Client*, struct Client*, int, char*[]);
 extern int ms_asll(struct Client*, struct Client*, int, char*[]);
 extern int ms_away(struct Client*, struct Client*, int, char*[]);
+extern int ms_bouncer_transfer(struct Client*, struct Client*, int, char*[]);
 extern int ms_burst(struct Client*, struct Client*, int, char*[]);
 extern int ms_clearmode(struct Client*, struct Client*, int, char*[]);
 extern int ms_connect(struct Client*, struct Client*, int, char*[]);
