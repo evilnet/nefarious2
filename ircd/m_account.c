@@ -192,6 +192,8 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         ClearAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
 
+        bounce_emit_alias_update(acptr, "account", "");
+
         sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                                "*");
 
@@ -222,6 +224,8 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
+
+        bounce_emit_alias_update(acptr, "account", cli_user(acptr)->account);
 
         /* Increment authusers for all channels this user is in */
         {

@@ -90,6 +90,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -147,6 +148,9 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Propagate to other servers */
   sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
+  /* Update bouncer aliases with new realname */
+  bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
+
   /* Echo SETNAME back to the sender per IRCv3 spec */
   if (CapOwnHas(sptr, CAP_SETNAME))
     sendcmdto_one(sptr, CMD_SETNAME, sptr, ":%s", cli_info(sptr));
@@ -196,6 +200,9 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* Propagate to other servers */
   sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+
+  /* Update bouncer aliases with new realname */
+  bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
 
   /* Notify local channel members with setname capability */
   sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,

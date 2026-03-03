@@ -53,6 +53,7 @@
 #define INCLUDED_stdint_h
 #endif
 
+struct Channel;
 struct Client;
 struct Listener;
 
@@ -66,6 +67,8 @@ struct Listener;
 #define BOUNCER_MAX_CHANNELS    50
 /** Maximum shadow connections per bouncer session. */
 #define BOUNCER_MAX_SHADOWS     4
+/** Maximum alias numerics per bouncer session (multi-server presence). */
+#define BOUNCER_MAX_ALIASES     4
 /** Maximum connection history entries per session (unique hosts). */
 #define BOUNCER_MAX_CONN_HISTORY 10
 
@@ -238,6 +241,12 @@ struct BounceChannel {
   unsigned int modes;         /**< CHFL_CHANOP, CHFL_VOICE, etc. */
 };
 
+/** Tracks an alias numeric for multi-server bouncer presence. */
+struct BounceAlias {
+  char ba_numeric[6];       /**< Alias P10 numeric (YYXXX) */
+  char ba_server[3];        /**< Server numeric hosting this alias (YY) */
+};
+
 /** A single bouncer session.
  *
  * Each session represents one logical connection to the IRC network.
@@ -269,6 +278,12 @@ struct BouncerSession {
 
   struct BounceChannel hs_channels[BOUNCER_MAX_CHANNELS];
   int hs_chancount;
+
+  /** Alias numerics for multi-server presence. */
+  struct BounceAlias hs_aliases[BOUNCER_MAX_ALIASES];
+  int hs_alias_count;
+
+  int hs_promoting;                    /**< Nonzero during SQUIT promotion (suppresses alias sync) */
 
   int hs_effective_away;               /**< Last computed effective away: 0=present, 1=away, 2=all-star */
   char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */
@@ -328,6 +343,60 @@ extern struct BouncerSession *bounce_find_by_token(const char *token);
  * @return AccountSessions pointer, or NULL if no sessions.
  */
 extern struct AccountSessions *bounce_find_by_account(const char *account);
+
+/** Sync alias join: when primary joins a channel, add local aliases.
+ * Called from add_user_to_channel() for non-alias members.
+ * @param[in] chptr Channel the primary just joined.
+ * @param[in] who   The primary client.
+ */
+extern void bounce_sync_alias_join(struct Channel *chptr, struct Client *who);
+
+/** Sync alias part: when primary leaves a channel, remove local aliases.
+ * Called from remove_user_from_channel() for non-alias members.
+ * @param[in] chptr Channel the primary is leaving.
+ * @param[in] who   The primary client.
+ */
+extern void bounce_sync_alias_part(struct Channel *chptr, struct Client *who);
+
+/** Forward a PM/NOTICE to all aliases of the target bouncer primary.
+ * @param[in] from    Client that sent the message.
+ * @param[in] target  Target client (primary).
+ * @param[in] cmd     Long command name (MSG_PRIVATE or MSG_NOTICE).
+ * @param[in] tok     Short command token (TOK_PRIVATE or TOK_NOTICE).
+ * @param[in] text    Message text.
+ */
+extern void bounce_forward_pm_to_aliases(struct Client *from,
+    struct Client *target, const char *cmd, const char *tok,
+    const char *text, const char *msgid);
+
+/** Remove an alias from its session replica's hs_aliases[].
+ * Safe to call even if the alias is not found (no-op).
+ * Uses the alias's own account (not primary's) to avoid use-after-free.
+ * @param[in] alias The alias client being destroyed.
+ */
+extern void bounce_alias_untrack(struct Client *alias);
+
+/** Broadcast BX U identity updates to all aliases when primary changes.
+ * @param[in] primary The primary client whose identity changed.
+ * @param[in] field   Field name (host, realname, fakehost, etc.).
+ * @param[in] value   New value for the field.
+ */
+extern void bounce_emit_alias_update(struct Client *primary,
+    const char *field, const char *value);
+
+/** Prepare bouncer sessions for SQUIT promotion.
+ * Called BEFORE exit_downlinks(). Marks sessions needing promotion,
+ * removes departing server's alias entries from session replicas.
+ * @param[in] server The departing server.
+ */
+extern void bounce_prepare_squit_promotions(struct Client *server);
+
+/** Execute SQUIT promotions for bouncer sessions.
+ * Called AFTER exit_downlinks(). Promotes winning aliases,
+ * restores mode flags, broadcasts BX P + BS T.
+ * @param[in] server The departing server.
+ */
+extern void bounce_execute_squit_promotions(struct Client *server);
 
 /** Attach a client to an existing session (resume).
  * @param[in] session Session to attach to.

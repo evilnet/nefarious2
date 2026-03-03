@@ -98,6 +98,7 @@
 #include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -133,6 +134,9 @@ static void apply_sethost_changes(struct Client *sptr, const char *hostmask,
 
   hide_hostmask(sptr);
   send_umode_out(sptr, sptr, setflags, 0);
+
+  /* Update bouncer aliases with new visible host */
+  bounce_emit_alias_update(sptr, "host", cli_user(sptr)->host);
 }
 
 /**

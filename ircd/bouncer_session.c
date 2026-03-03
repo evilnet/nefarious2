@@ -47,6 +47,7 @@
 #include "numnicks.h"
 #include "send.h"
 #include "hash.h"
+#include "querycmds.h"
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "parse.h"
@@ -2292,6 +2293,7 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
  *   BS D <account> <sessid> <disconnect-time> :<channels>
  *   BS X <account> <sessid>
  *   BS U <account> <sessid> <field>=<value>
+ *   BS T <account> <sessid> <new-origin>  (session ownership transfer)
  */
 int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                      int parc, char *parv[])
@@ -3062,6 +3064,34 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     break;
   }
 
+  case 'T': /* Transfer ownership (SQUIT promotion) */
+  {
+    /* BS T <account> <sessid> <new-origin>
+     * Updates hs_origin so BS S and other origin-gated operations
+     * route to the new managing server.
+     */
+    const char *new_origin;
+
+    if (parc < 5)
+      break;
+
+    new_origin = parv[4];
+    session = bounce_find_by_token_sessid(account, sessid);
+    if (session) {
+      ircd_strncpy(session->hs_origin, new_origin,
+                    sizeof(session->hs_origin) - 1);
+      Debug((DEBUG_INFO, "BS T: session %s/%s ownership transferred to %s",
+             account, sessid, new_origin));
+    }
+
+    /* Forward */
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+                          cptr,
+                          "T %s %s %s",
+                          account, sessid, new_origin);
+    break;
+  }
+
   default:
     break;
   }
@@ -3153,6 +3183,209 @@ struct ShadowConnection *bounce_add_remote_shadow(
          shadow->sh_relay_id, session->hs_sessid, cli_name(relay_server)));
 
   return shadow;
+}
+
+/* ---------------------------------------------------------------- */
+/* SQUIT alias promotion                                             */
+/* ---------------------------------------------------------------- */
+
+/** Prepare bouncer sessions for SQUIT promotion.
+ * Called from exit_client() BEFORE exit_downlinks().
+ *
+ * For each session whose managing server (hs_origin) matches the departing
+ * server: remove co-located alias entries, and if any aliases survive on
+ * other servers, set hs_promoting to suppress bounce_sync_alias_part()
+ * during the subsequent exit_downlinks() pass.
+ *
+ * @param[in] server The departing server.
+ */
+void bounce_prepare_squit_promotions(struct Client *server)
+{
+  int i, j;
+  struct BouncerSession *session;
+  const char *departed_yxx = cli_yxx(server);
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (session = tokenHash[i]; session; session = session->hs_tnext) {
+      /* Only sessions managed by the departing server */
+      if (0 != ircd_strcmp(session->hs_origin, departed_yxx))
+        continue;
+
+      /* Remove alias entries hosted on the departing server */
+      j = 0;
+      while (j < session->hs_alias_count) {
+        if (0 == ircd_strcmp(session->hs_aliases[j].ba_server, departed_yxx)) {
+          /* Shift remaining entries down */
+          if (j < session->hs_alias_count - 1)
+            memmove(&session->hs_aliases[j], &session->hs_aliases[j + 1],
+                    (session->hs_alias_count - 1 - j) * sizeof(struct BounceAlias));
+          session->hs_alias_count--;
+          /* Don't increment j — shifted entry now at j */
+        } else {
+          j++;
+        }
+      }
+
+      /* If any aliases survive, mark for promotion */
+      if (session->hs_alias_count > 0) {
+        session->hs_promoting = 1;
+        Debug((DEBUG_INFO, "bounce_prepare_squit: session %s/%s has %d "
+               "surviving aliases, marking for promotion",
+               session->hs_account, session->hs_sessid,
+               session->hs_alias_count));
+      } else {
+        /* No surviving aliases — session enters HOLDING from MDBX on reconnect */
+        session->hs_client = NULL;
+        Debug((DEBUG_INFO, "bounce_prepare_squit: session %s/%s has no "
+               "surviving aliases", session->hs_account, session->hs_sessid));
+      }
+    }
+  }
+}
+
+/** Execute SQUIT promotions for bouncer sessions.
+ * Called from exit_client() AFTER exit_downlinks().
+ *
+ * For each session marked hs_promoting: compute the deterministic
+ * tiebreaker (lowest ba_server numeric), promote the winning alias
+ * to primary, restore mode flags from session replica, and if the
+ * winner is local, broadcast BX P + BS T.
+ *
+ * @param[in] server The departing server (for logging).
+ */
+void bounce_execute_squit_promotions(struct Client *server)
+{
+  int i, j, k;
+  struct BouncerSession *session;
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (session = tokenHash[i]; session; session = session->hs_tnext) {
+      const char *winner_numeric = NULL;
+      const char *winner_server = NULL;
+      struct Client *alias;
+      struct Membership *member;
+      int winner_idx = -1;
+
+      if (!session->hs_promoting)
+        continue;
+
+      /* Determine winner: lowest ba_server numeric (lexicographic) */
+      for (j = 0; j < session->hs_alias_count; j++) {
+        if (!winner_server ||
+            ircd_strcmp(session->hs_aliases[j].ba_server, winner_server) < 0) {
+          winner_server = session->hs_aliases[j].ba_server;
+          winner_numeric = session->hs_aliases[j].ba_numeric;
+          winner_idx = j;
+        }
+      }
+
+      if (!winner_numeric || winner_idx < 0) {
+        session->hs_promoting = 0;
+        session->hs_client = NULL;
+        continue;
+      }
+
+      /* Find the winning alias Client */
+      alias = findNUser(winner_numeric);
+      if (!alias || !IsBouncerAlias(alias)) {
+        Debug((DEBUG_INFO, "bounce_promote: alias %s not found for session %s",
+               winner_numeric, session->hs_sessid));
+        session->hs_promoting = 0;
+        session->hs_client = NULL;
+        continue;
+      }
+
+      Debug((DEBUG_INFO, "bounce_promote: promoting alias %s (server %s) "
+             "for session %s/%s",
+             winner_numeric, winner_server,
+             session->hs_account, session->hs_sessid));
+
+      /* Promote: clear CHFL_ALIAS on all channel memberships, restore modes */
+      for (member = cli_user(alias)->channel; member;
+           member = member->next_channel) {
+        if (IsMemberAlias(member)) {
+          struct Channel *chptr = member->channel;
+
+          /* Clear alias flag */
+          member->status &= ~CHFL_ALIAS;
+
+          /* Restore mode flags from session replica */
+          for (k = 0; k < session->hs_chancount; k++) {
+            if (0 == ircd_strcmp(session->hs_channels[k].name, chptr->chname)) {
+              member->status |= session->hs_channels[k].modes;
+              break;
+            }
+          }
+
+          /* Fix counters: was tracked in aliases, now in users */
+          if (chptr->aliases > 0)
+            --chptr->aliases;
+          ++chptr->users;
+          ++((cli_user(alias))->joined);
+          if (!IsSSL(alias) && !IsChannelService(alias))
+            ++chptr->nonsslusers;
+          if (IsAccount(alias))
+            ++chptr->authusers;
+        }
+      }
+
+      /* Clear alias flags, set as bouncer primary */
+      ClearBouncerAlias(alias);
+      SetBouncerHold(alias);
+      cli_user(alias)->alias_primary = NULL;
+
+      /* Update nick timestamp for collision resolution —
+       * ensures promoted alias wins over stale ghosts from reconnect */
+      cli_lastnick(alias) = CurrentTime;
+
+      /* Add to nick hash (aliases aren't in nick hash) */
+      hAddClient(alias);
+
+      /* Add promoted alias to UserStats — alias was never counted,
+       * but old primary's exit already decremented the count */
+      ++UserStats.clients;
+      if (UserStats.clients > UserStats.clients_max) {
+        UserStats.clients_max = UserStats.clients;
+        save_tunefile();
+      }
+      ++(cli_serv(cli_user(alias)->server)->clients);
+      if (MyUser(alias)) {
+        ++UserStats.local_clients;
+        if (UserStats.local_clients > UserStats.local_clients_max) {
+          UserStats.local_clients_max = UserStats.local_clients;
+          save_tunefile();
+        }
+      }
+      if (IsInvisible(alias))
+        ++UserStats.inv_clients;
+
+      /* Remove promoted alias from hs_aliases[] */
+      if (winner_idx < session->hs_alias_count - 1)
+        memmove(&session->hs_aliases[winner_idx],
+                &session->hs_aliases[winner_idx + 1],
+                (session->hs_alias_count - 1 - winner_idx)
+                  * sizeof(struct BounceAlias));
+      session->hs_alias_count--;
+
+      /* Update session to point to promoted alias */
+      session->hs_client = alias;
+      ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
+                    sizeof(session->hs_origin) - 1);
+      session->hs_promoting = 0;
+
+      /* If promoted alias is on this server, broadcast BX P + BS T */
+      if (MyUser(alias)) {
+        sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                              "P %s %s %s %s",
+                              winner_numeric, winner_numeric,
+                              session->hs_sessid, cli_name(alias));
+        sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION, NULL,
+                              "T %s %s %s",
+                              session->hs_account, session->hs_sessid,
+                              cli_yxx(&me));
+      }
+    }
+  }
 }
 
 /** Clean up all bouncer state referencing a departing server.
@@ -4447,87 +4680,665 @@ void bounce_free_temp_client(struct Client *temp)
 }
 
 /* ---------------------------------------------------------------- */
+/* Alias channel auto-sync                                           */
+/* ---------------------------------------------------------------- */
+
+/** Sync alias join: when primary joins a channel, add local aliases.
+ * Called from add_user_to_channel() for non-alias members.
+ * Iterates the primary's session aliases and adds any local ones
+ * to the channel with CHFL_ALIAS.
+ */
+void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *session;
+  int i;
+
+  if (!IsAccount(who) || IsBouncerAlias(who))
+    return;
+
+  as = bounce_find_by_account(cli_user(who)->account);
+  if (!as)
+    return;
+
+  for (session = as->as_sessions; session; session = session->hs_anext) {
+    for (i = 0; i < session->hs_alias_count; i++) {
+      struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+      if (alias && IsBouncerAlias(alias)
+          && cli_alias_primary(alias) == who
+          && !find_member_link(chptr, alias)) {
+        add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
+      }
+    }
+  }
+}
+
+/** Sync alias part: when primary leaves a channel, remove local aliases.
+ * Called from remove_user_from_channel() for non-alias members.
+ * Iterates channel members and removes any aliases of the departing primary.
+ */
+void bounce_sync_alias_part(struct Channel *chptr, struct Client *who)
+{
+  struct BouncerSession *sess;
+  struct Membership *member, *next;
+
+  if (IsBouncerAlias(who))
+    return;
+
+  /* During SQUIT promotion, aliases must stay in channels so the
+   * promoted alias inherits channel memberships without a gap. */
+  if (IsAccount(who)) {
+    sess = bounce_get_session(who);
+    if (sess && sess->hs_promoting)
+      return;
+  }
+
+  for (member = chptr->members; member; member = next) {
+    next = member->next_member;
+    if (IsMemberAlias(member) && cli_alias_primary(member->user) == who) {
+      remove_user_from_channel(member->user, chptr);
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* PM forwarding to aliases                                          */
+/* ---------------------------------------------------------------- */
+
+/** Forward a private message or notice to all aliases of the target.
+ * When a PM/NOTICE is delivered to a bouncer primary, this function
+ * forwards it to all alias connections so every bouncer connection
+ * receives the message.
+ *
+ * @param[in] from    Client that sent the message.
+ * @param[in] target  Target client (must be the primary, not an alias).
+ * @param[in] cmd     Long command name (MSG_PRIVATE or MSG_NOTICE).
+ * @param[in] tok     Short command token (TOK_PRIVATE or TOK_NOTICE).
+ * @param[in] text    Message text.
+ */
+void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
+                                  const char *cmd, const char *tok,
+                                  const char *text, const char *msgid)
+{
+  struct BouncerSession *sess;
+  int i;
+
+  /* Only forward for bouncer primaries with aliases */
+  if (!IsAccount(target) || IsBouncerAlias(target))
+    return;
+
+  sess = bounce_get_session(target);
+  if (!sess || sess->hs_alias_count <= 0)
+    return;
+
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+    if (alias && alias != target && IsBouncerAlias(alias))
+      sendcmdto_one_tags_ext(from, cmd, tok, alias, msgid,
+                             "%C :%s", alias, text);
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* BX U emission: broadcast alias identity updates                    */
+/* ---------------------------------------------------------------- */
+
+/** Broadcast BX U identity updates to all aliases of a primary.
+ * Called when a user's visible identity changes (sethost, setname,
+ * fakehost, etc.) to keep alias Clients in sync.
+ *
+ * @param[in] primary The primary client whose identity changed.
+ * @param[in] field   Field name (host, realname, fakehost, etc.).
+ * @param[in] value   New value for the field.
+ */
+void bounce_emit_alias_update(struct Client *primary, const char *field,
+                              const char *value)
+{
+  struct BouncerSession *sess;
+  int i;
+
+  if (!IsAccount(primary) || IsBouncerAlias(primary))
+    return;
+
+  sess = bounce_get_session(primary);
+  if (!sess || sess->hs_alias_count <= 0)
+    return;
+
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                          "U %s %s=%s",
+                          sess->hs_aliases[i].ba_numeric, field, value);
+  }
+}
+
+/* ---------------------------------------------------------------- */
 /* Cross-server transfer (BT token)                                  */
 /* ---------------------------------------------------------------- */
 
 /** Handle BT (Bouncer Transfer) P10 message.
  * Format: BT <old-numeric> <new-numeric> <session-id>
  *
- * This message is broadcast when a user resumes their bouncer session
- * on a different server than where the ghost exists. All servers
- * receiving this message transfer channel memberships from the old
- * client (ghost) to the new client.
+ * BX subcommand dispatch for multi-server bouncer presence.
+ *
+ * Subcommands:
+ *   BX C <primary> <alias> <account> <sessid> :<channels>  -- Create alias
+ *   BX X <alias>                                           -- Destroy alias
+ *   BX P <old> <new> <sessid> <nick>                       -- Promote/transfer
+ *   BX N <primary> <new_nick> <ts>                         -- Nick sync
+ *   BX U <alias> <field>=<value>                           -- Identity update
  */
+
+/* Forward declarations for BX subcommand handlers */
+static int bounce_alias_create(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_promote(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_update(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+
 int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
                      int parc, char *parv[])
+{
+  char subcmd;
+
+  if (parc < 2)
+    return 0;
+
+  subcmd = parv[1][0];
+
+  switch (subcmd) {
+  case 'C':
+    return bounce_alias_create(cptr, sptr, parc, parv);
+  case 'X':
+    return bounce_alias_destroy(cptr, sptr, parc, parv);
+  case 'P':
+    return bounce_alias_promote(cptr, sptr, parc, parv);
+  case 'N':
+    return bounce_alias_nicksync(cptr, sptr, parc, parv);
+  case 'U':
+    return bounce_alias_update(cptr, sptr, parc, parv);
+  default:
+    Debug((DEBUG_INFO, "BX: unknown subcommand '%c' from %C", subcmd, sptr));
+    /* Forward unknown subcommands for future compatibility */
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "%s", parv[1]);
+    return 0;
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* BX P: Promote/transfer — dual-mode handler                       */
+/* ---------------------------------------------------------------- */
+
+/** Handle BX P (Promote/Transfer).
+ *
+ * Dual-mode:
+ *   - If new_client is a bouncer alias (CHFL_ALIAS in channels):
+ *     Clear CHFL_ALIAS, apply mode flags from old's memberships.
+ *   - If new_client has no channel memberships (legacy/sequential swap):
+ *     Transfer memberships from old to new, rename new to nick.
+ *
+ * Wire format: <server> BX P <old_numeric> <new_numeric> <sessid> <nick>
+ */
+static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
+                                int parc, char *parv[])
 {
   struct Client *old_client;
   struct Client *new_client;
   const char *old_numeric;
   const char *new_numeric;
   const char *sessid;
+  const char *nick;
   struct Membership *member;
   struct Membership *next_member;
 
-  if (parc < 4)
-    return 0;
+  if (parc < 6)
+    return protocol_violation(sptr, "BX P requires 4 parameters");
 
-  old_numeric = parv[1];
-  new_numeric = parv[2];
-  sessid = parv[3];
+  old_numeric = parv[2];
+  new_numeric = parv[3];
+  sessid = parv[4];
+  nick = parv[5];
 
-  /* Find both clients by numeric */
   old_client = findNUser(old_numeric);
   new_client = findNUser(new_numeric);
 
   if (!old_client || !new_client) {
-    Debug((DEBUG_INFO, "BT: client not found - old=%s new=%s",
+    Debug((DEBUG_INFO, "BX P: client not found - old=%s new=%s",
            old_numeric, new_numeric));
     /* Forward anyway for other servers */
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                          "%s %s %s", old_numeric, new_numeric, sessid);
+                          "P %s %s %s %s", old_numeric, new_numeric, sessid, nick);
     return 0;
   }
 
-  /* Transfer channel memberships from old to new */
-  for (member = cli_user(old_client)->channel; member; member = next_member) {
-    next_member = member->next_channel;
-
-    /* Add new client with old client's modes */
-    unsigned int modes = member->status & ~CHFL_HOLDING;
-    add_user_to_channel(member->channel, new_client, modes, OpLevel(member));
-
-    /* Remove old client silently */
-    remove_user_from_channel(old_client, member->channel);
+  if (IsBouncerAlias(new_client)) {
+    /* Alias path: new_client is already in channels with CHFL_ALIAS.
+     * Copy mode flags from old's memberships, clear CHFL_ALIAS. */
+    for (member = cli_user(old_client)->channel; member; member = next_member) {
+      next_member = member->next_channel;
+      struct Membership *alias_member = find_member_link(member->channel, new_client);
+      if (alias_member && IsMemberAlias(alias_member)) {
+        /* Transfer modes from old to alias, clear CHFL_ALIAS */
+        unsigned int modes = member->status & ~(CHFL_HOLDING | CHFL_ALIAS);
+        alias_member->status = modes;
+        /* Adjust counters: alias becomes real member */
+        member->channel->aliases--;
+        member->channel->users++;
+        if (!IsSSL(new_client) && !IsChannelService(new_client))
+          member->channel->nonsslusers++;
+        if (IsAccount(new_client))
+          member->channel->authusers++;
+        ++(cli_user(new_client))->joined;
+      }
+    }
+    ClearBouncerAlias(new_client);
+    cli_user(new_client)->alias_primary = NULL;
+  } else {
+    /* Swap path: new_client has no channel memberships.
+     * Transfer memberships from old to new (legacy/sequential). */
+    for (member = cli_user(old_client)->channel; member; member = next_member) {
+      next_member = member->next_channel;
+      unsigned int modes = member->status & ~CHFL_HOLDING;
+      add_user_to_channel(member->channel, new_client, modes, OpLevel(member));
+      remove_user_from_channel(old_client, member->channel);
+    }
+    /* Rename new client to the session's nick */
+    if (ircd_strcmp(cli_name(new_client), nick)) {
+      /* Hash re-key: remove from old name, set new, add back */
+      hRemClient(new_client);
+      ircd_strncpy(cli_name(new_client), nick, NICKLEN);
+      hAddClient(new_client);
+    }
   }
 
   /* Clear bouncer flags from old client */
   if (IsBouncerHold(old_client))
     ClearBouncerHold(old_client);
 
-  /* Exit the old client silently (FLAG_KILLED suppresses QUIT broadcast) */
+  /* Exit the old client silently */
   SetFlag(old_client, FLAG_KILLED);
   exit_client(old_client, old_client, &me, "Session transferred");
 
   /* Forward to other servers */
   sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                        "%s %s %s", old_numeric, new_numeric, sessid);
+                        "P %s %s %s %s", old_numeric, new_numeric, sessid, nick);
 
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX C: Create alias                                                */
+/* ---------------------------------------------------------------- */
+
+/** Handle BX C (Create Alias).
+ *
+ * Wire format: <server> BX C <primary_numeric> <alias_numeric> <account> <sessid> :<channels>
+ *
+ * Creates a remote struct Client for the alias numeric on this server.
+ * The alias is NOT added to the nick hash — FindUser() returns the primary.
+ * The alias is added to each of the primary's channels with CHFL_ALIAS.
+ */
+static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
+                               int parc, char *parv[])
+{
+  struct Client *primary;
+  struct Client *alias;
+  struct Client *alias_server;
+  struct User *user;
+  struct BouncerSession *session;
+  const char *primary_numeric;
+  const char *alias_numeric;
+  const char *account;
+  const char *sessid;
+  const char *chanlist;
+  char *chan_copy;
+  char *chan_name;
+  char *chan_tok;
+
+  if (parc < 7)
+    return protocol_violation(sptr, "BX C requires 5 parameters");
+
+  primary_numeric = parv[2];
+  alias_numeric = parv[3];
+  account = parv[4];
+  sessid = parv[5];
+  chanlist = parv[6];
+
+  /* Find the primary client */
+  primary = findNUser(primary_numeric);
+  if (!primary) {
+    Debug((DEBUG_INFO, "BX C: primary %s not found", primary_numeric));
+    goto forward;
+  }
+
+  /* Find the server that hosts the alias (from the 2-char numeric prefix) */
+  {
+    char svr_yy[3];
+    svr_yy[0] = alias_numeric[0];
+    svr_yy[1] = alias_numeric[1];
+    svr_yy[2] = '\0';
+    alias_server = FindNServer(svr_yy);
+  }
+  if (!alias_server) {
+    Debug((DEBUG_INFO, "BX C: alias server not found for %s", alias_numeric));
+    goto forward;
+  }
+
+  /* Don't create if alias numeric already exists (duplicate BX C) */
+  if (findNUser(alias_numeric)) {
+    Debug((DEBUG_INFO, "BX C: alias %s already exists", alias_numeric));
+    goto forward;
+  }
+
+  /* Create a remote client sharing the alias server's connection */
+  alias = make_client(alias_server, STAT_UNKNOWN);
+  if (!alias)
+    goto forward;
+
+  user = make_user(alias);
+  if (!user)
+    goto forward;
+
+  /* Copy identity from primary */
+  ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN);
+  ircd_strncpy(user->username, cli_user(primary)->username, USERLEN);
+  ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN);
+  ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN);
+  ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN);
+  ircd_strncpy(user->account, account, ACCOUNTLEN);
+  user->acc_create = cli_user(primary)->acc_create;
+  user->server = alias_server;
+  user->alias_primary = primary;
+
+  /* Copy IP and cloaked/fake host from primary */
+  memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
+  ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
+  ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
+  ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+
+  /* Register in P10 numeric space — NOT in nick hash */
+  SetRemoteNumNick(alias, alias_numeric);
+
+  /* Set client state */
+  SetUser(alias);
+  cli_handler(alias) = CLIENT_HANDLER;
+  SetAccount(alias);
+  if (IsHiddenHost(primary))
+    SetHiddenHost(alias);
+  SetBouncerAlias(alias);
+  cli_lastnick(alias) = cli_lastnick(primary);
+
+  /* Add to global client list */
+  add_client_to_list(alias);
+
+  /* Track alias in session replica */
+  session = bounce_find_by_token_sessid(account, sessid);
+  if (session && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+    struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
+    ircd_strncpy(ba->ba_numeric, alias_numeric, 5);
+    ba->ba_numeric[5] = '\0';
+    ircd_strncpy(ba->ba_server, alias_numeric, 2);
+    ba->ba_server[2] = '\0';
+  }
+
+  /* Add alias to each of the primary's channels with CHFL_ALIAS */
+  if (chanlist && *chanlist) {
+    chan_copy = MyMalloc(strlen(chanlist) + 1);
+    strcpy(chan_copy, chanlist);
+    for (chan_name = ircd_strtok(&chan_tok, chan_copy, " ");
+         chan_name;
+         chan_name = ircd_strtok(&chan_tok, NULL, " ")) {
+      struct Channel *chptr = FindChannel(chan_name);
+      if (chptr && find_member_link(chptr, primary)) {
+        add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
+      }
+    }
+    MyFree(chan_copy);
+  }
+
+  Debug((DEBUG_INFO, "BX C: created alias %s for primary %s (%s)",
+         alias_numeric, primary_numeric, cli_name(primary)));
+
+forward:
+  /* Forward to other servers */
+  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                        "C %s %s %s %s :%s",
+                        primary_numeric, alias_numeric, account, sessid, chanlist);
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX X: Destroy alias                                               */
+/* ---------------------------------------------------------------- */
+
+/** Remove an alias from the session replica's hs_aliases[] array.
+ * Walks all sessions for the primary's account to find the matching entry.
+ */
+void bounce_alias_untrack(struct Client *alias)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *session;
+  char full_numeric[6];
+  int i;
+
+  /* Use alias's own account — avoids use-after-free on cli_alias_primary
+   * when the primary has already been freed (SQUIT ordering). */
+  if (!IsAccount(alias))
+    return;
+
+  as = bounce_find_by_account(cli_user(alias)->account);
+  if (!as)
+    return;
+
+  /* Reconstruct full YYXXX numeric: cli_yxx(server)=YY + cli_yxx(alias)=XXX */
+  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                cli_yxx(cli_user(alias)->server), cli_yxx(alias));
+
+  for (session = as->as_sessions; session; session = session->hs_anext) {
+    for (i = 0; i < session->hs_alias_count; i++) {
+      if (0 == strcmp(session->hs_aliases[i].ba_numeric, full_numeric)) {
+        /* Shift remaining entries down */
+        if (i < session->hs_alias_count - 1)
+          memmove(&session->hs_aliases[i], &session->hs_aliases[i + 1],
+                  (session->hs_alias_count - 1 - i) * sizeof(struct BounceAlias));
+        session->hs_alias_count--;
+        return;
+      }
+    }
+  }
+}
+
+/** Handle BX X (Destroy Alias).
+ *
+ * Wire format: <server> BX X <alias_numeric>
+ *
+ * Removes the alias Client from all channels and destroys it.
+ * Unlike normal client exit, aliases are torn down silently:
+ * no QUIT to channels, no chathistory events, no IPcheck, no nick hash.
+ */
+static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
+                                int parc, char *parv[])
+{
+  struct Client *alias;
+  const char *alias_numeric;
+
+  if (parc < 3)
+    return protocol_violation(sptr, "BX X requires alias_numeric");
+
+  alias_numeric = parv[2];
+  alias = findNUser(alias_numeric);
+
+  if (!alias || !IsBouncerAlias(alias)) {
+    Debug((DEBUG_INFO, "BX X: alias %s not found or not alias", alias_numeric));
+    goto forward;
+  }
+
+  Debug((DEBUG_INFO, "BX X: destroying alias %s (%s) for primary %s",
+         alias_numeric, cli_name(alias),
+         cli_alias_primary(alias) ? cli_name(cli_alias_primary(alias)) : "?"));
+
+  /* Remove alias from session replica tracking */
+  bounce_alias_untrack(alias);
+
+  /* Remove from all channels silently.
+   * Note: counter behavior (users vs aliases) is symmetrically wrong
+   * here and in BX C until counter guards are added to
+   * add_user_to_channel/remove_member_from_channel. */
+  remove_user_from_all_channels(alias);
+
+  /* Remove from P10 numeric space */
+  RemoveYXXClient(cli_user(alias)->server, cli_yxx(alias));
+
+  /* Remove from global client list — frees User and Client structs.
+   * Skip hRemClient: alias was never added to the nick hash. */
+  remove_client_from_list(alias);
+
+forward:
+  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                        "X %s", alias_numeric);
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX N: Nick sync                                                   */
+/* ---------------------------------------------------------------- */
+
+/** Handle BX N (Nick Sync).
+ *
+ * Wire format: <server> BX N <primary_numeric> <new_nick> <ts>
+ *
+ * Updates all aliases of the primary to match the new nick.
+ */
+static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr,
+                                 int parc, char *parv[])
+{
+  struct Client *primary;
+  const char *primary_numeric;
+  const char *new_nick;
+  struct AccountSessions *as;
+  struct BouncerSession *session;
+  int i;
+
+  if (parc < 5)
+    return protocol_violation(sptr, "BX N requires 3 parameters");
+
+  primary_numeric = parv[2];
+  new_nick = parv[3];
+  /* parv[4] = ts (for collision resolution) */
+
+  primary = findNUser(primary_numeric);
+  if (!primary || !IsAccount(primary))
+    goto forward;
+
+  /* Find all aliases of this primary and update their nicks.
+   * Aliases are NOT in the nick hash, so no hRemClient/hAddClient needed. */
+  as = bounce_find_by_account(cli_user(primary)->account);
+  if (!as)
+    goto forward;
+
+  for (session = as->as_sessions; session; session = session->hs_anext) {
+    for (i = 0; i < session->hs_alias_count; i++) {
+      struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+      if (alias && IsBouncerAlias(alias) && cli_alias_primary(alias) == primary) {
+        ircd_strncpy(cli_name(alias), new_nick, NICKLEN);
+      }
+    }
+  }
+
+forward:
+  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                        "N %s %s %s", parv[2], parv[3], parv[4]);
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX U: Identity update                                             */
+/* ---------------------------------------------------------------- */
+
+/** Handle BX U (Identity Update).
+ *
+ * Wire format: <server> BX U <alias_numeric> <field>=<value>
+ *
+ * Updates an alias's identity fields (host, realname, etc.)
+ */
+static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
+                               int parc, char *parv[])
+{
+  struct Client *alias;
+  const char *alias_numeric;
+  const char *field_value;
+  char *eq;
+  char field[32];
+  const char *value;
+
+  if (parc < 4)
+    return protocol_violation(sptr, "BX U requires 2 parameters");
+
+  alias_numeric = parv[2];
+  field_value = parv[3];
+
+  alias = findNUser(alias_numeric);
+  if (!alias || !IsBouncerAlias(alias))
+    goto forward;
+
+  /* Parse field=value */
+  eq = strchr(field_value, '=');
+  if (!eq)
+    goto forward;
+
+  {
+    size_t flen = eq - field_value;
+    if (flen >= sizeof(field))
+      flen = sizeof(field) - 1;
+    memcpy(field, field_value, flen);
+    field[flen] = '\0';
+    value = eq + 1;
+  }
+
+  /* Apply update based on field name */
+  if (0 == ircd_strcmp(field, "host")) {
+    ircd_strncpy(cli_user(alias)->host, value, HOSTLEN);
+  } else if (0 == ircd_strcmp(field, "realhost")) {
+    ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN);
+  } else if (0 == ircd_strcmp(field, "realname")) {
+    ircd_strncpy(cli_info(alias), value, REALLEN);
+  } else if (0 == ircd_strcmp(field, "fakehost")) {
+    ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN);
+  } else if (0 == ircd_strcmp(field, "cloakhost")) {
+    ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN);
+  } else if (0 == ircd_strcmp(field, "cloakip")) {
+    ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN);
+  } else if (0 == ircd_strcmp(field, "username")) {
+    ircd_strncpy(cli_user(alias)->username, value, USERLEN);
+  } else if (0 == ircd_strcmp(field, "account")) {
+    ircd_strncpy(cli_user(alias)->account, value, ACCOUNTLEN);
+    if (value[0] != '\0')
+      SetAccount(alias);
+    else
+      ClearAccount(alias);
+  } else {
+    Debug((DEBUG_INFO, "BX U: unknown field '%s' for alias %s", field, alias_numeric));
+  }
+
+forward:
+  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                        "U %s %s", parv[2], parv[3]);
   return 0;
 }
 
 /** Initiate a cross-server bouncer transfer.
  * Called when BOUNCER RESUME is received and the ghost is on another server.
- * Broadcasts BT to network to transfer the ghost's channels to the new client.
+ * Broadcasts BX P to network to transfer the ghost's channels to the new client.
  */
 void bounce_initiate_transfer(struct BouncerSession *session,
                               struct Client *new_client,
                               const char *old_numeric)
 {
-  /* Broadcast the transfer request */
+  /* Broadcast the transfer request (BX P subcommand) */
   sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
-                        "%s %s %s",
-                        old_numeric, cli_yxx(new_client), session->hs_sessid);
+                        "P %s %s %s %s",
+                        old_numeric, cli_yxx(new_client),
+                        session->hs_sessid, cli_name(new_client));
 
   /* Update session state */
   session->hs_state = BOUNCE_ACTIVE;

@@ -1147,6 +1147,17 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       add_history(sptr, 1);
       sendcmdto_serv_butone(sptr, CMD_NICK, cptr, "%s %Tu", nick,
                             cli_lastnick(sptr));
+
+      /* BX N: sync nick change to aliases if user has any */
+      if (MyUser(sptr) && IsAccount(sptr)) {
+        struct BouncerSession *bsess = bounce_get_session(sptr);
+        if (bsess && bsess->hs_alias_count > 0) {
+          sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cptr,
+                                "N %s%s %s %Tu",
+                                cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
+                                nick, cli_lastnick(sptr));
+        }
+      }
     }
     else
       sendcmdto_one(sptr, CMD_NICK, sptr, ":%s", nick);
@@ -2274,12 +2285,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
     if (FlagHas(&setflags, FLAG_HIDDENHOST) && !IsHiddenHost(acptr)) {
       unhide_hostmask(acptr);
+      bounce_emit_alias_update(acptr, "host", cli_user(acptr)->host);
     }
   }
 
   if (do_host_hiding) {
-    if (IsHiddenHost(acptr))
+    if (IsHiddenHost(acptr)) {
       hide_hostmask(acptr);
+      bounce_emit_alias_update(acptr, "host", cli_user(acptr)->host);
+    }
   }
 
   return 0;

@@ -1534,6 +1534,63 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
   msgq_clean(mb);
 }
 
+/** Send a (prefixed) command to a single client with message tags,
+ * using a supplied msgid instead of generating one.
+ * @param[in] from Client sending the command.
+ * @param[in] cmd Long name of command (used if \a to is a user).
+ * @param[in] tok Short name of command (used if \a to is a server).
+ * @param[in] to Destination of command.
+ * @param[in] ext_msgid Message ID to include (may be NULL to skip).
+ * @param[in] pattern Format string for command arguments.
+ */
+void sendcmdto_one_tags_ext(struct Client *from, const char *cmd, const char *tok,
+		   struct Client *to, const char *ext_msgid,
+		   const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[512];
+  char *tags;
+  int prio;
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  /* Union caps: if target has a bouncer session with shadows, format tags
+   * using the union of all connections' capabilities. */
+  if (MyUser(to) && !IsServer(to)) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_shadow_count > 0) {
+      struct CapSet union_caps;
+      bounce_build_union_caps(bsess, &union_caps);
+      tags = format_message_tags_for_caps(tagbuf, sizeof(tagbuf), from, to,
+                                           ext_msgid, &union_caps);
+    } else {
+      tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, ext_msgid);
+    }
+  } else {
+    tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, ext_msgid);
+  }
+
+  if (tags)
+    mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+  else
+    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+		   &vd);
+
+  va_end(vd.vd_args);
+
+  /* Flush immediately for messages from U-lined servers (services) */
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+
+  send_buffer(to, mb, prio);
+
+  msgq_clean(mb);
+}
+
 /** Send a (prefixed) command to a single local client with message tags,
  * returning the generated msgid.
  * @param[in] from Client originating the message.

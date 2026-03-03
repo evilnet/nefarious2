@@ -94,6 +94,7 @@
 #include "numnicks.h"
 #include "random.h"
 #include "send.h"
+#include "bouncer_session.h"
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_misc.h"
@@ -272,6 +273,8 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
           ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN + 1);
           SetAccount(acptr);
+
+          bounce_emit_alias_update(acptr, "account", cli_user(acptr)->account);
 
           if (cli_saslacccreate(acptr))
             cli_user(acptr)->acc_create = cli_saslacccreate(acptr);

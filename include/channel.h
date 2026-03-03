@@ -82,6 +82,7 @@ struct MetadataEntry;
 					 */
 #define CHFL_DELAYED            0x40000 /**< User's join message is delayed */
 #define CHFL_HOLDING            0x80000 /**< User membership held during bouncer disconnect */
+#define CHFL_ALIAS              0x100000 /**< Alias numeric — invisible member for multi-server bouncer */
 
 #define CHFL_BURST_ALREADY_HALFOPPED	0x400000
 					/**< In oob BURST, but was already
@@ -263,6 +264,9 @@ struct Membership {
 #define IsMemberHolding(x)  ((x)->status & CHFL_HOLDING)
 #define SetMemberHolding(x) ((x)->status |= CHFL_HOLDING)
 #define ClearMemberHolding(x) ((x)->status &= ~CHFL_HOLDING)
+#define IsMemberAlias(x)    ((x)->status & CHFL_ALIAS)
+#define SetMemberAlias(x)   ((x)->status |= CHFL_ALIAS)
+#define ClearMemberAlias(x) ((x)->status &= ~CHFL_ALIAS)
 #define IsExcepted(x)       ((x)->banflags & MBFL_EXCEPTED)
 #define IsExceptValid(x)    ((x)->banflags & MBFL_EXCEPTVALID)
 #define IsExceptedQuiet(x)  ((x)->banflags & MBFL_EXCEPTED_QUIET)
@@ -386,6 +390,7 @@ struct Channel {
   unsigned int       users;	   /**< Number of clients on this channel */
   unsigned int       nonsslusers;  /**< Number of clients without user mode +z */
   unsigned int       authusers;    /**< Number of authenticated (logged-in) members */
+  unsigned int       aliases;      /**< Number of CHFL_ALIAS members (not counted in users) */
   struct Membership* members;	   /**< Pointer to the clients on this channel*/
   struct SLink*      invites;	   /**< List of invites on this channel */
   struct Ban*        banlist;      /**< List of bans on this channel */

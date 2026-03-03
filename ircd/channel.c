@@ -760,13 +760,19 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
 
     if (chptr->destruct_event)
       remove_destruct_event(chptr);
-    ++chptr->users;
-    if (!IsSSL(who) && !IsChannelService(who))
-      ++chptr->nonsslusers;
-    if (IsAccount(who))
-      ++chptr->authusers;
-    ++((cli_user(who))->joined);
 
+    if (!(flags & CHFL_ALIAS)) {
+      ++chptr->users;
+      if (!IsSSL(who) && !IsChannelService(who))
+        ++chptr->nonsslusers;
+      if (IsAccount(who))
+        ++chptr->authusers;
+      ++((cli_user(who))->joined);
+      /* Auto-sync: add local aliases of this user to the channel */
+      bounce_sync_alias_join(chptr, who);
+    } else {
+      ++chptr->aliases;
+    }
 
   }
 }
@@ -808,10 +814,19 @@ static int remove_member_from_channel(struct Membership* member)
   else
     (cli_user(member->user))->channel = member->next_channel;
 
-  --(cli_user(member->user))->joined;
-
   member->next_member = membershipFreeList;
   membershipFreeList = member;
+
+  if (IsMemberAlias(member)) {
+    /* Alias removal: decrement alias counter only.
+     * Skip joined/nonssl/auth decrements.
+     * Skip sub1_from_channel — alias removal never destroys a channel. */
+    if (chptr->aliases > 0)
+      --chptr->aliases;
+    return 1;
+  }
+
+  --(cli_user(member->user))->joined;
 
   if (!IsSSL(member->user) && !IsChannelService(member->user))
     --chptr->nonsslusers;
@@ -853,6 +868,9 @@ void remove_user_from_channel(struct Client* cptr, struct Channel* chptr)
   assert(0 != chptr);
 
   if ((member = find_member_link(chptr, cptr))) {
+    /* Auto-sync: remove aliases of this user from the channel first */
+    if (!IsMemberAlias(member))
+      bounce_sync_alias_part(chptr, cptr);
     if (remove_member_from_channel(member)) {
       if (channel_all_zombies(chptr)) {
         /*
@@ -992,6 +1010,10 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
       RevealDelayedJoin(member);
     return 1;
   }
+
+  /* Alias inherits primary's send rights — same trust as remote users. */
+  if (IsBouncerAlias(member->user))
+    return 1;
 
   /* Discourage using the Apass to get op.  They should use the Upass. */
   if (IsChannelManager(member) && member->channel->mode.apass[0] &&
@@ -1373,6 +1395,11 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
     {
       while (member)
       {
+	/* Skip alias members — aliases are created via BX C, not BURST */
+	if (IsMemberAlias(member)) {
+	  member = member->next_member;
+	  continue;
+	}
 	if (flag_cnt < 2 && IsChanOp(member))
 	{
 	  /*

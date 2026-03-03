@@ -267,6 +267,16 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     clear_server_ad(bcptr);     /* Clear chathistory advertisement */
   }
   if (IsUser(bcptr)) {
+    /* Bouncer aliases: minimal silent teardown.
+     * No QUIT to channels, no chathistory, no UserStats, no IPcheck.
+     * Just remove from channels, numeric space, and client list. */
+    if (IsBouncerAlias(bcptr)) {
+      bounce_alias_untrack(bcptr);
+      remove_user_from_all_channels(bcptr);
+      RemoveYXXClient(cli_user(bcptr)->server, cli_yxx(bcptr));
+      remove_client_from_list(bcptr);
+      return;
+    }
     /*
      * clear out uping requests
      */
@@ -610,6 +620,11 @@ int exit_client(struct Client *cptr,
     /* Clean up bouncer relay state referencing this server.
      * Must happen before the server's Client struct is freed. */
     bounce_cleanup_server(victim);
+
+    /* Prepare alias promotions: mark sessions where the managing server
+     * is departing and surviving aliases exist. Sets hs_promoting to
+     * suppress bounce_sync_alias_part() during exit_downlinks(). */
+    bounce_prepare_squit_promotions(victim);
   }
 
   /*
@@ -638,6 +653,10 @@ int exit_client(struct Client *cptr,
     /* Clear active batch and end IRCv3 netsplit batch */
     set_active_network_batch(NULL);
     send_netsplit_batch_end(netsplit_batch_id);
+
+    /* Execute alias promotions: promote winning aliases, restore channel
+     * modes from session replica, broadcast BX P + BS T from winner. */
+    bounce_execute_squit_promotions(victim);
   }
   exit_one_client(victim, comment);
 

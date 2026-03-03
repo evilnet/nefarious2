@@ -92,6 +92,7 @@
 #include "numnicks.h"
 #include "s_user.h"
 #include "send.h"
+#include "bouncer_session.h"
 #include "version.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -131,6 +132,10 @@ int ms_fake(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   sendcmdto_serv_butone(sptr, CMD_FAKE, cptr, "%C %s", target,
                         cli_user(target)->fakehost);
+
+  /* Update bouncer aliases with new fakehost */
+  bounce_emit_alias_update(target, "fakehost", cli_user(target)->fakehost);
+
   return 0;
 }
 

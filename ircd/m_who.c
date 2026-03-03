@@ -349,6 +349,8 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                     || ((member->status & CHFL_DELAYED)
                         && !(bitsel & WHOSELECT_DELAY))))
               continue;
+            if (IsMemberAlias(member) && acptr != sptr)
+              continue;
             if (!(isthere || (SEE_USER(sptr, acptr, bitsel))))
               continue;
             if (!Process(acptr))        /* This can't be moved before other checks */
@@ -411,6 +413,8 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           if (!(IsUser(acptr) && Process(acptr)))
             continue;           /* Now Process() is at the beginning, if we fail
                                    we'll never have to show this acptr in this query */
+          if (IsMemberAlias(member) && acptr != sptr)
+            continue;
  	  if ((bitsel & WHOSELECT_OPER) && !SeeOper(sptr,acptr))
 	    continue;
           if ((mask) && (matchsel & WHO_FIELD_MRK)) {

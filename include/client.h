@@ -272,6 +272,7 @@ enum Flag
     FLAG_BNC_HOLDPREF,              /**< User prefers bouncer hold mode enabled (+b) */
 
     FLAG_BOUNCER_HOLD,              /**< Client is in bouncer HOLDING state (ghost) */
+    FLAG_BOUNCER_ALIAS,             /**< Client is an alias numeric for multi-server bouncer presence */
 
     FLAG_DNSBL_EXEMPT,              /**< Client is exempt from blocks (native DNSBL whitelist hit) */
 
@@ -567,6 +568,8 @@ struct Client {
 #define cli_info(cli)		((cli)->cli_info)
 /** Get client account string. */
 #define cli_account(cli)       (cli_user(cli) ? cli_user(cli)->account : "0")
+/** Get the primary Client for an alias numeric (NULL if not an alias). */
+#define cli_alias_primary(cli) (cli_user(cli) ? cli_user(cli)->alias_primary : NULL)
 /** Get client connection IP address. */
 #define cli_connectip(cli)      ((cli)->cli_connectip)
 /** Get client connection host name. */
@@ -938,6 +941,10 @@ struct Client {
 #define IsBouncerHold(x)        HasFlag(x, FLAG_BOUNCER_HOLD)
 #define SetBouncerHold(x)       SetFlag(x, FLAG_BOUNCER_HOLD)
 #define ClearBouncerHold(x)     ClrFlag(x, FLAG_BOUNCER_HOLD)
+/** Return non-zero if client is an alias numeric for multi-server bouncer presence. */
+#define IsBouncerAlias(x)       HasFlag(x, FLAG_BOUNCER_ALIAS)
+#define SetBouncerAlias(x)      SetFlag(x, FLAG_BOUNCER_ALIAS)
+#define ClearBouncerAlias(x)    ClrFlag(x, FLAG_BOUNCER_ALIAS)
 /** Return non-zero if the client has been IP-checked for clones. */
 #define IsIPChecked(x)          HasFlag(x, FLAG_IPCHECK)
 /** Return non-zero if we have received an ident response for the client. */

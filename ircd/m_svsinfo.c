@@ -32,6 +32,7 @@
 #include "msg.h"
 #include "numnicks.h"
 #include "send.h"
+#include "bouncer_session.h"
 #include "s_conf.h"
 #include "s_user.h"
 
@@ -60,6 +61,7 @@ int ms_svsinfo(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      be truncated */
   ircd_strncpy(acptr->cli_info, parv[2], REALLEN + 1);
 
+  bounce_emit_alias_update(acptr, "realname", acptr->cli_info);
 
   sendcmdto_serv_butone(sptr, CMD_SVSINFO, cptr, "%C :%s", acptr, acptr->cli_info);
 

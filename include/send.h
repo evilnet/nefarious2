@@ -111,6 +111,12 @@ extern void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd,
 			  char *time_out, size_t time_out_len,
 			  const char *pattern, ...);
 
+/* Same as sendcmdto_one_tags, but uses a supplied msgid instead of generating one */
+extern void sendcmdto_one_tags_ext(struct Client *from, const char *cmd,
+			  const char *tok, struct Client *to,
+			  const char *ext_msgid,
+			  const char *pattern, ...);
+
 /* Send TAGMSG with client-only tags to a single client */
 extern void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
                                struct Client *to, const char *client_tags,

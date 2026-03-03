@@ -972,6 +972,8 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   struct Client* acptr;
   const char* mytext = text;
   char utf8buf[BUFSIZE];
+  char pm_msgid[64];
+  char pm_timestamp[32];
 
   assert(0 != sptr);
   assert(0 != name);
@@ -1041,6 +1043,18 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
+  /* Generate shared msgid + timestamp for alias forwarding, echo, and history */
+  pm_msgid[0] = '\0';
+  pm_timestamp[0] = '\0';
+  if (feature_bool(FEAT_MSGID)) {
+    struct timeval tv;
+    generate_msgid(pm_msgid, sizeof(pm_msgid));
+    gettimeofday(&tv, NULL);
+    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec,
+                  (unsigned long)(tv.tv_usec / 1000));
+  }
+
   /* Use variant with client-only tags if sender has them and recipient supports it */
   {
     const char *client_tags = cli_client_tags(sptr);
@@ -1052,12 +1066,13 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     }
   }
 
+  /* Forward PM to all aliases of the target bouncer primary */
+  bounce_forward_pm_to_aliases(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
+
   /* Echo/mirror private message back to sender's connections.
    * Same bouncer mirror logic as channel messages. */
 #ifdef USE_MDBX
   {
-    char msgid[64] = "";
-    char timestamp[32] = "";
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
@@ -1077,29 +1092,18 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
       shadow_tag_ctx.stc_cache = NULL;
       shadow_tag_ctx.stc_notags = NULL;
       shadow_tag_ctx.stc_include_batch = 0;
-      sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
-                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
-                               "%C :%s", acptr, mytext);
+      sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, pm_msgid,
+                             "%C :%s", acptr, mytext);
       shadow_tag_ctx.stc_active = 0;
       shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
-    } else if (feature_bool(FEAT_MSGID)) {
-      struct timeval tv;
-      gettimeofday(&tv, NULL);
-      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                    (unsigned long)tv.tv_sec,
-                    (unsigned long)(tv.tv_usec / 1000));
-      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                    cli_yxx(&me),
-                    (unsigned long)cli_firsttime(&me),
-                    ++MsgIdCounter);
     }
 
     /* Store private message in history database (if enabled) */
-    if (msgid[0])
-      store_private_history(sptr, acptr, mytext, HISTORY_PRIVMSG, msgid, timestamp);
+    if (pm_msgid[0])
+      store_private_history(sptr, acptr, mytext, HISTORY_PRIVMSG, pm_msgid, pm_timestamp);
   }
 #else
   {
@@ -1121,7 +1125,8 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
       shadow_tag_ctx.stc_cache = NULL;
       shadow_tag_ctx.stc_notags = NULL;
       shadow_tag_ctx.stc_include_batch = 0;
-      sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%C :%s", acptr, mytext);
+      sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, pm_msgid,
+                             "%C :%s", acptr, mytext);
       shadow_tag_ctx.stc_active = 0;
       shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
@@ -1145,6 +1150,8 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   struct Client* acptr;
   const char* mytext = text;
   char utf8buf[BUFSIZE];
+  char pm_msgid[64];
+  char pm_timestamp[32];
 
   assert(0 != sptr);
   assert(0 != name);
@@ -1205,6 +1212,18 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
+  /* Generate shared msgid + timestamp for alias forwarding, echo, and history */
+  pm_msgid[0] = '\0';
+  pm_timestamp[0] = '\0';
+  if (feature_bool(FEAT_MSGID)) {
+    struct timeval tv;
+    generate_msgid(pm_msgid, sizeof(pm_msgid));
+    gettimeofday(&tv, NULL);
+    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec,
+                  (unsigned long)(tv.tv_usec / 1000));
+  }
+
   /* Use variant with client-only tags if sender has them and recipient supports it */
   {
     const char *client_tags = cli_client_tags(sptr);
@@ -1216,16 +1235,17 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     }
   }
 
+  /* Forward notice to all aliases of the target bouncer primary */
+  bounce_forward_pm_to_aliases(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
+
+  /* Echo/mirror private notice back to sender's connections.
+   * Same bouncer mirror logic as channel messages. */
 #ifdef USE_MDBX
   {
-    char msgid[64] = "";
-    char timestamp[32] = "";
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
     struct BouncerSession *bsess = bounce_get_session(sptr);
     int has_shadows = bsess && bsess->hs_shadow_count > 0;
 
-    /* Echo/mirror private notice back to sender's connections.
-     * Same bouncer mirror logic as channel messages. */
     if (need_echo || current_shadow || has_shadows) {
       struct ShadowConnection *saved_shadow = current_shadow;
       current_shadow = NULL;
@@ -1241,29 +1261,18 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       shadow_tag_ctx.stc_cache = NULL;
       shadow_tag_ctx.stc_notags = NULL;
       shadow_tag_ctx.stc_include_batch = 0;
-      sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
-                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
-                               "%C :%s", acptr, mytext);
+      sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
+                             "%C :%s", acptr, mytext);
       shadow_tag_ctx.stc_active = 0;
       shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
       skip_shadow_dup = NULL;
       current_shadow = saved_shadow;
-    } else if (feature_bool(FEAT_MSGID)) {
-      struct timeval tv;
-      gettimeofday(&tv, NULL);
-      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                    (unsigned long)tv.tv_sec,
-                    (unsigned long)(tv.tv_usec / 1000));
-      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                    cli_yxx(&me),
-                    (unsigned long)cli_firsttime(&me),
-                    ++MsgIdCounter);
     }
 
     /* Store private notice in history database (if enabled) */
-    if (msgid[0])
-      store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, msgid, timestamp);
+    if (pm_msgid[0])
+      store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, pm_msgid, pm_timestamp);
   }
 #else
   {
@@ -1285,7 +1294,8 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       shadow_tag_ctx.stc_cache = NULL;
       shadow_tag_ctx.stc_notags = NULL;
       shadow_tag_ctx.stc_include_batch = 0;
-      sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%C :%s", acptr, mytext);
+      sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
+                             "%C :%s", acptr, mytext);
       shadow_tag_ctx.stc_active = 0;
       shadow_tag_ctx.stc_withcap = CAP_NONE;
       skip_primary_echo = 0;
@@ -1305,6 +1315,9 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 void server_relay_private_message(struct Client* sptr, const char* name, const char* text)
 {
   struct Client* acptr;
+  char pm_msgid[64];
+  char pm_timestamp[32];
+
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
@@ -1323,6 +1336,18 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
+  /* Generate shared msgid + timestamp for alias forwarding and history */
+  pm_msgid[0] = '\0';
+  pm_timestamp[0] = '\0';
+  if (feature_bool(FEAT_MSGID)) {
+    struct timeval tv;
+    generate_msgid(pm_msgid, sizeof(pm_msgid));
+    gettimeofday(&tv, NULL);
+    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec,
+                  (unsigned long)(tv.tv_usec / 1000));
+  }
+
   /* Use variant with client-only tags if sender has them and recipient supports it */
   {
     const char *client_tags = cli_client_tags(sptr);
@@ -1334,22 +1359,13 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
     }
   }
 
+  /* Forward PM to all aliases of the target bouncer primary */
+  bounce_forward_pm_to_aliases(sptr, acptr, CMD_PRIVATE, text, pm_msgid);
+
 #ifdef USE_MDBX
   /* Store server-relayed private message in history database (if enabled) */
-  if (feature_bool(FEAT_MSGID)) {
-    char msgid[64];
-    char timestamp[32];
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                  (unsigned long)tv.tv_sec,
-                  (unsigned long)(tv.tv_usec / 1000));
-    ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                  cli_yxx(&me),
-                  (unsigned long)cli_firsttime(&me),
-                  ++MsgIdCounter);
-    store_private_history(sptr, acptr, text, HISTORY_PRIVMSG, msgid, timestamp);
-  }
+  if (pm_msgid[0])
+    store_private_history(sptr, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp);
 #endif
 }
 
@@ -1363,6 +1379,9 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
 void server_relay_private_notice(struct Client* sptr, const char* name, const char* text)
 {
   struct Client* acptr;
+  char pm_msgid[64];
+  char pm_timestamp[32];
+
   assert(0 != sptr);
   assert(0 != name);
   assert(0 != text);
@@ -1378,6 +1397,18 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   if (MyUser(acptr))
     add_target(acptr, sptr);
 
+  /* Generate shared msgid + timestamp for alias forwarding and history */
+  pm_msgid[0] = '\0';
+  pm_timestamp[0] = '\0';
+  if (feature_bool(FEAT_MSGID)) {
+    struct timeval tv;
+    generate_msgid(pm_msgid, sizeof(pm_msgid));
+    gettimeofday(&tv, NULL);
+    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec,
+                  (unsigned long)(tv.tv_usec / 1000));
+  }
+
   /* Use variant with client-only tags if sender has them and recipient supports it */
   {
     const char *client_tags = cli_client_tags(sptr);
@@ -1389,22 +1420,13 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
     }
   }
 
+  /* Forward notice to all aliases of the target bouncer primary */
+  bounce_forward_pm_to_aliases(sptr, acptr, CMD_NOTICE, text, pm_msgid);
+
 #ifdef USE_MDBX
   /* Store server-relayed private notice in history database (if enabled) */
-  if (feature_bool(FEAT_MSGID)) {
-    char msgid[64];
-    char timestamp[32];
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                  (unsigned long)tv.tv_sec,
-                  (unsigned long)(tv.tv_usec / 1000));
-    ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                  cli_yxx(&me),
-                  (unsigned long)cli_firsttime(&me),
-                  ++MsgIdCounter);
-    store_private_history(sptr, acptr, text, HISTORY_NOTICE, msgid, timestamp);
-  }
+  if (pm_msgid[0])
+    store_private_history(sptr, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp);
 #endif
 }
 

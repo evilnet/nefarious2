@@ -45,6 +45,7 @@
 #include "send.h"
 #include "s_conf.h"
 #include "s_user.h"
+#include "bouncer_session.h"
 #include "s_debug.h"
 #include "userload.h"
 #include "patchlevel.h"
@@ -97,6 +98,8 @@ int ms_svsident(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
 
   ircd_strncpy(cli_user(acptr)->username, newident, USERLEN + 1);
   ircd_strncpy(cli_username(acptr), newident, USERLEN + 1);
+
+  bounce_emit_alias_update(acptr, "username", cli_username(acptr));
 
   sendcmdto_serv_butone(sptr, CMD_SVSIDENT, cptr, "%C %s", acptr, cli_username(acptr));
 

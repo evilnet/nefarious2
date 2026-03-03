@@ -223,6 +223,13 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (!(member = find_member_link(chptr, who)) || IsZombie(member))
     return send_reply(sptr, ERR_USERNOTINCHANNEL, cli_name(who), chptr->chname);
 
+  /* Redirect alias KICK to primary — kicking an alias alone would desync */
+  if (IsMemberAlias(member)) {
+    who = cli_alias_primary(who);
+    if (!who || !(member = find_member_link(chptr, who)) || IsZombie(member))
+      return send_reply(sptr, ERR_USERNOTINCHANNEL, cli_name(who), chptr->chname);
+  }
+
   /* Prevent halfops from kicking ops */
   if (IsChanOp(member) && IsHalfOp(member2) && !IsChanOp(member2))
     return send_reply(sptr, ERR_HALFCANTKICKOP, name);
@@ -317,6 +324,10 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       !(chptr = get_channel(sptr, name, CGT_NO_CREATE)) ||
       !(who = findNUser(parv[2])))
     return 0;
+
+  /* Redirect alias KICK to primary */
+  if (IsBouncerAlias(who) && cli_alias_primary(who))
+    who = cli_alias_primary(who);
 
   /* We go ahead and pass on the KICK for users not on the channel */
   member = find_member_link(chptr, who);

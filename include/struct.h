@@ -70,6 +70,7 @@ struct Server {
 /** Describes a user on the network. */
 struct User {
   struct Client*     server;         /**< client structure of server */
+  struct Client*     alias_primary;  /**< For alias numerics: pointer to the primary Client */
   struct Membership* channel;        /**< chain of channel pointer blocks */
   struct SLink*      invited;        /**< chain of invite pointer blocks */
   struct SLink*      watch;          /**< chain of watch pointer blocks */

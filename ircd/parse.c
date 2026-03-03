@@ -1055,7 +1055,7 @@ struct Message msgtab[] = {
     0, MAXPARA, 0, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_ignore, m_ignore, ms_bouncer_transfer, m_ignore, m_ignore },
-    "<old-numeric> <new-numeric> <sessid> - Cross-server ghost transfer"
+    "C|X|P|N|U <args> - Bouncer alias/transfer management"
   },
   {
     MSG_FINGERPRINT,
