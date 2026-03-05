@@ -730,6 +730,12 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
   one = cli_from(sptr);
   client_tags = cli_client_tags(sptr);
 
+  /* Unified msgid: if no incoming S2S msgid, generate one now so
+   * format_s2s_tags() (relay) and storage both use the same value.
+   * Handles messages from legacy servers without P10_MESSAGE_TAGS. */
+  if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
+    generate_msgid(cli_s2s_msgid(one), 64);
+
   /* Alias source rewriting: use primary's P10 numeric for S2S.
    * The alias numeric (from BX C) is only known to BX-aware servers.
    * The primary numeric (from N token) is universally known.
@@ -813,6 +819,10 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
   /* Save alias's server link and client tags before potential rewrite */
   one = cli_from(sptr);
   client_tags = cli_client_tags(sptr);
+
+  /* Unified msgid (see server_relay_channel_message) */
+  if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
+    generate_msgid(cli_s2s_msgid(one), 64);
 
   /* Alias source rewriting (see server_relay_channel_message) */
   if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
@@ -1454,6 +1464,11 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   if (MyUser(acptr))
     add_target(acptr, from);
 
+  /* Unified msgid: pre-populate before pm_msgid generation and relay */
+  if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
+      && !cli_s2s_msgid(cli_from(sptr))[0])
+    generate_msgid(cli_s2s_msgid(cli_from(sptr)), 64);
+
   /* Generate shared msgid + timestamp for alias forwarding and history.
    * Prefer S2S msgid for federation dedup — sptr is never reassigned
    * in PM relay, so cli_from(sptr) still has the incoming S2S tags. */
@@ -1545,6 +1560,11 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
 
   if (MyUser(acptr))
     add_target(acptr, from);
+
+  /* Unified msgid: pre-populate before pm_msgid generation and relay */
+  if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
+      && !cli_s2s_msgid(cli_from(sptr))[0])
+    generate_msgid(cli_s2s_msgid(cli_from(sptr)), 64);
 
   /* Generate shared msgid + timestamp (prefer S2S msgid for federation dedup) */
   pm_msgid[0] = '\0';
