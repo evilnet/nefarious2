@@ -1531,7 +1531,6 @@ static struct FedRequest *start_fed_targets_query(
   char reqid[32];
   char s2s_ref[64];
   int i, server_count;
-  struct DLink *lp;
 
   server_count = count_storage_servers(NULL, 0);
   if (server_count == 0)
@@ -1579,15 +1578,28 @@ static struct FedRequest *start_fed_targets_query(
             feature_int(FEAT_CHATHISTORY_TIMEOUT));
   req->timer_active = 1;
 
-  /* Send query to storage servers */
-  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
-    struct Client *server = lp->value.cptr;
-    if (is_ulined_server(server))
-      continue;
-    if (!has_chathistory_advertisement(server))
-      continue;
-    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q * T %s %d %s",
-                  s2s_ref, limit, reqid);
+  /* Send targeted queries to all storage servers in the network */
+  {
+    int si;
+    for (si = 0; si < MAX_AD_SERVERS; si++) {
+      struct ChathistoryAd *ad = server_ads[si];
+      struct Client *server;
+      char dest_yxx[4];
+
+      if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+        continue;
+
+      inttobase64(dest_yxx, si, 2);
+      server = FindNServer(dest_yxx);
+      if (!server || server == &me)
+        continue;
+
+      if (is_ulined_server(server))
+        continue;
+
+      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q * T %s %d %s %s",
+                    s2s_ref, limit, reqid, dest_yxx);
+    }
   }
 
   return req;
@@ -3200,17 +3212,25 @@ static int count_servers(void)
 static int count_storage_servers(const char *target, time_t query_time)
 {
   int count = 0;
-  struct DLink *lp;
+  int i;
+  char buf[4];
 
-  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
-    struct Client *server = lp->value.cptr;
+  /* Iterate all known storage servers in the network (not just direct links).
+   * server_ads[] is populated via CH A S propagation and tracks all servers. */
+  for (i = 0; i < MAX_AD_SERVERS; i++) {
+    struct ChathistoryAd *ad = server_ads[i];
+    struct Client *server;
+
+    if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+      continue;
+
+    /* Resolve numeric index to server struct */
+    server = FindNServer(inttobase64(buf, i, 2));
+    if (!server || server == &me)
+      continue;
 
     /* Skip U-lined servers (services) */
     if (is_ulined_server(server))
-      continue;
-
-    /* Skip servers without storage advertisement */
-    if (!has_chathistory_advertisement(server))
       continue;
 
     /* Skip servers whose retention doesn't cover query time */
@@ -3253,7 +3273,6 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   char s2s_ref[64];
   char s2s_subcmd;
   int i, server_count;
-  struct DLink *lp;
   time_t query_time = 0;
   enum HistoryRefType ref_type;
   const char *ref_value;
@@ -3326,36 +3345,40 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
             feature_int(FEAT_CHATHISTORY_TIMEOUT));
   req->timer_active = 1;
 
-  /* Send query to storage servers using efficient S2S format:
-   * CH Q <target> <subcmd:1char> <ref:T/M prefix> <limit> <reqid>
+  /* Send targeted queries to all storage servers in the network.
+   * Uses dest_numeric for multi-hop routing — intermediates forward
+   * without processing, only the destination processes the query.
    *
-   * Only query servers that:
-   * 1. Are not U-lined (services)
-   * 2. Have advertised chathistory storage (CH A S)
-   * 3. Have retention that covers the query timeframe
-   * 4. (Layer 1) If server has channel-level ads, target must be advertised
+   * CH Q <target> <subcmd:1char> <ref:T/M prefix> <limit> <reqid> <dest_numeric>
    */
-  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
-    struct Client *server = lp->value.cptr;
+  {
+    int si;
+    for (si = 0; si < MAX_AD_SERVERS; si++) {
+      struct ChathistoryAd *ad = server_ads[si];
+      struct Client *server;
+      char dest_yxx[4];
 
-    /* Skip U-lined servers (services don't store history) */
-    if (is_ulined_server(server))
-      continue;
+      if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+        continue;
 
-    /* Skip servers without storage advertisement */
-    if (!has_chathistory_advertisement(server))
-      continue;
+      inttobase64(dest_yxx, si, 2);
+      server = FindNServer(dest_yxx);
+      if (!server || server == &me)
+        continue;
 
-    /* Skip servers whose retention doesn't cover query time */
-    if (query_time != 0 && !server_retention_covers(server, query_time))
-      continue;
+      if (is_ulined_server(server))
+        continue;
 
-    /* Layer 1: If server has channel-level ads, check if it has this target */
-    if (has_channel_advertisement(server) && !server_advertises_channel(server, target))
-      continue;
+      if (query_time != 0 && !server_retention_covers(server, query_time))
+        continue;
 
-    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s",
-                  target, s2s_subcmd, s2s_ref, limit, reqid);
+      /* Layer 1: If server has channel-level ads, check if it has this target */
+      if (has_channel_advertisement(server) && !server_advertises_channel(server, target))
+        continue;
+
+      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s",
+                    target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx);
+    }
   }
 
   return req;
@@ -3623,8 +3646,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
   subcmd = parv[1];
 
   if (strcmp(subcmd, "Q") == 0) {
-    /* Query: Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid> */
+    /* Query: Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid> [<dest_numeric>] */
     char *target, *query_subcmd_str, *ref, *reqid;
+    char *dest_numeric = NULL;
     char query_subcmd_char;
     const char *query_subcmd_full;
     int limit, count;
@@ -3642,10 +3666,28 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     limit = atoi(parv[5]);
     reqid = parv[6];
 
-    /* Phase 3: Propagate query to storage servers only.
+    /* Optional destination numeric (multi-hop direct addressing) */
+    if (parc >= 8 && parv[7][0] != '\0')
+      dest_numeric = parv[7];
+
+    /* Destination-addressed query: if not for us, forward and skip */
+    if (dest_numeric) {
+      struct Client *dest = FindNServer(dest_numeric);
+      if (dest && dest != &me) {
+        /* Forward to destination via P10 routing — don't process locally */
+        sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s",
+                      target, query_subcmd_str, ref, limit, reqid,
+                      dest_numeric);
+        return 0;
+      }
+      /* dest_numeric is us — fall through to local processing.
+       * Don't propagate (query was targeted at us specifically). */
+    }
+
+    /* Legacy path (no dest_numeric): propagate to direct links as before.
      * Filter by advertisement (CH A S) and retention window.
      */
-    {
+    if (!dest_numeric) {
       struct DLink *lp;
       time_t query_time = 0;
 
