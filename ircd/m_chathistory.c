@@ -974,12 +974,15 @@ static int check_history_access(struct Client *sptr, const char *target,
   }
 }
 
-/* Forward declaration for federation query */
+/* Forward declarations for federation */
 static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
                                            const char *subcmd, const char *ref,
                                            int limit,
                                            struct HistoryMessage *local_msgs,
                                            int local_count, int ops_override);
+static int count_storage_servers(const char *target, time_t query_time);
+static int is_ulined_server(struct Client *server);
+static void fed_timeout_callback(struct Event *ev);
 
 /** Check if we should trigger federation query.
  * Returns 1 if we should federate, 0 otherwise.
@@ -1322,17 +1325,321 @@ static int chathistory_between(struct Client *sptr, const char *target,
   return 0;
 }
 
+/*
+ * S2S Chathistory Federation — Struct & Globals
+ * (Moved early for TARGETS federation support)
+ */
+
+/** Maximum pending federation requests */
+#define MAX_FED_REQUESTS 64
+
+/** Maximum messages collected per request */
+#define MAX_FED_MESSAGES 500
+
+/** Structure for a pending federation request */
+struct FedRequest {
+  char reqid[32];                     /**< Request ID */
+  char target[CHANNELLEN + 1];        /**< Target channel */
+  char client_yxx[6];                 /**< Client numeric (YXX) for safe lookup */
+  struct HistoryMessage *local_msgs;  /**< Local LMDB results */
+  struct HistoryMessage *fed_msgs;    /**< Federated results */
+  int local_count;                    /**< Number of local messages */
+  int fed_count;                      /**< Number of federated messages */
+  int servers_pending;                /**< Servers we're waiting for */
+  time_t start_time;                  /**< When request started */
+  int limit;                          /**< Original limit requested */
+  int ops_override;                   /**< Whether client requested :full override */
+  struct Timer timer;                 /**< Timeout timer (embedded) */
+  int timer_active;                   /**< Whether timer is active */
+  int response_sent;                  /**< Whether response was already sent */
+  void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
+  void *cb_data;                      /**< Custom data for completion callback */
+  void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
+};
+
+/** Global array of pending federation requests */
+static struct FedRequest *fed_requests[MAX_FED_REQUESTS];
+
+/** Counter for generating unique request IDs */
+static unsigned long fed_reqid_counter = 0;
+
+/* ---------------------------------------------------------------- */
+/* TARGETS Federation Support                                        */
+/* ---------------------------------------------------------------- */
+
+/** Context for federated TARGETS query, stored in FedRequest.cb_data. */
+struct TargetsFedContext {
+  struct HistoryTarget *local_targets;   /**< Local MDBX results */
+  struct HistoryTarget *fed_targets;     /**< Accumulated federated results */
+  int local_count;
+  int fed_count;
+};
+
+/* Forward declarations for TARGETS federation */
+static void complete_targets_fed(struct FedRequest *req);
+static void cleanup_targets_context(void *data);
+
+/** Check if we should federate a TARGETS query. */
+static int should_federate_targets(int local_count, int limit)
+{
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return 0;
+  if (local_count >= limit)
+    return 0;  /* Local DB satisfied the request */
+  if (count_storage_servers(NULL, 0) == 0)
+    return 0;  /* No storage servers to query */
+  return 1;
+}
+
+/** Accumulate a CH T response into the federated targets list. */
+static void add_fed_target(struct FedRequest *req, const char *target,
+                           const char *last_timestamp)
+{
+  struct TargetsFedContext *ctx;
+  struct HistoryTarget *tgt;
+
+  if (!req || !req->cb_data)
+    return;
+
+  ctx = (struct TargetsFedContext *)req->cb_data;
+
+  tgt = (struct HistoryTarget *)MyCalloc(1, sizeof(struct HistoryTarget));
+  ircd_strncpy(tgt->target, target, sizeof(tgt->target) - 1);
+  ircd_strncpy(tgt->last_timestamp, last_timestamp,
+               sizeof(tgt->last_timestamp) - 1);
+
+  /* Prepend to list (order doesn't matter pre-merge) */
+  tgt->next = ctx->fed_targets;
+  ctx->fed_targets = tgt;
+  ctx->fed_count++;
+}
+
+/** Merge local + federated targets: dedup by name, keep latest timestamp,
+ * sort descending by recency (most recent first, per IRCv3 spec). */
+static struct HistoryTarget *merge_targets(struct HistoryTarget *local,
+                                            struct HistoryTarget *remote)
+{
+  struct HistoryTarget *result = NULL, *tail = NULL;
+  struct HistoryTarget *tgt, *existing;
+
+  /* 1. Start with copies of all local targets */
+  for (tgt = local; tgt; tgt = tgt->next) {
+    struct HistoryTarget *copy = (struct HistoryTarget *)MyCalloc(1, sizeof(struct HistoryTarget));
+    memcpy(copy, tgt, sizeof(struct HistoryTarget));
+    copy->next = NULL;
+    if (tail) { tail->next = copy; tail = copy; }
+    else { result = tail = copy; }
+  }
+
+  /* 2. Merge remote targets: dedup by target name, keep latest timestamp */
+  for (tgt = remote; tgt; tgt = tgt->next) {
+    existing = NULL;
+    for (struct HistoryTarget *r = result; r; r = r->next) {
+      if (ircd_strcmp(r->target, tgt->target) == 0) {
+        existing = r;
+        break;
+      }
+    }
+    if (existing) {
+      /* Keep the later timestamp */
+      if (strcmp(tgt->last_timestamp, existing->last_timestamp) > 0)
+        ircd_strncpy(existing->last_timestamp, tgt->last_timestamp,
+                     sizeof(existing->last_timestamp) - 1);
+    } else {
+      struct HistoryTarget *copy = (struct HistoryTarget *)MyCalloc(1, sizeof(struct HistoryTarget));
+      memcpy(copy, tgt, sizeof(struct HistoryTarget));
+      copy->next = NULL;
+      if (tail) { tail->next = copy; tail = copy; }
+      else { result = tail = copy; }
+    }
+  }
+
+  /* 3. Sort descending by last_timestamp (most recent first).
+   * Bubble sort — target lists are small (capped by limit * over-fetch). */
+  if (result && result->next) {
+    int swapped;
+    do {
+      swapped = 0;
+      struct HistoryTarget **pp = &result;
+      while ((*pp)->next) {
+        struct HistoryTarget *a = *pp;
+        struct HistoryTarget *b = a->next;
+        if (strcmp(a->last_timestamp, b->last_timestamp) < 0) {
+          a->next = b->next;
+          b->next = a;
+          *pp = b;
+          swapped = 1;
+        }
+        pp = &((*pp)->next);
+      }
+    } while (swapped);
+  }
+
+  return result;
+}
+
+/** Send TARGETS results to a client with access filtering and limit. */
+static void send_targets_batch(struct Client *sptr, struct HistoryTarget *targets,
+                               int limit)
+{
+  char batchid[BATCH_ID_LEN];
+  char iso_time[32];
+  const char *time_str;
+  int sent = 0;
+
+  generate_batch_id(batchid, sizeof(batchid), sptr);
+
+  if (CapRecipientHas(sptr, CAP_BATCH))
+    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/chathistory-targets",
+                  batchid);
+
+  for (struct HistoryTarget *tgt = targets; tgt && sent < limit; tgt = tgt->next) {
+    /* Access filter — skip targets the client can't read */
+    if (check_history_access(sptr, tgt->target, NULL, 0) != 0)
+      continue;
+
+    if (history_unix_to_iso(tgt->last_timestamp, iso_time, sizeof(iso_time)) == 0)
+      time_str = iso_time;
+    else
+      time_str = tgt->last_timestamp;
+
+    if (CapRecipientHas(sptr, CAP_BATCH))
+      sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
+                    batchid, cli_name(&me), "chathistory", cli_name(&me),
+                    tgt->target, time_str);
+    else
+      sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
+                    cli_name(&me), "chathistory", cli_name(&me),
+                    tgt->target, time_str);
+    sent++;
+  }
+
+  if (CapRecipientHas(sptr, CAP_BATCH))
+    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
+}
+
+/** Initiate a federated TARGETS query to storage servers. */
+static struct FedRequest *start_fed_targets_query(
+  struct Client *sptr,
+  const char *ts1, const char *ts2,
+  int limit,
+  struct HistoryTarget *local_targets,
+  int local_count)
+{
+  struct FedRequest *req;
+  struct TargetsFedContext *ctx;
+  char reqid[32];
+  char s2s_ref[64];
+  int i, server_count;
+  struct DLink *lp;
+
+  server_count = count_storage_servers(NULL, 0);
+  if (server_count == 0)
+    return NULL;
+
+  /* Find empty slot */
+  for (i = 0; i < MAX_FED_REQUESTS; i++) {
+    if (!fed_requests[i])
+      break;
+  }
+  if (i >= MAX_FED_REQUESTS)
+    return NULL;
+
+  /* Build S2S dual-timestamp ref: <ts1>,<ts2> */
+  ircd_snprintf(0, s2s_ref, sizeof(s2s_ref), "%s,%s", ts1, ts2);
+
+  /* Generate request ID */
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu",
+                cli_yxx(&me), ++fed_reqid_counter);
+
+  /* Create context for targets accumulation */
+  ctx = (struct TargetsFedContext *)MyCalloc(1, sizeof(struct TargetsFedContext));
+  ctx->local_targets = local_targets;
+  ctx->local_count = local_count;
+
+  /* Create request */
+  req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+  ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+  req->target[0] = '*';
+  req->target[1] = '\0';
+  ircd_snprintf(0, req->client_yxx, sizeof(req->client_yxx), "%s%s",
+                cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+  req->servers_pending = server_count;
+  req->start_time = CurrentTime;
+  req->limit = limit;
+  req->completion_cb = complete_targets_fed;
+  req->cb_data = ctx;
+  req->cleanup_cb = cleanup_targets_context;
+
+  fed_requests[i] = req;
+
+  /* Set timeout timer */
+  timer_add(timer_init(&req->timer), fed_timeout_callback,
+            (void *)req, TT_RELATIVE,
+            feature_int(FEAT_CHATHISTORY_TIMEOUT));
+  req->timer_active = 1;
+
+  /* Send query to storage servers */
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *server = lp->value.cptr;
+    if (is_ulined_server(server))
+      continue;
+    if (!has_chathistory_advertisement(server))
+      continue;
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q * T %s %d %s",
+                  s2s_ref, limit, reqid);
+  }
+
+  return req;
+}
+
+/** Federation completion callback for TARGETS. */
+static void complete_targets_fed(struct FedRequest *req)
+{
+  struct TargetsFedContext *ctx;
+  struct HistoryTarget *merged;
+  struct Client *client;
+
+  if (!req || req->response_sent || !req->cb_data)
+    return;
+
+  req->response_sent = 1;
+
+  client = findNUser(req->client_yxx);
+  if (!client)
+    return;  /* Client disconnected */
+
+  ctx = (struct TargetsFedContext *)req->cb_data;
+
+  /* Merge local + federated targets (dedup + sort by recency) */
+  merged = merge_targets(ctx->local_targets, ctx->fed_targets);
+
+  /* Send to client with access filtering and limit enforcement */
+  send_targets_batch(client, merged, req->limit);
+
+  history_free_targets(merged);
+}
+
+/** Custom cleanup for TargetsFedContext — frees inner target lists. */
+static void cleanup_targets_context(void *data)
+{
+  struct TargetsFedContext *ctx = (struct TargetsFedContext *)data;
+  if (!ctx)
+    return;
+  if (ctx->local_targets)
+    history_free_targets(ctx->local_targets);
+  if (ctx->fed_targets)
+    history_free_targets(ctx->fed_targets);
+  MyFree(ctx);
+}
+
 /** Handle CHATHISTORY TARGETS subcommand. */
 static int chathistory_targets(struct Client *sptr, const char *ref1_str,
                                 const char *ref2_str, const char *limit_str)
 {
   struct HistoryTarget *targets = NULL;
-  struct HistoryTarget *tgt;
   enum HistoryRefType ref_type1, ref_type2;
   const char *ts1, *ts2;
-  char batchid[BATCH_ID_LEN];
-  char iso_time[32];
-  const char *time_str;
   int limit, count, max_limit;
 
   /* TARGETS uses timestamp references only */
@@ -1357,48 +1664,36 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   if (limit > max_limit)
     limit = max_limit;
 
-  count = history_query_targets(ts1, ts2, limit, &targets);
-  if (count < 0) {
-    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", "*",
-              "Failed to retrieve targets");
-    return 0;
-  }
+  /* Over-fetch from MDBX to compensate for post-query access filtering */
+  {
+    int fetch_limit = limit * 3;
+    if (fetch_limit > 500)
+      fetch_limit = 500;
 
-  /* Send targets in a batch */
-  generate_batch_id(batchid, sizeof(batchid), sptr);
-
-  if (CapRecipientHas(sptr, CAP_BATCH)) {
-    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/chathistory-targets",
-                  batchid);
-  }
-
-  for (tgt = targets; tgt; tgt = tgt->next) {
-    /* Check access for each target before including.
-     * Note: targets from LMDB are already in internal format (nick1:nick2 for PMs),
-     * so we pass NULL for normalized_target since we don't need normalization. */
-    if (check_history_access(sptr, tgt->target, NULL, 0) == 0) {
-      /* Convert Unix timestamp to ISO 8601 for client display */
-      if (history_unix_to_iso(tgt->last_timestamp, iso_time, sizeof(iso_time)) == 0)
-        time_str = iso_time;
-      else
-        time_str = tgt->last_timestamp;  /* Fallback if conversion fails */
-
-      if (CapRecipientHas(sptr, CAP_BATCH)) {
-        sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
-                      batchid, cli_name(&me), "chathistory", cli_name(&me),
-                      tgt->target, time_str);
-      } else {
-        sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
-                      cli_name(&me), "chathistory", cli_name(&me),
-                      tgt->target, time_str);
-      }
+    count = history_query_targets(ts1, ts2, fetch_limit, &targets);
+    if (count < 0) {
+      send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", "*",
+                "Failed to retrieve targets");
+      return 0;
     }
   }
 
-  if (CapRecipientHas(sptr, CAP_BATCH)) {
-    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
+  /* Federation decision: if local didn't fill the request, ask storage servers */
+  if (should_federate_targets(count, limit)) {
+    struct FedRequest *req = start_fed_targets_query(sptr, ts1, ts2, limit,
+                                                      targets, count);
+    if (req)
+      return 0;  /* Deferred — response sent asynchronously by complete_targets_fed */
+    /* Federation failed to start — fall through to local-only response.
+     * targets ownership stays with us (not transferred to FedRequest). */
   }
 
+  /* Local-only path: sort by recency and send */
+  {
+    struct HistoryTarget *sorted = merge_targets(targets, NULL);
+    send_targets_batch(sptr, sorted, limit);
+    history_free_targets(sorted);
+  }
   history_free_targets(targets);
 
   return 0;
@@ -1526,38 +1821,6 @@ int m_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv
  *   [SERVER] CH Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_zstd> - Compressed response
  *   [SERVER] CH E <reqid> <count>   - End response
  */
-
-/** Maximum pending federation requests */
-#define MAX_FED_REQUESTS 64
-
-/** Maximum messages collected per request */
-#define MAX_FED_MESSAGES 500
-
-/** Structure for a pending federation request */
-struct FedRequest {
-  char reqid[32];                     /**< Request ID */
-  char target[CHANNELLEN + 1];        /**< Target channel */
-  char client_yxx[6];                 /**< Client numeric (YXX) for safe lookup */
-  struct HistoryMessage *local_msgs;  /**< Local LMDB results */
-  struct HistoryMessage *fed_msgs;    /**< Federated results */
-  int local_count;                    /**< Number of local messages */
-  int fed_count;                      /**< Number of federated messages */
-  int servers_pending;                /**< Servers we're waiting for */
-  time_t start_time;                  /**< When request started */
-  int limit;                          /**< Original limit requested */
-  int ops_override;                   /**< Whether client requested :full override */
-  struct Timer timer;                 /**< Timeout timer (embedded) */
-  int timer_active;                   /**< Whether timer is active */
-  int response_sent;                  /**< Whether response was already sent */
-  void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
-  void *cb_data;                      /**< Custom data for completion callback */
-};
-
-/** Global array of pending federation requests */
-static struct FedRequest *fed_requests[MAX_FED_REQUESTS];
-
-/** Counter for generating unique request IDs */
-static unsigned long fed_reqid_counter = 0;
 
 /** Maximum number of pending base64 chunks */
 #define MAX_PENDING_CHUNKS 64
@@ -2658,8 +2921,13 @@ static void free_fed_request(struct FedRequest *req)
     history_free_messages(req->fed_msgs);
 
   /* Free custom callback data */
-  if (req->cb_data)
-    MyFree(req->cb_data);
+  if (req->cb_data) {
+    if (req->cleanup_cb)
+      req->cleanup_cb(req->cb_data);
+    else
+      MyFree(req->cb_data);
+    req->cb_data = NULL;
+  }
 
   /* Remove timer if active */
   if (req->timer_active)
@@ -2785,8 +3053,8 @@ static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
       while (*pp && (*pp)->next) {
         struct HistoryMessage *a = *pp;
         struct HistoryMessage *b = a->next;
-        /* Sort descending by timestamp (newest first) */
-        if (strcmp(a->timestamp, b->timestamp) < 0) {
+        /* Sort ascending by timestamp (chronological, per IRCv3 spec) */
+        if (strcmp(a->timestamp, b->timestamp) > 0) {
           a->next = b->next;
           b->next = a;
           *pp = b;
@@ -3413,6 +3681,54 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
     }
 
+    /* TARGETS: handle before channel check (uses * as target) */
+    if (query_subcmd_str[0] == 'T') {
+      struct HistoryTarget *targets = NULL;
+      struct HistoryTarget *tgt;
+      char *comma;
+      char ts1_buf[HISTORY_TIMESTAMP_LEN], ts2_buf[HISTORY_TIMESTAMP_LEN];
+      int tgt_count;
+      int fetch_limit;
+
+      if (!history_is_available()) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+
+      /* Parse dual timestamp from ref: <ts1>,<ts2> */
+      comma = strchr(ref, ',');
+      if (!comma) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+      *comma = '\0';
+      ircd_strncpy(ts1_buf, ref, sizeof(ts1_buf) - 1);
+      ircd_strncpy(ts2_buf, comma + 1, sizeof(ts2_buf) - 1);
+      *comma = ',';  /* Restore for propagation */
+
+      /* Over-fetch to give originating server room for access filtering */
+      fetch_limit = limit * 3;
+      if (fetch_limit > 500)
+        fetch_limit = 500;
+
+      tgt_count = history_query_targets(ts1_buf, ts2_buf, fetch_limit, &targets);
+      if (tgt_count <= 0) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+
+      /* Send CH T responses */
+      for (tgt = targets; tgt; tgt = tgt->next) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "T %s %s %s",
+                      reqid, tgt->target, tgt->last_timestamp);
+      }
+
+      /* End marker */
+      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, tgt_count);
+      history_free_targets(targets);
+      return 0;
+    }
+
     /* Only process for channels (not PMs) */
     if (!IsChannelName(target)) {
       /* Send empty response for PMs */
@@ -3667,6 +3983,24 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
       free_chunk(chunk);
     }
+  }
+  else if (strcmp(subcmd, "T") == 0) {
+    /* Target Response: T <reqid> <target> <last_timestamp> */
+    char *reqid, *target, *last_timestamp;
+    struct FedRequest *req;
+
+    if (parc < 5)
+      return 0;
+
+    reqid = parv[2];
+    target = parv[3];
+    last_timestamp = parv[4];
+
+    req = find_fed_request(reqid);
+    if (!req)
+      return 0;
+
+    add_fed_target(req, target, last_timestamp);
   }
   else if (strcmp(subcmd, "E") == 0) {
     /* End: E <reqid> <count> */

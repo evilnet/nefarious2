@@ -755,19 +755,33 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
                                SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
     }
 #ifdef USE_MDBX
-    /* Store server-relayed message in history database */
+    /* Store server-relayed message in history database.
+     * Prefer originating server's msgid from S2S tags (P10_MESSAGE_TAGS)
+     * so all servers store the same msgid — enables exact dedup in
+     * federated CHATHISTORY queries.  Use 'one' (saved before alias
+     * rewriting) to access the incoming server link's S2S tags. */
     if (feature_bool(FEAT_MSGID)) {
       char msgid[64];
       char timestamp[32];
+      const char *s2s_mid = NULL;
       struct timeval tv;
+
+      if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one
+          && cli_s2s_msgid(one)[0])
+        s2s_mid = cli_s2s_msgid(one);
+
+      if (s2s_mid)
+        ircd_strncpy(msgid, s2s_mid, sizeof(msgid));
+      else
+        ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                      cli_yxx(&me),
+                      (unsigned long)cli_firsttime(&me),
+                      ++MsgIdCounter);
+
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                    cli_yxx(&me),
-                    (unsigned long)cli_firsttime(&me),
-                    ++MsgIdCounter);
       store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, msgid, timestamp);
     }
 #endif
@@ -823,19 +837,30 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
                                SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
     }
 #ifdef USE_MDBX
-    /* Store server-relayed notice in history database */
+    /* Store server-relayed notice in history database.
+     * Prefer S2S msgid for federation dedup (see server_relay_channel_message). */
     if (feature_bool(FEAT_MSGID)) {
       char msgid[64];
       char timestamp[32];
+      const char *s2s_mid = NULL;
       struct timeval tv;
+
+      if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one
+          && cli_s2s_msgid(one)[0])
+        s2s_mid = cli_s2s_msgid(one);
+
+      if (s2s_mid)
+        ircd_strncpy(msgid, s2s_mid, sizeof(msgid));
+      else
+        ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
+                      cli_yxx(&me),
+                      (unsigned long)cli_firsttime(&me),
+                      ++MsgIdCounter);
+
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                    cli_yxx(&me),
-                    (unsigned long)cli_firsttime(&me),
-                    ++MsgIdCounter);
       store_channel_history(sptr, chptr, text, HISTORY_NOTICE, msgid, timestamp);
     }
 #endif
@@ -1429,12 +1454,24 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   if (MyUser(acptr))
     add_target(acptr, from);
 
-  /* Generate shared msgid + timestamp for alias forwarding and history */
+  /* Generate shared msgid + timestamp for alias forwarding and history.
+   * Prefer S2S msgid for federation dedup — sptr is never reassigned
+   * in PM relay, so cli_from(sptr) still has the incoming S2S tags. */
   pm_msgid[0] = '\0';
   pm_timestamp[0] = '\0';
   if (feature_bool(FEAT_MSGID)) {
+    const char *s2s_mid = NULL;
     struct timeval tv;
-    generate_msgid(pm_msgid, sizeof(pm_msgid));
+
+    if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
+        && cli_s2s_msgid(cli_from(sptr))[0])
+      s2s_mid = cli_s2s_msgid(cli_from(sptr));
+
+    if (s2s_mid)
+      ircd_strncpy(pm_msgid, s2s_mid, sizeof(pm_msgid));
+    else
+      generate_msgid(pm_msgid, sizeof(pm_msgid));
+
     gettimeofday(&tv, NULL);
     ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
                   (unsigned long)tv.tv_sec,
@@ -1509,12 +1546,22 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   if (MyUser(acptr))
     add_target(acptr, from);
 
-  /* Generate shared msgid + timestamp for alias forwarding and history */
+  /* Generate shared msgid + timestamp (prefer S2S msgid for federation dedup) */
   pm_msgid[0] = '\0';
   pm_timestamp[0] = '\0';
   if (feature_bool(FEAT_MSGID)) {
+    const char *s2s_mid = NULL;
     struct timeval tv;
-    generate_msgid(pm_msgid, sizeof(pm_msgid));
+
+    if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
+        && cli_s2s_msgid(cli_from(sptr))[0])
+      s2s_mid = cli_s2s_msgid(cli_from(sptr));
+
+    if (s2s_mid)
+      ircd_strncpy(pm_msgid, s2s_mid, sizeof(pm_msgid));
+    else
+      generate_msgid(pm_msgid, sizeof(pm_msgid));
+
     gettimeofday(&tv, NULL);
     ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
                   (unsigned long)tv.tv_sec,
