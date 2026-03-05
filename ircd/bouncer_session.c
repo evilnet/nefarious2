@@ -983,6 +983,25 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       }
     } else {
       /* ACTIVE session with primary — attach as shadow connection */
+
+      /* --- Local alias path (preferred over shadows when enabled) --- */
+      if (feature_bool(FEAT_BOUNCER_ALIASES)
+          && session->hs_client
+          && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+#ifdef USE_SSL
+        /* Respect BOUNCER_REQUIRE_TLS for aliases too */
+        if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
+          Debug((DEBUG_INFO, "Bouncer: skipping local alias for plaintext client %s (REQUIRE_TLS)",
+                 cli_name(cptr)));
+          goto skip_shadow;
+        }
+#endif
+        Debug((DEBUG_INFO, "Bouncer: local alias path for %s session %s",
+               account, session->hs_sessid));
+        *out_session = session;
+        return BOUNCE_RESUME_ALIAS_LOCAL;
+      }
+
 #ifdef USE_SSL
       /* If BOUNCER_REQUIRE_TLS is set, skip shadow for plaintext clients */
       if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
@@ -4857,6 +4876,93 @@ void bounce_forward_pm_to_aliases(struct Client *from, struct Client *target,
 }
 
 /* ---------------------------------------------------------------- */
+/* PM echo: mirror outgoing PMs to other session members              */
+/* ---------------------------------------------------------------- */
+
+/** Echo an outgoing PM/NOTICE to all other members of the sender's session.
+ * When any session member (primary or alias) sends a PM, the other members
+ * need to see it so the conversation appears complete on all connections.
+ *
+ * For local members: direct client-format delivery.
+ * For remote members: BX E token (see bounce_alias_echo handler).
+ *
+ * @param[in] sender  Client that sent the PM (primary or alias).
+ * @param[in] target  PM recipient (external user).
+ * @param[in] cmd     Long command name (e.g. "PRIVMSG").
+ * @param[in] tok     Short command token (e.g. "P").
+ * @param[in] text    Message text.
+ * @param[in] msgid   Message ID for tags (may be NULL or empty).
+ */
+void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
+                               const char *cmd, const char *tok,
+                               const char *text, const char *msgid)
+{
+  struct Client *primary;
+  struct BouncerSession *sess;
+  int i;
+
+  /* Determine session primary */
+  if (IsBouncerAlias(sender) && cli_user(sender)
+      && cli_user(sender)->alias_primary)
+    primary = cli_user(sender)->alias_primary;
+  else
+    primary = sender;
+
+  if (!IsAccount(primary))
+    return;
+
+  sess = bounce_get_session(primary);
+  if (!sess || sess->hs_alias_count <= 0)
+    return;
+
+  /* Guard: skip echo for self-PMs (target is a session member) */
+  if (target == primary)
+    return;
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *a = findNUser(sess->hs_aliases[i].ba_numeric);
+    if (a && a == target)
+      return;
+  }
+
+  /* Normalize empty msgid */
+  if (msgid && !*msgid)
+    msgid = NULL;
+
+  /* Echo to primary (if sender is not the primary) */
+  if (sender != primary) {
+    if (MyConnect(primary)) {
+      sendcmdto_one_tags_ext(primary, cmd, tok, primary, msgid,
+                             "%s :%s", cli_name(target), text);
+    } else {
+      char nn[6];
+      ircd_snprintf(0, nn, sizeof(nn), "%s%s", NumNick(primary));
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, primary,
+          "E %s %s%s %s %s %s :%s",
+          nn, NumNick(primary), tok, cli_name(target),
+          msgid ? msgid : "*", text);
+    }
+  }
+
+  /* Echo to aliases (except the sender) */
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+    if (!alias || !IsBouncerAlias(alias) || alias == sender)
+      continue;
+
+    if (MyConnect(alias)) {
+      sendcmdto_one_tags_ext(primary, cmd, tok, alias, msgid,
+                             "%s :%s", cli_name(target), text);
+    } else {
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, alias,
+          "E %s %s%s %s %s %s :%s",
+          sess->hs_aliases[i].ba_numeric,
+          NumNick(primary), tok, cli_name(target),
+          msgid ? msgid : "*", text);
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- */
 /* BX U emission: broadcast alias identity updates                    */
 /* ---------------------------------------------------------------- */
 
@@ -4900,6 +5006,7 @@ static const int umode_sync_flags[] = {
   FLAG_ACCOUNTONLY, FLAG_BOT, FLAG_PRIVDEAF, FLAG_ADMIN,
   FLAG_XTRAOP, FLAG_NOLINK, FLAG_MULTILINE_EXPAND, FLAG_NOSTORAGE,
   FLAG_OPERED_LOCAL, FLAG_OPERED_REMOTE,
+  FLAG_CLOAKIP, FLAG_CLOAKHOST, FLAG_SSL,
   -1
 };
 
@@ -4937,8 +5044,22 @@ void bounce_sync_alias_umodes(struct Client *primary)
 
   for (i = 0; i < sess->hs_alias_count; i++) {
     struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
-    if (alias && IsBouncerAlias(alias))
+    if (alias && IsBouncerAlias(alias)) {
       bounce_copy_umodes(primary, alias);
+      if (MyConnect(alias)) {
+        /* Local alias: sync oper privileges, handler, and snomask directly */
+        if (IsOper(primary)) {
+          memcpy(&cli_privs(alias), &cli_privs(primary), sizeof(cli_privs(alias)));
+          cli_handler(alias) = OPER_HANDLER;
+        }
+        set_snomask(alias, cli_snomask(primary), SNO_SET);
+      } else {
+        /* Remote alias: tell its server to set snomask via BX K */
+        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, alias,
+                      "K %s %u", sess->hs_aliases[i].ba_numeric,
+                      cli_snomask(primary));
+      }
+    }
   }
 }
 
@@ -4952,7 +5073,7 @@ void bounce_sync_alias_umodes(struct Client *primary)
  * BX subcommand dispatch for multi-server bouncer presence.
  *
  * Subcommands:
- *   BX C <primary> <alias> <account> <sessid> :<channels>  -- Create alias
+ *   BX C <primary> <alias> <account> <sessid> [<modes>] :<channels>  -- Create alias
  *   BX X <alias>                                           -- Destroy alias
  *   BX P <old> <new> <sessid> <nick>                       -- Promote/transfer
  *   BX N <primary> <new_nick> <ts>                         -- Nick sync
@@ -4965,6 +5086,8 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr, int pa
 static int bounce_alias_promote(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_update(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 
 int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
                      int parc, char *parv[])
@@ -4987,6 +5110,10 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
     return bounce_alias_nicksync(cptr, sptr, parc, parv);
   case 'U':
     return bounce_alias_update(cptr, sptr, parc, parv);
+  case 'E':
+    return bounce_alias_echo(cptr, sptr, parc, parv);
+  case 'K':
+    return bounce_alias_snomask(cptr, sptr, parc, parv);
   default:
     Debug((DEBUG_INFO, "BX: unknown subcommand '%c' from %C", subcmd, sptr));
     /* Forward unknown subcommands for future compatibility */
@@ -5179,6 +5306,28 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
   bounce_copy_umodes(primary, sptr);
 
+  /* Copy oper privileges from primary so HasPriv() works correctly.
+   * Without this, umode_str() strips +o (PRIV_PROPAGATE check) and
+   * oper commands are denied on the alias connection. */
+  if (IsOper(primary)) {
+    memcpy(&cli_privs(sptr), &cli_privs(primary), sizeof(cli_privs(sptr)));
+    cli_handler(sptr) = OPER_HANDLER;
+    /* Sync snomask so alias is in opsarray for server notice delivery.
+     * Only works when primary is local (has real snomask). Remote primary
+     * case is handled by BX K from the primary's server. */
+    if (cli_snomask(primary))
+      set_snomask(sptr, cli_snomask(primary), SNO_SET);
+  }
+
+  /* Re-assert the alias's own SSL state — bounce_copy_umodes copies the
+   * primary's FLAG_SSL, but local aliases have their own TLS connection. */
+#ifdef USE_SSL
+  if (cli_socket(sptr).ssl)
+    SetSSL(sptr);
+  else
+    ClearSSL(sptr);
+#endif
+
   /* --- Step 4: Allocate local P10 numeric --- */
   if (!SetLocalNumNick(sptr)) {
     Debug((DEBUG_INFO, "bounce_setup_local_alias: no numerics available for alias"));
@@ -5238,13 +5387,18 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
     }
 
     /* --- Step 8: Broadcast BX C to network --- */
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
-                           "C %s %s %s %s :%s",
-                           primary_full,
-                           alias_full,
-                           session->hs_account,
-                           session->hs_sessid,
-                           chanlist_buf);
+    {
+      char *alias_modes = umode_str(sptr);
+      sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                             "C %s %s %s %s %s%s :%s",
+                             primary_full,
+                             alias_full,
+                             session->hs_account,
+                             session->hs_sessid,
+                             *alias_modes ? "+" : "+",
+                             alias_modes,
+                             chanlist_buf);
+    }
   } /* end YYXXX numeric scope */
 
   /* --- Step 9: Send welcome sequence to the alias client ---
@@ -5276,6 +5430,23 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 
   /* --- Step 10: Send channel state (JOINs, TOPICs, NAMES) --- */
   bounce_send_channel_state(sptr);
+
+  /* Auto-replay missed messages for legacy clients.
+   * Clients with draft/chathistory do their own replay via CHATHISTORY command.
+   * Uses local MDBX store; on non-storing servers, history_is_available()
+   * returns 0 and no replay occurs (capable clients federate via CHATHISTORY).
+   *
+   * Use session's hs_last_active as the replay baseline — it's the
+   * authoritative "last activity" time, persisted in MDBX and replicated
+   * via BS C.  cli_user(primary)->last is 0 for remote primaries. */
+  if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY)
+      && !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
+    time_t since = session->hs_last_active;
+    if (since == 0)
+      since = session->hs_created;
+    if (since > 0 && since < CurrentTime)
+      bouncer_auto_replay(sptr, session, since);
+  }
 
   if (IsIPChecked(sptr))
     IPcheck_connect_succeeded(sptr);
@@ -5313,6 +5484,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   const char *account;
   const char *sessid;
   const char *chanlist;
+  const char *alias_modes = NULL;
   char *chan_copy;
   char *chan_name;
   char *chan_tok;
@@ -5324,7 +5496,14 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   alias_numeric = parv[3];
   account = parv[4];
   sessid = parv[5];
-  chanlist = parv[6];
+  if (parc >= 8) {
+    /* New format: BX C <primary> <alias> <account> <sessid> <modes> :<channels> */
+    alias_modes = parv[6];
+    chanlist = parv[parc - 1];
+  } else {
+    /* Old format: BX C <primary> <alias> <account> <sessid> :<channels> */
+    chanlist = parv[6];
+  }
 
   /* Find the primary client */
   primary = findNUser(primary_numeric);
@@ -5348,6 +5527,10 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
 
   /* Check if alias numeric already exists */
   alias = findNUser(alias_numeric);
+  Debug((DEBUG_INFO, "BX C: processing alias=%s primary=%s account=%s chanlist='%s' existing=%s",
+         alias_numeric, primary_numeric, account,
+         chanlist ? chanlist : "?",
+         alias ? cli_name(alias) : "NULL"));
   if (alias) {
     if (IsBouncerAlias(alias)) {
       /* Already an alias — duplicate BX C, skip creation */
@@ -5433,6 +5616,13 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
 
 track_alias:
 
+  /* Apply mode string from BX C if present — overrides modes copied from
+   * the local view of the primary, which may be stale or incomplete.
+   * e.g. alias created on originating server after /OPER, but the
+   * primary on this server hasn't received the mode change yet. */
+  if (alias_modes && *alias_modes)
+    user_apply_umode_str(alias, alias_modes);
+
   /* Track alias in session replica */
   session = bounce_find_by_token_sessid(account, sessid);
   if (session && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
@@ -5443,30 +5633,58 @@ track_alias:
 
   /* Add alias to each of the primary's channels with CHFL_ALIAS */
   if (chanlist && *chanlist) {
+    Debug((DEBUG_INFO, "BX C: chanlist='%s' for alias %s primary %s",
+           chanlist, alias_numeric, primary_numeric));
     chan_copy = MyMalloc(strlen(chanlist) + 1);
     strcpy(chan_copy, chanlist);
     for (chan_name = ircd_strtok(&chan_tok, chan_copy, " ");
          chan_name;
          chan_name = ircd_strtok(&chan_tok, NULL, " ")) {
       struct Channel *chptr = FindChannel(chan_name);
-      if (chptr && find_member_link(chptr, primary)) {
-        /* Skip +Z channels for non-TLS aliases */
-        if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias))
-          continue;
-        add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
+      if (!chptr) {
+        Debug((DEBUG_INFO, "BX C: channel '%s' not found on this server", chan_name));
+        continue;
       }
+      if (!find_member_link(chptr, primary)) {
+        Debug((DEBUG_INFO, "BX C: primary %s (%s) not in channel %s",
+               primary_numeric, cli_name(primary), chan_name));
+        continue;
+      }
+      /* Skip +Z channels for non-TLS aliases */
+      if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
+        Debug((DEBUG_INFO, "BX C: skipping +Z channel %s (alias not SSL)", chan_name));
+        continue;
+      }
+      add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
+      Debug((DEBUG_INFO, "BX C: added alias %s to channel %s (members=%d aliases=%d)",
+             alias_numeric, chan_name, chptr->users, chptr->aliases));
     }
     MyFree(chan_copy);
+  } else {
+    Debug((DEBUG_INFO, "BX C: empty chanlist for alias %s", alias_numeric));
+  }
+
+  /* If primary is local and opered, send BX K so the alias's server
+   * adds it to opsarray for server notice delivery. */
+  if (MyUser(primary) && cli_snomask(primary)) {
+    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cptr,
+                          "K %s %u", alias_numeric, cli_snomask(primary));
   }
 
   Debug((DEBUG_INFO, "BX C: created alias %s for primary %s (%s)",
          alias_numeric, primary_numeric, cli_name(primary)));
 
 forward:
-  /* Forward to other servers */
-  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                        "C %s %s %s %s :%s",
-                        primary_numeric, alias_numeric, account, sessid, chanlist);
+  /* Forward to other servers — include modes if present */
+  if (alias_modes && *alias_modes)
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "C %s %s %s %s %s :%s",
+                          primary_numeric, alias_numeric, account, sessid,
+                          alias_modes, chanlist);
+  else
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "C %s %s %s %s :%s",
+                          primary_numeric, alias_numeric, account, sessid, chanlist);
   return 0;
 }
 
@@ -5686,6 +5904,105 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
 forward:
   sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
                         "U %s %s", parv[2], parv[3]);
+  return 0;
+}
+
+/** Handle BX E: deliver a PM echo to a local session member.
+ * When a session member sends a PM, the originating server sends BX E to
+ * other servers hosting session members so they see the outgoing message.
+ *
+ * Wire format: <server> BX E <target_nn> <from_nn> <tok> <pm_target> <msgid> :<text>
+ *
+ * @param[in] cptr Client that sent us the message.
+ * @param[in] sptr Original source of message (a server).
+ * @param[in] parc Number of arguments.
+ * @param[in] parv Argument vector.
+ */
+static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
+                             int parc, char *parv[])
+{
+  struct Client *target, *from;
+  const char *tok_char, *target_nick, *msgid, *text;
+  const char *msg_cmd, *msg_tok;
+
+  if (parc < 8)
+    return protocol_violation(sptr, "BX E requires 7 parameters");
+
+  target = findNUser(parv[2]);
+  if (!target || !IsUser(target))
+    return 0;
+
+  /* Forward if target is not on this server */
+  if (!MyConnect(target)) {
+    sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, target,
+        "E %s %s %s %s %s :%s",
+        parv[2], parv[3], parv[4], parv[5], parv[6], parv[7]);
+    return 0;
+  }
+
+  from = findNUser(parv[3]);
+  if (!from)
+    return 0;
+
+  tok_char = parv[4];
+  target_nick = parv[5];
+  msgid = parv[6];
+  text = parv[7];
+
+  if (strcmp(msgid, "*") == 0)
+    msgid = NULL;
+
+  if (tok_char[0] == 'P') {
+    msg_cmd = MSG_PRIVATE;
+    msg_tok = TOK_PRIVATE;
+  } else {
+    msg_cmd = MSG_NOTICE;
+    msg_tok = TOK_NOTICE;
+  }
+
+  /* Deliver the echo to the local client */
+  sendcmdto_one_tags_ext(from, msg_cmd, msg_tok, target, msgid,
+                         "%s :%s", target_nick, text);
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX K: Sync snomask to alias                                       */
+/* ---------------------------------------------------------------- */
+
+/** Set the snomask on a bouncer alias.
+ * Sent by the primary's server (which has the authoritative oper state)
+ * to ensure aliases on other servers are added to opsarray and receive
+ * server notices (oper notices, glines, connection notices, etc.).
+ *
+ * Format: BX K <alias_numeric> <snomask_decimal>
+ */
+static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
+                                int parc, char *parv[])
+{
+  struct Client *alias;
+  unsigned int snomask;
+
+  if (parc < 4)
+    return protocol_violation(sptr, "BX K requires 2 parameters");
+
+  alias = findNUser(parv[2]);
+  if (!alias || !IsBouncerAlias(alias))
+    goto forward;
+
+  snomask = (unsigned int)atoi(parv[3]);
+
+  /* Only set snomask on local aliases — remote ones will receive
+   * the forwarded BX K and handle it themselves. */
+  if (MyConnect(alias)) {
+    set_snomask(alias, snomask, SNO_SET);
+    Debug((DEBUG_INFO, "BX K: set snomask %u on alias %s (%s)",
+           snomask, cli_name(alias), parv[2]));
+  }
+
+forward:
+  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                        "K %s %s", parv[2], parv[3]);
   return 0;
 }
 
@@ -7133,16 +7450,13 @@ void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
   }
 
   /* Auto-replay recent history for the new shadow connection.
-   * Use the primary's idle time as the "since" timestamp — replay
-   * messages that arrived while the session was idle.
-   * For active sessions there is no disconnect_time; the idle time
-   * (user->last = last PRIVMSG from any connection) is a reasonable
-   * proxy.  If no message was ever sent, fall back to signon time. */
+   * Use session's hs_last_active as the replay baseline — it's the
+   * authoritative "last activity" time, consistent with alias path. */
   if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY) && cli_user(primary)
       && !CapHas(&shadow->sh_active, CAP_DRAFT_CHATHISTORY)) {
-    time_t since = cli_user(primary)->last;
+    time_t since = session->hs_last_active;
     if (since == 0)
-      since = cli_firsttime(primary);
+      since = session->hs_created;
     if (since > 0 && since < CurrentTime) {
       current_shadow = shadow;
       bouncer_auto_replay(primary, session, since);

@@ -390,6 +390,18 @@ extern void bounce_emit_alias_update(struct Client *primary,
  */
 extern void bounce_sync_alias_umodes(struct Client *primary);
 
+/** Echo an outgoing PM/NOTICE to all other members of the sender's session.
+ * @param[in] sender  Client that sent the PM (primary or alias).
+ * @param[in] target  PM recipient (external user).
+ * @param[in] cmd     Long command name (e.g. "PRIVMSG").
+ * @param[in] tok     Short command token (e.g. "P").
+ * @param[in] text    Message text.
+ * @param[in] msgid   Message ID for tags (may be NULL or empty).
+ */
+extern void bounce_echo_pm_to_session(struct Client *sender,
+    struct Client *target, const char *cmd, const char *tok,
+    const char *text, const char *msgid);
+
 /** Prepare bouncer sessions for SQUIT promotion.
  * Called BEFORE exit_downlinks(). Marks sessions needing promotion,
  * removes departing server's alias entries from session replicas.
@@ -785,7 +797,8 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  *             replay, falling back to disconnect time if unavailable.
  * @return 1 if resumed, 2 if converted to shadow, 3 if cross-server relay
  *         established (caller must not introduce client),
- *         4 if alias path selected (caller must call bounce_setup_local_alias),
+ *         4 if remote alias path selected (caller must call bounce_setup_local_alias),
+ *         5 if local alias path selected (caller must call bounce_setup_local_alias),
  *         0 otherwise.
  */
 #define BOUNCE_RESUME_NONE           0
@@ -793,6 +806,7 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
 #define BOUNCE_RESUME_SHADOW         2
 #define BOUNCE_RESUME_RELAY_REMOTE   3
 #define BOUNCE_RESUME_ALIAS_REMOTE   4
+#define BOUNCE_RESUME_ALIAS_LOCAL    5
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
                                time_t *out_since_time);

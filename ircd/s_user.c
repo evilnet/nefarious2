@@ -644,7 +644,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * The client becomes a first-class alias — own numeric, own connection,
      * channels mirrored from primary with CHFL_ALIAS.  Not introduced via
      * N token; other servers learn about it through BX C. */
-    if (auto_resumed == BOUNCE_RESUME_ALIAS_REMOTE && auto_session) {
+    if ((auto_resumed == BOUNCE_RESUME_ALIAS_REMOTE
+         || auto_resumed == BOUNCE_RESUME_ALIAS_LOCAL) && auto_session) {
       int alias_result = bounce_setup_local_alias(sptr, auto_session);
       if (alias_result == 0)
         return 0;  /* Alias setup complete — client is alive */
@@ -2369,7 +2370,7 @@ char *umode_str(struct Client *cptr)
   int i;
   struct Flags c_flags = cli_flags(cptr);
 
-  if (MyUser(cptr) && !HasPriv(cptr, PRIV_PROPAGATE))
+  if (MyUser(cptr) && !IsBouncerAlias(cptr) && !HasPriv(cptr, PRIV_PROPAGATE))
     FlagClr(&c_flags, FLAG_OPER);
 
   for (i = 0; i < USERMODELIST_SIZE; ++i)
@@ -2441,6 +2442,33 @@ char *umode_str(struct Client *cptr)
 
   return umodeBuf;                /* Note: static buffer, gets
                                    overwritten by send_umode() */
+}
+
+/** Apply a mode string (e.g. "+owgxzrCc") to a client's flags.
+ * Only sets global umode flags; does not process account/host suffixes.
+ * Used by BX C to apply the originating server's mode state to remote aliases.
+ * @param[in,out] cptr Client to modify.
+ * @param[in] modes Mode string (may start with '+').
+ */
+void user_apply_umode_str(struct Client *cptr, const char *modes)
+{
+  const char *m;
+  unsigned int i;
+
+  if (!modes || !*modes)
+    return;
+
+  m = modes;
+  if (*m == '+') m++;
+
+  for (; *m && *m != ' '; m++) {
+    for (i = 0; i < USERMODELIST_SIZE; i++) {
+      if (userModeList[i].c == *m && userModeList[i].flag >= FLAG_GLOBAL_UMODES) {
+        SetFlag(cptr, userModeList[i].flag);
+        break;
+      }
+    }
+  }
 }
 
 /** Send a mode change string for \a sptr to \a cptr.

@@ -413,7 +413,7 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           if (!(IsUser(acptr) && Process(acptr)))
             continue;           /* Now Process() is at the beginning, if we fail
                                    we'll never have to show this acptr in this query */
-          if (IsMemberAlias(member) && acptr != sptr)
+          if (IsMemberAlias(member))
             continue;
  	  if ((bitsel & WHOSELECT_OPER) && !SeeOper(sptr,acptr))
 	    continue;

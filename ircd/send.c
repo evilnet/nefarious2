@@ -112,6 +112,18 @@ void sendcmdto_set_s2s_cptr(struct Client *cptr)
   s2s_cptr_override = cptr;
 }
 
+/** Override alias source for split S2S delivery in channel broadcasts.
+ * When set, sendcmdto_channel_butone builds two S2S buffers:
+ * - Primary numeric for all servers except the primary's direction
+ * - Alias numeric for the primary's server direction (avoids fake direction)
+ */
+static struct Client *s2s_alias_source = NULL;
+
+void sendcmdto_set_alias_source(struct Client *alias)
+{
+  s2s_alias_source = alias;
+}
+
 /** When non-zero, numeric replies bypass the default suppression and
  * are duplicated to all shadows.  Set during JOIN post-join replies.
  */
@@ -128,6 +140,12 @@ int skip_primary_echo = 0;
  * hasn't negotiated echo-message (client displayed it locally).
  */
 struct ShadowConnection *skip_shadow_dup = NULL;
+
+/** When non-zero, send_buffer() skips alias mirroring.
+ * Set during vsendto_opmask_butone to prevent double delivery — aliases
+ * in opsarray get the notice directly, no need to also mirror from primary.
+ */
+static int suppress_alias_mirror = 0;
 
 /** Format current time as ISO 8601 timestamp for server-time capability.
  * @param[out] buf Buffer to write timestamp to.
@@ -1387,6 +1405,29 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
       }
     }
   }
+
+  /* Mirror to bouncer aliases (non-channel sends only).
+   * Aliases get channel messages through their own CHFL_ALIAS membership
+   * in the member loop, so we skip mirroring when stc_active is set
+   * (channel broadcast context) to avoid double delivery.
+   * For PMs, server notices, oper notices, wallops, etc., the alias has
+   * no other path to receive the message, so mirror here. */
+  if (MyUser(to) && !IsServer(to) && !shadow_tag_ctx.stc_active
+      && !suppress_alias_mirror) {
+    struct BouncerSession *bsess = bounce_get_session(to);
+    if (bsess && bsess->hs_alias_count > 0) {
+      int ai;
+      for (ai = 0; ai < bsess->hs_alias_count; ai++) {
+        struct Client *alias = findNUser(bsess->hs_aliases[ai].ba_numeric);
+        if (alias && IsBouncerAlias(alias) && MyUser(alias)) {
+          msgq_add(&(cli_sendQ(alias)), buf, prio);
+          client_add_sendq(cli_connect(alias), &send_queues);
+          update_write(alias);
+          ++(cli_sendM(alias));
+        }
+      }
+    }
+  }
 }
 
 /*
@@ -2387,8 +2428,11 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct MsgBuf *user_mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
+  struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
   struct Client *service;
   struct Client *cptr;  /* Server connection for incoming S2S tags */
+  struct Client *alias_from;    /* Alias source for split S2S delivery */
+  struct Client *primary_dir;   /* Primary's server direction (for split comparison) */
   const char *userfmt;
   const char *usercmd;
   char tagbuf[128];
@@ -2397,6 +2441,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   int tflags;
 
   vd.vd_format = pattern;
+
+  /* Consume alias source override for split S2S delivery.
+   * When set, we build two S2S buffers: primary numeric for most servers,
+   * alias numeric for the primary's server direction (avoids fake direction). */
+  alias_from = s2s_alias_source;
+  primary_dir = alias_from ? cli_from(from) : NULL;
+  s2s_alias_source = NULL;
 
   /* Get the server connection for S2S tag handling.
    * s2s_cptr_override is set by alias source rewriting — when the primary
@@ -2435,6 +2486,16 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   } else {
     va_start(vd.vd_args, pattern);
     serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+  }
+
+  /* Build alias S2S buffer for the primary's server direction */
+  if (alias_from) {
+    va_start(vd.vd_args, pattern);
+    if (serv_mb_tags)
+      serv_mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+    else
+      serv_mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
     va_end(vd.vd_args);
   }
 
@@ -2479,8 +2540,13 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       } else {
         send_buffer(member->user, user_mb, 0);
       }
-    } else
-      send_buffer(member->user, serv_mb, 0);
+    } else {
+      /* Use alias numeric for primary's server direction to avoid fake direction */
+      if (serv_mb_alias && cli_from(member->user) == primary_dir)
+        send_buffer(member->user, serv_mb_alias, 0);
+      else
+        send_buffer(member->user, serv_mb, 0);
+    }
   }
   /* Consult service forwarding table. */
   if(GlobalForwards[prefix]
@@ -2499,6 +2565,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       msgq_clean(user_mb_cache[tflags]);
   }
   msgq_clean(serv_mb);
+  if (serv_mb_alias)
+    msgq_clean(serv_mb_alias);
 }
 
 /** Send a (prefixed) command to all users on this channel, except for
@@ -2528,8 +2596,11 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   struct MsgBuf *user_mb_tags = NULL;
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;
+  struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
   struct Client *service;
   struct Client *cptr;
+  struct Client *alias_from;    /* Alias source for split S2S delivery */
+  struct Client *primary_dir;   /* Primary's server direction */
   const char *userfmt;
   const char *usercmd;
   char tagbuf[1024];
@@ -2537,6 +2608,11 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   char userfmt_tags[64];
 
   vd.vd_format = pattern;
+
+  /* Consume alias source override for split S2S delivery */
+  alias_from = s2s_alias_source;
+  primary_dir = alias_from ? cli_from(from) : NULL;
+  s2s_alias_source = NULL;
 
   /* Get the server connection for S2S tag handling.
    * s2s_cptr_override is set by alias source rewriting — when the primary
@@ -2575,6 +2651,16 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   } else {
     va_start(vd.vd_args, pattern);
     serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+  }
+
+  /* Build alias S2S buffer for the primary's server direction */
+  if (alias_from) {
+    va_start(vd.vd_args, pattern);
+    if (serv_mb_tags)
+      serv_mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+    else
+      serv_mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
     va_end(vd.vd_args);
   }
 
@@ -2624,8 +2710,13 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
           send_buffer(member->user, user_mb, 0);
         }
       }
-    } else
-      send_buffer(member->user, serv_mb, 0);
+    } else {
+      /* Use alias numeric for primary's server direction to avoid fake direction */
+      if (serv_mb_alias && cli_from(member->user) == primary_dir)
+        send_buffer(member->user, serv_mb_alias, 0);
+      else
+        send_buffer(member->user, serv_mb, 0);
+    }
   }
   /* Consult service forwarding table. */
   if(GlobalForwards[prefix]
@@ -2637,6 +2728,8 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
 
   msgq_clean(user_mb);
   msgq_clean(serv_mb);
+  if (serv_mb_alias)
+    msgq_clean(serv_mb_alias);
 }
 
 /** Send a (prefixed) WALL of type \a type to all users except \a one.
@@ -2882,9 +2975,14 @@ void vsendto_opmask_butone(struct Client *from, struct Client *one,
   mb = msgq_make(0, ":%s " MSG_NOTICE " * :*** Notice -- %v", cli_name(from),
 		 &vd);
 
+  /* Suppress alias mirroring during opslist delivery — aliases that are
+   * in opsarray (via BX K snomask sync) get the notice directly below.
+   * Without this, send_buffer(primary) would also mirror to aliases. */
+  suppress_alias_mirror = 1;
   for (; opslist; opslist = opslist->next)
     if (opslist->value.cptr != one)
       send_buffer(opslist->value.cptr, mb, 0);
+  suppress_alias_mirror = 0;
 
   msgq_clean(mb);
 }

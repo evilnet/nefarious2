@@ -103,6 +103,7 @@
 #include "s_misc.h"
 #include "s_bsd.h"
 #include "send.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -267,6 +268,10 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
         sendcmdto_one(&me, CMD_MODE, sptr, "%s %s", cli_name(sptr), modes);
     }
   }
+
+  /* Sync oper mode flags to all aliases of this primary.
+   * Must be after all mode and ConfUmode changes are applied. */
+  bounce_sync_alias_umodes(sptr);
 
   send_reply(sptr, RPL_YOUREOPER);
 

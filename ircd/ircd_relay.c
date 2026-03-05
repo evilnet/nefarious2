@@ -420,15 +420,26 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
 
-  /* Use variant with client-only tags if sender has them */
+  /* Alias source rewriting: use primary's numeric for S2S delivery.
+   * When primary is remote, use split S2S delivery: primary numeric for
+   * most servers, alias numeric for the primary's server direction
+   * (to avoid fake direction — the primary's server handles rewriting). */
   {
+    struct Client *from = sptr;
     const char *client_tags = cli_client_tags(sptr);
+
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      if (!MyUser(cli_user(sptr)->alias_primary))
+        sendcmdto_set_alias_source(sptr);
+      from = cli_user(sptr)->alias_primary;
+    }
+
     if (client_tags && *client_tags) {
-      sendcmdto_channel_butone_with_client_tags(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone_with_client_tags(from, CMD_PRIVATE, chptr, cli_from(sptr),
                          SKIP_DEAF | SKIP_BURST, text[0], client_tags,
                          "%H :%s", chptr, mytext);
     } else {
-      sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone(from, CMD_PRIVATE, chptr, cli_from(sptr),
                                SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, mytext);
     }
   }
@@ -592,15 +603,23 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
 
-  /* Use variant with client-only tags if sender has them */
+  /* Alias source rewriting (see relay_channel_message) */
   {
+    struct Client *from = sptr;
     const char *client_tags = cli_client_tags(sptr);
+
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      if (!MyUser(cli_user(sptr)->alias_primary))
+        sendcmdto_set_alias_source(sptr);
+      from = cli_user(sptr)->alias_primary;
+    }
+
     if (client_tags && *client_tags) {
-      sendcmdto_channel_butone_with_client_tags(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone_with_client_tags(from, CMD_NOTICE, chptr, cli_from(sptr),
                          SKIP_DEAF | SKIP_BURST, '\0', client_tags,
                          "%H :%s", chptr, mytext);
     } else {
-      sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, cli_from(sptr),
+      sendcmdto_channel_butone(from, CMD_NOTICE, chptr, cli_from(sptr),
                                SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, mytext);
     }
   }
@@ -717,6 +736,8 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
    * Keep 'one' = alias's server link for echo suppression. */
   if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
     sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
+    if (!MyUser(cli_user(sptr)->alias_primary))
+      sendcmdto_set_alias_source(sptr);
     sptr = cli_user(sptr)->alias_primary;
   }
 
@@ -781,7 +802,9 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 
   /* Alias source rewriting (see server_relay_channel_message) */
   if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
-    sendcmdto_set_s2s_cptr(one);
+    sendcmdto_set_s2s_cptr(one);  /* Preserve alias's S2S tags */
+    if (!MyUser(cli_user(sptr)->alias_primary))
+      sendcmdto_set_alias_source(sptr);
     sptr = cli_user(sptr)->alias_primary;
   }
 
@@ -1082,19 +1105,36 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
                   (unsigned long)(tv.tv_usec / 1000));
   }
 
-  /* Use variant with client-only tags if sender has them and recipient supports it */
+  /* Alias source rewriting for S2S legacy compat.
+   * If target is on the primary's server direction, keep alias numeric
+   * (avoids fake direction — server_relay handles rewriting there). */
   {
     const char *client_tags = cli_client_tags(sptr);
+    struct Client *from = sptr;
+
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      from = cli_user(sptr)->alias_primary;
+      /* Keep alias numeric for primary's server direction to avoid fake direction */
+      if (!MyUser(from) && !MyConnect(acptr)
+          && cli_from(from) == cli_from(acptr))
+        from = sptr;
+    }
+
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
-      sendcmdto_one_client_tags(sptr, MSG_PRIVATE, acptr, client_tags,
+      sendcmdto_one_client_tags(from, MSG_PRIVATE, acptr, client_tags,
                                 "%C :%s", acptr, mytext);
     } else {
-      sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, mytext);
+      if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
+        sendcmdto_set_s2s_cptr(cli_from(sptr));
+      sendcmdto_one(from, CMD_PRIVATE, acptr, "%C :%s", acptr, mytext);
     }
   }
 
   /* Forward PM to all aliases of the target bouncer primary */
   bounce_forward_pm_to_aliases(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
+
+  /* Echo outgoing PM to other members of the sender's bouncer session */
+  bounce_echo_pm_to_session(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
 
   /* Echo/mirror private message back to sender's connections.
    * Same bouncer mirror logic as channel messages. */
@@ -1251,19 +1291,33 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
                   (unsigned long)(tv.tv_usec / 1000));
   }
 
-  /* Use variant with client-only tags if sender has them and recipient supports it */
+  /* Alias source rewriting (see relay_private_message) */
   {
     const char *client_tags = cli_client_tags(sptr);
+    struct Client *from = sptr;
+
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      from = cli_user(sptr)->alias_primary;
+      if (!MyUser(from) && !MyConnect(acptr)
+          && cli_from(from) == cli_from(acptr))
+        from = sptr;
+    }
+
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
-      sendcmdto_one_client_tags(sptr, MSG_NOTICE, acptr, client_tags,
+      sendcmdto_one_client_tags(from, MSG_NOTICE, acptr, client_tags,
                                 "%C :%s", acptr, mytext);
     } else {
-      sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, mytext);
+      if (from != sptr)
+        sendcmdto_set_s2s_cptr(cli_from(sptr));
+      sendcmdto_one(from, CMD_NOTICE, acptr, "%C :%s", acptr, mytext);
     }
   }
 
   /* Forward notice to all aliases of the target bouncer primary */
   bounce_forward_pm_to_aliases(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
+
+  /* Echo outgoing notice to other members of the sender's bouncer session */
+  bounce_echo_pm_to_session(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
 
   /* Echo/mirror private notice back to sender's connections.
    * Same bouncer mirror logic as channel messages. */
@@ -1387,17 +1441,22 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
                   (unsigned long)(tv.tv_usec / 1000));
   }
 
-  /* Use variant with client-only tags if sender has them and recipient supports it.
-   * Set s2s_cptr_override only before sendcmdto_one (which consumes it);
-   * sendcmdto_one_client_tags is for local recipients and doesn't need it. */
+  /* Per-target direction guard for split S2S delivery:
+   * If target is behind the primary's server direction, keep alias numeric
+   * to avoid fake direction — that server handles rewriting locally. */
   {
+    struct Client *send_from = from;
+    if (send_from != sptr && !MyUser(send_from) && !MyConnect(acptr)
+        && cli_from(send_from) == cli_from(acptr))
+      send_from = sptr;
+
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
-      sendcmdto_one_client_tags(from, MSG_PRIVATE, acptr, client_tags,
+      sendcmdto_one_client_tags(send_from, MSG_PRIVATE, acptr, client_tags,
                                 "%C :%s", acptr, text);
     } else {
-      if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
+      if (send_from != sptr)  /* Alias was rewritten — preserve S2S tags */
         sendcmdto_set_s2s_cptr(cli_from(sptr));
-      sendcmdto_one(from, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+      sendcmdto_one(send_from, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
     }
   }
 
@@ -1462,15 +1521,20 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
                   (unsigned long)(tv.tv_usec / 1000));
   }
 
-  /* Use variant with client-only tags if sender has them and recipient supports it */
+  /* Per-target direction guard (see server_relay_private_message) */
   {
+    struct Client *send_from = from;
+    if (send_from != sptr && !MyUser(send_from) && !MyConnect(acptr)
+        && cli_from(send_from) == cli_from(acptr))
+      send_from = sptr;
+
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
-      sendcmdto_one_client_tags(from, MSG_NOTICE, acptr, client_tags,
+      sendcmdto_one_client_tags(send_from, MSG_NOTICE, acptr, client_tags,
                                 "%C :%s", acptr, text);
     } else {
-      if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
+      if (send_from != sptr)
         sendcmdto_set_s2s_cptr(cli_from(sptr));
-      sendcmdto_one(from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+      sendcmdto_one(send_from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
     }
   }
 
