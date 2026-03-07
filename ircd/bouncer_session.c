@@ -3730,19 +3730,29 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 
   /* Auto-replay missed messages for legacy clients.
    * Clients with draft/chathistory do their own replay via CHATHISTORY command.
-   * Uses local MDBX store; on non-storing servers, history_is_available()
-   * returns 0 and no replay occurs (capable clients federate via CHATHISTORY).
    *
-   * Use session's hs_last_active as the replay baseline — it's the
-   * authoritative "last activity" time, persisted in MDBX and replicated
-   * via BS C.  cli_user(primary)->last is 0 for remote primaries. */
+   * Two paths:
+   * 1. Local MDBX available: use sync bouncer_auto_replay() (existing path).
+   * 2. No local store but federation available: use chathistory_auto_replay_fed()
+   *    which issues CHATHISTORY LATEST * queries to storage servers.
+   *    Follows IRCv3 chathistory client pseudocode pattern. */
   if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY)
       && !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
     time_t since = session->hs_last_active;
     if (since == 0)
       since = session->hs_created;
-    if (since > 0 && since < CurrentTime)
-      bouncer_auto_replay(sptr, session, since);
+
+    if (history_is_available()) {
+      /* Local store: sync replay from MDBX */
+      if (since > 0 && since < CurrentTime)
+        bouncer_auto_replay(sptr, session, since);
+    } else {
+      /* No local store: federate to storage servers */
+      int limit = feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
+      if (limit <= 0)
+        limit = 100;
+      chathistory_auto_replay_fed(sptr, since, limit);
+    }
   }
 
   if (IsIPChecked(sptr))

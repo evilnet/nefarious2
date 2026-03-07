@@ -984,6 +984,11 @@ static int count_storage_servers(const char *target, time_t query_time);
 static int is_ulined_server(struct Client *server);
 static void fed_timeout_callback(struct Event *ev);
 
+/* Forward declarations for auto-replay federation */
+struct AutoReplayContext;
+static void autoreplay_next_channel(struct AutoReplayContext *ctx);
+static void complete_autoreplay_channel(struct FedRequest *req);
+
 /* Server advertisement tracking — defined here (before first use in
  * start_fed_targets_query), full struct definition is below. */
 #define MAX_AD_SERVERS 4096
@@ -3612,6 +3617,258 @@ int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
                   target, s2s_ref, reqid);
   }
 
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* Auto-Replay Federation (for bouncer alias setup on non-storing servers) */
+/* ---------------------------------------------------------------- */
+
+/** Context for federated auto-replay, shared across sequential FedRequests.
+ * Processes channels one at a time to avoid exhausting the fed_requests[] array.
+ * Freed when all channels are processed or the client disconnects.
+ */
+struct AutoReplayContext {
+  char client_yxx[6];              /**< Alias client numeric for safe lookup */
+  struct Channel *next_chan;        /**< Next channel to process (by channel ptr) */
+  struct Membership *cursor;       /**< Current position in client's channel list */
+  int limit;                       /**< Per-channel message limit */
+  int total_replayed;              /**< Running total of replayed messages */
+  int chan_count;                   /**< Number of channels replayed */
+  time_t since_time;               /**< Baseline timestamp (for read marker comparison) */
+  char timestamp[HISTORY_TIMESTAMP_LEN]; /**< Formatted baseline ts */
+};
+
+/** Process the next channel in the auto-replay chain.
+ * Walks the alias's channel memberships, issuing federation queries
+ * sequentially.  When all channels are done, sends a summary NOTICE.
+ */
+static void autoreplay_next_channel(struct AutoReplayContext *ctx)
+{
+  struct Client *sptr;
+  struct Membership *member;
+  struct FedRequest *req;
+  char reqid[32];
+  int i, server_count;
+
+  if (!ctx)
+    return;
+
+  /* Look up alias client — may have disconnected */
+  sptr = findNUser(ctx->client_yxx);
+  if (!sptr) {
+    MyFree(ctx);
+    return;
+  }
+
+  /* Walk channel memberships from current cursor position */
+  for (member = ctx->cursor; member; member = member->next_channel) {
+    struct Channel *chptr = member->channel;
+    const char *channame;
+    char marker_ts[32];
+
+    if (IsZombie(member) || IsDelayedJoin(member))
+      continue;
+
+    channame = chptr->chname;
+
+    /* Check read marker: if user already read past since_time, skip */
+    if (ctx->since_time > 0 && IsAccount(sptr) &&
+        metadata_readmarker_get(cli_account(sptr), channame, marker_ts) == 0) {
+      char since_str[HISTORY_TIMESTAMP_LEN];
+      ircd_snprintf(0, since_str, sizeof(since_str), "%lu.000",
+                    (unsigned long)ctx->since_time);
+      if (strcmp(marker_ts, since_str) > 0)
+        continue;  /* Already read past our baseline */
+    }
+
+    /* Save cursor for next iteration (after this channel completes) */
+    ctx->cursor = member->next_channel;
+
+    /* Try local first if available */
+    if (history_is_available()) {
+      struct HistoryMessage *messages = NULL;
+      int count = history_query_latest(channame, HISTORY_REF_NONE, "*",
+                                        ctx->limit, &messages);
+      if (count > 0 && messages) {
+        send_history_batch(sptr, channame, messages, count, 0);
+        ctx->total_replayed += count;
+        ctx->chan_count++;
+        history_free_messages(messages);
+        /* Continue to next channel synchronously */
+        continue;
+      }
+      if (messages)
+        history_free_messages(messages);
+    }
+
+    /* No local history or insufficient — federate */
+    server_count = count_storage_servers(channame, 0);
+    if (server_count == 0)
+      continue;  /* No storage servers, skip this channel */
+
+    /* Find empty federation slot */
+    for (i = 0; i < MAX_FED_REQUESTS; i++) {
+      if (!fed_requests[i])
+        break;
+    }
+    if (i >= MAX_FED_REQUESTS)
+      continue;  /* No slots, skip */
+
+    /* Generate request ID */
+    ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu",
+                  cli_yxx(&me), ++fed_reqid_counter);
+
+    /* Create federation request */
+    req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+    ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+    ircd_strncpy(req->target, channame, sizeof(req->target) - 1);
+    ircd_snprintf(0, req->client_yxx, sizeof(req->client_yxx), "%s%s",
+                  cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+    req->local_msgs = NULL;
+    req->local_count = 0;
+    req->fed_msgs = NULL;
+    req->fed_count = 0;
+    req->servers_pending = server_count;
+    req->start_time = CurrentTime;
+    req->limit = ctx->limit;
+    req->ops_override = 0;
+    req->completion_cb = complete_autoreplay_channel;
+    req->cb_data = ctx;
+    req->cleanup_cb = NULL;  /* We manage ctx lifetime ourselves */
+
+    fed_requests[i] = req;
+
+    /* Set timeout timer */
+    timer_add(timer_init(&req->timer), fed_timeout_callback,
+              (void *)req, TT_RELATIVE,
+              feature_int(FEAT_CHATHISTORY_TIMEOUT));
+    req->timer_active = 1;
+
+    /* Send LATEST * query to all storage servers */
+    {
+      int si;
+      for (si = 0; si < MAX_AD_SERVERS; si++) {
+        struct ChathistoryAd *ad = server_ads[si];
+        struct Client *server;
+        char dest_yxx[4];
+
+        if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+          continue;
+
+        inttobase64(dest_yxx, si, 2);
+        server = FindNServer(dest_yxx);
+        if (!server || server == &me)
+          continue;
+        if (is_ulined_server(server))
+          continue;
+
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s L * %d %s %s",
+                      channame, ctx->limit, reqid, dest_yxx);
+      }
+    }
+
+    /* Federation started — return and wait for callback */
+    return;
+  }
+
+  /* All channels processed — send summary and clean up */
+  if (ctx->total_replayed > 0) {
+    sendcmdto_one(&me, CMD_NOTICE, sptr,
+                  "%C :Session replay: %d message(s) from %d channel(s).",
+                  sptr, ctx->total_replayed, ctx->chan_count);
+  }
+
+  MyFree(ctx);
+}
+
+/** Completion callback for per-channel auto-replay federation request. */
+static void complete_autoreplay_channel(struct FedRequest *req)
+{
+  struct AutoReplayContext *ctx;
+  struct Client *sptr;
+
+  if (!req || req->response_sent)
+    return;
+
+  req->response_sent = 1;
+
+  ctx = (struct AutoReplayContext *)req->cb_data;
+  /* Detach ctx from request so free_fed_request doesn't free it —
+   * we manage ctx lifetime across the sequential chain. */
+  req->cb_data = NULL;
+
+  if (!ctx)
+    return;
+
+  sptr = findNUser(req->client_yxx);
+  if (!sptr) {
+    MyFree(ctx);
+    return;
+  }
+
+  /* Deliver federated results to client */
+  if (req->fed_count > 0 && req->fed_msgs) {
+    struct HistoryMessage *merged;
+    int total;
+
+    merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit);
+    total = 0;
+    for (struct HistoryMessage *m = merged; m; m = m->next)
+      total++;
+
+    if (total > 0) {
+      send_history_batch(sptr, req->target, merged, total, 0);
+      ctx->total_replayed += total;
+      ctx->chan_count++;
+    }
+
+    history_free_messages(merged);
+  }
+
+  /* Continue to next channel */
+  autoreplay_next_channel(ctx);
+}
+
+/** Start federated auto-replay for a bouncer alias.
+ * Iterates the alias's channel memberships, issuing CHATHISTORY LATEST *
+ * federation queries to storage servers.  Results are delivered as chathistory
+ * batches to the alias client.
+ *
+ * Follows the IRCv3 chathistory client pseudocode pattern: starts with
+ * LATEST * (no lower bound) to get the most recent messages per channel.
+ *
+ * @param[in] sptr The alias client.
+ * @param[in] since_time Baseline timestamp (for read marker optimization, may be 0).
+ * @param[in] limit Per-channel message limit.
+ * @return 0 on success (replay started), -1 if federation unavailable.
+ */
+int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time, int limit)
+{
+  struct AutoReplayContext *ctx;
+
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return -1;
+
+  if (count_storage_servers(NULL, 0) == 0)
+    return -1;
+
+  if (!sptr || !cli_user(sptr) || !cli_user(sptr)->channel)
+    return -1;
+
+  ctx = (struct AutoReplayContext *)MyCalloc(1, sizeof(struct AutoReplayContext));
+  ircd_snprintf(0, ctx->client_yxx, sizeof(ctx->client_yxx), "%s%s",
+                cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+  ctx->cursor = cli_user(sptr)->channel;
+  ctx->limit = limit;
+  ctx->total_replayed = 0;
+  ctx->chan_count = 0;
+  ctx->since_time = since_time;
+  if (since_time > 0)
+    ircd_snprintf(0, ctx->timestamp, sizeof(ctx->timestamp), "%lu.000",
+                  (unsigned long)since_time);
+
+  autoreplay_next_channel(ctx);
   return 0;
 }
 

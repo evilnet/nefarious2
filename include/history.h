@@ -494,4 +494,15 @@ extern int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
                                   const char *target, const char *msgid,
                                   const char *reason, int is_chanop, int is_oper);
 
+/** Start federated auto-replay for a bouncer alias.
+ * Issues CHATHISTORY LATEST * queries to storage servers for each channel
+ * the alias is in.  Results are delivered as chathistory batches.
+ * @param[in] sptr The alias client.
+ * @param[in] since_time Baseline timestamp (for read marker optimization, may be 0).
+ * @param[in] limit Per-channel message limit.
+ * @return 0 on success (replay started), -1 if federation unavailable.
+ */
+extern int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time,
+                                       int limit);
+
 #endif /* INCLUDED_history_h */
