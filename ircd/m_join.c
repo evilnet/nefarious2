@@ -133,8 +133,10 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     if (!(chptr = get_channel(sptr, chan, CGT_CREATE)))
       return;
 
-    /* Try to add the new channel as a recent target for the user. */
-    if (check_target_limit(sptr, chptr, chptr->chname, 0)) {
+    /* Try to add the new channel as a recent target for the user.
+     * Skip when sptr was rewritten from alias to remote primary — the
+     * local alias is already rate-limited by its own connection. */
+    if (MyUser(sptr) && check_target_limit(sptr, chptr, chptr->chname, 0)) {
       chptr->members = 0;
       destruct_channel(chptr);
       return;
@@ -143,7 +145,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     joinbuf_join(create, chptr, CHFL_CHANOP | CHFL_CHANNEL_MANAGER);
   } else if (find_member_link(chptr, sptr)) {
     return; /* already on channel */
-  } else if (check_target_limit(sptr, chptr, chptr->chname, 0)) {
+  } else if (MyUser(sptr) && check_target_limit(sptr, chptr, chptr->chname, 0)) {
     return;
   } else {
     int flags = CHFL_DEOPPED;
@@ -279,30 +281,22 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
 
   del_invite(sptr, chptr);
 
-  /* Post-JOIN replies (TOPIC, MARKREAD, NAMES) must reach ALL bouncer
-   * connections, not just the originating shadow.  Clear current_shadow
-   * so replies go to the primary's sendQ + shadow duplication loop, and
-   * set mirror_to_shadows to override the default numeric suppression. */
-  {
-    struct ShadowConnection *saved_shadow = current_shadow;
-    current_shadow = NULL;
-    mirror_to_shadows = 1;
-
+  /* Post-JOIN replies (TOPIC, MARKREAD, NAMES).
+   * For bouncer accounts: bounce_send_alias_join_replies() handles both
+   * the primary and aliases with per-connection caps.
+   * It's called from joinbuf_join after the JOIN echo.
+   * For non-bouncer users: send here directly. */
+  if (!IsAccount(sptr)) {
     if (chptr->topic[0]) {
       send_reply(sptr, RPL_TOPIC, chptr->chname, chptr->topic);
       send_reply(sptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
                  chptr->topic_time);
     }
 
-    /* Send MARKREAD for draft/read-marker before NAMES (per spec: after JOIN, before 366) */
     send_markread_on_join(sptr, chptr->chname);
 
-    /* Skip implicit NAMES if client has draft/no-implicit-names capability */
     if (!HasCap(sptr, CAP_DRAFT_NOIMPLICITNAMES))
-      do_names(sptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
-
-    mirror_to_shadows = 0;
-    current_shadow = saved_shadow;
+      do_names(sptr, chptr, NAMES_ALL|NAMES_EON);
   }
 }
 
@@ -321,6 +315,16 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   char *chanlist;
   char *name;
   char *keys;
+  struct Client *alias_source = NULL;
+
+  /* Alias JOIN means the user is joining — rewrite to primary so
+   * add_user_to_channel adds the primary (triggering bounce_sync_alias_join
+   * to add all aliases), and the J/C token carries the primary numeric.
+   * For remote primaries, jb_alias_source enables split S2S delivery. */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    alias_source = sptr;
+    sptr = cli_alias_primary(sptr);
+  }
 
   if (parc < 2 || *parv[1] == '\0')
     return need_more_params(sptr, "JOIN");
@@ -332,6 +336,10 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
   joinbuf_init(&create, sptr, cptr, JOINBUF_TYPE_CREATE, 0, TStime());
+  if (alias_source && !MyConnect(sptr)) {
+    join.jb_alias_source = alias_source;
+    create.jb_alias_source = alias_source;
+  }
 
   chanlist = last0(cptr, sptr, parv[1]); /* find last "JOIN 0" */
 
@@ -394,6 +402,15 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   char *p = 0;
   char *chanlist;
   char *name;
+  struct Client *alias_source = NULL;
+
+  /* Alias JOIN — rewrite to primary unconditionally.  On the primary's
+   * server, add_user_to_channel triggers bounce_sync_alias_join.
+   * jb_alias_source enables split S2S delivery for further relay. */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    alias_source = sptr;
+    sptr = cli_alias_primary(sptr);
+  }
 
   if (IsServer(sptr))
   {
@@ -412,6 +429,8 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     creation = atoi(parv[2]);
 
   joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
+  if (alias_source && !MyConnect(sptr))
+    join.jb_alias_source = alias_source;
 
   chanlist = last0(cptr, sptr, parv[1]); /* find last "JOIN 0" */
 

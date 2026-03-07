@@ -87,17 +87,12 @@ static struct Connection *send_queues;
 static char active_network_batch_id[32] = "";
 char *GlobalForwards[256];
 
-/** Global shadow tag context for per-shadow CAP tag filtering.
+/** Global tag context for per-connection CAP routing.
  * Set by channel send functions around their member loop, read by
- * send_buffer()'s shadow duplication loop.
+ * send_buffer() for cap filtering and alias mirror suppression.
  */
-struct ShadowTagContext shadow_tag_ctx;
+struct CapRouteContext cap_route_ctx;
 
-/** When non-zero, send_buffer() skips shadow duplication.
- * Used by check_pings() to prevent server PINGs from reaching shadows;
- * each shadow has its own independent PING cycle.
- */
-int suppress_shadow_dup = 0;
 
 /** Override for S2S tag source connection.
  * When alias source rewriting substitutes a local primary for a remote alias,
@@ -124,28 +119,6 @@ void sendcmdto_set_alias_source(struct Client *alias)
   s2s_alias_source = alias;
 }
 
-/** When non-zero, numeric replies bypass the default suppression and
- * are duplicated to all shadows.  Set during JOIN post-join replies.
- */
-int mirror_to_shadows = 0;
-
-/** When non-zero, send_buffer() skips the primary's sendQ but still
- * runs the shadow duplication loop.  Delivers echoes to shadows
- * without sending an unwanted echo to the primary connection.
- */
-int skip_primary_echo = 0;
-
-/** When set, the shadow duplication loop skips this specific shadow.
- * Prevents echoing a message back to the originating shadow when it
- * hasn't negotiated echo-message (client displayed it locally).
- */
-struct ShadowConnection *skip_shadow_dup = NULL;
-
-/** When non-zero, send_buffer() skips alias mirroring.
- * Set during vsendto_opmask_butone to prevent double delivery — aliases
- * in opsarray get the notice directly, no need to also mirror from primary.
- */
-static int suppress_alias_mirror = 0;
 
 /** Format current time as ISO 8601 timestamp for server-time capability.
  * @param[out] buf Buffer to write timestamp to.
@@ -300,29 +273,6 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
   return flags;
 }
 
-/** Get the tag flags appropriate for a shadow connection based on its capabilities.
- * Mirrors get_client_tag_flags() but uses the shadow's sh_active CapSet.
- * @param[in] sh Shadow connection.
- * @param[in] from Source client (for bot detection).
- * @param[in] include_batch Whether to include batch tag if network batch is active.
- * @return TAGS_* flags for this shadow.
- */
-static int get_shadow_tag_flags(struct ShadowConnection *sh, struct Client *from, int include_batch)
-{
-  int flags = 0;
-
-  if (feature_bool(FEAT_CAP_server_time) && CapHas(&sh->sh_active, CAP_SERVERTIME))
-    flags |= TAGS_TIME;
-  if (feature_bool(FEAT_CAP_account_tag) && CapHas(&sh->sh_active, CAP_ACCOUNTTAG))
-    flags |= TAGS_ACCOUNT;
-  if (include_batch && CapHas(&sh->sh_active, CAP_BATCH) && active_network_batch_id[0])
-    flags |= TAGS_BATCH;
-  /* Bot tag is sent to any recipient that gets any tags */
-  if (flags && from && IsBot(from))
-    flags |= TAGS_BOT;
-
-  return flags;
-}
 
 /** Generate a unique message ID for IRCv3 message-ids.
  * Format: <server_numeric>-<startup_ts>-<counter>
@@ -495,7 +445,7 @@ static char *format_message_tags_for(char *buf, size_t buflen, struct Client *fr
  *
  * Like format_message_tags_for_ex(), but checks capabilities against the
  * provided CapSet instead of the recipient's active caps. Used when the
- * recipient has a bouncer session with shadows — the union of all
+ * recipient has a bouncer session with aliases — the union of all
  * connections' caps is passed so the MsgBuf includes all tags any
  * connection might need. send_buffer() then strips per-connection.
  *
@@ -913,144 +863,8 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
   if (cli_from(to))
     to = cli_from(to);
 
-  /* Remote relay shadow routing — must be checked BEFORE can_send().
-   * For relay-only ghosts (held→revive via remote server), cli_fd == -1
-   * and can_send() returns 0.  But output for these ghosts goes via BS O
-   * to the relay server, not to a local socket, so we don't need a valid fd.
-   * Handle this case early and return. */
-  if (current_shadow && (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE)
-      && !IsServer(to) && !shadow_tag_ctx.stc_active) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_client == to
-        && !(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)
-        && current_shadow->sh_relay_server && current_shadow->sh_session) {
-      const char *data;
-      unsigned int data_len;
-      char linebuf[BUFSIZE];
-      msgq_buf_data(buf, &data, &data_len);
-      if (data_len > 0 && data_len < sizeof(linebuf)) {
-        memcpy(linebuf, data, data_len);
-        while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
-          data_len--;
-        linebuf[data_len] = '\0';
-        sendcmdto_one(&me, CMD_BOUNCER_SESSION,
-                      current_shadow->sh_relay_server,
-                      "O %s %s %s M :%s",
-                      current_shadow->sh_session->hs_account,
-                      current_shadow->sh_session->hs_sessid,
-                      current_shadow->sh_relay_id, linebuf);
-      }
-      current_shadow->sh_sendM++;
-    }
+  if (!can_send(to))
     return;
-  }
-
-  if (!can_send(to)) {
-    /* Socket is dead or has no fd.  Normally we drop the message.
-     * Exception: relay-only ghosts (held→revive via remote server) have
-     * cli_fd == -1 but may have REMOTE shadows that need channel messages.
-     * Route to those shadows via BS O, then return.
-     *
-     * IMPORTANT: When current_shadow is set, we're routing output for a
-     * specific shadow (e.g., shadow welcome in bounce_send_shadow_welcome).
-     * Route to that shadow only — do NOT broadcast to all remote shadows,
-     * which would leak per-connection welcome state to the relay. */
-    if (current_shadow && !IsServer(to) && !shadow_tag_ctx.stc_active) {
-      struct BouncerSession *bsess = bounce_get_session(to);
-      if (bsess && bsess->hs_client == to
-          && !(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)) {
-        if (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE) {
-          /* Remote shadow: route via BS O */
-          if (current_shadow->sh_relay_server && current_shadow->sh_session) {
-            const char *data;
-            unsigned int data_len;
-            char linebuf[BUFSIZE];
-            msgq_buf_data(buf, &data, &data_len);
-            if (data_len > 0 && data_len < sizeof(linebuf)) {
-              memcpy(linebuf, data, data_len);
-              while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
-                data_len--;
-              linebuf[data_len] = '\0';
-              sendcmdto_one(&me, CMD_BOUNCER_SESSION,
-                            current_shadow->sh_relay_server,
-                            "O %s %s %s M :%s",
-                            current_shadow->sh_session->hs_account,
-                            current_shadow->sh_session->hs_sessid,
-                            current_shadow->sh_relay_id, linebuf);
-            }
-            current_shadow->sh_sendM++;
-          }
-        } else {
-          /* Local shadow: add to shadow's sendQ */
-          struct MsgBuf *sh_buf = buf;
-          int sh_flags = get_shadow_tag_flags(current_shadow, NULL, 0);
-          if (sh_flags == 0) {
-            const char *data;
-            unsigned int len;
-            msgq_buf_data(buf, &data, &len);
-            if (len >= 2 && data[0] == '@') {
-              struct MsgBuf *stripped = msgq_strip_tags(buf);
-              if (stripped) {
-                msgq_add(&current_shadow->sh_sendQ, stripped, 0);
-                current_shadow->sh_sendM++;
-                socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(stripped);
-                return;
-              }
-            }
-          }
-          msgq_add(&current_shadow->sh_sendQ, sh_buf, 0);
-          current_shadow->sh_sendM++;
-          socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-        }
-      }
-      return;
-    }
-    if (!IsServer(to) && !suppress_shadow_dup && IsUser(to) && IsAccount(to)) {
-      struct BouncerSession *bsess = bounce_get_session(to);
-      if (bsess && bsess->hs_client == to && bsess->hs_shadow_count > 0) {
-        struct ShadowConnection *sh;
-        for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
-          if ((sh->sh_flags & SHADOW_FLAGS_DEAD) || !(sh->sh_flags & SHADOW_FLAGS_REMOTE))
-            continue;
-          if (!sh->sh_relay_server || !sh->sh_session)
-            continue;
-          /* Respect skip_shadow_dup — the originating shadow that lacks
-           * echo-message should not see its own channel messages back. */
-          if (sh == skip_shadow_dup)
-            continue;
-          /* Per-shadow cap routing for dual-call broadcasts */
-          if (shadow_tag_ctx.stc_withcap != CAP_NONE
-              && !CapHas(&sh->sh_active, shadow_tag_ctx.stc_withcap))
-            continue;
-          if (shadow_tag_ctx.stc_skipcap != CAP_NONE
-              && CapHas(&sh->sh_active, shadow_tag_ctx.stc_skipcap))
-            continue;
-          /* Route to remote shadow via BS O */
-          {
-            const char *data;
-            unsigned int data_len;
-            char linebuf[BUFSIZE];
-            msgq_buf_data(buf, &data, &data_len);
-            if (data_len > 0 && data_len < sizeof(linebuf)) {
-              memcpy(linebuf, data, data_len);
-              while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
-                data_len--;
-              linebuf[data_len] = '\0';
-              sendcmdto_one(&me, CMD_BOUNCER_SESSION,
-                            sh->sh_relay_server,
-                            "O %s %s %s M :%s",
-                            sh->sh_session->hs_account,
-                            sh->sh_session->hs_sessid,
-                            sh->sh_relay_id, linebuf);
-            }
-            sh->sh_sendM++;
-          }
-        }
-      }
-    }
-    return;
-  }
 
   if (MsgQLength(&(cli_sendQ(to))) > get_sendq(to)) {
     if (IsServer(to))
@@ -1063,111 +877,22 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
 
   Debug((DEBUG_SEND, "Sending [%p] to %s", buf, cli_name(to)));
 
-  /* Bouncer reply routing: when a shadow connection sent a command
-   * (current_shadow is set) and the reply is directed at the session's
-   * primary client, route it ONLY to the originating shadow.
-   *
-   * This prevents unsolicited numerics/replies from appearing on other
-   * connections, which confuses many IRC clients.
-   *
-   * IMPORTANT: This intercept is SKIPPED when shadow_tag_ctx.stc_active
-   * is set, indicating we are inside a channel broadcast function
-   * (sendcmdto_channel_*).  Channel messages (JOIN, PART, PRIVMSG, MODE,
-   * etc.) are state changes that ALL connections need as mirrors.  They
-   * flow normally to the primary sendQ and the duplication loop below
-   * delivers them to all shadows.
-   */
-  if (current_shadow && !IsServer(to) && !shadow_tag_ctx.stc_active
-      && (MyUser(to) || (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE))) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_client == to) {
-      /* This is a direct reply to the session's primary — route to originating
-       * shadow only.  Skip this intercept when stc_active is set (channel
-       * broadcast): channel messages (JOIN, PART, PRIVMSG, etc.) must reach
-       * ALL connections since shadows are mirrors of the primary.
-       * Apply per-shadow tag filtering: strip tags the shadow hasn't negotiated. */
-      if (!(current_shadow->sh_flags & SHADOW_FLAGS_DEAD)) {
-        /* Remote shadow: route via BS O to relay server, not local socket */
-        if (current_shadow->sh_flags & SHADOW_FLAGS_REMOTE) {
-          if (current_shadow->sh_relay_server && current_shadow->sh_session) {
-            const char *data;
-            unsigned int data_len;
-            char linebuf[BUFSIZE];
-            msgq_buf_data(buf, &data, &data_len);
-            if (data_len > 0 && data_len < sizeof(linebuf)) {
-              memcpy(linebuf, data, data_len);
-              while (data_len > 0 && (linebuf[data_len-1] == '\r' || linebuf[data_len-1] == '\n'))
-                data_len--;
-              linebuf[data_len] = '\0';
-              sendcmdto_one(&me, CMD_BOUNCER_SESSION,
-                            current_shadow->sh_relay_server,
-                            "O %s %s %s M :%s",
-                            current_shadow->sh_session->hs_account,
-                            current_shadow->sh_session->hs_sessid,
-                            current_shadow->sh_relay_id, linebuf);
-            }
-            current_shadow->sh_sendM++;
-          }
-          return;
-        }
-
-        struct MsgBuf *sh_buf = buf;
-        int sh_flags = get_shadow_tag_flags(current_shadow, NULL, 0);
-        if (sh_flags == 0) {
-          const char *data;
-          unsigned int len;
-          msgq_buf_data(buf, &data, &len);
-          if (len >= 2 && data[0] == '@') {
-            struct MsgBuf *stripped = msgq_strip_tags(buf);
-            if (stripped) {
-              msgq_add(&current_shadow->sh_sendQ, stripped, prio);
-              current_shadow->sh_sendM++;
-              socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-              msgq_clean(stripped);
-              return;
-            }
-          }
-        } else {
-          /* Shadow wants some tags — check if filtering needed */
-          const char *data;
-          unsigned int len;
-          msgq_buf_data(buf, &data, &len);
-          if (len >= 2 && data[0] == '@') {
-            struct MsgBuf *filtered = msgq_filter_tags(buf, &current_shadow->sh_active);
-            if (filtered) {
-              sh_buf = filtered;
-              msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
-              current_shadow->sh_sendM++;
-              socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-              msgq_clean(filtered);
-              return;
-            }
-          }
-        }
-        msgq_add(&current_shadow->sh_sendQ, sh_buf, prio);
-        current_shadow->sh_sendM++;
-        socket_events(&current_shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-      }
-      return; /* Do NOT send to primary or other shadows */
-    }
-  }
-
   /* Per-connection cap routing for dual-call broadcasts.
    * When stc_withcap/skipcap are set and this is a bouncer primary,
    * check the primary's OWN caps (not union) to decide delivery. */
   {
     int suppress_primary = 0;
-    if (shadow_tag_ctx.stc_active && MyUser(to) && !IsServer(to)
-        && (shadow_tag_ctx.stc_withcap != CAP_NONE
-            || shadow_tag_ctx.stc_skipcap != CAP_NONE)) {
-      if (shadow_tag_ctx.stc_withcap != CAP_NONE
-          && !CapOwnHas(to, shadow_tag_ctx.stc_withcap))
+    if (cap_route_ctx.stc_active && MyUser(to) && !IsServer(to)
+        && (cap_route_ctx.stc_withcap != CAP_NONE
+            || cap_route_ctx.stc_skipcap != CAP_NONE)) {
+      if (cap_route_ctx.stc_withcap != CAP_NONE
+          && !CapOwnHas(to, cap_route_ctx.stc_withcap))
         suppress_primary = 1;
-      if (shadow_tag_ctx.stc_skipcap != CAP_NONE
-          && CapOwnHas(to, shadow_tag_ctx.stc_skipcap))
+      if (cap_route_ctx.stc_skipcap != CAP_NONE
+          && CapOwnHas(to, cap_route_ctx.stc_skipcap))
         suppress_primary = 1;
     }
-    if (!suppress_primary && !skip_primary_echo) {
+    if (!suppress_primary) {
       msgq_add(&(cli_sendQ(to)), buf, prio);
       client_add_sendq(cli_connect(to), &send_queues);
       update_write(to);
@@ -1178,256 +903,6 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
     }
   }
 
-  /* Duplicate to bouncer shadow connections (multi-client support).
-   * If this client has an active bouncer session with shadows, queue
-   * a MsgBuf to each shadow's sendQ. Per-shadow CAP tag filtering
-   * ensures each shadow only receives tags it negotiated.
-   *
-   * Two-tier approach:
-   *  - Tier 1: If shadow_tag_ctx is active (channel send function),
-   *    pick the correct cached MsgBuf from mb_cache by shadow's tag flags.
-   *  - Tier 2: Otherwise (non-channel sends), strip or filter tags
-   *    when the shadow's caps differ from the primary's.
-   */
-  if (MyUser(to) && !IsServer(to) && !suppress_shadow_dup) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_shadow_count > 0) {
-      struct ShadowConnection *sh;
-      int primary_flags;
-      struct MsgBuf *stripped = NULL;    /* cached stripped MsgBuf for no-tag shadows */
-      struct MsgBuf *filtered_list[8];   /* track filtered MsgBufs for cleanup */
-      int filtered_count = 0;
-
-      /* Compute primary's tag flags if context is available */
-      if (shadow_tag_ctx.stc_active)
-        primary_flags = get_client_tag_flags(to, shadow_tag_ctx.stc_from,
-                                              shadow_tag_ctx.stc_include_batch);
-      else
-        primary_flags = -1; /* unknown — no context available */
-
-      for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
-        struct MsgBuf *sh_buf;
-        int sh_flags;
-
-        if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-          continue;
-
-        /* Skip the originating shadow when it hasn't negotiated
-         * echo-message — the client already displayed it locally. */
-        if (sh == skip_shadow_dup)
-          continue;
-
-        /* Per-shadow cap routing: skip shadows that don't match the
-         * withcap/skipcap criteria for this broadcast variant. */
-        if (shadow_tag_ctx.stc_withcap != CAP_NONE
-            && !CapHas(&sh->sh_active, shadow_tag_ctx.stc_withcap))
-          continue;
-        if (shadow_tag_ctx.stc_skipcap != CAP_NONE
-            && CapHas(&sh->sh_active, shadow_tag_ctx.stc_skipcap))
-          continue;
-
-        if (primary_flags < 0) {
-          /* No context (non-channel send). With union caps, buf may have
-           * more tags than this shadow needs. Filter appropriately. */
-          sh_flags = get_shadow_tag_flags(sh, NULL, 0);
-          if (sh_flags == 0) {
-            const char *data;
-            unsigned int len;
-            msgq_buf_data(buf, &data, &len);
-            if (len >= 2 && data[0] == '@') {
-              /* Message has tags, shadow wants none — strip */
-              if (!stripped)
-                stripped = msgq_strip_tags(buf);
-              sh_buf = stripped ? stripped : buf;
-            } else {
-              sh_buf = buf; /* no tags to strip */
-            }
-          } else {
-            /* Shadow wants some tags — filter to only what it negotiated.
-             * With union caps formatting, buf may contain tags the shadow
-             * didn't negotiate, so we must filter rather than passthrough. */
-            const char *data;
-            unsigned int len;
-            msgq_buf_data(buf, &data, &len);
-            if (len >= 2 && data[0] == '@') {
-              struct MsgBuf *filt = msgq_filter_tags(buf, &sh->sh_active);
-              if (filt) {
-                sh_buf = filt;
-                if (filtered_count < 8)
-                  filtered_list[filtered_count++] = filt;
-              } else {
-                sh_buf = buf;
-              }
-            } else {
-              sh_buf = buf; /* no tags in message */
-            }
-          }
-        } else {
-          sh_flags = get_shadow_tag_flags(sh, shadow_tag_ctx.stc_from,
-                                           shadow_tag_ctx.stc_include_batch);
-          if (sh_flags == primary_flags) {
-            /* Same caps as primary — zero overhead */
-            sh_buf = buf;
-          } else if (shadow_tag_ctx.stc_cache && shadow_tag_ctx.stc_cache[sh_flags]) {
-            /* Exact match from channel mb_cache — zero allocation */
-            sh_buf = shadow_tag_ctx.stc_cache[sh_flags];
-          } else if (sh_flags == 0 && shadow_tag_ctx.stc_notags) {
-            /* No-tags version from channel cache */
-            sh_buf = shadow_tag_ctx.stc_notags;
-          } else if (sh_flags == 0) {
-            /* Strip all tags (fallback for non-channel sends) */
-            if (!stripped)
-              stripped = msgq_strip_tags(buf);
-            sh_buf = stripped ? stripped : buf;
-          } else if (shadow_tag_ctx.stc_notags) {
-            /* Shadow wants tags not in cache — build from base no-tags MsgBuf.
-             * This handles CAP state divergence: the shadow has caps that no
-             * channel member (including the primary) has, so no mb_cache entry
-             * was built. We generate the tag prefix from the shadow's flags
-             * and prepend it to the untagged message body. */
-            char sh_tagbuf[128];
-            if (format_message_tags_ex(sh_tagbuf, sizeof(sh_tagbuf),
-                                        shadow_tag_ctx.stc_from, sh_flags)) {
-              struct MsgBuf *tagged = msgq_prepend_tags(sh_tagbuf,
-                                                         shadow_tag_ctx.stc_notags);
-              if (tagged) {
-                sh_buf = tagged;
-                if (filtered_count < 8)
-                  filtered_list[filtered_count++] = tagged;
-              } else {
-                sh_buf = buf;
-              }
-            } else {
-              sh_buf = buf;
-            }
-          } else {
-            /* No base MsgBuf available — fallback to tag filtering */
-            struct MsgBuf *filt = msgq_filter_tags(buf, &sh->sh_active);
-            if (filt) {
-              sh_buf = filt;
-              if (filtered_count < 8)
-                filtered_list[filtered_count++] = filt;
-            } else {
-              sh_buf = buf;
-            }
-          }
-        }
-
-        if (sh->sh_flags & SHADOW_FLAGS_REMOTE) {
-          /* Remote shadow: send via BS O to relay server.
-           * Extract the formatted message data and determine the mode:
-           * N (numeric — B reconstructs with own server name) or
-           * M (message — B forwards verbatim to relay socket). */
-          if (sh->sh_relay_server && sh->sh_session) {
-            const char *data;
-            unsigned int len;
-            char linebuf[BUFSIZE];
-
-            msgq_buf_data(sh_buf, &data, &len);
-            if (len > 0 && len < sizeof(linebuf)) {
-              memcpy(linebuf, data, len);
-              /* Strip trailing \r\n if present */
-              while (len > 0 && (linebuf[len-1] == '\r' || linebuf[len-1] == '\n'))
-                len--;
-              linebuf[len] = '\0';
-
-              /* Check if this is a server-sourced numeric (starts with
-               * :<servername> <3-digit-number> <nick>) */
-              {
-                int is_numeric = 0;
-                const char *p = linebuf;
-                if (*p == '@') {
-                  /* Skip message tags */
-                  p = strchr(p, ' ');
-                  if (p) p++; else p = linebuf;
-                }
-                if (*p == ':') {
-                  const char *space = strchr(p + 1, ' ');
-                  if (space && space[1] >= '0' && space[1] <= '9' &&
-                      space[2] >= '0' && space[2] <= '9' &&
-                      space[3] >= '0' && space[3] <= '9' &&
-                      (space[4] == ' ' || space[4] == '\0')) {
-                    /* Check if source is our server name */
-                    size_t sname_len = space - (p + 1);
-                    if (sname_len == strlen(cli_name(&me)) &&
-                        0 == memcmp(p + 1, cli_name(&me), sname_len)) {
-                      is_numeric = 1;
-                    }
-                  }
-                }
-
-                if (is_numeric) {
-                  /* Numeric mode: send code + params, B reconstructs
-                   * with its own server name */
-                  const char *p2 = linebuf;
-                  /* Skip tags */
-                  if (*p2 == '@') {
-                    p2 = strchr(p2, ' ');
-                    if (p2) p2++; else p2 = linebuf;
-                  }
-                  /* Skip :<servername> */
-                  p2 = strchr(p2 + 1, ' ');
-                  if (p2) p2++; /* now at <numeric> <nick> <params> */
-
-                  sendcmdto_one(&me, CMD_BOUNCER_SESSION,
-                                sh->sh_relay_server,
-                                "O %s %s %s N %s",
-                                sh->sh_session->hs_account,
-                                sh->sh_session->hs_sessid,
-                                sh->sh_relay_id, p2);
-                } else {
-                  /* Message mode: fully formatted, B forwards verbatim */
-                  sendcmdto_one(&me, CMD_BOUNCER_SESSION,
-                                sh->sh_relay_server,
-                                "O %s %s %s M :%s",
-                                sh->sh_session->hs_account,
-                                sh->sh_session->hs_sessid,
-                                sh->sh_relay_id, linebuf);
-                }
-              }
-            }
-          }
-          sh->sh_sendM++;
-        } else {
-          msgq_add(&sh->sh_sendQ, sh_buf, prio);
-          sh->sh_sendM++;
-          socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-        }
-      }
-
-      /* Clean up any MsgBufs we allocated for this send_buffer call */
-      if (stripped)
-        msgq_clean(stripped);
-      {
-        int fi;
-        for (fi = 0; fi < filtered_count; fi++)
-          msgq_clean(filtered_list[fi]);
-      }
-    }
-  }
-
-  /* Mirror to bouncer aliases (non-channel sends only).
-   * Aliases get channel messages through their own CHFL_ALIAS membership
-   * in the member loop, so we skip mirroring when stc_active is set
-   * (channel broadcast context) to avoid double delivery.
-   * For PMs, server notices, oper notices, wallops, etc., the alias has
-   * no other path to receive the message, so mirror here. */
-  if (MyUser(to) && !IsServer(to) && !shadow_tag_ctx.stc_active
-      && !suppress_alias_mirror) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_alias_count > 0) {
-      int ai;
-      for (ai = 0; ai < bsess->hs_alias_count; ai++) {
-        struct Client *alias = findNUser(bsess->hs_aliases[ai].ba_numeric);
-        if (alias && IsBouncerAlias(alias) && MyUser(alias)) {
-          msgq_add(&(cli_sendQ(alias)), buf, prio);
-          client_add_sendq(cli_connect(alias), &send_queues);
-          update_write(alias);
-          ++(cli_sendM(alias));
-        }
-      }
-    }
-  }
 }
 
 /*
@@ -1557,23 +1032,7 @@ void sendcmdto_one_tags(struct Client *from, const char *cmd, const char *tok,
     msgid = generate_msgid(msgidbuf, sizeof(msgidbuf));
   }
 
-  /* Union caps: if target has a bouncer session with shadows, format tags
-   * using the union of all connections' capabilities. This ensures the
-   * MsgBuf includes all tags any connection (primary or shadow) might need.
-   * send_buffer() then strips per-connection via the shadow duplication loop. */
-  if (MyUser(to) && !IsServer(to)) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_shadow_count > 0) {
-      struct CapSet union_caps;
-      bounce_build_union_caps(bsess, &union_caps);
-      tags = format_message_tags_for_caps(tagbuf, sizeof(tagbuf), from, to,
-                                           msgid, &union_caps);
-    } else {
-      tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
-    }
-  } else {
-    tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
-  }
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
@@ -1616,21 +1075,7 @@ void sendcmdto_one_tags_ext(struct Client *from, const char *cmd, const char *to
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
 
-  /* Union caps: if target has a bouncer session with shadows, format tags
-   * using the union of all connections' capabilities. */
-  if (MyUser(to) && !IsServer(to)) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_shadow_count > 0) {
-      struct CapSet union_caps;
-      bounce_build_union_caps(bsess, &union_caps);
-      tags = format_message_tags_for_caps(tagbuf, sizeof(tagbuf), from, to,
-                                           ext_msgid, &union_caps);
-    } else {
-      tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, ext_msgid);
-    }
-  } else {
-    tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, ext_msgid);
-  }
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, ext_msgid);
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
@@ -1707,21 +1152,7 @@ void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *
              (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
   }
 
-  /* Union caps: if target has a bouncer session with shadows, format tags
-   * using the union of all connections' capabilities. */
-  if (MyUser(to) && !IsServer(to)) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_shadow_count > 0) {
-      struct CapSet union_caps;
-      bounce_build_union_caps(bsess, &union_caps);
-      tags = format_message_tags_for_caps(tagbuf, sizeof(tagbuf), from, to,
-                                           msgid, &union_caps);
-    } else {
-      tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
-    }
-  } else {
-    tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
-  }
+  tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, msgid);
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, IsServer(to) || IsMe(to) ? tok : cmd,
@@ -1764,20 +1195,7 @@ void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
 
-  /* Union caps for bouncer sessions with shadows */
-  if (MyUser(to) && !IsServer(to)) {
-    struct BouncerSession *bsess = bounce_get_session(to);
-    if (bsess && bsess->hs_shadow_count > 0) {
-      struct CapSet union_caps;
-      bounce_build_union_caps(bsess, &union_caps);
-      tags = format_message_tags_with_client_caps(tagbuf, sizeof(tagbuf), from, to,
-                                                    client_tags, &union_caps);
-    } else {
-      tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
-    }
-  } else {
-    tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
-  }
+  tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to, client_tags);
 
   if (tags)
     mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
@@ -1841,14 +1259,32 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct MsgBuf *mb_alias = NULL;
   struct DLink *lp;
+  struct Client *alias_from = NULL;
+  struct Client *primary_dir = NULL;
+
+  /* Split S2S delivery for aliases (see sendcmdto_serv_butone) */
+  if (s2s_alias_source) {
+    alias_from = s2s_alias_source;
+    s2s_alias_source = NULL;
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  } else if (IsBouncerAlias(from) && cli_alias_primary(from)) {
+    alias_from = from;
+    from = cli_alias_primary(from);
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  }
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
-
-  /* use token */
   mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
   va_end(vd.vd_args);
+
+  if (alias_from) {
+    va_start(vd.vd_args, pattern);
+    mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+    va_end(vd.vd_args);
+  }
 
   /* send it to our downlinks */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
@@ -1858,10 +1294,15 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
       continue;
     if ((forbid < FLAG_LAST_FLAG) && HasFlag(lp->value.cptr, forbid))
       continue;
-    send_buffer(lp->value.cptr, mb, 0);
+    if (mb_alias && lp->value.cptr == primary_dir)
+      send_buffer(lp->value.cptr, mb_alias, 0);
+    else
+      send_buffer(lp->value.cptr, mb, 0);
   }
 
   msgq_clean(mb);
+  if (mb_alias)
+    msgq_clean(mb_alias);
 }
 
 /**
@@ -1878,23 +1319,52 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
+  struct MsgBuf *mb_alias = NULL;
   struct DLink *lp;
+  struct Client *alias_from = NULL;
+  struct Client *primary_dir = NULL;
+
+  /* Split S2S delivery for aliases: two modes.
+   * 1) Explicit: caller set s2s_alias_source (JOIN/PART via joinbuf)
+   * 2) Automatic: from is an alias (MODE, KICK, TOPIC, etc.)
+   * Send alias numeric to primary's server direction (avoids wrong-direction),
+   * send primary numeric to all other servers. */
+  if (s2s_alias_source) {
+    alias_from = s2s_alias_source;
+    s2s_alias_source = NULL;
+    /* from is already the primary (caller rewrote it) */
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  } else if (IsBouncerAlias(from) && cli_alias_primary(from)) {
+    alias_from = from;
+    from = cli_alias_primary(from);
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  }
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
-
-  /* use token */
   mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
   va_end(vd.vd_args);
+
+  /* Build alias buffer for primary's server direction */
+  if (alias_from) {
+    va_start(vd.vd_args, pattern);
+    mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+    va_end(vd.vd_args);
+  }
 
   /* send it to our downlinks */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     if (one && lp->value.cptr == cli_from(one))
       continue;
-    send_buffer(lp->value.cptr, mb, 0);
+    if (mb_alias && lp->value.cptr == primary_dir)
+      send_buffer(lp->value.cptr, mb_alias, 0);
+    else
+      send_buffer(lp->value.cptr, mb, 0);
   }
 
   msgq_clean(mb);
+  if (mb_alias)
+    msgq_clean(mb_alias);
 }
 
 /** Safely increment the sentalong marker.
@@ -1954,12 +1424,10 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
 
   bump_sentalong(from);
 
-  /* Set shadow tag context for per-shadow CAP filtering */
-  shadow_tag_ctx.stc_cache = mb_cache;
-  shadow_tag_ctx.stc_notags = mb;
-  shadow_tag_ctx.stc_from = from;
-  shadow_tag_ctx.stc_active = 1;
-  shadow_tag_ctx.stc_include_batch = 1;
+  /* Set tag context for per-connection CAP routing */
+  cap_route_ctx.stc_active = 1;
+  cap_route_ctx.stc_withcap = CAP_NONE;
+  cap_route_ctx.stc_skipcap = CAP_NONE;
 
   /*
    * loop through from's channels, and the members on their channels
@@ -2001,8 +1469,8 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
       send_buffer(from, mb, 0);
   }
 
-  /* Clear shadow tag context */
-  shadow_tag_ctx.stc_active = 0;
+  /* Clear cap route context */
+  cap_route_ctx.stc_active = 0;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -2047,14 +1515,10 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
 
   bump_sentalong(from);
 
-  /* Set shadow tag context for per-shadow CAP filtering and cap routing */
-  shadow_tag_ctx.stc_cache = mb_cache;
-  shadow_tag_ctx.stc_notags = mb;
-  shadow_tag_ctx.stc_from = from;
-  shadow_tag_ctx.stc_active = 1;
-  shadow_tag_ctx.stc_include_batch = 0;
-  shadow_tag_ctx.stc_withcap = withcap;
-  shadow_tag_ctx.stc_skipcap = skipcap;
+  /* Set tag context for per-connection CAP routing */
+  cap_route_ctx.stc_active = 1;
+  cap_route_ctx.stc_withcap = withcap;
+  cap_route_ctx.stc_skipcap = skipcap;
 
   /*
    * loop through from's channels, and the members on their channels
@@ -2064,22 +1528,13 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
       continue;
     for (member = chan->channel->members; member;
          member = member->next_member) {
-      struct BouncerSession *bsess;
-      int has_shadows;
       if (!MyConnect(member->user)
           || member->user == one
           || cli_sentalong(member->user) == sentalong_marker)
         continue;
-      /* Bouncer primaries with shadows bypass cap routing — send_buffer
-       * handles per-connection delivery. */
-      bsess = bounce_get_session(member->user);
-      has_shadows = (bsess && bsess->hs_client == member->user
-                     && bsess->hs_shadow_count > 0);
-      if (!has_shadows
-          && ((withcap != CAP_NONE) && !CapActive(member->user, withcap)))
+      if ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         continue;
-      if (!has_shadows
-          && ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
+      if ((skipcap != CAP_NONE) && CapActive(member->user, skipcap))
         continue;
       {
         cli_sentalong(member->user) = sentalong_marker;
@@ -2112,10 +1567,10 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
       send_buffer(from, mb, 0);
   }
 
-  /* Clear shadow tag context */
-  shadow_tag_ctx.stc_active = 0;
-  shadow_tag_ctx.stc_withcap = CAP_NONE;
-  shadow_tag_ctx.stc_skipcap = CAP_NONE;
+  /* Clear cap route context */
+  cap_route_ctx.stc_active = 0;
+  cap_route_ctx.stc_withcap = CAP_NONE;
+  cap_route_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -2153,12 +1608,10 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
-  /* Set shadow tag context for per-shadow CAP filtering */
-  shadow_tag_ctx.stc_cache = mb_cache;
-  shadow_tag_ctx.stc_notags = mb;
-  shadow_tag_ctx.stc_from = from;
-  shadow_tag_ctx.stc_active = 1;
-  shadow_tag_ctx.stc_include_batch = 0;
+  /* Set tag context for per-connection CAP routing */
+  cap_route_ctx.stc_active = 1;
+  cap_route_ctx.stc_withcap = CAP_NONE;
+  cap_route_ctx.stc_skipcap = CAP_NONE;
 
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
@@ -2190,8 +1643,8 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
     }
   }
 
-  /* Clear shadow tag context */
-  shadow_tag_ctx.stc_active = 0;
+  /* Clear cap route context */
+  cap_route_ctx.stc_active = 0;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -2233,19 +1686,13 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   mb = msgq_make(0, "%:#C %s %v", from, cmd, &vd);
   va_end(vd.vd_args);
 
-  /* Set shadow tag context for per-shadow CAP filtering and cap routing */
-  shadow_tag_ctx.stc_cache = mb_cache;
-  shadow_tag_ctx.stc_notags = mb;
-  shadow_tag_ctx.stc_from = from;
-  shadow_tag_ctx.stc_active = 1;
-  shadow_tag_ctx.stc_include_batch = 0;
-  shadow_tag_ctx.stc_withcap = withcap;
-  shadow_tag_ctx.stc_skipcap = skipcap;
+  /* Set tag context for per-connection CAP routing */
+  cap_route_ctx.stc_active = 1;
+  cap_route_ctx.stc_withcap = withcap;
+  cap_route_ctx.stc_skipcap = skipcap;
 
   /* send the buffer to each local channel member */
   for (member = to->members; member; member = member->next_member) {
-    struct BouncerSession *bsess;
-    int has_shadows;
     if (!MyConnect(member->user)
         || member->user == one
         || IsZombie(member)
@@ -2255,17 +1702,9 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
         || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST)))
         continue;
-    /* For bouncer primaries with shadows, both dual-call variants must
-     * reach send_buffer() so per-connection routing can deliver the
-     * correct format to each connection (primary + each shadow). */
-    bsess = bounce_get_session(member->user);
-    has_shadows = (bsess && bsess->hs_client == member->user
-                   && bsess->hs_shadow_count > 0);
-    if (!has_shadows
-        && ((withcap != CAP_NONE) && !CapActive(member->user, withcap)))
+    if ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         continue;
-    if (!has_shadows
-        && ((skipcap != CAP_NONE) && CapActive(member->user, skipcap)))
+    if ((skipcap != CAP_NONE) && CapActive(member->user, skipcap))
         continue;
     flags = get_client_tag_flags(member->user, from, 0);
     if (flags) {
@@ -2286,10 +1725,10 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
     }
   }
 
-  /* Clear shadow tag context */
-  shadow_tag_ctx.stc_active = 0;
-  shadow_tag_ctx.stc_withcap = CAP_NONE;
-  shadow_tag_ctx.stc_skipcap = CAP_NONE;
+  /* Clear cap route context */
+  cap_route_ctx.stc_active = 0;
+  cap_route_ctx.stc_withcap = CAP_NONE;
+  cap_route_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
   for (flags = 0; flags < 16; flags++) {
@@ -2321,16 +1760,12 @@ void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
 
-  /* Set up shadow context to filter out shadows without message-tags capability.
-   * TAGMSG is meaningless without tags, so shadows that don't support message-tags
-   * must not receive these messages (they'd see "TAGMSG #channel" with no body). */
-  shadow_tag_ctx.stc_active = 1;
-  shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
-  shadow_tag_ctx.stc_skipcap = CAP_NONE;
-  shadow_tag_ctx.stc_from = from;
-  shadow_tag_ctx.stc_cache = NULL;
-  shadow_tag_ctx.stc_notags = NULL;
-  shadow_tag_ctx.stc_include_batch = 0;
+  /* Set tag context to filter out connections without message-tags capability.
+   * TAGMSG is meaningless without tags, so connections that don't support
+   * message-tags must not receive these messages. */
+  cap_route_ctx.stc_active = 1;
+  cap_route_ctx.stc_withcap = CAP_MSGTAGS;
+  cap_route_ctx.stc_skipcap = CAP_NONE;
 
   /* Send to each local channel member with message-tags capability */
   for (member = to->members; member; member = member->next_member) {
@@ -2354,9 +1789,9 @@ void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
     }
   }
 
-  /* Reset shadow context */
-  shadow_tag_ctx.stc_active = 0;
-  shadow_tag_ctx.stc_withcap = CAP_NONE;
+  /* Reset cap route context */
+  cap_route_ctx.stc_active = 0;
+  cap_route_ctx.stc_withcap = CAP_NONE;
 
   va_end(vd.vd_args);
 }
@@ -2378,13 +1813,33 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *serv_mb;
+  struct MsgBuf *serv_mb_alias = NULL;
   struct Membership *member;
+  struct Client *alias_from = NULL;
+  struct Client *primary_dir = NULL;
+
+  /* Split S2S delivery for aliases (see sendcmdto_serv_butone) */
+  if (s2s_alias_source) {
+    alias_from = s2s_alias_source;
+    s2s_alias_source = NULL;
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  } else if (IsBouncerAlias(from) && cli_alias_primary(from)) {
+    alias_from = from;
+    from = cli_alias_primary(from);
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  }
 
   /* build the buffer */
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
   serv_mb = msgq_make(&me, "%:#C %s %v", from, tok, &vd);
   va_end(vd.vd_args);
+
+  if (alias_from) {
+    va_start(vd.vd_args, pattern);
+    serv_mb_alias = msgq_make(&me, "%:#C %s %v", alias_from, tok, &vd);
+    va_end(vd.vd_args);
+  }
 
   /* send the buffer to each server */
   bump_sentalong(one);
@@ -2399,9 +1854,14 @@ void sendcmdto_channel_servers_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member)))
       continue;
     cli_sentalong(member->user) = sentalong_marker;
-    send_buffer(member->user, serv_mb, 0);
+    if (serv_mb_alias && cli_from(member->user) == primary_dir)
+      send_buffer(member->user, serv_mb_alias, 0);
+    else
+      send_buffer(member->user, serv_mb, 0);
   }
   msgq_clean(serv_mb);
+  if (serv_mb_alias)
+    msgq_clean(serv_mb_alias);
 }
 
 
@@ -2499,12 +1959,10 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     va_end(vd.vd_args);
   }
 
-  /* Set shadow tag context for per-shadow CAP filtering */
-  shadow_tag_ctx.stc_cache = user_mb_cache;
-  shadow_tag_ctx.stc_notags = user_mb;
-  shadow_tag_ctx.stc_from = from;
-  shadow_tag_ctx.stc_active = 1;
-  shadow_tag_ctx.stc_include_batch = 0;
+  /* Set tag context for per-connection CAP routing */
+  cap_route_ctx.stc_active = 1;
+  cap_route_ctx.stc_withcap = CAP_NONE;
+  cap_route_ctx.stc_skipcap = CAP_NONE;
 
   /* send buffer along! */
   bump_sentalong(one);
@@ -2556,8 +2014,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
       send_buffer(service, serv_mb, 0);
   }
 
-  /* Clear shadow tag context */
-  shadow_tag_ctx.stc_active = 0;
+  /* Clear cap route context */
+  cap_route_ctx.stc_active = 0;
 
   msgq_clean(user_mb);
   for (tflags = 0; tflags < 16; tflags++) {
@@ -2975,14 +2433,9 @@ void vsendto_opmask_butone(struct Client *from, struct Client *one,
   mb = msgq_make(0, ":%s " MSG_NOTICE " * :*** Notice -- %v", cli_name(from),
 		 &vd);
 
-  /* Suppress alias mirroring during opslist delivery — aliases that are
-   * in opsarray (via BX K snomask sync) get the notice directly below.
-   * Without this, send_buffer(primary) would also mirror to aliases. */
-  suppress_alias_mirror = 1;
   for (; opslist; opslist = opslist->next)
     if (opslist->value.cptr != one)
       send_buffer(opslist->value.cptr, mb, 0);
-  suppress_alias_mirror = 0;
 
   msgq_clean(mb);
 }
@@ -3238,16 +2691,9 @@ void send_s2s_batch_end(struct Client *sptr, const char *batch_id)
   cli_s2s_batch_type(sptr)[0] = '\0';
 }
 
-/** Send a BATCH command to the correct connections within a bouncer
- * session, respecting per-connection CAP_BATCH negotiation.
+/** Send a BATCH command to a client if it has CAP_BATCH.
  *
- * For non-bouncer clients: sends to the client if it has CAP_BATCH.
- * For bouncer sessions: sends to primary (if it has CAP_BATCH on its own)
- * and directly to each shadow that has CAP_BATCH.
- *
- * This avoids the problem where CapActive() (union caps) causes the primary
- * to receive BATCH commands it never negotiated, and where send_buffer()
- * auto-duplication sends BATCH to all shadows regardless of their caps.
+ * Checks per-connection caps (CapOwnHas) to decide delivery.
  *
  * @param[in] acptr  Local user client to consider.
  * @param[in] fmt    printf-style format string for the BATCH command body.
@@ -3255,7 +2701,6 @@ void send_s2s_batch_end(struct Client *sptr, const char *batch_id)
 void
 send_batch_perconn(struct Client *acptr, const char *fmt, ...)
 {
-  struct BouncerSession *bsess;
   struct MsgBuf *mb;
   struct VarData vd;
   va_list ap;
@@ -3270,34 +2715,8 @@ send_batch_perconn(struct Client *acptr, const char *fmt, ...)
   if (!mb)
     return;
 
-  bsess = bounce_get_session(acptr);
-
-  if (bsess && bsess->hs_shadow_count > 0) {
-    /* Bouncer session with shadows: deliver per-connection */
-    struct ShadowConnection *sh;
-
-    /* Primary gets it only if its own caps include batch */
-    if (CapOwnHas(acptr, CAP_BATCH)) {
-      suppress_shadow_dup = 1;
-      send_buffer(acptr, mb, 0);
-      suppress_shadow_dup = 0;
-    }
-
-    /* Send directly to each shadow that has batch */
-    for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
-      if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-        continue;
-      if (!CapHas(&sh->sh_active, CAP_BATCH))
-        continue;
-      msgq_add(&sh->sh_sendQ, mb, 0);
-      sh->sh_sendM++;
-      socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-    }
-  } else {
-    /* Non-bouncer or no shadows: simple check */
-    if (CapOwnHas(acptr, CAP_BATCH))
-      send_buffer(acptr, mb, 0);
-  }
+  if (CapOwnHas(acptr, CAP_BATCH))
+    send_buffer(acptr, mb, 0);
 
   msgq_clean(mb);
 }

@@ -92,6 +92,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -111,6 +112,17 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   unsigned int flags = 0;
   char *p = 0;
   char *name;
+  struct Client *alias_source = NULL;
+
+  /* Alias PART means the user is leaving — rewrite to primary so
+   * joinbuf removes the primary (triggering bounce_sync_alias_part to
+   * clean up all aliases), and the L token carries the primary numeric.
+   * For remote primaries, jb_alias_source enables split S2S delivery:
+   * alias numeric to the primary's server, primary numeric to others. */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    alias_source = sptr;
+    sptr = cli_alias_primary(sptr);
+  }
 
   ClrFlag(sptr, FLAG_TS8);
 
@@ -136,6 +148,8 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   joinbuf_init(&parts, sptr, cptr, JOINBUF_TYPE_PART,
 	       (parc > 2 && !EmptyString(parv[parc - 1])) ? parv[parc - 1] : 0,
 	       0);
+  if (alias_source && !MyConnect(sptr))
+    parts.jb_alias_source = alias_source;
 
   /* scan through channel list */
   for (name = ircd_strtok(&p, parv[1], ","); name;
@@ -201,6 +215,16 @@ int ms_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   unsigned int flags;
   char *p = 0;
   char *name;
+  struct Client *alias_source = NULL;
+
+  /* Alias PART — rewrite to primary unconditionally.  On the primary's
+   * server, this triggers normal PART + bounce_sync_alias_part cascade.
+   * On other servers, the primary was already the jb_source (from the
+   * split delivery's primary-numeric buffer). */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    alias_source = sptr;
+    sptr = cli_alias_primary(sptr);
+  }
 
   ClrFlag(sptr, FLAG_TS8);
 
@@ -212,6 +236,8 @@ int ms_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   joinbuf_init(&parts, sptr, cptr, JOINBUF_TYPE_PART,
 	       (parc > 2 && !EmptyString(parv[parc - 1])) ? parv[parc - 1] : 0,
 	       0);
+  if (alias_source && !MyConnect(sptr))
+    parts.jb_alias_source = alias_source;
 
   /* scan through channel list */
   for (name = ircd_strtok(&p, parv[1], ","); name;

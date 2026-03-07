@@ -600,10 +600,7 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
     break;
   }
 
-  /* Use the socket's own SSL context for error lookup, not the client's.
-   * When called from shadow_read_packet, cptr is the PRIMARY client but
-   * socketh is the SHADOW's socket — using cli_socket(cptr).ssl would
-   * access the wrong (possibly NULL/freed) SSL context. */
+  /* Use the socket's own SSL context for error lookup, not the client's. */
   err = SSL_get_error(socketh->ssl, res);
   cli_sslerror(cptr) = ssl_error_str(err, errno);
   cli_error(cptr) = errno;

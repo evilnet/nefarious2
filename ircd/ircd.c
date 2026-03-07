@@ -548,11 +548,8 @@ static void check_pings(struct Event* ev) {
 
     max_ping = client_get_ping(cptr);
 
-    /* Check shadow liveness for bouncer primaries.
-     * Done here (before active-client skip) so shadows are checked
-     * even when the primary itself is active. */
-    if (IsUser(cptr))
-      bounce_check_shadow_pings(cptr, max_ping);
+    /* Aliases have their own Client ping management — no
+     * separate alias ping check needed. */
 
     /* If it's a server and we have not sent an AsLL lately, do so. */
     if (IsServer(cptr)) {
@@ -597,15 +594,12 @@ static void check_pings(struct Event* ev) {
                              "No response from %s, closing link",
                              cli_name(cptr));
 
-      /* Try shadow promotion first — if shadows exist, promote one */
+      /* Try alias promotion first — if aliases exist, promote one */
       if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
         struct BouncerSession *bsess = bounce_get_session(cptr);
-        if (bsess && bsess->hs_shadows) {
-          if (bounce_promote_shadow(bsess) == 0)
-            continue; /* Shadow promoted — client stays alive */
-          /* Promotion failed — try relay-only mode */
-          if (bounce_relay_only_transition(bsess, cptr) == 0)
-            continue;
+        if (bsess && bsess->hs_alias_count > 0) {
+          if (bounce_promote_alias(bsess) == 0)
+            continue; /* Alias promoted — session transferred */
         }
       }
 
@@ -632,13 +626,9 @@ static void check_pings(struct Event* ev) {
       /* If we're late in noticing don't hold it against them :) */
       cli_lasttime(cptr) = CurrentTime - max_ping;
       
-      if (IsUser(cptr)) {
-        /* Suppress shadow duplication — shadows have their own PING cycle
-         * via bounce_check_shadow_pings(), not duplicated from primary. */
-        suppress_shadow_dup = 1;
+      if (IsUser(cptr))
         sendrawto_one(cptr, MSG_PING " :%s", cli_name(&me));
-        suppress_shadow_dup = 0;
-      } else
+      else
         sendcmdto_prio_one(&me, CMD_PING, cptr, ":%s", cli_name(&me));
     }
     

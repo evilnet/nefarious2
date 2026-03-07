@@ -147,13 +147,17 @@ int ms_destruct(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
     struct ModeBuf mbuf;
     struct Ban *link;
 
-    /* Next, send all PARTs upstream. */
-    for (member = chptr->members; member; member = member->next_member)
+    /* Next, send all PARTs upstream (skip aliases — not known upstream). */
+    for (member = chptr->members; member; member = member->next_member) {
+      if (IsMemberAlias(member)) continue;
       sendcmdto_one(member->user, CMD_PART, cptr, "%H", chptr);
+    }
 
     /* Next, send JOINs for all members. */
-    for (member = chptr->members; member; member = member->next_member)
+    for (member = chptr->members; member; member = member->next_member) {
+      if (IsMemberAlias(member)) continue;
       sendcmdto_one(member->user, CMD_JOIN, cptr, "%H", chptr);
+    }
 
     /* Build MODE strings. We use MODEBUF_DEST_BOUNCE with MODE_DEL to assure
        that the resulting MODEs are only sent upstream. */
@@ -162,6 +166,7 @@ int ms_destruct(struct Client* cptr, struct Client* sptr, int parc, char* parv[]
     /* Op/voice the users as appropriate. We use MODE_DEL because we fake a bounce. */
     for (member = chptr->members; member; member = member->next_member)
     {
+      if (IsMemberAlias(member)) continue;
       if (IsChanOp(member))
         modebuf_mode_client(&mbuf, MODE_DEL | MODE_CHANOP, member->user, OpLevel(member));
       if (HasVoice(member))

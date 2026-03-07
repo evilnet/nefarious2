@@ -677,7 +677,7 @@ socket_del(struct Socket* sock)
 /** Reattach a socket to a new file descriptor without reinitializing
  * the generator header.  This preserves gh_ref and gh_flags, which is
  * critical when the socket is being reattached during an event callback
- * (e.g., bouncer shadow promotion).  Calling socket_del + socket_add
+ * (e.g., bouncer alias promotion).  Calling socket_del + socket_add
  * would reset gh_ref via gen_init, corrupting the reference count held
  * by the currently executing event.
  * @param[in] sock Socket to reattach.

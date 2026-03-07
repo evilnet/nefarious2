@@ -984,6 +984,26 @@ static int count_storage_servers(const char *target, time_t query_time);
 static int is_ulined_server(struct Client *server);
 static void fed_timeout_callback(struct Event *ev);
 
+/* Server advertisement tracking — defined here (before first use in
+ * start_fed_targets_query), full struct definition is below. */
+#define MAX_AD_SERVERS 4096
+#define MAX_AD_CHANNELS 8192
+
+/** Structure for chathistory storage advertisement from a server */
+struct ChathistoryAd {
+  int has_advertisement;           /**< Received any CH A? */
+  int retention_days;              /**< Retention policy (0 = unlimited) */
+  int is_storage_server;           /**< Does this server store history? */
+  time_t last_update;              /**< When we last received an update */
+  /* Layer 1: Channel presence tracking */
+  int has_channel_ads;             /**< Received CH A F? */
+  int channel_count;               /**< Number of channels in set */
+  char **channels;                 /**< Array of channel names (lowercase) */
+};
+
+/** Global array of server advertisements, indexed by server numeric */
+static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
+
 /** Check if we should trigger federation query.
  * Returns 1 if we should federate, 0 otherwise.
  */
@@ -2264,26 +2284,9 @@ void forward_history_write(struct Channel *chptr, struct Client *sptr,
  *   CH A - :<channel> ...    - Remove channel(s)
  */
 
-/** Maximum servers we track advertisements for (matches NN_MAX_SERVER) */
-#define MAX_AD_SERVERS 4096
-
-/** Maximum channels to track per server in advertisement */
-#define MAX_AD_CHANNELS 8192
-
-/** Structure for chathistory storage advertisement from a server */
-struct ChathistoryAd {
-  int has_advertisement;           /**< Received any CH A? */
-  int retention_days;              /**< Retention policy (0 = unlimited) */
-  int is_storage_server;           /**< Does this server store history? */
-  time_t last_update;              /**< When we last received an update */
-  /* Layer 1: Channel presence tracking */
-  int has_channel_ads;             /**< Received CH A F? */
-  int channel_count;               /**< Number of channels in set */
-  char **channels;                 /**< Array of channel names (lowercase) */
-};
-
-/** Global array of server advertisements, indexed by server numeric */
-static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
+/* MAX_AD_SERVERS, MAX_AD_CHANNELS, struct ChathistoryAd, and server_ads[]
+ * are defined above (near federation forward declarations) for visibility
+ * in start_fed_targets_query() and count_storage_servers(). */
 
 /** Get server numeric index for array lookup.
  * @param[in] server Server client.

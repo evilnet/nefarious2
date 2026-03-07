@@ -160,20 +160,7 @@ int send_reply(struct Client *to, int reply, ...)
 
   va_end(vd.vd_args);
 
-  /* Numeric replies are direct responses to whoever sent the command.
-   * When current_shadow is NULL (primary processing its own input),
-   * suppress duplication to shadows — they didn't ask for this reply.
-   * mirror_to_shadows overrides this for cases like JOIN TOPIC/NAMES
-   * where all bouncer connections need the response. */
-  {
-    int saved_suppress = suppress_shadow_dup;
-    if (!current_shadow && !mirror_to_shadows)
-      suppress_shadow_dup = 1;
-
-    send_buffer(to, mb, 0);
-
-    suppress_shadow_dup = saved_suppress;
-  }
+  send_buffer(to, mb, 0);
 
   msgq_clean(mb);
 

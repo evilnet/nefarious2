@@ -98,32 +98,6 @@ static unsigned int sessionSeq = 0;
 static int bounce_db_put(struct BouncerSession *session);
 static int bounce_db_del(const char *sessid);
 
-/* Forward declarations for cross-server relay (Phase 1) */
-static void relay_shadow_read_callback(struct Event *ev);
-static void relay_shadow_write(struct RelayShadowEntry *entry, const char *data);
-static void relay_replay_history(struct RelayShadowEntry *entry, const char *target, int limit);
-static void relay_send_names(struct RelayShadowEntry *entry, const char *channame);
-static void relay_send_topic(struct RelayShadowEntry *entry, const char *channame);
-static void bounce_remove_remote_shadow(struct ShadowConnection *shadow);
-static struct RelayShadowEntry *bounce_find_relay_pending(const char *account,
-                                                          const char *sessid);
-/* bounce_add_pending_relay declared in bouncer_session.h */
-extern struct RelayShadowEntry *bounce_find_relay(const char *relay_id);
-
-/* Relay hash table and hash function — declared here for use in
- * bounce_handle_bs which appears before the relay management section. */
-static struct RelayShadowEntry *relayHash[RELAY_SHADOW_HASHSIZE];
-static struct RelayShadowEntry *pendingRelays;
-static unsigned int relay_id_seq;
-
-static unsigned int relay_hash(const char *id)
-{
-  unsigned int h = 0;
-  for (; *id; id++)
-    h = h * 31 + (unsigned char)*id;
-  return h % RELAY_SHADOW_HASHSIZE;
-}
-
 /* ---------------------------------------------------------------- */
 /* Connection stats accumulation helpers                              */
 /* ---------------------------------------------------------------- */
@@ -140,17 +114,6 @@ static void bounce_accumulate_and_reset_primary(struct BouncerSession *session,
   session->hs_agg_receiveM += con_receiveM(con);
   con_sendB(con) = con_receiveB(con) = 0;
   con_sendM(con) = con_receiveM(con) = 0;
-}
-
-/** Aggregate a shadow's lifetime counters into session totals.
- * Called when a shadow is removed (disconnect). */
-static void bounce_accumulate_shadow(struct BouncerSession *session,
-                                      struct ShadowConnection *shadow)
-{
-  session->hs_agg_sendB    += shadow->sh_sendB;
-  session->hs_agg_receiveB += shadow->sh_receiveB;
-  session->hs_agg_sendM    += shadow->sh_sendM;
-  session->hs_agg_receiveM += shadow->sh_receiveM;
 }
 
 /* ---------------------------------------------------------------- */
@@ -223,65 +186,6 @@ static void bounce_history_disconnect(struct BouncerSession *session,
       session->hs_history[i].bch_last_disconnect = (int64_t)CurrentTime;
       return;
     }
-  }
-}
-
-/* ---------------------------------------------------------------- */
-/* Deferred shadow free list                                         */
-/* ---------------------------------------------------------------- */
-
-/** List of shadow structs pending deferred free.
- *
- * When bounce_promote_shadow() runs inside an engine_loop event callback,
- * epoll may have returned events for BOTH the primary and shadow sockets
- * in the same batch.  Freeing the shadow immediately would leave a dangling
- * pointer in the events array — engine_loop would read freed memory when
- * processing the shadow's stale event.
- *
- * Instead, shadows are queued here and freed during timer_run(), which
- * runs AFTER all events in the current batch are processed.
- */
-/* Forward declarations */
-static void shadow_flush_sendq(struct ShadowConnection *shadow);
-static void shadow_send_raw(struct ShadowConnection *shadow,
-                             struct Client *primary,
-                             const char *fmt, ...);
-
-static struct ShadowConnection *deferred_free_head;
-static struct Timer deferred_free_timer;
-static int deferred_free_timer_active;
-
-/** Timer callback: free all deferred shadow structs. */
-static void deferred_shadow_free_cb(struct Event *ev)
-{
-  struct ShadowConnection *s, *next;
-  for (s = deferred_free_head; s; s = next) {
-    next = s->sh_next;
-    if (s->sh_listener) {
-      release_listener(s->sh_listener);
-      s->sh_listener = NULL;
-    }
-#ifdef USE_SSL
-    if (s->sh_ssl_flush) {
-      MyFree(s->sh_ssl_flush);
-      s->sh_ssl_flush = NULL;
-    }
-#endif
-    MyFree(s);
-  }
-  deferred_free_head = NULL;
-  deferred_free_timer_active = 0;
-}
-
-/** Queue a shadow struct for deferred free (after current event batch). */
-static void bounce_defer_shadow_free(struct ShadowConnection *shadow)
-{
-  shadow->sh_next = deferred_free_head;
-  deferred_free_head = shadow;
-  if (!deferred_free_timer_active) {
-    timer_add(timer_init(&deferred_free_timer), deferred_shadow_free_cb,
-              NULL, TT_ABSOLUTE, CurrentTime);
-    deferred_free_timer_active = 1;
   }
 }
 
@@ -721,13 +625,12 @@ struct BouncerSession *bounce_find_best_held(const char *account)
  * Used for session-wide TLS enforcement: one plaintext connection
  * means the entire session is treated as non-TLS for +Z purposes.
  * @param[in] cptr Client to check (must be the primary).
- * @return 1 if any connection (primary or shadow) lacks TLS, 0 otherwise.
+ * @return 1 if any connection (primary or alias) lacks TLS, 0 otherwise.
  */
 int bounce_session_has_plaintext(struct Client *cptr)
 {
 #ifdef USE_SSL
   struct BouncerSession *session;
-  struct ShadowConnection *shadow;
 
   session = bounce_get_session(cptr);
   if (!session || session->hs_state != BOUNCE_ACTIVE)
@@ -736,12 +639,6 @@ int bounce_session_has_plaintext(struct Client *cptr)
   /* Check primary */
   if (session->hs_client && !cli_socket(session->hs_client).ssl)
     return 1;
-
-  /* Check all live shadows */
-  for (shadow = session->hs_shadows; shadow; shadow = shadow->sh_next) {
-    if (!(shadow->sh_flags & SHADOW_FLAGS_DEAD) && !shadow->sh_socket.ssl)
-      return 1;
-  }
 
   /* Check aliases — remote clients, so check FLAG_SSL (set from their
    * actual socket on the remote server) rather than a local socket. */
@@ -760,70 +657,18 @@ int bounce_session_has_plaintext(struct Client *cptr)
 #endif
 }
 
-/** Check shadow liveness — send PINGs to idle shadows, timeout dead ones.
- * Called from check_pings() for bouncer primaries.  Each shadow has its
- * own independent PING cycle so clients can detect server unreachability.
- * @param[in] cptr Primary client of bouncer session.
- * @param[in] max_ping Ping interval in seconds.
- */
-void bounce_check_shadow_pings(struct Client *cptr, int max_ping)
-{
-  struct BouncerSession *session;
-  struct ShadowConnection *shadow;
-
-  session = bounce_get_session(cptr);
-  if (!session || session->hs_state != BOUNCE_ACTIVE || !session->hs_shadows)
-    return;
-
-  for (shadow = session->hs_shadows; shadow; shadow = shadow->sh_next) {
-    if (shadow->sh_flags & SHADOW_FLAGS_DEAD)
-      continue;
-
-    /* Remote shadows are pinged by the relay server (B-side) which owns
-     * the actual TCP connection.  Skip them here on the managing server. */
-    if (shadow->sh_flags & SHADOW_FLAGS_REMOTE)
-      continue;
-
-    /* Timeout: no data in max_ping*2 — mark dead */
-    if (CurrentTime - shadow->sh_lasttime >= (time_t)(max_ping * 2)) {
-      Debug((DEBUG_INFO, "Bouncer: shadow #%u for %s ping timeout (%ld seconds)",
-             shadow->sh_id, cli_name(cptr),
-             (long)(CurrentTime - shadow->sh_lasttime)));
-      shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-      continue;
-    }
-
-    /* Idle: no data in max_ping — send PING if not already sent */
-    if (CurrentTime - shadow->sh_lasttime >= (time_t)max_ping &&
-        !(shadow->sh_flags & SHADOW_FLAGS_PINGSENT)) {
-      struct MsgBuf *mb;
-      mb = msgq_make(cptr, MSG_PING " :%s", cli_name(&me));
-      if (mb) {
-        msgq_add(&shadow->sh_sendQ, mb, 0);
-        socket_events(&shadow->sh_socket,
-                      SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-        msgq_clean(mb);
-      }
-      shadow->sh_flags |= SHADOW_FLAGS_PINGSENT;
-      /* Reset lasttime like check_pings does for primaries — don't penalize
-       * the shadow for the time we were late in noticing. */
-      shadow->sh_lasttime = CurrentTime - max_ping;
-    }
-  }
-}
-
 /** SASL-triggered automatic resume.
  * Called from register_user() after SASL auth sets the account
  * but before the client is introduced to the network.
  *
  * Three outcomes:
  *   1. Held session found → resume it (return 1)
- *   2. Active session found → convert cptr to shadow connection (return 2)
+ *   2. Active session found → attach as alias (return 2)
  *   3. No session → auto-create one (return 0)
  *
  * @param[in] cptr Newly authenticated client.
  * @param[out] out_session Set to the session if resumed or created.
- * @return 1 if resumed a held session, 2 if converted to shadow, 0 otherwise.
+ * @return 1 if resumed a held session, 2 if attached as alias, 0 otherwise.
  */
 int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                        time_t *out_since_time)
@@ -869,21 +714,15 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
     /* Check if session is on a remote server */
     if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
       struct Client *managing_server = FindNServer(session->hs_origin);
-      if (managing_server) {
+      if (managing_server && feature_bool(FEAT_BOUNCER_ALIASES)
+          && session->hs_client
+          && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
         *out_session = session;
-        /* Prefer alias path if enabled — gives first-class multi-server presence.
-         * Requires session replica with primary info and alias slots available. */
-        if (feature_bool(FEAT_BOUNCER_ALIASES) && session->hs_client
-            && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
-          Debug((DEBUG_INFO, "Bouncer: alias path for %s session %s (primary on %s)",
-                 account, session->hs_sessid, cli_name(managing_server)));
-          return BOUNCE_RESUME_ALIAS_REMOTE;
-        }
-        Debug((DEBUG_INFO, "Bouncer: relay path for %s session %s via %s",
+        Debug((DEBUG_INFO, "Bouncer: alias path for %s session %s (primary on %s)",
                account, session->hs_sessid, cli_name(managing_server)));
-        return BOUNCE_RESUME_RELAY_REMOTE;
+        return BOUNCE_RESUME_ALIAS_REMOTE;
       }
-      /* Managing server not found — fall through to try other sessions */
+      /* Alias not possible — fall through to try other sessions */
     } else {
     /* Local session — proceed with normal resume */
     char original_nick[NICKLEN + 1];
@@ -948,28 +787,23 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
   }
 
   /* Check for ACTIVE session — either orphaned (reclaim as primary) or
-   * with an existing primary (attach as shadow connection).
+   * with an existing primary (attach as alias connection).
    * An orphaned session is ACTIVE but has no primary (hs_client == NULL).
    * This can happen after server restart or when primary exits before
-   * shadows and the session persists.  These sessions count toward the
+   * aliases and the session persists.  These sessions count toward the
    * per-account limit, so we must reclaim them rather than creating new ones. */
   session = bounce_find_any_session(account);
   if (session && session->hs_state == BOUNCE_ACTIVE) {
     /* Check if session is on a remote server */
     if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
       struct Client *managing_server = FindNServer(session->hs_origin);
-      if (managing_server) {
+      if (managing_server && feature_bool(FEAT_BOUNCER_ALIASES)
+          && session->hs_client
+          && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
         *out_session = session;
-        /* Prefer alias path for active sessions with known primary */
-        if (feature_bool(FEAT_BOUNCER_ALIASES) && session->hs_client
-            && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
-          Debug((DEBUG_INFO, "Bouncer: alias path for %s active session %s (primary on %s)",
-                 account, session->hs_sessid, cli_name(managing_server)));
-          return BOUNCE_RESUME_ALIAS_REMOTE;
-        }
-        Debug((DEBUG_INFO, "Bouncer: relay path for %s active session %s via %s",
+        Debug((DEBUG_INFO, "Bouncer: alias path for %s active session %s (primary on %s)",
                account, session->hs_sessid, cli_name(managing_server)));
-        return BOUNCE_RESUME_RELAY_REMOTE;
+        return BOUNCE_RESUME_ALIAS_REMOTE;
       }
     }
     if (!session->hs_client) {
@@ -982,261 +816,26 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
         return 1;
       }
     } else {
-      /* ACTIVE session with primary — attach as shadow connection */
-
-      /* --- Local alias path (preferred over shadows when enabled) --- */
+      /* ACTIVE session with primary — attach as alias connection */
       if (feature_bool(FEAT_BOUNCER_ALIASES)
           && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
 #ifdef USE_SSL
         /* Respect BOUNCER_REQUIRE_TLS for aliases too */
         if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
-          Debug((DEBUG_INFO, "Bouncer: skipping local alias for plaintext client %s (REQUIRE_TLS)",
+          Debug((DEBUG_INFO, "Bouncer: skipping alias for plaintext client %s (REQUIRE_TLS)",
                  cli_name(cptr)));
-          goto skip_shadow;
+        } else
+#endif
+        {
+          Debug((DEBUG_INFO, "Bouncer: local alias path for %s session %s",
+                 account, session->hs_sessid));
+          *out_session = session;
+          return BOUNCE_RESUME_ALIAS_LOCAL;
         }
-#endif
-        Debug((DEBUG_INFO, "Bouncer: local alias path for %s session %s",
-               account, session->hs_sessid));
-        *out_session = session;
-        return BOUNCE_RESUME_ALIAS_LOCAL;
-      }
-
-#ifdef USE_SSL
-      /* If BOUNCER_REQUIRE_TLS is set, skip shadow for plaintext clients */
-      if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
-        Debug((DEBUG_INFO, "Bouncer: skipping shadow for plaintext client %s (REQUIRE_TLS)",
-               cli_name(cptr)));
-        goto skip_shadow;
-      }
-      /* Gate A: Block plaintext shadow if primary is in any +Z channel.
-       * One non-TLS connection compromises the entire session's +Z access.
-       * The client falls through to normal registration with a NOTE. */
-      if (!cli_socket(cptr).ssl && cli_user(session->hs_client)) {
-        struct Membership *m;
-        for (m = cli_user(session->hs_client)->channel; m; m = m->next_channel) {
-          if (m->channel->mode.exmode & EXMODE_SSLONLY) {
-            Debug((DEBUG_INFO,
-                   "Bouncer: blocking plaintext shadow for %s (session in +Z channel %s)",
-                   cli_name(cptr), m->channel->chname));
-            sendrawto_one(cptr,
-              ":%s NOTE BOUNCER TLS_REQUIRED "
-              ":Cannot attach to session - active session is in SSL-only (+Z) "
-              "channels. Connect with TLS to attach.",
-              cli_name(&me));
-            goto skip_shadow;
-          }
-        }
-      }
-#endif
-      /* Convert this registering client into a shadow connection.
-       * The Client struct will be freed; only the socket fd survives.
-       *
-       * Socket transfer follows the same pattern as bounce_revive():
-       * steal fd+SSL from the client via socket_del, then give the
-       * original fd to the shadow.  This avoids SSL_set_fd() which
-       * would create new BIOs on the dup'd fd. */
-      struct ShadowConnection *shadow;
-      int fd;
-      char sock_ip[SOCKIPLEN + 1];
-#ifdef USE_SSL
-      SSL *saved_ssl;
-      char *auth_flush_data = NULL;
-      unsigned int auth_flush_len = 0;
-#endif
-      int max_sh;
-
-      /* Early max-shadows check — must happen BEFORE we steal the fd,
-       * because stealing is not easily reversible. */
-      max_sh = feature_int(FEAT_BOUNCER_MAX_SHADOWS);
-      if (max_sh > 0 && session->hs_shadow_count >= max_sh)
-        goto skip_shadow;
-
-      /* Flush any pending writes before stealing the SSL object.
-       *
-       * With pipelining clients (e.g. goguma sends 21 individual CAP REQ
-       * commands + AUTHENTICATE + CAP END in one burst), the auth phase
-       * generates many responses that may not all flush in one shot.
-       * If the P10 SASL callback fires before the event loop processes
-       * the client's write-ready event, FLAG_BLOCKED is still set and
-       * the client's MsgQ has queued data with corresponding SSL pending
-       * write state (wpend_tot/wpend_buf).  Transferring the SSL in that
-       * state causes "bad write retry" when the shadow's first SSL_write
-       * uses a different buffer.
-       *
-       * Clear FLAG_BLOCKED and flush here.  If the socket is writable,
-       * the pending writes complete and wpend clears.  If not, set
-       * SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER so the pending write can
-       * complete even with a different buffer pointer — the SSL record
-       * layer writes from its internal wbuf (already-encrypted data),
-       * not from the application buffer.  We then flush the pending
-       * state after transferring the SSL to the shadow. */
-      ClrFlag(cptr, FLAG_BLOCKED);
-      send_queued(cptr);
-      if (IsDead(cptr))
-        goto skip_shadow;
-#ifdef USE_SSL
-      if (MsgQLength(&(cli_sendQ(cptr))) > 0 && cli_socket(cptr).ssl) {
-        /* Snapshot the unflushed sendQ data.  We need this to build a
-         * coalesced buffer later (auth prefix + welcome messages) so
-         * the shadow's first SSL_write satisfies wpend_tot <= len.
-         * Must happen BEFORE stealing the SSL/fd. */
-        struct iovec snap_iov[128];
-        unsigned int snap_bytes = 0;
-        int snap_count = msgq_mapiov(&cli_sendQ(cptr), snap_iov, 128, &snap_bytes);
-        if (snap_count > 0 && snap_bytes > 0) {
-          auth_flush_data = (char *)MyMalloc(snap_bytes);
-          if (auth_flush_data) {
-            unsigned int off = 0;
-            int i;
-            for (i = 0; i < snap_count && off < snap_bytes; i++) {
-              unsigned int n = snap_iov[i].iov_len;
-              if (off + n > snap_bytes) n = snap_bytes - off;
-              memcpy(auth_flush_data + off, snap_iov[i].iov_base, n);
-              off += n;
-            }
-            auth_flush_len = off;
-          }
-        }
-        SSL_set_mode(cli_socket(cptr).ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-        Debug((DEBUG_INFO, "Bouncer: %u bytes unflushed for %s, "
-               "set ACCEPT_MOVING_WRITE_BUFFER",
-               snap_bytes, cli_name(cptr)));
-      }
-#endif
-
-      /* Extract fd and IP from the client's connection */
-      fd = cli_fd(cptr);
-      ircd_strncpy(sock_ip, cli_sock_ip(cptr), SOCKIPLEN + 1);
-
-      /* Step 1: Steal fd and SSL from client (same pattern as bounce_revive).
-       * Save and NULL the SSL pointer BEFORE socket_del, because
-       * socket_del triggers ET_DESTROY which calls ssl_free(). */
-#ifdef USE_SSL
-      saved_ssl = cli_socket(cptr).ssl;
-      cli_socket(cptr).ssl = NULL;
-#endif
-      s_data(&cli_socket(cptr)) = NULL;  /* Prevent stale callbacks */
-      socket_del(&cli_socket(cptr));
-      LocalClientArray[fd] = 0;
-      cli_fd(cptr) = -1;  /* Mark client as fd-less (like bounce_revive) */
-
-      /* Step 2: Create shadow with the original fd.
-       * socket_add inside bounce_add_shadow registers fd with the
-       * event engine (safe because socket_del above deregistered it).
-       * After the max_shadows check above, failure here means OOM or
-       * socket_add failure — both catastrophic.  The connection is lost. */
-      shadow = bounce_add_shadow(session, fd, sock_ip);
-      if (shadow) {
-          /* Copy CAP state from the registering client to the shadow.
-           * con_capab() and con_active() return pointers to CapSet structs. */
-          memcpy(&shadow->sh_capab, con_capab(cli_connect(cptr)),
-                 sizeof(struct CapSet));
-          memcpy(&shadow->sh_active, con_active(cli_connect(cptr)),
-                 sizeof(struct CapSet));
-          shadow->sh_capab_version = con_capab_version(cli_connect(cptr));
-
-          /* Copy pre-away state if any */
-          shadow->sh_away_state = con_pre_away(cli_connect(cptr));
-          if (shadow->sh_away_state == 1) {
-            ircd_strncpy(shadow->sh_away_msg,
-                         con_pre_away_msg(cli_connect(cptr)), AWAYLEN);
-          }
-
-#ifdef USE_SSL
-          /* Transfer SSL — no SSL_set_fd needed since the SSL's BIOs
-           * already reference fd, and the shadow now owns fd. */
-          if (saved_ssl) {
-            shadow->sh_socket.ssl = saved_ssl;
-            saved_ssl = NULL;  /* Shadow owns it now */
-
-            /* If we saved unflushed auth data, store it on the shadow.
-             * shadow_flush_sendq will coalesce this with the welcome
-             * messages and do a single large SSL_write that satisfies
-             * the wpend_tot <= len check for the pending TLS record. */
-            if (auth_flush_data) {
-              shadow->sh_ssl_flush = auth_flush_data;
-              shadow->sh_ssl_flush_len = auth_flush_len;
-              shadow->sh_ssl_flush_auth = auth_flush_len;
-              shadow->sh_flags |= SHADOW_FLAGS_SSL_PENDING;
-              auth_flush_data = NULL;  /* Shadow owns it now */
-              Debug((DEBUG_INFO, "Bouncer: saved %u bytes auth data for "
-                     "shadow #%u SSL pending flush",
-                     auth_flush_len, shadow->sh_id));
-            }
-
-            Debug((DEBUG_INFO, "Bouncer: transferred SSL to shadow #%u fd=%d",
-                   shadow->sh_id, fd));
-          }
-#endif
-
-          {
-            /* Capture connection metadata for later promotion.
-             * The Client struct will be freed after we return, so copy
-             * everything we'll need to restore the primary's identity
-             * if this shadow gets promoted. */
-            shadow->sh_port = cli_port(cptr);
-            ircd_strncpy(shadow->sh_sockhost, cli_sockhost(cptr), HOSTLEN + 1);
-            memcpy(&shadow->sh_ip, &cli_ip(cptr), sizeof(struct irc_in_addr));
-            memcpy(&shadow->sh_connectip, &cli_connectip(cptr), sizeof(struct irc_in_addr));
-            ircd_strncpy(shadow->sh_connecthost, cli_connecthost(cptr), HOSTLEN + 1);
-            shadow->sh_listener = con_listener(cli_connect(cptr));
-            if (shadow->sh_listener)
-              shadow->sh_listener->ref_count++;  /* Own ref; exit_client releases cptr's */
-
-            /* Record connect event in connection history */
-            bounce_history_connect(session, sock_ip, cli_sockhost(cptr));
-
-            /* Notify existing connections about the new shadow.
-             * Mirrors X3/AuthServ's "authed to your account" warning. */
-            {
-              struct Client *primary = session->hs_client;
-              struct ShadowConnection *s;
-
-              /* Notify primary */
-              sendrawto_one(primary, ":%s NOTICE %s :Warning: %s (%s@%s) connected to your session.",
-                            cli_name(&me), cli_name(primary),
-                            cli_name(cptr), cli_user(cptr)->username, sock_ip);
-
-              /* Notify existing shadows (skip the newly added one) */
-              for (s = session->hs_shadows; s; s = s->sh_next) {
-                if (s != shadow && !(s->sh_flags & SHADOW_FLAGS_DEAD))
-                  shadow_send_raw(s, primary,
-                                  ":%s NOTICE %s :Warning: %s (%s@%s) connected to your session.",
-                                  cli_name(&me), cli_name(primary),
-                                  cli_name(cptr), cli_user(cptr)->username, sock_ip);
-              }
-            }
-
-            /* Recompute session union caps now that this shadow's caps are in play */
-            bounce_recompute_session_caps(session->hs_client);
-
-            Debug((DEBUG_INFO, "Bouncer: converted %s to shadow #%u on session %s",
-                   cli_name(cptr), shadow->sh_id, session->hs_sessid));
-
-            *out_session = session;
-
-            /* Send registration sequence to the shadow.
-             * This happens AFTER the Client is freed in register_user(),
-             * so we queue it via bounce_send_shadow_welcome(). */
-
-            return 2; /* Signal: converted to shadow, do not introduce to network */
-          }
-      } else {
-        /* Shadow creation failed — fd and SSL are orphaned, clean up */
-#ifdef USE_SSL
-        if (saved_ssl)
-          SSL_free(saved_ssl);
-        if (auth_flush_data)
-          MyFree(auth_flush_data);
-#endif
-        close(fd);
       }
     }
   }
-#ifdef USE_SSL
-skip_shadow:
-#endif
 
   /* No held session — auto-create only if account has NO sessions at all.
    * If sessions already exist (all ACTIVE), this is just a second connection
@@ -1289,10 +888,6 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   session->hs_client = cptr;
   ircd_strncpy(session->hs_origin, cli_yxx(&me), sizeof(session->hs_origin) - 1);
   session->hs_hold_override = -1; /* Use default */
-  session->hs_shadows = NULL;
-  session->hs_shadow_count = 0;
-  session->hs_client_id_seq = 1; /* Primary gets ID 1 */
-  session->hs_primary_id = 1;
   session->hs_effective_away = 0;
   session->hs_effective_away_msg[0] = '\0';
   session->hs_chancount = 0;
@@ -1438,16 +1033,16 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   /* Session is live again — remove persisted state (re-persisted at next hold or shutdown) */
   bounce_db_del(session->hs_sessid);
 
-  /* Recompute session union caps for the new primary + existing shadows */
+  /* Recompute session union caps for the new primary + existing aliases */
   bounce_recompute_session_caps(cptr);
 
   return 0;
 }
 
 /** Compute adaptive hold time for a session based on usage history.
- * Sessions with more connections (resumes + shadow attaches) earn longer
- * hold times.  This rewards active use — a mobile device connecting as a
- * shadow counts the same as a full resume from HOLDING.
+ * Sessions with more connections (resumes + alias attaches) earn longer
+ * hold times.  This rewards active use — a mobile device connecting as an
+ * alias counts the same as a full resume from HOLDING.
  */
 static time_t bounce_compute_hold_time(struct BouncerSession *session)
 {
@@ -1542,51 +1137,11 @@ int bounce_detach(struct BouncerSession *session)
 /** Destroy a session entirely. */
 void bounce_destroy(struct BouncerSession *session)
 {
-  struct ShadowConnection *shadow, *next;
-
   assert(0 != session);
 
   /* Cancel timer if active */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
-
-  /* Clean up all shadow connections */
-  for (shadow = session->hs_shadows; shadow; shadow = next) {
-    next = shadow->sh_next;
-    if (current_shadow == shadow)
-      current_shadow = NULL;
-    /* Best-effort flush of pending data (KILL/ERROR/etc.) before closing */
-    if (MsgQLength(&shadow->sh_sendQ) > 0 && shadow->sh_fd >= 0)
-      shadow_flush_sendq(shadow);
-    /* Clear s_data BEFORE socket_del to prevent the synchronous
-     * ET_DESTROY handler from freeing the shadow (which would make
-     * the MsgQClear/dbuf_delete below use-after-free). */
-    s_data(&shadow->sh_socket) = NULL;
-    if (shadow->sh_listener) {
-      release_listener(shadow->sh_listener);
-      shadow->sh_listener = NULL;
-    }
-#ifdef USE_SSL
-    if (shadow->sh_ssl_flush) {
-      MyFree(shadow->sh_ssl_flush);
-      shadow->sh_ssl_flush = NULL;
-    }
-    ssl_free(&shadow->sh_socket);
-    shadow->sh_socket.ssl = NULL;
-#endif
-    socket_del(&shadow->sh_socket);
-    if (shadow->sh_fd >= 0) {
-      close(shadow->sh_fd);
-      shadow->sh_fd = -1;
-    }
-    MsgQClear(&shadow->sh_sendQ);
-    dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
-    /* Defer free: a stale epoll event may still reference
-     * &shadow->sh_socket in the current engine_loop batch. */
-    bounce_defer_shadow_free(shadow);
-  }
-  session->hs_shadows = NULL;
-  session->hs_shadow_count = 0;
 
   /* Remove from hash tables */
   token_hash_remove(session);
@@ -2045,10 +1600,6 @@ int bounce_db_restore(void)
     ircd_strncpy(session->hs_ghost_numeric, cli_yxx(ghost),
                  sizeof(session->hs_ghost_numeric) - 1);
     session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
-    session->hs_shadows = NULL;
-    session->hs_shadow_count = 0;
-    session->hs_client_id_seq = 1;
-    session->hs_primary_id = 0;
     session->hs_effective_away = 0;
     session->hs_effective_away_msg[0] = '\0';
     session->hs_created = (time_t)rec->bsr_created;
@@ -2427,10 +1978,6 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     ircd_strncpy(session->hs_origin, cli_yxx(sptr),
                  sizeof(session->hs_origin) - 1);
     session->hs_hold_override = -1;
-    session->hs_shadows = NULL;
-    session->hs_shadow_count = 0;
-    session->hs_client_id_seq = 0;
-    session->hs_primary_id = 0;
     session->hs_effective_away = 0;
     session->hs_effective_away_msg[0] = '\0';
     session->hs_created = created;
@@ -2586,536 +2133,18 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     break;
   }
 
-  case 'X': /* Destroy or XS (Shadow destroy) */
+  case 'X': /* Destroy session */
   {
-    if (subcmd[1] == 'S') {
-      /* BS XS <account> <sessid> <relay_id> — remote shadow disconnected (B→A) */
-      const char *relay_id;
-      struct ShadowConnection *sh;
-
-      if (parc < 5)
-        return 0;
-
-      relay_id = parv[4];
-      session = bounce_find_by_token_sessid(account, sessid);
-      if (!session)
-        return 0;
-
-      /* Find and remove the remote shadow by relay_id */
-      for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-        if ((sh->sh_flags & SHADOW_FLAGS_REMOTE) &&
-            0 == strcmp(sh->sh_relay_id, relay_id)) {
-          bounce_remove_remote_shadow(sh);
-          break;
-        }
-      }
-
-      /* If the last shadow was removed from a relay-only ghost (no local
-       * fd, no remaining shadows), transition back to HOLDING.  The ghost
-       * was revived from HOLDING by BS S and has been relay-only since;
-       * now that the relay is gone, it returns to holding state with a
-       * fresh hold timer. */
-      if (session->hs_client && !session->hs_shadows
-          && cli_fd(session->hs_client) == -1
-          && session->hs_state == BOUNCE_ACTIVE) {
-        int hold_time = feature_int(FEAT_BOUNCER_SESSION_HOLD);
-
-        SetBouncerHold(session->hs_client);
-
-        /* Re-mark channel memberships as HOLDING */
-        if (cli_user(session->hs_client)) {
-          struct Membership *member;
-          for (member = cli_user(session->hs_client)->channel;
-               member; member = member->next_channel)
-            SetMemberHolding(member);
-        }
-
-        session->hs_state = BOUNCE_HOLDING;
-        session->hs_disconnect_time = CurrentTime;
-        session->hs_last_active = CurrentTime;
-
-        timer_init(&session->hs_hold_timer);
-        timer_add(&session->hs_hold_timer, bounce_hold_expire,
-                  (void *)session, TT_RELATIVE, hold_time);
-
-        bounce_broadcast(session, 'D', NULL);
-        bounce_db_put(session);
-
-        Debug((DEBUG_INFO, "Bouncer: relay-only session %s back to HOLDING "
-               "(last remote shadow removed)", session->hs_sessid));
-      }
-
-      /* Forward */
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
-                            cptr,
-                            "XS %s %s %s",
-                            account, sessid, relay_id);
-    } else {
-      /* BS X <account> <sessid> — destroy session */
-      session = bounce_find_by_token_sessid(account, sessid);
-      if (session)
-        bounce_destroy(session);
-
-      /* Forward */
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
-                            cptr,
-                            "X %s %s",
-                            account, sessid);
-    }
-    break;
-  }
-
-  case 'S': /* Shadow establish (B→A): relay server has a user connection */
-  {
-    /* BS S <account> <sessid> <capab_hex> <is_ssl> <sock_ip> */
-    unsigned long capab_hex;
-    int is_ssl;
-    const char *sock_ip;
-    struct ShadowConnection *remote_shadow;
-    char chanbuf[512];
-
-    if (parc < 7)
-      return 0;
-
-    capab_hex = strtoul(parv[4], NULL, 16);
-    is_ssl = atoi(parv[5]);
-    sock_ip = parv[6];
-
-    /* Find the session — it must exist on this server as managing server */
+    /* BS X <account> <sessid> — destroy session */
     session = bounce_find_by_token_sessid(account, sessid);
-    if (!session) {
-      Debug((DEBUG_INFO, "BS S: session %s/%s not found", account, sessid));
-      return 0;
-    }
-
-    /* Only the managing server processes BS S */
-    if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
-      /* Not our session — forward to the actual managing server */
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION, cptr,
-                            "S %s %s %s %d %s",
-                            account, sessid, parv[4], is_ssl, sock_ip);
-      return 0;
-    }
-
-    /* TLS enforcement: reject non-TLS relay if session is in +Z channels */
-    if (!is_ssl && session->hs_client) {
-      /* Check if session has +Z channel memberships */
-      if (bounce_session_has_plaintext(session->hs_client)) {
-        /* Already has plaintext — another non-TLS is fine.
-         * But if all existing connections are TLS and user tries
-         * non-TLS, check +Z channels. */
-      }
-      /* TODO: Full +Z enforcement — for now, allow all connections.
-       * Gate A equivalent will be added when channel +Z checking
-       * is integrated with remote shadow creation. */
-    }
-
-    /* Create remote shadow on managing server */
-    remote_shadow = bounce_add_remote_shadow(session, sptr, capab_hex,
-                                             is_ssl, sock_ip);
-    if (!remote_shadow) {
-      Debug((DEBUG_INFO, "BS S: failed to create remote shadow for %s", sessid));
-      return 0;
-    }
-
-    /* If session is HOLDING, revive the ghost */
-    if (session->hs_state == BOUNCE_HOLDING && session->hs_client) {
-      /* Cancel hold timer */
-      if (t_active(&session->hs_hold_timer))
-        timer_del(&session->hs_hold_timer);
-
-      /* Clear hold flags on ghost */
-      ClearBouncerHold(session->hs_client);
-      ClrFlag(session->hs_client, FLAG_DEADSOCKET);
-
-      /* Clear stale caps from the ghost's previous connection.
-       * The ghost has no primary socket — only remote shadows provide
-       * capabilities.  Without this, CapOwnHas(ghost, CAP_ECHOMSG)
-       * returns true from the old connection's caps, causing spurious
-       * echo-message delivery. */
-      memset(cli_active_own(session->hs_client), 0, sizeof(struct CapSet));
-      memset(cli_active(session->hs_client), 0, sizeof(struct CapSet));
-
-      /* Clear CHFL_HOLDING on channel memberships */
-      if (cli_user(session->hs_client)) {
-        struct Membership *member;
-        for (member = cli_user(session->hs_client)->channel;
-             member; member = member->next_channel) {
-          ClearMemberHolding(member);
-        }
-      }
-
-      session->hs_state = BOUNCE_ACTIVE;
-      session->hs_disconnect_time = 0;
-      session->hs_last_active = CurrentTime;
-      session->hs_attach_count++;
-      session->hs_connect_count++;
-
-      /* Delete persisted state */
-      if (feature_bool(FEAT_BOUNCER_PERSIST))
-        bounce_db_del(session->hs_sessid);
-
-      /* Broadcast attach to network */
-      bounce_broadcast(session, 'A', cli_yxx(session->hs_client));
-    }
-
-    /* Recompute union caps with the new remote shadow included */
-    if (session->hs_client)
-      bounce_recompute_session_caps(session->hs_client);
-
-    /* Send BS W (acknowledge) + BS N (channel state) to relay server.
-     * The relay server (B) generates the full welcome (001-005, MOTD)
-     * locally from its own server info.  We only send channel state. */
-    sendcmdto_one(&me, CMD_BOUNCER_SESSION, sptr,
-                  "W %s %s %s %s",
-                  account, sessid, remote_shadow->sh_relay_id,
-                  session->hs_client ? cli_name(session->hs_client) : "*");
-
-    /* BS N with channel list for state replay */
-    build_channel_string(session, chanbuf, sizeof(chanbuf));
-    sendcmdto_one(&me, CMD_BOUNCER_SESSION, sptr,
-                  "N %s %s %s CHANNELS :%s",
-                  account, sessid, remote_shadow->sh_relay_id,
-                  chanbuf);
-
-    /* Do NOT forward BS S — it's point-to-point between relay server and managing server */
-    break;
-  }
-
-  case 'W': /* Shadow welcome/ack (A→B): managing server acknowledges relay */
-  {
-    /* BS W <account> <sessid> <relay_id> <nick> */
-    const char *relay_id;
-    const char *nick;
-
-    if (parc < 6)
-      return 0;
-
-    relay_id = parv[4];
-    nick = parv[5];
-
-    /* This server is the relay server (B).
-     * We need to find our pending relay connection and finalize it.
-     * The relay connection was set up during register_user() when we
-     * detected a cross-server session and sent BS S. At that point we
-     * saved the dup'd fd and client info in a pending relay entry. */
-
-    /* Look up pending relay by sessid + source server */
-    {
-      struct RelayShadowEntry *entry = bounce_find_relay_pending(account, sessid);
-      if (!entry) {
-        Debug((DEBUG_INFO, "BS W: no pending relay for %s/%s relay_id=%s",
-               account, sessid, relay_id));
-        return 0;
-      }
-
-      /* Finalize the relay entry with the assigned relay_id and nick */
-      ircd_strncpy(entry->rs_relay_id, relay_id, sizeof(entry->rs_relay_id) - 1);
-      ircd_strncpy(entry->rs_nick, nick, NICKLEN);
-
-      /* Re-register in relay hash with the real relay_id */
-      {
-        unsigned int h = relay_hash(relay_id);
-        entry->rs_next = relayHash[h];
-        relayHash[h] = entry;
-      }
-
-      if (entry->rs_shadow)
-        ircd_strncpy(entry->rs_shadow->sh_relay_id, relay_id,
-                     sizeof(entry->rs_shadow->sh_relay_id) - 1);
-
-      Debug((DEBUG_INFO, "BS W: finalized relay %s for %s/%s nick=%s",
-             relay_id, account, sessid, nick));
-
-      /* Send full welcome sequence to the relay socket.
-       * All numerics use B's (this server's) name since the client
-       * connected here.  ISUPPORT reflects this server's capabilities. */
-      if (entry->rs_shadow && entry->rs_shadow->sh_fd >= 0) {
-        char buf[512];
-        struct SLink *line;
-
-        /* 001 RPL_WELCOME */
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s 001 %s :Welcome to the %s IRC Network %s",
-                      cli_name(&me), nick, feature_str(FEAT_NETWORK), nick);
-        relay_shadow_write(entry, buf);
-
-        /* 002 RPL_YOURHOST */
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s 002 %s :Your host is %s, running version %s",
-                      cli_name(&me), nick, cli_name(&me), version);
-        relay_shadow_write(entry, buf);
-
-        /* 003 RPL_CREATED */
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s 003 %s :This server was created %s",
-                      cli_name(&me), nick, creation);
-        relay_shadow_write(entry, buf);
-
-        /* 004 RPL_MYINFO */
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s 004 %s %s %s %s %s %s",
-                      cli_name(&me), nick, cli_name(&me), version,
-                      infousermodes, infochanmodes, infochanmodeswithparams);
-        relay_shadow_write(entry, buf);
-
-        /* 005 RPL_ISUPPORT */
-        for (line = get_isupport_lines(); line; line = line->next) {
-          ircd_snprintf(0, buf, sizeof(buf),
-                        ":%s 005 %s %s :are supported by this server",
-                        cli_name(&me), nick, line->value.cp);
-          relay_shadow_write(entry, buf);
-        }
-
-        /* Minimal MOTD */
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s 375 %s :- %s Message of the Day -",
-                      cli_name(&me), nick, cli_name(&me));
-        relay_shadow_write(entry, buf);
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s 376 %s :End of /MOTD command.",
-                      cli_name(&me), nick);
-        relay_shadow_write(entry, buf);
-
-        /* NOTE: bouncer relay attached (informational) */
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s NOTE BOUNCER SHADOW_ATTACHED :Attached to session %s via relay through %s",
-                      cli_name(&me), sessid, cli_name(sptr));
-        relay_shadow_write(entry, buf);
-      }
-    }
-
-    /* Do NOT forward BS W — point-to-point */
-    break;
-  }
-
-  case 'N': /* Welcome numerics (A→B): managing server sends 004/005/CHANNELS */
-  {
-    /* BS N <account> <sessid> <relay_id> <type> [params...] */
-    const char *relay_id;
-    const char *ntype;
-    struct RelayShadowEntry *entry;
-
-    if (parc < 6)
-      return 0;
-
-    relay_id = parv[4];
-    ntype = parv[5];
-
-    entry = bounce_find_relay(relay_id);
-    if (!entry || !entry->rs_shadow || entry->rs_shadow->sh_fd < 0) {
-      Debug((DEBUG_INFO, "BS N: relay %s not found", relay_id));
-      return 0;
-    }
-
-    if (0 == strcmp(ntype, "004") && parc >= 11) {
-      /* 004: <servername> <version> <usermodes> <chanmodes> <chanmodes_w_params>
-       * Rewrite source to B's server name */
-      char buf[512];
-      ircd_snprintf(0, buf, sizeof(buf),
-                    ":%s 004 %s %s %s %s %s %s",
-                    cli_name(&me), entry->rs_nick,
-                    parv[6], parv[7], parv[8], parv[9], parv[10]);
-      relay_shadow_write(entry, buf);
-    }
-    else if (0 == strcmp(ntype, "005")) {
-      /* 005: ISUPPORT tokens — rewrite source to B's server name */
-      char buf[512];
-      int i;
-      size_t pos;
-
-      pos = ircd_snprintf(0, buf, sizeof(buf), ":%s 005 %s",
-                          cli_name(&me), entry->rs_nick);
-      for (i = 6; i < parc; i++) {
-        pos += ircd_snprintf(0, buf + pos, sizeof(buf) - pos,
-                             " %s", parv[i]);
-      }
-      relay_shadow_write(entry, buf);
-    }
-    else if (0 == strcmp(ntype, "CHANNELS")) {
-      /* Channel list for state replay — trailing param is channel list */
-      const char *channels = parv[parc - 1];
-      int chan_count = 0;
-      if (channels && *channels) {
-        char chanlist[512];
-        char *tok, *saveptr;
-        char buf[512];
-        char name[CHANNELLEN + 1];
-        unsigned int modes;
-
-        ircd_strncpy(chanlist, channels, sizeof(chanlist) - 1);
-        for (tok = strtok_r(chanlist, ",", &saveptr);
-             tok;
-             tok = strtok_r(NULL, ",", &saveptr)) {
-          parse_channel_modes(tok, name, &modes);
-          chan_count++;
-
-          /* Send JOIN */
-          ircd_snprintf(0, buf, sizeof(buf),
-                        ":%s JOIN %s", entry->rs_nick, name);
-          relay_shadow_write(entry, buf);
-
-          /* Send mode prefix if applicable */
-          if (modes & CHFL_CHANOP) {
-            ircd_snprintf(0, buf, sizeof(buf),
-                          ":%s MODE %s +o %s",
-                          cli_name(&me), name, entry->rs_nick);
-            relay_shadow_write(entry, buf);
-          }
-          if (modes & CHFL_HALFOP) {
-            ircd_snprintf(0, buf, sizeof(buf),
-                          ":%s MODE %s +h %s",
-                          cli_name(&me), name, entry->rs_nick);
-            relay_shadow_write(entry, buf);
-          }
-          if (modes & CHFL_VOICE) {
-            ircd_snprintf(0, buf, sizeof(buf),
-                          ":%s MODE %s +v %s",
-                          cli_name(&me), name, entry->rs_nick);
-            relay_shadow_write(entry, buf);
-          }
-
-          /* Send TOPIC and NAMES from local channel state */
-          relay_send_topic(entry, name);
-          relay_send_names(entry, name);
-        }
-      }
-
-      /* Replay local chathistory for each channel */
-      if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY) && channels && *channels) {
-        int replay_limit = feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
-        char replay_chanlist[512];
-        char *rtok, *rsaveptr;
-
-        if (replay_limit <= 0)
-          replay_limit = 50;
-
-        ircd_strncpy(replay_chanlist, channels, sizeof(replay_chanlist) - 1);
-        for (rtok = strtok_r(replay_chanlist, ",", &rsaveptr);
-             rtok;
-             rtok = strtok_r(NULL, ",", &rsaveptr)) {
-          char rname[CHANNELLEN + 1];
-          unsigned int rmodes;
-          parse_channel_modes(rtok, rname, &rmodes);
-          relay_replay_history(entry, rname, replay_limit);
-        }
-      }
-
-      /* Session resume summary */
-      {
-        char buf[512];
-        ircd_snprintf(0, buf, sizeof(buf),
-                      ":%s NOTICE %s :Session resumed. You are in %d channel(s).",
-                      cli_name(&me), entry->rs_nick, chan_count);
-        relay_shadow_write(entry, buf);
-      }
-    }
-
-    /* Do NOT forward BS N — point-to-point */
-    break;
-  }
-
-  case 'R': /* Relay input (B→A): user typed something on relay socket */
-  {
-    /* BS R <account> <sessid> <relay_id> :<raw IRC line> */
-    const char *relay_id;
-    const char *raw_line;
-    struct ShadowConnection *sh;
-
-    if (parc < 6)
-      return 0;
-
-    relay_id = parv[4];
-    raw_line = parv[parc - 1]; /* trailing param */
-
-    session = bounce_find_by_token_sessid(account, sessid);
-    if (!session || !session->hs_client) {
-      Debug((DEBUG_INFO, "BS R: session %s/%s not found or no client", account, sessid));
-      return 0;
-    }
-
-    /* Only the managing server processes BS R */
-    if (0 != strcmp(session->hs_origin, cli_yxx(&me)))
-      return 0;
-
-    /* Find the remote shadow by relay_id */
-    for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-      if ((sh->sh_flags & SHADOW_FLAGS_REMOTE) &&
-          0 == strcmp(sh->sh_relay_id, relay_id))
-        break;
-    }
-    if (!sh) {
-      Debug((DEBUG_INFO, "BS R: relay %s not found in session %s", relay_id, sessid));
-      return 0;
-    }
-
-    /* Filter out QUIT — relay client disconnect is handled by BS XS.
-     * Feeding QUIT to the parser would kill the primary client. */
-    if (0 == ircd_strncmp(raw_line, "QUIT", 4) &&
-        (raw_line[4] == '\0' || raw_line[4] == ' ' || raw_line[4] == '\r'))
-      break;
-
-    /* Set current_shadow so reply routing sends output to this shadow via BS O */
-    current_shadow = sh;
-
-    /* Parse and dispatch the IRC command as if the session's client sent it.
-     * This reuses the existing parser — source routing is correct because
-     * the client (hs_client) lives on this server. */
-    {
-      char parsebuf[BUFSIZE];
-      ircd_strncpy(parsebuf, raw_line, sizeof(parsebuf) - 1);
-      parse_client(session->hs_client, parsebuf, parsebuf + strlen(parsebuf));
-    }
-
-    current_shadow = NULL;
-
-    /* Do NOT forward BS R — point-to-point */
-    break;
-  }
-
-  case 'O': /* Output relay (A→B): managing server sends output to relay socket */
-  {
-    /* BS O <account> <sessid> <relay_id> N <numeric> <params...> :<trailing>
-     * BS O <account> <sessid> <relay_id> M :<fully formatted IRC line> */
-    const char *relay_id;
-    const char *mode;
-    struct RelayShadowEntry *entry;
-
-    if (parc < 7)
-      return 0;
-
-    relay_id = parv[4];
-    mode = parv[5];
-
-    entry = bounce_find_relay(relay_id);
-    if (!entry || !entry->rs_shadow || entry->rs_shadow->sh_fd < 0)
-      return 0;
-
-    if (mode[0] == 'N') {
-      /* Numeric mode: reconstruct with B's server name */
-      char buf[BUFSIZE];
-      int i;
-      size_t pos;
-
-      /* parv[6] is the numeric code, remaining are params */
-      pos = ircd_snprintf(0, buf, sizeof(buf), ":%s %s %s",
-                          cli_name(&me), parv[6], entry->rs_nick);
-      for (i = 7; i < parc; i++) {
-        if (i == parc - 1)
-          pos += ircd_snprintf(0, buf + pos, sizeof(buf) - pos,
-                               " :%s", parv[i]);
-        else
-          pos += ircd_snprintf(0, buf + pos, sizeof(buf) - pos,
-                               " %s", parv[i]);
-      }
-      relay_shadow_write(entry, buf);
-    }
-    else if (mode[0] == 'M') {
-      /* Message mode: pass through verbatim (trailing param) */
-      relay_shadow_write(entry, parv[parc - 1]);
-    }
-
-    /* Do NOT forward BS O — point-to-point */
+    if (session)
+      bounce_destroy(session);
+
+    /* Forward */
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+                          cptr,
+                          "X %s %s",
+                          account, sessid);
     break;
   }
 
@@ -3199,74 +2228,149 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
   return NULL;
 }
 
-/* ---------------------------------------------------------------- */
-/* Cross-server shadow relay management (Phase 1)                    */
-/* ---------------------------------------------------------------- */
-
-/* relayHash, pendingRelays, relay_id_seq, relay_hash() — defined at top of file */
-
-/** Generate a unique relay_id for a new remote shadow.
- * Format: "R<server_yy><seq>" — compact, unique per server.
- */
-static void generate_relay_id(char *buf, size_t buflen)
-{
-  ircd_snprintf(0, buf, buflen, "R%s%u", cli_yxx(&me), ++relay_id_seq);
-}
-
-/** Add a remote shadow to a session on the managing server (A-side).
- * Creates a ShadowConnection with SHADOW_FLAGS_REMOTE — no local fd,
- * I/O flows via BS R (input) and BS O (output) through the relay server.
- */
-struct ShadowConnection *bounce_add_remote_shadow(
-    struct BouncerSession *session, struct Client *relay_server,
-    unsigned long capab_hex, int is_ssl, const char *sock_ip)
-{
-  struct ShadowConnection *shadow;
-
-  if (!session || !relay_server)
-    return NULL;
-
-  if (session->hs_shadow_count >= BOUNCER_MAX_SHADOWS) {
-    Debug((DEBUG_INFO, "bounce_add_remote_shadow: max shadows reached for %s",
-           session->hs_sessid));
-    return NULL;
-  }
-
-  shadow = (struct ShadowConnection *)MyCalloc(1, sizeof(*shadow));
-  shadow->sh_id = ++session->hs_client_id_seq;
-  shadow->sh_fd = -1; /* No local fd for remote shadows */
-  shadow->sh_session = session;
-  shadow->sh_flags = SHADOW_FLAGS_REMOTE;
-  shadow->sh_relay_server = relay_server;
-  shadow->sh_is_ssl = is_ssl;
-  shadow->sh_connected = CurrentTime;
-  shadow->sh_lasttime = CurrentTime;
-
-  /* Set capabilities from hex bitfield */
-  memset(&shadow->sh_capab, 0, sizeof(shadow->sh_capab));
-  memset(&shadow->sh_active, 0, sizeof(shadow->sh_active));
-  /* TODO: decode capab_hex into CapSet when cap negotiation relay is added */
-
-  if (sock_ip)
-    ircd_strncpy(shadow->sh_sock_ip, sock_ip, SOCKIPLEN);
-
-  /* Generate relay_id */
-  generate_relay_id(shadow->sh_relay_id, sizeof(shadow->sh_relay_id));
-
-  /* Link into session's shadow list */
-  shadow->sh_next = session->hs_shadows;
-  session->hs_shadows = shadow;
-  session->hs_shadow_count++;
-
-  Debug((DEBUG_INFO, "bounce_add_remote_shadow: added relay %s for session %s via %s",
-         shadow->sh_relay_id, session->hs_sessid, cli_name(relay_server)));
-
-  return shadow;
-}
 
 /* ---------------------------------------------------------------- */
 /* SQUIT alias promotion                                             */
 /* ---------------------------------------------------------------- */
+
+/** Promote an alias to primary for a bouncer session.
+ * Extracts the promotion logic shared by disconnect handlers and SQUIT.
+ *
+ * Tiebreaker: prefer local alias (MyUser) first — in disconnect scenarios
+ * all servers are up, so promoting locally avoids unnecessary BX P remote
+ * promotion.  Falls back to lowest ba_server numeric (same as SQUIT path).
+ *
+ * @param[in] session Session whose primary is departing.
+ * @return 0 on success, -1 if no aliases available.
+ */
+int bounce_promote_alias(struct BouncerSession *session)
+{
+  int j, k;
+  const char *winner_numeric = NULL;
+  const char *winner_server = NULL;
+  struct Client *alias;
+  struct Membership *member;
+  int winner_idx = -1;
+
+  if (session->hs_alias_count <= 0)
+    return -1;
+
+  /* Tiebreaker: prefer local alias first, then lowest ba_server numeric */
+  for (j = 0; j < session->hs_alias_count; j++) {
+    struct Client *candidate = findNUser(session->hs_aliases[j].ba_numeric);
+    if (!candidate || !IsBouncerAlias(candidate))
+      continue;
+    if (MyUser(candidate)) {
+      /* Local alias — best choice, use immediately */
+      winner_server = session->hs_aliases[j].ba_server;
+      winner_numeric = session->hs_aliases[j].ba_numeric;
+      winner_idx = j;
+      break;
+    }
+    if (!winner_server ||
+        ircd_strcmp(session->hs_aliases[j].ba_server, winner_server) < 0) {
+      winner_server = session->hs_aliases[j].ba_server;
+      winner_numeric = session->hs_aliases[j].ba_numeric;
+      winner_idx = j;
+    }
+  }
+
+  if (!winner_numeric || winner_idx < 0)
+    return -1;
+
+  alias = findNUser(winner_numeric);
+  if (!alias || !IsBouncerAlias(alias))
+    return -1;
+
+  Debug((DEBUG_INFO, "bounce_promote_alias: promoting alias %s (server %s) "
+         "for session %s/%s",
+         winner_numeric, winner_server,
+         session->hs_account, session->hs_sessid));
+
+  /* Promote: clear CHFL_ALIAS on all channel memberships, restore modes */
+  for (member = cli_user(alias)->channel; member;
+       member = member->next_channel) {
+    if (IsMemberAlias(member)) {
+      struct Channel *chptr = member->channel;
+
+      member->status &= ~CHFL_ALIAS;
+
+      /* Restore mode flags from session replica */
+      for (k = 0; k < session->hs_chancount; k++) {
+        if (0 == ircd_strcmp(session->hs_channels[k].name, chptr->chname)) {
+          member->status |= session->hs_channels[k].modes;
+          break;
+        }
+      }
+
+      /* Fix counters: was tracked in aliases, now in users */
+      if (chptr->aliases > 0)
+        --chptr->aliases;
+      ++chptr->users;
+      ++((cli_user(alias))->joined);
+      if (!IsSSL(alias) && !IsChannelService(alias))
+        ++chptr->nonsslusers;
+      if (IsAccount(alias))
+        ++chptr->authusers;
+    }
+  }
+
+  /* Clear alias flags, set as bouncer primary */
+  ClearBouncerAlias(alias);
+  SetBouncerHold(alias);
+  cli_user(alias)->alias_primary = NULL;
+
+  /* Update nick timestamp for collision resolution */
+  cli_lastnick(alias) = CurrentTime;
+
+  /* Add to nick hash (aliases aren't in nick hash) */
+  hAddClient(alias);
+
+  /* Add promoted alias to UserStats — alias was never counted,
+   * but old primary's exit already decremented the count */
+  ++UserStats.clients;
+  if (UserStats.clients > UserStats.clients_max) {
+    UserStats.clients_max = UserStats.clients;
+    save_tunefile();
+  }
+  ++(cli_serv(cli_user(alias)->server)->clients);
+  if (MyUser(alias)) {
+    ++UserStats.local_clients;
+    if (UserStats.local_clients > UserStats.local_clients_max) {
+      UserStats.local_clients_max = UserStats.local_clients;
+      save_tunefile();
+    }
+  }
+  if (IsInvisible(alias))
+    ++UserStats.inv_clients;
+
+  /* Remove promoted alias from hs_aliases[] */
+  if (winner_idx < session->hs_alias_count - 1)
+    memmove(&session->hs_aliases[winner_idx],
+            &session->hs_aliases[winner_idx + 1],
+            (session->hs_alias_count - 1 - winner_idx)
+              * sizeof(struct BounceAlias));
+  session->hs_alias_count--;
+
+  /* Update session to point to promoted alias */
+  session->hs_client = alias;
+  ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
+                sizeof(session->hs_origin) - 1);
+
+  /* If promoted alias is on this server, broadcast BX P + BS T */
+  if (MyUser(alias)) {
+    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                          "P %s %s %s %s",
+                          winner_numeric, winner_numeric,
+                          session->hs_sessid, cli_name(alias));
+    sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION, NULL,
+                          "T %s %s %s",
+                          session->hs_account, session->hs_sessid,
+                          cli_yxx(&me));
+  }
+
+  return 0;
+}
 
 /** Prepare bouncer sessions for SQUIT promotion.
  * Called from exit_client() BEFORE exit_downlinks().
@@ -3325,937 +2429,36 @@ void bounce_prepare_squit_promotions(struct Client *server)
 /** Execute SQUIT promotions for bouncer sessions.
  * Called from exit_client() AFTER exit_downlinks().
  *
- * For each session marked hs_promoting: compute the deterministic
- * tiebreaker (lowest ba_server numeric), promote the winning alias
- * to primary, restore mode flags from session replica, and if the
- * winner is local, broadcast BX P + BS T.
+ * For each session marked hs_promoting, delegates to bounce_promote_alias()
+ * for the actual promotion logic (tiebreaker, counter fixup, broadcast).
  *
  * @param[in] server The departing server (for logging).
  */
 void bounce_execute_squit_promotions(struct Client *server)
 {
-  int i, j, k;
+  int i;
   struct BouncerSession *session;
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (session = tokenHash[i]; session; session = session->hs_tnext) {
-      const char *winner_numeric = NULL;
-      const char *winner_server = NULL;
-      struct Client *alias;
-      struct Membership *member;
-      int winner_idx = -1;
-
       if (!session->hs_promoting)
         continue;
 
-      /* Determine winner: lowest ba_server numeric (lexicographic) */
-      for (j = 0; j < session->hs_alias_count; j++) {
-        if (!winner_server ||
-            ircd_strcmp(session->hs_aliases[j].ba_server, winner_server) < 0) {
-          winner_server = session->hs_aliases[j].ba_server;
-          winner_numeric = session->hs_aliases[j].ba_numeric;
-          winner_idx = j;
-        }
-      }
-
-      if (!winner_numeric || winner_idx < 0) {
-        session->hs_promoting = 0;
-        session->hs_client = NULL;
-        continue;
-      }
-
-      /* Find the winning alias Client */
-      alias = findNUser(winner_numeric);
-      if (!alias || !IsBouncerAlias(alias)) {
-        Debug((DEBUG_INFO, "bounce_promote: alias %s not found for session %s",
-               winner_numeric, session->hs_sessid));
-        session->hs_promoting = 0;
-        session->hs_client = NULL;
-        continue;
-      }
-
-      Debug((DEBUG_INFO, "bounce_promote: promoting alias %s (server %s) "
-             "for session %s/%s",
-             winner_numeric, winner_server,
-             session->hs_account, session->hs_sessid));
-
-      /* Promote: clear CHFL_ALIAS on all channel memberships, restore modes */
-      for (member = cli_user(alias)->channel; member;
-           member = member->next_channel) {
-        if (IsMemberAlias(member)) {
-          struct Channel *chptr = member->channel;
-
-          /* Clear alias flag */
-          member->status &= ~CHFL_ALIAS;
-
-          /* Restore mode flags from session replica */
-          for (k = 0; k < session->hs_chancount; k++) {
-            if (0 == ircd_strcmp(session->hs_channels[k].name, chptr->chname)) {
-              member->status |= session->hs_channels[k].modes;
-              break;
-            }
-          }
-
-          /* Fix counters: was tracked in aliases, now in users */
-          if (chptr->aliases > 0)
-            --chptr->aliases;
-          ++chptr->users;
-          ++((cli_user(alias))->joined);
-          if (!IsSSL(alias) && !IsChannelService(alias))
-            ++chptr->nonsslusers;
-          if (IsAccount(alias))
-            ++chptr->authusers;
-        }
-      }
-
-      /* Clear alias flags, set as bouncer primary */
-      ClearBouncerAlias(alias);
-      SetBouncerHold(alias);
-      cli_user(alias)->alias_primary = NULL;
-
-      /* Update nick timestamp for collision resolution —
-       * ensures promoted alias wins over stale ghosts from reconnect */
-      cli_lastnick(alias) = CurrentTime;
-
-      /* Add to nick hash (aliases aren't in nick hash) */
-      hAddClient(alias);
-
-      /* Add promoted alias to UserStats — alias was never counted,
-       * but old primary's exit already decremented the count */
-      ++UserStats.clients;
-      if (UserStats.clients > UserStats.clients_max) {
-        UserStats.clients_max = UserStats.clients;
-        save_tunefile();
-      }
-      ++(cli_serv(cli_user(alias)->server)->clients);
-      if (MyUser(alias)) {
-        ++UserStats.local_clients;
-        if (UserStats.local_clients > UserStats.local_clients_max) {
-          UserStats.local_clients_max = UserStats.local_clients;
-          save_tunefile();
-        }
-      }
-      if (IsInvisible(alias))
-        ++UserStats.inv_clients;
-
-      /* Remove promoted alias from hs_aliases[] */
-      if (winner_idx < session->hs_alias_count - 1)
-        memmove(&session->hs_aliases[winner_idx],
-                &session->hs_aliases[winner_idx + 1],
-                (session->hs_alias_count - 1 - winner_idx)
-                  * sizeof(struct BounceAlias));
-      session->hs_alias_count--;
-
-      /* Update session to point to promoted alias */
-      session->hs_client = alias;
-      ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
-                    sizeof(session->hs_origin) - 1);
       session->hs_promoting = 0;
 
-      /* If promoted alias is on this server, broadcast BX P + BS T */
-      if (MyUser(alias)) {
-        sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
-                              "P %s %s %s %s",
-                              winner_numeric, winner_numeric,
-                              session->hs_sessid, cli_name(alias));
-        sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION, NULL,
-                              "T %s %s %s",
-                              session->hs_account, session->hs_sessid,
-                              cli_yxx(&me));
+      if (bounce_promote_alias(session) != 0) {
+        /* No viable alias — session becomes orphaned */
+        session->hs_client = NULL;
+        Debug((DEBUG_INFO, "bounce_execute_squit: no alias to promote "
+               "for session %s/%s",
+               session->hs_account, session->hs_sessid));
       }
     }
   }
-}
-
-/** Clean up all bouncer state referencing a departing server.
- * Called from exit_client() when a server SQUITs.
- *
- * A-side: removes remote shadows whose sh_relay_server matches the
- * departing server.
- * B-side: destroys relay entries whose rs_server matches the departing
- * server, and cleans up pending relays.
- */
-void bounce_cleanup_server(struct Client *server)
-{
-  int i;
-  struct BouncerSession *session;
-  struct ShadowConnection *sh, **pp;
-  struct RelayShadowEntry *entry, *entry_next;
-
-  if (!server)
-    return;
-
-  /* A-side: remove remote shadows referencing this relay server */
-  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
-    for (session = tokenHash[i]; session; session = session->hs_tnext) {
-      pp = &session->hs_shadows;
-      while (*pp) {
-        sh = *pp;
-        if ((sh->sh_flags & SHADOW_FLAGS_REMOTE) &&
-            sh->sh_relay_server == server) {
-          *pp = sh->sh_next;
-          session->hs_shadow_count--;
-          Debug((DEBUG_INFO, "bounce_cleanup_server: removed remote shadow %s "
-                 "for session %s (server %s departing)",
-                 sh->sh_relay_id, session->hs_sessid, cli_name(server)));
-          MyFree(sh);
-        } else {
-          pp = &sh->sh_next;
-        }
-      }
-    }
-  }
-
-  /* B-side: destroy relay entries referencing this managing server */
-  for (i = 0; i < RELAY_SHADOW_HASHSIZE; i++) {
-    entry = relayHash[i];
-    while (entry) {
-      entry_next = entry->rs_next;
-      if (entry->rs_server == server) {
-        Debug((DEBUG_INFO, "bounce_cleanup_server: destroying relay %s "
-               "(managing server %s departing)",
-               entry->rs_relay_id, cli_name(server)));
-        bounce_destroy_relay(entry, 0); /* no notify — server is gone */
-      }
-      entry = entry_next;
-    }
-  }
-
-  /* B-side: clean up pending relays referencing this managing server */
-  {
-    struct RelayShadowEntry **rpp = &pendingRelays;
-    while (*rpp) {
-      entry = *rpp;
-      if (entry->rs_server == server) {
-        *rpp = entry->rs_next;
-        Debug((DEBUG_INFO, "bounce_cleanup_server: removing pending relay for %s "
-               "(managing server %s departing)",
-               entry->rs_account, cli_name(server)));
-        if (entry->rs_shadow) {
-          MsgQClear(&entry->rs_shadow->sh_sendQ);
-          DBufClear(&entry->rs_shadow->sh_recvQ);
-#ifdef USE_SSL
-          ssl_free(&entry->rs_shadow->sh_socket);
-          entry->rs_shadow->sh_socket.ssl = NULL;
-#endif
-          if (entry->rs_shadow->sh_fd >= 0) {
-            /* Same deferred-free pattern as bounce_destroy_relay:
-             * socket_del may fire ET_DESTROY synchronously, freeing
-             * shadow+entry via the callback. */
-            int saved_fd = entry->rs_shadow->sh_fd;
-            entry->rs_shadow->sh_fd = -1;
-            socket_del(&entry->rs_shadow->sh_socket);
-            close(saved_fd);
-            /* ET_DESTROY frees shadow and entry */
-          } else {
-            MyFree(entry->rs_shadow);
-            MyFree(entry);
-          }
-        } else {
-          MyFree(entry);
-        }
-      } else {
-        rpp = &entry->rs_next;
-      }
-    }
-  }
-}
-
-/** Remove a remote shadow from its session (A-side cleanup). */
-static void bounce_remove_remote_shadow(struct ShadowConnection *shadow)
-{
-  struct BouncerSession *session;
-  struct ShadowConnection **pp;
-
-  if (!shadow || !(shadow->sh_flags & SHADOW_FLAGS_REMOTE))
-    return;
-
-  session = shadow->sh_session;
-  if (!session)
-    return;
-
-  /* Roll shadow's lifetime data counters into session aggregates */
-  bounce_accumulate_shadow(session, shadow);
-
-  /* Unlink from session's shadow list */
-  for (pp = &session->hs_shadows; *pp; pp = &(*pp)->sh_next) {
-    if (*pp == shadow) {
-      *pp = shadow->sh_next;
-      session->hs_shadow_count--;
-      break;
-    }
-  }
-
-  MyFree(shadow);
-}
-
-/** Find a pending relay entry by account + sessid (B-side).
- * Used when BS W arrives to finalize a pending relay.
- */
-static struct RelayShadowEntry *bounce_find_relay_pending(const char *account,
-                                                          const char *sessid)
-{
-  struct RelayShadowEntry *entry, **pp;
-
-  for (pp = &pendingRelays; *pp; pp = &(*pp)->rs_next) {
-    entry = *pp;
-    if (0 == strcmp(entry->rs_account, account) &&
-        0 == strcmp(entry->rs_sessid, sessid)) {
-      /* Remove from pending list — caller will add to relay hash */
-      *pp = entry->rs_next;
-      entry->rs_next = NULL;
-      return entry;
-    }
-  }
-  return NULL;
-}
-
-/** Create a pending relay entry (B-side, during register_user).
- * The entry goes on the pending list until BS W arrives with the relay_id.
- */
-struct RelayShadowEntry *bounce_add_pending_relay(
-    int fd, const char *account, const char *sessid,
-    struct Client *server, int is_ssl, const char *sock_ip,
-    void *ssl)
-{
-  struct RelayShadowEntry *entry;
-  struct ShadowConnection *shadow;
-
-  if (fd < 0 || !server)
-    return NULL;
-
-  /* Create the ShadowConnection for the relay socket */
-  shadow = (struct ShadowConnection *)MyCalloc(1, sizeof(*shadow));
-  shadow->sh_fd = fd;
-  shadow->sh_flags = SHADOW_FLAGS_RELAY_LOCAL;
-  shadow->sh_relay_server = server;
-  shadow->sh_is_ssl = is_ssl;
-  shadow->sh_connected = CurrentTime;
-  shadow->sh_lasttime = CurrentTime;
-  shadow->sh_session = NULL;
-  shadow->sh_relay_id[0] = '\0'; /* Will be assigned by BS W */
-#ifdef USE_SSL
-  shadow->sh_socket.ssl = ssl;
-#endif
-
-  if (sock_ip)
-    ircd_strncpy(shadow->sh_sock_ip, sock_ip, SOCKIPLEN);
-
-  msgq_init(&shadow->sh_sendQ);
-  /* sh_recvQ already zeroed by MyCalloc — valid empty DBuf */
-  shadow->sh_count = 0;
-
-  /* Create the relay entry */
-  entry = (struct RelayShadowEntry *)MyCalloc(1, sizeof(*entry));
-  entry->rs_relay_id[0] = '\0'; /* Pending — no relay_id yet */
-  ircd_strncpy(entry->rs_account, account, ACCOUNTLEN);
-  ircd_strncpy(entry->rs_sessid, sessid, BOUNCER_SESSID_LEN - 1);
-  entry->rs_server = server;
-  entry->rs_shadow = shadow;
-  entry->rs_is_ssl = is_ssl;
-
-  /* Register with event loop for reads while pending.
-   * We don't forward input until BS W arrives (no relay_id yet),
-   * but we need to drain the socket to prevent blocking.
-   * The read callback handles the pending state. */
-  if (!socket_add(&shadow->sh_socket, relay_shadow_read_callback,
-                  (void *)entry, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
-    Debug((DEBUG_ERROR, "bounce_add_pending_relay: socket_add failed"));
-#ifdef USE_SSL
-    ssl_free(&shadow->sh_socket);
-    shadow->sh_socket.ssl = NULL;
-#endif
-    MyFree(shadow);
-    MyFree(entry);
-    return NULL;
-  }
-
-  /* Add to pending list */
-  entry->rs_next = pendingRelays;
-  pendingRelays = entry;
-
-  Debug((DEBUG_INFO, "bounce_add_pending_relay: created pending relay for %s@%s via %s",
-         account, sessid, cli_name(server)));
-
-  return entry;
-}
-
-/** Find a relay shadow entry by relay_id on this server (B-side). */
-struct RelayShadowEntry *bounce_find_relay(const char *relay_id)
-{
-  unsigned int h;
-  struct RelayShadowEntry *entry;
-
-  if (!relay_id || !*relay_id)
-    return NULL;
-
-  h = relay_hash(relay_id);
-  for (entry = relayHash[h]; entry; entry = entry->rs_next) {
-    if (0 == strcmp(entry->rs_relay_id, relay_id))
-      return entry;
-  }
-  return NULL;
-}
-
-/** Create a relay shadow entry on the relay server (B-side).
- * Creates a local ShadowConnection with SHADOW_FLAGS_RELAY_LOCAL that
- * owns the dup'd user socket fd, and registers it in the relay hash.
- */
-struct RelayShadowEntry *bounce_create_relay(
-    int fd, const char *account, const char *sessid,
-    const char *relay_id, struct Client *server,
-    const char *nick, int is_ssl, const char *sock_ip)
-{
-  struct RelayShadowEntry *entry;
-  struct ShadowConnection *shadow;
-  unsigned int h;
-
-  if (fd < 0 || !relay_id || !server)
-    return NULL;
-
-  /* Create the ShadowConnection for the relay socket */
-  shadow = (struct ShadowConnection *)MyCalloc(1, sizeof(*shadow));
-  shadow->sh_fd = fd;
-  shadow->sh_flags = SHADOW_FLAGS_RELAY_LOCAL;
-  shadow->sh_relay_server = server;
-  shadow->sh_is_ssl = is_ssl;
-  shadow->sh_connected = CurrentTime;
-  shadow->sh_lasttime = CurrentTime;
-  shadow->sh_session = NULL; /* Not attached to a local session */
-  ircd_strncpy(shadow->sh_relay_id, relay_id, sizeof(shadow->sh_relay_id) - 1);
-
-  if (sock_ip)
-    ircd_strncpy(shadow->sh_sock_ip, sock_ip, SOCKIPLEN);
-
-  msgq_init(&shadow->sh_sendQ);
-  /* sh_recvQ already zeroed by MyCalloc — valid empty DBuf */
-  shadow->sh_count = 0;
-
-  /* Create the relay entry */
-  entry = (struct RelayShadowEntry *)MyCalloc(1, sizeof(*entry));
-  ircd_strncpy(entry->rs_relay_id, relay_id, sizeof(entry->rs_relay_id) - 1);
-  ircd_strncpy(entry->rs_account, account, ACCOUNTLEN);
-  ircd_strncpy(entry->rs_sessid, sessid, BOUNCER_SESSID_LEN - 1);
-  entry->rs_server = server;
-  entry->rs_shadow = shadow;
-  entry->rs_is_ssl = is_ssl;
-  if (nick)
-    ircd_strncpy(entry->rs_nick, nick, NICKLEN);
-
-  /* Register with event loop — the relay socket needs read events.
-   * We use SS_CONNECTED since the socket is already established. */
-  if (!socket_add(&shadow->sh_socket, relay_shadow_read_callback,
-                  (void *)entry, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
-    Debug((DEBUG_ERROR, "bounce_create_relay: socket_add failed for relay %s", relay_id));
-    MyFree(shadow);
-    MyFree(entry);
-    return NULL;
-  }
-
-  /* Add to relay hash */
-  h = relay_hash(relay_id);
-  entry->rs_next = relayHash[h];
-  relayHash[h] = entry;
-
-  Debug((DEBUG_INFO, "bounce_create_relay: created relay %s for %s@%s via %s",
-         relay_id, account, sessid, cli_name(server)));
-
-  return entry;
-}
-
-/** Destroy a relay shadow entry and its ShadowConnection (B-side). */
-void bounce_destroy_relay(struct RelayShadowEntry *entry, int notify)
-{
-  struct ShadowConnection *shadow;
-  struct RelayShadowEntry **pp;
-  unsigned int h;
-
-  if (!entry)
-    return;
-
-  shadow = entry->rs_shadow;
-
-  /* Remove from relay hash */
-  h = relay_hash(entry->rs_relay_id);
-  for (pp = &relayHash[h]; *pp; pp = &(*pp)->rs_next) {
-    if (*pp == entry) {
-      *pp = entry->rs_next;
-      break;
-    }
-  }
-
-  /* Notify managing server if requested */
-  if (notify && entry->rs_server) {
-    sendcmdto_one(&me, CMD_BOUNCER_SESSION, entry->rs_server,
-                  "XS %s %s %s",
-                  entry->rs_account, entry->rs_sessid, entry->rs_relay_id);
-  }
-
-  /* Clean up the shadow connection */
-  if (shadow) {
-    MsgQClear(&shadow->sh_sendQ);
-    DBufClear(&shadow->sh_recvQ);
-
-    if (shadow->sh_fd >= 0) {
-      /* Socket is registered with the event engine.  socket_del() marks
-       * GEN_DESTROY but the engine may still hold references (gh_ref > 0)
-       * from the current event dispatch.  Freeing the shadow now would
-       * destroy the embedded Socket struct while the engine still accesses
-       * it — classic use-after-free.  Defer MyFree to ET_DESTROY callback
-       * which fires after the last gen_ref_dec drops gh_ref to 0.
-       *
-       * If gh_ref == 0, socket_del fires ET_DESTROY synchronously, which
-       * frees shadow+entry via the callback before returning here.  Save
-       * the fd and SSL pointer first so we don't touch freed memory. */
-      int saved_fd = shadow->sh_fd;
-#ifdef USE_SSL
-      SSL *saved_ssl = shadow->sh_socket.ssl;
-      shadow->sh_socket.ssl = NULL;
-#endif
-      shadow->sh_fd = -1;
-      socket_del(&shadow->sh_socket);
-      close(saved_fd);
-#ifdef USE_SSL
-      /* SSL_free after close — SSL_shutdown inside SSL_free won't send
-       * close_notify over a dead fd (same pattern as bounce_promote_shadow). */
-      if (saved_ssl)
-        SSL_free(saved_ssl);
-#endif
-      return; /* Memory freed by ET_DESTROY (now or deferred) */
-    }
-
-#ifdef USE_SSL
-    ssl_free(&shadow->sh_socket);
-#endif
-    MyFree(shadow);
-  }
-
-  MyFree(entry);
-}
-
-/** I/O callback for relay socket reads (B-side).
- * Reads user input from the relay socket, wraps it in BS R, and sends
- * to the managing server.
- */
-static void relay_shadow_read_callback(struct Event *ev)
-{
-  struct RelayShadowEntry *entry = (struct RelayShadowEntry *)s_data(ev_socket(ev));
-  struct ShadowConnection *shadow;
-  int len;
-  char *line_start;
-  char *newline;
-
-  if (!entry || !entry->rs_shadow)
-    return;
-
-  shadow = entry->rs_shadow;
-
-  switch (ev_type(ev)) {
-  case ET_READ:
-  case ET_EOF:
-#ifdef USE_SSL
-  relay_read_again:
-#endif
-    /* Read available data — use SSL_read for TLS connections */
-#ifdef USE_SSL
-    if (shadow->sh_socket.ssl) {
-      ERR_clear_error();
-      len = SSL_read(shadow->sh_socket.ssl,
-                     shadow->sh_buffer + shadow->sh_count,
-                     sizeof(shadow->sh_buffer) - shadow->sh_count - 1);
-      if (len <= 0) {
-        int err = SSL_get_error(shadow->sh_socket.ssl, len);
-        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
-          return; /* Retry later */
-        /* Connection closed or error */
-        bounce_destroy_relay(entry, 1);
-        return;
-      }
-    } else
-#endif
-    {
-      len = read(shadow->sh_fd, shadow->sh_buffer + shadow->sh_count,
-                 sizeof(shadow->sh_buffer) - shadow->sh_count - 1);
-      if (len <= 0) {
-        if (len == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) {
-          bounce_destroy_relay(entry, 1);
-          return;
-        }
-        return; /* EAGAIN, try later */
-      }
-    }
-
-    shadow->sh_count += len;
-    shadow->sh_buffer[shadow->sh_count] = '\0';
-    shadow->sh_lasttime = CurrentTime;
-
-    /* Extract complete lines and send as BS R */
-    line_start = shadow->sh_buffer;
-    while ((newline = strchr(line_start, '\n')) != NULL) {
-      *newline = '\0';
-      /* Strip trailing \r if present */
-      if (newline > line_start && *(newline - 1) == '\r')
-        *(newline - 1) = '\0';
-
-      /* Handle PING during pending/active state */
-      if (0 == ircd_strncmp(line_start, "PING ", 5) ||
-          0 == ircd_strncmp(line_start, "PING\r", 5) ||
-          0 == ircd_strcmp(line_start, "PING")) {
-        /* Respond to PING locally — don't relay */
-        char pongbuf[512];
-        const char *pingarg = (line_start[4] == ' ') ? line_start + 5 : cli_name(&me);
-        ircd_snprintf(0, pongbuf, sizeof(pongbuf),
-                      ":%s PONG %s :%s",
-                      cli_name(&me), cli_name(&me), pingarg);
-        relay_shadow_write(entry, pongbuf);
-        line_start = newline + 1;
-        continue;
-      }
-
-      /* Send to managing server if relay_id is assigned */
-      if (entry->rs_relay_id[0] && entry->rs_server && *line_start) {
-        sendcmdto_one(&me, CMD_BOUNCER_SESSION, entry->rs_server,
-                      "R %s %s %s :%s",
-                      entry->rs_account, entry->rs_sessid,
-                      entry->rs_relay_id, line_start);
-      }
-      /* If relay_id not yet assigned (pending BS W), discard input.
-       * The user hasn't received welcome yet, so no meaningful commands. */
-
-      line_start = newline + 1;
-    }
-
-    /* Move remaining partial data to start of buffer */
-    if (line_start > shadow->sh_buffer) {
-      shadow->sh_count = strlen(line_start);
-      if (shadow->sh_count > 0)
-        memmove(shadow->sh_buffer, line_start, shadow->sh_count + 1);
-    }
-
-    /* Buffer overflow protection */
-    if (shadow->sh_count >= sizeof(shadow->sh_buffer) - 1) {
-      Debug((DEBUG_INFO, "relay_shadow_read_callback: buffer overflow for relay %s",
-             entry->rs_relay_id));
-      bounce_destroy_relay(entry, 1);
-      return;
-    }
-
-    if (ev_type(ev) == ET_EOF) {
-      bounce_destroy_relay(entry, 1);
-      return;
-    }
-
-#ifdef USE_SSL
-    /* Drain SSL internal buffer — OpenSSL may have decrypted multiple
-     * commands from a single TLS record. */
-    if (shadow->sh_socket.ssl && ssl_pending(&shadow->sh_socket) > 0)
-      goto relay_read_again;
-#endif
-    break;
-
-  case ET_DESTROY:
-    /* Event engine is done with this socket — safe to free memory.
-     * bounce_destroy_relay() deferred the free because gh_ref > 0
-     * when called from inside an event callback. */
-    if (entry) {
-      if (entry->rs_shadow) {
-        MyFree(entry->rs_shadow);
-        entry->rs_shadow = NULL;
-      }
-      MyFree(entry);
-    }
-    break;
-
-  case ET_WRITE:
-  {
-    /* Flush queued data from shadow sendQ to the relay socket */
-    unsigned int bytes_count = 0, bytes_written = 0;
-    IOResult result;
-
-    if (MsgQLength(&shadow->sh_sendQ) == 0) {
-      socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE);
-      break;
-    }
-
-#ifdef USE_SSL
-    if (shadow->sh_socket.ssl) {
-      /* SSL: coalesce sendQ into linear buffer and SSL_write.
-       * Can't use ssl_sendv — it requires a Client for error reporting. */
-      struct iovec iov[128];
-      char wbuf[BUFSIZE * 4];
-      unsigned int wlen = 0;
-      int iov_count, i, written;
-
-      iov_count = msgq_mapiov(&shadow->sh_sendQ, iov, 128, &bytes_count);
-      for (i = 0; i < iov_count && wlen < sizeof(wbuf); i++) {
-        unsigned int chunk = iov[i].iov_len;
-        if (wlen + chunk > sizeof(wbuf))
-          chunk = sizeof(wbuf) - wlen;
-        memcpy(wbuf + wlen, iov[i].iov_base, chunk);
-        wlen += chunk;
-      }
-
-      ERR_clear_error();
-      written = SSL_write(shadow->sh_socket.ssl, wbuf, wlen);
-      if (written > 0) {
-        msgq_delete(&shadow->sh_sendQ, written);
-        shadow->sh_sendB += written;
-      } else {
-        int err = SSL_get_error(shadow->sh_socket.ssl, written);
-        if (err != SSL_ERROR_WANT_WRITE && err != SSL_ERROR_WANT_READ) {
-          bounce_destroy_relay(entry, 1);
-          return;
-        }
-      }
-    } else
-#endif
-    {
-      result = os_sendv_nonb(shadow->sh_fd, &shadow->sh_sendQ,
-                             &bytes_count, &bytes_written);
-      if (result == IO_SUCCESS) {
-        msgq_delete(&shadow->sh_sendQ, bytes_written);
-        shadow->sh_sendB += bytes_written;
-      } else if (result == IO_FAILURE) {
-        bounce_destroy_relay(entry, 1);
-        return;
-      }
-      /* IO_BLOCKED: retry on next ET_WRITE */
-    }
-
-    /* Keep requesting writes if data remains */
-    if (MsgQLength(&shadow->sh_sendQ) > 0)
-      socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-    else
-      socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE);
-    break;
-  }
-
-  case ET_ERROR:
-    bounce_destroy_relay(entry, 1);
-    break;
-
-  default:
-    break;
-  }
-}
-
-/** Write output to a relay socket (B-side).
- * Queues data on the shadow's sendQ and requests a writable event.
- * The ET_WRITE handler in relay_shadow_read_callback flushes the queue.
- * @param[in] entry Relay entry to write to.
- * @param[in] data The formatted IRC line to send to the user.
- */
-static void relay_shadow_write(struct RelayShadowEntry *entry, const char *data)
-{
-  struct ShadowConnection *shadow;
-  struct MsgBuf *mb;
-
-  if (!entry || !entry->rs_shadow)
-    return;
-
-  shadow = entry->rs_shadow;
-  if (shadow->sh_fd < 0 || (shadow->sh_flags & SHADOW_FLAGS_DEAD))
-    return;
-
-  /* msgq_make appends \r\n automatically */
-
-  /* Queue on sendQ and request writable event for async flush */
-  mb = msgq_make(0, "%s", data);
-  if (mb) {
-    msgq_add(&shadow->sh_sendQ, mb, 0);
-    shadow->sh_sendM++;
-    msgq_clean(mb);
-    socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-  }
-}
-
-/** Send TOPIC (332/333) for a channel to a relay shadow.
- * @param[in] entry    Relay shadow entry.
- * @param[in] channame Channel name to send topic for.
- */
-static void relay_send_topic(struct RelayShadowEntry *entry,
-                              const char *channame)
-{
-  struct Channel *chptr;
-  char buf[BUFSIZE];
-
-  if (!entry || !channame)
-    return;
-
-  chptr = FindChannel(channame);
-  if (!chptr || !chptr->topic[0])
-    return;
-
-  ircd_snprintf(0, buf, sizeof(buf), ":%s 332 %s %s :%s",
-                cli_name(&me), entry->rs_nick, chptr->chname, chptr->topic);
-  relay_shadow_write(entry, buf);
-
-  ircd_snprintf(0, buf, sizeof(buf), ":%s 333 %s %s %s %lu",
-                cli_name(&me), entry->rs_nick, chptr->chname,
-                chptr->topic_nick, (unsigned long)chptr->topic_time);
-  relay_shadow_write(entry, buf);
-}
-
-/** Send NAMES (353/366) for a channel to a relay shadow.
- * Mirrors do_names() but writes through relay_shadow_write()
- * since we don't have a local Client* for the relay user.
- * @param[in] entry    Relay shadow entry.
- * @param[in] channame Channel name to send names for.
- */
-static void relay_send_names(struct RelayShadowEntry *entry,
-                              const char *channame)
-{
-  struct Channel *chptr;
-  struct Membership *member;
-  char buf[BUFSIZE];
-  char prefix[8];
-  int idx, mlen, needs_space;
-
-  if (!entry || !channame)
-    return;
-
-  chptr = FindChannel(channame);
-  if (!chptr)
-    return;
-
-  /* ":<server> 353 <nick> = <channel> :" */
-  mlen = strlen(cli_name(&me)) + 1 + 3 + 1 + strlen(entry->rs_nick) + 1
-       + 2 + strlen(chptr->chname) + 2;
-
-  /* Channel type prefix */
-  {
-    char chantype = '*';
-    if (PubChannel(chptr))
-      chantype = '=';
-    else if (SecretChannel(chptr))
-      chantype = '@';
-
-    ircd_snprintf(0, buf, sizeof(buf), ":%s 353 %s %c %s :",
-                  cli_name(&me), entry->rs_nick, chantype, chptr->chname);
-  }
-  idx = strlen(buf);
-  needs_space = 0;
-
-  for (member = chptr->members; member; member = member->next_member) {
-    struct Client *c2ptr = member->user;
-    int plen = 0;
-    int nlen;
-
-    if (IsZombie(member))
-      continue;
-    if (IsDelayedJoin(member))
-      continue;
-
-    /* Build status prefix */
-    if (IsChanOp(member))
-      prefix[plen++] = '@';
-    if (IsHalfOp(member))
-      prefix[plen++] = '%';
-    if (HasVoice(member))
-      prefix[plen++] = '+';
-    if (IsMemberHolding(member))
-      prefix[plen++] = '~';
-    prefix[plen] = '\0';
-
-    nlen = strlen(cli_name(c2ptr));
-
-    /* Check if adding this nick would overflow — flush if needed */
-    if (idx + needs_space + plen + nlen + 4 > BUFSIZE) {
-      relay_shadow_write(entry, buf);
-      ircd_snprintf(0, buf, sizeof(buf), ":%s 353 %s %c %s :",
-                    cli_name(&me), entry->rs_nick,
-                    PubChannel(chptr) ? '=' : (SecretChannel(chptr) ? '@' : '*'),
-                    chptr->chname);
-      idx = strlen(buf);
-      needs_space = 0;
-    }
-
-    if (needs_space)
-      buf[idx++] = ' ';
-    needs_space = 1;
-
-    memcpy(buf + idx, prefix, plen);
-    idx += plen;
-    memcpy(buf + idx, cli_name(c2ptr), nlen);
-    idx += nlen;
-    buf[idx] = '\0';
-  }
-
-  /* Flush remaining names */
-  if (needs_space)
-    relay_shadow_write(entry, buf);
-
-  /* RPL_ENDOFNAMES */
-  ircd_snprintf(0, buf, sizeof(buf), ":%s 366 %s %s :End of /NAMES list.",
-                cli_name(&me), entry->rs_nick, chptr->chname);
-  relay_shadow_write(entry, buf);
-}
-
-/** Replay local chathistory to a relay shadow for a single channel.
- * Queries the local MDBX chathistory DB and writes formatted messages
- * directly to the relay socket.  This avoids depending on the session
- * holder (A-side) for history — the leaf has its own DB and can also
- * use chathistory federation for channels it doesn't have locally.
- *
- * @param[in] entry  Relay shadow entry to write to.
- * @param[in] target Channel name to replay.
- * @param[in] limit  Max messages to replay.
- */
-static void relay_replay_history(struct RelayShadowEntry *entry,
-                                 const char *target, int limit)
-{
-  struct HistoryMessage *messages = NULL, *msg;
-  int count;
-  char buf[BUFSIZE];
-  char iso_time[32];
-  static const char *type_cmd[] = {
-    "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
-    "KICK", "MODE", "TOPIC", "TAGMSG", NULL /* GAP */
-  };
-
-  if (!entry || !entry->rs_shadow || !history_is_available())
-    return;
-
-  /* Replay last N messages — no floor timestamp since we don't know
-   * when the session was last active from the leaf's perspective.
-   * Use "0" as the after_timestamp to get the most recent messages. */
-  count = history_query_latest_after(target, limit, "0", &messages);
-  if (count <= 0 || !messages)
-    return;
-
-  for (msg = messages; msg; msg = msg->next) {
-    const char *cmd;
-    const char *content;
-
-    /* Skip gap markers */
-    if (msg->type == HISTORY_GAP)
-      continue;
-
-    cmd = (msg->type <= HISTORY_TAGMSG) ? type_cmd[msg->type] : "PRIVMSG";
-    content = msg->dyn_content ? msg->dyn_content : msg->content;
-
-    /* Convert timestamp to ISO 8601 for @time= tag */
-    if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) != 0)
-      continue;
-
-    /* Format: @time=<iso>;msgid=<id> :<sender> <CMD> <target> :<content> */
-    if (msg->type == HISTORY_TAGMSG || !content || !*content) {
-      ircd_snprintf(0, buf, sizeof(buf),
-                    "@time=%s;msgid=%s :%s %s %s",
-                    iso_time, msg->msgid, msg->sender, cmd, target);
-    } else {
-      ircd_snprintf(0, buf, sizeof(buf),
-                    "@time=%s;msgid=%s :%s %s %s :%s",
-                    iso_time, msg->msgid, msg->sender, cmd, target, content);
-    }
-    relay_shadow_write(entry, buf);
-  }
-
-  history_free_messages(messages);
 }
 
 /* ---------------------------------------------------------------- */
-/* Phase 2: Hold mode                                                */
+/* Hold mode                                                         */
 /* ---------------------------------------------------------------- */
 
 /** Check if a client should enter bouncer hold mode on disconnect.
@@ -4272,6 +2475,9 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
   int class_bouncer = 0;
   struct ConnectionClass *cls;
 
+  /* Forced exits: never hold a /KILL'd user */
+  if (HasFlag(cptr, FLAG_KILLED))
+    return NULL;
   if (!bounce_enabled_for(cptr))
     return NULL;
   if (!IsAccount(cptr))
@@ -4411,7 +2617,7 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
  * Handles two cases:
  * 1. HOLDING session: Ghost disconnected and holding. Normal revive.
  * 2. ACTIVE relay-only: Ghost has no local socket (cli_fd == -1), only
- *    remote shadows provide connectivity. A local client connecting
+ *    remote aliases provide connectivity. A local client connecting
  *    to the managing server becomes the primary via socket transplant.
  *
  * @param[in] session The HOLDING or ACTIVE relay-only session.
@@ -4441,10 +2647,10 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
       return -1;
     was_holding = 1;
   } else if (session->hs_state == BOUNCE_ACTIVE) {
-    /* Relay-only promotion: ghost has no local socket, remote shadow(s)
+    /* Relay-only promotion: ghost has no local socket, remote alias(es)
      * provide connectivity. Local client should become primary. */
     if (cli_fd(ghost) >= 0)
-      return -1;  /* Ghost has a local socket — use shadow-attach instead */
+      return -1;  /* Ghost has a local socket — use alias-attach instead */
     was_holding = 0;
   } else {
     return -1;
@@ -4634,8 +2840,6 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * timestamp and ID to reflect this new connection. */
   bounce_accumulate_and_reset_primary(session, ghost);
   cli_firsttime(ghost) = cli_firsttime(temp);
-  session->hs_primary_id = ++session->hs_client_id_seq;
-
   /* Record connect event in connection history */
   bounce_history_connect(session, con_sock_ip(ghost_con),
                          cli_sockhost(ghost));
@@ -4803,10 +3007,64 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
             alias, chptr->chname);
           continue;
         }
-        add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
+        /* Copy primary's channel mode flags so operator commands and
+         * @#channel delivery work for the alias. */
+        {
+          struct Membership *pmem = find_member_link(chptr, who);
+          unsigned int aflags = CHFL_ALIAS;
+          unsigned short aoplevel = MAXOPLEVEL;
+          if (pmem) {
+            aflags |= (pmem->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
+            aoplevel = OpLevel(pmem);
+          }
+          add_user_to_channel(chptr, alias, aflags, aoplevel);
+        }
       }
     }
   }
+}
+
+/** Send post-join replies (TOPIC, MARKREAD, NAMES) to all local aliases
+ * of the given primary in the channel.  Each alias gets do_names called
+ * with its own client so per-connection caps (UHNAMES etc.) are respected.
+ * Must be called AFTER the JOIN echo so clients see JOIN before NAMES.
+ */
+void bounce_send_alias_join_replies(struct Channel *chptr, struct Client *who)
+{
+  struct Membership *member;
+
+  if (!chptr || !who || !IsAccount(who) || IsBouncerAlias(who))
+    return;
+
+  /* Send to the primary itself if local. */
+  if (MyConnect(who)) {
+    if (chptr->topic[0]) {
+      send_reply(who, RPL_TOPIC, chptr->chname, chptr->topic);
+      send_reply(who, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
+                 chptr->topic_time);
+    }
+    send_markread_on_join(who, chptr->chname);
+    if (!HasCap(who, CAP_DRAFT_NOIMPLICITNAMES))
+      do_names(who, chptr, NAMES_ALL|NAMES_EON);
+  }
+
+  /* Send to each local alias with per-connection caps. */
+  for (member = chptr->members; member; member = member->next_member) {
+    struct Client *acli = member->user;
+    if (!IsMemberAlias(member) || !MyConnect(acli))
+      continue;
+    if (cli_alias_primary(acli) != who)
+      continue;
+    if (chptr->topic[0]) {
+      send_reply(acli, RPL_TOPIC, chptr->chname, chptr->topic);
+      send_reply(acli, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
+                 chptr->topic_time);
+    }
+    send_markread_on_join(acli, chptr->chname);
+    if (!HasCap(acli, CAP_DRAFT_NOIMPLICITNAMES))
+      do_names(acli, chptr, NAMES_ALL|NAMES_EON);
+  }
+
 }
 
 /** Sync alias part: when primary leaves a channel, remove local aliases.
@@ -4834,6 +3092,41 @@ void bounce_sync_alias_part(struct Channel *chptr, struct Client *who)
     if (IsMemberAlias(member) && cli_alias_primary(member->user) == who) {
       remove_user_from_channel(member->user, chptr);
     }
+  }
+}
+
+/** Sync channel mode flags from primary to all aliases in the channel.
+ * Called after the primary's CHFL_CHANOP/HALFOP/VOICE status changes
+ * (e.g. from mode_process_clients() or CLEARMODE) so that aliases
+ * inherit the same operator/voice status for command permissions and
+ * @#channel message delivery.
+ */
+void bounce_sync_alias_chanmodes(struct Channel *chptr, struct Client *primary)
+{
+  struct Membership *member;
+  struct Membership *primary_member;
+  unsigned int mode_bits;
+  unsigned short oplevel;
+
+  if (!chptr || !primary || !IsAccount(primary) || IsBouncerAlias(primary))
+    return;
+
+  primary_member = find_member_link(chptr, primary);
+  if (!primary_member)
+    return;
+
+  mode_bits = primary_member->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE);
+  oplevel = OpLevel(primary_member);
+
+  for (member = chptr->members; member; member = member->next_member) {
+    if (!IsMemberAlias(member))
+      continue;
+    if (cli_alias_primary(member->user) != primary)
+      continue;
+    /* Replace mode bits, preserve CHFL_ALIAS and other flags */
+    member->status = (member->status & ~(CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE))
+                   | mode_bits;
+    SetOpLevel(member, oplevel);
   }
 }
 
@@ -5375,8 +3668,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
         continue;
       }
 
-      if (!find_member_link(chptr, sptr))
-        add_user_to_channel(chptr, sptr, CHFL_ALIAS, MAXOPLEVEL);
+      if (!find_member_link(chptr, sptr)) {
+        /* Copy primary's channel mode flags (member is the primary's membership) */
+        unsigned int aflags = CHFL_ALIAS
+                            | (member->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
+        add_user_to_channel(chptr, sptr, aflags, OpLevel(member));
+      }
 
       /* Append to channel list for BX C (only joined channels) */
       if (chanlist_len > 0 && chanlist_len < (int)sizeof(chanlist_buf) - 1)
@@ -5655,7 +3952,17 @@ track_alias:
         Debug((DEBUG_INFO, "BX C: skipping +Z channel %s (alias not SSL)", chan_name));
         continue;
       }
-      add_user_to_channel(chptr, alias, CHFL_ALIAS, MAXOPLEVEL);
+      /* Copy primary's channel mode flags so alias inherits op/voice status */
+      {
+        struct Membership *pmem = find_member_link(chptr, primary);
+        unsigned int aflags = CHFL_ALIAS;
+        unsigned short aoplevel = MAXOPLEVEL;
+        if (pmem) {
+          aflags |= (pmem->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
+          aoplevel = OpLevel(pmem);
+        }
+        add_user_to_channel(chptr, alias, aflags, aoplevel);
+      }
       Debug((DEBUG_INFO, "BX C: added alias %s to channel %s (members=%d aliases=%d)",
              alias_numeric, chan_name, chptr->users, chptr->aliases));
     }
@@ -6031,1066 +4338,6 @@ void bounce_initiate_transfer(struct BouncerSession *session,
     timer_del(&session->hs_hold_timer);
 }
 
-/* ---------------------------------------------------------------- */
-/* Shadow connection management (multi-client support)               */
-/* ---------------------------------------------------------------- */
-
-/** Global pointer to the shadow that originated the current command.
- * Used for reply routing in send.c — when a shadow sends a command,
- * replies are directed to the shadow instead of (or in addition to)
- * the primary connection. NULL when the primary is the source.
- */
-struct ShadowConnection *current_shadow = NULL;
-
-/** Flush a shadow connection's sendQ to its socket.
- * Analogous to deliver_it() for normal clients, but operates directly
- * on a ShadowConnection's fd and MsgQ.
- */
-static void shadow_flush_sendq(struct ShadowConnection *shadow)
-{
-  unsigned int bytes_written = 0;
-  unsigned int bytes_count = 0;
-  IOResult result;
-
-  if (shadow->sh_flags & SHADOW_FLAGS_DEAD)
-    return;
-
-  if (MsgQLength(&shadow->sh_sendQ) == 0)
-    return;
-
-#ifdef USE_SSL
-  /* Coalesced flush path for SSL pending auth-phase writes.
-   *
-   * When a pipelining client had unflushed auth responses, the SSL object
-   * carries pending write state (wpend_tot/wpend_buf in wbuf).  The
-   * pending TLS record is already encrypted in wbuf — ssl3_write_pending
-   * writes from wbuf, not from the application buffer.
-   *
-   * After ssl3_write_pending completes, OpenSSL continues writing from
-   * buf + wpend_ret for (len - wpend_ret) bytes.  By placing the original
-   * auth data first in the coalesced buffer, buf[wpend_ret..] correctly
-   * contains the remaining auth data + welcome messages.  The client
-   * receives: pending TLS record (auth) + new records (remaining auth +
-   * welcome) = complete auth responses + welcome sequence. */
-  if ((shadow->sh_flags & SHADOW_FLAGS_SSL_PENDING) && shadow->sh_ssl_flush) {
-    /* Build the coalesced buffer on first attempt.  On retries (after
-     * WANT_WRITE), reuse the same heap buffer — OpenSSL expects the
-     * same len for wnum-based progress tracking.  ACCEPT_MOVING_WRITE_BUFFER
-     * allows the buf pointer to differ between retries. */
-    if (shadow->sh_ssl_flush_len == shadow->sh_ssl_flush_auth) {
-      /* Phase 1 → Phase 2: coalesce auth prefix with sendQ welcome data */
-      unsigned int sendq_len = MsgQLength(&shadow->sh_sendQ);
-      unsigned int new_len = shadow->sh_ssl_flush_auth + sendq_len;
-      char *new_buf;
-      struct iovec ciov[128];
-      unsigned int ciov_bytes = 0;
-      int ciov_count;
-      unsigned int off;
-      int i;
-
-      new_buf = (char *)MyMalloc(new_len);
-      if (!new_buf) {
-        shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-        return;
-      }
-
-      /* Copy auth prefix */
-      memcpy(new_buf, shadow->sh_ssl_flush, shadow->sh_ssl_flush_auth);
-
-      /* Copy sendQ iovecs (welcome messages) */
-      ciov_count = msgq_mapiov(&shadow->sh_sendQ, ciov, 128, &ciov_bytes);
-      off = shadow->sh_ssl_flush_auth;
-      for (i = 0; i < ciov_count && off < new_len; i++) {
-        unsigned int n = ciov[i].iov_len;
-        if (off + n > new_len) n = new_len - off;
-        memcpy(new_buf + off, ciov[i].iov_base, n);
-        off += n;
-      }
-
-      MyFree(shadow->sh_ssl_flush);
-      shadow->sh_ssl_flush = new_buf;
-      shadow->sh_ssl_flush_len = new_len;
-      /* sh_ssl_flush_auth unchanged — marks the auth/sendQ boundary */
-
-      Debug((DEBUG_INFO, "Bouncer: built coalesced flush buf for shadow #%u: "
-             "%u auth + %u sendQ = %u total",
-             shadow->sh_id, shadow->sh_ssl_flush_auth, sendq_len, new_len));
-    }
-
-    /* Attempt the coalesced SSL_write */
-    {
-      int res = SSL_write(shadow->sh_socket.ssl, shadow->sh_ssl_flush,
-                          shadow->sh_ssl_flush_len);
-      if (res > 0) {
-        /* Success: pending TLS record flushed + new data written.
-         * Delete the sendQ portion (welcome messages) that was included
-         * in the coalesced buffer.  Any messages added to the sendQ
-         * after the coalesced buffer was built remain untouched. */
-        unsigned int sendq_consumed = shadow->sh_ssl_flush_len
-                                      - shadow->sh_ssl_flush_auth;
-        if (sendq_consumed > 0)
-          msgq_delete(&shadow->sh_sendQ, sendq_consumed);
-        shadow->sh_sendB += res;
-
-        /* Clean up flush state */
-        MyFree(shadow->sh_ssl_flush);
-        shadow->sh_ssl_flush = NULL;
-        shadow->sh_ssl_flush_len = 0;
-        shadow->sh_ssl_flush_auth = 0;
-        shadow->sh_flags &= ~SHADOW_FLAGS_SSL_PENDING;
-        shadow->sh_flags &= ~SHADOW_FLAGS_BLOCKED;
-
-        Debug((DEBUG_INFO, "Bouncer: SSL coalesced flush OK for shadow #%u "
-               "(%d bytes)", shadow->sh_id, res));
-
-        /* If more data remains (added after coalesced build), flush normally */
-        if (MsgQLength(&shadow->sh_sendQ) > 0)
-          goto normal_flush;
-        return;
-      } else {
-        int err = SSL_get_error(shadow->sh_socket.ssl, res);
-        if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
-          shadow->sh_flags |= SHADOW_FLAGS_BLOCKED;
-          Debug((DEBUG_INFO, "Bouncer: SSL coalesced flush blocked for "
-                 "shadow #%u (err=%d)", shadow->sh_id, err));
-          return;
-        } else {
-          /* Fatal SSL error */
-          Debug((DEBUG_ERROR, "Bouncer: SSL coalesced flush failed for "
-                 "shadow #%u (res=%d err=%d)", shadow->sh_id, res, err));
-          MyFree(shadow->sh_ssl_flush);
-          shadow->sh_ssl_flush = NULL;
-          shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-          return;
-        }
-      }
-    }
-  }
-
-normal_flush:
-#endif
-
-#ifdef USE_SSL
-  if (shadow->sh_socket.ssl) {
-    struct Client *primary = (shadow->sh_session && shadow->sh_session->hs_client)
-                             ? shadow->sh_session->hs_client : NULL;
-    if (!primary) { shadow->sh_flags |= SHADOW_FLAGS_DEAD; return; }
-    result = ssl_sendv(&shadow->sh_socket, primary,
-                       &shadow->sh_sendQ, &bytes_count, &bytes_written);
-  } else
-#endif
-  {
-    result = os_sendv_nonb(shadow->sh_fd, &shadow->sh_sendQ,
-                           &bytes_count, &bytes_written);
-  }
-
-  switch (result) {
-  case IO_SUCCESS:
-    shadow->sh_flags &= ~SHADOW_FLAGS_BLOCKED;
-    if (bytes_written > 0) {
-      msgq_delete(&shadow->sh_sendQ, bytes_written);
-      shadow->sh_sendB += bytes_written;
-    }
-    if (bytes_written < bytes_count)
-      shadow->sh_flags |= SHADOW_FLAGS_BLOCKED;
-    break;
-  case IO_BLOCKED:
-    shadow->sh_flags |= SHADOW_FLAGS_BLOCKED;
-    break;
-  case IO_FAILURE:
-    shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-    break;
-  }
-}
-
-/** Handle a CAP command from a shadow connection locally.
- *
- * Shadow CAP commands must be processed here rather than forwarded to
- * parse_client(primary), because CAP modifies per-connection state.
- * Forwarding would modify the primary's caps instead of the shadow's.
- *
- * Supports the REQ and LIST subcommands. LS is not meaningful post-
- * registration but is handled for completeness. END is a no-op.
- *
- * @param[in] shadow The shadow connection that sent CAP.
- * @param[in] primary The session's primary client.
- * @param[in] args The CAP arguments (everything after "CAP ").
- */
-static void
-shadow_handle_cap(struct ShadowConnection *shadow, struct Client *primary,
-                  const char *args)
-{
-  char buf[BUFSIZE];
-  struct MsgBuf *mb;
-  const char *subcmd;
-  const char *caplist;
-
-  if (!args || !*args)
-    return;
-
-  /* Parse subcmd */
-  ircd_strncpy(buf, args, sizeof(buf) - 1);
-  buf[sizeof(buf) - 1] = '\0';
-  subcmd = buf;
-
-  /* Skip to end of subcmd */
-  caplist = subcmd;
-  while (*caplist && !IsSpace(*caplist))
-    caplist++;
-  if (*caplist) {
-    /* Null-terminate subcmd, advance caplist past space */
-    buf[caplist - buf] = '\0';
-    caplist++;
-    /* Skip leading colon if present */
-    if (*caplist == ':')
-      caplist++;
-  } else {
-    caplist = NULL;
-  }
-
-  if (0 == ircd_strcmp(subcmd, "REQ") && caplist && *caplist) {
-    /* Process CAP REQ for the shadow */
-    const char *cl = caplist;
-    struct CapSet set, rem;
-    int neg, cap_id;
-    unsigned long flags;
-    int any_unknown = 0;
-
-    memset(&set, 0, sizeof(set));
-    memset(&rem, 0, sizeof(rem));
-
-    while (cl) {
-      if (!cap_lookup(&cl, &neg, &cap_id, &flags)) {
-        any_unknown = 1;
-        continue;
-      }
-
-      if (neg) {
-        if (flags & CAPFL_STICKY)
-          continue;
-        CapSet(&rem, cap_id);
-      } else {
-        if (flags & CAPFL_PROHIBIT)
-          continue;
-        CapSet(&set, cap_id);
-      }
-    }
-
-    if (any_unknown) {
-      /* NAK the entire request per CAP spec */
-      mb = msgq_make(primary, ":%s CAP %s NAK :%s\r\n",
-                     cli_name(&me), cli_name(primary), caplist);
-    } else {
-      /* Apply changes to shadow's caps */
-      unsigned int i;
-      unsigned int nwords = sizeof(shadow->sh_active.bits) / sizeof(shadow->sh_active.bits[0]);
-      for (i = 0; i < nwords; i++) {
-        shadow->sh_active.bits[i] |= set.bits[i];
-        shadow->sh_active.bits[i] &= ~rem.bits[i];
-        shadow->sh_capab.bits[i] |= set.bits[i];
-        shadow->sh_capab.bits[i] &= ~rem.bits[i];
-      }
-
-      /* Recompute session union */
-      bounce_recompute_session_caps(primary);
-
-      /* ACK to shadow */
-      mb = msgq_make(primary, ":%s CAP %s ACK :%s\r\n",
-                     cli_name(&me), cli_name(primary), caplist);
-    }
-
-    if (mb) {
-      msgq_add(&shadow->sh_sendQ, mb, 0);
-      msgq_clean(mb);
-    }
-  }
-  else if (0 == ircd_strcmp(subcmd, "LIST")) {
-    /* Send shadow's active caps back */
-    /* For simplicity, just ACK with empty list — shadow already knows its caps */
-    mb = msgq_make(primary, ":%s CAP %s LIST :\r\n",
-                   cli_name(&me), cli_name(primary));
-    if (mb) {
-      msgq_add(&shadow->sh_sendQ, mb, 0);
-      msgq_clean(mb);
-    }
-  }
-  else if (0 == ircd_strcmp(subcmd, "END")) {
-    /* No-op for post-registration shadow */
-  }
-  /* LS, other subcmds: silently ignore for shadows */
-}
-
-/** Read data from a shadow connection and forward commands to primary.
- *
- * Reads bytes from the shadow's socket, buffers them, extracts complete
- * lines (terminated by \r\n), and dispatches each line through
- * parse_client() with the primary Client as cptr.
- *
- * The global current_shadow is set before dispatch so that reply routing
- * can direct responses to this shadow.
- *
- * @param[in] shadow Shadow connection to read from.
- * @return 0 on success, -1 if shadow should be removed.
- */
-static int shadow_read_packet(struct ShadowConnection *shadow)
-{
-  struct BouncerSession *session = shadow->sh_session;
-  struct Client *primary;
-  char readbuf[BUFSIZE];
-  int length;
-  IOResult result;
-  char *s, *end;
-
-  if (!session || session->hs_state != BOUNCE_ACTIVE || !session->hs_client)
-    return -1;
-
-  primary = session->hs_client;
-
-#ifdef USE_SSL
-shadow_ssl_read_again:
-#endif
-  /* Read from shadow's socket */
-#ifdef USE_SSL
-  if (shadow->sh_socket.ssl)
-    result = ssl_recv(&shadow->sh_socket, primary, readbuf,
-                      sizeof(readbuf) - 1, (unsigned int *)&length);
-  else
-#endif
-    result = os_recv_nonb(shadow->sh_fd, readbuf, sizeof(readbuf) - 1,
-                          (unsigned int *)&length);
-
-  switch (result) {
-  case IO_SUCCESS:
-    if (length <= 0)
-      return -1; /* EOF */
-    break;
-  case IO_BLOCKED:
-    return 0; /* Nothing to read right now */
-  case IO_FAILURE:
-    return -1; /* Socket error */
-  }
-
-  shadow->sh_lasttime = CurrentTime;
-  shadow->sh_flags &= ~SHADOW_FLAGS_PINGSENT;
-  shadow->sh_receiveB += length;
-
-  /* Append to shadow's parse buffer */
-  if (shadow->sh_count + length >= BUFSIZE) {
-    /* Buffer overflow — discard excess */
-    length = BUFSIZE - shadow->sh_count - 1;
-    if (length <= 0)
-      return 0;
-  }
-  memcpy(shadow->sh_buffer + shadow->sh_count, readbuf, length);
-  shadow->sh_count += length;
-  shadow->sh_buffer[shadow->sh_count] = '\0';
-
-  /* Extract and process complete lines */
-  s = shadow->sh_buffer;
-  while ((end = strchr(s, '\n')) != NULL) {
-    /* Null-terminate this line (strip \r\n) */
-    *end = '\0';
-    if (end > s && *(end - 1) == '\r')
-      *(end - 1) = '\0';
-
-    if (*s != '\0') {
-      int line_len = strlen(s);
-      shadow->sh_receiveM++;
-
-      /* Handle QUIT from shadow — disconnect this shadow only */
-      if (line_len >= 4 && 0 == ircd_strncmp(s, "QUIT", 4) &&
-          (s[4] == '\0' || s[4] == ' ')) {
-        shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-        return -1;
-      }
-
-      /* Handle PING locally for the shadow — respond with PONG */
-      if (line_len >= 4 && 0 == ircd_strncmp(s, "PING", 4)) {
-        struct MsgBuf *mb;
-        const char *param = (s[4] == ' ') ? s + 5 : cli_name(&me);
-        /* msgq_make appends \r\n, so don't include it in the format */
-        mb = msgq_make(primary, ":%s PONG %s :%s",
-                       cli_name(&me), cli_name(&me), param);
-        if (mb) {
-          msgq_add(&shadow->sh_sendQ, mb, 0);
-          socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-          msgq_clean(mb);
-        }
-        shadow->sh_lasttime = CurrentTime;
-        shadow->sh_flags &= ~SHADOW_FLAGS_PINGSENT;
-        s = end + 1;
-        continue;
-      }
-
-      /* Handle PONG locally — update shadow liveness, don't forward to primary */
-      if (line_len >= 4 && 0 == ircd_strncmp(s, "PONG", 4)) {
-        shadow->sh_lasttime = CurrentTime;
-        shadow->sh_flags &= ~SHADOW_FLAGS_PINGSENT;
-        s = end + 1;
-        continue;
-      }
-
-      /* Handle CAP from shadow — process locally instead of forwarding
-       * to primary, since CAP modifies the *connection's* capabilities.
-       * If forwarded via parse_client(primary), it would modify the
-       * primary's caps instead of the shadow's. */
-      if (line_len >= 3 && 0 == ircd_strncmp(s, "CAP", 3) &&
-          (s[3] == '\0' || s[3] == ' ')) {
-        shadow_handle_cap(shadow, primary, s + (s[3] == ' ' ? 4 : 3));
-        s = end + 1;
-        continue;
-      }
-
-      /* Forward command to primary Client.
-       * Set current_shadow so reply routing directs responses to this shadow.
-       */
-      current_shadow = shadow;
-      {
-        char line_copy[BUFSIZE];
-        ircd_strncpy(line_copy, s, sizeof(line_copy) - 1);
-        line_copy[sizeof(line_copy) - 1] = '\0';
-        parse_client(primary, line_copy, line_copy + strlen(line_copy));
-      }
-      current_shadow = NULL;
-
-      /* Check if primary was killed by the command */
-      if (IsDead(primary)) {
-        return -1;
-      }
-    }
-
-    s = end + 1;
-  }
-
-  /* Compact remaining partial data to start of buffer */
-  if (s > shadow->sh_buffer) {
-    unsigned int remaining = shadow->sh_count - (s - shadow->sh_buffer);
-    if (remaining > 0)
-      memmove(shadow->sh_buffer, s, remaining);
-    shadow->sh_count = remaining;
-    shadow->sh_buffer[remaining] = '\0';
-  }
-
-#ifdef USE_SSL
-  /* Drain SSL internal buffer — OpenSSL may have decrypted multiple IRC
-   * commands from a single TLS record.  Without this, commands buffered
-   * inside OpenSSL stall until the next network read triggers epoll. */
-  if (shadow->sh_socket.ssl && ssl_pending(&shadow->sh_socket) > 0)
-    goto shadow_ssl_read_again;
-#endif
-
-  return 0;
-}
-
-/** Socket event callback for shadow connections.
- * Handles readable/writable/error events on shadow sockets.
- */
-static void shadow_sock_callback(struct Event *ev)
-{
-  struct ShadowConnection *shadow;
-
-  assert(0 != ev_socket(ev));
-
-  shadow = (struct ShadowConnection *)s_data(ev_socket(ev));
-
-  /* Guard against stale events for already-promoted/removed shadows.
-   * bounce_promote_shadow() clears s_data before socket_del(); if a stale
-   * event slips through (e.g. same epoll_wait batch), shadow will be NULL. */
-  if (!shadow) {
-    if (ev_type(ev) != ET_DESTROY)
-      Debug((DEBUG_INFO, "Bouncer: ignoring stale shadow event (type=%d, s_data=NULL)",
-             ev_type(ev)));
-    return;
-  }
-
-  switch (ev_type(ev)) {
-  case ET_DESTROY:
-    /* Socket is being destroyed — free the shadow struct if still valid.
-     * bounce_remove_shadow() defers the free to here so the event engine
-     * never accesses freed memory in the epoll dispatch loop.
-     * bounce_promote_shadow() and bounce_destroy() clear s_data before
-     * socket_del() and use bounce_defer_shadow_free() instead. */
-    if (shadow) {
-#ifdef USE_SSL
-      ssl_free(&shadow->sh_socket);
-      if (shadow->sh_ssl_flush) {
-        MyFree(shadow->sh_ssl_flush);
-        shadow->sh_ssl_flush = NULL;
-      }
-#endif
-      if (shadow->sh_listener) {
-        release_listener(shadow->sh_listener);
-        shadow->sh_listener = NULL;
-      }
-      MyFree(shadow);
-    }
-    return;
-
-  case ET_READ:
-    /* Read and forward commands from shadow to primary */
-    if (shadow_read_packet(shadow) < 0) {
-      struct BouncerSession *sess = shadow->sh_session;
-      /* Flush any pending data (e.g. KILL/ERROR messages) before
-       * closing — the shadow's sendQ may have been populated by
-       * send_buffer's dup loop but never written to the fd yet. */
-      if (MsgQLength(&shadow->sh_sendQ) > 0)
-        shadow_flush_sendq(shadow);
-      shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-      bounce_remove_shadow(shadow);
-      /* Fix #23: If removing this shadow leaves the session orphaned
-       * (no primary client and no remaining shadows), destroy it.
-       * This happens when the primary QUITs while shadows are still
-       * connected — exit_one_client NULLs hs_client but can't destroy
-       * because shadows exist.  When the last shadow disconnects,
-       * nobody was destroying the orphaned session. */
-      if (sess && !sess->hs_client && !sess->hs_shadows) {
-        bounce_broadcast(sess, 'X', NULL);
-        bounce_destroy(sess);
-      }
-      return;
-    }
-    break;
-
-  case ET_WRITE:
-    /* Flush shadow sendQ to its socket */
-    shadow_flush_sendq(shadow);
-    /* Keep requesting writes if data remains (even if blocked — we need
-     * the write event to know when the OS buffer drains). */
-    if (MsgQLength(&shadow->sh_sendQ) > 0) {
-      socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-    } else {
-      /* sendQ drained — stop requesting writable events */
-      socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE);
-    }
-    break;
-
-  case ET_ERROR:
-  {
-    /* Shadow connection error — remove it */
-    struct BouncerSession *sess = shadow->sh_session;
-    /* Best-effort flush of pending data before closing */
-    if (MsgQLength(&shadow->sh_sendQ) > 0)
-      shadow_flush_sendq(shadow);
-    shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-    bounce_remove_shadow(shadow);
-    /* Fix #23: destroy orphaned session (see ET_READ comment) */
-    if (sess && !sess->hs_client && !sess->hs_shadows) {
-      bounce_broadcast(sess, 'X', NULL);
-      bounce_destroy(sess);
-    }
-    break;
-  }
-
-  case ET_EOF:
-  {
-    /* Shadow disconnected */
-    struct BouncerSession *sess = shadow->sh_session;
-    shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-    bounce_remove_shadow(shadow);
-    /* Fix #23: destroy orphaned session (see ET_READ comment) */
-    if (sess && !sess->hs_client && !sess->hs_shadows) {
-      bounce_broadcast(sess, 'X', NULL);
-      bounce_destroy(sess);
-    }
-    break;
-  }
-
-  default:
-    break;
-  }
-}
-
-/** Add a shadow connection to a bouncer session.
- *
- * Creates a new ShadowConnection with its own socket, sendQ, recvQ,
- * and CAP state. The shadow is NOT added to the nick hash or channel
- * lists — it piggybacks on the primary Client's identity.
- */
-struct ShadowConnection *bounce_add_shadow(struct BouncerSession *session,
-                                            int fd,
-                                            const char *sock_ip)
-{
-  struct ShadowConnection *shadow;
-  int max_shadows;
-
-  assert(0 != session);
-  assert(session->hs_state == BOUNCE_ACTIVE);
-
-  /* Enforce per-session shadow limit */
-  max_shadows = feature_int(FEAT_BOUNCER_MAX_SHADOWS);
-  if (max_shadows > 0 && session->hs_shadow_count >= max_shadows)
-    return NULL;
-
-  /* Allocate and initialize */
-  shadow = (struct ShadowConnection *)MyCalloc(1, sizeof(*shadow));
-  shadow->sh_id = ++session->hs_client_id_seq;
-  shadow->sh_fd = fd;
-  shadow->sh_session = session;
-  shadow->sh_lasttime = CurrentTime;
-  shadow->sh_since = CurrentTime;
-  shadow->sh_connected = CurrentTime;
-  shadow->sh_away_state = 0;  /* Present by default */
-  shadow->sh_away_msg[0] = '\0';
-  shadow->sh_flags = 0;
-  shadow->sh_count = 0;
-  shadow->sh_buffer[0] = '\0';
-  shadow->sh_label[0] = '\0';
-  shadow->sh_label_responded = 0;
-  shadow->sh_capab_version = 0;
-
-  /* Copy remote IP */
-  if (sock_ip)
-    ircd_strncpy(shadow->sh_sock_ip, sock_ip, SOCKIPLEN + 1);
-  else
-    shadow->sh_sock_ip[0] = '\0';
-
-  /* Initialize sendQ and recvQ */
-  msgq_init(&shadow->sh_sendQ);
-  /* DBuf is zero-initialized by MyCalloc */
-
-  /* Initialize CAP sets to zero (no caps negotiated yet) */
-  memset(&shadow->sh_capab, 0, sizeof(shadow->sh_capab));
-  memset(&shadow->sh_active, 0, sizeof(shadow->sh_active));
-
-  /* Register shadow socket with event engine */
-  if (!socket_add(&shadow->sh_socket, shadow_sock_callback,
-                  (void *)shadow, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
-    Debug((DEBUG_ERROR, "Bouncer: failed to add shadow socket fd=%d", fd));
-    MyFree(shadow);
-    close(fd);
-    return NULL;
-  }
-
-  /* Add to session's shadow list (prepend) */
-  shadow->sh_next = session->hs_shadows;
-  session->hs_shadows = shadow;
-  session->hs_shadow_count++;
-  session->hs_connect_count++;
-
-  Debug((DEBUG_INFO, "Bouncer: added shadow #%u to session %s (fd=%d, ip=%s, total=%d)",
-         shadow->sh_id, session->hs_sessid, fd,
-         sock_ip ? sock_ip : "?", session->hs_shadow_count));
-
-  return shadow;
-}
-
-/** Remove a shadow connection from its session.
- * Cleans up the shadow's sendQ, recvQ, socket, and frees the struct.
- */
-void bounce_remove_shadow(struct ShadowConnection *shadow)
-{
-  struct BouncerSession *session;
-  struct ShadowConnection **pp;
-
-  assert(0 != shadow);
-  session = shadow->sh_session;
-  assert(0 != session);
-
-  /* Unlink from session's shadow list */
-  for (pp = &session->hs_shadows; *pp; pp = &(*pp)->sh_next) {
-    if (*pp == shadow) {
-      *pp = shadow->sh_next;
-      session->hs_shadow_count--;
-      break;
-    }
-  }
-
-  Debug((DEBUG_INFO, "Bouncer: removing shadow #%u from session %s (remaining=%d)",
-         shadow->sh_id, session->hs_sessid, session->hs_shadow_count));
-
-  /* Roll shadow's lifetime data counters into session aggregates */
-  bounce_accumulate_shadow(session, shadow);
-
-  /* Record disconnect event in connection history */
-  bounce_history_disconnect(session, shadow->sh_sock_ip);
-
-  /* Recompute session union caps — this shadow's caps are no longer part of the session */
-  if (session->hs_client && MyConnect(session->hs_client))
-    bounce_recompute_session_caps(session->hs_client);
-
-  /* Clear current_shadow if this shadow is the active command source */
-  if (current_shadow == shadow)
-    current_shadow = NULL;
-
-  /* Release listener reference before cleanup */
-  if (shadow->sh_listener) {
-    release_listener(shadow->sh_listener);
-    shadow->sh_listener = NULL;
-  }
-
-  /* Mark dead, clean up queues, and trigger socket destruction.
-   * socket_del() marks the socket GEN_DESTROY; the event system will
-   * deliver ET_DESTROY to shadow_sock_callback later.  We defer the
-   * actual free(shadow) to that ET_DESTROY handler so the event engine
-   * never touches freed memory.  Clean up sendQ/recvQ here since they
-   * are no longer needed, but leave the shadow struct alive. */
-  shadow->sh_flags |= SHADOW_FLAGS_DEAD;
-
-  /* Clean up sendQ and recvQ */
-  MsgQClear(&shadow->sh_sendQ);
-  dbuf_delete(&shadow->sh_recvQ, DBufLength(&shadow->sh_recvQ));
-
-  /* Free SSL and pending flush state */
-#ifdef USE_SSL
-  if (shadow->sh_ssl_flush) {
-    MyFree(shadow->sh_ssl_flush);
-    shadow->sh_ssl_flush = NULL;
-  }
-  ssl_free(&shadow->sh_socket);
-  shadow->sh_socket.ssl = NULL;
-#endif
-
-  /* socket_del clears pending events; close fd after so the fd isn't
-   * reused before the engine stops tracking it. */
-  socket_del(&shadow->sh_socket);
-  if (shadow->sh_fd >= 0) {
-    close(shadow->sh_fd);
-    shadow->sh_fd = -1;
-  }
-
-  /* If session has no more connections (primary gone + no shadows),
-   * the session may need to enter HOLDING. This is handled by the
-   * caller (Phase F: bounce_promote_shadow or exit_one_client). */
-}
-
-/** Promote the first shadow to primary connection.
- *
- * When the primary disconnects but shadows remain, we transplant the
- * first shadow's socket into the Client's Connection struct so the
- * Client stays alive with the shadow's socket driving it.
- *
-/** Transition a session to relay-only mode when the primary disconnects
- * but remote shadows still exist.  Closes the primary's socket, clears
- * stale caps, and keeps the session ACTIVE without a local fd.
- * The ghost continues to function via BS R/O through the relay server.
- *
- * Returns 0 on success, -1 if no remote shadows found.
- */
-int bounce_relay_only_transition(struct BouncerSession *session, struct Client *cptr)
-{
-  struct ShadowConnection *sh;
-  int found_remote = 0;
-
-  if (!session || !cptr)
-    return -1;
-
-  /* Verify a non-dead remote shadow exists */
-  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-    if ((sh->sh_flags & SHADOW_FLAGS_REMOTE) && !(sh->sh_flags & SHADOW_FLAGS_DEAD)) {
-      found_remote = 1;
-      break;
-    }
-  }
-  if (!found_remote)
-    return -1;
-
-  Debug((DEBUG_INFO,
-         "Bouncer: primary disconnect, relay-only mode for %s session %s",
-         cli_name(cptr), session->hs_sessid));
-
-  /* Close the primary's socket (fd, confs, listener, queues) */
-  close_connection(cptr);
-  ClrFlag(cptr, FLAG_DEADSOCKET);
-
-  /* Clear stale caps from the dead primary connection.
-   * The ghost has no local socket — only remote shadow caps matter. */
-  memset(cli_active_own(cptr), 0, sizeof(struct CapSet));
-  memset(cli_active(cptr), 0, sizeof(struct CapSet));
-
-  /* Roll primary counters into session aggregates */
-  bounce_accumulate_and_reset_primary(session, cptr);
-  bounce_history_disconnect(session, cli_sock_ip(cptr));
-
-  session->hs_last_active = CurrentTime;
-
-  /* Recompute union caps with only the remote shadow(s) */
-  bounce_recompute_session_caps(cptr);
-
-  return 0;
-}
-
-/** Promote the first eligible (non-remote) shadow to primary.
- *
- * The caller must have already closed/cleaned up the primary's old socket
- * (e.g. via close_connection or equivalent cleanup).  This function:
- *  1. Removes the first shadow from the list
- *  2. Transfers its fd into the Client's Connection
- *  3. Re-registers the socket with the event engine (client callback)
- *  4. Copies CAP state from shadow to Connection
- *  5. Frees the shadow struct
- *
- * Returns 0 on success, -1 if no shadows available.
- */
-int bounce_promote_shadow(struct BouncerSession *session)
-{
-  struct ShadowConnection *shadow;
-  struct Client *cptr;
-  struct Connection *con;
-  int old_fd, fd;
-
-  assert(0 != session);
-
-  /* Find a LOCAL shadow to promote.  Remote shadows (SHADOW_FLAGS_REMOTE)
-   * have no local fd or socket — they use BS R/O through the relay server
-   * and cannot be promoted to primary. */
-  shadow = NULL;
-  {
-    struct ShadowConnection *s;
-    for (s = session->hs_shadows; s; s = s->sh_next) {
-      if (!(s->sh_flags & SHADOW_FLAGS_REMOTE) && !(s->sh_flags & SHADOW_FLAGS_DEAD)) {
-        shadow = s;
-        break;
-      }
-    }
-  }
-  if (!shadow)
-    return -1; /* No local shadows to promote (may still have remote shadows) */
-
-  cptr = session->hs_client;
-  assert(0 != cptr);
-  con = cli_connect(cptr);
-  assert(0 != con);
-
-#ifdef USE_SSL
-  /* Prefer a TLS shadow if the primary had TLS, to preserve +z usermode
-   * and +Z (SSL-only) channel access.  Falls back to first local shadow if
-   * no TLS shadow exists. */
-  if (IsSSL(cptr)) {
-    struct ShadowConnection *s;
-    for (s = session->hs_shadows; s; s = s->sh_next) {
-      if (!(s->sh_flags & SHADOW_FLAGS_REMOTE) && s->sh_socket.ssl) { shadow = s; break; }
-    }
-  }
-
-  /* Refuse promotion if it would put a non-TLS connection in +Z channels.
-   * Primary was TLS, best shadow is plaintext, user is in +Z → HOLDING. */
-  if (IsSSL(cptr) && !shadow->sh_socket.ssl && cli_user(cptr)) {
-    struct Membership *m;
-    for (m = cli_user(cptr)->channel; m; m = m->next_channel) {
-      if (m->channel->mode.exmode & EXMODE_SSLONLY) {
-        Debug((DEBUG_INFO,
-               "Bouncer: refusing promotion for %s - no TLS shadow, in +Z channel %s",
-               cli_name(cptr), m->channel->chname));
-        return -1;  /* Session goes to HOLDING */
-      }
-    }
-  }
-#endif
-
-  /* Unlink chosen shadow from list (may not be the first element
-   * when TLS preference selected a different shadow). */
-  {
-    struct ShadowConnection **pp;
-    for (pp = &session->hs_shadows; *pp; pp = &(*pp)->sh_next) {
-      if (*pp == shadow) {
-        *pp = shadow->sh_next;
-        break;
-      }
-    }
-  }
-  session->hs_shadow_count--;
-  shadow->sh_next = NULL;
-
-  Debug((DEBUG_INFO, "Bouncer: promoting shadow #%u (fd %d) to primary for session %s",
-         shadow->sh_id, shadow->sh_fd, session->hs_sessid));
-
-  /* Step 1: Remove shadow's socket from the event engine WHILE the fd
-   * is still valid.  engine_delete calls epoll_ctl(EPOLL_CTL_DEL) to
-   * explicitly remove the fd from the epoll interest list, preventing
-   * stale epoll events from referencing the freed shadow struct.
-   *
-   * Clear s_data BEFORE socket_del() because in non-threaded mode,
-   * socket_del() synchronously fires ET_DESTROY → shadow_sock_callback.
-   * If s_data is still set, the callback will MyFree(shadow) and we'd
-   * access freed memory. */
-  s_data(&shadow->sh_socket) = NULL;
-  socket_del(&shadow->sh_socket);
-
-  /* Step 2: Steal the shadow's fd — no dup() needed since engine_delete
-   * already removed it from the epoll interest list.  The fd transfers
-   * directly to the primary's Connection. */
-  fd = shadow->sh_fd;
-  shadow->sh_fd = -1; /* prevent cleanup from closing the transferred fd */
-
-  /* Step 3: Close the primary's old fd.  The caller has NOT called
-   * close_connection() — doing so would call socket_del() on the
-   * primary's socket, which corrupts gh_ref when the event engine
-   * still holds references from the current event callback.  Instead,
-   * we close the fd directly (kernel removes it from epoll) and use
-   * socket_reattach() below to swap in the new fd. */
-  old_fd = cli_fd(cptr);
-  if (old_fd >= 0) {
-    LocalClientArray[old_fd] = 0;
-    close(old_fd);
-  }
-
-#ifdef USE_SSL
-  /* Free the primary's old SSL object (if any).  This must happen AFTER
-   * close(old_fd) — SSL_free implicitly calls SSL_shutdown which needs
-   * the fd to be gone so the close_notify isn't actually sent. */
-  if (con_socket(con).ssl) {
-    SSL_free(con_socket(con).ssl);
-    con_socket(con).ssl = NULL;
-  }
-  /* Transfer shadow's SSL object to the primary's Connection.
-   * NULL out shadow's copy so deferred free doesn't double-free. */
-  con_socket(con).ssl = shadow->sh_socket.ssl;
-  shadow->sh_socket.ssl = NULL;
-#endif
-
-  /* Step 4: Transplant the stolen fd into the Client's Connection. */
-  s_fd(&con_socket(con)) = fd;
-  ClrFlag(cptr, FLAG_DEADSOCKET);
-  ClrFlag(cptr, FLAG_BLOCKED);
-
-  /* Step 5: Transfer sendQ/recvQ contents.
-   * Move any pending data from shadow's queues to the Connection. */
-  MsgQClear(&con_sendQ(con));
-  /* Swap the MsgQ — move shadow's queued data to connection */
-  con_sendQ(con) = shadow->sh_sendQ;
-  /* Zero out shadow's sendQ so cleanup doesn't free the moved data */
-  msgq_init(&shadow->sh_sendQ);
-
-  /* Transfer recvQ (struct copy moves buffer pointers) */
-  DBufClear(&con_recvQ(con));
-  con_recvQ(con) = shadow->sh_recvQ;
-  memset(&shadow->sh_recvQ, 0, sizeof(shadow->sh_recvQ));
-
-  /* Step 6: Copy CAP state from shadow to Connection.
-   * The shadow's caps become this connection's own negotiated caps.
-   * cli_active (the union) will be recomputed after promotion. */
-  memcpy(con_capab(con), &shadow->sh_capab, sizeof(struct CapSet));
-  memcpy(con_active_own(con), &shadow->sh_active, sizeof(struct CapSet));
-  memcpy(con_active(con), &shadow->sh_active, sizeof(struct CapSet));
-  con_capab_version(con) = shadow->sh_capab_version;
-
-  /* Step 6b: Transfer connection identity from shadow to primary.
-   * The primary's IP, sockhost, port, listener may be stale (from the
-   * old primary connection). Update them to reflect the promoted shadow's
-   * actual connection properties. Mirrors bounce_revive() Step 6a. */
-  memcpy(&cli_ip(cptr), &shadow->sh_ip, sizeof(struct irc_in_addr));
-  ircd_strncpy(con_sock_ip(con), shadow->sh_sock_ip, SOCKIPLEN + 1);
-  ircd_strncpy(con_sockhost(con), shadow->sh_sockhost, HOSTLEN + 1);
-  con->con_port = shadow->sh_port;
-  memcpy(&cli_connectip(cptr), &shadow->sh_connectip, sizeof(struct irc_in_addr));
-  ircd_strncpy(cli_connecthost(cptr), shadow->sh_connecthost, HOSTLEN + 1);
-
-  /* Transfer listener reference (shadow's ref transfers to primary) */
-  if (con_listener(con))
-    release_listener(con_listener(con));
-  con_listener(con) = shadow->sh_listener;
-  shadow->sh_listener = NULL; /* Prevent deferred free from releasing */
-
-  /* Step 7: Update LocalClientArray */
-  LocalClientArray[fd] = cptr;
-
-  /* Step 8: Re-register socket with event engine.
-   * For relay-only ghosts (revived from HOLDING via BS S without a local
-   * socket), the primary's socket was socket_del'd during hold entry and
-   * never re-initialized — GEN_ACTIVE is not set.  Use socket_add in that
-   * case.  For normal ghosts with an active socket, use socket_reattach
-   * which preserves the GenHeader (gh_ref, gh_flags, list linkage). */
-  if (!(cli_socket(cptr).s_header.gh_flags & GEN_ACTIVE)) {
-    /* Ghost socket was inactive (relay-only) — use socket_add */
-    Debug((DEBUG_INFO, "Bouncer: using socket_add for inactive ghost socket in shadow promotion"));
-    if (!socket_add(&cli_socket(cptr), client_sock_callback,
-                    (void *)con, SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
-      Debug((DEBUG_ERROR, "Bouncer: socket_add failed during shadow promotion for %s",
-             cli_name(cptr)));
-      close(fd);
-      s_fd(&con_socket(con)) = -1;
-      LocalClientArray[fd] = 0;
-      SetFlag(cptr, FLAG_DEADSOCKET);
-      bounce_defer_shadow_free(shadow);
-      return -1;
-    }
-    con_freeflag(con) |= FREEFLAG_SOCKET;
-  } else {
-    /* Normal ghost with active socket — use socket_reattach */
-    if (!socket_reattach(&cli_socket(cptr), fd)) {
-      Debug((DEBUG_ERROR, "Bouncer: socket_reattach failed during shadow promotion for %s",
-             cli_name(cptr)));
-      close(fd);
-      s_fd(&con_socket(con)) = -1;
-      LocalClientArray[fd] = 0;
-      SetFlag(cptr, FLAG_DEADSOCKET);
-      bounce_defer_shadow_free(shadow);
-      return -1;
-    }
-  }
-
-  /* Step 9: Reset socket interest to readable only (we may have been
-   * writable from the old connection's pending sendQ). */
-  socket_events(&cli_socket(cptr), SOCK_EVENT_READABLE);
-
-#ifdef USE_SSL
-  /* Step 9b: Update FLAG_SSL and channel nonsslusers counters.
-   * A TLS→plaintext promotion clears +z and increments nonsslusers.
-   * A plaintext→TLS promotion sets +z and decrements nonsslusers.
-   * This ensures +Z (SSL-only) channel enforcement stays correct. */
-  {
-    int was_ssl = IsSSL(cptr);
-    int now_ssl = (con_socket(con).ssl != NULL);
-    if (now_ssl && !was_ssl) {
-      SetSSL(cptr);
-      if (cli_user(cptr)) {
-        struct Membership *m;
-        for (m = cli_user(cptr)->channel; m; m = m->next_channel)
-          if (m->channel->nonsslusers > 0)
-            m->channel->nonsslusers--;
-      }
-    } else if (!now_ssl && was_ssl) {
-      ClearSSL(cptr);
-      if (cli_user(cptr)) {
-        struct Membership *m;
-        for (m = cli_user(cptr)->channel; m; m = m->next_channel)
-          m->channel->nonsslusers++;
-      }
-    }
-  }
-#endif
-
-  /* Step 10: Update timing */
-  con_lasttime(con) = shadow->sh_lasttime;
-  con_since(con) = shadow->sh_since;
-
-  /* Step 10b: Accumulate the dying primary's data counters into session
-   * aggregates, then set the ghost's counters FROM the promoted shadow's
-   * lifetime total.  The promoted connection carries its full history
-   * (accumulated while it was a shadow) into the primary role. */
-  bounce_accumulate_and_reset_primary(session, cptr);
-  con_sendB(con) = shadow->sh_sendB;
-  con_receiveB(con) = shadow->sh_receiveB;
-  con_sendM(con) = shadow->sh_sendM;
-  con_receiveM(con) = shadow->sh_receiveM;
-  cli_firsttime(cptr) = shadow->sh_connected;
-
-  /* Step 11: Update session primary ID */
-  session->hs_primary_id = shadow->sh_id;
-
-  /* Step 12: Clean up the shadow struct (queues already moved).
-   * s_data was already cleared before socket_del() in step 2 to prevent
-   * the synchronous ET_DESTROY handler from freeing the shadow.
-   *
-   * IMPORTANT: Do NOT MyFree(shadow) here.  We are inside an engine_loop
-   * event callback (processing the primary's disconnect).  If epoll_wait
-   * returned events for both the primary and shadow sockets in the same
-   * batch, the shadow's event is still in the events array with
-   * evt->data.ptr pointing to &shadow->sh_socket.  Freeing the shadow
-   * now would cause engine_loop to read freed memory when it processes
-   * that stale event.  Instead, defer the free to timer_run() which
-   * executes after all events in the current batch are processed. */
-  bounce_defer_shadow_free(shadow);
-
-  /* Recompute session union caps for the new primary + remaining shadows */
-  bounce_recompute_session_caps(cptr);
-
-  log_write(LS_USER, L_TRACE, 0, "Bouncer: shadow promoted to primary for %s session %s",
-            cli_name(cptr), session->hs_sessid);
-
-  return 0;
-}
-
 /** Find the bouncer session for a client. */
 struct BouncerSession *bounce_get_session(struct Client *cptr)
 {
@@ -7139,12 +4386,10 @@ int bounce_compute_effective_away(struct BouncerSession *session,
                                    char *effective_msg)
 {
   struct Client *primary;
-  struct ShadowConnection *sh;
   int has_present = 0;
   int has_away = 0;
-  int old_effective;
   const char *latest_away_msg = NULL;
-  time_t latest_away_time = 0;
+  int i;
 
   assert(0 != session);
   assert(0 != effective_state);
@@ -7153,13 +4398,9 @@ int bounce_compute_effective_away(struct BouncerSession *session,
   primary = session->hs_client;
   effective_msg[0] = '\0';
 
-  /* Remember old state for change detection.
-   * We store the effective state in hs_hold_override's upper bits.
-   * Actually, let's use a simpler approach: just compute and let caller compare. */
-
   /* Check primary connection's per-connection away state.
    * con_pre_away tracks the primary's own away state (0=present, 1=away, 2=away-star),
-   * independent of shadow commands.  con_pre_away_msg stores the primary's per-connection
+   * independent of alias commands.  con_pre_away_msg stores the primary's per-connection
    * away message.  cli_user(primary)->away reflects the EFFECTIVE state and is updated
    * by the caller after this computation. */
   if (primary && MyUser(primary)) {
@@ -7176,24 +4417,28 @@ int bounce_compute_effective_away(struct BouncerSession *session,
     }
   }
 
-  /* Check all shadow connections */
-  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-    if (sh->sh_flags & SHADOW_FLAGS_DEAD)
+  /* Check alias connections */
+  for (i = 0; i < session->hs_alias_count; i++) {
+    struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+    if (!alias || !IsBouncerAlias(alias))
       continue;
-    if (sh->sh_away_state == 2) {
-      /* AWAY * — invisible to aggregation */
-      continue;
-    } else if (sh->sh_away_state == 1) {
-      /* Explicit away */
-      has_away = 1;
-      /* Use most recently set away message */
-      if (sh->sh_away_msg[0] && sh->sh_since > latest_away_time) {
-        latest_away_msg = sh->sh_away_msg;
-        latest_away_time = sh->sh_since;
+    if (MyUser(alias)) {
+      int alias_state = con_pre_away(cli_connect(alias));
+      if (alias_state == 2) {
+        /* AWAY * — invisible to aggregation */
+      } else if (alias_state == 1) {
+        has_away = 1;
+        if (con_pre_away_msg(cli_connect(alias))[0])
+          latest_away_msg = con_pre_away_msg(cli_connect(alias));
+      } else {
+        has_present = 1;
       }
     } else {
-      /* Present */
-      has_present = 1;
+      /* Remote alias — check its user away state */
+      if (cli_user(alias) && cli_user(alias)->away)
+        has_away = 1;
+      else
+        has_present = 1;
     }
   }
 
@@ -7220,104 +4465,41 @@ int bounce_connection_count(struct BouncerSession *session)
     return 0;
   if (session->hs_state != BOUNCE_ACTIVE || !session->hs_client)
     return 0;
-  /* Primary (1) + shadows */
-  return 1 + session->hs_shadow_count;
+  /* Primary (1) + aliases */
+  return 1 + session->hs_alias_count;
 }
 
-/** Helper: write a raw IRC line to a shadow's sendQ.
- * Uses the primary client as the msgq_make dest (for formatting),
- * then queues to the shadow's sendQ.
- */
-static void shadow_send_raw(struct ShadowConnection *shadow,
-                             struct Client *primary,
-                             const char *fmt, ...)
-{
-  char buf[BUFSIZE];
-  struct MsgBuf *mb;
-  va_list ap;
-  int len;
-
-  va_start(ap, fmt);
-  len = vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-
-  if (len <= 0 || len >= (int)sizeof(buf))
-    return;
-
-  /* Strip trailing \r\n — msgq_make adds its own \r\n termination.
-   * Callers may include \r\n in their format strings; without stripping,
-   * the MsgBuf would contain double \r\n. */
-  while (len > 0 && (buf[len - 1] == '\r' || buf[len - 1] == '\n')) {
-    buf[--len] = '\0';
-  }
-
-  if (len == 0)
-    return;
-
-  mb = msgq_make(primary, "%s", buf);
-  if (mb) {
-    msgq_add(&shadow->sh_sendQ, mb, 0);
-    msgq_clean(mb);
-  }
-}
-
-/** Recompute cli_active as the union of all session connections' caps.
- * For bouncer sessions: cli_active = con_active_own | sh1.sh_active | sh2.sh_active | ...
- * For non-bouncer clients: cli_active = con_active_own (no shadows to merge).
- *
- * Called after any cap change on primary (CAP REQ/ACK/CLEAR) or shadow
- * (CAP intercept in shadow_read_packet), and on shadow attach/detach.
+/** Recompute cli_active from cli_active_own.
+ * With the alias system, each alias has its own Client with its own caps,
+ * so the primary's cli_active simply mirrors cli_active_own.
  *
  * @param[in] primary The primary client.
  */
 void bounce_recompute_session_caps(struct Client *primary)
 {
-  struct BouncerSession *session;
-  struct ShadowConnection *sh;
-
   if (!primary || !MyConnect(primary))
     return;
 
-  /* Start with this connection's own negotiated caps */
+  /* cli_active == cli_active_own (aliases have their own Client caps) */
   *cli_active(primary) = *cli_active_own(primary);
-
-  /* If no bouncer session, we're done — cli_active == cli_active_own */
-  session = bounce_get_session(primary);
-  if (!session)
-    return;
-
-  /* OR in each shadow's caps */
-  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-    if (!(sh->sh_flags & SHADOW_FLAGS_DEAD))
-      CapSetOR(cli_active(primary), &sh->sh_active);
-  }
 }
 
-/** Build a union CapSet from the primary connection and all shadow
- * connections' active capabilities.
- *
- * Used for formatting outbound messages with the maximal set of tags
- * that any connection (primary or shadow) might need. The send_buffer()
- * shadow duplication loop then strips tags per-connection, ensuring
- * each connection only receives tags it negotiated.
- *
- * This solves the CAP state divergence problem: when the primary has
- * fewer caps than a shadow, the message would otherwise be formatted
- * without tags the shadow needs (since tag filtering is subtractive).
+/** Build a union CapSet from the primary connection's active capabilities.
+ * With the alias system, each alias has its own Client and own caps,
+ * so we just return the primary's caps.
  *
  * @param[in] session Bouncer session.
- * @param[out] out CapSet to populate with the union of all connections' caps.
+ * @param[out] out CapSet to populate with the primary's caps.
  */
 void bounce_build_union_caps(struct BouncerSession *session, struct CapSet *out)
 {
-  struct ShadowConnection *sh;
   unsigned int i;
   unsigned int nwords = sizeof(out->bits) / sizeof(out->bits[0]);
 
   assert(0 != session);
   assert(0 != out);
 
-  /* Start with primary's active caps */
+  /* Just return primary's active caps */
   if (session->hs_client && MyConnect(session->hs_client)) {
     struct CapSet *primary_caps = cli_active(session->hs_client);
     for (i = 0; i < nwords; i++)
@@ -7326,154 +4508,6 @@ void bounce_build_union_caps(struct BouncerSession *session, struct CapSet *out)
     for (i = 0; i < nwords; i++)
       out->bits[i] = 0;
   }
-
-  /* OR in each shadow's active caps */
-  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-    if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-      continue;
-    for (i = 0; i < nwords; i++)
-      out->bits[i] |= sh->sh_active.bits[i];
-  }
-}
-
-/** Send IRC registration welcome sequence to a newly attached shadow.
- *
- * This gives the shadow connection a full registration sequence so that
- * standard IRC client libraries work without modification. The shadow
- * receives RPL_WELCOME through MOTD, appearing as a normal connection
- * to the session's nick.
- *
- * @param[in] shadow The newly created shadow connection.
- */
-void bounce_send_shadow_welcome(struct ShadowConnection *shadow)
-{
-  struct BouncerSession *session;
-  struct Client *primary;
-  const char *nick;
-
-  assert(0 != shadow);
-  session = shadow->sh_session;
-  assert(0 != session);
-  primary = session->hs_client;
-  assert(0 != primary);
-
-  nick = cli_name(primary);
-
-  /* 001 RPL_WELCOME */
-  shadow_send_raw(shadow, primary,
-    ":%s 001 %s :Welcome to the %s IRC Network %s\r\n",
-    cli_name(&me), nick, feature_str(FEAT_NETWORK), nick);
-
-  /* 002 RPL_YOURHOST */
-  shadow_send_raw(shadow, primary,
-    ":%s 002 %s :Your host is %s, running version %s\r\n",
-    cli_name(&me), nick, cli_name(&me), version);
-
-  /* 003 RPL_CREATED */
-  shadow_send_raw(shadow, primary,
-    ":%s 003 %s :This server was created %s\r\n",
-    cli_name(&me), nick, creation);
-
-  /* 004 RPL_MYINFO */
-  shadow_send_raw(shadow, primary,
-    ":%s 004 %s %s %s %s %s %s\r\n",
-    cli_name(&me), nick, cli_name(&me), version,
-    infousermodes, infochanmodes, infochanmodeswithparams);
-
-  /* 005 RPL_ISUPPORT — required for clients to know channel modes,
-   * PREFIX, CHANMODES, etc.  Route via current_shadow so send_reply()
-   * delivers to the shadow's sendQ through the intercept path. */
-  current_shadow = shadow;
-  send_supported(primary);
-  current_shadow = NULL;
-
-  /* 375 RPL_MOTDSTART + 376 RPL_ENDOFMOTD (minimal) */
-  shadow_send_raw(shadow, primary,
-    ":%s 375 %s :- %s Message of the Day -\r\n",
-    cli_name(&me), nick, cli_name(&me));
-  shadow_send_raw(shadow, primary,
-    ":%s 376 %s :End of /MOTD command.\r\n",
-    cli_name(&me), nick);
-
-  /* NOTE: bouncer shadow attached (informational) */
-  shadow_send_raw(shadow, primary,
-    ":%s NOTE BOUNCER SHADOW_ATTACHED :Attached to session %s as connection #%u\r\n",
-    cli_name(&me), session->hs_sessid, shadow->sh_id);
-
-  /* Replay channel state: the shadow needs to know which channels
-   * the primary is in so the client can display them.  For each
-   * channel, send JOIN + TOPIC (if set) + NAMES. */
-  if (cli_user(primary)) {
-    struct Membership *member;
-    for (member = cli_user(primary)->channel; member; member = member->next_channel) {
-      struct Channel *chptr = member->channel;
-
-      /* Skip invisible memberships */
-      if (IsZombie(member) || IsDelayedJoin(member))
-        continue;
-
-      /* Send JOIN — use extended-join format if shadow negotiated it */
-      if (CapHas(&shadow->sh_active, CAP_EXTJOIN))
-        shadow_send_raw(shadow, primary,
-          ":%s!%s@%s JOIN %s %s :%s\r\n",
-          nick, cli_user(primary)->username, cli_user(primary)->host,
-          chptr->chname,
-          IsAccount(primary) ? cli_account(primary) : "*",
-          cli_info(primary));
-      else
-        shadow_send_raw(shadow, primary,
-          ":%s!%s@%s JOIN :%s\r\n",
-          nick, cli_user(primary)->username, cli_user(primary)->host,
-          chptr->chname);
-
-      /* Route TOPIC and NAMES replies to this shadow via current_shadow.
-       * send_reply() / do_names() use sendto_one() which checks
-       * current_shadow and routes to the shadow's sendQ. */
-      current_shadow = shadow;
-
-      if (chptr->topic[0]) {
-        send_reply(primary, RPL_TOPIC, chptr->chname, chptr->topic);
-        send_reply(primary, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
-                   chptr->topic_time);
-      }
-
-      /* Send MARKREAD — CapActive now returns the union, so if this
-       * shadow has read-marker, the check inside send_markread_on_join
-       * will pass.  current_shadow routes the output to the shadow. */
-      send_markread_on_join(primary, chptr->chname);
-
-      if (!CapRecipientHas(primary, CAP_DRAFT_NOIMPLICITNAMES))
-        do_names(primary, chptr, NAMES_ALL|NAMES_EON);
-
-      current_shadow = NULL;
-    }
-  }
-
-  /* Auto-replay recent history for the new shadow connection.
-   * Use session's hs_last_active as the replay baseline — it's the
-   * authoritative "last activity" time, consistent with alias path. */
-  if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY) && cli_user(primary)
-      && !CapHas(&shadow->sh_active, CAP_DRAFT_CHATHISTORY)) {
-    time_t since = session->hs_last_active;
-    if (since == 0)
-      since = session->hs_created;
-    if (since > 0 && since < CurrentTime) {
-      current_shadow = shadow;
-      bouncer_auto_replay(primary, session, since);
-      current_shadow = NULL;
-    }
-  }
-
-  /* Flush the welcome messages immediately.
-   * Previously we relied on socket_events to trigger ET_WRITE, but there
-   * seems to be a race or ordering issue that delays the flush by ~60s
-   * (until check_pings sends a PING and triggers socket_events again).
-   * Calling shadow_flush_sendq directly ensures the welcome is sent now. */
-  shadow_flush_sendq(shadow);
-
-  /* Request writable notification for any remaining data (if blocked) */
-  if (MsgQLength(&shadow->sh_sendQ) > 0)
-    socket_events(&shadow->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
 }
 
 /** Replay channel state to a client after held session resume.

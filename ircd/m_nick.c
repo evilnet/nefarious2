@@ -268,7 +268,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
   /* Defer collision with bouncer ghost or live bouncer session user.
    * After SASL, if accounts match, the bounce system handles it
-   * (ghost revive or shadow attach). Otherwise send late 433.
+   * (ghost revive or alias creation). Otherwise send late 433.
    * For remote ghosts, IsBouncerHold and bounce_get_session won't
    * match (flag isn't propagated via P10, hs_client is NULL on
    * replicas), so also check by account for any bouncer session. */

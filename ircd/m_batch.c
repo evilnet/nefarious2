@@ -61,7 +61,6 @@
 #include "class.h"
 #include "history.h"
 #include "ml_content.h"
-#include "bouncer_session.h"
 #include "paste_listener.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -546,15 +545,9 @@ process_multiline_batch(struct Client *sptr)
 
   /* Deliver to recipients */
   if (is_channel) {
-    /* Suppress automatic shadow duplication - we handle shadows explicitly
-     * to send the appropriate format based on each shadow's capabilities. */
-    suppress_shadow_dup = 1;
-
     /* For each member of the channel */
     for (member = chptr->members; member; member = member->next_member) {
       struct Client *to = member->user;
-      struct BouncerSession *mbsess;
-      int member_has_shadows;
 
       if (to == sptr)
         continue;  /* Skip sender (handle echo-message separately) */
@@ -562,15 +555,13 @@ process_multiline_batch(struct Client *sptr)
       if (!MyConnect(to))
         continue;  /* Skip remote users - handled by S2S relay */
 
-      mbsess = bounce_get_session(to);
-      member_has_shadows = (mbsess && mbsess->hs_shadow_count > 0);
-
-      /* Send to PRIMARY based on its OWN capabilities (not union) */
-      if (CapOwnHas(to, CAP_DRAFT_MULTILINE) && CapOwnHas(to, CAP_BATCH)) {
-        /* Send as batch to supporting primary */
+      /* With aliases, each connection is a separate Client with its own caps.
+       * CapActive checks the client's own capabilities directly. */
+      if (CapActive(to, CAP_DRAFT_MULTILINE) && CapActive(to, CAP_BATCH)) {
+        /* Send as batch to supporting client */
         char batchid[16];
         char timebuf[32];
-        int use_tags = CapOwnHas(to, CAP_MSGTAGS);
+        int use_tags = CapActive(to, CAP_MSGTAGS);
 
         ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                       NumNick(sptr), con_batch_seq(cli_connect(to))++);
@@ -647,145 +638,21 @@ process_multiline_batch(struct Client *sptr)
         }
       }
 
-      /* Send to each SHADOW based on its capabilities */
-      if (member_has_shadows) {
-        struct ShadowConnection *sh;
-        for (sh = mbsess->hs_shadows; sh; sh = sh->sh_next) {
-          if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-            continue;
-
-          if (CapHas(&sh->sh_active, CAP_DRAFT_MULTILINE) && CapHas(&sh->sh_active, CAP_BATCH)) {
-            /* Shadow has multiline - send batch */
-            char batchid[16];
-            char timebuf[32];
-            int use_tags = CapHas(&sh->sh_active, CAP_MSGTAGS);
-            struct MsgBuf *mb;
-
-            ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
-                          NumNick(sptr), con_batch_seq(cli_connect(to))++);
-
-            mb = msgq_make(to, ":%s BATCH +%s draft/multiline %s",
-                           cli_name(&me), batchid, chptr->chname);
-            if (mb) {
-              msgq_add(&sh->sh_sendQ, mb, 0);
-              socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-              msgq_clean(mb);
-            }
-
-            first = 1;
-            for (lp = con_ml_messages(con); lp; lp = lp->next) {
-              int concat = lp->value.cp[0];
-              char *text = lp->value.cp + 1;
-
-              if (use_tags) {
-                format_time_tag(timebuf, sizeof(timebuf));
-              }
-
-              if (first && !concat) {
-                if (use_tags) {
-                  mb = msgq_make(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                                 batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                 get_displayed_host(sptr), chptr->chname, text);
-                } else {
-                  mb = msgq_make(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                                 batchid, cli_name(sptr), cli_user(sptr)->username,
-                                 get_displayed_host(sptr), chptr->chname, text);
-                }
-                first = 0;
-              } else if (concat) {
-                if (use_tags) {
-                  mb = msgq_make(to, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                                 batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                 get_displayed_host(sptr), chptr->chname, text);
-                } else {
-                  mb = msgq_make(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                                 batchid, cli_name(sptr), cli_user(sptr)->username,
-                                 get_displayed_host(sptr), chptr->chname, text);
-                }
-              } else {
-                if (use_tags) {
-                  mb = msgq_make(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                                 batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                 get_displayed_host(sptr), chptr->chname, text);
-                } else {
-                  mb = msgq_make(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                                 batchid, cli_name(sptr), cli_user(sptr)->username,
-                                 get_displayed_host(sptr), chptr->chname, text);
-                }
-              }
-              if (mb) {
-                msgq_add(&sh->sh_sendQ, mb, 0);
-                socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(mb);
-              }
-            }
-
-            mb = msgq_make(to, ":%s BATCH -%s", cli_name(&me), batchid);
-            if (mb) {
-              msgq_add(&sh->sh_sendQ, mb, 0);
-              socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-              msgq_clean(mb);
-            }
-          } else {
-            /* Shadow doesn't have multiline - send fallback */
-            int total_lines = con_ml_msg_count(con);
-            int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-            int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
-            int sent = 0;
-            struct MsgBuf *mb;
-
-            for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
-              char *text = lp->value.cp + 1;
-              if (*text == '\0')
-                continue;  /* Skip blank lines */
-              mb = msgq_make(to, ":%s!%s@%s PRIVMSG %s :%s",
-                             cli_name(sptr), cli_user(sptr)->username,
-                             get_displayed_host(sptr), chptr->chname, text);
-              if (mb) {
-                msgq_add(&sh->sh_sendQ, mb, 0);
-                socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(mb);
-              }
-              sent++;
-            }
-
-            /* Send truncation notice if needed */
-            if (total_lines > max_preview) {
-              int remaining = total_lines - sent;
-              if (batch_paste_url) {
-                mb = msgq_make(to, ":%s NOTICE %s :[%d more lines - %s]",
-                               cli_name(&me), chptr->chname, remaining, batch_paste_url);
-              } else {
-                mb = msgq_make(to, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
-                               cli_name(&me), chptr->chname, remaining);
-              }
-              if (mb) {
-                msgq_add(&sh->sh_sendQ, mb, 0);
-                socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(mb);
-              }
-            }
-          }
-        }
-      }
     }
 
-    suppress_shadow_dup = 0;
-
-    /* Echo to sender and bouncer shadows with per-connection capability awareness.
+    /* Echo to sender if they have echo-message capability.
      *
-     * Bouncer sessions may have multiple connections (primary + shadows) with
-     * different capabilities. Each connection that has echo-message should
-     * receive the echo, formatted according to its own multiline capability.
+     * With aliases, each connection is a separate Client with its own channel
+     * membership and capabilities. Aliases receive messages through normal
+     * channel delivery above. PM echo for aliases is handled by
+     * bounce_echo_pm_to_session.
      *
      * Bounded echo protection: allows echo to proceed even if SendQ is
      * near the limit, as long as we stay within an extended limit
      * (sendq_limit + input_bytes * ECHO_MAX_FACTOR).
      */
     {
-      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-      struct BouncerSession *bsess = bounce_get_session(sptr);
-      int has_shadows = bsess && bsess->hs_shadow_count > 0;
+      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
       int skip_echo = 0;
 
       /* SendQ protection check */
@@ -807,244 +674,85 @@ process_multiline_batch(struct Client *sptr)
         }
       }
 
-      /* Also need to deliver to primary when a shadow originated the message,
-       * even if primary doesn't have echo-message — the primary didn't type it. */
-      int from_shadow = (current_shadow != NULL);
-      struct ShadowConnection *saved_shadow = current_shadow;
+      if (!skip_echo && need_echo) {
+        if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+          /* Sender has multiline - send batch echo */
+          char batchid[16];
+          char timebuf[32];
+          int use_tags = CapActive(sptr, CAP_MSGTAGS);
+          int use_label = con_ml_label(con)[0] && CapActive(sptr, CAP_LABELEDRESP);
 
-      if (!skip_echo && (need_echo || has_shadows || from_shadow)) {
-        /* Suppress automatic shadow duplication - we handle shadows manually
-         * to send the appropriate format based on each shadow's capabilities. */
-        suppress_shadow_dup = 1;
+          ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+                        NumNick(sptr), con_batch_seq(con)++);
 
-        /* Clear current_shadow so send_buffer() delivers to the primary's
-         * sendQ, not the shadow's.  The shadow loop below handles shadows. */
-        current_shadow = NULL;
-
-        /* Send to primary if it has echo-message, OR if message came from a
-         * shadow (primary didn't type it, so it needs to see it regardless). */
-        if (need_echo || from_shadow) {
-          if (CapOwnHas(sptr, CAP_DRAFT_MULTILINE) && CapOwnHas(sptr, CAP_BATCH)) {
-            /* Primary has multiline - send batch echo */
-            char batchid[16];
-            char timebuf[32];
-            int use_tags = CapOwnHas(sptr, CAP_MSGTAGS);
-            int use_label = con_ml_label(con)[0] && CapOwnHas(sptr, CAP_LABELEDRESP);
-
-            ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
-                          NumNick(sptr), con_batch_seq(con)++);
-
-            if (use_label) {
-              sendrawto_one(sptr, "@label=%s :%s BATCH +%s draft/multiline %s",
-                            con_ml_label(con), cli_name(&me), batchid, chptr->chname);
-            } else {
-              sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
-                            batchid, chptr->chname);
-            }
-
-            first = 1;
-            for (lp = con_ml_messages(con); lp; lp = lp->next) {
-              int concat = lp->value.cp[0];
-              char *text = lp->value.cp + 1;
-
-              if (use_tags) {
-                format_time_tag(timebuf, sizeof(timebuf));
-              }
-
-              if (first && !concat) {
-                if (use_tags) {
-                  sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                                batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                get_displayed_host(sptr), chptr->chname, text);
-                } else {
-                  sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                                batchid, cli_name(sptr), cli_user(sptr)->username,
-                                get_displayed_host(sptr), chptr->chname, text);
-                }
-                first = 0;
-              } else if (concat) {
-                if (use_tags) {
-                  sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                                batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                get_displayed_host(sptr), chptr->chname, text);
-                } else {
-                  sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                                batchid, cli_name(sptr), cli_user(sptr)->username,
-                                get_displayed_host(sptr), chptr->chname, text);
-                }
-              } else {
-                if (use_tags) {
-                  sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                                batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                get_displayed_host(sptr), chptr->chname, text);
-                } else {
-                  sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                                batchid, cli_name(sptr), cli_user(sptr)->username,
-                                get_displayed_host(sptr), chptr->chname, text);
-                }
-              }
-            }
-
-            sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
+          if (use_label) {
+            sendrawto_one(sptr, "@label=%s :%s BATCH +%s draft/multiline %s",
+                          con_ml_label(con), cli_name(&me), batchid, chptr->chname);
           } else {
-            /* Primary doesn't have multiline - preview + truncation fallback */
-            send_multiline_fallback(sptr, sptr, chptr->chname, batch_base_msgid,
-                                     con_ml_messages(con), con_ml_msg_count(con),
-                                     1, chptr, batch_paste_url);
+            sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
+                          batchid, chptr->chname);
           }
-        }
 
-        /* Restore current_shadow before the shadow loop */
-        current_shadow = saved_shadow;
+          first = 1;
+          for (lp = con_ml_messages(con); lp; lp = lp->next) {
+            int concat = lp->value.cp[0];
+            char *text = lp->value.cp + 1;
 
-        /* Send to each shadow based on its capabilities.
-         * Unlike the primary, shadows ALWAYS receive the message regardless of
-         * echo-message cap - they're mirrors of the session and need to see what
-         * was sent. This matches single-line behavior where automatic shadow
-         * duplication sends to all shadows. */
-        if (has_shadows) {
-          struct ShadowConnection *sh;
-          for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
-            if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-              continue;
-            /* Skip originating shadow if it doesn't have echo-message —
-             * the client already displayed the message locally. */
-            if (sh == current_shadow && !CapHas(&sh->sh_active, CAP_ECHOMSG))
-              continue;
+            if (use_tags) {
+              format_time_tag(timebuf, sizeof(timebuf));
+            }
 
-            if (CapHas(&sh->sh_active, CAP_DRAFT_MULTILINE) && CapHas(&sh->sh_active, CAP_BATCH)) {
-              /* Shadow has multiline - send batch echo */
-              char batchid[16];
-              char timebuf[32];
-              int use_tags = CapHas(&sh->sh_active, CAP_MSGTAGS);
-              struct MsgBuf *mb;
-
-              ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
-                            NumNick(sptr), con_batch_seq(con)++);
-
-              mb = msgq_make(sptr, ":%s BATCH +%s draft/multiline %s",
-                             cli_name(&me), batchid, chptr->chname);
-              if (mb) {
-                msgq_add(&sh->sh_sendQ, mb, 0);
-                socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(mb);
+            if (first && !concat) {
+              if (use_tags) {
+                sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
+                              batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
+                              get_displayed_host(sptr), chptr->chname, text);
+              } else {
+                sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                              batchid, cli_name(sptr), cli_user(sptr)->username,
+                              get_displayed_host(sptr), chptr->chname, text);
               }
-
-              first = 1;
-              for (lp = con_ml_messages(con); lp; lp = lp->next) {
-                int concat = lp->value.cp[0];
-                char *text = lp->value.cp + 1;
-
-                if (use_tags) {
-                  format_time_tag(timebuf, sizeof(timebuf));
-                }
-
-                if (first && !concat) {
-                  if (use_tags) {
-                    mb = msgq_make(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                                   batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                   get_displayed_host(sptr), chptr->chname, text);
-                  } else {
-                    mb = msgq_make(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                                   batchid, cli_name(sptr), cli_user(sptr)->username,
-                                   get_displayed_host(sptr), chptr->chname, text);
-                  }
-                  first = 0;
-                } else if (concat) {
-                  if (use_tags) {
-                    mb = msgq_make(sptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                                   batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                   get_displayed_host(sptr), chptr->chname, text);
-                  } else {
-                    mb = msgq_make(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                                   batchid, cli_name(sptr), cli_user(sptr)->username,
-                                   get_displayed_host(sptr), chptr->chname, text);
-                  }
-                } else {
-                  if (use_tags) {
-                    mb = msgq_make(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                                   batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                                   get_displayed_host(sptr), chptr->chname, text);
-                  } else {
-                    mb = msgq_make(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                                   batchid, cli_name(sptr), cli_user(sptr)->username,
-                                   get_displayed_host(sptr), chptr->chname, text);
-                  }
-                }
-                if (mb) {
-                  msgq_add(&sh->sh_sendQ, mb, 0);
-                  socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                  msgq_clean(mb);
-                }
-              }
-
-              mb = msgq_make(sptr, ":%s BATCH -%s", cli_name(&me), batchid);
-              if (mb) {
-                msgq_add(&sh->sh_sendQ, mb, 0);
-                socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(mb);
+              first = 0;
+            } else if (concat) {
+              if (use_tags) {
+                sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                              batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
+                              get_displayed_host(sptr), chptr->chname, text);
+              } else {
+                sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                              batchid, cli_name(sptr), cli_user(sptr)->username,
+                              get_displayed_host(sptr), chptr->chname, text);
               }
             } else {
-              /* Shadow doesn't have multiline - send truncated fallback echo.
-               * Use the same max_preview limit as regular fallback to avoid
-               * flooding the shadow with many lines. */
-              struct MsgBuf *mb;
-              int total_lines = con_ml_msg_count(con);
-              int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-              int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
-              int sent = 0;
-
-              for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
-                char *text = lp->value.cp + 1;
-                if (*text == '\0')
-                  continue;  /* Skip blank lines */
-                mb = msgq_make(sptr, ":%s!%s@%s PRIVMSG %s :%s",
-                               cli_name(sptr), cli_user(sptr)->username,
-                               get_displayed_host(sptr), chptr->chname, text);
-                if (mb) {
-                  msgq_add(&sh->sh_sendQ, mb, 0);
-                  socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                  msgq_clean(mb);
-                }
-                sent++;
-              }
-
-              /* Send truncation notice if needed */
-              if (total_lines > max_preview) {
-                int remaining = total_lines - sent;
-                if (batch_paste_url) {
-                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
-                                 cli_name(&me), chptr->chname, remaining, batch_paste_url);
-                } else {
-                  mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines]",
-                                 cli_name(&me), chptr->chname, remaining);
-                }
-                if (mb) {
-                  msgq_add(&sh->sh_sendQ, mb, 0);
-                  socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                  msgq_clean(mb);
-                }
+              if (use_tags) {
+                sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
+                              batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
+                              get_displayed_host(sptr), chptr->chname, text);
+              } else {
+                sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                              batchid, cli_name(sptr), cli_user(sptr)->username,
+                              get_displayed_host(sptr), chptr->chname, text);
               }
             }
           }
-        }
 
-        suppress_shadow_dup = 0;
+          sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
+        } else {
+          /* Sender doesn't have multiline - preview + truncation fallback */
+          send_multiline_fallback(sptr, sptr, chptr->chname, batch_base_msgid,
+                                   con_ml_messages(con), con_ml_msg_count(con),
+                                   1, chptr, batch_paste_url);
+        }
       }
     }
   } else {
-    /* Private message to user */
-    struct BouncerSession *dmbsess = bounce_get_session(acptr);
-    int dm_has_shadows = (dmbsess && dmbsess->hs_shadow_count > 0);
-
-    /* Suppress automatic shadow duplication - handle shadows explicitly */
-    suppress_shadow_dup = 1;
-
-    /* Send to PRIMARY based on its OWN capabilities */
-    if (CapOwnHas(acptr, CAP_DRAFT_MULTILINE) && CapOwnHas(acptr, CAP_BATCH)) {
+    /* Private message to user.
+     * With aliases, each connection is a separate Client. PM echo for
+     * aliases is handled by bounce_echo_pm_to_session. */
+    if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
       char batchid[16];
       char timebuf[32];
-      int use_tags = CapOwnHas(acptr, CAP_MSGTAGS);
+      int use_tags = CapActive(acptr, CAP_MSGTAGS);
 
       ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                     NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
@@ -1121,136 +829,10 @@ process_multiline_batch(struct Client *sptr)
       }
     }
 
-    /* Send to each SHADOW of the recipient based on its capabilities */
-    if (dm_has_shadows) {
-      struct ShadowConnection *sh;
-      for (sh = dmbsess->hs_shadows; sh; sh = sh->sh_next) {
-        if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-          continue;
-
-        if (CapHas(&sh->sh_active, CAP_DRAFT_MULTILINE) && CapHas(&sh->sh_active, CAP_BATCH)) {
-          /* Shadow has multiline - send batch */
-          char batchid[16];
-          char timebuf[32];
-          int use_tags = CapHas(&sh->sh_active, CAP_MSGTAGS);
-          struct MsgBuf *mb;
-
-          ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
-                        NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
-
-          mb = msgq_make(acptr, ":%s BATCH +%s draft/multiline %s",
-                         cli_name(&me), batchid, cli_name(acptr));
-          if (mb) {
-            msgq_add(&sh->sh_sendQ, mb, 0);
-            socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-            msgq_clean(mb);
-          }
-
-          first = 1;
-          for (lp = con_ml_messages(con); lp; lp = lp->next) {
-            int concat = lp->value.cp[0];
-            char *text = lp->value.cp + 1;
-
-            if (use_tags) {
-              format_time_tag(timebuf, sizeof(timebuf));
-            }
-
-            if (first && !concat) {
-              if (use_tags) {
-                mb = msgq_make(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                               batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                               get_displayed_host(sptr), cli_name(acptr), text);
-              } else {
-                mb = msgq_make(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                               batchid, cli_name(sptr), cli_user(sptr)->username,
-                               get_displayed_host(sptr), cli_name(acptr), text);
-              }
-              first = 0;
-            } else if (concat) {
-              if (use_tags) {
-                mb = msgq_make(acptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                               batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                               get_displayed_host(sptr), cli_name(acptr), text);
-              } else {
-                mb = msgq_make(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                               batchid, cli_name(sptr), cli_user(sptr)->username,
-                               get_displayed_host(sptr), cli_name(acptr), text);
-              }
-            } else {
-              if (use_tags) {
-                mb = msgq_make(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                               batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                               get_displayed_host(sptr), cli_name(acptr), text);
-              } else {
-                mb = msgq_make(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                               batchid, cli_name(sptr), cli_user(sptr)->username,
-                               get_displayed_host(sptr), cli_name(acptr), text);
-              }
-            }
-            if (mb) {
-              msgq_add(&sh->sh_sendQ, mb, 0);
-              socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-              msgq_clean(mb);
-            }
-          }
-
-          mb = msgq_make(acptr, ":%s BATCH -%s", cli_name(&me), batchid);
-          if (mb) {
-            msgq_add(&sh->sh_sendQ, mb, 0);
-            socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-            msgq_clean(mb);
-          }
-        } else {
-          /* Shadow doesn't have multiline - send fallback */
-          int total_lines = con_ml_msg_count(con);
-          int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-          int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
-          int sent = 0;
-          struct MsgBuf *mb;
-
-          for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
-            char *text = lp->value.cp + 1;
-            if (*text == '\0')
-              continue;  /* Skip blank lines */
-            mb = msgq_make(acptr, ":%s!%s@%s PRIVMSG %s :%s",
-                           cli_name(sptr), cli_user(sptr)->username,
-                           get_displayed_host(sptr), cli_name(acptr), text);
-            if (mb) {
-              msgq_add(&sh->sh_sendQ, mb, 0);
-              socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-              msgq_clean(mb);
-            }
-            sent++;
-          }
-
-          /* Send truncation notice if needed */
-          if (total_lines > max_preview) {
-            int remaining = total_lines - sent;
-            if (batch_paste_url) {
-              mb = msgq_make(acptr, ":%s NOTICE %s :[%d more lines - %s]",
-                             cli_name(&me), cli_name(acptr), remaining, batch_paste_url);
-            } else {
-              mb = msgq_make(acptr, ":%s NOTICE %s :[%d more lines - use a multiline-capable client to view]",
-                             cli_name(&me), cli_name(acptr), remaining);
-            }
-            if (mb) {
-              msgq_add(&sh->sh_sendQ, mb, 0);
-              socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-              msgq_clean(mb);
-            }
-          }
-        }
-      }
-    }
-
-    suppress_shadow_dup = 0;
-
-    /* Echo to sender and bouncer shadows with per-connection capability awareness.
-     * Same logic as channel echo above. */
+    /* Echo to sender if they have echo-message capability.
+     * With aliases, PM echo for aliases is handled by bounce_echo_pm_to_session. */
     {
-      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-      struct BouncerSession *bsess = bounce_get_session(sptr);
-      int has_shadows = bsess && bsess->hs_shadow_count > 0;
+      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
       int skip_dm_echo = 0;
 
       if (MyConnect(sptr)) {
@@ -1271,83 +853,11 @@ process_multiline_batch(struct Client *sptr)
         }
       }
 
-      /* Also deliver to primary when shadow originated the message. */
-      int from_shadow = (current_shadow != NULL);
-      struct ShadowConnection *saved_dm_shadow = current_shadow;
-
-      if (!skip_dm_echo && (need_echo || has_shadows || from_shadow)) {
-        suppress_shadow_dup = 1;
-
-        /* Clear current_shadow so send_buffer() delivers to the primary's
-         * sendQ, not the shadow's.  The shadow loop below handles shadows. */
-        current_shadow = NULL;
-
-        /* Send to primary if it has echo-message, OR if a shadow sent it. */
-        if (need_echo || from_shadow) {
-          /* Preview + truncation fallback for DM echo */
-          send_multiline_fallback(sptr, sptr, cli_name(acptr), batch_base_msgid,
-                                   con_ml_messages(con), con_ml_msg_count(con),
-                                   0, NULL, batch_paste_url);
-        }
-
-        /* Restore current_shadow before the shadow loop */
-        current_shadow = saved_dm_shadow;
-
-        /* Send to each shadow based on its capabilities.
-         * Shadows ALWAYS receive the message regardless of echo-message cap -
-         * they're mirrors of the session and need to see what was sent. */
-        if (has_shadows) {
-          struct ShadowConnection *sh;
-          for (sh = bsess->hs_shadows; sh; sh = sh->sh_next) {
-            struct MsgBuf *mb;
-
-            if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-              continue;
-            /* Skip originating shadow if it doesn't have echo-message. */
-            if (sh == current_shadow && !CapHas(&sh->sh_active, CAP_ECHOMSG))
-              continue;
-
-            /* For DM echo, send truncated fallback to avoid flooding */
-            int total_lines = con_ml_msg_count(con);
-            int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
-            int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
-            int sent = 0;
-
-            for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
-              char *text = lp->value.cp + 1;
-              if (*text == '\0')
-                continue;  /* Skip blank lines */
-              mb = msgq_make(sptr, ":%s!%s@%s PRIVMSG %s :%s",
-                             cli_name(sptr), cli_user(sptr)->username,
-                             get_displayed_host(sptr), cli_name(acptr), text);
-              if (mb) {
-                msgq_add(&sh->sh_sendQ, mb, 0);
-                socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(mb);
-              }
-              sent++;
-            }
-
-            /* Send truncation notice if needed */
-            if (total_lines > max_preview) {
-              int remaining = total_lines - sent;
-              if (batch_paste_url) {
-                mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines - %s]",
-                               cli_name(&me), cli_name(acptr), remaining, batch_paste_url);
-              } else {
-                mb = msgq_make(sptr, ":%s NOTICE %s :[%d more lines]",
-                               cli_name(&me), cli_name(acptr), remaining);
-              }
-              if (mb) {
-                msgq_add(&sh->sh_sendQ, mb, 0);
-                socket_events(&sh->sh_socket, SOCK_EVENT_READABLE | SOCK_EVENT_WRITABLE);
-                msgq_clean(mb);
-              }
-            }
-          }
-        }
-
-        suppress_shadow_dup = 0;
+      if (!skip_dm_echo && need_echo) {
+        /* Preview + truncation fallback for DM echo */
+        send_multiline_fallback(sptr, sptr, cli_name(acptr), batch_base_msgid,
+                                 con_ml_messages(con), con_ml_msg_count(con),
+                                 0, NULL, batch_paste_url);
       }
     }
 

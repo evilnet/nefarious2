@@ -470,6 +470,7 @@ struct JoinBuf {
   time_t		jb_create;	/**< Creation timestamp */
   unsigned int		jb_count;	/**< Number of channels */
   unsigned int		jb_strlen;	/**< length so far */
+  struct Client	       *jb_alias_source; /**< Alias for split S2S delivery (NULL if none) */
   struct Channel       *jb_channels[MAXJOINARGS];
 					/**< channels joined or whatever */
 };

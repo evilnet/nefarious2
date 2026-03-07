@@ -825,7 +825,7 @@ msgq_filter_tags(struct MsgBuf *mb, struct CapSet *active)
 
 /** Create a new MsgBuf by prepending a tag string to a base (no-tags) MsgBuf.
  *
- * Used when a shadow connection needs tags that weren't in the mb_cache
+ * Used when a connection needs tags that weren't in the mb_cache
  * because no other channel member had the same capability set. The tag
  * string should already be formatted (e.g., "@time=...;account=... ")
  * with a trailing space.

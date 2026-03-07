@@ -65,8 +65,6 @@ struct Listener;
 #define BOUNCER_NAME_LEN        32
 /** Maximum channels tracked per session. */
 #define BOUNCER_MAX_CHANNELS    50
-/** Maximum shadow connections per bouncer session. */
-#define BOUNCER_MAX_SHADOWS     4
 /** Maximum alias numerics per bouncer session (multi-server presence). */
 #define BOUNCER_MAX_ALIASES     4
 /** Maximum connection history entries per session (unique hosts). */
@@ -143,98 +141,6 @@ struct BounceSessionRecord {
   } bsr_channels[BOUNCER_MAX_CHANNELS];
 };
 
-/** Shadow connection flags. */
-#define SHADOW_FLAGS_DEAD     0x0001  /**< Marked for cleanup */
-#define SHADOW_FLAGS_BLOCKED  0x0002  /**< Write blocked (sendQ full) */
-#define SHADOW_FLAGS_PINGSENT 0x0004  /**< PING sent, awaiting PONG */
-#define SHADOW_FLAGS_SSL_PENDING 0x0008 /**< SSL has pending auth-phase write */
-#define SHADOW_FLAGS_REMOTE   0x0010  /**< Remote shadow on managing server (A-side, I/O via BS R/O) */
-#define SHADOW_FLAGS_RELAY_LOCAL 0x0020 /**< Relay socket on relay server (B-side, local fd + BS R/O) */
-
-/** Shadow connection — a secondary TCP connection sharing a bouncer session's identity.
- *
- * Shadows piggyback on the "real" Client (the primary connection). They have
- * their own socket, sendQ, recvQ, and CAP state, but are NOT in the nick hash,
- * NOT in channel lists, and have NO P10 numeric.
- *
- * Outbound messages to the primary are duplicated to all shadows (respecting
- * per-shadow CAP filtering). Inbound commands from shadows are forwarded
- * through the primary's handler chain.
- */
-struct ShadowConnection {
-  struct ShadowConnection *sh_next;     /**< Next shadow in session list */
-  unsigned int             sh_id;       /**< Client ID (unique within session) */
-  int                      sh_fd;       /**< File descriptor */
-  struct Socket            sh_socket;   /**< Physical socket */
-  struct MsgQ              sh_sendQ;    /**< Outgoing message queue */
-  struct DBuf              sh_recvQ;    /**< Incoming data buffer */
-  unsigned int             sh_count;    /**< Bytes in parse buffer */
-  char                     sh_buffer[BUFSIZE]; /**< Parse buffer */
-  struct CapSet            sh_capab;    /**< Negotiated capabilities (from us) */
-  struct CapSet            sh_active;   /**< Active capabilities (to us) */
-  unsigned short           sh_capab_version; /**< CAP version */
-  char                     sh_label[64]; /**< Current labeled-response label */
-  unsigned char            sh_label_responded; /**< Whether response sent for label */
-  struct BouncerSession   *sh_session;  /**< Back-pointer to owning session */
-  time_t                   sh_lasttime; /**< Last data read from socket */
-  time_t                   sh_since;    /**< Last command accepted */
-  time_t                   sh_connected; /**< When this shadow connected */
-  unsigned char            sh_away_state; /**< Per-connection away: 0=present, 1=away, 2=away-star */
-  char                     sh_away_msg[AWAYLEN + 1]; /**< Per-connection away message */
-  unsigned int             sh_flags;    /**< Shadow-specific flags */
-  char                     sh_sock_ip[SOCKIPLEN + 1]; /**< Remote IP as string */
-  unsigned short           sh_port;            /**< Remote port number */
-  char                     sh_sockhost[HOSTLEN + 1]; /**< Remote hostname */
-  struct irc_in_addr       sh_ip;              /**< Remote IP (struct) */
-  struct irc_in_addr       sh_connectip;       /**< Connection IP */
-  char                     sh_connecthost[HOSTLEN + 1]; /**< Connection hostname */
-  struct Listener         *sh_listener;        /**< Listener reference (ref-counted) */
-  /* Per-connection lifetime data counters (carried across primary/shadow phases) */
-  uint64_t                 sh_sendB;    /**< Connection lifetime bytes sent */
-  uint64_t                 sh_receiveB; /**< Connection lifetime bytes received */
-  unsigned int             sh_sendM;    /**< Connection lifetime messages sent */
-  unsigned int             sh_receiveM; /**< Connection lifetime messages received */
-  /* Cross-server relay fields (Phase 1) */
-  struct Client           *sh_relay_server; /**< Remote: relay server (B). Local: managing server (A). */
-  char                     sh_relay_id[16]; /**< Relay ID assigned by managing server in BS W */
-  unsigned int             sh_is_ssl;       /**< 1 if relay socket is TLS, 0 if plaintext */
-#ifdef USE_SSL
-  /** SSL pending auth-phase flush state.
-   * When a pipelining client (e.g. goguma) generates auth responses that
-   * don't fully flush before shadow creation, the SSL object carries
-   * pending write state (wpend_tot/wpend_buf).  We save the unflushed
-   * auth data here and coalesce it with the welcome messages into a single
-   * SSL_write that satisfies the wpend_tot <= len check.  After the pending
-   * TLS record flushes from wbuf, OpenSSL continues writing from
-   * buf + wpend_ret, which correctly contains the remaining auth data
-   * followed by welcome messages. */
-  char                    *sh_ssl_flush;     /**< Coalesced flush buffer (heap) */
-  unsigned int             sh_ssl_flush_len; /**< Total bytes in flush buffer */
-  unsigned int             sh_ssl_flush_auth;/**< Auth prefix bytes in flush buffer */
-#endif
-};
-
-/** Cross-server relay entry on the relay server (B-side).
- *
- * Maps a relay_id to a local ShadowConnection that holds the user's TCP socket.
- * Not attached to a local BouncerSession — the session lives on the managing
- * server (A). This entry is created during BS W processing and destroyed when
- * the relay socket disconnects or BS X_SHADOW arrives.
- */
-struct RelayShadowEntry {
-  struct RelayShadowEntry *rs_next;    /**< Hash chain */
-  char                     rs_relay_id[16]; /**< Relay ID (from BS W) */
-  char                     rs_account[ACCOUNTLEN + 1]; /**< Session owner account */
-  char                     rs_sessid[BOUNCER_SESSID_LEN]; /**< Remote session ID */
-  struct Client           *rs_server;  /**< Managing server (A) */
-  struct ShadowConnection *rs_shadow;  /**< Local relay ShadowConnection (owns the fd) */
-  char                     rs_nick[NICKLEN + 1]; /**< Session nick (for welcome) */
-  unsigned int             rs_is_ssl;  /**< 1 if relay socket is TLS */
-};
-
-/** Maximum relay shadow entries per server. */
-#define RELAY_SHADOW_HASHSIZE 64
-
 /** Channel membership preserved in a held session. */
 struct BounceChannel {
   char name[CHANNELLEN + 1];
@@ -270,12 +176,6 @@ struct BouncerSession {
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
 
-  /** Shadow connection list (secondary TCP connections sharing this session). */
-  struct ShadowConnection *hs_shadows; /**< Linked list of shadow connections */
-  int hs_shadow_count;                 /**< Number of attached shadows */
-  unsigned int hs_client_id_seq;       /**< Monotonic counter for client IDs */
-  unsigned int hs_primary_id;          /**< Client ID of the primary connection */
-
   struct BounceChannel hs_channels[BOUNCER_MAX_CHANNELS];
   int hs_chancount;
 
@@ -295,7 +195,7 @@ struct BouncerSession {
   time_t hs_last_msg_time;            /**< Last PRIVMSG time (user idle baseline) */
   time_t hs_disconnect_time;          /**< When client disconnected (0=active) */
   unsigned int hs_attach_count;       /**< Number of times resumed from HOLDING */
-  unsigned int hs_connect_count;      /**< Total connections (resumes + shadow attaches) */
+  unsigned int hs_connect_count;      /**< Total connections (resumes + alias attaches) */
   time_t hs_total_active;             /**< Cumulative active time (seconds) */
   struct Timer hs_hold_timer;         /**< Expiry timer for HOLDING state */
 
@@ -358,6 +258,14 @@ extern void bounce_sync_alias_join(struct Channel *chptr, struct Client *who);
  */
 extern void bounce_sync_alias_part(struct Channel *chptr, struct Client *who);
 
+/** Sync channel mode flags (op/halfop/voice) from primary to all aliases.
+ * Called after a primary's channel membership status changes.
+ */
+extern void bounce_sync_alias_chanmodes(struct Channel *chptr, struct Client *primary);
+
+/** Send post-join replies (TOPIC/MARKREAD/NAMES) to local aliases after JOIN echo. */
+extern void bounce_send_alias_join_replies(struct Channel *chptr, struct Client *who);
+
 /** Forward a PM/NOTICE to all aliases of the target bouncer primary.
  * @param[in] from    Client that sent the message.
  * @param[in] target  Target client (primary).
@@ -416,6 +324,13 @@ extern void bounce_prepare_squit_promotions(struct Client *server);
  */
 extern void bounce_execute_squit_promotions(struct Client *server);
 
+/** Promote an alias to primary for a bouncer session.
+ * Used by disconnect handlers and SQUIT promotion.
+ * @param[in] session Session whose primary is departing.
+ * @return 0 on success, -1 if no aliases available.
+ */
+extern int bounce_promote_alias(struct BouncerSession *session);
+
 /** Attach a client to an existing session (resume).
  * @param[in] session Session to attach to.
  * @param[in] cptr Client to attach.
@@ -448,117 +363,6 @@ extern void bounce_setname(struct BouncerSession *session, const char *name);
 extern void bounce_snapshot_channels(struct BouncerSession *session,
                                      struct Client *cptr);
 
-/*
- * Shadow connection API (multi-client support)
- */
-
-/** Add a shadow connection to a bouncer session.
- * The shadow gets its own socket/sendQ/CAP state but shares the session's
- * IRC identity (nick, channels, modes).
- * @param[in] session Active bouncer session.
- * @param[in] fd File descriptor of the new connection.
- * @param[in] sock_ip Remote IP address as string.
- * @return Pointer to new ShadowConnection, or NULL on error.
- */
-extern struct ShadowConnection *bounce_add_shadow(struct BouncerSession *session,
-                                                   int fd,
-                                                   const char *sock_ip);
-
-/** Remove a shadow connection from its session.
- * Cleans up the shadow's sendQ, recvQ, socket, and removes it from the list.
- * @param[in] shadow Shadow connection to remove.
- */
-extern void bounce_remove_shadow(struct ShadowConnection *shadow);
-
-/** Promote the first shadow to primary connection.
- * Called when the primary connection disconnects but shadows remain.
- * Transplants the shadow's socket into the Client's Connection struct.
- * @param[in] session Session whose primary disconnected.
- * @return 0 on success, -1 if no shadows available.
- */
-extern int bounce_promote_shadow(struct BouncerSession *session);
-
-/** Transition to relay-only mode when primary disconnects but remote
- * shadows still exist.  Closes primary socket, clears caps, keeps ACTIVE.
- * @return 0 on success, -1 if no remote shadows found.
- */
-extern int bounce_relay_only_transition(struct BouncerSession *session,
-                                         struct Client *cptr);
-
-/*
- * Cross-server shadow relay API (Phase 1)
- */
-
-/** Add a remote shadow to a session on the managing server (A-side).
- * Called when BS S arrives from a relay server. Creates a ShadowConnection
- * with SHADOW_FLAGS_REMOTE — no local fd, I/O via BS R/O.
- * @param[in] session Session to add remote shadow to.
- * @param[in] relay_server The relay server (B).
- * @param[in] capab_hex Client's negotiated capabilities as hex.
- * @param[in] is_ssl 1 if relay socket is TLS, 0 if plaintext.
- * @param[in] sock_ip Remote client IP string.
- * @return Pointer to new ShadowConnection, or NULL on error.
- */
-extern struct ShadowConnection *bounce_add_remote_shadow(
-    struct BouncerSession *session, struct Client *relay_server,
-    unsigned long capab_hex, int is_ssl, const char *sock_ip);
-
-/** Find a relay shadow entry by relay_id on this server (B-side).
- * @param[in] relay_id Relay ID string.
- * @return RelayShadowEntry pointer, or NULL if not found.
- */
-extern struct RelayShadowEntry *bounce_find_relay(const char *relay_id);
-
-/** Create a relay shadow entry on the relay server (B-side).
- * Called during BS W processing. Creates a local ShadowConnection
- * with SHADOW_FLAGS_RELAY_LOCAL that owns the dup'd user socket fd.
- * @param[in] fd Dup'd file descriptor of user's TCP socket.
- * @param[in] account Session owner account.
- * @param[in] sessid Remote session ID.
- * @param[in] relay_id Relay ID assigned by managing server.
- * @param[in] server Managing server (A).
- * @param[in] nick Session nick.
- * @param[in] is_ssl 1 if fd is TLS, 0 if plaintext.
- * @param[in] sock_ip Remote client IP string.
- * @return RelayShadowEntry pointer, or NULL on error.
- */
-extern struct RelayShadowEntry *bounce_create_relay(
-    int fd, const char *account, const char *sessid,
-    const char *relay_id, struct Client *server,
-    const char *nick, int is_ssl, const char *sock_ip);
-
-/** Create a pending relay entry on the relay server (B-side).
- * Called from register_user() when a cross-server session is detected.
- * The entry goes on the pending list until BS W arrives with the relay_id.
- * @param[in] fd Dup'd file descriptor of user's TCP socket.
- * @param[in] account Session owner account.
- * @param[in] sessid Remote session ID.
- * @param[in] server Managing server (A).
- * @param[in] is_ssl 1 if fd is TLS, 0 if plaintext.
- * @param[in] sock_ip Remote client IP string.
- * @param[in] ssl SSL context (transferred ownership), or NULL for plaintext.
- * @return RelayShadowEntry pointer, or NULL on error.
- */
-extern struct RelayShadowEntry *bounce_add_pending_relay(
-    int fd, const char *account, const char *sessid,
-    struct Client *server, int is_ssl, const char *sock_ip,
-    void *ssl);
-
-/** Destroy a relay shadow entry and its ShadowConnection (B-side).
- * Closes the relay socket and sends BS X_SHADOW to managing server.
- * @param[in] entry Relay entry to destroy.
- * @param[in] notify 1 to send BS X_SHADOW to managing server, 0 to skip.
- */
-extern void bounce_destroy_relay(struct RelayShadowEntry *entry, int notify);
-
-/** Clean up all bouncer state referencing a departing server.
- * Called from exit_client() when a server SQUITs.
- * A-side: removes remote shadows whose relay server is departing.
- * B-side: destroys relay entries whose managing server is departing.
- * @param[in] server The departing server.
- */
-extern void bounce_cleanup_server(struct Client *server);
-
 /** Find the bouncer session for a client (if any).
  * @param[in] cptr Client to look up.
  * @return Session pointer, or NULL if client has no bouncer session.
@@ -572,7 +376,7 @@ extern struct BouncerSession *bounce_get_session(struct Client *cptr);
  */
 extern struct BouncerSession *bounce_find_any_session(const char *account);
 
-/** Get the total number of connections (primary + shadows) for a session.
+/** Get the total number of connections (primary + aliases) for a session.
  * @param[in] session Session to query.
  * @return Number of connections (0 if HOLDING, 1+ if ACTIVE).
  */
@@ -588,17 +392,12 @@ extern int bounce_compute_effective_away(struct BouncerSession *session,
                                           int *effective_state,
                                           char *effective_msg);
 
-/** Send IRC registration welcome sequence to a newly attached shadow.
- * @param[in] shadow The newly created shadow connection.
- */
-extern void bounce_send_shadow_welcome(struct ShadowConnection *shadow);
-
 /** Replay channel state (JOIN/TOPIC/NAMES) to a client after held session resume.
  * @param[in] cptr Client that just resumed a held session.
  */
 extern void bounce_send_channel_state(struct Client *cptr);
 
-/** Build a union CapSet from primary + all shadow active capabilities.
+/** Build a union CapSet from primary + all alias active capabilities.
  * Used to format outbound messages with the maximal set of tags any
  * connection might need. send_buffer() then strips per-connection.
  * @param[in] session Bouncer session.
@@ -607,28 +406,17 @@ extern void bounce_send_channel_state(struct Client *cptr);
 extern void bounce_build_union_caps(struct BouncerSession *session,
                                      struct CapSet *out);
 
-/** Global pointer to the shadow connection that originated the current command.
- * Single-threaded IRCd, so a global is safe. Used for reply routing:
- * when a shadow sends a command, replies should go to the shadow, not the primary.
- * NULL when the primary (or no shadow) is the source.
- */
-extern struct ShadowConnection *current_shadow;
-
 /** Check if the *receiving* connection has a capability.
- * When current_shadow is set, checks the shadow's caps.
- * Otherwise checks the primary's own caps (not the session union).
- * Use this for format-sensitive decisions where the wire format must
- * match the actual recipient's negotiated capabilities.
- * @param[in] cli The primary client.
+ * With aliases, each connection is a full Client, so this simply
+ * checks the client's own active caps.
+ * @param[in] cli The client.
  * @param[in] cap The capability to check.
- * @return Non-zero if the receiving connection has the capability.
+ * @return Non-zero if the client has the capability.
  */
-#define CapRecipientHas(cli, cap) \
-  (current_shadow ? CapHas(&current_shadow->sh_active, (cap)) \
-                  : CapHas(cli_active_own(cli), (cap)))
+#define CapRecipientHas(cli, cap) CapOwnHas(cli, cap)
 
 /** Recompute cli_active as the union of all session connections' caps.
- * Called after any cap change on primary or shadow, and on shadow
+ * Called after any cap change on primary or alias, and on alias
  * attach/detach.  For non-bouncer clients this is a no-op.
  * @param[in] primary The primary client.
  */
@@ -760,17 +548,10 @@ extern int bounce_enabled(void);
 extern int bounce_enabled_for(struct Client *cptr);
 
 /** Check if a bouncer session has any non-TLS connection.
- * Returns 1 if any connection (primary or shadow) lacks TLS.
+ * Returns 1 if any connection (primary or alias) lacks TLS.
  * Returns 0 for non-bouncer clients or if all connections are TLS.
  */
 extern int bounce_session_has_plaintext(struct Client *cptr);
-
-/** Check shadow liveness — send PINGs and timeout dead shadows.
- * Called from check_pings() for bouncer primaries.
- * @param[in] cptr Primary client of bouncer session.
- * @param[in] max_ping Ping interval in seconds.
- */
-extern void bounce_check_shadow_pings(struct Client *cptr, int max_ping);
 
 /** Get the number of sessions for an account. */
 extern int bounce_count(const char *account);
@@ -795,16 +576,13 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
  * @param[out] out_session Set to session if resumed or created.
  * @param[out] out_since_time Set to the user's idle time (user->last) for
  *             replay, falling back to disconnect time if unavailable.
- * @return 1 if resumed, 2 if converted to shadow, 3 if cross-server relay
- *         established (caller must not introduce client),
+ * @return 1 if resumed,
  *         4 if remote alias path selected (caller must call bounce_setup_local_alias),
  *         5 if local alias path selected (caller must call bounce_setup_local_alias),
  *         0 otherwise.
  */
 #define BOUNCE_RESUME_NONE           0
 #define BOUNCE_RESUME_HELD           1
-#define BOUNCE_RESUME_SHADOW         2
-#define BOUNCE_RESUME_RELAY_REMOTE   3
 #define BOUNCE_RESUME_ALIAS_REMOTE   4
 #define BOUNCE_RESUME_ALIAS_LOCAL    5
 extern int bounce_auto_resume(struct Client *cptr,

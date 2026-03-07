@@ -320,57 +320,8 @@ static void send_rename_to_members(struct Client *sptr, struct Channel *chptr,
     if (!MyUser(acptr))
       continue;
 
-    /* Check if this is a bouncer member with shadows that may need
-     * different format routing (some with CHANRENAME, some without) */
     {
-      struct BouncerSession *bsess = bounce_get_session(acptr);
-      int has_shadows = bsess && bsess->hs_shadow_count > 0;
-
-      if (has_shadows) {
-        /* Bouncer member: send BOTH formats — send_buffer() routes
-         * per-connection via stc_withcap/stc_skipcap. */
-
-        /* 1. RENAME for connections WITH the cap */
-        shadow_tag_ctx.stc_active = 1;
-        shadow_tag_ctx.stc_withcap = CAP_DRAFT_CHANRENAME;
-        shadow_tag_ctx.stc_skipcap = CAP_NONE;
-        shadow_tag_ctx.stc_from = sptr;
-        shadow_tag_ctx.stc_cache = NULL;
-        shadow_tag_ctx.stc_notags = NULL;
-        shadow_tag_ctx.stc_include_batch = 0;
-
-        sendcmdto_one(sptr, CMD_RENAME, acptr, "%s %s :%s",
-                      oldname, chptr->chname, reason ? reason : "");
-
-        shadow_tag_ctx.stc_active = 0;
-        shadow_tag_ctx.stc_withcap = CAP_NONE;
-
-        /* 2. PART/JOIN fallback for connections WITHOUT the cap */
-        shadow_tag_ctx.stc_active = 1;
-        shadow_tag_ctx.stc_withcap = CAP_NONE;
-        shadow_tag_ctx.stc_skipcap = CAP_DRAFT_CHANRENAME;
-        shadow_tag_ctx.stc_from = sptr;
-        shadow_tag_ctx.stc_cache = NULL;
-        shadow_tag_ctx.stc_notags = NULL;
-        shadow_tag_ctx.stc_include_batch = 0;
-        mirror_to_shadows = 1;  /* Let send_reply() reach shadows */
-
-        sendcmdto_one(acptr, CMD_PART, acptr, "%s :Channel renamed to %s%s%s",
-                      oldname, chptr->chname,
-                      (reason && *reason) ? ": " : "",
-                      (reason && *reason) ? reason : "");
-        sendcmdto_one(acptr, CMD_JOIN, acptr, "%s", chptr->chname);
-        if (chptr->topic[0]) {
-          send_reply(acptr, RPL_TOPIC, chptr->chname, chptr->topic);
-          send_reply(acptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
-                     chptr->topic_time);
-        }
-        do_names(acptr, chptr, NAMES_ALL|NAMES_EON);
-
-        mirror_to_shadows = 0;
-        shadow_tag_ctx.stc_active = 0;
-        shadow_tag_ctx.stc_skipcap = CAP_NONE;
-      } else if (CapOwnHas(acptr, CAP_DRAFT_CHANRENAME)) {
+      if (CapOwnHas(acptr, CAP_DRAFT_CHANRENAME)) {
         /* Non-bouncer with cap — send RENAME */
         sendcmdto_one(sptr, CMD_RENAME, acptr, "%s %s :%s",
                       oldname, chptr->chname, reason ? reason : "");

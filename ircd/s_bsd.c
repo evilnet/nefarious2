@@ -1540,31 +1540,20 @@ void client_sock_callback(struct Event* ev)
     if (!msg)
       msg = "Unknown error";
 
-    /* Bouncer alias: skip shadow/hold logic — just clean up.
+    /* Bouncer alias: skip hold logic — just clean up.
      * exit_client_msg() → exit_client() sends BX X to other servers. */
     if (IsUser(cptr) && IsBouncerAlias(cptr)) {
       exit_client_msg(cptr, cptr, &me, fmt, msg);
       return;
     }
 
-    /* Check if primary has shadow connections — promote one instead of exiting */
+    /* Check if session has aliases — promote one instead of exiting */
     if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
       struct BouncerSession *bsess = bounce_get_session(cptr);
-      if (bsess && bsess->hs_shadows) {
-        /* Do NOT call close_connection() here — it calls socket_del()
-         * which corrupts gh_ref when the event engine still holds
-         * references from the current event callback.  Instead,
-         * bounce_promote_shadow() closes the old fd directly and uses
-         * socket_reattach() to swap in the shadow's fd. */
-        if (bounce_promote_shadow(bsess) == 0) {
-          /* Shadow promoted — client stays alive with new socket */
-          return;
-        }
-        /* Promotion failed — try relay-only mode (remote shadows with no
-         * local fd).  Session stays ACTIVE with ghost fd-less. */
-        if (bounce_relay_only_transition(bsess, cptr) == 0)
-          return;
-        /* No local or remote shadows — fall through to hold or exit */
+      if (bsess && bsess->hs_alias_count > 0) {
+        if (bounce_promote_alias(bsess) == 0)
+          return;  /* Alias promoted — session transferred */
+        /* No viable alias — fall through to hold or exit */
       }
     }
 

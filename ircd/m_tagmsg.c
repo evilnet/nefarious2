@@ -95,7 +95,6 @@
 #include "numnicks.h"
 #include "send.h"
 #include "s_user.h"
-#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -221,35 +220,12 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                   SKIP_DEAF | SKIP_BURST, client_tags,
                                   "%H", chptr);
 
-    /* Echo/mirror TAGMSG back to sender's connections.
-     * - need_echo: sender has echo-message → echo to sender
-     * - current_shadow: shadow sent this → mirror to primary + other shadows
-     * - has_shadows: primary sent without echo-message → mirror to shadows only */
+    /* Echo TAGMSG back to sender if they have echo-message */
     {
       int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-      struct BouncerSession *bsess = bounce_get_session(sptr);
-      int has_shadows = bsess && bsess->hs_shadow_count > 0;
-      if (need_echo || current_shadow || has_shadows) {
-        struct ShadowConnection *saved_shadow = current_shadow;
-        current_shadow = NULL;
-        if (has_shadows && !need_echo && !saved_shadow)
-          skip_primary_echo = 1;
-        if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
-          skip_shadow_dup = saved_shadow;
-        shadow_tag_ctx.stc_active = 1;
-        shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
-        shadow_tag_ctx.stc_skipcap = CAP_NONE;
-        shadow_tag_ctx.stc_from = sptr;
-        shadow_tag_ctx.stc_cache = NULL;
-        shadow_tag_ctx.stc_notags = NULL;
-        shadow_tag_ctx.stc_include_batch = 0;
+      if (need_echo) {
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
                                   "%H", chptr);
-        shadow_tag_ctx.stc_active = 0;
-        shadow_tag_ctx.stc_withcap = CAP_NONE;
-        skip_primary_echo = 0;
-        skip_shadow_dup = NULL;
-        current_shadow = saved_shadow;
       }
     }
 
@@ -274,49 +250,19 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags if they support message-tags */
       if (CapActive(acptr, CAP_MSGTAGS)) {
-        /* Filter shadows without message-tags capability */
-        shadow_tag_ctx.stc_active = 1;
-        shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
-        shadow_tag_ctx.stc_skipcap = CAP_NONE;
-        shadow_tag_ctx.stc_from = sptr;
-        shadow_tag_ctx.stc_cache = NULL;
-        shadow_tag_ctx.stc_notags = NULL;
-        shadow_tag_ctx.stc_include_batch = 0;
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
-        shadow_tag_ctx.stc_active = 0;
-        shadow_tag_ctx.stc_withcap = CAP_NONE;
       }
       /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
        * per the IRCv3 spec - there's no message body to send as fallback */
 
-      /* Echo/mirror TAGMSG back to sender's connections
+      /* Echo TAGMSG back to sender if they have echo-message
        * (but not if they're messaging themselves) */
       if (sptr != acptr) {
         int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-        struct BouncerSession *bsess = bounce_get_session(sptr);
-        int has_shadows = bsess && bsess->hs_shadow_count > 0;
-        if (need_echo || current_shadow || has_shadows) {
-          struct ShadowConnection *saved_shadow = current_shadow;
-          current_shadow = NULL;
-          if (has_shadows && !need_echo && !saved_shadow)
-            skip_primary_echo = 1;
-          if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
-            skip_shadow_dup = saved_shadow;
-          shadow_tag_ctx.stc_active = 1;
-          shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
-          shadow_tag_ctx.stc_skipcap = CAP_NONE;
-          shadow_tag_ctx.stc_from = sptr;
-          shadow_tag_ctx.stc_cache = NULL;
-          shadow_tag_ctx.stc_notags = NULL;
-          shadow_tag_ctx.stc_include_batch = 0;
+        if (need_echo) {
           sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
                                     "%C", acptr);
-          shadow_tag_ctx.stc_active = 0;
-          shadow_tag_ctx.stc_withcap = CAP_NONE;
-          skip_primary_echo = 0;
-          skip_shadow_dup = NULL;
-          current_shadow = saved_shadow;
         }
       }
     }
@@ -325,32 +271,12 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
                     client_tags, acptr);
 
-      /* Echo/mirror TAGMSG back to sender's connections */
+      /* Echo TAGMSG back to sender if they have echo-message */
       {
         int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-        struct BouncerSession *bsess = bounce_get_session(sptr);
-        int has_shadows = bsess && bsess->hs_shadow_count > 0;
-        if (need_echo || current_shadow || has_shadows) {
-          struct ShadowConnection *saved_shadow = current_shadow;
-          current_shadow = NULL;
-          if (has_shadows && !need_echo && !saved_shadow)
-            skip_primary_echo = 1;
-          if (saved_shadow && !CapHas(&saved_shadow->sh_active, CAP_ECHOMSG))
-            skip_shadow_dup = saved_shadow;
-          shadow_tag_ctx.stc_active = 1;
-          shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
-          shadow_tag_ctx.stc_skipcap = CAP_NONE;
-          shadow_tag_ctx.stc_from = sptr;
-          shadow_tag_ctx.stc_cache = NULL;
-          shadow_tag_ctx.stc_notags = NULL;
-          shadow_tag_ctx.stc_include_batch = 0;
+        if (need_echo) {
           sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
                                     "%C", acptr);
-          shadow_tag_ctx.stc_active = 0;
-          shadow_tag_ctx.stc_withcap = CAP_NONE;
-          skip_primary_echo = 0;
-          skip_shadow_dup = NULL;
-          current_shadow = saved_shadow;
         }
       }
     }
@@ -429,18 +355,8 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags if they support message-tags */
       if (CapActive(acptr, CAP_MSGTAGS)) {
-        /* Filter shadows without message-tags capability */
-        shadow_tag_ctx.stc_active = 1;
-        shadow_tag_ctx.stc_withcap = CAP_MSGTAGS;
-        shadow_tag_ctx.stc_skipcap = CAP_NONE;
-        shadow_tag_ctx.stc_from = sptr;
-        shadow_tag_ctx.stc_cache = NULL;
-        shadow_tag_ctx.stc_notags = NULL;
-        shadow_tag_ctx.stc_include_batch = 0;
         sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                   "%C", acptr);
-        shadow_tag_ctx.stc_active = 0;
-        shadow_tag_ctx.stc_withcap = CAP_NONE;
       }
       /* Note: If client doesn't support message-tags, TAGMSG is silently dropped */
     }

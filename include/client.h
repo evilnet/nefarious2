@@ -347,7 +347,7 @@ struct Connection
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) — for bouncer
                                         sessions this becomes the union of all
-                                        connections' caps (primary + shadows) */
+                                        connections' caps (primary + aliases) */
   struct CapSet       con_active_own; /**< This connection's own negotiated caps.
                                         For non-bouncer clients, identical to con_active.
                                         For bouncer primaries, tracks only this connection's

@@ -18,29 +18,25 @@ struct Client;
 struct DBuf;
 struct MsgBuf;
 
-/** Context for passing mb_cache from channel send functions down to
- * send_buffer() for per-shadow tag filtering.
+/** Context for per-connection cap routing in channel send functions.
  *
- * Channel send functions build mb_cache[16] — one MsgBuf per tag flag
- * combination. This context lets the shadow duplication loop in
- * send_buffer() pick the correct cached MsgBuf for each shadow's
- * CAP state, avoiding extra allocations.
+ * Channel send functions set stc_active around their member loops so
+ * send_buffer() can apply per-connection cap filtering (withcap/skipcap)
+ * and suppress alias mirroring (aliases get channel messages through
+ * their own CHFL_ALIAS membership).
  */
-struct ShadowTagContext {
-  struct MsgBuf **stc_cache;     /**< Pointer to mb_cache[16] array */
-  struct MsgBuf  *stc_notags;    /**< Pointer to no-tags MsgBuf (base mb) */
-  struct Client  *stc_from;      /**< Source client (for tag flag computation) */
+struct CapRouteContext {
   int             stc_active;    /**< Non-zero when context is valid */
-  int             stc_include_batch; /**< Whether to include batch tag */
   int             stc_withcap;   /**< Cap routing: deliver only to connections WITH this cap (CAP_NONE=disabled) */
   int             stc_skipcap;   /**< Cap routing: skip connections WITH this cap (CAP_NONE=disabled) */
 };
 
-/** Global shadow tag context — set by channel send functions around
- * their member loops, read by send_buffer() shadow duplication.
+/** Global tag context — set by channel send functions around
+ * their member loops, read by send_buffer() for per-connection
+ * cap routing and alias mirror suppression.
  * Single-threaded IRCd makes a global safe.
  */
-extern struct ShadowTagContext shadow_tag_ctx;
+extern struct CapRouteContext cap_route_ctx;
 
 /*
  * Prototypes
@@ -58,41 +54,13 @@ extern void send_queued(struct Client *to);
  */
 extern void sendrawto_one(struct Client *to, const char *pattern, ...);
 
-/** When set, send_buffer() skips the shadow duplication loop.
- * Used by check_pings() to prevent server PINGs from being duplicated
- * to shadows — each shadow has its own independent PING cycle.
- */
-extern int suppress_shadow_dup;
-
-/** Send a BATCH command to the correct connections in a bouncer session.
- * Checks per-connection caps (CapOwnHas/sh_active) instead of the union,
- * and sends directly to each qualifying connection's sendQ.
- * For non-bouncer clients, simply checks the client's own caps.
+/** Send a BATCH command to a client if it has CAP_BATCH.
+ * Checks per-connection caps (CapOwnHas) to decide delivery.
  * @param[in] acptr  Local user client.
  * @param[in] fmt    Format string for BATCH arguments (e.g., "+%s netsplit %s %s").
  */
 extern void send_batch_perconn(struct Client *acptr, const char *fmt, ...);
 
-
-/** When set, numeric replies (send_reply) are duplicated to shadows
- * even when current_shadow is NULL.  Used by JOIN to mirror TOPIC,
- * NAMES, and MARKREAD to all bouncer connections.
- */
-extern int mirror_to_shadows;
-
-/** When set, send_buffer() skips the primary's sendQ but still runs
- * the shadow duplication loop.  Used to deliver echoes to shadows
- * without sending an unwanted echo to the primary.
- */
-extern int skip_primary_echo;
-
-/** When set, the shadow duplication loop skips this specific shadow.
- * Used to avoid echoing a message back to the shadow that sent it
- * when that shadow hasn't negotiated echo-message (the client already
- * displayed it locally).
- */
-struct ShadowConnection;
-extern struct ShadowConnection *skip_shadow_dup;
 
 /* Override S2S tag source connection for alias source rewriting */
 extern void sendcmdto_set_s2s_cptr(struct Client *cptr);

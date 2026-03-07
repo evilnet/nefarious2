@@ -290,12 +290,9 @@ static int bouncer_resume(struct Client *sptr, const char *token)
   send_note(sptr, "BOUNCER", "SESSION_RESUMED", session->hs_sessid,
             "Session resumed");
 
-  /* Auto-replay for clients without draft/chathistory.
-   * Suppress shadow duplication — this is per-connection welcome output. */
+  /* Auto-replay for clients without draft/chathistory. */
   if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
-    suppress_shadow_dup = 1;
     bouncer_auto_replay(sptr, session, since_time);
-    suppress_shadow_dup = 0;
   }
 
   return 0;
@@ -499,7 +496,7 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
       metadata_set_client(sptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
 
       /* Fix #24: Active teardown — user no longer wants bouncer behavior.
-       * Destroy the session (disconnects all shadows) so the primary
+       * Destroy the session (disconnects all aliases) so the primary
        * continues as a normal non-bounced IRC client. */
       {
         struct BouncerSession *session = bounce_get_session(sptr);
@@ -619,19 +616,20 @@ static int bouncer_settings(struct Client *sptr)
 /* ---------------------------------------------------------------- */
 
 /** Handle BOUNCER LISTCLIENTS - list all connections for the session.
- * Shows primary + shadow connections with client IDs, away state,
+ * Shows primary + alias connections with client IDs, away state,
  * connect time, and IP address.
  *
  * Reply format uses NOTE:
- *   :server NOTE BOUNCER CLIENT id=N type=primary|shadow state=present|away|away-star since=TIMESTAMP ip=ADDR
+ *   :server NOTE BOUNCER CLIENT id=N type=primary|alias state=present|away since=TIMESTAMP ip=ADDR
  *   :server NOTE BOUNCER LISTCLIENTS_END :End of client list
  */
 static int bouncer_listclients(struct Client *sptr)
 {
   struct BouncerSession *session;
-  struct ShadowConnection *sh;
   const char *state_str;
   char info[512];
+  int i;
+  int count;
 
   if (!IsAccount(sptr)) {
     send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", "LISTCLIENTS",
@@ -646,47 +644,46 @@ static int bouncer_listclients(struct Client *sptr)
     return 0;
   }
 
+  count = 0;
+
   /* Primary connection */
   if (session->hs_client && session->hs_state == BOUNCE_ACTIVE) {
     int away_state = 0;
     if (cli_user(session->hs_client)->away) {
       away_state = 1;
     }
-    switch (away_state) {
-      case 1:  state_str = "away"; break;
-      case 2:  state_str = "away-star"; break;
-      default: state_str = "present"; break;
-    }
+    state_str = away_state ? "away" : "present";
     ircd_snprintf(0, info, sizeof(info),
-                  "id=%u type=primary state=%s since=%lu ip=%s",
-                  session->hs_primary_id,
+                  "type=primary state=%s since=%lu ip=%s",
                   state_str,
                   (unsigned long)cli_firsttime(session->hs_client),
                   cli_sock_ip(session->hs_client));
     send_note(sptr, "BOUNCER", "CLIENT", session->hs_sessid, info);
+    count++;
   }
 
-  /* Shadow connections */
-  for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-    switch (sh->sh_away_state) {
-      case 1:  state_str = "away"; break;
-      case 2:  state_str = "away-star"; break;
-      default: state_str = "present"; break;
-    }
+  /* Alias connections */
+  for (i = 0; i < session->hs_alias_count; i++) {
+    struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+    if (!alias)
+      continue;
+    state_str = (cli_user(alias) && cli_user(alias)->away) ? "away" : "present";
     ircd_snprintf(0, info, sizeof(info),
-                  "id=%u type=shadow state=%s since=%lu ip=%s",
-                  sh->sh_id,
+                  "id=%d type=alias state=%s since=%lu ip=%s server=%s",
+                  i + 1,
                   state_str,
-                  (unsigned long)sh->sh_connected,
-                  sh->sh_sock_ip);
+                  (unsigned long)cli_firsttime(alias),
+                  cli_sock_ip(alias),
+                  session->hs_aliases[i].ba_server);
     send_note(sptr, "BOUNCER", "CLIENT", session->hs_sessid, info);
+    count++;
   }
 
   {
     char end_msg[128];
     ircd_snprintf(0, end_msg, sizeof(end_msg),
                   "End of client list (%d connections)",
-                  bounce_connection_count(session));
+                  count);
     send_note(sptr, "BOUNCER", "LISTCLIENTS_END", session->hs_sessid, end_msg);
   }
 

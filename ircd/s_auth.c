@@ -438,7 +438,7 @@ static void auth_loc_timeout_callback(struct Event* ev)
     auth = (struct AuthRequest*) t_data(ev_timer(ev));
     cptr = auth->client;
 
-    /* Client was freed (e.g. bouncer shadow conversion) - clean up orphaned auth */
+    /* Client was freed (e.g. bouncer alias conversion) - clean up orphaned auth */
     if (!cptr) {
       destroy_auth_request(auth);
       return;
@@ -559,7 +559,7 @@ static int check_auth_finished(struct AuthRequest *auth)
 
   /* Resolve deferred bouncer nick collision.
    * If SASL set an account matching the nick holder's account, accept
-   * the nick (register_user will do ghost revive or shadow attach).
+   * the nick (register_user will do ghost revive or alias creation).
    * Otherwise send ERR_NICKNAMEINUSE and wait for a new NICK. */
   if (auth->deferred_nick[0]) {
     struct Client *holder = FindClient(auth->deferred_nick);
@@ -569,7 +569,7 @@ static int check_auth_finished(struct AuthRequest *auth)
         && 0 == ircd_strcmp(cli_user(holder)->account,
                             cli_user(auth->client)->account)) {
       /* Same account — set cli_name but don't add to hash (holder owns it).
-       * register_user() will do ghost revive or shadow attach. */
+       * register_user() will do ghost revive or alias creation. */
       strcpy(cli_name(auth->client), auth->deferred_nick);
     } else if (!holder) {
       /* Nick holder gone during auth — nick is free, claim it */
@@ -1071,7 +1071,7 @@ void destroy_auth_request(struct AuthRequest* auth)
  * Sets the auth request's client pointer to NULL so that
  * destroy_auth_request() won't dereference freed memory.
  * Used when the Client is freed before auth cleanup (e.g.,
- * bouncer shadow conversion).
+ * bouncer alias conversion).
  * @param[in] auth The auth request to detach from its client.
  */
 void auth_detach_client(struct AuthRequest *auth)
@@ -1178,7 +1178,7 @@ static void auth_timeout_callback(struct Event* ev)
   auth = (struct AuthRequest*) t_data(ev_timer(ev));
 
   if (ev_type(ev) == ET_EXPIRE) {
-    /* Client was freed (e.g. bouncer shadow conversion) — just clean up */
+    /* Client was freed (e.g. bouncer alias conversion) — just clean up */
     if (!auth->client) {
       destroy_auth_request(auth);
       return;

@@ -114,7 +114,7 @@ extern void msgq_buf_data(struct MsgBuf *mb, const char **data,
                            unsigned int *len);
 
 /** Create a new MsgBuf by prepending a tag string to a base (no-tags) MsgBuf.
- * Used when a shadow connection needs tags that weren't in the mb_cache
+ * Used when an alias connection needs tags that weren't in the mb_cache
  * because no other channel member had the same capability set.
  * @param[in] tags Tag string to prepend (e.g., "@time=...;account=... ").
  * @param[in] base Base MsgBuf without tags (the body to prepend to).

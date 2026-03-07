@@ -363,7 +363,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
 
   /* Clean up bouncer session if this client is the primary.
    * If the session is ACTIVE and hs_client points to this client,
-   * either destroy the session (no shadows) or null hs_client to
+   * either destroy the session (no aliases) or null hs_client to
    * prevent a dangling pointer.  This handles the case where
    * bounce_should_hold() returned NULL (hold disabled) but the
    * session still exists from a previous BOUNCER SET HOLD on.
@@ -378,7 +378,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     if (bsess && bsess->hs_client == bcptr) {
       if (bsess->hs_state == BOUNCE_HOLDING) {
         /* HOLDING ghost destroyed (e.g., /KILL).  The ghost is the only
-         * thing keeping the session alive — no shadows, no socket.
+         * thing keeping the session alive — no aliases, no socket.
          * Destroy the session to prevent a dangling hs_client pointer
          * and stale replica sessions on other servers. */
         if (t_active(&bsess->hs_hold_timer))
@@ -388,13 +388,26 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         bounce_destroy(bsess);
       } else if (bsess->hs_state == BOUNCE_ACTIVE) {
         bsess->hs_client = NULL;
-        if (MyUser(bcptr) && bounce_enabled_for(bcptr) && !bsess->hs_shadows) {
-          /* Local client, no shadows — session is orphaned, destroy it */
+        if (HasFlag(bcptr, FLAG_KILLED)) {
+          /* KILL: force-destroy session regardless of aliases */
+          if (bsess->hs_alias_count > 0) {
+            int i;
+            for (i = bsess->hs_alias_count - 1; i >= 0; i--) {
+              struct Client *alias = findNUser(bsess->hs_aliases[i].ba_numeric);
+              if (alias)
+                exit_client(alias, alias, &me, "Session killed");
+            }
+          }
+          bounce_broadcast(bsess, 'X', NULL);
+          bounce_destroy(bsess);
+        } else if (MyUser(bcptr) && bounce_enabled_for(bcptr)
+            && bsess->hs_alias_count == 0) {
+          /* Local client, no aliases — session is orphaned, destroy it */
           bounce_broadcast(bsess, 'X', NULL);
           bounce_destroy(bsess);
         }
-        /* Remote clients or local with shadows: managing server or
-         * shadow promotion handles the session lifecycle. */
+        /* Remote clients or clients with aliases: managing server or
+         * alias promotion handles the session lifecycle. */
       }
     }
   }
@@ -616,10 +629,6 @@ int exit_client(struct Client *cptr,
 			   get_client_name(killer, HIDE_IP));
     sendto_opmask_butone(0, SNO_NETWORK, "Net break: %C %C (%s)",
 			 cli_serv(victim)->up, victim, comment);
-
-    /* Clean up bouncer relay state referencing this server.
-     * Must happen before the server's Client struct is freed. */
-    bounce_cleanup_server(victim);
 
     /* Prepare alias promotions: mark sessions where the managing server
      * is departing and surviving aliases exist. Sets hs_promoting to

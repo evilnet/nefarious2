@@ -663,25 +663,13 @@ void checkClient(struct Client *sptr, struct Client *acptr)
    {
       struct BouncerSession *session = bounce_get_session(acptr);
       if (session) {
-         struct ShadowConnection *sh;
          const char *state_str;
          const char *hold_str;
          time_t elapsed;
-         int local_shadows = 0, remote_shadows = 0;
          int has_primary = (session->hs_state == BOUNCE_ACTIVE && MyConnect(acptr)
                             && cli_fd(acptr) >= 0);
          int has_remote_primary = (!has_primary && session->hs_state == BOUNCE_ACTIVE
                                    && IsUser(acptr) && !MyConnect(acptr));
-
-         /* Count local vs remote shadows */
-         for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-            if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-               continue;
-            if (sh->sh_flags & SHADOW_FLAGS_REMOTE)
-               remote_shadows++;
-            else
-               local_shadows++;
-         }
 
          /* Determine state string */
          if (session->hs_state == BOUNCE_ACTIVE) {
@@ -689,8 +677,6 @@ void checkClient(struct Client *sptr, struct Client *acptr)
                state_str = "ACTIVE";
             else if (has_remote_primary)
                state_str = "ACTIVE (remote primary)";
-            else if (remote_shadows > 0)
-               state_str = "ACTIVE (relay-only)";
             else
                state_str = "ACTIVE (orphaned)";
          } else {
@@ -725,18 +711,19 @@ void checkClient(struct Client *sptr, struct Client *acptr)
 
          /* Connections breakdown */
          {
-            int total = (has_primary ? 1 : 0) + local_shadows + remote_shadows;
-            char detail[128];
+            int aliases = session->hs_alias_count;
+            int total = (has_primary ? 1 : 0) + aliases;
 
             if (session->hs_state != BOUNCE_ACTIVE) {
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: 0 (holding)");
-            } else if (has_remote_primary && local_shadows == 0 && remote_shadows == 0) {
+            } else if (has_remote_primary && aliases == 0) {
                struct Client *mgr = FindNServer(session->hs_origin);
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: primary on %s",
                              mgr ? cli_name(mgr) : session->hs_origin);
-            } else if (has_primary && local_shadows == 0 && remote_shadows == 0) {
+            } else if (has_primary && aliases == 0) {
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: 1 (primary only)");
             } else {
+               char detail[128];
                char *p = detail;
                if (has_primary)
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "1 primary");
@@ -746,12 +733,9 @@ void checkClient(struct Client *sptr, struct Client *acptr)
                                      mgr ? cli_name(mgr) : session->hs_origin);
                } else
                   p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), "no primary");
-               if (local_shadows > 0)
-                  p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), ", %d local shadow%s",
-                                     local_shadows, local_shadows > 1 ? "s" : "");
-               if (remote_shadows > 0)
-                  p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), ", %d remote shadow%s",
-                                     remote_shadows, remote_shadows > 1 ? "s" : "");
+               if (aliases > 0)
+                  p += ircd_snprintf(0, p, sizeof(detail) - (p - detail), ", %d alias%s",
+                                     aliases, aliases > 1 ? "es" : "");
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: %d (%s)", total, detail);
             }
             send_reply(sptr, RPL_DATASTR, outbuf);
@@ -796,7 +780,6 @@ void checkClient(struct Client *sptr, struct Client *acptr)
             uint64_t tot_recvB = session->hs_agg_receiveB;
             unsigned int tot_sendM = session->hs_agg_sendM;
             unsigned int tot_recvM = session->hs_agg_receiveM;
-            struct ShadowConnection *s;
 
             /* Add live primary counters */
             if (has_primary) {
@@ -804,15 +787,6 @@ void checkClient(struct Client *sptr, struct Client *acptr)
                tot_recvB += cli_sendB(acptr);
                tot_sendM += cli_receiveM(acptr);
                tot_recvM += cli_sendM(acptr);
-            }
-            /* Add live shadow counters */
-            for (s = session->hs_shadows; s; s = s->sh_next) {
-               if (!(s->sh_flags & SHADOW_FLAGS_DEAD)) {
-                  tot_sendB += s->sh_sendB;
-                  tot_recvB += s->sh_receiveB;
-                  tot_sendM += s->sh_sendM;
-                  tot_recvM += s->sh_receiveM;
-               }
             }
             ircd_snprintf(0, outbuf, sizeof(outbuf),
                           " Session totals:: %lu.%03lu Kb sent / %lu.%03lu Kb recv (%u msgs sent / %u recv)",
@@ -826,7 +800,7 @@ void checkClient(struct Client *sptr, struct Client *acptr)
          if (has_primary) {
             const char *away_str;
             send_reply(sptr, RPL_DATASTR, " ");
-            ircd_snprintf(0, outbuf, sizeof(outbuf), "  Primary [id=%u]::", session->hs_primary_id);
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "  Primary::");
             send_reply(sptr, RPL_DATASTR, outbuf);
 
             ircd_snprintf(0, outbuf, sizeof(outbuf), "             IP:: %s", ircd_ntoa(&cli_ip(acptr)));
@@ -872,85 +846,6 @@ void checkClient(struct Client *sptr, struct Client *acptr)
             send_reply(sptr, RPL_DATASTR, outbuf);
             ircd_snprintf(0, outbuf, sizeof(outbuf), "       Connected:: %s",
                           myctime(cli_firsttime(acptr) ? cli_firsttime(acptr) : cli_lastnick(acptr)));
-            send_reply(sptr, RPL_DATASTR, outbuf);
-         } else if (session->hs_state == BOUNCE_ACTIVE && remote_shadows > 0) {
-            send_reply(sptr, RPL_DATASTR, " ");
-            send_reply(sptr, RPL_DATASTR, "        Primary:: (relay-only, no local socket)");
-         }
-
-         /* Shadow connections */
-         for (sh = session->hs_shadows; sh; sh = sh->sh_next) {
-            const char *away_str;
-
-            if (sh->sh_flags & SHADOW_FLAGS_DEAD)
-               continue;
-
-            send_reply(sptr, RPL_DATASTR, " ");
-            ircd_snprintf(0, outbuf, sizeof(outbuf), "  Shadow [id=%u]::", sh->sh_id);
-            send_reply(sptr, RPL_DATASTR, outbuf);
-
-            if (sh->sh_flags & SHADOW_FLAGS_REMOTE) {
-               ircd_snprintf(0, outbuf, sizeof(outbuf), "           Type:: remote (relay via %s)",
-                             sh->sh_relay_server ? cli_name(sh->sh_relay_server) : "?");
-               send_reply(sptr, RPL_DATASTR, outbuf);
-               if (sh->sh_relay_id[0]) {
-                  ircd_snprintf(0, outbuf, sizeof(outbuf), "       Relay ID:: %s", sh->sh_relay_id);
-                  send_reply(sptr, RPL_DATASTR, outbuf);
-               }
-            } else {
-               ircd_snprintf(0, outbuf, sizeof(outbuf), "           Type:: local");
-               send_reply(sptr, RPL_DATASTR, outbuf);
-            }
-
-            ircd_snprintf(0, outbuf, sizeof(outbuf), "             IP:: %s", sh->sh_sock_ip);
-            send_reply(sptr, RPL_DATASTR, outbuf);
-
-            ircd_snprintf(0, outbuf, sizeof(outbuf), "      Connected:: %s", myctime(sh->sh_connected));
-            send_reply(sptr, RPL_DATASTR, outbuf);
-
-            elapsed = CurrentTime - sh->sh_connected;
-            ircd_snprintf(0, outbuf, sizeof(outbuf), "       Duration:: %ld days, %02ld:%02ld:%02ld",
-                          elapsed / 86400, (elapsed / 3600) % 24, (elapsed / 60) % 60, elapsed % 60);
-            send_reply(sptr, RPL_DATASTR, outbuf);
-
-            if (!(sh->sh_flags & SHADOW_FLAGS_REMOTE)) {
-               ircd_snprintf(0, outbuf, sizeof(outbuf), "             FD:: %d", sh->sh_fd);
-               send_reply(sptr, RPL_DATASTR, outbuf);
-            }
-
-            /* Per-shadow away state */
-            switch (sh->sh_away_state) {
-               case 0: away_str = "present"; break;
-               case 1: away_str = "away"; break;
-               case 2: away_str = "away*"; break;
-               default: away_str = "unknown"; break;
-            }
-            ircd_snprintf(0, outbuf, sizeof(outbuf), "     Away state:: %s", away_str);
-            send_reply(sptr, RPL_DATASTR, outbuf);
-
-            /* Shadow flags */
-            if (sh->sh_flags & (SHADOW_FLAGS_BLOCKED | SHADOW_FLAGS_PINGSENT)) {
-               char flags_buf[64] = "";
-               if (sh->sh_flags & SHADOW_FLAGS_BLOCKED)
-                  strcat(flags_buf, "blocked ");
-               if (sh->sh_flags & SHADOW_FLAGS_PINGSENT)
-                  strcat(flags_buf, "ping-sent ");
-               ircd_snprintf(0, outbuf, sizeof(outbuf), "          Flags:: %s", flags_buf);
-               send_reply(sptr, RPL_DATASTR, outbuf);
-            }
-
-            /* Per-shadow data counters */
-            ircd_snprintf(0, outbuf, sizeof(outbuf),
-                          "      Data sent:: %lu.%03lu Kb (%u msgs)",
-                          (unsigned long)(sh->sh_sendB / 1024),
-                          (unsigned long)(sh->sh_sendB % 1024),
-                          sh->sh_sendM);
-            send_reply(sptr, RPL_DATASTR, outbuf);
-            ircd_snprintf(0, outbuf, sizeof(outbuf),
-                          "  Data received:: %lu.%03lu Kb (%u msgs)",
-                          (unsigned long)(sh->sh_receiveB / 1024),
-                          (unsigned long)(sh->sh_receiveB % 1024),
-                          sh->sh_receiveM);
             send_reply(sptr, RPL_DATASTR, outbuf);
          }
 

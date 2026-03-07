@@ -45,7 +45,6 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
-#include "bouncer_session.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -68,38 +67,22 @@ static void propagate_redact_to_channel(struct Client *sptr, struct Channel *chp
   for (member = chptr->members; member; member = member->next_member) {
     struct Client *acptr = member->user;
 
-    /* Only send to local clients with message-redaction capability.
-     * CapActive (union) is correct here — enter the path if ANY connection
-     * in the bouncer session has REDACT. send_buffer per-connection routing
-     * handles delivery to the right connections. */
+    /* Only send to local clients with message-redaction capability */
     if (!MyUser(acptr))
       continue;
     if (!CapActive(acptr, CAP_DRAFT_REDACT))
       continue;
 
-    /* Sender echo/mirror: respect echo-message per-connection, mirror to
-     * other bouncer connections that didn't send it. */
+    /* Sender echo: only send back to sender if they have echo-message */
     if (acptr == sptr) {
-      int sender_has_echo = CapOwnHas(sptr, CAP_ECHOMSG);
-      struct BouncerSession *rbsess = bounce_get_session(sptr);
-      int sender_has_shadows = rbsess && rbsess->hs_shadow_count > 0;
-      int from_shadow = (current_shadow != NULL);
-      if (!sender_has_echo && !sender_has_shadows && !from_shadow)
+      if (!CapOwnHas(sptr, CAP_ECHOMSG))
         continue;
-      if (!sender_has_echo && !from_shadow)
-        skip_primary_echo = 1;
-      if (current_shadow && !CapHas(&current_shadow->sh_active, CAP_ECHOMSG))
-        skip_shadow_dup = current_shadow;
     }
 
     /* Set stc_withcap so send_buffer routes per-connection */
-    shadow_tag_ctx.stc_active = 1;
-    shadow_tag_ctx.stc_withcap = CAP_DRAFT_REDACT;
-    shadow_tag_ctx.stc_skipcap = CAP_NONE;
-    shadow_tag_ctx.stc_from = sptr;
-    shadow_tag_ctx.stc_cache = NULL;
-    shadow_tag_ctx.stc_notags = NULL;
-    shadow_tag_ctx.stc_include_batch = 0;
+    cap_route_ctx.stc_active = 1;
+    cap_route_ctx.stc_withcap = CAP_DRAFT_REDACT;
+    cap_route_ctx.stc_skipcap = CAP_NONE;
 
     if (reason && *reason) {
       sendcmdto_one(sptr, CMD_REDACT, acptr, "%s %s :%s", target, msgid, reason);
@@ -107,13 +90,8 @@ static void propagate_redact_to_channel(struct Client *sptr, struct Channel *chp
       sendcmdto_one(sptr, CMD_REDACT, acptr, "%s %s", target, msgid);
     }
 
-    shadow_tag_ctx.stc_active = 0;
-    shadow_tag_ctx.stc_withcap = CAP_NONE;
-
-    if (acptr == sptr) {
-      skip_primary_echo = 0;
-      skip_shadow_dup = NULL;
-    }
+    cap_route_ctx.stc_active = 0;
+    cap_route_ctx.stc_withcap = CAP_NONE;
   }
 }
 

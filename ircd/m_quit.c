@@ -113,25 +113,22 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(0 != sptr);
   assert(cptr == sptr);
 
-  /* Bouncer alias: skip all shadow/hold logic — just clean up.
+  /* Bouncer alias: skip all hold logic — just clean up.
    * exit_client() sends BX X to notify other servers. */
   if (IsBouncerAlias(sptr))
     return exit_client(cptr, sptr, sptr, "Quit");
 
-  /* Try shadow promotion first — if the session has shadows, promote
+  /* Try alias promotion first — if the session has aliases, promote
    * one to primary rather than going HOLDING.  This mirrors the
    * s_bsd.c disconnect handler which also tries promotion first.
    * Clients routinely send QUIT on disconnect, so this is the
-   * primary path for graceful disconnects with shadows attached. */
+   * primary path for graceful disconnects with aliases attached. */
   if (IsUser(sptr) && bounce_enabled_for(sptr) && IsAccount(sptr)) {
     struct BouncerSession *bsess = bounce_get_session(sptr);
-    if (bsess && bsess->hs_shadows) {
-      if (bounce_promote_shadow(bsess) == 0)
-        return 0; /* Shadow promoted — client stays alive */
-      /* Promotion failed — try relay-only mode */
-      if (bounce_relay_only_transition(bsess, sptr) == 0)
-        return 0;
-      /* No local or remote shadows — fall through to hold or exit */
+    if (bsess && bsess->hs_alias_count > 0) {
+      if (bounce_promote_alias(bsess) == 0)
+        return 0;  /* Alias promoted — session transferred */
+      /* No viable alias — fall through to hold or exit */
     }
   }
 

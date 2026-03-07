@@ -167,12 +167,10 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   assert(cptr == sptr);
 
   /* Check AWAY throttle - silently drop if too soon after last change.
-   * Skip throttle in the presence aggregation path: multiple connections
-   * (primary + shadows) share cli_nextaway, so a shadow's AWAY would be
-   * incorrectly throttled by the primary's.  The aggregation path's
+   * Skip throttle in the presence aggregation path: the aggregation path's
    * effective-state change detection already suppresses redundant broadcasts. */
   throttle = feature_int(FEAT_AWAY_THROTTLE);
-  if (throttle > 0 && !current_shadow &&
+  if (throttle > 0 &&
       !(feature_bool(FEAT_PRESENCE_AGGREGATION) && bounce_enabled_for(cptr))) {
     if (CurrentTime < cli_nextaway(cptr)) {
       /* Too soon - silently ignore (no error to avoid spam) */
@@ -192,13 +190,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* Presence aggregation path — only when bouncer is active for this account.
-   * Uses the bouncer session's connection list (primary + shadows) as the
-   * authoritative aggregation path.
-   *
-   * IMPORTANT: Do NOT call user_set_away() before this check.  Shadow commands
-   * are dispatched through the primary Client (parse_client(primary, ...)), so
-   * user_set_away would corrupt the primary's away state with the shadow's.
-   * Instead, update per-connection state independently, compute the effective
+   * Update per-connection state independently, compute the effective
    * state, then set cli_user->away from the effective result.
    */
   if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
@@ -208,34 +200,18 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     char new_msg[AWAYLEN + 1];
     int is_away = !EmptyString(away_message);
 
-    /* Update per-connection away state */
-    if (current_shadow) {
-      /* Shadow sent AWAY — update shadow state only, do NOT touch primary */
-      if (is_away_star) {
-        current_shadow->sh_away_state = 2;
-        current_shadow->sh_away_msg[0] = '\0';
-      } else if (is_away) {
-        current_shadow->sh_away_state = 1;
-        ircd_strncpy(current_shadow->sh_away_msg, away_message, AWAYLEN + 1);
-      } else {
-        current_shadow->sh_away_state = 0;
-        current_shadow->sh_away_msg[0] = '\0';
-      }
-      current_shadow->sh_since = CurrentTime;
+    /* Update per-connection away state.
+     * Store both the state and the message in con_pre_away/con_pre_away_msg
+     * so they survive effective-state updates to cli_user->away. */
+    if (is_away_star) {
+      con_pre_away(cli_connect(sptr)) = 2;
+      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+    } else if (is_away) {
+      con_pre_away(cli_connect(sptr)) = 1;
+      ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN + 1);
     } else {
-      /* Primary sent AWAY — update primary's per-connection state.
-       * Store both the state and the message in con_pre_away/con_pre_away_msg
-       * so they survive effective-state updates to cli_user->away. */
-      if (is_away_star) {
-        con_pre_away(cli_connect(sptr)) = 2;
-        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-      } else if (is_away) {
-        con_pre_away(cli_connect(sptr)) = 1;
-        ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN + 1);
-      } else {
-        con_pre_away(cli_connect(sptr)) = 0;
-        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-      }
+      con_pre_away(cli_connect(sptr)) = 0;
+      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
     }
 
     /* Send the appropriate reply to the user */

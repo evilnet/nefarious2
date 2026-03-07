@@ -419,8 +419,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * 1. Socket transplant: If there's a local HOLDING ghost or a local
      *    relay-only ACTIVE ghost, transplant this client's socket onto it.
      *    The ghost "wakes up" with no network visibility.
-     * 2. Shadow attach: If there's an ACTIVE session with a local primary
-     *    socket, become a shadow.
+     * 2. Alias attach: If there's an ACTIVE session with a local primary
+     *    socket, become an alias.
      * 3. Fall back to auto_resume for remote ghosts or new sessions.
      */
     auto_session = NULL;
@@ -441,8 +441,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
 
       /* Try 2: Local relay-only ACTIVE ghost (no local socket, remote
-       * shadows only). When a user reconnects to the managing server,
-       * they should become the primary instead of another shadow. */
+       * aliases only). When a user reconnects to the managing server,
+       * they should become the primary instead of another alias. */
       if (!revive_target) {
         struct BouncerSession *active = bounce_find_any_session(cli_account(sptr));
         if (active && active->hs_state == BOUNCE_ACTIVE
@@ -472,13 +472,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
          * Note: We can't use the normal register_user flow because
          * the ghost is already on the network with a numeric.
          *
-         * Suppress shadow duplication for the entire welcome block.
-         * This is per-connection state (ISUPPORT, LUSERS, MOTD,
-         * channel state, chathistory replay) that only the new
-         * primary needs.  Shadows already received their own welcome
-         * when they attached via bounce_send_shadow_welcome(). */
-        suppress_shadow_dup = 1;
-
+         * Send welcome block to the revived ghost. */
         send_reply(ghost, RPL_WELCOME, feature_str(FEAT_NETWORK),
                    feature_str(FEAT_PROVIDER) ? " via " : "",
                    feature_str(FEAT_PROVIDER) ? feature_str(FEAT_PROVIDER) : "",
@@ -513,131 +507,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
           bouncer_auto_replay(ghost, revive_target, saved_since_time);
         }
 
-        suppress_shadow_dup = 0;
-
         /* Return special code — caller must not dereference sptr */
         return CPTR_KILLED;
       }
 
-      /* Fall back to existing auto_resume (handles shadows, remote ghosts, etc.) */
+      /* Fall back to existing auto_resume (handles aliases, remote ghosts, etc.) */
       auto_resumed = bounce_auto_resume(sptr, &auto_session, &saved_since_time);
-    }
-
-    /* If auto_resume converted this client to a shadow connection,
-     * the Client struct must be freed and we must NOT introduce it
-     * to the network. The shadow has already been attached to the
-     * existing session; bounce_send_shadow_welcome() sends the
-     * registration sequence on the shadow's socket.
-     */
-    if (auto_resumed == 2 && auto_session) {
-      /* Find the shadow that was just created (last one added = first in list) */
-      struct ShadowConnection *new_shadow = auto_session->hs_shadows;
-      if (new_shadow) {
-        bounce_send_shadow_welcome(new_shadow);
-      }
-      /* Client's fd+SSL were stolen by bounce_auto_resume (same pattern
-       * as bounce_revive).  Use bounce_free_temp_client for silent
-       * teardown — the client was never introduced to the network.
-       *
-       * Detach auth request's client pointer BEFORE freeing the Client
-       * struct, so destroy_auth_request() (called by our caller
-       * check_auth_finished) won't dereference freed memory.
-       *
-       * Fix #22: Also NULL cli_auth(sptr) so that free_client() (called
-       * by bounce_free_temp_client → remove_client_from_list) does NOT
-       * call destroy_auth_request() again.  Without this, the auth
-       * struct gets put on the freelist twice — once by free_client and
-       * once by check_auth_finished line 617 — creating a cycle that
-       * causes two new clients to share the same auth struct, leading
-       * to empty cli_name on registration. */
-      auth_detach_client(cli_auth(sptr));
-      cli_auth(sptr) = NULL;
-      bounce_free_temp_client(sptr);
-      return CPTR_KILLED; /* Client freed — callers must not dereference cptr */
-    }
-
-    /* Cross-server relay: session is on a remote server.
-     * dup(fd) for the relay socket, send BS S to managing server,
-     * and free the temp client — it was never introduced to the network. */
-    if (auto_resumed == BOUNCE_RESUME_RELAY_REMOTE && auto_session) {
-      struct Client *managing_server = FindNServer(auto_session->hs_origin);
-      if (managing_server) {
-        int relay_fd;
-        int is_ssl = 0;
-        void *saved_ssl = NULL;
-#ifdef USE_SSL
-        is_ssl = (cli_socket(sptr).ssl != NULL) ? 1 : 0;
-#endif
-
-        /* dup the fd — the original fd will be closed below */
-        relay_fd = dup(cli_fd(sptr));
-        if (relay_fd >= 0) {
-#ifdef USE_SSL
-          /* Transfer the SSL context to the relay shadow.  Redirect the
-           * SSL BIO to the dup'd fd so it survives socket_del + close of
-           * the original.  NULL out the temp client's copy so ET_DESTROY
-           * (from socket_del) doesn't call ssl_free on it. */
-          if (cli_socket(sptr).ssl) {
-            saved_ssl = cli_socket(sptr).ssl;
-            cli_socket(sptr).ssl = NULL;
-            SSL_set_fd((SSL *)saved_ssl, relay_fd);
-          }
-#endif
-
-          /* Create pending relay entry on this server (B-side) */
-          struct RelayShadowEntry *relay_entry;
-          relay_entry = bounce_add_pending_relay(
-              relay_fd, auto_session->hs_account, auto_session->hs_sessid,
-              managing_server, is_ssl, cli_sock_ip(sptr), saved_ssl);
-
-          if (relay_entry) {
-            /* Send BS S to managing server:
-             * BS S <account> <sessid> <capab_hex> <is_ssl> <sock_ip> */
-            sendcmdto_one(&me, CMD_BOUNCER_SESSION, managing_server,
-                          "S %s %s %lx %d %s",
-                          auto_session->hs_account,
-                          auto_session->hs_sessid,
-                          0UL, /* TODO: encode cli_capab as hex */
-                          is_ssl,
-                          cli_sock_ip(sptr));
-
-            Debug((DEBUG_INFO, "register_user: cross-server relay for %s session %s via %s",
-                   cli_name(sptr), auto_session->hs_sessid,
-                   cli_name(managing_server)));
-          } else {
-            /* Failed to create relay entry — clean up */
-#ifdef USE_SSL
-            if (saved_ssl) {
-              SSL_shutdown((SSL *)saved_ssl);
-              SSL_free((SSL *)saved_ssl);
-              saved_ssl = NULL;
-            }
-#endif
-            close(relay_fd);
-          }
-        }
-      }
-
-      /* Detach the temp client's socket from the event engine and close
-       * the original fd.  The relay shadow owns the dup'd copy.
-       * SSL context was already transferred to relay (or cleaned up on
-       * failure), so ET_DESTROY won't call ssl_free.
-       * bounce_free_temp_client() asserts cli_fd == -1. */
-      s_data(&cli_socket(sptr)) = NULL;
-      LocalClientArray[cli_fd(sptr)] = 0;
-      socket_del(&cli_socket(sptr));
-      close(cli_fd(sptr));
-      cli_fd(sptr) = -1;
-      for ( ; HighestFd > 0; --HighestFd) {
-        if (LocalClientArray[HighestFd])
-          break;
-      }
-
-      /* Free the temp client — never introduced to network */
-      auth_detach_client(cli_auth(sptr));
-      cli_auth(sptr) = NULL;
-      bounce_free_temp_client(sptr);
-      return CPTR_KILLED;
     }
 
     /* Alias path: session is on a remote server, create local alias.
@@ -774,22 +649,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
       }
     }
 
-    /* Replay channel state and chathistory after session resume.
-     * Suppress shadow duplication — this is per-connection welcome output;
-     * existing shadows already got their own via bounce_send_shadow_welcome(). */
+    /* Replay channel state and chathistory after session resume. */
     if (auto_resumed && auto_session) {
-      suppress_shadow_dup = 1;
-
       if (auto_resumed == 1)
         bounce_send_channel_state(sptr);
 
-      /* Auto-replay for legacy clients (no chathistory CAP).
-       * Use CapOwnHas (not CapActive/union) — if only a shadow has chathistory,
-       * the primary still needs auto-replay since it can't fetch history itself. */
+      /* Auto-replay for legacy clients (no chathistory CAP). */
       if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY))
         bouncer_auto_replay(sptr, auto_session, saved_since_time);
-
-      suppress_shadow_dup = 0;
     }
   }
   else {

@@ -4482,6 +4482,16 @@ mode_process_clients(struct ParseState *state)
       continue;
     }
 
+    /* Block mode changes targeting alias members — aliases inherit
+     * their channel mode from the primary; direct changes desync. */
+    if (IsMemberAlias(member)) {
+      if (MyUser(state->sptr))
+        send_reply(state->sptr, ERR_USERNOTINCHANNEL,
+                   cli_name(state->cli_change[i].client),
+                   state->chptr->chname);
+      continue;
+    }
+
     newoplevel = MAXOPLEVEL + 1;
     /* get op-level for member being opped */
     if ((state->cli_change[i].flag & (MODE_ADD | MODE_CHANOP)) ==
@@ -4589,6 +4599,9 @@ mode_process_clients(struct ParseState *state)
 
       /* Mark bouncer session dirty for periodic persistence (mode change) */
       bounce_mark_dirty(state->cli_change[i].client);
+
+      /* Sync channel modes to aliases of this member */
+      bounce_sync_alias_chanmodes(state->chptr, state->cli_change[i].client);
     }
 
     /* accumulate the change */
@@ -5108,6 +5121,7 @@ joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
   jbuf->jb_comment = comment;
   jbuf->jb_create = create;
   jbuf->jb_count = 0;
+  jbuf->jb_alias_source = NULL;
   jbuf->jb_strlen = (((type == JOINBUF_TYPE_JOIN ||
 		       type == JOINBUF_TYPE_PART ||
 		       type == JOINBUF_TYPE_PARTALL) ?
@@ -5130,6 +5144,8 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
   assert(0 != jbuf);
 
   if (!chan) {
+    if (jbuf->jb_alias_source)
+      sendcmdto_set_alias_source(jbuf->jb_alias_source);
     sendcmdto_serv_butone(jbuf->jb_source, CMD_JOIN, jbuf->jb_connect, "0");
     return;
   }
@@ -5188,10 +5204,13 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
     /* Mark bouncer session dirty for periodic persistence */
     bounce_mark_dirty(jbuf->jb_source);
 
-    /* send JOIN notification to all servers (CREATE is sent later). */
-    if (jbuf->jb_type != JOINBUF_TYPE_CREATE && !is_local)
+    /* send JOIN notification to all servers (CREATE is sent later) */
+    if (jbuf->jb_type != JOINBUF_TYPE_CREATE && !is_local) {
+      if (jbuf->jb_alias_source)
+        sendcmdto_set_alias_source(jbuf->jb_alias_source);
       sendcmdto_serv_butone(jbuf->jb_source, CMD_JOIN, jbuf->jb_connect,
 			    "%H %Tu", chan, chan->creationtime);
+    }
 
     if (!((chan->mode.mode & MODE_DELJOINS) && !(flags & CHFL_VOICED_OR_OPPED))) {
       /* Send the notification to the channel */
@@ -5226,6 +5245,11 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       else
         sendcmdto_one(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
     }
+
+    /* Send post-join replies (TOPIC/NAMES) to local aliases.  Must be
+     * AFTER the JOIN echo above so clients see JOIN before NAMES. */
+    if (!IsBouncerAlias(jbuf->jb_source))
+      bounce_send_alias_join_replies(chan, jbuf->jb_source);
   }
 
   if (jbuf->jb_type == JOINBUF_TYPE_PARTALL ||
@@ -5281,6 +5305,8 @@ joinbuf_flush(struct JoinBuf *jbuf)
   /* and send the appropriate command */
   switch (jbuf->jb_type) {
   case JOINBUF_TYPE_CREATE:
+    if (jbuf->jb_alias_source)
+      sendcmdto_set_alias_source(jbuf->jb_alias_source);
     sendcmdto_serv_butone(jbuf->jb_source, CMD_CREATE, jbuf->jb_connect,
 			  "%s %Tu", chanlist, jbuf->jb_create);
     if (feature_bool(FEAT_AUTOCHANMODES) && feature_str(FEAT_AUTOCHANMODES_LIST)
@@ -5294,6 +5320,8 @@ joinbuf_flush(struct JoinBuf *jbuf)
     break;
 
   case JOINBUF_TYPE_PART:
+    if (jbuf->jb_alias_source)
+      sendcmdto_set_alias_source(jbuf->jb_alias_source);
     sendcmdto_serv_butone(jbuf->jb_source, CMD_PART, jbuf->jb_connect,
 			  jbuf->jb_comment ? "%s :%s" : "%s", chanlist,
 			  jbuf->jb_comment);

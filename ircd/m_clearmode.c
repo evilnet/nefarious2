@@ -82,6 +82,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "client.h"
 #include "channel.h"
 #include "hash.h"
@@ -262,6 +263,12 @@ do_clearmode(struct Client *cptr, struct Client *sptr, struct Channel *chptr,
 	member->status &= ~CHFL_VOICE;
       }
     }
+
+  /* Sync cleared modes to bouncer aliases */
+  if (del_mode & (MODE_CHANOP | MODE_HALFOP | MODE_VOICE))
+    for (member = chptr->members; member; member = member->next_member)
+      if (!IsMemberAlias(member) && IsAccount(member->user))
+        bounce_sync_alias_chanmodes(chptr, member->user);
 
   /* And flush the modes to the channel */
   modebuf_flush(&mbuf);
