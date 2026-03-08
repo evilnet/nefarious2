@@ -1551,8 +1551,10 @@ void client_sock_callback(struct Event* ev)
     if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
       struct BouncerSession *bsess = bounce_get_session(cptr);
       if (bsess && bsess->hs_alias_count > 0) {
-        if (bounce_promote_alias(bsess) == 0)
-          return;  /* Alias promoted — session transferred */
+        if (bounce_promote_alias(bsess) == 0) {
+          exit_client(cptr, cptr, &me, "Session transferred");
+          return;
+        }
         /* No viable alias — fall through to hold or exit */
       }
     }

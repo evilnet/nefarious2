@@ -1209,7 +1209,7 @@ static int bounce_db_put(struct BouncerSession *session)
   MDBX_txn *txn;
   MDBX_val key, data;
   struct BounceSessionRecord rec;
-  struct Client *ghost;
+  struct Client *ghost = session->hs_client;
   int rc;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
@@ -1244,9 +1244,6 @@ static int bounce_db_put(struct BouncerSession *session)
   rec.bsr_total_active = (int64_t)session->hs_total_active;
   rec.bsr_attach_count = session->hs_attach_count;
   rec.bsr_connect_count = session->hs_connect_count;
-
-  /* Ghost client identity (if client exists) */
-  ghost = session->hs_client;
   if (ghost) {
     ircd_strncpy(rec.bsr_nick, cli_name(ghost), NICKLEN + 1);
     if (cli_user(ghost)) {
@@ -2236,9 +2233,13 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
 /** Promote an alias to primary for a bouncer session.
  * Extracts the promotion logic shared by disconnect handlers and SQUIT.
  *
- * Tiebreaker: prefer local alias (MyUser) first — in disconnect scenarios
- * all servers are up, so promoting locally avoids unnecessary BX P remote
- * promotion.  Falls back to lowest ba_server numeric (same as SQUIT path).
+ * Tiebreaker: oldest connection (lowest cli_firsttime) wins.  This is
+ * deterministic across all servers, ensuring consistent promotion during
+ * SQUIT when multiple servers independently promote.
+ *
+ * After promotion, callers MUST call exit_client() on the old primary
+ * to propagate S2S QUIT and free the numeric.  The old primary is already
+ * removed from all channels here, so exit_client produces no visible QUIT.
  *
  * @param[in] session Session whose primary is departing.
  * @return 0 on success, -1 if no aliases available.
@@ -2249,26 +2250,29 @@ int bounce_promote_alias(struct BouncerSession *session)
   const char *winner_numeric = NULL;
   const char *winner_server = NULL;
   struct Client *alias;
+  struct Client *old_primary;
+  char old_numeric[6];
   struct Membership *member;
   int winner_idx = -1;
+  time_t oldest_time = 0;
 
   if (session->hs_alias_count <= 0)
     return -1;
 
-  /* Tiebreaker: prefer local alias first, then lowest ba_server numeric */
+  /* A1: Save old primary reference before any changes.
+   * May be NULL in SQUIT path (nulled by bounce_prepare_squit_promotions). */
+  old_primary = session->hs_client;
+  if (old_primary)
+    ircd_snprintf(0, old_numeric, sizeof(old_numeric), "%s%s",
+                  cli_yxx(cli_user(old_primary)->server), cli_yxx(old_primary));
+
+  /* A0: Tiebreaker — oldest connection (lowest cli_firsttime) */
   for (j = 0; j < session->hs_alias_count; j++) {
     struct Client *candidate = findNUser(session->hs_aliases[j].ba_numeric);
     if (!candidate || !IsBouncerAlias(candidate))
       continue;
-    if (MyUser(candidate)) {
-      /* Local alias — best choice, use immediately */
-      winner_server = session->hs_aliases[j].ba_server;
-      winner_numeric = session->hs_aliases[j].ba_numeric;
-      winner_idx = j;
-      break;
-    }
-    if (!winner_server ||
-        ircd_strcmp(session->hs_aliases[j].ba_server, winner_server) < 0) {
+    if (!winner_numeric || cli_firsttime(candidate) < oldest_time) {
+      oldest_time = cli_firsttime(candidate);
       winner_server = session->hs_aliases[j].ba_server;
       winner_numeric = session->hs_aliases[j].ba_numeric;
       winner_idx = j;
@@ -2357,17 +2361,35 @@ int bounce_promote_alias(struct BouncerSession *session)
   ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
                 sizeof(session->hs_origin) - 1);
 
-  /* If promoted alias is on this server, broadcast BX P + BS T */
-  if (MyUser(alias)) {
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
-                          "P %s %s %s %s",
-                          winner_numeric, winner_numeric,
-                          session->hs_sessid, cli_name(alias));
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION, NULL,
-                          "T %s %s %s",
-                          session->hs_account, session->hs_sessid,
-                          cli_yxx(&me));
+  /* A2: Update remaining aliases' alias_primary to point to new primary.
+   * Must happen BEFORE A4 (remove old_primary from channels) so that
+   * bounce_sync_alias_part() finds no aliases pointing to old_primary. */
+  for (j = 0; j < session->hs_alias_count; j++) {
+    struct Client *sibling = findNUser(session->hs_aliases[j].ba_numeric);
+    if (sibling && IsBouncerAlias(sibling))
+      cli_user(sibling)->alias_primary = alias;
   }
+
+  /* A0b/A3: Broadcast BX P + BS T to all servers.
+   * In SQUIT path old_primary is NULL — use winner_numeric as fallback
+   * (remote handlers will find old_client=NULL and forward as no-op).
+   * BS T uses winner_server for consistency when multiple servers
+   * independently promote during SQUIT. */
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "P %s %s %s %s",
+                        old_primary ? old_numeric : winner_numeric,
+                        winner_numeric,
+                        session->hs_sessid, cli_name(alias));
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION, NULL,
+                        "T %s %s %s",
+                        session->hs_account, session->hs_sessid,
+                        winner_server);
+
+  /* A4: Remove old primary from channels silently.
+   * After this, callers' exit_client() produces no visible QUIT
+   * (sendcmdto_common_channels_butone is a no-op with no channels). */
+  if (old_primary)
+    remove_user_from_all_channels(old_primary);
 
   return 0;
 }
@@ -2412,6 +2434,11 @@ void bounce_prepare_squit_promotions(struct Client *server)
       /* If any aliases survive, mark for promotion */
       if (session->hs_alias_count > 0) {
         session->hs_promoting = 1;
+        /* Null hs_client BEFORE exit_downlinks frees the old primary.
+         * bounce_promote_alias() checks old_primary for NULL to handle
+         * the SQUIT path correctly (skip numeric construction, skip
+         * channel removal since exit_downlinks already cleaned up). */
+        session->hs_client = NULL;
         Debug((DEBUG_INFO, "bounce_prepare_squit: session %s/%s has %d "
                "surviving aliases, marking for promotion",
                session->hs_account, session->hs_sessid,
@@ -3462,6 +3489,15 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     return 0;
   }
 
+  /* SQUIT path: when old_primary was NULL, originating server sends
+   * winner_numeric for both params.  If this server already promoted
+   * independently, old_client == new_client — nothing to do. */
+  if (old_client == new_client) {
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "P %s %s %s %s", old_numeric, new_numeric, sessid, nick);
+    return 0;
+  }
+
   if (IsBouncerAlias(new_client)) {
     /* Alias path: new_client is already in channels with CHFL_ALIAS.
      * Copy mode flags from old's memberships, clear CHFL_ALIAS. */
@@ -3484,6 +3520,8 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     }
     ClearBouncerAlias(new_client);
     cli_user(new_client)->alias_primary = NULL;
+    /* C1: Add promoted alias to nick hash (aliases aren't in nick hash) */
+    hAddClient(new_client);
   } else {
     /* Swap path: new_client has no channel memberships.
      * Transfer memberships from old to new (legacy/sequential). */
@@ -3502,11 +3540,41 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     }
   }
 
-  /* Clear bouncer flags from old client */
-  if (IsBouncerHold(old_client))
-    ClearBouncerHold(old_client);
+  /* C2: Update session via string-based lookup (reliable even when
+   * hs_client is NULL, e.g. during SQUIT). */
+  {
+    struct BouncerSession *bsess = bounce_find_by_token_sessid(
+        cli_account(old_client), sessid);
+    if (bsess) {
+      int k;
+      /* Point session to new primary */
+      bsess->hs_client = new_client;
+      /* Update remaining aliases' alias_primary */
+      for (k = 0; k < bsess->hs_alias_count; k++) {
+        struct Client *sibling = findNUser(bsess->hs_aliases[k].ba_numeric);
+        if (sibling && IsBouncerAlias(sibling))
+          cli_user(sibling)->alias_primary = new_client;
+      }
+      /* Remove promoted alias from hs_aliases[] */
+      for (k = 0; k < bsess->hs_alias_count; k++) {
+        if (findNUser(bsess->hs_aliases[k].ba_numeric) == new_client) {
+          if (k < bsess->hs_alias_count - 1)
+            memmove(&bsess->hs_aliases[k], &bsess->hs_aliases[k + 1],
+                    (bsess->hs_alias_count - 1 - k)
+                      * sizeof(struct BounceAlias));
+          bsess->hs_alias_count--;
+          break;
+        }
+      }
+    }
+  }
 
-  /* Exit the old client silently */
+  /* C3: Remove old_client from channels silently, then exit with
+   * FLAG_KILLED to suppress S2S QUIT propagation to upstream servers
+   * that don't understand alias promotion (they'd desync if they saw
+   * the QUIT).  The originating server's S2S QUIT arrives later (TCP
+   * ordering) and is harmlessly ignored (numeric already freed). */
+  remove_user_from_all_channels(old_client);
   SetFlag(old_client, FLAG_KILLED);
   exit_client(old_client, old_client, &me, "Session transferred");
 

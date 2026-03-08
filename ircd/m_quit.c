@@ -127,7 +127,7 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     struct BouncerSession *bsess = bounce_get_session(sptr);
     if (bsess && bsess->hs_alias_count > 0) {
       if (bounce_promote_alias(bsess) == 0)
-        return 0;  /* Alias promoted — session transferred */
+        return exit_client(cptr, sptr, sptr, "Session transferred");
       /* No viable alias — fall through to hold or exit */
     }
   }

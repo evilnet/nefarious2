@@ -599,8 +599,10 @@ static void check_pings(struct Event* ev) {
       if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
         struct BouncerSession *bsess = bounce_get_session(cptr);
         if (bsess && bsess->hs_alias_count > 0) {
-          if (bounce_promote_alias(bsess) == 0)
-            continue; /* Alias promoted — session transferred */
+          if (bounce_promote_alias(bsess) == 0) {
+            exit_client_msg(cptr, cptr, &me, "Session transferred");
+            continue;
+          }
         }
       }
 
