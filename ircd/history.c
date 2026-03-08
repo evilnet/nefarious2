@@ -2811,6 +2811,28 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                  (unsigned long)stat.ms_entries);
     }
 
+    /* GC (garbage collection) info */
+    {
+      MDBX_gc_info_t gc;
+      memset(&gc, 0, sizeof(gc));
+      rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
+      if (rc == 0 || rc == MDBX_NOTFOUND) {
+        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                   "H :  GC: total=%lu backed=%lu alloc=%lu gc=%lu reclaimable=%lu",
+                   (unsigned long)gc.pages_total,
+                   (unsigned long)gc.pages_backed,
+                   (unsigned long)gc.pages_allocated,
+                   (unsigned long)gc.pages_gc,
+                   (unsigned long)gc.gc_reclaimable.pages);
+        if (gc.max_reader_lag > 0 || gc.max_retained_pages > 0) {
+          send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                     "H :  GC pressure: reader_lag=%lu retained=%lu pages",
+                     (unsigned long)gc.max_reader_lag,
+                     (unsigned long)gc.max_retained_pages);
+        }
+      }
+    }
+
     mdbx_txn_abort(txn);
   }
 }
