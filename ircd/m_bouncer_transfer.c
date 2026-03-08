@@ -4,10 +4,19 @@
  *
  * Minimal BX (Bouncer Transfer) handler for legacy/upstream Nefarious.
  *
- * Handles BX P (membership swap between two user numerics) and
- * forwards ALL BX subcommands to peer servers without processing.
- * This allows legacy servers to participate in a mixed network where
- * IRCv3 servers use BX C/X/P/N/U for multi-server bouncer aliases.
+ * Handles BX P (promote/transfer) and forwards ALL BX subcommands to
+ * peer servers without processing.  This allows legacy servers to
+ * participate in a mixed network where IRCv3 servers use BX C/X/P/N/U
+ * for multi-server bouncer aliases.
+ *
+ * BX P has two modes:
+ *   - If both old and new numerics are known: transfer memberships
+ *     (swap path, used when BX C created the alias Client).
+ *   - If the new numeric is unknown (no BX C support): swap old
+ *     client's P10 numeric to the new one in-place.  The client
+ *     keeps its nick, channels, and all state — only the internal
+ *     routing numeric changes, so messages from the promoted alias
+ *     are properly attributed.
  *
  * See evilnet/nefarious2 IRCv3 branch for the full alias implementation.
  */
@@ -74,40 +83,66 @@ int ms_bouncer_transfer(struct Client *cptr, struct Client *sptr,
 
     if (!old_client || !IsUser(old_client))
       goto relay;
-    if (!new_client || !IsUser(new_client))
-      goto relay;
 
-    /* Transfer channel memberships from old to new.
-     * For each channel old is on, add new with same flags, then remove old. */
-    for (memb = cli_user(old_client)->channel; memb; memb = next) {
-      struct Channel *chptr = memb->channel;
-      unsigned int status = memb->status;
-      unsigned short oplevel = memb->oplevel;
+    if (new_client && IsUser(new_client)) {
+      /* Both clients exist: transfer channel memberships from old to new. */
+      for (memb = cli_user(old_client)->channel; memb; memb = next) {
+        struct Channel *chptr = memb->channel;
+        unsigned int status = memb->status;
+        unsigned short oplevel = memb->oplevel;
 
-      /* Save next before we modify the chain */
-      next = memb->next_channel;
+        next = memb->next_channel;
 
-      /* Skip if new is already on this channel */
-      if (find_member_link(chptr, new_client))
-        continue;
+        if (find_member_link(chptr, new_client))
+          continue;
 
-      add_user_to_channel(chptr, new_client, status, oplevel);
+        add_user_to_channel(chptr, new_client, status, oplevel);
+      }
+
+      remove_user_from_all_channels(old_client);
+
+      if (ircd_strcmp(cli_name(new_client), nick) != 0) {
+        char safe_nick[NICKLEN + 1];
+        ircd_strncpy(safe_nick, nick, NICKLEN + 1);
+        hChangeClient(new_client, safe_nick);
+        ircd_strncpy(cli_name(new_client), safe_nick, NICKLEN + 1);
+      }
+
+      SetFlag(old_client, FLAG_KILLED);
+      exit_client(cptr, old_client, &me, "Bouncer transfer");
+    } else {
+      /* new_client not found: this server doesn't have the alias
+       * (no BX C support).  Swap old_client's P10 numeric to the
+       * new one so messages from the promoted alias route correctly.
+       * old_client keeps its nick, channels, and all state — only
+       * the internal numeric changes. */
+      struct Client *new_server = FindNServer(parv[3]);
+      if (!new_server || !IsServer(new_server))
+        goto relay;
+
+      /* Same numeric = no-op (SQUIT independent promotion) */
+      if (0 == ircd_strcmp(parv[2], parv[3]))
+        goto relay;
+
+      /* Remove from old server's client array */
+      RemoveYXXClient(cli_user(old_client)->server, cli_yxx(old_client));
+
+      /* Move to new server */
+      --(cli_serv(cli_user(old_client)->server)->clients);
+      cli_user(old_client)->server = new_server;
+      ++(cli_serv(new_server)->clients);
+
+      /* Assign new numeric (sets cli_yxx + adds to new server's client_list) */
+      SetRemoteNumNick(old_client, parv[3]);
+
+      /* Rename if nick changed */
+      if (ircd_strcmp(cli_name(old_client), nick) != 0) {
+        char safe_nick[NICKLEN + 1];
+        ircd_strncpy(safe_nick, nick, NICKLEN + 1);
+        hChangeClient(old_client, safe_nick);
+        ircd_strncpy(cli_name(old_client), safe_nick, NICKLEN + 1);
+      }
     }
-
-    /* Remove old from all channels */
-    remove_user_from_all_channels(old_client);
-
-    /* Rename new_client to the target nick */
-    if (ircd_strcmp(cli_name(new_client), nick) != 0) {
-      char safe_nick[NICKLEN + 1];
-      ircd_strncpy(safe_nick, nick, NICKLEN + 1);
-      hChangeClient(new_client, safe_nick);
-      ircd_strncpy(cli_name(new_client), safe_nick, NICKLEN + 1);
-    }
-
-    /* Silently exit old_client (FLAG_KILLED suppresses QUIT) */
-    SetFlag(old_client, FLAG_KILLED);
-    exit_client(cptr, old_client, &me, "Bouncer transfer");
   }
 
 relay:
