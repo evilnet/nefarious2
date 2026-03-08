@@ -437,6 +437,32 @@ struct StatDesc;
  */
 extern void history_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
 
+/** Defragment the history database environment.
+ * @param[in] time_limit_seconds Maximum wall-clock time to spend (0 = no limit).
+ * @return 0 on success, negative on error.
+ */
+extern int history_defrag(unsigned int time_limit_seconds);
+
+/** Report defrag results for the history database.
+ * @param[in] to Client to send results to.
+ */
+extern void history_report_defrag(struct Client *to);
+
+/** Force sync/flush the history database to disk.
+ * @return 0 on success, -1 on error.
+ */
+extern int history_sync(void);
+
+/** Report detailed GC info for the history database.
+ * @param[in] to Client to send results to.
+ */
+extern void history_report_gc(struct Client *to);
+
+/** Report detailed MDBX environment info for the history database.
+ * @param[in] to Client to send results to.
+ */
+extern void history_report_mdbx_info(struct Client *to);
+
 /*
  * Per-User Quota API (anti-flood protection)
  *

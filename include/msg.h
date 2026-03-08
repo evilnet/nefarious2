@@ -584,6 +584,10 @@ struct Client;
 #define TOK_BOUNCER_TRANSFER	"BX"
 #define CMD_BOUNCER_TRANSFER	MSG_BOUNCER_TRANSFER, TOK_BOUNCER_TRANSFER
 
+#define MSG_MDBX	"MDBX"
+#define TOK_MDBX	"MX"
+#define CMD_MDBX	MSG_MDBX, TOK_MDBX
+
 /*
  * Constants
  */

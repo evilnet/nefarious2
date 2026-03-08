@@ -1934,3 +1934,238 @@ metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 
   /* Nefarious is now authoritative for metadata - no X3 dependency */
 }
+
+/** \brief Defragment the metadata database. */
+int
+metadata_defrag(unsigned int time_limit_seconds)
+{
+#ifdef USE_MDBX
+  MDBX_defrag_result_t result;
+  size_t time_16dot16;
+  int rc;
+
+  if (!metadata_lmdb_available || !metadata_env)
+    return -1;
+
+  memset(&result, 0, sizeof(result));
+  time_16dot16 = time_limit_seconds ? (size_t)time_limit_seconds * 65536 : 0;
+
+  rc = mdbx_env_defrag(metadata_env,
+                        0, 0, 0,
+                        time_16dot16,
+                        -1, 0,
+                        NULL, NULL,
+                        &result);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "metadata: defrag complete rc=%d shrinked=%ld moved=%lu cycles=%u reasons=0x%x",
+            rc, (long)result.pages_shrinked,
+            (unsigned long)result.pages_moved,
+            result.cycles, result.stopping_reasons);
+
+  return rc;
+#else
+  return -1;
+#endif
+}
+
+/** \brief Report defrag results for metadata DB */
+void
+metadata_report_defrag(struct Client *to)
+{
+#ifdef USE_MDBX
+  MDBX_defrag_result_t result;
+  size_t time_16dot16;
+  int rc;
+
+  if (!metadata_lmdb_available || !metadata_env) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "D :  Metadata: unavailable");
+    return;
+  }
+
+  memset(&result, 0, sizeof(result));
+  time_16dot16 = 5 * 65536;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "D :  Metadata: defragmenting (5s limit)...");
+
+  rc = mdbx_env_defrag(metadata_env,
+                        0, 0, 0,
+                        time_16dot16,
+                        -1, 0,
+                        NULL, NULL,
+                        &result);
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "D :  Metadata: rc=%d shrinked=%ld moved=%lu left=%lu cycles=%u",
+             rc, (long)result.pages_shrinked,
+             (unsigned long)result.pages_moved,
+             (unsigned long)result.pages_left,
+             result.cycles);
+
+  if (result.stopping_reasons) {
+    char reasons[128];
+    reasons[0] = '\0';
+    if (result.stopping_reasons & 1) strcat(reasons, "threshold ");
+    if (result.stopping_reasons & 2) strcat(reasons, "time-limit ");
+    if (result.stopping_reasons & 4) strcat(reasons, "laggard-reader ");
+    if (result.stopping_reasons & 8) strcat(reasons, "large-chunk ");
+    if (result.stopping_reasons & 16) strcat(reasons, "user-break ");
+    if (result.stopping_reasons & 32) strcat(reasons, "error ");
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "D :  Metadata: stopped: %s", reasons);
+  }
+#else
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "D :  Metadata: MDBX not compiled in");
+#endif
+}
+
+/** \brief Force sync/flush the metadata database to disk. */
+int
+metadata_sync(void)
+{
+#ifdef USE_MDBX
+  if (!metadata_lmdb_available || !metadata_env)
+    return -1;
+  return mdbx_env_sync_ex(metadata_env, 1, 0);
+#else
+  return -1;
+#endif
+}
+
+/** \brief Report detailed GC info for the metadata database. */
+void
+metadata_report_gc(struct Client *to)
+{
+#ifdef USE_MDBX
+  MDBX_txn *txn;
+  MDBX_gc_info_t gc;
+  MDBX_stat envstat;
+  int rc;
+
+  if (!metadata_lmdb_available || !metadata_env) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  Metadata GC: unavailable");
+    return;
+  }
+
+  rc = mdbx_env_stat_ex(metadata_env, NULL, &envstat, sizeof(envstat));
+  if (rc != MDBX_SUCCESS)
+    return;
+
+  rc = mdbx_txn_begin(metadata_env, NULL, MDBX_RDONLY, &txn);
+  if (rc != 0)
+    return;
+
+  memset(&gc, 0, sizeof(gc));
+  rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
+  if (rc == 0 || rc == MDBX_NOTFOUND) {
+    size_t page_size = envstat.ms_psize;
+
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  Metadata GC:");
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    Pages: total=%lu backed=%lu allocated=%lu",
+               (unsigned long)gc.pages_total,
+               (unsigned long)gc.pages_backed,
+               (unsigned long)gc.pages_allocated);
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    GC pages=%lu reclaimable=%lu",
+               (unsigned long)gc.pages_gc,
+               (unsigned long)gc.gc_reclaimable.pages);
+    if (page_size > 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "X :    Reclaimable: %lu KB (%lu MB)",
+                 (unsigned long)(gc.gc_reclaimable.pages * page_size / 1024),
+                 (unsigned long)(gc.gc_reclaimable.pages * page_size / (1024 * 1024)));
+    }
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    Reader lag=%lu retained=%lu pages",
+               (unsigned long)gc.max_reader_lag,
+               (unsigned long)gc.max_retained_pages);
+  }
+
+  mdbx_txn_abort(txn);
+#else
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :  Metadata GC: MDBX not compiled in");
+#endif
+}
+
+/** \brief Report detailed MDBX environment info for the metadata database. */
+void
+metadata_report_mdbx_info(struct Client *to)
+{
+#ifdef USE_MDBX
+  MDBX_envinfo info;
+  MDBX_stat envstat;
+  MDBX_stat stat;
+  MDBX_txn *txn;
+  int rc;
+
+  if (!metadata_lmdb_available || !metadata_env) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  Metadata: unavailable");
+    return;
+  }
+
+  rc = mdbx_env_info_ex(metadata_env, NULL, &info, sizeof(info));
+  if (rc != MDBX_SUCCESS)
+    return;
+
+  rc = mdbx_env_stat_ex(metadata_env, NULL, &envstat, sizeof(envstat));
+  if (rc != MDBX_SUCCESS)
+    return;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :  Metadata Environment:");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Page size: %u bytes", envstat.ms_psize);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Geometry: min=%lu cur=%lu max=%lu MB",
+             (unsigned long)(info.mi_geo.lower / (1024 * 1024)),
+             (unsigned long)(info.mi_geo.current / (1024 * 1024)),
+             (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Growth=%lu MB  Shrink=%lu MB",
+             (unsigned long)(info.mi_geo.grow / (1024 * 1024)),
+             (unsigned long)(info.mi_geo.shrink / (1024 * 1024)));
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Last pgno=%lu  Readers=%u/%u",
+             (unsigned long)info.mi_last_pgno,
+             info.mi_numreaders, info.mi_maxreaders);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Pages: branch=%lu leaf=%lu overflow=%lu",
+             (unsigned long)envstat.ms_branch_pages,
+             (unsigned long)envstat.ms_leaf_pages,
+             (unsigned long)envstat.ms_overflow_pages);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    B-tree depth: %u", envstat.ms_depth);
+
+  /* Per-database stats */
+  rc = mdbx_txn_begin(metadata_env, NULL, MDBX_RDONLY, &txn);
+  if (rc == 0) {
+    rc = mdbx_dbi_stat(txn, metadata_dbi, &stat, sizeof(stat));
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "X :    metadata: %lu entries depth=%u branch=%lu leaf=%lu overflow=%lu",
+                 (unsigned long)stat.ms_entries, stat.ms_depth,
+                 (unsigned long)stat.ms_branch_pages,
+                 (unsigned long)stat.ms_leaf_pages,
+                 (unsigned long)stat.ms_overflow_pages);
+    }
+    rc = mdbx_dbi_stat(txn, readmarkers_dbi, &stat, sizeof(stat));
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "X :    readmarkers: %lu entries depth=%u",
+                 (unsigned long)stat.ms_entries, stat.ms_depth);
+    }
+    mdbx_txn_abort(txn);
+  }
+#else
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :  Metadata: MDBX not compiled in");
+#endif
+}

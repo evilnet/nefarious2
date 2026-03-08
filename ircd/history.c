@@ -2837,6 +2837,234 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   }
 }
 
+/** \brief Defragment the history database.
+ * Moves pages from the end of the DB file to free pages near the beginning,
+ * then truncates, reducing file size.
+ * \param time_limit_seconds  Maximum wall-clock time to spend (0 = no limit)
+ * \return 0 on success, negative on error */
+int
+history_defrag(unsigned int time_limit_seconds)
+{
+  MDBX_defrag_result_t result;
+  size_t time_16dot16;
+  int rc;
+
+  if (!history_available || !history_env)
+    return -1;
+
+  memset(&result, 0, sizeof(result));
+  /* Convert seconds to 16.16 fixed-point (seconds * 65536) */
+  time_16dot16 = time_limit_seconds ? (size_t)time_limit_seconds * 65536 : 0;
+
+  rc = mdbx_env_defrag(history_env,
+                        0,              /* defrag_atleast: no minimum */
+                        0,              /* time_atleast: no minimum time */
+                        0,              /* defrag_enough: no upper goal */
+                        time_16dot16,   /* time_limit */
+                        -1,             /* acceptable_backlash: autopilot */
+                        0,              /* preferred_batch: no limit */
+                        NULL, NULL,     /* no progress callback */
+                        &result);
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "history: defrag complete rc=%d shrinked=%ld moved=%lu cycles=%u reasons=0x%x",
+            rc, (long)result.pages_shrinked,
+            (unsigned long)result.pages_moved,
+            result.cycles, result.stopping_reasons);
+
+  return rc;
+}
+
+/** \brief Report defrag results for history DB */
+void
+history_report_defrag(struct Client *to)
+{
+  MDBX_defrag_result_t result;
+  size_t time_16dot16;
+  int rc;
+
+  if (!history_available || !history_env) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "D :  History: unavailable");
+    return;
+  }
+
+  memset(&result, 0, sizeof(result));
+  /* 5 second time limit for interactive defrag */
+  time_16dot16 = 5 * 65536;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "D :  History: defragmenting (5s limit)...");
+
+  rc = mdbx_env_defrag(history_env,
+                        0, 0, 0,
+                        time_16dot16,
+                        -1, 0,
+                        NULL, NULL,
+                        &result);
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "D :  History: rc=%d shrinked=%ld moved=%lu left=%lu cycles=%u",
+             rc, (long)result.pages_shrinked,
+             (unsigned long)result.pages_moved,
+             (unsigned long)result.pages_left,
+             result.cycles);
+
+  if (result.stopping_reasons) {
+    char reasons[128];
+    reasons[0] = '\0';
+    if (result.stopping_reasons & 1) strcat(reasons, "threshold ");
+    if (result.stopping_reasons & 2) strcat(reasons, "time-limit ");
+    if (result.stopping_reasons & 4) strcat(reasons, "laggard-reader ");
+    if (result.stopping_reasons & 8) strcat(reasons, "large-chunk ");
+    if (result.stopping_reasons & 16) strcat(reasons, "user-break ");
+    if (result.stopping_reasons & 32) strcat(reasons, "error ");
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "D :  History: stopped: %s", reasons);
+  }
+}
+
+/** \brief Force sync/flush the history database to disk.
+ * \return 0 on success, -1 on error */
+int
+history_sync(void)
+{
+  if (!history_available || !history_env)
+    return -1;
+  return mdbx_env_sync_ex(history_env, 1, 0);
+}
+
+/** \brief Report detailed GC info for the history database. */
+void
+history_report_gc(struct Client *to)
+{
+  MDBX_txn *txn;
+  MDBX_gc_info_t gc;
+  MDBX_stat envstat;
+  int rc;
+
+  if (!history_available || !history_env) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  History GC: unavailable");
+    return;
+  }
+
+  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
+  if (rc != MDBX_SUCCESS)
+    return;
+
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
+  if (rc != 0)
+    return;
+
+  memset(&gc, 0, sizeof(gc));
+  rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
+  if (rc == 0 || rc == MDBX_NOTFOUND) {
+    size_t page_size = envstat.ms_psize;
+
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  History GC:");
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    Pages: total=%lu backed=%lu allocated=%lu",
+               (unsigned long)gc.pages_total,
+               (unsigned long)gc.pages_backed,
+               (unsigned long)gc.pages_allocated);
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    GC pages=%lu reclaimable=%lu",
+               (unsigned long)gc.pages_gc,
+               (unsigned long)gc.gc_reclaimable.pages);
+    if (page_size > 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "X :    Reclaimable: %lu KB (%lu MB)",
+                 (unsigned long)(gc.gc_reclaimable.pages * page_size / 1024),
+                 (unsigned long)(gc.gc_reclaimable.pages * page_size / (1024 * 1024)));
+    }
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    Reader lag=%lu retained=%lu pages",
+               (unsigned long)gc.max_reader_lag,
+               (unsigned long)gc.max_retained_pages);
+  }
+
+  mdbx_txn_abort(txn);
+}
+
+/** \brief Report detailed MDBX environment info for the history database. */
+void
+history_report_mdbx_info(struct Client *to)
+{
+  MDBX_envinfo info;
+  MDBX_stat envstat;
+  MDBX_stat stat;
+  MDBX_txn *txn;
+  int rc;
+
+  if (!history_available || !history_env) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  History: unavailable");
+    return;
+  }
+
+  rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
+  if (rc != MDBX_SUCCESS)
+    return;
+
+  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
+  if (rc != MDBX_SUCCESS)
+    return;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :  History Environment:");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Page size: %u bytes", envstat.ms_psize);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Geometry: min=%lu cur=%lu max=%lu MB",
+             (unsigned long)(info.mi_geo.lower / (1024 * 1024)),
+             (unsigned long)(info.mi_geo.current / (1024 * 1024)),
+             (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Growth=%lu MB  Shrink=%lu MB",
+             (unsigned long)(info.mi_geo.grow / (1024 * 1024)),
+             (unsigned long)(info.mi_geo.shrink / (1024 * 1024)));
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Last pgno=%lu  Readers=%u/%u",
+             (unsigned long)info.mi_last_pgno,
+             info.mi_numreaders, info.mi_maxreaders);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Pages: branch=%lu leaf=%lu overflow=%lu",
+             (unsigned long)envstat.ms_branch_pages,
+             (unsigned long)envstat.ms_leaf_pages,
+             (unsigned long)envstat.ms_overflow_pages);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    B-tree depth: %u", envstat.ms_depth);
+
+  /* Per-database stats */
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
+  if (rc == 0) {
+    rc = mdbx_dbi_stat(txn, history_dbi, &stat, sizeof(stat));
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "X :    messages: %lu entries depth=%u branch=%lu leaf=%lu overflow=%lu",
+                 (unsigned long)stat.ms_entries, stat.ms_depth,
+                 (unsigned long)stat.ms_branch_pages,
+                 (unsigned long)stat.ms_leaf_pages,
+                 (unsigned long)stat.ms_overflow_pages);
+    }
+    rc = mdbx_dbi_stat(txn, history_targets_dbi, &stat, sizeof(stat));
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "X :    targets: %lu entries depth=%u",
+                 (unsigned long)stat.ms_entries, stat.ms_depth);
+    }
+    rc = mdbx_dbi_stat(txn, history_msgid_dbi, &stat, sizeof(stat));
+    if (rc == 0) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "X :    msgid_index: %lu entries depth=%u",
+                 (unsigned long)stat.ms_entries, stat.ms_depth);
+    }
+    mdbx_txn_abort(txn);
+  }
+}
+
 
 /* ========== Per-User Quota Tracking ========== */
 
@@ -3216,6 +3444,32 @@ int history_channel_has_messages(const char *target)
 void history_set_channel_removed_callback(history_channels_removed_cb cb)
 {
   (void)cb;
+}
+
+int history_defrag(unsigned int time_limit_seconds)
+{
+  (void)time_limit_seconds;
+  return -1;
+}
+
+void history_report_defrag(struct Client *to)
+{
+  (void)to;
+}
+
+int history_sync(void)
+{
+  return -1;
+}
+
+void history_report_gc(struct Client *to)
+{
+  (void)to;
+}
+
+void history_report_mdbx_info(struct Client *to)
+{
+  (void)to;
 }
 
 /* Quota tracking stubs */

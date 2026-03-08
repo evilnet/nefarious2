@@ -168,6 +168,7 @@ extern int mo_admin(struct Client*, struct Client*, int, char*[]);
 extern int mo_asll(struct Client*, struct Client*, int, char*[]);
 extern int mo_check(struct Client*, struct Client*, int, char*[]);
 extern int mo_clearmode(struct Client*, struct Client*, int, char*[]);
+extern int mo_mdbx(struct Client*, struct Client*, int, char*[]);
 extern int mo_close(struct Client*, struct Client*, int, char*[]);
 extern int mo_connect(struct Client*, struct Client*, int, char*[]);
 extern int mo_die(struct Client*, struct Client*, int, char*[]);
