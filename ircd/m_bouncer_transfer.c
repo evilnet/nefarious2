@@ -99,8 +99,10 @@ int ms_bouncer_transfer(struct Client *cptr, struct Client *sptr,
 
     /* Rename new_client to the target nick */
     if (ircd_strcmp(cli_name(new_client), nick) != 0) {
-      hChangeClient(new_client, nick);
-      ircd_strncpy(cli_name(new_client), nick, NICKLEN);
+      char safe_nick[NICKLEN + 1];
+      ircd_strncpy(safe_nick, nick, NICKLEN + 1);
+      hChangeClient(new_client, safe_nick);
+      ircd_strncpy(cli_name(new_client), safe_nick, NICKLEN + 1);
     }
 
     /* Silently exit old_client (FLAG_KILLED suppresses QUIT) */
@@ -124,6 +126,8 @@ relay:
         len += ircd_snprintf(0, buf + len, sizeof(buf) - len, "%s", parv[i]);
       }
     }
+    if (len >= (int)sizeof(buf))
+      len = (int)sizeof(buf) - 1;
     buf[len] = '\0';
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr, "%s", buf);
   }
