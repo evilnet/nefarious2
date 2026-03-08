@@ -2252,6 +2252,8 @@ int bounce_promote_alias(struct BouncerSession *session)
   struct Client *alias;
   struct Client *old_primary;
   char old_numeric[6];
+  char saved_winner[6];  /* Copy of winner_numeric — pointer invalidated by memmove */
+  char saved_server[3];  /* Copy of winner_server — same issue */
   struct Membership *member;
   int winner_idx = -1;
   time_t oldest_time = 0;
@@ -2281,6 +2283,14 @@ int bounce_promote_alias(struct BouncerSession *session)
 
   if (!winner_numeric || winner_idx < 0)
     return -1;
+
+  /* Save winner_numeric and winner_server — they're pointers into
+   * hs_aliases[] which will be invalidated by the memmove that removes
+   * the winner from the array. */
+  ircd_strncpy(saved_winner, winner_numeric, sizeof(saved_winner));
+  ircd_strncpy(saved_server, winner_server, sizeof(saved_server));
+  winner_numeric = saved_winner;
+  winner_server = saved_server;
 
   alias = findNUser(winner_numeric);
   if (!alias || !IsBouncerAlias(alias))
