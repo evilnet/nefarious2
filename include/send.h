@@ -12,6 +12,10 @@
 #include <time.h>	/* time_t */
 #define INCLUDED_time_h
 #endif
+#ifndef INCLUDED_stdint_h
+#include <stdint.h>	/* uint64_t */
+#define INCLUDED_stdint_h
+#endif
 
 struct Channel;
 struct Client;
@@ -65,6 +69,8 @@ extern void send_batch_perconn(struct Client *acptr, const char *fmt, ...);
 /* Override S2S tag source connection for alias source rewriting */
 extern void sendcmdto_set_s2s_cptr(struct Client *cptr);
 extern void sendcmdto_set_alias_source(struct Client *alias);
+/* Opt-in S2S tags for the next sendcmdto_serv_butone() call */
+extern void sendcmdto_want_s2s_tags(int want);
 
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,
@@ -254,6 +260,8 @@ extern const char *get_active_network_batch(void);
 
 /* Generate unique message ID for IRCv3 message-ids */
 extern char *generate_msgid(char *buf, size_t buflen);
+/* Parse ISO 8601 timestamp to epoch milliseconds (backward compat) */
+extern uint64_t iso8601_to_epoch_ms(const char *iso);
 
 /* IRCv3 standard-replies (FAIL/WARN/NOTE) */
 extern void send_fail(struct Client *to, const char *command, const char *code,

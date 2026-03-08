@@ -921,6 +921,17 @@ process_multiline_batch(struct Client *sptr)
     }
   }
 
+  /* Alias source rewriting for S2S relay — match relay_channel_message pattern.
+   * Use primary numeric so servers without alias support can resolve the sender.
+   * CRITICAL: Must use split delivery when primary is remote — sending primary's
+   * numeric toward primary's server is fake direction and gets dropped. */
+  struct Client *relay_from = sptr;       /* default: alias (or non-alias sender) */
+  struct Client *relay_primary = NULL;
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    relay_primary = cli_alias_primary(sptr);
+    relay_from = relay_primary;           /* primary numeric for most servers */
+  }
+
   /* Capability-aware S2S relay for channel messages.
    * Send ML tokens to servers that support multiline, fallback PRIVMSGs to legacy.
    * This fixes N² duplication bug: previously we sent fallback per remote user,
@@ -951,6 +962,14 @@ process_multiline_batch(struct Client *sptr)
 
       cli_sentalong(server) = s2s_relay_marker;
 
+      /* Split delivery: alias numeric toward primary's server direction
+       * to avoid fake direction (primary's server would drop messages
+       * appearing to come from its own local client via external link). */
+      {
+        struct Client *from = relay_from;
+        if (relay_primary && cli_from(relay_primary) == server)
+          from = sptr;  /* use alias numeric toward primary's server */
+
       if (IsMultiline(server)) {
         /* Send ML tokens to capable servers */
         first = 1;
@@ -959,19 +978,20 @@ process_multiline_batch(struct Client *sptr)
           char *text = lp->value.cp + 1;
 
           if (first) {
-            sendcmdto_one(sptr, CMD_MULTILINE, server, "+%s %s :%s",
+            sendcmdto_one(from, CMD_MULTILINE, server, "+%s %s :%s",
                           s2s_batch_id, chptr->chname, text);
             first = 0;
           } else if (concat) {
-            sendcmdto_one(sptr, CMD_MULTILINE, server, "c%s %s :%s",
+            sendcmdto_one(from, CMD_MULTILINE, server, "c%s %s :%s",
                           s2s_batch_id, chptr->chname, text);
           } else {
-            sendcmdto_one(sptr, CMD_MULTILINE, server, "%s %s :%s",
+            sendcmdto_one(from, CMD_MULTILINE, server, "%s %s :%s",
                           s2s_batch_id, chptr->chname, text);
           }
         }
-        sendcmdto_one(sptr, CMD_MULTILINE, server, "-%s %s :",
-                      s2s_batch_id, chptr->chname);
+        sendcmdto_one(from, CMD_MULTILINE, server, "-%s %s :%s",
+                      s2s_batch_id, chptr->chname,
+                      batch_paste_url ? batch_paste_url : "");
       } else {
         /* Send fallback PRIVMSGs to legacy servers (once per server, not per user) */
         int sent = 0;
@@ -981,28 +1001,25 @@ process_multiline_batch(struct Client *sptr)
           char *text = lp->value.cp + 1;
           if (*text == '\0')
             continue;
-          sendcmdto_one(sptr, CMD_PRIVATE, server, "%H :%s", chptr, text);
+          sendcmdto_one(from, CMD_PRIVATE, server, "%H :%s", chptr, text);
           sent++;
         }
 
-        /* Send truncation notice if needed.
-         * Use sptr (user) as source to be consistent with preview PRIVMSGs.
-         * This also ensures legacy servers properly relay it to channel members,
-         * as some may not handle server-originated channel messages correctly.
-         */
+        /* Send truncation notice if needed */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
           if (batch_paste_url) {
-            sendcmdto_one(sptr, CMD_NOTICE, server,
+            sendcmdto_one(from, CMD_NOTICE, server,
                 "%H :[%d more lines - %s]",
                 chptr, remaining, batch_paste_url);
           } else {
-            sendcmdto_one(sptr, CMD_NOTICE, server,
+            sendcmdto_one(from, CMD_NOTICE, server,
                 "%H :[%d more lines - connect to a multiline-capable server to view]",
                 chptr, remaining);
           }
         }
       }
+      } /* end split delivery block */
     }
   }
 
@@ -1238,6 +1255,7 @@ struct S2SMultilineBatch {
   struct SLink *messages;       /**< Linked list of messages */
   int msg_count;                /**< Number of messages */
   time_t start_time;            /**< When batch started */
+  char paste_url[256];          /**< Forwarded paste URL from originating server */
 };
 
 /** Global array of pending S2S multiline batches (indexed by server connection) */
@@ -1280,6 +1298,7 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   batch->messages = NULL;
   batch->msg_count = 0;
   batch->start_time = CurrentTime;
+  batch->paste_url[0] = '\0';
 
   s2s_ml_batches[i] = batch;
   return batch;
@@ -1366,11 +1385,14 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
   /* Generate ONE base msgid for the entire S2S multiline batch */
   generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
-  /* Pre-compute paste URL for fallback paths */
+  /* Pre-compute paste URL for fallback paths.
+   * Prefer forwarded URL from originating server, fall back to local generation. */
   char s2s_paste_secret[12] = "";
   const char *s2s_paste_url = NULL;
   static char s2s_paste_url_buf[256];
-  {
+  if (batch->paste_url[0]) {
+    s2s_paste_url = batch->paste_url;
+  } else {
     const char *url = generate_paste_url(batch_base_msgid,
                                          s2s_paste_secret, sizeof(s2s_paste_secret));
     if (url) {
@@ -1680,6 +1702,9 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
     /* End batch and deliver */
     batch = find_s2s_multiline_batch(batch_ref);
     if (batch) {
+      /* Capture forwarded paste URL from end token text param */
+      if (!EmptyString(text))
+        ircd_strncpy(batch->paste_url, text, sizeof(batch->paste_url));
       deliver_s2s_multiline_batch(batch, cptr);
       free_s2s_multiline_batch(batch);
     }

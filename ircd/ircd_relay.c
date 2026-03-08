@@ -163,7 +163,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
     struct Membership *member;
     has_local_interest = 0;
     for (member = chptr->members; member; member = member->next_member) {
-      if (MyConnect(member->user)) {
+      if (MyConnect(member->user) || IsMemberAlias(member)) {
         has_local_interest = 1;
         break;
       }
@@ -200,7 +200,8 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   /* Skip storage if no authenticated members and channel isn't +H (public history).
    * Only authed users can query CHATHISTORY (membership mode), so messages in
    * channels with no authed members would never be retrieved. */
-  if (chptr->authusers == 0 && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+  if (chptr->authusers == 0 && chptr->aliases == 0
+      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
     return;
 
   /* Check if sender has +Y (no storage) user mode — store gap marker */
@@ -462,10 +463,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                    cli_yxx(&me),
-                    (unsigned long)cli_firsttime(&me),
-                    ++MsgIdCounter);
+      generate_msgid(msgid, sizeof(msgid));
     }
 
     /* Store message in history database for draft/chathistory */
@@ -590,10 +588,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                    cli_yxx(&me),
-                    (unsigned long)cli_firsttime(&me),
-                    ++MsgIdCounter);
+      generate_msgid(msgid, sizeof(msgid));
     }
 
     /* Store notice in history database for draft/chathistory */
@@ -640,7 +635,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
    * format_s2s_tags() (relay) and storage both use the same value.
    * Handles messages from legacy servers without P10_MESSAGE_TAGS. */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
-    generate_msgid(cli_s2s_msgid(one), 64);
+    generate_msgid(cli_s2s_msgid(one), S2S_MSGID_BUFSIZE);
 
   /* Alias source rewriting: use primary's P10 numeric for S2S.
    * The alias numeric (from BX C) is only known to BX-aware servers.
@@ -685,10 +680,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       if (s2s_mid)
         ircd_strncpy(msgid, s2s_mid, sizeof(msgid));
       else
-        ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                      cli_yxx(&me),
-                      (unsigned long)cli_firsttime(&me),
-                      ++MsgIdCounter);
+        generate_msgid(msgid, sizeof(msgid));
 
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -728,7 +720,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 
   /* Unified msgid (see server_relay_channel_message) */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
-    generate_msgid(cli_s2s_msgid(one), 64);
+    generate_msgid(cli_s2s_msgid(one), S2S_MSGID_BUFSIZE);
 
   /* Alias source rewriting (see server_relay_channel_message) */
   if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
@@ -768,10 +760,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       if (s2s_mid)
         ircd_strncpy(msgid, s2s_mid, sizeof(msgid));
       else
-        ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                      cli_yxx(&me),
-                      (unsigned long)cli_firsttime(&me),
-                      ++MsgIdCounter);
+        generate_msgid(msgid, sizeof(msgid));
 
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -1287,7 +1276,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   /* Unified msgid: pre-populate before pm_msgid generation and relay */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
       && !cli_s2s_msgid(cli_from(sptr))[0])
-    generate_msgid(cli_s2s_msgid(cli_from(sptr)), 64);
+    generate_msgid(cli_s2s_msgid(cli_from(sptr)), S2S_MSGID_BUFSIZE);
 
   /* Generate shared msgid + timestamp for alias forwarding and history.
    * Prefer S2S msgid for federation dedup — sptr is never reassigned
@@ -1384,7 +1373,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   /* Unified msgid: pre-populate before pm_msgid generation and relay */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
       && !cli_s2s_msgid(cli_from(sptr))[0])
-    generate_msgid(cli_s2s_msgid(cli_from(sptr)), 64);
+    generate_msgid(cli_s2s_msgid(cli_from(sptr)), S2S_MSGID_BUFSIZE);
 
   /* Generate shared msgid + timestamp (prefer S2S msgid for federation dedup) */
   pm_msgid[0] = '\0';

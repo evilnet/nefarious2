@@ -28,6 +28,7 @@
 #include "class.h"
 #include "client.h"
 #include "handlers.h"
+#include "crdt_hlc.h"
 #include "crule.h"
 #include "destruct_event.h"
 #include "hash.h"
@@ -1029,6 +1030,8 @@ int main(int argc, char **argv) {
   SetYXXCapacity(&me, MAXCLIENTS);
 
   cli_lasttime(&me) = cli_since(&me) = cli_firsttime(&me) = CurrentTime;
+
+  hlc_init((uint16_t)base64toint(cli_yxx(&me)));
 
   hAddClient(&me);
   SetIPv6(&me);

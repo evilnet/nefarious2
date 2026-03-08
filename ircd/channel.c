@@ -81,8 +81,6 @@ static size_t bans_inuse;
 int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix);
 
 #ifdef USE_MDBX
-/** Counter for generating unique message IDs for channel event history storage */
-static unsigned long channel_history_msgid_counter = 0;
 
 /** Store a channel event (JOIN, PART, etc.) in the history database.
  * Generates a unique msgid and timestamp, then stores the event.
@@ -125,10 +123,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
                 (unsigned long)(tv.tv_usec / 1000));
 
   /* Generate unique msgid */
-  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                cli_yxx(&me),
-                (unsigned long)cli_firsttime(&me),
-                ++channel_history_msgid_counter);
+  generate_msgid(msgid, sizeof(msgid));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -5146,6 +5141,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
   if (!chan) {
     if (jbuf->jb_alias_source)
       sendcmdto_set_alias_source(jbuf->jb_alias_source);
+    sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(jbuf->jb_source, CMD_JOIN, jbuf->jb_connect, "0");
     return;
   }
@@ -5307,6 +5303,7 @@ joinbuf_flush(struct JoinBuf *jbuf)
   case JOINBUF_TYPE_CREATE:
     if (jbuf->jb_alias_source)
       sendcmdto_set_alias_source(jbuf->jb_alias_source);
+    sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(jbuf->jb_source, CMD_CREATE, jbuf->jb_connect,
 			  "%s %Tu", chanlist, jbuf->jb_create);
     if (feature_bool(FEAT_AUTOCHANMODES) && feature_str(FEAT_AUTOCHANMODES_LIST)
@@ -5322,6 +5319,7 @@ joinbuf_flush(struct JoinBuf *jbuf)
   case JOINBUF_TYPE_PART:
     if (jbuf->jb_alias_source)
       sendcmdto_set_alias_source(jbuf->jb_alias_source);
+    sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(jbuf->jb_source, CMD_PART, jbuf->jb_connect,
 			  jbuf->jb_comment ? "%s :%s" : "%s", chanlist,
 			  jbuf->jb_comment);

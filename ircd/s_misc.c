@@ -31,6 +31,7 @@
 #include "IPcheck.h"
 #include "channel.h"
 #include "client.h"
+#include "crdt_hlc.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -179,12 +180,41 @@ const char* get_client_name(const struct Client* sptr, int showip)
 }
 
 #ifdef USE_MDBX
-/** Counter for generating unique message IDs for QUIT event history storage */
-static unsigned long quit_history_msgid_counter = 0;
+/** Derive a per-channel msgid from a base msgid and channel name.
+ * Deterministic: same (base, channel) -> same result on every server.
+ * Used for QUIT events where one S2S msgid maps to N channel entries.
+ * @param[out] buf Output buffer for derived msgid.
+ * @param[in] buflen Size of output buffer.
+ * @param[in] base_msgid Base msgid from S2S tag.
+ * @param[in] channel Channel name.
+ * @return Pointer to buf.
+ */
+static char *derive_channel_msgid(char *buf, size_t buflen,
+                                  const char *base_msgid, const char *channel)
+{
+  /* FNV-1a hash of channel name (case-insensitive) */
+  uint32_t h = 2166136261u;
+  const char *p;
+  char disc[7];
+
+  for (p = channel; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c >= 'A' && c <= 'Z')
+      c += 'a' - 'A';
+    h ^= (uint32_t)c;
+    h *= 16777619u;
+  }
+
+  /* 6 base64 chars encodes 32 bits (top 4 bits zero).
+   * Birthday collision at 1000 channels: ~10^-4. Acceptable. */
+  inttobase64(disc, h, 6);
+  snprintf(buf, buflen, "%s%s", base_msgid, disc);
+  return buf;
+}
 
 /** Store QUIT events in history for all channels the user is on.
- * This is called before remove_user_from_all_channels() so we can
- * iterate through the user's channels.
+ * Uses the pre-populated base msgid from cli_s2s_msgid(sptr) and derives
+ * per-channel msgids deterministically for cross-server dedup.
  * @param[in] sptr Client that is quitting.
  * @param[in] comment The quit message.
  */
@@ -193,9 +223,11 @@ static void store_quit_events(struct Client *sptr, const char *comment)
   struct Membership *member;
   struct timeval tv;
   char timestamp[32];
-  char msgid[64];
+  char msgid[S2S_MSGID_BUFSIZE];
   char sender[HISTORY_SENDER_LEN];
   const char *account;
+  const char *base_msgid;
+  char base_buf[S2S_MSGID_BUFSIZE];
 
   if (!history_is_available())
     return;
@@ -230,22 +262,24 @@ static void store_quit_events(struct Client *sptr, const char *comment)
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
+  /* Use pre-populated base msgid, or generate if not set (defensive) */
+  base_msgid = cli_s2s_msgid(sptr)[0]
+             ? cli_s2s_msgid(sptr) : NULL;
+  if (!base_msgid)
+    base_msgid = generate_msgid(base_buf, sizeof(base_buf));
+
   /* Store QUIT event for each channel the user is on */
   for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
     /* Skip channels with +P (no storage) mode */
     if (member->channel->mode.exmode & EXMODE_NOSTORAGE)
       continue;
 
-    /* Generate unique msgid for each channel's QUIT event */
-    ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                  cli_yxx(&me),
-                  (unsigned long)cli_firsttime(&me),
-                  ++quit_history_msgid_counter);
+    /* Derive per-channel msgid from base + channel name */
+    derive_channel_msgid(msgid, sizeof(msgid),
+                         base_msgid, member->channel->chname);
 
     history_store_message(msgid, timestamp, member->channel->chname, sender,
                           account, HISTORY_QUIT, comment ? comment : "");
-
-
   }
 }
 #endif /* USE_MDBX */
@@ -652,6 +686,15 @@ int exit_client(struct Client *cptr,
                           "X %s", alias_full);
   }
 
+  /* Pre-populate base msgid and time on local user QUITs for S2S tags.
+   * All servers in the loop receive the same base msgid. store_quit_events()
+   * (called later from exit_one_client) derives per-channel msgids from it. */
+  if (feature_bool(FEAT_P10_MESSAGE_TAGS) && IsUser(victim)
+      && !IsBouncerAlias(victim) && MyConnect(victim)) {
+    generate_msgid(cli_s2s_msgid(victim), S2S_MSGID_BUFSIZE);
+    cli_s2s_time_ms(victim) = hlc_global()->physical_ms;
+  }
+
   for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
     if (dlp->value.cptr != cli_from(killer) && dlp->value.cptr != victim)
     {
@@ -659,8 +702,10 @@ int exit_client(struct Client *cptr,
 	sendcmdto_one(killer, CMD_SQUIT, dlp->value.cptr, "%s %Tu :%s",
 		      cli_name(victim), cli_serv(victim)->timestamp, comment);
       else if (IsUser(victim) && !HasFlag(victim, FLAG_KILLED)
-               && !IsBouncerAlias(victim))
+               && !IsBouncerAlias(victim)) {
+	sendcmdto_set_s2s_cptr(victim);
 	sendcmdto_one(victim, CMD_QUIT, dlp->value.cptr, ":%s", comment);
+      }
     }
   }
   /* Then remove the client structures */

@@ -102,9 +102,6 @@
 #include <time.h>
 
 #ifdef USE_MDBX
-/** Counter for generating unique message IDs for KICK event history storage */
-static unsigned long kick_history_msgid_counter = 0;
-
 /** Store a KICK event in the history database.
  * The message content is formatted as "kicked_nick :reason" per event-playback spec.
  * @param[in] sptr Client that did the kick.
@@ -147,10 +144,7 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
                 (unsigned long)(tv.tv_usec / 1000));
 
   /* Generate unique msgid */
-  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                cli_yxx(&me),
-                (unsigned long)cli_firsttime(&me),
-                ++kick_history_msgid_counter);
+  generate_msgid(msgid, sizeof(msgid));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -265,9 +259,11 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
               "Kick reason contained invalid UTF-8 and was sanitized");
   }
 
-  if (!IsLocalChannel(name))
+  if (!IsLocalChannel(name)) {
+    sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,
 			  comment);
+  }
 
   if (IsDelayedJoin(member)) {
     /* If it's a delayed join, only send the KICK to the person doing
@@ -386,6 +382,7 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
   } else {
     /* Propagate kick... */
+    sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,
 			  comment);
 

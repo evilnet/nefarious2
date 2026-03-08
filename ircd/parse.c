@@ -26,6 +26,7 @@
 #include "parse.h"
 #include "capab.h"
 #include "class.h"
+#include "crdt_hlc.h"
 #include "client.h"
 #include "channel.h"
 #include "handlers.h"
@@ -1665,50 +1666,78 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
    * We extract @time and @msgid for S2S relay (Phase 13c).
    */
   /* Clear previous S2S tags */
-  cli_s2s_time(cptr)[0] = '\0';
+  cli_s2s_time_ms(cptr) = 0;
   cli_s2s_msgid(cptr)[0] = '\0';
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
     char *tagend = strchr(ch, ' ');
     if (tagend) {
-      char *tagpos = ch + 1;  /* Skip the @ prefix */
-      char *semicolon;
+      /* Auto-detect format: P10 base64 alphabet doesn't contain '='.
+       * Compact tags have no '='; verbose IRCv3 tags always have '='. */
+      if (!memchr(ch + 1, '=', tagend - ch - 1)) {
+        /* COMPACT FORMAT: @<version_1><time_7><msgid_14> */
+        int tag_len = tagend - ch - 1;  /* chars after @ */
+        if (tag_len >= 22 && ch[1] == 'A') {  /* version A: 1+7+14=22 */
+          char time_b64[8];
 
-      /* Parse individual tags */
-      while (tagpos < tagend) {
-        char *tag_name = tagpos;
-        int tag_len;
+          /* Decode time: 7 base64 chars -> epoch_ms */
+          memcpy(time_b64, ch + 2, 7);
+          time_b64[7] = '\0';
+          cli_s2s_time_ms(cptr) = base64toint_64(time_b64);
 
-        /* Find the end of this tag (semicolon or end of tags) */
-        semicolon = memchr(tagpos, ';', tagend - tagpos);
-        if (semicolon)
-          tag_len = semicolon - tagpos;
-        else
-          tag_len = tagend - tagpos;
+          /* Extract msgid: 14 chars */
+          if (14 < S2S_MSGID_BUFSIZE) {
+            memcpy(cli_s2s_msgid(cptr), ch + 9, 14);
+            cli_s2s_msgid(cptr)[14] = '\0';
+          }
 
-        /* Check for @time tag */
-        if (tag_len >= 5 && memcmp(tag_name, "time=", 5) == 0) {
-          int value_len = tag_len - 5;
-          if (value_len < (int)sizeof(cli_s2s_time(cptr))) {
-            memcpy(cli_s2s_time(cptr), tag_name + 5, value_len);
-            cli_s2s_time(cptr)[value_len] = '\0';
+          /* Update local HLC from remote's time + logical (HLC receive) */
+          {
+            struct HLC remote_hlc;
+            char logical_b64[4], node_b64[3];
+            remote_hlc.physical_ms = cli_s2s_time_ms(cptr);
+            memcpy(logical_b64, cli_s2s_msgid(cptr) + 2, 3);
+            logical_b64[3] = '\0';
+            remote_hlc.logical = (uint16_t)base64toint_64(logical_b64);
+            node_b64[0] = cli_s2s_msgid(cptr)[0];
+            node_b64[1] = cli_s2s_msgid(cptr)[1];
+            node_b64[2] = '\0';
+            remote_hlc.node_id = (uint16_t)base64toint(node_b64);
+            hlc_global_receive(&remote_hlc);
           }
         }
-        /* Check for @msgid tag */
-        else if (tag_len >= 6 && memcmp(tag_name, "msgid=", 6) == 0) {
-          int value_len = tag_len - 6;
-          if (value_len < (int)sizeof(cli_s2s_msgid(cptr))) {
-            memcpy(cli_s2s_msgid(cptr), tag_name + 6, value_len);
-            cli_s2s_msgid(cptr)[value_len] = '\0';
-          }
-        }
+      } else {
+        /* VERBOSE FORMAT: key=value pairs (backward compat) */
+        char *tagpos = ch + 1;
+        while (tagpos < tagend) {
+          char *tag_name = tagpos;
+          char *semicolon = memchr(tagpos, ';', tagend - tagpos);
+          int tag_len = semicolon ? (semicolon - tagpos) : (tagend - tagpos);
 
-        /* Move to next tag */
-        if (semicolon)
-          tagpos = semicolon + 1;
-        else
-          break;
+          if (tag_len >= 5 && memcmp(tag_name, "time=", 5) == 0) {
+            int value_len = tag_len - 5;
+            /* Convert verbose ISO 8601 to epoch_ms */
+            char iso_buf[32];
+            if (value_len < (int)sizeof(iso_buf)) {
+              memcpy(iso_buf, tag_name + 5, value_len);
+              iso_buf[value_len] = '\0';
+              cli_s2s_time_ms(cptr) = iso8601_to_epoch_ms(iso_buf);
+            }
+          }
+          else if (tag_len >= 6 && memcmp(tag_name, "msgid=", 6) == 0) {
+            int value_len = tag_len - 6;
+            if (value_len < S2S_MSGID_BUFSIZE) {
+              memcpy(cli_s2s_msgid(cptr), tag_name + 6, value_len);
+              cli_s2s_msgid(cptr)[value_len] = '\0';
+            }
+          }
+
+          if (semicolon)
+            tagpos = semicolon + 1;
+          else
+            break;
+        }
       }
 
       /* Skip past the @ prefix and tags to the actual message */

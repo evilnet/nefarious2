@@ -46,9 +46,6 @@
 #include <time.h>
 
 #ifdef USE_MDBX
-/** Counter for generating unique message IDs for TOPIC event history storage */
-static unsigned long topic_history_msgid_counter = 0;
-
 /** Store a TOPIC event in the history database.
  * @param[in] sptr Client that set the topic.
  * @param[in] chptr Channel where topic was set.
@@ -89,10 +86,7 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
                 (unsigned long)(tv.tv_usec / 1000));
 
   /* Generate unique msgid */
-  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                cli_yxx(&me),
-                (unsigned long)cli_firsttime(&me),
-                ++topic_history_msgid_counter);
+  generate_msgid(msgid, sizeof(msgid));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -160,6 +154,7 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
    /* Fixed in 2.10.11: Don't propagate local topics */
    if (!IsLocalChannel(chptr->chname))
    {
+     sendcmdto_want_s2s_tags(1);
      if (setter != NULL)
        sendcmdto_serv_butone(sptr, CMD_TOPIC, cptr, "%H %s %Tu %Tu :%s", chptr,
                              chptr->topic_nick, chptr->creationtime,

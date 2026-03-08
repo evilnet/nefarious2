@@ -158,6 +158,37 @@ const char* inttobase64(char* buf, unsigned int v, unsigned int count)
   return buf;
 }
 
+/** Convert a string to its 64-bit value as a numnick.
+ * Same algorithm as base64toint() but for uint64_t values.
+ * @param[in] s Numnick string to decode.
+ * @return 64-bit numeric value.
+ */
+uint64_t base64toint_64(const char* s)
+{
+  uint64_t i = convert2n[(unsigned char) *s++];
+  while (*s) {
+    i <<= NUMNICKLOG;
+    i += convert2n[(unsigned char) *s++];
+  }
+  return i;
+}
+
+/** Encode a 64-bit number as a numnick.
+ * Same algorithm as inttobase64() but for uint64_t values.
+ * @param[out] buf Output buffer.
+ * @param[in] v Value to encode.
+ * @param[in] count Number of numnick digits to write to \a buf.
+ */
+const char* inttobase64_64(char* buf, uint64_t v, unsigned int count)
+{
+  buf[count] = '\0';
+  while (count > 0) {
+    buf[--count] = convert2y[(v & NUMNICKMASK)];
+    v >>= NUMNICKLOG;
+  }
+  return buf;
+}
+
 /** Look up a server by numnick string.
  * See @ref numnicks for more details.
  * @param[in] numeric %Numeric nickname of server (may contain trailing junk).

@@ -94,6 +94,7 @@ IRCD_SRC = \
 	channel.c \
 	class.c \
 	client.c \
+	crdt_hlc.c \
 	crule.c \
 	dbuf.c \
 	destruct_event.c \

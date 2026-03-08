@@ -28,6 +28,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
+#include "crdt_hlc.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -117,6 +118,17 @@ static struct Client *s2s_alias_source = NULL;
 void sendcmdto_set_alias_source(struct Client *alias)
 {
   s2s_alias_source = alias;
+}
+
+/** Opt-in flag for S2S tags on the next sendcmdto_serv_butone() call.
+ * Set to 1 before calling sendcmdto_serv_butone() to include compact S2S
+ * tags on channel events (JOIN, PART, KICK, TOPIC). Auto-cleared after use.
+ */
+static int s2s_want_tags = 0;
+
+void sendcmdto_want_s2s_tags(int want)
+{
+  s2s_want_tags = want;
 }
 
 
@@ -275,23 +287,46 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
 
 
 /** Generate a unique message ID for IRCv3 message-ids.
- * Format: <server_numeric>-<startup_ts>-<counter>
+ * HLC v1 format: <node_id_2><logical_b64_3><counter_b64_9> = 14 chars.
+ * Advances the global HLC clock on each call.
  * @param[out] buf Buffer to write message ID to.
  * @param[in] buflen Size of buffer.
  * @return Pointer to buf.
  */
 char *generate_msgid(char *buf, size_t buflen)
 {
-  snprintf(buf, buflen, "%s-%lu-%lu",
-           cli_yxx(&me),
-           (unsigned long)cli_firsttime(&me),
-           ++MsgIdCounter);
+  /* HLC format: YY(node_id 2) + LLL(logical 3) + QQQQQQQQQ(counter 9) = 14 chars */
+  struct HLC hlc = hlc_global_event();
+  char logical_b64[4], counter_b64[10];
+  inttobase64_64(logical_b64, (uint64_t)hlc.logical, 3);
+  inttobase64_64(counter_b64, (uint64_t)(++MsgIdCounter), 9);
+  snprintf(buf, buflen, "%s%s%s", cli_yxx(&me), logical_b64, counter_b64);
   return buf;
 }
 
+/** Parse ISO 8601 timestamp to epoch milliseconds.
+ * Used for backward-compatible parsing of verbose-format S2S time tags.
+ * @param[in] iso ISO 8601 string (e.g., "2026-03-06T12:34:56.789Z").
+ * @return Epoch milliseconds, or 0 on parse failure.
+ */
+uint64_t iso8601_to_epoch_ms(const char *iso)
+{
+  struct tm tm;
+  int ms = 0;
+  memset(&tm, 0, sizeof(tm));
+  if (sscanf(iso, "%d-%d-%dT%d:%d:%d.%dZ",
+             &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+             &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &ms) < 6)
+    return 0;
+  tm.tm_year -= 1900;
+  tm.tm_mon -= 1;
+  return (uint64_t)timegm(&tm) * 1000 + ms;
+}
+
 /** Format message tags for S2S (server-to-server) relay.
+ * Produces compact P10-native wire encoding: @A<time_b64_7><msgid_14>
  * If the message came from another server with tags, preserve them.
- * Otherwise, generate new @time and @msgid tags.
+ * Otherwise, generate new time and msgid.
  * @param[out] buf Buffer for tag string (includes trailing space).
  * @param[in] buflen Size of buffer.
  * @param[in] cptr Server connection the message came from (for incoming tags).
@@ -302,51 +337,38 @@ char *generate_msgid(char *buf, size_t buflen)
 static char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
                              char *msgid_out, size_t msgid_out_len)
 {
-  int pos = 0;
-  char timebuf[32];
-  char msgidbuf[64];
-  const char *time_tag = NULL;
+  char time_b64[8];
+  char msgidbuf[S2S_MSGID_BUFSIZE];
+  uint64_t epoch_ms;
   const char *msgid_tag = NULL;
 
   /* Check if P10 message tags are enabled */
   if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
     return NULL;
 
-  /* Check for incoming S2S tags from cptr */
-  if (cptr && cli_s2s_time(cptr)[0])
-    time_tag = cli_s2s_time(cptr);
+  /* Msgid FIRST: generate before time so HLC is advanced when we read physical_ms.
+   * Use preserved from incoming, or generate new. */
   if (cptr && cli_s2s_msgid(cptr)[0])
     msgid_tag = cli_s2s_msgid(cptr);
-
-  /* Generate new tags if not present */
-  if (!time_tag) {
-    struct timeval tv;
-    struct tm tm;
-    gettimeofday(&tv, NULL);
-    gmtime_r(&tv.tv_sec, &tm);
-    snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-             tm.tm_hour, tm.tm_min, tm.tm_sec,
-             tv.tv_usec / 1000);
-    time_tag = timebuf;
-  }
-
-  if (!msgid_tag) {
+  else {
     generate_msgid(msgidbuf, sizeof(msgidbuf));
     msgid_tag = msgidbuf;
   }
 
+  /* Time: use preserved epoch_ms from incoming, or read from HLC (now advanced) */
+  if (cptr && cli_s2s_time_ms(cptr))
+    epoch_ms = cli_s2s_time_ms(cptr);
+  else
+    epoch_ms = hlc_global()->physical_ms;
+
   /* Store msgid for caller if requested (for echo-message) */
   if (msgid_out && msgid_out_len > 0) {
-    ircd_strncpy(msgid_out, msgid_tag, msgid_out_len - 1);
-    msgid_out[msgid_out_len - 1] = '\0';
+    ircd_strncpy(msgid_out, msgid_tag, msgid_out_len);
   }
 
-  /* Format the tag string with trailing space */
-  pos = snprintf(buf, buflen, "@time=%s;msgid=%s ", time_tag, msgid_tag);
-  if (pos >= (int)buflen)
-    buf[buflen - 1] = '\0';
-
+  /* Compact format: @A<time_7><msgid_14> */
+  inttobase64_64(time_b64, epoch_ms, 7);
+  snprintf(buf, buflen, "@A%s%s ", time_b64, msgid_tag);
   return buf;
 }
 
@@ -973,7 +995,8 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 
   /* For S2S messages (PRIVMSG/NOTICE to servers), add S2S tags */
   if ((IsServer(to) || IsMe(to)) &&
-      (strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0) &&
+      (strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0
+       || strcmp(tok, TOK_QUIT) == 0) &&
       feature_bool(FEAT_P10_MESSAGE_TAGS)) {
     /* Get incoming server connection for tag preservation.
      * s2s_cptr_override preserves tags during alias source rewriting. */
@@ -1318,7 +1341,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
 			   const char *pattern, ...)
 {
   struct VarData vd;
-  struct MsgBuf *mb;
+  struct MsgBuf *mb = NULL;
   struct MsgBuf *mb_alias = NULL;
   struct DLink *lp;
   struct Client *alias_from = NULL;
@@ -1341,15 +1364,44 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
   }
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
-  va_start(vd.vd_args, pattern);
-  mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
-  va_end(vd.vd_args);
 
-  /* Build alias buffer for primary's server direction */
-  if (alias_from) {
+  /* Consume s2s_want_tags flag (auto-clear) */
+  {
+    int want_tags = s2s_want_tags;
+    s2s_want_tags = 0;
+
+    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+      char s2s_tagbuf[128];
+      struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
+                              : (MyConnect(from) ? NULL : cli_from(from));
+      s2s_cptr_override = NULL;
+
+      if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+        va_start(vd.vd_args, pattern);
+        mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+        va_end(vd.vd_args);
+
+        /* Alias buffer also needs tag prefix */
+        if (alias_from) {
+          va_start(vd.vd_args, pattern);
+          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+          va_end(vd.vd_args);
+        }
+      }
+    }
+  }
+
+  if (!mb) {
+    /* No tags or tags disabled — existing untagged path */
     va_start(vd.vd_args, pattern);
-    mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+    mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
     va_end(vd.vd_args);
+
+    if (alias_from) {
+      va_start(vd.vd_args, pattern);
+      mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+      va_end(vd.vd_args);
+    }
   }
 
   /* send it to our downlinks */

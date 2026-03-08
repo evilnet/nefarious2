@@ -360,8 +360,9 @@ struct Connection
   char                con_batch_id[16]; /**< Current batch reference ID */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
   char                con_client_tags[512]; /**< Client-only tags (+tag=value) for TAGMSG relay */
-  char                con_s2s_time[32];  /**< S2S @time tag from incoming message */
-  char                con_s2s_msgid[64]; /**< S2S @msgid tag from incoming message */
+  uint64_t            con_s2s_time_ms;   /**< S2S @time as epoch milliseconds (0 = not set) */
+#define S2S_MSGID_BUFSIZE 64  /**< Msgid buffer: fits both verbose (~34 chars) and compact (14 chars) */
+  char                con_s2s_msgid[S2S_MSGID_BUFSIZE]; /**< S2S @msgid tag from incoming message */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
@@ -516,8 +517,8 @@ struct Client {
 #define cli_batch_seq(cli)	con_batch_seq(cli_connect(cli))
 /** Get client-only tags buffer for TAGMSG relay */
 #define cli_client_tags(cli)	con_client_tags(cli_connect(cli))
-/** Get S2S @time tag from incoming message */
-#define cli_s2s_time(cli)	con_s2s_time(cli_connect(cli))
+/** Get S2S @time as epoch milliseconds from incoming message */
+#define cli_s2s_time_ms(cli)	con_s2s_time_ms(cli_connect(cli))
 /** Get S2S @msgid tag from incoming message */
 #define cli_s2s_msgid(cli)	con_s2s_msgid(cli_connect(cli))
 /** Get S2S batch ID from server */
@@ -790,8 +791,8 @@ struct Client {
 #define con_batch_seq(con)	((con)->con_batch_seq)
 /** Get the client-only tags buffer for TAGMSG relay. */
 #define con_client_tags(con)	((con)->con_client_tags)
-/** Get the S2S @time tag from incoming message. */
-#define con_s2s_time(con)	((con)->con_s2s_time)
+/** Get the S2S @time as epoch milliseconds from incoming message. */
+#define con_s2s_time_ms(con)	((con)->con_s2s_time_ms)
 /** Get the S2S @msgid tag from incoming message. */
 #define con_s2s_msgid(con)	((con)->con_s2s_msgid)
 /** Get the S2S batch ID from server. */

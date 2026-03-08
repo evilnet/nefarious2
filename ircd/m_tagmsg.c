@@ -100,9 +100,6 @@
 #include <string.h>
 #include <sys/time.h>
 
-/** Counter for generating unique message IDs for history */
-static unsigned long tagmsg_history_counter = 0;
-
 /**
  * Store a TAGMSG in channel history for event-playback.
  * TAGMSG content is stored as the client-only tags.
@@ -138,10 +135,7 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
                 (unsigned long)(tv.tv_usec / 1000));
 
   /* Generate unique msgid */
-  ircd_snprintf(0, msgid, sizeof(msgid), "%s-%lu-%lu",
-                cli_yxx(&me),
-                (unsigned long)cli_firsttime(&me),
-                ++tagmsg_history_counter);
+  generate_msgid(msgid, sizeof(msgid));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
