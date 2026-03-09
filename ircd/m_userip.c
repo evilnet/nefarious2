@@ -100,16 +100,16 @@ static void userip_formatter(struct Client* cptr, struct Client *sptr, struct Ms
   assert(IsUser(cptr));
 
   if ((sptr == cptr) || IsAnOper(sptr) || !IsHiddenHost(cptr))
-    ircd_snprintf(0, iphost, HOSTLEN, "%s", ircd_ntoa(&cli_ip(cptr)));
+    ircd_snprintf(0, iphost, HOSTLEN + 1, "%s", ircd_ntoa(&cli_ip(cptr)));
   else if (IsCloakIP(cptr))
-    ircd_snprintf(0, iphost, HOSTLEN, "%s", cli_user(cptr)->cloakip);
+    ircd_snprintf(0, iphost, HOSTLEN + 1, "%s", cli_user(cptr)->cloakip);
   else if (IsFakeHost(cptr) || IsSetHost(cptr))
-    ircd_snprintf(0, iphost, HOSTLEN, "%s", feature_str(FEAT_HIDDEN_IP));
+    ircd_snprintf(0, iphost, HOSTLEN + 1, "%s", feature_str(FEAT_HIDDEN_IP));
   else if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
             (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) && IsAccount(cptr))
-    ircd_snprintf(0, iphost, HOSTLEN, "%s", feature_str(FEAT_HIDDEN_IP));
+    ircd_snprintf(0, iphost, HOSTLEN + 1, "%s", feature_str(FEAT_HIDDEN_IP));
   else
-    ircd_snprintf(0, iphost, HOSTLEN, "%s", ircd_ntoa(&cli_ip(cptr)));
+    ircd_snprintf(0, iphost, HOSTLEN + 1, "%s", ircd_ntoa(&cli_ip(cptr)));
 
   msgq_append(0, mb, "%s%s=%c%s@%s", cli_name(cptr),
 	      SeeOper(sptr,cptr) ? "*" : "",

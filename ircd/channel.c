@@ -424,7 +424,7 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, i
   if (IsAccount(cptr) && ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
       (feature_int(FEAT_HOST_HIDING_STYLE) == 3)))
   {
-    ircd_snprintf(0, tmphost, HOSTLEN, "%s.%s",
+    ircd_snprintf(0, tmphost, HOSTLEN + 1, "%s.%s",
                   cli_user(cptr)->account, (feature_bool(FEAT_OPERHOST_HIDING) &&
                   IsAnOper(cptr) ? feature_str(FEAT_HIDDEN_OPERHOST) :
                   feature_str(FEAT_HIDDEN_HOST)));
