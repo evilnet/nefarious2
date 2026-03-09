@@ -3642,6 +3642,13 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   Debug((DEBUG_INFO, "bounce_setup_local_alias: converting %s to alias of %s (session %s)",
          cli_name(sptr), cli_name(primary), session->hs_sessid));
 
+  /* --- Step 0: Complete IPcheck connect ---
+   * The alias keeps its own real socket IP (not overwritten from primary),
+   * so IPcheck_connect_succeeded() can find the registry entry normally.
+   * IPcheck_disconnect() is called in the alias exit path. */
+  if (IsIPChecked(sptr))
+    IPcheck_connect_succeeded(sptr);
+
   /* --- Step 1: Remove from nick hash ---
    * The client was added during NICK registration.  Aliases must NOT be
    * in the nick hash — FindUser() should return the primary, not the alias. */
@@ -3652,13 +3659,15 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   ircd_strncpy(cli_name(sptr), cli_name(primary), NICKLEN);
   ircd_strncpy(user->username, cli_user(primary)->username, USERLEN);
   ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN);
-  ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN);
+  /* Do NOT overwrite realhost — the alias has its own real connection host,
+   * needed for oper WHOIS, gline matching, and stays correct on promotion. */
   ircd_strncpy(cli_info(sptr), cli_info(primary), REALLEN);
   ircd_strncpy(user->account, cli_user(primary)->account, ACCOUNTLEN);
   user->acc_create = cli_user(primary)->acc_create;
 
-  /* Copy IP and cloaked/fake host */
-  memcpy(&cli_ip(sptr), &cli_ip(primary), sizeof(cli_ip(sptr)));
+  /* Copy cloaked/fake host (controls what other users see).
+   * Do NOT overwrite cli_ip — the alias has its own real socket IP,
+   * needed for IPcheck, ban matching, and logging. */
   ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
   ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
   ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
@@ -3833,8 +3842,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
     }
   }
 
-  if (IsIPChecked(sptr))
-    IPcheck_connect_succeeded(sptr);
+  /* IPcheck already completed in Step 0 above, before IP overwrite. */
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "Bouncer: alias %s (%s@%s) created for session %s on %s [%s]",
