@@ -3585,12 +3585,10 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       add_user_to_channel(member->channel, new_client, modes, OpLevel(member));
       remove_user_from_channel(old_client, member->channel);
     }
-    /* Rename new client to the session's nick */
+    /* Nick should already match — don't propagate a desync from the wire. */
     if (ircd_strcmp(cli_name(new_client), nick)) {
-      /* Hash re-key: remove from old name, set new, add back */
-      hRemClient(new_client);
-      ircd_strncpy(cli_name(new_client), nick, NICKLEN);
-      hAddClient(new_client);
+      Debug((DEBUG_ERROR, "BX P: nick mismatch (swap) — local '%s' vs wire '%s', keeping local",
+             cli_name(new_client), nick));
     }
   }
 
