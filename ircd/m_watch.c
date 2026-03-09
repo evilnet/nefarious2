@@ -62,6 +62,7 @@ int m_watch(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   char *s, *p = 0;
   int i = 0;
+  int lb;
 
   if (parc < 2)
   {
@@ -69,6 +70,8 @@ int m_watch(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     parc = 2;
     parv[1] = "l";
   }
+
+  lb = labeled_batch_start(sptr);
 
   /*
    * The parameters can be separated for " " or "," or both.
@@ -219,5 +222,6 @@ int m_watch(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	  }
   }
 
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }

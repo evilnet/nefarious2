@@ -114,12 +114,16 @@
  */
 int m_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
+
   if (parc > 1 && match(parv[1], cli_name(&me)))
     return send_reply(sptr, ERR_NOPRIVILEGES);
 
+  lb = labeled_batch_start(sptr);
   send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
              debug_serveropts());
   send_supported(sptr);
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 
@@ -148,6 +152,7 @@ int mo_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                            parc, parv)
                       == HUNTED_ISME)
   {
+    int lb = labeled_batch_start(sptr);
     send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
 	       debug_serveropts());
 #ifdef USE_SSL
@@ -163,6 +168,7 @@ int mo_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :MaxMindDB %s", sptr, geoip_libmmdb_version());
 #endif
     send_supported(sptr);
+    if (lb) labeled_batch_end(sptr);
   }
 
   return 0;
@@ -191,10 +197,15 @@ int ms_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (hunt_server_cmd(sptr, CMD_VERSION, cptr, 0, ":%C", 1, parc, parv) ==
       HUNTED_ISME)
   {
+    int lb = labeled_batch_start(sptr);
     send_reply(sptr, RPL_VERSION, version, cvs_version, debugmode, cli_name(&me),
 	       debug_serveropts());
     if (IsAnOper(sptr))
     {
+      /* Echo compact tag for labeled-response correlation */
+      if (!MyUser(sptr) && feature_bool(FEAT_P10_MESSAGE_TAGS) &&
+          cli_s2s_msgid(cli_from(sptr))[0])
+        sendcmdto_set_s2s_tags(cli_s2s_time_ms(cli_from(sptr)), cli_s2s_msgid(cli_from(sptr)));
 #ifdef USE_SSL
 #ifdef DEBUGMODE
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Headers: %s", sptr, OPENSSL_VERSION_TEXT);
@@ -208,6 +219,7 @@ int ms_version(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :MaxMindDB %s", sptr, geoip_libmmdb_version());
 #endif
     }
+    if (lb) labeled_batch_end(sptr);
   }
 
   return 0;

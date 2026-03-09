@@ -113,17 +113,21 @@ int m_whowas(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int cur = 0;
   int max = -1, found = 0;
   char *p, *nick, *s;
+  int lb = labeled_batch_start(sptr);
 
   if (parc < 2)
   {
     send_reply(sptr, ERR_NONICKNAMEGIVEN);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
   if (parc > 2)
     max = atoi(parv[2]);
   if (parc > 3)
-    if (hunt_server_cmd(sptr, CMD_WHOWAS, cptr, 1, "%s %s :%C", 3, parc, parv))
+    if (hunt_server_cmd(sptr, CMD_WHOWAS, cptr, 1, "%s %s :%C", 3, parc, parv)) {
+      if (lb) labeled_batch_end(sptr);
       return 0;
+    }
 
   parv[1] = canonize(parv[1]);
   if (!MyConnect(sptr) && (max > 20))
@@ -160,5 +164,6 @@ int m_whowas(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       p[-1] = ',';
   }
   send_reply(sptr, RPL_ENDOFWHOWAS, parv[1]);
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }

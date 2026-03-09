@@ -110,6 +110,7 @@ m_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct ModeBuf mbuf;
   struct Membership *member;
   int hoflags = 0;
+  int lb;
 
   if (parc < 2)
     return need_more_params(sptr, "MODE");
@@ -144,11 +145,13 @@ m_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     char modebuf[MODEBUFLEN];
     char parabuf[MODEBUFLEN];
 
+    lb = labeled_batch_start(sptr);
     *modebuf = *parabuf = '\0';
     modebuf[1] = '\0';
     channel_modes(sptr, modebuf, parabuf, sizeof(parabuf), chptr, member);
     send_reply(sptr, RPL_CHANNELMODEIS, chptr->chname, modebuf, parabuf);
     send_reply(sptr, RPL_CREATIONTIME, chptr->chname, chptr->creationtime);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 

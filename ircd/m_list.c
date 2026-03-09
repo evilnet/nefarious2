@@ -371,17 +371,21 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if ((cli_firsttime(sptr) + feature_int(FEAT_LISTDELAY) > CurrentTime) && !IsOper(sptr)) {
     if (!find_except_conf(sptr, EFLAG_LISTDELAY)) {
+      int lb = labeled_batch_start(sptr);
       sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :*** You have not been connected long enough to use /list. You must wait %d seconds before trying again.",
                     sptr, (cli_firsttime(sptr) + feature_int(FEAT_LISTDELAY)) - CurrentTime);
       send_reply(sptr, RPL_LISTSTART);
       send_reply(sptr, RPL_LISTEND);
+      if (lb) labeled_batch_end(sptr);
       return 0;
     }
   }
 
   if (cli_listing(sptr))            /* Already listing ? */
   {
-    if (cli_listing(sptr))
+    /* Close any labeled-response batch from the previous LIST */
+    if (cli_listing(sptr)->batch_id[0] && has_active_batch(sptr))
+      send_batch_end(sptr);
     MyFree(cli_listing(sptr));
     cli_listing(sptr) = 0;
     send_reply(sptr, RPL_LISTEND);
@@ -420,24 +424,43 @@ int m_list(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       cli_listing(sptr) = (struct ListingArgs*) MyMalloc(sizeof(struct ListingArgs));
       assert(0 != cli_listing(sptr));
       memcpy(cli_listing(sptr), &args, sizeof(struct ListingArgs));
+      /* Open labeled-response batch for async LIST — stays open across event loop iterations */
+      cli_listing(sptr)->batch_id[0] = '\0';
+      if (MyConnect(sptr) && cli_label(sptr)[0] &&
+          feature_bool(FEAT_CAP_labeled_response) &&
+          CapActive(sptr, CAP_LABELEDRESP) &&
+          feature_bool(FEAT_CAP_batch) && CapActive(sptr, CAP_BATCH)) {
+        send_batch_start(sptr, "labeled-response");
+        ircd_strncpy(cli_listing(sptr)->batch_id, cli_batch_id(sptr),
+                     sizeof(cli_listing(sptr)->batch_id));
+      }
       list_next_channels(sptr);
       return 0;
     }
-    send_reply(sptr, RPL_LISTEND);
+    /* Sanity fail — sync path */
+    {
+      int lb = labeled_batch_start(sptr);
+      send_reply(sptr, RPL_LISTEND);
+      if (lb) labeled_batch_end(sptr);
+    }
     return 0;
   }
 
-  for (; (name = ircd_strtok(&p, parv[1], ",")); parv[1] = 0)
+  /* Specific channel names — sync path */
   {
-    chptr = FindChannel(name);
-    if (!chptr)
-        continue;
-    if (ShowChannel(sptr, chptr)
-        || (IsAnOper(sptr) && HasPriv(sptr, PRIV_LIST_CHAN)))
-      send_reply(sptr, RPL_LIST, chptr->chname,
-		 chptr->users - number_of_zombies(chptr), chptr->topic);
+    int lb = labeled_batch_start(sptr);
+    for (; (name = ircd_strtok(&p, parv[1], ",")); parv[1] = 0)
+    {
+      chptr = FindChannel(name);
+      if (!chptr)
+          continue;
+      if (ShowChannel(sptr, chptr)
+          || (IsAnOper(sptr) && HasPriv(sptr, PRIV_LIST_CHAN)))
+        send_reply(sptr, RPL_LIST, chptr->chname,
+                   chptr->users - number_of_zombies(chptr), chptr->topic);
+    }
+    send_reply(sptr, RPL_LISTEND);
+    if (lb) labeled_batch_end(sptr);
   }
-
-  send_reply(sptr, RPL_LISTEND);
   return 0;
 }

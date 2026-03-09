@@ -114,6 +114,7 @@ int m_links(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   char *mask;
   struct Client *acptr;
+  int lb;
 
   if (feature_bool(FEAT_HIS_LINKS) && !IsAnOper(sptr))
   {
@@ -134,6 +135,8 @@ int m_links(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   else
     mask = parc < 2 ? 0 : parv[1];
 
+  lb = labeled_batch_start(sptr);
+
   for (acptr = GlobalClientList, collapse(mask); acptr; acptr = cli_next(acptr))
   {
     if (!IsServer(acptr) && !IsMe(acptr))
@@ -147,6 +150,7 @@ int m_links(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   send_reply(sptr, RPL_ENDOFLINKS, BadPtr(mask) ? "*" : mask);
 
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 
@@ -167,6 +171,7 @@ ms_links(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  {
    char *mask;
    struct Client *acptr;
+   int lb;
 
    if (parc > 2)
    {
@@ -177,7 +182,9 @@ ms_links(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    }
    else
      mask = parc < 2 ? 0 : parv[1];
- 
+
+   lb = labeled_batch_start(sptr);
+
    for (acptr = GlobalClientList, collapse(mask); acptr; acptr = cli_next(acptr))
    {
      if (!IsServer(acptr) && !IsMe(acptr))
@@ -188,7 +195,9 @@ ms_links(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                 cli_hopcount(acptr), cli_serv(acptr)->prot,
                 ((cli_info(acptr))[0] ? cli_info(acptr) : "(Unknown Location)"));
    }
- 
+
    send_reply(sptr, RPL_ENDOFLINKS, BadPtr(mask) ? "*" : mask);
+
+   if (lb) labeled_batch_end(sptr);
    return 0;
  }

@@ -27,6 +27,7 @@
 #include "s_numeric.h"
 #include "channel.h"
 #include "client.h"
+#include "forwarded_label.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_features.h"
@@ -93,11 +94,40 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
   /* Since 2.10.10.pl14 we rewrite numerics from remote servers to appear to
    * come from the local server
    */
-  if (acptr)
-    sendcmdto_one((feature_bool(FEAT_HIS_REWRITE) && !IsOper(acptr)) ?
-                    &me : sptr,
-                  num, num, acptr, "%C %s", acptr, parv[2]);
-  else
+  if (acptr) {
+    struct Client *from = (feature_bool(FEAT_HIS_REWRITE) && !IsOper(acptr)) ? &me : sptr;
+
+    if (MyConnect(acptr)) {
+      const char *incoming_msgid = cli_s2s_msgid(cptr);
+
+      /* Check for forwarded label batch wrapping */
+      struct ForwardedLabel *fl = fwd_label_find(acptr, incoming_msgid);
+      if (fl) {
+        if (fl->fl_state == FWD_LABEL_PENDING)
+          fwd_label_open_batch(acptr, fl);
+
+        /* DRAINING → ACTIVE: more messages arrived with same msgid */
+        if (fl->fl_state == FWD_LABEL_DRAINING)
+          fl->fl_state = FWD_LABEL_ACTIVE;
+
+        sendcmdto_set_fwd_batch(fl->fl_batch_id);
+        sendcmdto_one_tags(from, num, num, acptr, "%C %s", acptr, parv[2]);
+
+        if (fwd_label_is_terminal(fl, numeric))
+          fl->fl_state = FWD_LABEL_DRAINING;
+        return 0;
+      }
+
+      /* Numeric with different/no msgid: close any DRAINING batches */
+      fwd_label_close_draining(acptr);
+    } else {
+      /* Remote client: relay numeric, preserving compact tag for correlation */
+      if (cli_s2s_msgid(cptr)[0] && cli_s2s_time_ms(cptr))
+        sendcmdto_set_s2s_tags(cli_s2s_time_ms(cptr), cli_s2s_msgid(cptr));
+    }
+
+    sendcmdto_one(from, num, num, acptr, "%C %s", acptr, parv[2]);
+  } else
     sendcmdto_channel_butone(feature_bool(FEAT_HIS_REWRITE) ? &me : sptr,
                              num, num, achptr, cptr, SKIP_DEAF | SKIP_BURST,
                              '\0', "%H %s", achptr, parv[2]);

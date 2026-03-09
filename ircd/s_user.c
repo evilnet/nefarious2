@@ -38,6 +38,7 @@
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
 #include "ircd_cloaking.h"
+#include "forwarded_label.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -250,6 +251,19 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
 
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
 
+  /* Save label and generate compact tag for forwarded labeled commands.
+   * Must happen before sendcmdto_one which picks up the s2s overrides. */
+  if (MyConnect(from) && cli_label(from)[0] &&
+      feature_bool(FEAT_CAP_labeled_response) &&
+      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH)) {
+    char msgid[S2S_MSGID_BUFSIZE];
+    uint64_t time_ms;
+    if (fwd_label_save(from, cmd, msgid, &time_ms)) {
+      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
+        sendcmdto_set_s2s_tags(time_ms, msgid);
+    }
+  }
+
   sendcmdto_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],
                 parv[4], parv[5], parv[6], parv[7], parv[8]);
 
@@ -317,6 +331,18 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
   /* assert(!IsServer(from)); SETTIME to particular destinations permitted */
 
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
+
+  /* Save label and generate compact tag for forwarded labeled commands. */
+  if (MyConnect(from) && cli_label(from)[0] &&
+      feature_bool(FEAT_CAP_labeled_response) &&
+      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH)) {
+    char msgid[S2S_MSGID_BUFSIZE];
+    uint64_t time_ms;
+    if (fwd_label_save(from, cmd, msgid, &time_ms)) {
+      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
+        sendcmdto_set_s2s_tags(time_ms, msgid);
+    }
+  }
 
   sendcmdto_prio_one(from, cmd, tok, acptr, pattern, parv[1], parv[2], parv[3],
 		     parv[4], parv[5], parv[6], parv[7], parv[8]);

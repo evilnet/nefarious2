@@ -116,11 +116,16 @@
  */
 int m_motd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
+
   if (hunt_server_cmd(sptr, CMD_MOTD, cptr, feature_int(FEAT_HIS_REMOTE), "%C", 1,
 		      parc, parv) != HUNTED_ISME)
     return 0;
 
-  return motd_send(sptr);
+  lb = labeled_batch_start(sptr);
+  motd_send(sptr);
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }
 
 /*
@@ -139,9 +144,14 @@ int m_motd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int ms_motd(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
+
   if (hunt_server_cmd(sptr, CMD_MOTD, cptr, 0, "%C", 1, parc, parv) !=
       HUNTED_ISME)
     return 0;
 
-  return motd_send(sptr);
+  lb = labeled_batch_start(sptr);
+  motd_send(sptr);
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }

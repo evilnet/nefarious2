@@ -518,6 +518,146 @@ static void send_history_message(struct Client *sptr, struct HistoryMessage *msg
   char first_line[512];
   char *content = msg->dyn_content ? msg->dyn_content : msg->content;
 
+  /* QUIT messages don't take a channel target in IRC protocol.
+   * Format: :sender QUIT :reason (no target parameter).
+   * QUIT is always single-line so handle it early and return. */
+  if (msg->type == HISTORY_QUIT) {
+    if (outer_batchid) {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s :%s",
+                      outer_batchid, time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, content);
+      } else {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s :%s",
+                      outer_batchid, time_str, msg->msgid,
+                      msg->sender, cmd, content);
+      }
+    } else {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s :%s",
+                      time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, content);
+      } else {
+        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s :%s",
+                      time_str, msg->msgid,
+                      msg->sender, cmd, content);
+      }
+    }
+    return;
+  }
+
+  /* JOIN content is empty — don't emit a trailing ":" with nothing after it.
+   * Correct IRC: "JOIN #channel" (no trailing parameter). */
+  if (msg->type == HISTORY_JOIN) {
+    if (outer_batchid) {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s",
+                      outer_batchid, time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target);
+      } else {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s",
+                      outer_batchid, time_str, msg->msgid,
+                      msg->sender, cmd, target);
+      }
+    } else {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s",
+                      time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target);
+      } else {
+        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s",
+                      time_str, msg->msgid,
+                      msg->sender, cmd, target);
+      }
+    }
+    return;
+  }
+
+  /* PART with empty reason — don't emit trailing ":".
+   * PART with reason uses trailing normally via generic path. */
+  if (msg->type == HISTORY_PART && (!content[0])) {
+    if (outer_batchid) {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s",
+                      outer_batchid, time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target);
+      } else {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s",
+                      outer_batchid, time_str, msg->msgid,
+                      msg->sender, cmd, target);
+      }
+    } else {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s",
+                      time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target);
+      } else {
+        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s",
+                      time_str, msg->msgid,
+                      msg->sender, cmd, target);
+      }
+    }
+    return;
+  }
+
+  /* MODE content is stored as "-o nick" or "+o nick" (mode string + params).
+   * The generic format wraps content with ":" producing "MODE #chan :-o nick"
+   * which merges mode+target into one trailing parameter.
+   * Correct IRC: "MODE #chan -o nick" — params must be space-separated. */
+  if (msg->type == HISTORY_MODE) {
+    if (outer_batchid) {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s %s",
+                      outer_batchid, time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s %s",
+                      outer_batchid, time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    } else {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s %s",
+                      time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s %s",
+                      time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    }
+    return;
+  }
+
+  /* KICK content is stored as "nick :reason" (already properly formatted).
+   * The generic format would add an extra ":" prefix, producing
+   * "KICK #channel :nick :reason" which is malformed.
+   * Correct IRC: "KICK #channel nick :reason" — emit content raw. */
+  if (msg->type == HISTORY_KICK) {
+    if (outer_batchid) {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s %s",
+                      outer_batchid, time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s %s",
+                      outer_batchid, time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    } else {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s %s",
+                      time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s %s",
+                      time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    }
+    return;
+  }
+
   /* Check if content contains Unit Separator (multiline) */
   separator = strchr(content, '\x1F');
 
@@ -753,10 +893,11 @@ static void send_gap_marker(struct Client *sptr, const char *target,
  * @param[in] messages List of messages to send.
  * @param[in] count Number of messages.
  * @param[in] ops_override If non-zero, user requested :full override.
+ * @param[in] label Label string for labeled-response (NULL for auto-replay).
  */
 static void send_history_batch(struct Client *sptr, const char *target,
                                 struct HistoryMessage *messages, int count,
-                                int ops_override)
+                                int ops_override, const char *label)
 {
   struct HistoryMessage *msg;
   char batchid[BATCH_ID_LEN];
@@ -769,10 +910,17 @@ static void send_history_batch(struct Client *sptr, const char *target,
   /* Generate batch ID */
   generate_batch_id(batchid, sizeof(batchid), sptr);
 
-  /* Start batch */
+  /* Start batch — include @label on BATCH +start if labeled-response applies */
   if (CapRecipientHas(sptr, CAP_BATCH)) {
-    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s chathistory %s",
-                  batchid, target);
+    if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
+        CapRecipientHas(sptr, CAP_LABELEDRESP)) {
+      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                    label, cli_name(&me), batchid, target);
+      cli_label_responded(sptr) = 1;
+    } else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s chathistory %s",
+                    batchid, target);
+    }
   }
 
   /* Send each message */
@@ -849,7 +997,7 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
 
   if (count > 0 && messages) {
     /* Send the messages as a chathistory batch (reusing internal logic) */
-    send_history_batch(sptr, target, messages, count, 0);
+    send_history_batch(sptr, target, messages, count, 0, NULL);
     history_free_messages(messages);
   }
 
@@ -1102,7 +1250,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   }
 
   /* Send local-only response using normalized target */
-  send_history_batch(sptr, lookup_target, messages, count, ops_override);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
 
   /* Free messages */
   history_free_messages(messages);
@@ -1164,7 +1312,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
   history_free_messages(messages);
 
   return 0;
@@ -1224,7 +1372,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
   history_free_messages(messages);
 
   return 0;
@@ -1284,7 +1432,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
   history_free_messages(messages);
 
   return 0;
@@ -1344,7 +1492,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
     return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override);
+  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
   history_free_messages(messages);
 
   return 0;
@@ -1380,6 +1528,7 @@ struct FedRequest {
   void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
   void *cb_data;                      /**< Custom data for completion callback */
   void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
+  char label[64];                     /**< Saved label for labeled-response on async completion */
 };
 
 /** Global array of pending federation requests */
@@ -1503,9 +1652,14 @@ static struct HistoryTarget *merge_targets(struct HistoryTarget *local,
   return result;
 }
 
-/** Send TARGETS results to a client with access filtering and limit. */
+/** Send TARGETS results to a client with access filtering and limit.
+ * @param[in] sptr Client to send to.
+ * @param[in] targets List of targets to send.
+ * @param[in] limit Maximum number of targets.
+ * @param[in] label Label string for labeled-response (NULL for auto-replay).
+ */
 static void send_targets_batch(struct Client *sptr, struct HistoryTarget *targets,
-                               int limit)
+                               int limit, const char *label)
 {
   char batchid[BATCH_ID_LEN];
   char iso_time[32];
@@ -1514,9 +1668,18 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
 
   generate_batch_id(batchid, sizeof(batchid), sptr);
 
-  if (CapRecipientHas(sptr, CAP_BATCH))
-    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/chathistory-targets",
-                  batchid);
+  /* Start batch — include @label on BATCH +start if labeled-response applies */
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
+    if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
+        CapRecipientHas(sptr, CAP_LABELEDRESP)) {
+      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+                    label, cli_name(&me), batchid);
+      cli_label_responded(sptr) = 1;
+    } else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/chathistory-targets",
+                    batchid);
+    }
+  }
 
   for (struct HistoryTarget *tgt = targets; tgt && sent < limit; tgt = tgt->next) {
     /* Access filter — skip targets the client can't read */
@@ -1595,6 +1758,13 @@ static struct FedRequest *start_fed_targets_query(
   req->cb_data = ctx;
   req->cleanup_cb = cleanup_targets_context;
 
+  /* Save label for async response delivery */
+  req->label[0] = '\0';
+  if (cli_label(sptr)[0]) {
+    ircd_strncpy(req->label, cli_label(sptr), sizeof(req->label));
+    cli_label_responded(sptr) = 1;  /* Suppress generic ACK */
+  }
+
   fed_requests[i] = req;
 
   /* Set timeout timer */
@@ -1652,7 +1822,7 @@ static void complete_targets_fed(struct FedRequest *req)
   merged = merge_targets(ctx->local_targets, ctx->fed_targets);
 
   /* Send to client with access filtering and limit enforcement */
-  send_targets_batch(client, merged, req->limit);
+  send_targets_batch(client, merged, req->limit, req->label);
 
   history_free_targets(merged);
 }
@@ -1728,7 +1898,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
   /* Local-only path: sort by recency and send */
   {
     struct HistoryTarget *sorted = merge_targets(targets, NULL);
-    send_targets_batch(sptr, sorted, limit);
+    send_targets_batch(sptr, sorted, limit, cli_label(sptr));
     history_free_targets(sorted);
   }
   history_free_targets(targets);
@@ -3118,7 +3288,7 @@ static void send_fed_response(struct FedRequest *req)
     total++;
 
   /* Send to client */
-  send_history_batch(client, req->target, merged, total, req->ops_override);
+  send_history_batch(client, req->target, merged, total, req->ops_override, req->label);
 
   /* Free merged list */
   history_free_messages(merged);
@@ -3344,6 +3514,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   req->start_time = CurrentTime;
   req->limit = limit;
   req->ops_override = ops_override;
+
+  /* Save label for async response delivery */
+  req->label[0] = '\0';
+  if (cli_label(sptr)[0]) {
+    ircd_strncpy(req->label, cli_label(sptr), sizeof(req->label));
+    cli_label_responded(sptr) = 1;  /* Suppress generic ACK */
+  }
 
   fed_requests[i] = req;
 
@@ -3691,7 +3868,7 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
       int count = history_query_latest(channame, HISTORY_REF_NONE, "*",
                                         ctx->limit, &messages);
       if (count > 0 && messages) {
-        send_history_batch(sptr, channame, messages, count, 0);
+        send_history_batch(sptr, channame, messages, count, 0, NULL);
         ctx->total_replayed += count;
         ctx->chan_count++;
         history_free_messages(messages);
@@ -3818,7 +3995,7 @@ static void complete_autoreplay_channel(struct FedRequest *req)
       total++;
 
     if (total > 0) {
-      send_history_batch(sptr, req->target, merged, total, 0);
+      send_history_batch(sptr, req->target, merged, total, 0, NULL);
       ctx->total_replayed += total;
       ctx->chan_count++;
     }

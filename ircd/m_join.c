@@ -334,53 +334,59 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
-  joinbuf_init(&create, sptr, cptr, JOINBUF_TYPE_CREATE, 0, TStime());
-  if (alias_source && !MyConnect(sptr)) {
-    join.jb_alias_source = alias_source;
-    create.jb_alias_source = alias_source;
-  }
+  {
+    int lb = labeled_batch_start(sptr);
 
-  chanlist = last0(cptr, sptr, parv[1]); /* find last "JOIN 0" */
-
-  keys = parv[2]; /* remember where keys are */
-
-  for (name = ircd_strtok(&p, chanlist, ","); name;
-       name = ircd_strtok(&p, 0, ",")) {
-    char *key = 0;
-
-    /* If we have any more keys, take the first for this channel. */
-    if (!BadPtr(keys)
-        && (keys = strchr(key = keys, ',')))
-      *keys++ = '\0';
-
-    /* Empty keys are the same as no keys. */
-    if (key && !key[0])
-      key = 0;
-
-    if (!IsChannelName(name) || !strIsIrcCh(name))
-    {
-      /* bad channel name */
-      send_reply(sptr, ERR_NOSUCHCHANNEL, name);
-      continue;
+    joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
+    joinbuf_init(&create, sptr, cptr, JOINBUF_TYPE_CREATE, 0, TStime());
+    if (alias_source && !MyConnect(sptr)) {
+      join.jb_alias_source = alias_source;
+      create.jb_alias_source = alias_source;
     }
 
-    if (feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY) && !string_character_structure_is_sane(name)) {
+    chanlist = last0(cptr, sptr, parv[1]); /* find last "JOIN 0" */
+
+    keys = parv[2]; /* remember where keys are */
+
+    for (name = ircd_strtok(&p, chanlist, ","); name;
+         name = ircd_strtok(&p, 0, ",")) {
+      char *key = 0;
+
+      /* If we have any more keys, take the first for this channel. */
+      if (!BadPtr(keys)
+          && (keys = strchr(key = keys, ',')))
+        *keys++ = '\0';
+
+      /* Empty keys are the same as no keys. */
+      if (key && !key[0])
+        key = 0;
+
+      if (!IsChannelName(name) || !strIsIrcCh(name))
+      {
+        /* bad channel name */
         send_reply(sptr, ERR_NOSUCHCHANNEL, name);
         continue;
+      }
+
+      if (feature_bool(FEAT_VALID_UTF8_CHANNELS_ONLY) && !string_character_structure_is_sane(name)) {
+          send_reply(sptr, ERR_NOSUCHCHANNEL, name);
+          continue;
+      }
+
+      if (cli_user(sptr)->joined >= get_client_maxchans(sptr)
+          && !HasPriv(sptr, PRIV_CHAN_LIMIT)) {
+        send_reply(sptr, ERR_TOOMANYCHANNELS, name);
+        break; /* no point processing the other channels */
+      }
+
+      do_join(cptr, sptr, &join, &create, name, key, 0);
     }
 
-    if (cli_user(sptr)->joined >= get_client_maxchans(sptr)
-	&& !HasPriv(sptr, PRIV_CHAN_LIMIT)) {
-      send_reply(sptr, ERR_TOOMANYCHANNELS, name);
-      break; /* no point processing the other channels */
-    }
+    joinbuf_flush(&join); /* must be first, if there's a JOIN 0 */
+    joinbuf_flush(&create);
 
-    do_join(cptr, sptr, &join, &create, name, key, 0);
+    if (lb) labeled_batch_end(sptr);
   }
-
-  joinbuf_flush(&join); /* must be first, if there's a JOIN 0 */
-  joinbuf_flush(&create);
 
   return 0;
 }

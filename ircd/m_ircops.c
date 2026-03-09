@@ -104,6 +104,7 @@ int m_ircops(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   struct Client *server = 0;
   char buf[BUFSIZE];
   int ircops = 0;
+  int lb;
 
   if (!IsAnOper(sptr) && feature_bool(FEAT_HIS_IRCOPS))
     return send_reply(sptr, ERR_NOPRIVILEGES);
@@ -122,6 +123,8 @@ int m_ircops(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!server || IsService(server))
       return send_reply(sptr, ERR_NOSUCHSERVER, parv[1]);
   }
+
+  lb = labeled_batch_start(sptr);
 
   send_reply(sptr, RPL_IRCOPSHEADER, (parc > 1) ? cli_name(server) :
              feature_str(FEAT_NETWORK));
@@ -155,6 +158,7 @@ int m_ircops(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                 ircops, (ircops != 1) ? "s" : "");
   send_reply(sptr, RPL_ENDOFIRCOPS, buf);
 
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 

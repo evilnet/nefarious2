@@ -32,6 +32,7 @@
 #include "channel.h"
 #include "client.h"
 #include "crdt_hlc.h"
+#include "forwarded_label.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -302,9 +303,12 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   }
   if (IsUser(bcptr)) {
     /* Bouncer aliases: minimal silent teardown.
-     * No QUIT to channels, no chathistory, no UserStats, no IPcheck.
-     * Just remove from channels, numeric space, and client list. */
+     * No QUIT to channels, no chathistory, no UserStats.
+     * Just remove from channels, numeric space, and client list.
+     * Local aliases do need IPcheck_disconnect for their real socket IP. */
     if (IsBouncerAlias(bcptr)) {
+      if (MyConnect(bcptr) && IsIPChecked(bcptr))
+        IPcheck_disconnect(bcptr);
       bounce_alias_untrack(bcptr);
       remove_user_from_all_channels(bcptr);
       RemoveYXXClient(cli_user(bcptr)->server, cli_yxx(bcptr));
@@ -323,6 +327,11 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       MyFree(cli_listing(bcptr));
       cli_listing(bcptr) = NULL;
     }
+    /*
+     * Clean up any pending forwarded label batches (no BATCH close sent)
+     */
+    if (MyUser(bcptr))
+      fwd_label_cleanup(bcptr);
     /*
      * If a person is on a channel, send a QUIT notice
      * to every client (person) on the same channel (so

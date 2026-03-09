@@ -93,6 +93,7 @@
 #include "numnicks.h"
 #include "s_conf.h"
 #include "s_user.h"
+#include "send.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -117,13 +118,17 @@ static int send_admin_info(struct Client* sptr)
  */
 int m_admin(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
   assert(0 != cptr);
   assert(cptr == sptr);
 
   if (parc > 1  && match(parv[1], cli_name(&me)))
     return send_reply(sptr, ERR_NOPRIVILEGES);
 
-  return send_admin_info(sptr);
+  lb = labeled_batch_start(sptr);
+  send_admin_info(sptr);
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }
 
 /*
@@ -134,13 +139,18 @@ int m_admin(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int mo_admin(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
   assert(0 != cptr);
   assert(cptr == sptr);
 
-  if (hunt_server_cmd(sptr, CMD_ADMIN, cptr, feature_int(FEAT_HIS_REMOTE), 
+  if (hunt_server_cmd(sptr, CMD_ADMIN, cptr, feature_int(FEAT_HIS_REMOTE),
                       ":%C", 1, parc, parv) != HUNTED_ISME)
     return 0;
-  return send_admin_info(sptr);
+
+  lb = labeled_batch_start(sptr);
+  send_admin_info(sptr);
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }
 
 /*
@@ -151,6 +161,7 @@ int mo_admin(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int ms_admin(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
   assert(0 != cptr);
   assert(0 != sptr);
 
@@ -160,6 +171,9 @@ int ms_admin(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (hunt_server_cmd(sptr, CMD_ADMIN, cptr, 0, ":%C", 1, parc, parv) != HUNTED_ISME)
     return 0;
 
-  return send_admin_info(sptr);
+  lb = labeled_batch_start(sptr);
+  send_admin_info(sptr);
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }
 

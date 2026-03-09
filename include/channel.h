@@ -417,6 +417,7 @@ struct ListingArgs {
   time_t min_topic_time;
   unsigned int bucket;
   char wildcard[CHANNELLEN + 1];
+  char batch_id[16]; /**< Labeled-response batch ID for async LIST */
 };
 
 struct ModeBuf {

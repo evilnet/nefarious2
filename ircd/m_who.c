@@ -156,6 +156,7 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char *p;                      /* Scratch char pointer                     */
   char *qrt;                    /* Pointer to the query type                */
   static char mymask[512];      /* To save the mask before corrupting it    */
+  int lb = labeled_batch_start(sptr);
 
   /* Let's find where is our mask, and if actually contains something */
   mask = ((parc > 1) ? parv[1] : 0);
@@ -510,5 +511,6 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     send_reply(sptr, ERR_QUERYTOOLONG, BadPtr(mask) ? "*" : mask);
   send_reply(sptr, RPL_ENDOFWHO, BadPtr(mask) ? "*" : mask);
 
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }

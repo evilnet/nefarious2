@@ -486,6 +486,8 @@ int m_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     parv[1] = parv[2];
   }
 
+  int lb = labeled_batch_start(sptr);
+
   for (tmp = parv[1]; (nick = ircd_strtok(&p, tmp, ",")); tmp = 0)
   {
     int wilds;
@@ -525,6 +527,9 @@ int m_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   } /* of tokenised parm[1] */
   send_reply(sptr, RPL_ENDOFWHOIS, parv[1]);
 
+  if (lb)
+    labeled_batch_end(sptr);
+
   return 0;
 }
 
@@ -561,6 +566,8 @@ int ms_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     parv[1] = parv[2];
   }
 
+  int lb = labeled_batch_start(sptr);
+
   total = 0;
 
   for (tmp = parv[1]; (nick = ircd_strtok(&p, tmp, ",")); tmp = 0)
@@ -591,6 +598,9 @@ int ms_whois(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       p[-1] = ',';
   } /* of tokenised parm[1] */
   send_reply(sptr, RPL_ENDOFWHOIS, parv[1]);
+
+  if (lb)
+    labeled_batch_end(sptr);
 
   return 0;
 }

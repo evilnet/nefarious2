@@ -108,6 +108,8 @@
  */
 int m_rules(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
+
   if (!feature_bool(FEAT_RULES))
     return send_reply(sptr, ERR_DISABLED, "RULES");
 
@@ -115,7 +117,10 @@ int m_rules(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 		      parc, parv) != HUNTED_ISME)
     return 0;
 
-  return motd_send_type(sptr, MOTD_RULES);
+  lb = labeled_batch_start(sptr);
+  motd_send_type(sptr, MOTD_RULES);
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }
 
 /*
@@ -126,9 +131,14 @@ int m_rules(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int ms_rules(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
+
   if (hunt_server_cmd(sptr, CMD_RULES, cptr, 0, "%C", 1, parc, parv) !=
       HUNTED_ISME)
     return 0;
 
-  return motd_send_type(sptr, MOTD_RULES);
+  lb = labeled_batch_start(sptr);
+  motd_send_type(sptr, MOTD_RULES);
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }

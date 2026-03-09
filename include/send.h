@@ -71,6 +71,10 @@ extern void sendcmdto_set_s2s_cptr(struct Client *cptr);
 extern void sendcmdto_set_alias_source(struct Client *alias);
 /* Opt-in S2S tags for the next sendcmdto_serv_butone() call */
 extern void sendcmdto_want_s2s_tags(int want);
+/* Override batch ID for forwarded label responses (auto-cleared after use) */
+extern void sendcmdto_set_fwd_batch(const char *batch_id);
+/* Override S2S compact tag time/msgid for forwarded commands (auto-cleared) */
+extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
 
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,
@@ -260,6 +264,9 @@ extern const char *get_active_network_batch(void);
 
 /* Generate unique message ID for IRCv3 message-ids */
 extern char *generate_msgid(char *buf, size_t buflen);
+/* Format S2S compact tags (time + msgid) for inter-server messages */
+extern char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
+                             char *msgid_out, size_t msgid_out_len);
 /* Parse ISO 8601 timestamp to epoch milliseconds (backward compat) */
 extern uint64_t iso8601_to_epoch_ms(const char *iso);
 
@@ -276,5 +283,13 @@ extern void send_note(struct Client *to, const char *command, const char *code,
 
 /* IRCv3 labeled-response ACK (send when command produces no response) */
 extern void send_labeled_ack(struct Client *to);
+
+/* Start a labeled-response batch if client has pending label + batch cap.
+ * Returns 1 if batch was started, 0 otherwise.
+ */
+extern int labeled_batch_start(struct Client *sptr);
+
+/* End a labeled-response batch started by labeled_batch_start(). */
+extern void labeled_batch_end(struct Client *sptr);
 
 #endif /* INCLUDED_send_h */

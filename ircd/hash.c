@@ -501,9 +501,14 @@ void list_next_channels(struct Client *cptr)
   /* If we did all buckets, clean the client and send RPL_LISTEND. */
   if (args->bucket >= HASHSIZE)
   {
+    char saved_batch[16];
+    ircd_strncpy(saved_batch, args->batch_id, sizeof(saved_batch));
     MyFree(cli_listing(cptr));
     cli_listing(cptr) = NULL;
     send_reply(cptr, RPL_LISTEND);
+    /* Close the labeled-response batch opened in m_list for async LIST */
+    if (saved_batch[0] && has_active_batch(cptr))
+      send_batch_end(cptr);
   }
 }
 

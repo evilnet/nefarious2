@@ -158,9 +158,15 @@ m_stats(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   assert(sd->sd_func != 0);
 
-  /* Ok, dispatch the stats function */
-  (*sd->sd_func)(sptr, sd, param);
+  {
+    int lb = labeled_batch_start(sptr);
 
-  /* Done sending them the stats */
-  return send_reply(sptr, RPL_ENDOFSTATS, parv[1]);
+    /* Ok, dispatch the stats function */
+    (*sd->sd_func)(sptr, sd, param);
+
+    /* Done sending them the stats */
+    send_reply(sptr, RPL_ENDOFSTATS, parv[1]);
+    if (lb) labeled_batch_end(sptr);
+  }
+  return 0;
 }

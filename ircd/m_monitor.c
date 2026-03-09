@@ -97,10 +97,12 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   int online_len = 0;
   int offline_len = 0;
   char subcmd;
+  int lb;
 
   if (parc < 2 || !parv[1] || !*parv[1])
     return need_more_params(sptr, "MONITOR");
 
+  lb = labeled_batch_start(sptr);
   subcmd = parv[1][0];
 
   /*
@@ -109,8 +111,10 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    */
   if (subcmd == '+')
   {
-    if (parc < 3 || !parv[2] || !*parv[2])
+    if (parc < 3 || !parv[2] || !*parv[2]) {
+      if (lb) labeled_batch_end(sptr);
       return need_more_params(sptr, "MONITOR");
+    }
 
     online_buf[0] = '\0';
     offline_buf[0] = '\0';
@@ -146,6 +150,7 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
         /* Send list full error */
         send_reply(sptr, ERR_MONLISTFULL, feature_int(FEAT_MAXWATCHS), s);
+        if (lb) labeled_batch_end(sptr);
         return 0;
       }
 
@@ -202,6 +207,7 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     /* Send any remaining buffered responses */
     monitor_send_status(sptr, online_buf, offline_buf);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
@@ -211,8 +217,10 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    */
   if (subcmd == '-')
   {
-    if (parc < 3 || !parv[2] || !*parv[2])
+    if (parc < 3 || !parv[2] || !*parv[2]) {
+      if (lb) labeled_batch_end(sptr);
       return need_more_params(sptr, "MONITOR");
+    }
 
     /* Parse comma-separated nick list */
     for (s = ircd_strtok(&p, parv[2], ","); s; s = ircd_strtok(&p, NULL, ","))
@@ -233,6 +241,7 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     /* MONITOR - doesn't send a response per the spec */
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
@@ -243,6 +252,7 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (subcmd == 'C' || subcmd == 'c')
   {
     del_list_watch(sptr);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
@@ -288,6 +298,7 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       send_reply(sptr, RPL_MONLIST, list_buf);
 
     send_reply(sptr, RPL_ENDOFMONLIST);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
@@ -360,9 +371,11 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     /* Send any remaining buffered responses */
     monitor_send_status(sptr, online_buf, offline_buf);
     send_reply(sptr, RPL_ENDOFMONLIST);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
   /* Unknown subcommand - silently ignore per spec */
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }

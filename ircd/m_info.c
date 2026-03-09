@@ -106,11 +106,13 @@
 int m_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   const char **text = infotext;
+  int lb;
 
   if (hunt_server_cmd(sptr, CMD_INFO, cptr, 1, ":%C", 1, parc, parv) !=
       HUNTED_ISME)
 	return 0;
 
+  lb = labeled_batch_start(sptr);
   while (text[212])
   {
     send_reply(sptr, RPL_INFO, *text);
@@ -121,6 +123,7 @@ int m_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   send_reply(sptr, SND_EXPLICIT | RPL_INFO, ":On-line since %s",
       myctime(cli_firsttime(&me)));
   send_reply(sptr, RPL_ENDOFINFO);
+  if (lb) labeled_batch_end(sptr);
 
   return 0;
 }
@@ -134,6 +137,7 @@ int m_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 int ms_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   const char **text = infotext;
+  int lb;
 
   if (IsServer(sptr))
     return 0;
@@ -141,6 +145,8 @@ int ms_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (hunt_server_cmd(sptr, CMD_INFO, cptr, 1, ":%C", 1, parc, parv) !=
       HUNTED_ISME)
 	return 0;
+
+  lb = labeled_batch_start(sptr);
   while (text[212])
   {
     if (!IsOper(sptr))
@@ -158,6 +164,7 @@ int ms_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   send_reply(sptr, SND_EXPLICIT | RPL_INFO, ":On-line since %s",
       myctime(cli_firsttime(&me)));
   send_reply(sptr, RPL_ENDOFINFO);
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 
@@ -170,10 +177,12 @@ int ms_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 int mo_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   const char **text = infotext;
+  int lb;
 
   if (hunt_server_cmd(sptr, CMD_INFO, cptr, 1, ":%C", 1, parc, parv) ==
       HUNTED_ISME)
   {
+    lb = labeled_batch_start(sptr);
     while (text[212])
     {
       if (!IsOper(sptr))
@@ -191,6 +200,7 @@ int mo_info(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     send_reply(sptr, SND_EXPLICIT | RPL_INFO, ":On-line since %s",
 	       myctime(cli_firsttime(&me)));
     send_reply(sptr, RPL_ENDOFINFO);
+    if (lb) labeled_batch_end(sptr);
   }
   return 0;
 }

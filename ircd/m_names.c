@@ -260,8 +260,11 @@ int m_names(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   } else if (parc > 2 && hunt_server_cmd(sptr, CMD_NAMES, cptr, 1, "%s %C", 2, parc, parv))
     return 0;
 
+  int lb = labeled_batch_start(sptr);
+
   if (EmptyString(para)) {
     send_reply(sptr, RPL_ENDOFNAMES, "*");
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
@@ -368,5 +371,6 @@ int m_names(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         send_reply(sptr, RPL_ENDOFNAMES, para);
   } while ((para = s) != NULL);
 
+  if (lb) labeled_batch_end(sptr);
   return 1;
 }

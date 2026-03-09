@@ -301,9 +301,12 @@ void do_trace(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  */
 int m_trace(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
   if (feature_bool(FEAT_HIS_TRACE))
     return send_reply(cptr, ERR_NOPRIVILEGES);
+  lb = labeled_batch_start(sptr);
   do_trace(cptr, sptr, parc, parv);
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 
@@ -316,7 +319,9 @@ int m_trace(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int ms_trace(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb = labeled_batch_start(sptr);
   do_trace(cptr, sptr, parc, parv);
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 
@@ -329,8 +334,11 @@ int ms_trace(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  */
 int mo_trace(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
   if (feature_bool(FEAT_HIS_TRACE) && !IsAnOper(sptr))
     return send_reply(cptr, ERR_NOPRIVILEGES);
+  lb = labeled_batch_start(sptr);
   do_trace(cptr, sptr, parc, parv);
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }

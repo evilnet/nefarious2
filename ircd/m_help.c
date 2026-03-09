@@ -100,14 +100,16 @@
 int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   int i;
+  int lb;
   char *cmd;
 
+  lb = labeled_batch_start(sptr);
 
   if (parc < 2) {
     send_reply(sptr, RPL_HELPSTART, "*", "Nefarious Help System");
     for (i = 0; msgtab[i].cmd; i++)
       send_reply(sptr, RPL_HELPTXT, "*", msgtab[i].cmd, msgtab[i].help);
-    return send_reply(sptr, RPL_ENDOFHELP, "*", "End of HELP");
+    send_reply(sptr, RPL_ENDOFHELP, "*", "End of HELP");
   }
   else {
     cmd = parv[1];
@@ -122,13 +124,17 @@ int m_help(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     for (i = 0; msgtab[i].cmd; i++) {
       if (!strcmp(cmd, msgtab[i].cmd)) {
         send_reply(sptr, RPL_HELPTXT, cmd, msgtab[i].cmd, msgtab[i].help);
-        return send_reply(sptr, RPL_ENDOFHELP, cmd, "");
+        send_reply(sptr, RPL_ENDOFHELP, cmd, "");
+        if (lb) labeled_batch_end(sptr);
+        return 0;
       }
     }
     /* FIXME: We should return ERR_HELPNOTFOUND on unknown command (and only that);
      * but this would conflict with ERR_QUARANTINED */
     send_reply(sptr, RPL_HELPTXT, cmd, cmd, "is not a command");
-    return send_reply(sptr, RPL_ENDOFHELP, cmd, "End of HELP");
+    send_reply(sptr, RPL_ENDOFHELP, cmd, "End of HELP");
   }
+  if (lb) labeled_batch_end(sptr);
+  return 0;
 }
 

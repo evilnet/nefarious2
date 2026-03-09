@@ -28,6 +28,7 @@
 #include "class.h"
 #include "crdt_hlc.h"
 #include "client.h"
+#include "forwarded_label.h"
 #include "channel.h"
 #include "handlers.h"
 #include "hash.h"
@@ -1386,6 +1387,9 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   if (IsDead(cptr))
     return 0;
 
+  /* Close any DRAINING forwarded label batches before processing new command */
+  fwd_label_close_draining(cptr);
+
   /* Clear any previous label, client-only tags, and batch tags */
   cli_label(cptr)[0] = '\0';
   cli_label_responded(cptr) = 0;  /* Reset labeled-response tracking for ACK */
@@ -1638,6 +1642,9 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
 
   {
     int result = (*handler) (cptr, from, i, para);
+    /* IRCv3 labeled-response: close any batch opened by labeled_batch_start */
+    if (result != CPTR_KILLED && cli_labeled_batch(cptr))
+      labeled_batch_end(cptr);
     /* IRCv3 labeled-response: send ACK if command produced no response */
     if (result != CPTR_KILLED)
       send_labeled_ack(cptr);

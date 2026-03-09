@@ -150,6 +150,22 @@ int send_reply(struct Client *to, int reply, ...)
       }
       use_tags = 1;
     }
+  } else if (feature_bool(FEAT_P10_MESSAGE_TAGS) &&
+             cli_s2s_msgid(cli_from(to))[0]) {
+    /* Remote recipient: echo compact tag for correlation.
+     * In P10 tree topology, cli_from(to) is the server link that delivered
+     * the forwarded command. cli_s2s_msgid/time_ms holds the correlation
+     * msgid. Single-threaded guarantee means these are valid for the
+     * entire handler execution.
+     */
+    char s2s_tagbuf[128];
+    if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cli_from(to), NULL, 0)) {
+      mb = msgq_make(cli_from(to), "%s%:#C %s %C %v", s2s_tagbuf, &me, num->str, to, &vd);
+      va_end(vd.vd_args);
+      send_buffer(to, mb, 0);
+      msgq_clean(mb);
+      return 0;
+    }
   }
 
   /* build buffer with or without tags */

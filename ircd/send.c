@@ -120,6 +120,38 @@ void sendcmdto_set_alias_source(struct Client *alias)
   s2s_alias_source = alias;
 }
 
+/** Override batch ID for forwarded label responses.
+ * When non-empty, format_message_tags_for_ex() uses this instead of
+ * cli_batch_id(to). Takes priority over use_batch. Auto-cleared after use.
+ */
+static char fwd_batch_id_override[16] = "";
+
+/** Override S2S time for forwarded command compact tags.
+ * When s2s_msgid_override is non-empty, sendcmdto_one uses these instead
+ * of computing from cptr. Auto-cleared after use.
+ */
+static uint64_t s2s_time_override = 0;
+
+/** Override S2S msgid for forwarded command compact tags. */
+static char s2s_msgid_override[S2S_MSGID_BUFSIZE] = "";
+
+void sendcmdto_set_fwd_batch(const char *batch_id)
+{
+  if (batch_id)
+    ircd_strncpy(fwd_batch_id_override, batch_id, sizeof(fwd_batch_id_override));
+  else
+    fwd_batch_id_override[0] = '\0';
+}
+
+void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
+{
+  s2s_time_override = time_ms;
+  if (msgid)
+    ircd_strncpy(s2s_msgid_override, msgid, sizeof(s2s_msgid_override));
+  else
+    s2s_msgid_override[0] = '\0';
+}
+
 /** Opt-in flag for S2S tags on the next sendcmdto_serv_butone() call.
  * Set to 1 before calling sendcmdto_serv_butone() to include compact S2S
  * tags on channel events (JOIN, PART, KICK, TOPIC). Auto-cleared after use.
@@ -334,8 +366,8 @@ uint64_t iso8601_to_epoch_ms(const char *iso)
  * @param[in] msgid_out_len Size of msgid_out buffer.
  * @return Pointer to buf, or NULL if P10_MESSAGE_TAGS is disabled.
  */
-static char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
-                             char *msgid_out, size_t msgid_out_len)
+char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
+                      char *msgid_out, size_t msgid_out_len)
 {
   char time_b64[8];
   char msgidbuf[S2S_MSGID_BUFSIZE];
@@ -390,17 +422,24 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
                   to && MyConnect(to) && cli_label(to)[0];
   int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
+  int use_fwd_batch = fwd_batch_id_override[0] && feature_bool(FEAT_CAP_batch) &&
+                      CapActive(to, CAP_BATCH);
   int use_msgid = msgid && *msgid;
   int pos = 0;
 
-  if (!use_time && !use_account && !use_label && !use_batch && !use_msgid)
+  if (!use_time && !use_account && !use_label && !use_batch && !use_fwd_batch && !use_msgid)
     return NULL;
 
   buf[0] = '@';
   pos = 1;
 
-  /* When in a batch, use @batch instead of @label */
-  if (use_batch) {
+  /* Forwarded label batch override takes priority over cli_batch_id.
+   * This prevents forwarded numerics from leaking into LIST/chathistory batches.
+   */
+  if (use_fwd_batch) {
+    pos += snprintf(buf + pos, buflen - pos, "batch=%s", fwd_batch_id_override);
+    fwd_batch_id_override[0] = '\0';  /* auto-clear */
+  } else if (use_batch) {
     pos += snprintf(buf + pos, buflen - pos, "batch=%s", cli_batch_id(to));
   } else if (use_label) {
     pos += snprintf(buf + pos, buflen - pos, "label=%s", cli_label(to));
@@ -993,23 +1032,35 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  /* For S2S messages (PRIVMSG/NOTICE to servers), add S2S tags */
-  if ((IsServer(to) || IsMe(to)) &&
-      (strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0
-       || strcmp(tok, TOK_QUIT) == 0) &&
-      feature_bool(FEAT_P10_MESSAGE_TAGS)) {
-    /* Get incoming server connection for tag preservation.
-     * s2s_cptr_override preserves tags during alias source rewriting. */
-    cptr = s2s_cptr_override ? s2s_cptr_override
-         : (MyConnect(from) ? NULL : cli_from(from));
-    s2s_cptr_override = NULL;
-    if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
+  /* For S2S messages, add compact tags */
+  if ((IsServer(to) || IsMe(to)) && feature_bool(FEAT_P10_MESSAGE_TAGS) &&
+      (s2s_msgid_override[0] ||
+       strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0 ||
+       strcmp(tok, TOK_QUIT) == 0)) {
+    if (s2s_msgid_override[0]) {
+      /* Explicit tag override for forwarded commands / numeric relay */
+      char time_b64[8];
+      inttobase64_64(time_b64, s2s_time_override, 7);
+      snprintf(s2s_tagbuf, sizeof(s2s_tagbuf), "@A%s%s ", time_b64, s2s_msgid_override);
+      s2s_msgid_override[0] = '\0';
+      s2s_time_override = 0;
+      s2s_cptr_override = NULL;
       mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
     } else {
-      mb = msgq_make(to, "%:#C %s %v", from, tok, &vd);
+      /* Existing path: format_s2s_tags with cptr preservation */
+      cptr = s2s_cptr_override ? s2s_cptr_override
+           : (MyConnect(from) ? NULL : cli_from(from));
+      s2s_cptr_override = NULL;
+      if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
+        mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
+      } else {
+        mb = msgq_make(to, "%:#C %s %v", from, tok, &vd);
+      }
     }
   } else {
     s2s_cptr_override = NULL;  /* Clear even if not used */
+    s2s_msgid_override[0] = '\0';  /* Clear even if not used */
+    s2s_time_override = 0;
     mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
                    &vd);
   }
@@ -3165,5 +3216,42 @@ void send_labeled_ack(struct Client *to)
 
   /* Mark as responded so we don't send duplicate ACKs */
   cli_label_responded(to) = 1;
+}
+
+/** Start a labeled-response batch if client has pending label + batch cap.
+ * Opens a labeled-response batch and sets cli_labeled_batch flag for
+ * safety net tracking.
+ * @param[in] sptr Local client to start batch for.
+ * @return 1 if batch was started, 0 otherwise.
+ */
+int labeled_batch_start(struct Client *sptr)
+{
+  if (!MyConnect(sptr))
+    return 0;
+  if (!cli_label(sptr)[0])
+    return 0;
+  if (!feature_bool(FEAT_CAP_labeled_response) || !CapActive(sptr, CAP_LABELEDRESP))
+    return 0;
+  if (!feature_bool(FEAT_CAP_batch) || !CapActive(sptr, CAP_BATCH))
+    return 0;
+
+  send_batch_start(sptr, "labeled-response");
+  cli_labeled_batch(sptr) = 1;
+  return 1;
+}
+
+/** End a labeled-response batch started by labeled_batch_start().
+ * Closes the batch and clears the cli_labeled_batch flag.
+ * @param[in] sptr Local client to end batch for.
+ */
+void labeled_batch_end(struct Client *sptr)
+{
+  if (!MyConnect(sptr))
+    return;
+  if (!cli_labeled_batch(sptr))
+    return;
+
+  send_batch_end(sptr);
+  cli_labeled_batch(sptr) = 0;
 }
 

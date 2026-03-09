@@ -288,6 +288,30 @@ DECLARE_FLAGSET(Flags, FLAG_LAST_FLAG);
 
 #include "capab.h" /* client capabilities */
 
+/** Maximum number of concurrent forwarded label entries per connection. */
+#define MAX_FORWARDED_LABELS 4
+
+/** State of a forwarded label entry in the FIFO queue. */
+enum ForwardedLabelState {
+  FWD_LABEL_EMPTY = 0,    /**< Slot is available */
+  FWD_LABEL_PENDING,      /**< Waiting for first response numeric */
+  FWD_LABEL_ACTIVE,       /**< Batch opened, receiving numerics */
+  FWD_LABEL_DRAINING      /**< Terminal seen, draining trailing messages */
+};
+
+/** Tracks a labeled command forwarded to a remote server via hunt_server_cmd.
+ * Stored in a per-connection FIFO array on the Connection struct.
+ */
+struct ForwardedLabel {
+  char                     fl_label[64];   /**< Saved client label */
+  char                     fl_batch_id[16]; /**< Batch ID for labeled-response batch */
+  char                     fl_msgid[16];   /**< Compact tag msgid for correlation */
+  unsigned short           fl_terminal;    /**< Primary terminal numeric */
+  unsigned short           fl_terminal2;   /**< Alternate terminal (0 = none) */
+  time_t                   fl_created;     /**< For timeout cleanup */
+  enum ForwardedLabelState fl_state;       /**< Current state */
+};
+
 /** Represents a local connection.
  * This contains a lot of stuff irrelevant to server connections, but
  * those are so rare as to not be worth special-casing.
@@ -383,6 +407,8 @@ struct Connection
   /* Current message @batch tag for PRIVMSG interception */
   char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
+  unsigned char       con_labeled_batch; /**< 1 if labeled_batch_start opened a batch */
+  struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
   /* WebSocket state for RFC 6455 compliance */
   unsigned char       con_ws_frame_buf[BUFSIZE]; /**< Partial WebSocket frame buffer */
   int                 con_ws_frame_len;   /**< Length of data in frame buffer */
@@ -551,6 +577,10 @@ struct Client {
 #define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
 /** Get current message concat flag. */
 #define cli_msg_concat(cli)	con_msg_concat(cli_connect(cli))
+/** Get labeled batch flag (1 if labeled_batch_start opened a batch). */
+#define cli_labeled_batch(cli)	con_labeled_batch(cli_connect(cli))
+/** Get forwarded label FIFO array. */
+#define cli_fwd_labels(cli)	con_fwd_labels(cli_connect(cli))
 /** Get WebSocket partial frame buffer. */
 #define cli_ws_frame_buf(cli)	con_ws_frame_buf(cli_connect(cli))
 /** Get WebSocket partial frame buffer length. */
@@ -829,6 +859,10 @@ struct Client {
 #define con_msg_batch_tag(con)	((con)->con_msg_batch_tag)
 /** Get the current message draft/multiline-concat flag. */
 #define con_msg_concat(con)	((con)->con_msg_concat)
+/** Get the labeled batch flag (1 if labeled_batch_start opened a batch). */
+#define con_labeled_batch(con)	((con)->con_labeled_batch)
+/** Get the forwarded label FIFO array. */
+#define con_fwd_labels(con)	((con)->con_fwd_labels)
 /** Get WebSocket partial frame buffer. */
 #define con_ws_frame_buf(con)	((con)->con_ws_frame_buf)
 /** Get WebSocket partial frame buffer length. */

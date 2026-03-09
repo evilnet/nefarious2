@@ -120,8 +120,9 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client *acptr;
   struct Channel *chptr;
-  
-  if (parc < 2 ) { 
+  int lb = labeled_batch_start(sptr);
+
+  if (parc < 2 ) {
     /*
      * list the channels you have an invite to.
      */
@@ -129,39 +130,49 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     for (lp = cli_user(sptr)->invited; lp; lp = lp->next)
       send_reply(cptr, RPL_INVITELIST, lp->value.chptr->chname);
     send_reply(cptr, RPL_ENDOFINVITELIST);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
-  
-  if (parc < 3 || EmptyString(parv[2]))
+
+  if (parc < 3 || EmptyString(parv[2])) {
+    if (lb) labeled_batch_end(sptr);
     return need_more_params(sptr, "INVITE");
+  }
 
   if (!(acptr = FindUser(parv[1]))) {
     send_reply(sptr, ERR_NOSUCHNICK, parv[1]);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
-  if (is_silenced(sptr, acptr, 0))
+  if (is_silenced(sptr, acptr, 0)) {
+    if (lb) labeled_batch_end(sptr);
     return 0;
+  }
 
   if (!IsChannelName(parv[2])
       || !strIsIrcCh(parv[2])
       || !(chptr = FindChannel(parv[2]))) {
     send_reply(sptr, ERR_NOSUCHCHANNEL, parv[2]);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
   if (!find_channel_member(sptr, chptr)) {
     send_reply(sptr, ERR_NOTONCHANNEL, chptr->chname);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
   if (find_channel_member(acptr, chptr)) {
     send_reply(sptr, ERR_USERONCHANNEL, cli_name(acptr), chptr->chname);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
   if (!is_chan_op(sptr, chptr) && !is_half_op(sptr, chptr)) {
     send_reply(sptr, ERR_CHANOPRIVSNEEDED, chptr->chname);
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
@@ -169,21 +180,26 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (IsAccountOnly(acptr) && !IsAccount(sptr) && !IsOper(sptr)) {
     send_reply(sptr, ERR_ACCOUNTONLY, cli_name(acptr), "INVITE", cli_name(acptr));
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
   if (IsPrivDeaf(acptr) && !IsOper(sptr)) {
     send_reply(sptr, ERR_PRIVDEAF, cli_name(acptr), "INVITE", cli_name(acptr));
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
   if (IsCommonChansOnly(acptr) && !IsAnOper(sptr) && !common_chan_count(acptr, sptr, 1)) {
     send_reply(sptr, ERR_COMMONCHANSONLY, cli_name(acptr), "INVITE");
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
-  if (check_target_limit(sptr, acptr, cli_name(acptr), 0))
+  if (check_target_limit(sptr, acptr, cli_name(acptr), 0)) {
+    if (lb) labeled_batch_end(sptr);
     return 0;
+  }
 
   send_reply(sptr, RPL_INVITING, cli_name(acptr), chptr->chname);
 
@@ -218,6 +234,7 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 

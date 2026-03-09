@@ -171,6 +171,7 @@ static void dump_map(struct Client *cptr, struct Client *server, char *mask, int
  */
 int m_map(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb;
   if (feature_bool(FEAT_HIS_MAP) && !IsAnOper(sptr))
   {
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :%s %s", sptr,
@@ -178,21 +179,25 @@ int m_map(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                   "Visit ", feature_str(FEAT_HIS_URLSERVERS));
     return 0;
   }
+  lb = labeled_batch_start(sptr);
   if (parc < 2)
     parv[1] = "*";
   dump_map(sptr, &me, parv[1], 0);
   send_reply(sptr, RPL_MAPEND);
 
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 
 int mo_map(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
+  int lb = labeled_batch_start(sptr);
   if (parc < 2)
     parv[1] = "*";
 
   dump_map(sptr, &me, parv[1], 0);
   send_reply(sptr, RPL_MAPEND);
 
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }

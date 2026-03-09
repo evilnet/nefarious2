@@ -69,6 +69,7 @@
 #include "metadata.h"
 #include "handlers.h"
 #include "bouncer_session.h"
+#include "forwarded_label.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -1400,17 +1401,34 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   /* Per-target direction guard (see server_relay_private_message) */
   {
     struct Client *send_from = from;
+    int delivered = 0;
+
     if (send_from != sptr && !MyUser(send_from) && !MyConnect(acptr)
         && cli_from(send_from) == cli_from(acptr))
       send_from = sptr;
 
-    if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
-      sendcmdto_one_client_tags(send_from, MSG_NOTICE, acptr, client_tags,
-                                "%C :%s", acptr, text);
-    } else {
-      if (send_from != sptr)
-        sendcmdto_set_s2s_cptr(cli_from(sptr));
-      sendcmdto_one(send_from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+    /* Check for forwarded label batch in DRAINING state */
+    if (MyConnect(acptr) && feature_bool(FEAT_CAP_labeled_response)) {
+      const char *incoming_msgid = (cli_from(sptr) && cli_s2s_msgid(cli_from(sptr))[0])
+                                    ? cli_s2s_msgid(cli_from(sptr)) : "";
+      struct ForwardedLabel *fl = fwd_label_find_draining(acptr, incoming_msgid);
+      if (fl) {
+        sendcmdto_set_fwd_batch(fl->fl_batch_id);
+        sendcmdto_one_tags(send_from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+        /* Stay DRAINING -- more trailing messages may follow */
+        delivered = 1;
+      }
+    }
+
+    if (!delivered) {
+      if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+        sendcmdto_one_client_tags(send_from, MSG_NOTICE, acptr, client_tags,
+                                  "%C :%s", acptr, text);
+      } else {
+        if (send_from != sptr)
+          sendcmdto_set_s2s_cptr(cli_from(sptr));
+        sendcmdto_one(send_from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+      }
     }
   }
 

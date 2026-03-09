@@ -282,9 +282,12 @@ int m_silence(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client *acptr;
   struct Ban *sile;
+  int lb;
 
   assert(0 != cptr);
   assert(cptr == sptr);
+
+  lb = labeled_batch_start(sptr);
 
   /* See if the user is requesting a silence list. */
   acptr = sptr;
@@ -296,11 +299,13 @@ int m_silence(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       }
     }
     send_reply(sptr, RPL_ENDOFSILELIST, cli_name(acptr));
+    if (lb) labeled_batch_end(sptr);
     return 0;
   }
 
   /* The user must be attempting to update their list. */
   forward_silences(sptr, parv[1], NULL);
+  if (lb) labeled_batch_end(sptr);
   return 0;
 }
 

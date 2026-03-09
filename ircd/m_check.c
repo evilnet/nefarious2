@@ -93,6 +93,7 @@ int mo_check(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    struct Channel *chptr;
    struct Client *acptr;
    int flags = CHECK_SHOWUSERS, i;
+   int lb;
 
 
    if (!HasPriv(sptr, PRIV_CHECK))
@@ -110,6 +111,8 @@ int mo_check(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      parv++; parc--;
    }
 
+   lb = labeled_batch_start(sptr);
+
    /* This checks to see if any flags have been supplied */
    if ((parc >= 3) && (parv[2][0] == '-')) {
     for (i = 0; parv[2][i]; i++) {
@@ -117,17 +120,17 @@ int mo_check(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
        case 'c':
          flags |= CHECK_CHECKCHAN;
          break;
-        
+
        case 'o':
          flags |= CHECK_OPSONLY; /* fall through */
        case 'u':
          flags &= ~(CHECK_SHOWUSERS);
          break;
-        
+
        case 'i':
          flags |= CHECK_SHOWIPS;
          break;
-        
+
        default:
          /* might want to raise some sort of error here? */
          break;
@@ -152,6 +155,7 @@ int mo_check(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       if (!IsRegistered(acptr))
    	{
          send_reply(sptr, ERR_SEARCHNOMATCH, "CHECK", parv[1]);
+         if (lb) labeled_batch_end(sptr);
          return 0;
       }
 
@@ -160,12 +164,15 @@ int mo_check(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    else if ((acptr = FindServer(parv[1]))) { /* server */
      checkServer(sptr, acptr);
    }
-   else if (checkHostmask(sptr, parv[1], flags) > 0) /* hostmask */
+   else if (checkHostmask(sptr, parv[1], flags) > 0) { /* hostmask */
+     if (lb) labeled_batch_end(sptr);
      return 1;
+   }
    else /* no match */
      send_reply(sptr, ERR_SEARCHNOMATCH, "CHECK", parv[1]);
 
- 
+
+  if (lb) labeled_batch_end(sptr);
   return 1;
 }
 
