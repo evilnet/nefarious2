@@ -515,24 +515,34 @@ static void bounce_hold_expire(struct Event *ev)
   Debug((DEBUG_INFO, "Bouncer: hold expired for %s session %s",
          session->hs_account, session->hs_sessid));
 
-  /* Get the ghost client before destroying session.
+  /* Get the ghost client before any session changes.
    * Note: hs_client stores the ghost during HOLDING state.
    */
   ghost = session->hs_client;
 
-  /* Broadcast destruction to all servers */
-  bounce_broadcast(session, 'X', NULL);
-
-  /* Destroy session first (before exit_client) */
-  bounce_destroy(session);
-
-  /* Now exit the ghost client - this sends QUIT to channels and cleans up.
-   * The ghost has FLAG_BOUNCER_HOLD set, but exit_one_client doesn't
-   * know about that - it will just remove from channels normally.
-   */
-  if (ghost && IsBouncerHold(ghost)) {
-    ClearBouncerHold(ghost);
-    exit_client(ghost, ghost, &me, "Session expired");
+  if (session->hs_alias_count > 0) {
+    /* Aliases exist — promote instead of destroy.
+     * Promote removes ghost from channels (silent), sends BX P + BS T.
+     * Session continues under the promoted alias's server. */
+    Debug((DEBUG_INFO, "Bouncer: hold expired with %d aliases, promoting for %s",
+           session->hs_alias_count, session->hs_account));
+    bounce_promote_alias(session);
+    /* Session now points to promoted alias as hs_client.
+     * Exit ghost with FLAG_KILLED — BX P already told the network. */
+    if (ghost && IsBouncerHold(ghost)) {
+      ClearBouncerHold(ghost);
+      SetFlag(ghost, FLAG_KILLED);
+      exit_client(ghost, ghost, &me, "Session transferred");
+    }
+  } else {
+    /* No aliases — session truly expired. */
+    bounce_broadcast(session, 'X', NULL);
+    bounce_destroy(session);
+    /* session is now freed — don't dereference it. */
+    if (ghost && IsBouncerHold(ghost)) {
+      ClearBouncerHold(ghost);
+      exit_client(ghost, ghost, &me, "Session expired");
+    }
   }
 }
 
@@ -714,6 +724,14 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
     /* Check if session is on a remote server */
     if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
       struct Client *managing_server = FindNServer(session->hs_origin);
+      /* Resolve ghost from numeric if hs_client is NULL (e.g., BS D
+       * arrived before ghost numeric was resolvable). */
+      if (!session->hs_client && session->hs_ghost_numeric[0]) {
+        char full_numeric[6];
+        ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                      session->hs_origin, session->hs_ghost_numeric);
+        session->hs_client = findNUser(full_numeric);
+      }
       if (managing_server && feature_bool(FEAT_BOUNCER_ALIASES)
           && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
@@ -1823,16 +1841,18 @@ void bounce_burst(struct Client *cptr)
                       s->hs_created,
                       s->hs_attach_count, s->hs_total_active,
                       chanbuf);
-        /* Follow with BS A so the receiver can resolve hs_client
-         * for alias support.  Only for local sessions with a live
-         * primary — remote replicas have hs_client=NULL. */
-        if (s->hs_client)
-          sendcmdto_one(&me, CMD_BOUNCER_SESSION,
-                        cptr,
-                        "A %s %s %s",
-                        s->hs_account, s->hs_sessid,
-                        cli_yxx(s->hs_client));
       }
+      /* Follow with BS A so the receiver can resolve hs_client
+       * for alias support.  Applies to both HOLDING (ghost) and
+       * ACTIVE (live primary) sessions — without this, leaves
+       * can't activate the alias path for held sessions and get
+       * nick collisions instead. */
+      if (s->hs_client)
+        sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                      cptr,
+                      "A %s %s %s",
+                      s->hs_account, s->hs_sessid,
+                      cli_yxx(s->hs_client));
     }
   }
 }
@@ -2043,14 +2063,6 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     if (!session)
       return 0;
 
-    /* Cancel hold timer */
-    if (t_active(&session->hs_hold_timer))
-      timer_del(&session->hs_hold_timer);
-
-    session->hs_state = BOUNCE_ACTIVE;
-    session->hs_last_active = CurrentTime;
-    session->hs_disconnect_time = 0;
-
     /* Resolve primary client from numeric so remote servers can use
      * session->hs_client for alias creation.
      * BS A sends the 3-char client numeric (XXX); combine with the
@@ -2063,6 +2075,20 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       primary = findNUser(full_numeric);
       if (primary && IsUser(primary))
         session->hs_client = primary;
+    }
+
+    /* During burst, BS A just associates the session with its ghost
+     * numeric — the session keeps its burst state (HOLDING stays
+     * HOLDING).  Outside burst, BS A means a real client attached —
+     * transition to ACTIVE and cancel the hold timer. */
+    if (!IsBurstOrBurstAck(sptr)) {
+      /* Cancel hold timer */
+      if (t_active(&session->hs_hold_timer))
+        timer_del(&session->hs_hold_timer);
+
+      session->hs_state = BOUNCE_ACTIVE;
+      session->hs_last_active = CurrentTime;
+      session->hs_disconnect_time = 0;
     }
 
     /* Forward */
@@ -2094,11 +2120,23 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     channels = parv[parc - 1];
 
     session->hs_state = BOUNCE_HOLDING;
-    session->hs_client = NULL;
     session->hs_disconnect_time = disc_time;
     ircd_strncpy(session->hs_ghost_numeric, ghost_numeric,
                  sizeof(session->hs_ghost_numeric) - 1);
     session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+
+    /* Resolve ghost client from numeric so that bounce_auto_resume()
+     * can check hs_client for the alias path.  Without this, a new
+     * client connecting to a different server can't take the alias path
+     * because hs_client would be NULL. */
+    {
+      char full_numeric[6];
+      struct Client *ghost;
+      ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                    session->hs_origin, ghost_numeric);
+      ghost = findNUser(full_numeric);
+      session->hs_client = (ghost && IsUser(ghost)) ? ghost : NULL;
+    }
 
     /* Update channels if provided (BURST-style: #chan1:ov,#chan2:o,#chan3) */
     if (channels && *channels) {
@@ -2329,9 +2367,11 @@ int bounce_promote_alias(struct BouncerSession *session)
     }
   }
 
-  /* Clear alias flags, set as bouncer primary */
+  /* Clear alias flags — promoted alias becomes a normal primary.
+   * Do NOT set IsBouncerHold: the promoted alias is a live connection,
+   * not a ghost.  bounce_should_hold() needs to be able to create a
+   * ghost if the promoted alias later disconnects. */
   ClearBouncerAlias(alias);
-  SetBouncerHold(alias);
   cli_user(alias)->alias_primary = NULL;
 
   /* Update nick timestamp for collision resolution */
@@ -2366,8 +2406,12 @@ int bounce_promote_alias(struct BouncerSession *session)
               * sizeof(struct BounceAlias));
   session->hs_alias_count--;
 
-  /* Update session to point to promoted alias */
+  /* Update session to point to promoted alias.
+   * Transition to ACTIVE — the promoted alias is a live connection. */
   session->hs_client = alias;
+  session->hs_state = BOUNCE_ACTIVE;
+  session->hs_last_active = CurrentTime;
+  session->hs_disconnect_time = 0;
   ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
                 sizeof(session->hs_origin) - 1);
 
@@ -3557,8 +3601,14 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
         cli_account(old_client), sessid);
     if (bsess) {
       int k;
-      /* Point session to new primary */
+      /* Point session to new primary.
+       * Transition to ACTIVE — the promoted alias is a live connection.
+       * Without this, the session stays HOLDING on remote replicas and
+       * exit_one_client destroys it instead of re-holding on disconnect. */
       bsess->hs_client = new_client;
+      bsess->hs_state = BOUNCE_ACTIVE;
+      bsess->hs_last_active = CurrentTime;
+      bsess->hs_disconnect_time = 0;
       /* Update remaining aliases' alias_primary */
       for (k = 0; k < bsess->hs_alias_count; k++) {
         struct Client *sibling = findNUser(bsess->hs_aliases[k].ba_numeric);
@@ -3867,11 +3917,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
                                int parc, char *parv[])
 {
-  struct Client *primary;
+  struct Client *primary = NULL;
   struct Client *alias;
   struct Client *alias_server;
   struct User *user;
-  struct BouncerSession *session;
+  struct BouncerSession *session = NULL;
   const char *primary_numeric;
   const char *alias_numeric;
   const char *account;
@@ -4088,6 +4138,28 @@ forward:
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "C %s %s %s %s :%s",
                           primary_numeric, alias_numeric, account, sessid, chanlist);
+
+  /* Session move: if the primary is a local HOLDING ghost, promote the
+   * alias to primary BEFORE exiting the ghost.  This ensures the ghost's
+   * channels are silently removed by promote (remove_user_from_all_channels)
+   * while hs_client still points to the ghost.  After promote, the ghost
+   * has no channels, so exit_one_client sends no visible QUIT.
+   *
+   * Wire ordering: BX C (forwarded above) → BX P + BS T (from promote)
+   * → ghost exits with FLAG_KILLED (no S2S D token).
+   * Result: other IRC clients see no QUIT/JOIN — seamless transfer. */
+  if (session && session->hs_state == BOUNCE_HOLDING
+      && primary && MyConnect(primary) && IsBouncerHold(primary)) {
+    Debug((DEBUG_INFO, "BX C: session move — promoting alias, retiring ghost %s",
+           cli_name(primary)));
+    /* Promote BEFORE exit: promote removes ghost from channels (silent),
+     * sends BX P + BS T.  Then exit ghost — no channels, no visible QUIT. */
+    bounce_promote_alias(session);
+    /* Suppress S2S quit — BX P already told the network. */
+    SetFlag(primary, FLAG_KILLED);
+    exit_client(primary, primary, &me, "Session transferred");
+  }
+
   return 0;
 }
 

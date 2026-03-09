@@ -420,15 +420,22 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     struct BouncerSession *bsess = bounce_get_session(bcptr);
     if (bsess && bsess->hs_client == bcptr) {
       if (bsess->hs_state == BOUNCE_HOLDING) {
-        /* HOLDING ghost destroyed (e.g., /KILL).  The ghost is the only
-         * thing keeping the session alive — no aliases, no socket.
-         * Destroy the session to prevent a dangling hs_client pointer
-         * and stale replica sessions on other servers. */
         if (t_active(&bsess->hs_hold_timer))
           timer_del(&bsess->hs_hold_timer);
-        bsess->hs_client = NULL;
-        bounce_broadcast(bsess, 'X', NULL);
-        bounce_destroy(bsess);
+        if (bsess->hs_alias_count > 0) {
+          /* Ghost exited externally (e.g., /KILL) while aliases exist.
+           * Promote before we lose the ghost reference — promote needs
+           * hs_client to remove ghost from channels silently. */
+          bounce_promote_alias(bsess);
+          /* hs_client now points to the promoted alias, not the ghost.
+           * exit_one_client continues: ghost has no channels → no QUIT. */
+        } else {
+          /* No aliases — ghost is the only thing keeping the session
+           * alive.  Destroy to prevent dangling pointers. */
+          bsess->hs_client = NULL;
+          bounce_broadcast(bsess, 'X', NULL);
+          bounce_destroy(bsess);
+        }
       } else if (bsess->hs_state == BOUNCE_ACTIVE) {
         bsess->hs_client = NULL;
         if (HasFlag(bcptr, FLAG_KILLED)) {

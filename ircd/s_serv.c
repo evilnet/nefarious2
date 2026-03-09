@@ -213,9 +213,8 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   if (feature_bool(FEAT_CAP_draft_webpush))
     webpush_burst(cptr);
 
-  /* Burst bouncer sessions to newly linked server */
-  if (feature_bool(FEAT_BOUNCER_ENABLE))
-    bounce_burst(cptr);
+  /* Bouncer sessions are burst AFTER client introduction (below) so that
+   * BS A can resolve ghost numerics via findNUser(). */
 
   /* Advertise multiline capability - legacy servers ignore, modern sets flag.
    * Also burst ML capability for all known ML-capable servers so that when
@@ -374,6 +373,13 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       }
     }
   }
+
+  /* Burst bouncer sessions AFTER client introduction so that BS A can
+   * resolve ghost/primary numerics via findNUser().  If sent before N
+   * tokens, the leaf can't link sessions to their clients. */
+  if (feature_bool(FEAT_BOUNCER_ENABLE))
+    bounce_burst(cptr);
+
   /*
    * Last, send the BURST.
    * (Or for 2.9 servers: pass all channels plus statuses)
