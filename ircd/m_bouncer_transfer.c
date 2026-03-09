@@ -24,10 +24,11 @@
 
 #include "client.h"
 #include "channel.h"
-#include "hash.h"
 #include "ircd.h"
 #include "ircd_log.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "s_debug.h"
 #include "msg.h"
 #include "numnicks.h"
 #include "s_misc.h"
@@ -101,11 +102,11 @@ int ms_bouncer_transfer(struct Client *cptr, struct Client *sptr,
 
       remove_user_from_all_channels(old_client);
 
+      /* Nick should already match — aliases share the primary's nick.
+       * If it doesn't, that's a desync; don't propagate it. */
       if (ircd_strcmp(cli_name(new_client), nick) != 0) {
-        char safe_nick[NICKLEN + 1];
-        ircd_strncpy(safe_nick, nick, NICKLEN + 1);
-        hChangeClient(new_client, safe_nick);
-        ircd_strncpy(cli_name(new_client), safe_nick, NICKLEN + 1);
+        Debug((DEBUG_DEBUG, "BX P: nick mismatch (swap) — local '%s' vs wire '%s', keeping local",
+               cli_name(new_client), nick));
       }
 
       SetFlag(old_client, FLAG_KILLED);
@@ -124,6 +125,11 @@ int ms_bouncer_transfer(struct Client *cptr, struct Client *sptr,
       if (0 == ircd_strcmp(parv[2], parv[3]))
         goto relay;
 
+      /* Defensive: verify target slot is empty.  SetRemoteNumNick would
+       * exit_client any occupant — avoid ghosting unrelated clients. */
+      if (findNUser(parv[3]))
+        goto relay;
+
       /* Remove from old server's client array */
       RemoveYXXClient(cli_user(old_client)->server, cli_yxx(old_client));
 
@@ -132,15 +138,19 @@ int ms_bouncer_transfer(struct Client *cptr, struct Client *sptr,
       cli_user(old_client)->server = new_server;
       ++(cli_serv(new_server)->clients);
 
+      /* Note: cli_from is intentionally NOT updated.  Session transfers
+       * happen entirely within one IRCv3 island — they can't cross a
+       * legacy server because alias state (BX C) isn't maintained here.
+       * Both old and new server are behind the same link in the spanning
+       * tree, so cli_from already points the right way. */
+
       /* Assign new numeric (sets cli_yxx + adds to new server's client_list) */
       SetRemoteNumNick(old_client, parv[3]);
 
-      /* Rename if nick changed */
+      /* Nick should already match — don't propagate a desync from the wire. */
       if (ircd_strcmp(cli_name(old_client), nick) != 0) {
-        char safe_nick[NICKLEN + 1];
-        ircd_strncpy(safe_nick, nick, NICKLEN + 1);
-        hChangeClient(old_client, safe_nick);
-        ircd_strncpy(cli_name(old_client), safe_nick, NICKLEN + 1);
+        Debug((DEBUG_DEBUG, "BX P: nick mismatch (numswap) — local '%s' vs wire '%s', keeping local",
+               cli_name(old_client), nick));
       }
     }
   }

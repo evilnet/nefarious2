@@ -603,10 +603,10 @@ m_away.o: m_away.c ../config.h ../include/client.h ../include/ircd.h \
   ../include/ircd_string.h ../include/msg.h ../include/numeric.h \
   ../include/numnicks.h ../include/s_user.h ../include/send.h
 m_bouncer_transfer.o: m_bouncer_transfer.c ../config.h ../include/channel.h \
-  ../include/client.h ../include/hash.h ../include/ircd.h \
-  ../include/ircd_log.h ../include/ircd_string.h ../include/msg.h \
-  ../include/numnicks.h ../include/s_misc.h ../include/send.h \
-  ../include/struct.h
+  ../include/client.h ../include/ircd.h ../include/ircd_log.h \
+  ../include/ircd_snprintf.h ../include/ircd_string.h ../include/msg.h \
+  ../include/numnicks.h ../include/s_debug.h ../include/s_misc.h \
+  ../include/send.h ../include/struct.h
 m_burst.o: m_burst.c ../config.h ../include/channel.h ../include/client.h \
   ../include/hash.h ../include/ircd.h ../include/ircd_alloc.h \
   ../include/ircd_features.h ../include/ircd_log.h ../include/ircd_reply.h \
