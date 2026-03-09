@@ -516,15 +516,10 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
         if (vapid)
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=vapid=%s", vapid);
       } else if (capab_list[i].cap == CAP_DRAFT_CHATHISTORY) {
-        /* Build chathistory value with limit, retention, and optional pm flag */
-        int retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
-        if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
-          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d,retention=%dd,pm",
-                                  feature_int(FEAT_CHATHISTORY_MAX), retention_days);
-        } else {
-          val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=limit=%d,retention=%dd",
-                                  feature_int(FEAT_CHATHISTORY_MAX), retention_days);
-        }
+        /* Bare integer for compatibility (goguma does int.parse on the value).
+         * Extended info (retention, pm) is available via ISUPPORT CHATHISTORY. */
+        val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%d",
+                                feature_int(FEAT_CHATHISTORY_MAX));
 #ifdef USE_SSL
       } else if (capab_list[i].cap == CAP_STS) {
         /* STS value depends on whether connection is secure or not */

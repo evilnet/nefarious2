@@ -627,14 +627,8 @@ feature_notify_chathistory_caps(void)
   if (!feature_bool(FEAT_CAP_draft_chathistory))
     return;
 
-  retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
-  if (feature_bool(FEAT_CHATHISTORY_PRIVATE)) {
-    ircd_snprintf(0, valbuf, sizeof(valbuf), "limit=%d,retention=%dd,pm",
-                  feature_int(FEAT_CHATHISTORY_MAX), retention_days);
-  } else {
-    ircd_snprintf(0, valbuf, sizeof(valbuf), "limit=%d,retention=%dd",
-                  feature_int(FEAT_CHATHISTORY_MAX), retention_days);
-  }
+  ircd_snprintf(0, valbuf, sizeof(valbuf), "%d",
+                feature_int(FEAT_CHATHISTORY_MAX));
 
   send_cap_notify("draft/chathistory", 1, valbuf);
 
