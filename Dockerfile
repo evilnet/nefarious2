@@ -32,7 +32,7 @@ WORKDIR  /home/nefarious/nefarious2
 # I cant get the maxminddb library to compile in at all in debian 12, give up on geoip for now
 # --with-geoip=/usr --with-mmdb=/usr \
 RUN ./configure --libdir=/home/nefarious/ircd --enable-debug --with-maxcon=4096
-RUN make
+RUN make -C ircd build && make -C ircd/test build
 RUN touch /home/nefarious/ircd/ircd.pem && make install && rm /home/nefarious/ircd/ircd.pem
 
 # Build iauthd-ts
