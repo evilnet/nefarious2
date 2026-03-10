@@ -230,6 +230,21 @@ extern int metadata_count_client(struct Client *cptr);
  */
 extern int metadata_count_channel(struct Channel *chptr);
 
+/** Check if a viewer can see a metadata entry.
+ * @param[in] viewer Client viewing the metadata.
+ * @param[in] owner Client owning the metadata (NULL for channel metadata).
+ * @param[in] entry Metadata entry to check.
+ * @return Non-zero if visible.
+ */
+extern int can_view_metadata(struct Client *viewer, struct Client *owner,
+                             struct MetadataEntry *entry);
+
+/** Get visibility string for metadata entry.
+ * @param[in] entry Metadata entry.
+ * @return "*" for public, "private" for private.
+ */
+extern const char *get_visibility_str(struct MetadataEntry *entry);
+
 /** Free a metadata entry.
  * @param[in] entry Entry to free.
  */

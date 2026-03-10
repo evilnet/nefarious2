@@ -82,6 +82,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "capab.h"
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
@@ -93,6 +94,7 @@
 #include "ircd_string.h"
 #include "list.h"
 #include "match.h"
+#include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -248,6 +250,17 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
 
     if (IsAccount(acptr))
       send_reply(sptr, RPL_WHOISACCOUNT, name, user->account);
+
+    /* IRCv3 draft/metadata-2: send metadata in WHOIS */
+    if (CapActive(sptr, CAP_DRAFT_METADATA2)) {
+      struct MetadataEntry *md = metadata_list_client(acptr);
+      while (md) {
+        if (can_view_metadata(sptr, acptr, md))
+          send_reply(sptr, RPL_WHOISKEYVALUE, name, md->key,
+                     get_visibility_str(md), md->value);
+        md = md->next;
+      }
+    }
 
     if (IsHiddenHost(acptr) && (IsAnOper(sptr) || acptr == sptr))
       send_reply(sptr, RPL_WHOISACTUALLY, name, user->username,

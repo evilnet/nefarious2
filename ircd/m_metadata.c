@@ -234,8 +234,8 @@ static void notify_subscribers(const char *target, const char *key, const char *
  * @param[in] entry Metadata entry to check.
  * @return 1 if visible, 0 if not.
  */
-static int can_view_metadata(struct Client *viewer, struct Client *owner,
-                             struct MetadataEntry *entry)
+int can_view_metadata(struct Client *viewer, struct Client *owner,
+                      struct MetadataEntry *entry)
 {
   if (!entry)
     return 0;
@@ -259,7 +259,7 @@ static int can_view_metadata(struct Client *viewer, struct Client *owner,
  * @param[in] entry Metadata entry.
  * @return "*" for public, "private" for private.
  */
-static const char *get_visibility_str(struct MetadataEntry *entry)
+const char *get_visibility_str(struct MetadataEntry *entry)
 {
   if (entry && entry->visibility == METADATA_VIS_PRIVATE)
     return "private";
@@ -791,7 +791,7 @@ static int metadata_cmd_sub(struct Client *sptr, int parc, char *parv[])
 
     /* Check if already at limit */
     if (metadata_sub_count(sptr) >= max_subs) {
-      send_fail(sptr, "METADATA", "LIMIT_REACHED", key,
+      send_fail(sptr, "METADATA", "TOO_MANY_SUBS", key,
                 "Maximum number of subscriptions reached");
       break;
     }
@@ -842,11 +842,15 @@ static int metadata_cmd_subs(struct Client *sptr, int parc, char *parv[])
 {
   struct MetadataSub *sub;
 
+  send_batch_start(sptr, "metadata-subs");
+
   sub = metadata_sub_list(sptr);
   while (sub) {
     send_reply(sptr, RPL_METADATASUBS, sub->key);
     sub = sub->next;
   }
+
+  send_batch_end(sptr);
 
   return 0;
 }
@@ -1049,7 +1053,7 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   } else if (ircd_strcmp(subcmd, "SYNC") == 0) {
     return metadata_cmd_sync(sptr, parc, parv);
   } else {
-    send_fail(sptr, "METADATA", "INVALID_PARAMS", subcmd,
+    send_fail(sptr, "METADATA", "SUBCOMMAND_INVALID", subcmd,
               "Unknown subcommand");
     return 0;
   }

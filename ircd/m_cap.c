@@ -330,7 +330,7 @@ static struct capabilities {
   _CAP_V(DRAFT_ACCOUNTREG, 0, "draft/account-registration", FEAT_CAP_draft_account_registration, "before-connect,custom-account-name"),
   _CAP(DRAFT_READMARKER, 0, "draft/read-marker", FEAT_CAP_draft_read_marker),
   _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", FEAT_CAP_draft_channel_rename),
-  _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "max-subs=50,max-keys=20,max-value-bytes=300"),
+  _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "before-connect,max-subs=50,max-keys=20,max-value-bytes=300"),
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
   _CAP(DRAFT_BOUNCER, 0, "draft/bouncer", FEAT_CAP_draft_bouncer),
 #ifdef USE_SSL

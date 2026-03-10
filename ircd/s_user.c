@@ -635,6 +635,20 @@ int register_user(struct Client *cptr, struct Client *sptr)
     update_load();
     motd_signon(sptr);
 
+    /* IRCv3 draft/metadata-2: burst client's own metadata after registration.
+     * Spec requires this in a metadata batch before post-registration activity.
+     * Empty batch (start+end) is sent if no metadata exists. */
+    if (CapActive(sptr, CAP_DRAFT_METADATA2)) {
+      struct MetadataEntry *md = metadata_list_client(sptr);
+      send_batch_start(sptr, "metadata");
+      while (md) {
+        send_reply(sptr, RPL_KEYVALUE, cli_name(sptr), md->key,
+                   get_visibility_str(md), md->value);
+        md = md->next;
+      }
+      send_batch_end(sptr);
+    }
+
     if (cli_snomask(sptr) & SNO_NOISY)
       set_snomask(sptr, cli_snomask(sptr) & SNO_NOISY, SNO_ADD);
     if (feature_bool(FEAT_CONNEXIT_NOTICES))
