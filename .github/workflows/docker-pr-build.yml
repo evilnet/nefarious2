@@ -25,6 +25,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ inputs.pr_number }}/merge
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Generate version info
+        run: git describe --dirty --long --always > .release
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
