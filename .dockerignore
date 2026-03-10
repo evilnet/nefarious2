@@ -1,2 +1,24 @@
 **/.git
 **/.sw?
+**/*.o
+**/*.a
+**/*.so
+**/*.lo
+**/*.la
+**/.deps/
+**/.libs/
+**/autom4te.cache/
+.vscode/
+.idea/
+*~
+
+# Generated autotools artifacts — must not overwrite Docker's configure output
+Makefile
+ircd/Makefile
+ircd/test/Makefile
+config.h
+config.status
+config.log
+config.cache
+stamp-h
+stamp-h1
