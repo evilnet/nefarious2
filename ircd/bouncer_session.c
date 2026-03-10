@@ -2406,6 +2406,11 @@ int bounce_promote_alias(struct BouncerSession *session)
               * sizeof(struct BounceAlias));
   session->hs_alias_count--;
 
+  /* Cancel hold timer if running — every HOLDING→ACTIVE transition must do this.
+   * Without this, timer_init() on a still-queued timer corrupts the list. */
+  if (t_active(&session->hs_hold_timer))
+    timer_del(&session->hs_hold_timer);
+
   /* Update session to point to promoted alias.
    * Transition to ACTIVE — the promoted alias is a live connection. */
   session->hs_client = alias;
