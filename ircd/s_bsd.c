@@ -816,10 +816,10 @@ void add_connection(struct Listener* listener, int fd) {
 #endif
 
   /* Mark WebSocket connections - they need handshake before IRC protocol */
-  Debug((DEBUG_DEBUG, "WebSocket check: listener_websocket=%d, listener_websocket_auto=%d, FEAT_DRAFT_WEBSOCKET=%d, listener_port=%d",
+  Debug((DEBUG_DEBUG, "WebSocket check: listener_websocket=%d, listener_websocket_auto=%d, FEAT_WEBSOCKET=%d, listener_port=%d",
          listener_websocket(listener), listener_websocket_auto(listener),
-         feature_bool(FEAT_DRAFT_WEBSOCKET), listener->addr.port));
-  if (feature_bool(FEAT_DRAFT_WEBSOCKET)) {
+         feature_bool(FEAT_WEBSOCKET), listener->addr.port));
+  if (feature_bool(FEAT_WEBSOCKET)) {
     if (listener_websocket(listener)) {
       Debug((DEBUG_DEBUG, "Setting WSNeedHandshake for new client"));
       SetWSNeedHandshake(new_client);
@@ -1100,6 +1100,12 @@ ssl_read_again:
             char *frag_data = cli_ws_frag_buf(cptr);
             int frag_len = cli_ws_frag_len(cptr);
             if (frag_len > 0) {
+              /* RFC 6455 Section 8.1: text frames must be valid UTF-8 */
+              if (cli_ws_frag_opcode(cptr) == WS_OPCODE_TEXT) {
+                frag_data[frag_len] = '\0';
+                if (!string_is_valid_utf8(frag_data))
+                  return exit_client(cptr, cptr, &me, "WebSocket text frame: invalid UTF-8");
+              }
               /* Add line ending if needed */
               if (frag_len < 16384 - 1 && frag_data[frag_len - 1] != '\n') {
                 frag_data[frag_len++] = '\n';
@@ -1134,6 +1140,16 @@ ssl_read_again:
           } else {
             /* Complete frame - deliver immediately */
             if (ws_len > 0) {
+              /* RFC 6455 Section 8.1: text frames must be valid UTF-8.
+               * Sanitize invalid sequences to U+FFFD. */
+              if (opcode == WS_OPCODE_TEXT) {
+                ws_payload[ws_len] = '\0';
+                if (!string_is_valid_utf8(ws_payload)) {
+                  int new_len = string_sanitize_utf8(ws_payload);
+                  if (new_len > 0)
+                    ws_len = new_len;
+                }
+              }
               /* WebSocket IRC: messages don't require \r\n, add \n for parser */
               if (ws_len < (int)sizeof(ws_payload) - 1 &&
                   ws_payload[ws_len - 1] != '\n') {
