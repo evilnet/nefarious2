@@ -41,6 +41,9 @@ FROM configure AS build
 # Copy all remaining source (this layer busts on any .c/.h change)
 COPY . /home/nefarious/nefarious2
 
+# .release is generated before docker build (e.g. by CI) and needs to be in ircd/ where version.c.SH runs
+RUN test -f .release && cp .release ircd/.release || true
+
 # ccache via BuildKit cache mount — persists across docker builds
 ENV PATH="/usr/lib/ccache:${PATH}"
 RUN --mount=type=cache,target=/root/.ccache \
