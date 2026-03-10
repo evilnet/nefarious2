@@ -1115,6 +1115,28 @@ process_multiline_batch(struct Client *sptr)
  *   BATCH +id draft/multiline #channel
  *   BATCH -id
  */
+
+/** Validate batch reference tag per IRCv3 client-batch spec.
+ * Must match [a-zA-Z0-9_:-]{1,64}.
+ */
+static int is_valid_batch_reftag(const char *tag)
+{
+  const char *p;
+  int len = 0;
+
+  if (!tag || !*tag)
+    return 0;
+
+  for (p = tag; *p; p++) {
+    if (!IsAlnum(*p) && *p != '_' && *p != ':' && *p != '-')
+      return 0;
+    if (++len > 64)
+      return 0;
+  }
+
+  return 1;
+}
+
 int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Connection *con;
@@ -1165,11 +1187,18 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (EmptyString(batch_ref))
     return send_reply(sptr, ERR_NEEDMOREPARAMS, "BATCH");
 
+  /* Validate batch reference tag charset and length */
+  if (!is_valid_batch_reftag(batch_ref)) {
+    send_fail(sptr, "BATCH", "INVALID_REFTAG", batch_ref,
+              "Invalid batch reference tag");
+    return 0;
+  }
+
   if (is_start) {
     /* Only support draft/multiline for now */
     if (ircd_strcmp(batch_type, "draft/multiline") != 0) {
-      send_fail(sptr, "BATCH", "UNSUPPORTED_TYPE", batch_type,
-                "Unsupported batch type");
+      send_fail(sptr, "BATCH", "UNKNOWN_TYPE", batch_type,
+                "Unknown batch type");
       return 0;
     }
 
