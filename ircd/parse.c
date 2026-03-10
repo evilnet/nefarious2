@@ -1022,6 +1022,14 @@ struct Message msgtab[] = {
     { m_ignore, m_ignore, m_ignore, m_ignore, m_ignore },
     ""
   },
+  {
+    MSG_BOUNCER_TRANSFER,
+    TOK_BOUNCER_TRANSFER,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_bouncer_transfer, m_ignore, m_ignore },
+    ""
+  },
   { 0 }
 };
 
@@ -1360,6 +1368,17 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
 
   if (IsDead(cptr))
     return 0;
+
+  /* Skip P10 message tags if present (compat with tag-aware servers).
+   * Doesn't parse or store — just advances past the @... prefix so
+   * the parser reaches the source numeric correctly. */
+  if (*ch == '@') {
+    ch = strchr(ch, ' ');
+    if (!ch)
+      return -1;
+    while (*ch == ' ')
+      ch++;
+  }
 
   para[0] = cli_name(from);
 
