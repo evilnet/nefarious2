@@ -12,12 +12,8 @@ Features {
      "CAP_draft_chathistory" = "TRUE";
      "CAP_draft_metadata_2" = "TRUE";
 
-     # PM Chathistory consent settings
+     # PM Chathistory
      "CHATHISTORY_PRIVATE" = "TRUE";
-     # Consent mode: 0=global (opt-out), 1=single-party (either opts in), 2=multi-party (both must opt in)
-     "CHATHISTORY_PRIVATE_CONSENT" = "2";
-     # Send policy notice on connect
-     "CHATHISTORY_PM_NOTICE" = "TRUE";
 };
 
 Admin {

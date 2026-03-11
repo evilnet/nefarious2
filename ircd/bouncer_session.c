@@ -35,6 +35,7 @@
 #include "ircd_alloc.h"
 #include "ircd_osdep.h"
 #include "ircd_features.h"
+#include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "listener.h"
 #include "list.h"
@@ -2913,6 +2914,9 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   cli_port(ghost) = cli_port(temp);
   memcpy(&cli_connectip(ghost), &cli_connectip(temp), sizeof(cli_connectip(ghost)));
   ircd_strncpy(cli_connecthost(ghost), cli_connecthost(temp), HOSTLEN + 1);
+
+  /* Re-apply GeoIP data based on the new connection's IP */
+  geoip_apply(ghost);
 
   /* Transfer listener reference (temp's ref count transfers to ghost) */
   if (con_listener(ghost_con))
