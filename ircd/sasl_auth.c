@@ -352,6 +352,104 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
   return 0;
 }
 
+/* ---- EXTERNAL mechanism handler ---- */
+
+/** Callback from kc_user_search() for fingerprint lookup. */
+static void sasl_external_cb(int result, const struct kc_user *users, int count, void *data)
+{
+  struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
+  struct Client *acptr;
+  struct SASLSession *session;
+
+  /* Re-resolve client via FD + cookie (use-after-free protection) */
+  acptr = LocalClientArray[ctx->fd];
+  if (!acptr || cli_saslcookie(acptr) != ctx->cookie) {
+    MyFree(ctx);
+    return;
+  }
+  MyFree(ctx);
+
+  session = cli_saslsession(acptr);
+  if (!session || session->state != SASL_STATE_WAITING_KC) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL EXTERNAL: Callback for %C but session state is wrong", acptr);
+    return;
+  }
+
+  if (result == KC_SUCCESS && count == 1) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL EXTERNAL: Fingerprint matched user %s (client %C)",
+              users[0].username, acptr);
+    sasl_complete_login(acptr, users[0].username, CurrentTime);
+  } else if (count > 1) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL EXTERNAL: Fingerprint collision — %d users matched (client %C)",
+              count, acptr);
+    send_reply(acptr, ERR_SASLFAIL, "");
+    session->state = SASL_STATE_FAILED;
+    cli_saslcookie(acptr) = 0;
+    cli_saslstart(acptr) = 0;
+    if (t_active(&cli_sasltimeout(acptr)))
+      timer_del(&cli_sasltimeout(acptr));
+    sasl_session_free(acptr);
+    if (cli_auth(acptr))
+      auth_sasl_done(cli_auth(acptr));
+  } else {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL EXTERNAL: No user found for fingerprint (client %C, result %d)",
+              acptr, result);
+    send_reply(acptr, ERR_SASLFAIL, "");
+    session->state = SASL_STATE_FAILED;
+    cli_saslcookie(acptr) = 0;
+    cli_saslstart(acptr) = 0;
+    if (t_active(&cli_sasltimeout(acptr)))
+      timer_del(&cli_sasltimeout(acptr));
+    sasl_session_free(acptr);
+    if (cli_auth(acptr))
+      auth_sasl_done(cli_auth(acptr));
+  }
+}
+
+/** Handle EXTERNAL mechanism — lookup client certificate fingerprint in Keycloak. */
+static int sasl_handle_external(struct Client *sptr, const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+  const char *fingerprint = cli_sslclifp(sptr);
+  char query[256];
+  struct sasl_cb_ctx *ctx;
+
+  /* Client must have a TLS client certificate */
+  if (!fingerprint || !*fingerprint) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL EXTERNAL: No client certificate for %C", sptr);
+    send_reply(sptr, ERR_SASLFAIL, ": no client certificate");
+    return -1;
+  }
+
+  /* If client sent an authzid, save it (for authorization identity assertion) */
+  if (decoded && len > 0) {
+    size_t zlen = len < ACCOUNTLEN ? len : ACCOUNTLEN;
+    memcpy(session->authzid, decoded, zlen);
+    session->authzid[zlen] = '\0';
+  }
+
+  session->state = SASL_STATE_WAITING_KC;
+
+  /* Allocate callback context */
+  ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
+  ctx->fd = cli_fd(sptr);
+  ctx->cookie = cli_saslcookie(sptr);
+
+  /* Search Keycloak for user with matching x509_fingerprints attribute */
+  snprintf(query, sizeof(query), "x509_fingerprints:%s", fingerprint);
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL EXTERNAL: Searching for fingerprint %s (client %C)",
+            fingerprint, sptr);
+  kc_user_search(query, true, sasl_external_cb, ctx);
+
+  return 0;
+}
+
 #endif /* USE_LIBKC */
 
 /* ---- Framework functions ---- */
@@ -369,8 +467,7 @@ const char *sasl_local_mechanisms(void)
 {
   if (!sasl_local_available())
     return NULL;
-  /* Phase 1: PLAIN only. EXTERNAL will be added when kc_user_search() is implemented. */
-  return "PLAIN";
+  return "PLAIN,EXTERNAL";
 }
 
 int sasl_start(struct Client *sptr, const char *mechanism)
@@ -383,6 +480,8 @@ int sasl_start(struct Client *sptr, const char *mechanism)
   /* Parse mechanism name */
   if (ircd_strcmp(mechanism, "PLAIN") == 0)
     mech = SASL_MECH_PLAIN;
+  else if (ircd_strcmp(mechanism, "EXTERNAL") == 0)
+    mech = SASL_MECH_EXTERNAL;
   else
     return -1;  /* Unsupported mechanism — fall through to P10 */
 
@@ -498,6 +597,13 @@ dispatch:
 #ifdef USE_LIBKC
       case SASL_MECH_PLAIN:
         rc = sasl_handle_plain(sptr, decoded, decoded_len);
+        if (rc < 0) {
+          sasl_abort_local(sptr);
+          return 0;
+        }
+        break;
+      case SASL_MECH_EXTERNAL:
+        rc = sasl_handle_external(sptr, decoded, decoded_len);
         if (rc < 0) {
           sasl_abort_local(sptr);
           return 0;
