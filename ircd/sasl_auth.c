@@ -39,10 +39,14 @@
 
 #ifdef USE_LIBKC
 #include <kc/kc_keycloak.h>
+#include <kc/kc_jwt.h>
 #endif
 
 /* Forward declarations */
 static void sasl_local_timeout_cb(struct Event *ev);
+#ifdef USE_LIBKC
+static void sasl_health_cb(int result, const struct kc_access_token *token, void *data);
+#endif
 
 /* ---- Health tracking ---- */
 
@@ -450,6 +454,193 @@ static int sasl_handle_external(struct Client *sptr, const unsigned char *decode
   return 0;
 }
 
+/* ---- OAUTHBEARER mechanism handler ---- */
+
+/** Parse RFC 7628 OAUTHBEARER initial client response.
+ *  Format: gs2-header kvsep *kvpair kvsep
+ *  gs2-header = "n" / "y" / "p=..." "," [authzid] ","
+ *  kvpair = key "=" value (separated by \x01)
+ *
+ *  Example: n,a=user,\x01auth=Bearer <token>\x01\x01
+ *  Example: n,,\x01auth=Bearer <token>\x01\x01
+ *
+ *  @return 0 on success (token extracted), -1 on parse error.
+ */
+static int oauthbearer_parse(const unsigned char *data, size_t len,
+                             char *authzid_out, size_t authzid_size,
+                             const char **token_out, size_t *token_len_out)
+{
+  const char *p = (const char *)data;
+  const char *end = p + len;
+  const char *comma;
+
+  /* Must start with gs2-cb-flag: 'n' (no channel binding), 'y', or 'p=' */
+  if (p >= end || (*p != 'n' && *p != 'y' && *p != 'p'))
+    return -1;
+
+  /* Skip gs2-cb-flag to first comma */
+  comma = memchr(p, ',', end - p);
+  if (!comma)
+    return -1;
+  p = comma + 1;
+
+  /* Optional authzid: "a=<value>" or empty */
+  comma = memchr(p, ',', end - p);
+  if (!comma)
+    return -1;
+
+  if (comma > p && p[0] == 'a' && p[1] == '=') {
+    size_t azlen = comma - p - 2;
+    if (azlen > 0 && azlen < authzid_size) {
+      memcpy(authzid_out, p + 2, azlen);
+      authzid_out[azlen] = '\0';
+    }
+  }
+  p = comma + 1;
+
+  /* Now at key-value pairs separated by \x01.
+   * Must start with \x01, then key=value pairs. */
+  if (p >= end || *p != '\x01')
+    return -1;
+  p++;
+
+  /* Search for "auth=Bearer " key-value pair */
+  while (p < end && *p != '\x01') {
+    const char *kvsep = memchr(p, '\x01', end - p);
+    if (!kvsep)
+      kvsep = end;
+
+    if (kvsep - p > 12 && strncmp(p, "auth=Bearer ", 12) == 0) {
+      *token_out = p + 12;
+      *token_len_out = kvsep - p - 12;
+      return 0;
+    }
+
+    p = kvsep;
+    if (p < end && *p == '\x01')
+      p++;
+  }
+
+  return -1;  /* No bearer token found */
+}
+
+/** Callback from kc_token_introspect() for OAUTHBEARER fallback. */
+static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *info, void *data)
+{
+  struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
+  struct Client *acptr;
+  struct SASLSession *session;
+
+  acptr = LocalClientArray[ctx->fd];
+  if (!acptr || cli_saslcookie(acptr) != ctx->cookie) {
+    MyFree(ctx);
+    return;
+  }
+  MyFree(ctx);
+
+  session = cli_saslsession(acptr);
+  if (!session || session->state != SASL_STATE_WAITING_KC) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL OAUTHBEARER: Introspect callback for %C but session state is wrong", acptr);
+    return;
+  }
+
+  if (result == KC_SUCCESS && info && info->active && info->username) {
+    /* Use authzid if set, otherwise username from token */
+    const char *login_as = session->authzid[0] ? session->authzid : info->username;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL OAUTHBEARER: Introspect success for %s (client %C)",
+              login_as, acptr);
+    sasl_complete_login(acptr, login_as, CurrentTime);
+  } else {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL OAUTHBEARER: Introspect failed for %C (result %d, active=%d)",
+              acptr, result, info ? info->active : 0);
+    /* RFC 7628 §3.2.3: Send error challenge, then wait for client to send
+     * "*" (abort).  The abort triggers sasl_abort_local → ERR_SASLFAIL. */
+    sendrawto_one(acptr, MSG_AUTHENTICATE " "
+                  "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
+    session->state = SASL_STATE_FAILED;
+  }
+}
+
+/** Handle decoded OAUTHBEARER data. */
+static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+  char authzid[ACCOUNTLEN + 1] = {0};
+  const char *token_str = NULL;
+  size_t token_len = 0;
+  char *token_nul = NULL;
+  struct kc_realm realm;
+  struct kc_token_info *info = NULL;
+  int rc;
+
+  /* Parse OAUTHBEARER format */
+  if (oauthbearer_parse(decoded, len, authzid, sizeof(authzid),
+                        &token_str, &token_len) != 0 || !token_str || token_len == 0) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL OAUTHBEARER: Malformed data from %C", sptr);
+    send_reply(sptr, ERR_SASLFAIL, ": malformed OAUTHBEARER data");
+    return -1;
+  }
+
+  /* Save authzid if present */
+  if (authzid[0])
+    ircd_strncpy(session->authzid, authzid, sizeof(session->authzid));
+
+  /* NUL-terminate token for libkc (which expects C strings) */
+  token_nul = (char *)MyMalloc(token_len + 1);
+  memcpy(token_nul, token_str, token_len);
+  token_nul[token_len] = '\0';
+
+  /* Strategy 1: Try local JWKS validation (synchronous, fast if cached) */
+  realm.base_url = feature_str(FEAT_KEYCLOAK_URL);
+  realm.realm = feature_str(FEAT_KEYCLOAK_REALM);
+
+  rc = kc_jwt_validate_local(realm, token_nul, &info);
+  if (rc == KC_SUCCESS && info && info->username) {
+    const char *login_as = session->authzid[0] ? session->authzid : info->username;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
+              login_as, sptr);
+    MyFree(token_nul);
+    sasl_complete_login(sptr, login_as, CurrentTime);
+    kc_jwt_token_info_free(info);
+    return 0;
+  }
+
+  if (info) {
+    kc_jwt_token_info_free(info);
+    info = NULL;
+  }
+
+  /* Strategy 2: Fall back to async token introspection */
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL OAUTHBEARER: JWT local validation failed (rc=%d), "
+            "falling back to introspection for %C", rc, sptr);
+
+  session->state = SASL_STATE_WAITING_KC;
+
+  {
+    struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
+    ctx->fd = cli_fd(sptr);
+    ctx->cookie = cli_saslcookie(sptr);
+
+    if (kc_token_introspect(token_nul, sasl_oauth_introspect_cb, ctx) != 0) {
+      MyFree(ctx);
+      MyFree(token_nul);
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL OAUTHBEARER: Failed to submit introspection for %C", sptr);
+      send_reply(sptr, ERR_SASLFAIL, ": introspection unavailable");
+      return -1;
+    }
+  }
+
+  MyFree(token_nul);
+  return 0;
+}
+
 #endif /* USE_LIBKC */
 
 /* ---- Framework functions ---- */
@@ -467,7 +658,7 @@ const char *sasl_local_mechanisms(void)
 {
   if (!sasl_local_available())
     return NULL;
-  return "PLAIN,EXTERNAL";
+  return "PLAIN,EXTERNAL,OAUTHBEARER";
 }
 
 int sasl_start(struct Client *sptr, const char *mechanism)
@@ -482,6 +673,8 @@ int sasl_start(struct Client *sptr, const char *mechanism)
     mech = SASL_MECH_PLAIN;
   else if (ircd_strcmp(mechanism, "EXTERNAL") == 0)
     mech = SASL_MECH_EXTERNAL;
+  else if (ircd_strcmp(mechanism, "OAUTHBEARER") == 0)
+    mech = SASL_MECH_OAUTHBEARER;
   else
     return -1;  /* Unsupported mechanism — fall through to P10 */
 
@@ -524,6 +717,14 @@ int sasl_continue(struct Client *sptr, const char *data)
 
   if (!session)
     return -1;
+
+  /* OAUTHBEARER §3.2.3: After server sends error challenge, client responds
+   * with dummy data or "*".  Either way, we send ERR_SASLFAIL and clean up. */
+  if (session->state == SASL_STATE_FAILED) {
+    send_reply(sptr, ERR_SASLFAIL, "");
+    sasl_abort_local(sptr);
+    return 0;
+  }
 
   /* Only accept data in INIT or WAITING_DATA states */
   if (session->state != SASL_STATE_INIT && session->state != SASL_STATE_WAITING_DATA)
@@ -609,6 +810,13 @@ dispatch:
           return 0;
         }
         break;
+      case SASL_MECH_OAUTHBEARER:
+        rc = sasl_handle_oauthbearer(sptr, decoded, decoded_len);
+        if (rc < 0) {
+          sasl_abort_local(sptr);
+          return 0;
+        }
+        break;
 #endif
       default:
         send_reply(sptr, ERR_SASLFAIL, ": unsupported mechanism");
@@ -686,6 +894,26 @@ int sasl_local_init(void)
   kc_sasl_healthy = 1;  /* Optimistic — kc_keycloak_init() already succeeded */
   log_write(LS_SYSTEM, L_NOTICE, 0,
             "SASL LOCAL: Initialized — will validate credentials via Keycloak");
+
+  /* Prime the Keycloak client credentials token (async — fires callback
+   * when complete, which also validates Keycloak availability) */
+  kc_token_ensure(sasl_health_cb, NULL);
+
+  /* Prime the JWKS cache for offline JWT validation (sync HTTP — blocks
+   * briefly on first fetch, then cached for 1 hour) */
+  {
+    struct kc_realm realm;
+    realm.base_url = feature_str(FEAT_KEYCLOAK_URL);
+    realm.realm = feature_str(FEAT_KEYCLOAK_REALM);
+    if (kc_jwt_prime_cache(realm) == KC_SUCCESS) {
+      log_write(LS_SYSTEM, L_NOTICE, 0,
+                "SASL LOCAL: JWKS cache primed for OAUTHBEARER");
+    } else {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL LOCAL: Failed to prime JWKS cache — OAUTHBEARER will fetch on first use");
+    }
+  }
+
   return 0;
 #else
   return -1;
