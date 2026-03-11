@@ -275,6 +275,7 @@ IRCD_SRC = \
 	s_stats.c \
 	s_user.c \
 	sasl_auth.c \
+	sasl_webhook.c \
 	send.c \
 	shun.c \
 	ssl.c \

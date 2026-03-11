@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
 #endif
+#include <stdint.h>
 
 struct Client;
 
@@ -58,6 +59,10 @@ struct SASLSession {
   int                chunks_received;
   char               authcid[ACCOUNTLEN + 1];  /**< Authentication identity */
   char               authzid[ACCOUNTLEN + 1];  /**< Authorization identity (may differ) */
+
+  /* Auth cache credential hash (PLAIN only) */
+  uint64_t           cred_hash;          /**< SipHash of username+password */
+  int                cred_hash_valid;    /**< Whether cred_hash is populated */
 
   /* SCRAM-SHA-256 state (Phase 3) */
   char              *scram_client_first_bare;  /**< "n=user,r=client_nonce" */
@@ -124,5 +129,27 @@ extern int sasl_local_init(void);
 
 /** Periodic health check callback — call from a timer to probe Keycloak liveness. */
 extern void sasl_health_check(void);
+
+/* ---- Auth cache API (for webhook invalidation and stats) ---- */
+
+/** Auth cache statistics. */
+struct sasl_cache_stats {
+  unsigned long neg_hits;
+  unsigned long neg_misses;
+  unsigned long neg_inserts;
+  unsigned long neg_invalidations;
+  unsigned long neg_expirations;
+  unsigned long pos_hits;
+  unsigned long pos_misses;
+  unsigned long pos_inserts;
+  unsigned long pos_invalidations;
+  unsigned long pos_expirations;
+};
+
+/** Invalidate all auth cache entries for a user (called from webhook handler). */
+extern void sasl_cache_invalidate_user(const char *username);
+
+/** Get auth cache statistics. */
+extern void sasl_cache_stats_get(struct sasl_cache_stats *out);
 
 #endif /* INCLUDED_sasl_auth_h */

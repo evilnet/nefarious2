@@ -79,6 +79,7 @@
 #include "webpush_store.h"
 #include "paste_listener.h"
 #include "sasl_auth.h"
+#include "sasl_webhook.h"
 #ifdef USE_LIBKC
 #include "ircd_kc_adapter.h"
 #include <kc/kc.h>
@@ -1156,9 +1157,10 @@ int main(int argc, char **argv) {
 
 #ifdef USE_LIBKC
   {
-    /* Initialize libkc transport — needed by both webpush and local SASL */
+    /* Initialize libkc transport — needed by webpush, local SASL, and webhooks */
     int kc_needed = feature_bool(FEAT_CAP_draft_webpush)
-                 || feature_bool(FEAT_SASL_LOCAL);
+                 || feature_bool(FEAT_SASL_LOCAL)
+                 || feature_int(FEAT_WEBHOOK_PORT) > 0;
 
     if (kc_needed) {
       ircd_kc_adapter_init();
@@ -1181,6 +1183,12 @@ int main(int argc, char **argv) {
           } else {
             sasl_local_init();
           }
+        }
+
+        /* Initialize webhook listener if configured */
+        if (feature_int(FEAT_WEBHOOK_PORT) > 0) {
+          sasl_webhook_init(feature_int(FEAT_WEBHOOK_PORT),
+                            feature_str(FEAT_WEBHOOK_SECRET));
         }
 
         /* Initialize webpush if enabled */

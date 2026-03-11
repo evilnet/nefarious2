@@ -37,6 +37,7 @@
 #include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/bio.h>
+#include <openssl/rand.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -58,6 +59,392 @@ static int kc_sasl_healthy = 0;
 
 /** Whether sasl_local_init() succeeded. */
 static int sasl_local_initialized = 0;
+
+/* ==================================================================
+ * Auth cache — negative (failed) and positive (successful) PLAIN
+ * results, keyed by SipHash-2-4 of lowercase(username)+NUL+password.
+ * ================================================================== */
+
+#define AUTHCACHE_BUCKETS 1024
+
+/** SipHash-2-4 reference implementation (public domain, J-P Aumasson / D.J. Bernstein). */
+static inline uint64_t rotl64(uint64_t x, int b) { return (x << b) | (x >> (64 - b)); }
+
+#define SIPROUND do { \
+  v0 += v1; v1 = rotl64(v1, 13); v1 ^= v0; v0 = rotl64(v0, 32); \
+  v2 += v3; v3 = rotl64(v3, 16); v3 ^= v2; \
+  v0 += v3; v3 = rotl64(v3, 21); v3 ^= v0; \
+  v2 += v1; v1 = rotl64(v1, 17); v1 ^= v2; v2 = rotl64(v2, 32); \
+} while(0)
+
+static uint64_t siphash24(const void *src, size_t len, const uint8_t key[16])
+{
+  const uint8_t *m = (const uint8_t *)src;
+  uint64_t k0, k1;
+  uint64_t v0, v1, v2, v3;
+  uint64_t mi;
+  int i, blocks;
+
+  memcpy(&k0, key, 8);
+  memcpy(&k1, key + 8, 8);
+
+  v0 = k0 ^ UINT64_C(0x736f6d6570736575);
+  v1 = k1 ^ UINT64_C(0x646f72616e646f6d);
+  v2 = k0 ^ UINT64_C(0x6c7967656e657261);
+  v3 = k1 ^ UINT64_C(0x7465646279746573);
+
+  blocks = (int)(len / 8);
+  for (i = 0; i < blocks; i++) {
+    memcpy(&mi, m + i * 8, 8);
+    v3 ^= mi;
+    SIPROUND; SIPROUND;
+    v0 ^= mi;
+  }
+
+  mi = ((uint64_t)len) << 56;
+  switch (len & 7) {
+    case 7: mi |= (uint64_t)m[blocks * 8 + 6] << 48; /* fall through */
+    case 6: mi |= (uint64_t)m[blocks * 8 + 5] << 40; /* fall through */
+    case 5: mi |= (uint64_t)m[blocks * 8 + 4] << 32; /* fall through */
+    case 4: mi |= (uint64_t)m[blocks * 8 + 3] << 24; /* fall through */
+    case 3: mi |= (uint64_t)m[blocks * 8 + 2] << 16; /* fall through */
+    case 2: mi |= (uint64_t)m[blocks * 8 + 1] << 8;  /* fall through */
+    case 1: mi |= (uint64_t)m[blocks * 8 + 0];
+  }
+
+  v3 ^= mi;
+  SIPROUND; SIPROUND;
+  v0 ^= mi;
+  v2 ^= 0xff;
+  SIPROUND; SIPROUND; SIPROUND; SIPROUND;
+  return v0 ^ v1 ^ v2 ^ v3;
+}
+
+/** Random SipHash key, set once at init. */
+static uint8_t authcache_siphash_key[16];
+static int     authcache_initialized = 0;
+
+/** Compute SipHash of lowercase(username) + NUL + password. */
+static uint64_t authcache_hash(const char *username, const char *password)
+{
+  char buf[ACCOUNTLEN + 1 + 512 + 1]; /* username + NUL + password */
+  size_t ulen = strlen(username);
+  size_t plen = strlen(password);
+  size_t total, i;
+
+  if (ulen > ACCOUNTLEN)
+    ulen = ACCOUNTLEN;
+  if (plen > 512)
+    plen = 512;
+  total = ulen + 1 + plen;
+
+  /* Lowercase username into buffer */
+  for (i = 0; i < ulen; i++)
+    buf[i] = ToLower(username[i]);
+  buf[ulen] = '\0';
+  memcpy(buf + ulen + 1, password, plen);
+
+  return siphash24(buf, total, authcache_siphash_key);
+}
+
+/* ---- Negative auth cache ---- */
+
+struct negcache_entry {
+  struct negcache_entry *next;
+  uint64_t              hash;
+  char                  username[ACCOUNTLEN + 1];
+  time_t                timestamp;
+};
+
+static struct negcache_entry *negcache_table[AUTHCACHE_BUCKETS];
+
+static struct sasl_cache_stats cache_stats;
+
+/** Insert or update a negative cache entry. */
+static void negcache_insert(const char *username, uint64_t hash)
+{
+  unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
+  struct negcache_entry *e;
+
+  /* Check for existing entry with same hash */
+  for (e = negcache_table[bucket]; e; e = e->next) {
+    if (e->hash == hash) {
+      e->timestamp = CurrentTime;
+      return;
+    }
+  }
+
+  /* Allocate new entry */
+  e = (struct negcache_entry *)MyMalloc(sizeof(struct negcache_entry));
+  e->hash = hash;
+  ircd_strncpy(e->username, username, sizeof(e->username));
+  e->timestamp = CurrentTime;
+  e->next = negcache_table[bucket];
+  negcache_table[bucket] = e;
+  cache_stats.neg_inserts++;
+}
+
+/** Check if credentials are in the negative cache.
+ *  @return 1 if cached (recent failure), 0 if not.
+ */
+static int negcache_check(uint64_t hash)
+{
+  unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
+  struct negcache_entry *e;
+  int ttl = feature_int(FEAT_SASL_NEGCACHE_TTL);
+
+  if (ttl <= 0)
+    return 0;
+
+  for (e = negcache_table[bucket]; e; e = e->next) {
+    if (e->hash == hash) {
+      if (CurrentTime - e->timestamp <= ttl) {
+        cache_stats.neg_hits++;
+        return 1;
+      }
+      /* Expired — will be cleaned up by sweep */
+      cache_stats.neg_misses++;
+      return 0;
+    }
+  }
+  cache_stats.neg_misses++;
+  return 0;
+}
+
+/** Remove a specific hash from the negative cache. */
+static void negcache_remove(uint64_t hash)
+{
+  unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
+  struct negcache_entry **pp = &negcache_table[bucket];
+  struct negcache_entry *e;
+
+  while ((e = *pp) != NULL) {
+    if (e->hash == hash) {
+      *pp = e->next;
+      MyFree(e);
+      return;
+    }
+    pp = &e->next;
+  }
+}
+
+/** Invalidate all negative cache entries for a username (webhook use). */
+static void negcache_invalidate_user(const char *username)
+{
+  unsigned int i;
+
+  for (i = 0; i < AUTHCACHE_BUCKETS; i++) {
+    struct negcache_entry **pp = &negcache_table[i];
+    struct negcache_entry *e;
+
+    while ((e = *pp) != NULL) {
+      if (0 == ircd_strcmp(e->username, username)) {
+        *pp = e->next;
+        MyFree(e);
+        cache_stats.neg_invalidations++;
+      } else {
+        pp = &e->next;
+      }
+    }
+  }
+}
+
+/* ---- Positive auth cache ---- */
+
+struct poscache_entry {
+  struct poscache_entry *next;
+  uint64_t              hash;
+  char                  username[ACCOUNTLEN + 1];
+  char                  account[ACCOUNTLEN + 1];
+  time_t                timestamp;
+};
+
+static struct poscache_entry *poscache_table[AUTHCACHE_BUCKETS];
+
+/** Insert or update a positive cache entry. */
+static void poscache_insert(const char *username, const char *account, uint64_t hash)
+{
+  unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
+  struct poscache_entry *e;
+
+  /* Check for existing entry with same hash */
+  for (e = poscache_table[bucket]; e; e = e->next) {
+    if (e->hash == hash) {
+      e->timestamp = CurrentTime;
+      ircd_strncpy(e->account, account, sizeof(e->account));
+      return;
+    }
+  }
+
+  /* Allocate new entry */
+  e = (struct poscache_entry *)MyMalloc(sizeof(struct poscache_entry));
+  e->hash = hash;
+  ircd_strncpy(e->username, username, sizeof(e->username));
+  ircd_strncpy(e->account, account, sizeof(e->account));
+  e->timestamp = CurrentTime;
+  e->next = poscache_table[bucket];
+  poscache_table[bucket] = e;
+  cache_stats.pos_inserts++;
+}
+
+/** Check if credentials are in the positive cache.
+ *  @param[out] account  Filled with cached account name on hit.
+ *  @return 1 if cached (recent success), 0 if not.
+ */
+static int poscache_check(uint64_t hash, char *account, size_t account_size)
+{
+  unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
+  struct poscache_entry *e;
+  int ttl = feature_int(FEAT_SASL_POSCACHE_TTL);
+
+  if (ttl <= 0)
+    return 0;
+
+  for (e = poscache_table[bucket]; e; e = e->next) {
+    if (e->hash == hash) {
+      if (CurrentTime - e->timestamp <= ttl) {
+        ircd_strncpy(account, e->account, account_size);
+        cache_stats.pos_hits++;
+        return 1;
+      }
+      cache_stats.pos_misses++;
+      return 0;
+    }
+  }
+  cache_stats.pos_misses++;
+  return 0;
+}
+
+/** Remove a specific hash from the positive cache. */
+static void poscache_remove(uint64_t hash)
+{
+  unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
+  struct poscache_entry **pp = &poscache_table[bucket];
+  struct poscache_entry *e;
+
+  while ((e = *pp) != NULL) {
+    if (e->hash == hash) {
+      *pp = e->next;
+      MyFree(e);
+      return;
+    }
+    pp = &e->next;
+  }
+}
+
+/** Invalidate all positive cache entries for a username (webhook use). */
+static void poscache_invalidate_user(const char *username)
+{
+  unsigned int i;
+
+  for (i = 0; i < AUTHCACHE_BUCKETS; i++) {
+    struct poscache_entry **pp = &poscache_table[i];
+    struct poscache_entry *e;
+
+    while ((e = *pp) != NULL) {
+      if (0 == ircd_strcmp(e->username, username)) {
+        *pp = e->next;
+        MyFree(e);
+        cache_stats.pos_invalidations++;
+      } else {
+        pp = &e->next;
+      }
+    }
+  }
+}
+
+/** Sweep expired entries from both caches. Called periodically. */
+static void authcache_expire_sweep(void)
+{
+  unsigned int i;
+  int neg_ttl = feature_int(FEAT_SASL_NEGCACHE_TTL);
+  int pos_ttl = feature_int(FEAT_SASL_POSCACHE_TTL);
+
+  for (i = 0; i < AUTHCACHE_BUCKETS; i++) {
+    /* Negative cache */
+    if (neg_ttl > 0) {
+      struct negcache_entry **pp = &negcache_table[i];
+      struct negcache_entry *e;
+      while ((e = *pp) != NULL) {
+        if (CurrentTime - e->timestamp > neg_ttl) {
+          *pp = e->next;
+          MyFree(e);
+          cache_stats.neg_expirations++;
+        } else {
+          pp = &e->next;
+        }
+      }
+    }
+
+    /* Positive cache */
+    if (pos_ttl > 0) {
+      struct poscache_entry **pp = &poscache_table[i];
+      struct poscache_entry *e;
+      while ((e = *pp) != NULL) {
+        if (CurrentTime - e->timestamp > pos_ttl) {
+          *pp = e->next;
+          MyFree(e);
+          cache_stats.pos_expirations++;
+        } else {
+          pp = &e->next;
+        }
+      }
+    }
+  }
+}
+
+/** Timer for periodic cache sweep. */
+static struct Timer authcache_sweep_timer;
+
+static void authcache_sweep_timer_cb(struct Event *ev)
+{
+  if (ev_type(ev) == ET_EXPIRE)
+    authcache_expire_sweep();
+}
+
+/** Initialize auth caches. Called from sasl_local_init(). */
+static void authcache_init(void)
+{
+  if (authcache_initialized)
+    return;
+
+  /* Generate random SipHash key via OpenSSL */
+  RAND_bytes(authcache_siphash_key, sizeof(authcache_siphash_key));
+
+  memset(negcache_table, 0, sizeof(negcache_table));
+  memset(poscache_table, 0, sizeof(poscache_table));
+  memset(&cache_stats, 0, sizeof(cache_stats));
+
+  /* Periodic sweep every 60 seconds */
+  timer_add(timer_init(&authcache_sweep_timer), authcache_sweep_timer_cb,
+            NULL, TT_PERIODIC, 60);
+
+  authcache_initialized = 1;
+  log_write(LS_SYSTEM, L_NOTICE, 0,
+            "SASL AUTH CACHE: Initialized (neg_ttl=%d, pos_ttl=%d)",
+            feature_int(FEAT_SASL_NEGCACHE_TTL),
+            feature_int(FEAT_SASL_POSCACHE_TTL));
+}
+
+/* ---- Public cache API for webhook invalidation ---- */
+
+/** Invalidate all auth cache entries for a user (called from webhook handler). */
+void sasl_cache_invalidate_user(const char *username)
+{
+  if (!authcache_initialized)
+    return;
+  negcache_invalidate_user(username);
+  poscache_invalidate_user(username);
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL AUTH CACHE: Invalidated caches for user %s", username);
+}
+
+/** Get auth cache statistics. */
+void sasl_cache_stats_get(struct sasl_cache_stats *out)
+{
+  if (out)
+    memcpy(out, &cache_stats, sizeof(cache_stats));
+}
 
 /* ---- Base64 helpers ---- */
 
@@ -271,11 +658,24 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
 
   if (result == KC_SUCCESS) {
     const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
+
+    /* Update auth caches */
+    if (session->cred_hash_valid) {
+      poscache_insert(session->authcid, login_as, session->cred_hash);
+      negcache_remove(session->cred_hash);
+    }
+
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL PLAIN: Successful authentication for %s (client %C)",
               login_as, acptr);
     sasl_complete_login(acptr, login_as, CurrentTime);
   } else {
+    /* Update auth caches */
+    if (session->cred_hash_valid) {
+      negcache_insert(session->authcid, session->cred_hash);
+      poscache_remove(session->cred_hash);
+    }
+
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL PLAIN: Failed authentication for %s (client %C, result %d)",
               session->authcid, acptr, result);
@@ -350,6 +750,45 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
               authcid_str, authzid_str, sptr);
   }
 
+  /* Auth cache check — avoids Keycloak round-trip for repeated attempts */
+  if (authcache_initialized) {
+    uint64_t cred_hash = authcache_hash(authcid_str, password_str);
+
+    /* 1. Negative cache — reject known-bad credentials immediately */
+    if (negcache_check(cred_hash)) {
+      log_write(LS_SYSTEM, L_DEBUG, 0,
+                "SASL PLAIN: Negative cache hit for %s (client %C)",
+                authcid_str, sptr);
+      send_reply(sptr, ERR_SASLFAIL, "");
+      session->state = SASL_STATE_FAILED;
+      cli_saslcookie(sptr) = 0;
+      cli_saslstart(sptr) = 0;
+      if (t_active(&cli_sasltimeout(sptr)))
+        timer_del(&cli_sasltimeout(sptr));
+      sasl_session_free(sptr);
+      if (cli_auth(sptr))
+        auth_sasl_done(cli_auth(sptr));
+      return 0;
+    }
+
+    /* 2. Positive cache — accept known-good credentials immediately */
+    {
+      char cached_account[ACCOUNTLEN + 1];
+      if (poscache_check(cred_hash, cached_account, sizeof(cached_account))) {
+        const char *login_as = session->authzid[0] ? session->authzid : cached_account;
+        log_write(LS_SYSTEM, L_DEBUG, 0,
+                  "SASL PLAIN: Positive cache hit for %s (client %C)",
+                  authcid_str, sptr);
+        sasl_complete_login(sptr, login_as, CurrentTime);
+        return 0;
+      }
+    }
+
+    /* Save hash in session for callback to update caches */
+    session->cred_hash = cred_hash;
+    session->cred_hash_valid = 1;
+  }
+
   /* Set state to waiting for Keycloak response */
   session->state = SASL_STATE_WAITING_KC;
 
@@ -360,7 +799,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
 
   /* Fire async Keycloak password verification */
   log_write(LS_SYSTEM, L_DEBUG, 0,
-            "SASL PLAIN: Verifying credentials for %s (client %C)",
+            "SASL PLAIN: Verifying credentials for %s via Keycloak (client %C)",
             authcid_str, sptr);
   kc_user_verify_password(authcid_str, password_str, sasl_plain_cb, ctx);
 
@@ -1504,6 +1943,10 @@ int sasl_local_init(void)
 
   sasl_local_initialized = 1;
   kc_sasl_healthy = 1;  /* Optimistic — kc_keycloak_init() already succeeded */
+
+  /* Initialize auth caches */
+  authcache_init();
+
   log_write(LS_SYSTEM, L_NOTICE, 0,
             "SASL LOCAL: Initialized — will validate credentials via Keycloak");
 
