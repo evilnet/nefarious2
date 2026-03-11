@@ -490,6 +490,7 @@ extern int feature_get(struct Client* from, const char* const* fields,
 
 extern void feature_unmark(void);
 extern void feature_mark(void);
+extern int feature_conf_loading(void);
 
 extern void feature_report(struct Client* to, const struct StatDesc* sd,
                            char* param);

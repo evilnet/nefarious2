@@ -1491,11 +1491,24 @@ feature_get(struct Client* from, const char* const* fields, int count)
   return 0;
 }
 
+static int features_loading = 0; /**< True while config file is being parsed */
+
+/** Return whether a config file is currently being parsed.
+ * Feature notify callbacks can use this to defer work until
+ * after all features are set.
+ */
+int feature_conf_loading(void)
+{
+  return features_loading;
+}
+
 /** Called before reading the .conf to clear all dirty marks. */
 void
 feature_unmark(void)
 {
   int i;
+
+  features_loading = 1;
 
   /* Start batching CAP notify calls for aggregation */
   cap_notify_begin_batch();
@@ -1547,6 +1560,8 @@ feature_mark(void)
     if (change && features[i].notify)
       (*features[i].notify)(); /* call change notify function */
   }
+
+  features_loading = 0;
 
   /* Flush aggregated CAP notify messages */
   cap_notify_flush();

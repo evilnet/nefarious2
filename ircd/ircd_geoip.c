@@ -258,10 +258,16 @@ void geoip_apply_mark(struct Client* cptr, char* country, char* continent, char*
   SetGeoIP(cptr);
 }
 
-/** Handle an update to FEAT_GEOIP_ENABLE. */
+/** Handle an update to FEAT_GEOIP_ENABLE.
+ * During config parsing, GEOIP_ENABLE may be set before GEOIP_FILE
+ * or GEOIP_IPV6_FILE. Defer loading — geoip_init() is called
+ * explicitly after config parsing completes (startup and rehash).
+ * For runtime /SET changes, reload immediately.
+ */
 void geoip_handle_enable(void)
 {
-  geoip_init();
+  if (!feature_conf_loading())
+    geoip_init();
 }
 
 /** Handle an update to FEAT_MMDB_FILE. */
