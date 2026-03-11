@@ -2417,8 +2417,16 @@ int bounce_promote_alias(struct BouncerSession *session)
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
-  ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
-                sizeof(session->hs_origin) - 1);
+  {
+    int was_local = is_local_session(session);
+    ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
+                  sizeof(session->hs_origin) - 1);
+    /* Session moved to a different server — delete stale MDBX record.
+     * Without this, both servers persist the session and both restore
+     * a ghost on restart, causing a nick collision on link. */
+    if (was_local && !is_local_session(session))
+      bounce_db_del(session->hs_sessid);
+  }
 
   /* A2: Update remaining aliases' alias_primary to point to new primary.
    * Must happen BEFORE A4 (remove old_primary from channels) so that
