@@ -64,6 +64,7 @@
 #include "userload.h"
 #include "watch.h"
 #include "history.h"
+#include "sasl_auth.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <fcntl.h>
@@ -619,6 +620,7 @@ int exit_client(struct Client *cptr,
     on_for = CurrentTime - cli_firsttime(victim);
 
     if (IsUser(victim) || IsUserPort(victim)) {
+      sasl_session_free(victim);  /* Clean up local SASL session if present */
       abort_sasl(victim, 0);
       auth_send_exit(victim);
       pending_rename_client_exit(victim);

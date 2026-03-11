@@ -100,6 +100,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "metadata.h"
+#include "sasl_auth.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -237,87 +238,21 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendrawto_one(acptr, MSG_AUTHENTICATE " %s", data);
     return 0;
   } else if (reply[0] == 'L') {
+    /* Store account name and creation time for sasl_complete_login() on D S */
     if (parc > 5)
       cli_saslacccreate(acptr) = atoi(parv[5]);
     ircd_strncpy(cli_saslaccount(acptr), data, ACCOUNTLEN + 1);
-    send_reply(acptr, RPL_LOGGEDIN,
-               BadPtr(cli_name(acptr)) ? "*" : cli_name(acptr),
-               (!cli_user(acptr) || BadPtr(cli_user(acptr)->username)) ? "*" : cli_user(acptr)->username,
-               (!cli_user(acptr) || BadPtr(cli_user(acptr)->host)) ? "*" : cli_user(acptr)->host,
-               cli_saslaccount(acptr), cli_saslaccount(acptr));
-    if (cli_auth(acptr))
-      auth_set_account(cli_auth(acptr), cli_saslaccount(acptr));
-    if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
-         (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
-        feature_bool(FEAT_SASL_AUTOHIDEHOST)) {
-      SetHiddenHost(acptr);
-    }
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
-      SetSASLComplete(acptr);
-      send_reply(acptr, RPL_SASLSUCCESS);
-
-      /* For registered users (post-registration reauth), update their account
-       * and broadcast AC to propagate the change network-wide.
-       */
-      if (IsRegistered(acptr) && cli_user(acptr) && cli_saslaccount(acptr)[0]) {
-        char type = IsAccount(acptr) ? 'M' : 'R';
-
-        /* Update account if changed */
-        if (ircd_strcmp(cli_user(acptr)->account, cli_saslaccount(acptr)) != 0) {
-          /* Load account-linked metadata BEFORE setting account flag.
-           * This ensures metadata is in place before we propagate the account
-           * change to other servers and notify channel members.
-           */
-          metadata_load_account(acptr, cli_saslaccount(acptr));
-
-          ircd_strncpy(cli_user(acptr)->account, cli_saslaccount(acptr), ACCOUNTLEN + 1);
-          SetAccount(acptr);
-
-          bounce_emit_alias_update(acptr, "account", cli_user(acptr)->account);
-
-          if (cli_saslacccreate(acptr))
-            cli_user(acptr)->acc_create = cli_saslacccreate(acptr);
-
-          /* Notify channel members with account-notify capability */
-          sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr,
-                                                  CAP_ACCNOTIFY, CAP_NONE,
-                                                  "%s", cli_user(acptr)->account);
-
-          /* Propagate to other servers - use extended format if enabled */
-          if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
-            if (cli_user(acptr)->acc_create) {
-              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu",
-                                    acptr, type, cli_user(acptr)->account,
-                                    cli_user(acptr)->acc_create);
-            } else {
-              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s",
-                                    acptr, type, cli_user(acptr)->account);
-            }
-          } else {
-            /* Non-extended format: AC <user> <account> [timestamp] */
-            if (cli_user(acptr)->acc_create) {
-              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s %Tu",
-                                    acptr, cli_user(acptr)->account,
-                                    cli_user(acptr)->acc_create);
-            } else {
-              sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %s",
-                                    acptr, cli_user(acptr)->account);
-            }
-          }
-
-          /* Apply hidden host if applicable */
-          if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
-               (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&
-              IsHiddenHost(acptr))
-            hide_hostmask(acptr);
-        }
-      }
+      /* Success — use shared login completion function */
+      sasl_complete_login(acptr, cli_saslaccount(acptr), cli_saslacccreate(acptr));
+      return 0;
     } else if (data[0] == 'F') {
       send_reply(acptr, ERR_SASLFAIL, "");
     } else if (data[0] == 'A') {
       send_reply(acptr, ERR_SASLABORTED);
     }
+    /* Cleanup for failure/abort cases (success cleanup is in sasl_complete_login) */
     if ((cli_saslagent(acptr) != NULL) && cli_saslagentref(cli_saslagent(acptr)))
       cli_saslagentref(cli_saslagent(acptr))--;
     cli_saslagent(acptr) = NULL;

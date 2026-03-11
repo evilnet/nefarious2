@@ -98,6 +98,7 @@
 #include "s_auth.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "sasl_auth.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 
@@ -126,6 +127,11 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
   if (parv[1][0] == '*' && parv[1][1] == '\0') {
     /* Only abort if there's an active session */
     if (cli_saslcookie(cptr) && !IsSASLComplete(cptr)) {
+      /* Local SASL session takes priority */
+      if (cli_saslsession(cptr)) {
+        sasl_abort_local(cptr);
+        return 0;
+      }
       /* Notify IAuth if applicable */
       if (auth_iauth_handles_sasl())
         auth_send_sasl_abort(cptr);
@@ -159,7 +165,20 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       timer_del(&cli_sasltimeout(cptr));
   }
 
-  /* Check if IAuth handles SASL */
+  /* Path 1: Local Keycloak-based SASL (highest priority) */
+  if (sasl_local_available()) {
+    if (cli_saslsession(cptr)) {
+      /* Continuation of an existing local SASL session */
+      return sasl_continue(cptr, parv[1]);
+    }
+    /* New session — sasl_start() returns 0 on success, -1 if mechanism
+     * is unsupported (fall through to IAuth/P10 for unknown mechanisms) */
+    if (sasl_start(cptr, parv[1]) == 0)
+      return 0;
+    /* Fall through to IAuth/P10 if sasl_start returned -1 */
+  }
+
+  /* Path 2: IAuth SASL */
   if (auth_iauth_handles_sasl()) {
     /* Route SASL to IAuth */
     if (!cli_saslcookie(cptr)) {

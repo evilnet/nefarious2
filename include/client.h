@@ -64,6 +64,7 @@ struct Privs;
 struct AuthRequest;
 struct MetadataEntry;
 struct MetadataSub;
+struct SASLSession;
 
 /*
  * Structures
@@ -474,6 +475,7 @@ struct Client {
   unsigned int cli_saslcookie;      /**< SASL session cookie */
   time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
   struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
+  struct SASLSession* cli_saslsession; /**< Local SASL session state (NULL if not using local path) */
 
   /* IRCv3 Metadata */
   struct MetadataEntry* cli_metadata;    /**< Client metadata key-value pairs */
@@ -645,6 +647,8 @@ struct Client {
 #define cli_saslstart(cli)      ((cli)->cli_saslstart)
 /** Get Timer for SASL timeout. */
 #define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
+/** Get local SASL session (may be NULL). */
+#define cli_saslsession(cli)     ((cli)->cli_saslsession)
 /** Get client metadata list. */
 #define cli_metadata(cli)        ((cli)->cli_metadata)
 /** Get client metadata subscriptions. */

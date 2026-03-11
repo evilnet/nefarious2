@@ -7,6 +7,18 @@
  * Architecture:
  *   libkc curl_multi  →  kc_event_ops  →  Nefarious Socket/Timer API
  *   libkc logging     →  kc_log_ops    →  log_write(LS_SYSTEM, ...)
+ *
+ * Socket lifecycle:
+ *   curl_multi recycles fds during callbacks (DNS socket close → TCP socket
+ *   open with same fd number). The adapter handles this with two strategies:
+ *
+ *   1. FD recycled (remove + re-add same fd): Use socket_reattach() to
+ *      re-register with epoll without touching gh_ref/gh_flags. Safe to
+ *      call from within callbacks.
+ *
+ *   2. Simple removal (no re-add): Defer socket_del to a 0-second timer.
+ *      timer_run() executes after engine_loop's event dispatch completes
+ *      and all gen_ref's are released.
  */
 
 #include "config.h"
@@ -17,6 +29,7 @@
 #include "ircd_events.h"
 #include "ircd_log.h"
 #include "ircd.h"      /* CurrentTime */
+#include "s_debug.h"   /* Debug(), DEBUG_INFO */
 
 #include <kc/kc_event.h>
 #include <kc/kc_log.h>
@@ -29,10 +42,6 @@
 /*
  * =============================================================================
  * Socket Adapter
- *
- * libkc provides an fd and event mask. Nefarious uses struct Socket
- * with socket_add/del/events. We maintain a mapping from fd → per-socket
- * context that holds the Socket struct and the libkc callback.
  * =============================================================================
  */
 
@@ -44,9 +53,20 @@ struct kc_sock_ctx {
     void *kc_data;                             /* libkc callback data */
     int fd;                                    /* file descriptor */
     int in_use;                                /* slot is active */
+    int pending_remove;                        /* deferred socket_del needed */
 };
 
 static struct kc_sock_ctx kc_sockets[MAX_KC_SOCKETS];
+
+/* Deferred removal timer: fires in timer_run() after engine_loop's
+ * event dispatch is complete and all gen_ref's are released. */
+static struct Timer kc_deferred_timer;
+static int kc_deferred_scheduled = 0;
+
+/* Forward declarations */
+static void kc_socket_event_cb(struct Event *ev);
+static unsigned int kc_to_sock_events(int kc_events);
+static void kc_schedule_deferred(void);
 
 /* Find a socket context by fd */
 static struct kc_sock_ctx *
@@ -55,6 +75,51 @@ find_sock_ctx(int fd)
     if (fd >= 0 && fd < MAX_KC_SOCKETS && kc_sockets[fd].in_use)
         return &kc_sockets[fd];
     return NULL;
+}
+
+/* Timer callback for deferred socket removals.
+ * Runs in timer_run() AFTER engine_loop's event dispatch loop completes,
+ * so all gen_ref's have been released and socket_del is safe. */
+static void
+kc_deferred_timer_cb(struct Event *ev)
+{
+    int i;
+
+    switch (ev_type(ev)) {
+    case ET_EXPIRE:
+        kc_deferred_scheduled = 0;
+
+        for (i = 0; i < MAX_KC_SOCKETS; i++) {
+            struct kc_sock_ctx *ctx = &kc_sockets[i];
+
+            if (!ctx->pending_remove || !ctx->in_use)
+                continue;
+
+            Debug((DEBUG_INFO, "kc_adapter: deferred socket_del fd=%d", i));
+            ctx->pending_remove = 0;
+            socket_del(&ctx->sock);
+            ctx->in_use = 0;
+        }
+        break;
+
+    case ET_DESTROY:
+        /* Static timer — nothing to free */
+        break;
+
+    default:
+        break;
+    }
+}
+
+/* Schedule the deferred removal timer if not already scheduled */
+static void
+kc_schedule_deferred(void)
+{
+    if (kc_deferred_scheduled)
+        return;
+    kc_deferred_scheduled = 1;
+    timer_add(timer_init(&kc_deferred_timer), kc_deferred_timer_cb, NULL,
+              TT_RELATIVE, 0);
 }
 
 /* Nefarious event callback - translates Event to libkc callback */
@@ -69,10 +134,12 @@ kc_socket_event_cb(struct Event *ev)
 
     switch (ev_type(ev)) {
     case ET_READ:
-        ctx->kc_callback(ctx->fd, KC_EVENT_READ, ctx->kc_data);
-        break;
     case ET_WRITE:
-        ctx->kc_callback(ctx->fd, KC_EVENT_WRITE, ctx->kc_data);
+        Debug((DEBUG_INFO, "kc_adapter: socket_event fd=%d type=%s",
+               ctx->fd, ev_type(ev) == ET_READ ? "READ" : "WRITE"));
+        ctx->kc_callback(ctx->fd,
+                          ev_type(ev) == ET_READ ? KC_EVENT_READ : KC_EVENT_WRITE,
+                          ctx->kc_data);
         break;
     case ET_DESTROY:
         /* Socket being destroyed by event engine - clean up our tracking */
@@ -104,18 +171,42 @@ ircd_kc_socket_add(int fd, int events,
 {
     struct kc_sock_ctx *ctx;
 
-    if (fd < 0 || fd >= MAX_KC_SOCKETS)
+    Debug((DEBUG_INFO, "kc_adapter: socket_add fd=%d events=%d", fd, events));
+
+    if (fd < 0 || fd >= MAX_KC_SOCKETS) {
+        log_write(LS_SYSTEM, L_ERROR, 0,
+                  "kc_adapter: socket_add fd=%d out of range (max %d)",
+                  fd, MAX_KC_SOCKETS);
         return -1;
+    }
 
     ctx = &kc_sockets[fd];
+
+    if (ctx->in_use && ctx->pending_remove) {
+        /* Strategy A: FD recycled — curl removed the old socket and is
+         * re-adding the same fd (e.g., DNS close → TCP open with same fd).
+         *
+         * Cancel the deferred remove. Use socket_reattach() to re-register
+         * with epoll without touching gh_ref/gh_flags, then update the
+         * event interest mask. The Socket struct stays alive. */
+        Debug((DEBUG_INFO, "kc_adapter: socket_reattach fd=%d events=%d", fd, events));
+        ctx->pending_remove = 0;
+        ctx->kc_callback = callback;
+        ctx->kc_data = data;
+        socket_reattach(&ctx->sock, fd);
+        socket_events(&ctx->sock, kc_to_sock_events(events));
+        return 0;
+    }
+
     if (ctx->in_use) {
-        /* Already tracked — update instead */
+        /* Already tracked, not pending remove — just update */
         ctx->kc_callback = callback;
         ctx->kc_data = data;
         socket_events(&ctx->sock, kc_to_sock_events(events));
         return 0;
     }
 
+    /* Brand new fd — fresh registration */
     memset(ctx, 0, sizeof(*ctx));
     ctx->kc_callback = callback;
     ctx->kc_data = data;
@@ -150,19 +241,23 @@ ircd_kc_socket_remove(int fd)
     if (!ctx)
         return;
 
-    socket_del(&ctx->sock);
-    ctx->in_use = 0;
+    Debug((DEBUG_INFO, "kc_adapter: socket_remove fd=%d", fd));
+
+    /* Strategy B: Defer socket_del to a 0-second timer.
+     * socket_del is unsafe during event dispatch (clears GEN_ACTIVE while
+     * engine_loop holds a gen_ref). The timer fires in timer_run() after
+     * all socket events are processed and gen_ref's released.
+     *
+     * If socket_add is called for this fd before the timer fires
+     * (fd recycling), Strategy A kicks in and cancels the deferred remove. */
+    ctx->pending_remove = 1;
+    ctx->kc_callback = NULL;  /* Stop delivering events */
+    kc_schedule_deferred();
 }
 
 /*
  * =============================================================================
  * Timer Adapter
- *
- * libkc needs millisecond-resolution one-shot timers. Nefarious Timer has
- * second resolution with TT_RELATIVE type. We round up ms to seconds, and
- * use poll_hint_ms for sub-second accuracy (similar to X3 adapter).
- *
- * Each timer is heap-allocated since libkc may cancel them.
  * =============================================================================
  */
 
@@ -173,12 +268,7 @@ struct kc_timer_ctx {
     int active;                            /* still valid */
 };
 
-/* Nefarious timer event callback.
- *
- * For one-shot timers (TT_RELATIVE without GEN_READD), Nefarious fires
- * ET_EXPIRE followed by ET_DESTROY. We invoke the libkc callback on
- * ET_EXPIRE but defer freeing to ET_DESTROY to avoid double-free.
- */
+/* Nefarious timer event callback. */
 static void
 kc_timer_event_cb(struct Event *ev)
 {
@@ -191,13 +281,12 @@ kc_timer_event_cb(struct Event *ev)
     switch (ev_type(ev)) {
     case ET_EXPIRE:
         if (ctx->active && ctx->kc_callback) {
+            Debug((DEBUG_INFO, "kc_adapter: timer_expire"));
             ctx->active = 0;
             ctx->kc_callback(ctx->kc_data);
         }
-        /* Don't free here — ET_DESTROY follows for one-shot timers */
         break;
     case ET_DESTROY:
-        /* Final cleanup — safe to free now */
         free(ctx);
         break;
     default:
@@ -221,12 +310,12 @@ ircd_kc_timer_add(unsigned long ms,
     ctx->kc_data = data;
     ctx->active = 1;
 
-    /* Round up to at least 1 second */
+    /* Round up ms to seconds. Allow 0 — fires on next timer_run() pass. */
     seconds = (time_t)(ms / 1000);
     if (ms % 1000)
         seconds++;
-    if (seconds < 1)
-        seconds = 1;
+
+    Debug((DEBUG_INFO, "kc_adapter: timer_add ms=%lu seconds=%ld", ms, (long)seconds));
 
     timer_add(timer_init(&ctx->timer), kc_timer_event_cb, ctx,
               TT_RELATIVE, seconds);
@@ -246,11 +335,8 @@ ircd_kc_timer_cancel(void *timer_handle)
     ctx->kc_callback = NULL;
 
     if (t_active(&ctx->timer)) {
-        /* timer_del generates ET_DESTROY, which frees ctx.
-         * After this call, ctx is invalid. */
         timer_del(&ctx->timer);
     } else {
-        /* Timer already expired/destroyed — free directly */
         free(ctx);
     }
 }
@@ -270,14 +356,8 @@ ircd_kc_now(void)
 static void
 ircd_kc_poll_hint_ms(long timeout_ms)
 {
-    /* Nefarious engine_loop calculates wait from timer_next.
-     * For sub-second accuracy, we add a short-lived timer to wake
-     * the event loop quickly. If timeout_ms <= 0, no hint needed. */
     (void)timeout_ms;
-    /* TODO: Nefarious doesn't have a poll_hint mechanism like X3's ioset.
-     * The timer adapter rounds up to 1 second which is sufficient for
-     * curl_multi timeouts. If more precision is needed, the engine_loop
-     * could be extended. */
+    /* TODO: Nefarious doesn't have a poll_hint mechanism like X3's ioset. */
 }
 
 /*
@@ -332,6 +412,7 @@ void
 ircd_kc_adapter_init(void)
 {
     memset(kc_sockets, 0, sizeof(kc_sockets));
+    kc_deferred_scheduled = 0;
 }
 
 const struct kc_event_ops *
@@ -355,6 +436,10 @@ ircd_kc_adapter_cleanup(void)
             socket_del(&kc_sockets[i].sock);
             kc_sockets[i].in_use = 0;
         }
+    }
+    if (kc_deferred_scheduled) {
+        timer_del(&kc_deferred_timer);
+        kc_deferred_scheduled = 0;
     }
 }
 

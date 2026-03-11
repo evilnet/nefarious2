@@ -44,6 +44,7 @@
 #include "send.h"
 #include "s_auth.h"
 #include "s_user.h"
+#include "sasl_auth.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -202,6 +203,13 @@ void cap_notify_flush(void)
 static const char *
 get_effective_sasl_mechanisms(void)
 {
+  /* Local Keycloak mechanisms take priority.
+   * This intentionally overrides any P10 SASL M broadcast from X3
+   * (which calls set_sasl_mechanisms() and would conflict). */
+  const char *local_mechs = sasl_local_mechanisms();
+  if (local_mechs)
+    return local_mechs;
+
   const char *mechs = get_sasl_mechanisms();
   if (mechs)
     return mechs;
@@ -220,7 +228,13 @@ get_effective_sasl_mechanisms(void)
 static int
 sasl_server_available(void)
 {
-  const char *sasl_server = feature_str(FEAT_SASL_SERVER);
+  const char *sasl_server;
+
+  /* Local Keycloak SASL — only if Keycloak is actually reachable.
+   * Per IRCv3 spec: "Servers MUST NOT advertise the sasl capability
+   * if the authentication layer is unavailable." */
+  if (sasl_local_available())
+    return 1;
 
   /* IAUTH can provide SASL independently of P10 services (supports fallback
    * when services disconnects). But we still require mechanisms - if IAUTH
@@ -234,6 +248,8 @@ sasl_server_available(void)
   /* No mechanisms = no SASL, regardless of server connectivity */
   if (!get_effective_sasl_mechanisms())
     return 0;
+
+  sasl_server = feature_str(FEAT_SASL_SERVER);
 
   /* If set to "*", SASL is broadcast to all servers - check if any exist */
   if (!strcmp(sasl_server, "*"))

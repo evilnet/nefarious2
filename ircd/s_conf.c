@@ -55,6 +55,7 @@
 #include "res.h"
 #include "s_auth.h"
 #include "s_bsd.h"
+#include "sasl_auth.h"
 #include "s_debug.h"
 #include "s_misc.h"
 #include "send.h"
@@ -407,11 +408,11 @@ enum AuthorizationCheckResult attach_iline(struct Client* cptr)
       return ACR_NO_AUTHORIZATION;
     }
     /* Check if class requires SASL and SASL is unavailable from all sources.
-     * Must consider both dynamic mechanisms (from P10 SASL M broadcast) and
-     * default mechanisms (FEAT_SASL_DEFAULT_MECHANISMS for legacy X3 that
-     * cannot advertise mechanisms dynamically). */
+     * Must consider: local Keycloak SASL, IAuth, dynamic P10 mechanisms,
+     * and default mechanisms (FEAT_SASL_DEFAULT_MECHANISMS for legacy X3). */
     if (aconf->conn_class &&
         FlagHas(&aconf->conn_class->restrictflags, CRFLAG_REQUIRE_SASL) &&
+        !sasl_local_available() &&
         !auth_iauth_handles_sasl()) {
       if (!get_sasl_mechanisms()) {
         /* No dynamic mechanisms — check for legacy fallback */

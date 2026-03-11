@@ -78,9 +78,11 @@
 #include "webpush.h"
 #include "webpush_store.h"
 #include "paste_listener.h"
+#include "sasl_auth.h"
 #ifdef USE_LIBKC
 #include "ircd_kc_adapter.h"
 #include <kc/kc.h>
+#include <kc/kc_keycloak.h>
 #endif
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -1153,15 +1155,38 @@ int main(int argc, char **argv) {
   }
 
 #ifdef USE_LIBKC
-  /* Initialize libkc HTTP transport (for webpush delivery) */
-  if (feature_bool(FEAT_CAP_draft_webpush)) {
-    ircd_kc_adapter_init();
-    if (kc_init(ircd_kc_get_event_ops(), ircd_kc_get_log_ops()) != 0) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "Failed to initialize libkc HTTP transport");
-    } else {
-      /* Initialize VAPID key and webpush crypto */
-      webpush_setup();
+  {
+    /* Initialize libkc transport — needed by both webpush and local SASL */
+    int kc_needed = feature_bool(FEAT_CAP_draft_webpush)
+                 || feature_bool(FEAT_SASL_LOCAL);
+
+    if (kc_needed) {
+      ircd_kc_adapter_init();
+      if (kc_init(ircd_kc_get_event_ops(), ircd_kc_get_log_ops()) != 0) {
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "Failed to initialize libkc HTTP transport");
+      } else {
+        /* Initialize Keycloak REST API layer if SASL_LOCAL is configured */
+        if (feature_bool(FEAT_SASL_LOCAL)) {
+          struct kc_config kc_cfg;
+          memset(&kc_cfg, 0, sizeof(kc_cfg));
+          kc_cfg.base_url      = feature_str(FEAT_KEYCLOAK_URL);
+          kc_cfg.realm          = feature_str(FEAT_KEYCLOAK_REALM);
+          kc_cfg.client_id      = feature_str(FEAT_KEYCLOAK_CLIENT_ID);
+          kc_cfg.client_secret  = feature_str(FEAT_KEYCLOAK_CLIENT_SECRET);
+
+          if (kc_keycloak_init(&kc_cfg) != 0) {
+            log_write(LS_SYSTEM, L_WARNING, 0,
+                      "Failed to initialize Keycloak REST API — local SASL unavailable");
+          } else {
+            sasl_local_init();
+          }
+        }
+
+        /* Initialize webpush if enabled */
+        if (feature_bool(FEAT_CAP_draft_webpush))
+          webpush_setup();
+      }
     }
   }
 #endif
