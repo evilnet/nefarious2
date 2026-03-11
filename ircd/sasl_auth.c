@@ -34,6 +34,9 @@
 #include "metadata.h"
 
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/pem.h>
+#include <openssl/bio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -113,6 +116,14 @@ void sasl_session_free(struct Client *sptr)
     MyFree(s->accumulated_data);
     s->accumulated_data = NULL;
   }
+  if (s->scram_client_first_bare)
+    MyFree(s->scram_client_first_bare);
+  if (s->scram_server_first)
+    MyFree(s->scram_server_first);
+  if (s->scram_combined_nonce)
+    MyFree(s->scram_combined_nonce);
+  if (s->scram_salt_b64)
+    MyFree(s->scram_salt_b64);
   MyFree(s);
   cli_saslsession(sptr) = NULL;
 }
@@ -641,6 +652,586 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
   return 0;
 }
 
+/* ---- SCRAM-SHA-256 mechanism handler ---- */
+
+/** Base64 encode helper (returns MyMalloc'd string, caller must MyFree). */
+static char *sasl_base64_encode(const unsigned char *input, size_t len)
+{
+  int outlen = ((len + 2) / 3) * 4;
+  char *output = (char *)MyMalloc(outlen + 1);
+  EVP_EncodeBlock((unsigned char *)output, input, len);
+  return output;
+}
+
+/** XOR two byte arrays of equal length. */
+static void xor_bytes(unsigned char *out, const unsigned char *a,
+                      const unsigned char *b, size_t len)
+{
+  size_t i;
+  for (i = 0; i < len; i++)
+    out[i] = a[i] ^ b[i];
+}
+
+/** Compute HMAC-SHA-256.  Output must be 32 bytes. */
+static int hmac_sha256(const unsigned char *key, size_t key_len,
+                       const unsigned char *data, size_t data_len,
+                       unsigned char *out)
+{
+  unsigned int out_len = 32;
+  if (!HMAC(EVP_sha256(), key, key_len, data, data_len, out, &out_len))
+    return -1;
+  return 0;
+}
+
+/** Compute SHA-256 hash. Output must be 32 bytes. */
+static int sha256_hash(const unsigned char *data, size_t len, unsigned char *out)
+{
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (!ctx)
+    return -1;
+  if (!EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) ||
+      !EVP_DigestUpdate(ctx, data, len) ||
+      !EVP_DigestFinal_ex(ctx, out, NULL)) {
+    EVP_MD_CTX_free(ctx);
+    return -1;
+  }
+  EVP_MD_CTX_free(ctx);
+  return 0;
+}
+
+/** Callback from kc_user_get() — received SCRAM credentials. */
+static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *data)
+{
+  struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
+  struct Client *acptr;
+  struct SASLSession *session;
+  unsigned char nonce_bytes[18];
+  char *nonce_b64;
+  char combined_nonce[128];
+  char server_first[512];
+  char *server_first_b64;
+  size_t decoded_len;
+
+  acptr = LocalClientArray[ctx->fd];
+  if (!acptr || cli_saslcookie(acptr) != ctx->cookie) {
+    MyFree(ctx);
+    return;
+  }
+  MyFree(ctx);
+
+  session = cli_saslsession(acptr);
+  if (!session || session->state != SASL_STATE_WAITING_KC) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL SCRAM: Creds callback for %C but session state is wrong", acptr);
+    return;
+  }
+
+  /* Check that SCRAM credentials exist for this user */
+  if (result != KC_SUCCESS || !user || !user->scram_salt ||
+      !user->scram_stored_key || !user->scram_server_key ||
+      user->scram_iterations < 1) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL SCRAM: No SCRAM credentials for %s (client %C)",
+              session->authcid, acptr);
+    send_reply(acptr, ERR_SASLFAIL, "");
+    session->state = SASL_STATE_FAILED;
+    cli_saslcookie(acptr) = 0;
+    cli_saslstart(acptr) = 0;
+    if (t_active(&cli_sasltimeout(acptr)))
+      timer_del(&cli_sasltimeout(acptr));
+    sasl_session_free(acptr);
+    if (cli_auth(acptr))
+      auth_sasl_done(cli_auth(acptr));
+    return;
+  }
+
+  /* Decode stored key and server key from base64 */
+  if (!sasl_base64_decode(user->scram_stored_key, session->scram_stored_key,
+                          sizeof(session->scram_stored_key), &decoded_len) ||
+      decoded_len != 32) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL SCRAM: Invalid StoredKey for %s", session->authcid);
+    send_reply(acptr, ERR_SASLFAIL, "");
+    sasl_abort_local(acptr);
+    return;
+  }
+  if (!sasl_base64_decode(user->scram_server_key, session->scram_server_key,
+                          sizeof(session->scram_server_key), &decoded_len) ||
+      decoded_len != 32) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL SCRAM: Invalid ServerKey for %s", session->authcid);
+    send_reply(acptr, ERR_SASLFAIL, "");
+    sasl_abort_local(acptr);
+    return;
+  }
+
+  DupString(session->scram_salt_b64, user->scram_salt);
+  session->scram_iterations = user->scram_iterations;
+
+  /* Generate server nonce (18 random bytes → 24 base64 chars) */
+  {
+    int i;
+    for (i = 0; i < 18; i++)
+      nonce_bytes[i] = (unsigned char)(ircrandom() & 0xFF);
+  }
+  nonce_b64 = sasl_base64_encode(nonce_bytes, 18);
+
+  /* Combined nonce = client_nonce + server_nonce */
+  {
+    /* Extract client nonce from client-first-bare: "n=user,r=<nonce>" */
+    const char *r = strstr(session->scram_client_first_bare, ",r=");
+    if (!r) {
+      MyFree(nonce_b64);
+      send_reply(acptr, ERR_SASLFAIL, "");
+      sasl_abort_local(acptr);
+      return;
+    }
+    snprintf(combined_nonce, sizeof(combined_nonce), "%s%s", r + 3, nonce_b64);
+  }
+  MyFree(nonce_b64);
+
+  DupString(session->scram_combined_nonce, combined_nonce);
+
+  /* Build server-first message: r=<combined>,s=<salt>,i=<iterations> */
+  snprintf(server_first, sizeof(server_first), "r=%s,s=%s,i=%d",
+           combined_nonce, session->scram_salt_b64, session->scram_iterations);
+
+  DupString(session->scram_server_first, server_first);
+
+  /* Base64 encode and send as AUTHENTICATE challenge */
+  server_first_b64 = sasl_base64_encode((const unsigned char *)server_first,
+                                         strlen(server_first));
+
+  {
+    char sendbuf[600];
+    snprintf(sendbuf, sizeof(sendbuf), "%s %s", MSG_AUTHENTICATE, server_first_b64);
+    sendrawto_one(acptr, sendbuf);
+  }
+  MyFree(server_first_b64);
+
+  /* Reset chunk accumulation for the next client message (client-final) */
+  if (session->accumulated_data) {
+    MyFree(session->accumulated_data);
+    session->accumulated_data = NULL;
+    session->data_len = 0;
+    session->data_alloc = 0;
+    session->chunks_received = 0;
+  }
+
+  /* Now waiting for client-final message */
+  session->state = SASL_STATE_SCRAM_SENT;
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL SCRAM: Sent server-first for %s (client %C)",
+            session->authcid, acptr);
+}
+
+/** Handle SCRAM client-first message: n,,n=<user>,r=<nonce>
+ *  Parses username and client nonce, then async-fetches SCRAM creds from KC.
+ */
+static int sasl_scram_client_first(struct Client *sptr,
+                                    const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+  const char *msg = (const char *)decoded;
+  const char *bare;
+  const char *n_field;
+  const char *r_field;
+  char username[ACCOUNTLEN + 1];
+  struct sasl_cb_ctx *ctx;
+
+  /* Must start with "n,," (no channel binding, no authzid) or "n,a=..," */
+  if (len < 5 || msg[0] != 'n' || msg[1] != ',')
+    return -1;
+
+  /* Find the start of client-first-message-bare (after "n,,") */
+  {
+    const char *second_comma = memchr(msg + 2, ',', len - 2);
+    if (!second_comma)
+      return -1;
+    bare = second_comma + 1;
+  }
+
+  /* Extract authzid if present */
+  if (msg[2] == 'a' && msg[3] == '=') {
+    const char *comma = memchr(msg + 4, ',', len - 4);
+    if (comma) {
+      size_t azlen = comma - msg - 4;
+      if (azlen > 0 && azlen < ACCOUNTLEN)  {
+        memcpy(session->authzid, msg + 4, azlen);
+        session->authzid[azlen] = '\0';
+      }
+    }
+  }
+
+  /* Parse n=<username> */
+  n_field = bare;
+  if (strncmp(n_field, "n=", 2) != 0)
+    return -1;
+
+  r_field = strstr(n_field, ",r=");
+  if (!r_field)
+    return -1;
+
+  {
+    size_t ulen = r_field - n_field - 2;
+    if (ulen == 0 || ulen > ACCOUNTLEN) {
+      send_reply(sptr, ERR_SASLFAIL, ": invalid SCRAM username");
+      return -1;
+    }
+    memcpy(username, n_field + 2, ulen);
+    username[ulen] = '\0';
+  }
+
+  /* Save authcid and client-first-message-bare for later verification */
+  ircd_strncpy(session->authcid, username, sizeof(session->authcid));
+  DupString(session->scram_client_first_bare, bare);
+
+  /* Async fetch user from Keycloak to get SCRAM credentials */
+  session->state = SASL_STATE_WAITING_KC;
+
+  ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
+  ctx->fd = cli_fd(sptr);
+  ctx->cookie = cli_saslcookie(sptr);
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL SCRAM: Fetching credentials for %s (client %C)",
+            username, sptr);
+  kc_user_get(username, sasl_scram_creds_cb, ctx);
+
+  return 0;
+}
+
+/** Handle SCRAM client-final message: c=<binding>,r=<nonce>,p=<proof>
+ *  Verifies the client proof using stored credentials.
+ */
+static int sasl_scram_client_final(struct Client *sptr,
+                                    const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+  const char *msg = (const char *)decoded;
+  const char *msg_end = msg + len;
+  const char *p_field;
+  const char *proof_b64;
+  unsigned char client_proof[32];
+  unsigned char client_key[32];
+  unsigned char stored_key_check[32];
+  unsigned char client_sig[32];
+  unsigned char server_sig[32];
+  char *server_sig_b64;
+  char auth_message[2048];
+  const char *client_final_without_proof;
+  size_t cfwp_len;
+  size_t decoded_len;
+
+  /* Find p=<proof> at end of message */
+  p_field = strstr(msg, ",p=");
+  if (!p_field) {
+    send_reply(sptr, ERR_SASLFAIL, ": malformed SCRAM client-final");
+    return -1;
+  }
+  proof_b64 = p_field + 3;
+
+  /* Verify the nonce matches */
+  {
+    const char *r_field = strstr(msg, ",r=");
+    if (!r_field || r_field > p_field) {
+      send_reply(sptr, ERR_SASLFAIL, ": missing nonce in client-final");
+      return -1;
+    }
+    {
+      size_t nonce_len = p_field - r_field - 3;
+      if (nonce_len != strlen(session->scram_combined_nonce) ||
+          strncmp(r_field + 3, session->scram_combined_nonce, nonce_len) != 0) {
+        send_reply(sptr, ERR_SASLFAIL, ": nonce mismatch");
+        return -1;
+      }
+    }
+  }
+
+  /* Decode client proof from base64 */
+  if (!sasl_base64_decode(proof_b64, client_proof, sizeof(client_proof), &decoded_len) ||
+      decoded_len != 32) {
+    send_reply(sptr, ERR_SASLFAIL, ": invalid client proof");
+    return -1;
+  }
+
+  /* Build AuthMessage = client-first-bare + "," + server-first + "," + client-final-without-proof */
+  client_final_without_proof = msg;
+  cfwp_len = p_field - msg;
+  snprintf(auth_message, sizeof(auth_message), "%s,%s,%.*s",
+           session->scram_client_first_bare,
+           session->scram_server_first,
+           (int)cfwp_len, client_final_without_proof);
+
+  /* ClientSignature = HMAC(StoredKey, AuthMessage) */
+  if (hmac_sha256(session->scram_stored_key, 32,
+                  (const unsigned char *)auth_message, strlen(auth_message),
+                  client_sig) != 0) {
+    send_reply(sptr, ERR_SASLFAIL, ": HMAC computation failed");
+    return -1;
+  }
+
+  /* ClientKey = ClientProof XOR ClientSignature */
+  xor_bytes(client_key, client_proof, client_sig, 32);
+
+  /* StoredKey' = H(ClientKey) — should match stored StoredKey */
+  if (sha256_hash(client_key, 32, stored_key_check) != 0) {
+    send_reply(sptr, ERR_SASLFAIL, ": hash computation failed");
+    return -1;
+  }
+
+  if (memcmp(stored_key_check, session->scram_stored_key, 32) != 0) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL SCRAM: Proof verification failed for %s (client %C)",
+              session->authcid, sptr);
+    send_reply(sptr, ERR_SASLFAIL, "");
+    return -1;
+  }
+
+  /* Verification passed! Compute ServerSignature for mutual auth */
+  /* ServerSignature = HMAC(ServerKey, AuthMessage) */
+  if (hmac_sha256(session->scram_server_key, 32,
+                  (const unsigned char *)auth_message, strlen(auth_message),
+                  server_sig) != 0) {
+    send_reply(sptr, ERR_SASLFAIL, ": HMAC computation failed");
+    return -1;
+  }
+
+  /* Send server-final: v=<server_signature> */
+  {
+    char server_final[128];
+    char *sf_b64;
+
+    server_sig_b64 = sasl_base64_encode(server_sig, 32);
+    snprintf(server_final, sizeof(server_final), "v=%s", server_sig_b64);
+    MyFree(server_sig_b64);
+
+    sf_b64 = sasl_base64_encode((const unsigned char *)server_final,
+                                 strlen(server_final));
+
+    {
+      char sendbuf[600];
+      snprintf(sendbuf, sizeof(sendbuf), "%s %s", MSG_AUTHENTICATE, sf_b64);
+      sendrawto_one(sptr, sendbuf);
+    }
+    MyFree(sf_b64);
+  }
+
+  /* Complete login */
+  {
+    const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL SCRAM: Successful authentication for %s (client %C)",
+              login_as, sptr);
+    sasl_complete_login(sptr, login_as, CurrentTime);
+  }
+
+  return 0;
+}
+
+/* ---- ECDSA-NIST256P-CHALLENGE mechanism handler ---- */
+
+/** Callback from kc_user_get() — received ECDSA public key. */
+static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data)
+{
+  struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
+  struct Client *acptr;
+  struct SASLSession *session;
+  unsigned char challenge[32];
+  char *challenge_b64;
+  int i;
+
+  acptr = LocalClientArray[ctx->fd];
+  if (!acptr || cli_saslcookie(acptr) != ctx->cookie) {
+    MyFree(ctx);
+    return;
+  }
+  MyFree(ctx);
+
+  session = cli_saslsession(acptr);
+  if (!session || session->state != SASL_STATE_WAITING_KC) {
+    return;
+  }
+
+  if (result != KC_SUCCESS || !user || !user->ecdsa_pubkey) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL ECDSA: No ECDSA key for %s (client %C)",
+              session->authcid, acptr);
+    send_reply(acptr, ERR_SASLFAIL, "");
+    sasl_abort_local(acptr);
+    return;
+  }
+
+  /* Save the public key PEM for later verification */
+  DupString(session->scram_client_first_bare, user->ecdsa_pubkey);
+  /* (Reusing scram_client_first_bare to store ecdsa_pubkey — it's just a string slot) */
+
+  /* Generate 32-byte random challenge */
+  for (i = 0; i < 32; i++)
+    challenge[i] = (unsigned char)(ircrandom() & 0xFF);
+
+  /* Save challenge for verification (reusing scram_stored_key — 32 bytes) */
+  memcpy(session->scram_stored_key, challenge, 32);
+
+  /* Send challenge as AUTHENTICATE <base64(challenge)> */
+  challenge_b64 = sasl_base64_encode(challenge, 32);
+  {
+    char sendbuf[600];
+    snprintf(sendbuf, sizeof(sendbuf), "%s %s", MSG_AUTHENTICATE, challenge_b64);
+    sendrawto_one(acptr, sendbuf);
+  }
+  MyFree(challenge_b64);
+
+  /* Waiting for signed response */
+  session->state = SASL_STATE_SCRAM_SENT;  /* Reuse this state for "challenge sent" */
+
+  /* Reset chunk accumulation for the response */
+  if (session->accumulated_data) {
+    MyFree(session->accumulated_data);
+    session->accumulated_data = NULL;
+    session->data_len = 0;
+    session->data_alloc = 0;
+    session->chunks_received = 0;
+  }
+}
+
+/** Handle ECDSA client-first: just the authcid (username). */
+static int sasl_ecdsa_client_first(struct Client *sptr,
+                                    const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+  const char *username = (const char *)decoded;
+  struct sasl_cb_ctx *ctx;
+
+  if (len == 0 || len > ACCOUNTLEN) {
+    send_reply(sptr, ERR_SASLFAIL, ": invalid ECDSA username");
+    return -1;
+  }
+
+  ircd_strncpy(session->authcid, username, sizeof(session->authcid));
+
+  session->state = SASL_STATE_WAITING_KC;
+
+  ctx = (struct sasl_cb_ctx *)MyMalloc(sizeof(struct sasl_cb_ctx));
+  ctx->fd = cli_fd(sptr);
+  ctx->cookie = cli_saslcookie(sptr);
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL ECDSA: Fetching public key for %s (client %C)",
+            session->authcid, sptr);
+  kc_user_get(session->authcid, sasl_ecdsa_key_cb, ctx);
+
+  return 0;
+}
+
+/** Verify ECDSA signature over the challenge. */
+static int sasl_ecdsa_verify(struct Client *sptr,
+                              const unsigned char *signature, size_t sig_len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+  const char *pubkey_pem = session->scram_client_first_bare;  /* Stored earlier */
+  BIO *bio = NULL;
+  EVP_PKEY *pkey = NULL;
+  EVP_MD_CTX *md_ctx = NULL;
+  int rc = -1;
+
+  if (!pubkey_pem || !*pubkey_pem) {
+    send_reply(sptr, ERR_SASLFAIL, ": no public key");
+    return -1;
+  }
+
+  /* Load PEM public key */
+  bio = BIO_new_mem_buf(pubkey_pem, -1);
+  if (!bio)
+    goto cleanup;
+
+  pkey = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+  if (!pkey) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL ECDSA: Failed to parse public key for %s", session->authcid);
+    goto cleanup;
+  }
+
+  /* Verify signature over the challenge */
+  md_ctx = EVP_MD_CTX_new();
+  if (!md_ctx)
+    goto cleanup;
+
+  if (EVP_DigestVerifyInit(md_ctx, NULL, EVP_sha256(), NULL, pkey) != 1)
+    goto cleanup;
+
+  if (EVP_DigestVerifyUpdate(md_ctx, session->scram_stored_key, 32) != 1)
+    goto cleanup;
+
+  if (EVP_DigestVerifyFinal(md_ctx, signature, sig_len) == 1) {
+    rc = 0;  /* Signature valid */
+  }
+
+cleanup:
+  if (md_ctx)
+    EVP_MD_CTX_free(md_ctx);
+  if (pkey)
+    EVP_PKEY_free(pkey);
+  if (bio)
+    BIO_free(bio);
+
+  return rc;
+}
+
+/** Handle ECDSA client response: the signed challenge. */
+static int sasl_ecdsa_client_response(struct Client *sptr,
+                                       const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+
+  if (sasl_ecdsa_verify(sptr, decoded, len) == 0) {
+    const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL ECDSA: Successful authentication for %s (client %C)",
+              login_as, sptr);
+    sasl_complete_login(sptr, login_as, CurrentTime);
+    return 0;
+  }
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "SASL ECDSA: Signature verification failed for %s (client %C)",
+            session->authcid, sptr);
+  send_reply(sptr, ERR_SASLFAIL, "");
+  return -1;
+}
+
+/** Top-level ECDSA handler — dispatches based on progress. */
+static int sasl_handle_ecdsa(struct Client *sptr, const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+
+  if (!session->scram_client_first_bare) {
+    /* First message: username */
+    return sasl_ecdsa_client_first(sptr, decoded, len);
+  } else {
+    /* Second message: signed challenge */
+    return sasl_ecdsa_client_response(sptr, decoded, len);
+  }
+}
+
+/** Top-level SCRAM-SHA-256 handler — dispatches based on SCRAM progress.
+ *  Uses presence of scram_server_first to distinguish client-first from client-final,
+ *  since sasl_continue's chunk accumulation overwrites session->state to WAITING_DATA.
+ */
+static int sasl_handle_scram(struct Client *sptr, const unsigned char *decoded, size_t len)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+
+  if (!session->scram_server_first) {
+    /* Haven't sent server-first yet — this is client-first */
+    return sasl_scram_client_first(sptr, decoded, len);
+  } else {
+    /* Already sent server-first — this is client-final */
+    return sasl_scram_client_final(sptr, decoded, len);
+  }
+}
+
 #endif /* USE_LIBKC */
 
 /* ---- Framework functions ---- */
@@ -658,7 +1249,7 @@ const char *sasl_local_mechanisms(void)
 {
   if (!sasl_local_available())
     return NULL;
-  return "PLAIN,EXTERNAL,OAUTHBEARER";
+  return "PLAIN,EXTERNAL,OAUTHBEARER,SCRAM-SHA-256,ECDSA-NIST256P-CHALLENGE";
 }
 
 int sasl_start(struct Client *sptr, const char *mechanism)
@@ -675,6 +1266,10 @@ int sasl_start(struct Client *sptr, const char *mechanism)
     mech = SASL_MECH_EXTERNAL;
   else if (ircd_strcmp(mechanism, "OAUTHBEARER") == 0)
     mech = SASL_MECH_OAUTHBEARER;
+  else if (ircd_strcmp(mechanism, "SCRAM-SHA-256") == 0)
+    mech = SASL_MECH_SCRAM_SHA256;
+  else if (ircd_strcmp(mechanism, "ECDSA-NIST256P-CHALLENGE") == 0)
+    mech = SASL_MECH_ECDSA;
   else
     return -1;  /* Unsupported mechanism — fall through to P10 */
 
@@ -726,8 +1321,11 @@ int sasl_continue(struct Client *sptr, const char *data)
     return 0;
   }
 
-  /* Only accept data in INIT or WAITING_DATA states */
-  if (session->state != SASL_STATE_INIT && session->state != SASL_STATE_WAITING_DATA)
+  /* Only accept data in states that expect client messages.
+   * SCRAM_SENT also accepts data (client-final after server-first). */
+  if (session->state != SASL_STATE_INIT &&
+      session->state != SASL_STATE_WAITING_DATA &&
+      session->state != SASL_STATE_SCRAM_SENT)
     return -1;
 
   /* Handle chunk accumulation per IRCv3 SASL spec:
@@ -812,6 +1410,20 @@ dispatch:
         break;
       case SASL_MECH_OAUTHBEARER:
         rc = sasl_handle_oauthbearer(sptr, decoded, decoded_len);
+        if (rc < 0) {
+          sasl_abort_local(sptr);
+          return 0;
+        }
+        break;
+      case SASL_MECH_SCRAM_SHA256:
+        rc = sasl_handle_scram(sptr, decoded, decoded_len);
+        if (rc < 0) {
+          sasl_abort_local(sptr);
+          return 0;
+        }
+        break;
+      case SASL_MECH_ECDSA:
+        rc = sasl_handle_ecdsa(sptr, decoded, decoded_len);
         if (rc < 0) {
           sasl_abort_local(sptr);
           return 0;

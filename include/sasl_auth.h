@@ -40,6 +40,7 @@ enum SASLState {
   SASL_STATE_INIT,          /**< Mechanism selected, waiting for data */
   SASL_STATE_WAITING_DATA,  /**< Accumulating chunked data */
   SASL_STATE_WAITING_KC,    /**< Async Keycloak request in flight */
+  SASL_STATE_SCRAM_SENT,    /**< SCRAM: server-first sent, waiting for client-final */
   SASL_STATE_COMPLETE,
   SASL_STATE_FAILED,
 };
@@ -57,6 +58,15 @@ struct SASLSession {
   int                chunks_received;
   char               authcid[ACCOUNTLEN + 1];  /**< Authentication identity */
   char               authzid[ACCOUNTLEN + 1];  /**< Authorization identity (may differ) */
+
+  /* SCRAM-SHA-256 state (Phase 3) */
+  char              *scram_client_first_bare;  /**< "n=user,r=client_nonce" */
+  char              *scram_server_first;       /**< "r=combined,s=salt,i=iter" */
+  char              *scram_combined_nonce;      /**< Server's full nonce */
+  unsigned char      scram_stored_key[32];     /**< Binary StoredKey from KC */
+  unsigned char      scram_server_key[32];     /**< Binary ServerKey from KC */
+  char              *scram_salt_b64;           /**< Base64 salt from KC */
+  int                scram_iterations;         /**< Iteration count from KC */
 };
 
 /** Heap-allocated context for async Keycloak callbacks.
