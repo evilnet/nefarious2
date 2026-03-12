@@ -42,6 +42,7 @@ enum SASLState {
   SASL_STATE_WAITING_DATA,  /**< Accumulating chunked data */
   SASL_STATE_WAITING_KC,    /**< Async Keycloak request in flight */
   SASL_STATE_SCRAM_SENT,    /**< SCRAM: server-first sent, waiting for client-final */
+  SASL_STATE_SCRAM_VERIFY,  /**< SCRAM: server-final sent, waiting for client ack */
   SASL_STATE_COMPLETE,
   SASL_STATE_FAILED,
 };

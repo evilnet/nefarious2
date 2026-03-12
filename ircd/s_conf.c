@@ -408,10 +408,13 @@ enum AuthorizationCheckResult attach_iline(struct Client* cptr)
       return ACR_NO_AUTHORIZATION;
     }
     /* Check if class requires SASL and SASL is unavailable from all sources.
+     * Skip if user already authenticated via SASL (IsAccount) — the check
+     * gates whether SASL *can* be offered, not whether it *was* used.
      * Must consider: local Keycloak SASL, IAuth, dynamic P10 mechanisms,
      * and default mechanisms (FEAT_SASL_DEFAULT_MECHANISMS for legacy X3). */
     if (aconf->conn_class &&
         FlagHas(&aconf->conn_class->restrictflags, CRFLAG_REQUIRE_SASL) &&
+        !IsAccount(cptr) &&
         !sasl_local_available() &&
         !auth_iauth_handles_sasl()) {
       if (!get_sasl_mechanisms()) {

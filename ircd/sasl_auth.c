@@ -60,6 +60,18 @@ static int kc_sasl_healthy = 0;
 /** Whether sasl_local_init() succeeded. */
 static int sasl_local_initialized = 0;
 
+/** Timer for periodic health retry when Keycloak is unhealthy. */
+static struct Timer sasl_health_retry_timer;
+static int sasl_health_retry_timer_active = 0;
+
+#ifdef USE_LIBKC
+static void sasl_health_retry_timer_cb(struct Event *ev);
+static void sasl_start_health_retry(void);
+static void sasl_stop_health_retry(void);
+static void sasl_mark_unhealthy(int result);
+static void sasl_mark_healthy(void);
+#endif
+
 /* ==================================================================
  * Auth cache — negative (failed) and positive (successful) PLAIN
  * results, keyed by SipHash-2-4 of lowercase(username)+NUL+password.
@@ -462,19 +474,31 @@ static int sasl_base64_decode(const char *input, unsigned char *output,
     return 1;
   }
 
-  /* EVP_DecodeBlock requires output buffer of at least 3/4 of input */
-  if ((size_t)inlen * 3 / 4 > output_size)
-    return 0;
+  /* EVP_DecodeBlock writes (inlen/4)*3 bytes before padding adjustment.
+   * Use a temporary buffer to avoid overflowing output when the raw
+   * decode is larger than the final padded result. */
+  {
+    size_t raw_len = ((size_t)inlen / 4) * 3;
+    unsigned char tmp[SASL_DATA_MAX];
 
-  outlen = EVP_DecodeBlock(output, (const unsigned char *)input, inlen);
-  if (outlen < 0)
-    return 0;
+    if (raw_len > sizeof(tmp))
+      return 0;
 
-  /* EVP_DecodeBlock doesn't account for padding, adjust for = characters */
-  if (inlen > 0 && input[inlen - 1] == '=') {
-    outlen--;
-    if (inlen > 1 && input[inlen - 2] == '=')
+    outlen = EVP_DecodeBlock(tmp, (const unsigned char *)input, inlen);
+    if (outlen < 0)
+      return 0;
+
+    /* EVP_DecodeBlock doesn't account for padding, adjust for = characters */
+    if (inlen > 0 && input[inlen - 1] == '=') {
       outlen--;
+      if (inlen > 1 && input[inlen - 2] == '=')
+        outlen--;
+    }
+
+    if ((size_t)outlen > output_size)
+      return 0;
+
+    memcpy(output, tmp, outlen);
   }
 
   *decoded_len = outlen;
@@ -659,6 +683,10 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
   if (result == KC_SUCCESS) {
     const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
 
+    /* Successful auth confirms Keycloak is reachable */
+    if (!kc_sasl_healthy)
+      sasl_mark_healthy();
+
     /* Update auth caches */
     if (session->cred_hash_valid) {
       poscache_insert(session->authcid, login_as, session->cred_hash);
@@ -670,8 +698,18 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
               login_as, acptr);
     sasl_complete_login(acptr, login_as, CurrentTime);
   } else {
-    /* Update auth caches */
-    if (session->cred_hash_valid) {
+    /* Distinguish auth failures from connectivity errors.
+     * KC_FORBIDDEN = wrong password (HTTP 401/400) — Keycloak is working fine.
+     * KC_NOT_FOUND = user doesn't exist — Keycloak is working fine.
+     * Everything else (KC_ERROR, KC_UNAVAILABLE, KC_TIMEOUT, KC_TOKEN_ERROR,
+     * KC_INVALID_RESPONSE) indicates a connectivity or service problem.
+     */
+    if (result != KC_FORBIDDEN && result != KC_NOT_FOUND) {
+      sasl_mark_unhealthy(result);
+    }
+
+    /* Update auth caches — only for actual auth failures, not connectivity errors */
+    if ((result == KC_FORBIDDEN || result == KC_NOT_FOUND) && session->cred_hash_valid) {
       negcache_insert(session->authcid, session->cred_hash);
       poscache_remove(session->cred_hash);
     }
@@ -831,6 +869,9 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
   }
 
   if (result == KC_SUCCESS && count == 1) {
+    /* Successful lookup confirms Keycloak is reachable */
+    if (!kc_sasl_healthy)
+      sasl_mark_healthy();
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL EXTERNAL: Fingerprint matched user %s (client %C)",
               users[0].username, acptr);
@@ -849,6 +890,9 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
     if (cli_auth(acptr))
       auth_sasl_done(cli_auth(acptr));
   } else {
+    /* Distinguish connectivity errors from "user not found" */
+    if (result != KC_SUCCESS && result != KC_NOT_FOUND)
+      sasl_mark_unhealthy(result);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL EXTERNAL: No user found for fingerprint (client %C, result %d)",
               acptr, result);
@@ -996,6 +1040,9 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
   }
 
   if (result == KC_SUCCESS && info && info->active && info->username) {
+    /* Successful introspect confirms Keycloak is reachable */
+    if (!kc_sasl_healthy)
+      sasl_mark_healthy();
     /* Use authzid if set, otherwise username from token */
     const char *login_as = session->authzid[0] ? session->authzid : info->username;
     log_write(LS_SYSTEM, L_INFO, 0,
@@ -1003,6 +1050,9 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
               login_as, acptr);
     sasl_complete_login(acptr, login_as, CurrentTime);
   } else {
+    /* Connectivity errors should degrade health; invalid/inactive tokens should not */
+    if (result != KC_SUCCESS && result != KC_FORBIDDEN)
+      sasl_mark_unhealthy(result);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: Introspect failed for %C (result %d, active=%d)",
               acptr, result, info ? info->active : 0);
@@ -1169,6 +1219,9 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
   if (result != KC_SUCCESS || !user || !user->scram_salt ||
       !user->scram_stored_key || !user->scram_server_key ||
       user->scram_iterations < 1) {
+    /* Distinguish connectivity errors from missing credentials */
+    if (result != KC_SUCCESS && result != KC_NOT_FOUND)
+      sasl_mark_unhealthy(result);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL SCRAM: No SCRAM credentials for %s (client %C)",
               session->authcid, acptr);
@@ -1183,6 +1236,10 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
       auth_sasl_done(cli_auth(acptr));
     return;
   }
+
+  /* Successful credential lookup confirms Keycloak is reachable */
+  if (!kc_sasl_healthy)
+    sasl_mark_healthy();
 
   /* Decode stored key and server key from base64 */
   if (!sasl_base64_decode(user->scram_stored_key, session->scram_stored_key,
@@ -1457,15 +1514,31 @@ static int sasl_scram_client_final(struct Client *sptr,
     MyFree(sf_b64);
   }
 
-  /* Complete login */
-  {
-    const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "SASL SCRAM: Successful authentication for %s (client %C)",
-              login_as, sptr);
-    sasl_complete_login(sptr, login_as, CurrentTime);
+  /* Proof verified — wait for client's final ack before completing login */
+  session->state = SASL_STATE_SCRAM_VERIFY;
+
+  /* Reset chunk accumulation for the ack */
+  if (session->accumulated_data) {
+    MyFree(session->accumulated_data);
+    session->accumulated_data = NULL;
+    session->data_len = 0;
+    session->data_alloc = 0;
+    session->chunks_received = 0;
   }
 
+  return 0;
+}
+
+/** Handle SCRAM client ack after server-final — complete login. */
+static int sasl_scram_complete(struct Client *sptr)
+{
+  struct SASLSession *session = cli_saslsession(sptr);
+  const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "SASL SCRAM: Successful authentication for %s (client %C)",
+            login_as, sptr);
+  sasl_complete_login(sptr, login_as, CurrentTime);
   return 0;
 }
 
@@ -1494,6 +1567,9 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
   }
 
   if (result != KC_SUCCESS || !user || !user->ecdsa_pubkey) {
+    /* Distinguish connectivity errors from missing credentials */
+    if (result != KC_SUCCESS && result != KC_NOT_FOUND)
+      sasl_mark_unhealthy(result);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL ECDSA: No ECDSA key for %s (client %C)",
               session->authcid, acptr);
@@ -1501,6 +1577,10 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
     sasl_abort_local(acptr);
     return;
   }
+
+  /* Successful key lookup confirms Keycloak is reachable */
+  if (!kc_sasl_healthy)
+    sasl_mark_healthy();
 
   /* Save the public key PEM for later verification */
   DupString(session->scram_client_first_bare, user->ecdsa_pubkey);
@@ -1662,7 +1742,10 @@ static int sasl_handle_scram(struct Client *sptr, const unsigned char *decoded, 
 {
   struct SASLSession *session = cli_saslsession(sptr);
 
-  if (!session->scram_server_first) {
+  if (session->state == SASL_STATE_SCRAM_VERIFY) {
+    /* Client ack after server-final v= message — complete login */
+    return sasl_scram_complete(sptr);
+  } else if (!session->scram_server_first) {
     /* Haven't sent server-first yet — this is client-first */
     return sasl_scram_client_first(sptr, decoded, len);
   } else {
@@ -1761,10 +1844,12 @@ int sasl_continue(struct Client *sptr, const char *data)
   }
 
   /* Only accept data in states that expect client messages.
-   * SCRAM_SENT also accepts data (client-final after server-first). */
+   * SCRAM_SENT also accepts data (client-final after server-first).
+   * SCRAM_VERIFY accepts the final client ack after server-final. */
   if (session->state != SASL_STATE_INIT &&
       session->state != SASL_STATE_WAITING_DATA &&
-      session->state != SASL_STATE_SCRAM_SENT)
+      session->state != SASL_STATE_SCRAM_SENT &&
+      session->state != SASL_STATE_SCRAM_VERIFY)
     return -1;
 
   /* Handle chunk accumulation per IRCv3 SASL spec:
@@ -1824,12 +1909,14 @@ dispatch:
 
     if (session->accumulated_data && session->data_len > 0) {
       if (!sasl_base64_decode(session->accumulated_data, decoded,
-                              sizeof(decoded), &decoded_len)) {
+                              sizeof(decoded) - 1, &decoded_len)) {
         send_reply(sptr, ERR_SASLFAIL, ": base64 decode failed");
         sasl_abort_local(sptr);
         return 0;
       }
     }
+    /* Null-terminate — SCRAM handlers use strstr/strlen on decoded text */
+    decoded[decoded_len] = '\0';
 
     switch (session->mech) {
 #ifdef USE_LIBKC
@@ -1975,26 +2062,96 @@ int sasl_local_init(void)
 #endif
 }
 
-/** Health check callback — called from kc_token_ensure() result. */
+/** Start periodic health retry timer (called when Keycloak becomes unhealthy). */
 #ifdef USE_LIBKC
-static void sasl_health_cb(int result, const struct kc_access_token *token, void *data)
+static void sasl_start_health_retry(void)
+{
+  int interval;
+
+  if (sasl_health_retry_timer_active)
+    return;
+
+  interval = feature_int(FEAT_SASL_HEALTH_INTERVAL);
+  if (interval <= 0)
+    interval = 30;
+
+  timer_add(timer_init(&sasl_health_retry_timer), sasl_health_retry_timer_cb,
+            NULL, TT_PERIODIC, interval);
+  sasl_health_retry_timer_active = 1;
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL LOCAL: Health retry timer started (interval %d seconds)", interval);
+}
+
+/** Stop periodic health retry timer (called when Keycloak recovers). */
+static void sasl_stop_health_retry(void)
+{
+  if (!sasl_health_retry_timer_active)
+    return;
+
+  timer_del(&sasl_health_retry_timer);
+  sasl_health_retry_timer_active = 0;
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL LOCAL: Health retry timer stopped — Keycloak is healthy");
+}
+
+/** Periodic health retry timer callback — probes Keycloak when unhealthy. */
+static void sasl_health_retry_timer_cb(struct Event *ev)
+{
+  if (ev_type(ev) == ET_EXPIRE) {
+    if (kc_sasl_healthy) {
+      /* Already recovered (e.g. via sasl_plain_cb path) — stop retrying */
+      sasl_stop_health_retry();
+      return;
+    }
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "SASL LOCAL: Health retry — probing Keycloak availability");
+    kc_token_ensure(sasl_health_cb, NULL);
+  } else if (ev_type(ev) == ET_DESTROY) {
+    sasl_health_retry_timer_active = 0;
+  }
+}
+
+/** Mark Keycloak as unhealthy and start retry timer.
+ *  Sends CAP DEL if transitioning from healthy to unhealthy.
+ */
+static void sasl_mark_unhealthy(int result)
 {
   int was_healthy = kc_sasl_healthy;
 
+  kc_sasl_healthy = 0;
+  if (was_healthy && sasl_local_initialized) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL LOCAL: Keycloak became unreachable (result %d) — removing SASL", result);
+    send_cap_notify("sasl", 0, NULL);
+  }
+  sasl_start_health_retry();
+}
+
+/** Mark Keycloak as healthy and stop retry timer.
+ *  Sends CAP NEW if transitioning from unhealthy to healthy.
+ */
+static void sasl_mark_healthy(void)
+{
+  int was_healthy = kc_sasl_healthy;
+
+  kc_sasl_healthy = 1;
+  if (!was_healthy && sasl_local_initialized) {
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "SASL LOCAL: Keycloak is now reachable — advertising SASL");
+    send_cap_notify("sasl", 1, sasl_local_mechanisms());
+  }
+  sasl_stop_health_retry();
+}
+
+/** Health check callback — called from kc_token_ensure() result. */
+static void sasl_health_cb(int result, const struct kc_access_token *token, void *data)
+{
   if (result == KC_SUCCESS) {
-    kc_sasl_healthy = 1;
-    if (!was_healthy && sasl_local_initialized) {
-      log_write(LS_SYSTEM, L_NOTICE, 0,
-                "SASL LOCAL: Keycloak is now reachable — advertising SASL");
-      send_cap_notify("sasl", 1, sasl_local_mechanisms());
-    }
+    sasl_mark_healthy();
   } else {
-    kc_sasl_healthy = 0;
-    if (was_healthy && sasl_local_initialized) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "SASL LOCAL: Keycloak became unreachable (result %d) — removing SASL", result);
-      send_cap_notify("sasl", 0, NULL);
-    }
+    sasl_mark_unhealthy(result);
   }
 }
 #endif
