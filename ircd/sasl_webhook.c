@@ -131,6 +131,7 @@ static void handle_credential_event(const struct kc_webhook_event *event)
               "WEBHOOK: Password change for %s — invalidating auth caches",
               event->username);
     sasl_cache_invalidate_user(event->username);
+    sendcmdto_serv_butone(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
     wh_stats.cache_invalidations++;
   }
   else if (event->operation_type == KC_WH_OP_DELETE && event->representation) {
@@ -144,6 +145,7 @@ static void handle_credential_event(const struct kc_webhook_event *event)
     } else {
       /* Password deleted — invalidate caches */
       sasl_cache_invalidate_user(event->username);
+      sendcmdto_serv_butone(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
       wh_stats.cache_invalidations++;
     }
   }
@@ -164,6 +166,7 @@ static void handle_user_event(const struct kc_webhook_event *event)
               "WEBHOOK: Account deleted: %s — invalidating caches",
               event->username);
     sasl_cache_invalidate_user(event->username);
+    sendcmdto_serv_butone(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
     wh_stats.cache_invalidations++;
 
     /* Default: deauth (AC U). KILL_ON_DELETE escalates to disconnect. */
@@ -178,6 +181,7 @@ static void handle_user_event(const struct kc_webhook_event *event)
                 "WEBHOOK: Account disabled: %s — invalidating caches",
                 event->username);
       sasl_cache_invalidate_user(event->username);
+      sendcmdto_serv_butone(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
       wh_stats.cache_invalidations++;
 
       /* Default: deauth (AC U). KILL_ON_DISABLE escalates to disconnect. */
@@ -311,3 +315,30 @@ void sasl_webhook_stats_get(struct sasl_webhook_stats *out)
 }
 
 #endif /* USE_LIBKC */
+
+/* ---- P10 CI (Cache Invalidate) handler ----
+ * This handler is independent of USE_LIBKC since any server
+ * can receive CI messages from a peer that has webhook support.
+ *
+ * Format: <servernumeric> CI <username>
+ */
+int ms_cacheinval(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  const char *username;
+
+  if (parc < 2)
+    return 0;
+
+  username = parv[1];
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "CI: Cache invalidation for %s from %C", username, sptr);
+
+  /* Invalidate local auth caches for this user */
+  sasl_cache_invalidate_user(username);
+
+  /* Relay to all other servers (flood-fill) */
+  sendcmdto_serv_butone(sptr, CMD_CACHEINVAL, cptr, "%s", username);
+
+  return 0;
+}

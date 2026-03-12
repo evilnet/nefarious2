@@ -588,6 +588,10 @@ struct Client;
 #define TOK_MDBX	"MX"
 #define CMD_MDBX	MSG_MDBX, TOK_MDBX
 
+#define MSG_CACHEINVAL	"CACHEINVAL"
+#define TOK_CACHEINVAL	"CI"
+#define CMD_CACHEINVAL	MSG_CACHEINVAL, TOK_CACHEINVAL
+
 /*
  * Constants
  */

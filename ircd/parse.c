@@ -706,6 +706,14 @@ struct Message msgtab[] = {
     ""
   },
   {
+    MSG_CACHEINVAL,
+    TOK_CACHEINVAL,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_cacheinval, m_ignore, m_ignore },
+    ""
+  },
+  {
     MSG_ASLL,
     TOK_ASLL,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
