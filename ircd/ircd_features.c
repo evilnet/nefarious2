@@ -1069,14 +1069,12 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_OPS_OVERRIDE, 0, 1, 0),
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
-  F_I(MULTILINE_MAX_BYTES, 0, 4096, feature_notify_multiline),
-  F_I(MULTILINE_MAX_LINES, 0, 24, feature_notify_multiline),
+  F_I(MULTILINE_MAX_BYTES, 0, 16384, feature_notify_multiline),
+  F_I(MULTILINE_MAX_LINES, 0, 100, feature_notify_multiline),
   F_I(MULTILINE_LAG_DISCOUNT, 0, 50, 0),
   F_I(MULTILINE_CHANNEL_LAG_DISCOUNT, 0, 75, 0),
   F_I(MULTILINE_MAX_LAG, 0, 30, 0),
   F_B(MULTILINE_RECIPIENT_DISCOUNT, 0, 1, 0),
-  F_B(MULTILINE_ECHO_PROTECT, 0, 1, 0),
-  F_I(MULTILINE_ECHO_MAX_FACTOR, 0, 2, 0),
   F_I(MULTILINE_LEGACY_THRESHOLD, 0, 3, 0),
   F_I(MULTILINE_LEGACY_MAX_LINES, 0, 5, 0),
   F_B(MULTILINE_FALLBACK_NOTIFY, 0, 1, 0),
@@ -1111,6 +1109,7 @@ static struct FeatureDesc {
   F_B(BOUNCER_AUTO_RESUME, 0, 1, 0),
   F_B(BOUNCER_AUTO_REPLAY, 0, 1, 0),
   F_I(BOUNCER_AUTO_REPLAY_LIMIT, 0, 100, 0),
+  F_I(REPLAY_SENDQ_THRESHOLD, 0, 50, 0),
   F_B(BOUNCER_REQUIRE_TLS, 0, 1, 0),
   F_I(BOUNCER_MAX_HOLD, 0, 1209600, 0),      /* 14 days */
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */

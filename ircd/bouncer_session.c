@@ -50,6 +50,7 @@
 #include "send.h"
 #include "hash.h"
 #include "querycmds.h"
+#include "replay.h"
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "parse.h"
@@ -3884,7 +3885,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * Clients with draft/chathistory do their own replay via CHATHISTORY command.
    *
    * Two paths:
-   * 1. Local MDBX available: use sync bouncer_auto_replay() (existing path).
+   * 1. Local MDBX available: use async replay_start_bouncer().
    * 2. No local store but federation available: use chathistory_auto_replay_fed()
    *    which issues CHATHISTORY LATEST * queries to storage servers.
    *    Follows IRCv3 chathistory client pseudocode pattern. */
@@ -3895,9 +3896,9 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
       since = session->hs_created;
 
     if (history_is_available()) {
-      /* Local store: sync replay from MDBX */
+      /* Local store: async replay from MDBX */
       if (since > 0 && since < CurrentTime)
-        bouncer_auto_replay(sptr, session, since);
+        replay_start_bouncer(sptr, since, 0);
     } else {
       /* No local store: federate to storage servers */
       int limit = feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);

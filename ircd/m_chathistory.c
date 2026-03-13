@@ -50,6 +50,7 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "replay.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -227,8 +228,10 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
   MyFree(b64);
 }
 
-/** Message type names for formatting */
-static const char *msg_type_cmd[] = {
+/** Message type names for formatting.
+ * Non-static: shared with replay.c for async history delivery.
+ */
+const char *msg_type_cmd[] = {
   "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
   "KICK", "MODE", "TOPIC", "TAGMSG", "PRIVMSG" /* GAP rendered as PRIVMSG */
 };
@@ -477,7 +480,7 @@ static int parse_s2s_reference(const char *ref, enum HistoryRefType *ref_type, c
  * @param[in] buflen Size of buffer.
  * @param[in] sptr Client receiving the batch.
  */
-static void generate_batch_id(char *buf, size_t buflen, struct Client *sptr)
+void generate_batch_id(char *buf, size_t buflen, struct Client *sptr)
 {
   static unsigned long batch_counter = 0;
   ircd_snprintf(0, buf, buflen, "hist%lu%s", ++batch_counter, cli_yxx(sptr));
@@ -489,7 +492,7 @@ static void generate_batch_id(char *buf, size_t buflen, struct Client *sptr)
  * @param[in] type Message type.
  * @return 1 if should send, 0 if should skip.
  */
-static int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
+int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
 {
   /* PRIVMSG, NOTICE, and GAP markers are always sent */
   if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE || type == HISTORY_GAP)
@@ -510,8 +513,8 @@ static int should_send_message_type(struct Client *sptr, enum HistoryMessageType
  * @param[in] time_str ISO timestamp string.
  * @param[in] cmd Command name (PRIVMSG, NOTICE, etc.).
  */
-static void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
-                                  const char *target, const char *outer_batchid,
+void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
+                           const char *target, const char *outer_batchid,
                                   const char *time_str, const char *cmd)
 {
   char *separator;
@@ -861,9 +864,9 @@ static int has_ops_override(struct Client *sptr, struct Channel *chptr)
  * @param[in] sender Original sender hostmask.
  * @param[in] count Number of collapsed gap markers.
  */
-static void send_gap_marker(struct Client *sptr, const char *target,
-                             const char *batchid, const char *time_str,
-                             const char *msgid, const char *sender,
+void send_gap_marker(struct Client *sptr, const char *target,
+                      const char *batchid, const char *time_str,
+                      const char *msgid, const char *sender,
                              int count)
 {
   char content[128];
@@ -961,6 +964,10 @@ static void send_history_batch(struct Client *sptr, const char *target,
     send_history_message(sptr, msg, target,
                          CapRecipientHas(sptr, CAP_BATCH) ? batchid : NULL,
                          time_str, cmd);
+
+    /* SendQ safety for federation paths (main path uses async replay) */
+    if (!sendq_replay_ok(sptr))
+      break;
   }
 
   /* End batch */
@@ -996,9 +1003,8 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
     return -1;
 
   if (count > 0 && messages) {
-    /* Send the messages as a chathistory batch (reusing internal logic) */
-    send_history_batch(sptr, target, messages, count, 0, NULL);
-    history_free_messages(messages);
+    /* Ownership of messages transfers to replay_start_batch */
+    replay_start_batch(sptr, target, messages, count, 0, NULL);
   }
 
   return count;
@@ -1249,11 +1255,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     /* Federation failed to start, fall through to local-only response */
   }
 
-  /* Send local-only response using normalized target */
-  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
-
-  /* Free messages */
-  history_free_messages(messages);
+  /* Async replay — ownership of messages transfers to ReplayState */
+  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
 
   return 0;
 }
@@ -1312,8 +1315,8 @@ static int chathistory_before(struct Client *sptr, const char *target,
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
-  history_free_messages(messages);
+  /* Async replay — ownership of messages transfers to ReplayState */
+  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
 
   return 0;
 }
@@ -1372,8 +1375,8 @@ static int chathistory_after(struct Client *sptr, const char *target,
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
-  history_free_messages(messages);
+  /* Async replay — ownership of messages transfers to ReplayState */
+  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
 
   return 0;
 }
@@ -1432,8 +1435,8 @@ static int chathistory_around(struct Client *sptr, const char *target,
       return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
-  history_free_messages(messages);
+  /* Async replay — ownership of messages transfers to ReplayState */
+  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
 
   return 0;
 }
@@ -1492,8 +1495,8 @@ static int chathistory_between(struct Client *sptr, const char *target,
     return 0;
   }
 
-  send_history_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
-  history_free_messages(messages);
+  /* Async replay — ownership of messages transfers to ReplayState */
+  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
 
   return 0;
 }
@@ -3287,11 +3290,8 @@ static void send_fed_response(struct FedRequest *req)
   for (struct HistoryMessage *m = merged; m; m = m->next)
     total++;
 
-  /* Send to client */
-  send_history_batch(client, req->target, merged, total, req->ops_override, req->label);
-
-  /* Free merged list */
-  history_free_messages(merged);
+  /* Async replay — ownership of merged list transfers to ReplayState */
+  replay_start_batch(client, req->target, merged, total, req->ops_override, req->label);
 }
 
 /** Complete a federation request - sends response and triggers cleanup.
@@ -3872,7 +3872,9 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
         ctx->total_replayed += count;
         ctx->chan_count++;
         history_free_messages(messages);
-        /* Continue to next channel synchronously */
+        /* SendQ safety — break out if sendQ is getting full */
+        if (!sendq_replay_ok(sptr))
+          return;
         continue;
       }
       if (messages)

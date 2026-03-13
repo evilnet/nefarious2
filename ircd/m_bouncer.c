@@ -50,6 +50,7 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "replay.h"
 #include "send.h"
 #include "s_debug.h"
 
@@ -97,146 +98,7 @@ static int bouncer_token(struct Client *sptr)
 /* Subcommand: RESUME                                                */
 /* ---------------------------------------------------------------- */
 
-/** Check if a PM target (nick1:nick2 format) involves the given client.
- * @param[in] target PM target in nick1:nick2 format.
- * @param[in] cptr Client to check.
- * @return 1 if client's nick matches one of the nicks, 0 otherwise.
- */
-static int is_pm_target_for_client(const char *target, struct Client *cptr)
-{
-  const char *colon = strchr(target, ':');
-  const char *mynick = cli_name(cptr);
-  size_t mynick_len, nick1_len;
 
-  if (!colon)
-    return 0;
-
-  mynick_len = strlen(mynick);
-  nick1_len = colon - target;
-
-  /* Check if first nick matches */
-  if (nick1_len == mynick_len && ircd_strncmp(target, mynick, nick1_len) == 0)
-    return 1;
-
-  /* Check if second nick matches */
-  if (ircd_strcmp(colon + 1, mynick) == 0)
-    return 1;
-
-  return 0;
-}
-
-/** Auto-replay chathistory to legacy clients after resume.
- * For clients that don't support draft/chathistory, this function
- * automatically replays missed messages since disconnection.
- */
-void bouncer_auto_replay(struct Client *sptr, struct BouncerSession *session,
-                         time_t since_time)
-{
-  struct Membership *member;
-  struct HistoryTarget *targets = NULL;
-  struct HistoryTarget *tgt;
-  int limit;
-  int total_replayed = 0;
-  int chan_count = 0;
-  int pm_count = 0;
-  char timestamp[HISTORY_TIMESTAMP_LEN];
-  char now_timestamp[HISTORY_TIMESTAMP_LEN];
-
-  /* Check if auto-replay is enabled */
-  if (!feature_bool(FEAT_BOUNCER_AUTO_REPLAY))
-    return;
-
-  /* Need a valid since time to know what to replay.
-   * Callers pass the user's idle time (user->last) — the last time any
-   * connection sent a message.  Messages arriving after that may not
-   * have been seen by the user even if they were delivered to a client
-   * that was connected at the time. */
-  if (since_time == 0)
-    return;
-
-  /* Convert since_time to timestamp string (seconds.000 format) */
-  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.000",
-                (unsigned long)since_time);
-
-  /* Current timestamp for PM target query range */
-  ircd_snprintf(0, now_timestamp, sizeof(now_timestamp), "%lu.000",
-                (unsigned long)CurrentTime);
-
-  limit = feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
-  if (limit <= 0)
-    limit = 100;
-
-  /* Replay history for each channel the user is in */
-  for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
-    const char *channame = member->channel->chname;
-    const char *chan_since = timestamp;
-    char marker_ts[32];
-    int count;
-
-    /* If this channel has a read marker ahead of idle time, use it —
-     * the user already read up to that point (possibly on another device). */
-    if (IsAccount(sptr) &&
-        metadata_readmarker_get(cli_account(sptr), channame, marker_ts) == 0 &&
-        strcmp(marker_ts, timestamp) > 0) {
-      chan_since = marker_ts;
-    }
-
-    count = chathistory_auto_replay(sptr, channame, chan_since, limit);
-    if (count > 0) {
-      total_replayed += count;
-      chan_count++;
-    }
-  }
-
-  /* Replay PMs if PM history is enabled */
-  if (feature_bool(FEAT_CHATHISTORY_PRIVATE) && IsAccount(sptr)) {
-    int target_count;
-
-    /* Query all targets with activity since disconnect */
-    target_count = history_query_targets(timestamp, now_timestamp, 50, &targets);
-
-    if (target_count > 0 && targets) {
-      for (tgt = targets; tgt; tgt = tgt->next) {
-        /* Check if this is a PM target that involves us */
-        if (strchr(tgt->target, ':') && is_pm_target_for_client(tgt->target, sptr)) {
-          int count = chathistory_auto_replay(sptr, tgt->target, timestamp, limit);
-          if (count > 0) {
-            total_replayed += count;
-            pm_count++;
-          }
-        }
-      }
-      history_free_targets(targets);
-    }
-  }
-
-  /* Send summary to client */
-  if (total_replayed > 0) {
-    if (pm_count > 0 && chan_count > 0) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :Session resumed. Replayed %d message(s) from %d channel(s) and %d PM(s).",
-                    sptr, total_replayed, chan_count, pm_count);
-    } else if (pm_count > 0) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :Session resumed. Replayed %d message(s) from %d PM(s).",
-                    sptr, total_replayed, pm_count);
-    } else {
-      sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :Session resumed. Replayed %d message(s) from %d channel(s).",
-                    sptr, total_replayed, chan_count);
-    }
-  } else {
-    /* No messages to replay - just confirm resume */
-    int total_chans = 0;
-    for (member = cli_user(sptr)->channel; member; member = member->next_channel)
-      total_chans++;
-    if (total_chans > 0) {
-      sendcmdto_one(&me, CMD_NOTICE, sptr,
-                    "%C :Session resumed. You are in %d channel(s). No missed messages.",
-                    sptr, total_chans);
-    }
-  }
-}
 
 /** Handle BOUNCER RESUME <token> - resume an existing session. */
 static int bouncer_resume(struct Client *sptr, const char *token)
@@ -290,9 +152,9 @@ static int bouncer_resume(struct Client *sptr, const char *token)
   send_note(sptr, "BOUNCER", "SESSION_RESUMED", session->hs_sessid,
             "Session resumed");
 
-  /* Auto-replay for clients without draft/chathistory. */
+  /* Async auto-replay for clients without draft/chathistory. */
   if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
-    bouncer_auto_replay(sptr, session, since_time);
+    replay_start_bouncer(sptr, since_time, 0);
   }
 
   return 0;

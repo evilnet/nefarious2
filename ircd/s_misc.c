@@ -48,6 +48,7 @@
 #include "numnicks.h"
 #include "parse.h"
 #include "querycmds.h"
+#include "replay.h"
 #include "res.h"
 #include "s_auth.h"
 #include "s_bsd.h"
@@ -327,6 +328,11 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       MyFree(cli_listing(bcptr));
       cli_listing(bcptr) = NULL;
     }
+    /*
+     * Stop a running chathistory replay clean
+     */
+    if (MyUser(bcptr) && cli_replay(bcptr))
+      replay_cancel(bcptr);
     /*
      * Clean up any pending forwarded label batches (no BATCH close sent)
      */

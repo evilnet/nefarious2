@@ -523,17 +523,6 @@ extern void bounce_free_temp_client(struct Client *temp);
  * Utility
  */
 
-/** Replay missed messages for a resumed/attached session (legacy clients).
- * @param[in] sptr Client to replay to.
- * @param[in] session Session being resumed or attached.
- * @param[in] since_time Replay messages since this time.  Callers should
- *            pass the user's idle time (user->last) so messages the user
- *            may not have read are replayed.  Fall back to disconnect_time
- *            or signon time if idle time is unavailable.
- */
-extern void bouncer_auto_replay(struct Client *sptr,
-                                 struct BouncerSession *session,
-                                 time_t since_time);
 
 /** Compute adaptive hold time for a session.
  * @param[in] session Session to compute for.

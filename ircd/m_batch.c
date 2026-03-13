@@ -647,31 +647,21 @@ process_multiline_batch(struct Client *sptr)
      * channel delivery above. PM echo for aliases is handled by
      * bounce_echo_pm_to_session.
      *
-     * Bounded echo protection: allows echo to proceed even if SendQ is
-     * near the limit, as long as we stay within an extended limit
-     * (sendq_limit + input_bytes * ECHO_MAX_FACTOR).
+     * Echo protection: skip echo only when it literally won't fit in
+     * the remaining sendQ space.  Since echo size equals the user's
+     * own input size, this is predictable and almost always delivers.
      */
     {
       int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
       int skip_echo = 0;
 
-      /* SendQ protection check */
+      /* SendQ protection: skip echo only if it literally won't fit */
       if (MyConnect(sptr)) {
-        unsigned int batch_input_bytes = con_ml_total_bytes(con);
+        unsigned int echo_bytes = con_ml_total_bytes(con);
         unsigned int current_sendq = MsgQLength(&(cli_sendQ(sptr)));
         unsigned int sendq_limit = get_sendq(sptr);
-
-        if (feature_bool(FEAT_MULTILINE_ECHO_PROTECT)) {
-          unsigned int max_echo_bytes = batch_input_bytes * feature_int(FEAT_MULTILINE_ECHO_MAX_FACTOR);
-          unsigned int extended_limit = sendq_limit + max_echo_bytes;
-          if (current_sendq > extended_limit) {
-            skip_echo = 1;
-          }
-        } else {
-          if (current_sendq >= sendq_limit) {
-            skip_echo = 1;
-          }
-        }
+        if (current_sendq + echo_bytes > sendq_limit)
+          skip_echo = 1;
       }
 
       if (!skip_echo && need_echo) {
@@ -835,22 +825,13 @@ process_multiline_batch(struct Client *sptr)
       int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
       int skip_dm_echo = 0;
 
+      /* SendQ protection: skip echo only if it literally won't fit */
       if (MyConnect(sptr)) {
-        unsigned int batch_input_bytes = con_ml_total_bytes(con);
+        unsigned int echo_bytes = con_ml_total_bytes(con);
         unsigned int current_sendq = MsgQLength(&(cli_sendQ(sptr)));
         unsigned int sendq_limit = get_sendq(sptr);
-
-        if (feature_bool(FEAT_MULTILINE_ECHO_PROTECT)) {
-          unsigned int max_echo_bytes = batch_input_bytes * feature_int(FEAT_MULTILINE_ECHO_MAX_FACTOR);
-          unsigned int extended_limit = sendq_limit + max_echo_bytes;
-          if (current_sendq > extended_limit) {
-            skip_dm_echo = 1;
-          }
-        } else {
-          if (current_sendq >= sendq_limit) {
-            skip_dm_echo = 1;
-          }
-        }
+        if (current_sendq + echo_bytes > sendq_limit)
+          skip_dm_echo = 1;
       }
 
       if (!skip_dm_echo && need_echo) {

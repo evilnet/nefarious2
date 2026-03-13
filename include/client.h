@@ -54,6 +54,7 @@
 struct ConfItem;
 struct Listener;
 struct ListingArgs;
+struct ReplayState;
 struct SLink;
 struct Server;
 struct User;
@@ -344,6 +345,7 @@ struct Connection
   HandlerType         con_handler;   /**< Message index into command table
                                         for parsing. */
   struct ListingArgs* con_listing;   /**< Current LIST status. */
+  struct ReplayState* con_replay;    /**< Current chathistory replay status. */
   unsigned int        con_max_sendq; /**< cached max send queue for client */
   unsigned int        con_max_recvq; /**< cached max recv queue for client */
   unsigned int        con_ping_freq; /**< cached ping freq */
@@ -686,6 +688,8 @@ struct Client {
 #define cli_handler(cli)	con_handler(cli_connect(cli))
 /** Get LIST status for client. */
 #define cli_listing(cli)	con_listing(cli_connect(cli))
+/** Get chathistory replay status for client. */
+#define cli_replay(cli)		con_replay(cli_connect(cli))
 /** Get cached max SendQ for client. */
 #define cli_max_sendq(cli)	con_max_sendq(cli_connect(cli))
 /** Get cached max RecvQ for client. */
@@ -775,6 +779,8 @@ struct Client {
 #define con_handler(con)	((con)->con_handler)
 /** Get the LIST status for the connection. */
 #define con_listing(con)	((con)->con_listing)
+/** Get the chathistory replay status for the connection. */
+#define con_replay(con)		((con)->con_replay)
 /** Get the maximum permitted SendQ size for the connection. */
 #define con_max_sendq(con)	((con)->con_max_sendq)
 /** Get the maximum permitted RecvQ size for the connection. */

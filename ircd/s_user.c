@@ -55,6 +55,7 @@
 #include "numnicks.h"
 #include "parse.h"
 #include "querycmds.h"
+#include "replay.h"
 #include "random.h"
 #include "s_auth.h"
 #include "s_bsd.h"
@@ -528,9 +529,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* Replay channel state */
         bounce_send_channel_state(ghost);
 
-        /* Auto-replay missed messages for legacy clients */
+        /* Async auto-replay missed messages for legacy clients */
         if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)) {
-          bouncer_auto_replay(ghost, revive_target, saved_since_time);
+          replay_start_bouncer(ghost, saved_since_time, 0);
         }
 
         /* Return special code — caller must not dereference sptr */
@@ -694,9 +695,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (auto_resumed == 1)
         bounce_send_channel_state(sptr);
 
-      /* Auto-replay for legacy clients (no chathistory CAP). */
+      /* Async auto-replay for legacy clients (no chathistory CAP). */
       if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY))
-        bouncer_auto_replay(sptr, auto_session, saved_since_time);
+        replay_start_bouncer(sptr, saved_since_time, 0);
     }
   }
   else {

@@ -47,6 +47,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "packet.h"
+#include "replay.h"
 #include "parse.h"
 #include "querycmds.h"
 #include "res.h"
@@ -847,7 +848,7 @@ void update_write(struct Client* cptr)
    * that interest.
    */
   socket_events(&(cli_socket(cptr)),
-		((MsgQLength(&cli_sendQ(cptr)) || cli_listing(cptr)) ?
+		((MsgQLength(&cli_sendQ(cptr)) || cli_listing(cptr) || cli_replay(cptr)) ?
 		 SOCK_ACTION_ADD : SOCK_ACTION_DEL) | SOCK_EVENT_WRITABLE);
 }
 
@@ -1513,6 +1514,8 @@ void client_sock_callback(struct Event* ev)
     }
 #endif
     ClrFlag(cptr, FLAG_BLOCKED);
+    if (cli_replay(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
+      replay_continue(cptr);
     if (cli_listing(cptr) && MsgQLength(&(cli_sendQ(cptr))) < 2048)
       list_next_channels(cptr);
     Debug((DEBUG_SEND, "Sending queued data to %C", cptr));

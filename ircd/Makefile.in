@@ -263,6 +263,7 @@ IRCD_SRC = \
 	parse.c \
 	querycmds.c \
 	random.c \
+	replay.c \
 	s_auth.c \
 	s_bsd.c \
 	s_conf.c \
