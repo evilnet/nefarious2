@@ -73,6 +73,9 @@ struct SASLSession {
   unsigned char      scram_server_key[32];     /**< Binary ServerKey from KC */
   char              *scram_salt_b64;           /**< Base64 salt from KC */
   int                scram_iterations;         /**< Iteration count from KC */
+
+  /* Account creation timestamp from Keycloak (epoch secs, 0 = unknown) */
+  time_t             acc_created_at;
 };
 
 /** Heap-allocated context for async Keycloak callbacks.

@@ -269,12 +269,14 @@ struct poscache_entry {
   char                  username[ACCOUNTLEN + 1];
   char                  account[ACCOUNTLEN + 1];
   time_t                timestamp;
+  time_t                created_at;   /**< Account creation time (epoch), 0 = unknown */
 };
 
 static struct poscache_entry *poscache_table[AUTHCACHE_BUCKETS];
 
 /** Insert or update a positive cache entry. */
-static void poscache_insert(const char *username, const char *account, uint64_t hash)
+static void poscache_insert(const char *username, const char *account,
+                            uint64_t hash, time_t created_at)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -283,6 +285,7 @@ static void poscache_insert(const char *username, const char *account, uint64_t 
   for (e = poscache_table[bucket]; e; e = e->next) {
     if (e->hash == hash) {
       e->timestamp = CurrentTime;
+      e->created_at = created_at;
       ircd_strncpy(e->account, account, sizeof(e->account));
       return;
     }
@@ -294,16 +297,19 @@ static void poscache_insert(const char *username, const char *account, uint64_t 
   ircd_strncpy(e->username, username, sizeof(e->username));
   ircd_strncpy(e->account, account, sizeof(e->account));
   e->timestamp = CurrentTime;
+  e->created_at = created_at;
   e->next = poscache_table[bucket];
   poscache_table[bucket] = e;
   cache_stats.pos_inserts++;
 }
 
 /** Check if credentials are in the positive cache.
- *  @param[out] account  Filled with cached account name on hit.
+ *  @param[out] account     Filled with cached account name on hit.
+ *  @param[out] created_at  Filled with cached creation timestamp on hit.
  *  @return 1 if cached (recent success), 0 if not.
  */
-static int poscache_check(uint64_t hash, char *account, size_t account_size)
+static int poscache_check(uint64_t hash, char *account, size_t account_size,
+                          time_t *created_at)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -316,6 +322,8 @@ static int poscache_check(uint64_t hash, char *account, size_t account_size)
     if (e->hash == hash) {
       if (CurrentTime - e->timestamp <= ttl) {
         ircd_strncpy(account, e->account, account_size);
+        if (created_at)
+          *created_at = e->created_at;
         cache_stats.pos_hits++;
         return 1;
       }
@@ -689,14 +697,16 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
 
     /* Update auth caches */
     if (session->cred_hash_valid) {
-      poscache_insert(session->authcid, login_as, session->cred_hash);
+      poscache_insert(session->authcid, login_as, session->cred_hash,
+                      token ? token->created_at : 0);
       negcache_remove(session->cred_hash);
     }
 
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL PLAIN: Successful authentication for %s (client %C)",
               login_as, acptr);
-    sasl_complete_login(acptr, login_as, CurrentTime);
+    sasl_complete_login(acptr, login_as,
+                        token && token->created_at ? token->created_at : 0);
   } else {
     /* Distinguish auth failures from connectivity errors.
      * KC_FORBIDDEN = wrong password (HTTP 401/400) — Keycloak is working fine.
@@ -812,12 +822,14 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
     /* 2. Positive cache — accept known-good credentials immediately */
     {
       char cached_account[ACCOUNTLEN + 1];
-      if (poscache_check(cred_hash, cached_account, sizeof(cached_account))) {
+      time_t cached_created_at = 0;
+      if (poscache_check(cred_hash, cached_account, sizeof(cached_account),
+                         &cached_created_at)) {
         const char *login_as = session->authzid[0] ? session->authzid : cached_account;
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
                   authcid_str, sptr);
-        sasl_complete_login(sptr, login_as, CurrentTime);
+        sasl_complete_login(sptr, login_as, cached_created_at);
         return 0;
       }
     }
@@ -875,7 +887,8 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL EXTERNAL: Fingerprint matched user %s (client %C)",
               users[0].username, acptr);
-    sasl_complete_login(acptr, users[0].username, CurrentTime);
+    sasl_complete_login(acptr, users[0].username,
+                        users[0].created_at ? users[0].created_at : 0);
   } else if (count > 1) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "SASL EXTERNAL: Fingerprint collision — %d users matched (client %C)",
@@ -1048,7 +1061,8 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: Introspect success for %s (client %C)",
               login_as, acptr);
-    sasl_complete_login(acptr, login_as, CurrentTime);
+    sasl_complete_login(acptr, login_as,
+                        info->created_at ? info->created_at : 0);
   } else {
     /* Connectivity errors should degrade health; invalid/inactive tokens should not */
     if (result != KC_SUCCESS && result != KC_FORBIDDEN)
@@ -1101,13 +1115,16 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
   rc = kc_jwt_validate_local(realm, token_nul, &info);
   if (rc == KC_SUCCESS && info && info->username) {
     const char *login_as = session->authzid[0] ? session->authzid : info->username;
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
-              login_as, sptr);
-    MyFree(token_nul);
-    sasl_complete_login(sptr, login_as, CurrentTime);
-    kc_jwt_token_info_free(info);
-    return 0;
+    {
+      time_t jwt_created_at = info->created_at ? info->created_at : 0;
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
+                login_as, sptr);
+      MyFree(token_nul);
+      sasl_complete_login(sptr, login_as, jwt_created_at);
+      kc_jwt_token_info_free(info);
+      return 0;
+    }
   }
 
   if (info) {
@@ -1263,6 +1280,7 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
 
   DupString(session->scram_salt_b64, user->scram_salt);
   session->scram_iterations = user->scram_iterations;
+  session->acc_created_at = user->created_at;
 
   /* Generate server nonce (18 random bytes → 24 base64 chars) */
   {
@@ -1538,7 +1556,8 @@ static int sasl_scram_complete(struct Client *sptr)
   log_write(LS_SYSTEM, L_INFO, 0,
             "SASL SCRAM: Successful authentication for %s (client %C)",
             login_as, sptr);
-  sasl_complete_login(sptr, login_as, CurrentTime);
+  sasl_complete_login(sptr, login_as,
+                      session->acc_created_at ? session->acc_created_at : 0);
   return 0;
 }
 
@@ -1585,6 +1604,7 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
   /* Save the public key PEM for later verification */
   DupString(session->scram_client_first_bare, user->ecdsa_pubkey);
   /* (Reusing scram_client_first_bare to store ecdsa_pubkey — it's just a string slot) */
+  session->acc_created_at = user->created_at;
 
   /* Generate 32-byte random challenge */
   for (i = 0; i < 32; i++)
@@ -1709,7 +1729,8 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL ECDSA: Successful authentication for %s (client %C)",
               login_as, sptr);
-    sasl_complete_login(sptr, login_as, CurrentTime);
+    sasl_complete_login(sptr, login_as,
+                        session->acc_created_at ? session->acc_created_at : 0);
     return 0;
   }
 
