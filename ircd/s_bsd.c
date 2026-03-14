@@ -1223,18 +1223,17 @@ ssl_read_again:
       return exit_client(cptr, cptr, &me, "dbuf_put fail");
 
     /*
-     * Check for buffer flood, but allow extra buffer space for clients
-     * with multiline capability. When a client has draft/multiline enabled,
-     * they may send BATCH + id, many lines, BATCH - id all at once in a
-     * single TCP burst. The batch ID won't be set until BATCH + is parsed,
-     * so we must check capability, not just active batch state.
+     * Check for buffer flood.  Allow extra buffer space for multiline-
+     * capable clients so a TCP burst containing BATCH + plus content
+     * can be read and parsed.  After the parse loop below, a second
+     * check enforces the strict (unboosted) limit if no batch was
+     * actually opened — prevents abuse of the boosted recvQ for
+     * non-batch traffic.
      */
     {
       unsigned int max_recvq = get_recvq(cptr);
-      if (cli_ml_batch_id(cptr)[0] || CapActive(cptr, CAP_DRAFT_MULTILINE)) {
-        /* Client has multiline cap or is in batch - allow extra buffer space */
+      if (cli_ml_batch_id(cptr)[0] || CapActive(cptr, CAP_DRAFT_MULTILINE))
         max_recvq += feature_int(FEAT_MULTILINE_MAX_BYTES);
-      }
       if (DBufLength(&(cli_recvQ(cptr))) > max_recvq)
         return exit_client(cptr, cptr, &me, "Excess Flood");
     }
@@ -1286,6 +1285,17 @@ ssl_read_again:
         }
       }
     }
+
+    /*
+     * Post-parse safety: if the client got the boosted recvQ limit
+     * due to multiline CAP but did NOT open a batch, enforce the
+     * strict limit now.  This prevents a multiline-capable client
+     * from abusing the inflated buffer for regular (non-batch) flood.
+     */
+    if (IsUser(cptr) && !cli_ml_batch_id(cptr)[0]
+        && CapActive(cptr, CAP_DRAFT_MULTILINE)
+        && DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr))
+      return exit_client(cptr, cptr, &me, "Excess Flood");
 
     /* If there's still data to process, wait 2 seconds first */
     if (DBufLength(&(cli_recvQ(cptr))) && !NoNewLine(cptr) &&

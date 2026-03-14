@@ -129,6 +129,12 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     if (cli_saslcookie(cptr) && !IsSASLComplete(cptr)) {
       /* Local SASL session takes priority */
       if (cli_saslsession(cptr)) {
+        /* RFC 7628 §3.2.3: after an error challenge, client sends "*"
+         * to acknowledge failure — reply with SASLFAIL, not SASLABORTED. */
+        if (cli_saslsession(cptr)->state == SASL_STATE_FAILED)
+          send_reply(cptr, ERR_SASLFAIL, "");
+        else
+          send_reply(cptr, ERR_SASLABORTED);
         sasl_abort_local(cptr);
         return 0;
       }
