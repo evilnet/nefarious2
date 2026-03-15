@@ -39,7 +39,7 @@ else
     openssl x509 -subject -dates -fingerprint -noout -in $1/ircd.pem
   else
     FileExist=FALSE
-    while [ "$FileExist" == "FALSE" ];
+    while [ "$FileExist" = "FALSE" ];
     do
       echo Please enter in the filname of the SSL certificate including the full path; read sslpath
       if test -f $sslpath
