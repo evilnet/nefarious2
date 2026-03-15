@@ -278,7 +278,7 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
     /* acptr->from == acptr for acptr == cptr */
     if (cli_from(acptr) == cptr)
       continue;
-    if (IsUser(acptr))
+    if (IsUser(acptr) && !IsBouncerAlias(acptr))
     {
       char xxx_buf[25];
       char *s = umode_str(acptr);
