@@ -418,17 +418,21 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
     return NULL;
 
   /* Msgid FIRST: generate before time so HLC is advanced when we read physical_ms.
-   * Use preserved from incoming, or generate new. */
+   * Use preserved from incoming, override from caller, or generate new. */
   if (cptr && cli_s2s_msgid(cptr)[0])
     msgid_tag = cli_s2s_msgid(cptr);
+  else if (s2s_msgid_override[0])
+    msgid_tag = s2s_msgid_override;
   else {
     generate_msgid(msgidbuf, sizeof(msgidbuf));
     msgid_tag = msgidbuf;
   }
 
-  /* Time: use preserved epoch_ms from incoming, or read from HLC (now advanced) */
+  /* Time: use preserved epoch_ms from incoming, override, or read from HLC (now advanced) */
   if (cptr && cli_s2s_time_ms(cptr))
     epoch_ms = cli_s2s_time_ms(cptr);
+  else if (s2s_time_override)
+    epoch_ms = s2s_time_override;
   else
     epoch_ms = hlc_global()->physical_ms;
 
@@ -1501,6 +1505,9 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
           va_end(vd.vd_args);
         }
       }
+      /* Clear overrides consumed by format_s2s_tags */
+      s2s_msgid_override[0] = '\0';
+      s2s_time_override = 0;
     }
   }
 

@@ -120,6 +120,10 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CAP_draft_event_playback))
     return;
 
+  /* Filter ephemeral tags — typing indicators are not meaningful in history */
+  if (strstr(client_tags, "+typing"))
+    return;
+
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
@@ -235,12 +239,15 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       /* Store for chathistory event-playback */
       store_tagmsg_history(sptr, chptr, client_tags);
-    }
 
-    /* Propagate to other servers (S2S with tags in P10 message) */
-    if (!IsLocalChannel(chptr->chname)) {
-      sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
-                            client_tags, chptr->chname);
+      /* Propagate to other servers (S2S with tags in P10 message).
+       * Use the same msgid we generated for local delivery. */
+      if (!IsLocalChannel(chptr->chname)) {
+        sendcmdto_set_s2s_tags(0, tagmsg_msgid);
+        sendcmdto_want_s2s_tags(1);
+        sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
+                              client_tags, chptr->chname);
+      }
     }
   }
   else {
@@ -252,37 +259,46 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return send_reply(sptr, ERR_NOSUCHNICK, target);
     }
 
-    if (MyConnect(acptr)) {
-      /* Local user - deliver with client-only tags if they support message-tags */
-      if (CapActive(acptr, CAP_MSGTAGS)) {
-        sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
-                                  "%C", acptr);
-      }
-      /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
-       * per the IRCv3 spec - there's no message body to send as fallback */
+    {
+      char dm_msgid[64];
+      generate_msgid(dm_msgid, sizeof(dm_msgid));
+      sendcmdto_set_client_msgid(dm_msgid);
 
-      /* Echo TAGMSG back to sender if they have echo-message */
-      {
-        int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-        if (need_echo) {
-          sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
+      if (MyConnect(acptr)) {
+        /* Local user - deliver with client-only tags if they support message-tags */
+        if (CapActive(acptr, CAP_MSGTAGS)) {
+          sendcmdto_one_client_tags(sptr, MSG_TAGMSG, acptr, client_tags,
                                     "%C", acptr);
         }
-      }
-    }
-    else {
-      /* Remote user - forward to their server with tags */
-      sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
-                    client_tags, acptr);
+        /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
+         * per the IRCv3 spec - there's no message body to send as fallback */
 
-      /* Echo TAGMSG back to sender if they have echo-message */
-      {
-        int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-        if (need_echo) {
-          sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
-                                    "%C", acptr);
+        /* Echo TAGMSG back to sender if they have echo-message */
+        {
+          int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
+          if (need_echo) {
+            sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
+                                      "%C", acptr);
+          }
         }
       }
+      else {
+        /* Remote user - forward to their server with tags */
+        sendcmdto_set_s2s_tags(0, dm_msgid);
+        sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
+                      client_tags, acptr);
+
+        /* Echo TAGMSG back to sender if they have echo-message */
+        {
+          int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
+          if (need_echo) {
+            sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
+                                      "%C", acptr);
+          }
+        }
+      }
+
+      sendcmdto_set_client_msgid(NULL);
     }
   }
 
@@ -339,10 +355,16 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!chptr)
       return 0;
 
+    /* Set msgid from S2S tags for local client delivery */
+    if (cli_s2s_msgid(cptr)[0])
+      sendcmdto_set_client_msgid(cli_s2s_msgid(cptr));
+
     /* Relay to local channel members with message-tags capability */
     sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, cptr,
                                   SKIP_DEAF | SKIP_BURST, client_tags,
                                   "%H", chptr);
+
+    sendcmdto_set_client_msgid(NULL);
 
     /* Propagate to other servers */
     sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
@@ -355,6 +377,10 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       acptr = FindUser(target);
     if (!acptr)
       return 0;
+
+    /* Set msgid from S2S tags for local client delivery */
+    if (cli_s2s_msgid(cptr)[0])
+      sendcmdto_set_client_msgid(cli_s2s_msgid(cptr));
 
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags if they support message-tags */
@@ -369,6 +395,8 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
                     client_tags, acptr);
     }
+
+    sendcmdto_set_client_msgid(NULL);
   }
 
   return 0;
