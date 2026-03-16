@@ -844,8 +844,13 @@ process_multiline_batch(struct Client *sptr)
           char *text = lp->value.cp + 1;
 
           if (first) {
-            sendcmdto_one(sptr, CMD_MULTILINE, target_server, "+%s %s :%s",
-                          s2s_batch_id, cli_name(acptr), text);
+            const char *ctags = con_ml_client_tags(con);
+            if (ctags[0])
+              sendcmdto_one(sptr, CMD_MULTILINE, target_server, "+%s @%s %s :%s",
+                            s2s_batch_id, ctags, cli_name(acptr), text);
+            else
+              sendcmdto_one(sptr, CMD_MULTILINE, target_server, "+%s %s :%s",
+                            s2s_batch_id, cli_name(acptr), text);
             first = 0;
           } else if (concat) {
             sendcmdto_one(sptr, CMD_MULTILINE, target_server, "c%s %s :%s",
@@ -946,8 +951,13 @@ process_multiline_batch(struct Client *sptr)
           char *text = lp->value.cp + 1;
 
           if (first) {
-            sendcmdto_one(from, CMD_MULTILINE, server, "+%s %s :%s",
-                          s2s_batch_id, chptr->chname, text);
+            const char *ctags = con_ml_client_tags(con);
+            if (ctags[0])
+              sendcmdto_one(from, CMD_MULTILINE, server, "+%s @%s %s :%s",
+                            s2s_batch_id, ctags, chptr->chname, text);
+            else
+              sendcmdto_one(from, CMD_MULTILINE, server, "+%s %s :%s",
+                            s2s_batch_id, chptr->chname, text);
             first = 0;
           } else if (concat) {
             sendcmdto_one(from, CMD_MULTILINE, server, "c%s %s :%s",
@@ -1267,6 +1277,7 @@ struct S2SMultilineBatch {
   int msg_count;                /**< Number of messages */
   time_t start_time;            /**< When batch started */
   char paste_url[256];          /**< Forwarded paste URL from originating server */
+  char client_tags[512];        /**< Client-only tags from batch opener */
 };
 
 /** Global array of pending S2S multiline batches (indexed by server connection) */
@@ -1287,7 +1298,7 @@ find_s2s_multiline_batch(const char *batch_id)
 /** Create a new S2S multiline batch */
 static struct S2SMultilineBatch *
 create_s2s_multiline_batch(const char *batch_id, const char *target,
-                           struct Client *sender)
+                           struct Client *sender, const char *client_tags)
 {
   int i;
   struct S2SMultilineBatch *batch;
@@ -1310,6 +1321,10 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   batch->msg_count = 0;
   batch->start_time = CurrentTime;
   batch->paste_url[0] = '\0';
+  if (client_tags && *client_tags)
+    ircd_strncpy(batch->client_tags, client_tags, sizeof(batch->client_tags));
+  else
+    batch->client_tags[0] = '\0';
 
   s2s_ml_batches[i] = batch;
   return batch;
@@ -1447,9 +1462,14 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
         /* Per IRCv3 multiline spec, msgid and time go on the BATCH + opener */
         if (use_tags) {
+          const char *ctags = batch->client_tags;
           format_time_tag(timebuf, sizeof(timebuf));
-          sendrawto_one(to, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
-                        timebuf, batch_base_msgid, cli_name(&me), batchid, chptr->chname);
+          if (ctags[0])
+            sendrawto_one(to, "@time=%s;msgid=%s;%s :%s BATCH +%s draft/multiline %s",
+                          timebuf, batch_base_msgid, ctags, cli_name(&me), batchid, chptr->chname);
+          else
+            sendrawto_one(to, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                          timebuf, batch_base_msgid, cli_name(&me), batchid, chptr->chname);
         } else {
           sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
                         batchid, chptr->chname);
@@ -1475,7 +1495,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         /* Graceful fallback for S2S channel delivery */
         send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
                                  batch->messages, batch->msg_count, 1, chptr,
-                                 s2s_paste_url, NULL);
+                                 s2s_paste_url,
+                                 batch->client_tags[0] ? batch->client_tags : NULL);
       }
     }
   } else if (acptr && MyConnect(acptr)) {
@@ -1490,9 +1511,14 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
       /* Per IRCv3 multiline spec, msgid and time go on the BATCH + opener */
       if (use_tags) {
+        const char *ctags = batch->client_tags;
         format_time_tag(timebuf, sizeof(timebuf));
-        sendrawto_one(acptr, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
-                      timebuf, batch_base_msgid, cli_name(&me), batchid, cli_name(acptr));
+        if (ctags[0])
+          sendrawto_one(acptr, "@time=%s;msgid=%s;%s :%s BATCH +%s draft/multiline %s",
+                        timebuf, batch_base_msgid, ctags, cli_name(&me), batchid, cli_name(acptr));
+        else
+          sendrawto_one(acptr, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                        timebuf, batch_base_msgid, cli_name(&me), batchid, cli_name(acptr));
       } else {
         sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
                       batchid, cli_name(acptr));
@@ -1518,7 +1544,8 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       /* Graceful fallback for S2S DM delivery */
       send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
                                batch->messages, batch->msg_count, 0, NULL,
-                               s2s_paste_url, NULL);
+                               s2s_paste_url,
+                               batch->client_tags[0] ? batch->client_tags : NULL);
     }
   }
 
@@ -1584,10 +1611,11 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
  *   [USER_NUMERIC] ML batchid target :line          (normal continuation)
  *   [USER_NUMERIC] ML cbatchid target :line         (concat continuation)
  *   [USER_NUMERIC] ML -batchid target :             (end batch)
+ *   [USER_NUMERIC] ML +batchid @tags target :text   (start with client tags)
  *
  * parv[0] = sender prefix
  * parv[1] = batch_id with modifier (+, c, or -)
- * parv[2] = target
+ * parv[2] = target (or @client-tags on start, then target shifts to parv[3])
  * parv[3] = text (may be empty for end)
  */
 int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
@@ -1595,6 +1623,7 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   char *batch_ref;
   char *target;
   char *text;
+  char *client_tags = NULL;
   int is_start = 0, is_end = 0, is_concat = 0;
   struct S2SMultilineBatch *batch;
 
@@ -1626,8 +1655,6 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
     return 0;
 
   batch_ref = parv[1];
-  target = parv[2];
-  text = (parc >= 4 && !EmptyString(parv[3])) ? parv[3] : "";
 
   /* Parse batch modifier */
   if (batch_ref[0] == '+') {
@@ -1644,10 +1671,25 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
   if (EmptyString(batch_ref))
     return 0;
 
+  /* Check for client-only tags (@-prefixed param, only on start messages) */
+  client_tags = NULL;
+  if (is_start && parc >= 4 && parv[2][0] == '@') {
+    client_tags = parv[2] + 1;  /* skip @ prefix */
+    target = parv[3];
+    text = (parc >= 5 && !EmptyString(parv[4])) ? parv[4] : "";
+  } else {
+    target = parv[2];
+    text = (parc >= 4 && !EmptyString(parv[3])) ? parv[3] : "";
+  }
+
   /* Propagate to other servers first */
-  sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "%s%s %s :%s",
-                        is_start ? "+" : (is_end ? "-" : (is_concat ? "c" : "")),
-                        batch_ref, target, text);
+  if (is_start && client_tags && *client_tags)
+    sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "+%s @%s %s :%s",
+                          batch_ref, client_tags, target, text);
+  else
+    sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "%s%s %s :%s",
+                          is_start ? "+" : (is_end ? "-" : (is_concat ? "c" : "")),
+                          batch_ref, target, text);
 
   if (is_start) {
     /* Start new batch */
@@ -1657,7 +1699,7 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
       free_s2s_multiline_batch(batch);
     }
 
-    batch = create_s2s_multiline_batch(batch_ref, target, sptr);
+    batch = create_s2s_multiline_batch(batch_ref, target, sptr, client_tags);
     if (!batch)
       return 0;  /* No room for new batch */
 
