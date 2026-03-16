@@ -899,6 +899,7 @@ static struct FeatureDesc {
   F_B(LIST_SHOWMODES_OPERONLY, 0, 0, 0),
   F_S(LIST_PRIVATE_CHANNELS, FEAT_NULL, 0, 0),
   F_I(MAXWATCHS, 0, 128, set_isupport_watchs),
+  F_I(NICKDELAY, 0, 30, 0),
   F_B(HIS_STATS_Z, 0, 1, 0),
   F_I(SASL_TIMEOUT, 0, 10, 0),
   F_B(NOMULTITARGETS, 0, 0, 0),
@@ -1069,6 +1070,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_OPS_OVERRIDE, 0, 1, 0),
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
+  F_B(CHATHISTORY_REQUIRE_AUTH, 0, 1, 0),   /* Require auth for channel history (non-+H) */
   F_I(MULTILINE_MAX_BYTES, 0, 16384, feature_notify_multiline),
   F_I(MULTILINE_MAX_LINES, 0, 100, feature_notify_multiline),
   F_I(MULTILINE_LAG_DISCOUNT, 0, 50, 0),

@@ -370,7 +370,7 @@ int m_monitor(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     /* Send any remaining buffered responses */
     monitor_send_status(sptr, online_buf, offline_buf);
-    send_reply(sptr, RPL_ENDOFMONLIST);
+    /* RPL_ENDOFMONLIST (733) is only for MONITOR L, not MONITOR S per spec */
     if (lb) labeled_batch_end(sptr);
     return 0;
   }

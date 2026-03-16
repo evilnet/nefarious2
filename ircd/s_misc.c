@@ -370,8 +370,10 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     /* Clean up watch lists */
     if (MyUser(bcptr))
       del_list_watch(bcptr);
-    /* Notify Logout */
-    check_status_watch(bcptr, RPL_LOGOFF);
+    /* Notify Logout — for local users, already done in exit_client()
+     * before close_connection(). Only fire here for remote users. */
+    if (!IsDead(bcptr))
+      check_status_watch(bcptr, RPL_LOGOFF);
 
     /* Clean up snotice lists */
     if (MyUser(bcptr))
@@ -608,24 +610,20 @@ int exit_client(struct Client *cptr,
                 NumNick(victim), /* two %s's */
                 cli_name(victim), cli_info(victim));
 
+    /* Always send ERROR to local user clients before closing, even on
+     * voluntary QUIT (where victim == cli_from(killer)).  Modern IRC
+     * clients and test frameworks expect ERROR as the close indicator. */
+    if (IsUser(victim) && !IsConnecting(victim) && !IsDead(victim)) {
+      sendrawto_one(victim, MSG_ERROR " :Closing Link: %s by %s (%s)",
+                    cli_name(victim),
+                    cli_name(IsServer(killer) ? &his : killer),
+                    comment);
+    }
     if (victim != cli_from(killer)  /* The source knows already */
         && IsClient(victim))    /* Not a Ping struct or Log file */
     {
       if (IsServer(victim) || IsHandshake(victim))
 	sendcmdto_one(killer, CMD_SQUIT, victim, "%s 0 :%s", cli_name(&me), comment);
-      else if (!IsConnecting(victim)) {
-        if (!IsDead(victim)) {
-	  if (IsServer(victim))
-	    sendcmdto_one(killer, CMD_ERROR, victim,
-			  ":Closing Link: %s by %s (%s)", cli_name(victim),
-			  cli_name(killer), comment);
-	  else
-	    sendrawto_one(victim, MSG_ERROR " :Closing Link: %s by %s (%s)",
-			  cli_name(victim),
-                          cli_name(IsServer(killer) ? &his : killer),
-			  comment);
-	}
-      }
       if ((IsServer(victim) || IsHandshake(victim) || IsConnecting(victim)) &&
           (killer == &me || (IsServer(killer) &&
           (strncmp(comment, "Leaf-only link", 14) ||
@@ -655,6 +653,12 @@ int exit_client(struct Client *cptr,
 			       cli_name(victim), comment);
       }
     }
+    /* Send MONITOR/WATCH offline notifications BEFORE closing the socket.
+     * This ensures watchers receive 731/RPL_LOGOFF while the victim's
+     * connection is still open (preventing ConnectionClosed vs RST issues).
+     * For local users, we do this here; exit_one_client skips the duplicate. */
+    if (IsUser(victim))
+      check_status_watch(victim, RPL_LOGOFF);
     /*
      *  Close the Client connection first.
      */

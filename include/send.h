@@ -73,6 +73,10 @@ extern void sendcmdto_set_alias_source(struct Client *alias);
 extern void sendcmdto_want_s2s_tags(int want);
 /* Override batch ID for forwarded label responses (auto-cleared after use) */
 extern void sendcmdto_set_fwd_batch(const char *batch_id);
+/* Override msgid for client-side channel broadcasts (caller must clear after use) */
+extern void sendcmdto_set_client_msgid(const char *msgid);
+/* Override server-time for client-side tag formatting (caller must clear after use) */
+extern void sendcmdto_set_client_time(const char *timestr);
 /* Override S2S compact tag time/msgid for forwarded commands (auto-cleared) */
 extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
 
@@ -270,7 +274,7 @@ extern char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
 /* Parse ISO 8601 timestamp to epoch milliseconds (backward compat) */
 extern uint64_t iso8601_to_epoch_ms(const char *iso);
 
-/* IRCv3 standard-replies (FAIL/WARN/NOTE) */
+/* IRCv3 standard-replies (FAIL/WARN/NOTE) — single context parameter */
 extern void send_fail(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);
 extern void send_warn(struct Client *to, const char *command, const char *code,
@@ -280,6 +284,14 @@ extern void send_warn_with_label(struct Client *to, const char *command, const c
                                  const char *label);
 extern void send_note(struct Client *to, const char *command, const char *code,
                       const char *context, const char *description);
+/* IRCv3 standard-replies with printf-formatted context for multiple params.
+ * Usage: send_fail_ctx(cli, "CMD", "CODE", "desc", "%s %s", ctx1, ctx2); */
+extern void send_fail_ctx(struct Client *to, const char *command, const char *code,
+                          const char *description, const char *context_fmt, ...);
+extern void send_warn_ctx(struct Client *to, const char *command, const char *code,
+                          const char *description, const char *context_fmt, ...);
+extern void send_note_ctx(struct Client *to, const char *command, const char *code,
+                          const char *description, const char *context_fmt, ...);
 
 /* IRCv3 labeled-response ACK (send when command produces no response) */
 extern void send_labeled_ack(struct Client *to);

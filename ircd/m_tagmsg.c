@@ -209,22 +209,33 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return send_reply(sptr, ERR_CANNOTSENDTOCHAN, chptr->chname);
     }
 
-    /* Relay TAGMSG with client-only tags to local channel members */
-    sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, sptr,
-                                  SKIP_DEAF | SKIP_BURST, client_tags,
-                                  "%H", chptr);
-
-    /* Echo TAGMSG back to sender if they have echo-message */
+    /* Generate msgid for this TAGMSG (used in relay and history) */
     {
-      int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-      if (need_echo) {
-        sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
-                                  "%H", chptr);
-      }
-    }
+      char tagmsg_msgid[64];
+      generate_msgid(tagmsg_msgid, sizeof(tagmsg_msgid));
 
-    /* Store for chathistory event-playback */
-    store_tagmsg_history(sptr, chptr, client_tags);
+      /* Set msgid override so channel/client tag sends include it */
+      sendcmdto_set_client_msgid(tagmsg_msgid);
+
+      /* Relay TAGMSG with client-only tags to local channel members */
+      sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, sptr,
+                                    SKIP_DEAF | SKIP_BURST, client_tags,
+                                    "%H", chptr);
+
+      /* Echo TAGMSG back to sender if they have echo-message */
+      {
+        int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
+        if (need_echo) {
+          sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,
+                                    "%H", chptr);
+        }
+      }
+
+      sendcmdto_set_client_msgid(NULL);
+
+      /* Store for chathistory event-playback */
+      store_tagmsg_history(sptr, chptr, client_tags);
+    }
 
     /* Propagate to other servers (S2S with tags in P10 message) */
     if (!IsLocalChannel(chptr->chname)) {
@@ -250,9 +261,8 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Note: If client doesn't support message-tags, TAGMSG is silently dropped
        * per the IRCv3 spec - there's no message body to send as fallback */
 
-      /* Echo TAGMSG back to sender if they have echo-message
-       * (but not if they're messaging themselves) */
-      if (sptr != acptr) {
+      /* Echo TAGMSG back to sender if they have echo-message */
+      {
         int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
         if (need_echo) {
           sendcmdto_one_client_tags(sptr, MSG_TAGMSG, sptr, client_tags,

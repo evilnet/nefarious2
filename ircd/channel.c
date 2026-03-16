@@ -5209,13 +5209,31 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
     }
 
     if (!((chan->mode.mode & MODE_DELJOINS) && !(flags & CHFL_VOICED_OR_OPPED))) {
+      /* When the joiner has a labeled-response batch active, skip them from
+       * the channel send and send a separate tagged message. The channel send
+       * functions use format_message_tags_ex() which only supports network
+       * batches, not per-client labeled-response batches (cli_batch_id). */
+      struct Client *skip_one = NULL;
+      if (MyUser(jbuf->jb_source) && has_active_batch(jbuf->jb_source))
+        skip_one = jbuf->jb_source;
+
       /* Send the notification to the channel */
-      sendcmdto_channel_capab_butserv_butone(jbuf->jb_source, CMD_JOIN, chan, NULL, 0,
+      sendcmdto_channel_capab_butserv_butone(jbuf->jb_source, CMD_JOIN, chan, skip_one, 0,
                                              CAP_NONE, CAP_EXTJOIN, "%H", chan);
-      sendcmdto_channel_capab_butserv_butone(jbuf->jb_source, CMD_JOIN, chan, NULL, 0,
+      sendcmdto_channel_capab_butserv_butone(jbuf->jb_source, CMD_JOIN, chan, skip_one, 0,
                                              CAP_EXTJOIN, CAP_NONE, "%H %s :%s", chan,
                                              IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
                                              cli_info(jbuf->jb_source));
+
+      /* Send tagged JOIN echo to joiner separately (for labeled-response batch) */
+      if (skip_one) {
+        if (CapRecipientHas(jbuf->jb_source, CAP_EXTJOIN))
+          sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, "%H %s :%s", chan,
+                        IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
+                        cli_info(jbuf->jb_source));
+        else
+          sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
+      }
 
 #ifdef USE_MDBX
       /* Store JOIN event in history (only from local users to avoid duplicates) */
@@ -5234,18 +5252,22 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                                          CMD_MODE, chan, NULL, 0, "%H +o %C",
 					 chan, jbuf->jb_source);
     } else if (MyUser(jbuf->jb_source)) {
+      /* Use tag-aware send so batch=/label=/time= tags are included */
       if (CapRecipientHas(jbuf->jb_source, CAP_EXTJOIN))
-        sendcmdto_one(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, "%H %s :%s", chan,
+        sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, "%H %s :%s", chan,
                       IsAccount(jbuf->jb_source) ? cli_account(jbuf->jb_source) : "*",
                       cli_info(jbuf->jb_source));
       else
-        sendcmdto_one(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
+        sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
     }
 
     /* Send post-join replies (TOPIC/NAMES) to local aliases.  Must be
      * AFTER the JOIN echo above so clients see JOIN before NAMES. */
     if (!IsBouncerAlias(jbuf->jb_source))
       bounce_send_alias_join_replies(chan, jbuf->jb_source);
+
+    /* Send metadata subscription notifications for new channel member */
+    metadata_send_join_notifications(jbuf->jb_source, chan);
   }
 
   if (jbuf->jb_type == JOINBUF_TYPE_PARTALL ||

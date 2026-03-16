@@ -328,8 +328,8 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
    * We extract data from the MsgQ, frame it, and send the framed version.
    */
   if (IsWebSocket(cptr)) {
-    static char ws_frame[BUFSIZE + 16];
-    static char irc_line[BUFSIZE + 4];
+    static char ws_frame[FULL_MSG_SIZE + 16];
+    static char irc_line[FULL_MSG_SIZE + 4];
     struct iovec iov[IOV_MAX];
     int iovcnt;
     int i, line_len = 0;
@@ -584,8 +584,15 @@ void close_connection(struct Client *cptr)
   if (-1 < cli_fd(cptr)) {
     flush_connections(cptr);
     LocalClientArray[cli_fd(cptr)] = 0;
-    close(cli_fd(cptr));
-    socket_del(&(cli_socket(cptr))); /* queue a socket delete */
+    /* Use shutdown() instead of close() to send FIN gracefully.
+     * close() on a socket with unread data in the recv buffer sends RST,
+     * which discards pending data at the remote end's recv buffer (on Linux).
+     * shutdown(SHUT_RDWR) sends FIN and silently ACKs any incoming data,
+     * preventing RST.  The actual close(fd) is deferred to the ET_DESTROY
+     * callback via socket_del(), giving remote clients time to read any
+     * queued messages (ERROR, MONITOR 731 notifications, etc.). */
+    shutdown(cli_fd(cptr), SHUT_RDWR);
+    socket_del(&(cli_socket(cptr))); /* queue deferred socket destroy + close */
     cli_fd(cptr) = -1;
   }
   SetFlag(cptr, FLAG_DEADSOCKET);
@@ -1196,24 +1203,18 @@ ssl_read_again:
     while (DBufLength(&(cli_recvQ(cptr))) && !NoNewLine(cptr) && 
            (IsTrusted(cptr) || cli_since(cptr) - CurrentTime < 10))
     {
-      dolen = dbuf_getmsg(&(cli_recvQ(cptr)), cli_buffer(cptr), BUFSIZE);
+      dolen = dbuf_getmsg(&(cli_recvQ(cptr)), cli_buffer(cptr), FULL_MSG_SIZE);
       /*
-       * Devious looking...whats it do ? well..if a client
-       * sends a *long* message without any CR or LF, then
-       * dbuf_getmsg fails and we pull it out using this
-       * loop which just gets the next 512 bytes and then
-       * deletes the rest of the buffer contents.
-       * -avalon
+       * If a client sends a long message without CR/LF, dbuf_getmsg
+       * returns 0.  Allow up to FULL_MSG_SIZE (IRCv3 tags + command).
        */
       if (dolen == 0)
       {
-        if (DBufLength(&(cli_recvQ(cptr))) < 510)
+        if (DBufLength(&(cli_recvQ(cptr))) < (FULL_MSG_SIZE - 2))
           SetFlag(cptr, FLAG_NONL);
         else
         {
-          /* More than 512 bytes in the line - drop the input and yell
-           * at the client.
-           */
+          /* Exceeds IRCv3 maximum message size — drop and warn */
           DBufClear(&(cli_recvQ(cptr)));
           send_reply(cptr, ERR_INPUTTOOLONG);
         }
@@ -1421,6 +1422,11 @@ void client_sock_callback(struct Event* ev)
     con = (struct Connection*) s_data(ev_socket(ev));
     s_data(ev_socket(ev)) = NULL;  /* Claim it - subsequent events see NULL */
     if (!con) {
+      /* Still need to close the deferred fd even if connection was already claimed */
+      if (s_fd(ev_socket(ev)) >= 0) {
+        close(s_fd(ev_socket(ev)));
+        s_fd(ev_socket(ev)) = -1;
+      }
 #ifdef USE_SSL
       ssl_free(ev_socket(ev));
 #endif
@@ -1444,6 +1450,13 @@ void client_sock_callback(struct Event* ev)
   switch (ev_type(ev)) {
   case ET_DESTROY:
     con_freeflag(con) &= ~FREEFLAG_SOCKET;
+
+    /* Deferred close: close_connection() used shutdown() instead of close()
+     * to avoid RST.  Now actually release the file descriptor. */
+    if (s_fd(ev_socket(ev)) >= 0) {
+      close(s_fd(ev_socket(ev)));
+      s_fd(ev_socket(ev)) = -1;
+    }
 
 #ifdef USE_SSL
     /* Free SSL BEFORE potentially freeing the Connection, because the

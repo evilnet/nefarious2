@@ -164,7 +164,8 @@ int m_ping(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NOORIGIN);
 
-  sendcmdto_one(&me, CMD_PONG, sptr, "%C :%s", &me, parv[1]);
+  /* Use tag-aware send so labeled-response label is included on the PONG */
+  sendcmdto_one_tags(&me, CMD_PONG, sptr, "%C :%s", &me, parv[1]);
   return 0;
 }
 

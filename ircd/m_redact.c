@@ -156,13 +156,9 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Must be authenticated to use REDACT.
-   * Self-redaction requires account match; chanop redaction requires
-   * identifiable users. When X3 is integrated into the IRCd, chanop
-   * redaction can additionally check the ChanServ access list. */
-  if (!cli_user(sptr) || !cli_user(sptr)->account[0]) {
-    send_fail(sptr, "REDACT", "ACCOUNT_REQUIRED", NULL,
-              "You must be logged in to use REDACT");
+  if (!cli_user(sptr)) {
+    send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", NULL,
+              "You must be fully registered to use REDACT");
     return 0;
   }
 
@@ -180,10 +176,14 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* If chathistory is available, validate ownership and check time window */
   if (history_is_available()) {
+    /* Build combined context for FAIL responses: "target msgid" */
+    char fail_ctx[BUFSIZE];
+    ircd_snprintf(0, fail_ctx, sizeof(fail_ctx), "%s %s", target, msgid);
+
     rc = history_lookup_message(target, msgid, &msg);
     if (rc == 1) {
       /* Not found in history */
-      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", msgid,
+      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fail_ctx,
                 "Message not found");
       return 0;
     } else if (rc < 0) {
@@ -198,7 +198,7 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
         if (window > 0 && (CurrentTime - msg_time) > window) {
           history_free_messages(msg);
-          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
+          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", fail_ctx,
                     "Redaction window has expired");
           return 0;
         }
@@ -208,12 +208,23 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                  && ircd_strcmp(msg->account, cli_user(sptr)->account) == 0) {
         /* Authenticated owner: account match, no time window */
         can_redact = 1;
-      } else {
+      } else if (!msg->account[0] && !cli_user(sptr)->account[0]) {
+        /* Unauthenticated sender mask fallback: both message and user must
+         * be unauthenticated, and nick!user@host must match exactly.
+         * This only works within the same session (nick changes break it). */
+        char current_mask[HISTORY_SENDER_LEN];
+        ircd_snprintf(0, current_mask, sizeof(current_mask), "%s!%s@%s",
+                      cli_name(sptr), cli_user(sptr)->username,
+                      cli_user(sptr)->host);
+        if (ircd_strcmp(current_mask, msg->sender) == 0)
+          can_redact = 1;
+      }
+      if (!can_redact) {
         /* Everyone else: regular time window applies */
         window = (time_t)feature_int(FEAT_REDACT_WINDOW);
         if (window > 0 && (CurrentTime - msg_time) > window) {
           history_free_messages(msg);
-          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", msgid,
+          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", fail_ctx,
                     "Redaction window has expired");
           return 0;
         }
@@ -226,7 +237,7 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
       if (!can_redact) {
         history_free_messages(msg);
-        send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", msgid,
+        send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", fail_ctx,
                   "You are not authorized to redact this message");
         return 0;
       }
@@ -245,8 +256,12 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
     /* Federation not available or failed to start */
-    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", msgid,
-              "Message history is not available on this server");
+    {
+      char fail_ctx[BUFSIZE];
+      ircd_snprintf(0, fail_ctx, sizeof(fail_ctx), "%s %s", target, msgid);
+      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fail_ctx,
+                "Message history is not available on this server");
+    }
     return 0;
   }
 

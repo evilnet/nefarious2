@@ -276,7 +276,7 @@ struct Message msgtab[] = {
     TOK_PING,
     0, MAXPARA, MFLG_SLOW | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_ping, ms_ping, mo_ping, m_ignore },
+    { m_ping, m_ping, ms_ping, mo_ping, m_ignore },
     ""
   },
   {
@@ -1022,7 +1022,7 @@ struct Message msgtab[] = {
     TOK_METADATA,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_metadata, ms_metadata, m_metadata, m_ignore },
+    { m_metadata, m_metadata, ms_metadata, m_metadata, m_ignore },
     "<subcommand> [args] - Manage user/channel metadata"
   },
   {
@@ -1412,10 +1412,16 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
       int client_tags_pos = 0;
       size_t total_tags_len = tag_end - ch;  /* Include @ prefix */
 
-      /* IRCv3 message-tags spec: 8191 bytes max for all tags */
+      /* IRCv3 message-tags spec: server-to-client tags max 8191 bytes,
+       * client-to-server tags max 4094 bytes (+ @ prefix = 4095 total).
+       * Messages from clients exceeding 4095 get ERR_INPUTTOOLONG. */
       if (total_tags_len > 8191) {
         Debug((DEBUG_DEBUG, "Rejecting message: tags exceed 8191 byte limit (%zu)", total_tags_len));
         ServerStats->is_ref++;
+        return -1;
+      }
+      if (!IsServer(cptr) && !IsHandshake(cptr) && total_tags_len > 4095) {
+        send_reply(from, ERR_INPUTTOOLONG);
         return -1;
       }
 

@@ -589,7 +589,7 @@ cap_req(struct Client *sptr, const char *caplist)
   struct capabilities *cap;
   struct CapSet set, rem;
   struct CapSet cs = *cli_capab(sptr); /* capability set */
-  struct CapSet as = *cli_active(sptr); /* active set */
+  struct CapSet as = *cli_active_own(sptr); /* active set (per-connection, not union) */
   int neg;
 
   if (IsUnknown(sptr) && cli_auth(sptr)) /* registration hasn't completed; suspend it... */

@@ -1106,11 +1106,12 @@ static int check_history_access(struct Client *sptr, const char *target,
       return 0;  /* Public history - allow access */
     }
 
-    /* Must be authenticated */
-    if (!IsAccount(sptr))
+    /* Must be a current member of the channel.
+     * When CHATHISTORY_REQUIRE_AUTH is set, also require authentication
+     * (Afternet policy).  When unset, current members can access history
+     * without auth — they can already see messages in real-time. */
+    if (!IsAccount(sptr) && feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH))
       return -1;
-
-    /* Must be a current member of the channel */
     if (!find_member_link(chptr, sptr))
       return -1;
 

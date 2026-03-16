@@ -300,6 +300,12 @@ extern int metadata_sub_count(struct Client *cptr);
  */
 extern void metadata_sub_free(struct Client *cptr);
 
+/** Send metadata subscription notifications when a client joins a channel.
+ * @param[in] joiner Client that just joined.
+ * @param[in] chptr Channel being joined.
+ */
+extern void metadata_send_join_notifications(struct Client *joiner, struct Channel *chptr);
+
 /* ========== Cache-Aware Metadata Operations ========== */
 
 /** Get metadata for a client with cache-through behavior.

@@ -1572,9 +1572,9 @@ static Numeric replyTable[] = {
 /* 769 */
   { 0 },
 /* 770 - RPL_METADATASUBOK */
-  { RPL_METADATASUBOK, "%s :subscribed", "770" },
+  { RPL_METADATASUBOK, "%s", "770" },
 /* 771 - RPL_METADATAUNSUBOK */
-  { RPL_METADATAUNSUBOK, "%s :unsubscribed", "771" },
+  { RPL_METADATAUNSUBOK, "%s", "771" },
 /* 772 - RPL_METADATASUBS */
   { RPL_METADATASUBS, "%s", "772" },
 /* 773 */

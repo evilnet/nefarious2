@@ -199,10 +199,29 @@ static int can_modify_target(struct Client *sptr, const char *target, int is_cha
  * @param[in] key Metadata key that changed.
  * @param[in] value New value (NULL if deleted).
  */
+/** Check if two clients share at least one common channel. */
+static int shares_channel(struct Client *a, struct Client *b)
+{
+  struct Membership *chan;
+  for (chan = cli_user(a)->channel; chan; chan = chan->next_channel) {
+    if (find_member_link(chan->channel, b))
+      return 1;
+  }
+  return 0;
+}
+
 static void notify_subscribers(const char *target, const char *key, const char *value)
 {
   struct Client *acptr;
+  struct Client *target_cli = NULL;
+  struct Channel *target_chptr = NULL;
   int fd;
+
+  /* Resolve target for visibility checks */
+  if (IsChannelPrefix(*target))
+    target_chptr = FindChannel(target);
+  else
+    target_cli = FindUser(target);
 
   /* Iterate over all local clients */
   for (fd = HighestFd; fd >= 0; --fd) {
@@ -217,14 +236,76 @@ static void notify_subscribers(const char *target, const char *key, const char *
     if (!metadata_sub_check(acptr, key))
       continue;
 
-    /* Send notification: METADATA <target> <key> [*] :<value> */
+    /* Visibility: for user metadata, only notify if they share a channel
+     * or are the target themselves. For channel metadata, only if member. */
+    if (target_cli) {
+      if (acptr != target_cli && !shares_channel(acptr, target_cli))
+        continue;
+    } else if (target_chptr) {
+      if (!find_member_link(target_chptr, acptr))
+        continue;
+    }
+
+    /* Send notification: METADATA <target> <key> <visibility> [:<value>] */
     if (value && *value) {
       sendrawto_one(acptr, ":%s METADATA %s %s * :%s",
                     cli_name(&me), target, key, value);
     } else {
-      sendrawto_one(acptr, ":%s METADATA %s %s * :",
+      /* Unset: no value parameter */
+      sendrawto_one(acptr, ":%s METADATA %s %s *",
                     cli_name(&me), target, key);
     }
+  }
+}
+
+/** Send metadata subscription notifications to a client joining a channel.
+ * For each channel member's metadata keys that the joiner is subscribed to,
+ * send a METADATA notification. Also send for channel metadata.
+ * @param[in] joiner Client that just joined.
+ * @param[in] chptr Channel being joined.
+ */
+void metadata_send_join_notifications(struct Client *joiner, struct Channel *chptr)
+{
+  struct Membership *member;
+  struct MetadataEntry *entry;
+
+  if (!MyUser(joiner) || !CapActive(joiner, CAP_DRAFT_METADATA2))
+    return;
+
+  /* Send subscribed user metadata for each existing channel member */
+  for (member = chptr->members; member; member = member->next_member) {
+    struct Client *target = member->user;
+    if (target == joiner)
+      continue;
+
+    entry = metadata_list_client(target);
+    while (entry) {
+      if (entry->visibility != METADATA_VIS_PRIVATE
+          && metadata_sub_check(joiner, entry->key)) {
+        if (entry->value && *entry->value)
+          sendrawto_one(joiner, ":%s METADATA %s %s * :%s",
+                        cli_name(&me), cli_name(target), entry->key, entry->value);
+        else
+          sendrawto_one(joiner, ":%s METADATA %s %s * :",
+                        cli_name(&me), cli_name(target), entry->key);
+      }
+      entry = entry->next;
+    }
+  }
+
+  /* Send subscribed channel metadata */
+  entry = metadata_list_channel(chptr);
+  while (entry) {
+    if (entry->visibility != METADATA_VIS_PRIVATE
+        && metadata_sub_check(joiner, entry->key)) {
+      if (entry->value && *entry->value)
+        sendrawto_one(joiner, ":%s METADATA %s %s * :%s",
+                      cli_name(&me), chptr->chname, entry->key, entry->value);
+      else
+        sendrawto_one(joiner, ":%s METADATA %s %s * :",
+                      cli_name(&me), chptr->chname, entry->key);
+    }
+    entry = entry->next;
   }
 }
 
@@ -268,14 +349,19 @@ const char *get_visibility_str(struct MetadataEntry *entry)
 
 /** Send a KEYVALUE reply.
  * Format: :<server> 761 <client> <target> <key> <visibility> :<value>
+ * Per draft/metadata-2 spec, "*" target is expanded to the client's nick.
  */
 static void send_keyvalue(struct Client *to, const char *target, const char *key,
                           const char *value, const char *visibility)
 {
+  /* Expand "*" to the client's own nick (only if registered and nick is set) */
+  const char *display_target = (target && *target == '*' && !target[1]
+                                && IsUser(to) && cli_name(to)[0])
+                                ? cli_name(to) : target;
   if (value && *value)
-    send_reply(to, RPL_KEYVALUE, target, key, visibility ? visibility : "*", value);
+    send_reply(to, RPL_KEYVALUE, display_target, key, visibility ? visibility : "*", value);
   else
-    send_reply(to, RPL_KEYNOTSET, target, key);
+    send_reply(to, RPL_KEYNOTSET, display_target, key);
 }
 
 /** Handle GET subcommand.
@@ -301,7 +387,7 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  target = parv[2];
+  target = parv[1];
 
   /* Check if target exists online */
   target_found = can_see_target(sptr, target, &is_channel, &target_client, &target_channel);
@@ -311,7 +397,7 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
   if (!target_found) {
     if (is_channel) {
       /* Channels must exist in memory to be valid metadata targets */
-      send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+      send_fail(sptr, "METADATA", "INVALID_TARGET", target,
                 "No such channel");
       return 0;
     }
@@ -327,16 +413,19 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
           e = n;
         }
       } else {
-        send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+        send_fail(sptr, "METADATA", "INVALID_TARGET", target,
                   "No such target");
         return 0;
       }
     } else {
-      send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+      send_fail(sptr, "METADATA", "INVALID_TARGET", target,
                 "No such target");
       return 0;
     }
   }
+
+  /* Wrap responses in a metadata batch */
+  send_batch_start(sptr, "metadata");
 
   /* Process each key */
   for (i = 3; i < parc; i++) {
@@ -469,9 +558,15 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
     }
 
     if (!found) {
-      send_reply(sptr, RPL_KEYNOTSET, target, key);
+      /* Expand "*" to client's nick for RPL_KEYNOTSET */
+      const char *display = (target[0] == '*' && !target[1]
+                             && IsUser(sptr) && cli_name(sptr)[0])
+                             ? cli_name(sptr) : target;
+      send_reply(sptr, RPL_KEYNOTSET, display, key);
     }
   }
+
+  send_batch_end(sptr);
 
   return 0;
 }
@@ -517,7 +612,7 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  target = parv[2];
+  target = parv[1];
   key = parv[3];
 
   /* Parse optional visibility and value.
@@ -558,8 +653,9 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     const char *account_name = target + 1;
 
     if (!IsOper(sptr)) {
-      send_fail(sptr, "METADATA", "KEY_NO_PERMISSION", key,
-                "Account targets require oper privileges");
+      send_fail_ctx(sptr, "METADATA", "KEY_NO_PERMISSION",
+                    "Account targets require oper privileges",
+                    "%s %s", target, key);
       return 0;
     }
 
@@ -603,14 +699,17 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   }
 
   if (!can_see_target(sptr, target, &is_channel, &target_client, &target_channel)) {
-    send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+    send_fail(sptr, "METADATA", "INVALID_TARGET", target,
               "Invalid target");
     return 0;
   }
 
   if (!can_modify_target(sptr, target, is_channel, target_client, target_channel)) {
-    send_fail(sptr, "METADATA", "KEY_NO_PERMISSION", key,
-              "You don't have permission to set metadata on this target");
+    const char *err_target = (target[0] == '*' && !target[1])
+                              ? cli_name(sptr) : target;
+    send_fail_ctx(sptr, "METADATA", "KEY_NO_PERMISSION",
+                  "You don't have permission to set metadata on this target",
+                  "%s %s", err_target, key);
     return 0;
   }
 
@@ -618,10 +717,17 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
   max_value_bytes = feature_int(FEAT_METADATA_MAX_VALUE_BYTES);
 
-  if (value && strlen(value) > max_value_bytes) {
-    send_fail(sptr, "METADATA", "VALUE_INVALID", key,
-              "value is too long or not UTF8");
-    return 0;
+  if (value) {
+    if (!string_is_valid_utf8(value)) {
+      send_fail(sptr, "METADATA", "VALUE_INVALID", NULL,
+                "value is not valid UTF-8");
+      return 0;
+    }
+    if (strlen(value) > max_value_bytes) {
+      send_fail(sptr, "METADATA", "VALUE_INVALID", NULL,
+                "value is too long");
+      return 0;
+    }
   }
 
   /* Check key count limit if setting new key */
@@ -662,7 +768,11 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
 
   /* Notify local subscribers (only for public metadata) */
   if (visibility == METADATA_VIS_PUBLIC) {
-    notify_subscribers(target, key, value);
+    /* Expand "*" to client's nick for subscriber notifications */
+    const char *notify_target = (target[0] == '*' && !target[1]
+                                 && !is_channel && target_client)
+                                 ? cli_name(target_client) : target;
+    notify_subscribers(notify_target, key, value);
   }
 
   /* Propagate to other servers with visibility */
@@ -696,13 +806,16 @@ static int metadata_cmd_list(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  target = parv[2];
+  target = parv[1];
 
   if (!can_see_target(sptr, target, &is_channel, &target_client, &target_channel)) {
-    send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+    send_fail(sptr, "METADATA", "INVALID_TARGET", target,
               "Invalid target");
     return 0;
   }
+
+  /* Wrap responses in a metadata batch */
+  send_batch_start(sptr, "metadata");
 
   /* List all keys for target */
   if (is_channel) {
@@ -719,8 +832,7 @@ static int metadata_cmd_list(struct Client *sptr, int parc, char *parv[])
     entry = entry->next;
   }
 
-  /* Send end of list */
-  send_reply(sptr, RPL_METADATAEND, target);
+  send_batch_end(sptr);
   return 0;
 }
 
@@ -740,17 +852,20 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  target = parv[2];
+  target = parv[1];
 
   if (!can_see_target(sptr, target, &is_channel, &target_client, &target_channel)) {
-    send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+    send_fail(sptr, "METADATA", "INVALID_TARGET", target,
               "Invalid target");
     return 0;
   }
 
   if (!can_modify_target(sptr, target, is_channel, target_client, target_channel)) {
-    send_fail(sptr, "METADATA", "KEY_NO_PERMISSION", "*",
-              "You don't have permission to clear metadata on this target");
+    const char *err_target = (target[0] == '*' && !target[1])
+                              ? cli_name(sptr) : target;
+    send_fail_ctx(sptr, "METADATA", "KEY_NO_PERMISSION",
+                  "You don't have permission to clear metadata on this target",
+                  "%s *", err_target);
     return 0;
   }
 
@@ -772,7 +887,7 @@ static int metadata_cmd_sub(struct Client *sptr, int parc, char *parv[])
   int i;
   int max_subs;
 
-  if (parc < 3) {
+  if (parc < 4) {
     send_fail(sptr, "METADATA", "INVALID_PARAMS", NULL,
               "SUB requires at least one key");
     return 0;
@@ -780,7 +895,7 @@ static int metadata_cmd_sub(struct Client *sptr, int parc, char *parv[])
 
   max_subs = feature_int(FEAT_METADATA_MAX_SUBS);
 
-  for (i = 2; i < parc; i++) {
+  for (i = 3; i < parc; i++) {
     const char *key = parv[i];
 
     if (!is_valid_key(key)) {
@@ -811,13 +926,13 @@ static int metadata_cmd_unsub(struct Client *sptr, int parc, char *parv[])
 {
   int i;
 
-  if (parc < 3) {
+  if (parc < 4) {
     send_fail(sptr, "METADATA", "INVALID_PARAMS", NULL,
               "UNSUB requires at least one key");
     return 0;
   }
 
-  for (i = 2; i < parc; i++) {
+  for (i = 3; i < parc; i++) {
     const char *key = parv[i];
 
     if (!is_valid_key(key)) {
@@ -921,10 +1036,10 @@ static int metadata_cmd_sync(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  target = parv[2];
+  target = parv[1];
 
   if (!can_see_target(sptr, target, &is_channel, &target_client, &target_channel)) {
-    send_fail(sptr, "METADATA", "TARGET_INVALID", target,
+    send_fail(sptr, "METADATA", "INVALID_TARGET", target,
               "Invalid target");
     return 0;
   }
@@ -1028,13 +1143,15 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  if (parc < 2 || EmptyString(parv[1])) {
+  /* draft/metadata-2 format: METADATA <target> <subcommand> [args...]
+   * parv[1] = target, parv[2] = subcommand */
+  if (parc < 3 || EmptyString(parv[2])) {
     send_fail(sptr, "METADATA", "INVALID_PARAMS", NULL,
-              "Missing subcommand");
+              "Usage: METADATA <target> <subcommand>");
     return 0;
   }
 
-  subcmd = parv[1];
+  subcmd = parv[2];
 
   if (ircd_strcmp(subcmd, "GET") == 0) {
     return metadata_cmd_get(sptr, parc, parv);

@@ -102,6 +102,7 @@ enum AuthRequestFlag {
     AR_PASSWORD_CHECKED, /**< client password already checked */
     AR_LOC_DONE,        /**< loc messages have been sent */
     AR_DNSBL_PENDING,   /**< native DNSBL check pending */
+    AR_CAP_DONE,        /**< CAP negotiation completed (CAP END received) */
     AR_NUM_FLAGS
 };
 
@@ -1516,8 +1517,14 @@ int auth_set_nick(struct AuthRequest *auth, const char *nickname)
   /*
    * If the client hasn't gotten a cookie-ping yet,
    * choose a cookie and send it. -record!jegelhof@cloud9.net
+   *
+   * Skip for clients that did CAP negotiation — the bidirectional
+   * CAP LS/REQ/ACK/END exchange already proves connectivity, and
+   * the cookie PING breaks pre-registration command flows (metadata
+   * before-connect, etc.) where the client expects burst immediately
+   * after CAP END without an intermediate PING/PONG handshake.
    */
-  if (!auth->cookie) {
+  if (!auth->cookie && !FlagHas(&auth->flags, AR_CAP_DONE) && !FlagHas(&auth->flags, AR_CAP_PENDING)) {
     do {
       auth->cookie = ircrandom();
     } while (!auth->cookie);
@@ -1543,7 +1550,7 @@ int auth_defer_nick(struct AuthRequest *auth, const char *nickname)
   ircd_strncpy(auth->deferred_nick, nickname, NICKLEN);
   FlagClr(&auth->flags, AR_NEEDS_NICK);
 
-  if (!auth->cookie) {
+  if (!auth->cookie && !FlagHas(&auth->flags, AR_CAP_DONE) && !FlagHas(&auth->flags, AR_CAP_PENDING)) {
     do {
       auth->cookie = ircrandom();
     } while (!auth->cookie);
@@ -1683,6 +1690,7 @@ int auth_cap_done(struct AuthRequest *auth)
 {
   assert(auth != NULL);
   FlagClr(&auth->flags, AR_CAP_PENDING);
+  FlagSet(&auth->flags, AR_CAP_DONE);
   return check_auth_finished(auth);
 }
 

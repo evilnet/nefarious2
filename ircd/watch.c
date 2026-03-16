@@ -139,10 +139,12 @@ void check_status_watch(struct Client *cptr, int raw)
 
   wt_lasttime(wptr) = TStime();
 
-  /* Determine MONITOR equivalent numeric */
-  if (raw == RPL_NOWON)
+  /* Determine MONITOR equivalent numeric.
+   * RPL_NOWON/RPL_LOGON both mean "came online",
+   * RPL_NOWOFF/RPL_LOGOFF both mean "went offline". */
+  if (raw == RPL_NOWON || raw == RPL_LOGON)
     monitor_raw = RPL_MONONLINE;
-  else if (raw == RPL_NOWOFF)
+  else if (raw == RPL_NOWOFF || raw == RPL_LOGOFF)
     monitor_raw = RPL_MONOFFLINE;
   else
     monitor_raw = 0;  /* Unknown - use WATCH format */
@@ -154,8 +156,8 @@ void check_status_watch(struct Client *cptr, int raw)
   for (lp = wt_watch(wptr); lp; lp = lp->next)
   {
     if ((lp->flags & WATCH_FLAG_MONITOR) && monitor_raw) {
-      /* MONITOR client - use 730/731 format: nick!user@host */
-      if (IsUser(cptr)) {
+      /* MONITOR client - 730 uses nick!user@host, 731 uses just nick */
+      if (monitor_raw == RPL_MONONLINE && IsUser(cptr)) {
         ircd_snprintf(0, hostmask, sizeof(hostmask), "%s!%s@%s",
                       cli_name(cptr),
                       cli_user(cptr)->username,

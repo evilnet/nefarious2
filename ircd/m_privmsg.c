@@ -124,22 +124,34 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NORECIPIENT, MSG_PRIVATE);
 
-  if (parc < 3 || EmptyString(parv[parc - 1]))
-    return send_reply(sptr, ERR_NOTEXTTOSEND);
-
   /*
    * Check for multiline batch interception (draft/multiline).
    * If this message has a @batch tag matching an active multiline batch,
    * add it to the batch instead of delivering immediately.
+   * This must be checked BEFORE the empty-text check so that blank lines
+   * in a multiline batch can reach multiline_add_message() for validation.
    */
-  if (cli_msg_batch_tag(sptr)[0] != '\0' &&
-      cli_ml_batch_id(sptr)[0] != '\0' &&
-      strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
-    /* This PRIVMSG is part of an active multiline batch - add to batch */
-    return multiline_add_message(sptr, parv[parc - 1], cli_msg_concat(sptr));
+  if (cli_msg_batch_tag(sptr)[0] != '\0' && cli_ml_batch_id(sptr)[0] != '\0') {
+    if (strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
+      /* This PRIVMSG is part of an active multiline batch - add to batch */
+      return multiline_add_message(sptr, (parc >= 3) ? parv[parc - 1] : NULL, cli_msg_concat(sptr));
+    } else {
+      /* Batch tag doesn't match active batch - invalid */
+      send_fail(sptr, "BATCH", "MULTILINE_INVALID", NULL,
+                "Batch tag does not match active multiline batch");
+      return 0;
+    }
   }
 
+  if (parc < 3 || EmptyString(parv[parc - 1]))
+    return send_reply(sptr, ERR_NOTEXTTOSEND);
+
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
+
+  /* Multi-target PRIVMSG with echo-message produces multiple echoes;
+   * wrap them in a labeled-response batch if applicable */
+  if (count > 1 && feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG))
+    labeled_batch_start(sptr);
 
   for (i = 0; i < count; ++i) {
     name = vector[i];
@@ -155,7 +167,7 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      */
     else if ((server = strchr(name, '@')))
       relay_directed_message(sptr, name, server, parv[parc - 1]);
-    else 
+    else
       relay_private_message(sptr, name, parv[parc - 1]);
   }
   return 0;

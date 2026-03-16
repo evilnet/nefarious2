@@ -135,6 +135,34 @@ static uint64_t s2s_time_override = 0;
 /** Override S2S msgid for forwarded command compact tags. */
 static char s2s_msgid_override[S2S_MSGID_BUFSIZE] = "";
 
+/** Override msgid for client-side channel broadcasts.
+ * When non-empty, format_message_tags_ex includes msgid for clients with
+ * message-tags capability. Auto-cleared after channel broadcast completes.
+ */
+static char client_msgid_override[64] = "";
+
+/** Override server-time for client-side tag formatting.
+ * When non-empty, format_message_tags functions use this timestamp
+ * instead of calling gettimeofday(). Used by multiline batch to ensure
+ * consistent timestamps across all recipients. */
+static char client_time_override[40] = "";
+
+void sendcmdto_set_client_time(const char *timestr)
+{
+  if (timestr)
+    ircd_strncpy(client_time_override, timestr, sizeof(client_time_override));
+  else
+    client_time_override[0] = '\0';
+}
+
+void sendcmdto_set_client_msgid(const char *msgid)
+{
+  if (msgid)
+    ircd_strncpy(client_msgid_override, msgid, sizeof(client_msgid_override));
+  else
+    client_msgid_override[0] = '\0';
+}
+
 void sendcmdto_set_fwd_batch(const char *batch_id)
 {
   if (batch_id)
@@ -228,6 +256,7 @@ static int wants_message_tags(struct Client *to)
 #define TAGS_ACCOUNT  0x02  /**< Include @account tag */
 #define TAGS_BATCH    0x04  /**< Include @batch tag (network batch) */
 #define TAGS_BOT      0x08  /**< Include @bot tag */
+#define TAGS_MSGID    0x10  /**< Include @msgid tag from client_msgid_override */
 
 /** Format message tags with explicit control over which tags to include.
  * @param[out] buf Buffer to write tags to.
@@ -243,8 +272,9 @@ static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *fro
   int use_account = flags & TAGS_ACCOUNT;
   int use_batch = (flags & TAGS_BATCH) && active_network_batch_id[0];
   int use_bot = (flags & TAGS_BOT) && from && IsBot(from);
+  int use_msgid = (flags & TAGS_MSGID) && client_msgid_override[0];
 
-  if (!use_time && !use_account && !use_batch && !use_bot)
+  if (!use_time && !use_account && !use_batch && !use_bot && !use_msgid)
     return NULL;
 
   buf[0] = '@';
@@ -267,6 +297,12 @@ static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *fro
                     tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                     tm.tm_hour, tm.tm_min, tm.tm_sec,
                     tv.tv_usec / 1000);
+  }
+
+  if (use_msgid) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "msgid=%s", client_msgid_override);
   }
 
   if (use_account && from && cli_user(from) && IsAccount(from)) {
@@ -310,9 +346,12 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
     flags |= TAGS_ACCOUNT;
   if (include_batch && CapOwnHas(to, CAP_BATCH) && active_network_batch_id[0])
     flags |= TAGS_BATCH;
-  /* Bot tag is sent to any client that gets any tags */
-  if (flags && from && IsBot(from))
+  /* Bot tag requires message-tags capability (server-generated tag per IRCv3) */
+  if (CapOwnHas(to, CAP_MSGTAGS) && from && IsBot(from))
     flags |= TAGS_BOT;
+  /* Include msgid when override is set and client has message-tags */
+  if (client_msgid_override[0] && CapOwnHas(to, CAP_MSGTAGS))
+    flags |= TAGS_MSGID;
 
   return flags;
 }
@@ -419,12 +458,13 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapActive(to, CAP_LABELEDRESP) &&
-                  to && MyConnect(to) && cli_label(to)[0];
+                  to && MyConnect(to) && cli_label(to)[0] &&
+                  !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
   int use_fwd_batch = fwd_batch_id_override[0] && feature_bool(FEAT_CAP_batch) &&
                       CapActive(to, CAP_BATCH);
-  int use_msgid = msgid && *msgid;
+  int use_msgid = msgid && *msgid && CapActive(to, CAP_MSGTAGS);
   int pos = 0;
 
   if (!use_time && !use_account && !use_label && !use_batch && !use_fwd_batch && !use_msgid)
@@ -455,17 +495,21 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
   }
 
   if (use_time) {
-    struct timeval tv;
-    struct tm tm;
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    gettimeofday(&tv, NULL);
-    gmtime_r(&tv.tv_sec, &tm);
-    pos += snprintf(buf + pos, buflen - pos,
-                    "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                    tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                    tm.tm_hour, tm.tm_min, tm.tm_sec,
-                    tv.tv_usec / 1000);
+    if (client_time_override[0]) {
+      pos += snprintf(buf + pos, buflen - pos, "time=%s", client_time_override);
+    } else {
+      struct timeval tv;
+      struct tm tm;
+      gettimeofday(&tv, NULL);
+      gmtime_r(&tv.tv_sec, &tm);
+      pos += snprintf(buf + pos, buflen - pos,
+                      "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec,
+                      tv.tv_usec / 1000);
+    }
   }
 
   if (use_account && from && cli_user(from) && IsAccount(from)) {
@@ -475,8 +519,9 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
                     cli_user(from)->account);
   }
 
-  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
-  if (from && IsBot(from)) {
+  /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec).
+   * Per IRCv3, server-generated tags require message-tags capability. */
+  if (from && IsBot(from) && CapActive(to, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "bot");
@@ -531,10 +576,11 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapHas(caps, CAP_ACCOUNTTAG);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapHas(caps, CAP_LABELEDRESP) &&
-                  to && MyConnect(to) && cli_label(to)[0];
+                  to && MyConnect(to) && cli_label(to)[0] &&
+                  !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapHas(caps, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
-  int use_msgid = msgid && *msgid;
+  int use_msgid = msgid && *msgid && CapHas(caps, CAP_MSGTAGS);
   int pos = 0;
 
   if (!use_time && !use_account && !use_label && !use_batch && !use_msgid)
@@ -578,7 +624,7 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
                     cli_user(from)->account);
   }
 
-  if (from && IsBot(from)) {
+  if (from && IsBot(from) && CapHas(caps, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "bot");
@@ -607,10 +653,11 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapActive(to, CAP_LABELEDRESP) &&
-                  to && MyConnect(to) && cli_label(to)[0];
+                  to && MyConnect(to) && cli_label(to)[0] &&
+                  !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
-  int use_client_tags = client_tags && *client_tags;
+  int use_client_tags = client_tags && *client_tags && CapActive(to, CAP_MSGTAGS);
   int pos = 0;
 
   /* TAGMSG is only useful if there are client-only tags to relay */
@@ -623,6 +670,13 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   /* Client-only tags first (these are the primary content for TAGMSG) */
   if (use_client_tags) {
     pos += snprintf(buf + pos, buflen - pos, "%s", client_tags);
+  }
+
+  /* Include msgid from channel broadcast override */
+  if (client_msgid_override[0] && CapActive(to, CAP_MSGTAGS)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "msgid=%s", client_msgid_override);
   }
 
   /* When in a batch, use @batch instead of @label */
@@ -660,7 +714,7 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   }
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
-  if (from && IsBot(from)) {
+  if (from && IsBot(from) && CapActive(to, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "bot");
@@ -696,10 +750,11 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapHas(caps, CAP_ACCOUNTTAG);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapHas(caps, CAP_LABELEDRESP) &&
-                  to && MyConnect(to) && cli_label(to)[0];
+                  to && MyConnect(to) && cli_label(to)[0] &&
+                  !cli_label_responded(to);
   int use_batch = feature_bool(FEAT_CAP_batch) && CapHas(caps, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
-  int use_client_tags = client_tags && *client_tags;
+  int use_client_tags = client_tags && *client_tags && CapHas(caps, CAP_MSGTAGS);
   int pos = 0;
 
   if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch)
@@ -710,6 +765,13 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
 
   if (use_client_tags) {
     pos += snprintf(buf + pos, buflen - pos, "%s", client_tags);
+  }
+
+  /* Include msgid from channel broadcast override */
+  if (client_msgid_override[0] && CapHas(caps, CAP_MSGTAGS)) {
+    if (pos > 1 && pos < (int)buflen - 1)
+      buf[pos++] = ';';
+    pos += snprintf(buf + pos, buflen - pos, "msgid=%s", client_msgid_override);
   }
 
   if (use_batch) {
@@ -744,7 +806,7 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
                     cli_user(from)->account);
   }
 
-  if (from && IsBot(from)) {
+  if (from && IsBot(from) && CapHas(caps, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "bot");
@@ -1260,7 +1322,7 @@ void sendcmdto_one_client_tags(struct Client *from, const char *cmd,
 {
   struct VarData vd;
   struct MsgBuf *mb;
-  char tagbuf[1024];
+  char tagbuf[4608];
   char *tags;
   int prio;
 
@@ -1858,7 +1920,7 @@ void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *mb;
   struct Membership *member;
-  char tagbuf[1024];
+  char tagbuf[4608];
 
   vd.vd_format = pattern;
   va_start(vd.vd_args, pattern);
@@ -1988,7 +2050,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *user_mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *user_mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *user_mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
   struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
@@ -2164,7 +2226,7 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   struct Client *primary_dir;   /* Primary's server direction */
   const char *userfmt;
   const char *usercmd;
-  char tagbuf[1024];
+  char tagbuf[4608];
   char s2s_tagbuf[128];
   char userfmt_tags[64];
 
@@ -2242,8 +2304,8 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
     cli_sentalong(member->user) = sentalong_marker;
 
     if (MyConnect(member->user)) {
-      /* For clients with message-tags, include client-only tags */
-      if (wants_message_tags(member->user) && client_tags && *client_tags) {
+      /* For clients with message-tags cap, include client-only tags */
+      if (CapOwnHas(member->user, CAP_MSGTAGS) && client_tags && *client_tags) {
         /* Build message with client-only tags + server tags for this recipient */
         if (format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, member->user, client_tags)) {
           va_start(vd.vd_args, pattern);
@@ -2999,40 +3061,10 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
   if (!MyConnect(to))
     return;
 
-  /* If recipient doesn't have standard-replies, fall back to numerics or NOTICE */
-  if (!feature_bool(FEAT_CAP_standard_replies) || !CapRecipientHas(to, CAP_STANDARDREPLIES)) {
-    /* Map known error codes to traditional numerics where applicable */
-    if (strcmp(type, "FAIL") == 0) {
-      if (strcmp(code, "NEED_MORE_PARAMS") == 0) {
-        /* ERR_NEEDMOREPARAMS (461) */
-        mb = msgq_make(to, ":%s 461 %s %s :Not enough parameters",
-                       cli_name(&me), IsRegistered(to) ? cli_name(to) : "*", command);
-        send_buffer(to, mb, 0);
-        msgq_clean(mb);
-        return;
-      }
-      if (strcmp(code, "ALREADY_AUTHENTICATED") == 0) {
-        /* ERR_ALREADYREGISTRED (462) */
-        mb = msgq_make(to, ":%s 462 %s :You may not reregister",
-                       cli_name(&me), IsRegistered(to) ? cli_name(to) : "*");
-        send_buffer(to, mb, 0);
-        msgq_clean(mb);
-        return;
-      }
-    }
-    /* Fall back to NOTICE for unmapped codes */
-    if (context && *context)
-      mb = msgq_make(to, ":%s NOTICE %s :%s %s %s %s :%s",
-                     cli_name(&me), IsRegistered(to) ? cli_name(to) : "*",
-                     type, command, code, context, description);
-    else
-      mb = msgq_make(to, ":%s NOTICE %s :%s %s %s :%s",
-                     cli_name(&me), IsRegistered(to) ? cli_name(to) : "*",
-                     type, command, code, description);
-    send_buffer(to, mb, 0);
-    msgq_clean(mb);
-    return;
-  }
+  /* Always send FAIL/WARN/NOTE as actual IRC commands per IRCv3 standard-replies.
+   * Draft extensions (metadata, redact, multiline, etc.) define FAIL as their
+   * native error format — falling back to NOTICE breaks conformance tests.
+   * Legacy clients will simply ignore unknown commands. */
 
   /* Format tags with explicit label override if provided */
   use_time = feature_bool(FEAT_CAP_server_time) && CapRecipientHas(to, CAP_SERVERTIME);
@@ -3053,17 +3085,21 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
     }
 
     if (use_time) {
-      struct timeval tv;
-      struct tm tm;
       if (pos > 1 && pos < (int)sizeof(tagbuf) - 1)
         tagbuf[pos++] = ';';
-      gettimeofday(&tv, NULL);
-      gmtime_r(&tv.tv_sec, &tm);
-      pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
-                      "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                      tm.tm_hour, tm.tm_min, tm.tm_sec,
-                      (long)(tv.tv_usec / 1000));
+      if (client_time_override[0]) {
+        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos, "time=%s", client_time_override);
+      } else {
+        struct timeval tv;
+        struct tm tm;
+        gettimeofday(&tv, NULL);
+        gmtime_r(&tv.tv_sec, &tm);
+        pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
+                        "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                        tm.tm_hour, tm.tm_min, tm.tm_sec,
+                        (long)(tv.tv_usec / 1000));
+      }
     }
 
     tagbuf[pos++] = ' ';
@@ -3161,6 +3197,64 @@ void send_note(struct Client *to, const char *command, const char *code,
                const char *context, const char *description)
 {
   send_standard_reply(to, "NOTE", command, code, context, description);
+}
+
+/**
+ * Send a FAIL reply with printf-formatted context (IRCv3 standard-replies).
+ * Supports multiple context parameters via format string, e.g.:
+ *   send_fail_ctx(cli, "METADATA", "KEY_NO_PERMISSION",
+ *                 "You don't have permission", "%s %s", target, key);
+ * produces: FAIL METADATA KEY_NO_PERMISSION <target> <key> :You don't have permission
+ */
+void send_fail_ctx(struct Client *to, const char *command, const char *code,
+                   const char *description, const char *context_fmt, ...)
+{
+  char ctx[512];
+  if (context_fmt) {
+    va_list ap;
+    va_start(ap, context_fmt);
+    ircd_vsnprintf(0, ctx, sizeof(ctx), context_fmt, ap);
+    va_end(ap);
+    send_standard_reply(to, "FAIL", command, code, ctx, description);
+  } else {
+    send_standard_reply(to, "FAIL", command, code, NULL, description);
+  }
+}
+
+/**
+ * Send a WARN reply with printf-formatted context (IRCv3 standard-replies).
+ */
+void send_warn_ctx(struct Client *to, const char *command, const char *code,
+                   const char *description, const char *context_fmt, ...)
+{
+  char ctx[512];
+  if (context_fmt) {
+    va_list ap;
+    va_start(ap, context_fmt);
+    ircd_vsnprintf(0, ctx, sizeof(ctx), context_fmt, ap);
+    va_end(ap);
+    send_standard_reply(to, "WARN", command, code, ctx, description);
+  } else {
+    send_standard_reply(to, "WARN", command, code, NULL, description);
+  }
+}
+
+/**
+ * Send a NOTE reply with printf-formatted context (IRCv3 standard-replies).
+ */
+void send_note_ctx(struct Client *to, const char *command, const char *code,
+                   const char *description, const char *context_fmt, ...)
+{
+  char ctx[512];
+  if (context_fmt) {
+    va_list ap;
+    va_start(ap, context_fmt);
+    ircd_vsnprintf(0, ctx, sizeof(ctx), context_fmt, ap);
+    va_end(ap);
+    send_standard_reply(to, "NOTE", command, code, ctx, description);
+  } else {
+    send_standard_reply(to, "NOTE", command, code, NULL, description);
+  }
 }
 
 /**

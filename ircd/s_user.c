@@ -637,17 +637,28 @@ int register_user(struct Client *cptr, struct Client *sptr)
     motd_signon(sptr);
 
     /* IRCv3 draft/metadata-2: burst client's own metadata after registration.
-     * Spec requires this in a metadata batch before post-registration activity.
-     * Empty batch (start+end) is sent if no metadata exists. */
+     * Spec requires METADATA commands in a metadata batch with target param. */
     if (CapActive(sptr, CAP_DRAFT_METADATA2)) {
       struct MetadataEntry *md = metadata_list_client(sptr);
-      send_batch_start(sptr, "metadata");
-      while (md) {
-        send_reply(sptr, RPL_KEYVALUE, cli_name(sptr), md->key,
-                   get_visibility_str(md), md->value);
-        md = md->next;
+      if (md) {
+        /* Manual batch open with target parameter (send_batch_start doesn't support it) */
+        {
+          unsigned int seq = con_batch_seq(cli_connect(sptr))++;
+          ircd_snprintf(NULL, cli_batch_id(sptr),
+                        sizeof(con_batch_id(cli_connect(sptr))),
+                        "%s%u", cli_yxx(sptr), seq);
+        }
+        sendrawto_one(sptr, ":%s BATCH +%s metadata %s",
+                      cli_name(&me), cli_batch_id(sptr), cli_name(sptr));
+        while (md) {
+          sendrawto_one(sptr, "@batch=%s :%s METADATA %s %s %s :%s",
+                        cli_batch_id(sptr), cli_name(&me),
+                        cli_name(sptr), md->key,
+                        get_visibility_str(md), md->value);
+          md = md->next;
+        }
+        send_batch_end(sptr);
       }
-      send_batch_end(sptr);
     }
 
     if (cli_snomask(sptr) & SNO_NOISY)
@@ -1030,22 +1041,25 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
        * however, allow to do two nick changes immediately after another
        * before limiting the nick flood. -Run
        */
-      if (CurrentTime < cli_nextnick(cptr))
       {
-        cli_nextnick(cptr) += 2;
-        send_reply(cptr, ERR_NICKTOOFAST, parv[1],
-                   cli_nextnick(cptr) - CurrentTime);
-        /* Send error message */
-        sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
-        /* bounce NICK to user */
-        return 0;                /* ignore nick change! */
-      }
-      else {
-        /* Limit total to 1 change per NICK_DELAY seconds: */
-        cli_nextnick(cptr) += NICK_DELAY;
-        /* However allow _maximal_ 1 extra consecutive nick change: */
-        if (cli_nextnick(cptr) < CurrentTime)
-          cli_nextnick(cptr) = CurrentTime;
+        int nick_delay = feature_int(FEAT_NICKDELAY);
+        if (nick_delay > 0 && CurrentTime < cli_nextnick(cptr))
+        {
+          cli_nextnick(cptr) += 2;
+          send_reply(cptr, ERR_NICKTOOFAST, parv[1],
+                     cli_nextnick(cptr) - CurrentTime);
+          /* Send error message */
+          sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
+          /* bounce NICK to user */
+          return 0;                /* ignore nick change! */
+        }
+        else if (nick_delay > 0) {
+          /* Limit total to 1 change per NICKDELAY seconds: */
+          cli_nextnick(cptr) += nick_delay;
+          /* However allow _maximal_ 1 extra consecutive nick change: */
+          if (cli_nextnick(cptr) < CurrentTime)
+            cli_nextnick(cptr) = CurrentTime;
+        }
       }
       /* Invalidate all bans against the user so we check them again */
       for (member = (cli_user(cptr))->channel; member;
@@ -1067,11 +1081,24 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
      * on a channel, send note of change to all clients
      * on that channel. Propagate notice to other servers.
      */
+    /* Check for case-only nick changes — suppress MONITOR notifications */
+    {
+    int case_only_change = IsUser(sptr) && (ircd_strcmp(cli_name(sptr), nick) == 0);
     if (IsUser(sptr)) {
-      /* Notify exit user */
-      check_status_watch(sptr, RPL_LOGOFF);
+      /* Notify exit user — skip for case-only nick changes (same nick per RFC1459) */
+      if (!case_only_change)
+        check_status_watch(sptr, RPL_LOGOFF);
 
-      sendcmdto_common_channels_butone(sptr, CMD_NICK, NULL, ":%s", nick);
+      /* If sender has a labeled-response label, send them a labeled NICK
+       * echo first, then skip them in the broadcast to other members. */
+      if (MyConnect(sptr) && cli_label(sptr)[0]
+          && feature_bool(FEAT_CAP_labeled_response)
+          && CapActive(sptr, CAP_LABELEDRESP)) {
+        sendcmdto_one_tags(sptr, CMD_NICK, sptr, ":%s", nick);
+        sendcmdto_common_channels_butone(sptr, CMD_NICK, sptr, ":%s", nick);
+      } else {
+        sendcmdto_common_channels_butone(sptr, CMD_NICK, NULL, ":%s", nick);
+      }
       add_history(sptr, 1);
       sendcmdto_serv_butone(sptr, CMD_NICK, cptr, "%s %Tu", nick,
                             cli_lastnick(sptr));
@@ -1108,8 +1135,10 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
     strcpy(cli_name(sptr), nick);
     hAddClient(sptr);
 
-    /* Notify change nick local/remote user */
-    check_status_watch(sptr, RPL_LOGON);
+    /* Notify change nick local/remote user — skip for case-only changes */
+    if (!case_only_change)
+      check_status_watch(sptr, RPL_LOGON);
+    } /* end case_only_change scope */
   }
   else {
     /* Local client setting NICK the first time */

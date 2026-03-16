@@ -118,7 +118,8 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                      const char *target, const char *msgid,
                                      struct SLink *messages, int total_lines,
                                      int is_channel, struct Channel *chptr,
-                                     const char *paste_url_str)
+                                     const char *paste_url_str,
+                                     const char *client_tags)
 {
   struct SLink *lp;
   int lines_to_send;
@@ -134,16 +135,35 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
     send_notice = 1;
   }
 
-  /* Send preview lines */
+  /* Send preview lines with server tags (time, msgid) for IRCv3 compliance.
+   * Per multiline spec, only the FIRST fallback line carries msgid to avoid
+   * duplicate history entries in receiving clients.
+   * Client-only tags from BATCH open are included on each fallback line. */
   int sent = 0;
+  int msgid_sent = 0;
+  int use_ctags = (client_tags && *client_tags && CapActive(to, CAP_MSGTAGS));
   for (lp = messages; lp && sent < lines_to_send; lp = lp->next, sent++) {
     char *text = lp->value.cp + 1;
     if (*text == '\0')
       continue;  /* Skip blank lines in fallback per IRCv3 spec */
-    if (is_channel) {
-      sendcmdto_one(sptr, CMD_PRIVATE, to, "%H :%s", chptr, text);
+    const char *line_msgid = (!msgid_sent) ? msgid : NULL;
+    msgid_sent = 1;
+    if (use_ctags) {
+      if (line_msgid)
+        sendcmdto_set_client_msgid(line_msgid);
+      if (is_channel)
+        sendcmdto_one_client_tags(sptr, MSG_PRIVATE, to, client_tags,
+                                  "%H :%s", chptr, text);
+      else
+        sendcmdto_one_client_tags(sptr, MSG_PRIVATE, to, client_tags,
+                                  "%C :%s", to, text);
+      if (line_msgid)
+        sendcmdto_set_client_msgid(NULL);
     } else {
-      sendcmdto_one(sptr, CMD_PRIVATE, to, "%C :%s", to, text);
+      if (is_channel)
+        sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, to, line_msgid, "%H :%s", chptr, text);
+      else
+        sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, to, line_msgid, "%C :%s", to, text);
     }
   }
 
@@ -347,6 +367,7 @@ clear_multiline_batch(struct Connection *con)
   con_ml_batch_id(con)[0] = '\0';
   con_ml_target(con)[0] = '\0';
   con_ml_label(con)[0] = '\0';
+  con_ml_client_tags(con)[0] = '\0';
   con_ml_messages(con) = NULL;
   con_ml_msg_count(con) = 0;
   con_ml_total_bytes(con) = 0;
@@ -397,12 +418,12 @@ multiline_add_message(struct Client *sptr, const char *text, int concat)
   if (!con_ml_batch_id(con)[0])
     return 0;  /* No active batch */
 
-  len = strlen(text);
+  len = (text && *text) ? strlen(text) : 0;
 
   /* IRCv3 multiline spec: concat flag on blank line is invalid */
   if (concat && len == 0) {
-    send_fail(sptr, "BATCH", "INVALID_MULTILINE",
-              con_ml_batch_id(con), "Cannot use concat tag on blank line");
+    send_fail(sptr, "BATCH", "MULTILINE_INVALID",
+              NULL, "Cannot use concat tag on blank line");
     clear_multiline_batch(con);
     return -1;
   }
@@ -528,6 +549,14 @@ process_multiline_batch(struct Client *sptr)
    */
   generate_msgid(batch_base_msgid, sizeof(batch_base_msgid));
 
+  /* Capture time ONCE for consistent timestamps across all recipients */
+  char batch_timebuf[32];
+  format_time_tag(batch_timebuf, sizeof(batch_timebuf));
+
+  /* Set global time override so all send.c tag formatters use the same
+   * timestamp as the batch opener. Cleared at the end of this function. */
+  sendcmdto_set_client_time(batch_timebuf);
+
   /* Pre-compute paste URL once for all fallback paths.
    * The paste secret is captured for later atomic storage in history_store_multiline.
    */
@@ -560,56 +589,38 @@ process_multiline_batch(struct Client *sptr)
       if (CapActive(to, CAP_DRAFT_MULTILINE) && CapActive(to, CAP_BATCH)) {
         /* Send as batch to supporting client */
         char batchid[16];
-        char timebuf[32];
         int use_tags = CapActive(to, CAP_MSGTAGS);
 
         ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                       NumNick(sptr), con_batch_seq(cli_connect(to))++);
 
-        sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
-                      batchid, chptr->chname);
+        /* Per IRCv3 multiline spec, msgid and time go on the BATCH + opener.
+         * Client-only tags from the original BATCH open are included. */
+        if (use_tags) {
+          const char *ctags = con_ml_client_tags(con);
+          if (ctags[0])
+            sendrawto_one(to, "@time=%s;msgid=%s;%s :%s BATCH +%s draft/multiline %s",
+                          batch_timebuf, batch_base_msgid, ctags, cli_name(&me), batchid, chptr->chname);
+          else
+            sendrawto_one(to, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                          batch_timebuf, batch_base_msgid, cli_name(&me), batchid, chptr->chname);
+        } else {
+          sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
+                        batchid, chptr->chname);
+        }
 
-        first = 1;
         for (lp = con_ml_messages(con); lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          /* All lines in the batch share the same msgid per IRCv3 multiline spec */
-          if (use_tags) {
-            format_time_tag(timebuf, sizeof(timebuf));
-          }
-
-          if (first && !concat) {
-            if (use_tags) {
-              sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            } else {
-              sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            }
-            first = 0;
-          } else if (concat) {
-            if (use_tags) {
-              sendrawto_one(to, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            } else {
-              sendrawto_one(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            }
+          if (concat) {
+            sendrawto_one(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                          batchid, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), chptr->chname, text);
           } else {
-            if (use_tags) {
-              sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            } else {
-              sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            }
+            sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                          batchid, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), chptr->chname, text);
           }
         }
 
@@ -634,7 +645,7 @@ process_multiline_batch(struct Client *sptr)
           /* Preview + paste URL fallback for legacy clients */
           send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
                                    con_ml_messages(con), total_lines, 1, chptr,
-                                   batch_paste_url);
+                                   batch_paste_url, con_ml_client_tags(con));
         }
       }
 
@@ -668,61 +679,55 @@ process_multiline_batch(struct Client *sptr)
         if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
           /* Sender has multiline - send batch echo */
           char batchid[16];
-          char timebuf[32];
           int use_tags = CapActive(sptr, CAP_MSGTAGS);
           int use_label = con_ml_label(con)[0] && CapActive(sptr, CAP_LABELEDRESP);
 
           ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                         NumNick(sptr), con_batch_seq(con)++);
 
-          if (use_label) {
-            sendrawto_one(sptr, "@label=%s :%s BATCH +%s draft/multiline %s",
-                          con_ml_label(con), cli_name(&me), batchid, chptr->chname);
-          } else {
-            sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
-                          batchid, chptr->chname);
+          /* Per IRCv3 multiline spec, msgid and time go on the BATCH + opener.
+           * Client-only tags from the original BATCH open are included for
+           * recipients with message-tags capability. */
+          {
+            const char *ctags = con_ml_client_tags(con);
+            int has_ctags = (ctags[0] && use_tags);
+            if (use_label && use_tags) {
+              if (has_ctags)
+                sendrawto_one(sptr, "@label=%s;time=%s;msgid=%s;%s :%s BATCH +%s draft/multiline %s",
+                              con_ml_label(con), batch_timebuf, batch_base_msgid, ctags,
+                              cli_name(&me), batchid, chptr->chname);
+              else
+                sendrawto_one(sptr, "@label=%s;time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                              con_ml_label(con), batch_timebuf, batch_base_msgid,
+                              cli_name(&me), batchid, chptr->chname);
+            } else if (use_label) {
+              sendrawto_one(sptr, "@label=%s :%s BATCH +%s draft/multiline %s",
+                            con_ml_label(con), cli_name(&me), batchid, chptr->chname);
+            } else if (use_tags) {
+              if (has_ctags)
+                sendrawto_one(sptr, "@time=%s;msgid=%s;%s :%s BATCH +%s draft/multiline %s",
+                              batch_timebuf, batch_base_msgid, ctags, cli_name(&me), batchid, chptr->chname);
+              else
+                sendrawto_one(sptr, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                              batch_timebuf, batch_base_msgid, cli_name(&me), batchid, chptr->chname);
+            } else {
+              sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
+                            batchid, chptr->chname);
+            }
           }
 
-          first = 1;
           for (lp = con_ml_messages(con); lp; lp = lp->next) {
             int concat = lp->value.cp[0];
             char *text = lp->value.cp + 1;
 
-            if (use_tags) {
-              format_time_tag(timebuf, sizeof(timebuf));
-            }
-
-            if (first && !concat) {
-              if (use_tags) {
-                sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                              batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                              get_displayed_host(sptr), chptr->chname, text);
-              } else {
-                sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                              batchid, cli_name(sptr), cli_user(sptr)->username,
-                              get_displayed_host(sptr), chptr->chname, text);
-              }
-              first = 0;
-            } else if (concat) {
-              if (use_tags) {
-                sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                              batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                              get_displayed_host(sptr), chptr->chname, text);
-              } else {
-                sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                              batchid, cli_name(sptr), cli_user(sptr)->username,
-                              get_displayed_host(sptr), chptr->chname, text);
-              }
+            if (concat) {
+              sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                            batchid, cli_name(sptr), cli_user(sptr)->username,
+                            get_displayed_host(sptr), chptr->chname, text);
             } else {
-              if (use_tags) {
-                sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                              batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                              get_displayed_host(sptr), chptr->chname, text);
-              } else {
-                sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                              batchid, cli_name(sptr), cli_user(sptr)->username,
-                              get_displayed_host(sptr), chptr->chname, text);
-              }
+              sendrawto_one(sptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                            batchid, cli_name(sptr), cli_user(sptr)->username,
+                            get_displayed_host(sptr), chptr->chname, text);
             }
           }
 
@@ -731,7 +736,7 @@ process_multiline_batch(struct Client *sptr)
           /* Sender doesn't have multiline - preview + truncation fallback */
           send_multiline_fallback(sptr, sptr, chptr->chname, batch_base_msgid,
                                    con_ml_messages(con), con_ml_msg_count(con),
-                                   1, chptr, batch_paste_url);
+                                   1, chptr, batch_paste_url, con_ml_client_tags(con));
         }
       }
     }
@@ -741,56 +746,38 @@ process_multiline_batch(struct Client *sptr)
      * aliases is handled by bounce_echo_pm_to_session. */
     if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
       char batchid[16];
-      char timebuf[32];
       int use_tags = CapActive(acptr, CAP_MSGTAGS);
 
       ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                     NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
 
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
-                    batchid, cli_name(acptr));
+      /* Per IRCv3 multiline spec, msgid and time go on the BATCH + opener.
+       * Client-only tags from the original BATCH open are included. */
+      if (use_tags) {
+        const char *ctags = con_ml_client_tags(con);
+        if (ctags[0])
+          sendrawto_one(acptr, "@time=%s;msgid=%s;%s :%s BATCH +%s draft/multiline %s",
+                        batch_timebuf, batch_base_msgid, ctags, cli_name(&me), batchid, cli_name(acptr));
+        else
+          sendrawto_one(acptr, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                        batch_timebuf, batch_base_msgid, cli_name(&me), batchid, cli_name(acptr));
+      } else {
+        sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
+                      batchid, cli_name(acptr));
+      }
 
-      first = 1;
       for (lp = con_ml_messages(con); lp; lp = lp->next) {
         int concat = lp->value.cp[0];
         char *text = lp->value.cp + 1;
 
-        /* All lines in the batch share the same msgid per IRCv3 multiline spec */
-        if (use_tags) {
-          format_time_tag(timebuf, sizeof(timebuf));
-        }
-
-        if (first && !concat) {
-          if (use_tags) {
-            sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          } else {
-            sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          }
-          first = 0;
-        } else if (concat) {
-          if (use_tags) {
-            sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          } else {
-            sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          }
+        if (concat) {
+          sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                        batchid, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), cli_name(acptr), text);
         } else {
-          if (use_tags) {
-            sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          } else {
-            sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          }
+          sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                        batchid, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), cli_name(acptr), text);
         }
       }
 
@@ -815,7 +802,7 @@ process_multiline_batch(struct Client *sptr)
         /* Preview + paste URL fallback for legacy clients */
         send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
                                  con_ml_messages(con), total_lines, 0, NULL,
-                                 batch_paste_url);
+                                 batch_paste_url, con_ml_client_tags(con));
       }
     }
 
@@ -838,7 +825,7 @@ process_multiline_batch(struct Client *sptr)
         /* Preview + truncation fallback for DM echo */
         send_multiline_fallback(sptr, sptr, cli_name(acptr), batch_base_msgid,
                                  con_ml_messages(con), con_ml_msg_count(con),
-                                 0, NULL, batch_paste_url);
+                                 0, NULL, batch_paste_url, con_ml_client_tags(con));
       }
     }
 
@@ -1080,6 +1067,9 @@ process_multiline_batch(struct Client *sptr)
     MyFree(history_content);
   }
 
+  /* Clear the time override set at the start of this function */
+  sendcmdto_set_client_time(NULL);
+
   clear_multiline_batch(con);
   return 0;
 }
@@ -1223,13 +1213,24 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_ml_batch_start(con) = CurrentTime;
     con_ml_lag_accum(con) = 0;  /* Reset lag accumulator for new batch */
 
-    /* Save the label from BATCH +id for labeled-response on WARN */
+    /* Save the label from BATCH +id for labeled-response echo.
+     * Suppress generic ACK — the label will be attached to the echo batch
+     * when process_multiline_batch() delivers the content. */
     if (cli_label(sptr)[0]) {
       ircd_strncpy(con_ml_label(con), cli_label(sptr),
                    sizeof(con->con_ml_label) - 1);
       con_ml_label(con)[sizeof(con->con_ml_label) - 1] = '\0';
+      cli_label_responded(sptr) = 1;  /* Suppress generic ACK */
     } else {
       con_ml_label(con)[0] = '\0';
+    }
+
+    /* Save client-only tags from BATCH open for relay to recipients */
+    if (cli_client_tags(sptr)[0]) {
+      ircd_strncpy(con_ml_client_tags(con), cli_client_tags(sptr),
+                   sizeof(con->con_ml_client_tags));
+    } else {
+      con_ml_client_tags(con)[0] = '\0';
     }
   }
   else {
@@ -1444,50 +1445,28 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                       NumNick(sptr), con_batch_seq(cli_connect(to))++);
 
-        sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
-                      batchid, chptr->chname);
+        /* Per IRCv3 multiline spec, msgid and time go on the BATCH + opener */
+        if (use_tags) {
+          format_time_tag(timebuf, sizeof(timebuf));
+          sendrawto_one(to, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                        timebuf, batch_base_msgid, cli_name(&me), batchid, chptr->chname);
+        } else {
+          sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
+                        batchid, chptr->chname);
+        }
 
-        first = 1;
         for (lp = batch->messages; lp; lp = lp->next) {
           int concat = lp->value.cp[0];
           char *text = lp->value.cp + 1;
 
-          /* All lines in the batch share the same msgid per IRCv3 multiline spec */
-          if (use_tags) {
-            format_time_tag(timebuf, sizeof(timebuf));
-          }
-
-          if (first && !concat) {
-            if (use_tags) {
-              sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            } else {
-              sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            }
-            first = 0;
-          } else if (concat) {
-            if (use_tags) {
-              sendrawto_one(to, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            } else {
-              sendrawto_one(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            }
+          if (concat) {
+            sendrawto_one(to, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                          batchid, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), chptr->chname, text);
           } else {
-            if (use_tags) {
-              sendrawto_one(to, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            } else {
-              sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), chptr->chname, text);
-            }
+            sendrawto_one(to, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                          batchid, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), chptr->chname, text);
           }
         }
 
@@ -1496,7 +1475,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         /* Graceful fallback for S2S channel delivery */
         send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
                                  batch->messages, batch->msg_count, 1, chptr,
-                                 s2s_paste_url);
+                                 s2s_paste_url, NULL);
       }
     }
   } else if (acptr && MyConnect(acptr)) {
@@ -1509,50 +1488,28 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
                     NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
 
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
-                    batchid, cli_name(acptr));
+      /* Per IRCv3 multiline spec, msgid and time go on the BATCH + opener */
+      if (use_tags) {
+        format_time_tag(timebuf, sizeof(timebuf));
+        sendrawto_one(acptr, "@time=%s;msgid=%s :%s BATCH +%s draft/multiline %s",
+                      timebuf, batch_base_msgid, cli_name(&me), batchid, cli_name(acptr));
+      } else {
+        sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
+                      batchid, cli_name(acptr));
+      }
 
-      first = 1;
       for (lp = batch->messages; lp; lp = lp->next) {
         int concat = lp->value.cp[0];
         char *text = lp->value.cp + 1;
 
-        /* All lines in the batch share the same msgid per IRCv3 multiline spec */
-        if (use_tags) {
-          format_time_tag(timebuf, sizeof(timebuf));
-        }
-
-        if (first && !concat) {
-          if (use_tags) {
-            sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          } else {
-            sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          }
-          first = 0;
-        } else if (concat) {
-          if (use_tags) {
-            sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          } else {
-            sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          }
+        if (concat) {
+          sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s PRIVMSG %s :%s",
+                        batchid, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), cli_name(acptr), text);
         } else {
-          if (use_tags) {
-            sendrawto_one(acptr, "@batch=%s;time=%s;msgid=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, timebuf, batch_base_msgid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          } else {
-            sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
-                          batchid, cli_name(sptr), cli_user(sptr)->username,
-                          get_displayed_host(sptr), cli_name(acptr), text);
-          }
+          sendrawto_one(acptr, "@batch=%s :%s!%s@%s PRIVMSG %s :%s",
+                        batchid, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), cli_name(acptr), text);
         }
       }
 
@@ -1561,7 +1518,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       /* Graceful fallback for S2S DM delivery */
       send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
                                batch->messages, batch->msg_count, 0, NULL,
-                               s2s_paste_url);
+                               s2s_paste_url, NULL);
     }
   }
 

@@ -43,7 +43,7 @@
 #include <sys/uio.h>	/* struct iovec */
 
 #define MB_BASE_SHIFT	5 /**< Log2 of smallest message body to allocate. */
-#define MB_MAX_SHIFT	9 /**< Log2 of largest message body to allocate. */
+#define MB_MAX_SHIFT	14 /**< Log2 of largest message body to allocate (16384 for IRCv3 tagged msgs). */
 
 /** Buffer for a single message. */
 struct MsgBuf {
@@ -264,7 +264,7 @@ msgq_alloc(struct MsgBuf *in_mb, int length)
     if ((length - 1) >> power == 0)
       break;
   assert((1 << power) >= length);
-  assert((1 << power) <= 512);
+  assert((1 << power) <= (1 << MB_MAX_SHIFT));
   length = 1 << power; /* reset the length */
 
   /* If the message needs a buffer of exactly the existing size, just use it */
@@ -328,45 +328,45 @@ msgq_clear_freembs(void)
 struct MsgBuf *
 msgq_vmake(struct Client *dest, const char *format, va_list vl)
 {
+  /* Static scratch buffer for formatting — single-threaded server, so safe.
+   * Sized for IRCv3 tagged messages (up to 8191 tag bytes + 512 command).
+   * The formatted content is then copied into a pool MsgBuf allocated at
+   * max(BUFSIZE, needed) to preserve slack for msgq_append() callers. */
+  static char fmt_scratch[FULL_MSG_SIZE];
   struct MsgBuf *mb;
+  int len, alloc_size;
 
   assert(0 != format);
 
-  if (!(mb = msgq_alloc(0, BUFSIZE))) {
+  /* Format into scratch buffer first to determine actual size */
+  len = ircd_vsnprintf(dest, fmt_scratch, sizeof(fmt_scratch) - 1, format, vl);
+
+  if (len > (int)sizeof(fmt_scratch) - 3)
+    len = (int)sizeof(fmt_scratch) - 3;
+
+  /* Allocate at least BUFSIZE to preserve slack for msgq_append() */
+  alloc_size = len + 3;
+  if (alloc_size < BUFSIZE)
+    alloc_size = BUFSIZE;
+
+  if (!(mb = msgq_alloc(0, alloc_size))) {
     if (feature_bool(FEAT_HAS_FERGUSON_FLUSHER)) {
-      /*
-       * from "Married With Children" episode were Al bought a REAL toilet
-       * on the black market because he was tired of the wimpy water
-       * conserving toilets they make these days --Bleep
-       */
-      /*
-       * Apparently this doesn't work, the server _has_ to
-       * dump a few clients to handle the load. A fully loaded
-       * server cannot handle a net break without dumping some
-       * clients. If we flush the connections here under a full
-       * load we may end up starving the kernel for mbufs and
-       * crash the machine
-       */
-      /*
-       * attempt to recover from buffer starvation before
-       * bailing this may help servers running out of memory
-       */
       flush_connections(0);
-      mb = msgq_alloc(0, BUFSIZE);
+      mb = msgq_alloc(0, alloc_size);
     }
     if (!mb) { /* OK, try clearing the buffer free list */
       msgq_clear_freembs();
-      mb = msgq_alloc(0, BUFSIZE);
+      mb = msgq_alloc(0, alloc_size);
     }
     if (!mb) { /* OK, try killing a client */
       kill_highest_sendq(0); /* Don't kill any server connections */
       msgq_clear_freembs();  /* Release whatever was just freelisted */
-      mb = msgq_alloc(0, BUFSIZE);
+      mb = msgq_alloc(0, alloc_size);
     }
     if (!mb) { /* hmmm... */
       kill_highest_sendq(1); /* Try killing a server connection now */
       msgq_clear_freembs();  /* Clear freelist again */
-      mb = msgq_alloc(0, BUFSIZE);
+      mb = msgq_alloc(0, alloc_size);
     }
     if (!mb) /* AIEEEE! */
       server_panic("Unable to allocate buffers!");
@@ -375,11 +375,9 @@ msgq_vmake(struct Client *dest, const char *format, va_list vl)
   mb->next = MQData.msglist; /* initialize the msgbuf */
   mb->prev_p = &MQData.msglist;
 
-  /* fill the buffer */
-  mb->length = ircd_vsnprintf(dest, mb->msg, bufsize(mb) - 1, format, vl);
-
-  if (mb->length > bufsize(mb) - 2)
-    mb->length = bufsize(mb) - 2;
+  /* Copy formatted content into the MsgBuf */
+  memcpy(mb->msg, fmt_scratch, len);
+  mb->length = len;
 
   mb->msg[mb->length++] = '\r'; /* add \r\n to buffer */
   mb->msg[mb->length++] = '\n';
@@ -515,7 +513,7 @@ msgq_add(struct MsgQ *mq, struct MsgBuf *mb, int prio)
     struct MsgBuf *tmp;
 
     MQData.sizes.msgs++; /* update histogram counts */
-    MQData.sizes.sizes[mb->length - 1]++;
+    MQData.sizes.sizes[mb->length < BUFSIZE ? mb->length - 1 : BUFSIZE - 1]++;
 
     tmp = msgq_alloc(mb, mb->length); /* allocate a close-fitting buffer */
 

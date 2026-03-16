@@ -198,12 +198,10 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Skip storage if no authenticated members and channel isn't +H (public history).
-   * Only authed users can query CHATHISTORY (membership mode), so messages in
-   * channels with no authed members would never be retrieved. */
-  if (chptr->authusers == 0 && chptr->aliases == 0
-      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
-    return;
+  /* Always store when CHATHISTORY_STORE is enabled.
+   * Messages must be stored for REDACT to look up msgids, even for
+   * unauthenticated channels. The +P (NOSTORAGE) mode above handles
+   * channels that explicitly opt out of storage. */
 
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {
@@ -422,43 +420,14 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
 
-  /* Alias source rewriting: use primary's numeric for S2S delivery.
-   * When primary is remote, use split S2S delivery: primary numeric for
-   * most servers, alias numeric for the primary's server direction
-   * (to avoid fake direction — the primary's server handles rewriting). */
-  {
-    struct Client *from = sptr;
-    const char *client_tags = cli_client_tags(sptr);
-
-    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
-      if (!MyUser(cli_user(sptr)->alias_primary))
-        sendcmdto_set_alias_source(sptr);
-      from = cli_user(sptr)->alias_primary;
-    }
-
-    if (client_tags && *client_tags) {
-      sendcmdto_channel_butone_with_client_tags(from, CMD_PRIVATE, chptr, cli_from(sptr),
-                         SKIP_DEAF | SKIP_BURST, text[0], client_tags,
-                         "%H :%s", chptr, mytext);
-    } else {
-      sendcmdto_channel_butone(from, CMD_PRIVATE, chptr, cli_from(sptr),
-                               SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, mytext);
-    }
-  }
-
-#ifdef USE_MDBX
+  /* Generate msgid before channel broadcast so all recipients get the same one */
   {
     char msgid[64] = "";
     char timestamp[32] = "";
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
-    /* Echo message back to sender if they have echo-message cap */
-    if (need_echo) {
-      sendcmdto_one_tags_msgid(sptr, CMD_PRIVATE, sptr,
-                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
-                               "%H :%s", chptr, mytext);
-    } else if (feature_bool(FEAT_MSGID)) {
-      /* Generate msgid and timestamp even if not echoing, for history storage */
+#ifdef USE_MDBX
+    if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
@@ -466,19 +435,65 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
                     (unsigned long)(tv.tv_usec / 1000));
       generate_msgid(msgid, sizeof(msgid));
     }
+#endif
 
+    /* Set msgid override so channel broadcast includes it in client tags */
+    if (msgid[0])
+      sendcmdto_set_client_msgid(msgid);
+
+    /* Alias source rewriting: use primary's numeric for S2S delivery.
+     * When primary is remote, use split S2S delivery: primary numeric for
+     * most servers, alias numeric for the primary's server direction
+     * (to avoid fake direction — the primary's server handles rewriting). */
+    {
+      struct Client *from = sptr;
+      const char *client_tags = cli_client_tags(sptr);
+
+      if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+        if (!MyUser(cli_user(sptr)->alias_primary))
+          sendcmdto_set_alias_source(sptr);
+        from = cli_user(sptr)->alias_primary;
+      }
+
+      if (client_tags && *client_tags) {
+        sendcmdto_channel_butone_with_client_tags(from, CMD_PRIVATE, chptr, cli_from(sptr),
+                           SKIP_DEAF | SKIP_BURST, text[0], client_tags,
+                           "%H :%s", chptr, mytext);
+      } else {
+        sendcmdto_channel_butone(from, CMD_PRIVATE, chptr, cli_from(sptr),
+                                 SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, mytext);
+      }
+    }
+
+    /* Clear the msgid override after broadcast */
+    sendcmdto_set_client_msgid(NULL);
+
+    /* Echo message back to sender if they have echo-message cap */
+    if (need_echo) {
+      const char *echo_ctags = cli_client_tags(sptr);
+      if (echo_ctags && *echo_ctags && CapOwnHas(sptr, CAP_MSGTAGS)) {
+        /* Include client tags in echo */
+        if (msgid[0])
+          sendcmdto_set_client_msgid(msgid);
+        sendcmdto_one_client_tags(sptr, MSG_PRIVATE, sptr, echo_ctags,
+                                  "%H :%s", chptr, mytext);
+        sendcmdto_set_client_msgid(NULL);
+      } else {
+#ifdef USE_MDBX
+        sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, msgid,
+                               "%H :%s", chptr, mytext);
+#else
+        sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
+#endif
+      }
+    }
+
+#ifdef USE_MDBX
     /* Store message in history database for draft/chathistory */
     if (msgid[0])
       store_channel_history(sptr, chptr, mytext, HISTORY_PRIVMSG, msgid, timestamp);
-  }
-#else
-  {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
-    if (need_echo) {
-      sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
-    }
-  }
 #endif
+  }
 }
 
 /** Relay a local user's notice to a channel.
@@ -580,9 +595,27 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
     /* Echo notice back to sender if they have echo-message cap */
     if (need_echo) {
-      sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
-                               msgid, sizeof(msgid), timestamp, sizeof(timestamp),
-                               "%H :%s", chptr, mytext);
+      const char *echo_ctags = cli_client_tags(sptr);
+      if (echo_ctags && *echo_ctags && CapOwnHas(sptr, CAP_MSGTAGS)) {
+        /* Generate msgid for the echo */
+        if (feature_bool(FEAT_MSGID)) {
+          struct timeval tv;
+          gettimeofday(&tv, NULL);
+          ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                        (unsigned long)tv.tv_sec,
+                        (unsigned long)(tv.tv_usec / 1000));
+          generate_msgid(msgid, sizeof(msgid));
+        }
+        if (msgid[0])
+          sendcmdto_set_client_msgid(msgid);
+        sendcmdto_one_client_tags(sptr, MSG_NOTICE, sptr, echo_ctags,
+                                  "%H :%s", chptr, mytext);
+        sendcmdto_set_client_msgid(NULL);
+      } else {
+        sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
+                                 msgid, sizeof(msgid), timestamp, sizeof(timestamp),
+                                 "%H :%s", chptr, mytext);
+      }
     } else if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
@@ -1052,12 +1085,18 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     }
 
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+      /* Set msgid override so format_message_tags_with_client includes it */
+      if (pm_msgid[0])
+        sendcmdto_set_client_msgid(pm_msgid);
       sendcmdto_one_client_tags(from, MSG_PRIVATE, acptr, client_tags,
                                 "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
     } else {
       if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
         sendcmdto_set_s2s_cptr(cli_from(sptr));
-      sendcmdto_one(from, CMD_PRIVATE, acptr, "%C :%s", acptr, mytext);
+      /* Use tag-aware send so recipient gets server-time/msgid per caps */
+      sendcmdto_one_tags_ext(from, CMD_PRIVATE, acptr, pm_msgid,
+                             "%C :%s", acptr, mytext);
     }
   }
 
@@ -1070,11 +1109,41 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   /* Echo private message back to sender if they have echo-message cap */
 #ifdef USE_MDBX
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
     if (need_echo) {
-      sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, pm_msgid,
-                             "%C :%s", acptr, mytext);
+      const char *echo_client_tags = cli_client_tags(sptr);
+      if (echo_client_tags && *echo_client_tags && CapActive(sptr, CAP_MSGTAGS)) {
+        /* Include client-only tags in echo per IRCv3 echo-message spec */
+        char echo_tagbuf[4608];
+        int tpos = 0;
+        echo_tagbuf[0] = '@';
+        tpos = 1;
+        /* Client tags first */
+        tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, "%s", echo_client_tags);
+        /* Then server tags: label, msgid, time */
+        if (cli_label(sptr)[0] && CapActive(sptr, CAP_LABELEDRESP) && !cli_label_responded(sptr)) {
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";label=%s", cli_label(sptr));
+          cli_label_responded(sptr) = 1;
+        }
+        if (pm_msgid[0])
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";msgid=%s", pm_msgid);
+        if (feature_bool(FEAT_CAP_server_time) && CapActive(sptr, CAP_SERVERTIME)) {
+          struct timeval tv; struct tm tm;
+          gettimeofday(&tv, NULL); gmtime_r(&tv.tv_sec, &tm);
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos,
+                           ";time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                           tm.tm_hour, tm.tm_min, tm.tm_sec, tv.tv_usec / 1000);
+        }
+        echo_tagbuf[tpos] = '\0';
+        sendrawto_one(sptr, "%s :%s!%s@%s PRIVMSG %C :%s",
+                      echo_tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                      cli_user(sptr)->host, acptr, mytext);
+      } else {
+        sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, pm_msgid,
+                               "%C :%s", acptr, mytext);
+      }
     }
 
     /* Store private message in history database (if enabled) */
@@ -1083,10 +1152,37 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   }
 #else
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
     if (need_echo) {
-      sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, pm_msgid,
-                             "%C :%s", acptr, mytext);
+      const char *echo_client_tags = cli_client_tags(sptr);
+      if (echo_client_tags && *echo_client_tags && CapActive(sptr, CAP_MSGTAGS)) {
+        char echo_tagbuf[4608];
+        int tpos = 0;
+        echo_tagbuf[0] = '@';
+        tpos = 1;
+        tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, "%s", echo_client_tags);
+        if (cli_label(sptr)[0] && CapActive(sptr, CAP_LABELEDRESP) && !cli_label_responded(sptr)) {
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";label=%s", cli_label(sptr));
+          cli_label_responded(sptr) = 1;
+        }
+        if (pm_msgid[0])
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";msgid=%s", pm_msgid);
+        if (feature_bool(FEAT_CAP_server_time) && CapActive(sptr, CAP_SERVERTIME)) {
+          struct timeval tv; struct tm tm;
+          gettimeofday(&tv, NULL); gmtime_r(&tv.tv_sec, &tm);
+          tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos,
+                           ";time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                           tm.tm_hour, tm.tm_min, tm.tm_sec, tv.tv_usec / 1000);
+        }
+        echo_tagbuf[tpos] = '\0';
+        sendrawto_one(sptr, "%s :%s!%s@%s PRIVMSG %C :%s",
+                      echo_tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                      cli_user(sptr)->host, acptr, mytext);
+      } else {
+        sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, pm_msgid,
+                               "%C :%s", acptr, mytext);
+      }
     }
   }
 #endif
@@ -1192,12 +1288,17 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     }
 
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
+      if (pm_msgid[0])
+        sendcmdto_set_client_msgid(pm_msgid);
       sendcmdto_one_client_tags(from, MSG_NOTICE, acptr, client_tags,
                                 "%C :%s", acptr, mytext);
+      sendcmdto_set_client_msgid(NULL);
     } else {
       if (from != sptr)
         sendcmdto_set_s2s_cptr(cli_from(sptr));
-      sendcmdto_one(from, CMD_NOTICE, acptr, "%C :%s", acptr, mytext);
+      /* Use tag-aware send so recipient gets server-time/msgid per caps */
+      sendcmdto_one_tags_ext(from, CMD_NOTICE, acptr, pm_msgid,
+                             "%C :%s", acptr, mytext);
     }
   }
 
@@ -1210,7 +1311,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   /* Echo private notice back to sender if they have echo-message cap */
 #ifdef USE_MDBX
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
     if (need_echo) {
       sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
@@ -1223,7 +1324,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   }
 #else
   {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG) && sptr != acptr;
+    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
     if (need_echo) {
       sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, pm_msgid,
                              "%C :%s", acptr, mytext);

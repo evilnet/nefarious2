@@ -361,9 +361,10 @@ struct Connection
                                         the socket and after which the
                                         connection was accepted. */
   char con_passwd[PASSWDLEN + 1];    /**< Password given by user. */
-  char con_buffer[BUFSIZE];          /**< Incoming message buffer; or
-                                        the error that caused this
-                                        clients socket to close. */
+  char con_buffer[FULL_MSG_SIZE];    /**< Incoming message buffer; sized
+                                        for IRCv3 message-tags, or the
+                                        error that caused this clients
+                                        socket to close. */
   char*               con_sslerror;  /**< SSL Error. */
 
   struct Socket       con_socket;    /**< socket descriptor for
@@ -385,7 +386,7 @@ struct Connection
   unsigned char       con_label_responded; /**< Whether a response was sent for current label */
   char                con_batch_id[16]; /**< Current batch reference ID */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
-  char                con_client_tags[512]; /**< Client-only tags (+tag=value) for TAGMSG relay */
+  char                con_client_tags[4096]; /**< Client-only tags (+tag=value) for TAGMSG relay (IRCv3: 4094 max) */
   uint64_t            con_s2s_time_ms;   /**< S2S @time as epoch milliseconds (0 = not set) */
 #define S2S_MSGID_BUFSIZE 64  /**< Msgid buffer: fits both verbose (~34 chars) and compact (14 chars) */
   char                con_s2s_msgid[S2S_MSGID_BUFSIZE]; /**< S2S @msgid tag from incoming message */
@@ -402,6 +403,7 @@ struct Connection
   time_t              con_ml_batch_start; /**< When batch was started (for timeout) */
   int                 con_ml_lag_accum;   /**< Accumulated fake lag during batch (applied at end) */
   char                con_ml_label[64];   /**< Label from BATCH +id for labeled-response on WARN */
+  char                con_ml_client_tags[512]; /**< Client-only tags from BATCH open command */
   /* Batch rate limiting (FEAT_BATCH_RATE_LIMIT) */
   time_t              con_batch_minute;   /**< Start of current rate limit window */
   int                 con_batch_count;    /**< Number of batches in current window */
@@ -412,7 +414,7 @@ struct Connection
   unsigned char       con_labeled_batch; /**< 1 if labeled_batch_start opened a batch */
   struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
   /* WebSocket state for RFC 6455 compliance */
-  unsigned char       con_ws_frame_buf[BUFSIZE]; /**< Partial WebSocket frame buffer */
+  unsigned char       con_ws_frame_buf[FULL_MSG_SIZE]; /**< Partial WebSocket frame buffer */
   int                 con_ws_frame_len;   /**< Length of data in frame buffer */
   char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
   int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
@@ -569,6 +571,8 @@ struct Client {
 #define cli_ml_lag_accum(cli)	con_ml_lag_accum(cli_connect(cli))
 /** Get label from BATCH +id for labeled-response. */
 #define cli_ml_label(cli)	con_ml_label(cli_connect(cli))
+/** Get client-only tags from BATCH open command. */
+#define cli_ml_client_tags(cli)	con_ml_client_tags(cli_connect(cli))
 /** Get batch rate limit window start time. */
 #define cli_batch_minute(cli)	con_batch_minute(cli_connect(cli))
 /** Get batch count in current rate limit window. */
@@ -855,6 +859,8 @@ struct Client {
 #define con_ml_lag_accum(con)	((con)->con_ml_lag_accum)
 /** Get the label from BATCH +id for labeled-response on WARN. */
 #define con_ml_label(con)	((con)->con_ml_label)
+/** Get client-only tags from BATCH open command. */
+#define con_ml_client_tags(con)	((con)->con_ml_client_tags)
 /** Get the batch rate limit window start time. */
 #define con_batch_minute(con)	((con)->con_batch_minute)
 /** Get the batch count in current rate limit window. */
