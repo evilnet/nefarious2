@@ -222,8 +222,14 @@ const char* get_vapid_pubkey(void)
 }
 
 /** Check if a client-only tag is denied by CLIENTTAGDENY config.
- * The CLIENTTAGDENY feature is a comma-separated list of tag patterns.
- * Patterns can use * as a wildcard suffix (e.g., "+custom/*" matches all +custom/ tags).
+ * Full IRCv3 CLIENTTAGDENY semantics:
+ *   "*"          - deny all client-only tags (whitelist mode)
+ *   "+tag"       - deny exactly +tag
+ *   "+prefix/*"  - deny all tags starting with +prefix/
+ *   "-tag"       - exempt +tag from denial (negation, overrides * and +patterns)
+ *   "-prefix/*"  - exempt all +prefix/ tags from denial
+ * Example: "*,-typing,-reply,-react" = deny all except those three.
+ * Negations always take priority over denials.
  * @param[in] tag The tag name to check (including + prefix).
  * @param[in] tag_len Length of the tag name (up to = or end).
  * @return 1 if tag is denied, 0 if allowed.
@@ -233,6 +239,9 @@ int is_client_tag_denied(const char *tag, size_t tag_len)
   const char *deny_list;
   const char *p, *pattern_start;
   size_t pattern_len;
+  int deny_all = 0;
+  int explicitly_exempted = 0;
+  int explicitly_denied = 0;
 
   /* Only client-only tags (starting with +) can be denied */
   if (!tag || tag_len == 0 || tag[0] != '+')
@@ -242,48 +251,84 @@ int is_client_tag_denied(const char *tag, size_t tag_len)
   if (!deny_list || !*deny_list)
     return 0;
 
-  /* Parse comma-separated deny list */
+  /* First pass: check for bare * (deny-all / whitelist mode) */
   p = deny_list;
   while (*p) {
-    /* Skip leading whitespace */
     while (*p == ' ' || *p == ',')
       p++;
     if (!*p)
       break;
-
     pattern_start = p;
-
-    /* Find end of this pattern (comma or end) */
     while (*p && *p != ',')
       p++;
     pattern_len = p - pattern_start;
-
-    /* Trim trailing whitespace from pattern */
     while (pattern_len > 0 && pattern_start[pattern_len - 1] == ' ')
       pattern_len--;
+    if (pattern_len == 1 && pattern_start[0] == '*')
+      deny_all = 1;
+  }
 
+  /* Second pass: check negation and positive patterns */
+  p = deny_list;
+  while (*p) {
+    while (*p == ' ' || *p == ',')
+      p++;
+    if (!*p)
+      break;
+    pattern_start = p;
+    while (*p && *p != ',')
+      p++;
+    pattern_len = p - pattern_start;
+    while (pattern_len > 0 && pattern_start[pattern_len - 1] == ' ')
+      pattern_len--;
     if (pattern_len == 0)
       continue;
 
-    /* Check for wildcard suffix match (e.g., "+custom/*") */
-    if (pattern_len >= 2 && pattern_start[pattern_len - 1] == '*' &&
-        pattern_start[pattern_len - 2] == '/') {
-      /* Prefix match: pattern without trailing * */
-      size_t prefix_len = pattern_len - 1;  /* Include the / but not * */
-      if (tag_len >= prefix_len &&
-          ircd_strncmp(tag, pattern_start, prefix_len) == 0) {
-        return 1;  /* Tag is denied */
+    /* Skip bare * (handled in first pass) */
+    if (pattern_len == 1 && pattern_start[0] == '*')
+      continue;
+
+    /* Negation pattern: -tag or -prefix/* (exempts +tag from denial) */
+    if (pattern_start[0] == '-') {
+      const char *neg = pattern_start + 1;
+      size_t neg_len = pattern_len - 1;
+      if (neg_len == 0)
+        continue;
+      /* Wildcard suffix negation: -prefix/* exempts +prefix/ tags */
+      if (neg_len >= 2 && neg[neg_len - 1] == '*' && neg[neg_len - 2] == '/') {
+        size_t prefix_len = neg_len - 1;  /* Include / but not * */
+        if (tag_len > prefix_len + 1 &&
+            ircd_strncmp(tag + 1, neg, prefix_len) == 0)
+          explicitly_exempted = 1;
       }
-    } else {
-      /* Exact match */
-      if (tag_len == pattern_len &&
-          ircd_strncmp(tag, pattern_start, pattern_len) == 0) {
-        return 1;  /* Tag is denied */
+      /* Exact negation: -tag exempts +tag */
+      else if (tag_len - 1 == neg_len &&
+               ircd_strncmp(tag + 1, neg, neg_len) == 0)
+        explicitly_exempted = 1;
+    }
+    /* Positive deny pattern: +tag or +prefix/* */
+    else if (pattern_start[0] == '+') {
+      if (pattern_len >= 2 && pattern_start[pattern_len - 1] == '*' &&
+          pattern_start[pattern_len - 2] == '/') {
+        size_t prefix_len = pattern_len - 1;
+        if (tag_len >= prefix_len &&
+            ircd_strncmp(tag, pattern_start, prefix_len) == 0)
+          explicitly_denied = 1;
       }
+      else if (tag_len == pattern_len &&
+               ircd_strncmp(tag, pattern_start, pattern_len) == 0)
+        explicitly_denied = 1;
     }
   }
 
-  return 0;  /* Tag is allowed */
+  /* Exemptions always take priority over denials */
+  if (explicitly_exempted)
+    return 0;
+  if (explicitly_denied)
+    return 1;
+  if (deny_all)
+    return 1;
+  return 0;
 }
 
 /*----------------------------------------------------------------------------
