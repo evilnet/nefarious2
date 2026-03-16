@@ -177,13 +177,21 @@ static int parse_ws_handshake(const char *buffer, int length,
       if (strstr(line, "13"))
         found_version = 1;
     }
-    /* Check Sec-WebSocket-Protocol for subprotocol preference */
+    /* Check Sec-WebSocket-Protocol for subprotocol preference.
+     * RFC 6455 §4.2.1: Client lists subprotocols in preference order.
+     * We select the first one we support.
+     */
     else if (strncasecmp(line, "Sec-WebSocket-Protocol:", 23) == 0) {
-      /* Prefer text.ircv3.net if client requests it */
-      if (strstr(line, "text.ircv3.net"))
+      const char *text_pos = strstr(line, "text.ircv3.net");
+      const char *binary_pos = strstr(line, "binary.ircv3.net");
+      if (text_pos && binary_pos) {
+        /* Both present — pick whichever appears first (client preference) */
+        *subproto = (binary_pos < text_pos) ? WS_SUBPROTO_BINARY : WS_SUBPROTO_TEXT;
+      } else if (text_pos) {
         *subproto = WS_SUBPROTO_TEXT;
-      else if (strstr(line, "binary.ircv3.net"))
+      } else if (binary_pos) {
         *subproto = WS_SUBPROTO_BINARY;
+      }
     }
     /* Get Origin header for validation */
     else if (strncasecmp(line, "Origin:", 7) == 0) {

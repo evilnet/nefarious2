@@ -329,93 +329,132 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
    */
   if (IsWebSocket(cptr)) {
     static char ws_frame[FULL_MSG_SIZE + 16];
-    static char irc_line[FULL_MSG_SIZE + 4];
+    static char concat_buf[FULL_MSG_SIZE * 4];
     struct iovec iov[IOV_MAX];
     int iovcnt;
-    int i, line_len = 0;
-    int frame_len;
-    IOResult result;
-    int send_result;
+    int i, buf_len = 0;
+    IOResult result = IO_SUCCESS;
+    int text_mode = IsWSText(cptr) ? 1 : 0;
+    unsigned int total_ws_written = 0;
 
     /* Get data from message queue as iovecs */
     iovcnt = msgq_mapiov(buf, iov, IOV_MAX, &bytes_count);
 
-    /* Concatenate iovecs into single buffer for framing */
-    for (i = 0; i < iovcnt && line_len < (int)sizeof(irc_line) - 1; i++) {
+    /* Concatenate iovecs into single buffer */
+    for (i = 0; i < iovcnt && buf_len < (int)sizeof(concat_buf) - 1; i++) {
       int copy_len = iov[i].iov_len;
-      if (line_len + copy_len >= (int)sizeof(irc_line))
-        copy_len = sizeof(irc_line) - line_len - 1;
-      memcpy(irc_line + line_len, iov[i].iov_base, copy_len);
-      line_len += copy_len;
+      if (buf_len + copy_len >= (int)sizeof(concat_buf))
+        copy_len = sizeof(concat_buf) - buf_len - 1;
+      memcpy(concat_buf + buf_len, iov[i].iov_base, copy_len);
+      buf_len += copy_len;
     }
-    irc_line[line_len] = '\0';
+    concat_buf[buf_len] = '\0';
 
-    /* Strip \r\n from end - WebSocket IRC doesn't need it */
-    while (line_len > 0 && (irc_line[line_len-1] == '\r' || irc_line[line_len-1] == '\n'))
-      irc_line[--line_len] = '\0';
+    /* IRCv3 WebSocket spec: each IRC message = one WebSocket frame.
+     * Split the concatenated sendQ on \r\n boundaries and send each
+     * IRC message as its own WebSocket frame.
+     */
+    {
+      char *pos = concat_buf;
+      char *end = concat_buf + buf_len;
 
-    if (line_len > 0) {
-      int text_mode = IsWSText(cptr) ? 1 : 0;
+      while (pos < end) {
+        char *crlf = strstr(pos, "\r\n");
+        int line_len;
+        int frame_len;
 
-      /* For text mode, validate UTF-8 and sanitize if needed.
-       * RFC 6455: Servers MUST NOT relay non-UTF-8 content to clients
-       * using text messages. We replace invalid bytes with U+FFFD.
-       */
-      if (text_mode && !string_is_valid_utf8(irc_line)) {
-        line_len = string_sanitize_utf8(irc_line);
-      }
+        if (!crlf) {
+          /* Incomplete line (no \r\n) — shouldn't happen in normal IRC,
+           * but handle gracefully: send what we have */
+          line_len = end - pos;
+        } else {
+          line_len = crlf - pos;  /* exclude \r\n */
+        }
 
-      /* Encode as WebSocket frame using client's negotiated/detected mode */
-      frame_len = websocket_encode_frame(irc_line, line_len,
-                                         (unsigned char *)ws_frame, text_mode);
+        if (line_len > 0) {
+          char irc_line[FULL_MSG_SIZE + 4];
+          if (line_len >= (int)sizeof(irc_line))
+            line_len = sizeof(irc_line) - 1;
+          memcpy(irc_line, pos, line_len);
+          irc_line[line_len] = '\0';
 
-      Debug((DEBUG_DEBUG, "WebSocket deliver: line_len=%d, frame_len=%d, msg='%.50s'",
-             line_len, frame_len, irc_line));
+          /* For text mode, validate UTF-8 and sanitize if needed.
+           * RFC 6455: Servers MUST NOT relay non-UTF-8 content to clients
+           * using text messages. We replace invalid bytes with U+FFFD.
+           */
+          if (text_mode && !string_is_valid_utf8(irc_line)) {
+            line_len = string_sanitize_utf8(irc_line);
+          }
+
+          /* Encode as WebSocket frame using client's negotiated/detected mode */
+          frame_len = websocket_encode_frame(irc_line, line_len,
+                                             (unsigned char *)ws_frame, text_mode);
+
+          Debug((DEBUG_DEBUG, "WebSocket deliver: line_len=%d, frame_len=%d, msg='%.50s'",
+                 line_len, frame_len, irc_line));
 
 #ifdef USE_SSL
-      if (cli_socket(cptr).ssl) {
-        /* SSL WebSocket - use SSL_write directly */
-        send_result = SSL_write(cli_socket(cptr).ssl, ws_frame, frame_len);
-        Debug((DEBUG_DEBUG, "WebSocket SSL_write: result=%d", send_result));
-        if (send_result > 0) {
-          result = IO_SUCCESS;
-          bytes_written = send_result;
-        } else {
-          int ssl_err = SSL_get_error(cli_socket(cptr).ssl, send_result);
-          Debug((DEBUG_DEBUG, "WebSocket SSL_write error: ssl_err=%d", ssl_err));
-          if (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ)
-            result = IO_BLOCKED;
-          else
-            result = IO_FAILURE;
-          bytes_written = 0;
-        }
-      } else
+          if (cli_socket(cptr).ssl) {
+            int send_result = SSL_write(cli_socket(cptr).ssl, ws_frame, frame_len);
+            if (send_result > 0) {
+              result = IO_SUCCESS;
+              total_ws_written += send_result;
+            } else {
+              int ssl_err = SSL_get_error(cli_socket(cptr).ssl, send_result);
+              if (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ)
+                result = IO_BLOCKED;
+              else
+                result = IO_FAILURE;
+              break;  /* Stop sending on error */
+            }
+          } else
 #endif
-        result = os_send_nonb(cli_fd(cptr), ws_frame, frame_len, &bytes_written);
+          {
+            unsigned int frame_written;
+            result = os_send_nonb(cli_fd(cptr), ws_frame, frame_len, &frame_written);
+            if (result == IO_SUCCESS) {
+              total_ws_written += frame_written;
+              if (frame_written < (unsigned)frame_len) {
+                result = IO_BLOCKED;
+                break;  /* Partial write — stop */
+              }
+            } else {
+              break;  /* Error — stop sending */
+            }
+          }
+        }
 
-      switch (result) {
-      case IO_SUCCESS:
-        ClrFlag(cptr, FLAG_BLOCKED);
-        cli_sendB(cptr) += bytes_written;
-        cli_sendB(&me)  += bytes_written;
-        /* Return original byte count so msgq knows how much to delete */
-        if (bytes_written >= (unsigned)frame_len)
-          bytes_written = bytes_count;
+        /* Advance past this message (including \r\n) */
+        if (crlf)
+          pos = crlf + 2;
         else
-          bytes_written = 0; /* Partial write - don't delete from queue */
-        if (bytes_written < bytes_count)
-          SetFlag(cptr, FLAG_BLOCKED);
-        break;
-      case IO_BLOCKED:
-        SetFlag(cptr, FLAG_BLOCKED);
-        bytes_written = 0;
-        break;
-      case IO_FAILURE:
-        cli_error(cptr) = errno;
-        SetFlag(cptr, FLAG_DEADSOCKET);
-        bytes_written = 0;
-        break;
+          break;
       }
+    }
+
+    switch (result) {
+    case IO_SUCCESS:
+      ClrFlag(cptr, FLAG_BLOCKED);
+      cli_sendB(cptr) += total_ws_written;
+      cli_sendB(&me)  += total_ws_written;
+      /* Return original byte count so msgq knows how much to delete */
+      bytes_written = bytes_count;
+      break;
+    case IO_BLOCKED:
+      SetFlag(cptr, FLAG_BLOCKED);
+      cli_sendB(cptr) += total_ws_written;
+      cli_sendB(&me)  += total_ws_written;
+      /* Partial delivery — tell msgq we consumed everything we could.
+       * Since we can't partially consume msgq entries, report 0 to
+       * retry the whole batch next time, or bytes_count if we sent
+       * all frames despite a partial write on the last one. */
+      bytes_written = 0;
+      break;
+    case IO_FAILURE:
+      cli_error(cptr) = errno;
+      SetFlag(cptr, FLAG_DEADSOCKET);
+      bytes_written = 0;
+      break;
     }
     return bytes_written;
   }

@@ -341,8 +341,16 @@ msgq_vmake(struct Client *dest, const char *format, va_list vl)
   /* Format into scratch buffer first to determine actual size */
   len = ircd_vsnprintf(dest, fmt_scratch, sizeof(fmt_scratch) - 1, format, vl);
 
-  if (len > (int)sizeof(fmt_scratch) - 3)
-    len = (int)sizeof(fmt_scratch) - 3;
+  /* IRC RFC 1459: messages must fit in 512 bytes including \r\n.
+   * Tagged messages (starting with @) can use up to FULL_MSG_SIZE.
+   * Non-tagged messages are truncated to BUFSIZE-2 (510) before \r\n. */
+  if (fmt_scratch[0] == '@') {
+    if (len > (int)sizeof(fmt_scratch) - 3)
+      len = (int)sizeof(fmt_scratch) - 3;
+  } else {
+    if (len > BUFSIZE - 2)
+      len = BUFSIZE - 2;
+  }
 
   /* Allocate at least BUFSIZE to preserve slack for msgq_append() */
   alloc_size = len + 3;
