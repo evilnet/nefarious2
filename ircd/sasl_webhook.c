@@ -19,25 +19,28 @@
  */
 #include "config.h"
 
-#ifdef USE_LIBKC
-
+/* Common includes needed by both USE_LIBKC and stub/P10 handler paths */
 #include "sasl_webhook.h"
 #include "sasl_auth.h"
-#include "channel.h"
 #include "client.h"
+#include "ircd_log.h"
+#include "msg.h"
+#include "send.h"
+
+#include <string.h>
+
+#ifdef USE_LIBKC
+
+#include "channel.h"
 #include "ircd.h"
 #include "ircd_features.h"
-#include "ircd_log.h"
 #include "ircd_string.h"
-#include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "s_misc.h"
 #include "s_user.h"
-#include "send.h"
 #include "bouncer_session.h"
 
-#include <string.h>
 #include <jansson.h>
 #include <kc/kc_webhook.h>
 

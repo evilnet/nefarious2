@@ -909,6 +909,7 @@ static struct FeatureDesc {
   F_B(SASL_AUTOHIDEHOST, 0, 1, 0),
   F_S(SASL_DEFAULT_MECHANISMS, 0, "", 0),
   F_B(SASL_LOCAL, 0, 0, 0),
+  F_S(SASL_LOCAL_MECHANISMS, 0, "PLAIN,OAUTHBEARER", 0),
   F_S(KEYCLOAK_URL, 0, "", 0),
   F_S(KEYCLOAK_REALM, 0, "master", 0),
   F_S(KEYCLOAK_CLIENT_ID, 0, "", 0),

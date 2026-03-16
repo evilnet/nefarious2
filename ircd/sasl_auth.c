@@ -1790,9 +1790,34 @@ int sasl_local_available(void)
 
 const char *sasl_local_mechanisms(void)
 {
+  const char *mechs;
   if (!sasl_local_available())
     return NULL;
-  return "PLAIN,EXTERNAL,OAUTHBEARER,SCRAM-SHA-256,ECDSA-NIST256P-CHALLENGE";
+  mechs = feature_str(FEAT_SASL_LOCAL_MECHANISMS);
+  return (mechs && *mechs) ? mechs : "PLAIN,OAUTHBEARER";
+}
+
+/** Check if a mechanism name appears in a comma-separated list. */
+static int sasl_mech_enabled(const char *mechanism)
+{
+  const char *list = feature_str(FEAT_SASL_LOCAL_MECHANISMS);
+  const char *p;
+  size_t len;
+
+  if (!list || !*list)
+    return 0;
+
+  len = strlen(mechanism);
+  for (p = list; *p; ) {
+    if (ircd_strncmp(p, mechanism, len) == 0
+        && (p[len] == ',' || p[len] == '\0'))
+      return 1;
+    p = strchr(p, ',');
+    if (!p)
+      break;
+    p++;  /* skip comma */
+  }
+  return 0;
 }
 
 int sasl_start(struct Client *sptr, const char *mechanism)
@@ -1814,7 +1839,11 @@ int sasl_start(struct Client *sptr, const char *mechanism)
   else if (ircd_strcmp(mechanism, "ECDSA-NIST256P-CHALLENGE") == 0)
     mech = SASL_MECH_ECDSA;
   else
-    return -1;  /* Unsupported mechanism — fall through to P10 */
+    return -1;  /* Unknown mechanism — fall through to P10 */
+
+  /* Check if this mechanism is enabled in SASL_LOCAL_MECHANISMS */
+  if (!sasl_mech_enabled(mechanism))
+    return -1;  /* Disabled — fall through to P10 */
 
 #ifdef USE_LIBKC
   {
