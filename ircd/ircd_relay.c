@@ -687,6 +687,19 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
    * Servers may have channel services, need to check for it here
    */
   if (client_can_send_to_channel(sptr, chptr, 1) || IsChannelService(sptr)) {
+    /* Set client msgid override so local clients get msgid tag.
+     * Use S2S msgid if available, otherwise generate one. */
+    char relay_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      const char *s2s_mid = (feature_bool(FEAT_P10_MESSAGE_TAGS) && one
+                             && cli_s2s_msgid(one)[0]) ? cli_s2s_msgid(one) : NULL;
+      if (s2s_mid)
+        ircd_strncpy(relay_msgid, s2s_mid, sizeof(relay_msgid));
+      else
+        generate_msgid(relay_msgid, sizeof(relay_msgid));
+      sendcmdto_set_client_msgid(relay_msgid);
+    }
+
     if (client_tags && *client_tags) {
       sendcmdto_channel_butone_with_client_tags(sptr, CMD_PRIVATE, chptr, one,
                          SKIP_DEAF | SKIP_BURST, text[0], client_tags,
@@ -695,32 +708,21 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       sendcmdto_channel_butone(sptr, CMD_PRIVATE, chptr, one,
                                SKIP_DEAF | SKIP_BURST, text[0], "%H :%s", chptr, text);
     }
+
+    sendcmdto_set_client_msgid(NULL);
+
 #ifdef USE_MDBX
     /* Store server-relayed message in history database.
-     * Prefer originating server's msgid from S2S tags (P10_MESSAGE_TAGS)
-     * so all servers store the same msgid — enables exact dedup in
-     * federated CHATHISTORY queries.  Use 'one' (saved before alias
-     * rewriting) to access the incoming server link's S2S tags. */
-    if (feature_bool(FEAT_MSGID)) {
-      char msgid[64];
+     * Uses the same msgid that was broadcast to clients above. */
+    if (relay_msgid[0]) {
       char timestamp[32];
-      const char *s2s_mid = NULL;
       struct timeval tv;
-
-      if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one
-          && cli_s2s_msgid(one)[0])
-        s2s_mid = cli_s2s_msgid(one);
-
-      if (s2s_mid)
-        ircd_strncpy(msgid, s2s_mid, sizeof(msgid));
-      else
-        generate_msgid(msgid, sizeof(msgid));
 
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, msgid, timestamp);
+      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, timestamp);
     }
 #endif
   }
@@ -770,6 +772,18 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
    */
   if ((client_can_send_to_channel(sptr, chptr, 1) &&
        !(chptr->mode.exmode & EXMODE_NONOTICES)) || IsChannelService(sptr)) {
+    /* Set client msgid override so local clients get msgid tag. */
+    char relay_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      const char *s2s_mid = (feature_bool(FEAT_P10_MESSAGE_TAGS) && one
+                             && cli_s2s_msgid(one)[0]) ? cli_s2s_msgid(one) : NULL;
+      if (s2s_mid)
+        ircd_strncpy(relay_msgid, s2s_mid, sizeof(relay_msgid));
+      else
+        generate_msgid(relay_msgid, sizeof(relay_msgid));
+      sendcmdto_set_client_msgid(relay_msgid);
+    }
+
     if (client_tags && *client_tags) {
       sendcmdto_channel_butone_with_client_tags(sptr, CMD_NOTICE, chptr, one,
                          SKIP_DEAF | SKIP_BURST, '\0', client_tags,
@@ -778,29 +792,21 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       sendcmdto_channel_butone(sptr, CMD_NOTICE, chptr, one,
                                SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, text);
     }
+
+    sendcmdto_set_client_msgid(NULL);
+
 #ifdef USE_MDBX
     /* Store server-relayed notice in history database.
-     * Prefer S2S msgid for federation dedup (see server_relay_channel_message). */
-    if (feature_bool(FEAT_MSGID)) {
-      char msgid[64];
+     * Uses the same msgid that was broadcast to clients above. */
+    if (relay_msgid[0]) {
       char timestamp[32];
-      const char *s2s_mid = NULL;
       struct timeval tv;
-
-      if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one
-          && cli_s2s_msgid(one)[0])
-        s2s_mid = cli_s2s_msgid(one);
-
-      if (s2s_mid)
-        ircd_strncpy(msgid, s2s_mid, sizeof(msgid));
-      else
-        generate_msgid(msgid, sizeof(msgid));
 
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, msgid, timestamp);
+      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, timestamp);
     }
 #endif
   }

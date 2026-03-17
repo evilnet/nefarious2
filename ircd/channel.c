@@ -1070,12 +1070,27 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
     if (IsSSL(member->user) && bounce_session_has_plaintext(member->user)) {
       /* Invariant violation: TLS primary in +Z but session has plaintext.
        * Kick from channel — this shouldn't happen with gates A/B working. */
+      char ssl_kick_msgid[64] = "";
+      if (feature_bool(FEAT_MSGID)) {
+        generate_msgid(ssl_kick_msgid, sizeof(ssl_kick_msgid));
+        sendcmdto_set_client_msgid(ssl_kick_msgid);
+      }
       sendcmdto_serv_butone(&me, CMD_KICK, NULL,
                             "%H %C :SSL-only channel (insecure session)",
                             member->channel, member->user);
       sendcmdto_channel_butserv_butone(&me, CMD_KICK, member->channel, NULL, 0,
                                        "%H %C :SSL-only channel (insecure session)",
                                        member->channel, member->user);
+      sendcmdto_set_client_msgid(NULL);
+#ifdef USE_MDBX
+      {
+        char kick_text[512];
+        ircd_snprintf(0, kick_text, sizeof(kick_text), "%s :SSL-only channel (insecure session)",
+                      cli_name(member->user));
+        store_channel_event(&me, member->channel, kick_text,
+                            HISTORY_KICK, ssl_kick_msgid[0] ? ssl_kick_msgid : NULL);
+      }
+#endif
       make_zombie(member, member->user, &me, &me, member->channel);
     }
     return 0;
@@ -2668,6 +2683,12 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 		addbuf_i ? "+" : "", addbuf, remstr, addstr);
 
     if (mbuf->mb_dest & MODEBUF_DEST_CHANNEL) {
+      char mode_msgid[64] = "";
+      if (feature_bool(FEAT_MSGID)) {
+        generate_msgid(mode_msgid, sizeof(mode_msgid));
+        sendcmdto_set_client_msgid(mode_msgid);
+      }
+
       sendcmdto_channel_butserv_butone(app_source, CMD_MODE, mbuf->mb_channel, NULL, 0,
                                        "%H %s%s%s%s%s%s%s%s", mbuf->mb_channel,
                                        rembuf_i || rembuf_local_i ? "-" : "",
@@ -2676,8 +2697,10 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                        addbuf, addbuf_local,
                                        remstr, addstr);
 
+      sendcmdto_set_client_msgid(NULL);
+
 #ifdef USE_MDBX
-      /* Store MODE event in history (only from local users) */
+      /* Store MODE event in history — same msgid as broadcast */
       if (MyUser(mbuf->mb_source)) {
         char mode_text[512];
         ircd_snprintf(0, mode_text, sizeof(mode_text), "%s%s%s%s%s%s%s%s",
@@ -2686,7 +2709,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                       addbuf_i || addbuf_local_i ? "+" : "",
                       addbuf, addbuf_local,
                       remstr, addstr);
-        store_channel_event(mbuf->mb_source, mbuf->mb_channel, mode_text, HISTORY_MODE, NULL);
+        store_channel_event(mbuf->mb_source, mbuf->mb_channel, mode_text, HISTORY_MODE,
+                            mode_msgid[0] ? mode_msgid : NULL);
       }
 #endif
     }
@@ -5414,7 +5438,15 @@ int IsInvited(struct Client* cptr, const void* chptr)
 
 void RevealDelayedJoin(struct Membership *member)
 {
+  char reveal_msgid[64] = "";
+
   ClearDelayedJoin(member);
+
+  if (feature_bool(FEAT_MSGID)) {
+    generate_msgid(reveal_msgid, sizeof(reveal_msgid));
+    sendcmdto_set_client_msgid(reveal_msgid);
+  }
+
   sendcmdto_channel_capab_butserv_butone(member->user, CMD_JOIN, member->channel,
                                    member->user, 0, CAP_NONE, CAP_EXTJOIN, "%H",
                                    member->channel);
@@ -5427,6 +5459,14 @@ void RevealDelayedJoin(struct Membership *member)
     sendcmdto_channel_capab_butserv_butone(member->user, CMD_AWAY, member->channel, NULL, 0,
                                            CAP_AWAYNOTIFY, CAP_NONE, ":%s",
                                            cli_user(member->user)->away);
+
+  sendcmdto_set_client_msgid(NULL);
+
+#ifdef USE_MDBX
+  if (MyUser(member->user))
+    store_channel_event(member->user, member->channel, "", HISTORY_JOIN,
+                        reveal_msgid[0] ? reveal_msgid : NULL);
+#endif
 
   CheckDelayedJoins(member->channel);
 }

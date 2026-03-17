@@ -628,6 +628,11 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	  {
 	    add_user_to_channel(chptr, acptr, current_mode, oplevel);
             if (!(current_mode & CHFL_DELAYED)) {
+              char burst_msgid[64] = "";
+              if (feature_bool(FEAT_MSGID)) {
+                generate_msgid(burst_msgid, sizeof(burst_msgid));
+                sendcmdto_set_client_msgid(burst_msgid);
+              }
               sendcmdto_channel_capab_butserv_butone(acptr, CMD_JOIN, chptr, NULL, 0,
                                                      CAP_NONE, CAP_EXTJOIN, "%H", chptr);
               sendcmdto_channel_capab_butserv_butone(acptr, CMD_JOIN, chptr, NULL, 0,
@@ -638,6 +643,7 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                 sendcmdto_channel_capab_butserv_butone(acptr, CMD_AWAY, chptr, NULL, 0,
                                                        CAP_AWAYNOTIFY, CAP_NONE, ":%s",
                                                        cli_user(acptr)->away);
+              sendcmdto_set_client_msgid(NULL);
             }
 	  }
 	  else

@@ -28,6 +28,7 @@
 
 #include "s_user.h"
 #include "bouncer_session.h"
+#include "history.h"
 #include "capab.h"
 #include "IPcheck.h"
 #include "channel.h"
@@ -82,6 +83,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 /** Sends response \a m of length \a l to client \a c. */
@@ -1089,15 +1091,53 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       if (!case_only_change)
         check_status_watch(sptr, RPL_LOGOFF);
 
-      /* If sender has a labeled-response label, send them a labeled NICK
-       * echo first, then skip them in the broadcast to other members. */
-      if (MyConnect(sptr) && cli_label(sptr)[0]
-          && feature_bool(FEAT_CAP_labeled_response)
-          && CapActive(sptr, CAP_LABELEDRESP)) {
-        sendcmdto_one_tags(sptr, CMD_NICK, sptr, ":%s", nick);
-        sendcmdto_common_channels_butone(sptr, CMD_NICK, sptr, ":%s", nick);
-      } else {
-        sendcmdto_common_channels_butone(sptr, CMD_NICK, NULL, ":%s", nick);
+      /* Generate msgid for NICK change so clients get @msgid tag */
+      {
+        char nick_msgid[64] = "";
+        if (feature_bool(FEAT_MSGID)) {
+          generate_msgid(nick_msgid, sizeof(nick_msgid));
+          sendcmdto_set_client_msgid(nick_msgid);
+        }
+
+        /* If sender has a labeled-response label, send them a labeled NICK
+         * echo first, then skip them in the broadcast to other members. */
+        if (MyConnect(sptr) && cli_label(sptr)[0]
+            && feature_bool(FEAT_CAP_labeled_response)
+            && CapActive(sptr, CAP_LABELEDRESP)) {
+          sendcmdto_one_tags(sptr, CMD_NICK, sptr, ":%s", nick);
+          sendcmdto_common_channels_butone(sptr, CMD_NICK, sptr, ":%s", nick);
+        } else {
+          sendcmdto_common_channels_butone(sptr, CMD_NICK, NULL, ":%s", nick);
+        }
+
+        sendcmdto_set_client_msgid(NULL);
+
+#ifdef USE_MDBX
+        /* Store NICK event in chathistory for each common channel.
+         * cli_name(sptr) still has the OLD nick at this point. */
+        if (MyUser(sptr) && history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)) {
+          struct Membership *chan;
+          struct timeval tv;
+          char timestamp[32];
+          char old_sender[HISTORY_SENDER_LEN];
+          const char *account = (cli_user(sptr) && cli_user(sptr)->account[0])
+                                ? cli_user(sptr)->account : NULL;
+
+          ircd_snprintf(0, old_sender, sizeof(old_sender), "%s!%s@%s",
+                        cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->host);
+
+          gettimeofday(&tv, NULL);
+          ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                        (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
+
+          for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
+            if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)
+              continue;
+            history_store_message(nick_msgid, timestamp, chan->channel->chname,
+                                  old_sender, account, HISTORY_NICK, nick);
+          }
+        }
+#endif
       }
       add_history(sptr, 1);
       sendcmdto_serv_butone(sptr, CMD_NICK, cptr, "%s %Tu", nick,
@@ -1474,22 +1514,33 @@ hide_hostmask(struct Client *cptr)
   ircd_strncpy(oldhost, cli_user(cptr)->host, HOSTLEN + 1);
   ircd_strncpy(olduser, cli_user(cptr)->username, USERLEN + 1);
 
-  /* For clients without chghost capability, use QUIT+JOIN if enabled */
-  if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
-    sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
-                  CAP_NONE, CAP_CHGHOST, ":%s",
-                  feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
+  /* Generate one msgid for both QUIT (non-CHGHOST) and CHGHOST broadcasts */
+  {
+    char hh_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      generate_msgid(hh_msgid, sizeof(hh_msgid));
+      sendcmdto_set_client_msgid(hh_msgid);
+    }
 
-  /* Finally copy the new host to the users current host. */
-  ircd_strncpy(cli_user(cptr)->host, newhost, HOSTLEN + 1);
-  if (newuser[0] != '\0')
-    ircd_strncpy(cli_user(cptr)->username, newuser, USERLEN + 1);
+    /* For clients without chghost capability, use QUIT+JOIN if enabled */
+    if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
+      sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
+                    CAP_NONE, CAP_CHGHOST, ":%s",
+                    feature_str(FEAT_HIDDEN_HOST_SET_MESSAGE));
 
-  /* Send CHGHOST to clients with the chghost capability */
-  if (feature_bool(FEAT_CAP_chghost))
-    sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
-                  CAP_CHGHOST, CAP_NONE, "%s %s",
-                  cli_user(cptr)->username, cli_user(cptr)->host);
+    /* Finally copy the new host to the users current host. */
+    ircd_strncpy(cli_user(cptr)->host, newhost, HOSTLEN + 1);
+    if (newuser[0] != '\0')
+      ircd_strncpy(cli_user(cptr)->username, newuser, USERLEN + 1);
+
+    /* Send CHGHOST to clients with the chghost capability */
+    if (feature_bool(FEAT_CAP_chghost))
+      sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
+                    CAP_CHGHOST, CAP_NONE, "%s %s",
+                    cli_user(cptr)->username, cli_user(cptr)->host);
+
+    sendcmdto_set_client_msgid(NULL);
+  }
 
   /* ok, the client is now fully hidden, so let them know -- hikari */
   if (MyConnect(cptr))
@@ -1571,18 +1622,29 @@ unhide_hostmask(struct Client *cptr)
     ClearExceptValidNick(chan);
   }
 
-  /* For clients without chghost capability, use QUIT+JOIN if enabled */
-  if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
-    sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
-                  CAP_NONE, CAP_CHGHOST, ":%s",
-                  feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
-  ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->realhost, HOSTLEN + 1);
+  /* Generate one msgid for both QUIT (non-CHGHOST) and CHGHOST broadcasts */
+  {
+    char uh_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      generate_msgid(uh_msgid, sizeof(uh_msgid));
+      sendcmdto_set_client_msgid(uh_msgid);
+    }
 
-  /* Send CHGHOST to clients with the chghost capability */
-  if (feature_bool(FEAT_CAP_chghost))
-    sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
-                  CAP_CHGHOST, CAP_NONE, "%s %s",
-                  cli_user(cptr)->username, cli_user(cptr)->host);
+    /* For clients without chghost capability, use QUIT+JOIN if enabled */
+    if (feature_bool(FEAT_HIDDEN_HOST_QUIT))
+      sendcmdto_common_channels_capab_butone(cptr, CMD_QUIT, cptr,
+                    CAP_NONE, CAP_CHGHOST, ":%s",
+                    feature_str(FEAT_HIDDEN_HOST_UNSET_MESSAGE));
+    ircd_strncpy(cli_user(cptr)->host, cli_user(cptr)->realhost, HOSTLEN + 1);
+
+    /* Send CHGHOST to clients with the chghost capability */
+    if (feature_bool(FEAT_CAP_chghost))
+      sendcmdto_common_channels_capab_butone(cptr, CMD_CHGHOST, cptr,
+                    CAP_CHGHOST, CAP_NONE, "%s %s",
+                    cli_user(cptr)->username, cli_user(cptr)->host);
+
+    sendcmdto_set_client_msgid(NULL);
+  }
 
   /* ok, the client is now fully unhidden, so let them know -- hikari */
   if (MyConnect(cptr))

@@ -194,8 +194,16 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         bounce_emit_alias_update(acptr, "account", "");
 
-        sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
-                                               "*");
+        {
+          char ac_msgid[64] = "";
+          if (feature_bool(FEAT_MSGID)) {
+            generate_msgid(ac_msgid, sizeof(ac_msgid));
+            sendcmdto_set_client_msgid(ac_msgid);
+          }
+          sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
+                                                 "*");
+          sendcmdto_set_client_msgid(NULL);
+        }
 
         sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C U", acptr);
       } else if (type == 'R' || type == 'M') {
@@ -241,8 +249,16 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                  "timestamp %Tu", parv[3], cli_user(acptr)->acc_create));
         }
 
-        sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
-                                               "%s", cli_user(acptr)->account);
+        {
+          char ac_msgid[64] = "";
+          if (feature_bool(FEAT_MSGID)) {
+            generate_msgid(ac_msgid, sizeof(ac_msgid));
+            sendcmdto_set_client_msgid(ac_msgid);
+          }
+          sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
+                                                 "%s", cli_user(acptr)->account);
+          sendcmdto_set_client_msgid(NULL);
+        }
 
         if (parc > 4) {
           sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s %s",
@@ -397,8 +413,16 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);
 
-    sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
-                                           "%s", cli_user(acptr)->account);
+    {
+      char ac_msgid[64] = "";
+      if (feature_bool(FEAT_MSGID)) {
+        generate_msgid(ac_msgid, sizeof(ac_msgid));
+        sendcmdto_set_client_msgid(ac_msgid);
+      }
+      sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
+                                             "%s", cli_user(acptr)->account);
+      sendcmdto_set_client_msgid(NULL);
+    }
 
     if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
          (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) &&

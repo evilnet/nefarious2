@@ -233,7 +233,8 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
  */
 const char *msg_type_cmd[] = {
   "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
-  "KICK", "MODE", "TOPIC", "TAGMSG", "PRIVMSG" /* GAP rendered as PRIVMSG */
+  "KICK", "MODE", "TOPIC", "TAGMSG", "PRIVMSG", /* GAP rendered as PRIVMSG */
+  "NICK"
 };
 
 /** Validate a timestamp value.
@@ -521,10 +522,10 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
   char first_line[512];
   char *content = msg->dyn_content ? msg->dyn_content : msg->content;
 
-  /* QUIT messages don't take a channel target in IRC protocol.
-   * Format: :sender QUIT :reason (no target parameter).
-   * QUIT is always single-line so handle it early and return. */
-  if (msg->type == HISTORY_QUIT) {
+  /* QUIT and NICK messages don't take a channel target in IRC protocol.
+   * Format: :sender QUIT :reason  /  :oldnick!u@h NICK :newnick
+   * Both are always single-line so handle them early and return. */
+  if (msg->type == HISTORY_QUIT || msg->type == HISTORY_NICK) {
     if (outer_batchid) {
       if (msg->account[0]) {
         sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s :%s",
@@ -958,7 +959,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
       continue;
     }
 
-    cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
+    cmd = (msg->type <= HISTORY_NICK) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
     /* Send message, handling multiline content if present */
     send_history_message(sptr, msg, target,
@@ -2196,7 +2197,14 @@ static void process_write_forward(const char *target, const char *msgid,
   switch (type_char) {
     case 'P': type = HISTORY_PRIVMSG; break;
     case 'N': type = HISTORY_NOTICE; break;
+    case 'J': type = HISTORY_JOIN; break;
+    case 'L': type = HISTORY_PART; break;
+    case 'Q': type = HISTORY_QUIT; break;
+    case 'I': type = HISTORY_KICK; break;
+    case 'M': type = HISTORY_MODE; break;
+    case 'O': type = HISTORY_TOPIC; break;
     case 'T': type = HISTORY_TAGMSG; break;
+    case 'K': type = HISTORY_NICK; break;
     default:
       Debug((DEBUG_DEBUG, "CH W: Unknown type '%c' for %s", type_char, target));
       return;
@@ -2409,8 +2417,15 @@ void forward_history_write(struct Channel *chptr, struct Client *sptr,
   /* Convert type to char */
   switch (type) {
     case HISTORY_PRIVMSG: type_char = 'P'; break;
-    case HISTORY_NOTICE: type_char = 'N'; break;
-    case HISTORY_TAGMSG: type_char = 'T'; break;
+    case HISTORY_NOTICE:  type_char = 'N'; break;
+    case HISTORY_JOIN:    type_char = 'J'; break;
+    case HISTORY_PART:    type_char = 'L'; break;
+    case HISTORY_QUIT:    type_char = 'Q'; break;
+    case HISTORY_KICK:    type_char = 'I'; break;
+    case HISTORY_MODE:    type_char = 'M'; break;
+    case HISTORY_TOPIC:   type_char = 'O'; break;
+    case HISTORY_TAGMSG:  type_char = 'T'; break;
+    case HISTORY_NICK:    type_char = 'K'; break;
     default: type_char = 'P'; break;
   }
 
@@ -4746,7 +4761,14 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       switch (type_char) {
         case 'P': type_int = HISTORY_PRIVMSG; break;
         case 'N': type_int = HISTORY_NOTICE; break;
+        case 'J': type_int = HISTORY_JOIN; break;
+        case 'L': type_int = HISTORY_PART; break;
+        case 'Q': type_int = HISTORY_QUIT; break;
+        case 'I': type_int = HISTORY_KICK; break;
+        case 'M': type_int = HISTORY_MODE; break;
+        case 'O': type_int = HISTORY_TOPIC; break;
         case 'T': type_int = HISTORY_TAGMSG; break;
+        case 'K': type_int = HISTORY_NICK; break;
       }
       chunk = create_write_chunk(target, msgid, parv[4], type_int, parv[5], parv[6]);
       if (!chunk) {
@@ -4767,8 +4789,15 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       /* Convert type enum back to char for process_write_forward */
       switch (chunk->type) {
         case HISTORY_PRIVMSG: type_char = 'P'; break;
-        case HISTORY_NOTICE: type_char = 'N'; break;
-        case HISTORY_TAGMSG: type_char = 'T'; break;
+        case HISTORY_NOTICE:  type_char = 'N'; break;
+        case HISTORY_JOIN:    type_char = 'J'; break;
+        case HISTORY_PART:    type_char = 'L'; break;
+        case HISTORY_QUIT:    type_char = 'Q'; break;
+        case HISTORY_KICK:    type_char = 'I'; break;
+        case HISTORY_MODE:    type_char = 'M'; break;
+        case HISTORY_TOPIC:   type_char = 'O'; break;
+        case HISTORY_TAGMSG:  type_char = 'T'; break;
+        case HISTORY_NICK:    type_char = 'K'; break;
         default: type_char = 'P'; break;
       }
 

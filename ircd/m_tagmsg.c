@@ -105,11 +105,13 @@
  * TAGMSG content is stored as the client-only tags.
  */
 static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
-                                  const char *client_tags)
+                                  const char *client_tags,
+                                  const char *broadcast_msgid)
 {
   struct timeval tv;
   char timestamp[32];
-  char msgid[64];
+  char fallback_msgid[64];
+  const char *msgid;
   char sender[HISTORY_SENDER_LEN];
   const char *account;
 
@@ -132,14 +134,17 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   if (IsNoStorage(sptr))
     return;
 
+  /* Use broadcast msgid so clients can deduplicate */
+  if (broadcast_msgid && broadcast_msgid[0])
+    msgid = broadcast_msgid;
+  else
+    msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
+
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                 (unsigned long)tv.tv_sec,
                 (unsigned long)(tv.tv_usec / 1000));
-
-  /* Generate unique msgid */
-  generate_msgid(msgid, sizeof(msgid));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -237,8 +242,8 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       sendcmdto_set_client_msgid(NULL);
 
-      /* Store for chathistory event-playback */
-      store_tagmsg_history(sptr, chptr, client_tags);
+      /* Store for chathistory event-playback — same msgid as broadcast */
+      store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid);
 
       /* Propagate to other servers (S2S with tags in P10 message).
        * Use the same msgid we generated for local delivery. */

@@ -151,14 +151,25 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Update bouncer aliases with new realname */
   bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
 
-  /* Echo SETNAME back to the sender per IRCv3 spec */
-  if (CapOwnHas(sptr, CAP_SETNAME))
-    sendcmdto_one(sptr, CMD_SETNAME, sptr, ":%s", cli_info(sptr));
+  /* Generate msgid for client broadcast */
+  {
+    char sn_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      generate_msgid(sn_msgid, sizeof(sn_msgid));
+      sendcmdto_set_client_msgid(sn_msgid);
+    }
 
-  /* Notify channel members with setname capability (excluding sender who already got echo) */
-  sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
-                                         CAP_SETNAME, CAP_NONE,
-                                         ":%s", cli_info(sptr));
+    /* Echo SETNAME back to the sender per IRCv3 spec */
+    if (CapOwnHas(sptr, CAP_SETNAME))
+      sendcmdto_one(sptr, CMD_SETNAME, sptr, ":%s", cli_info(sptr));
+
+    /* Notify channel members with setname capability (excluding sender who already got echo) */
+    sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
+                                           CAP_SETNAME, CAP_NONE,
+                                           ":%s", cli_info(sptr));
+
+    sendcmdto_set_client_msgid(NULL);
+  }
 
   return 0;
 }
@@ -205,9 +216,19 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
 
   /* Notify local channel members with setname capability */
-  sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
-                                         CAP_SETNAME, CAP_NONE,
-                                         ":%s", cli_info(sptr));
+  {
+    char sn_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      generate_msgid(sn_msgid, sizeof(sn_msgid));
+      sendcmdto_set_client_msgid(sn_msgid);
+    }
+
+    sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
+                                           CAP_SETNAME, CAP_NONE,
+                                           ":%s", cli_info(sptr));
+
+    sendcmdto_set_client_msgid(NULL);
+  }
 
   return 0;
 }

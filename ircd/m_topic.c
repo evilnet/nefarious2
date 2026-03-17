@@ -52,11 +52,13 @@
  * @param[in] topic The new topic text.
  */
 static void store_topic_event(struct Client *sptr, struct Channel *chptr,
-                              const char *topic)
+                              const char *topic,
+                              const char *broadcast_msgid)
 {
   struct timeval tv;
   char timestamp[32];
-  char msgid[64];
+  char fallback_msgid[64];
+  const char *msgid;
   char sender[HISTORY_SENDER_LEN];
   const char *account;
 
@@ -79,14 +81,17 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   if (IsNoStorage(sptr))
     return;
 
+  /* Use broadcast msgid so clients can deduplicate */
+  if (broadcast_msgid && broadcast_msgid[0])
+    msgid = broadcast_msgid;
+  else
+    msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
+
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                 (unsigned long)tv.tv_sec,
                 (unsigned long)(tv.tv_usec / 1000));
-
-  /* Generate unique msgid */
-  generate_msgid(msgid, sizeof(msgid));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -173,14 +178,26 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
      if (member && IsDelayedJoin(member))
        RevealDelayedJoin(member);
 
-     sendcmdto_channel_butserv_butone(from, CMD_TOPIC, chptr, NULL, 0,
-      				       (setter ? "%H :%s (%s)" : "%H :%s%s"),
-                                       chptr, chptr->topic, (setter ? nick : ""));
+     /* Generate one msgid for both broadcast and chathistory storage */
+     {
+       char topic_msgid[64] = "";
+       if (feature_bool(FEAT_MSGID)) {
+         generate_msgid(topic_msgid, sizeof(topic_msgid));
+         sendcmdto_set_client_msgid(topic_msgid);
+       }
+
+       sendcmdto_channel_butserv_butone(from, CMD_TOPIC, chptr, NULL, 0,
+                                        (setter ? "%H :%s (%s)" : "%H :%s%s"),
+                                        chptr, chptr->topic, (setter ? nick : ""));
+
+       sendcmdto_set_client_msgid(NULL);
 
 #ifdef USE_MDBX
-     /* Store TOPIC event in history */
-     store_topic_event(sptr, chptr, chptr->topic);
+       /* Store TOPIC event in history — same msgid as broadcast */
+       store_topic_event(sptr, chptr, chptr->topic,
+                         topic_msgid[0] ? topic_msgid : NULL);
 #endif
+     }
    }
       /* if this is the same topic as before we send it to the person that
        * set it (so they knew it went through ok), but don't bother sending

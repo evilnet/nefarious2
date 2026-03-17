@@ -110,11 +110,13 @@
  * @param[in] comment Kick reason.
  */
 static void store_kick_event(struct Client *sptr, struct Channel *chptr,
-                             struct Client *who, const char *comment)
+                             struct Client *who, const char *comment,
+                             const char *broadcast_msgid)
 {
   struct timeval tv;
   char timestamp[32];
-  char msgid[64];
+  char fallback_msgid[64];
+  const char *msgid;
   char sender[HISTORY_SENDER_LEN];
   char kick_text[512];
   const char *account;
@@ -134,17 +136,17 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
-   * not channel events (KICK) which are metadata */
+  /* Use broadcast msgid so clients can deduplicate */
+  if (broadcast_msgid && broadcast_msgid[0])
+    msgid = broadcast_msgid;
+  else
+    msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
 
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
   ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                 (unsigned long)tv.tv_sec,
                 (unsigned long)(tv.tv_usec / 1000));
-
-  /* Generate unique msgid */
-  generate_msgid(msgid, sizeof(msgid));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -265,27 +267,37 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 			  comment);
   }
 
-  if (IsDelayedJoin(member)) {
-    /* If it's a delayed join, only send the KICK to the person doing
-     * the kicking and the victim */
-    if (MyUser(who))
-      sendcmdto_one(sptr, CMD_KICK, who, "%H %C :%s", chptr, who, comment);
-    if (CapRecipientHas(sptr, CAP_EXTJOIN))
-      sendcmdto_one(who, CMD_JOIN, sptr, "%H %s :%s", chptr, IsAccount(who) ? cli_account(who) : "*",  cli_info(who));
-    else
-      sendcmdto_one(who, CMD_JOIN, sptr, "%H", chptr);
-    sendcmdto_one(sptr, CMD_KICK, sptr, "%H %C :%s", chptr, who, comment);
-    CheckDelayedJoins(chptr);
-  } else
-    sendcmdto_channel_butserv_butone(sptr, CMD_KICK, chptr, NULL, 0, "%H %C :%s", chptr, who,
-                                     comment);
+  /* Generate one msgid for both broadcast and chathistory storage */
+  {
+    char kick_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      generate_msgid(kick_msgid, sizeof(kick_msgid));
+      sendcmdto_set_client_msgid(kick_msgid);
+    }
+
+    if (IsDelayedJoin(member)) {
+      /* If it's a delayed join, only send the KICK to the person doing
+       * the kicking and the victim */
+      if (MyUser(who))
+        sendcmdto_one(sptr, CMD_KICK, who, "%H %C :%s", chptr, who, comment);
+      if (CapRecipientHas(sptr, CAP_EXTJOIN))
+        sendcmdto_one(who, CMD_JOIN, sptr, "%H %s :%s", chptr, IsAccount(who) ? cli_account(who) : "*",  cli_info(who));
+      else
+        sendcmdto_one(who, CMD_JOIN, sptr, "%H", chptr);
+      sendcmdto_one(sptr, CMD_KICK, sptr, "%H %C :%s", chptr, who, comment);
+      CheckDelayedJoins(chptr);
+    } else
+      sendcmdto_channel_butserv_butone(sptr, CMD_KICK, chptr, NULL, 0, "%H %C :%s", chptr, who,
+                                       comment);
+
+    sendcmdto_set_client_msgid(NULL);
 
 #ifdef USE_MDBX
-  /* Store KICK event in history */
-  store_kick_event(sptr, chptr, who, comment);
-
-
+    /* Store KICK event in history — same msgid as broadcast */
+    store_kick_event(sptr, chptr, who, comment,
+                     kick_msgid[0] ? kick_msgid : NULL);
 #endif
+  }
 
   make_zombie(member, who, cptr, sptr, chptr);
 
@@ -387,19 +399,25 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 			  comment);
 
     if (member) { /* and tell the channel about it */
-      if (IsDelayedJoin(member)) {
-        if (MyUser(who))
-          sendcmdto_one(IsServer(sptr) ? &his : sptr, CMD_KICK,
-                        who, "%H %C :%s", chptr, who, comment);
-      } else {
-        sendcmdto_channel_butserv_butone(IsServer(sptr) ? &his : sptr, CMD_KICK,
-                                         chptr, NULL, 0, "%H %C :%s", chptr, who,
-                                         comment);
+      {
+        char kick_msgid[64] = "";
+        if (feature_bool(FEAT_MSGID)) {
+          generate_msgid(kick_msgid, sizeof(kick_msgid));
+          sendcmdto_set_client_msgid(kick_msgid);
+        }
+
+        if (IsDelayedJoin(member)) {
+          if (MyUser(who))
+            sendcmdto_one(IsServer(sptr) ? &his : sptr, CMD_KICK,
+                          who, "%H %C :%s", chptr, who, comment);
+        } else {
+          sendcmdto_channel_butserv_butone(IsServer(sptr) ? &his : sptr, CMD_KICK,
+                                           chptr, NULL, 0, "%H %C :%s", chptr, who,
+                                           comment);
+        }
+
+        sendcmdto_set_client_msgid(NULL);
       }
-
-#ifdef USE_MDBX
-
-#endif
 
       make_zombie(member, who, cptr, sptr, chptr);
     }

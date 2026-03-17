@@ -215,21 +215,21 @@ static char *derive_channel_msgid(char *buf, size_t buflen,
 }
 
 /** Store QUIT events in history for all channels the user is on.
- * Uses the pre-populated base msgid from cli_s2s_msgid(sptr) and derives
- * per-channel msgids deterministically for cross-server dedup.
+ * Uses the same msgid that was broadcast to clients so they can deduplicate.
  * @param[in] sptr Client that is quitting.
  * @param[in] comment The quit message.
+ * @param[in] msgid The msgid used in the live broadcast.
  */
-static void store_quit_events(struct Client *sptr, const char *comment)
+static void store_quit_events(struct Client *sptr, const char *comment,
+                              const char *broadcast_msgid)
 {
   struct Membership *member;
   struct timeval tv;
   char timestamp[32];
-  char msgid[S2S_MSGID_BUFSIZE];
+  char fallback_msgid[64];
+  const char *msgid;
   char sender[HISTORY_SENDER_LEN];
   const char *account;
-  const char *base_msgid;
-  char base_buf[S2S_MSGID_BUFSIZE];
 
   if (!history_is_available())
     return;
@@ -244,6 +244,25 @@ static void store_quit_events(struct Client *sptr, const char *comment)
 
   /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
    * not channel events (JOIN/PART/QUIT) which are metadata */
+
+  /* Suppress netsplit QUITs from chathistory — they're state events,
+   * not user actions. Burst JOINs are already not stored.
+   * Detection: comment is "server1 server2" or "*.net *.split" format —
+   * exactly one space, no colon, both halves contain a dot. */
+  if (comment) {
+    const char *sp = strchr(comment, ' ');
+    if (sp && !strchr(comment, ':') && !strchr(sp + 1, ' ')) {
+      /* Exactly one space, no colon, two words */
+      if (memchr(comment, '.', sp - comment) && strchr(sp + 1, '.'))
+        return;  /* Netsplit QUIT — don't store */
+    }
+  }
+
+  /* Use broadcast msgid if available, otherwise generate a fallback */
+  if (broadcast_msgid && broadcast_msgid[0])
+    msgid = broadcast_msgid;
+  else
+    msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
 
   /* Generate Unix timestamp (same for all channels) */
   gettimeofday(&tv, NULL);
@@ -264,21 +283,13 @@ static void store_quit_events(struct Client *sptr, const char *comment)
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
-  /* Use pre-populated base msgid, or generate if not set (defensive) */
-  base_msgid = cli_s2s_msgid(sptr)[0]
-             ? cli_s2s_msgid(sptr) : NULL;
-  if (!base_msgid)
-    base_msgid = generate_msgid(base_buf, sizeof(base_buf));
-
-  /* Store QUIT event for each channel the user is on */
+  /* Store QUIT event for each channel the user is on.
+   * Same msgid is used across all channels — it's a single event.
+   * DB keys are unique because channel name is part of the key. */
   for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
     /* Skip channels with +P (no storage) mode */
     if (member->channel->mode.exmode & EXMODE_NOSTORAGE)
       continue;
-
-    /* Derive per-channel msgid from base + channel name */
-    derive_channel_msgid(msgid, sizeof(msgid),
-                         base_msgid, member->channel->chname);
 
     history_store_message(msgid, timestamp, member->channel->chname, sender,
                           account, HISTORY_QUIT, comment ? comment : "");
@@ -344,13 +355,25 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * that the client can show the "**signoff" message).
      * (Note: The notice is to the local clients *only*)
      */
-    sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
-
+    /* Generate one msgid for both the live broadcast and chathistory storage
+     * so clients can deduplicate cached messages against history queries. */
+    {
+      char quit_msgid[64] = "";
+      if (feature_bool(FEAT_MSGID)) {
+        if (cli_s2s_msgid(bcptr)[0])
+          ircd_strncpy(quit_msgid, cli_s2s_msgid(bcptr), sizeof(quit_msgid));
+        else
+          generate_msgid(quit_msgid, sizeof(quit_msgid));
+        sendcmdto_set_client_msgid(quit_msgid);
+      }
+      sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
+      sendcmdto_set_client_msgid(NULL);
 
 #ifdef USE_MDBX
-    /* Store QUIT events in history before removing from channels */
-    store_quit_events(bcptr, comment);
+      /* Store QUIT events in history before removing from channels */
+      store_quit_events(bcptr, comment, quit_msgid[0] ? quit_msgid : NULL);
 #endif
+    }
 
     remove_user_from_all_channels(bcptr);
 

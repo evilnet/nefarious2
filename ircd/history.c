@@ -1300,36 +1300,45 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
                          struct HistoryMessage **result)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+  char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
-  int keylen;
+  int keylen, floorlen;
 
   *result = NULL;
 
   if (ref_type == HISTORY_REF_NONE) {
     /* LATEST * - start from end of target's range */
-    /* Use a Unix timestamp far in the future (year 2999) */
     keylen = build_key(keybuf, sizeof(keybuf), target, "32503680000.000", NULL);
-  } else {
-    /* Convert reference to Unix timestamp format */
-    if (ref_type == HISTORY_REF_MSGID) {
-      if (history_msgid_to_timestamp(reference, timestamp) != 0)
-        return 0;
-      reference = timestamp;
-    } else if (ref_type == HISTORY_REF_TIMESTAMP) {
-      /* Client sends ISO 8601, convert to Unix for lookup */
-      if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
-        reference = timestamp;
-      /* If conversion fails, assume it's already Unix format */
-    }
-    keylen = build_key(keybuf, sizeof(keybuf), target, reference, NULL);
+    if (keylen < 0)
+      return -1;
+    return history_query_internal(target, keybuf, keylen,
+                                  HISTORY_DIR_LATEST, limit, result,
+                                  NULL, 0);
   }
 
-  if (keylen < 0)
+  /* Convert reference to Unix timestamp format */
+  if (ref_type == HISTORY_REF_MSGID) {
+    if (history_msgid_to_timestamp(reference, timestamp) != 0)
+      return 0;
+    reference = timestamp;
+  } else if (ref_type == HISTORY_REF_TIMESTAMP) {
+    /* Client sends ISO 8601, convert to Unix for lookup */
+    if (history_iso_to_unix(reference, timestamp, sizeof(timestamp)) == 0)
+      reference = timestamp;
+    /* If conversion fails, assume it's already Unix format */
+  }
+
+  /* LATEST with anchor: walk backwards from the end, stop at anchor.
+   * Per IRCv3 spec, LATEST <target> <msgid> <limit> returns the most
+   * recent messages AFTER the anchor, up to limit. */
+  keylen = build_key(keybuf, sizeof(keybuf), target, "32503680000.000", NULL);
+  floorlen = build_key(floorbuf, sizeof(floorbuf), target, reference, NULL);
+  if (keylen < 0 || floorlen < 0)
     return -1;
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_LATEST, limit, result,
-                                NULL, 0);
+                                floorbuf, floorlen);
 }
 
 int history_query_latest_after(const char *target, int limit,

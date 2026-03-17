@@ -243,6 +243,12 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
       /* Only broadcast if effective state changed */
       if (new_effective != prev_effective) {
+        char away_msgid[64] = "";
+        if (feature_bool(FEAT_MSGID)) {
+          generate_msgid(away_msgid, sizeof(away_msgid));
+          sendcmdto_set_client_msgid(away_msgid);
+        }
+
         if (new_effective == 0) {
           /* Became present — broadcast unaway */
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
@@ -268,6 +274,8 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                  CAP_AWAYNOTIFY, CAP_NONE,
                                                  ":%s", star_msg);
         }
+
+        sendcmdto_set_client_msgid(NULL);
         bsess->hs_effective_away = new_effective;
         ircd_strncpy(bsess->hs_effective_away_msg, new_msg, AWAYLEN + 1);
       }
@@ -278,18 +286,28 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   /* Original non-aggregated path */
   is_away = user_set_away(cli_user(sptr), away_message);
-  if (is_away)
   {
-    if (!was_away)
-      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
-    send_reply(sptr, RPL_NOWAWAY);
-    sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE,
-                                           ":%s", away_message);
-  }
-  else {
-    sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
-    send_reply(sptr, RPL_UNAWAY);
-    sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE, "");
+    char away_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID)) {
+      generate_msgid(away_msgid, sizeof(away_msgid));
+      sendcmdto_set_client_msgid(away_msgid);
+    }
+
+    if (is_away)
+    {
+      if (!was_away)
+        sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
+      send_reply(sptr, RPL_NOWAWAY);
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE,
+                                             ":%s", away_message);
+    }
+    else {
+      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+      send_reply(sptr, RPL_UNAWAY);
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE, "");
+    }
+
+    sendcmdto_set_client_msgid(NULL);
   }
   return 0;
 }
