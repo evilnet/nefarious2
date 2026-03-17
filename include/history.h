@@ -267,6 +267,22 @@ extern int history_query_between(const char *target,
 extern int history_query_targets(const char *timestamp1, const char *timestamp2,
                                   int limit, struct HistoryTarget **result);
 
+/** Find the most recent JOIN event for a nick in a channel.
+ * Scans backward through the channel's history looking for a JOIN
+ * whose sender matches "nick!*".  Used by bouncer replay to recover
+ * the original JOIN's msgid and timestamp.
+ * @param[in] channel Channel name to search.
+ * @param[in] nick Nick to match (compared case-insensitively against sender prefix).
+ * @param[out] out_msgid Buffer for the JOIN's message ID.
+ * @param[in] msgid_len Size of out_msgid buffer.
+ * @param[out] out_timestamp Buffer for the JOIN's Unix timestamp (seconds.milliseconds).
+ * @param[in] timestamp_len Size of out_timestamp buffer.
+ * @return 1 if found, 0 if not found or error.
+ */
+extern int history_find_last_join(const char *channel, const char *nick,
+                                  char *out_msgid, size_t msgid_len,
+                                  char *out_timestamp, size_t timestamp_len);
+
 /** Free a list of history messages.
  * @param[in] list Head of the message list to free.
  */

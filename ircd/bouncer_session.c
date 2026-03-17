@@ -3825,7 +3825,14 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
         /* Copy primary's channel mode flags (member is the primary's membership) */
         unsigned int aflags = CHFL_ALIAS
                             | (member->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
+        struct Membership *amemb;
         add_user_to_channel(chptr, sptr, aflags, OpLevel(member));
+        /* Inherit primary's JOIN msgid/timestamp for bouncer replay */
+        amemb = find_member_link(chptr, sptr);
+        if (amemb && member->join_msgid[0]) {
+          memcpy(amemb->join_msgid, member->join_msgid, sizeof(amemb->join_msgid));
+          amemb->join_tv = member->join_tv;
+        }
       }
 
       /* Append to channel list for BX C (only joined channels) */
@@ -4717,13 +4724,34 @@ void bounce_send_channel_state(struct Client *cptr)
     if (IsZombie(member) || IsDelayedJoin(member))
       continue;
 
-    /* Send JOIN with original msgid and timestamp from when the user
-     * actually joined (stored on Membership).  This ensures bouncer
-     * replay JOINs carry correct historical tags, not current time. */
+    /* Send JOIN with original msgid and timestamp.  First try the
+     * in-memory values (set when the JOIN happened this session), then
+     * fall back to querying chathistory for the last JOIN by this nick. */
     {
-      const char *join_msgid = member->join_msgid[0] ? member->join_msgid : NULL;
+      char hist_msgid[HISTORY_MSGID_LEN];
+      char hist_ts[HISTORY_TIMESTAMP_LEN];
+      const char *join_msgid = NULL;
+      const char *join_ts = NULL;
 
-      /* Set time override to the original JOIN timestamp if available */
+      hist_msgid[0] = '\0';
+      hist_ts[0] = '\0';
+
+      if (member->join_msgid[0]) {
+        /* In-memory: JOIN happened while server was running */
+        join_msgid = member->join_msgid;
+      }
+
+      /* If no in-memory msgid (e.g. after restart/BURST), query history */
+      if (!join_msgid && history_is_available()) {
+        if (history_find_last_join(chptr->chname, cli_name(cptr),
+                                   hist_msgid, sizeof(hist_msgid),
+                                   hist_ts, sizeof(hist_ts))) {
+          join_msgid = hist_msgid;
+          join_ts = hist_ts;
+        }
+      }
+
+      /* Set time override: prefer in-memory timeval, then history timestamp */
       if (member->join_tv.tv_sec) {
         char timebuf[40];
         struct tm tm;
@@ -4733,6 +4761,21 @@ void bounce_send_channel_state(struct Client *cptr)
                       tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                       tm.tm_hour, tm.tm_min, tm.tm_sec,
                       (long)(member->join_tv.tv_usec / 1000));
+        sendcmdto_set_client_time(timebuf);
+      } else if (join_ts && join_ts[0]) {
+        /* History stores Unix "seconds.milliseconds" — convert to ISO 8601 */
+        char timebuf[40];
+        struct tm tm;
+        unsigned long sec = 0;
+        unsigned long ms = 0;
+        time_t t;
+        sscanf(join_ts, "%lu.%lu", &sec, &ms);
+        t = (time_t)sec;
+        gmtime_r(&t, &tm);
+        ircd_snprintf(0, timebuf, sizeof(timebuf),
+                      "%04d-%02d-%02dT%02d:%02d:%02d.%03luZ",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
         sendcmdto_set_client_time(timebuf);
       }
 

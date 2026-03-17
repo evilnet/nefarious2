@@ -1365,6 +1365,134 @@ int history_query_latest_after(const char *target, int limit,
                                 floorbuf, floorlen);
 }
 
+int history_find_last_join(const char *channel, const char *nick,
+                           char *out_msgid, size_t msgid_len,
+                           char *out_timestamp, size_t timestamp_len)
+{
+  MDBX_txn *txn;
+  MDBX_cursor *cursor;
+  MDBX_val key, data;
+  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+  char target_prefix[CHANNELLEN + 2];
+  int target_prefix_len, keylen, rc;
+  int found = 0;
+  size_t nick_len;
+
+  if (!history_available || !channel || !nick)
+    return 0;
+
+  nick_len = strlen(nick);
+
+  /* Build target prefix for boundary checking */
+  target_prefix_len = ircd_snprintf(0, target_prefix, sizeof(target_prefix),
+                                    "%s%c", channel, KEY_SEP);
+
+  /* Start from end of channel's key range */
+  keylen = build_key(keybuf, sizeof(keybuf), channel, "32503680000.000", NULL);
+  if (keylen < 0)
+    return 0;
+
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
+  if (rc != 0)
+    return 0;
+
+  rc = mdbx_cursor_open(txn, history_dbi, &cursor);
+  if (rc != 0) {
+    mdbx_txn_abort(txn);
+    return 0;
+  }
+
+  /* Position at or after the far-future key */
+  key.iov_len = keylen;
+  key.iov_base = (void *)keybuf;
+  rc = mdbx_cursor_get(cursor, &key, &data, MDBX_SET_RANGE);
+  if (rc == MDBX_NOTFOUND)
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_LAST);
+  else if (rc == 0)
+    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+
+  /* Walk backward through channel history looking for this user's last JOIN.
+   * JOIN events are channel metadata, so they're relatively frequent —
+   * typically found within a few hundred entries at most. Cap the scan
+   * to avoid pathological cases. */
+  {
+    int scanned = 0;
+    int max_scan = 2000;
+
+    while (rc == 0 && scanned < max_scan) {
+      const char *val;
+      const char *pipe1, *pipe2;
+      int type;
+
+      /* Check if still in channel's range */
+      if (key.iov_len < (size_t)target_prefix_len ||
+          memcmp(key.iov_base, target_prefix, target_prefix_len) != 0)
+        break;
+
+      scanned++;
+      val = (const char *)data.iov_base;
+
+      /* Quick reject: compressed data won't start with a digit.
+       * JOIN events are short and shouldn't be compressed, but skip
+       * compressed entries rather than decompressing them all. */
+      if (is_compressed((const unsigned char *)val, data.iov_len)) {
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+        continue;
+      }
+
+      /* Value format: type|sender|account|content
+       * HISTORY_JOIN = 2, so we need "2|nick!..." */
+      pipe1 = memchr(val, '|', data.iov_len);
+      if (!pipe1) {
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+        continue;
+      }
+
+      type = atoi(val);
+      if (type != HISTORY_JOIN) {
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+        continue;
+      }
+
+      /* Check sender: starts with "nick!" */
+      pipe2 = memchr(pipe1 + 1, '|', data.iov_len - (pipe1 + 1 - val));
+      if (!pipe2) {
+        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+        continue;
+      }
+
+      {
+        const char *sender = pipe1 + 1;
+        size_t sender_len = pipe2 - sender;
+        if (sender_len > nick_len && sender[nick_len] == '!' &&
+            ircd_strncmp(sender, nick, nick_len) == 0) {
+          /* Found it — extract msgid and timestamp from the key */
+          char tmp_target[CHANNELLEN + 1];
+          char tmp_ts[HISTORY_TIMESTAMP_LEN];
+          char tmp_msgid[HISTORY_MSGID_LEN];
+          if (parse_key(key.iov_base, key.iov_len,
+                        tmp_target, tmp_ts, tmp_msgid) == 0) {
+            if (out_msgid && msgid_len > 0) {
+              ircd_strncpy(out_msgid, tmp_msgid, msgid_len);
+            }
+            if (out_timestamp && timestamp_len > 0) {
+              ircd_strncpy(out_timestamp, tmp_ts, timestamp_len);
+            }
+            found = 1;
+          }
+          break;
+        }
+      }
+
+      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_PREV);
+    }
+  }
+
+  mdbx_cursor_close(cursor);
+  mdbx_txn_abort(txn);
+  return found;
+}
+
 int history_query_around(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
                          struct HistoryMessage **result)
@@ -3306,6 +3434,16 @@ int history_query_latest_after(const char *target, int limit,
   (void)target; (void)limit; (void)after_timestamp;
   *result = NULL;
   return -1;
+}
+
+int history_find_last_join(const char *channel, const char *nick,
+                           char *out_msgid, size_t msgid_len,
+                           char *out_timestamp, size_t timestamp_len)
+{
+  (void)channel; (void)nick;
+  (void)out_msgid; (void)msgid_len;
+  (void)out_timestamp; (void)timestamp_len;
+  return 0;
 }
 
 int history_query_around(const char *target, enum HistoryRefType ref_type,
