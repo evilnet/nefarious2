@@ -1575,7 +1575,7 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
   char tagbuf[128];
@@ -1645,7 +1645,7 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   cap_route_ctx.stc_active = 0;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 16; flags++) {
+  for (flags = 0; flags < 32; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
@@ -1666,7 +1666,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
   char tagbuf[128];
@@ -1745,7 +1745,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   cap_route_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 16; flags++) {
+  for (flags = 0; flags < 32; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
@@ -1768,7 +1768,7 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
   char tagbuf[128];
   int flags;
@@ -1819,7 +1819,7 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   cap_route_ctx.stc_active = 0;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 16; flags++) {
+  for (flags = 0; flags < 32; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
@@ -1846,7 +1846,7 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[16] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
   char tagbuf[128];
   int flags;
@@ -1903,7 +1903,7 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   cap_route_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 16; flags++) {
+  for (flags = 0; flags < 32; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
