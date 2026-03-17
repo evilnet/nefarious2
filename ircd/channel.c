@@ -83,20 +83,23 @@ int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix);
 #ifdef USE_MDBX
 
 /** Store a channel event (JOIN, PART, etc.) in the history database.
- * Generates a unique msgid and timestamp, then stores the event.
+ * If ext_msgid is provided, uses it; otherwise generates a new one.
  * @param[in] sptr Client that triggered the event.
  * @param[in] chptr Target channel.
  * @param[in] text Event content (e.g., part reason, empty for joins).
  * @param[in] type Event type (HISTORY_JOIN, HISTORY_PART, etc.).
+ * @param[in] ext_msgid Pre-generated msgid (NULL to auto-generate).
  */
 static void store_channel_event(struct Client *sptr, struct Channel *chptr,
-                                const char *text, enum HistoryMessageType type)
+                                const char *text, enum HistoryMessageType type,
+                                const char *ext_msgid)
 {
   struct timeval tv;
   char timestamp[32];
   char msgid[64];
   char sender[HISTORY_SENDER_LEN];
   const char *account;
+  const char *use_msgid;
 
   if (!history_is_available())
     return;
@@ -122,8 +125,13 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
                 (unsigned long)tv.tv_sec,
                 (unsigned long)(tv.tv_usec / 1000));
 
-  /* Generate unique msgid */
-  generate_msgid(msgid, sizeof(msgid));
+  /* Use provided msgid or generate a new one */
+  if (ext_msgid && *ext_msgid)
+    use_msgid = ext_msgid;
+  else {
+    generate_msgid(msgid, sizeof(msgid));
+    use_msgid = msgid;
+  }
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -139,7 +147,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
             ? cli_user(sptr)->account : NULL;
 
   /* Store in database */
-  history_store_message(msgid, timestamp, chptr->chname, sender,
+  history_store_message(use_msgid, timestamp, chptr->chname, sender,
                         account, type, text ? text : "");
 }
 #endif /* USE_MDBX */
@@ -2678,7 +2686,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                       addbuf_i || addbuf_local_i ? "+" : "",
                       addbuf, addbuf_local,
                       remstr, addstr);
-        store_channel_event(mbuf->mb_source, mbuf->mb_channel, mode_text, HISTORY_MODE);
+        store_channel_event(mbuf->mb_source, mbuf->mb_channel, mode_text, HISTORY_MODE, NULL);
       }
 #endif
     }
@@ -5157,24 +5165,33 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       return;
     SetUserParting(member);
 
-    /* Send notification to channel */
-    if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
-      sendcmdto_channel_butserv_butone(jbuf->jb_source, CMD_PART, chan, NULL, 0,
-				(flags & CHFL_BANNED || !jbuf->jb_comment) ?
-				":%H" : "%H :%s", chan, jbuf->jb_comment);
-    else if (MyUser(jbuf->jb_source))
-      sendcmdto_one(jbuf->jb_source, CMD_PART, jbuf->jb_source,
-		    (flags & CHFL_BANNED || !jbuf->jb_comment) ?
-		    ":%H" : "%H :%s", chan, jbuf->jb_comment);
+    /* Generate msgid for PART and set override for channel sends */
+    {
+      char part_msgid[64];
+      generate_msgid(part_msgid, sizeof(part_msgid));
+      if (feature_bool(FEAT_MSGID))
+        sendcmdto_set_client_msgid(part_msgid);
+
+      /* Send notification to channel */
+      if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
+        sendcmdto_channel_butserv_butone(jbuf->jb_source, CMD_PART, chan, NULL, 0,
+                                         (flags & CHFL_BANNED || !jbuf->jb_comment) ?
+                                         ":%H" : "%H :%s", chan, jbuf->jb_comment);
+      else if (MyUser(jbuf->jb_source))
+        sendcmdto_one_tags(jbuf->jb_source, CMD_PART, jbuf->jb_source,
+                           (flags & CHFL_BANNED || !jbuf->jb_comment) ?
+                           ":%H" : "%H :%s", chan, jbuf->jb_comment);
 
 #ifdef USE_MDBX
-    /* Store PART event in history (only from local users to avoid duplicates) */
-    if (MyUser(jbuf->jb_source) && !(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
-      store_channel_event(jbuf->jb_source, chan,
-                          (flags & CHFL_BANNED || !jbuf->jb_comment) ? "" : jbuf->jb_comment,
-                          HISTORY_PART);
-
+      /* Store PART event in history (only from local users to avoid duplicates) */
+      if (MyUser(jbuf->jb_source) && !(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
+        store_channel_event(jbuf->jb_source, chan,
+                            (flags & CHFL_BANNED || !jbuf->jb_comment) ? "" : jbuf->jb_comment,
+                            HISTORY_PART, part_msgid);
 #endif
+
+      sendcmdto_set_client_msgid(NULL);
+    }
 
     /* Mark bouncer session dirty for periodic persistence */
     bounce_mark_dirty(jbuf->jb_source);
@@ -5199,14 +5216,24 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
     else
       add_user_to_channel(chan, jbuf->jb_source, flags, oplevel);
 
-    /* Stamp membership with JOIN time and msgid for bouncer replay */
+    /* Generate a single msgid for this JOIN — used in membership stamp,
+     * channel broadcast, joiner echo, and history storage. */
     {
-      struct Membership *memb = find_member_link(chan, jbuf->jb_source);
+      char join_msgid[64];
+      struct Membership *memb;
+
+      generate_msgid(join_msgid, sizeof(join_msgid));
+
+      /* Stamp membership for bouncer replay */
+      memb = find_member_link(chan, jbuf->jb_source);
       if (memb) {
         gettimeofday(&memb->join_tv, NULL);
-        generate_msgid(memb->join_msgid, sizeof(memb->join_msgid));
+        ircd_strncpy(memb->join_msgid, join_msgid, sizeof(memb->join_msgid));
       }
-    }
+
+      /* Set msgid override so channel sends and echo include it */
+      if (feature_bool(FEAT_MSGID))
+        sendcmdto_set_client_msgid(join_msgid);
 
     /* Mark bouncer session dirty for periodic persistence */
     bounce_mark_dirty(jbuf->jb_source);
@@ -5247,9 +5274,9 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       }
 
 #ifdef USE_MDBX
-      /* Store JOIN event in history (only from local users to avoid duplicates) */
+      /* Store JOIN event in history with the same msgid */
       if (MyUser(jbuf->jb_source))
-        store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN);
+        store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
 #endif
 
       if (cli_user(jbuf->jb_source)->away)
@@ -5270,7 +5297,17 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                       cli_info(jbuf->jb_source));
       else
         sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
+
+#ifdef USE_MDBX
+      /* Store DELJOINS JOIN event in history */
+      if (MyUser(jbuf->jb_source))
+        store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
+#endif
     }
+
+    /* Clear msgid override after all JOIN sends */
+    sendcmdto_set_client_msgid(NULL);
+    } /* end join_msgid scope */
 
     /* Send post-join replies (TOPIC/NAMES) to local aliases.  Must be
      * AFTER the JOIN echo above so clients see JOIN before NAMES. */
