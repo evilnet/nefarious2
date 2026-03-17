@@ -3217,15 +3217,34 @@ static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
                                               int limit)
 {
   struct HistoryMessage *result = NULL, *tail = NULL;
-  struct HistoryMessage *m, *next, *best;
-  struct HistoryMessage *p1 = list1, *p2 = list2;
   int count = 0;
 
-  /* Simple merge: collect all unique messages, sort by timestamp */
-  /* First, add all from list1 */
-  for (m = list1; m && count < limit; m = m->next) {
+  /* Merge-sort both lists by timestamp (both are already chronological).
+   * Collect ALL unique messages first, then truncate to keep the N most
+   * recent. The old code greedily filled from list1 first, which meant
+   * stale local messages (e.g. typing indicators) could crowd out newer
+   * federated messages. */
+
+  /* Step 1: Merge both lists into one sorted list (no limit yet) */
+  struct HistoryMessage *p1 = list1, *p2 = list2;
+  while (p1 || p2) {
+    struct HistoryMessage *pick;
+    if (!p1) {
+      pick = p2; p2 = p2->next;
+    } else if (!p2) {
+      pick = p1; p1 = p1->next;
+    } else if (strcmp(p1->timestamp, p2->timestamp) <= 0) {
+      pick = p1; p1 = p1->next;
+    } else {
+      pick = p2; p2 = p2->next;
+    }
+
+    /* Deduplicate by msgid */
+    if (message_exists(result, pick))
+      continue;
+
     struct HistoryMessage *copy = (struct HistoryMessage *)MyCalloc(1, sizeof(*copy));
-    memcpy(copy, m, sizeof(*copy));
+    memcpy(copy, pick, sizeof(*copy));
     copy->next = NULL;
     if (!result) {
       result = tail = copy;
@@ -3236,42 +3255,15 @@ static struct HistoryMessage *merge_messages(struct HistoryMessage *list1,
     count++;
   }
 
-  /* Add unique messages from list2 */
-  for (m = list2; m && count < limit; m = m->next) {
-    if (!message_exists(result, m)) {
-      struct HistoryMessage *copy = (struct HistoryMessage *)MyCalloc(1, sizeof(*copy));
-      memcpy(copy, m, sizeof(*copy));
-      copy->next = NULL;
-      if (!result) {
-        result = tail = copy;
-      } else {
-        tail->next = copy;
-        tail = copy;
-      }
-      count++;
-    }
-  }
-
-  /* Simple bubble sort by timestamp (descending for LATEST) */
-  /* For small lists this is fine; for large lists we'd want better sorting */
-  if (result && result->next) {
-    int swapped;
-    do {
-      swapped = 0;
-      struct HistoryMessage **pp = &result;
-      while (*pp && (*pp)->next) {
-        struct HistoryMessage *a = *pp;
-        struct HistoryMessage *b = a->next;
-        /* Sort ascending by timestamp (chronological, per IRCv3 spec) */
-        if (strcmp(a->timestamp, b->timestamp) > 0) {
-          a->next = b->next;
-          b->next = a;
-          *pp = b;
-          swapped = 1;
-        }
-        pp = &((*pp)->next);
-      }
-    } while (swapped);
+  /* Step 2: If over limit, drop the oldest (front of list) to keep
+   * the N most recent messages. Result is chronological (ascending).
+   * Don't free raw_content/dyn_content — those are shallow copies of
+   * pointers owned by the original lists (freed by the caller). */
+  while (count > limit && result) {
+    struct HistoryMessage *old = result;
+    result = result->next;
+    MyFree(old);
+    count--;
   }
 
   return result;
