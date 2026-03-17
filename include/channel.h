@@ -30,6 +30,7 @@
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
 #endif
+#include <sys/time.h>
 #ifndef INCLUDED_res_h
 #include "res.h"
 #endif
@@ -237,6 +238,8 @@ struct Membership {
   unsigned int       status;		/**< Flags for op'd, voice'd, etc */
   unsigned int       banflags;          /**< Ban cache flags */
   unsigned short     oplevel;		/**< Op level */
+  char               join_msgid[16];    /**< Msgid from the original JOIN */
+  struct timeval     join_tv;           /**< Timestamp of the original JOIN */
 };
 
 #define MAXOPLEVELDIGITS    3

@@ -748,6 +748,8 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
     member->channel      = chptr;
     member->status       = flags;
     member->banflags     = 0;
+    member->join_msgid[0] = '\0';
+    memset(&member->join_tv, 0, sizeof(member->join_tv));
     SetOpLevel(member, oplevel);
 
     member->next_member  = chptr->members;
@@ -5196,6 +5198,15 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       add_user_to_channel(chan, jbuf->jb_source, flags | CHFL_DELAYED, oplevel);
     else
       add_user_to_channel(chan, jbuf->jb_source, flags, oplevel);
+
+    /* Stamp membership with JOIN time and msgid for bouncer replay */
+    {
+      struct Membership *memb = find_member_link(chan, jbuf->jb_source);
+      if (memb) {
+        gettimeofday(&memb->join_tv, NULL);
+        generate_msgid(memb->join_msgid, sizeof(memb->join_msgid));
+      }
+    }
 
     /* Mark bouncer session dirty for periodic persistence */
     bounce_mark_dirty(jbuf->jb_source);

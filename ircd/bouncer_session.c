@@ -4717,14 +4717,36 @@ void bounce_send_channel_state(struct Client *cptr)
     if (IsZombie(member) || IsDelayedJoin(member))
       continue;
 
-    /* Send JOIN to the client — use CapRecipientHas for format decisions
-     * so the wire format matches the actual recipient's caps (not the union). */
-    if (CapRecipientHas(cptr, CAP_EXTJOIN))
-      sendcmdto_one(cptr, CMD_JOIN, cptr, "%H %s :%s", chptr,
-                    IsAccount(cptr) ? cli_account(cptr) : "*",
-                    cli_info(cptr));
-    else
-      sendcmdto_one(cptr, CMD_JOIN, cptr, ":%H", chptr);
+    /* Send JOIN with original msgid and timestamp from when the user
+     * actually joined (stored on Membership).  This ensures bouncer
+     * replay JOINs carry correct historical tags, not current time. */
+    {
+      const char *join_msgid = member->join_msgid[0] ? member->join_msgid : NULL;
+
+      /* Set time override to the original JOIN timestamp if available */
+      if (member->join_tv.tv_sec) {
+        char timebuf[40];
+        struct tm tm;
+        gmtime_r(&member->join_tv.tv_sec, &tm);
+        ircd_snprintf(0, timebuf, sizeof(timebuf),
+                      "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                      tm.tm_hour, tm.tm_min, tm.tm_sec,
+                      (long)(member->join_tv.tv_usec / 1000));
+        sendcmdto_set_client_time(timebuf);
+      }
+
+      if (CapRecipientHas(cptr, CAP_EXTJOIN))
+        sendcmdto_one_tags_ext(cptr, CMD_JOIN, cptr, join_msgid,
+                               "%H %s :%s", chptr,
+                               IsAccount(cptr) ? cli_account(cptr) : "*",
+                               cli_info(cptr));
+      else
+        sendcmdto_one_tags_ext(cptr, CMD_JOIN, cptr, join_msgid,
+                               ":%H", chptr);
+
+      sendcmdto_set_client_time(NULL);
+    }
 
     if (chptr->topic[0]) {
       send_reply(cptr, RPL_TOPIC, chptr->chname, chptr->topic);
