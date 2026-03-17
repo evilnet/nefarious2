@@ -1080,6 +1080,11 @@ int main(int argc, char **argv) {
 
   hlc_init((uint16_t)base64toint(cli_yxx(&me)));
 
+  /* Seed MsgIdCounter from epoch milliseconds to ensure uniqueness across
+   * restarts.  9 base64 chars holds ~1.8e16; epoch ms is ~1.7e12, leaving
+   * ~10^4 years of headroom before the counter space wraps. */
+  MsgIdCounter = (unsigned long)hlc_wall_clock_ms();
+
   hAddClient(&me);
   SetIPv6(&me);
 
