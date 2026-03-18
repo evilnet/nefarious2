@@ -58,6 +58,7 @@
 #include "sasl_auth.h"
 #include "s_debug.h"
 #include "s_misc.h"
+#include "s_user.h"
 #include "send.h"
 #include "struct.h"
 #include "sys.h"
@@ -1407,6 +1408,11 @@ int rehash(struct Client *cptr, int sig)
   close_mappings();
 
   read_configuration_file();
+
+  /* Rebuild ISUPPORT tokens from current feature values and
+   * push updates to clients with draft/extended-isupport */
+  init_isupport();
+  send_isupport_update();
 
   if (sig != 2)
     restart_resolver();

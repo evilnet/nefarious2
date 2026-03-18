@@ -1025,6 +1025,11 @@ int main(int argc, char **argv) {
     return 7;
   }
 
+  /* Rebuild ISUPPORT after config is loaded.  init_isupport() ran before
+   * init_conf(), so feature-dependent tokens (CHATHISTORY, NETWORK_ICON,
+   * etc.) were built with defaults.  Re-running picks up config values. */
+  init_isupport();
+
   if (thisServer.bootopt & BOOT_CHKCONF) {
     if (dbg_client)
       conf_debug_iline(dbg_client);

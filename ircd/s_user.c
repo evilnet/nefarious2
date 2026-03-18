@@ -3143,5 +3143,23 @@ send_supported_batched(struct Client *cptr)
   return 0;
 }
 
-/* vim: shiftwidth=2 
- */ 
+/** Push updated ISUPPORT to all local clients with draft/extended-isupport.
+ * Called after rehash or feature changes to proactively notify clients
+ * per the IRCv3 extended-isupport specification.
+ */
+void
+send_isupport_update(void)
+{
+  struct Client *cptr;
+
+  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+    if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
+      continue;
+    if (!CapActive(cptr, CAP_DRAFT_EXTISUPPORT))
+      continue;
+    send_supported_batched(cptr);
+  }
+}
+
+/* vim: shiftwidth=2
+ */

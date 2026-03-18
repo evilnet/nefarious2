@@ -632,6 +632,11 @@ feature_notify_chathistory_caps(void)
 
   send_cap_notify("draft/chathistory", 1, valbuf);
 
+  /* Keep ISUPPORT CHATHISTORY token in sync with the CAP value and
+   * push to clients with draft/extended-isupport. */
+  add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
+  send_isupport_update();
+
   log_write(LS_SYSTEM, L_INFO, 0,
             "chathistory: parameters changed to %s, notified cap-notify clients",
             valbuf);

@@ -123,6 +123,7 @@ extern void init_isupport(void);
 extern void del_isupport(const char *name);
 extern void add_isupport_s(const char *name, const char *value);
 extern void add_isupport_i(const char *name, int value);
+extern void send_isupport_update(void);
 
 #define NAMES_ALL 1 /**< List all users in channel */
 #define NAMES_VIS 2 /**< List only visible users in non-secret channels */
