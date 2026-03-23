@@ -1134,10 +1134,21 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
             if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)
               continue;
             history_store_message(nick_msgid, timestamp, chan->channel->chname,
-                                  old_sender, account, HISTORY_NICK, nick);
+                                  old_sender, account, HISTORY_NICK, nick, NULL);
           }
         }
 #endif
+
+      /* Set S2S msgid override so NICK relay carries same msgid as local storage.
+       * Static globals survive past the nick_msgid scope closure. */
+      if (nick_msgid[0]) {
+        struct timeval nick_tv;
+        gettimeofday(&nick_tv, NULL);
+        sendcmdto_set_s2s_tags(
+          (uint64_t)nick_tv.tv_sec * 1000 + nick_tv.tv_usec / 1000,
+          nick_msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
       }
       add_history(sptr, 1);
       sendcmdto_serv_butone(sptr, CMD_NICK, cptr, "%s %Tu", nick,

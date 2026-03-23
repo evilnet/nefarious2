@@ -293,7 +293,7 @@ static void store_quit_events(struct Client *sptr, const char *comment,
       continue;
 
     history_store_message(msgid, timestamp, member->channel->chname, sender,
-                          account, HISTORY_QUIT, comment ? comment : "");
+                          account, HISTORY_QUIT, comment ? comment : "", NULL);
   }
 }
 #endif /* USE_MDBX */
@@ -322,6 +322,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     if (IsBouncerAlias(bcptr)) {
       if (MyConnect(bcptr) && IsIPChecked(bcptr))
         IPcheck_disconnect(bcptr);
+      if (MyUser(bcptr))
+        del_list_watch(bcptr);
       bounce_alias_untrack(bcptr);
       remove_user_from_all_channels(bcptr);
       RemoveYXXClient(cli_user(bcptr)->server, cli_yxx(bcptr));

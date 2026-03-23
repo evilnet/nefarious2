@@ -707,12 +707,14 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 	if ((member->status & CHFL_VOICE) && !(member->status & CHFL_BURST_ALREADY_VOICED))
 	  modebuf_mode_client(mbuf, MODE_ADD | CHFL_VOICE, member->user, OpLevel(member));
       } else if (parse_flags & MODE_PARSE_WIPEOUT) { /* wipeout old ops */
-	if (member->status & CHFL_CHANOP)
-	  modebuf_mode_client(mbuf, MODE_DEL | CHFL_CHANOP, member->user, OpLevel(member));
-        if (member->status & CHFL_HALFOP)
-          modebuf_mode_client(mbuf, MODE_DEL | CHFL_HALFOP, member->user, OpLevel(member));
-	if (member->status & CHFL_VOICE)
-	  modebuf_mode_client(mbuf, MODE_DEL | CHFL_VOICE, member->user, OpLevel(member));
+	if (!IsMemberAlias(member)) {
+	  if (member->status & CHFL_CHANOP)
+	    modebuf_mode_client(mbuf, MODE_DEL | CHFL_CHANOP, member->user, OpLevel(member));
+	  if (member->status & CHFL_HALFOP)
+	    modebuf_mode_client(mbuf, MODE_DEL | CHFL_HALFOP, member->user, OpLevel(member));
+	  if (member->status & CHFL_VOICE)
+	    modebuf_mode_client(mbuf, MODE_DEL | CHFL_VOICE, member->user, OpLevel(member));
+	}
 	member->status = (member->status
                           & ~(CHFL_CHANNEL_MANAGER | CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE))
 			 | CHFL_DEOPPED;

@@ -148,9 +148,35 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
   joinbuf_init(&create, sptr, cptr, JOINBUF_TYPE_CREATE, 0, chanTS);
 
+  /* Parse per-channel msgids from incoming S2S multi-msgid tag into local array.
+   * Format: "msgid1+msgid2+msgid3" — positional match to channel list. */
+  {
+    char incoming_msgids[MAXJOINARGS][16];
+    int chan_idx = 0;
+    memset(incoming_msgids, 0, sizeof(incoming_msgids));
+    {
+      const char *multi = cli_s2s_multi_msgid(cptr);
+      if (multi[0]) {
+        const char *mp = multi;
+        int idx = 0;
+        while (mp && *mp && idx < MAXJOINARGS) {
+          const char *plus = strchr(mp, '+');
+          int len = plus ? (int)(plus - mp) : (int)strlen(mp);
+          if (len > 0 && len < (int)sizeof(incoming_msgids[0])) {
+            memcpy(incoming_msgids[idx], mp, len);
+            incoming_msgids[idx][len] = '\0';
+          }
+          idx++;
+          mp = plus ? plus + 1 : NULL;
+        }
+      }
+    }
+    if (cli_s2s_time_ms(cptr))
+      create.jb_msgid_time_ms = cli_s2s_time_ms(cptr);
+
   /* For each channel in the comma separated list: */
   for (name = ircd_strtok(&p, parv[1], ","); name;
-       name = ircd_strtok(&p, 0, ",")) {
+       name = ircd_strtok(&p, 0, ","), chan_idx++) {
     badop = 0;
 
     if (IsLocalChannel(name))
@@ -222,9 +248,16 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!badop) {
       /* Set (or correct) our copy of the TS */
       chptr->creationtime = chanTS;
+      /* Pre-populate per-channel msgid from incoming S2S tag (positional) */
+      if (incoming_msgids[chan_idx][0])
+        ircd_strncpy(create.jb_msgids[create.jb_count],
+                      incoming_msgids[chan_idx],
+                      sizeof(create.jb_msgids[0]));
       joinbuf_join(&create, chptr, CHFL_CHANOP);
     }
   }
+
+  } /* end incoming_msgids/chan_idx scope */
 
   joinbuf_flush(&join); /* flush out the joins and creates */
   joinbuf_flush(&create);

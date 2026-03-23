@@ -148,7 +148,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
 
   /* Store in database */
   history_store_message(use_msgid, timestamp, chptr->chname, sender,
-                        account, type, text ? text : "");
+                        account, type, text ? text : "", NULL);
 }
 #endif /* USE_MDBX */
 
@@ -2438,6 +2438,9 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
   unsigned int limitdel = MODE_LIMIT;
   unsigned int redirdel = MODE_REDIRECT;
 
+  char mode_msgid[64] = "";
+  uint64_t mode_time_ms = 0;
+
   assert(0 != mbuf);
 
   /* If the ModeBuf is empty, we have nothing to do */
@@ -2683,9 +2686,12 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 		addbuf_i ? "+" : "", addbuf, remstr, addstr);
 
     if (mbuf->mb_dest & MODEBUF_DEST_CHANNEL) {
-      char mode_msgid[64] = "";
       if (feature_bool(FEAT_MSGID)) {
+        struct timeval mode_tv;
         generate_msgid(mode_msgid, sizeof(mode_msgid));
+        gettimeofday(&mode_tv, NULL);
+        mode_time_ms = (uint64_t)mode_tv.tv_sec * 1000
+                     + mode_tv.tv_usec / 1000;
         sendcmdto_set_client_msgid(mode_msgid);
       }
 
@@ -2802,11 +2808,19 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
     if (mbuf->mb_dest & MODEBUF_DEST_OPMODE) {
       /* If OPMODE was set, we're propagating the mode as an OPMODE message */
+      if (mode_msgid[0] && mode_time_ms) {
+        sendcmdto_set_s2s_tags(mode_time_ms, mode_msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
       sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_OPMODE, mbuf->mb_connect,
                             FLAG_OPLEVELS, FLAG_LAST_FLAG,
 			    "%H %s%s%s%s%s%s", mbuf->mb_channel,
 			    rembuf_i ? "-" : "", rembuf, addbuf_i ? "+" : "",
 			    addbuf, remstr, addstr);
+      if (mode_msgid[0] && mode_time_ms) {
+        sendcmdto_set_s2s_tags(mode_time_ms, mode_msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
       sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_OPMODE, mbuf->mb_connect,
                             FLAG_LAST_FLAG, FLAG_OPLEVELS,
                             "%H %s%s%s%s%s%s", mbuf->mb_channel,
@@ -2829,6 +2843,10 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
        * to the rest of the network.  We send the actual channel TS.
        */
       /* Send oplevels to servers with oplevels support. */
+      if (mode_msgid[0] && mode_time_ms) {
+        sendcmdto_set_s2s_tags(mode_time_ms, mode_msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
       sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
                                  FLAG_OPLEVELS, FLAG_LAST_FLAG,
                                  "%H %s%s%s%s%s%s %Tu", mbuf->mb_channel,
@@ -2836,6 +2854,10 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                                  addbuf, remstr, addstr,
                                  mbuf->mb_channel->creationtime);
       /* Send no oplevels to servers without oplevels support. */
+      if (mode_msgid[0] && mode_time_ms) {
+        sendcmdto_set_s2s_tags(mode_time_ms, mode_msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
       sendcmdto_flag_serv_butone(mbuf->mb_source, CMD_MODE, mbuf->mb_connect,
                                  FLAG_LAST_FLAG, FLAG_OPLEVELS,
                                  "%H %s%s%s%s%s%s %Tu", mbuf->mb_channel,
@@ -5151,6 +5173,8 @@ joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
   jbuf->jb_create = create;
   jbuf->jb_count = 0;
   jbuf->jb_alias_source = NULL;
+  memset(jbuf->jb_msgids, 0, sizeof(jbuf->jb_msgids));
+  jbuf->jb_msgid_time_ms = 0;
   jbuf->jb_strlen = (((type == JOINBUF_TYPE_JOIN ||
 		       type == JOINBUF_TYPE_PART ||
 		       type == JOINBUF_TYPE_PARTALL) ?
@@ -5189,12 +5213,27 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       return;
     SetUserParting(member);
 
-    /* Generate msgid for PART and set override for channel sends */
+    /* Generate or use pre-populated msgid for PART */
     {
       char part_msgid[64];
-      generate_msgid(part_msgid, sizeof(part_msgid));
+      struct timeval part_tv;
+      gettimeofday(&part_tv, NULL);
+
+      /* Use pre-populated msgid from incoming S2S (re-relay), or generate new */
+      if (jbuf->jb_msgids[jbuf->jb_count][0])
+        ircd_strncpy(part_msgid, jbuf->jb_msgids[jbuf->jb_count],
+                      sizeof(part_msgid));
+      else
+        generate_msgid(part_msgid, sizeof(part_msgid));
+
       if (feature_bool(FEAT_MSGID))
         sendcmdto_set_client_msgid(part_msgid);
+
+      /* Save per-channel msgid for S2S relay in joinbuf_flush() */
+      ircd_strncpy(jbuf->jb_msgids[jbuf->jb_count], part_msgid,
+                    sizeof(jbuf->jb_msgids[0]));
+      jbuf->jb_msgid_time_ms = (uint64_t)part_tv.tv_sec * 1000
+                              + part_tv.tv_usec / 1000;
 
       /* Send notification to channel */
       if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
@@ -5240,13 +5279,19 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
     else
       add_user_to_channel(chan, jbuf->jb_source, flags, oplevel);
 
-    /* Generate a single msgid for this JOIN — used in membership stamp,
+    /* Generate or use pre-populated msgid for this JOIN — used in membership stamp,
      * channel broadcast, joiner echo, and history storage. */
     {
       char join_msgid[64];
       struct Membership *memb;
 
-      generate_msgid(join_msgid, sizeof(join_msgid));
+      /* Use pre-populated msgid from incoming S2S (re-relay), or generate new */
+      if (jbuf->jb_type == JOINBUF_TYPE_CREATE
+          && jbuf->jb_msgids[jbuf->jb_count][0])
+        ircd_strncpy(join_msgid, jbuf->jb_msgids[jbuf->jb_count],
+                      sizeof(join_msgid));
+      else
+        generate_msgid(join_msgid, sizeof(join_msgid));
 
       /* Stamp membership for bouncer replay */
       memb = find_member_link(chan, jbuf->jb_source);
@@ -5259,6 +5304,14 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       if (feature_bool(FEAT_MSGID))
         sendcmdto_set_client_msgid(join_msgid);
 
+      /* Save per-channel msgid for S2S relay in joinbuf_flush() (CREATE batches channels) */
+      if (jbuf->jb_type == JOINBUF_TYPE_CREATE && memb) {
+        ircd_strncpy(jbuf->jb_msgids[jbuf->jb_count], join_msgid,
+                      sizeof(jbuf->jb_msgids[0]));
+        jbuf->jb_msgid_time_ms = (uint64_t)memb->join_tv.tv_sec * 1000
+                                + memb->join_tv.tv_usec / 1000;
+      }
+
     /* Mark bouncer session dirty for periodic persistence */
     bounce_mark_dirty(jbuf->jb_source);
 
@@ -5266,6 +5319,12 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
     if (jbuf->jb_type != JOINBUF_TYPE_CREATE && !is_local) {
       if (jbuf->jb_alias_source)
         sendcmdto_set_alias_source(jbuf->jb_alias_source);
+      if (join_msgid[0] && memb) {
+        sendcmdto_set_s2s_tags(
+          (uint64_t)memb->join_tv.tv_sec * 1000 + memb->join_tv.tv_usec / 1000,
+          join_msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
       sendcmdto_serv_butone(jbuf->jb_source, CMD_JOIN, jbuf->jb_connect,
 			    "%H %Tu", chan, chan->creationtime);
     }
@@ -5371,10 +5430,13 @@ joinbuf_flush(struct JoinBuf *jbuf)
   char *p = 0;
   int chanlist_i = 0;
   int i;
+  int saved_count;
 
   if (!jbuf->jb_count || jbuf->jb_type == JOINBUF_TYPE_PARTALL ||
       jbuf->jb_type == JOINBUF_TYPE_JOIN)
     return 0; /* no joins to process */
+
+  saved_count = jbuf->jb_count;
 
   for (i = 0; i < jbuf->jb_count; i++) { /* build channel list */
     build_string(chanlist, &chanlist_i,
@@ -5391,6 +5453,31 @@ joinbuf_flush(struct JoinBuf *jbuf)
   jbuf->jb_strlen = ((jbuf->jb_type == JOINBUF_TYPE_PART ?
 		      STARTJOINLEN : STARTCREATELEN) +
 		     (jbuf->jb_comment ? strlen(jbuf->jb_comment) + 2 : 0));
+
+  /* Build multi-msgid S2S tag: @A<time_7><msgid1>+<msgid2>+...
+   * Each msgid corresponds positionally to a channel in the comma list.
+   * Old servers extract only the first msgid (backwards compatible). */
+  if (jbuf->jb_msgids[0][0] && jbuf->jb_msgid_time_ms
+      && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    char s2s_tag[256];
+    char time_b64[8];
+    int pos;
+
+    inttobase64_64(time_b64, jbuf->jb_msgid_time_ms, 7);
+    pos = ircd_snprintf(0, s2s_tag, sizeof(s2s_tag), "@A%s%s",
+                        time_b64, jbuf->jb_msgids[0]);
+    for (i = 1; i < saved_count && pos < (int)sizeof(s2s_tag) - 16; i++) {
+      if (jbuf->jb_msgids[i][0])
+        pos += ircd_snprintf(0, s2s_tag + pos, sizeof(s2s_tag) - pos,
+                             "+%s", jbuf->jb_msgids[i]);
+    }
+    /* Trailing space required by tag format */
+    if (pos < (int)sizeof(s2s_tag) - 1) {
+      s2s_tag[pos++] = ' ';
+      s2s_tag[pos] = '\0';
+    }
+    sendcmdto_set_s2s_raw_tags(s2s_tag);
+  }
 
   /* and send the appropriate command */
   switch (jbuf->jb_type) {

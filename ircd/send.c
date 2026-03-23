@@ -180,6 +180,20 @@ void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
     s2s_msgid_override[0] = '\0';
 }
 
+/** Pre-built S2S tag prefix for multi-msgid scenarios (e.g. batched CREATE/PART).
+ * When non-empty, sendcmdto_serv_butone uses this directly instead of calling
+ * format_s2s_tags(). Must include the trailing space. Auto-cleared after use.
+ */
+static char s2s_raw_tags[256] = "";
+
+void sendcmdto_set_s2s_raw_tags(const char *tags)
+{
+  if (tags)
+    ircd_strncpy(s2s_raw_tags, tags, sizeof(s2s_raw_tags));
+  else
+    s2s_raw_tags[0] = '\0';
+}
+
 /** Opt-in flag for S2S tags on the next sendcmdto_serv_butone() call.
  * Set to 1 before calling sendcmdto_serv_butone() to include compact S2S
  * tags on channel events (JOIN, PART, KICK, TOPIC). Auto-cleared after use.
@@ -1398,7 +1412,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
                                 const char *pattern, ...)
 {
   struct VarData vd;
-  struct MsgBuf *mb;
+  struct MsgBuf *mb = NULL;
   struct MsgBuf *mb_alias = NULL;
   struct DLink *lp;
   struct Client *alias_from = NULL;
@@ -1416,14 +1430,67 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
   }
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
-  va_start(vd.vd_args, pattern);
-  mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
-  va_end(vd.vd_args);
 
-  if (alias_from) {
-    va_start(vd.vd_args, pattern);
-    mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
-    va_end(vd.vd_args);
+  /* Consume s2s_want_tags flag (auto-clear) */
+  {
+    int want_tags = s2s_want_tags;
+    s2s_want_tags = 0;
+
+    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+      /* Check for pre-built raw tag string first */
+      if (s2s_raw_tags[0]) {
+        va_start(vd.vd_args, pattern);
+        mb = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, from, tok, &vd);
+        va_end(vd.vd_args);
+
+        if (alias_from) {
+          va_start(vd.vd_args, pattern);
+          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, alias_from, tok, &vd);
+          va_end(vd.vd_args);
+        }
+        s2s_raw_tags[0] = '\0';
+        s2s_cptr_override = NULL;
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
+      } else {
+        char s2s_tagbuf[128];
+        struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
+                                : (MyConnect(from) ? NULL : cli_from(from));
+        s2s_cptr_override = NULL;
+
+        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+          va_start(vd.vd_args, pattern);
+          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+          va_end(vd.vd_args);
+
+          if (alias_from) {
+            va_start(vd.vd_args, pattern);
+            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+            va_end(vd.vd_args);
+          }
+        }
+        /* Clear overrides consumed by format_s2s_tags */
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
+      }
+    } else {
+      s2s_cptr_override = NULL;
+      s2s_raw_tags[0] = '\0';
+      s2s_msgid_override[0] = '\0';
+      s2s_time_override = 0;
+    }
+
+    if (!mb) {
+      va_start(vd.vd_args, pattern);
+      mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+      va_end(vd.vd_args);
+
+      if (alias_from) {
+        va_start(vd.vd_args, pattern);
+        mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+        va_end(vd.vd_args);
+      }
+    }
   }
 
   /* send it to our downlinks */
@@ -1488,26 +1555,43 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
     s2s_want_tags = 0;
 
     if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
-      char s2s_tagbuf[128];
-      struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
-                              : (MyConnect(from) ? NULL : cli_from(from));
-      s2s_cptr_override = NULL;
-
-      if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+      /* Check for pre-built raw tag string (multi-msgid CREATE/PART) */
+      if (s2s_raw_tags[0]) {
         va_start(vd.vd_args, pattern);
-        mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+        mb = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, from, tok, &vd);
         va_end(vd.vd_args);
 
-        /* Alias buffer also needs tag prefix */
         if (alias_from) {
           va_start(vd.vd_args, pattern);
-          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, alias_from, tok, &vd);
           va_end(vd.vd_args);
         }
+        s2s_raw_tags[0] = '\0';
+        s2s_cptr_override = NULL;
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
+      } else {
+        char s2s_tagbuf[128];
+        struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
+                                : (MyConnect(from) ? NULL : cli_from(from));
+        s2s_cptr_override = NULL;
+
+        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+          va_start(vd.vd_args, pattern);
+          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+          va_end(vd.vd_args);
+
+          /* Alias buffer also needs tag prefix */
+          if (alias_from) {
+            va_start(vd.vd_args, pattern);
+            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+            va_end(vd.vd_args);
+          }
+        }
+        /* Clear overrides consumed by format_s2s_tags */
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
       }
-      /* Clear overrides consumed by format_s2s_tags */
-      s2s_msgid_override[0] = '\0';
-      s2s_time_override = 0;
     }
   }
 

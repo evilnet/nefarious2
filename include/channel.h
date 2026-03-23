@@ -475,6 +475,8 @@ struct JoinBuf {
   unsigned int		jb_count;	/**< Number of channels */
   unsigned int		jb_strlen;	/**< length so far */
   struct Client	       *jb_alias_source; /**< Alias for split S2S delivery (NULL if none) */
+  char			jb_msgids[MAXJOINARGS][16]; /**< Per-channel msgids for S2S relay */
+  uint64_t		jb_msgid_time_ms; /**< Timestamp for S2S tags (ms since epoch) */
   struct Channel       *jb_channels[MAXJOINARGS];
 					/**< channels joined or whatever */
 };

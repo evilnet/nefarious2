@@ -167,7 +167,7 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
 
   /* Store in database */
   history_store_message(msgid, timestamp, chptr->chname, sender,
-                        account, HISTORY_KICK, kick_text);
+                        account, HISTORY_KICK, kick_text, NULL);
 }
 #endif /* USE_MDBX */
 
@@ -261,19 +261,25 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
               "Kick reason contained invalid UTF-8 and was sanitized");
   }
 
-  if (!IsLocalChannel(name)) {
-    sendcmdto_want_s2s_tags(1);
-    sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,
-			  comment);
-  }
-
-  /* Generate one msgid for both broadcast and chathistory storage */
+  /* Generate msgid before S2S relay so both use the same one */
   {
     char kick_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
       generate_msgid(kick_msgid, sizeof(kick_msgid));
       sendcmdto_set_client_msgid(kick_msgid);
     }
+
+  if (!IsLocalChannel(name)) {
+    if (kick_msgid[0]) {
+      struct timeval tv;
+      gettimeofday(&tv, NULL);
+      sendcmdto_set_s2s_tags(
+        (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, kick_msgid);
+    }
+    sendcmdto_want_s2s_tags(1);
+    sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,
+			  comment);
+  }
 
     if (IsDelayedJoin(member)) {
       /* If it's a delayed join, only send the KICK to the person doing
@@ -393,31 +399,37 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       modebuf_flush(&mbuf);
     }
   } else {
-    /* Propagate kick... */
+    /* Generate msgid before S2S relay so both use the same one */
+    char kick_msgid[64] = "";
+    if (feature_bool(FEAT_MSGID))
+      generate_msgid(kick_msgid, sizeof(kick_msgid));
+
+    /* Propagate kick with consistent S2S msgid... */
+    if (kick_msgid[0]) {
+      struct timeval tv;
+      gettimeofday(&tv, NULL);
+      sendcmdto_set_s2s_tags(
+        (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, kick_msgid);
+    }
     sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,
 			  comment);
 
     if (member) { /* and tell the channel about it */
-      {
-        char kick_msgid[64] = "";
-        if (feature_bool(FEAT_MSGID)) {
-          generate_msgid(kick_msgid, sizeof(kick_msgid));
-          sendcmdto_set_client_msgid(kick_msgid);
-        }
+      if (kick_msgid[0])
+        sendcmdto_set_client_msgid(kick_msgid);
 
-        if (IsDelayedJoin(member)) {
-          if (MyUser(who))
-            sendcmdto_one(IsServer(sptr) ? &his : sptr, CMD_KICK,
-                          who, "%H %C :%s", chptr, who, comment);
-        } else {
-          sendcmdto_channel_butserv_butone(IsServer(sptr) ? &his : sptr, CMD_KICK,
-                                           chptr, NULL, 0, "%H %C :%s", chptr, who,
-                                           comment);
-        }
-
-        sendcmdto_set_client_msgid(NULL);
+      if (IsDelayedJoin(member)) {
+        if (MyUser(who))
+          sendcmdto_one(IsServer(sptr) ? &his : sptr, CMD_KICK,
+                        who, "%H %C :%s", chptr, who, comment);
+      } else {
+        sendcmdto_channel_butserv_butone(IsServer(sptr) ? &his : sptr, CMD_KICK,
+                                         chptr, NULL, 0, "%H %C :%s", chptr, who,
+                                         comment);
       }
+
+      sendcmdto_set_client_msgid(NULL);
 
       make_zombie(member, who, cptr, sptr, chptr);
     }

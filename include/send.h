@@ -79,6 +79,8 @@ extern void sendcmdto_set_client_msgid(const char *msgid);
 extern void sendcmdto_set_client_time(const char *timestr);
 /* Override S2S compact tag time/msgid for forwarded commands (auto-cleared) */
 extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
+/* Pre-built S2S tag prefix for multi-msgid (batched CREATE/PART) */
+extern void sendcmdto_set_s2s_raw_tags(const char *tags);
 
 /* Send a command to one client */
 extern void sendcmdto_one(struct Client *from, const char *cmd,

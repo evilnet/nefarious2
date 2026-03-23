@@ -239,9 +239,35 @@ int ms_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (alias_source && !MyConnect(sptr))
     parts.jb_alias_source = alias_source;
 
+  /* Parse per-channel msgids from incoming S2S multi-msgid tag.
+   * Format: "msgid1+msgid2+msgid3" — positional match to channel list. */
+  {
+    char incoming_msgids[MAXJOINARGS][16];
+    int chan_idx = 0;
+    memset(incoming_msgids, 0, sizeof(incoming_msgids));
+    {
+      const char *multi = cli_s2s_multi_msgid(cptr);
+      if (multi[0]) {
+        const char *mp = multi;
+        int idx = 0;
+        while (mp && *mp && idx < MAXJOINARGS) {
+          const char *plus = strchr(mp, '+');
+          int len = plus ? (int)(plus - mp) : (int)strlen(mp);
+          if (len > 0 && len < (int)sizeof(incoming_msgids[0])) {
+            memcpy(incoming_msgids[idx], mp, len);
+            incoming_msgids[idx][len] = '\0';
+          }
+          idx++;
+          mp = plus ? plus + 1 : NULL;
+        }
+      }
+    }
+    if (cli_s2s_time_ms(cptr))
+      parts.jb_msgid_time_ms = cli_s2s_time_ms(cptr);
+
   /* scan through channel list */
   for (name = ircd_strtok(&p, parv[1], ","); name;
-       name = ircd_strtok(&p, 0, ",")) {
+       name = ircd_strtok(&p, 0, ","), chan_idx++) {
 
     flags = 0;
 
@@ -257,9 +283,17 @@ int ms_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (IsDelayedJoin(member))
       flags |= CHFL_DELAYED;
 
+    /* Pre-populate per-channel msgid from incoming S2S tag (positional) */
+    if (incoming_msgids[chan_idx][0])
+      ircd_strncpy(parts.jb_msgids[parts.jb_count],
+                    incoming_msgids[chan_idx],
+                    sizeof(parts.jb_msgids[0]));
+
     /* part user from channel */
     joinbuf_join(&parts, chptr, flags);
   }
+
+  } /* end incoming_msgids/chan_idx scope */
 
   return joinbuf_flush(&parts); /* flush channel parts */
 }

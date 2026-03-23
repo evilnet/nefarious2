@@ -108,7 +108,7 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
 
   /* Store in database */
   history_store_message(msgid, timestamp, chptr->chname, sender,
-                        account, HISTORY_TOPIC, topic ? topic : "");
+                        account, HISTORY_TOPIC, topic ? topic : "", NULL);
 }
 #endif /* USE_MDBX */
 
@@ -156,9 +156,22 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
      ircd_strncpy((char *)&nick, cli_name(from), NICKLEN + 1);
    }
    chptr->topic_time = ts ? ts : TStime();
+
+   /* Generate msgid before S2S relay so both use the same one */
+   {
+     char topic_msgid[64] = "";
+     if (newtopic && feature_bool(FEAT_MSGID))
+       generate_msgid(topic_msgid, sizeof(topic_msgid));
+
    /* Fixed in 2.10.11: Don't propagate local topics */
    if (!IsLocalChannel(chptr->chname))
    {
+     if (topic_msgid[0]) {
+       struct timeval tv;
+       gettimeofday(&tv, NULL);
+       sendcmdto_set_s2s_tags(
+         (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, topic_msgid);
+     }
      sendcmdto_want_s2s_tags(1);
      if (setter != NULL)
        sendcmdto_serv_butone(sptr, CMD_TOPIC, cptr, "%H %s %Tu %Tu :%s", chptr,
@@ -178,13 +191,10 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
      if (member && IsDelayedJoin(member))
        RevealDelayedJoin(member);
 
-     /* Generate one msgid for both broadcast and chathistory storage */
+     /* Use the same msgid for broadcast and chathistory storage */
      {
-       char topic_msgid[64] = "";
-       if (feature_bool(FEAT_MSGID)) {
-         generate_msgid(topic_msgid, sizeof(topic_msgid));
+       if (topic_msgid[0])
          sendcmdto_set_client_msgid(topic_msgid);
-       }
 
        sendcmdto_channel_butserv_butone(from, CMD_TOPIC, chptr, NULL, 0,
                                         (setter ? "%H :%s (%s)" : "%H :%s%s"),
@@ -205,6 +215,7 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
        */
     else if (MyUser(sptr))
       sendcmdto_one(sptr, CMD_TOPIC, sptr, "%H :%s", chptr, chptr->topic);
+   } /* end topic_msgid scope */
 }
 
 /** Handle a local user's attempt to get or set a channel topic.

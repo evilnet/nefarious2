@@ -1697,6 +1697,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   /* Clear previous S2S tags */
   cli_s2s_time_ms(cptr) = 0;
   cli_s2s_msgid(cptr)[0] = '\0';
+  cli_s2s_multi_msgid(cptr)[0] = '\0';
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
@@ -1715,10 +1716,21 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
           time_b64[7] = '\0';
           cli_s2s_time_ms(cptr) = base64toint_64(time_b64);
 
-          /* Extract msgid: 14 chars */
+          /* Extract first msgid: 14 chars */
           if (14 < S2S_MSGID_BUFSIZE) {
             memcpy(cli_s2s_msgid(cptr), ch + 9, 14);
             cli_s2s_msgid(cptr)[14] = '\0';
+          }
+
+          /* Extract full multi-msgid string (msgid1+msgid2+...) if present.
+           * Starts at ch+9, runs until tagend. Contains +-separated msgids
+           * for batched CREATE/PART. */
+          {
+            int multi_len = tagend - (ch + 9);
+            if (multi_len > 14 && multi_len < S2S_MULTI_MSGID_BUFSIZE) {
+              memcpy(cli_s2s_multi_msgid(cptr), ch + 9, multi_len);
+              cli_s2s_multi_msgid(cptr)[multi_len] = '\0';
+            }
           }
 
           /* Update local HLC from remote's time + logical (HLC receive) */
