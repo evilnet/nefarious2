@@ -83,6 +83,7 @@ struct HistoryMessage {
   char account[ACCOUNTLEN + 1];        /**< Sender's account name (or empty) */
   enum HistoryMessageType type;        /**< Message type */
   char content[HISTORY_CONTENT_LEN];   /**< Message content (inline, single-line) */
+  char client_tags[512];               /**< Client-only tags (+reply=msgid, +draft/react, etc.) */
   char *dyn_content;                   /**< Resolved multiline content (MyMalloc'd, caller frees) */
   size_t dyn_content_len;              /**< Length of dyn_content */
   unsigned char *raw_content;          /**< Raw compressed content (for federation passthrough) */
@@ -145,7 +146,7 @@ extern void history_shutdown(void);
 extern int history_store_message(const char *msgid, const char *timestamp,
                                   const char *target, const char *sender,
                                   const char *account, enum HistoryMessageType type,
-                                  const char *content);
+                                  const char *content, const char *client_tags);
 
 /** Store a multiline message with content in the unified content store.
  * Content is stored separately in ml_content, and the history entry stores

@@ -135,7 +135,8 @@ static int check_utf8_text(struct Client *sptr, char *text, const char *command)
  */
 static void store_channel_history(struct Client *sptr, struct Channel *chptr,
                                    const char *text, enum HistoryMessageType type,
-                                   const char *msgid, const char *timestamp)
+                                   const char *msgid, const char *timestamp,
+                                   const char *client_tags)
 {
   char sender[HISTORY_SENDER_LEN];
   const char *account;
@@ -146,9 +147,19 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
 
   /* Check if chathistory storage is enabled */
   if (!feature_bool(FEAT_CHATHISTORY_STORE)) {
-    /* If write forwarding is enabled, forward to a storage server */
+    /* If write forwarding is enabled, forward to a storage server.
+     * Encode client tags into the content using \x06 sentinel so they
+     * survive the CH W wire format transparently. */
     if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
-      forward_history_write(chptr, sptr, msgid, timestamp, type, text);
+      if (client_tags && client_tags[0]) {
+        char tagged_content[HISTORY_CONTENT_LEN + 512];
+        ircd_snprintf(0, tagged_content, sizeof(tagged_content),
+                      "\x06%s\x06%s", client_tags, text ? text : "");
+        forward_history_write(chptr, sptr, msgid, timestamp, type,
+                              tagged_content);
+      } else {
+        forward_history_write(chptr, sptr, msgid, timestamp, type, text);
+      }
     }
     return;
   }
@@ -206,7 +217,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {
     history_store_message(msgid, timestamp, chptr->chname, sender,
-                          account, HISTORY_GAP, "");
+                          account, HISTORY_GAP, "", NULL);
     return;
   }
 
@@ -215,7 +226,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
 
   /* Store in database */
   if (history_store_message(msgid, timestamp, chptr->chname, sender,
-                            account, type, text) == 0) {
+                            account, type, text, client_tags) == 0) {
     /* Layer 1: Broadcast CH A + if this is the first message in the channel */
     if (is_new_channel) {
       broadcast_channel_advertisement(chptr->chname);
@@ -272,7 +283,8 @@ static int should_store_pm(struct Client *sender, struct Client *recipient)
  */
 static void store_private_history(struct Client *sptr, struct Client *acptr,
                                    const char *text, enum HistoryMessageType type,
-                                   const char *msgid, const char *timestamp)
+                                   const char *msgid, const char *timestamp,
+                                   const char *client_tags)
 {
   char sender[HISTORY_SENDER_LEN];
   char target[NICKLEN * 2 + 2];  /* nick1:nick2 */
@@ -322,20 +334,20 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   /* Check opt-out — store gap marker if either party opted out */
   if (has_pm_optout(sptr) || has_pm_optout(acptr)) {
     history_store_message(msgid, timestamp, target, sender,
-                          account, HISTORY_GAP, "");
+                          account, HISTORY_GAP, "", NULL);
     return;
   }
 
   /* Check +Y no-storage — store gap marker */
   if (IsNoStorage(sptr)) {
     history_store_message(msgid, timestamp, target, sender,
-                          account, HISTORY_GAP, "");
+                          account, HISTORY_GAP, "", NULL);
     return;
   }
 
   /* Store in database */
   history_store_message(msgid, timestamp, target, sender,
-                        account, type, text);
+                        account, type, text, client_tags);
 }
 #endif /* USE_MDBX */
 
@@ -434,6 +446,11 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
       generate_msgid(msgid, sizeof(msgid));
+
+      /* Set S2S msgid override so the S2S relay carries the same msgid
+       * that we store locally — prevents federation dedup failures. */
+      sendcmdto_set_s2s_tags(
+        (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, msgid);
     }
 #endif
 
@@ -489,9 +506,13 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     }
 
 #ifdef USE_MDBX
-    /* Store message in history database for draft/chathistory */
-    if (msgid[0])
-      store_channel_history(sptr, chptr, mytext, HISTORY_PRIVMSG, msgid, timestamp);
+    /* Store message in history database for draft/chathistory.
+     * Include client-only tags (+reply, +draft/react) if present. */
+    if (msgid[0]) {
+      const char *store_ctags = cli_client_tags(sptr);
+      store_channel_history(sptr, chptr, mytext, HISTORY_PRIVMSG, msgid, timestamp,
+                            (store_ctags && *store_ctags) ? store_ctags : NULL);
+    }
 #endif
   }
 }
@@ -566,77 +587,85 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
   RevealDelayedJoinIfNeeded(sptr, chptr);
 
-  /* Alias source rewriting (see relay_channel_message) */
-  {
-    struct Client *from = sptr;
-    const char *client_tags = cli_client_tags(sptr);
-
-    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
-      if (!MyUser(cli_user(sptr)->alias_primary))
-        sendcmdto_set_alias_source(sptr);
-      from = cli_user(sptr)->alias_primary;
-    }
-
-    if (client_tags && *client_tags) {
-      sendcmdto_channel_butone_with_client_tags(from, CMD_NOTICE, chptr, cli_from(sptr),
-                         SKIP_DEAF | SKIP_BURST, '\0', client_tags,
-                         "%H :%s", chptr, mytext);
-    } else {
-      sendcmdto_channel_butone(from, CMD_NOTICE, chptr, cli_from(sptr),
-                               SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, mytext);
-    }
-  }
-
-#ifdef USE_MDBX
+  /* Generate msgid before channel broadcast (mirrors relay_channel_message).
+   * Setting S2S msgid override ensures the same msgid is used for both
+   * local storage and S2S relay — prevents federation dedup failures. */
   {
     char msgid[64] = "";
     char timestamp[32] = "";
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
-    /* Echo notice back to sender if they have echo-message cap */
-    if (need_echo) {
-      const char *echo_ctags = cli_client_tags(sptr);
-      if (echo_ctags && *echo_ctags && CapOwnHas(sptr, CAP_MSGTAGS)) {
-        /* Generate msgid for the echo */
-        if (feature_bool(FEAT_MSGID)) {
-          struct timeval tv;
-          gettimeofday(&tv, NULL);
-          ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                        (unsigned long)tv.tv_sec,
-                        (unsigned long)(tv.tv_usec / 1000));
-          generate_msgid(msgid, sizeof(msgid));
-        }
-        if (msgid[0])
-          sendcmdto_set_client_msgid(msgid);
-        sendcmdto_one_client_tags(sptr, MSG_NOTICE, sptr, echo_ctags,
-                                  "%H :%s", chptr, mytext);
-        sendcmdto_set_client_msgid(NULL);
-      } else {
-        sendcmdto_one_tags_msgid(sptr, CMD_NOTICE, sptr,
-                                 msgid, sizeof(msgid), timestamp, sizeof(timestamp),
-                                 "%H :%s", chptr, mytext);
-      }
-    } else if (feature_bool(FEAT_MSGID)) {
+#ifdef USE_MDBX
+    if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
       generate_msgid(msgid, sizeof(msgid));
+
+      sendcmdto_set_s2s_tags(
+        (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, msgid);
+    }
+#endif
+
+    /* Set msgid override so channel broadcast includes it in client tags */
+    if (msgid[0])
+      sendcmdto_set_client_msgid(msgid);
+
+    /* Alias source rewriting (see relay_channel_message) */
+    {
+      struct Client *from = sptr;
+      const char *client_tags = cli_client_tags(sptr);
+
+      if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+        if (!MyUser(cli_user(sptr)->alias_primary))
+          sendcmdto_set_alias_source(sptr);
+        from = cli_user(sptr)->alias_primary;
+      }
+
+      if (client_tags && *client_tags) {
+        sendcmdto_channel_butone_with_client_tags(from, CMD_NOTICE, chptr, cli_from(sptr),
+                           SKIP_DEAF | SKIP_BURST, '\0', client_tags,
+                           "%H :%s", chptr, mytext);
+      } else {
+        sendcmdto_channel_butone(from, CMD_NOTICE, chptr, cli_from(sptr),
+                                 SKIP_DEAF | SKIP_BURST, '\0', "%H :%s", chptr, mytext);
+      }
     }
 
-    /* Store notice in history database for draft/chathistory */
-    if (msgid[0])
-      store_channel_history(sptr, chptr, mytext, HISTORY_NOTICE, msgid, timestamp);
-  }
-#else
-  {
-    int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
+    /* Clear the msgid override after broadcast */
+    sendcmdto_set_client_msgid(NULL);
+
+    /* Echo notice back to sender if they have echo-message cap */
     if (need_echo) {
-      sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
-    }
-  }
+      const char *echo_ctags = cli_client_tags(sptr);
+      if (echo_ctags && *echo_ctags && CapOwnHas(sptr, CAP_MSGTAGS)) {
+        if (msgid[0])
+          sendcmdto_set_client_msgid(msgid);
+        sendcmdto_one_client_tags(sptr, MSG_NOTICE, sptr, echo_ctags,
+                                  "%H :%s", chptr, mytext);
+        sendcmdto_set_client_msgid(NULL);
+      } else {
+#ifdef USE_MDBX
+        sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, msgid,
+                               "%H :%s", chptr, mytext);
+#else
+        sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
 #endif
+      }
+    }
+
+#ifdef USE_MDBX
+    /* Store notice in history database for draft/chathistory.
+     * Include client-only tags (+reply, +draft/react) if present. */
+    if (msgid[0]) {
+      const char *store_ctags = cli_client_tags(sptr);
+      store_channel_history(sptr, chptr, mytext, HISTORY_NOTICE, msgid, timestamp,
+                            (store_ctags && *store_ctags) ? store_ctags : NULL);
+    }
+#endif
+  }
 }
 
 /** Relay a message to a channel.
@@ -722,7 +751,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, timestamp);
+      store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, timestamp, NULL);
     }
 #endif
   }
@@ -806,7 +835,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
       ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
                     (unsigned long)tv.tv_sec,
                     (unsigned long)(tv.tv_usec / 1000));
-      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, timestamp);
+      store_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, timestamp, NULL);
     }
 #endif
   }
@@ -1154,7 +1183,8 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
 
     /* Store private message in history database (if enabled) */
     if (pm_msgid[0])
-      store_private_history(sptr, acptr, mytext, HISTORY_PRIVMSG, pm_msgid, pm_timestamp);
+      store_private_history(sptr, acptr, mytext, HISTORY_PRIVMSG, pm_msgid, pm_timestamp,
+                            cli_client_tags(sptr));
   }
 #else
   {
@@ -1326,7 +1356,8 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
     /* Store private notice in history database (if enabled) */
     if (pm_msgid[0])
-      store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, pm_msgid, pm_timestamp);
+      store_private_history(sptr, acptr, mytext, HISTORY_NOTICE, pm_msgid, pm_timestamp,
+                            cli_client_tags(sptr));
   }
 #else
   {
@@ -1435,7 +1466,8 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
 #ifdef USE_MDBX
   /* Store server-relayed private message in history database (if enabled) */
   if (pm_msgid[0])
-    store_private_history(from, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp);
+    store_private_history(from, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp,
+                          client_tags);
 #endif
 }
 
@@ -1545,7 +1577,8 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
 #ifdef USE_MDBX
   /* Store server-relayed private notice in history database (if enabled) */
   if (pm_msgid[0])
-    store_private_history(from, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp);
+    store_private_history(from, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp,
+                          client_tags);
 #endif
 }
 

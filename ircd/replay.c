@@ -135,6 +135,29 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
       continue;
     }
 
+    /* Skip typing-only TAGMSGs (legacy data stored before typing filter) */
+    if (msg->type == HISTORY_TAGMSG) {
+      const char *tags = msg->client_tags[0] ? msg->client_tags
+                       : (msg->dyn_content ? msg->dyn_content : msg->content);
+      int dominated = 1;
+      const char *tp = tags;
+      if (!tags[0]) { dominated = 1; }
+      else while (tp && *tp) {
+        const char *sep = strchr(tp, ';');
+        size_t tlen = sep ? (size_t)(sep - tp) : strlen(tp);
+        if (tlen < 7 || strncmp(tp, "+typing", 7) != 0 ||
+            (tlen > 7 && tp[7] != '=')) {
+          dominated = 0;
+          break;
+        }
+        tp = sep ? sep + 1 : NULL;
+      }
+      if (dominated) {
+        rs->current = msg->next;
+        continue;
+      }
+    }
+
     /* Convert Unix timestamp to ISO 8601 for @time= tag */
     if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) == 0)
       time_str = iso_time;

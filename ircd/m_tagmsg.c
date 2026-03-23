@@ -94,11 +94,37 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
+#include "handlers.h"
 #include "s_user.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
 #include <sys/time.h>
+
+/** Check if client_tags contains only ephemeral tags (+typing).
+ * Returns 1 if ALL tags are ephemeral (should skip storage), 0 otherwise.
+ * A TAGMSG with both +typing and +draft/react should still be stored.
+ */
+static int has_only_ephemeral_tags(const char *tags)
+{
+  const char *p = tags;
+
+  if (!tags || !*tags)
+    return 1;
+
+  while (p && *p) {
+    const char *sep = strchr(p, ';');
+    size_t taglen = sep ? (size_t)(sep - p) : strlen(p);
+
+    /* Check if this tag is +typing or +typing=* */
+    if (taglen < 7 || strncmp(p, "+typing", 7) != 0 ||
+        (taglen > 7 && p[7] != '=')) {
+      return 0;  /* Found a non-ephemeral tag */
+    }
+    p = sep ? sep + 1 : NULL;
+  }
+  return 1;
+}
 
 /**
  * Store a TAGMSG in channel history for event-playback.
@@ -122,8 +148,10 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CAP_draft_event_playback))
     return;
 
-  /* Filter ephemeral tags — typing indicators are not meaningful in history */
-  if (strstr(client_tags, "+typing"))
+  /* Filter ephemeral tags — typing indicators are not meaningful in history.
+   * Only skip if ALL tags are ephemeral; a TAGMSG with both +typing and
+   * +draft/react should still be stored for the reaction. */
+  if (has_only_ephemeral_tags(client_tags))
     return;
 
   /* Check if channel has +P (no storage) mode */
@@ -159,9 +187,18 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
-  /* Store in database - content is the client-only tags */
-  history_store_message(msgid, timestamp, chptr->chname, sender,
-                        account, HISTORY_TAGMSG, client_tags);
+  /* Store locally or forward to STORE server */
+  if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+    history_store_message(msgid, timestamp, chptr->chname, sender,
+                          account, HISTORY_TAGMSG, "", client_tags);
+  } else if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
+    /* Encode client tags with \x06 sentinel for transparent forwarding */
+    char tagged_content[512 + 4];
+    ircd_snprintf(0, tagged_content, sizeof(tagged_content),
+                  "\x06%s\x06", client_tags);
+    forward_history_write(chptr, sptr, msgid, timestamp, HISTORY_TAGMSG,
+                          tagged_content);
+  }
 }
 
 /*
@@ -374,6 +411,11 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Propagate to other servers */
     sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
                           client_tags, target);
+
+    /* Store in history (or write-forward to STORE server).
+     * Use S2S msgid if available so clients can deduplicate. */
+    store_tagmsg_history(sptr, chptr, client_tags,
+                         cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL);
   }
   else {
     /* Target is a user */

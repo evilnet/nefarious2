@@ -156,8 +156,18 @@ static int build_key(char *key, int keysize, const char *target,
 static int serialize_message(char *buf, int bufsize,
                              enum HistoryMessageType type,
                              const char *sender, const char *account,
-                             const char *content)
+                             const char *content, const char *client_tags)
 {
+  /* When client_tags is present, prefix content with \x06tags\x06 sentinel.
+   * \x06 (ACK) is unused by any IRC formatting or control code.
+   * Old data without sentinel deserializes with empty client_tags. */
+  if (client_tags && client_tags[0])
+    return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|\x06%s\x06%s",
+                         (int)type,
+                         sender ? sender : "",
+                         account ? account : "",
+                         client_tags,
+                         content ? content : "");
   return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s",
                        (int)type,
                        sender ? sender : "",
@@ -241,9 +251,26 @@ static int deserialize_message(const char *data, int datalen,
   msg->account[field - p] = '\0';
   p = field + 1;
 
-  /* Parse content (rest of string) — truncate if exceeds struct field */
+  /* Parse content (rest of string), extracting client_tags if sentinel present.
+   * New format: \x06client_tags\x06content
+   * Old format: content (no sentinel) */
   {
     size_t content_len = end - p;
+    msg->client_tags[0] = '\0';
+
+    if (content_len > 2 && p[0] == '\x06') {
+      const char *tag_end = memchr(p + 1, '\x06', content_len - 1);
+      if (tag_end) {
+        size_t tags_len = tag_end - (p + 1);
+        if (tags_len >= sizeof(msg->client_tags))
+          tags_len = sizeof(msg->client_tags) - 1;
+        memcpy(msg->client_tags, p + 1, tags_len);
+        msg->client_tags[tags_len] = '\0';
+        p = tag_end + 1;
+        content_len = end - p;
+      }
+    }
+
     if (content_len >= sizeof(msg->content))
       content_len = sizeof(msg->content) - 1;
     memcpy(msg->content, p, content_len);
@@ -605,7 +632,7 @@ MDBX_env *history_get_env(void)
 int history_store_message(const char *msgid, const char *timestamp,
                           const char *target, const char *sender,
                           const char *account, enum HistoryMessageType type,
-                          const char *content)
+                          const char *content, const char *client_tags)
 {
   MDBX_txn *txn;
   MDBX_val key, data;
@@ -619,7 +646,8 @@ int history_store_message(const char *msgid, const char *timestamp,
    * heap allocation for multiline content that exceeds it.
    */
   size_t content_len = content ? strlen(content) : 0;
-  size_t bufsize = content_len + HISTORY_SENDER_LEN + ACCOUNTLEN + 32;
+  size_t tags_len = client_tags ? strlen(client_tags) : 0;
+  size_t bufsize = content_len + tags_len + HISTORY_SENDER_LEN + ACCOUNTLEN + 32;
   if (bufsize < HISTORY_VALUE_BUFSIZE)
     bufsize = HISTORY_VALUE_BUFSIZE;
 
@@ -660,7 +688,8 @@ int history_store_message(const char *msgid, const char *timestamp,
   }
 
   /* Serialize value */
-  vallen = serialize_message(valbuf, bufsize, type, sender, account, content);
+  vallen = serialize_message(valbuf, bufsize, type, sender, account, content,
+                             client_tags);
   if (vallen < 0) {
     rc = -1;
     goto store_cleanup;
@@ -827,7 +856,7 @@ int history_store_multiline(const char *msgid, const char *timestamp,
 
   /* Serialize with sentinel content */
   vallen = serialize_message(valbuf, sizeof(valbuf), HISTORY_PRIVMSG,
-                             sender, account, ML_CONTENT_SENTINEL);
+                             sender, account, ML_CONTENT_SENTINEL, NULL);
   if (vallen < 0)
     return -1;
   if ((size_t)vallen >= sizeof(valbuf))
@@ -3396,10 +3425,10 @@ void history_shutdown(void)
 int history_store_message(const char *msgid, const char *timestamp,
                           const char *target, const char *sender,
                           const char *account, enum HistoryMessageType type,
-                          const char *content)
+                          const char *content, const char *client_tags)
 {
   (void)msgid; (void)timestamp; (void)target; (void)sender;
-  (void)account; (void)type; (void)content;
+  (void)account; (void)type; (void)content; (void)client_tags;
   return -1;
 }
 
