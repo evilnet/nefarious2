@@ -519,9 +519,14 @@ void webpush_burst(struct Client *cptr)
  * ---------------------------------------------------------------------------*/
 
 /** Initialize the webpush subsystem with VAPID key persistence.
- * Attempts to load VAPID key from LMDB store. If not found, generates
- * a new keypair and persists it. Broadcasts the VAPID public key to
- * linked servers.
+ * Key loading priority:
+ *   1. FEAT_WEBPUSH_VAPID_PRIVKEY (config/gitsync) — shared across network
+ *   2. Existing key in LMDB store — standalone/legacy
+ *   3. Generate new keypair — first start
+ *
+ * Safe to call on REHASH: compares config key against current key and
+ * only re-imports if actually changed.
+ *
  * @return 0 on success, -1 on error.
  */
 int webpush_setup(void)
@@ -529,6 +534,11 @@ int webpush_setup(void)
   unsigned char privkey[32];
   size_t privkey_len = sizeof(privkey);
   const char *vapid_pubkey;
+  const char *config_key;
+  char old_pubkey[WEBPUSH_VAPID_B64_LEN + 1];
+  int had_key = 0;
+  int key_loaded = 0;
+  int changed;
 
   if (!webpush_store_available()) {
     log_write(LS_SYSTEM, L_WARNING, 0,
@@ -536,25 +546,64 @@ int webpush_setup(void)
     return -1;
   }
 
-  /* Try to load existing VAPID key from persistent store */
-  if (webpush_store_get_vapid_key(privkey, &privkey_len) == 0) {
-    /* Import the persisted key */
-    if (webpush_import_vapid_key(privkey, privkey_len, NULL, 0) != 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "WEBPUSH: failed to import persisted VAPID key");
-      return -1;
-    }
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "WEBPUSH: loaded VAPID key from persistent store");
+  /* Remember old pubkey for change detection (static buffer gets overwritten) */
+  vapid_pubkey = webpush_get_vapid_pubkey();
+  if (vapid_pubkey) {
+    ircd_strncpy(old_pubkey, vapid_pubkey, sizeof(old_pubkey));
+    had_key = 1;
   } else {
-    /* Generate new VAPID keypair */
+    old_pubkey[0] = '\0';
+  }
+
+  /* Priority 1: Config-based key (FEAT_WEBPUSH_VAPID_PRIVKEY) */
+  config_key = feature_str(FEAT_WEBPUSH_VAPID_PRIVKEY);
+  if (config_key && config_key[0] != '\0') {
+    /* Import config key (base64url-encoded 32-byte P-256 private scalar).
+     * On REHASH this may re-import the same key — we detect that below
+     * by comparing old_pubkey vs new pubkey and skip broadcast if unchanged. */
+    if (webpush_import_vapid_key_b64(config_key, strlen(config_key)) != 0) {
+      log_write(LS_SYSTEM, L_ERROR, 0,
+                "WEBPUSH: failed to import config VAPID key (WEBPUSH_VAPID_PRIVKEY)");
+      /* Fall through to LMDB/generation */
+    } else {
+      /* Persist config key to LMDB so it survives config removal */
+      privkey_len = sizeof(privkey);
+      if (webpush_export_vapid_privkey(privkey, &privkey_len) == 0) {
+        webpush_store_set_vapid_key(privkey, privkey_len);
+        memset(privkey, 0, sizeof(privkey));
+      }
+
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "WEBPUSH: loaded VAPID key from config (WEBPUSH_VAPID_PRIVKEY)");
+      key_loaded = 1;
+    }
+  }
+
+  /* Priority 2: Load from LMDB persistent store */
+  if (!key_loaded) {
+    privkey_len = sizeof(privkey);
+    if (webpush_store_get_vapid_key(privkey, &privkey_len) == 0) {
+      if (webpush_import_vapid_key(privkey, privkey_len, NULL, 0) != 0) {
+        log_write(LS_SYSTEM, L_ERROR, 0,
+                  "WEBPUSH: failed to import persisted VAPID key");
+        memset(privkey, 0, sizeof(privkey));
+        return -1;
+      }
+      memset(privkey, 0, sizeof(privkey));
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "WEBPUSH: loaded VAPID key from persistent store");
+      key_loaded = 1;
+    }
+  }
+
+  /* Priority 3: Generate new keypair */
+  if (!key_loaded) {
     if (webpush_init() != 0) {
       log_write(LS_SYSTEM, L_ERROR, 0,
                 "WEBPUSH: failed to generate VAPID keypair");
       return -1;
     }
 
-    /* Export and persist the private key */
     privkey_len = sizeof(privkey);
     if (webpush_export_vapid_privkey(privkey, &privkey_len) != 0) {
       log_write(LS_SYSTEM, L_ERROR, 0,
@@ -565,27 +614,30 @@ int webpush_setup(void)
     if (webpush_store_set_vapid_key(privkey, privkey_len) != 0) {
       log_write(LS_SYSTEM, L_ERROR, 0,
                 "WEBPUSH: failed to persist VAPID key");
-      /* Continue anyway — key works in memory */
     }
+    memset(privkey, 0, sizeof(privkey));
 
     log_write(LS_SYSTEM, L_INFO, 0,
               "WEBPUSH: generated and persisted new VAPID keypair");
   }
 
-  /* Clear sensitive material from stack */
-  memset(privkey, 0, sizeof(privkey));
-
   /* Set the VAPID public key for capability advertisement */
   vapid_pubkey = webpush_get_vapid_pubkey();
   if (vapid_pubkey) {
+    /* Only broadcast if the key actually changed */
+    changed = (!had_key || strcmp(old_pubkey, vapid_pubkey) != 0);
+
     set_vapid_pubkey(vapid_pubkey);
     add_isupport_s("VAPID", vapid_pubkey);
 
-    /* Broadcast to all linked servers */
-    sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "V :%s", vapid_pubkey);
+    if (changed) {
+      sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "V :%s", vapid_pubkey);
+      send_isupport_update();
+    }
 
     log_write(LS_SYSTEM, L_INFO, 0,
-              "WEBPUSH: VAPID public key: %s", vapid_pubkey);
+              "WEBPUSH: VAPID public key: %s%s", vapid_pubkey,
+              changed ? " (changed)" : "");
   }
 
   return 0;

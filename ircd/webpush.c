@@ -424,6 +424,29 @@ int webpush_export_vapid_privkey(unsigned char *out, size_t *out_len)
   return 0;
 }
 
+int webpush_import_vapid_key_b64(const char *b64, size_t b64_len)
+{
+  unsigned char privkey[32];
+  size_t privkey_len = 0;
+  int ret;
+
+  if (!b64 || b64_len == 0)
+    return -1;
+
+  if (base64url_decode(b64, b64_len, privkey, sizeof(privkey),
+                       &privkey_len) != 0 || privkey_len != 32) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "WebPush: invalid base64url VAPID private key (decoded %u bytes, expected 32)",
+              (unsigned)privkey_len);
+    memset(privkey, 0, sizeof(privkey));
+    return -1;
+  }
+
+  ret = webpush_import_vapid_key(privkey, privkey_len, NULL, 0);
+  memset(privkey, 0, sizeof(privkey));
+  return ret;
+}
+
 /* ---------------------------------------------------------------------------
  * RFC 8291: Web Push message encryption (aes128gcm)
  * ---------------------------------------------------------------------------*/
@@ -1096,6 +1119,10 @@ int webpush_import_vapid_key(const unsigned char *p, size_t pl,
 }
 int webpush_export_vapid_privkey(unsigned char *o, size_t *l) {
   (void)o; (void)l;
+  return -1;
+}
+int webpush_import_vapid_key_b64(const char *b, size_t l) {
+  (void)b; (void)l;
   return -1;
 }
 int webpush_parse_subscription(const char *s,

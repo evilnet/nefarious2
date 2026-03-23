@@ -92,6 +92,13 @@ int webpush_import_vapid_key(const unsigned char *privkey, size_t privkey_len,
 int webpush_export_vapid_privkey(unsigned char *out, size_t *out_len);
 
 /*
+ * Import VAPID private key from base64url-encoded string.
+ * Decodes and delegates to webpush_import_vapid_key().
+ * Returns 0 on success, -1 on error.
+ */
+int webpush_import_vapid_key_b64(const char *b64, size_t b64_len);
+
+/*
  * Parse subscription from stored format: "endpoint|p256dh_base64|auth_base64"
  * Returns 0 on success, -1 on parse error.
  */

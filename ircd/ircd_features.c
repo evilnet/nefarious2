@@ -51,6 +51,7 @@
 #include "send.h"
 #include "struct.h"
 #include "sys.h"    /* FALSE bleah */
+#include "webpush.h"
 #include "whowas.h"	/* whowas_realloc */
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -642,6 +643,16 @@ feature_notify_chathistory_caps(void)
             valbuf);
 }
 
+/** Handle FEAT_WEBPUSH_VAPID_PRIVKEY change.
+ * Re-runs webpush_setup() which now checks the config key first,
+ * falling back to LMDB then generation.
+ */
+static void
+feature_notify_webpush_vapid_privkey(void)
+{
+  webpush_setup();
+}
+
 /** Sets a feature to the given value.
  * @param[in] from Client trying to set parameters.
  * @param[in] fields Array of parameters to set.
@@ -1058,6 +1069,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_webpush, 0, 0, 0),  /* webpush has special handling via VAPID key */
   F_S(WEBPUSH_DB, 0, "webpush", 0),
   F_B(WEBPUSH_DB_AUTOGROW, 0, 1, 0),
+  F_S(WEBPUSH_VAPID_PRIVKEY, 0, "", feature_notify_webpush_vapid_privkey),
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
   F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* Limited by 512-byte IRC message size */
   F_I(METADATA_MAX_SUBS, 0, 50, 0),
