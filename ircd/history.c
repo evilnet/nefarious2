@@ -231,7 +231,7 @@ static int deserialize_message(const char *data, int datalen,
   field = strchr(p, '|');
   if (!field || field >= end) goto deser_cleanup;
   type = atoi(p);
-  if (type < 0 || type > HISTORY_TAGMSG) goto deser_cleanup;
+  if (type < 0 || type > HISTORY_REDACT) goto deser_cleanup;
   msg->type = (enum HistoryMessageType)type;
   p = field + 1;
 
