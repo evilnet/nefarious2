@@ -180,7 +180,7 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
       rs->current = msg->next;
       rs->total_replayed += gap_count;
     } else {
-      cmd = (msg->type <= HISTORY_TAGMSG) ? msg_type_cmd[msg->type] : "PRIVMSG";
+      cmd = (msg->type <= HISTORY_REDACT) ? msg_type_cmd[msg->type] : "PRIVMSG";
       send_history_message(sptr, msg, rs->target, batchid, time_str, cmd);
       rs->current = msg->next;
       rs->total_replayed++;

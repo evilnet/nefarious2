@@ -68,7 +68,8 @@ enum HistoryMessageType {
   HISTORY_TOPIC   = 7,
   HISTORY_TAGMSG  = 8,
   HISTORY_GAP     = 9,  /**< Message not stored (sender opted out via +Y/+y) */
-  HISTORY_NICK    = 10  /**< Nick change event */
+  HISTORY_NICK    = 10, /**< Nick change event */
+  HISTORY_REDACT  = 11  /**< Message redaction event */
 };
 
 /** Stored message for chathistory retrieval.

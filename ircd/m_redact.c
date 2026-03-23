@@ -33,6 +33,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "handlers.h"
 #include "hash.h"
 #include "history.h"
 #include "ircd.h"
@@ -48,6 +49,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <sys/time.h>
 #include <time.h>
 
 
@@ -265,12 +267,62 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Propagate to channel members with capability */
-  propagate_redact_to_channel(sptr, chptr, target, msgid, reason);
+  /* Generate a single msgid for the REDACT event — used for history storage,
+   * live channel broadcast, and S2S relay. */
+  {
+    char redact_msgid[HISTORY_MSGID_LEN];
+    struct timeval tv;
+    uint64_t time_ms;
 
-  /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_REDACT, cptr, "%s %s :%s",
-                        target, msgid, reason ? reason : "");
+    generate_msgid(redact_msgid, sizeof(redact_msgid));
+    gettimeofday(&tv, NULL);
+    time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+
+    /* Store REDACT event in history */
+    if (history_is_available()) {
+      char timestamp[32];
+      char sender[HISTORY_SENDER_LEN];
+      char redact_content[512];
+
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
+      ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                    cli_name(sptr), cli_user(sptr)->username,
+                    cli_user(sptr)->host);
+
+      if (reason && reason[0])
+        ircd_snprintf(0, redact_content, sizeof(redact_content),
+                      "%s :%s", msgid, reason);
+      else
+        ircd_snprintf(0, redact_content, sizeof(redact_content),
+                      "%s", msgid);
+
+      history_store_message(redact_msgid, timestamp, target, sender,
+                            cli_user(sptr)->account[0] ? cli_user(sptr)->account : "",
+                            HISTORY_REDACT, redact_content, NULL);
+
+      /* Write-forward to STORE servers if we're non-STORE */
+      if (chptr)
+        forward_history_write(chptr, sptr, redact_msgid, timestamp,
+                              HISTORY_REDACT, redact_content);
+    }
+
+    /* Set msgid for live channel broadcast */
+    if (feature_bool(FEAT_MSGID))
+      sendcmdto_set_client_msgid(redact_msgid);
+
+    /* Propagate to channel members with capability */
+    propagate_redact_to_channel(sptr, chptr, target, msgid, reason);
+
+    /* Set S2S tags for server relay */
+    sendcmdto_set_s2s_tags(time_ms, redact_msgid);
+    sendcmdto_want_s2s_tags(1);
+
+    /* Propagate to other servers */
+    sendcmdto_serv_butone(sptr, CMD_REDACT, cptr, "%s %s :%s",
+                          target, msgid, reason ? reason : "");
+  }
 
   return 0;
 }
@@ -313,8 +365,65 @@ int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         history_delete_message(target, msgid);
       }
 
-      /* Propagate to channel members with capability */
-      propagate_redact_to_channel(sptr, chptr, target, msgid, reason);
+      /* Use incoming S2S msgid for the REDACT event, or generate new */
+      {
+        char redact_msgid[HISTORY_MSGID_LEN];
+        struct timeval tv;
+        uint64_t time_ms;
+
+        if (cli_s2s_msgid(cptr)[0])
+          ircd_strncpy(redact_msgid, cli_s2s_msgid(cptr), sizeof(redact_msgid));
+        else
+          generate_msgid(redact_msgid, sizeof(redact_msgid));
+
+        if (cli_s2s_time_ms(cptr))
+          time_ms = cli_s2s_time_ms(cptr);
+        else {
+          gettimeofday(&tv, NULL);
+          time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+        }
+
+        /* Store REDACT event in history */
+        if (history_is_available()) {
+          char timestamp[32];
+          char sender[HISTORY_SENDER_LEN];
+          char redact_content[512];
+
+          ircd_snprintf(0, timestamp, sizeof(timestamp), "%llu.%03llu",
+                        (unsigned long long)(time_ms / 1000),
+                        (unsigned long long)(time_ms % 1000));
+
+          if (cli_user(sptr))
+            ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                          cli_name(sptr), cli_user(sptr)->username,
+                          cli_user(sptr)->host);
+          else
+            ircd_strncpy(sender, cli_name(sptr), sizeof(sender));
+
+          if (reason && reason[0])
+            ircd_snprintf(0, redact_content, sizeof(redact_content),
+                          "%s :%s", msgid, reason);
+          else
+            ircd_snprintf(0, redact_content, sizeof(redact_content),
+                          "%s", msgid);
+
+          history_store_message(redact_msgid, timestamp, target, sender,
+                                (cli_user(sptr) && cli_user(sptr)->account[0])
+                                  ? cli_user(sptr)->account : "",
+                                HISTORY_REDACT, redact_content, NULL);
+        }
+
+        /* Set msgid for live channel broadcast */
+        if (feature_bool(FEAT_MSGID))
+          sendcmdto_set_client_msgid(redact_msgid);
+
+        /* Propagate to channel members with capability */
+        propagate_redact_to_channel(sptr, chptr, target, msgid, reason);
+
+        /* Set S2S tags for server relay */
+        sendcmdto_set_s2s_tags(time_ms, redact_msgid);
+        sendcmdto_want_s2s_tags(1);
+      }
     }
   }
 

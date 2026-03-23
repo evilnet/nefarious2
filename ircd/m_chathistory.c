@@ -234,7 +234,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
 const char *msg_type_cmd[] = {
   "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
   "KICK", "MODE", "TOPIC", "TAGMSG", "PRIVMSG", /* GAP rendered as PRIVMSG */
-  "NICK"
+  "NICK", "REDACT"
 };
 
 /** Validate a timestamp value.
@@ -499,6 +499,10 @@ int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
   if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE || type == HISTORY_GAP)
     return 1;
 
+  /* REDACT requires both event-playback and message-redaction */
+  if (type == HISTORY_REDACT)
+    return CapActive(sptr, CAP_DRAFT_EVENTPLAYBACK) && CapActive(sptr, CAP_DRAFT_REDACT);
+
   /* Other events require draft/event-playback capability */
   return CapActive(sptr, CAP_DRAFT_EVENTPLAYBACK);
 }
@@ -638,6 +642,34 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
    * "KICK #channel :nick :reason" which is malformed.
    * Correct IRC: "KICK #channel nick :reason" — emit content raw. */
   if (msg->type == HISTORY_KICK) {
+    if (outer_batchid) {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s %s",
+                      outer_batchid, time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s %s",
+                      outer_batchid, time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    } else {
+      if (msg->account[0]) {
+        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s %s",
+                      time_str, msg->msgid, msg->account,
+                      msg->sender, cmd, target, content);
+      } else {
+        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s %s",
+                      time_str, msg->msgid,
+                      msg->sender, cmd, target, content);
+      }
+    }
+    return;
+  }
+
+  /* REDACT content is stored as "target_msgid :reason" or just "target_msgid".
+   * Same layout as KICK — emit content raw after target.
+   * IRC format: REDACT #channel target_msgid [:reason] */
+  if (msg->type == HISTORY_REDACT) {
     if (outer_batchid) {
       if (msg->account[0]) {
         sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s %s",
@@ -1025,7 +1057,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
       continue;
     }
 
-    cmd = (msg->type <= HISTORY_NICK) ? msg_type_cmd[msg->type] : "PRIVMSG";
+    cmd = (msg->type <= HISTORY_REDACT) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
     /* Send message, handling multiline content if present */
     send_history_message(sptr, msg, target,
@@ -2271,6 +2303,7 @@ static void process_write_forward(const char *target, const char *msgid,
     case 'O': type = HISTORY_TOPIC; break;
     case 'T': type = HISTORY_TAGMSG; break;
     case 'K': type = HISTORY_NICK; break;
+    case 'R': type = HISTORY_REDACT; break;
     default:
       Debug((DEBUG_DEBUG, "CH W: Unknown type '%c' for %s", type_char, target));
       return;
@@ -2325,6 +2358,18 @@ static void process_write_forward(const char *target, const char *msgid,
      * This enables storage for channels where we have no local presence.
      */
     Debug((DEBUG_DEBUG, "CH W: Channel %s doesn't exist locally, storing anyway (CH W trust)", target));
+  }
+
+  /* REDACT: delete the original message before storing the REDACT event */
+  if (type == HISTORY_REDACT && content) {
+    char target_msgid[HISTORY_MSGID_LEN];
+    const char *space = strchr(content, ' ');
+    size_t len = space ? (size_t)(space - content) : strlen(content);
+    if (len >= sizeof(target_msgid))
+      len = sizeof(target_msgid) - 1;
+    memcpy(target_msgid, content, len);
+    target_msgid[len] = '\0';
+    history_delete_message(target, target_msgid);
   }
 
   /* Check if this is a new channel for Layer 1 advertisement */
@@ -2492,6 +2537,7 @@ void forward_history_write(struct Channel *chptr, struct Client *sptr,
     case HISTORY_TOPIC:   type_char = 'O'; break;
     case HISTORY_TAGMSG:  type_char = 'T'; break;
     case HISTORY_NICK:    type_char = 'K'; break;
+    case HISTORY_REDACT:  type_char = 'R'; break;
     default: type_char = 'P'; break;
   }
 
@@ -3743,10 +3789,41 @@ static void complete_redact_fed(struct FedRequest *req)
     return;
   }
 
-  /* Authorization passed — propagate REDACT to channel members */
+  /* Authorization passed — generate msgid and propagate REDACT */
   {
     struct Membership *member;
     const char *reason = ctx->reason[0] ? ctx->reason : NULL;
+    char redact_msgid[HISTORY_MSGID_LEN];
+    struct timeval tv;
+    uint64_t time_ms;
+
+    generate_msgid(redact_msgid, sizeof(redact_msgid));
+    gettimeofday(&tv, NULL);
+    time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+
+    /* Write-forward the REDACT event to STORE servers */
+    {
+      char timestamp[32];
+      char redact_content[512];
+
+      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
+                    (unsigned long)tv.tv_sec,
+                    (unsigned long)(tv.tv_usec / 1000));
+
+      if (reason)
+        ircd_snprintf(0, redact_content, sizeof(redact_content),
+                      "%s :%s", ctx->msgid, reason);
+      else
+        ircd_snprintf(0, redact_content, sizeof(redact_content),
+                      "%s", ctx->msgid);
+
+      forward_history_write(chptr, sptr, redact_msgid, timestamp,
+                            HISTORY_REDACT, redact_content);
+    }
+
+    /* Set msgid for live channel broadcast */
+    if (feature_bool(FEAT_MSGID))
+      sendcmdto_set_client_msgid(redact_msgid);
 
     for (member = chptr->members; member; member = member->next_member) {
       struct Client *acptr = member->user;
@@ -3767,10 +3844,10 @@ static void complete_redact_fed(struct FedRequest *req)
       }
     }
 
-    /* Propagate to other servers (ms_redact on storage servers will delete).
-     * Pass sptr as 'one' — sendcmdto_serv_butone skips cli_from(one),
-     * and for local clients cli_from(sptr) is the local connection,
-     * so all servers receive the REDACT. */
+    /* Propagate to other servers (ms_redact on storage servers will delete
+     * and store the REDACT event with this same msgid via S2S tags). */
+    sendcmdto_set_s2s_tags(time_ms, redact_msgid);
+    sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(sptr, CMD_REDACT, sptr, "%s %s :%s",
                           req->target, ctx->msgid, reason ? reason : "");
   }
@@ -4856,6 +4933,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         case HISTORY_TOPIC:   type_char = 'O'; break;
         case HISTORY_TAGMSG:  type_char = 'T'; break;
         case HISTORY_NICK:    type_char = 'K'; break;
+        case HISTORY_REDACT:  type_char = 'R'; break;
         default: type_char = 'P'; break;
       }
 
