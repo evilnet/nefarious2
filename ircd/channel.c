@@ -2687,11 +2687,20 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
     if (mbuf->mb_dest & MODEBUF_DEST_CHANNEL) {
       if (feature_bool(FEAT_MSGID)) {
-        struct timeval mode_tv;
-        generate_msgid(mode_msgid, sizeof(mode_msgid));
-        gettimeofday(&mode_tv, NULL);
-        mode_time_ms = (uint64_t)mode_tv.tv_sec * 1000
-                     + mode_tv.tv_usec / 1000;
+        /* Reuse incoming S2S msgid for cross-server consistency */
+        if (mbuf->mb_connect && cli_s2s_msgid(mbuf->mb_connect)[0]) {
+          ircd_strncpy(mode_msgid, cli_s2s_msgid(mbuf->mb_connect),
+                       sizeof(mode_msgid));
+          mode_time_ms = cli_s2s_time_ms(mbuf->mb_connect);
+        } else {
+          generate_msgid(mode_msgid, sizeof(mode_msgid));
+        }
+        if (!mode_time_ms) {
+          struct timeval mode_tv;
+          gettimeofday(&mode_tv, NULL);
+          mode_time_ms = (uint64_t)mode_tv.tv_sec * 1000
+                       + mode_tv.tv_usec / 1000;
+        }
         sendcmdto_set_client_msgid(mode_msgid);
       }
 

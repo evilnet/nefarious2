@@ -197,12 +197,26 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         {
           char ac_msgid[64] = "";
           if (feature_bool(FEAT_MSGID)) {
-            generate_msgid(ac_msgid, sizeof(ac_msgid));
+            if (cli_s2s_msgid(cptr)[0])
+              ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
+            else
+              generate_msgid(ac_msgid, sizeof(ac_msgid));
             sendcmdto_set_client_msgid(ac_msgid);
           }
           sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                                  "*");
           sendcmdto_set_client_msgid(NULL);
+
+          /* Set S2S tags before relay so downstream servers reuse this msgid */
+          if (ac_msgid[0]) {
+            uint64_t ac_time = cli_s2s_time_ms(cptr) ? cli_s2s_time_ms(cptr) : 0;
+            if (!ac_time) {
+              struct timeval tv;
+              gettimeofday(&tv, NULL);
+              ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+            }
+            sendcmdto_set_s2s_tags(ac_time, ac_msgid);
+          }
         }
 
         sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C U", acptr);
@@ -252,12 +266,25 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         {
           char ac_msgid[64] = "";
           if (feature_bool(FEAT_MSGID)) {
-            generate_msgid(ac_msgid, sizeof(ac_msgid));
+            if (cli_s2s_msgid(cptr)[0])
+              ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
+            else
+              generate_msgid(ac_msgid, sizeof(ac_msgid));
             sendcmdto_set_client_msgid(ac_msgid);
           }
           sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                                  "%s", cli_user(acptr)->account);
           sendcmdto_set_client_msgid(NULL);
+
+          if (ac_msgid[0]) {
+            uint64_t ac_time = cli_s2s_time_ms(cptr) ? cli_s2s_time_ms(cptr) : 0;
+            if (!ac_time) {
+              struct timeval tv;
+              gettimeofday(&tv, NULL);
+              ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+            }
+            sendcmdto_set_s2s_tags(ac_time, ac_msgid);
+          }
         }
 
         if (parc > 4) {
@@ -416,12 +443,25 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
     {
       char ac_msgid[64] = "";
       if (feature_bool(FEAT_MSGID)) {
-        generate_msgid(ac_msgid, sizeof(ac_msgid));
+        if (cli_s2s_msgid(cptr)[0])
+          ircd_strncpy(ac_msgid, cli_s2s_msgid(cptr), sizeof(ac_msgid));
+        else
+          generate_msgid(ac_msgid, sizeof(ac_msgid));
         sendcmdto_set_client_msgid(ac_msgid);
       }
       sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                              "%s", cli_user(acptr)->account);
       sendcmdto_set_client_msgid(NULL);
+
+      if (ac_msgid[0]) {
+        uint64_t ac_time = cli_s2s_time_ms(cptr) ? cli_s2s_time_ms(cptr) : 0;
+        if (!ac_time) {
+          struct timeval tv;
+          gettimeofday(&tv, NULL);
+          ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+        }
+        sendcmdto_set_s2s_tags(ac_time, ac_msgid);
+      }
     }
 
     if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||

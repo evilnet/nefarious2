@@ -399,17 +399,25 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       modebuf_flush(&mbuf);
     }
   } else {
-    /* Generate msgid before S2S relay so both use the same one */
+    /* Reuse incoming S2S msgid or generate new */
     char kick_msgid[64] = "";
-    if (feature_bool(FEAT_MSGID))
-      generate_msgid(kick_msgid, sizeof(kick_msgid));
+    uint64_t kick_time_ms = 0;
+    if (feature_bool(FEAT_MSGID)) {
+      if (cli_s2s_msgid(cptr)[0]) {
+        ircd_strncpy(kick_msgid, cli_s2s_msgid(cptr), sizeof(kick_msgid));
+        kick_time_ms = cli_s2s_time_ms(cptr);
+      } else
+        generate_msgid(kick_msgid, sizeof(kick_msgid));
+    }
 
     /* Propagate kick with consistent S2S msgid... */
     if (kick_msgid[0]) {
-      struct timeval tv;
-      gettimeofday(&tv, NULL);
-      sendcmdto_set_s2s_tags(
-        (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, kick_msgid);
+      if (!kick_time_ms) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        kick_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+      }
+      sendcmdto_set_s2s_tags(kick_time_ms, kick_msgid);
     }
     sendcmdto_want_s2s_tags(1);
     sendcmdto_serv_butone(sptr, CMD_KICK, cptr, "%H %C :%s", chptr, who,

@@ -1450,14 +1450,21 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
         && cli_from(send_from) == cli_from(acptr))
       send_from = sptr;
 
+    /* Set client msgid so local client gets @msgid= tag */
+    if (pm_msgid[0])
+      sendcmdto_set_client_msgid(pm_msgid);
+
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       sendcmdto_one_client_tags(send_from, MSG_PRIVATE, acptr, client_tags,
                                 "%C :%s", acptr, text);
     } else {
       if (send_from != sptr)  /* Alias was rewritten — preserve S2S tags */
         sendcmdto_set_s2s_cptr(cli_from(sptr));
-      sendcmdto_one(send_from, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
+      sendcmdto_one_tags_ext(send_from, CMD_PRIVATE, acptr, pm_msgid,
+                             "%C :%s", acptr, text);
     }
+
+    sendcmdto_set_client_msgid(NULL);
   }
 
   /* Forward PM to all aliases of the target bouncer primary */
@@ -1546,6 +1553,10 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
         && cli_from(send_from) == cli_from(acptr))
       send_from = sptr;
 
+    /* Set client msgid so local client gets @msgid= tag */
+    if (pm_msgid[0])
+      sendcmdto_set_client_msgid(pm_msgid);
+
     /* Check for forwarded label batch in DRAINING state */
     if (MyConnect(acptr) && feature_bool(FEAT_CAP_labeled_response)) {
       const char *incoming_msgid = (cli_from(sptr) && cli_s2s_msgid(cli_from(sptr))[0])
@@ -1553,7 +1564,8 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
       struct ForwardedLabel *fl = fwd_label_find_draining(acptr, incoming_msgid);
       if (fl) {
         sendcmdto_set_fwd_batch(fl->fl_batch_id);
-        sendcmdto_one_tags(send_from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+        sendcmdto_one_tags_ext(send_from, CMD_NOTICE, acptr, pm_msgid,
+                               "%C :%s", acptr, text);
         /* Stay DRAINING -- more trailing messages may follow */
         delivered = 1;
       }
@@ -1566,9 +1578,12 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
       } else {
         if (send_from != sptr)
           sendcmdto_set_s2s_cptr(cli_from(sptr));
-        sendcmdto_one(send_from, CMD_NOTICE, acptr, "%C :%s", acptr, text);
+        sendcmdto_one_tags_ext(send_from, CMD_NOTICE, acptr, pm_msgid,
+                               "%C :%s", acptr, text);
       }
     }
+
+    sendcmdto_set_client_msgid(NULL);
   }
 
   /* Forward notice to all aliases of the target bouncer primary */

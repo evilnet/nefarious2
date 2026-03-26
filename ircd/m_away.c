@@ -244,18 +244,26 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Only broadcast if effective state changed */
       if (new_effective != prev_effective) {
         char away_msgid[64] = "";
+        uint64_t away_time_ms = 0;
         if (feature_bool(FEAT_MSGID)) {
+          struct timeval tv;
           generate_msgid(away_msgid, sizeof(away_msgid));
           sendcmdto_set_client_msgid(away_msgid);
+          gettimeofday(&tv, NULL);
+          away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
         }
 
         if (new_effective == 0) {
           /* Became present — broadcast unaway */
+          if (away_msgid[0])
+            sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE, "");
         } else if (new_effective == 1) {
           /* Became away — broadcast with effective message */
+          if (away_msgid[0])
+            sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s",
                                new_msg[0] ? new_msg : away_message);
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
@@ -269,6 +277,8 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
            * NOT that the user becomes invisible to the network. */
           const char *star_msg = feature_str(FEAT_AWAY_STAR_MSG);
           if (!star_msg) star_msg = "*";
+          if (away_msgid[0])
+            sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", star_msg);
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE,
@@ -288,20 +298,29 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   is_away = user_set_away(cli_user(sptr), away_message);
   {
     char away_msgid[64] = "";
+    uint64_t away_time_ms = 0;
     if (feature_bool(FEAT_MSGID)) {
+      struct timeval tv;
       generate_msgid(away_msgid, sizeof(away_msgid));
       sendcmdto_set_client_msgid(away_msgid);
+      gettimeofday(&tv, NULL);
+      away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
     }
 
     if (is_away)
     {
-      if (!was_away)
+      if (!was_away) {
+        if (away_msgid[0])
+          sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
         sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
+      }
       send_reply(sptr, RPL_NOWAWAY);
       sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE,
                                              ":%s", away_message);
     }
     else {
+      if (away_msgid[0])
+        sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
       sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
       send_reply(sptr, RPL_UNAWAY);
       sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE, "");
@@ -344,10 +363,46 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   is_away = user_set_away(cli_user(sptr), away_message);
 
-  if (is_away)
-    sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
-  else
-    sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+  /* Reuse incoming S2S msgid or generate new for away-notify */
+  {
+    char away_msgid[64] = "";
+    uint64_t away_time_ms = 0;
+    if (feature_bool(FEAT_MSGID)) {
+      if (cli_s2s_msgid(cptr)[0]) {
+        ircd_strncpy(away_msgid, cli_s2s_msgid(cptr), sizeof(away_msgid));
+        away_time_ms = cli_s2s_time_ms(cptr);
+      } else
+        generate_msgid(away_msgid, sizeof(away_msgid));
+      if (!away_time_ms) {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+      }
+    }
+
+    /* Set S2S tags for downstream server relay */
+    if (away_msgid[0])
+      sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+
+    if (is_away)
+      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
+    else
+      sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
+
+    /* Notify local channel members with away-notify (was missing for S2S) */
+    if (away_msgid[0])
+      sendcmdto_set_client_msgid(away_msgid);
+
+    if (is_away)
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+                                             CAP_AWAYNOTIFY, CAP_NONE,
+                                             ":%s", away_message);
+    else
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+                                             CAP_AWAYNOTIFY, CAP_NONE, "");
+
+    sendcmdto_set_client_msgid(NULL);
+  }
   return 0;
 }
 

@@ -157,20 +157,28 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
    }
    chptr->topic_time = ts ? ts : TStime();
 
-   /* Generate msgid before S2S relay so both use the same one */
+   /* Generate or reuse msgid before S2S relay so all servers use the same one */
    {
      char topic_msgid[64] = "";
-     if (newtopic && feature_bool(FEAT_MSGID))
-       generate_msgid(topic_msgid, sizeof(topic_msgid));
+     uint64_t topic_time_ms = 0;
+     if (newtopic && feature_bool(FEAT_MSGID)) {
+       if (cli_s2s_msgid(cptr)[0]) {
+         ircd_strncpy(topic_msgid, cli_s2s_msgid(cptr), sizeof(topic_msgid));
+         topic_time_ms = cli_s2s_time_ms(cptr);
+       } else
+         generate_msgid(topic_msgid, sizeof(topic_msgid));
+     }
 
    /* Fixed in 2.10.11: Don't propagate local topics */
    if (!IsLocalChannel(chptr->chname))
    {
      if (topic_msgid[0]) {
-       struct timeval tv;
-       gettimeofday(&tv, NULL);
-       sendcmdto_set_s2s_tags(
-         (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, topic_msgid);
+       if (!topic_time_ms) {
+         struct timeval tv;
+         gettimeofday(&tv, NULL);
+         topic_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+       }
+       sendcmdto_set_s2s_tags(topic_time_ms, topic_msgid);
      }
      sendcmdto_want_s2s_tags(1);
      if (setter != NULL)

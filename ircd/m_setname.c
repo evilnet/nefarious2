@@ -145,19 +145,30 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Update the realname */
   ircd_strncpy(cli_info(sptr), newname, REALLEN + 1);
 
-  /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
-
-  /* Update bouncer aliases with new realname */
-  bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
-
-  /* Generate msgid for client broadcast */
+  /* Generate msgid BEFORE S2S relay so all servers use the same one */
   {
     char sn_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
       generate_msgid(sn_msgid, sizeof(sn_msgid));
-      sendcmdto_set_client_msgid(sn_msgid);
+
+      /* Set S2S tags so receiving servers reuse this msgid */
+      {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        sendcmdto_set_s2s_tags(
+          (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, sn_msgid);
+      }
     }
+
+    /* Propagate to other servers (with S2S tags) */
+    sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+
+    /* Update bouncer aliases with new realname */
+    bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
+
+    /* Set client msgid for local broadcast */
+    if (sn_msgid[0])
+      sendcmdto_set_client_msgid(sn_msgid);
 
     /* Echo SETNAME back to the sender per IRCv3 spec */
     if (CapOwnHas(sptr, CAP_SETNAME))
@@ -209,19 +220,40 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Update the realname */
   ircd_strncpy(cli_info(sptr), newname, REALLEN + 1);
 
-  /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
-
-  /* Update bouncer aliases with new realname */
-  bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
-
-  /* Notify local channel members with setname capability */
+  /* Reuse incoming S2S msgid or generate new */
   {
     char sn_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
-      generate_msgid(sn_msgid, sizeof(sn_msgid));
-      sendcmdto_set_client_msgid(sn_msgid);
+      if (cli_s2s_msgid(cptr)[0]) {
+        ircd_strncpy(sn_msgid, cli_s2s_msgid(cptr), sizeof(sn_msgid));
+        if (cli_s2s_time_ms(cptr))
+          sendcmdto_set_s2s_tags(cli_s2s_time_ms(cptr), sn_msgid);
+        else {
+          struct timeval tv;
+          gettimeofday(&tv, NULL);
+          sendcmdto_set_s2s_tags(
+            (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, sn_msgid);
+        }
+      } else {
+        generate_msgid(sn_msgid, sizeof(sn_msgid));
+        {
+          struct timeval tv;
+          gettimeofday(&tv, NULL);
+          sendcmdto_set_s2s_tags(
+            (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, sn_msgid);
+        }
+      }
     }
+
+    /* Propagate to other servers (with S2S tags) */
+    sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+
+    /* Update bouncer aliases with new realname */
+    bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
+
+    /* Notify local channel members with setname capability */
+    if (sn_msgid[0])
+      sendcmdto_set_client_msgid(sn_msgid);
 
     sendcmdto_common_channels_capab_butone(sptr, CMD_SETNAME, sptr,
                                            CAP_SETNAME, CAP_NONE,
