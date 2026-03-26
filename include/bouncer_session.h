@@ -77,7 +77,8 @@ struct Listener;
 /** Session state. */
 enum BouncerState {
   BOUNCE_ACTIVE,    /**< Client is connected */
-  BOUNCE_HOLDING    /**< Client disconnected, session preserved */
+  BOUNCE_HOLDING,   /**< Client disconnected, session preserved */
+  BOUNCE_DESTROYING /**< Timer expired, awaiting ET_DESTROY to free */
 };
 
 /** A single connection history entry (deduped by IP). */
@@ -90,7 +91,7 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 6
+#define BOUNCER_DB_VERSION 7
 
 /** On-disk representation of a bouncer session for MDBX persistence.
  * Fixed-width, versioned. All IRC identifiers have known max lengths.
@@ -138,6 +139,9 @@ struct BounceSessionRecord {
   struct {
     char     name[CHANNELLEN + 1];
     uint32_t modes;
+    int64_t  join_tv_sec;       /**< Original JOIN time (seconds) */
+    int32_t  join_tv_usec;      /**< Original JOIN time (microseconds) */
+    char     join_msgid[16];    /**< Original JOIN msgid */
   } bsr_channels[BOUNCER_MAX_CHANNELS];
 };
 
@@ -145,6 +149,9 @@ struct BounceSessionRecord {
 struct BounceChannel {
   char name[CHANNELLEN + 1];
   unsigned int modes;         /**< CHFL_CHANOP, CHFL_VOICE, etc. */
+  int64_t  join_tv_sec;       /**< Original JOIN time (seconds) */
+  int32_t  join_tv_usec;      /**< Original JOIN time (microseconds) */
+  char     join_msgid[16];    /**< Original JOIN msgid */
 };
 
 /** Tracks an alias numeric for multi-server bouncer presence. */

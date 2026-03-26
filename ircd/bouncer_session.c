@@ -500,14 +500,29 @@ static void bounce_hold_expire(struct Event *ev)
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
 
-  /* ET_DESTROY is sent when timer_del() cancels the timer (e.g., during
-   * bounce_attach).  Only the real expiry (ET_EXPIRE) should destroy
-   * the session and exit the ghost.  Ignoring ET_DESTROY prevents a
-   * use-after-free where bounce_attach → timer_del → ET_DESTROY →
-   * bounce_hold_expire destroys the ghost that bounce_attach still
-   * needs to transfer channels from. */
-  if (ev_type(ev) == ET_DESTROY)
+  /* ET_DESTROY is sent by timer_run() after ET_EXPIRE, or by timer_del()
+   * when the timer is cancelled (e.g., during bounce_attach).
+   *
+   * If the session was marked BOUNCE_DESTROYING by the ET_EXPIRE handler,
+   * this is where we actually free it.  The timer struct is embedded in the
+   * session, so we CANNOT free the session during ET_EXPIRE — timer_run()
+   * still accesses the timer struct after the ET_EXPIRE callback returns.
+   *
+   * For timer_del() cancellations (bounce_attach), the session is still
+   * BOUNCE_HOLDING, so we just return. */
+  if (ev_type(ev) == ET_DESTROY) {
+    session = (struct BouncerSession *)t_data(ev_timer(ev));
+    if (session && session->hs_state == BOUNCE_DESTROYING) {
+      /* Timer is already dead — clean up without calling timer_del. */
+      token_hash_remove(session);
+      account_remove_session(session);
+      bounce_db_del(session->hs_sessid);
+      Debug((DEBUG_INFO, "Bouncer: destroyed session %s for %s (deferred)",
+             session->hs_sessid, session->hs_account));
+      MyFree(session);
+    }
     return;
+  }
 
   session = (struct BouncerSession *)t_data(ev_timer(ev));
 
@@ -537,10 +552,13 @@ static void bounce_hold_expire(struct Event *ev)
       exit_client(ghost, ghost, &me, "Session transferred");
     }
   } else {
-    /* No aliases — session truly expired. */
+    /* No aliases — session truly expired.
+     * Mark DESTROYING and null hs_client so exit_client's cleanup path
+     * in exit_one_client (s_misc.c) won't try to destroy it again.
+     * The actual free is deferred to the ET_DESTROY handler above. */
     bounce_broadcast(session, 'X', NULL);
-    bounce_destroy(session);
-    /* session is now freed — don't dereference it. */
+    session->hs_state = BOUNCE_DESTROYING;
+    session->hs_client = NULL;
     if (ghost && IsBouncerHold(ghost)) {
       ClearBouncerHold(ghost);
       exit_client(ghost, ghost, &me, "Session expired");
@@ -1202,6 +1220,9 @@ void bounce_snapshot_channels(struct BouncerSession *session,
     ircd_strncpy(session->hs_channels[i].name,
                  member->channel->chname, CHANNELLEN);
     session->hs_channels[i].modes = member->status;
+    session->hs_channels[i].join_tv_sec = member->join_tv.tv_sec;
+    session->hs_channels[i].join_tv_usec = member->join_tv.tv_usec;
+    memcpy(session->hs_channels[i].join_msgid, member->join_msgid, 16);
     i++;
   }
   session->hs_chancount = i;
@@ -1293,6 +1314,10 @@ static int bounce_db_put(struct BouncerSession *session)
       ircd_strncpy(rec.bsr_channels[i].name,
                    session->hs_channels[i].name, CHANNELLEN + 1);
       rec.bsr_channels[i].modes = session->hs_channels[i].modes;
+      rec.bsr_channels[i].join_tv_sec = session->hs_channels[i].join_tv_sec;
+      rec.bsr_channels[i].join_tv_usec = session->hs_channels[i].join_tv_usec;
+      memcpy(rec.bsr_channels[i].join_msgid,
+             session->hs_channels[i].join_msgid, 16);
     }
   }
 
@@ -1513,6 +1538,16 @@ static void bounce_restore_channels(struct Client *ghost,
 
     modes = rec->bsr_channels[i].modes | CHFL_HOLDING;
     add_user_to_channel(chptr, ghost, modes, 0);
+
+    /* Restore persisted join metadata (add_user_to_channel zeroes these) */
+    if (rec->bsr_channels[i].join_tv_sec) {
+      struct Membership *memb = find_member_link(chptr, ghost);
+      if (memb) {
+        memb->join_tv.tv_sec  = (time_t)rec->bsr_channels[i].join_tv_sec;
+        memb->join_tv.tv_usec = (suseconds_t)rec->bsr_channels[i].join_tv_usec;
+        memcpy(memb->join_msgid, rec->bsr_channels[i].join_msgid, 16);
+      }
+    }
   }
 }
 
