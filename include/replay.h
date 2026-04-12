@@ -60,6 +60,7 @@ struct ReplayState {
   int ops_override;                   /**< Whether :full override active */
   char label[64];                     /**< Labeled-response label (first batch only) */
   int label_used;                     /**< Whether label was applied */
+  int is_last_page;                   /**< True if query returned fewer results than limit */
 
   /* === Multi-channel iteration (bouncer replay) === */
   enum ReplayPhase phase;

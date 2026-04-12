@@ -77,6 +77,13 @@ static MDBX_dbi history_targets_dbi;
  */
 static MDBX_dbi history_quota_dbi;
 
+/** Reply/context index database (DUPSORT)
+ * Key: "target\0parent_msgid"
+ * Value: "timestamp\0child_msgid"
+ * Used to find reactions/redacts that reference a given message.
+ */
+static MDBX_dbi history_reply_dbi;
+
 /** Flag indicating if history is available */
 static int history_available = 0;
 
@@ -87,7 +94,7 @@ static size_t history_map_size = 1UL * 1024 * 1024 * 1024;
 static history_channels_removed_cb channel_removed_callback = NULL;
 
 /** Maximum number of named databases */
-#define HISTORY_MAX_DBS 9
+#define HISTORY_MAX_DBS 10
 
 /** Key separator character */
 #define KEY_SEP '\0'
@@ -344,6 +351,163 @@ static int parse_key(const char *key, int keylen,
   return 0;
 }
 
+/** Extract +reply= value from a client_tags string.
+ * @param[in] client_tags Semicolon-separated tag list (e.g. "+draft/react=X;+reply=MSGID").
+ * @param[out] buf Buffer for the extracted msgid.
+ * @param[in] buflen Size of buf.
+ * @return Pointer to buf on success, NULL if no +reply= found.
+ */
+static const char *extract_reply_tag(const char *client_tags, char *buf, size_t buflen)
+{
+  const char *p;
+
+  if (!client_tags || !client_tags[0])
+    return NULL;
+
+  /* Search for "+reply=" in the tag string */
+  p = client_tags;
+  while ((p = strstr(p, "+reply=")) != NULL) {
+    /* Ensure it's at the start or after a separator */
+    if (p != client_tags && *(p - 1) != ';') {
+      p += 7;
+      continue;
+    }
+    p += 7; /* skip "+reply=" */
+    {
+      const char *end = strchr(p, ';');
+      size_t len = end ? (size_t)(end - p) : strlen(p);
+      if (len == 0 || len >= buflen)
+        return NULL;
+      memcpy(buf, p, len);
+      buf[len] = '\0';
+      return buf;
+    }
+  }
+  return NULL;
+}
+
+/** Index a parent→child reply relationship.
+ * @param[in] txn Active write transaction.
+ * @param[in] target Channel or nick.
+ * @param[in] parent_msgid The msgid being referenced.
+ * @param[in] timestamp Timestamp of the child message.
+ * @param[in] child_msgid Msgid of the child (reaction/redact).
+ */
+static void reply_index_put(MDBX_txn *txn, const char *target,
+                            const char *parent_msgid,
+                            const char *timestamp, const char *child_msgid)
+{
+  char keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+  char valbuf[HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 4];
+  MDBX_val key, val;
+  int kpos = 0, vpos = 0;
+  size_t len;
+
+  /* Key: target\0parent_msgid */
+  len = strlen(target);
+  if (kpos + len + 1 >= sizeof(keybuf)) return;
+  memcpy(keybuf + kpos, target, len);
+  kpos += len;
+  keybuf[kpos++] = KEY_SEP;
+  len = strlen(parent_msgid);
+  if (kpos + len >= sizeof(keybuf)) return;
+  memcpy(keybuf + kpos, parent_msgid, len);
+  kpos += len;
+
+  /* Value: timestamp\0child_msgid */
+  len = strlen(timestamp);
+  if (vpos + len + 1 >= sizeof(valbuf)) return;
+  memcpy(valbuf + vpos, timestamp, len);
+  vpos += len;
+  valbuf[vpos++] = KEY_SEP;
+  len = strlen(child_msgid);
+  if (vpos + len >= sizeof(valbuf)) return;
+  memcpy(valbuf + vpos, child_msgid, len);
+  vpos += len;
+
+  key.iov_base = keybuf;
+  key.iov_len = kpos;
+  val.iov_base = valbuf;
+  val.iov_len = vpos;
+
+  mdbx_put(txn, history_reply_dbi, &key, &val, 0);
+}
+
+/** Remove all reply index entries where child_msgid is the child.
+ * Called during retention purge when a message is deleted.
+ * @param[in] txn Active write transaction.
+ * @param[in] target Channel or nick.
+ * @param[in] child_msgid Msgid of the message being deleted.
+ * @param[in] client_tags Client tags of the message (to find +reply=).
+ * @param[in] type Message type.
+ * @param[in] content Message content (for REDACT target extraction).
+ */
+static void reply_index_del_child(MDBX_txn *txn, const char *target,
+                                  const char *child_msgid,
+                                  const char *client_tags,
+                                  enum HistoryMessageType type,
+                                  const char *content)
+{
+  char parent_mid[HISTORY_MSGID_LEN];
+  const char *parent = NULL;
+
+  /* Find the parent msgid this child references */
+  if (client_tags && client_tags[0])
+    parent = extract_reply_tag(client_tags, parent_mid, sizeof(parent_mid));
+
+  if (!parent && type == HISTORY_REDACT && content && content[0]) {
+    /* REDACT content starts with target_msgid */
+    const char *space = strchr(content, ' ');
+    size_t len = space ? (size_t)(space - content) : strlen(content);
+    if (len > 0 && len < sizeof(parent_mid)) {
+      memcpy(parent_mid, content, len);
+      parent_mid[len] = '\0';
+      parent = parent_mid;
+    }
+  }
+
+  if (parent) {
+    /* Build key: target\0parent_msgid, scan dup values for matching child_msgid */
+    char keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+    MDBX_val key, val;
+    MDBX_cursor *cursor;
+    int kpos = 0, rc;
+    size_t len;
+
+    len = strlen(target);
+    if (kpos + len + 1 >= sizeof(keybuf)) return;
+    memcpy(keybuf + kpos, target, len);
+    kpos += len;
+    keybuf[kpos++] = KEY_SEP;
+    len = strlen(parent);
+    if (kpos + len >= sizeof(keybuf)) return;
+    memcpy(keybuf + kpos, parent, len);
+    kpos += len;
+
+    key.iov_base = keybuf;
+    key.iov_len = kpos;
+
+    rc = mdbx_cursor_open(txn, history_reply_dbi, &cursor);
+    if (rc != 0) return;
+
+    rc = mdbx_cursor_get(cursor, &key, &val, MDBX_SET_KEY);
+    while (rc == 0) {
+      /* Value is timestamp\0child_msgid — check if child matches */
+      const char *sep = memchr(val.iov_base, KEY_SEP, val.iov_len);
+      if (sep) {
+        sep++;
+        size_t cmid_len = (char *)val.iov_base + val.iov_len - sep;
+        if (cmid_len == strlen(child_msgid) && memcmp(sep, child_msgid, cmid_len) == 0) {
+          mdbx_cursor_del(cursor, 0);
+          break;
+        }
+      }
+      rc = mdbx_cursor_get(cursor, &key, &val, MDBX_NEXT_DUP);
+    }
+    mdbx_cursor_close(cursor);
+  }
+}
+
 /*
  * Timestamp Conversion Functions
  *
@@ -573,6 +737,17 @@ int history_init(const char *dbpath)
     return -1;
   }
 
+  /* Open reply/context index database (DUPSORT: one parent can have multiple children) */
+  rc = mdbx_dbi_open(txn, "reply_index", MDBX_CREATE | MDBX_DUPSORT, &history_reply_dbi);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(reply_index) failed: %s",
+              mdbx_strerror(rc));
+    mdbx_txn_abort(txn);
+    mdbx_env_close(history_env);
+    history_env = NULL;
+    return -1;
+  }
+
   /* Open multiline content databases (ml_content + ml_paste_secrets) */
   if (ml_content_init(history_env, txn) != 0) {
     log_write(LS_SYSTEM, L_WARNING, 0,
@@ -617,6 +792,7 @@ void history_shutdown(void)
   mdbx_dbi_close(history_env, history_msgid_dbi);
   mdbx_dbi_close(history_env, history_targets_dbi);
   mdbx_dbi_close(history_env, history_quota_dbi);
+  mdbx_dbi_close(history_env, history_reply_dbi);
   mdbx_env_close(history_env);
   history_env = NULL;
   history_available = 0;
@@ -782,6 +958,26 @@ store_retry:
     }
     rc = -1;
     goto store_cleanup;
+  }
+
+  /* Index reply references for draft/chathistory-context lookups.
+   * Check for +reply= in client_tags (reactions) and REDACT target msgid. */
+  {
+    char parent_mid[HISTORY_MSGID_LEN];
+    const char *parent = extract_reply_tag(client_tags, parent_mid, sizeof(parent_mid));
+    if (parent)
+      reply_index_put(txn, target, parent, timestamp, msgid);
+
+    if (type == HISTORY_REDACT && content && content[0]) {
+      /* REDACT content format: "target_msgid [:reason]" */
+      const char *space = strchr(content, ' ');
+      size_t len = space ? (size_t)(space - content) : strlen(content);
+      if (len > 0 && len < sizeof(parent_mid)) {
+        memcpy(parent_mid, content, len);
+        parent_mid[len] = '\0';
+        reply_index_put(txn, target, parent_mid, timestamp, msgid);
+      }
+    }
   }
 
   rc = mdbx_txn_commit(txn);
@@ -2020,6 +2216,26 @@ int history_purge_old(unsigned long max_age_seconds)
           msgid_key.iov_base = msg_msgid;
           mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
           ml_content_delete(txn, msg_msgid);
+
+          /* Delete reply index entries where this msgid is the parent.
+           * Orphaned child entries (referencing deleted parents) are harmless
+           * and cleaned when the child itself is purged. */
+          {
+            char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+            MDBX_val ri_key;
+            int ri_kpos = 0;
+            size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
+            if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
+              memcpy(ri_keybuf, msg_target, tlen);
+              ri_kpos += tlen;
+              ri_keybuf[ri_kpos++] = KEY_SEP;
+              memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
+              ri_kpos += mlen;
+              ri_key.iov_base = ri_keybuf;
+              ri_key.iov_len = ri_kpos;
+              mdbx_del(txn, history_reply_dbi, &ri_key, NULL);
+            }
+          }
         }
 
         /* Delete the message using cursor */
@@ -2411,6 +2627,24 @@ int history_delete_message(const char *target, const char *msgid)
     return -1;
   }
 
+  /* Clean reply index entries where this msgid is the parent */
+  {
+    char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+    MDBX_val ri_key;
+    int ri_kpos = 0;
+    size_t tlen = strlen(target), mlen = strlen(msgid);
+    if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
+      memcpy(ri_keybuf, target, tlen);
+      ri_kpos += tlen;
+      ri_keybuf[ri_kpos++] = KEY_SEP;
+      memcpy(ri_keybuf + ri_kpos, msgid, mlen);
+      ri_kpos += mlen;
+      ri_key.iov_base = ri_keybuf;
+      ri_key.iov_len = ri_kpos;
+      mdbx_del(txn, history_reply_dbi, &ri_key, NULL);
+    }
+  }
+
   rc = mdbx_txn_commit(txn);
   if (rc != 0)
     return -1;
@@ -2421,6 +2655,244 @@ int history_delete_message(const char *target, const char *msgid)
 int history_is_available(void)
 {
   return history_available;
+}
+
+int history_attach_context(const char *target, struct HistoryMessage *messages)
+{
+  MDBX_txn *txn;
+  MDBX_cursor *ri_cursor;
+  struct HistoryMessage *msg;
+  int added = 0;
+  int rc;
+
+  if (!history_available || !messages)
+    return 0;
+
+  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
+  if (rc != 0)
+    return 0;
+
+  rc = mdbx_cursor_open(txn, history_reply_dbi, &ri_cursor);
+  if (rc != 0) {
+    mdbx_txn_abort(txn);
+    return 0;
+  }
+
+  for (msg = messages; msg; msg = msg->next) {
+    char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+    MDBX_val ri_key, ri_val;
+    int ri_kpos = 0;
+    size_t tlen, mlen;
+
+    /* Skip context messages themselves (don't attach context to context) */
+    if (msg->is_context)
+      continue;
+
+    /* Build reply index key: target\0msgid */
+    tlen = strlen(target);
+    mlen = strlen(msg->msgid);
+    if (tlen + 1 + mlen >= sizeof(ri_keybuf))
+      continue;
+    memcpy(ri_keybuf, target, tlen);
+    ri_kpos = tlen;
+    ri_keybuf[ri_kpos++] = KEY_SEP;
+    memcpy(ri_keybuf + ri_kpos, msg->msgid, mlen);
+    ri_kpos += mlen;
+
+    ri_key.iov_base = ri_keybuf;
+    ri_key.iov_len = ri_kpos;
+
+    /* Find all children for this parent */
+    rc = mdbx_cursor_get(ri_cursor, &ri_key, &ri_val, MDBX_SET_KEY);
+    while (rc == 0) {
+      /* Value is timestamp\0child_msgid */
+      const char *sep = memchr(ri_val.iov_base, KEY_SEP, ri_val.iov_len);
+      if (sep) {
+        char child_ts[HISTORY_TIMESTAMP_LEN];
+        char child_mid[HISTORY_MSGID_LEN];
+        size_t ts_len = sep - (const char *)ri_val.iov_base;
+        size_t mid_len = (const char *)ri_val.iov_base + ri_val.iov_len - (sep + 1);
+
+        if (ts_len < sizeof(child_ts) && mid_len < sizeof(child_mid) && mid_len > 0) {
+          MDBX_val main_key, main_data;
+          char main_keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+          int main_keylen;
+          struct HistoryMessage *ctx;
+
+          memcpy(child_ts, ri_val.iov_base, ts_len);
+          child_ts[ts_len] = '\0';
+          memcpy(child_mid, sep + 1, mid_len);
+          child_mid[mid_len] = '\0';
+
+          /* Check if this child msgid is already in the primary list (avoid dup) */
+          {
+            struct HistoryMessage *dup;
+            int found = 0;
+            for (dup = messages; dup; dup = dup->next) {
+              if (strcmp(dup->msgid, child_mid) == 0) {
+                found = 1;
+                break;
+              }
+            }
+            if (found)
+              goto next_dup;
+          }
+
+          /* Fetch the full message from main DBI */
+          main_keylen = build_key(main_keybuf, sizeof(main_keybuf), target, child_ts, child_mid);
+          if (main_keylen < 0)
+            goto next_dup;
+
+          main_key.iov_base = main_keybuf;
+          main_key.iov_len = main_keylen;
+          rc = mdbx_get(txn, history_dbi, &main_key, &main_data);
+          if (rc != 0)
+            goto next_dup;
+
+          ctx = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
+          if (deserialize_message(main_data.iov_base, main_data.iov_len, ctx) != 0) {
+            MyFree(ctx);
+            goto next_dup;
+          }
+
+          /* Fill in key fields */
+          ircd_strncpy(ctx->target, target, sizeof(ctx->target));
+          ircd_strncpy(ctx->timestamp, child_ts, sizeof(ctx->timestamp));
+          ircd_strncpy(ctx->msgid, child_mid, sizeof(ctx->msgid));
+          ctx->is_context = 1;
+
+          /* Splice into list immediately after the parent */
+          ctx->next = msg->next;
+          msg->next = ctx;
+          added++;
+        }
+      }
+next_dup:
+      rc = mdbx_cursor_get(ri_cursor, &ri_key, &ri_val, MDBX_NEXT_DUP);
+    }
+  }
+
+  mdbx_cursor_close(ri_cursor);
+  mdbx_txn_abort(txn);
+  return added;
+}
+
+int history_redact_message(const char *target, const char *msgid)
+{
+  MDBX_txn *txn;
+  MDBX_val key, data;
+  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char timestamp[HISTORY_TIMESTAMP_LEN];
+  int keylen;
+  int rc;
+
+  if (!history_available)
+    return -1;
+
+  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
+  if (rc != 0)
+    return -1;
+
+  /* Look up msgid to get timestamp */
+  key.iov_len = strlen(msgid);
+  key.iov_base = (void *)msgid;
+
+  rc = mdbx_get(txn, history_msgid_dbi, &key, &data);
+  if (rc == MDBX_NOTFOUND) {
+    mdbx_txn_abort(txn);
+    return 1;
+  }
+  if (rc != 0) {
+    mdbx_txn_abort(txn);
+    return -1;
+  }
+
+  /* Extract timestamp from value (target\0timestamp) */
+  {
+    const char *sep = memchr(data.iov_base, KEY_SEP, data.iov_len);
+    if (!sep) {
+      mdbx_txn_abort(txn);
+      return -1;
+    }
+    sep++;
+    if ((size_t)((char *)data.iov_base + data.iov_len - sep) >= HISTORY_TIMESTAMP_LEN) {
+      mdbx_txn_abort(txn);
+      return -1;
+    }
+    memcpy(timestamp, sep, (char *)data.iov_base + data.iov_len - sep);
+    timestamp[(char *)data.iov_base + data.iov_len - sep] = '\0';
+  }
+
+  /* Build full key for main database */
+  keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
+  if (keylen < 0) {
+    mdbx_txn_abort(txn);
+    return -1;
+  }
+
+  /* Fetch the current message to get sender and account */
+  key.iov_base = keybuf;
+  key.iov_len = keylen;
+  rc = mdbx_get(txn, history_dbi, &key, &data);
+  if (rc != 0) {
+    mdbx_txn_abort(txn);
+    return (rc == MDBX_NOTFOUND) ? 1 : -1;
+  }
+
+  /* Deserialize to get type, sender, account */
+  {
+    struct HistoryMessage orig;
+    char valbuf[HISTORY_VALUE_BUFSIZE];
+    int vallen;
+    MDBX_val new_data;
+
+    memset(&orig, 0, sizeof(orig));
+    if (deserialize_message(data.iov_base, data.iov_len, &orig) != 0) {
+      mdbx_txn_abort(txn);
+      return -1;
+    }
+
+    /* Re-serialize with empty content and no client_tags */
+    vallen = serialize_message(valbuf, sizeof(valbuf), orig.type,
+                               orig.sender, orig.account, "", NULL);
+    if (vallen < 0 || (size_t)vallen >= sizeof(valbuf)) {
+      mdbx_txn_abort(txn);
+      return -1;
+    }
+
+    /* Overwrite in main DBI */
+    key.iov_base = keybuf;
+    key.iov_len = keylen;
+#ifdef USE_ZSTD
+    {
+      unsigned char comp_buf[HISTORY_VALUE_BUFSIZE + 64];
+      size_t comp_len;
+      if (compress_data((unsigned char *)valbuf, vallen,
+                        comp_buf, sizeof(comp_buf), &comp_len) >= 0) {
+        new_data.iov_base = comp_buf;
+        new_data.iov_len = comp_len;
+      } else {
+        new_data.iov_base = valbuf;
+        new_data.iov_len = vallen;
+      }
+      rc = mdbx_put(txn, history_dbi, &key, &new_data, 0);
+    }
+#else
+    new_data.iov_base = valbuf;
+    new_data.iov_len = vallen;
+    rc = mdbx_put(txn, history_dbi, &key, &new_data, 0);
+#endif
+    if (rc != 0) {
+      mdbx_txn_abort(txn);
+      return -1;
+    }
+  }
+
+  /* Delete multiline content if any */
+  ml_content_delete(txn, msgid);
+
+  rc = mdbx_txn_commit(txn);
+  return (rc == 0) ? 0 : -1;
 }
 
 /** Build a readmarker key from account and target.
@@ -2526,6 +2998,24 @@ static int history_emergency_evict(void)
         msgid_key.iov_base = msg_msgid;
         mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
         ml_content_delete(txn, msg_msgid);
+
+        /* Clean reply index entries where this msgid is the parent */
+        {
+          char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+          MDBX_val ri_key;
+          int ri_kpos = 0;
+          size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
+          if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
+            memcpy(ri_keybuf, msg_target, tlen);
+            ri_kpos += tlen;
+            ri_keybuf[ri_kpos++] = KEY_SEP;
+            memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
+            ri_kpos += mlen;
+            ri_key.iov_base = ri_keybuf;
+            ri_key.iov_len = ri_kpos;
+            mdbx_del(txn, history_reply_dbi, &ri_key, NULL);
+          }
+        }
       }
     }
 
@@ -2705,6 +3195,24 @@ int history_evict_to_target(int target_percent)
           msgid_key.iov_base = msg_msgid;
           mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
           ml_content_delete(txn, msg_msgid);
+
+          /* Clean reply index entries where this msgid is the parent */
+          {
+            char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+            MDBX_val ri_key;
+            int ri_kpos = 0;
+            size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
+            if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
+              memcpy(ri_keybuf, msg_target, tlen);
+              ri_kpos += tlen;
+              ri_keybuf[ri_kpos++] = KEY_SEP;
+              memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
+              ri_kpos += mlen;
+              ri_key.iov_base = ri_keybuf;
+              ri_key.iov_len = ri_kpos;
+              mdbx_del(txn, history_reply_dbi, &ri_key, NULL);
+            }
+          }
         }
       }
 

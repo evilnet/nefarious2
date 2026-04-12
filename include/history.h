@@ -90,6 +90,7 @@ struct HistoryMessage {
   unsigned char *raw_content;          /**< Raw compressed content (for federation passthrough) */
   size_t raw_content_len;              /**< Length of raw_content */
   struct HistoryMessage *next;         /**< Next in linked list (for results) */
+  int is_context;                      /**< Non-zero if draft/chathistory-context message */
 };
 
 /** Target info for CHATHISTORY TARGETS query. */
@@ -310,6 +311,28 @@ extern int history_purge_old(unsigned long max_age_seconds);
  * @return 0 on success, -1 if not found.
  */
 extern int history_msgid_to_timestamp(const char *msgid, char *timestamp);
+
+/** Redact a message: strip content/tags but keep the entry in the database.
+ * Used instead of history_delete_message() to support REDACT-as-context.
+ * The original message remains with empty content so it can serve as the
+ * parent for a REDACT context message during chathistory replay.
+ * @param[in] target Channel or nick where message was sent.
+ * @param[in] msgid Message ID to redact.
+ * @return 0 on success, 1 if not found, -1 on error.
+ */
+extern int history_redact_message(const char *target, const char *msgid);
+
+/** Query context messages (reactions, redacts) for a set of parent msgids.
+ * Looks up the reply index to find TAGMSG(+draft/react) and REDACT events
+ * that reference any of the given parent msgids, then splices them into
+ * the message list immediately after their parents.
+ * @param[in] target Channel or nick to scope the query.
+ * @param[in,out] messages Message list to augment with context.
+ *                Context messages are spliced in with is_context=1.
+ * @return Number of context messages added.
+ */
+extern int history_attach_context(const char *target,
+                                  struct HistoryMessage *messages);
 
 /** Check if history subsystem is initialized and available.
  * @return 1 if available, 0 if not.

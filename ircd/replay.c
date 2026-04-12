@@ -84,19 +84,26 @@ static int is_pm_target_for_client(const char *target, struct Client *cptr)
 
 /** Open a chathistory batch for the current target.
  * Handles labeled-response on the first batch if applicable.
+ * If is_last_page is set, includes @draft/chathistory-end tag
+ * on the BATCH start line to signal no more pages available.
  */
 static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
 {
   generate_batch_id(rs->batch_id, sizeof(rs->batch_id), sptr);
 
   if (CapRecipientHas(sptr, CAP_BATCH)) {
+    const char *end_tag = rs->is_last_page ? "draft/chathistory-end;" : "";
+
     if (!rs->label_used && rs->label[0] &&
         feature_bool(FEAT_CAP_labeled_response) &&
         CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
-                    rs->label, cli_name(&me), rs->batch_id, rs->target);
+      sendrawto_one(sptr, "@%slabel=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                    end_tag, rs->label, cli_name(&me), rs->batch_id, rs->target);
       cli_label_responded(sptr) = 1;
       rs->label_used = 1;
+    } else if (rs->is_last_page) {
+      sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                    cli_name(&me), rs->batch_id, rs->target);
     } else {
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s chathistory %s",
                     rs->batch_id, rs->target);
@@ -183,7 +190,8 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
       cmd = (msg->type <= HISTORY_REDACT) ? msg_type_cmd[msg->type] : "PRIVMSG";
       send_history_message(sptr, msg, rs->target, batchid, time_str, cmd);
       rs->current = msg->next;
-      rs->total_replayed++;
+      if (!msg->is_context)
+        rs->total_replayed++;
     }
 
     /* Check sendQ threshold after each message */
@@ -449,19 +457,20 @@ void replay_start_batch(struct Client *sptr, const char *target,
     replay_cancel(sptr);
 
   if (!messages || count == 0) {
-    /* Send empty batch synchronously */
+    /* Send empty batch synchronously — always last page */
     char batchid[REPLAY_BATCH_ID_LEN];
     generate_batch_id(batchid, sizeof(batchid), sptr);
 
     if (CapRecipientHas(sptr, CAP_BATCH)) {
+      /* Empty batch is always the last page — tag on BATCH start */
       if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
           CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-        sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+        sendrawto_one(sptr, "@draft/chathistory-end;label=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
                       label, cli_name(&me), batchid, target);
         cli_label_responded(sptr) = 1;
       } else {
-        sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s chathistory %s",
-                      batchid, target);
+        sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                      cli_name(&me), batchid, target);
       }
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
     }

@@ -106,6 +106,8 @@
 #include "handlers.h"
 #endif
 
+extern int multiline_add_message(struct Client *sptr, const char *target, const char *text, int concat, int is_notice);
+
 /*
  * mr_notice - Pre-registration message handler to catch CTCP VERSION reply
  */
@@ -177,6 +179,22 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NORECIPIENT, MSG_NOTICE);
+
+  /*
+   * Check for multiline batch interception (draft/multiline).
+   * Must be checked BEFORE the empty-text check so that blank lines
+   * in a multiline batch can reach multiline_add_message() for validation.
+   */
+  if (cli_msg_batch_tag(sptr)[0] != '\0' && cli_ml_batch_id(sptr)[0] != '\0') {
+    if (strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
+      return multiline_add_message(sptr, parv[1],
+               (parc >= 3) ? parv[parc - 1] : NULL, cli_msg_concat(sptr), 1);
+    } else {
+      send_fail(sptr, "BATCH", "MULTILINE_INVALID", NULL,
+                "Batch tag does not match active multiline batch");
+      return 0;
+    }
+  }
 
   if (parc < 3 || EmptyString(parv[parc - 1]))
     return send_reply(sptr, ERR_NOTEXTTOSEND);
@@ -320,6 +338,18 @@ int mo_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NORECIPIENT, MSG_NOTICE);
+
+  /* Multiline batch interception for NOTICE */
+  if (cli_msg_batch_tag(sptr)[0] != '\0' && cli_ml_batch_id(sptr)[0] != '\0') {
+    if (strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
+      return multiline_add_message(sptr, parv[1],
+               (parc >= 3) ? parv[parc - 1] : NULL, cli_msg_concat(sptr), 1);
+    } else {
+      send_fail(sptr, "BATCH", "MULTILINE_INVALID", NULL,
+                "Batch tag does not match active multiline batch");
+      return 0;
+    }
+  }
 
   if (parc < 3 || EmptyString(parv[parc - 1]))
     return send_reply(sptr, ERR_NOTEXTTOSEND);

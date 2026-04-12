@@ -411,6 +411,7 @@ struct Connection
   time_t              con_batch_minute;   /**< Start of current rate limit window */
   int                 con_batch_count;    /**< Number of batches in current window */
   int                 con_ml_had_fallback; /**< Batch had recipients needing fallback (for recipient discount) */
+  int                 con_ml_is_notice;    /**< 1=NOTICE batch, 0=PRIVMSG batch, -1=not yet set */
   /* Current message @batch tag for PRIVMSG interception */
   char                con_msg_batch_tag[65]; /**< @batch tag from current message (IRCv3 allows up to 64 chars) */
   unsigned char       con_msg_concat; /**< draft/multiline-concat tag present */
@@ -585,6 +586,8 @@ struct Client {
 #define cli_batch_count(cli)	con_batch_count(cli_connect(cli))
 /** Get whether batch had fallback recipients. */
 #define cli_ml_had_fallback(cli)	con_ml_had_fallback(cli_connect(cli))
+/** Get whether batch is NOTICE (1), PRIVMSG (0), or unset (-1). */
+#define cli_ml_is_notice(cli)	con_ml_is_notice(cli_connect(cli))
 /** Get current message @batch tag. */
 #define cli_msg_batch_tag(cli)	con_msg_batch_tag(cli_connect(cli))
 /** Get current message concat flag. */
@@ -877,6 +880,8 @@ struct Client {
 #define con_batch_count(con)	((con)->con_batch_count)
 /** Get whether batch had fallback recipients. */
 #define con_ml_had_fallback(con)	((con)->con_ml_had_fallback)
+/** Get whether batch is NOTICE (1), PRIVMSG (0), or unset (-1). */
+#define con_ml_is_notice(con)	((con)->con_ml_is_notice)
 /** Get the current message @batch tag. */
 #define con_msg_batch_tag(con)	((con)->con_msg_batch_tag)
 /** Get the current message draft/multiline-concat flag. */

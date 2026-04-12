@@ -244,8 +244,8 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         return 0;
       }
 
-      /* Delete from history database */
-      history_delete_message(target, msgid);
+      /* Redact message: strip content but keep entry for context */
+      history_redact_message(target, msgid);
       history_free_messages(msg);
     }
   } else {
@@ -360,9 +360,9 @@ int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (IsChannelName(target)) {
     chptr = FindChannel(target);
     if (chptr) {
-      /* Delete from local history if available */
+      /* Redact message: strip content but keep entry for context */
       if (history_is_available()) {
-        history_delete_message(target, msgid);
+        history_redact_message(target, msgid);
       }
 
       /* Use incoming S2S msgid for the REDACT event, or generate new */

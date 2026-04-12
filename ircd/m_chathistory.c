@@ -495,15 +495,21 @@ void generate_batch_id(char *buf, size_t buflen, struct Client *sptr)
  */
 int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
 {
-  /* PRIVMSG, NOTICE, and GAP markers are always sent */
-  if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE || type == HISTORY_GAP)
+  /* PRIVMSG, NOTICE, GAP markers, and TAGMSG are always sent.
+   * TAGMSG is included without event-playback per chathistory ratification
+   * discussion — reactions are message-like content, not events.
+   * Only stored TAGMSGs pass this check (typing-only are filtered earlier). */
+  if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE ||
+      type == HISTORY_GAP || type == HISTORY_TAGMSG)
     return 1;
 
-  /* REDACT requires both event-playback and message-redaction */
+  /* REDACT requires message-redaction cap but NOT event-playback.
+   * Per spec: "draft/event-playback is not required in order to include
+   * REDACT messages in chathistory responses." */
   if (type == HISTORY_REDACT)
-    return CapActive(sptr, CAP_DRAFT_EVENTPLAYBACK) && CapActive(sptr, CAP_DRAFT_REDACT);
+    return CapActive(sptr, CAP_DRAFT_REDACT);
 
-  /* Other events require draft/event-playback capability */
+  /* Other events (JOIN, PART, QUIT, KICK, MODE, NICK) require event-playback */
   return CapActive(sptr, CAP_DRAFT_EVENTPLAYBACK);
 }
 
@@ -525,172 +531,96 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
   char *separator;
   char first_line[512];
   char *content = msg->dyn_content ? msg->dyn_content : msg->content;
+  const char *ctx_tag = msg->is_context ? ";draft/chathistory-context" : "";
+
+  /* Build tag prefix once, gating each tag behind its capability.
+   * Format: "batch=X;time=T;msgid=M;account=A;ctx" or subset thereof.
+   * This avoids duplicating cap checks across every sendrawto_one call. */
+  char tags[512];
+  int tpos = 0;
+  int has_time = (time_str && *time_str && CapRecipientHas(sptr, CAP_SERVERTIME));
+  int has_msgid = (msg->msgid[0] && CapRecipientHas(sptr, CAP_MSGTAGS));
+  int has_account = (msg->account[0] && CapRecipientHas(sptr, CAP_ACCOUNTTAG));
+
+  if (outer_batchid) {
+    tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "batch=%s", outer_batchid);
+  }
+  if (has_time) {
+    if (tpos) tags[tpos++] = ';';
+    tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "time=%s", time_str);
+  }
+  if (has_msgid) {
+    if (tpos) tags[tpos++] = ';';
+    tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "msgid=%s", msg->msgid);
+  }
+  if (has_account) {
+    if (tpos) tags[tpos++] = ';';
+    tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "account=%s", msg->account);
+  }
+  if (ctx_tag[0]) {
+    /* ctx_tag starts with ';' already */
+    tpos += ircd_snprintf(0, tags + tpos, sizeof(tags) - tpos, "%s", ctx_tag);
+  }
+  tags[tpos] = '\0';
 
   /* QUIT and NICK messages don't take a channel target in IRC protocol.
    * Format: :sender QUIT :reason  /  :oldnick!u@h NICK :newnick
    * Both are always single-line so handle them early and return. */
   if (msg->type == HISTORY_QUIT || msg->type == HISTORY_NICK) {
-    if (outer_batchid) {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s :%s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, content);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s :%s",
-                      outer_batchid, time_str, msg->msgid,
-                      msg->sender, cmd, content);
-      }
-    } else {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s :%s",
-                      time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, content);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s :%s",
-                      time_str, msg->msgid,
-                      msg->sender, cmd, content);
-      }
-    }
+    if (tpos)
+      sendrawto_one(sptr, "@%s :%s %s :%s", tags, msg->sender, cmd, content);
+    else
+      sendrawto_one(sptr, ":%s %s :%s", msg->sender, cmd, content);
     return;
   }
 
   /* JOIN content is empty — don't emit a trailing ":" with nothing after it.
    * Correct IRC: "JOIN #channel" (no trailing parameter). */
   if (msg->type == HISTORY_JOIN) {
-    if (outer_batchid) {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s",
-                      outer_batchid, time_str, msg->msgid,
-                      msg->sender, cmd, target);
-      }
-    } else {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s",
-                      time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s",
-                      time_str, msg->msgid,
-                      msg->sender, cmd, target);
-      }
-    }
+    if (tpos)
+      sendrawto_one(sptr, "@%s :%s %s %s", tags, msg->sender, cmd, target);
+    else
+      sendrawto_one(sptr, ":%s %s %s", msg->sender, cmd, target);
     return;
   }
 
   /* PART with empty reason — don't emit trailing ":".
    * PART with reason uses trailing normally via generic path. */
   if (msg->type == HISTORY_PART && (!content[0])) {
-    if (outer_batchid) {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s",
-                      outer_batchid, time_str, msg->msgid,
-                      msg->sender, cmd, target);
-      }
-    } else {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s",
-                      time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s",
-                      time_str, msg->msgid,
-                      msg->sender, cmd, target);
-      }
-    }
+    if (tpos)
+      sendrawto_one(sptr, "@%s :%s %s %s", tags, msg->sender, cmd, target);
+    else
+      sendrawto_one(sptr, ":%s %s %s", msg->sender, cmd, target);
     return;
   }
 
   /* MODE content is stored as "-o nick" or "+o nick" (mode string + params).
-   * The generic format wraps content with ":" producing "MODE #chan :-o nick"
-   * which merges mode+target into one trailing parameter.
    * Correct IRC: "MODE #chan -o nick" — params must be space-separated. */
   if (msg->type == HISTORY_MODE) {
-    if (outer_batchid) {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s %s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s %s",
-                      outer_batchid, time_str, msg->msgid,
-                      msg->sender, cmd, target, content);
-      }
-    } else {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s %s",
-                      time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s %s",
-                      time_str, msg->msgid,
-                      msg->sender, cmd, target, content);
-      }
-    }
+    if (tpos)
+      sendrawto_one(sptr, "@%s :%s %s %s %s", tags, msg->sender, cmd, target, content);
+    else
+      sendrawto_one(sptr, ":%s %s %s %s", msg->sender, cmd, target, content);
     return;
   }
 
-  /* KICK content is stored as "nick :reason" (already properly formatted).
-   * The generic format would add an extra ":" prefix, producing
-   * "KICK #channel :nick :reason" which is malformed.
-   * Correct IRC: "KICK #channel nick :reason" — emit content raw. */
+  /* KICK content is stored as "nick :reason" — emit raw after target.
+   * Correct IRC: "KICK #channel nick :reason" */
   if (msg->type == HISTORY_KICK) {
-    if (outer_batchid) {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s %s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s %s",
-                      outer_batchid, time_str, msg->msgid,
-                      msg->sender, cmd, target, content);
-      }
-    } else {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s %s",
-                      time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s %s",
-                      time_str, msg->msgid,
-                      msg->sender, cmd, target, content);
-      }
-    }
+    if (tpos)
+      sendrawto_one(sptr, "@%s :%s %s %s %s", tags, msg->sender, cmd, target, content);
+    else
+      sendrawto_one(sptr, ":%s %s %s %s", msg->sender, cmd, target, content);
     return;
   }
 
   /* REDACT content is stored as "target_msgid :reason" or just "target_msgid".
-   * Same layout as KICK — emit content raw after target.
    * IRC format: REDACT #channel target_msgid [:reason] */
   if (msg->type == HISTORY_REDACT) {
-    if (outer_batchid) {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s %s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s %s",
-                      outer_batchid, time_str, msg->msgid,
-                      msg->sender, cmd, target, content);
-      }
-    } else {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s :%s %s %s %s",
-                      time_str, msg->msgid, msg->account,
-                      msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s :%s %s %s %s",
-                      time_str, msg->msgid,
-                      msg->sender, cmd, target, content);
-      }
-    }
+    if (tpos)
+      sendrawto_one(sptr, "@%s :%s %s %s %s", tags, msg->sender, cmd, target, content);
+    else
+      sendrawto_one(sptr, ":%s %s %s %s", msg->sender, cmd, target, content);
     return;
   }
 
@@ -700,36 +630,20 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
    * Legacy format: content has the tags, client_tags is empty.
    * Format: @batch=X;time=T;msgid=M;+draft/react=val :sender TAGMSG #channel */
   if (msg->type == HISTORY_TAGMSG) {
-    const char *tags = msg->client_tags[0] ? msg->client_tags : content;
-    if (outer_batchid) {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s;%s :%s %s %s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      tags, msg->sender, cmd, target);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;%s :%s %s %s",
-                      outer_batchid, time_str, msg->msgid,
-                      tags, msg->sender, cmd, target);
-      }
-    } else {
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s;%s :%s %s %s",
-                      time_str, msg->msgid, msg->account,
-                      tags, msg->sender, cmd, target);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;%s :%s %s %s",
-                      time_str, msg->msgid,
-                      tags, msg->sender, cmd, target);
-      }
-    }
+    const char *ctags = msg->client_tags[0] ? msg->client_tags : content;
+    if (tpos)
+      sendrawto_one(sptr, "@%s;%s :%s %s %s", tags, ctags, msg->sender, cmd, target);
+    else
+      sendrawto_one(sptr, "@%s :%s %s %s", ctags, msg->sender, cmd, target);
     return;
   }
 
   /* Build client tags suffix for PRIVMSG/NOTICE replay.
    * Format: ";+reply=abc123" (leading semicolon for tag list concatenation).
-   * Only emit for PRIVMSG/NOTICE when recipient has message-tags cap. */
+   * Only emit for PRIVMSG/NOTICE when recipient has message-tags cap.
+   * Note: ctx_tag and account are already in `tags` prefix above. */
   {
-    char ctags_str[516] = "";  /* ";"+512 tags */
+    char ctags_str[516] = "";
 
     if (msg->client_tags[0] &&
         (msg->type == HISTORY_PRIVMSG || msg->type == HISTORY_NOTICE) &&
@@ -746,15 +660,20 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
     char ml_batchid[BATCH_ID_LEN];
     char *line_start = content;
     char *line_end;
-    int first = 1;
 
     /* Generate unique multiline batch ID */
     ircd_snprintf(0, ml_batchid, sizeof(ml_batchid), "ml%lu%s", ++ml_counter, cli_yxx(sptr));
 
-    /* Start nested multiline batch (inside outer chathistory batch) */
-    if (outer_batchid) {
-      sendrawto_one(sptr, "@batch=%s :testnet.fractalrealities.net BATCH +%s draft/multiline %s",
-                    outer_batchid, ml_batchid, target);
+    /* Start nested multiline batch (inside outer chathistory batch).
+     * Per multiline spec, server tags (time, msgid, account) and client tags
+     * go on the BATCH + opener. The `tags` prefix already has these. */
+    if (tpos) {
+      if (ctags_str[0])
+        sendrawto_one(sptr, "@%s%s :%s BATCH +%s draft/multiline %s",
+                      tags, ctags_str, cli_name(&me), ml_batchid, target);
+      else
+        sendrawto_one(sptr, "@%s :%s BATCH +%s draft/multiline %s",
+                      tags, cli_name(&me), ml_batchid, target);
     } else {
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
                     ml_batchid, target);
@@ -777,46 +696,23 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
         line_start = NULL;
       }
 
-      /* Send line as part of multiline batch */
-      if (first) {
-        /* First line gets time, msgid, and client tags */
-        if (msg->account[0]) {
-          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s%s :%s %s %s :%s",
-                        ml_batchid, time_str, msg->msgid, msg->account,
-                        ctags_str, msg->sender, cmd, target, first_line);
-        } else {
-          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s%s :%s %s %s :%s",
-                        ml_batchid, time_str, msg->msgid,
-                        ctags_str, msg->sender, cmd, target, first_line);
-        }
-        first = 0;
-      } else {
-        /* Subsequent lines - same msgid, batch tag only */
-        if (msg->account[0]) {
-          sendrawto_one(sptr, "@batch=%s;msgid=%s;account=%s :%s %s %s :%s",
-                        ml_batchid, msg->msgid, msg->account,
-                        msg->sender, cmd, target, first_line);
-        } else {
-          sendrawto_one(sptr, "@batch=%s;msgid=%s :%s %s %s :%s",
-                        ml_batchid, msg->msgid,
-                        msg->sender, cmd, target, first_line);
-        }
-      }
+      /* Per multiline spec, inner lines only get @batch= tag.
+       * Server tags (time, msgid, account) go on the BATCH opener. */
+      sendrawto_one(sptr, "@batch=%s :%s %s %s :%s",
+                    ml_batchid, msg->sender, cmd, target, first_line);
     }
 
     /* End nested multiline batch */
     if (outer_batchid) {
-      sendrawto_one(sptr, "@batch=%s :testnet.fractalrealities.net BATCH -%s",
-                    outer_batchid, ml_batchid);
+      sendrawto_one(sptr, "@batch=%s :%s BATCH -%s",
+                    outer_batchid, cli_name(&me), ml_batchid);
     } else {
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", ml_batchid);
     }
   } else if (separator && outer_batchid) {
     /* Tier 2: Client has chathistory batch but not multiline capability.
      * Send each line as separate PRIVMSG within the chathistory batch.
-     * This allows full content retrieval even without multiline support.
-     * All lines share the same msgid so clients know they're related.
-     */
+     * All lines share the same msgid so clients know they're related. */
     char *line_start = content;
     char *line_end;
     int first = 1;
@@ -835,38 +731,27 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
         line_start = NULL;
       }
 
-      /* Send each line as separate message in batch */
       if (first) {
-        /* First line gets time, msgid, and client tags */
-        if (msg->account[0]) {
-          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s%s :%s %s %s :%s",
-                        outer_batchid, time_str, msg->msgid, msg->account,
-                        ctags_str, msg->sender, cmd, target, first_line);
-        } else {
-          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s%s :%s %s %s :%s",
-                        outer_batchid, time_str, msg->msgid,
-                        ctags_str, msg->sender, cmd, target, first_line);
-        }
+        /* First line gets all tags + client tags */
+        if (tpos)
+          sendrawto_one(sptr, "@%s%s :%s %s %s :%s",
+                        tags, ctags_str, msg->sender, cmd, target, first_line);
+        else
+          sendrawto_one(sptr, ":%s %s %s :%s",
+                        msg->sender, cmd, target, first_line);
         first = 0;
       } else {
-        /* Subsequent lines - same msgid indicates they're part of same logical message.
-         * Include time= on every line since these are standalone PRIVMSGs,
-         * not inside a multiline batch. Clients without multiline support
-         * treat each line independently and need the timestamp. */
-        if (msg->account[0]) {
-          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s :%s %s %s :%s",
-                        outer_batchid, time_str, msg->msgid, msg->account,
+        /* Subsequent lines — same tags (time+msgid for standalone PRIVMSGs) */
+        if (tpos)
+          sendrawto_one(sptr, "@%s :%s %s %s :%s",
+                        tags, msg->sender, cmd, target, first_line);
+        else
+          sendrawto_one(sptr, ":%s %s %s :%s",
                         msg->sender, cmd, target, first_line);
-        } else {
-          sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s :%s %s %s :%s",
-                        outer_batchid, time_str, msg->msgid,
-                        msg->sender, cmd, target, first_line);
-        }
       }
     }
   } else {
     /* Tier 3: No chathistory batch or no separators - send single message */
-    /* If there are separators but no batch, truncate to first line */
     if (separator) {
       size_t len = separator - content;
       if (len >= sizeof(first_line))
@@ -876,29 +761,12 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
       content = first_line;
     }
 
-    if (outer_batchid) {
-      /* With batch (but no separators) */
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;account=%s%s :%s %s %s :%s",
-                      outer_batchid, time_str, msg->msgid, msg->account,
-                      ctags_str, msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s%s :%s %s %s :%s",
-                      outer_batchid, time_str, msg->msgid,
-                      ctags_str, msg->sender, cmd, target, content);
-      }
-    } else {
-      /* Without batch */
-      if (msg->account[0]) {
-        sendrawto_one(sptr, "@time=%s;msgid=%s;account=%s%s :%s %s %s :%s",
-                      time_str, msg->msgid, msg->account,
-                      ctags_str, msg->sender, cmd, target, content);
-      } else {
-        sendrawto_one(sptr, "@time=%s;msgid=%s%s :%s %s %s :%s",
-                      time_str, msg->msgid,
-                      ctags_str, msg->sender, cmd, target, content);
-      }
-    }
+    if (tpos)
+      sendrawto_one(sptr, "@%s%s :%s %s %s :%s",
+                    tags, ctags_str, msg->sender, cmd, target, content);
+    else
+      sendrawto_one(sptr, ":%s %s %s :%s",
+                    msg->sender, cmd, target, content);
   }
   } /* end ctags_str scope */
 }
@@ -958,12 +826,25 @@ void send_gap_marker(struct Client *sptr, const char *target,
   /* Channel gaps: from server (hide sender). PM gaps: from original sender. */
   source = is_channel ? cli_name(&me) : sender;
 
-  if (batchid) {
-    sendrawto_one(sptr, "@batch=%s;time=%s;msgid=%s;+draft/chathistory-gap :%s PRIVMSG %s :%s",
-                  batchid, time_str, msgid, source, target, content);
-  } else {
-    sendrawto_one(sptr, "@time=%s;msgid=%s;+draft/chathistory-gap :%s PRIVMSG %s :%s",
-                  time_str, msgid, source, target, content);
+  /* Build tags with capability checks */
+  {
+    char gtags[256];
+    int gpos = 0;
+    if (batchid)
+      gpos += ircd_snprintf(0, gtags + gpos, sizeof(gtags) - gpos, "batch=%s", batchid);
+    if (time_str && *time_str && CapRecipientHas(sptr, CAP_SERVERTIME)) {
+      if (gpos) gtags[gpos++] = ';';
+      gpos += ircd_snprintf(0, gtags + gpos, sizeof(gtags) - gpos, "time=%s", time_str);
+    }
+    if (msgid && *msgid && CapRecipientHas(sptr, CAP_MSGTAGS)) {
+      if (gpos) gtags[gpos++] = ';';
+      gpos += ircd_snprintf(0, gtags + gpos, sizeof(gtags) - gpos, "msgid=%s", msgid);
+    }
+    if (gpos) gtags[gpos++] = ';';
+    gpos += ircd_snprintf(0, gtags + gpos, sizeof(gtags) - gpos, "+draft/chathistory-gap");
+    gtags[gpos] = '\0';
+
+    sendrawto_one(sptr, "@%s :%s PRIVMSG %s :%s", gtags, source, target, content);
   }
 }
 
@@ -1102,6 +983,8 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
     return -1;
 
   if (count > 0 && messages) {
+    /* Attach context messages (reactions, redacts) to their parents */
+    history_attach_context(target, messages);
     /* Ownership of messages transfers to replay_start_batch */
     replay_start_batch(sptr, target, messages, count, 0, NULL);
   }
@@ -1355,8 +1238,12 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     /* Federation failed to start, fall through to local-only response */
   }
 
+  /* Attach context messages (reactions, redacts) to their parents */
+  history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
   replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  if (cli_replay(sptr) && count < limit)
+    cli_replay(sptr)->is_last_page = 1;
 
   return 0;
 }
@@ -1415,8 +1302,12 @@ static int chathistory_before(struct Client *sptr, const char *target,
       return 0;
   }
 
+  /* Attach context messages (reactions, redacts) to their parents */
+  history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
   replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  if (cli_replay(sptr) && count < limit)
+    cli_replay(sptr)->is_last_page = 1;
 
   return 0;
 }
@@ -1475,8 +1366,12 @@ static int chathistory_after(struct Client *sptr, const char *target,
       return 0;
   }
 
+  /* Attach context messages (reactions, redacts) to their parents */
+  history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
   replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  if (cli_replay(sptr) && count < limit)
+    cli_replay(sptr)->is_last_page = 1;
 
   return 0;
 }
@@ -1535,8 +1430,12 @@ static int chathistory_around(struct Client *sptr, const char *target,
       return 0;
   }
 
+  /* Attach context messages (reactions, redacts) to their parents */
+  history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
   replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  if (cli_replay(sptr) && count < limit)
+    cli_replay(sptr)->is_last_page = 1;
 
   return 0;
 }
@@ -1595,8 +1494,12 @@ static int chathistory_between(struct Client *sptr, const char *target,
     return 0;
   }
 
+  /* Attach context messages (reactions, redacts) to their parents */
+  history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
   replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  if (cli_replay(sptr) && count < limit)
+    cli_replay(sptr)->is_last_page = 1;
 
   return 0;
 }
@@ -1771,16 +1674,16 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
 
   generate_batch_id(batchid, sizeof(batchid), sptr);
 
-  /* Start batch — include @label on BATCH +start if labeled-response applies */
+  /* Start batch — TARGETS always returns all results so always last page */
   if (CapRecipientHas(sptr, CAP_BATCH)) {
     if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
         CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+      sendrawto_one(sptr, "@draft/chathistory-end;label=%s :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
                     label, cli_name(&me), batchid);
       cli_label_responded(sptr) = 1;
     } else {
-      sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/chathistory-targets",
-                    batchid);
+      sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+                    cli_name(&me), batchid);
     }
   }
 
@@ -2369,7 +2272,7 @@ static void process_write_forward(const char *target, const char *msgid,
       len = sizeof(target_msgid) - 1;
     memcpy(target_msgid, content, len);
     target_msgid[len] = '\0';
-    history_delete_message(target, target_msgid);
+    history_redact_message(target, target_msgid);
   }
 
   /* Check if this is a new channel for Layer 1 advertisement */
@@ -3410,8 +3313,12 @@ static void send_fed_response(struct FedRequest *req)
   for (struct HistoryMessage *m = merged; m; m = m->next)
     total++;
 
+  /* Attach context messages (reactions, redacts) to their parents */
+  history_attach_context(req->target, merged);
   /* Async replay — ownership of merged list transfers to ReplayState */
   replay_start_batch(client, req->target, merged, total, req->ops_override, req->label);
+  if (cli_replay(client) && total < req->limit)
+    cli_replay(client)->is_last_page = 1;
 }
 
 /** Complete a federation request - sends response and triggers cleanup.

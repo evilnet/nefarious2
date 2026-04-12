@@ -472,17 +472,17 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
 static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client *from,
                                         struct Client *to, const char *msgid)
 {
-  int use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
-  int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapOwnHas(to, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapOwnHas(to, CAP_ACCOUNTTAG);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
-                  CapActive(to, CAP_LABELEDRESP) &&
+                  CapOwnHas(to, CAP_LABELEDRESP) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
                   !cli_label_responded(to);
-  int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
   int use_fwd_batch = fwd_batch_id_override[0] && feature_bool(FEAT_CAP_batch) &&
-                      CapActive(to, CAP_BATCH);
-  int use_msgid = msgid && *msgid && CapActive(to, CAP_MSGTAGS);
+                      CapOwnHas(to, CAP_BATCH);
+  int use_msgid = msgid && *msgid && CapOwnHas(to, CAP_MSGTAGS);
   int pos = 0;
 
   if (!use_time && !use_account && !use_label && !use_batch && !use_fwd_batch && !use_msgid)
@@ -539,7 +539,7 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec).
    * Per IRCv3, server-generated tags require message-tags capability. */
-  if (from && IsBot(from) && CapActive(to, CAP_MSGTAGS)) {
+  if (from && IsBot(from) && CapOwnHas(to, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "bot");
@@ -667,15 +667,15 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
 static char *format_message_tags_with_client(char *buf, size_t buflen, struct Client *from,
                                               struct Client *to, const char *client_tags)
 {
-  int use_time = feature_bool(FEAT_CAP_server_time) && CapActive(to, CAP_SERVERTIME);
-  int use_account = feature_bool(FEAT_CAP_account_tag) && CapActive(to, CAP_ACCOUNTTAG);
+  int use_time = feature_bool(FEAT_CAP_server_time) && CapOwnHas(to, CAP_SERVERTIME);
+  int use_account = feature_bool(FEAT_CAP_account_tag) && CapOwnHas(to, CAP_ACCOUNTTAG);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
-                  CapActive(to, CAP_LABELEDRESP) &&
+                  CapOwnHas(to, CAP_LABELEDRESP) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
                   !cli_label_responded(to);
-  int use_batch = feature_bool(FEAT_CAP_batch) && CapActive(to, CAP_BATCH) &&
+  int use_batch = feature_bool(FEAT_CAP_batch) && CapOwnHas(to, CAP_BATCH) &&
                   to && MyConnect(to) && cli_batch_id(to)[0];
-  int use_client_tags = client_tags && *client_tags && CapActive(to, CAP_MSGTAGS);
+  int use_client_tags = client_tags && *client_tags && CapOwnHas(to, CAP_MSGTAGS);
   int pos = 0;
 
   /* TAGMSG is only useful if there are client-only tags to relay */
@@ -691,7 +691,7 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   }
 
   /* Include msgid from channel broadcast override */
-  if (client_msgid_override[0] && CapActive(to, CAP_MSGTAGS)) {
+  if (client_msgid_override[0] && CapOwnHas(to, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "msgid=%s", client_msgid_override);
@@ -732,7 +732,7 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   }
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
-  if (from && IsBot(from) && CapActive(to, CAP_MSGTAGS)) {
+  if (from && IsBot(from) && CapOwnHas(to, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
     pos += snprintf(buf + pos, buflen - pos, "bot");

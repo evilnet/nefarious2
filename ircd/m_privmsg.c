@@ -99,7 +99,7 @@
 #include <string.h>
 
 /* External function from m_batch.c for multiline message handling */
-extern int multiline_add_message(struct Client *sptr, const char *text, int concat);
+extern int multiline_add_message(struct Client *sptr, const char *target, const char *text, int concat, int is_notice);
 
 /*
  * m_privmsg - generic message handler
@@ -133,8 +133,10 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    */
   if (cli_msg_batch_tag(sptr)[0] != '\0' && cli_ml_batch_id(sptr)[0] != '\0') {
     if (strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
-      /* This PRIVMSG is part of an active multiline batch - add to batch */
-      return multiline_add_message(sptr, (parc >= 3) ? parv[parc - 1] : NULL, cli_msg_concat(sptr));
+      /* This PRIVMSG is part of an active multiline batch - add to batch.
+       * Target validation happens inside multiline_add_message(). */
+      return multiline_add_message(sptr, parv[1],
+               (parc >= 3) ? parv[parc - 1] : NULL, cli_msg_concat(sptr), 0);
     } else {
       /* Batch tag doesn't match active batch - invalid */
       send_fail(sptr, "BATCH", "MULTILINE_INVALID", NULL,
@@ -247,7 +249,7 @@ int mo_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (cli_msg_batch_tag(sptr)[0] != '\0' &&
       cli_ml_batch_id(sptr)[0] != '\0' &&
       strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
-    return multiline_add_message(sptr, parv[parc - 1], cli_msg_concat(sptr));
+    return multiline_add_message(sptr, parv[1], parv[parc - 1], cli_msg_concat(sptr), 0);
   }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
