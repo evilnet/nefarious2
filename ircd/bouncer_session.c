@@ -1041,12 +1041,13 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
       remove_user_from_channel(ghost, member->channel);
     }
 
-    /* Clean up the ghost client - it no longer has channels */
+    /* Clean up the ghost client - it no longer has channels.
+     * Let QUIT propagate to remote servers.  cptr is about to be
+     * introduced by register_user() with a new numeric; if we suppress
+     * the ghost's QUIT here, remote servers retain the ghost under its
+     * old numeric and the incoming NICK N for cptr collides with it on
+     * same nick/user@host. */
     ClearBouncerHold(ghost);
-    /* Use exit_client to properly clean up the ghost.
-     * Pass a "silent" flag via FLAG_KILLED to suppress QUIT broadcast.
-     */
-    SetFlag(ghost, FLAG_KILLED);
     exit_client(ghost, ghost, &me, "Session resumed");
   }
   /* Cross-server resume: ghost is on another server, initiate transfer */
@@ -2902,23 +2903,23 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * because socket_del triggers ET_DESTROY which calls ssl_free().
    * If we don't NULL it first, the SSL context gets freed before we
    * can transfer it to the ghost.
-   * EQUALLY CRITICAL: Clear temp's s_fd BEFORE socket_del.  In Nefarious's
-   * synchronous event model (event_add == event_execute, see CLAUDE.md),
-   * socket_del fires ET_DESTROY immediately, and the destroy handler in
-   * s_bsd.c:client_sock_callback closes s_fd if it's >= 0.  Without
-   * clearing s_fd here, the ghost's transplanted fd gets close()d by the
-   * kernel during that destroy callback, leaving the ghost with a stale
-   * descriptor.  The subsequent socket_add sees a closed fd → EBADF →
-   * ghost revival fails.  This manifested as clients disconnecting
-   * immediately after SASL success. */
+   * EQUALLY CRITICAL: use socket_del_keepfd so the engine unregisters
+   * fd (epoll_ctl DEL runs while s_fd is still valid) but ET_DESTROY's
+   * close() is skipped (s_fd is zeroed between eng_closing and the
+   * destroy event in the synchronous event model).  Clearing s_fd
+   * before socket_del (as a plain socket_del variant) breaks eng_closing,
+   * leaving the fd registered in epoll — subsequent socket_add on the
+   * ghost fails with EEXIST, revive returns -1, and register_user falls
+   * back to bounce_attach which silently kills the ghost and introduces
+   * a new NICK, colliding with the ghost that's still alive on remote
+   * servers (user@host kill from upstream hub). */
   fd = cli_fd(temp);
   s_data(&cli_socket(temp)) = NULL;
-  s_fd(&cli_socket(temp)) = -1;  /* Prevent ET_DESTROY from closing transplant fd */
 #ifdef USE_SSL
   {
     SSL *temp_ssl = con_socket(temp_con).ssl;
     con_socket(temp_con).ssl = NULL;  /* Prevent ssl_free from freeing it */
-    socket_del(&cli_socket(temp));
+    socket_del_keepfd(&cli_socket(temp));
     cli_fd(temp) = -1;
 
     /* Step 2: Ghost's old fd should be -1 from close_connection() during hold.
@@ -2937,7 +2938,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     con_socket(ghost_con).ssl = temp_ssl;
   }
 #else
-  socket_del(&cli_socket(temp));
+  socket_del_keepfd(&cli_socket(temp));
   cli_fd(temp) = -1;
 
   /* Step 2: Ghost's old fd should be -1 from close_connection() during hold.

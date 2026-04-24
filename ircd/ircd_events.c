@@ -674,6 +674,36 @@ socket_del(struct Socket* sock)
   }
 }
 
+/** Variant of socket_del that preserves the file descriptor so it can be
+ * transplanted to another Socket (e.g., bouncer ghost revival).  Runs
+ * eng_closing with the fd still valid so the engine unregisters it
+ * (epoll_ctl DEL), then zeroes s_fd before ET_DESTROY fires so the
+ * destroy callback's close() is skipped.  Caller has already saved fd.
+ * @param[in] sock Event generator to clear.
+ */
+void
+socket_del_keepfd(struct Socket* sock)
+{
+  assert(0 != sock);
+  assert(!(sock->s_header.gh_flags & GEN_DESTROY));
+  assert(0 != evInfo.engine);
+  assert(0 != evInfo.engine->eng_closing);
+
+  /* Unregister from engine WITH valid fd so epoll_ctl(DEL, fd) runs. */
+  (*evInfo.engine->eng_closing)(sock);
+
+  /* Zero s_fd so the destroy callback's close() is skipped.  Caller
+   * retains the kernel fd via the value they saved before this call. */
+  sock->s_fd = -1;
+
+  sock->s_header.gh_flags |= GEN_DESTROY;
+
+  if (!sock->s_header.gh_ref) {
+    gen_dequeue(sock);
+    event_generate(ET_DESTROY, sock, 0);
+  }
+}
+
 /** Reattach a socket to a new file descriptor without reinitializing
  * the generator header.  This preserves gh_ref and gh_flags, which is
  * critical when the socket is being reattached during an event callback
