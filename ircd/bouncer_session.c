@@ -872,6 +872,15 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
           return BOUNCE_RESUME_ALIAS_LOCAL;
         }
       }
+      /* ACTIVE session with live primary but alias path unavailable
+       * (aliases disabled, max reached, or TLS policy).  Letting this
+       * connection proceed to register_user's NICK N broadcast would
+       * collide with the primary (same user@host) on any upstream hub
+       * that already has the primary.  Reject instead. */
+      Debug((DEBUG_INFO, "Bouncer: rejecting duplicate connection for %s — "
+             "active primary on this network, alias path unavailable", account));
+      *out_session = session;
+      return BOUNCE_RESUME_REJECT_DUPLICATE;
     }
   }
 

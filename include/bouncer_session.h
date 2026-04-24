@@ -581,6 +581,7 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
 #define BOUNCE_RESUME_HELD           1
 #define BOUNCE_RESUME_ALIAS_REMOTE   4
 #define BOUNCE_RESUME_ALIAS_LOCAL    5
+#define BOUNCE_RESUME_REJECT_DUPLICATE 6
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
                                time_t *out_since_time);

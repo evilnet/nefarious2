@@ -558,6 +558,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
              cli_name(sptr)));
     }
 
+    /* An ACTIVE bouncer session with a live primary exists for this
+     * account but the alias path was unavailable (aliases disabled,
+     * max reached, or TLS policy mismatch).  Proceeding with a normal
+     * NICK N introduction would collide with the primary on upstream
+     * servers (same user@host kill).  Reject the duplicate. */
+    if (auto_resumed == BOUNCE_RESUME_REJECT_DUPLICATE) {
+      ++ServerStats->is_ref;
+      return exit_client(cptr, sptr, &me,
+                         "Account already has an active session on this network");
+    }
+
     SetLocalNumNick(sptr);
 
     /* cli_name must be set by NICK before registration proceeds.
