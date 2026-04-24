@@ -639,10 +639,12 @@ int exit_client(struct Client *cptr,
 
     /* Always send ERROR to local user clients before closing, even on
      * voluntary QUIT (where victim == cli_from(killer)).  Modern IRC
-     * clients and test frameworks expect ERROR as the close indicator. */
-    if (IsUser(victim) && !IsConnecting(victim) && !IsDead(victim)) {
+     * clients and test frameworks expect ERROR as the close indicator.
+     * Include IsUserPort to cover pre-registration rejections (e.g.,
+     * SASL required) where SetUser has not been called yet. */
+    if ((IsUser(victim) || IsUserPort(victim)) && !IsConnecting(victim) && !IsDead(victim)) {
       sendrawto_one(victim, MSG_ERROR " :Closing Link: %s by %s (%s)",
-                    cli_name(victim),
+                    cli_name(victim) && *cli_name(victim) ? cli_name(victim) : "*",
                     cli_name(IsServer(killer) ? &his : killer),
                     comment);
     }

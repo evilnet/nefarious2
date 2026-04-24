@@ -1890,6 +1890,67 @@ void bounce_burst(struct Client *cptr)
                       "A %s %s %s",
                       s->hs_account, s->hs_sessid,
                       cli_yxx(s->hs_client));
+
+      /* Burst existing aliases via BX C so the new server learns about
+       * alias Client identities before the channel BURST references
+       * them as members.  Aliases are filtered out of the NICK burst
+       * in s_serv.c (see `!IsBouncerAlias(acptr)` check) because
+       * aliases are introduced via BX C, not N token.  Without this
+       * pass, a server connecting after aliases were auto-created
+       * receives channel BURST entries referring to numerics it was
+       * never introduced to — the receiver logs the alias as
+       * unresolvable and drops JOIN/MODE events for it.  Only ACTIVE
+       * sessions have aliases worth bursting; HOLDING sessions have
+       * at most a ghost primary and no aliases.  Requires s->hs_client
+       * so we can compose the full primary YYXXX numeric for the BX C. */
+      if (s->hs_state == BOUNCE_ACTIVE && s->hs_client
+          && s->hs_alias_count > 0) {
+        char primary_full[6];
+        int a;
+        ircd_snprintf(0, primary_full, sizeof(primary_full), "%s%s",
+                      cli_yxx(cli_user(s->hs_client)->server),
+                      cli_yxx(s->hs_client));
+        for (a = 0; a < s->hs_alias_count; a++) {
+          struct Client *alias;
+          struct Membership *memb;
+          char alias_chans[512];
+          int chans_len = 0;
+          const char *alias_modes;
+
+          alias = findNUser(s->hs_aliases[a].ba_numeric);
+          if (!alias || !IsBouncerAlias(alias))
+            continue;
+
+          /* Build the alias's joined-channel list so the receiver
+           * can re-add the alias to the same channels with
+           * CHFL_ALIAS.  Walk cli_user(alias)->channel directly
+           * (not the primary's channels) — aliases can diverge
+           * from the primary over time via KICK or PART. */
+          alias_chans[0] = '\0';
+          for (memb = cli_user(alias)->channel; memb;
+               memb = memb->next_channel) {
+            if (IsZombie(memb) || IsDelayedJoin(memb))
+              continue;
+            if (chans_len > 0
+                && chans_len < (int)sizeof(alias_chans) - 1)
+              alias_chans[chans_len++] = ' ';
+            chans_len += ircd_snprintf(0, alias_chans + chans_len,
+                                       sizeof(alias_chans) - chans_len,
+                                       "%s", memb->channel->chname);
+          }
+
+          alias_modes = umode_str(alias);
+          sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
+                        "C %s %s %s %s %s%s :%s",
+                        primary_full,
+                        s->hs_aliases[a].ba_numeric,
+                        s->hs_account,
+                        s->hs_sessid,
+                        *alias_modes ? "+" : "+",
+                        alias_modes,
+                        alias_chans);
+        }
+      }
     }
   }
 }
@@ -2434,6 +2495,8 @@ int bounce_promote_alias(struct BouncerSession *session)
   }
   if (IsInvisible(alias))
     ++UserStats.inv_clients;
+  if (IsOper(alias) && !IsHideOper(alias) && !IsChannelService(alias) && !IsBot(alias))
+    ++UserStats.opers;
 
   /* Remove promoted alias from hs_aliases[] */
   if (winner_idx < session->hs_alias_count - 1)
@@ -2838,9 +2901,19 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * IMPORTANT: Also save and NULL the SSL pointer BEFORE socket_del,
    * because socket_del triggers ET_DESTROY which calls ssl_free().
    * If we don't NULL it first, the SSL context gets freed before we
-   * can transfer it to the ghost. */
+   * can transfer it to the ghost.
+   * EQUALLY CRITICAL: Clear temp's s_fd BEFORE socket_del.  In Nefarious's
+   * synchronous event model (event_add == event_execute, see CLAUDE.md),
+   * socket_del fires ET_DESTROY immediately, and the destroy handler in
+   * s_bsd.c:client_sock_callback closes s_fd if it's >= 0.  Without
+   * clearing s_fd here, the ghost's transplanted fd gets close()d by the
+   * kernel during that destroy callback, leaving the ghost with a stale
+   * descriptor.  The subsequent socket_add sees a closed fd → EBADF →
+   * ghost revival fails.  This manifested as clients disconnecting
+   * immediately after SASL success. */
   fd = cli_fd(temp);
   s_data(&cli_socket(temp)) = NULL;
+  s_fd(&cli_socket(temp)) = -1;  /* Prevent ET_DESTROY from closing transplant fd */
 #ifdef USE_SSL
   {
     SSL *temp_ssl = con_socket(temp_con).ssl;

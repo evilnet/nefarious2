@@ -98,6 +98,7 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
+#include <sys/time.h>
 
 /*
  * user_set_away - set user away state
@@ -189,13 +190,24 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
-  /* Presence aggregation path — only when bouncer is active for this account.
-   * Update per-connection state independently, compute the effective
-   * state, then set cli_user->away from the effective result.
+  /* Presence aggregation path — only when bouncer is active for this account
+   * AND this specific connection has an attached session. A user can be
+   * IsAccount() with sessions persisted on their account from other
+   * connections, but if this connection isn't part of a session there's
+   * nothing coherent to aggregate across — fall through to the normal
+   * broadcast path instead. Previously this branch was taken on the
+   * outer account-level predicate and then the broadcast was gated on
+   * `if (bsess)`, which silently dropped the S2S AWAY and the local
+   * away-notify while still sending RPL_NOWAWAY to the client.
    */
-  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
-      && bounce_enabled_for(sptr) && bounce_has_sessions(cli_account(sptr))) {
-    struct BouncerSession *bsess = bounce_get_session(sptr);
+  {
+    struct BouncerSession *bsess = NULL;
+    if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
+        && bounce_enabled_for(sptr) && bounce_has_sessions(cli_account(sptr))) {
+      bsess = bounce_get_session(sptr);
+    }
+
+    if (bsess) {
     int new_effective = 0;
     char new_msg[AWAYLEN + 1];
     int is_away = !EmptyString(away_message);
@@ -222,7 +234,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
 
     /* Compute effective state across all connections */
-    if (bsess) {
+    {
       int prev_effective = bsess->hs_effective_away;
       bounce_compute_effective_away(bsess, &new_effective, new_msg);
 
@@ -292,9 +304,12 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* If effective state unchanged: suppress broadcast */
     }
     return 0;
+    }
   }
 
-  /* Original non-aggregated path */
+  /* Non-aggregated path — used when there is no bouncer session for
+   * this connection (including account users whose current connection
+   * isn't attached to a session). */
   is_away = user_set_away(cli_user(sptr), away_message);
   {
     char away_msgid[64] = "";

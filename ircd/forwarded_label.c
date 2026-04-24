@@ -19,6 +19,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <sys/time.h>
 
 /** Terminal numeric table for forwarded commands.
  * Maps command names to their terminal numeric(s). Error numerics

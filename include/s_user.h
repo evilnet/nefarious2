@@ -14,6 +14,7 @@ struct User;
 struct Channel;
 struct MsgBuf;
 struct Flags;
+struct ConfItem;
 
 /*
  * Macros

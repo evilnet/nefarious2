@@ -94,6 +94,7 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
+#include <sys/time.h>
 
 /*
  * m_setname - local client message handler
