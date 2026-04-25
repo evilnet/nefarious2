@@ -561,6 +561,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
                 "register_user: alias setup failed for %s, rejecting "
                 "(auto_resumed=%d)", cli_name(sptr), auto_resumed);
       ++ServerStats->is_ref;
+      /* sptr has no P10 numeric yet (SetLocalNumNick hasn't run) and was
+       * never introduced to peers, so we must not broadcast QUIT — the
+       * source would degrade to just our server prefix and upstream
+       * servers parse it as ":<server> Q" (Server QUIT, not SQUIT
+       * protocol violation).  FLAG_KILLED suppresses the QUIT broadcast
+       * in exit_one_client. */
+      SetFlag(sptr, FLAG_KILLED);
       return exit_client(cptr, sptr, &me,
                          "Could not attach as alias to existing session");
     }
@@ -572,6 +579,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
      * servers (same user@host kill).  Reject the duplicate. */
     if (auto_resumed == BOUNCE_RESUME_REJECT_DUPLICATE) {
       ++ServerStats->is_ref;
+      /* See note above: no numeric, no prior introduction → no QUIT. */
+      SetFlag(sptr, FLAG_KILLED);
       return exit_client(cptr, sptr, &me,
                          "Account already has an active session on this network");
     }
