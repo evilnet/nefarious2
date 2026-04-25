@@ -397,8 +397,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     if (MyUser(bcptr))
       del_list_watch(bcptr);
     /* Notify Logout — for local users, already done in exit_client()
-     * before close_connection(). Only fire here for remote users. */
-    if (!IsDead(bcptr))
+     * before close_connection(). Only fire here for remote users.
+     * Skip aliases — they share the primary's nick. */
+    if (!IsDead(bcptr) && !IsBouncerAlias(bcptr))
       check_status_watch(bcptr, RPL_LOGOFF);
 
     /* Clean up snotice lists */
@@ -685,8 +686,12 @@ int exit_client(struct Client *cptr,
     /* Send MONITOR/WATCH offline notifications BEFORE closing the socket.
      * This ensures watchers receive 731/RPL_LOGOFF while the victim's
      * connection is still open (preventing ConnectionClosed vs RST issues).
-     * For local users, we do this here; exit_one_client skips the duplicate. */
-    if (IsUser(victim))
+     * For local users, we do this here; exit_one_client skips the duplicate.
+     *
+     * Skip aliases — an alias shares the primary's nick. Firing LOGOFF for
+     * an alias exit produces a phantom "user offline" notification while the
+     * primary remains connected. */
+    if (IsUser(victim) && !IsBouncerAlias(victim))
       check_status_watch(victim, RPL_LOGOFF);
     /*
      *  Close the Client connection first.

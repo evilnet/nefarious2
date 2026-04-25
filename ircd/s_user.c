@@ -940,8 +940,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
   }
 
-  /* Notify new local/remote user */
-  check_status_watch(sptr, RPL_LOGON);
+  /* Notify new local/remote user.
+   * Skip aliases — they share the primary's nick, and the primary's own
+   * registration already fired the LOGON for this nick. Firing here would
+   * produce a phantom second "online" notification. */
+  if (!IsBouncerAlias(sptr))
+    check_status_watch(sptr, RPL_LOGON);
 
   return 0;
 }
@@ -1114,8 +1118,10 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
     {
     int case_only_change = IsUser(sptr) && (ircd_strcmp(cli_name(sptr), nick) == 0);
     if (IsUser(sptr)) {
-      /* Notify exit user — skip for case-only nick changes (same nick per RFC1459) */
-      if (!case_only_change)
+      /* Notify exit user — skip for case-only nick changes (same nick per
+       * RFC1459) and for aliases (which share the primary's nick; the
+       * primary's own NICK handling fires the LOGOFF for this nick). */
+      if (!case_only_change && !IsBouncerAlias(sptr))
         check_status_watch(sptr, RPL_LOGOFF);
 
       /* Generate msgid for NICK change so clients get @msgid tag */
@@ -1213,8 +1219,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
     strcpy(cli_name(sptr), nick);
     hAddClient(sptr);
 
-    /* Notify change nick local/remote user — skip for case-only changes */
-    if (!case_only_change)
+    /* Notify change nick local/remote user — skip for case-only changes
+     * and for aliases (shared primary nick — see RPL_LOGOFF site above). */
+    if (!case_only_change && !IsBouncerAlias(sptr))
       check_status_watch(sptr, RPL_LOGON);
     } /* end case_only_change scope */
   }
