@@ -557,8 +557,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
        * on the network.  We cannot fall through to normal registration
        * — the NICK N broadcast would collide with the primary on any
        * upstream server (same user@host kill).  Reject. */
-      Debug((DEBUG_INFO, "register_user: alias setup failed for %s, rejecting",
-             cli_name(sptr)));
+      log_write(LS_USER, L_INFO, 0,
+                "register_user: alias setup failed for %s, rejecting "
+                "(auto_resumed=%d)", cli_name(sptr), auto_resumed);
       ++ServerStats->is_ref;
       return exit_client(cptr, sptr, &me,
                          "Could not attach as alias to existing session");

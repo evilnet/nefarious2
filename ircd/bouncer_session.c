@@ -756,10 +756,17 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
           && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
         *out_session = session;
-        Debug((DEBUG_INFO, "Bouncer: alias path for %s session %s (primary on %s)",
-               account, session->hs_sessid, cli_name(managing_server)));
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: HELD alias_remote path for %s session %s (primary on %s)",
+                  account, session->hs_sessid, cli_name(managing_server));
         return BOUNCE_RESUME_ALIAS_REMOTE;
       }
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: HELD remote alias unavailable for %s session %s "
+                "(managing_server=%p ALIASES=%d hs_client=%p alias_count=%u)",
+                account, session->hs_sessid, (void*)managing_server,
+                feature_bool(FEAT_BOUNCER_ALIASES),
+                (void*)session->hs_client, session->hs_alias_count);
       /* Alias not possible — fall through to try other sessions */
     } else {
     /* Local session — proceed with normal resume */
@@ -832,6 +839,12 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
    * per-account limit, so we must reclaim them rather than creating new ones. */
   session = bounce_find_any_session(account);
   if (session && session->hs_state == BOUNCE_ACTIVE) {
+    log_write(LS_USER, L_INFO, 0,
+              "Bouncer: ACTIVE session %s found for %s "
+              "(origin=%s me=%s hs_client=%p alias_count=%u)",
+              session->hs_sessid, account, session->hs_origin,
+              cli_yxx(&me), (void*)session->hs_client,
+              session->hs_alias_count);
     /* Check if session is on a remote server */
     if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
       struct Client *managing_server = FindNServer(session->hs_origin);
@@ -839,20 +852,31 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
           && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
         *out_session = session;
-        Debug((DEBUG_INFO, "Bouncer: alias path for %s active session %s (primary on %s)",
-               account, session->hs_sessid, cli_name(managing_server)));
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: ACTIVE alias_remote path for %s session %s (primary on %s)",
+                  account, session->hs_sessid, cli_name(managing_server));
         return BOUNCE_RESUME_ALIAS_REMOTE;
       }
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: ACTIVE remote alias unavailable for %s "
+                "(managing_server=%p ALIASES=%d hs_client=%p alias_count=%u)",
+                account, (void*)managing_server,
+                feature_bool(FEAT_BOUNCER_ALIASES),
+                (void*)session->hs_client, session->hs_alias_count);
     }
     if (!session->hs_client) {
       /* Orphaned ACTIVE session — reclaim as primary */
-      Debug((DEBUG_INFO, "Bouncer: reclaiming orphaned ACTIVE session %s for %s",
-             session->hs_sessid, cli_name(cptr)));
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: reclaiming orphaned ACTIVE session %s for %s",
+                session->hs_sessid, cli_name(cptr));
       if (bounce_attach(session, cptr) == 0) {
         bounce_broadcast(session, 'A', cli_yxx(cptr));
         *out_session = session;
         return 1;
       }
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: orphan reclaim (bounce_attach) FAILED for %s session %s",
+                account, session->hs_sessid);
     } else {
       /* ACTIVE session with primary — attach as alias connection */
       if (feature_bool(FEAT_BOUNCER_ALIASES)
@@ -861,13 +885,15 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
 #ifdef USE_SSL
         /* Respect BOUNCER_REQUIRE_TLS for aliases too */
         if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
-          Debug((DEBUG_INFO, "Bouncer: skipping alias for plaintext client %s (REQUIRE_TLS)",
-                 cli_name(cptr)));
+          log_write(LS_USER, L_INFO, 0,
+                    "Bouncer: skipping alias for plaintext client of %s (REQUIRE_TLS)",
+                    account);
         } else
 #endif
         {
-          Debug((DEBUG_INFO, "Bouncer: local alias path for %s session %s",
-                 account, session->hs_sessid));
+          log_write(LS_USER, L_INFO, 0,
+                    "Bouncer: ACTIVE alias_local path for %s session %s",
+                    account, session->hs_sessid);
           *out_session = session;
           return BOUNCE_RESUME_ALIAS_LOCAL;
         }
@@ -877,8 +903,12 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * connection proceed to register_user's NICK N broadcast would
        * collide with the primary (same user@host) on any upstream hub
        * that already has the primary.  Reject instead. */
-      Debug((DEBUG_INFO, "Bouncer: rejecting duplicate connection for %s — "
-             "active primary on this network, alias path unavailable", account));
+      log_write(LS_USER, L_INFO, 0,
+                "Bouncer: REJECT_DUPLICATE for %s session %s "
+                "(ALIASES=%d alias_count=%u)",
+                account, session->hs_sessid,
+                feature_bool(FEAT_BOUNCER_ALIASES),
+                session->hs_alias_count);
       *out_session = session;
       return BOUNCE_RESUME_REJECT_DUPLICATE;
     }
@@ -3814,17 +3844,25 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   /* The primary must exist on the network (remote Client from N token) */
   primary = session->hs_client;
   if (!primary || !IsUser(primary)) {
-    Debug((DEBUG_INFO, "bounce_setup_local_alias: no primary for session %s",
-           session->hs_sessid));
+    log_write(LS_USER, L_INFO, 0,
+              "bounce_setup_local_alias: no primary for session %s "
+              "(primary=%p IsUser=%d)",
+              session->hs_sessid, (void*)primary,
+              primary ? IsUser(primary) : 0);
     return -1;
   }
 
   user = cli_user(sptr);
-  if (!user)
+  if (!user) {
+    log_write(LS_USER, L_INFO, 0,
+              "bounce_setup_local_alias: sptr has no User struct (session %s)",
+              session->hs_sessid);
     return -1;
+  }
 
-  Debug((DEBUG_INFO, "bounce_setup_local_alias: converting %s to alias of %s (session %s)",
-         cli_name(sptr), cli_name(primary), session->hs_sessid));
+  log_write(LS_USER, L_INFO, 0,
+            "bounce_setup_local_alias: converting %s to alias of %s (session %s)",
+            cli_name(sptr), cli_name(primary), session->hs_sessid);
 
   /* --- Step 0: Complete IPcheck connect ---
    * The alias keeps its own real socket IP (not overwritten from primary),
@@ -3894,7 +3932,9 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 
   /* --- Step 4: Allocate local P10 numeric --- */
   if (!SetLocalNumNick(sptr)) {
-    Debug((DEBUG_INFO, "bounce_setup_local_alias: no numerics available for alias"));
+    log_write(LS_USER, L_INFO, 0,
+              "bounce_setup_local_alias: SetLocalNumNick failed (numeric pool "
+              "exhausted) for session %s", session->hs_sessid);
     /* Restore nick hash entry since we removed it in step 1 */
     hAddClient(sptr);
     return -1;
