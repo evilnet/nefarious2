@@ -1147,7 +1147,6 @@ static struct FeatureDesc {
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
   F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, 0),    /* periodic persist interval (seconds) */
-  F_B(BOUNCER_ALIASES, 0, 0, 0),             /* alias numerics for multi-server presence */
   F_B(CAP_draft_bouncer, 0, 1, feature_notify_cap_draft_bouncer),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL

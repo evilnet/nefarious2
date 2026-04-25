@@ -752,8 +752,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                       session->hs_origin, session->hs_ghost_numeric);
         session->hs_client = findNUser(full_numeric);
       }
-      if (managing_server && feature_bool(FEAT_BOUNCER_ALIASES)
-          && session->hs_client
+      if (managing_server && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
         *out_session = session;
         log_write(LS_USER, L_INFO, 0,
@@ -763,9 +762,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       }
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: HELD remote alias unavailable for %s session %s "
-                "(managing_server=%p ALIASES=%d hs_client=%p alias_count=%u)",
+                "(managing_server=%p hs_client=%p alias_count=%u)",
                 account, session->hs_sessid, (void*)managing_server,
-                feature_bool(FEAT_BOUNCER_ALIASES),
                 (void*)session->hs_client, session->hs_alias_count);
       /* Alias not possible — fall through to try other sessions */
     } else {
@@ -848,8 +846,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
     /* Check if session is on a remote server */
     if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
       struct Client *managing_server = FindNServer(session->hs_origin);
-      if (managing_server && feature_bool(FEAT_BOUNCER_ALIASES)
-          && session->hs_client
+      if (managing_server && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
         *out_session = session;
         log_write(LS_USER, L_INFO, 0,
@@ -859,9 +856,8 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
       }
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: ACTIVE remote alias unavailable for %s "
-                "(managing_server=%p ALIASES=%d hs_client=%p alias_count=%u)",
+                "(managing_server=%p hs_client=%p alias_count=%u)",
                 account, (void*)managing_server,
-                feature_bool(FEAT_BOUNCER_ALIASES),
                 (void*)session->hs_client, session->hs_alias_count);
     }
     if (!session->hs_client) {
@@ -879,9 +875,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                 account, session->hs_sessid);
     } else {
       /* ACTIVE session with primary — attach as alias connection */
-      if (feature_bool(FEAT_BOUNCER_ALIASES)
-          && session->hs_client
-          && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+      if (session->hs_alias_count < BOUNCER_MAX_ALIASES) {
 #ifdef USE_SSL
         /* Respect BOUNCER_REQUIRE_TLS for aliases too */
         if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
@@ -898,16 +892,15 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
           return BOUNCE_RESUME_ALIAS_LOCAL;
         }
       }
-      /* ACTIVE session with live primary but alias path unavailable
-       * (aliases disabled, max reached, or TLS policy).  Letting this
-       * connection proceed to register_user's NICK N broadcast would
-       * collide with the primary (same user@host) on any upstream hub
-       * that already has the primary.  Reject instead. */
+      /* ACTIVE session with live primary but no alias slot available
+       * (max reached, or TLS policy).  Letting this connection proceed
+       * to register_user's NICK N broadcast would collide with the
+       * primary (same user@host) on any upstream hub that already has
+       * the primary.  Reject instead. */
       log_write(LS_USER, L_INFO, 0,
                 "Bouncer: REJECT_DUPLICATE for %s session %s "
-                "(ALIASES=%d alias_count=%u)",
+                "(alias_count=%u)",
                 account, session->hs_sessid,
-                feature_bool(FEAT_BOUNCER_ALIASES),
                 session->hs_alias_count);
       *out_session = session;
       return BOUNCE_RESUME_REJECT_DUPLICATE;
