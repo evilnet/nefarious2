@@ -201,9 +201,9 @@ crypt_mechs_t* crypt_mech;
   return hashed_pass;
  }
 
- /* try bcrypt ($2a$, $2b$, $2y$) - pass directly to system crypt */
+ /* try bcrypt ($2a$, $2b$, $2x$, $2y$) - pass directly to system crypt */
  if (strlen(salt) > 4 && salt[0] == '$' && salt[1] == '2' &&
-     (salt[2] == 'a' || salt[2] == 'b' || salt[2] == 'y') && salt[3] == '$')
+     (salt[2] == 'a' || salt[2] == 'b' || salt[2] == 'x' || salt[2] == 'y') && salt[3] == '$')
  {
    char *s;
    Debug((DEBUG_DEBUG, "ircd_crypt: detected bcrypt hash"));
