@@ -553,13 +553,19 @@ int register_user(struct Client *cptr, struct Client *sptr)
       int alias_result = bounce_setup_local_alias(sptr, auto_session);
       if (alias_result == 0)
         return 0;  /* Alias setup complete — client is alive */
-      /* Alias setup failed — fall through to normal registration */
-      Debug((DEBUG_INFO, "register_user: alias setup failed for %s, falling through",
+      /* Alias setup failed for an account with a live primary already
+       * on the network.  We cannot fall through to normal registration
+       * — the NICK N broadcast would collide with the primary on any
+       * upstream server (same user@host kill).  Reject. */
+      Debug((DEBUG_INFO, "register_user: alias setup failed for %s, rejecting",
              cli_name(sptr)));
+      ++ServerStats->is_ref;
+      return exit_client(cptr, sptr, &me,
+                         "Could not attach as alias to existing session");
     }
 
     /* An ACTIVE bouncer session with a live primary exists for this
-     * account but the alias path was unavailable (aliases disabled,
+     * account but the alias path was never attempted (aliases disabled,
      * max reached, or TLS policy mismatch).  Proceeding with a normal
      * NICK N introduction would collide with the primary on upstream
      * servers (same user@host kill).  Reject the duplicate. */
