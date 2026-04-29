@@ -335,6 +335,19 @@ set_isupport_extbans(void)
       strcat(imaxlist, "M");
 
     add_isupport_s("EXTBANS", imaxlist);
+
+    /* IRCv3 account-extban (ratified 2026-03-18, #587):
+     * Servers publishing ACCOUNTEXTBAN MUST also publish EXTBAN. We
+     * publish EXTBANS (plural, historic) instead — separate compat
+     * concern. ACCOUNTEXTBAN value is the comma-separated list of
+     * extban-type names that match against account names; for us
+     * that's just 'a'. */
+    if (feature_bool(FEAT_EXTBAN_a))
+      add_isupport_s("ACCOUNTEXTBAN", "a");
+    else
+      del_isupport("ACCOUNTEXTBAN");
+  } else {
+    del_isupport("ACCOUNTEXTBAN");
   }
 }
 
