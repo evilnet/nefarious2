@@ -1572,6 +1572,28 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
   /* Set creation timestamp to original time (wins nick collisions: older wins) */
   cli_lastnick(ghost) = (time_t)rec->bsr_created;
 
+  /* Account the ghost as a local client. The intent (per BOUNCER STATUS audit
+   * comment in m_bouncer.c) is that holding ghosts are counted in
+   * UserStats.local_clients until the session is destroyed. The original
+   * primary's disconnect already ran Count_clientdisconnects when its socket
+   * closed; without the matching ++ here we under-count by 1 per ghost.
+   *
+   * unknowns is NOT touched: the ghost was never a STAT_UNKNOWN TCP
+   * connection on this server (it's spawned synthetically). When the ghost
+   * eventually exits via exit_one_client → IsUser branch →
+   * Count_clientdisconnects, only local_clients/clients are decremented,
+   * so this is balanced. */
+  ++UserStats.local_clients;
+  ++UserStats.clients;
+  if (UserStats.local_clients > UserStats.local_clients_max) {
+    UserStats.local_clients_max = UserStats.local_clients;
+    save_tunefile();
+  }
+  if (UserStats.clients > UserStats.clients_max) {
+    UserStats.clients_max = UserStats.clients;
+    save_tunefile();
+  }
+
   /* Register in global structures */
   add_client_to_list(ghost);
   hAddClient(ghost);
