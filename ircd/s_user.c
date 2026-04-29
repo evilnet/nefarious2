@@ -3076,12 +3076,9 @@ void init_isupport(void)
     if (feature_bool(FEAT_EXTBAN_r))
       strcat(extbanbuf, "r");
 
-    /* EXTBAN is the ratified token name; EXTBANS is our historic
-     * non-conformant spelling, kept as a deprecated alias during
-     * transition. See set_isupport_extbans() in ircd_features.c for
-     * the matching note. */
+    /* EXTBAN is the canonical ISUPPORT token, predating IRCv3.
+     * Our previous EXTBANS spelling was idiosyncratic. */
     add_isupport_s("EXTBAN", extbanbuf);
-    add_isupport_s("EXTBANS", extbanbuf);
   }
 
   add_isupport_s("CASEMAPPING", "rfc1459");
