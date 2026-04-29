@@ -316,12 +316,21 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   }
   if (IsUser(bcptr)) {
     /* Bouncer aliases: minimal silent teardown.
-     * No QUIT to channels, no chathistory, no UserStats.
+     * No QUIT to channels, no chathistory.
      * Just remove from channels, numeric space, and client list.
-     * Local aliases do need IPcheck_disconnect for their real socket IP. */
+     * Local aliases do need IPcheck_disconnect for their real socket IP, and
+     * also need Count_clientdisconnects: a local alias went through
+     * Count_unknownbecomesclient during register_user (before
+     * bounce_setup_local_alias re-purposed it), so its slot in
+     * UserStats.local_clients/clients must be released here.  Remote aliases
+     * (created via BX C in bounce_alias_create) bypass Count_newremoteclient
+     * entirely, so they have nothing to decrement. */
     if (IsBouncerAlias(bcptr)) {
-      if (MyConnect(bcptr) && IsIPChecked(bcptr))
-        IPcheck_disconnect(bcptr);
+      if (MyConnect(bcptr)) {
+        if (IsIPChecked(bcptr))
+          IPcheck_disconnect(bcptr);
+        Count_clientdisconnects(bcptr, UserStats);
+      }
       if (MyUser(bcptr))
         del_list_watch(bcptr);
       bounce_alias_untrack(bcptr);

@@ -20,16 +20,23 @@
  * @brief BOUNCER command handler - client-facing bouncer management.
  *
  * User subcommands:
+ *   BOUNCER HELP [subcommand]   - Subcommand listing or per-command help
  *   BOUNCER SET HOLD [on|off]   - Set hold preference
  *   BOUNCER INFO                - Show session state and preferences
  *   BOUNCER LISTCLIENTS         - List all connections for the session
+ *   BOUNCER HISTORY [sessid]    - Show connection history for a session
  *
  * Oper-only subcommands (for admin/testing):
  *   BOUNCER TOKEN          - Request a new session token
  *   BOUNCER RESUME <token> - Resume a session by token
- *   BOUNCER LISTSESSIONS   - List sessions for current account
+ *   BOUNCER LISTSESSIONS [*|all] - List sessions; "*" lists every session on
+ *                          this server (account name prefixed each row)
+ *   BOUNCER STATUS         - Server-wide bouncer accounting audit;
+ *                          compares walker counts against UserStats and
+ *                          LocalClientArray and reports drift
  *   BOUNCER DISCONNECT <id>- Disconnect/destroy a session
  *   BOUNCER SETNAME <id> <name> - Name a session
+ *   BOUNCER SETTINGS       - Show bouncer subsystem settings
  */
 #include "config.h"
 
@@ -50,7 +57,9 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "querycmds.h"
 #include "replay.h"
+#include "s_bsd.h"
 #include "send.h"
 #include "s_debug.h"
 
@@ -164,11 +173,95 @@ static int bouncer_resume(struct Client *sptr, const char *token)
 /* Subcommand: LISTSESSIONS                                          */
 /* ---------------------------------------------------------------- */
 
-/** Handle BOUNCER LISTSESSIONS - list sessions for current account. */
-static int bouncer_listsessions(struct Client *sptr)
+/** Emit one RPL_BOUNCERSESSION row to sptr.  Shared between the
+ * own-account and all-sessions listing paths.  When include_account is
+ * non-zero (all-sessions mode), the account name is prefixed onto the
+ * info string so opers can see who the session belongs to. */
+static void bouncer_listsessions_emit(struct Client *sptr,
+                                      struct BouncerSession *s,
+                                      int include_account)
+{
+  const char *state_str;
+  char info[320];
+  char *p = info;
+  int rem = sizeof(info);
+  int n;
+
+  state_str = (s->hs_state == BOUNCE_ACTIVE) ? "active" : "holding";
+
+  if (include_account) {
+    n = ircd_snprintf(0, p, rem, "%s ", s->hs_account);
+    if (n < 0 || n >= rem) return;
+    p += n;
+    rem -= n;
+  }
+
+  if (s->hs_state == BOUNCE_HOLDING && s->hs_disconnect_time) {
+    time_t hold_time = bounce_compute_hold_time_ext(s);
+    time_t remaining = hold_time -
+                       (CurrentTime - s->hs_disconnect_time);
+    if (remaining < 0)
+      remaining = 0;
+    ircd_snprintf(0, p, rem, "%s %s %s %ldm connects:%u aliases:%d",
+                  s->hs_sessid,
+                  s->hs_name[0] ? s->hs_name : "*",
+                  state_str,
+                  (long)(remaining / 60),
+                  s->hs_connect_count,
+                  s->hs_alias_count);
+  } else {
+    ircd_snprintf(0, p, rem, "%s %s %s connects:%u aliases:%d",
+                  s->hs_sessid,
+                  s->hs_name[0] ? s->hs_name : "*",
+                  state_str,
+                  s->hs_connect_count,
+                  s->hs_alias_count);
+  }
+
+  sendrawto_one(sptr, ":%s %d %s %s",
+                cli_name(&me), RPL_BOUNCERSESSION, cli_name(sptr),
+                info);
+}
+
+/** Walker callback for all-sessions listing mode. */
+static void bouncer_listsessions_walker(struct BouncerSession *s, void *data)
+{
+  struct Client *sptr = (struct Client *)data;
+  bouncer_listsessions_emit(sptr, s, 1);
+}
+
+/** Handle BOUNCER LISTSESSIONS [scope].
+ *
+ * Default: list sessions for the requesting account.
+ * Scope "*" or "all" (oper-only): list every session known to this server,
+ *   including ones whose primary lives on a remote server.  Account name
+ *   is prepended to each row in this mode.
+ *
+ * The all-sessions mode is the canonical way to audit server-wide session
+ * state — pairs with BOUNCER STATUS for accounting verification.
+ */
+static int bouncer_listsessions(struct Client *sptr, int parc, char *parv[])
 {
   struct AccountSessions *as;
   struct BouncerSession *s;
+  int all_mode = 0;
+
+  if (parc >= 3 && parv[2] && *parv[2]) {
+    if (0 == strcmp(parv[2], "*") || 0 == ircd_strcmp(parv[2], "all"))
+      all_mode = 1;
+  }
+
+  if (all_mode) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "LISTSESSIONS",
+                "All-sessions mode requires oper privileges");
+      return 0;
+    }
+    bounce_walk_sessions(bouncer_listsessions_walker, sptr);
+    sendrawto_one(sptr, ":%s %d %s :End of session list (all sessions)",
+                  cli_name(&me), RPL_BOUNCERSETTINGS, cli_name(sptr));
+    return 0;
+  }
 
   if (!IsAccount(sptr)) {
     send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", NULL,
@@ -183,39 +276,133 @@ static int bouncer_listsessions(struct Client *sptr)
     return 0;
   }
 
-  for (s = as->as_sessions; s; s = s->hs_anext) {
-    const char *state_str;
-    char info[256];
-
-    state_str = (s->hs_state == BOUNCE_ACTIVE) ? "active" : "holding";
-
-    if (s->hs_state == BOUNCE_HOLDING && s->hs_disconnect_time) {
-      time_t hold_time = bounce_compute_hold_time_ext(s);
-      time_t remaining = hold_time -
-                         (CurrentTime - s->hs_disconnect_time);
-      if (remaining < 0)
-        remaining = 0;
-      ircd_snprintf(0, info, sizeof(info), "%s %s %s %ldm connects:%u",
-                    s->hs_sessid,
-                    s->hs_name[0] ? s->hs_name : "*",
-                    state_str,
-                    (long)(remaining / 60),
-                    s->hs_connect_count);
-    } else {
-      ircd_snprintf(0, info, sizeof(info), "%s %s %s connects:%u",
-                    s->hs_sessid,
-                    s->hs_name[0] ? s->hs_name : "*",
-                    state_str,
-                    s->hs_connect_count);
-    }
-
-    sendrawto_one(sptr, ":%s %d %s %s",
-                  cli_name(&me), RPL_BOUNCERSESSION, cli_name(sptr),
-                  info);
-  }
+  for (s = as->as_sessions; s; s = s->hs_anext)
+    bouncer_listsessions_emit(sptr, s, 0);
 
   return 0;
 }
+
+/* ---------------------------------------------------------------- */
+/* Subcommand: STATUS                                                */
+/* ---------------------------------------------------------------- */
+
+/** Aggregate counters built up during a bounce_walk_sessions sweep. */
+struct BouncerStatusCounts {
+  unsigned int total_sessions;
+  unsigned int active_sessions;
+  unsigned int holding_sessions;
+  unsigned int local_primary_active;   /* hs_client local, ACTIVE */
+  unsigned int local_primary_holding;  /* hs_client local, HOLDING (ghost) */
+  unsigned int remote_primary;         /* hs_client on a remote server */
+  unsigned int orphan_session;         /* no hs_client at all */
+  unsigned int total_aliases;          /* sum of hs_alias_count */
+};
+
+static void bouncer_status_walker(struct BouncerSession *s, void *data)
+{
+  struct BouncerStatusCounts *c = (struct BouncerStatusCounts *)data;
+  c->total_sessions++;
+  if (s->hs_state == BOUNCE_ACTIVE)
+    c->active_sessions++;
+  else if (s->hs_state == BOUNCE_HOLDING)
+    c->holding_sessions++;
+  if (!s->hs_client)
+    c->orphan_session++;
+  else if (MyUser(s->hs_client)) {
+    if (s->hs_state == BOUNCE_HOLDING)
+      c->local_primary_holding++;
+    else
+      c->local_primary_active++;
+  } else {
+    c->remote_primary++;
+  }
+  c->total_aliases += s->hs_alias_count;
+}
+
+/** Handle BOUNCER STATUS - server-wide bouncer accounting.
+ *
+ * Oper-only.  Compares walker-derived session/alias counts against
+ * UserStats and the LocalClientArray walk so drift is visible at a
+ * glance.  Use in tandem with BOUNCER LISTSESSIONS * for audits.
+ */
+static int bouncer_status(struct Client *sptr)
+{
+  struct BouncerStatusCounts c;
+  unsigned int la_users = 0;        /* IsUser entries in LocalClientArray */
+  unsigned int la_aliases = 0;      /* IsBouncerAlias entries */
+  unsigned int la_servers = 0;      /* IsServer entries */
+  unsigned int la_unknown = 0;      /* in-progress / unregistered */
+  int fd;
+  char buf[400];
+  long drift;
+
+  memset(&c, 0, sizeof(c));
+  bounce_walk_sessions(bouncer_status_walker, &c);
+
+  for (fd = 0; fd <= HighestFd; fd++) {
+    struct Client *acptr = LocalClientArray[fd];
+    if (!acptr)
+      continue;
+    if (IsServer(acptr)) {
+      la_servers++;
+    } else if (IsUser(acptr)) {
+      la_users++;
+      if (IsBouncerAlias(acptr))
+        la_aliases++;
+    } else {
+      la_unknown++;
+    }
+  }
+
+  ircd_snprintf(0, buf, sizeof(buf),
+                "userstats local_clients=%u clients=%u unknowns=%u "
+                "servers=%u local_servers=%u",
+                UserStats.local_clients, UserStats.clients,
+                UserStats.unknowns, UserStats.servers,
+                UserStats.local_servers);
+  send_note(sptr, "BOUNCER", "STATUS", "userstats", buf);
+
+  ircd_snprintf(0, buf, sizeof(buf),
+                "sessions total=%u active=%u holding=%u "
+                "local_primary_active=%u local_primary_holding=%u "
+                "remote_primary=%u orphan=%u total_aliases=%u",
+                c.total_sessions, c.active_sessions, c.holding_sessions,
+                c.local_primary_active, c.local_primary_holding,
+                c.remote_primary, c.orphan_session, c.total_aliases);
+  send_note(sptr, "BOUNCER", "STATUS", "sessions", buf);
+
+  ircd_snprintf(0, buf, sizeof(buf),
+                "localarray fd_attached=%u users=%u aliases=%u "
+                "servers=%u unregistered=%u highest_fd=%d",
+                la_users + la_servers + la_unknown,
+                la_users, la_aliases, la_servers, la_unknown,
+                HighestFd);
+  send_note(sptr, "BOUNCER", "STATUS", "localarray", buf);
+
+  /* Audit: UserStats.local_clients should equal (LocalClientArray users) +
+   * (locally-managed holding ghosts).  Held ghosts have no fd so they
+   * are absent from LocalClientArray but still counted in local_clients
+   * until the session is destroyed, which is by design.
+   *
+   * drift > 0 means UserStats.local_clients is inflated relative to
+   * the sum of in-list users + holding ghosts → leak.
+   * drift < 0 would mean it's deflated → over-decrement somewhere. */
+  drift = (long)UserStats.local_clients
+        - (long)(la_users + c.local_primary_holding);
+
+  ircd_snprintf(0, buf, sizeof(buf),
+                "audit local_clients_drift=%ld "
+                "(expected=%u local_clients=%u; "
+                "expected = la_users[%u] + local_holding[%u])",
+                drift,
+                la_users + c.local_primary_holding,
+                UserStats.local_clients,
+                la_users, c.local_primary_holding);
+  send_note(sptr, "BOUNCER", "STATUS", "audit", buf);
+
+  return 0;
+}
+
 
 /* ---------------------------------------------------------------- */
 /* Subcommand: DISCONNECT                                            */
@@ -737,13 +924,107 @@ static int bouncer_history(struct Client *sptr, int parc, char *parv[])
 }
 
 /* ---------------------------------------------------------------- */
+/* Subcommand: HELP                                                  */
+/* ---------------------------------------------------------------- */
+
+/** One row of help text. */
+struct BouncerHelpRow {
+  const char *name;       /* Subcommand name */
+  const char *args;       /* Argument syntax (or "" for none) */
+  const char *desc;       /* One-line description */
+  int oper_only;          /* Non-zero if only opers may call */
+};
+
+static const struct BouncerHelpRow bouncer_help_rows[] = {
+  /* User-facing */
+  { "HELP",         "[subcommand]",
+    "Show this help (or detail for one subcommand)",                0 },
+  { "INFO",         "",
+    "Show your session state, hold preference, and stats",          0 },
+  { "SET",          "HOLD on|off|default",
+    "Configure session hold preference",                            0 },
+  { "LISTCLIENTS",  "",
+    "List the primary and aliases attached to your session",        0 },
+  { "HISTORY",      "[sessid]",
+    "Show connection history for your session",                     0 },
+
+  /* Oper-only */
+  { "TOKEN",        "",
+    "Create a new session and return its resume token",             1 },
+  { "RESUME",       "<token>",
+    "Resume a session by its token",                                1 },
+  { "LISTSESSIONS", "[*|all]",
+    "List sessions; \"*\" lists every session on this server",      1 },
+  { "STATUS",       "",
+    "Server-wide accounting audit (UserStats vs walker counts)",    1 },
+  { "DISCONNECT",   "<sessid>",
+    "Destroy a session by its ID",                                  1 },
+  { "SETNAME",      "<sessid> <name>",
+    "Assign a friendly name to a session",                          1 },
+  { "SETTINGS",     "",
+    "Show bouncer subsystem settings",                              1 },
+};
+
+/** Handle BOUNCER HELP [subcommand]. */
+static int bouncer_help(struct Client *sptr, int parc, char *parv[])
+{
+  unsigned int i;
+  int is_oper = (IsOper(sptr) || IsAnOper(sptr));
+  const char *target = (parc >= 3 && parv[2] && *parv[2]) ? parv[2] : NULL;
+  char line[256];
+
+  if (target) {
+    for (i = 0; i < sizeof(bouncer_help_rows)/sizeof(bouncer_help_rows[0]);
+         i++) {
+      const struct BouncerHelpRow *r = &bouncer_help_rows[i];
+      if (0 != ircd_strcmp(target, r->name))
+        continue;
+      if (r->oper_only && !is_oper)
+        break;  /* fall through to "not known" path */
+      ircd_snprintf(0, line, sizeof(line), "BOUNCER %s %s",
+                    r->name, r->args);
+      send_note(sptr, "BOUNCER", "HELP", r->name, line);
+      send_note(sptr, "BOUNCER", "HELP", r->name, r->desc);
+      if (r->oper_only)
+        send_note(sptr, "BOUNCER", "HELP", r->name, "(oper-only)");
+      send_note(sptr, "BOUNCER", "HELP_END", r->name,
+                "End of subcommand help");
+      return 0;
+    }
+    send_note(sptr, "BOUNCER", "HELP", target,
+              "Unknown subcommand");
+    send_note(sptr, "BOUNCER", "HELP_END", target,
+              "End of subcommand help");
+    return 0;
+  }
+
+  send_note(sptr, "BOUNCER", "HELP", "*",
+            "Bouncer subcommands (use BOUNCER HELP <name> for detail)");
+
+  for (i = 0; i < sizeof(bouncer_help_rows)/sizeof(bouncer_help_rows[0]);
+       i++) {
+    const struct BouncerHelpRow *r = &bouncer_help_rows[i];
+    if (r->oper_only && !is_oper)
+      continue;
+    ircd_snprintf(0, line, sizeof(line), "%-13s %-22s %s%s",
+                  r->name, r->args, r->desc,
+                  r->oper_only ? "  [oper]" : "");
+    send_note(sptr, "BOUNCER", "HELP", "*", line);
+  }
+
+  send_note(sptr, "BOUNCER", "HELP_END", "*", "End of help");
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* Main command handler                                              */
 /* ---------------------------------------------------------------- */
 
 /** Handle BOUNCER command from a local client.
  *
- * User commands: SET, INFO, LISTCLIENTS, HISTORY
- * Oper-only: TOKEN, RESUME, LISTSESSIONS, DISCONNECT, SETNAME, SETTINGS
+ * User commands: HELP, INFO, SET, LISTCLIENTS, HISTORY
+ * Oper-only: TOKEN, RESUME, LISTSESSIONS, STATUS, DISCONNECT, SETNAME,
+ *            SETTINGS
  *
  * @param[in] cptr Connected client.
  * @param[in] sptr Source client.
@@ -770,6 +1051,9 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   subcmd = parv[1];
 
   /* --- User-facing commands --- */
+
+  if (0 == ircd_strcmp(subcmd, "HELP"))
+    return bouncer_help(sptr, parc, parv);
 
   if (0 == ircd_strcmp(subcmd, "SET"))
     return bouncer_set(sptr, parc, parv);
@@ -814,7 +1098,16 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                 "Insufficient privileges");
       return 0;
     }
-    return bouncer_listsessions(sptr);
+    return bouncer_listsessions(sptr, parc, parv);
+  }
+
+  if (0 == ircd_strcmp(subcmd, "STATUS")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "STATUS",
+                "Insufficient privileges");
+      return 0;
+    }
+    return bouncer_status(sptr);
   }
 
   if (0 == ircd_strcmp(subcmd, "DISCONNECT")) {

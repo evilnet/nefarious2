@@ -251,6 +251,15 @@ extern struct BouncerSession *bounce_find_by_token(const char *token);
  */
 extern struct AccountSessions *bounce_find_by_account(const char *account);
 
+/** Walk every session known to this server and invoke a callback.
+ * Callback must not destroy, rehash, or free the session being visited.
+ * @param[in] cb   Callback invoked once per session.
+ * @param[in] data Opaque pointer passed through to callback.
+ */
+extern void bounce_walk_sessions(void (*cb)(struct BouncerSession *,
+                                            void *),
+                                 void *data);
+
 /** Sync alias join: when primary joins a channel, add local aliases.
  * Called from add_user_to_channel() for non-alias members.
  * @param[in] chptr Channel the primary just joined.

@@ -43,6 +43,7 @@
 #include "ircd_snprintf.h"
 #include "random.h"
 #include "ircd_string.h"
+#include "match.h"
 #include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
@@ -50,6 +51,7 @@
 #include "send.h"
 #include "hash.h"
 #include "querycmds.h"
+#include "userload.h"
 #include "replay.h"
 #include "s_auth.h"
 #include "s_bsd.h"
@@ -1015,6 +1017,34 @@ struct AccountSessions *bounce_find_by_account(const char *account)
       return as;
   }
   return NULL;
+}
+
+/** Walk every session known to this server and invoke a callback.
+ *
+ * Iteration order: account hash bucket, then per-account list.  The
+ * callback must not free, destroy, or rehash the session — modifying
+ * the iteration target invalidates the walk.
+ *
+ * @param[in] cb   Callback invoked once per session.
+ * @param[in] data Opaque pointer passed through to callback.
+ */
+void bounce_walk_sessions(void (*cb)(struct BouncerSession *, void *),
+                          void *data)
+{
+  int i;
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+
+  if (!cb)
+    return;
+
+  for (i = 0; i < BOUNCE_ACCOUNT_HASHSIZE; i++) {
+    for (as = accountHash[i]; as; as = as->as_hnext) {
+      for (s = as->as_sessions; s; s = s->hs_anext) {
+        cb(s, data);
+      }
+    }
+  }
 }
 
 /** Attach a client to an existing session (resume).
@@ -2511,21 +2541,33 @@ int bounce_promote_alias(struct BouncerSession *session)
   /* Add to nick hash (aliases aren't in nick hash) */
   hAddClient(alias);
 
-  /* Add promoted alias to UserStats — alias was never counted,
-   * but old primary's exit already decremented the count */
-  ++UserStats.clients;
-  if (UserStats.clients > UserStats.clients_max) {
-    UserStats.clients_max = UserStats.clients;
-    save_tunefile();
-  }
-  ++(cli_serv(cli_user(alias)->server)->clients);
-  if (MyUser(alias)) {
-    ++UserStats.local_clients;
-    if (UserStats.local_clients > UserStats.local_clients_max) {
-      UserStats.local_clients_max = UserStats.local_clients;
+  /* Add promoted alias to UserStats.
+   *
+   * Local aliases (MyUser true) were already counted in UserStats.clients
+   * and UserStats.local_clients at register_user (s_user.c:415,
+   * Count_unknownbecomesclient).  The alias-setup branch returns at
+   * s_user.c:555 before the inv_clients / opers bumps later in
+   * register_user, so those counters were NOT picked up at register
+   * time and DO need to be incremented here.
+   *
+   * Remote aliases (created via BX C in bounce_alias_create) bypass all
+   * UserStats accounting on this server, so all of clients,
+   * local_clients-equivalent (n/a — they're remote), inv_clients and
+   * opers need to be picked up here.
+   *
+   * The cli_serv(...->server)->clients counter is per-server; for &me
+   * it's unused (m_check.c reads UserStats.local_clients instead) but
+   * for remote servers it's the canonical count, so always bump.  */
+  if (!MyUser(alias)) {
+    ++UserStats.clients;
+    if (UserStats.clients > UserStats.clients_max) {
+      UserStats.clients_max = UserStats.clients;
       save_tunefile();
     }
   }
+  ++(cli_serv(cli_user(alias)->server)->clients);
+  /* UserStats.local_clients: local aliases already counted at register;
+   * remote aliases are not local.  Either way, do not bump here. */
   if (IsInvisible(alias))
     ++UserStats.inv_clients;
   if (IsOper(alias) && !IsHideOper(alias) && !IsChannelService(alias) && !IsBot(alias))
@@ -3191,6 +3233,22 @@ void bounce_free_temp_client(struct Client *temp)
   /* fd should already be -1 from bounce_revive() */
   assert(cli_fd(temp) == -1);
   SetFlag(temp, FLAG_DEADSOCKET);
+
+  /* Balance accounting from registration before tearing down.  By the time
+   * we get here the temp has run through Count_unknownbecomesclient
+   * (--unknowns; ++local_clients; ++clients) and IPcheck_local_connect
+   * (entry->connected++).  remove_client_from_list/free_client touch none
+   * of those counters, and we're skipping exit_one_client entirely, so
+   * without explicit decrements every successful revive leaks +1 each in
+   * UserStats.local_clients, UserStats.clients, and the per-IP IPcheck slot.
+   * Must run while cli_status is still STAT_USER and cli_user is intact —
+   * Count_clientdisconnects reads cli_sockhost via the macro. */
+  if (MyConnect(temp) && IsUser(temp))
+    Count_clientdisconnects(temp, UserStats);
+  if (IsIPChecked(temp)) {
+    IPcheck_disconnect(temp);
+    ClearIPChecked(temp);
+  }
 
   /* Remove from nick hash if present.
    * Temp client was added by m_nick during registration. */
