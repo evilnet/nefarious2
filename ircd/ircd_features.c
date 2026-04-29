@@ -1072,6 +1072,7 @@ static struct FeatureDesc {
   F_B(CAP_message_tags, 0, 1, feature_notify_cap_message_tags),
   F_S(CLIENTTAGDENY, FEAT_NULL, 0, 0),
   F_B(CAP_no_implicit_names, 0, 1, feature_notify_cap_no_implicit_names),
+  F_A(CAP_draft_no_implicit_names, CAP_no_implicit_names),
   F_B(CAP_draft_extended_isupport, 0, 1, feature_notify_cap_draft_extended_isupport),
   F_B(CAP_draft_pre_away, 0, 1, feature_notify_cap_draft_pre_away),
   F_B(CAP_draft_multiline, 0, 1, feature_notify_cap_multiline),
