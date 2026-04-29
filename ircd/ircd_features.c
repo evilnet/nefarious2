@@ -334,14 +334,18 @@ set_isupport_extbans(void)
     if (feature_bool(FEAT_EXTBAN_M))
       strcat(imaxlist, "M");
 
+    /* Canonical ratified token name is EXTBAN (singular). EXTBANS
+     * (plural) was our historic non-conformant spelling — keep it for
+     * a transition period so older clients hard-coded to it don't
+     * suddenly stop seeing extban support. Drop EXTBANS in a future
+     * release once observed clients have migrated. */
+    add_isupport_s("EXTBAN", imaxlist);
     add_isupport_s("EXTBANS", imaxlist);
 
     /* IRCv3 account-extban (ratified 2026-03-18, #587):
-     * Servers publishing ACCOUNTEXTBAN MUST also publish EXTBAN. We
-     * publish EXTBANS (plural, historic) instead — separate compat
-     * concern. ACCOUNTEXTBAN value is the comma-separated list of
-     * extban-type names that match against account names; for us
-     * that's just 'a'. */
+     * Servers publishing ACCOUNTEXTBAN MUST also publish EXTBAN.
+     * Value is the comma-separated list of extban-type names that
+     * match against account names; for us that's just 'a'. */
     if (feature_bool(FEAT_EXTBAN_a))
       add_isupport_s("ACCOUNTEXTBAN", "a");
     else
