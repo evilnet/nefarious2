@@ -67,13 +67,30 @@ extern struct UserStatistics UserStats;
 /** Count a remote server quit. */
 #define Count_remoteserverquits(UserStats)      (--UserStats.servers)
 
+/** Underflow guard helper for Count_unknown* decrement macros. */
+void count_unknowns_underflow(const char *file, int line, const char *what);
+
+/** Decrement UserStats.unknowns with underflow detection.
+ * If the counter is already zero, log + skip the decrement and snotice
+ * the offending caller's file:line so the source of the imbalance can be
+ * traced rather than silently wrapping to UINT_MAX.
+ */
+#define DEC_UNKNOWNS_GUARDED(what) \
+  do { \
+    if (UserStats.unknowns == 0) \
+      count_unknowns_underflow(__FILE__, __LINE__, (what)); \
+    else \
+      --UserStats.unknowns; \
+  } while (0)
+
 /* Macros for local connections: */
 /** Count a new local unknown connection. */
 #define Count_newunknown(UserStats)                     (++UserStats.unknowns)
 /** Update counters when \a cptr goes from unknown to registered. */
 #define Count_unknownbecomesclient(cptr, UserStats) \
   do { \
-    --UserStats.unknowns; ++UserStats.local_clients; ++UserStats.clients; \
+    DEC_UNKNOWNS_GUARDED("becomesclient"); \
+    ++UserStats.local_clients; ++UserStats.clients; \
     if (match(feature_str(FEAT_DOMAINNAME), cli_sockhost(cptr)) == 0) \
       ++current_load.local_count; \
     if (UserStats.local_clients > max_client_count) \
@@ -95,7 +112,8 @@ extern struct UserStatistics UserStats;
     } \
   } while(0)
 /** Update counters when \a cptr goes from unknown to server. */
-#define Count_unknownbecomesserver(UserStats)   do { --UserStats.unknowns; ++UserStats.local_servers; ++UserStats.servers; } while(0)
+#define Count_unknownbecomesserver(UserStats) \
+  do { DEC_UNKNOWNS_GUARDED("becomesserver"); ++UserStats.local_servers; ++UserStats.servers; } while(0)
 /** Update counters when \a cptr (a local user) disconnects. */
 #define Count_clientdisconnects(cptr, UserStats) \
   do \
@@ -107,7 +125,7 @@ extern struct UserStatistics UserStats;
 /** Update counters when a local server disconnects. */
 #define Count_serverdisconnects(UserStats)              do { --UserStats.local_servers; --UserStats.servers; } while(0)
 /** Update counters when an unknown client disconnects. */
-#define Count_unknowndisconnects(UserStats)             (--UserStats.unknowns)
+#define Count_unknowndisconnects(UserStats)             DEC_UNKNOWNS_GUARDED("unknowndisconnects")
 
 /*
  * Prototypes

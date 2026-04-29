@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "client.h"
+#include "ircd_log.h"
 #include "ircd_snprintf.h"
 #include "querycmds.h"
 #include "s_debug.h"
@@ -45,6 +46,28 @@ void init_counters(void)
 {
   memset(&UserStats, 0, sizeof(UserStats));
   UserStats.servers = 1;
+}
+
+/** Log + skip a UserStats.unknowns underflow.
+ *
+ * Called from the Count_unknown* macros when the requested decrement would
+ * wrap the unsigned counter past zero. Reaching this code means the
+ * caller's path has run a Count_unknown* decrement without a matching
+ * earlier Count_newunknown — an accounting bug. We log the offending
+ * caller's file:line and the named operation, then return without
+ * decrementing so the counter stays at zero rather than wrapping to
+ * UINT_MAX.
+ */
+void count_unknowns_underflow(const char *file, int line, const char *what)
+{
+  log_write(LS_SYSTEM, L_ERROR, 0,
+            "UserStats.unknowns underflow guard: %s at %s:%d "
+            "(unknowns already 0 — refusing to decrement). "
+            "Some prior path decremented without a matching Count_newunknown.",
+            what, file, line);
+  sendto_opmask_butone(0, SNO_OLDSNO,
+                       "UserStats.unknowns underflow: %s at %s:%d",
+                       what, file, line);
 }
 
 /** Saves the tunefile which keeps the current local and global
