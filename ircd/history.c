@@ -352,35 +352,49 @@ static int parse_key(const char *key, int keylen,
 }
 
 /** Extract +reply= value from a client_tags string.
- * @param[in] client_tags Semicolon-separated tag list (e.g. "+draft/react=X;+reply=MSGID").
+ *
+ * Accepts both the ratified +reply tag (IRCv3 #535, ratified 2026-02-13)
+ * and the legacy +draft/reply form for backward compat with clients
+ * that haven't updated yet. If both are present, the ratified form wins.
+ *
+ * @param[in] client_tags Semicolon-separated tag list (e.g.
+ *   "+draft/react=X;+reply=MSGID" or "+draft/reply=MSGID").
  * @param[out] buf Buffer for the extracted msgid.
  * @param[in] buflen Size of buf.
- * @return Pointer to buf on success, NULL if no +reply= found.
+ * @return Pointer to buf on success, NULL if neither form is present.
  */
 static const char *extract_reply_tag(const char *client_tags, char *buf, size_t buflen)
 {
-  const char *p;
+  static const struct {
+    const char *needle;
+    size_t      len;
+  } needles[] = {
+    { "+reply=",       7 },   /* ratified — checked first */
+    { "+draft/reply=", 13 },  /* legacy draft form */
+  };
+  size_t i;
 
   if (!client_tags || !client_tags[0])
     return NULL;
 
-  /* Search for "+reply=" in the tag string */
-  p = client_tags;
-  while ((p = strstr(p, "+reply=")) != NULL) {
-    /* Ensure it's at the start or after a separator */
-    if (p != client_tags && *(p - 1) != ';') {
-      p += 7;
-      continue;
-    }
-    p += 7; /* skip "+reply=" */
-    {
-      const char *end = strchr(p, ';');
-      size_t len = end ? (size_t)(end - p) : strlen(p);
-      if (len == 0 || len >= buflen)
-        return NULL;
-      memcpy(buf, p, len);
-      buf[len] = '\0';
-      return buf;
+  for (i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
+    const char *p = client_tags;
+    while ((p = strstr(p, needles[i].needle)) != NULL) {
+      /* Ensure it's at the start or after a separator. */
+      if (p != client_tags && *(p - 1) != ';') {
+        p += needles[i].len;
+        continue;
+      }
+      p += needles[i].len;
+      {
+        const char *end = strchr(p, ';');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (len == 0 || len >= buflen)
+          return NULL;
+        memcpy(buf, p, len);
+        buf[len] = '\0';
+        return buf;
+      }
     }
   }
   return NULL;
