@@ -3364,7 +3364,7 @@ void bounce_send_alias_join_replies(struct Channel *chptr, struct Client *who)
                  chptr->topic_time);
     }
     send_markread_on_join(who, chptr->chname);
-    if (!HasCap(who, CAP_DRAFT_NOIMPLICITNAMES))
+    if (!HasNoImplicitNames(who))
       do_names(who, chptr, NAMES_ALL|NAMES_EON);
   }
 
@@ -3381,7 +3381,7 @@ void bounce_send_alias_join_replies(struct Channel *chptr, struct Client *who)
                  chptr->topic_time);
     }
     send_markread_on_join(acli, chptr->chname);
-    if (!HasCap(acli, CAP_DRAFT_NOIMPLICITNAMES))
+    if (!HasNoImplicitNames(acli))
       do_names(acli, chptr, NAMES_ALL|NAMES_EON);
   }
 
@@ -5030,7 +5030,9 @@ void bounce_send_channel_state(struct Client *cptr)
 
     send_markread_on_join(cptr, chptr->chname);
 
-    if (!CapRecipientHas(cptr, CAP_DRAFT_NOIMPLICITNAMES))
+    /* no-implicit-names: ratified 2026-03-18; accept legacy draft/ form too. */
+    if (!CapRecipientHas(cptr, CAP_NOIMPLICITNAMES) &&
+        !CapRecipientHas(cptr, CAP_NOIMPLICITNAMES_LEGACY))
       do_names(cptr, chptr, NAMES_ALL|NAMES_EON);
   }
 }

@@ -1470,6 +1470,12 @@ struct Client {
 /** Test whether this specific connection has the capability (not the session union) */
 #define CapOwnHas(cli, cap) CapHas(cli_active_own(cli), (cap))
 
+/** Test whether a client has no-implicit-names (ratified or legacy draft form).
+ * IRCv3 spec ratified 2026-03-18 (#590); legacy draft/ form kept for
+ * backward compat with clients that haven't updated yet. */
+#define HasNoImplicitNames(cli) \
+  (HasCap((cli), CAP_NOIMPLICITNAMES) || HasCap((cli), CAP_NOIMPLICITNAMES_LEGACY))
+
 #define HIDE_IP 0 /**< Do not show IP address in get_client_name() */
 #define SHOW_IP 1 /**< Show ident and IP address in get_client_name() */
 

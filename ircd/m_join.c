@@ -295,7 +295,7 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
 
     send_markread_on_join(sptr, chptr->chname);
 
-    if (!HasCap(sptr, CAP_DRAFT_NOIMPLICITNAMES))
+    if (!HasNoImplicitNames(sptr))
       do_names(sptr, chptr, NAMES_ALL|NAMES_EON);
   }
 }

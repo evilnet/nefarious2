@@ -195,8 +195,9 @@ int ms_svsjoin(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		 chptr->topic_time);
     }
 
-    /* Skip implicit NAMES if client has draft/no-implicit-names capability */
-    if (!HasCap(acptr, CAP_DRAFT_NOIMPLICITNAMES))
+    /* Skip implicit NAMES if client has no-implicit-names capability
+     * (ratified 2026-03-18; accept legacy draft/ form too). */
+    if (!HasNoImplicitNames(acptr))
       do_names(acptr, chptr, NAMES_ALL|NAMES_EON); /* send /names list */
   }
 

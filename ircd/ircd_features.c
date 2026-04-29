@@ -520,7 +520,7 @@ DEFINE_CAP_NOTIFY("batch", batch)
 DEFINE_CAP_NOTIFY("setname", setname)
 DEFINE_CAP_NOTIFY("standard-replies", standard_replies)
 DEFINE_CAP_NOTIFY("message-tags", message_tags)
-DEFINE_CAP_NOTIFY("draft/no-implicit-names", draft_no_implicit_names)
+DEFINE_CAP_NOTIFY("no-implicit-names", no_implicit_names)
 DEFINE_CAP_NOTIFY("draft/extended-isupport", draft_extended_isupport)
 DEFINE_CAP_NOTIFY("draft/pre-away", draft_pre_away)
 DEFINE_CAP_NOTIFY("draft/event-playback", draft_event_playback)
@@ -1054,7 +1054,7 @@ static struct FeatureDesc {
   F_B(CAP_standard_replies, 0, 1, feature_notify_cap_standard_replies),
   F_B(CAP_message_tags, 0, 1, feature_notify_cap_message_tags),
   F_S(CLIENTTAGDENY, FEAT_NULL, 0, 0),
-  F_B(CAP_draft_no_implicit_names, 0, 1, feature_notify_cap_draft_no_implicit_names),
+  F_B(CAP_no_implicit_names, 0, 1, feature_notify_cap_no_implicit_names),
   F_B(CAP_draft_extended_isupport, 0, 1, feature_notify_cap_draft_extended_isupport),
   F_B(CAP_draft_pre_away, 0, 1, feature_notify_cap_draft_pre_away),
   F_B(CAP_draft_multiline, 0, 1, feature_notify_cap_multiline),
