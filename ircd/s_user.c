@@ -412,6 +412,22 @@ int register_user(struct Client *cptr, struct Client *sptr)
   {
     assert(cptr == sptr);
 
+    /* Pre-flight: require-sasl reject must happen BEFORE
+     * Count_unknownbecomesclient. If we count the client as registered first
+     * and then exit_client without SetUser, exit_one_client's IsUnknown
+     * branch runs Count_unknowndisconnects — a second --unknowns on top of
+     * the one inside Count_unknownbecomesclient, underflowing the counter,
+     * and local_clients/clients are left inflated with no matching
+     * decrement. get_client_class_conf only reads cli_confs (attached
+     * during auth), so it's safe to call here. */
+    connclass = get_client_class_conf(sptr);
+    if (connclass && FlagHas(&connclass->restrictflags, CRFLAG_REQUIRE_SASL) &&
+        !IsAccount(sptr)) {
+      ++ServerStats->is_ref;
+      return exit_client(cptr, sptr, &me,
+                         "SASL authentication required for this connection class");
+    }
+
     Count_unknownbecomesclient(sptr, UserStats);
 
     /*
@@ -428,15 +444,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
       char *umodev[] = { NULL, NULL, NULL, NULL };
       umodev[2] = tmpstr;
       set_user_mode(cptr, sptr, 3, umodev, ALLOWMODES_ANY);
-    }
-
-    /* Check if connection class requires SASL authentication */
-    connclass = get_client_class_conf(sptr);
-    if (connclass && FlagHas(&connclass->restrictflags, CRFLAG_REQUIRE_SASL) &&
-        !IsAccount(sptr)) {
-      ++ServerStats->is_ref;
-      return exit_client(cptr, sptr, &me,
-                         "SASL authentication required for this connection class");
     }
 
     SetUser(sptr);
