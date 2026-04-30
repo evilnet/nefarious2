@@ -690,9 +690,17 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
     return;
   }
 
-  /* Save alias's server link and client tags before potential rewrite */
+  /* Save alias's server link and client tags before potential rewrite.
+   * For S2S-relayed messages, client tags arrive in the compact-tag
+   * ,C<client_tags> segment, populated by parse_server() into
+   * cli_s2s_client_tags(server_link). cli_client_tags(remote_user) is
+   * always empty since remote users don't go through parse_client(),
+   * so prefer the S2S-incoming form. */
   one = cli_from(sptr);
-  client_tags = cli_client_tags(sptr);
+  {
+    const char *s2s_tags = cli_s2s_client_tags(one);
+    client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
+  }
 
   /* Unified msgid: if no incoming S2S msgid, generate one now so
    * format_s2s_tags() (relay) and storage both use the same value.
@@ -779,9 +787,14 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
   if (IsLocalChannel(name) || 0 == (chptr = FindChannel(name)))
     return;
 
-  /* Save alias's server link and client tags before potential rewrite */
+  /* Save alias's server link and client tags before potential rewrite.
+   * For S2S-relayed messages, prefer cli_s2s_client_tags(server_link)
+   * — see server_relay_channel_message. */
   one = cli_from(sptr);
-  client_tags = cli_client_tags(sptr);
+  {
+    const char *s2s_tags = cli_s2s_client_tags(one);
+    client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
+  }
 
   /* Unified msgid (see server_relay_channel_message) */
   if (feature_bool(FEAT_P10_MESSAGE_TAGS) && one && !cli_s2s_msgid(one)[0])
@@ -1388,8 +1401,14 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   assert(0 != name);
   assert(0 != text);
 
-  /* Save alias context before potential rewrite */
-  client_tags = cli_client_tags(sptr);
+  /* Save alias context before potential rewrite.
+   * For S2S-relayed messages, prefer cli_s2s_client_tags(server_link)
+   * — see server_relay_channel_message. */
+  {
+    struct Client *one = cli_from(sptr);
+    const char *s2s_tags = cli_s2s_client_tags(one);
+    client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
+  }
   from = sptr;
 
   /* Alias source rewriting: use primary's numeric for S2S.
@@ -1497,8 +1516,14 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   assert(0 != name);
   assert(0 != text);
 
-  /* Save alias context before potential rewrite */
-  client_tags = cli_client_tags(sptr);
+  /* Save alias context before potential rewrite.
+   * For S2S-relayed messages, prefer cli_s2s_client_tags(server_link)
+   * — see server_relay_channel_message. */
+  {
+    struct Client *one = cli_from(sptr);
+    const char *s2s_tags = cli_s2s_client_tags(one);
+    client_tags = (s2s_tags && *s2s_tags) ? s2s_tags : cli_client_tags(sptr);
+  }
   from = sptr;
 
   /* Alias source rewriting (see server_relay_private_message) */

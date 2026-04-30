@@ -375,15 +375,31 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 2 || EmptyString(parv[1]))
     return 0;
 
-  /* Check if first param is client-only tags (starts with @) */
+  /* Two ways tags arrive on incoming S2S TAGMSG:
+   *
+   * 1. parv[1] @<tags> — pre-CAPAB ad-hoc convention. Still used by
+   *    fork peers running older code that hasn't adopted the
+   *    compact-tag ,C<client_tags> segment yet. parv[2] is the target.
+   *
+   * 2. cli_s2s_client_tags(cptr) — set by parse_server() from the
+   *    compact-tag ,C segment of the incoming line. parv[1] is the
+   *    target directly.
+   *
+   * Try the parv[1] form first for backward compat with peers still
+   * emitting the ad-hoc form, then fall back to the compact-tag form.
+   */
   if (parv[1][0] == '@') {
     client_tags = parv[1] + 1;  /* Skip the @ prefix */
     if (parc < 3 || EmptyString(parv[2]))
       return 0;
     target = parv[2];
   }
+  else if (cli_s2s_client_tags(cptr)[0]) {
+    client_tags = cli_s2s_client_tags(cptr);
+    target = parv[1];
+  }
   else {
-    /* Legacy format without tags - silently ignore */
+    /* No tags via either form - meaningless TAGMSG, drop */
     return 0;
   }
 
