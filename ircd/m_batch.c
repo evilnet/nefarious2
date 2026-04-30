@@ -1415,6 +1415,7 @@ struct S2SMultilineBatch {
   struct Client *sender;        /**< Original sender client */
   struct SLink *messages;       /**< Linked list of messages */
   int msg_count;                /**< Number of messages */
+  unsigned int total_bytes;     /**< Cumulative bytes accumulated (for network_max enforcement) */
   int is_notice;                /**< 1 if NOTICE batch, 0 if PRIVMSG */
   time_t start_time;            /**< When batch started */
   char paste_url[256];          /**< Forwarded paste URL from originating server */
@@ -1422,6 +1423,62 @@ struct S2SMultilineBatch {
   char msgid[64];               /**< Base msgid from originating server */
   uint64_t time_ms;             /**< Timestamp (ms) from originating server */
 };
+
+/** Compute the network-wide maximum multiline byte limit.
+ *
+ * Walks GlobalClientList collecting every multiline-capable server's
+ * advertised ml_max_bytes (set from ML burst at line 1860 below) and
+ * returns the maximum, clamped to FEAT_MULTILINE_BUFFER_CEILING.
+ *
+ * Per s2s-multiline-limits.md plan: send-side enforcement uses local
+ * FEAT_MULTILINE_MAX_BYTES (admin's choice); receive-side accepts up
+ * to network max so a 4096-byte-policy server can still relay/display
+ * a 16384-byte multiline from another server's larger-policy users.
+ *
+ * Servers with ml_max_bytes == 0 are unknown/legacy — excluded from
+ * the max so they can't lower the floor. Floor is local
+ * FEAT_MULTILINE_MAX_BYTES (we always accept at least what we'd
+ * locally produce).
+ */
+static unsigned int compute_network_ml_max_bytes(void)
+{
+  unsigned int max_bytes = (unsigned int)feature_int(FEAT_MULTILINE_MAX_BYTES);
+  unsigned int ceiling = (unsigned int)feature_int(FEAT_MULTILINE_BUFFER_CEILING);
+  struct Client *srv;
+
+  for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
+    if (!IsServer(srv) || IsMe(srv) || !IsMultiline(srv))
+      continue;
+    if (cli_serv(srv)->ml_max_bytes == 0)
+      continue;  /* unknown/legacy — don't lower the floor */
+    if (cli_serv(srv)->ml_max_bytes > max_bytes)
+      max_bytes = cli_serv(srv)->ml_max_bytes;
+  }
+  if (ceiling > 0 && max_bytes > ceiling)
+    max_bytes = ceiling;
+  return max_bytes;
+}
+
+/** Compute the network-wide maximum multiline line count. See
+ *  compute_network_ml_max_bytes() for rationale. */
+static unsigned int compute_network_ml_max_lines(void)
+{
+  unsigned int max_lines = (unsigned int)feature_int(FEAT_MULTILINE_MAX_LINES);
+  unsigned int ceiling = (unsigned int)feature_int(FEAT_MULTILINE_BUFFER_LINES_CEILING);
+  struct Client *srv;
+
+  for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
+    if (!IsServer(srv) || IsMe(srv) || !IsMultiline(srv))
+      continue;
+    if (cli_serv(srv)->ml_max_lines == 0)
+      continue;
+    if (cli_serv(srv)->ml_max_lines > max_lines)
+      max_lines = cli_serv(srv)->ml_max_lines;
+  }
+  if (ceiling > 0 && max_lines > ceiling)
+    max_lines = ceiling;
+  return max_lines;
+}
 
 /** Global array of pending S2S multiline batches (indexed by server connection) */
 static struct S2SMultilineBatch *s2s_ml_batches[MAXCONNECTIONS];
@@ -1463,6 +1520,7 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   batch->sender = sender;
   batch->messages = NULL;
   batch->msg_count = 0;
+  batch->total_bytes = 0;
   batch->is_notice = 0;  /* Default PRIVMSG; S2S protocol extension needed for NOTICE */
   batch->start_time = CurrentTime;
   batch->paste_url[0] = '\0';
@@ -1517,11 +1575,37 @@ add_s2s_multiline_message(struct S2SMultilineBatch *batch, const char *text, int
   struct SLink *lp;
   char *msgcopy;
   int len;
+  unsigned int net_max_bytes;
+  unsigned int net_max_lines;
 
   if (!batch || !text)
     return;
 
   len = strlen(text);
+
+  /* Enforce network-wide multiline limits on inbound S2S batches.
+   * Per s2s-multiline-limits.md: receive-side accepts up to network
+   * max so smaller-policy servers still display/relay multilines from
+   * larger-policy senders. Hard ceiling protects against runaway
+   * peers advertising absurd values. */
+  net_max_bytes = compute_network_ml_max_bytes();
+  net_max_lines = compute_network_ml_max_lines();
+
+  if ((unsigned int)batch->msg_count >= net_max_lines) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "S2S multiline batch %s exceeded network max-lines (%u); "
+              "dropping additional message",
+              batch->batch_id, net_max_lines);
+    return;
+  }
+  if (batch->total_bytes + (unsigned int)len > net_max_bytes) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "S2S multiline batch %s exceeded network max-bytes "
+              "(have %u, would add %d, cap %u); dropping additional message",
+              batch->batch_id, batch->total_bytes, len, net_max_bytes);
+    return;
+  }
+
   msgcopy = (char *)MyMalloc(len + 2);
   msgcopy[0] = concat ? 1 : 0;  /* Flag byte */
   strcpy(msgcopy + 1, text);
@@ -1541,6 +1625,7 @@ add_s2s_multiline_message(struct S2SMultilineBatch *batch, const char *text, int
   }
 
   batch->msg_count++;
+  batch->total_bytes += (unsigned int)len;
 }
 
 /** Deliver a completed S2S multiline batch to local clients */
