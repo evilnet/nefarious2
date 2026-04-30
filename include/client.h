@@ -191,6 +191,7 @@ enum Flag
     FLAG_SERVICE,                   /**< server is a service */
     FLAG_OPLEVELS,                  /**< server has oplevels support */
     FLAG_MULTILINE,                 /**< server supports P10 multiline batches */
+    FLAG_IRCV3AWARE,                /**< server speaks IRCv3 message-tag wire extensions */
     FLAG_GOTID,                     /**< successful ident lookup achieved */
     FLAG_DOID,                      /**< I-lines say must use ident return */
     FLAG_NONL,                      /**< No \n in buffer */
@@ -1045,6 +1046,8 @@ struct Client {
 #define IsOpLevels(x)           HasFlag(x, FLAG_OPLEVELS)
 /** Return non-zero if the server supports P10 multiline batches. */
 #define IsMultiline(x)          HasFlag(x, FLAG_MULTILINE)
+/** Return non-zero if the server speaks IRCv3 message-tag wire extensions. */
+#define IsIRCv3Aware(x)         HasFlag(x, FLAG_IRCV3AWARE)
 /** Return non-zero if the client has an account stamp. */
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
@@ -1187,6 +1190,8 @@ struct Client {
 #define SetOpLevels(x)          SetFlag(x, FLAG_OPLEVELS)
 /** Mark a server as supporting P10 multiline batches. */
 #define SetMultiline(x)         SetFlag(x, FLAG_MULTILINE)
+/** Mark a server as speaking IRCv3 message-tag wire extensions. */
+#define SetIRCv3Aware(x)        SetFlag(x, FLAG_IRCV3AWARE)
 /** Mark a client as having an account stamp. */
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */

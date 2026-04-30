@@ -1095,6 +1095,11 @@ int main(int argc, char **argv) {
 
   hAddClient(&me);
   SetIPv6(&me);
+  /* IRCv3-aware S2S framework: advertise that this server speaks
+   * IRCv3 message-tag wire extensions. Peers that understand the 'v'
+   * flag will set FLAG_IRCV3AWARE on us and gate fork-only emissions
+   * accordingly. Legacy peers ignore the unknown flag char. */
+  SetIRCv3Aware(&me);
 
   write_pidfile();
   init_counters();
