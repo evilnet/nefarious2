@@ -206,6 +206,7 @@ void sendcmdto_want_s2s_tags(int want)
 }
 
 
+
 /** Format current time as ISO 8601 timestamp for server-time capability.
  * @param[out] buf Buffer to write timestamp to.
  * @param[in] buflen Size of buffer.
@@ -1611,6 +1612,116 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
   /* send it to our downlinks */
   for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
     if (one && lp->value.cptr == cli_from(one))
+      continue;
+    if (mb_alias && lp->value.cptr == primary_dir)
+      send_buffer(lp->value.cptr, mb_alias, 0);
+    else
+      send_buffer(lp->value.cptr, mb, 0);
+  }
+
+  msgq_clean(mb);
+  if (mb_alias)
+    msgq_clean(mb_alias);
+}
+
+/** Send a (prefixed) command to all IRCv3-aware servers but one.
+ *
+ * Identical to sendcmdto_serv_butone() except non-IRCv3-aware peers are
+ * skipped during the downlink dispatch. Use this for fork-only P10 tokens
+ * that legacy peers would silently drop (BT, BS, CH, MD, ML, RD, TM, etc.
+ * — see ircv3aware-s2s-framework plan for the full list). Legacy peers
+ * just don't receive the emission at all, saving wire bytes and avoiding
+ * the 512-byte pre-strip line limit risk.
+ *
+ * BX (BOUNCER_TRANSFER) is the explicit exception — it must reach legacy
+ * peers (which have been patched to handle BX P numeric swaps) and stays
+ * on the unconditional sendcmdto_serv_butone() path.
+ *
+ * Implementation note: this function duplicates the body of
+ * sendcmdto_serv_butone() rather than calling it through a static gate
+ * flag, because variadic forwarding without a vsendcmdto* helper would
+ * require building the va_list twice. The duplication is shallow (mostly
+ * msgq_make calls + the dispatch loop); refactor to a shared inner helper
+ * if either function grows nontrivially.
+ */
+void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
+                              const char *tok, struct Client *one,
+                              const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb = NULL;
+  struct MsgBuf *mb_alias = NULL;
+  struct DLink *lp;
+  struct Client *alias_from = NULL;
+  struct Client *primary_dir = NULL;
+
+  if (s2s_alias_source) {
+    alias_from = s2s_alias_source;
+    s2s_alias_source = NULL;
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  } else if (IsBouncerAlias(from) && cli_alias_primary(from)) {
+    alias_from = from;
+    from = cli_alias_primary(from);
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  }
+
+  vd.vd_format = pattern;
+
+  {
+    int want_tags = s2s_want_tags;
+    s2s_want_tags = 0;
+
+    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+      if (s2s_raw_tags[0]) {
+        va_start(vd.vd_args, pattern);
+        mb = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, from, tok, &vd);
+        va_end(vd.vd_args);
+        if (alias_from) {
+          va_start(vd.vd_args, pattern);
+          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, alias_from, tok, &vd);
+          va_end(vd.vd_args);
+        }
+        s2s_raw_tags[0] = '\0';
+        s2s_cptr_override = NULL;
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
+      } else {
+        char s2s_tagbuf[128];
+        struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
+                                : (MyConnect(from) ? NULL : cli_from(from));
+        s2s_cptr_override = NULL;
+        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+          va_start(vd.vd_args, pattern);
+          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+          va_end(vd.vd_args);
+          if (alias_from) {
+            va_start(vd.vd_args, pattern);
+            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+            va_end(vd.vd_args);
+          }
+        }
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
+      }
+    }
+  }
+
+  if (!mb) {
+    va_start(vd.vd_args, pattern);
+    mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+    if (alias_from) {
+      va_start(vd.vd_args, pattern);
+      mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+      va_end(vd.vd_args);
+    }
+  }
+
+  /* IRCv3-aware downlink dispatch: skip legacy peers entirely. */
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    if (one && lp->value.cptr == cli_from(one))
+      continue;
+    if (!IsIRCv3Aware(lp->value.cptr))
       continue;
     if (mb_alias && lp->value.cptr == primary_dir)
       send_buffer(lp->value.cptr, mb_alias, 0);
