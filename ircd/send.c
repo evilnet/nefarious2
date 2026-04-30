@@ -404,10 +404,39 @@ char *generate_msgid(char *buf, size_t buflen)
 char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
                       char *msgid_out, size_t msgid_out_len)
 {
+  return format_s2s_tags_with_client(buf, buflen, cptr, NULL,
+                                     msgid_out, msgid_out_len);
+}
+
+/** Format message tags for S2S relay including optional client-only tags.
+ * Produces compact P10-native wire encoding:
+ *   @A<time_b64_7><msgid_14>[,C<client_tags>]
+ * The ,C<client_tags> segment is appended only when client_tags is non-NULL
+ * and non-empty. Receivers parse it into cli_s2s_client_tags(cptr) for
+ * forwarding to local recipients.
+ *
+ * Sized for callers that need to accommodate up to 4094 bytes of client
+ * tags (IRCv3 cap) plus the compact prefix; recommend buf ≥ 4128 bytes
+ * when client_tags may be present.
+ *
+ * @param[out] buf Buffer for tag string (includes trailing space).
+ * @param[in] buflen Size of buffer.
+ * @param[in] cptr Server connection the message came from (for incoming tags).
+ * @param[in] client_tags Optional client-only tags string ("+key=value;...").
+ * @param[out] msgid_out Optional: buffer to store the msgid used.
+ * @param[in] msgid_out_len Size of msgid_out buffer.
+ * @return Pointer to buf, or NULL if P10_MESSAGE_TAGS is disabled.
+ */
+char *format_s2s_tags_with_client(char *buf, size_t buflen,
+                                  struct Client *cptr,
+                                  const char *client_tags,
+                                  char *msgid_out, size_t msgid_out_len)
+{
   char time_b64[8];
   char msgidbuf[S2S_MSGID_BUFSIZE];
   uint64_t epoch_ms;
   const char *msgid_tag = NULL;
+  int has_ctags = (client_tags && *client_tags);
 
   /* Check if P10 message tags are enabled */
   if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
@@ -437,9 +466,12 @@ char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
     ircd_strncpy(msgid_out, msgid_tag, msgid_out_len);
   }
 
-  /* Compact format: @A<time_7><msgid_14> */
+  /* Compact format: @A<time_7><msgid_14>[,C<client_tags>] */
   inttobase64_64(time_b64, epoch_ms, 7);
-  snprintf(buf, buflen, "@A%s%s ", time_b64, msgid_tag);
+  if (has_ctags)
+    snprintf(buf, buflen, "@A%s%s,C%s ", time_b64, msgid_tag, client_tags);
+  else
+    snprintf(buf, buflen, "@A%s%s ", time_b64, msgid_tag);
   return buf;
 }
 

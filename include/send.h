@@ -132,6 +132,13 @@ extern void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
 				     const char *tok, struct Client *one,
 				     const char *pattern, ...);
 
+/* Format the S2S compact-tag prefix with optional client-tags segment. */
+extern char *format_s2s_tags_with_client(char *buf, size_t buflen,
+                                         struct Client *cptr,
+                                         const char *client_tags,
+                                         char *msgid_out,
+                                         size_t msgid_out_len);
+
 /* Send command to all channels user is on */
 extern void sendcmdto_common_channels_butone(struct Client *from,
 					     const char *cmd,
