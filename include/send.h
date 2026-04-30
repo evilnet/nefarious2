@@ -139,6 +139,16 @@ extern char *format_s2s_tags_with_client(char *buf, size_t buflen,
                                          char *msgid_out,
                                          size_t msgid_out_len);
 
+/* Variant of sendcmdto_one_tags_ext that includes client-only tags.
+ * For server-link destinations, emits @A...,C<client_tags> when peer is
+ * FLAG_IRCV3AWARE; legacy peers get bare command. */
+extern void sendcmdto_one_tags_with_client(struct Client *from,
+                                           const char *cmd, const char *tok,
+                                           struct Client *to,
+                                           const char *ext_msgid,
+                                           const char *client_tags,
+                                           const char *pattern, ...);
+
 /* Send command to all channels user is on */
 extern void sendcmdto_common_channels_butone(struct Client *from,
 					     const char *cmd,

@@ -1262,6 +1262,79 @@ void sendcmdto_one_tags_ext(struct Client *from, const char *cmd, const char *to
   msgq_clean(mb);
 }
 
+/** Variant of sendcmdto_one_tags_ext() that includes client-only tags.
+ *
+ * For local-client destinations: uses format_message_tags_with_client
+ * (existing per-recipient cap-aware tag formatting).
+ *
+ * For server-link destinations (= remote user delivery): uses
+ * format_s2s_tags_with_client when the peer link is FLAG_IRCV3AWARE
+ * to emit @A<time><msgid>,C<client_tags> prefix; non-IRCV3AWARE peers
+ * get the bare command (matching pre-IRCV3-aware-framework behaviour
+ * where direct PMs had no @A prefix at all).
+ *
+ * Used by relay_private_message and relay_private_notice for direct
+ * user-to-user PMs/NOTICEs that may carry client-only tags
+ * (+typing, +reply, +react, +channel-context).
+ */
+void sendcmdto_one_tags_with_client(struct Client *from,
+                                    const char *cmd, const char *tok,
+                                    struct Client *to,
+                                    const char *ext_msgid,
+                                    const char *client_tags,
+                                    const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[4608];
+  char s2s_tagbuf[4200];     /* fits @A prefix + ,C<4094-byte client_tags> */
+  char *tags;
+  int prio;
+  int has_ctags = (client_tags && *client_tags);
+
+  to = cli_from(to);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+
+  if (IsServer(to) || IsMe(to)) {
+    /* Server-link destination — use compact S2S tag prefix.
+     * IRCV3AWARE peers get @A...,C<client_tags>; legacy peers get the
+     * bare command (preserves pre-extension behaviour where direct
+     * PMs to remote users had no @A prefix). */
+    if (IsIRCv3Aware(to) &&
+        format_s2s_tags_with_client(s2s_tagbuf, sizeof(s2s_tagbuf), to,
+                                    has_ctags ? client_tags : NULL,
+                                    NULL, 0)) {
+      mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
+    } else {
+      mb = msgq_make(to, "%:#C %s %v", from, tok, &vd);
+    }
+  } else {
+    /* Local-client destination — use per-recipient cap-aware tag
+     * formatting (msgid via ext_msgid, plus client_tags if recipient
+     * has CAP_MSGTAGS). */
+    tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to,
+                                           has_ctags ? client_tags : NULL);
+    /* format_message_tags_with_client only handles the client-tag side;
+     * the ext_msgid still needs to fold in via the existing _for_ex
+     * path when no client_tags. Fall back when no client_tags so we
+     * don't drop ext_msgid. */
+    if (!has_ctags)
+      tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, ext_msgid);
+    if (tags)
+      mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
+    else
+      mb = msgq_make(to, "%:#C %s %v", from, cmd, &vd);
+  }
+
+  va_end(vd.vd_args);
+
+  prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
+  send_buffer(to, mb, prio);
+  msgq_clean(mb);
+}
+
 /** Send a (prefixed) command to a single local client with message tags,
  * returning the generated msgid.
  * @param[in] from Client originating the message.

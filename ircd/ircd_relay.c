@@ -1142,9 +1142,14 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     } else {
       if (from != sptr)  /* Alias was rewritten — preserve S2S tags */
         sendcmdto_set_s2s_cptr(cli_from(sptr));
-      /* Use tag-aware send so recipient gets server-time/msgid per caps */
-      sendcmdto_one_tags_ext(from, CMD_PRIVATE, acptr, pm_msgid,
-                             "%C :%s", acptr, mytext);
+      /* Use tag-aware send so recipient gets server-time/msgid per caps.
+       * For S2S delivery to IRCV3AWARE peers, sendcmdto_one_tags_with_client
+       * also adds the @A...,C<client_tags> compact-tag prefix so the
+       * remote server can forward client-only tags to its local recipient
+       * (per p10-compact-client-tags plan). */
+      sendcmdto_one_tags_with_client(from, CMD_PRIVATE, MSG_PRIVATE, acptr,
+                                     pm_msgid, client_tags,
+                                     "%C :%s", acptr, mytext);
     }
   }
 
@@ -1345,9 +1350,11 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
     } else {
       if (from != sptr)
         sendcmdto_set_s2s_cptr(cli_from(sptr));
-      /* Use tag-aware send so recipient gets server-time/msgid per caps */
-      sendcmdto_one_tags_ext(from, CMD_NOTICE, acptr, pm_msgid,
-                             "%C :%s", acptr, mytext);
+      /* Tag-aware send; for S2S to IRCV3AWARE peers also includes
+       * @A...,C<client_tags> compact-tag prefix. */
+      sendcmdto_one_tags_with_client(from, CMD_NOTICE, MSG_NOTICE, acptr,
+                                     pm_msgid, client_tags,
+                                     "%C :%s", acptr, mytext);
     }
   }
 
