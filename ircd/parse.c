@@ -1698,6 +1698,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   cli_s2s_time_ms(cptr) = 0;
   cli_s2s_msgid(cptr)[0] = '\0';
   cli_s2s_multi_msgid(cptr)[0] = '\0';
+  cli_s2s_client_tags(cptr)[0] = '\0';
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
@@ -1726,14 +1727,66 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
           cli_s2s_msgid(cptr)[14] = '\0';
         }
 
-        /* Extract full multi-msgid string (msgid1+msgid2+...) if present.
-         * Starts at ch+9, runs until tagend. Contains +-separated msgids
-         * for batched CREATE/PART. */
+        /* Find the segment-separator (first ',' after the msgid).
+         * Everything before this is multi-msgid payload (+-separated);
+         * everything after is one or more extension segments
+         * (',<marker><data>'). */
         {
-          int multi_len = tagend - (ch + 9);
-          if (multi_len > 14 && multi_len < S2S_MULTI_MSGID_BUFSIZE) {
-            memcpy(cli_s2s_multi_msgid(cptr), ch + 9, multi_len);
-            cli_s2s_multi_msgid(cptr)[multi_len] = '\0';
+          char *seg_start = memchr(ch + 9, ',', tagend - (ch + 9));
+          char *multi_end = seg_start ? seg_start : tagend;
+
+          /* Extract full multi-msgid string (msgid1+msgid2+...) if present.
+           * Starts at ch+9, runs until first ',' or tagend. Contains
+           * +-separated msgids for batched CREATE/PART. */
+          {
+            int multi_len = multi_end - (ch + 9);
+            if (multi_len > 14 && multi_len < S2S_MULTI_MSGID_BUFSIZE) {
+              memcpy(cli_s2s_multi_msgid(cptr), ch + 9, multi_len);
+              cli_s2s_multi_msgid(cptr)[multi_len] = '\0';
+            }
+          }
+
+          /* Walk extension segments after the msgid. Each segment is
+           * ',<marker><data>' where data runs until the next ',' or
+           * tagend. Marker is a single ASCII char identifying the
+           * segment type:
+           *   C — client-only tags (literal IRCv3 client-tag string)
+           * Unknown markers are silently skipped (forward-compatible
+           * for future segments). */
+          while (seg_start && seg_start < tagend) {
+            char marker;
+            char *seg_data;
+            char *seg_end;
+
+            /* Skip the comma; require at least one byte for the marker */
+            if (seg_start + 1 >= tagend)
+              break;
+            marker = seg_start[1];
+            seg_data = seg_start + 2;
+            seg_end = memchr(seg_data, ',', tagend - seg_data);
+            if (!seg_end)
+              seg_end = tagend;
+
+            switch (marker) {
+            case 'C': {
+              /* Client-only tags segment: literal IRCv3 client-tag
+               * string, copy verbatim into per-Connection buffer for
+               * ms_privmsg/ms_notice/ms_tagmsg to forward to local
+               * recipients. */
+              size_t data_len = seg_end - seg_data;
+              if (data_len > 0 &&
+                  data_len < sizeof(con_s2s_client_tags(cli_connect(cptr)))) {
+                memcpy(cli_s2s_client_tags(cptr), seg_data, data_len);
+                cli_s2s_client_tags(cptr)[data_len] = '\0';
+              }
+              break;
+            }
+            default:
+              /* Unknown segment marker — skip silently */
+              break;
+            }
+
+            seg_start = (seg_end < tagend) ? seg_end : NULL;
           }
         }
 

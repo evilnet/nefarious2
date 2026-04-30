@@ -394,6 +394,7 @@ struct Connection
   char                con_s2s_msgid[S2S_MSGID_BUFSIZE]; /**< S2S @msgid tag (first/only) from incoming message */
 #define S2S_MULTI_MSGID_BUFSIZE 256  /**< Multi-msgid: up to 15 x (14+1) = 225 chars */
   char                con_s2s_multi_msgid[S2S_MULTI_MSGID_BUFSIZE]; /**< Full multi-msgid string (+-separated, empty if single) */
+  char                con_s2s_client_tags[4096]; /**< S2S compact-tag ,C<client_tags> segment (IRCv3: 4094 max) */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
@@ -559,6 +560,8 @@ struct Client {
 #define cli_s2s_msgid(cli)	con_s2s_msgid(cli_connect(cli))
 /** Get multi-msgid string from incoming message (+-separated, for batched CREATE/PART) */
 #define cli_s2s_multi_msgid(cli) con_s2s_multi_msgid(cli_connect(cli))
+/** Get client-only tags from compact-tag ,C segment of incoming S2S message */
+#define cli_s2s_client_tags(cli) con_s2s_client_tags(cli_connect(cli))
 /** Get S2S batch ID from server */
 #define cli_s2s_batch_id(cli)	con_s2s_batch_id(cli_connect(cli))
 /** Get S2S batch type from server */
@@ -849,6 +852,8 @@ struct Client {
 #define con_s2s_msgid(con)	((con)->con_s2s_msgid)
 /** Get the full multi-msgid string from incoming message. */
 #define con_s2s_multi_msgid(con) ((con)->con_s2s_multi_msgid)
+/** Get the client-only tags from compact-tag ,C segment of incoming S2S message. */
+#define con_s2s_client_tags(con) ((con)->con_s2s_client_tags)
 /** Get the S2S batch ID from server. */
 #define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
 /** Get the S2S batch type from server. */
