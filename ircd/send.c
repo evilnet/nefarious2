@@ -2434,7 +2434,9 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   struct MsgBuf *user_mb_tags = NULL;
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;
+  struct MsgBuf *serv_mb_v3 = NULL;     /* @A...,C<client_tags> for IRCv3-aware peers */
   struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
+  struct MsgBuf *serv_mb_alias_v3 = NULL; /* Alias numeric, IRCv3-aware variant */
   struct Client *service;
   struct Client *cptr;
   struct Client *alias_from;    /* Alias source for split S2S delivery */
@@ -2443,7 +2445,9 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   const char *usercmd;
   char tagbuf[4608];
   char s2s_tagbuf[128];
+  char s2s_tagbuf_v3[4200];     /* fits @A prefix + ,C<4094-byte client_tags> */
   char userfmt_tags[64];
+  int has_ctags = (client_tags && *client_tags);
 
   vd.vd_format = pattern;
 
@@ -2480,12 +2484,25 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
   /* Prepare tagged format string */
   ircd_snprintf(0, userfmt_tags, sizeof(userfmt_tags), "%%s%s", userfmt);
 
-  /* Build buffer to send to servers - with S2S tags if enabled */
+  /* Build buffer to send to servers - with S2S tags if enabled.
+   * When client_tags are present, additionally build a v3 buffer with
+   * ,C<client_tags> in the compact-tag prefix; the dispatch loop picks
+   * it for IRCv3-aware peers so they can forward the tags to their
+   * local recipients. Legacy peers get the existing tag-only prefix
+   * (which they strip per the legacy patch — same as today). */
   if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), cptr, NULL, 0)) {
     va_start(vd.vd_args, pattern);
     serv_mb_tags = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
     va_end(vd.vd_args);
     serv_mb = serv_mb_tags;
+
+    if (has_ctags &&
+        format_s2s_tags_with_client(s2s_tagbuf_v3, sizeof(s2s_tagbuf_v3),
+                                    cptr, client_tags, NULL, 0)) {
+      va_start(vd.vd_args, pattern);
+      serv_mb_v3 = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_v3, from, tok, &vd);
+      va_end(vd.vd_args);
+    }
   } else {
     va_start(vd.vd_args, pattern);
     serv_mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
@@ -2500,6 +2517,14 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
     else
       serv_mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
     va_end(vd.vd_args);
+
+    /* Alias variant also needs a v3 buffer when client_tags present and
+     * the v3 prefix was successfully built above. */
+    if (serv_mb_v3) {
+      va_start(vd.vd_args, pattern);
+      serv_mb_alias_v3 = msgq_make(&me, "%s%C %s %v", s2s_tagbuf_v3, alias_from, tok, &vd);
+      va_end(vd.vd_args);
+    }
   }
 
   /* send buffer along! */
@@ -2549,11 +2574,28 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
         }
       }
     } else {
-      /* Use alias numeric for primary's server direction to avoid fake direction */
-      if (serv_mb_alias && cli_from(member->user) == primary_dir)
-        send_buffer(member->user, serv_mb_alias, 0);
-      else
-        send_buffer(member->user, serv_mb, 0);
+      /* S2S delivery. Pick buffer based on:
+       *   1. Primary-direction alias rewriting (serv_mb_alias variants)
+       *   2. IRCv3-aware peers get the ,C<client_tags> variant when available
+       *   3. Otherwise the standard prefix-only or no-prefix buffer
+       */
+      struct Client *peer_link = cli_from(member->user);
+      int is_v3 = IsIRCv3Aware(peer_link);
+      if (peer_link == primary_dir) {
+        if (is_v3 && serv_mb_alias_v3)
+          send_buffer(member->user, serv_mb_alias_v3, 0);
+        else if (serv_mb_alias)
+          send_buffer(member->user, serv_mb_alias, 0);
+        else if (is_v3 && serv_mb_v3)
+          send_buffer(member->user, serv_mb_v3, 0);
+        else
+          send_buffer(member->user, serv_mb, 0);
+      } else {
+        if (is_v3 && serv_mb_v3)
+          send_buffer(member->user, serv_mb_v3, 0);
+        else
+          send_buffer(member->user, serv_mb, 0);
+      }
     }
   }
   /* Consult service forwarding table. */
@@ -2561,13 +2603,20 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
       && (service = FindServer(GlobalForwards[prefix]))
       && cli_sentalong(service) != sentalong_marker) {
       cli_sentalong(service) = sentalong_marker;
-      send_buffer(service, serv_mb, 0);
+      if (IsIRCv3Aware(service) && serv_mb_v3)
+        send_buffer(service, serv_mb_v3, 0);
+      else
+        send_buffer(service, serv_mb, 0);
   }
 
   msgq_clean(user_mb);
   msgq_clean(serv_mb);
+  if (serv_mb_v3)
+    msgq_clean(serv_mb_v3);
   if (serv_mb_alias)
     msgq_clean(serv_mb_alias);
+  if (serv_mb_alias_v3)
+    msgq_clean(serv_mb_alias_v3);
 }
 
 /** Send a (prefixed) WALL of type \a type to all users except \a one.
