@@ -1213,6 +1213,14 @@ struct Message msgtab[] = {
     { m_ignore, m_ignore, m_ignore, m_ignore, m_ignore },
     ""
   },
+  {
+    MSG_BOUNCER_TRANSFER,
+    TOK_BOUNCER_TRANSFER,
+    0, MAXPARA, 0, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, ms_bouncer_transfer, m_ignore, m_ignore },
+    ""
+  },
   { 0 }
 };
 

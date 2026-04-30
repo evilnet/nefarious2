@@ -2303,6 +2303,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       char *ts;
       if ((ts = strchr(account, ':'))) {
 	len = (ts++) - account + 1; /* +1: ircd_strncpy copies len-1 chars */
+	if (len > ACCOUNTLEN + 1)
+	  len = ACCOUNTLEN + 1;
 	cli_user(acptr)->acc_create = atoi(ts);
 	Debug((DEBUG_DEBUG, "Received timestamped account in user mode; "
 	      "account \"%s\", timestamp %Tu", account,

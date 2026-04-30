@@ -1,7 +1,7 @@
 FROM debian:13 AS base
 
-ENV GID 1234
-ENV UID 1234
+ENV GID=1234
+ENV UID=1234
 
 # Single merged apt-get layer + ccache
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
@@ -44,6 +44,7 @@ FROM libs AS configure
 RUN mkdir -p /home/nefarious/nefarious2/ircd /home/nefarious/nefarious2/ircd/test /home/nefarious/ircd
 WORKDIR /home/nefarious/nefarious2
 
+
 # Copy ONLY the files configure needs — source changes won't bust this cache
 COPY configure.in acinclude.m4 aclocal.m4 configure install-sh config.guess config.sub ./
 COPY config.h.in ./
@@ -67,6 +68,9 @@ FROM configure AS build
 
 # Copy all remaining source (this layer busts on any .c/.h change)
 COPY . /home/nefarious/nefarious2
+
+# .release is generated before docker build (e.g. by CI) and needs to be in ircd/ where version.c.SH runs
+RUN test -f .release && cp .release ircd/.release || true
 
 # ccache via BuildKit cache mount — persists across docker builds
 ENV PATH="/usr/lib/ccache:${PATH}"
@@ -128,6 +132,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 USER nefarious
+WORKDIR /home/nefarious/ircd
 
 COPY ./tools/docker/dockerentrypoint.sh /home/nefarious/dockerentrypoint.sh
 COPY ./tools/linesync/gitsync.sh /home/nefarious/ircd/gitsync.sh

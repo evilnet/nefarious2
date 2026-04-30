@@ -21,3 +21,4 @@ tools/sidconvert/num2sid
 tools/iauthd-ts/dist/
 tools/iauthd-ts/node_modules/
 .claude/settings.local.json
+build/
