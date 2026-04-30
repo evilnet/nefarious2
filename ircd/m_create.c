@@ -95,6 +95,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "send.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -113,9 +114,19 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   struct JoinBuf create;
   struct ModeBuf mbuf; /* a mode buffer */
   int badop; /* a flag */
+  struct Client *alias_source = NULL;
 
   if (IsServer(sptr))
     return protocol_violation(sptr,"%s tried to CREATE a channel", cli_name(sptr));
+
+  /* Alias CREATE — rewrite to primary unconditionally, mirroring ms_join.
+   * The primary becomes the channel member; bounce_sync_alias_join then
+   * re-adds the alias with CHFL_ALIAS so both connections are members.
+   * jb_alias_source enables split S2S delivery on further relay. */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    alias_source = sptr;
+    sptr = cli_alias_primary(sptr);
+  }
 
   /* sanity checks: Only accept CREATE messages from servers */
   if (parc < 3 || *parv[2] == '\0')
@@ -147,6 +158,10 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   joinbuf_init(&join, sptr, cptr, JOINBUF_TYPE_JOIN, 0, 0);
   joinbuf_init(&create, sptr, cptr, JOINBUF_TYPE_CREATE, 0, chanTS);
+  if (alias_source && !MyConnect(sptr)) {
+    join.jb_alias_source = alias_source;
+    create.jb_alias_source = alias_source;
+  }
 
   /* Parse per-channel msgids from incoming S2S multi-msgid tag into local array.
    * Format: "msgid1+msgid2+msgid3" — positional match to channel list. */

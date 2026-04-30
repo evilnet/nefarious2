@@ -125,6 +125,15 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return send_reply(sptr, ERR_NEEDMOREPARAMS, "SETNAME");
   }
 
+  /* Alias /setname — rewrite to primary so realname change applies to
+   * the user's canonical identity, not just this connection's view.
+   * BX U (bounce_emit_alias_update) below syncs other servers'
+   * aliases. Local sibling aliases share the cli_info pointer indirectly
+   * via realname propagation, but we re-stamp them in case any code
+   * reads cli_info(alias) directly. */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+    sptr = cli_alias_primary(sptr);
+
   newname = parv[1];
 
   /* Handle oversized realname */
@@ -207,6 +216,10 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (parc < 2 || EmptyString(parv[1]))
     return 0;
+
+  /* Alias-source SETNAME relay — rewrite to primary. */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+    sptr = cli_alias_primary(sptr);
 
   newname = parv[1];
 

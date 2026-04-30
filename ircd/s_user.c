@@ -1204,6 +1204,40 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
                                 nick, cli_lastnick(sptr));
         }
       }
+
+      /* Local-alias rename pass.  Aliases are mirrors of the primary;
+       * their nick must follow.  BX N (above) covers aliases on remote
+       * servers, but two cases require a direct local rename here:
+       *   1) Aliases on the primary's home server — BX N is broadcast
+       *      to peers but doesn't loop back to ourselves.
+       *   2) The /nick was issued from an alias on this server (m_nick
+       *      rewrote sptr to a remote primary) — BX N is gated on
+       *      MyUser(sptr) and is skipped, so other servers learn via
+       *      the primary's home-server BX N triggered when it
+       *      processes our NICK relay.  Either way, our local aliases
+       *      need their cli_name updated here.
+       * Aliases are not in the nick hash, so no hRemClient/hAddClient. */
+      if (IsAccount(sptr) && IsUser(sptr)) {
+        struct AccountSessions *as_sib =
+            bounce_find_by_account(cli_user(sptr)->account);
+        if (as_sib) {
+          struct BouncerSession *sib_session;
+          for (sib_session = as_sib->as_sessions; sib_session;
+               sib_session = sib_session->hs_anext) {
+            int sib_i;
+            for (sib_i = 0; sib_i < sib_session->hs_alias_count; sib_i++) {
+              struct Client *sib_alias =
+                  findNUser(sib_session->hs_aliases[sib_i].ba_numeric);
+              if (sib_alias && IsBouncerAlias(sib_alias)
+                  && cli_alias_primary(sib_alias) == sptr
+                  && MyConnect(sib_alias)) {
+                ircd_strncpy(cli_name(sib_alias), nick, NICKLEN);
+                cli_name(sib_alias)[NICKLEN] = '\0';
+              }
+            }
+          }
+        }
+      }
     }
     else
       sendcmdto_one(sptr, CMD_NICK, sptr, ":%s", nick);

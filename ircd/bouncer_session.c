@@ -1137,6 +1137,10 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   /* Recompute session union caps for the new primary + existing aliases */
   bounce_recompute_session_caps(cptr);
 
+  /* Membership changed (HOLDING ghost replaced by live primary) — refresh
+   * effective away so any prior auto-away or stale aggregate clears. */
+  bounce_recompute_session_away(session);
+
   return 0;
 }
 
@@ -2164,9 +2168,50 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     /* Channel list is the trailing parameter */
     channels = parv[parc - 1];
 
-    /* Check if session already exists (BURST dedup) */
-    if (bounce_find_by_token(token))
-      return 0;
+    /* Reconcile against an existing local session for the same token.
+     *
+     * Stale local-origin HOLDING vs remote ACTIVE: leaf restored a ghost
+     * from MDBX while hub already had the session live. Without this,
+     * leaf keeps its stale ghost and every reconnect revives it instead
+     * of attaching as alias to hub's active session. The remote ACTIVE
+     * is authoritative — drop the ghost and become a remote replica.
+     *
+     * Same-state replicas (both holding or both active) are simple
+     * dedup: keep what we have. */
+    {
+      struct BouncerSession *existing = bounce_find_by_token(token);
+      if (existing) {
+        int existing_local = is_local_session(existing);
+        if (existing_local && existing->hs_state == BOUNCE_HOLDING
+            && !is_holding) {
+          struct Client *ghost = existing->hs_client;
+          log_write(LS_USER, L_INFO, 0,
+                    "Bouncer reconcile: dropping stale local HOLDING ghost "
+                    "for session %s — remote %s is ACTIVE",
+                    sessid, cli_name(sptr));
+          /* Repoint origin to authoritative server, transition to ACTIVE,
+           * and drop hs_client (the ghost) so we become a remote replica. */
+          ircd_strncpy(existing->hs_origin, cli_yxx(sptr),
+                       sizeof(existing->hs_origin) - 1);
+          existing->hs_origin[sizeof(existing->hs_origin) - 1] = '\0';
+          existing->hs_state = BOUNCE_ACTIVE;
+          existing->hs_disconnect_time = 0;
+          existing->hs_client = NULL;
+          if (t_active(&existing->hs_hold_timer))
+            timer_del(&existing->hs_hold_timer);
+          /* Drop the persisted record — we're no longer the origin. */
+          bounce_db_del(existing->hs_sessid);
+          /* Exit the ghost so it doesn't linger as a phantom user.
+           * SetFlag(KILLED) suppresses the QUIT broadcast — the ghost
+           * was never visible to peers (no N for it propagated). */
+          if (ghost) {
+            SetFlag(ghost, FLAG_KILLED);
+            exit_client(cptr, ghost, &me, "Bouncer session moved");
+          }
+        }
+        return 0;
+      }
+    }
 
     /* Create session from remote data */
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
@@ -3291,6 +3336,144 @@ void bounce_free_temp_client(struct Client *temp)
   remove_client_from_list(temp);
 }
 
+/** Rebind a held local ghost to be a remote primary on another server.
+ *
+ * Hub side: client connected, session is ACTIVE, primary is alive.
+ * Leaf side: ghost was restored from MDBX (or never disconnected from leaf
+ * after a netsplit). When the hub's burst introduces N for the live
+ * primary, the leaf's standard P10 nick-collision path would kill both
+ * because ghost and primary share user@host. They aren't independent
+ * clients — they're one logical user in two representational states.
+ *
+ * Reuse the ghost's Client struct: re-key its hash entry, switch its
+ * server/numeric/Connection ownership, and clear hold flags. Channel
+ * memberships are untouched — no QUIT, no JOIN echo. Wire-level
+ * invisible to peers (only local state mutates).
+ */
+int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
+                                          struct Client *server,
+                                          const char *new_numeric,
+                                          time_t new_lastnick,
+                                          const char *username,
+                                          const char *host,
+                                          const struct irc_in_addr *new_ip,
+                                          const char *info)
+{
+  struct BouncerSession *session;
+  struct Membership *member;
+  struct Connection *old_con;
+  int i;
+
+  if (!ghost || !server || !new_numeric || !*new_numeric)
+    return -1;
+  if (!IsBouncerHold(ghost) || !MyConnect(ghost))
+    return -1;
+  if (!cli_user(ghost) || !cli_user(ghost)->account[0])
+    return -1;
+
+  session = bounce_find_best_held(cli_user(ghost)->account);
+  if (!session || session->hs_client != ghost) {
+    log_write(LS_USER, L_WARNING, 0,
+              "bounce_rebind: no matching held session for ghost %s account %s",
+              cli_name(ghost), cli_user(ghost)->account);
+    return -1;
+  }
+
+  Debug((DEBUG_INFO,
+         "bounce_rebind: ghost %s account %s -> remote primary %s on %s",
+         cli_name(ghost), cli_user(ghost)->account, new_numeric,
+         cli_name(server)));
+
+  /* Cancel hold timer — session transitions back to ACTIVE. */
+  if (t_active(&session->hs_hold_timer))
+    timer_del(&session->hs_hold_timer);
+
+  /* Drop ghost from nick hash and release its local numeric. */
+  hRemClient(ghost);
+  RemoveYXXClient(&me, cli_yxx(ghost));
+
+  /* Counter rebalance: ghost was local in bounce_create_ghost
+   * (++local_clients, ++clients). It now becomes remote: undo the
+   * local_clients increment, leave clients alone (still 1 client),
+   * and credit the introducing server's per-server count. */
+  if (UserStats.local_clients > 0)
+    --UserStats.local_clients;
+  ++(cli_serv(server)->clients);
+
+  /* Free the ghost's own Connection. The ghost now shares the server's
+   * Connection so cli_from(ghost) routes outgoing messages through the
+   * server link, like any other remote client. */
+  old_con = cli_connect(ghost);
+  if (old_con) {
+    if (cli_fd(ghost) >= 0) {
+      LocalClientArray[cli_fd(ghost)] = 0;
+      close(cli_fd(ghost));
+      cli_fd(ghost) = -1;
+    }
+    /* free_connection asserts con_client(con) == NULL */
+    con_client(old_con) = NULL;
+    free_connection(old_con);
+  }
+  cli_connect(ghost) = cli_connect(server);
+
+  /* Local-only flags no longer apply. */
+  ClrFlag(ghost, FLAG_DEADSOCKET);
+  if (IsIPChecked(ghost))
+    ClearIPChecked(ghost);
+
+  /* Update identity from the N introduction. */
+  cli_user(ghost)->server = server;
+  ircd_strncpy(cli_username(ghost), username, USERLEN + 1);
+  ircd_strncpy(cli_user(ghost)->username, username, USERLEN + 1);
+  ircd_strncpy(cli_user(ghost)->host, host, HOSTLEN + 1);
+  ircd_strncpy(cli_user(ghost)->realhost, host, HOSTLEN + 1);
+  ircd_strncpy(cli_info(ghost), info, REALLEN + 1);
+  if (new_ip)
+    memcpy(&cli_ip(ghost), new_ip, sizeof(cli_ip(ghost)));
+  cli_lastnick(ghost) = new_lastnick;
+
+  /* Register hub-assigned numeric in the introducing server's client_list. */
+  SetRemoteNumNick(ghost, new_numeric);
+
+  /* Clear ghost flag and re-key the nick hash entry. */
+  ClearBouncerHold(ghost);
+  hAddClient(ghost);
+
+  /* Channels were marked HOLDING in bounce_hold_client; clear the flag
+   * so messages route through them again. Memberships, modes and
+   * counters are otherwise untouched. */
+  for (member = cli_user(ghost)->channel; member; member = member->next_channel)
+    ClearMemberHolding(member);
+
+  /* Update session state. The session's hs_origin (the authoritative server
+   * for this session) is left as-is — hub may or may not have taken ownership
+   * via the prior auto-resume, and that bookkeeping is not affected by the
+   * leaf-side representation rebind. */
+  session->hs_state = BOUNCE_ACTIVE;
+  session->hs_client = ghost;
+  session->hs_last_active = CurrentTime;
+  session->hs_disconnect_time = 0;
+
+  /* Update local aliases' alias_primary pointer (struct address didn't
+   * change, but be defensive — the session might have been restored
+   * with stale state). */
+  for (i = 0; i < session->hs_alias_count; i++) {
+    struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+    if (alias && IsBouncerAlias(alias))
+      cli_user(alias)->alias_primary = ghost;
+  }
+
+  /* Persisted record represented a HOLDING ghost; session is ACTIVE now. */
+  bounce_db_del(session->hs_sessid);
+
+  log_write(LS_USER, L_TRACE, 0,
+            "Bouncer rebind: ghost %s rebound to remote primary %s on %s "
+            "(session %s)", cli_name(ghost), new_numeric, cli_name(server),
+            session->hs_sessid);
+
+  return 0;
+}
+
 /* ---------------------------------------------------------------- */
 /* Alias channel auto-sync                                           */
 /* ---------------------------------------------------------------- */
@@ -3601,6 +3784,28 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
     return;
 
   for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+
+    /* Local aliases on this (primary's) server: apply the field update
+     * directly. The S2S broadcast below skips us for loop-prevention,
+     * so without this pass our own local aliases stay stale. */
+    if (alias && IsBouncerAlias(alias) && MyConnect(alias)) {
+      if (0 == ircd_strcmp(field, "host"))
+        ircd_strncpy(cli_user(alias)->host, value, HOSTLEN);
+      else if (0 == ircd_strcmp(field, "realhost"))
+        ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN);
+      else if (0 == ircd_strcmp(field, "realname"))
+        ircd_strncpy(cli_info(alias), value, REALLEN);
+      else if (0 == ircd_strcmp(field, "fakehost"))
+        ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN);
+      else if (0 == ircd_strcmp(field, "cloakhost"))
+        ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN);
+      else if (0 == ircd_strcmp(field, "cloakip"))
+        ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN);
+      else if (0 == ircd_strcmp(field, "username"))
+        ircd_strncpy(cli_user(alias)->username, value, USERLEN);
+    }
+
     sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                           "U %s %s=%s",
                           sess->hs_aliases[i].ba_numeric, field, value);
@@ -4153,6 +4358,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
             cli_name(sptr), user->username, user->realhost,
             session->hs_sessid, cli_name(&me), cli_sock_ip(sptr));
 
+  /* New session connection — re-aggregate effective away. A present
+   * alias attaching to an away primary should flip the session to
+   * present (and broadcast away-notify) even though no /away was typed. */
+  bounce_recompute_session_away(session);
+
   return 0;
 }
 
@@ -4452,6 +4662,10 @@ void bounce_alias_untrack(struct Client *alias)
           memmove(&session->hs_aliases[i], &session->hs_aliases[i + 1],
                   (session->hs_alias_count - 1 - i) * sizeof(struct BounceAlias));
         session->hs_alias_count--;
+        /* Membership shrunk — re-aggregate effective away. A present
+         * alias departing may flip the session back to away (if all
+         * remaining connections are away). */
+        bounce_recompute_session_away(session);
         return;
       }
     }
@@ -4878,6 +5092,82 @@ int bounce_compute_effective_away(struct BouncerSession *session,
   }
 
   return 1; /* Always return 1; caller tracks change detection */
+}
+
+/** Re-aggregate effective away across a session and broadcast on change. */
+void bounce_recompute_session_away(struct BouncerSession *session)
+{
+  int new_effective = 0;
+  char new_msg[AWAYLEN + 1];
+  int prev_effective;
+  int msg_changed;
+  const char *eff_msg;
+  struct Client *primary;
+  int i;
+
+  if (!session || !session->hs_client)
+    return;
+
+  primary = session->hs_client;
+  prev_effective = session->hs_effective_away;
+  bounce_compute_effective_away(session, &new_effective, new_msg);
+
+  if (new_effective == 0)
+    eff_msg = "";
+  else if (new_effective == 1)
+    eff_msg = new_msg[0] ? new_msg : "";
+  else
+    eff_msg = feature_str(FEAT_AWAY_STAR_MSG)
+                ? feature_str(FEAT_AWAY_STAR_MSG) : "*";
+
+  msg_changed = (new_effective == 1 && prev_effective == 1)
+                && 0 != ircd_strcmp(eff_msg, session->hs_effective_away_msg);
+
+  if (new_effective == prev_effective && !msg_changed)
+    return;
+
+  /* Mirror onto every local session connection's cli_user->away. */
+  if (MyConnect(primary))
+    user_set_away(cli_user(primary), new_effective ? (char *)eff_msg : NULL);
+  for (i = 0; i < session->hs_alias_count; i++) {
+    struct Client *al = findNUser(session->hs_aliases[i].ba_numeric);
+    if (al && IsBouncerAlias(al) && MyConnect(al))
+      user_set_away(cli_user(al), new_effective ? (char *)eff_msg : NULL);
+  }
+
+  /* Broadcast. butone=NULL — no specific connection initiated this
+   * (membership-change driven), so every local channel member of
+   * primary needs to know, including primary's own IRC client. */
+  {
+    char away_msgid[64] = "";
+    uint64_t away_time_ms = 0;
+    if (feature_bool(FEAT_MSGID)) {
+      struct timeval tv;
+      generate_msgid(away_msgid, sizeof(away_msgid));
+      gettimeofday(&tv, NULL);
+      away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+      sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+    }
+
+    if (new_effective == 0) {
+      sendcmdto_serv_butone(primary, CMD_AWAY, NULL, "");
+      if (away_msgid[0])
+        sendcmdto_set_client_msgid(away_msgid);
+      sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
+                                             CAP_AWAYNOTIFY, CAP_NONE, "");
+    } else {
+      sendcmdto_serv_butone(primary, CMD_AWAY, NULL, ":%s", eff_msg);
+      if (away_msgid[0])
+        sendcmdto_set_client_msgid(away_msgid);
+      sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
+                                             CAP_AWAYNOTIFY, CAP_NONE,
+                                             ":%s", eff_msg);
+    }
+    sendcmdto_set_client_msgid(NULL);
+  }
+
+  session->hs_effective_away = new_effective;
+  ircd_strncpy(session->hs_effective_away_msg, eff_msg, AWAYLEN + 1);
 }
 
 /** Get the total number of connections for a session. */

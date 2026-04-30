@@ -102,12 +102,12 @@
 
 /*
  * user_set_away - set user away state
- * returns 1 if client is away or changed away message, 0 if 
+ * returns 1 if client is away or changed away message, 0 if
  * client is removing away status.
  * NOTE: this function may modify user and message, so they
  * must be mutable.
  */
-static int user_set_away(struct User* user, char* message)
+int user_set_away(struct User* user, char* message)
 {
   char* away;
   assert(0 != user);
@@ -204,7 +204,13 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     struct BouncerSession *bsess = NULL;
     if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
         && bounce_enabled_for(sptr) && bounce_has_sessions(cli_account(sptr))) {
-      bsess = bounce_get_session(sptr);
+      /* Alias /away — look up the session via the alias's primary so
+       * presence aggregation considers this alias's con_pre_away.
+       * bounce_get_session keys on hs_client which is the primary. */
+      struct Client *anchor =
+          (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+              ? cli_alias_primary(sptr) : sptr;
+      bsess = bounce_get_session(anchor);
     }
 
     if (bsess) {
@@ -236,25 +242,54 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Compute effective state across all connections */
     {
       int prev_effective = bsess->hs_effective_away;
+      const char *eff_msg;
       bounce_compute_effective_away(bsess, &new_effective, new_msg);
 
-      /* Update cli_user(primary)->away to reflect the effective state.
-       * This ensures WHOIS, PRIVMSG auto-reply, and other lookups
-       * see the aggregated state, not a single connection's state. */
-      if (new_effective == 0) {
-        user_set_away(cli_user(sptr), NULL);
-      } else if (new_effective == 1) {
-        user_set_away(cli_user(sptr), new_msg[0] ? new_msg : (char *)away_message);
-      } else {
-        /* All AWAY * — set away with star message for WHOIS consistency */
-        user_set_away(cli_user(sptr),
-                      feature_str(FEAT_AWAY_STAR_MSG)
-                        ? (char *)feature_str(FEAT_AWAY_STAR_MSG)
-                        : (char *)"*");
+      /* Pick the effective away string to mirror onto every local
+       * session connection (primary + local aliases). It's one logical
+       * session, so WHOIS/PRIVMSG auto-reply give the same answer
+       * regardless of which connection is queried. Different
+       * connections may legitimately have different reasons for being
+       * away — most-recent-wins is the chosen tie-break: if sptr just
+       * set away, sptr's message is by definition the latest, so
+       * prefer it over whatever the aggregation iteration happened to
+       * land on. */
+      if (new_effective == 0)
+        eff_msg = NULL;
+      else if (new_effective == 1) {
+        if (con_pre_away(cli_connect(sptr)) == 1 && away_message
+            && *away_message)
+          eff_msg = (char *)away_message;
+        else
+          eff_msg = new_msg[0] ? new_msg : (char *)away_message;
+      } else
+        eff_msg = feature_str(FEAT_AWAY_STAR_MSG)
+                    ? feature_str(FEAT_AWAY_STAR_MSG) : "*";
+
+      user_set_away(cli_user(sptr), (char *)eff_msg);
+
+      /* Mirror to all other local connections in this session. */
+      {
+        struct Client *primary = bsess->hs_client;
+        int ai;
+        if (primary && primary != sptr && MyConnect(primary))
+          user_set_away(cli_user(primary), (char *)eff_msg);
+        for (ai = 0; ai < bsess->hs_alias_count; ai++) {
+          struct Client *al = findNUser(bsess->hs_aliases[ai].ba_numeric);
+          if (al && al != sptr && IsBouncerAlias(al) && MyConnect(al))
+            user_set_away(cli_user(al), (char *)eff_msg);
+        }
       }
 
-      /* Only broadcast if effective state changed */
-      if (new_effective != prev_effective) {
+      /* Broadcast when effective state changed OR (still away and the
+       * displayed message changed via most-recent-wins). away-notify
+       * clients should see message updates, not just state flips. */
+      {
+        int msg_changed = (new_effective == 1 && prev_effective == 1)
+            && eff_msg
+            && 0 != ircd_strcmp(eff_msg, bsess->hs_effective_away_msg);
+
+      if (new_effective != prev_effective || msg_changed) {
         char away_msgid[64] = "";
         uint64_t away_time_ms = 0;
         if (feature_bool(FEAT_MSGID)) {
@@ -273,15 +308,15 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE, "");
         } else if (new_effective == 1) {
-          /* Became away — broadcast with effective message */
+          /* Away (state-flip or message-update) — broadcast eff_msg */
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s",
-                               new_msg[0] ? new_msg : away_message);
+                                eff_msg ? eff_msg : "");
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE,
                                                  ":%s",
-                                                 new_msg[0] ? new_msg : away_message);
+                                                 eff_msg ? eff_msg : "");
         } else {
           /* All connections AWAY * — user is effectively away.
            * Broadcast with the AWAY_STAR_MSG fallback.  "Hidden" means
@@ -299,9 +334,14 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
         sendcmdto_set_client_msgid(NULL);
         bsess->hs_effective_away = new_effective;
-        ircd_strncpy(bsess->hs_effective_away_msg, new_msg, AWAYLEN + 1);
+        /* Persist the displayed message (eff_msg, not the raw aggregation
+         * pick) so the next message-change comparison is against what
+         * we actually broadcast. */
+        ircd_strncpy(bsess->hs_effective_away_msg,
+                     eff_msg ? eff_msg : "", AWAYLEN + 1);
       }
-      /* If effective state unchanged: suppress broadcast */
+      } /* end msg_changed scope */
+      /* If effective state and message both unchanged: suppress broadcast */
     }
     return 0;
     }
@@ -376,7 +416,37 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
+  /* Alias-source AWAY relay — rewrite to primary so the away state
+   * lands on the user's canonical identity (matters for WHOIS, PRIVMSG
+   * auto-reply, and effective-away aggregation). */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+    sptr = cli_alias_primary(sptr);
+
   is_away = user_set_away(cli_user(sptr), away_message);
+
+  /* Mirror the away state onto local aliases of this primary so their
+   * WHOIS/connections see the same state.  Remote aliases learn via
+   * the AWAY relay we forward below. */
+  if (IsAccount(sptr) && IsUser(sptr)) {
+    struct AccountSessions *as_sib =
+        bounce_find_by_account(cli_user(sptr)->account);
+    if (as_sib) {
+      struct BouncerSession *sib_sess;
+      for (sib_sess = as_sib->as_sessions; sib_sess;
+           sib_sess = sib_sess->hs_anext) {
+        int sib_i;
+        for (sib_i = 0; sib_i < sib_sess->hs_alias_count; sib_i++) {
+          struct Client *sib_alias =
+              findNUser(sib_sess->hs_aliases[sib_i].ba_numeric);
+          if (sib_alias && IsBouncerAlias(sib_alias)
+              && cli_alias_primary(sib_alias) == sptr
+              && MyConnect(sib_alias)) {
+            user_set_away(cli_user(sib_alias), away_message);
+          }
+        }
+      }
+    }
+  }
 
   /* Reuse incoming S2S msgid or generate new for away-notify */
   {
@@ -408,12 +478,19 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (away_msgid[0])
       sendcmdto_set_client_msgid(away_msgid);
 
+    /* butone=NULL: notify every local channel member of sptr.
+     * Excluding sptr makes sense for the user's own /away echo on the
+     * server where they typed it (handled in m_away), but never here:
+     * if sptr is remote on this server, exclusion is a no-op; if sptr
+     * is local (bouncer aggregation case where leaf sent :primary AWAY
+     * but the actual trigger was an alias on leaf), primary's IRC client
+     * needs to learn the new state — it didn't initiate this. */
     if (is_away)
-      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, NULL,
                                              CAP_AWAYNOTIFY, CAP_NONE,
                                              ":%s", away_message);
     else
-      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
+      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, NULL,
                                              CAP_AWAYNOTIFY, CAP_NONE, "");
 
     sendcmdto_set_client_msgid(NULL);

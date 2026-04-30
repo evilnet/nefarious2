@@ -89,6 +89,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
@@ -150,6 +151,8 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char           nick[NICKLEN + 2];
   char*          arg;
   char*          s;
+  char           ts_buf[20];
+  char*          rewrite_parv[3];
 
   assert(0 != cptr);
   assert(cptr == sptr);
@@ -203,6 +206,27 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
   }
 
+  /* Alias /nick — rewrite to primary so the rename hits the user's
+   * canonical identity. Aliases mirror the primary; their nick must
+   * follow the primary's, not diverge. set_nick_name then renames
+   * primary on this server, broadcasts NICK from primary source, and
+   * BX N (when sptr is local-MyUser) syncs aliases on other servers.
+   * Local aliases on this server are renamed in set_nick_name's
+   * local-alias rename pass. */
+  if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    sptr = cli_alias_primary(sptr);
+    /* Synthesize parv[2] timestamp so set_nick_name's
+     * cli_lastnick(sptr) = (sptr == cptr) ? TStime() : atoi(parv[2])
+     * path produces a sane lastnick when sptr is the (possibly remote)
+     * primary rather than the original cptr. */
+    ircd_snprintf(0, ts_buf, sizeof(ts_buf), "%Tu", TStime());
+    rewrite_parv[0] = parv[0];
+    rewrite_parv[1] = parv[1];
+    rewrite_parv[2] = ts_buf;
+    parv = rewrite_parv;
+    parc = 3;
+  }
+
   if (!(acptr = SeekClient(nick))) {
     /*
      * No collisions, all clear...
@@ -210,7 +234,9 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return set_nick_name(cptr, sptr, nick, parc, parv, 0);
   }
   if (IsServer(acptr)) {
-    send_reply(sptr, ERR_NICKNAMEINUSE, nick);
+    /* Reply to cptr (the local connection) — sptr may have been
+     * rewritten to a remote primary in the alias path above. */
+    send_reply(cptr, ERR_NICKNAMEINUSE, nick);
     return 0;                        /* NICK message ignored */
   }
   /*
@@ -279,9 +305,10 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
   /*
    * NICK is coming from local client connection. Just
-   * send error reply and ignore the command.
+   * send error reply and ignore the command.  Reply to cptr — sptr
+   * may have been rewritten to a remote primary above.
    */
-  send_reply(sptr, ERR_NICKNAMEINUSE, nick);
+  send_reply(cptr, ERR_NICKNAMEINUSE, nick);
   return 0;                        /* NICK message ignored */
 }
 
@@ -330,15 +357,26 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsServer(sptr))
   {
     lastnick = atoi(parv[3]);
-    if (lastnick > OLDEST_TS && !IsBurstOrBurstAck(sptr)) 
+    if (lastnick > OLDEST_TS && !IsBurstOrBurstAck(sptr))
       cli_serv(sptr)->lag = TStime() - lastnick;
   }
   else
   {
-    lastnick = atoi(parv[2]); 
+    lastnick = atoi(parv[2]);
     if (lastnick > OLDEST_TS && !IsBurstOrBurstAck(sptr))
       cli_serv(cli_user(sptr)->server)->lag = TStime() - lastnick;
   }
+
+  /* Alias-source NICK relay — rewrite to primary so receivers process
+   * the rename as the user's canonical identity, not as the alias
+   * diverging from primary. set_nick_name then renames primary on this
+   * server (it may be local or remote, both paths handle correctly),
+   * broadcasts NICK + (when primary is local-MyUser) BX N for sibling
+   * alias sync. Local aliases are renamed in set_nick_name's local-alias
+   * pass. */
+  if (!IsServer(sptr) && IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+    sptr = cli_alias_primary(sptr);
+
   /*
    * If do_nick_name() returns a null name OR if the server sent a nick
    * name and do_nick_name() changed it in some way (due to rules of nick
@@ -394,6 +432,62 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * acptr != sptr (point to different client structures).
    */
   assert(acptr != sptr);
+  /*
+   * Bouncer ghost-vs-primary revive.
+   *
+   * If acptr is a held bouncer ghost on this server and the incoming N
+   * is from a server introducing the same logical user (account match),
+   * rebind the ghost in place to represent the hub-introduced primary.
+   * Standard collision logic would kill both because they share
+   * user@host — they aren't independent clients, they're one user in
+   * two representational states.
+   */
+  if (IsServer(sptr) && IsBouncerHold(acptr) && parc > 7
+      && cli_user(acptr) && cli_user(acptr)->account[0]) {
+    const char *acct = NULL;
+    char acct_buf[ACCOUNTLEN + 1];
+    /* Walk parv[6] flag string, counting arg-taking flags before 'r'.
+     * Argument order in N matches umode_str() output order: r, h, f, C, c.
+     * Args occupy parv[7..parc-4]; parv[parc-3..parc-1] are ip/numeric/info. */
+    if (parv[6] && *parv[6] == '+') {
+      const char *m;
+      int argi = 7;
+      for (m = parv[6] + 1; *m; m++) {
+        if (*m == 'r' || *m == 'h' || *m == 'f' || *m == 'C' || *m == 'c') {
+          if (argi >= parc - 3)
+            break;
+          if (*m == 'r') {
+            const char *a = parv[argi];
+            const char *colon = strchr(a, ':');
+            size_t alen = colon ? (size_t)(colon - a) : strlen(a);
+            if (alen > ACCOUNTLEN)
+              alen = ACCOUNTLEN;
+            memcpy(acct_buf, a, alen);
+            acct_buf[alen] = '\0';
+            acct = acct_buf;
+            break;
+          }
+          argi++;
+        }
+      }
+    }
+    if (acct && 0 == ircd_strcmp(acct, cli_user(acptr)->account)) {
+      struct irc_in_addr ip;
+      base64toip(parv[parc - 3], &ip);
+      if (0 == bounce_rebind_ghost_to_remote_primary(acptr, sptr,
+                                                     parv[parc - 2],
+                                                     lastnick, parv[4],
+                                                     parv[5], &ip,
+                                                     parv[parc - 1])) {
+        sendto_opmask_butone(0, SNO_OLDSNO,
+                             "Bouncer rebind: %C ghost rebound to %s on %C "
+                             "(account %s)", acptr, parv[parc - 2], cptr,
+                             acct);
+        return 0;
+      }
+      /* Fall through to existing collision logic on rebind failure. */
+    }
+  }
   /*
    * If the older one is "non-person", the new entry is just
    * allowed to overwrite it. Just silently drop non-person,

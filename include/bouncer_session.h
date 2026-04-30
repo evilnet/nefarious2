@@ -408,6 +408,17 @@ extern int bounce_compute_effective_away(struct BouncerSession *session,
                                           int *effective_state,
                                           char *effective_msg);
 
+/** Re-aggregate effective away state across a session and broadcast
+ * (channel away-notify + S2S AWAY) if the effective state or message
+ * changed. Mirrors the result onto cli_user->away of every local
+ * session connection. Call when session membership changes (alias
+ * attach, detach, ghost revive) so the network-visible away tracks
+ * connection presence without requiring a fresh /away.
+ *
+ * @param[in] session Session to re-aggregate.
+ */
+extern void bounce_recompute_session_away(struct BouncerSession *session);
+
 /** Replay channel state (JOIN/TOPIC/NAMES) to a client after held session resume.
  * @param[in] cptr Client that just resumed a held session.
  */
@@ -534,6 +545,37 @@ extern int bounce_revive(struct BouncerSession *session, struct Client *temp);
  * @param[in] temp Temporary client to free.
  */
 extern void bounce_free_temp_client(struct Client *temp);
+
+/** Rebind a held local ghost to be a remote primary on another server.
+ *
+ * Called from ms_nick() when an N introduction from a server collides with
+ * a held ghost representing the same logical user (same account). Avoids
+ * the destructive P10 nick-collision path which would kill both the ghost
+ * and the incoming primary because they share user@host.
+ *
+ * The ghost's Client struct is reused, so channel memberships, msgids,
+ * etc. are preserved — no QUIT to channels, no JOIN echo. Ownership,
+ * numeric, identity and flags are updated to match the introduced primary.
+ *
+ * @param[in] ghost  Held ghost client (FLAG_BOUNCER_HOLD set, MyConnect).
+ * @param[in] server Server introducing the primary (cli_user->server target).
+ * @param[in] new_numeric YXXXX numeric assigned by introducing server.
+ * @param[in] new_lastnick Timestamp from N parv[3].
+ * @param[in] username Username from N parv[4].
+ * @param[in] host     Host from N parv[5].
+ * @param[in] new_ip   IP from N parv[parc-3] (NULL = keep ghost's).
+ * @param[in] info     Realname from N parv[parc-1].
+ * @return 0 on success, -1 on failure (caller should fall through to
+ *         existing collision logic).
+ */
+extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
+                                                 struct Client *server,
+                                                 const char *new_numeric,
+                                                 time_t new_lastnick,
+                                                 const char *username,
+                                                 const char *host,
+                                                 const struct irc_in_addr *new_ip,
+                                                 const char *info);
 
 /*
  * Utility

@@ -283,7 +283,14 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
     /* acptr->from == acptr for acptr == cptr */
     if (cli_from(acptr) == cptr)
       continue;
-    if (IsUser(acptr) && !IsBouncerAlias(acptr))
+    /* Skip bouncer-held ghosts: they're local-only representations of
+     * a HOLDING session (no real connection backing them).  Their
+     * existence on the network is communicated via BS C, not N.
+     * Without this filter, a peer that already revived the same
+     * session collides with our ghost-N (same nick, same user@host,
+     * same persisted lastnick) and the standard collision logic kills
+     * both — exactly the bug bouncer-burst-revive was meant to prevent. */
+    if (IsUser(acptr) && !IsBouncerAlias(acptr) && !IsBouncerHold(acptr))
     {
       char xxx_buf[25];
       char *s = umode_str(acptr);
