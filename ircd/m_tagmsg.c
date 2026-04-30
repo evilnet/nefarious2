@@ -287,7 +287,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       if (!IsLocalChannel(chptr->chname)) {
         sendcmdto_set_s2s_tags(0, tagmsg_msgid);
         sendcmdto_want_s2s_tags(1);
-        sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
+        sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
                               client_tags, chptr->chname);
       }
     }
@@ -409,7 +409,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     sendcmdto_set_client_msgid(NULL);
 
     /* Propagate to other servers */
-    sendcmdto_serv_butone(sptr, CMD_TAGMSG, cptr, "@%s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
                           client_tags, target);
 
     /* Store in history (or write-forward to STORE server).

@@ -152,7 +152,7 @@ static int history_set(struct Client *sptr, struct Channel *chptr,
                   sptr, chptr->chname, setting, metadata_value);
 
     /* Broadcast to other servers */
-    sendcmdto_serv_butone(&me, CMD_METADATA, NULL, "%s %s :%s",
+    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s :%s",
                           chptr->chname, metadata_key, metadata_value);
   } else {
     sendcmdto_one(&me, CMD_NOTICE, sptr,

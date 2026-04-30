@@ -221,7 +221,7 @@ void pending_rename_complete(struct PendingRename *pr)
   send_rename_to_members(pr->client, pr->channel, pr->oldname, pr->reason);
 
   /* Propagate to other servers */
-  sendcmdto_serv_butone(pr->client, CMD_RENAME, cli_from(pr->client),
+  sendcmdto_serv_butone_v3(pr->client, CMD_RENAME, cli_from(pr->client),
                         "%s %s :%s", pr->oldname, pr->channel->chname,
                         pr->reason);
 
@@ -464,7 +464,7 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   send_rename_to_members(sptr, chptr, oldname_buf, reason);
 
   /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_RENAME, cptr, "%s %s :%s",
+  sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s :%s",
                         oldname_buf, chptr->chname, reason);
 
   return 0;
@@ -523,7 +523,7 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   send_rename_to_members(sptr, chptr, oldname_buf, reason);
 
   /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_RENAME, cptr, "%s %s :%s",
+  sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s :%s",
                         oldname_buf, chptr->chname, reason);
 
   return 0;

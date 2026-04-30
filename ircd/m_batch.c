@@ -332,7 +332,7 @@ int ms_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   }
 
   /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, cptr, "%s%s%s%s",
+  sendcmdto_serv_butone_v3(sptr, CMD_BATCH_CMD, cptr, "%s%s%s%s",
                         is_start ? "+" : "-",
                         batch_ref,
                         batch_type ? " " : "",
@@ -1861,7 +1861,7 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
     if (parc >= 3 && !EmptyString(parv[2]))
       cli_serv(sptr)->ml_max_lines = atoi(parv[2]);
     /* Propagate with parameters */
-    sendcmdto_serv_butone(sptr, CMD_MULTILINE, cptr, "%u %u",
+    sendcmdto_serv_butone_v3(sptr, CMD_MULTILINE, cptr, "%u %u",
                           cli_serv(sptr)->ml_max_bytes,
                           cli_serv(sptr)->ml_max_lines);
     return 0;

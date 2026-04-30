@@ -408,9 +408,9 @@ int mo_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (strcmp(target, "*") == 0) {
       /* Broadcast to all servers */
       if (subarg)
-        sendcmdto_serv_butone(sptr, CMD_GITSYNC, cptr, "* %s %s", action, subarg);
+        sendcmdto_serv_butone_v3(sptr, CMD_GITSYNC, cptr, "* %s %s", action, subarg);
       else
-        sendcmdto_serv_butone(sptr, CMD_GITSYNC, cptr, "* %s", action);
+        sendcmdto_serv_butone_v3(sptr, CMD_GITSYNC, cptr, "* %s", action);
       /* Also do local */
     } else {
       /* Find target server */
@@ -703,9 +703,9 @@ int ms_gitsync(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (strcmp(target, "*") == 0) {
     /* Broadcast - forward to other servers and handle locally */
     if (subarg)
-      sendcmdto_serv_butone(sptr, CMD_GITSYNC, cptr, "* %s %s", action, subarg);
+      sendcmdto_serv_butone_v3(sptr, CMD_GITSYNC, cptr, "* %s %s", action, subarg);
     else
-      sendcmdto_serv_butone(sptr, CMD_GITSYNC, cptr, "* %s", action);
+      sendcmdto_serv_butone_v3(sptr, CMD_GITSYNC, cptr, "* %s", action);
   } else {
     acptr = FindNServer(target);
     if (!acptr)

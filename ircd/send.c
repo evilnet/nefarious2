@@ -2982,15 +2982,15 @@ void send_s2s_batch_start(struct Client *sptr, const char *type,
 
   /* Send to all servers */
   if (server1 && server2) {
-    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s %s",
                           batch_id, type, server1, server2);
   }
   else if (server1) {
-    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_BATCH_CMD, NULL, "+%s %s %s",
                           batch_id, type, server1);
   }
   else {
-    sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "+%s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_BATCH_CMD, NULL, "+%s %s",
                           batch_id, type);
   }
 
@@ -3041,7 +3041,7 @@ void send_s2s_batch_end(struct Client *sptr, const char *batch_id)
     return;
 
   /* Send to all servers */
-  sendcmdto_serv_butone(sptr, CMD_BATCH_CMD, NULL, "-%s", id);
+  sendcmdto_serv_butone_v3(sptr, CMD_BATCH_CMD, NULL, "-%s", id);
 
   /* Send batch end to each connection that has batch capability */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {

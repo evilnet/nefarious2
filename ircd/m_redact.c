@@ -320,7 +320,7 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     sendcmdto_want_s2s_tags(1);
 
     /* Propagate to other servers */
-    sendcmdto_serv_butone(sptr, CMD_REDACT, cptr, "%s %s :%s",
+    sendcmdto_serv_butone_v3(sptr, CMD_REDACT, cptr, "%s %s :%s",
                           target, msgid, reason ? reason : "");
   }
 
@@ -428,7 +428,7 @@ int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 
   /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_REDACT, cptr, "%s %s :%s",
+  sendcmdto_serv_butone_v3(sptr, CMD_REDACT, cptr, "%s %s :%s",
                         target, msgid, reason ? reason : "");
 
   return 0;

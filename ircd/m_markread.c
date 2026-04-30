@@ -218,7 +218,7 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       notify_local_clients(account, target, timestamp);
 
       /* Broadcast to other servers: MR <account> <target> <timestamp> */
-      sendcmdto_serv_butone(&me, CMD_MARKREAD, cptr, "%s %s %s",
+      sendcmdto_serv_butone_v3(&me, CMD_MARKREAD, cptr, "%s %s %s",
                             account, target, timestamp);
     } else if (rc == 1) {
       /* Timestamp was not newer - respond with current stored value */
@@ -288,7 +288,7 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   notify_local_clients(account, target, timestamp);
 
   /* Propagate to other servers */
-  sendcmdto_serv_butone(sptr, CMD_MARKREAD, cptr, "%s %s %s",
+  sendcmdto_serv_butone_v3(sptr, CMD_MARKREAD, cptr, "%s %s %s",
                         account, target, timestamp);
 
   return 0;

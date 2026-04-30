@@ -777,12 +777,12 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
 
   /* Propagate to other servers with visibility */
   if (value) {
-    sendcmdto_serv_butone(sptr, CMD_METADATA, NULL, "%s %s %s :%s",
+    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s %s :%s",
                           target, key,
                           visibility == METADATA_VIS_PRIVATE ? "P" : "*",
                           value);
   } else {
-    sendcmdto_serv_butone(sptr, CMD_METADATA, NULL, "%s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s",
                           target, key);
   }
 
@@ -1494,18 +1494,18 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   if (value) {
     if (is_compressed) {
       /* Forward compressed with Z flag */
-      sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s %s Z :%s",
+      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s Z :%s",
                             target, key,
                             visibility == METADATA_VIS_PRIVATE ? "P" : "*",
                             value);
     } else {
-      sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
+      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
                             target, key,
                             visibility == METADATA_VIS_PRIVATE ? "P" : "*",
                             value);
     }
   } else {
-    sendcmdto_serv_butone(sptr, CMD_METADATA, cptr, "%s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s",
                           target, key);
   }
 

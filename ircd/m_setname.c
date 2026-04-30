@@ -162,7 +162,7 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
 
     /* Propagate to other servers (with S2S tags) */
-    sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+    sendcmdto_serv_butone_v3(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
     /* Update bouncer aliases with new realname */
     bounce_emit_alias_update(sptr, "realname", cli_info(sptr));
@@ -247,7 +247,7 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     }
 
     /* Propagate to other servers (with S2S tags) */
-    sendcmdto_serv_butone(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
+    sendcmdto_serv_butone_v3(sptr, CMD_SETNAME, cptr, ":%s", cli_info(sptr));
 
     /* Update bouncer aliases with new realname */
     bounce_emit_alias_update(sptr, "realname", cli_info(sptr));

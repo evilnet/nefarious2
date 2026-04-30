@@ -2848,7 +2848,7 @@ static int channel_ad_callback(const char *channel, void *data)
       if (ctx->target) {
         sendcmdto_one(&me, CMD_CHATHISTORY, ctx->target, "A F :%s", ctx->buffer);
       } else {
-        sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A F :%s", ctx->buffer);
+        sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A F :%s", ctx->buffer);
       }
     }
     /* Reset buffer */
@@ -2914,7 +2914,7 @@ void broadcast_channel_advertisement(const char *channel)
 
   Debug((DEBUG_DEBUG, "CH A +: Broadcasting new channel %s", channel));
 
-  sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A + :%s", channel);
+  sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A + :%s", channel);
 }
 
 /** Maximum size for CH A +/- channel list (leave room for command overhead) */
@@ -2952,7 +2952,7 @@ static void broadcast_channel_removal(const char **channels, int count)
     if (buffer_len + chan_len + 1 > CH_A_PM_MAX_SIZE) {
       /* Send current buffer */
       if (buffer_len > 0) {
-        sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A - :%s", buffer);
+        sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A - :%s", buffer);
         Debug((DEBUG_DEBUG, "CH A -: Sent batch removal"));
       }
       buffer_len = 0;
@@ -2968,7 +2968,7 @@ static void broadcast_channel_removal(const char **channels, int count)
 
   /* Send remaining buffered channels */
   if (buffer_len > 0) {
-    sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A - :%s", buffer);
+    sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A - :%s", buffer);
     Debug((DEBUG_DEBUG, "CH A -: Broadcasting %d channel removals", count));
   }
 }
@@ -3755,7 +3755,7 @@ static void complete_redact_fed(struct FedRequest *req)
      * and store the REDACT event with this same msgid via S2S tags). */
     sendcmdto_set_s2s_tags(time_ms, redact_msgid);
     sendcmdto_want_s2s_tags(1);
-    sendcmdto_serv_butone(sptr, CMD_REDACT, sptr, "%s %s :%s",
+    sendcmdto_serv_butone_v3(sptr, CMD_REDACT, sptr, "%s %s :%s",
                           req->target, ctx->msgid, reason ? reason : "");
   }
 }
@@ -4603,7 +4603,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
              cli_name(sptr), retention));
 
       /* Propagate to other servers (except source) */
-      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A S %d", retention);
+      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A S %d", retention);
     }
     else if (subtype[0] == 'R') {
       /* Retention update: R <retention_days> */
@@ -4620,7 +4620,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
              cli_name(sptr), retention));
 
       /* Propagate to other servers (except source) */
-      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A R %d", retention);
+      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A R %d", retention);
     }
     else if (subtype[0] == 'F') {
       /* Full channel sync: F :<channel> <channel> ... (Layer 1) */
@@ -4654,7 +4654,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
              cli_name(sptr), added));
 
       /* Propagate to other servers (except source) */
-      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A F :%s", parv[parc - 1]);
+      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A F :%s", parv[parc - 1]);
     }
     else if (subtype[0] == '+') {
       /* Add channel(s): + :<channel> [channel2] ... (Layer 1) */
@@ -4686,7 +4686,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->last_update = CurrentTime;
 
       /* Propagate to other servers (except source) */
-      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A + :%s", parv[3]);
+      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A + :%s", parv[3]);
     }
     else if (subtype[0] == '-') {
       /* Remove channel(s): - :<channel> [channel2] ... (Layer 1) */
@@ -4718,7 +4718,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->last_update = CurrentTime;
 
       /* Propagate to other servers (except source) */
-      sendcmdto_serv_butone(sptr, CMD_CHATHISTORY, cptr, "A - :%s", parv[3]);
+      sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A - :%s", parv[3]);
     }
     /* Unknown subtypes are silently ignored for forward compatibility */
   }

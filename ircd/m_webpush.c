@@ -234,7 +234,7 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
   }
 
   /* Broadcast to all linked servers */
-  sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "R %s %s %s %s",
+  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "R %s %s %s %s",
                         cli_user(sptr)->account, endpoint, p256dh, auth);
 
   /* Echo success to client per spec */
@@ -281,7 +281,7 @@ static int webpush_cmd_unregister(struct Client *sptr, int parc, char *parv[])
   }
 
   /* Broadcast to all linked servers */
-  sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "U %s %s",
+  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "U %s %s",
                         cli_user(sptr)->account, endpoint);
 
   /* Echo success to client per spec (silently succeeds even if not registered) */
@@ -364,7 +364,7 @@ static void notify_send_cb(int result, long http_code, void *data)
     }
 
     /* Broadcast removal to linked servers */
-    sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "U %s %s",
+    sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "U %s %s",
                           ctx->account, ctx->endpoint);
   }
 
@@ -631,7 +631,7 @@ int webpush_setup(void)
     add_isupport_s("VAPID", vapid_pubkey);
 
     if (changed) {
-      sendcmdto_serv_butone(&me, CMD_WEBPUSH, NULL, "V :%s", vapid_pubkey);
+      sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "V :%s", vapid_pubkey);
       send_isupport_update();
     }
 
@@ -697,7 +697,7 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     /* Propagate to other servers regardless */
-    sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "V :%s", vapid_key);
+    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "V :%s", vapid_key);
 
     return 0;
   }
@@ -720,7 +720,7 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     /* Propagate to other servers */
-    sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s",
                           account, endpoint, p256dh, auth_secret);
 
     return 0;
@@ -736,7 +736,7 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     /* Propagate to other servers */
-    sendcmdto_serv_butone(sptr, CMD_WEBPUSH, cptr, "U %s %s",
+    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "U %s %s",
                           account, endpoint);
 
     return 0;

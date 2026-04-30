@@ -596,7 +596,7 @@ feature_notify_chathistory_retention(void)
   retention = feature_int(FEAT_CHATHISTORY_RETENTION);
 
   /* Send CH A R <retention> to all peer servers */
-  sendcmdto_serv_butone(&me, CMD_CHATHISTORY, NULL, "A R %d", retention);
+  sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A R %d", retention);
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "chathistory: retention changed to %d days, notified peers",

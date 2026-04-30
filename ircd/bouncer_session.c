@@ -2049,7 +2049,7 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
   switch (subcmd) {
   case 'C': /* Create */
     build_channel_string(session, chanbuf, sizeof(chanbuf));
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
                           NULL,
                           "C %s %s %s active %Tu %u %Tu :%s",
                           session->hs_account, session->hs_sessid,
@@ -2060,7 +2060,7 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
     break;
 
   case 'A': /* Attach */
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
                           NULL,
                           "A %s %s %s",
                           session->hs_account, session->hs_sessid,
@@ -2069,7 +2069,7 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
 
   case 'D': /* Detach */
     build_channel_string(session, chanbuf, sizeof(chanbuf));
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
                           NULL,
                           "D %s %s %s %Tu :%s",
                           session->hs_account, session->hs_sessid,
@@ -2079,14 +2079,14 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
     break;
 
   case 'X': /* Destroy */
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
                           NULL,
                           "X %s %s",
                           session->hs_account, session->hs_sessid);
     break;
 
   case 'U': /* Update */
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
                           NULL,
                           "U %s %s %s",
                           session->hs_account, session->hs_sessid,
@@ -2221,7 +2221,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     /* Forward to other servers — preserve all parameters verbatim so
      * downstream servers get full metadata (attach_count, total_active). */
     if (is_holding) {
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                             cptr,
                             "C %s %s %s holding %Tu %Tu %u %Tu :%s",
                             account, sessid, token,
@@ -2229,7 +2229,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                             attach_count, total_active,
                             channels ? channels : "");
     } else {
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                             cptr,
                             "C %s %s %s active %Tu %u %Tu :%s",
                             account, sessid, token,
@@ -2275,7 +2275,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     }
 
     /* Forward */
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                           cptr,
                           "A %s %s %s",
                           account, sessid,
@@ -2343,7 +2343,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
      * premature replica destruction (race with managing server). */
 
     /* Forward */
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                           cptr,
                           "D %s %s %s %Tu :%s",
                           account, sessid, ghost_numeric, disc_time,
@@ -2359,7 +2359,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       bounce_destroy(session);
 
     /* Forward */
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                           cptr,
                           "X %s %s",
                           account, sessid);
@@ -2383,7 +2383,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       bounce_setname(session, field + 5);
 
     /* Forward */
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                           cptr,
                           "U %s %s %s",
                           account, sessid, field);
@@ -2411,7 +2411,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     }
 
     /* Forward */
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_SESSION,
+    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                           cptr,
                           "T %s %s %s",
                           account, sessid, new_origin);
@@ -2644,7 +2644,7 @@ int bounce_promote_alias(struct BouncerSession *session)
                         old_primary ? old_numeric : winner_numeric,
                         winner_numeric,
                         session->hs_sessid, cli_name(alias));
-  sendcmdto_serv_butone(&me, CMD_BOUNCER_SESSION, NULL,
+  sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION, NULL,
                         "T %s %s %s",
                         session->hs_account, session->hs_sessid,
                         winner_server);
