@@ -134,9 +134,12 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
     if (aconf->passwd[0])
       sendrawto_one(cptr, MSG_PASS " :%s", aconf->passwd);
     /*
-     *  Pass my info to the new server
+     *  Pass my info to the new server.
+     *  Flag string: h=hub, 6=ipv6, o=oplevels, v=IRCv3-aware S2S extensions.
+     *  Legacy peers ignore unknown flag chars (set_server_flags has no
+     *  default in its switch).
      */
-    sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%s :%s",
+    sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%sv :%s",
 		  cli_name(&me), cli_serv(&me)->timestamp,
 		  cli_serv(cptr)->timestamp, MAJOR_PROTOCOL, NumServCap(&me),
 		  feature_bool(FEAT_HUB) ? "h" : "",
