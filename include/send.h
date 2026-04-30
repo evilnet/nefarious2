@@ -280,7 +280,6 @@ extern char *generate_msgid(char *buf, size_t buflen);
 extern char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
                              char *msgid_out, size_t msgid_out_len);
 /* Parse ISO 8601 timestamp to epoch milliseconds (backward compat) */
-extern uint64_t iso8601_to_epoch_ms(const char *iso);
 
 /* IRCv3 standard-replies (FAIL/WARN/NOTE) — single context parameter */
 extern void send_fail(struct Client *to, const char *command, const char *code,

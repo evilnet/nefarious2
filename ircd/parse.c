@@ -1703,81 +1703,53 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
     /* Find the end of tags (first space after @) */
     char *tagend = strchr(ch, ' ');
     if (tagend) {
-      /* Auto-detect format: P10 base64 alphabet doesn't contain '='.
-       * Compact tags have no '='; verbose IRCv3 tags always have '='. */
-      if (!memchr(ch + 1, '=', tagend - ch - 1)) {
-        /* COMPACT FORMAT: @<version_1><time_7><msgid_14> */
-        int tag_len = tagend - ch - 1;  /* chars after @ */
-        if (tag_len >= 22 && ch[1] == 'A') {  /* version A: 1+7+14=22 */
-          char time_b64[8];
+      /* Compact format A: @A<time_7><msgid_14>[+<msgid_14>]*
+       * Dispatch on the version letter. Anything else (malformed,
+       * unknown version, or — historically — verbose @key=value;...
+       * format) is silently ignored; we just skip past it to the
+       * message proper. The verbose-format S2S parser was carried for
+       * hypothetical interop that never materialised, and its dispatch
+       * heuristic (no '=' → compact, has '=' → verbose) breaks once
+       * extension segments embed '=' (planned ,C<client_tags>). */
+      int tag_len = tagend - ch - 1;  /* chars after @ */
+      if (tag_len >= 22 && ch[1] == 'A') {  /* version A: 1+7+14=22 */
+        char time_b64[8];
 
-          /* Decode time: 7 base64 chars -> epoch_ms */
-          memcpy(time_b64, ch + 2, 7);
-          time_b64[7] = '\0';
-          cli_s2s_time_ms(cptr) = base64toint_64(time_b64);
+        /* Decode time: 7 base64 chars -> epoch_ms */
+        memcpy(time_b64, ch + 2, 7);
+        time_b64[7] = '\0';
+        cli_s2s_time_ms(cptr) = base64toint_64(time_b64);
 
-          /* Extract first msgid: 14 chars */
-          if (14 < S2S_MSGID_BUFSIZE) {
-            memcpy(cli_s2s_msgid(cptr), ch + 9, 14);
-            cli_s2s_msgid(cptr)[14] = '\0';
-          }
+        /* Extract first msgid: 14 chars */
+        if (14 < S2S_MSGID_BUFSIZE) {
+          memcpy(cli_s2s_msgid(cptr), ch + 9, 14);
+          cli_s2s_msgid(cptr)[14] = '\0';
+        }
 
-          /* Extract full multi-msgid string (msgid1+msgid2+...) if present.
-           * Starts at ch+9, runs until tagend. Contains +-separated msgids
-           * for batched CREATE/PART. */
-          {
-            int multi_len = tagend - (ch + 9);
-            if (multi_len > 14 && multi_len < S2S_MULTI_MSGID_BUFSIZE) {
-              memcpy(cli_s2s_multi_msgid(cptr), ch + 9, multi_len);
-              cli_s2s_multi_msgid(cptr)[multi_len] = '\0';
-            }
-          }
-
-          /* Update local HLC from remote's time + logical (HLC receive) */
-          {
-            struct HLC remote_hlc;
-            char logical_b64[4], node_b64[3];
-            remote_hlc.physical_ms = cli_s2s_time_ms(cptr);
-            memcpy(logical_b64, cli_s2s_msgid(cptr) + 2, 3);
-            logical_b64[3] = '\0';
-            remote_hlc.logical = (uint16_t)base64toint_64(logical_b64);
-            node_b64[0] = cli_s2s_msgid(cptr)[0];
-            node_b64[1] = cli_s2s_msgid(cptr)[1];
-            node_b64[2] = '\0';
-            remote_hlc.node_id = (uint16_t)base64toint(node_b64);
-            hlc_global_receive(&remote_hlc);
+        /* Extract full multi-msgid string (msgid1+msgid2+...) if present.
+         * Starts at ch+9, runs until tagend. Contains +-separated msgids
+         * for batched CREATE/PART. */
+        {
+          int multi_len = tagend - (ch + 9);
+          if (multi_len > 14 && multi_len < S2S_MULTI_MSGID_BUFSIZE) {
+            memcpy(cli_s2s_multi_msgid(cptr), ch + 9, multi_len);
+            cli_s2s_multi_msgid(cptr)[multi_len] = '\0';
           }
         }
-      } else {
-        /* VERBOSE FORMAT: key=value pairs (backward compat) */
-        char *tagpos = ch + 1;
-        while (tagpos < tagend) {
-          char *tag_name = tagpos;
-          char *semicolon = memchr(tagpos, ';', tagend - tagpos);
-          int tag_len = semicolon ? (semicolon - tagpos) : (tagend - tagpos);
 
-          if (tag_len >= 5 && memcmp(tag_name, "time=", 5) == 0) {
-            int value_len = tag_len - 5;
-            /* Convert verbose ISO 8601 to epoch_ms */
-            char iso_buf[32];
-            if (value_len < (int)sizeof(iso_buf)) {
-              memcpy(iso_buf, tag_name + 5, value_len);
-              iso_buf[value_len] = '\0';
-              cli_s2s_time_ms(cptr) = iso8601_to_epoch_ms(iso_buf);
-            }
-          }
-          else if (tag_len >= 6 && memcmp(tag_name, "msgid=", 6) == 0) {
-            int value_len = tag_len - 6;
-            if (value_len < S2S_MSGID_BUFSIZE) {
-              memcpy(cli_s2s_msgid(cptr), tag_name + 6, value_len);
-              cli_s2s_msgid(cptr)[value_len] = '\0';
-            }
-          }
-
-          if (semicolon)
-            tagpos = semicolon + 1;
-          else
-            break;
+        /* Update local HLC from remote's time + logical (HLC receive) */
+        {
+          struct HLC remote_hlc;
+          char logical_b64[4], node_b64[3];
+          remote_hlc.physical_ms = cli_s2s_time_ms(cptr);
+          memcpy(logical_b64, cli_s2s_msgid(cptr) + 2, 3);
+          logical_b64[3] = '\0';
+          remote_hlc.logical = (uint16_t)base64toint_64(logical_b64);
+          node_b64[0] = cli_s2s_msgid(cptr)[0];
+          node_b64[1] = cli_s2s_msgid(cptr)[1];
+          node_b64[2] = '\0';
+          remote_hlc.node_id = (uint16_t)base64toint(node_b64);
+          hlc_global_receive(&remote_hlc);
         }
       }
 

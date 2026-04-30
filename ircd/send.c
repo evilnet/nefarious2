@@ -390,25 +390,6 @@ char *generate_msgid(char *buf, size_t buflen)
   return buf;
 }
 
-/** Parse ISO 8601 timestamp to epoch milliseconds.
- * Used for backward-compatible parsing of verbose-format S2S time tags.
- * @param[in] iso ISO 8601 string (e.g., "2026-03-06T12:34:56.789Z").
- * @return Epoch milliseconds, or 0 on parse failure.
- */
-uint64_t iso8601_to_epoch_ms(const char *iso)
-{
-  struct tm tm;
-  int ms = 0;
-  memset(&tm, 0, sizeof(tm));
-  if (sscanf(iso, "%d-%d-%dT%d:%d:%d.%dZ",
-             &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-             &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &ms) < 6)
-    return 0;
-  tm.tm_year -= 1900;
-  tm.tm_mon -= 1;
-  return (uint64_t)timegm(&tm) * 1000 + ms;
-}
-
 /** Format message tags for S2S (server-to-server) relay.
  * Produces compact P10-native wire encoding: @A<time_b64_7><msgid_14>
  * If the message came from another server with tags, preserve them.
