@@ -1128,6 +1128,15 @@ static struct FeatureDesc {
   F_I(MULTILINE_LEGACY_THRESHOLD, 0, 3, 0),
   F_I(MULTILINE_LEGACY_MAX_LINES, 0, 5, 0),
   F_B(MULTILINE_FALLBACK_NOTIFY, 0, 1, 0),
+  /* Network-wide multiline buffer sizing — see s2s-multiline-limits plan.
+   * CEILING: hard cap on receive buffer growth, regardless of what peers
+   * advertise via ML burst (defends against misconfigured/hostile servers).
+   * LINES_CEILING: same for line count.
+   * SHRINK_DELAY: lazy shrink window after a peer SQUITs / lowers limit;
+   * grow is immediate, shrink is delayed to absorb netflaps. */
+  F_I(MULTILINE_BUFFER_CEILING,       0, 65536, 0),
+  F_I(MULTILINE_BUFFER_LINES_CEILING, 0, 1000,  0),
+  F_I(MULTILINE_BUFFER_SHRINK_DELAY,  0, 1800,  0),
   F_I(BATCH_RATE_LIMIT, 0, 10, 0),
   F_I(CLIENT_BATCH_TIMEOUT, 0, 30, 0),
   F_B(WEBSOCKET, 0, 1, 0),
