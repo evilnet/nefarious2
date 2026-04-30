@@ -25,6 +25,8 @@
  *   BOUNCER INFO                - Show session state and preferences
  *   BOUNCER LISTCLIENTS         - List all connections for the session
  *   BOUNCER HISTORY [sessid]    - Show connection history for a session
+ *   BOUNCER RESET [sessid]      - Destroy session and exit all attached
+ *                                  connections (force reconnect)
  *
  * Oper-only subcommands (for admin/testing):
  *   BOUNCER TOKEN          - Request a new session token
@@ -58,6 +60,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "querycmds.h"
+#include "s_misc.h"
 #include "replay.h"
 #include "s_bsd.h"
 #include "send.h"
@@ -443,6 +446,96 @@ static int bouncer_disconnect(struct Client *sptr, const char *sessid)
 
 notfound:
   send_fail(sptr, "BOUNCER", "NO_SUCH_SESSION", sessid,
+            "No such session");
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* Subcommand: RESET                                                  */
+/* ---------------------------------------------------------------- */
+
+/** Handle BOUNCER RESET [sessid] - destroy a session AND exit all of
+ * its live connections (primary + aliases). DISCONNECT only nukes the
+ * session record, leaving the user's clients alive but session-disjoint
+ * — typically a worse state than before. RESET forces a clean
+ * reconnect by exiting every connection, so on next connect the first
+ * server seen becomes the new primary and others attach as aliases.
+ *
+ * Runnable from primary or alias; the caller is exited last so the
+ * teardown of siblings completes against a still-live calling client.
+ *
+ * If sessid is omitted, the caller's own session is targeted (looked
+ * up via the alias's primary or the caller itself).
+ */
+static int bouncer_reset(struct Client *cptr, struct Client *sptr,
+                         const char *sessid)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s = NULL;
+  struct Client *primary;
+  struct Client *aliases[BOUNCER_MAX_ALIASES];
+  int alias_count = 0;
+  int i;
+
+  if (!IsAccount(sptr)) {
+    send_fail(sptr, "BOUNCER", "ACCOUNT_REQUIRED", NULL,
+              "You must be logged in to use bouncer features");
+    return 0;
+  }
+
+  as = bounce_find_by_account(cli_account(sptr));
+  if (!as)
+    goto notfound;
+
+  if (sessid && *sessid) {
+    for (s = as->as_sessions; s; s = s->hs_anext)
+      if (0 == strcmp(s->hs_sessid, sessid))
+        break;
+  } else {
+    /* Default: the session this connection participates in. */
+    struct Client *anchor =
+        (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+            ? cli_alias_primary(sptr) : sptr;
+    s = bounce_get_session(anchor);
+    if (!s)
+      s = as->as_sessions; /* fallback: first session for account */
+  }
+
+  if (!s)
+    goto notfound;
+
+  /* Snapshot all live connections before destroying the session — once
+   * bounce_destroy runs, hs_aliases[] is gone. */
+  primary = s->hs_client;
+  for (i = 0; i < s->hs_alias_count && alias_count < BOUNCER_MAX_ALIASES; i++) {
+    struct Client *al = findNUser(s->hs_aliases[i].ba_numeric);
+    if (al && IsBouncerAlias(al))
+      aliases[alias_count++] = al;
+  }
+
+  send_note(sptr, "BOUNCER", "SESSION_RESET", s->hs_sessid,
+            "Session reset; all attached connections terminating");
+
+  /* Destroy session record first so exit paths don't try to re-hold
+   * the primary or untrack against a vanishing session. */
+  bounce_broadcast(s, 'X', NULL);
+  bounce_destroy(s);
+
+  /* Exit aliases (skip caller — exited last). */
+  for (i = 0; i < alias_count; i++) {
+    if (aliases[i] != sptr)
+      exit_client(cptr, aliases[i], &me, "Bouncer session reset");
+  }
+
+  /* Exit primary (skip caller). */
+  if (primary && primary != sptr)
+    exit_client(cptr, primary, &me, "Bouncer session reset");
+
+  /* Caller last. Returns CPTR_KILLED iff cptr == sptr. */
+  return exit_client(cptr, sptr, &me, "Bouncer session reset");
+
+notfound:
+  send_fail(sptr, "BOUNCER", "NO_SUCH_SESSION", sessid ? sessid : "",
             "No such session");
   return 0;
 }
@@ -947,6 +1040,8 @@ static const struct BouncerHelpRow bouncer_help_rows[] = {
     "List the primary and aliases attached to your session",        0 },
   { "HISTORY",      "[sessid]",
     "Show connection history for your session",                     0 },
+  { "RESET",        "[sessid]",
+    "Destroy session and exit all attached connections (force reconnect)", 0 },
 
   /* Oper-only */
   { "TOKEN",        "",
@@ -1066,6 +1161,9 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   if (0 == ircd_strcmp(subcmd, "HISTORY"))
     return bouncer_history(sptr, parc, parv);
+
+  if (0 == ircd_strcmp(subcmd, "RESET"))
+    return bouncer_reset(cptr, sptr, (parc >= 3) ? parv[2] : NULL);
 
   /* --- Oper-only commands (admin/testing) --- */
 
