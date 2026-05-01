@@ -4645,6 +4645,12 @@ void bounce_alias_untrack(struct Client *alias)
   char full_numeric[6];
   int i;
 
+  /* Free any buffered BX M batches addressed to this alias.  Without
+   * this, mid-batch alias destruction (alias quits between BX M+ and
+   * BX M-) leaves the slot pinned until the next link-drop sweep or
+   * MAXCONNECTIONS pressure. */
+  s2s_bxm_cleanup_alias(alias);
+
   /* Use alias's own account — avoids use-after-free on cli_alias_primary
    * when the primary has already been freed (SQUIT ordering). */
   if (!IsAccount(alias))
@@ -5068,6 +5074,33 @@ void s2s_bxm_cleanup_link(struct Client *link)
     return;
   for (i = 0; i < MAXCONNECTIONS; i++) {
     if (s2s_bxm_batches[i] && s2s_bxm_batches[i]->link == link)
+      free_s2s_bxm_batch(s2s_bxm_batches[i]);
+  }
+}
+
+/** Free any S2S BX M batches buffered with \a alias as the destination.
+ *
+ * Called from bounce_alias_untrack when an alias is destroyed mid-batch
+ * (alias quits between BX M+ and BX M-) so the buffered slot doesn't
+ * sit until the next link-drop sweep or MAXCONNECTIONS pressure.  The
+ * batch's alias_numeric is the full YYXXX form built from the alias's
+ * server and own numerics — same construction bounce_alias_untrack uses
+ * to look up the session entry.
+ */
+static void s2s_bxm_cleanup_alias(struct Client *alias)
+{
+  char full_numeric[6];
+  int i;
+
+  if (!alias || !cli_user(alias) || !cli_user(alias)->server)
+    return;
+
+  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                cli_yxx(cli_user(alias)->server), cli_yxx(alias));
+
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (s2s_bxm_batches[i]
+        && strcmp(s2s_bxm_batches[i]->alias_numeric, full_numeric) == 0)
       free_s2s_bxm_batch(s2s_bxm_batches[i]);
   }
 }
