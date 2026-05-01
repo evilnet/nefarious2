@@ -1163,11 +1163,16 @@ process_multiline_batch(struct Client *sptr)
                       s2s_batch_id, cli_name(acptr));
       } else {
         /* Send fallback PRIVMSGs to legacy server.
-         * Set S2S tags on first line for unified msgid. */
+         * Set S2S tags on first line for unified msgid.
+         * Mark had_fallback so MULTILINE_RECIPIENT_DISCOUNT correctly
+         * reflects that the wire actually expanded into N PRIVMSGs
+         * across this S2S link (not just one batch). */
         int sent = 0;
         int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
         int total_lines = con_ml_msg_count(con);
         int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
+
+        con_ml_had_fallback(con) = 1;
 
         for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
           char *text = lp->value.cp + 1;
@@ -1286,9 +1291,15 @@ process_multiline_batch(struct Client *sptr)
                       batch_paste_url ? batch_paste_url : "");
       } else {
         /* Send fallback PRIVMSGs to legacy servers (once per server, not per user).
-         * Set S2S tags on the first PRIVMSG to carry the batch's msgid. */
+         * Set S2S tags on the first PRIVMSG to carry the batch's msgid.
+         * Mark had_fallback so MULTILINE_RECIPIENT_DISCOUNT correctly
+         * reflects the actual wire cost — even if every local member
+         * is multiline-capable, the message expanded into N PRIVMSGs
+         * across this S2S link. */
         int sent = 0;
         int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
+
+        con_ml_had_fallback(con) = 1;
 
         for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
           char *text = lp->value.cp + 1;
