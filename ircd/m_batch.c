@@ -253,9 +253,7 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
     sendcmdto_one(&me, CMD_BATCH_CMD, route_to, "-%s", batchid);
     return 0;
   } else if (HasFlag(route_to, FLAG_MULTILINE_EXPAND)) {
-    /* +M opt-in: expand without truncation.  Wire is unbounded (one
-     * PRIVMSG per line), so suppress the discount halving — sender's
-     * wire cost scales with batch size. */
+    /* +M opt-in: expand without truncation. */
     for (lp = con_ml_messages(con); lp; lp = lp->next) {
       char *text = lp->value.cp + 1;
       if (is_notice)
@@ -263,14 +261,9 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
       else
         sendcmdto_one(sptr, CMD_PRIVATE, route_to, "%C :%s", wire_target, text);
     }
-    con_ml_had_fallback(con) = 1;
     return 1;
   } else {
-    /* Legacy fallback: preview + truncation NOTICE.  Wire is BOUNDED
-     * (max_preview lines + 1 NOTICE) regardless of batch size, so this
-     * does NOT suppress the discount halving — anti-flood semantics
-     * stay intact.  The recipient still got a fallback experience for
-     * sender-WARN counting purposes (the helper's return value).
+    /* Legacy fallback: preview + truncation NOTICE.
      * send_multiline_fallback already takes route_to (delivery) and
      * acptr (wire %C target) separately. */
     send_multiline_fallback(sptr, route_to, wire_target, batch_base_msgid,
@@ -554,23 +547,15 @@ clear_multiline_batch(struct Connection *con)
    * MULTILINE_CHANNEL_LAG_DISCOUNT is used for channel messages (typically
    * higher than DM discount since channels affect more users).
    *
-   * MULTILINE_RECIPIENT_DISCOUNT: When enabled, halve the lag discount
-   * percentage if the wire stayed bounded — i.e., no recipient required
-   * UNBOUNDED expansion of the batch.  "Bounded" includes:
-   *   - Proper draft/multiline BATCH wrapper to multiline-capable peers.
-   *   - Legacy fallback (preview + truncation NOTICE), which is capped
-   *     at FEAT_MULTILINE_LEGACY_MAX_LINES regardless of batch size.
-   *   - S2S relay to a legacy peer (also bounded by max_preview).
-   *
-   * Unbounded paths that DO suppress halving:
-   *   - +M opt-in expansion (FLAG_MULTILINE_EXPAND): one PRIVMSG per line.
-   *   - Per-line cross-server alias mirror (forward / BX E echo): we
-   *     emit N PRIVMSGs/BX E per remote alias, scaling with batch size.
-   *
-   * This frames the halving as an anti-flood reward for bounded wire
-   * cost, not as a "multiline worked end-to-end" reward.  During mixed-
-   * network rollout, multiline retains its lag benefit even when some
-   * recipients fall through to truncation — the wire is still bounded.
+   * MULTILINE_RECIPIENT_DISCOUNT: when enabled, halve the lag discount
+   * percentage unconditionally for any multiline batch.  Truncation
+   * fallback is bounded (capped at FEAT_MULTILINE_LEGACY_MAX_LINES) so
+   * it doesn't flood; +M opt-in expansion is the recipient's choice
+   * and shouldn't penalise the sender; cross-server alias mirror is
+   * the sender's own bouncer setup and shouldn't penalise them either.
+   * The base discount (50% DM / 75% channel) stays in place as the
+   * anti-flood floor; halving rewards multiline use without worrying
+   * about which path each recipient ended up on.
    */
   if (con_ml_lag_accum(con) > 0) {
     int discount;
@@ -582,8 +567,7 @@ clear_multiline_batch(struct Connection *con)
     else
       discount = feature_int(FEAT_MULTILINE_LAG_DISCOUNT);
 
-    /* Halve if the wire stayed bounded (see comment above). */
-    if (feature_bool(FEAT_MULTILINE_RECIPIENT_DISCOUNT) && !con_ml_had_fallback(con))
+    if (feature_bool(FEAT_MULTILINE_RECIPIENT_DISCOUNT))
       discount = discount / 2;
 
     /* Clamp discount to valid range */
@@ -805,9 +789,6 @@ process_multiline_batch(struct Client *sptr)
 
   is_channel = IsChannelName(con_ml_target(con));
 
-  /* Initialize fallback tracking for recipient-aware discounting */
-  con_ml_had_fallback(con) = 0;
-
   /* Validate target */
   if (is_channel) {
     chptr = FindChannel(con_ml_target(con));
@@ -921,22 +902,17 @@ process_multiline_batch(struct Client *sptr)
 
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
-        /* Fallback: send as individual messages to primary.
-         * If recipient has +M (multiline expand), send full unbounded
-         * expansion; otherwise use bounded preview + truncation NOTICE.
-         * had_fallback tracks WIRE-UNBOUNDED expansion for the discount
-         * halving suppression — set only inside the +M branch.
-         * fallback_count tracks any-fallback for the sender's WARN
-         * message and is set unconditionally here.
-         */
+        /* Fallback: send as individual messages to primary.  If
+         * recipient has +M (multiline expand), send full expansion;
+         * otherwise use bounded preview + truncation NOTICE.
+         * fallback_count ticks for the sender's WARN message either
+         * way (recipient saw a fallback experience). */
         int total_lines = con_ml_msg_count(con);
 
         fallback_count++;  /* Count for sender WARN notification */
 
         if (HasFlag(to, FLAG_MULTILINE_EXPAND)) {
-          /* User opted in with +M: send all lines without truncation —
-           * unbounded wire, suppress discount halving. */
-          con_ml_had_fallback(con) = 1;
+          /* User opted in with +M: send all lines without truncation. */
           for (lp = con_ml_messages(con); lp; lp = lp->next) {
             char *text = lp->value.cp + 1;
             if (is_notice)
@@ -1073,8 +1049,7 @@ process_multiline_batch(struct Client *sptr)
      * sendcmdto_one_tags_ext per line.  Future work (BX EM or similar)
      * could carry the batch wrapper across S2S so multiline-capable
      * remote aliases see a proper BATCH; until then per-line is the
-     * baseline.  Mark had_fallback so the discount accounts for the
-     * wire fragmentation. */
+     * baseline. */
     if (IsAccount(acptr) && !IsBouncerAlias(acptr)) {
       struct BouncerSession *acptr_sess = bounce_get_session(acptr);
       if (acptr_sess && acptr_sess->hs_alias_count > 0) {
@@ -1103,7 +1078,6 @@ process_multiline_batch(struct Client *sptr)
                                        "%C :%s", alias, text);
               alias_first = 0;
             }
-            con_ml_had_fallback(con) = 1;  /* per-line wire fragments the batch */
           }
         }
       }
@@ -1122,8 +1096,7 @@ process_multiline_batch(struct Client *sptr)
      * session messages present canonically as primary regardless of
      * which alias actually sent them.  Future work (BX EM) could carry
      * the batch across S2S; until then per-line is the protocol
-     * baseline.  Mark had_fallback so the discount accounts for the
-     * wire fragmentation. */
+     * baseline. */
     {
       struct Client *sender_primary;
       const char *bx_tok = is_notice ? TOK_NOTICE : TOK_PRIVATE;
@@ -1159,7 +1132,6 @@ process_multiline_batch(struct Client *sptr)
                   first_line ? batch_base_msgid : "*", text);
               first_line = 0;
             }
-            con_ml_had_fallback(con) = 1;
           }
         }
         /* Echo to other aliases. */
@@ -1190,7 +1162,6 @@ process_multiline_batch(struct Client *sptr)
                     first_line ? batch_base_msgid : "*", text);
                 first_line = 0;
               }
-              con_ml_had_fallback(con) = 1;
             }
           }
         }
