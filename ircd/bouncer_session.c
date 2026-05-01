@@ -43,6 +43,7 @@
 #include "ircd_snprintf.h"
 #include "random.h"
 #include "ircd_string.h"
+#include "m_batch.h"
 #include "match.h"
 #include "metadata.h"
 #include "msg.h"
@@ -3905,6 +3906,7 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr, int pa
 static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_update(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 
 int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
@@ -3930,6 +3932,8 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
     return bounce_alias_update(cptr, sptr, parc, parv);
   case 'E':
     return bounce_alias_echo(cptr, sptr, parc, parv);
+  case 'M':
+    return bounce_alias_multiline_echo(cptr, sptr, parc, parv);
   case 'K':
     return bounce_alias_snomask(cptr, sptr, parc, parv);
   default:
@@ -4907,6 +4911,397 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
   sendcmdto_one_tags_ext(from, msg_cmd, msg_tok, target, msgid,
                          "%s :%s", target_nick, text);
   return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX M: Multiline alias echo across S2S                            */
+/* ---------------------------------------------------------------- */
+
+/** Per-link multiline-echo buffer state.  Mirrors the shape of
+ * S2SMultilineBatch in m_batch.c but keyed on (link, batch_id) so
+ * concurrent batches arriving on different links can't collide.
+ *
+ * Wire format:
+ *   BX M+<bid> <alias_num> <from_num><tok> <target_nick> <msgid> [@<ctags>] :<line>
+ *   BX M <bid> <alias_num> :<line>
+ *   BX Mc<bid> <alias_num> :<line>           (concat continuation)
+ *   BX M-<bid> <alias_num> :<paste_url>      (end)
+ *
+ * Where alias_num is the final destination (sender's session member
+ * receiving the echo), and target_nick is the original PM target —
+ * the wire %C the alias's IRC client uses to route the conversation
+ * into the correct query window.
+ */
+struct S2SBxmBatch {
+  struct Client *link;          /**< incoming S2S link (cptr) */
+  char batch_id[16];
+  char alias_numeric[6];        /**< receiving session member */
+  char from_numeric[6];         /**< sender_primary, source for wire :from */
+  char target_nick[NICKLEN + 1];/**< original PM target — wire %C */
+  char msgid[64];               /**< base msgid, "" if absent */
+  char client_tags[512];        /**< @-prefixed ctags from start opener */
+  int  is_notice;               /**< 1 if NOTICE batch, 0 if PRIVMSG */
+  char paste_url[256];          /**< from -end token */
+  struct SLink *messages;       /**< SLink<concat-flag-byte + text> */
+  int  msg_count;
+  unsigned int total_bytes;
+  time_t start_time;
+};
+
+static struct S2SBxmBatch *s2s_bxm_batches[MAXCONNECTIONS];
+
+/** Look up a buffered BX M batch by link + batch_id. */
+static struct S2SBxmBatch *
+find_s2s_bxm_batch(struct Client *link, const char *batch_id)
+{
+  int i;
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    struct S2SBxmBatch *b = s2s_bxm_batches[i];
+    if (b && b->link == link && strcmp(b->batch_id, batch_id) == 0)
+      return b;
+  }
+  return NULL;
+}
+
+/** Allocate a new BX M batch slot.  Returns NULL if no slot is free. */
+static struct S2SBxmBatch *
+create_s2s_bxm_batch(struct Client *link, const char *batch_id,
+                     const char *alias_num, const char *from_num,
+                     const char *target_nick, const char *msgid,
+                     const char *client_tags, int is_notice)
+{
+  int i;
+  struct S2SBxmBatch *b;
+
+  for (i = 0; i < MAXCONNECTIONS; i++)
+    if (!s2s_bxm_batches[i])
+      break;
+  if (i >= MAXCONNECTIONS)
+    return NULL;
+
+  b = (struct S2SBxmBatch *)MyMalloc(sizeof(*b));
+  memset(b, 0, sizeof(*b));
+  b->link = link;
+  ircd_strncpy(b->batch_id, batch_id, sizeof(b->batch_id) - 1);
+  ircd_strncpy(b->alias_numeric, alias_num, sizeof(b->alias_numeric) - 1);
+  ircd_strncpy(b->from_numeric, from_num, sizeof(b->from_numeric) - 1);
+  ircd_strncpy(b->target_nick, target_nick, sizeof(b->target_nick) - 1);
+  if (msgid && strcmp(msgid, "*") != 0)
+    ircd_strncpy(b->msgid, msgid, sizeof(b->msgid) - 1);
+  if (client_tags && *client_tags)
+    ircd_strncpy(b->client_tags, client_tags, sizeof(b->client_tags) - 1);
+  b->is_notice = is_notice;
+  b->start_time = CurrentTime;
+  s2s_bxm_batches[i] = b;
+  return b;
+}
+
+/** Append a line to the buffered batch.  is_concat=1 carries the
+ * draft/multiline-concat marker forward to delivery. */
+static void
+add_s2s_bxm_message(struct S2SBxmBatch *b, const char *text, int is_concat)
+{
+  size_t len;
+  struct SLink *lp;
+  char *buf;
+
+  if (!b || !text)
+    return;
+
+  len = strlen(text);
+  buf = (char *)MyMalloc(len + 2);
+  buf[0] = is_concat ? 1 : 0;
+  memcpy(buf + 1, text, len);
+  buf[len + 1] = '\0';
+
+  lp = make_link();
+  lp->value.cp = buf;
+  lp->next = NULL;
+
+  if (!b->messages) {
+    b->messages = lp;
+  } else {
+    struct SLink *tail = b->messages;
+    while (tail->next)
+      tail = tail->next;
+    tail->next = lp;
+  }
+  b->msg_count++;
+  b->total_bytes += (unsigned int)len;
+}
+
+/** Free a buffered batch and clear its slot. */
+static void
+free_s2s_bxm_batch(struct S2SBxmBatch *b)
+{
+  int i;
+  struct SLink *lp, *next;
+
+  if (!b)
+    return;
+
+  for (lp = b->messages; lp; lp = next) {
+    next = lp->next;
+    if (lp->value.cp)
+      MyFree(lp->value.cp);
+    free_link(lp);
+  }
+
+  for (i = 0; i < MAXCONNECTIONS; i++)
+    if (s2s_bxm_batches[i] == b) {
+      s2s_bxm_batches[i] = NULL;
+      break;
+    }
+  MyFree(b);
+}
+
+/** Deliver a completed BX M batch to the local alias.
+ *
+ * If the alias has draft/multiline + batch caps, emit a real BATCH
+ * wrapper with wire target = target_nick (so the alias's IRC client
+ * routes the conversation into the correct query window).
+ *
+ * Otherwise fall back to send_multiline_fallback() — bounded preview
+ * + truncation NOTICE — which already accepts (route_to, wire_target)
+ * separately.
+ */
+static void
+deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
+{
+  struct Client *alias;
+  struct Client *from;
+  struct Client *wire_target;
+  const char *cmd_str;
+  struct SLink *lp;
+
+  if (!b)
+    return;
+
+  alias = findNUser(b->alias_numeric);
+  if (!alias || !MyConnect(alias) || !IsBouncerAlias(alias))
+    return;
+
+  from = findNUser(b->from_numeric);
+  if (!from)
+    from = &me;  /* graceful fallback if from-user vanished mid-batch */
+
+  /* The wire %C target on the inner messages is the original PM
+   * target — resolve to a Client* for the helpers that take it. */
+  wire_target = FindUser(b->target_nick);
+  cmd_str = b->is_notice ? MSG_NOTICE : MSG_PRIVATE;
+
+  if (CapActive(alias, CAP_DRAFT_MULTILINE) && CapActive(alias, CAP_BATCH)) {
+    char alias_batchid[16];
+    ircd_snprintf(0, alias_batchid, sizeof(alias_batchid), "%s%u",
+                  NumNick(from), con_batch_seq(cli_connect(alias))++);
+
+    /* BATCH +id draft/multiline <target_nick> opener.  Server tags
+     * (msgid/time/account) ride on the opener via standard tagged
+     * sendcmdto path.  Client-only tags from the originating BATCH
+     * +id pass through if present. */
+    if (b->client_tags[0]) {
+      sendrawto_one(alias,
+                    "@%s:%s BATCH +%s draft/multiline %s",
+                    b->client_tags, cli_name(&me),
+                    alias_batchid, b->target_nick);
+    } else {
+      sendcmdto_one(&me, CMD_BATCH_CMD, alias,
+                    "+%s draft/multiline %s",
+                    alias_batchid, b->target_nick);
+    }
+
+    /* Inner messages carry @batch=<id>; wire :from is from_user, wire
+     * %s target is target_nick — alias's client routes accordingly. */
+    for (lp = b->messages; lp; lp = lp->next) {
+      int concat = lp->value.cp[0];
+      const char *text = lp->value.cp + 1;
+      if (concat) {
+        sendrawto_one(alias,
+                      "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
+                      alias_batchid, cli_name(from),
+                      cli_user(from)->username,
+                      IsHiddenHost(from) ? cli_user(from)->host
+                                          : cli_user(from)->realhost,
+                      cmd_str, b->target_nick, text);
+      } else {
+        sendrawto_one(alias,
+                      "@batch=%s :%s!%s@%s %s %s :%s",
+                      alias_batchid, cli_name(from),
+                      cli_user(from)->username,
+                      IsHiddenHost(from) ? cli_user(from)->host
+                                          : cli_user(from)->realhost,
+                      cmd_str, b->target_nick, text);
+      }
+    }
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, alias, "-%s", alias_batchid);
+  } else {
+    /* Bounded fallback: preview + truncation NOTICE.  route_to=alias,
+     * wire_target=resolved target_nick so the truncated lines land in
+     * the alias's correct query window. */
+    send_multiline_fallback(from, alias, wire_target,
+                            b->msgid[0] ? b->msgid : NULL,
+                            b->messages, b->msg_count,
+                            0 /* not channel */, NULL /* chptr */,
+                            b->paste_url[0] ? b->paste_url : NULL,
+                            b->client_tags[0] ? b->client_tags : NULL,
+                            b->is_notice);
+  }
+}
+
+/** Re-emit a BX M line unchanged toward the alias's actual server.
+ * Used when the local server is an intermediate hop.  Mirrors the
+ * BX E forward at bounce_alias_echo above. */
+static void
+forward_bxm_line(struct Client *sptr, struct Client *next_hop,
+                 int parc, char *parv[])
+{
+  /* parv[0] is sender prefix, parv[1] is "M".  Re-emit parv[2..] as
+   * the BX M payload.  Length-bounded paste-url end can have an empty
+   * trailing param so we always pass at least up to whatever parv[]
+   * carried.  The exact set of trailing params depends on whether
+   * this is start / continuation / concat / end. */
+  switch (parc) {
+  case 5:
+    sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, next_hop,
+                  "M %s %s :%s", parv[2], parv[3], parv[4]);
+    break;
+  case 8:
+    sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, next_hop,
+                  "M %s %s %s %s %s :%s",
+                  parv[2], parv[3], parv[4], parv[5], parv[6], parv[7]);
+    break;
+  case 9:
+    sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, next_hop,
+                  "M %s %s %s %s %s %s :%s",
+                  parv[2], parv[3], parv[4], parv[5], parv[6], parv[7],
+                  parv[8]);
+    break;
+  default:
+    /* Unexpected param count — drop silently rather than emit a
+     * malformed forward. */
+    break;
+  }
+}
+
+/** Handle BX M (multiline alias echo).
+ *
+ * parv[0] = source prefix (server)
+ * parv[1] = "M"
+ * parv[2] = batch_id with prefix ('+'<bid>, <bid>, 'c'<bid>, '-'<bid>)
+ * parv[3] = alias_numeric (final destination)
+ *
+ * Start (parv[2] starts with '+'):
+ *   parv[4] = from_numeric (sender_primary)
+ *   parv[5] = command token char ('P' or 'O')
+ *   parv[6] = target_nick
+ *   parv[7] = msgid or "*"
+ *   parv[8] = optional "@<ctags>", with first line in parv[9],
+ *             OR first line if no ctags
+ *
+ * End (parv[2] starts with '-'):
+ *   parv[4] = paste_url or "" (trailing)
+ *
+ * Continuation / concat:
+ *   parv[4] = line text
+ */
+static int
+bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
+                            int parc, char *parv[])
+{
+  const char *bid_with_prefix;
+  const char *bid;
+  char prefix;
+  struct Client *alias;
+  struct S2SBxmBatch *batch;
+
+  if (parc < 5)
+    return protocol_violation(sptr, "BX M requires at least 4 parameters");
+
+  bid_with_prefix = parv[2];
+  prefix = bid_with_prefix[0];
+  bid = (prefix == '+' || prefix == '-' || prefix == 'c')
+        ? bid_with_prefix + 1
+        : bid_with_prefix;
+
+  if (!*bid)
+    return 0;  /* malformed; drop */
+
+  alias = findNUser(parv[3]);
+  if (!alias || !IsUser(alias))
+    return 0;  /* alias unknown; drop */
+
+  /* Forward through if alias is on another server. */
+  if (!MyConnect(alias)) {
+    forward_bxm_line(sptr, alias, parc, parv);
+    return 0;
+  }
+
+  switch (prefix) {
+  case '+': {
+    /* Start.  Need from_num, tok, target_nick, msgid, then optional
+     * @ctags + first line, or just first line. */
+    const char *from_num, *tok_str, *target_nick, *msgid_str;
+    const char *client_tags = "";
+    const char *first_line = "";
+    int is_notice;
+
+    if (parc < 9)
+      return protocol_violation(sptr,
+          "BX M+ requires from/tok/target/msgid/text params");
+
+    from_num    = parv[4];
+    tok_str     = parv[5];
+    target_nick = parv[6];
+    msgid_str   = parv[7];
+
+    if (parc >= 10 && parv[8][0] == '@') {
+      client_tags = parv[8] + 1;
+      first_line  = parv[9];
+    } else {
+      first_line  = parv[8];
+    }
+
+    is_notice = (tok_str[0] == 'O');
+
+    /* Drop pre-existing batch with same id (collision) before opening. */
+    if ((batch = find_s2s_bxm_batch(cptr, bid)))
+      free_s2s_bxm_batch(batch);
+
+    batch = create_s2s_bxm_batch(cptr, bid, parv[3], from_num,
+                                 target_nick, msgid_str, client_tags,
+                                 is_notice);
+    if (!batch)
+      return 0;  /* no slot available */
+
+    if (!EmptyString(first_line))
+      add_s2s_bxm_message(batch, first_line, 0);
+    return 0;
+  }
+
+  case '-':
+    batch = find_s2s_bxm_batch(cptr, bid);
+    if (!batch)
+      return 0;
+    /* parv[4] is paste_url (possibly empty) */
+    if (parc >= 5 && !EmptyString(parv[4]))
+      ircd_strncpy(batch->paste_url, parv[4], sizeof(batch->paste_url) - 1);
+    deliver_s2s_bxm_batch(batch);
+    free_s2s_bxm_batch(batch);
+    return 0;
+
+  case 'c':
+  default: {
+    /* Concat or plain continuation.  parv[4] is the line text. */
+    int is_concat = (prefix == 'c');
+    batch = find_s2s_bxm_batch(cptr, bid);
+    if (!batch)
+      return 0;
+    if (parc >= 5 && !EmptyString(parv[4]))
+      add_s2s_bxm_message(batch, parv[4], is_concat);
+    return 0;
+  }
+  }
 }
 
 /* ---------------------------------------------------------------- */

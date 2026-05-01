@@ -160,14 +160,25 @@ static int format_batch_open_tags(char *buf, size_t buflen,
 }
 
 /* Forward declarations: deliver_multiline_dm_to_one calls helpers
- * defined later in the file. */
-static void send_multiline_fallback(struct Client *sptr, struct Client *to,
+ * defined later in the file.  send_multiline_fallback is non-static so
+ * bouncer_session.c can reuse it from the BX M (multiline echo)
+ * handler — exposed via include/m_batch.h. */
+extern void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                      struct Client *acptr, const char *msgid,
                                      struct SLink *messages, int total_lines,
                                      int is_channel, struct Channel *chptr,
                                      const char *paste_url_str,
                                      const char *client_tags, int is_notice);
 static const char *get_displayed_host(struct Client *sptr);
+static void emit_bxm_to_remote_member(struct Client *member,
+                                       const char *member_numeric,
+                                       struct Client *sender_primary,
+                                       struct Client *acptr,
+                                       struct Connection *con,
+                                       int is_notice,
+                                       const char *batch_base_msgid,
+                                       const char *batch_paste_url,
+                                       int member_index);
 
 /*
  * deliver_multiline_dm_to_one - Send a multiline DM batch to a single
@@ -275,6 +286,92 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
 }
 
 /*
+ * emit_bxm_to_remote_member - Send a multiline DM batch to a remote
+ * bouncer-session member as a BX M (multiline alias echo) batch.
+ *
+ * Wire target on the inner messages is acptr (original PM target), so
+ * the receiving alias's IRC client routes the conversation into the
+ * correct query window.  Routing target on every BX M line is
+ * member_numeric (the receiving alias).  Receiving server's BX M
+ * handler (bouncer_session.c::bounce_alias_multiline_echo) buffers
+ * by (link, batch_id) and on '-' end either reconstructs a
+ * draft/multiline BATCH wrapper for the alias or falls back to
+ * send_multiline_fallback if the alias lacks the cap.
+ *
+ * Caller is responsible for verifying:
+ *   - !MyConnect(member)            (remote)
+ *   - IsMultiline(cli_from(member)) (alias's server speaks BX M;
+ *                                    in our fork, IsMultiline implies
+ *                                    BX M support)
+ *   - member is a session member of sender_primary's session, not the
+ *     sender themselves, and not acptr
+ *
+ * sender_primary is used as the BX M "from" per the bouncer-session
+ * convention — session messages present canonically as primary
+ * regardless of which alias actually sent them.
+ *
+ * member_index is the loop index of the alias within its session;
+ * baked into the batch_id to keep concurrent emissions to different
+ * aliases from colliding on the receiver's per-link batch table.
+ */
+static void emit_bxm_to_remote_member(struct Client *member,
+                                       const char *member_numeric,
+                                       struct Client *sender_primary,
+                                       struct Client *acptr,
+                                       struct Connection *con,
+                                       int is_notice,
+                                       const char *batch_base_msgid,
+                                       const char *batch_paste_url,
+                                       int member_index)
+{
+  char bxm_batch_id[16];
+  const char *ctags = con_ml_client_tags(con);
+  const char *bx_tok = is_notice ? TOK_NOTICE : TOK_PRIVATE;
+  struct SLink *lp;
+  int first = 1;
+
+  ircd_snprintf(0, bxm_batch_id, sizeof(bxm_batch_id), "%s%lu%d",
+                cli_yxx(sender_primary), (unsigned long)CurrentTime,
+                member_index);
+
+  for (lp = con_ml_messages(con); lp; lp = lp->next) {
+    int concat = lp->value.cp[0];
+    const char *text = lp->value.cp + 1;
+    if (*text == '\0')
+      continue;
+    if (first) {
+      const char *msgid = (batch_base_msgid && *batch_base_msgid)
+                          ? batch_base_msgid : "*";
+      if (ctags && *ctags) {
+        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, member,
+                      "M +%s %s %s%s %s %s %s @%s :%s",
+                      bxm_batch_id, member_numeric,
+                      NumNick(sender_primary), bx_tok,
+                      cli_name(acptr), msgid, ctags, text);
+      } else {
+        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, member,
+                      "M +%s %s %s%s %s %s %s :%s",
+                      bxm_batch_id, member_numeric,
+                      NumNick(sender_primary), bx_tok,
+                      cli_name(acptr), msgid, text);
+      }
+      first = 0;
+    } else if (concat) {
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, member,
+                    "M c%s %s :%s", bxm_batch_id, member_numeric, text);
+    } else {
+      sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, member,
+                    "M %s %s :%s", bxm_batch_id, member_numeric, text);
+    }
+  }
+
+  /* End of batch — paste_url empty if we don't have one. */
+  sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, member,
+                "M -%s %s :%s", bxm_batch_id, member_numeric,
+                batch_paste_url ? batch_paste_url : "");
+}
+
+/*
  * send_multiline_fallback - Send truncated multiline with paste URL
  *
  * Sends preview lines to legacy clients, with a paste URL for the full
@@ -307,12 +404,12 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
  * msgid; sharing the batch msgid would conflate system signal with user
  * content for history/replay.
  */
-static void send_multiline_fallback(struct Client *sptr, struct Client *to,
-                                     struct Client *acptr, const char *msgid,
-                                     struct SLink *messages, int total_lines,
-                                     int is_channel, struct Channel *chptr,
-                                     const char *paste_url_str,
-                                     const char *client_tags, int is_notice)
+void send_multiline_fallback(struct Client *sptr, struct Client *to,
+                              struct Client *acptr, const char *msgid,
+                              struct SLink *messages, int total_lines,
+                              int is_channel, struct Channel *chptr,
+                              const char *paste_url_str,
+                              const char *client_tags, int is_notice)
 {
   struct SLink *lp;
   int lines_to_send;
@@ -1134,13 +1231,13 @@ process_multiline_batch(struct Client *sptr)
      * client routes the conversation into the right window.
      *
      * Local members: proper batch via deliver_multiline_dm_to_one.
-     * Remote members: per-line BX E (single-line bouncer transfer),
-     * matching the legacy bounce_echo_pm_to_session behavior.  BX E
+     * Remote members on multiline-capable servers: BX M batch (the
+     * bouncer-aware multiline echo token, see emit_bxm_to_remote_member
+     * above and bounce_alias_multiline_echo on the receive side).
+     * Remote members on legacy bouncer servers: per-line BX E.  BX E/M
      * "from" is sender_primary per the bouncer-session convention —
      * session messages present canonically as primary regardless of
-     * which alias actually sent them.  Future work (BX EM) could carry
-     * the batch across S2S; until then per-line is the protocol
-     * baseline. */
+     * which alias actually sent them. */
     {
       struct Client *sender_primary;
       const char *bx_tok = is_notice ? TOK_NOTICE : TOK_PRIVATE;
@@ -1160,6 +1257,15 @@ process_multiline_batch(struct Client *sptr)
                                         batch_base_msgid, batch_timebuf,
                                         batch_paste_url, is_notice, cmd_str,
                                         0);
+          } else if (IsMultiline(cli_from(sender_primary))) {
+            char primary_nn[6];
+            ircd_snprintf(0, primary_nn, sizeof(primary_nn), "%s%s",
+                          NumNick(sender_primary));
+            emit_bxm_to_remote_member(sender_primary, primary_nn,
+                                      sender_primary, acptr, con,
+                                      is_notice, batch_base_msgid,
+                                      batch_paste_url,
+                                      -1 /* sentinel: not in alias loop */);
           } else {
             char rcpt_nn[6];
             int first_line = 1;
@@ -1192,6 +1298,12 @@ process_multiline_batch(struct Client *sptr)
                                           batch_base_msgid, batch_timebuf,
                                           batch_paste_url, is_notice, cmd_str,
                                           0);
+            } else if (IsMultiline(cli_from(member))) {
+              emit_bxm_to_remote_member(member,
+                                        sender_sess->hs_aliases[i].ba_numeric,
+                                        sender_primary, acptr, con,
+                                        is_notice, batch_base_msgid,
+                                        batch_paste_url, i);
             } else {
               int first_line = 1;
               for (lp = con_ml_messages(con); lp; lp = lp->next) {
