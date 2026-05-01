@@ -1043,13 +1043,14 @@ process_multiline_batch(struct Client *sptr)
      * sender's own message back to itself.
      *
      * Local aliases: proper batch (or fallback) via deliver_multiline_dm_to_one.
-     * Remote aliases: per-line PRIVMSG/NOTICE.  The wire target IS the
-     * alias itself (forwards present the alias as a normal recipient),
-     * so standard S2S routing reaches them — no BX E is needed, just
-     * sendcmdto_one_tags_ext per line.  Future work (BX EM or similar)
-     * could carry the batch wrapper across S2S so multiline-capable
-     * remote aliases see a proper BATCH; until then per-line is the
-     * baseline. */
+     *
+     * Remote aliases: the wire target IS the alias (forwards present the
+     * alias as a normal recipient), so we can reuse the existing
+     * CMD_MULTILINE S2S relay machinery for multiline-capable peers —
+     * the alias's server reconstructs the BATCH for the local alias via
+     * deliver_s2s_multiline_batch().  For legacy peers we fall back to
+     * per-line PRIVMSG/NOTICE; the receiving legacy server has no
+     * multiline state, so each line is delivered as a regular PM. */
     if (IsAccount(acptr) && !IsBouncerAlias(acptr)) {
       struct BouncerSession *acptr_sess = bounce_get_session(acptr);
       if (acptr_sess && acptr_sess->hs_alias_count > 0) {
@@ -1064,19 +1065,62 @@ process_multiline_batch(struct Client *sptr)
                                         batch_paste_url, is_notice, cmd_str,
                                         0);
           } else {
-            int alias_first = 1;
-            for (lp = con_ml_messages(con); lp; lp = lp->next) {
-              char *text = lp->value.cp + 1;
-              if (*text == '\0')
-                continue;
-              const char *line_msgid = alias_first ? batch_base_msgid : NULL;
-              if (is_notice)
-                sendcmdto_one_tags_ext(sptr, CMD_NOTICE, alias, line_msgid,
-                                       "%C :%s", alias, text);
-              else
-                sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, alias, line_msgid,
-                                       "%C :%s", alias, text);
-              alias_first = 0;
+            struct Client *alias_server = cli_from(alias);
+            if (IsServer(alias_server) && IsMultiline(alias_server)) {
+              /* Multiline-capable alias server: relay the full batch
+               * via CMD_MULTILINE so the remote alias sees a proper
+               * draft/multiline BATCH wrapper.  Per-alias batch_id keeps
+               * concurrent forwards from colliding on the receiver. */
+              char fwd_batch_id[16];
+              int first = 1;
+              ircd_snprintf(0, fwd_batch_id, sizeof(fwd_batch_id), "%s%lu%d",
+                            cli_yxx(sptr), (unsigned long)CurrentTime, i);
+              for (lp = con_ml_messages(con); lp; lp = lp->next) {
+                int concat = lp->value.cp[0];
+                char *text = lp->value.cp + 1;
+                if (first) {
+                  const char *ctags = con_ml_client_tags(con);
+                  sendcmdto_set_s2s_tags(batch_time_ms, batch_base_msgid);
+                  if (ctags && *ctags)
+                    sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
+                                  "+%s @%s %s :%s",
+                                  fwd_batch_id, ctags, cli_name(alias), text);
+                  else
+                    sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
+                                  "+%s %s :%s",
+                                  fwd_batch_id, cli_name(alias), text);
+                  first = 0;
+                } else if (concat) {
+                  sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
+                                "c%s %s :%s",
+                                fwd_batch_id, cli_name(alias), text);
+                } else {
+                  sendcmdto_one(sptr, CMD_MULTILINE, alias_server,
+                                "%s %s :%s",
+                                fwd_batch_id, cli_name(alias), text);
+                }
+              }
+              sendcmdto_one(sptr, CMD_MULTILINE, alias_server, "-%s %s :%s",
+                            fwd_batch_id, cli_name(alias),
+                            batch_paste_url ? batch_paste_url : "");
+            } else {
+              /* Legacy alias server: per-line PRIVMSG/NOTICE.  Receiver
+               * has no multiline state — delivers each line as a regular
+               * PM to the local alias. */
+              int alias_first = 1;
+              for (lp = con_ml_messages(con); lp; lp = lp->next) {
+                char *text = lp->value.cp + 1;
+                if (*text == '\0')
+                  continue;
+                const char *line_msgid = alias_first ? batch_base_msgid : NULL;
+                if (is_notice)
+                  sendcmdto_one_tags_ext(sptr, CMD_NOTICE, alias, line_msgid,
+                                         "%C :%s", alias, text);
+                else
+                  sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, alias, line_msgid,
+                                         "%C :%s", alias, text);
+                alias_first = 0;
+              }
             }
           }
         }
