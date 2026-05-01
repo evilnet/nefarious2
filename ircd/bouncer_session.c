@@ -5498,8 +5498,30 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
     return;
 
   alias = findNUser(b->alias_numeric);
-  if (!alias || !MyConnect(alias) || !IsBouncerAlias(alias))
+  if (!alias) {
+    Debug((DEBUG_INFO,
+           "BX M: deliver dropped — alias %s not found locally",
+           b->alias_numeric));
     return;
+  }
+  if (!MyConnect(alias)) {
+    Debug((DEBUG_INFO,
+           "BX M: deliver dropped — alias %s is not local (MyConnect=0)",
+           b->alias_numeric));
+    return;
+  }
+  if (!IsUser(alias)) {
+    Debug((DEBUG_INFO,
+           "BX M: deliver dropped — alias %s is not a user",
+           b->alias_numeric));
+    return;
+  }
+  /* Don't require IsBouncerAlias here — the sender's primary-echo
+   * path targets the bouncer session's PRIMARY (which is not an
+   * IsBouncerAlias) when the sender itself is an alias.  Any local
+   * user numeric the sender chose to address via BX M is a legitimate
+   * delivery target; sender-side filtering already restricts BX M
+   * emission to session members (hs_aliases + primary). */
 
   from = findNUser(b->from_numeric);
   if (!from)
