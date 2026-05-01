@@ -159,14 +159,15 @@ static int format_batch_open_tags(char *buf, size_t buflen,
   return pos;
 }
 
-/* Forward declaration: deliver_multiline_dm_to_one falls through to
- * send_multiline_fallback for legacy targets. */
+/* Forward declarations: deliver_multiline_dm_to_one calls helpers
+ * defined later in the file. */
 static void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                      struct Client *acptr, const char *msgid,
                                      struct SLink *messages, int total_lines,
                                      int is_channel, struct Channel *chptr,
                                      const char *paste_url_str,
                                      const char *client_tags, int is_notice);
+static const char *get_displayed_host(struct Client *sptr);
 
 /*
  * deliver_multiline_dm_to_one - Send a multiline DM batch to a single
