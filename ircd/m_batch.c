@@ -59,6 +59,7 @@
 #include "s_user.h"
 #include "msgq.h"
 #include "class.h"
+#include "bouncer_session.h"
 #include "history.h"
 #include "ml_content.h"
 #include "paste_listener.h"
@@ -156,6 +157,121 @@ static int format_batch_open_tags(char *buf, size_t buflen,
   buf[pos++] = ' ';
   buf[pos] = '\0';
   return pos;
+}
+
+/* Forward declaration: deliver_multiline_dm_to_one falls through to
+ * send_multiline_fallback for legacy targets. */
+static void send_multiline_fallback(struct Client *sptr, struct Client *to,
+                                     struct Client *acptr, const char *msgid,
+                                     struct SLink *messages, int total_lines,
+                                     int is_channel, struct Channel *chptr,
+                                     const char *paste_url_str,
+                                     const char *client_tags, int is_notice);
+
+/*
+ * deliver_multiline_dm_to_one - Send a multiline DM batch to a single
+ * local target, choosing between proper draft/multiline BATCH wrapping
+ * and legacy fallback based on the target's negotiated capabilities.
+ *
+ * Used for the original recipient, recipient's aliases (forward), the
+ * sender's session members (echo), and the sender themselves (echo).
+ * The wire_target controls what appears in %C/the inner PRIVMSG target:
+ *
+ *   - Primary delivery / forward to recipient's alias: route_to == wire_target
+ *     (the alias sees themselves as the target).
+ *   - Echo to sender or sender's session members: route_to is the recipient
+ *     of the echo, wire_target is the original DM recipient (so the alias's
+ *     client routes the lines into the conversation window).
+ *
+ * Remote targets (!MyConnect) are not handled here; callers are responsible
+ * for cross-server delivery via S2S relay or BX E.
+ *
+ * preserve_label: include the sender's @label tag on the BATCH opener.
+ * Only the sender's own echo passes 1; everything else passes 0.
+ *
+ * Returns 1 if the legacy fallback path (preview + truncation NOTICE or
+ * +M expansion) was taken, 0 if the proper BATCH wrapper was used or
+ * the target was skipped (remote / NULL).  Callers use the return to
+ * accumulate fallback_count for the sender's WARN notification.
+ */
+static int deliver_multiline_dm_to_one(struct Client *sptr,
+                                        struct Client *route_to,
+                                        struct Client *wire_target,
+                                        const char *batch_base_msgid,
+                                        const char *batch_timebuf,
+                                        const char *batch_paste_url,
+                                        int is_notice, const char *cmd_str,
+                                        int preserve_label)
+{
+  struct Connection *con = cli_connect(sptr);
+  struct SLink *lp;
+
+  if (!route_to || !wire_target || !MyConnect(route_to))
+    return 0;
+
+  if (CapActive(route_to, CAP_DRAFT_MULTILINE) && CapActive(route_to, CAP_BATCH)) {
+    /* Proper draft/multiline BATCH wrapper preserves concat semantics. */
+    char batchid[16];
+    const char *label = preserve_label ? con_ml_label(con) : NULL;
+
+    ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+                  NumNick(sptr), con_batch_seq(cli_connect(route_to))++);
+
+    {
+      char tagbuf[512];
+      int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), route_to, sptr,
+                     batch_timebuf, batch_base_msgid,
+                     (label && label[0]) ? label : NULL,
+                     con_ml_client_tags(con));
+      if (taglen)
+        sendrawto_one(route_to, "%s:%s BATCH +%s draft/multiline %s",
+                      tagbuf, cli_name(&me), batchid, cli_name(wire_target));
+      else
+        sendcmdto_one(&me, CMD_BATCH_CMD, route_to, "+%s draft/multiline %s",
+                      batchid, cli_name(wire_target));
+    }
+
+    for (lp = con_ml_messages(con); lp; lp = lp->next) {
+      int concat = lp->value.cp[0];
+      char *text = lp->value.cp + 1;
+      if (concat) {
+        sendrawto_one(route_to,
+                      "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
+                      batchid, cli_name(sptr), cli_user(sptr)->username,
+                      get_displayed_host(sptr), cmd_str,
+                      cli_name(wire_target), text);
+      } else {
+        sendrawto_one(route_to,
+                      "@batch=%s :%s!%s@%s %s %s :%s",
+                      batchid, cli_name(sptr), cli_user(sptr)->username,
+                      get_displayed_host(sptr), cmd_str,
+                      cli_name(wire_target), text);
+      }
+    }
+
+    sendcmdto_one(&me, CMD_BATCH_CMD, route_to, "-%s", batchid);
+    return 0;
+  } else if (HasFlag(route_to, FLAG_MULTILINE_EXPAND)) {
+    /* +M opt-in: expand without truncation. */
+    for (lp = con_ml_messages(con); lp; lp = lp->next) {
+      char *text = lp->value.cp + 1;
+      if (is_notice)
+        sendcmdto_one(sptr, CMD_NOTICE, route_to, "%C :%s", wire_target, text);
+      else
+        sendcmdto_one(sptr, CMD_PRIVATE, route_to, "%C :%s", wire_target, text);
+    }
+    con_ml_had_fallback(con) = 1;
+    return 1;
+  } else {
+    /* Legacy fallback: preview + truncation NOTICE.  send_multiline_fallback
+     * already takes route_to (delivery) and acptr (wire %C target) separately. */
+    send_multiline_fallback(sptr, route_to, wire_target, batch_base_msgid,
+                             con_ml_messages(con), con_ml_msg_count(con),
+                             0, NULL, batch_paste_url,
+                             con_ml_client_tags(con), is_notice);
+    con_ml_had_fallback(con) = 1;
+    return 1;
+  }
 }
 
 /*
@@ -888,88 +1004,111 @@ process_multiline_batch(struct Client *sptr)
     }
   } else {
     /* Private message to user.
-     * With aliases, each connection is a separate Client. PM echo for
-     * aliases is handled by bounce_echo_pm_to_session.
      *
-     * Local-only delivery: if acptr is on another server, the S2S relay
-     * block below handles it via CMD_MULTILINE / fallback PRIVMSGs.
-     * Without this guard, remote recipients get the message twice —
-     * once via this block's sendrawto_one / send_multiline_fallback, and
-     * again via the S2S relay. */
-    if (MyConnect(acptr)) {
-    if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
-      char batchid[16];
-      int use_tags = CapActive(acptr, CAP_MSGTAGS);
+     * Delivery model: the originating-server m_batch path is responsible
+     * for delivering a multiline DM to every local recipient that needs
+     * to see it.  That set is:
+     *
+     *   1. The primary recipient (acptr) if local.
+     *   2. Each local alias of acptr's session — bouncer "forward".
+     *   3. Each local member of sptr's session, except sptr — bouncer
+     *      "echo" (so the sender's other connections see the outgoing
+     *      DM in their conversation window).
+     *   4. sptr itself if echo-message is negotiated.
+     *
+     * For each of those targets, deliver_multiline_dm_to_one() emits
+     * either a proper draft/multiline BATCH wrapper (preserving concat
+     * semantics) or, for capability-poor targets, the legacy preview
+     * + truncation fallback.  Wire target controls what appears as the
+     * inner PRIVMSG/NOTICE target — the alias's own nick for forward,
+     * the original recipient's nick for echo so the sender's-side
+     * clients route the lines into the conversation window.
+     *
+     * Remote recipients (acptr or its aliases on another server) and
+     * remote sender-session members are NOT handled here — they are
+     * delivered by the S2S relay block below (CMD_MULTILINE / fallback
+     * PRIVMSGs) and, for aliases, by the cross-server bouncer transfer
+     * (BX E) which is single-line today.  Cross-server multiline alias
+     * mirroring is future work.
+     */
+    fallback_count += deliver_multiline_dm_to_one(sptr, acptr, acptr,
+                                batch_base_msgid, batch_timebuf,
+                                batch_paste_url, is_notice, cmd_str,
+                                0 /* no label preservation for delivery */);
 
-      ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
-                    NumNick(sptr), con_batch_seq(cli_connect(acptr))++);
-
-      /* Per IRCv3 multiline spec, server tags (time, msgid, account) and
-       * client-only tags go on the BATCH + opener. */
-      {
-        char tagbuf[512];
-        int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), acptr, sptr,
-                       batch_timebuf, batch_base_msgid, NULL,
-                       con_ml_client_tags(con));
-        if (taglen)
-          sendrawto_one(acptr, "%s:%s BATCH +%s draft/multiline %s",
-                        tagbuf, cli_name(&me), batchid, cli_name(acptr));
-        else
-          sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
-                        batchid, cli_name(acptr));
-      }
-
-      for (lp = con_ml_messages(con); lp; lp = lp->next) {
-        int concat = lp->value.cp[0];
-        char *text = lp->value.cp + 1;
-
-        if (concat) {
-          sendrawto_one(acptr, "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
-                        batchid, cli_name(sptr), cli_user(sptr)->username,
-                        get_displayed_host(sptr), cmd_str, cli_name(acptr), text);
-        } else {
-          sendrawto_one(acptr, "@batch=%s :%s!%s@%s %s %s :%s",
-                        batchid, cli_name(sptr), cli_user(sptr)->username,
-                        get_displayed_host(sptr), cmd_str, cli_name(acptr), text);
+    /* Forward to acptr's local session aliases.  Skip sptr itself: when
+     * sender and recipient are aliases of the same session, primary
+     * delivery already covers acptr, and forwarding to sptr would echo
+     * the sender's own message back to itself. */
+    if (IsAccount(acptr) && !IsBouncerAlias(acptr)) {
+      struct BouncerSession *acptr_sess = bounce_get_session(acptr);
+      if (acptr_sess && acptr_sess->hs_alias_count > 0) {
+        int i;
+        for (i = 0; i < acptr_sess->hs_alias_count; i++) {
+          struct Client *alias = findNUser(acptr_sess->hs_aliases[i].ba_numeric);
+          if (!alias || alias == acptr || alias == sptr || !IsBouncerAlias(alias))
+            continue;
+          if (!MyConnect(alias))
+            continue;  /* Cross-server forward is BX E single-line work */
+          fallback_count += deliver_multiline_dm_to_one(sptr, alias, alias,
+                                      batch_base_msgid, batch_timebuf,
+                                      batch_paste_url, is_notice, cmd_str,
+                                      0);
         }
-      }
-
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
-    } else {
-      /* Fallback for DM: send as individual messages to primary
-       * If recipient has +M (multiline expand), send full expansion
-       * Otherwise use graduated truncation based on batch size
-       */
-      int total_lines = con_ml_msg_count(con);
-
-      con_ml_had_fallback(con) = 1;
-      fallback_count++;  /* Count for sender WARN notification */
-
-      if (HasFlag(acptr, FLAG_MULTILINE_EXPAND)) {
-        /* User opted in with +M: send all lines without truncation */
-        for (lp = con_ml_messages(con); lp; lp = lp->next) {
-          char *text = lp->value.cp + 1;
-          if (is_notice)
-            sendcmdto_one(sptr, CMD_NOTICE, acptr, "%C :%s", acptr, text);
-          else
-            sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%C :%s", acptr, text);
-        }
-      } else {
-        /* Preview + paste URL fallback for legacy clients */
-        send_multiline_fallback(sptr, acptr, acptr, batch_base_msgid,
-                                 con_ml_messages(con), total_lines, 0, NULL,
-                                 batch_paste_url, con_ml_client_tags(con), is_notice);
       }
     }
-    } /* end MyConnect(acptr) — remote handled by S2S relay below */
 
-    /* Echo to sender if they have echo-message capability.
-     * With aliases, PM echo for aliases is handled by bounce_echo_pm_to_session. */
+    /* Echo to sptr's local session members (primary + other aliases),
+     * skipping sptr itself and skipping any member that IS acptr (those
+     * already received the message via primary delivery — echoing
+     * again would duplicate).  Wire target = acptr so the alias's
+     * client routes the conversation into the right window. */
+    {
+      struct Client *sender_primary;
+      if (IsBouncerAlias(sptr) && cli_user(sptr)
+          && cli_user(sptr)->alias_primary)
+        sender_primary = cli_user(sptr)->alias_primary;
+      else
+        sender_primary = sptr;
+
+      if (IsAccount(sender_primary)) {
+        struct BouncerSession *sender_sess = bounce_get_session(sender_primary);
+        /* Echo to primary if sender is an alias, primary is local, and
+         * primary != acptr (avoid double-delivery on self-session DM). */
+        if (sender_primary != sptr && sender_primary != acptr
+            && MyConnect(sender_primary))
+          deliver_multiline_dm_to_one(sptr, sender_primary, acptr,
+                                      batch_base_msgid, batch_timebuf,
+                                      batch_paste_url, is_notice, cmd_str,
+                                      0);
+        /* Echo to other aliases. */
+        if (sender_sess && sender_sess->hs_alias_count > 0) {
+          int i;
+          for (i = 0; i < sender_sess->hs_alias_count; i++) {
+            struct Client *member =
+              findNUser(sender_sess->hs_aliases[i].ba_numeric);
+            if (!member || member == sptr || member == acptr
+                || !IsBouncerAlias(member))
+              continue;
+            if (!MyConnect(member))
+              continue;  /* Cross-server echo is BX E single-line work */
+            deliver_multiline_dm_to_one(sptr, member, acptr,
+                                        batch_base_msgid, batch_timebuf,
+                                        batch_paste_url, is_notice, cmd_str,
+                                        0);
+          }
+        }
+      }
+    }
+
+    /* Echo to sender if they have echo-message capability.  Label is
+     * preserved here (and only here) so labeled-response correlates
+     * with the sender's own request.  SendQ protection: drop echo only
+     * if the message literally won't fit. */
     {
       int need_echo = feature_bool(FEAT_CAP_echo_message) && CapActive(sptr, CAP_ECHOMSG);
       int skip_dm_echo = 0;
 
-      /* SendQ protection: skip echo only if it literally won't fit */
       if (MyConnect(sptr)) {
         unsigned int echo_bytes = con_ml_total_bytes(con);
         unsigned int current_sendq = MsgQLength(&(cli_sendQ(sptr)));
@@ -979,56 +1118,10 @@ process_multiline_batch(struct Client *sptr)
       }
 
       if (!skip_dm_echo && need_echo) {
-        if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
-          /* Sender has multiline - echo as a labeled batch with their
-           * @label preserved.  Mirrors the channel echo path above. */
-          char batchid[16];
-          int use_label = con_ml_label(con)[0] && CapActive(sptr, CAP_LABELEDRESP);
-          (void)use_label; /* tag inclusion handled by format_batch_open_tags */
-
-          ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
-                        NumNick(sptr), con_batch_seq(con)++);
-
-          /* Server tags (time, msgid, account), label, and client-only
-           * tags go on the BATCH + opener per the multiline spec. */
-          {
-            char tagbuf[512];
-            int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), sptr, sptr,
-                           batch_timebuf, batch_base_msgid,
-                           con_ml_label(con), con_ml_client_tags(con));
-            if (taglen)
-              sendrawto_one(sptr, "%s:%s BATCH +%s draft/multiline %s",
-                            tagbuf, cli_name(&me), batchid, cli_name(acptr));
-            else
-              sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
-                            batchid, cli_name(acptr));
-          }
-
-          for (lp = con_ml_messages(con); lp; lp = lp->next) {
-            int concat = lp->value.cp[0];
-            char *text = lp->value.cp + 1;
-
-            if (concat) {
-              sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), cmd_str, cli_name(acptr), text);
-            } else {
-              sendrawto_one(sptr, "@batch=%s :%s!%s@%s %s %s :%s",
-                            batchid, cli_name(sptr), cli_user(sptr)->username,
-                            get_displayed_host(sptr), cmd_str, cli_name(acptr), text);
-            }
-          }
-
-          sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
-        } else {
-          /* Sender doesn't have multiline - preview + truncation fallback
-           * for DM echo.  Routing target = sptr (deliver to sender);
-           * wire target = acptr (so the sender's client routes the lines
-           * to the recipient's query window). */
-          send_multiline_fallback(sptr, sptr, acptr, batch_base_msgid,
-                                   con_ml_messages(con), con_ml_msg_count(con),
-                                   0, NULL, batch_paste_url, con_ml_client_tags(con), is_notice);
-        }
+        deliver_multiline_dm_to_one(sptr, sptr, acptr,
+                                    batch_base_msgid, batch_timebuf,
+                                    batch_paste_url, is_notice, cmd_str,
+                                    1 /* preserve @label on echo */);
       }
     }
 
