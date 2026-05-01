@@ -5055,6 +5055,23 @@ free_s2s_bxm_batch(struct S2SBxmBatch *b)
   MyFree(b);
 }
 
+/** Free any S2S BX M batches buffered against \a link.
+ *
+ * Called from exit_one_client when a directly-connected server exits,
+ * so partially-accumulated batches whose terminating BX M- token will
+ * never arrive don't leak their slots in s2s_bxm_batches[].
+ */
+void s2s_bxm_cleanup_link(struct Client *link)
+{
+  int i;
+  if (!link)
+    return;
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (s2s_bxm_batches[i] && s2s_bxm_batches[i]->link == link)
+      free_s2s_bxm_batch(s2s_bxm_batches[i]);
+  }
+}
+
 /** Deliver a completed BX M batch to the local alias.
  *
  * If the alias has draft/multiline + batch caps, emit a real BATCH

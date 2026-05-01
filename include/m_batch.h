@@ -25,4 +25,11 @@ extern void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                      const char *paste_url_str,
                                      const char *client_tags, int is_notice);
 
+/** Free any S2S multiline batches buffered against \a link.
+ * Called from exit_one_client when a directly-connected server exits,
+ * so partially-accumulated batches whose terminating ML "-" token will
+ * never arrive don't leak their slots in the per-link batch array.
+ */
+extern void s2s_multiline_cleanup_link(struct Client *link);
+
 #endif /* INCLUDED_m_batch_h */

@@ -1824,6 +1824,7 @@ struct S2SMultilineBatch {
   char batch_id[16];            /**< Batch ID */
   char target[CHANNELLEN + 1];  /**< Target channel or nick */
   struct Client *sender;        /**< Original sender client */
+  struct Client *link;          /**< S2S link the batch arrived on (for cleanup on link drop) */
   struct SLink *messages;       /**< Linked list of messages */
   int msg_count;                /**< Number of messages */
   unsigned int total_bytes;     /**< Cumulative bytes accumulated (for network_max enforcement) */
@@ -1906,10 +1907,15 @@ find_s2s_multiline_batch(const char *batch_id)
   return NULL;
 }
 
-/** Create a new S2S multiline batch */
+/** Create a new S2S multiline batch.
+ * @param[in] link The directly-connected S2S link cptr the batch
+ *                 arrived on.  Recorded so we can free the entry on
+ *                 link drop (see s2s_multiline_cleanup_link).
+ */
 static struct S2SMultilineBatch *
 create_s2s_multiline_batch(const char *batch_id, const char *target,
-                           struct Client *sender, const char *client_tags,
+                           struct Client *sender, struct Client *link,
+                           const char *client_tags,
                            const char *msgid, uint64_t time_ms)
 {
   int i;
@@ -1929,6 +1935,7 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   ircd_strncpy(batch->target, target, sizeof(batch->target) - 1);
   batch->target[sizeof(batch->target) - 1] = '\0';
   batch->sender = sender;
+  batch->link = link;
   batch->messages = NULL;
   batch->msg_count = 0;
   batch->total_bytes = 0;
@@ -1948,6 +1955,23 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
 
   s2s_ml_batches[i] = batch;
   return batch;
+}
+
+/** Free any S2S multiline batches buffered against \a link.
+ *
+ * Called from exit_one_client when a directly-connected server exits,
+ * so partially-accumulated batches whose terminating "-" token will
+ * never arrive don't leak their slots in the array.
+ */
+void s2s_multiline_cleanup_link(struct Client *link)
+{
+  int i;
+  if (!link)
+    return;
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (s2s_ml_batches[i] && s2s_ml_batches[i]->link == link)
+      free_s2s_multiline_batch(s2s_ml_batches[i]);
+  }
 }
 
 /** Free an S2S multiline batch */
@@ -2442,7 +2466,8 @@ int ms_multiline(struct Client* cptr, struct Client* sptr, int parc, char* parv[
       free_s2s_multiline_batch(batch);
     }
 
-    batch = create_s2s_multiline_batch(batch_ref, target, sptr, client_tags,
+    batch = create_s2s_multiline_batch(batch_ref, target, sptr, cptr,
+                                       client_tags,
                                        cli_s2s_msgid(cptr), cli_s2s_time_ms(cptr));
     if (!batch)
       return 0;  /* No room for new batch */

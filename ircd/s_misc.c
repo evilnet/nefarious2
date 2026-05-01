@@ -28,6 +28,7 @@
 
 #include "s_misc.h"
 #include "bouncer_session.h"
+#include "m_batch.h"
 #include "IPcheck.h"
 #include "channel.h"
 #include "client.h"
@@ -313,6 +314,14 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   if (cli_serv(bcptr) && cli_serv(bcptr)->client_list) {  /* Was SetServerYXX called ? */
     ClearServerYXX(bcptr);      /* Removes server from server_list[] */
     clear_server_ad(bcptr);     /* Clear chathistory advertisement */
+  }
+  /* If this is a directly-connected server, free any S2S multiline /
+   * BX M batches buffered against the dying link.  Without this the
+   * partial-batch slots leak (the matching '-' end token will never
+   * arrive). */
+  if (IsServer(bcptr)) {
+    s2s_multiline_cleanup_link(bcptr);
+    s2s_bxm_cleanup_link(bcptr);
   }
   if (IsUser(bcptr)) {
     /* Bouncer aliases: minimal silent teardown.

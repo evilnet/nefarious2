@@ -300,6 +300,13 @@ extern void bounce_forward_pm_to_aliases(struct Client *from,
  */
 extern void bounce_alias_untrack(struct Client *alias);
 
+/** Free any BX M (multiline alias echo) batches buffered against \a link.
+ * Called from exit_one_client when a directly-connected server exits,
+ * so partially-accumulated batches whose terminating BX M- token will
+ * never arrive don't leak their slots in s2s_bxm_batches[].
+ */
+extern void s2s_bxm_cleanup_link(struct Client *link);
+
 /** Broadcast BX U identity updates to all aliases when primary changes.
  * @param[in] primary The primary client whose identity changed.
  * @param[in] field   Field name (host, realname, fakehost, etc.).
