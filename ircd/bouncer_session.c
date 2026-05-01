@@ -3909,6 +3909,15 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr, int parc,
 static int bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 
+/* Pending BX queue helpers — defers BX subcommands targeting an alias
+ * whose BX C hasn't been processed yet on this server (burst race).
+ * See implementation block below the BX subcommand handlers. */
+static void expire_pending_bx(void);
+static int  defer_bx_for_alias(const char *alias_numeric,
+                                struct Client *cptr, struct Client *sptr,
+                                int parc, char *parv[]);
+static void drain_pending_bx_for_alias(const char *alias_numeric);
+
 int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
                      int parc, char *parv[])
 {
@@ -3916,6 +3925,11 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
 
   if (parc < 2)
     return 0;
+
+  /* Opportunistic TTL sweep of the pending-BX queue.  Cheap (linear scan
+   * of a small fixed array) and good enough — we only need expired
+   * entries gone before they pile up across a long-quiet period. */
+  expire_pending_bx();
 
   subcmd = parv[1][0];
 
@@ -4628,6 +4642,12 @@ forward:
     exit_client(primary, primary, &me, "Session transferred");
   }
 
+  /* Drain any BX subcommands that were deferred waiting for this
+   * alias's BX C.  alias_numeric here is the full YYXXX as it was
+   * encoded on the wire — same form the deferred entries were
+   * keyed by. */
+  drain_pending_bx_for_alias(alias_numeric);
+
   return 0;
 }
 
@@ -4804,6 +4824,7 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
   char *eq;
   char field[32];
   const char *value;
+  int is_replay = bx_drain_in_progress;
 
   if (parc < 4)
     return protocol_violation(sptr, "BX U requires 2 parameters");
@@ -4812,8 +4833,17 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
   field_value = parv[3];
 
   alias = findNUser(alias_numeric);
-  if (!alias || !IsBouncerAlias(alias))
-    goto forward;
+  if (!alias || !IsBouncerAlias(alias)) {
+    /* Burst race: defer the local identity update for replay when
+     * BX C arrives.  Forward immediately on first arrival so other
+     * servers can process; replay skips forward (already broadcast). */
+    if (!is_replay)
+      defer_bx_for_alias(alias_numeric, cptr, sptr, parc, parv);
+    if (!is_replay)
+      sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                            "U %s %s", parv[2], parv[3]);
+    return 0;
+  }
 
   /* Parse field=value */
   eq = strchr(field_value, '=');
@@ -4855,8 +4885,11 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
   }
 
 forward:
-  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                        "U %s %s", parv[2], parv[3]);
+  /* Forward only on first arrival.  Replay skips since the original
+   * arrival already broadcast — re-running here would duplicate. */
+  if (!is_replay)
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "U %s %s", parv[2], parv[3]);
   return 0;
 }
 
@@ -4882,8 +4915,14 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
     return protocol_violation(sptr, "BX E requires 7 parameters");
 
   target = findNUser(parv[2]);
-  if (!target || !IsUser(target))
+  if (!target || !IsUser(target)) {
+    /* Burst race: BX C for this alias may not have arrived yet.  Defer
+     * and replay when it does; falls through to silent drop only if
+     * the queue is full or we're inside a drain replay. */
+    if (defer_bx_for_alias(parv[2], cptr, sptr, parc, parv) == 0)
+      return 0;
     return 0;
+  }
 
   /* Forward if target is not on this server */
   if (!MyConnect(target)) {
@@ -4917,6 +4956,220 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
   sendcmdto_one_tags_ext(from, msg_cmd, msg_tok, target, msgid,
                          "%s :%s", target_nick, text);
   return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* Pending BX queue: defer BX subcommands until BX C arrives        */
+/* ---------------------------------------------------------------- */
+
+/** Burst race: a BX subcommand can arrive on this server before the
+ * matching BX C (alias-create) has been processed.  findNUser
+ * returns NULL for the target alias and the message would be dropped.
+ *
+ * Defer the message into a small bounded queue instead.  When BX C
+ * for the matching alias arrives, drain replays the deferred messages
+ * through bounce_handle_bt — by then findNUser succeeds and the
+ * handler proceeds to deliver locally or forward onward as
+ * appropriate.
+ *
+ * Applies to BX E, BX M (all four variants), BX K, BX U.  BX P and
+ * BX X are one-shot semantics where dropping is correct.  BX C
+ * itself obviously can't be deferred.
+ */
+
+#define BX_PENDING_TTL 30   /* seconds before deferred entries expire */
+
+struct PendingBxEntry {
+  char alias_numeric[6];        /**< target alias YYXXX, drain key */
+  char cptr_yxx[3];             /**< incoming link server numeric */
+  char sptr_yxx[3];             /**< message-source server numeric */
+  int  parc;
+  char *parv[MAXPARA + 1];      /**< deep-copied; NULL-terminated */
+  time_t buffered_at;
+  char subcmd_char;             /**< 'E'/'M'/'K'/'U' for diagnostics */
+};
+
+static struct PendingBxEntry *pending_bx[MAXCONNECTIONS];
+
+/** Recursion guard: when drain replays an entry through
+ * bounce_handle_bt, the per-subcommand handlers must not re-defer if
+ * findNUser still fails (alias destroyed in the meantime, or sptr
+ * server has split).  Set across the replay span; defer_bx_for_alias
+ * checks it and returns failure to fall through to the silent-drop
+ * path the handlers already have. */
+static int bx_drain_in_progress = 0;
+
+/** Free a pending entry's deep-copied parv and the entry itself. */
+static void
+free_pending_bx_entry(struct PendingBxEntry *entry)
+{
+  int i;
+  if (!entry)
+    return;
+  for (i = 0; i <= MAXPARA; i++) {
+    if (entry->parv[i])
+      MyFree(entry->parv[i]);
+  }
+  MyFree(entry);
+}
+
+/** Walk the pending array, free entries older than TTL. */
+static void
+expire_pending_bx(void)
+{
+  int i;
+  time_t cutoff = CurrentTime - BX_PENDING_TTL;
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (pending_bx[i] && pending_bx[i]->buffered_at < cutoff) {
+      Debug((DEBUG_INFO,
+             "BX: pending entry for alias %s (subcmd %c) expired",
+             pending_bx[i]->alias_numeric, pending_bx[i]->subcmd_char));
+      free_pending_bx_entry(pending_bx[i]);
+      pending_bx[i] = NULL;
+    }
+  }
+}
+
+/** Buffer a BX subcommand whose target alias couldn't be resolved.
+ * Returns 0 on success (caller should return without dropping), -1 if
+ * we couldn't buffer (caller falls through to the silent-drop path).
+ *
+ * If we're inside a drain replay (bx_drain_in_progress != 0), refuse
+ * to re-buffer to avoid infinite loops on alias-destroyed-mid-burst.
+ *
+ * Eviction policy when the array is full: drop the oldest entry.  The
+ * window is short (BX_PENDING_TTL = 30s) so under sustained pressure
+ * the FIFO behaviour is the right tradeoff — older entries are most
+ * likely to be stale anyway.
+ */
+static int
+defer_bx_for_alias(const char *alias_numeric,
+                   struct Client *cptr, struct Client *sptr,
+                   int parc, char *parv[])
+{
+  int i, oldest_i = -1;
+  time_t oldest_t = CurrentTime;
+  struct PendingBxEntry *entry;
+
+  if (bx_drain_in_progress)
+    return -1;
+  if (!alias_numeric || !*alias_numeric || parc < 2)
+    return -1;
+
+  /* Find empty slot, or oldest entry to evict. */
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (!pending_bx[i]) {
+      oldest_i = i;
+      break;
+    }
+    if (pending_bx[i]->buffered_at <= oldest_t) {
+      oldest_t = pending_bx[i]->buffered_at;
+      oldest_i = i;
+    }
+  }
+  if (oldest_i < 0)
+    return -1;
+  if (pending_bx[oldest_i])
+    free_pending_bx_entry(pending_bx[oldest_i]);
+
+  entry = (struct PendingBxEntry *)MyMalloc(sizeof(*entry));
+  memset(entry, 0, sizeof(*entry));
+  ircd_strncpy(entry->alias_numeric, alias_numeric,
+               sizeof(entry->alias_numeric) - 1);
+  /* Server numerics are 2 chars + null (3 bytes).  cptr is always a
+   * server for S2S BX traffic; sptr is too. */
+  if (cptr && IsServer(cptr))
+    ircd_strncpy(entry->cptr_yxx, cli_yxx(cptr), sizeof(entry->cptr_yxx) - 1);
+  if (sptr && IsServer(sptr))
+    ircd_strncpy(entry->sptr_yxx, cli_yxx(sptr), sizeof(entry->sptr_yxx) - 1);
+  entry->parc = (parc > MAXPARA) ? MAXPARA : parc;
+  for (i = 0; i < entry->parc; i++) {
+    if (parv[i])
+      DupString(entry->parv[i], parv[i]);
+    else
+      entry->parv[i] = NULL;
+  }
+  entry->parv[entry->parc] = NULL;
+  entry->buffered_at = CurrentTime;
+  entry->subcmd_char = (parv[1] && parv[1][0]) ? parv[1][0] : '?';
+
+  pending_bx[oldest_i] = entry;
+  Debug((DEBUG_INFO,
+         "BX: deferred subcmd %c for unknown alias %s (slot %d)",
+         entry->subcmd_char, alias_numeric, oldest_i));
+  return 0;
+}
+
+/** Replay deferred BX entries whose alias_numeric matches.  Called
+ * from bounce_alias_create after the new alias's local Client is set
+ * up; by then findNUser succeeds for the alias and replay can either
+ * deliver locally or forward as appropriate.
+ *
+ * Replays are issued in array order; for BX M the protocol's
+ * insertion-order arrival means M+ runs before its M/Mc/M-
+ * continuations, which matches what create_s2s_bxm_batch expects.
+ */
+static void
+drain_pending_bx_for_alias(const char *alias_numeric)
+{
+  int i;
+  if (!alias_numeric || !*alias_numeric)
+    return;
+
+  bx_drain_in_progress = 1;
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    struct PendingBxEntry *entry = pending_bx[i];
+    struct Client *cptr;
+    struct Client *sptr;
+
+    if (!entry)
+      continue;
+    if (strcmp(entry->alias_numeric, alias_numeric) != 0)
+      continue;
+
+    /* Re-resolve cptr / sptr from server numerics — the original
+     * Client*'s could be stale if a server SQUITed in the meantime. */
+    cptr = entry->cptr_yxx[0] ? FindNServer(entry->cptr_yxx) : NULL;
+    sptr = entry->sptr_yxx[0] ? FindNServer(entry->sptr_yxx) : NULL;
+
+    if (cptr && sptr) {
+      Debug((DEBUG_INFO,
+             "BX: replaying deferred subcmd %c for alias %s",
+             entry->subcmd_char, alias_numeric));
+      bounce_handle_bt(cptr, sptr, entry->parc, entry->parv);
+    } else {
+      Debug((DEBUG_INFO,
+             "BX: dropping deferred subcmd %c for alias %s "
+             "(source server gone)",
+             entry->subcmd_char, alias_numeric));
+    }
+    free_pending_bx_entry(entry);
+    pending_bx[i] = NULL;
+  }
+  bx_drain_in_progress = 0;
+}
+
+/** Free deferred entries pinned to a dying server link.  Called from
+ * exit_one_client when a directly-connected server exits; matches
+ * either the cptr_yxx or sptr_yxx field. */
+void pending_bx_cleanup_link(struct Client *link)
+{
+  int i;
+  const char *yxx;
+  if (!link || !IsServer(link))
+    return;
+  yxx = cli_yxx(link);
+  if (!yxx || !*yxx)
+    return;
+
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (pending_bx[i]
+        && (strcmp(pending_bx[i]->cptr_yxx, yxx) == 0
+            || strcmp(pending_bx[i]->sptr_yxx, yxx) == 0)) {
+      free_pending_bx_entry(pending_bx[i]);
+      pending_bx[i] = NULL;
+    }
+  }
 }
 
 /* ---------------------------------------------------------------- */
@@ -5283,8 +5536,14 @@ bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
     return 0;  /* malformed; drop */
 
   alias = findNUser(parv[3]);
-  if (!alias || !IsUser(alias))
-    return 0;  /* alias unknown; drop */
+  if (!alias || !IsUser(alias)) {
+    /* Burst race: defer until BX C arrives.  Applies to all BX M
+     * variants (start / cont / concat / end) — the alias_numeric is
+     * always parv[3] regardless of prefix, and replay-in-order means
+     * M+ runs before its continuations. */
+    defer_bx_for_alias(parv[3], cptr, sptr, parc, parv);
+    return 0;
+  }
 
   /* Forward through if alias is on another server. */
   if (!MyConnect(alias)) {
@@ -5375,13 +5634,24 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
 {
   struct Client *alias;
   unsigned int snomask;
+  int is_replay = bx_drain_in_progress;
 
   if (parc < 4)
     return protocol_violation(sptr, "BX K requires 2 parameters");
 
   alias = findNUser(parv[2]);
-  if (!alias || !IsBouncerAlias(alias))
-    goto forward;
+  if (!alias || !IsBouncerAlias(alias)) {
+    /* Burst race: defer the local snomask-set for replay when BX C
+     * arrives for this alias.  Forward to other servers immediately
+     * on first arrival (they may have BX C state already); replay
+     * skips forward since the original arrival already broadcast. */
+    if (!is_replay)
+      defer_bx_for_alias(parv[2], cptr, sptr, parc, parv);
+    if (!is_replay)
+      sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                            "K %s %s", parv[2], parv[3]);
+    return 0;
+  }
 
   snomask = (unsigned int)atoi(parv[3]);
 
@@ -5393,9 +5663,11 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
            snomask, cli_name(alias), parv[2]));
   }
 
-forward:
-  sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                        "K %s %s", parv[2], parv[3]);
+  /* Forward only on first arrival.  Replay re-running the broadcast
+   * would duplicate it on the network. */
+  if (!is_replay)
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "K %s %s", parv[2], parv[3]);
   return 0;
 }
 

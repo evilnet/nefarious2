@@ -316,12 +316,14 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     clear_server_ad(bcptr);     /* Clear chathistory advertisement */
   }
   /* If this is a directly-connected server, free any S2S multiline /
-   * BX M batches buffered against the dying link.  Without this the
-   * partial-batch slots leak (the matching '-' end token will never
-   * arrive). */
+   * BX M batches buffered against the dying link, plus any deferred
+   * BX subcommands pinned to it.  Without this, partial state leaks
+   * (the matching '-' end token will never arrive; deferred entries
+   * referencing a dead source can never replay correctly). */
   if (IsServer(bcptr)) {
     s2s_multiline_cleanup_link(bcptr);
     s2s_bxm_cleanup_link(bcptr);
+    pending_bx_cleanup_link(bcptr);
   }
   if (IsUser(bcptr)) {
     /* Bouncer aliases: minimal silent teardown.

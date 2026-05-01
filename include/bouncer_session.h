@@ -307,6 +307,13 @@ extern void bounce_alias_untrack(struct Client *alias);
  */
 extern void s2s_bxm_cleanup_link(struct Client *link);
 
+/** Free any deferred BX subcommands pinned to a dying server link.
+ * Called from exit_one_client.  Matches entries whose original cptr
+ * (incoming link) or sptr (message-source server) numeric corresponds
+ * to the exiting server; they couldn't be replayed correctly anyway
+ * since the source is gone. */
+extern void pending_bx_cleanup_link(struct Client *link);
+
 /** Broadcast BX U identity updates to all aliases when primary changes.
  * @param[in] primary The primary client whose identity changed.
  * @param[in] field   Field name (host, realname, fakehost, etc.).
