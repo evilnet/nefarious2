@@ -1491,39 +1491,13 @@ process_multiline_batch(struct Client *sptr)
    * a remote recipient may live behind a multi-hop path where some
    * intermediate or terminal server lacks draft/multiline.  In that
    * case the batch WILL fragment somewhere downstream, so the
-   * sender's lag discount must NOT be halved.
-   *
-   * Two-tier check:
-   *
-   *   1. Global short-circuit: if any server in the network is not
-   *      IRCv3-aware (CAPAB IRCV3AWARE), it can't possibly be
-   *      multiline-capable.  Set had_fallback and skip the per-member
-   *      walk.  Slightly conservative for channels (a non-IRCv3 server
-   *      with zero channel members would still suppress halving), but
-   *      cheap O(servers) and matches the practical reality of a
-   *      mixed-rollout network — if any legacy peer exists, multiline
-   *      batches are likely to fragment somewhere.
-   *
-   *   2. All servers IRCv3-aware: walk the relevant scope (channel
-   *      members for channels, acptr for DMs) and check each remote
-   *      target's home server for IsMultiline.  IRCv3-aware is a
-   *      prerequisite for multiline but not the same — a server can
-   *      speak IRCv3 message tags without supporting multiline.
-   */
+   * sender's lag discount must NOT be halved.  Walk the relevant scope
+   * (channel members for channels, acptr for DMs) and check each
+   * remote target's home server for IsMultiline.  Any non-multiline
+   * home server forces had_fallback so the discount calc in
+   * clear_multiline_batch picks it up. */
   if (!con_ml_had_fallback(con)) {
-    struct Client *srv;
-    int has_non_ircv3 = 0;
-    for (srv = GlobalClientList; srv; srv = cli_next(srv)) {
-      if (!IsServer(srv) || IsMe(srv))
-        continue;
-      if (!IsIRCv3Aware(srv)) {
-        has_non_ircv3 = 1;
-        break;
-      }
-    }
-    if (has_non_ircv3) {
-      con_ml_had_fallback(con) = 1;
-    } else if (is_channel && chptr) {
+    if (is_channel && chptr) {
       struct Membership *m;
       for (m = chptr->members; m; m = m->next_member) {
         struct Client *home;
