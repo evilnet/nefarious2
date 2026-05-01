@@ -1957,6 +1957,8 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   return batch;
 }
 
+static void free_s2s_multiline_batch(struct S2SMultilineBatch *batch);
+
 /** Free any S2S multiline batches buffered against \a link.
  *
  * Called from exit_one_client when a directly-connected server exits,
