@@ -246,11 +246,14 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
   int remaining = total_lines - sent;
 
   if (paste_url_str) {
+    /* URL goes outside the bracketed count so clients that auto-linkify
+     * don't grab the trailing ']' (msgids embed P10 base64 which uses
+     * '[' and ']' — linkifiers can't tell URL-bracket from frame-bracket). */
     if (is_channel) {
-      sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines - %s]",
+      sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines] %s",
                     chptr, remaining, paste_url_str);
     } else {
-      sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines - %s]",
+      sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines] %s",
                     to, remaining, paste_url_str);
     }
   } else {
@@ -1012,8 +1015,9 @@ process_multiline_batch(struct Client *sptr)
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
           if (batch_paste_url) {
+            /* URL outside the bracket so linkifiers don't grab the ']'. */
             sendcmdto_one(sptr, CMD_NOTICE, target_server,
-                "%C :[%d more lines - %s]",
+                "%C :[%d more lines] %s",
                 acptr, remaining, batch_paste_url);
           } else {
             sendcmdto_one(sptr, CMD_NOTICE, target_server,
@@ -1127,8 +1131,9 @@ process_multiline_batch(struct Client *sptr)
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
           if (batch_paste_url) {
+            /* URL outside the bracket so linkifiers don't grab the ']'. */
             sendcmdto_one(from, CMD_NOTICE, server,
-                "%H :[%d more lines - %s]",
+                "%H :[%d more lines] %s",
                 chptr, remaining, batch_paste_url);
           } else {
             sendcmdto_one(from, CMD_NOTICE, server,
@@ -1841,8 +1846,9 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
           if (s2s_paste_url) {
+            /* URL outside the bracket so linkifiers don't grab the ']'. */
             sendcmdto_one(sptr, CMD_NOTICE, server,
-                "%H :[%d more lines - %s]",
+                "%H :[%d more lines] %s",
                 chptr, remaining, s2s_paste_url);
           } else {
             sendcmdto_one(sptr, CMD_NOTICE, server,
