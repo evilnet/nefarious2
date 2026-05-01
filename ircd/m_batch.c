@@ -889,7 +889,14 @@ process_multiline_batch(struct Client *sptr)
   } else {
     /* Private message to user.
      * With aliases, each connection is a separate Client. PM echo for
-     * aliases is handled by bounce_echo_pm_to_session. */
+     * aliases is handled by bounce_echo_pm_to_session.
+     *
+     * Local-only delivery: if acptr is on another server, the S2S relay
+     * block below handles it via CMD_MULTILINE / fallback PRIVMSGs.
+     * Without this guard, remote recipients get the message twice —
+     * once via this block's sendrawto_one / send_multiline_fallback, and
+     * again via the S2S relay. */
+    if (MyConnect(acptr)) {
     if (CapActive(acptr, CAP_DRAFT_MULTILINE) && CapActive(acptr, CAP_BATCH)) {
       char batchid[16];
       int use_tags = CapActive(acptr, CAP_MSGTAGS);
@@ -954,6 +961,7 @@ process_multiline_batch(struct Client *sptr)
                                  batch_paste_url, con_ml_client_tags(con), is_notice);
       }
     }
+    } /* end MyConnect(acptr) — remote handled by S2S relay below */
 
     /* Echo to sender if they have echo-message capability.
      * With aliases, PM echo for aliases is handled by bounce_echo_pm_to_session. */
