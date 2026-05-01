@@ -158,7 +158,28 @@ struct BounceChannel {
 struct BounceAlias {
   char ba_numeric[6];       /**< Alias P10 numeric (YYXXX) */
   char ba_server[3];        /**< Server numeric hosting this alias (YY) */
+  unsigned int ba_caps;     /**< Bouncer-relevant cap bitmask (BX_CAP_*).
+                                 Updated via BX U caps=<hex>; consulted
+                                 by sender to pick BX M vs BX E. */
+  int ba_caps_known;        /**< 1 once a BX U caps= has been received
+                                 for this alias.  0 means "fall back to
+                                 IsMultiline link-level proxy" — needed
+                                 because ba_caps == 0 is otherwise
+                                 ambiguous (no relevant caps vs. no info
+                                 received yet). */
 };
+
+/* BX_CAP_* — bouncer-relevant subset of client capabilities, sent
+ * across S2S in the BX U caps= field as a hex bitmask.  Curated set
+ * (rather than the full cli_active_own flagset) keeps S2S noise
+ * bounded and gives forward-compat headroom for new bits.
+ *
+ * Both DRAFT_MULTILINE + BATCH are required for BX M to be useful:
+ * multiline alone gives N PRIVMSGs without the wrapper, batch alone
+ * has nothing to wrap. */
+#define BX_CAP_DRAFT_MULTILINE 0x01
+#define BX_CAP_BATCH           0x02
+/* Future: 0x04 MSGTAGS, 0x08 LABELEDRESP, 0x10 ECHOMSG */
 
 /** A single bouncer session.
  *
@@ -313,6 +334,16 @@ extern void s2s_bxm_cleanup_link(struct Client *link);
  * to the exiting server; they couldn't be replayed correctly anyway
  * since the source is gone. */
 extern void pending_bx_cleanup_link(struct Client *link);
+
+/** Broadcast a BX U caps=<hex> message to all servers when a local
+ * bouncer-session client's cap state changes.  Called from m_cap.c's
+ * cap_req / cap_ack / cap_clear right after
+ * bounce_recompute_session_caps.  Returns silently if the client
+ * isn't part of a bouncer session.  Receivers update the matching
+ * BounceAlias->ba_caps so the sender of a future BX M can decide
+ * BX M vs BX E based on the alias's actual cap state instead of
+ * the link-level IsMultiline proxy. */
+extern void bounce_emit_alias_caps(struct Client *cptr);
 
 /** Broadcast BX U identity updates to all aliases when primary changes.
  * @param[in] primary The primary client whose identity changed.

@@ -643,6 +643,7 @@ cap_req(struct Client *sptr, const char *caplist)
   *cli_capab(sptr) = cs;
   *cli_active_own(sptr) = as;
   bounce_recompute_session_caps(sptr);
+  bounce_emit_alias_caps(sptr);
 
   return 0;
 }
@@ -680,6 +681,7 @@ cap_ack(struct Client *sptr, const char *caplist)
   }
 
   bounce_recompute_session_caps(sptr);
+  bounce_emit_alias_caps(sptr);
   return 0;
 }
 
@@ -710,6 +712,7 @@ cap_clear(struct Client *sptr, const char *caplist)
   }
   send_caplist(sptr, 0, &cleared, "ACK");
   bounce_recompute_session_caps(sptr);
+  bounce_emit_alias_caps(sptr);
 
   return 0;
 }

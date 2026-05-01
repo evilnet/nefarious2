@@ -1172,7 +1172,22 @@ process_multiline_batch(struct Client *sptr)
                                         0);
           } else {
             struct Client *alias_server = cli_from(alias);
-            if (IsServer(alias_server) && IsMultiline(alias_server)) {
+            /* Prefer the alias's own cap state (set via BX U caps=)
+             * over the link-level IsMultiline proxy.  Falls back to
+             * IsMultiline if no caps info has arrived yet.  This
+             * forward path uses CMD_MULTILINE rather than BX M
+             * (the wire target IS the alias for forwards), but the
+             * decision criterion is the same as for echo. */
+            int forward_use_ml;
+            if (acptr_sess->hs_aliases[i].ba_caps_known) {
+              unsigned int caps = acptr_sess->hs_aliases[i].ba_caps;
+              forward_use_ml = (caps & BX_CAP_DRAFT_MULTILINE)
+                               && (caps & BX_CAP_BATCH);
+            } else {
+              forward_use_ml = IsServer(alias_server)
+                               && IsMultiline(alias_server);
+            }
+            if (forward_use_ml) {
               /* Multiline-capable alias server: relay the full batch
                * via CMD_MULTILINE so the remote alias sees a proper
                * draft/multiline BATCH wrapper.  Per-alias batch_id keeps
@@ -1299,15 +1314,28 @@ process_multiline_batch(struct Client *sptr)
           for (i = 0; i < sender_sess->hs_alias_count; i++) {
             struct Client *member =
               findNUser(sender_sess->hs_aliases[i].ba_numeric);
+            int member_use_bxm;
             if (!member || member == sptr || member == acptr
                 || !IsBouncerAlias(member))
               continue;
+            /* Pick BX M when the alias's actual cap state is known
+             * and includes both DRAFT_MULTILINE and BATCH.  Fall back
+             * to the link-level IsMultiline proxy if the alias's home
+             * server hasn't yet broadcast a BX U caps= for it (burst
+             * race or older fork without per-alias cap discovery). */
+            if (sender_sess->hs_aliases[i].ba_caps_known) {
+              unsigned int caps = sender_sess->hs_aliases[i].ba_caps;
+              member_use_bxm = (caps & BX_CAP_DRAFT_MULTILINE)
+                               && (caps & BX_CAP_BATCH);
+            } else {
+              member_use_bxm = IsMultiline(cli_from(member));
+            }
             if (MyConnect(member)) {
               deliver_multiline_dm_to_one(sptr, member, acptr,
                                           batch_base_msgid, batch_timebuf,
                                           batch_paste_url, is_notice, cmd_str,
                                           0);
-            } else if (IsMultiline(cli_from(member))) {
+            } else if (member_use_bxm) {
               emit_bxm_to_remote_member(member,
                                         sender_sess->hs_aliases[i].ba_numeric,
                                         sender_primary, acptr, con,

@@ -3813,6 +3813,83 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
   }
 }
 
+/** Compute the BX_CAP_* bitmask for a client from its active caps. */
+static unsigned int
+bounce_compute_bx_caps(struct Client *cptr)
+{
+  unsigned int caps = 0;
+  if (CapActive(cptr, CAP_DRAFT_MULTILINE))
+    caps |= BX_CAP_DRAFT_MULTILINE;
+  if (CapActive(cptr, CAP_BATCH))
+    caps |= BX_CAP_BATCH;
+  return caps;
+}
+
+/** Broadcast a BX U caps=<hex> for a local client whose cap state
+ * changed.  Called from m_cap.c (cap_req / cap_ack / cap_clear) right
+ * after bounce_recompute_session_caps, and also from
+ * bounce_alias_create's local-alias setup so newly-created aliases
+ * publish their initial caps without waiting for a CAP REQ.
+ *
+ * The receiver uses the caps to pick BX M vs BX E in
+ * emit_bxm_to_remote_member.  Updates the local-server view of its
+ * own ba_caps too — keeps everyone (including the originator's
+ * aliases on the same server) coherent.
+ */
+void bounce_emit_alias_caps(struct Client *cptr)
+{
+  unsigned int caps;
+  char full_numeric[6];
+  char hex[12];
+  struct AccountSessions *as;
+  struct BouncerSession *sess;
+  int i;
+
+  if (!cptr || !MyConnect(cptr) || !IsUser(cptr))
+    return;
+  if (!IsAccount(cptr))
+    return;
+
+  /* Only emit for clients participating in a bouncer session — primary
+   * with hs_aliases, OR a bouncer alias.  Plain non-bouncer users
+   * don't need their caps tracked across S2S. */
+  as = bounce_find_by_account(cli_user(cptr)->account);
+  if (!as || !as->as_sessions)
+    return;
+  if (!IsBouncerAlias(cptr)) {
+    /* Primary — only emit if there are aliases that would care. */
+    int has_any = 0;
+    for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
+      if (sess->hs_alias_count > 0) {
+        has_any = 1;
+        break;
+      }
+    }
+    if (!has_any)
+      return;
+  }
+
+  caps = bounce_compute_bx_caps(cptr);
+  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                cli_yxx(cli_user(cptr)->server), cli_yxx(cptr));
+  ircd_snprintf(0, hex, sizeof(hex), "%x", caps);
+
+  /* Update our own session-replica view first.  The S2S broadcast
+   * below skips us via butone, so without this our own server's
+   * ba_caps for this alias would stay stale. */
+  for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
+    for (i = 0; i < sess->hs_alias_count; i++) {
+      if (0 == strcmp(sess->hs_aliases[i].ba_numeric, full_numeric)) {
+        sess->hs_aliases[i].ba_caps = caps;
+        sess->hs_aliases[i].ba_caps_known = 1;
+      }
+    }
+  }
+
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "U %s caps=%s", full_numeric, hex);
+}
+
 /** User mode flags that should be synchronized between primary and aliases.
  * These are the user-visible mode flags (o, w, i, g, etc.) plus internal
  * oper tracking flags.  Internal state flags like FLAG_BOUNCER_ALIAS,
@@ -4391,6 +4468,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * present (and broadcast away-notify) even though no /away was typed. */
   bounce_recompute_session_away(session);
 
+  /* Publish initial cap state to the network so other servers can
+   * decide BX M vs BX E for this alias without waiting for a
+   * subsequent CAP REQ from the client. */
+  bounce_emit_alias_caps(sptr);
+
   return 0;
 }
 
@@ -4890,6 +4972,31 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
       SetAccount(alias);
     else
       ClearAccount(alias);
+  } else if (0 == ircd_strcmp(field, "caps")) {
+    /* Update the BounceAlias entry's ba_caps for this alias.  Walk
+     * the alias's account's sessions, find the matching entry by
+     * full YYXXX numeric, set ba_caps + ba_caps_known.  Sender-side
+     * BX M dispatch consults this to pick BX M vs BX E. */
+    unsigned long caps = strtoul(value, NULL, 16);
+    if (IsAccount(alias)) {
+      struct AccountSessions *as =
+        bounce_find_by_account(cli_user(alias)->account);
+      if (as) {
+        char full_numeric[6];
+        ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                      cli_yxx(cli_user(alias)->server), cli_yxx(alias));
+        struct BouncerSession *sess;
+        int i;
+        for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
+          for (i = 0; i < sess->hs_alias_count; i++) {
+            if (0 == strcmp(sess->hs_aliases[i].ba_numeric, full_numeric)) {
+              sess->hs_aliases[i].ba_caps = (unsigned int)caps;
+              sess->hs_aliases[i].ba_caps_known = 1;
+            }
+          }
+        }
+      }
+    }
   } else {
     Debug((DEBUG_INFO, "BX U: unknown field '%s' for alias %s", field, alias_numeric));
   }
