@@ -1037,10 +1037,20 @@ process_multiline_batch(struct Client *sptr)
                                 batch_paste_url, is_notice, cmd_str,
                                 0 /* no label preservation for delivery */);
 
-    /* Forward to acptr's local session aliases.  Skip sptr itself: when
-     * sender and recipient are aliases of the same session, primary
-     * delivery already covers acptr, and forwarding to sptr would echo
-     * the sender's own message back to itself. */
+    /* Forward to acptr's session aliases.  Skip sptr itself: when sender
+     * and recipient are aliases of the same session, primary delivery
+     * already covers acptr, and forwarding to sptr would echo the
+     * sender's own message back to itself.
+     *
+     * Local aliases: proper batch (or fallback) via deliver_multiline_dm_to_one.
+     * Remote aliases: per-line PRIVMSG/NOTICE.  The wire target IS the
+     * alias itself (forwards present the alias as a normal recipient),
+     * so standard S2S routing reaches them — no BX E is needed, just
+     * sendcmdto_one_tags_ext per line.  Future work (BX EM or similar)
+     * could carry the batch wrapper across S2S so multiline-capable
+     * remote aliases see a proper BATCH; until then per-line is the
+     * baseline.  Mark had_fallback so the discount accounts for the
+     * wire fragmentation. */
     if (IsAccount(acptr) && !IsBouncerAlias(acptr)) {
       struct BouncerSession *acptr_sess = bounce_get_session(acptr);
       if (acptr_sess && acptr_sess->hs_alias_count > 0) {
@@ -1049,23 +1059,50 @@ process_multiline_batch(struct Client *sptr)
           struct Client *alias = findNUser(acptr_sess->hs_aliases[i].ba_numeric);
           if (!alias || alias == acptr || alias == sptr || !IsBouncerAlias(alias))
             continue;
-          if (!MyConnect(alias))
-            continue;  /* Cross-server forward is BX E single-line work */
-          fallback_count += deliver_multiline_dm_to_one(sptr, alias, alias,
-                                      batch_base_msgid, batch_timebuf,
-                                      batch_paste_url, is_notice, cmd_str,
-                                      0);
+          if (MyConnect(alias)) {
+            fallback_count += deliver_multiline_dm_to_one(sptr, alias, alias,
+                                        batch_base_msgid, batch_timebuf,
+                                        batch_paste_url, is_notice, cmd_str,
+                                        0);
+          } else {
+            int alias_first = 1;
+            for (lp = con_ml_messages(con); lp; lp = lp->next) {
+              char *text = lp->value.cp + 1;
+              if (*text == '\0')
+                continue;
+              const char *line_msgid = alias_first ? batch_base_msgid : NULL;
+              if (is_notice)
+                sendcmdto_one_tags_ext(sptr, CMD_NOTICE, alias, line_msgid,
+                                       "%C :%s", alias, text);
+              else
+                sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, alias, line_msgid,
+                                       "%C :%s", alias, text);
+              alias_first = 0;
+            }
+            con_ml_had_fallback(con) = 1;  /* per-line wire fragments the batch */
+          }
         }
       }
     }
 
-    /* Echo to sptr's local session members (primary + other aliases),
+    /* Echo to sptr's session members (primary + other aliases),
      * skipping sptr itself and skipping any member that IS acptr (those
      * already received the message via primary delivery — echoing
      * again would duplicate).  Wire target = acptr so the alias's
-     * client routes the conversation into the right window. */
+     * client routes the conversation into the right window.
+     *
+     * Local members: proper batch via deliver_multiline_dm_to_one.
+     * Remote members: per-line BX E (single-line bouncer transfer),
+     * matching the legacy bounce_echo_pm_to_session behavior.  BX E
+     * "from" is sender_primary per the bouncer-session convention —
+     * session messages present canonically as primary regardless of
+     * which alias actually sent them.  Future work (BX EM) could carry
+     * the batch across S2S; until then per-line is the protocol
+     * baseline.  Mark had_fallback so the discount accounts for the
+     * wire fragmentation. */
     {
       struct Client *sender_primary;
+      const char *bx_tok = is_notice ? TOK_NOTICE : TOK_PRIVATE;
       if (IsBouncerAlias(sptr) && cli_user(sptr)
           && cli_user(sptr)->alias_primary)
         sender_primary = cli_user(sptr)->alias_primary;
@@ -1074,14 +1111,33 @@ process_multiline_batch(struct Client *sptr)
 
       if (IsAccount(sender_primary)) {
         struct BouncerSession *sender_sess = bounce_get_session(sender_primary);
-        /* Echo to primary if sender is an alias, primary is local, and
-         * primary != acptr (avoid double-delivery on self-session DM). */
-        if (sender_primary != sptr && sender_primary != acptr
-            && MyConnect(sender_primary))
-          deliver_multiline_dm_to_one(sptr, sender_primary, acptr,
-                                      batch_base_msgid, batch_timebuf,
-                                      batch_paste_url, is_notice, cmd_str,
-                                      0);
+        /* Echo to primary if sender is an alias and primary != acptr
+         * (avoid double-delivery on self-session DM). */
+        if (sender_primary != sptr && sender_primary != acptr) {
+          if (MyConnect(sender_primary)) {
+            deliver_multiline_dm_to_one(sptr, sender_primary, acptr,
+                                        batch_base_msgid, batch_timebuf,
+                                        batch_paste_url, is_notice, cmd_str,
+                                        0);
+          } else {
+            char rcpt_nn[6];
+            int first_line = 1;
+            ircd_snprintf(0, rcpt_nn, sizeof(rcpt_nn), "%s%s",
+                          NumNick(sender_primary));
+            for (lp = con_ml_messages(con); lp; lp = lp->next) {
+              char *text = lp->value.cp + 1;
+              if (*text == '\0')
+                continue;
+              sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, sender_primary,
+                  "E %s %s%s %s %s %s :%s",
+                  rcpt_nn, NumNick(sender_primary), bx_tok,
+                  cli_name(acptr),
+                  first_line ? batch_base_msgid : "*", text);
+              first_line = 0;
+            }
+            con_ml_had_fallback(con) = 1;
+          }
+        }
         /* Echo to other aliases. */
         if (sender_sess && sender_sess->hs_alias_count > 0) {
           int i;
@@ -1091,12 +1147,27 @@ process_multiline_batch(struct Client *sptr)
             if (!member || member == sptr || member == acptr
                 || !IsBouncerAlias(member))
               continue;
-            if (!MyConnect(member))
-              continue;  /* Cross-server echo is BX E single-line work */
-            deliver_multiline_dm_to_one(sptr, member, acptr,
-                                        batch_base_msgid, batch_timebuf,
-                                        batch_paste_url, is_notice, cmd_str,
-                                        0);
+            if (MyConnect(member)) {
+              deliver_multiline_dm_to_one(sptr, member, acptr,
+                                          batch_base_msgid, batch_timebuf,
+                                          batch_paste_url, is_notice, cmd_str,
+                                          0);
+            } else {
+              int first_line = 1;
+              for (lp = con_ml_messages(con); lp; lp = lp->next) {
+                char *text = lp->value.cp + 1;
+                if (*text == '\0')
+                  continue;
+                sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, member,
+                    "E %s %s%s %s %s %s :%s",
+                    sender_sess->hs_aliases[i].ba_numeric,
+                    NumNick(sender_primary), bx_tok,
+                    cli_name(acptr),
+                    first_line ? batch_base_msgid : "*", text);
+                first_line = 0;
+              }
+              con_ml_had_fallback(con) = 1;
+            }
           }
         }
       }
@@ -1414,6 +1485,36 @@ process_multiline_batch(struct Client *sptr)
 
   /* Clear the time override set at the start of this function */
   sendcmdto_set_client_time(NULL);
+
+  /* Network walk for MULTILINE_RECIPIENT_DISCOUNT correctness: even if
+   * our own delivery and direct S2S hops never fragmented the batch,
+   * a remote recipient may live behind a multi-hop path where some
+   * intermediate or terminal server lacks draft/multiline.  In that
+   * case the batch WILL fragment somewhere downstream, so the
+   * sender's lag discount must NOT be halved.  Walk the relevant scope
+   * (channel members for channels, acptr for DMs) and check each
+   * remote target's home server for IsMultiline.  Any non-multiline
+   * home server forces had_fallback so the discount calc in
+   * clear_multiline_batch picks it up. */
+  if (!con_ml_had_fallback(con)) {
+    if (is_channel && chptr) {
+      struct Membership *m;
+      for (m = chptr->members; m; m = m->next_member) {
+        struct Client *home;
+        if (MyConnect(m->user))
+          continue;  /* local already accounted for */
+        home = cli_user(m->user) ? cli_user(m->user)->server : NULL;
+        if (home && !IsMultiline(home)) {
+          con_ml_had_fallback(con) = 1;
+          break;
+        }
+      }
+    } else if (acptr && !MyConnect(acptr)) {
+      struct Client *home = cli_user(acptr) ? cli_user(acptr)->server : NULL;
+      if (home && !IsMultiline(home))
+        con_ml_had_fallback(con) = 1;
+    }
+  }
 
   clear_multiline_batch(con);
   return 0;
