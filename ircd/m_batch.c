@@ -59,6 +59,7 @@
 #include "s_user.h"
 #include "msgq.h"
 #include "class.h"
+#include "bouncer_session.h"
 #include "history.h"
 #include "ml_content.h"
 #include "paste_listener.h"
@@ -962,6 +963,32 @@ process_multiline_batch(struct Client *sptr)
       }
     }
     } /* end MyConnect(acptr) — remote handled by S2S relay below */
+
+    /* Mirror outgoing DM to bouncer session aliases — both the
+     * recipient's aliases (forward) and the sender's other connections
+     * (echo).  Mirrors the per-line bounce_forward_pm_to_aliases /
+     * bounce_echo_pm_to_session calls in ircd_relay.c's PM path; until
+     * those helpers grow a multiline-aware variant, send each line as
+     * its own PRIVMSG/NOTICE.  Both helpers no-op cheaply if the
+     * target/sender has no session, so they're safe to call
+     * unconditionally.  Only the first line carries the batch msgid
+     * to avoid duplicate history entries on the alias clients. */
+    {
+      const char *fwd_cmd = is_notice ? MSG_NOTICE : MSG_PRIVATE;
+      const char *fwd_tok = is_notice ? TOK_NOTICE : TOK_PRIVATE;
+      int alias_first = 1;
+      for (lp = con_ml_messages(con); lp; lp = lp->next) {
+        char *text = lp->value.cp + 1;
+        if (*text == '\0')
+          continue;
+        const char *line_msgid = alias_first ? batch_base_msgid : NULL;
+        bounce_forward_pm_to_aliases(sptr, acptr, fwd_cmd, fwd_tok,
+                                     text, line_msgid);
+        bounce_echo_pm_to_session(sptr, acptr, fwd_cmd, fwd_tok,
+                                  text, line_msgid);
+        alias_first = 0;
+      }
+    }
 
     /* Echo to sender if they have echo-message capability.
      * With aliases, PM echo for aliases is handled by bounce_echo_pm_to_session. */
