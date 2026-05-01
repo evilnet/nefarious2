@@ -3918,6 +3918,16 @@ static int  defer_bx_for_alias(const char *alias_numeric,
                                 int parc, char *parv[]);
 static void drain_pending_bx_for_alias(const char *alias_numeric);
 
+/* BX M state cleanup for a destroyed alias.  Defined alongside
+ * s2s_bxm_cleanup_link further down in the BX M section. */
+static void s2s_bxm_cleanup_alias(struct Client *alias);
+
+/* Recursion guard for the pending-BX drain.  Set across replay span
+ * so BX handlers know not to re-defer or re-broadcast.  Defined here
+ * because BX K / BX U handlers — which appear earlier in the file
+ * than the pending-BX implementation block — read it. */
+static int bx_drain_in_progress = 0;
+
 int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
                      int parc, char *parv[])
 {
@@ -4991,13 +5001,10 @@ struct PendingBxEntry {
 
 static struct PendingBxEntry *pending_bx[MAXCONNECTIONS];
 
-/** Recursion guard: when drain replays an entry through
- * bounce_handle_bt, the per-subcommand handlers must not re-defer if
- * findNUser still fails (alias destroyed in the meantime, or sptr
- * server has split).  Set across the replay span; defer_bx_for_alias
- * checks it and returns failure to fall through to the silent-drop
- * path the handlers already have. */
-static int bx_drain_in_progress = 0;
+/* bx_drain_in_progress is defined up near the forward declarations
+ * because BX K / BX U handlers (which appear earlier in the file)
+ * also read it to skip duplicate forwards during replay.  See
+ * defer_bx_for_alias and drain_pending_bx_for_alias for the lifetime. */
 
 /** Free a pending entry's deep-copied parv and the entry itself. */
 static void
