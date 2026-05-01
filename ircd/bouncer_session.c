@@ -5193,9 +5193,9 @@ defer_bx_for_alias(const char *alias_numeric,
   /* Server numerics are 2 chars + null (3 bytes).  cptr is always a
    * server for S2S BX traffic; sptr is too. */
   if (cptr && IsServer(cptr))
-    ircd_strncpy(entry->cptr_yxx, cli_yxx(cptr), sizeof(entry->cptr_yxx) - 1);
+    ircd_strncpy(entry->cptr_yxx, cli_yxx(cptr), sizeof(entry->cptr_yxx));
   if (sptr && IsServer(sptr))
-    ircd_strncpy(entry->sptr_yxx, cli_yxx(sptr), sizeof(entry->sptr_yxx) - 1);
+    ircd_strncpy(entry->sptr_yxx, cli_yxx(sptr), sizeof(entry->sptr_yxx));
   entry->parc = (parc > MAXPARA) ? MAXPARA : parc;
   for (i = 0; i < entry->parc; i++) {
     if (parv[i])
@@ -5355,14 +5355,17 @@ create_s2s_bxm_batch(struct Client *link, const char *batch_id,
   b = (struct S2SBxmBatch *)MyMalloc(sizeof(*b));
   memset(b, 0, sizeof(*b));
   b->link = link;
-  ircd_strncpy(b->batch_id, batch_id, sizeof(b->batch_id) - 1);
-  ircd_strncpy(b->alias_numeric, alias_num, sizeof(b->alias_numeric) - 1);
-  ircd_strncpy(b->from_numeric, from_num, sizeof(b->from_numeric) - 1);
-  ircd_strncpy(b->target_nick, target_nick, sizeof(b->target_nick) - 1);
+  /* ircd_strncpy uses strlcpy semantics — pass full buffer size, NOT
+   * sizeof-1.  Numerics are exactly 5 chars (YYXXX) and need a 6-byte
+   * buffer with full sizeof to copy correctly. */
+  ircd_strncpy(b->batch_id, batch_id, sizeof(b->batch_id));
+  ircd_strncpy(b->alias_numeric, alias_num, sizeof(b->alias_numeric));
+  ircd_strncpy(b->from_numeric, from_num, sizeof(b->from_numeric));
+  ircd_strncpy(b->target_nick, target_nick, sizeof(b->target_nick));
   if (msgid && strcmp(msgid, "*") != 0)
-    ircd_strncpy(b->msgid, msgid, sizeof(b->msgid) - 1);
+    ircd_strncpy(b->msgid, msgid, sizeof(b->msgid));
   if (client_tags && *client_tags)
-    ircd_strncpy(b->client_tags, client_tags, sizeof(b->client_tags) - 1);
+    ircd_strncpy(b->client_tags, client_tags, sizeof(b->client_tags));
   b->is_notice = is_notice;
   b->start_time = CurrentTime;
   s2s_bxm_batches[i] = b;
@@ -5711,9 +5714,10 @@ bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
     batch = find_s2s_bxm_batch(cptr, bid);
     if (!batch)
       return 0;
-    /* parv[4] is paste_url (possibly empty) */
+    /* parv[4] is paste_url (possibly empty).  ircd_strncpy uses full
+     * buffer size (strlcpy semantics). */
     if (parc >= 5 && !EmptyString(parv[4]))
-      ircd_strncpy(batch->paste_url, parv[4], sizeof(batch->paste_url) - 1);
+      ircd_strncpy(batch->paste_url, parv[4], sizeof(batch->paste_url));
     deliver_s2s_bxm_batch(batch);
     free_s2s_bxm_batch(batch);
     return 0;
