@@ -170,17 +170,29 @@ static int format_batch_open_tags(char *buf, size_t buflen,
  *
  * Parameters:
  *   sptr          - sender client
- *   to            - recipient client
- *   target        - channel name or nick (for retrieval hint)
- *   msgid         - base msgid for retrieval
+ *   to            - routing target (delivery recipient).  For DM echo this
+ *                   is sptr; for DM delivery this equals acptr.
+ *   acptr         - DM wire target (used for %C in NOTICE/PRIVMSG format).
+ *                   Pass NULL for channel cases.  When `to == sptr` (DM
+ *                   echo) this MUST point to the actual recipient so the
+ *                   wire reads ":sptr ... acptr ..." and the sender's
+ *                   client routes the line to the correct query window.
+ *   msgid         - base msgid for retrieval (carried only on the first
+ *                   preview line per multiline spec)
  *   messages      - linked list of message lines
  *   total_lines   - total line count
  *   is_channel    - 1 if channel, 0 if DM
  *   chptr         - channel pointer (NULL for DMs)
  *   paste_url_str - pre-computed paste URL (NULL if unavailable)
+ *
+ * Truncation NOTICE source: &me for channels (system signal in the
+ * channel buffer), sptr for DMs (so it routes to the conversation
+ * window rather than status).  Truncation gets its own freshly-generated
+ * msgid; sharing the batch msgid would conflate system signal with user
+ * content for history/replay.
  */
 static void send_multiline_fallback(struct Client *sptr, struct Client *to,
-                                     const char *target, const char *msgid,
+                                     struct Client *acptr, const char *msgid,
                                      struct SLink *messages, int total_lines,
                                      int is_channel, struct Channel *chptr,
                                      const char *paste_url_str,
@@ -222,7 +234,7 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
                                   "%H :%s", chptr, text);
       else
         sendcmdto_one_client_tags(sptr, msg_str, to, client_tags,
-                                  "%C :%s", to, text);
+                                  "%C :%s", acptr, text);
       if (line_msgid)
         sendcmdto_set_client_msgid(NULL);
     } else {
@@ -230,12 +242,12 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
         if (is_channel)
           sendcmdto_one_tags_ext(sptr, CMD_NOTICE, to, line_msgid, "%H :%s", chptr, text);
         else
-          sendcmdto_one_tags_ext(sptr, CMD_NOTICE, to, line_msgid, "%C :%s", to, text);
+          sendcmdto_one_tags_ext(sptr, CMD_NOTICE, to, line_msgid, "%C :%s", acptr, text);
       } else {
         if (is_channel)
           sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, to, line_msgid, "%H :%s", chptr, text);
         else
-          sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, to, line_msgid, "%C :%s", to, text);
+          sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, to, line_msgid, "%C :%s", acptr, text);
       }
     }
   }
@@ -245,24 +257,35 @@ static void send_multiline_fallback(struct Client *sptr, struct Client *to,
 
   int remaining = total_lines - sent;
 
+  /* Truncation NOTICE: fresh msgid (system-generated, not part of user
+   * content), tag-aware send so it carries msgid/time.  Source is &me
+   * for channel (notice goes to channel buffer) and sptr for DM (so the
+   * sender's/recipient's client routes it to the conversation window). */
+  char trunc_msgid[S2S_MSGID_BUFSIZE];
+  generate_msgid(trunc_msgid, sizeof(trunc_msgid));
+
   if (paste_url_str) {
     /* URL goes outside the bracketed count so clients that auto-linkify
      * don't grab the trailing ']' (msgids embed P10 base64 which uses
      * '[' and ']' — linkifiers can't tell URL-bracket from frame-bracket). */
     if (is_channel) {
-      sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines] %s",
-                    chptr, remaining, paste_url_str);
+      sendcmdto_one_tags_ext(&me, CMD_NOTICE, to, trunc_msgid,
+                             "%H :[%d more lines] %s",
+                             chptr, remaining, paste_url_str);
     } else {
-      sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines] %s",
-                    to, remaining, paste_url_str);
+      sendcmdto_one_tags_ext(sptr, CMD_NOTICE, to, trunc_msgid,
+                             "%C :[%d more lines] %s",
+                             acptr, remaining, paste_url_str);
     }
   } else {
     if (is_channel) {
-      sendcmdto_one(&me, CMD_NOTICE, to, "%H :[%d more lines]",
-                    chptr, remaining);
+      sendcmdto_one_tags_ext(&me, CMD_NOTICE, to, trunc_msgid,
+                             "%H :[%d more lines]",
+                             chptr, remaining);
     } else {
-      sendcmdto_one(&me, CMD_NOTICE, to, "%C :[%d more lines]",
-                    to, remaining);
+      sendcmdto_one_tags_ext(sptr, CMD_NOTICE, to, trunc_msgid,
+                             "%C :[%d more lines]",
+                             acptr, remaining);
     }
   }
 }
@@ -782,7 +805,7 @@ process_multiline_batch(struct Client *sptr)
           }
         } else {
           /* Preview + paste URL fallback for legacy clients */
-          send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
+          send_multiline_fallback(sptr, to, NULL, batch_base_msgid,
                                    con_ml_messages(con), total_lines, 1, chptr,
                                    batch_paste_url, con_ml_client_tags(con), is_notice);
         }
@@ -857,7 +880,7 @@ process_multiline_batch(struct Client *sptr)
           sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
         } else {
           /* Sender doesn't have multiline - preview + truncation fallback */
-          send_multiline_fallback(sptr, sptr, chptr->chname, batch_base_msgid,
+          send_multiline_fallback(sptr, sptr, NULL, batch_base_msgid,
                                    con_ml_messages(con), con_ml_msg_count(con),
                                    1, chptr, batch_paste_url, con_ml_client_tags(con), is_notice);
         }
@@ -926,7 +949,7 @@ process_multiline_batch(struct Client *sptr)
         }
       } else {
         /* Preview + paste URL fallback for legacy clients */
-        send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
+        send_multiline_fallback(sptr, acptr, acptr, batch_base_msgid,
                                  con_ml_messages(con), total_lines, 0, NULL,
                                  batch_paste_url, con_ml_client_tags(con), is_notice);
       }
@@ -948,10 +971,56 @@ process_multiline_batch(struct Client *sptr)
       }
 
       if (!skip_dm_echo && need_echo) {
-        /* Preview + truncation fallback for DM echo */
-        send_multiline_fallback(sptr, sptr, cli_name(acptr), batch_base_msgid,
-                                 con_ml_messages(con), con_ml_msg_count(con),
-                                 0, NULL, batch_paste_url, con_ml_client_tags(con), is_notice);
+        if (CapActive(sptr, CAP_DRAFT_MULTILINE) && CapActive(sptr, CAP_BATCH)) {
+          /* Sender has multiline - echo as a labeled batch with their
+           * @label preserved.  Mirrors the channel echo path above. */
+          char batchid[16];
+          int use_label = con_ml_label(con)[0] && CapActive(sptr, CAP_LABELEDRESP);
+          (void)use_label; /* tag inclusion handled by format_batch_open_tags */
+
+          ircd_snprintf(0, batchid, sizeof(batchid), "%s%u",
+                        NumNick(sptr), con_batch_seq(con)++);
+
+          /* Server tags (time, msgid, account), label, and client-only
+           * tags go on the BATCH + opener per the multiline spec. */
+          {
+            char tagbuf[512];
+            int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), sptr, sptr,
+                           batch_timebuf, batch_base_msgid,
+                           con_ml_label(con), con_ml_client_tags(con));
+            if (taglen)
+              sendrawto_one(sptr, "%s:%s BATCH +%s draft/multiline %s",
+                            tagbuf, cli_name(&me), batchid, cli_name(acptr));
+            else
+              sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
+                            batchid, cli_name(acptr));
+          }
+
+          for (lp = con_ml_messages(con); lp; lp = lp->next) {
+            int concat = lp->value.cp[0];
+            char *text = lp->value.cp + 1;
+
+            if (concat) {
+              sendrawto_one(sptr, "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
+                            batchid, cli_name(sptr), cli_user(sptr)->username,
+                            get_displayed_host(sptr), cmd_str, cli_name(acptr), text);
+            } else {
+              sendrawto_one(sptr, "@batch=%s :%s!%s@%s %s %s :%s",
+                            batchid, cli_name(sptr), cli_user(sptr)->username,
+                            get_displayed_host(sptr), cmd_str, cli_name(acptr), text);
+            }
+          }
+
+          sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
+        } else {
+          /* Sender doesn't have multiline - preview + truncation fallback
+           * for DM echo.  Routing target = sptr (deliver to sender);
+           * wire target = acptr (so the sender's client routes the lines
+           * to the recipient's query window). */
+          send_multiline_fallback(sptr, sptr, acptr, batch_base_msgid,
+                                   con_ml_messages(con), con_ml_msg_count(con),
+                                   0, NULL, batch_paste_url, con_ml_client_tags(con), is_notice);
+        }
       }
     }
 
@@ -1011,19 +1080,21 @@ process_multiline_batch(struct Client *sptr)
           sent++;
         }
 
-        /* Send truncation notice from the server, not the user — the
-         * notice is a system signal that content was elided, not user
-         * speech.  Server source also dodges per-user CTCP/away/script
-         * filters that some clients apply to user notices. */
+        /* DM truncation NOTICE: source = sptr so the notice routes to
+         * the conversation window in the recipient's client, not status.
+         * Fresh msgid via the tag-aware send so the notice carries
+         * msgid/time tags like the preview lines do. */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
+          char trunc_msgid[S2S_MSGID_BUFSIZE];
+          generate_msgid(trunc_msgid, sizeof(trunc_msgid));
           if (batch_paste_url) {
             /* URL outside the bracket so linkifiers don't grab the ']'. */
-            sendcmdto_one(&me, CMD_NOTICE, target_server,
+            sendcmdto_one_tags_ext(sptr, CMD_NOTICE, target_server, trunc_msgid,
                 "%C :[%d more lines] %s",
                 acptr, remaining, batch_paste_url);
           } else {
-            sendcmdto_one(&me, CMD_NOTICE, target_server,
+            sendcmdto_one_tags_ext(sptr, CMD_NOTICE, target_server, trunc_msgid,
                 "%C :[%d more lines - connect to a multiline-capable server to view]",
                 acptr, remaining);
           }
@@ -1130,16 +1201,19 @@ process_multiline_batch(struct Client *sptr)
           sent++;
         }
 
-        /* Send truncation notice from the server, not the user. */
+        /* Channel truncation NOTICE: server source (channel system signal).
+         * Fresh msgid + tag-aware send so the notice carries msgid/time. */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
+          char trunc_msgid[S2S_MSGID_BUFSIZE];
+          generate_msgid(trunc_msgid, sizeof(trunc_msgid));
           if (batch_paste_url) {
             /* URL outside the bracket so linkifiers don't grab the ']'. */
-            sendcmdto_one(&me, CMD_NOTICE, server,
+            sendcmdto_one_tags_ext(&me, CMD_NOTICE, server, trunc_msgid,
                 "%H :[%d more lines] %s",
                 chptr, remaining, batch_paste_url);
           } else {
-            sendcmdto_one(&me, CMD_NOTICE, server,
+            sendcmdto_one_tags_ext(&me, CMD_NOTICE, server, trunc_msgid,
                 "%H :[%d more lines - connect to a multiline-capable server to view]",
                 chptr, remaining);
           }
@@ -1744,7 +1818,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
         /* Graceful fallback for S2S channel delivery */
-        send_multiline_fallback(sptr, to, chptr->chname, batch_base_msgid,
+        send_multiline_fallback(sptr, to, NULL, batch_base_msgid,
                                  batch->messages, batch->msg_count, 1, chptr,
                                  s2s_paste_url,
                                  batch->client_tags[0] ? batch->client_tags : NULL, is_notice);
@@ -1794,7 +1868,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
     } else {
       /* Graceful fallback for S2S DM delivery */
-      send_multiline_fallback(sptr, acptr, cli_name(acptr), batch_base_msgid,
+      send_multiline_fallback(sptr, acptr, acptr, batch_base_msgid,
                                batch->messages, batch->msg_count, 0, NULL,
                                s2s_paste_url,
                                batch->client_tags[0] ? batch->client_tags : NULL, is_notice);
@@ -1848,14 +1922,17 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
 
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
+          char trunc_msgid[S2S_MSGID_BUFSIZE];
+          generate_msgid(trunc_msgid, sizeof(trunc_msgid));
           if (s2s_paste_url) {
             /* URL outside the bracket so linkifiers don't grab the ']'.
-             * Server source — truncation is a system signal. */
-            sendcmdto_one(&me, CMD_NOTICE, server,
+             * Server source — truncation is a system signal.  Tag-aware
+             * send so the notice carries msgid/time. */
+            sendcmdto_one_tags_ext(&me, CMD_NOTICE, server, trunc_msgid,
                 "%H :[%d more lines] %s",
                 chptr, remaining, s2s_paste_url);
           } else {
-            sendcmdto_one(&me, CMD_NOTICE, server,
+            sendcmdto_one_tags_ext(&me, CMD_NOTICE, server, trunc_msgid,
                 "%H :[%d more lines - connect to a multiline-capable server to view]",
                 chptr, remaining);
           }
