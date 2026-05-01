@@ -253,7 +253,9 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
     sendcmdto_one(&me, CMD_BATCH_CMD, route_to, "-%s", batchid);
     return 0;
   } else if (HasFlag(route_to, FLAG_MULTILINE_EXPAND)) {
-    /* +M opt-in: expand without truncation. */
+    /* +M opt-in: expand without truncation.  Wire is unbounded (one
+     * PRIVMSG per line), so suppress the discount halving — sender's
+     * wire cost scales with batch size. */
     for (lp = con_ml_messages(con); lp; lp = lp->next) {
       char *text = lp->value.cp + 1;
       if (is_notice)
@@ -264,13 +266,17 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
     con_ml_had_fallback(con) = 1;
     return 1;
   } else {
-    /* Legacy fallback: preview + truncation NOTICE.  send_multiline_fallback
-     * already takes route_to (delivery) and acptr (wire %C target) separately. */
+    /* Legacy fallback: preview + truncation NOTICE.  Wire is BOUNDED
+     * (max_preview lines + 1 NOTICE) regardless of batch size, so this
+     * does NOT suppress the discount halving — anti-flood semantics
+     * stay intact.  The recipient still got a fallback experience for
+     * sender-WARN counting purposes (the helper's return value).
+     * send_multiline_fallback already takes route_to (delivery) and
+     * acptr (wire %C target) separately. */
     send_multiline_fallback(sptr, route_to, wire_target, batch_base_msgid,
                              con_ml_messages(con), con_ml_msg_count(con),
                              0, NULL, batch_paste_url,
                              con_ml_client_tags(con), is_notice);
-    con_ml_had_fallback(con) = 1;
     return 1;
   }
 }
@@ -548,10 +554,23 @@ clear_multiline_batch(struct Connection *con)
    * MULTILINE_CHANNEL_LAG_DISCOUNT is used for channel messages (typically
    * higher than DM discount since channels affect more users).
    *
-   * MULTILINE_RECIPIENT_DISCOUNT: When enabled, if ALL recipients support
-   * draft/multiline (no fallback to individual PRIVMSGs was needed), we can
-   * be more lenient since the batch was delivered as intended - halve the
-   * lag discount percentage.
+   * MULTILINE_RECIPIENT_DISCOUNT: When enabled, halve the lag discount
+   * percentage if the wire stayed bounded — i.e., no recipient required
+   * UNBOUNDED expansion of the batch.  "Bounded" includes:
+   *   - Proper draft/multiline BATCH wrapper to multiline-capable peers.
+   *   - Legacy fallback (preview + truncation NOTICE), which is capped
+   *     at FEAT_MULTILINE_LEGACY_MAX_LINES regardless of batch size.
+   *   - S2S relay to a legacy peer (also bounded by max_preview).
+   *
+   * Unbounded paths that DO suppress halving:
+   *   - +M opt-in expansion (FLAG_MULTILINE_EXPAND): one PRIVMSG per line.
+   *   - Per-line cross-server alias mirror (forward / BX E echo): we
+   *     emit N PRIVMSGs/BX E per remote alias, scaling with batch size.
+   *
+   * This frames the halving as an anti-flood reward for bounded wire
+   * cost, not as a "multiline worked end-to-end" reward.  During mixed-
+   * network rollout, multiline retains its lag benefit even when some
+   * recipients fall through to truncation — the wire is still bounded.
    */
   if (con_ml_lag_accum(con) > 0) {
     int discount;
@@ -563,7 +582,7 @@ clear_multiline_batch(struct Connection *con)
     else
       discount = feature_int(FEAT_MULTILINE_LAG_DISCOUNT);
 
-    /* If all recipients supported multiline (no fallback), halve the discount */
+    /* Halve if the wire stayed bounded (see comment above). */
     if (feature_bool(FEAT_MULTILINE_RECIPIENT_DISCOUNT) && !con_ml_had_fallback(con))
       discount = discount / 2;
 
@@ -902,17 +921,22 @@ process_multiline_batch(struct Client *sptr)
 
         sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
-        /* Fallback: send as individual messages to primary
-         * If recipient has +M (multiline expand), send full expansion
-         * Otherwise use graduated truncation based on batch size
+        /* Fallback: send as individual messages to primary.
+         * If recipient has +M (multiline expand), send full unbounded
+         * expansion; otherwise use bounded preview + truncation NOTICE.
+         * had_fallback tracks WIRE-UNBOUNDED expansion for the discount
+         * halving suppression — set only inside the +M branch.
+         * fallback_count tracks any-fallback for the sender's WARN
+         * message and is set unconditionally here.
          */
         int total_lines = con_ml_msg_count(con);
 
-        con_ml_had_fallback(con) = 1;  /* Track for recipient-aware discounting */
         fallback_count++;  /* Count for sender WARN notification */
 
         if (HasFlag(to, FLAG_MULTILINE_EXPAND)) {
-          /* User opted in with +M: send all lines without truncation */
+          /* User opted in with +M: send all lines without truncation —
+           * unbounded wire, suppress discount halving. */
+          con_ml_had_fallback(con) = 1;
           for (lp = con_ml_messages(con); lp; lp = lp->next) {
             char *text = lp->value.cp + 1;
             if (is_notice)
@@ -1233,17 +1257,14 @@ process_multiline_batch(struct Client *sptr)
         sendcmdto_one(sptr, CMD_MULTILINE, target_server, "-%s %s :",
                       s2s_batch_id, cli_name(acptr));
       } else {
-        /* Send fallback PRIVMSGs to legacy server.
-         * Set S2S tags on first line for unified msgid.
-         * Mark had_fallback so MULTILINE_RECIPIENT_DISCOUNT correctly
-         * reflects that the wire actually expanded into N PRIVMSGs
-         * across this S2S link (not just one batch). */
+        /* Send fallback PRIVMSGs to legacy server.  Wire is BOUNDED
+         * by max_preview + 1 NOTICE, so this does not suppress the
+         * discount halving — anti-flood semantics stay intact even
+         * though the legacy peer's local users see truncated content. */
         int sent = 0;
         int max_preview = feature_int(FEAT_MULTILINE_LEGACY_MAX_LINES);
         int total_lines = con_ml_msg_count(con);
         int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
-
-        con_ml_had_fallback(con) = 1;
 
         for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
           char *text = lp->value.cp + 1;
@@ -1361,16 +1382,13 @@ process_multiline_batch(struct Client *sptr)
                       s2s_batch_id, chptr->chname,
                       batch_paste_url ? batch_paste_url : "");
       } else {
-        /* Send fallback PRIVMSGs to legacy servers (once per server, not per user).
-         * Set S2S tags on the first PRIVMSG to carry the batch's msgid.
-         * Mark had_fallback so MULTILINE_RECIPIENT_DISCOUNT correctly
-         * reflects the actual wire cost — even if every local member
-         * is multiline-capable, the message expanded into N PRIVMSGs
-         * across this S2S link. */
+        /* Send fallback PRIVMSGs to legacy servers (once per server,
+         * not per user).  Wire is BOUNDED by max_preview + 1 NOTICE,
+         * so this does not suppress the discount halving — anti-flood
+         * semantics stay intact even though the legacy peer's local
+         * users see truncated content. */
         int sent = 0;
         int lines_to_send = (total_lines <= max_preview) ? total_lines : max_preview;
-
-        con_ml_had_fallback(con) = 1;
 
         for (lp = con_ml_messages(con); lp && sent < lines_to_send; lp = lp->next) {
           char *text = lp->value.cp + 1;
@@ -1485,36 +1503,6 @@ process_multiline_batch(struct Client *sptr)
 
   /* Clear the time override set at the start of this function */
   sendcmdto_set_client_time(NULL);
-
-  /* Network walk for MULTILINE_RECIPIENT_DISCOUNT correctness: even if
-   * our own delivery and direct S2S hops never fragmented the batch,
-   * a remote recipient may live behind a multi-hop path where some
-   * intermediate or terminal server lacks draft/multiline.  In that
-   * case the batch WILL fragment somewhere downstream, so the
-   * sender's lag discount must NOT be halved.  Walk the relevant scope
-   * (channel members for channels, acptr for DMs) and check each
-   * remote target's home server for IsMultiline.  Any non-multiline
-   * home server forces had_fallback so the discount calc in
-   * clear_multiline_batch picks it up. */
-  if (!con_ml_had_fallback(con)) {
-    if (is_channel && chptr) {
-      struct Membership *m;
-      for (m = chptr->members; m; m = m->next_member) {
-        struct Client *home;
-        if (MyConnect(m->user))
-          continue;  /* local already accounted for */
-        home = cli_user(m->user) ? cli_user(m->user)->server : NULL;
-        if (home && !IsMultiline(home)) {
-          con_ml_had_fallback(con) = 1;
-          break;
-        }
-      }
-    } else if (acptr && !MyConnect(acptr)) {
-      struct Client *home = cli_user(acptr) ? cli_user(acptr)->server : NULL;
-      if (home && !IsMultiline(home))
-        con_ml_had_fallback(con) = 1;
-    }
-  }
 
   clear_multiline_batch(con);
   return 0;
