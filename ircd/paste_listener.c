@@ -628,6 +628,25 @@ static int paste_parse_request(struct paste_conn *conn, char *method,
   return 0;
 }
 
+/* In-place percent-decode of '%5B'/'%5D' (case-insensitive) to '[' / ']'.
+ * Applied to paste_id before validation: '[' and ']' appear in P10
+ * msgids (numnicks.c convert2y[62..63]) and some clients percent-encode
+ * them per RFC 3986.  Limited to bracket pairs so the decoder cannot
+ * be abused to smuggle '/', NUL, or other unsafe bytes past validation.
+ */
+static void paste_unescape_brackets(char *s)
+{
+  char *r = s, *w = s;
+  while (*r) {
+    if (*r == '%' && r[1] == '5' && r[2]) {
+      if (r[2] == 'B' || r[2] == 'b') { *w++ = '['; r += 3; continue; }
+      if (r[2] == 'D' || r[2] == 'd') { *w++ = ']'; r += 3; continue; }
+    }
+    *w++ = *r++;
+  }
+  *w = '\0';
+}
+
 static int paste_validate_paste_id(const char *paste_id)
 {
   const char *p;
@@ -636,11 +655,15 @@ static int paste_validate_paste_id(const char *paste_id)
   if (!paste_id || !paste_id[0])
     return 0;
 
-  /* Check for valid chars: A-Z, a-z, 0-9, -, _ */
+  /* Check for valid chars: A-Z, a-z, 0-9, -, _, [, ].
+   * '[' and ']' appear because P10 msgids embed the server numeric
+   * and HLC fields encoded with the P10 base64 alphabet (numnicks.c
+   * convert2y[]), which uses '[' and ']' for indices 62 and 63. */
   for (p = paste_id; *p; p++) {
     if (*p == '-')
       has_dash = 1;
-    else if (!isalnum((unsigned char)*p) && *p != '_')
+    else if (!isalnum((unsigned char)*p)
+             && *p != '_' && *p != '[' && *p != ']')
       return 0;
   }
 
@@ -681,7 +704,9 @@ static void paste_handle_request(struct paste_conn *conn)
     return;
   }
 
-  /* Extract paste_id */
+  /* Extract paste_id; decode '%5B'/'%5D' so percent-encoded brackets
+   * round-trip back to the literal '[' / ']' the storage key uses. */
+  paste_unescape_brackets(path + sizeof(PASTE_URL_PATH_PREFIX) - 1);
   paste_id = path + sizeof(PASTE_URL_PATH_PREFIX) - 1;
 
   /* Validate paste_id (security: prevent path traversal, etc.) */
