@@ -810,10 +810,16 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 
   /*
    * This first: Almost never a server/service
-   * Servers may have channel services, need to check for it here
+   * Servers may have channel services, need to check for it here.
+   *
+   * IsServer bypass for +N: server-source NOTICEs are system signals
+   * (multiline truncation, etc.), not user speech.  client_can_send_to_channel
+   * already exempts IsServer from +n/+m/+M/+R/+Z/+O, so exempting +N keeps
+   * +N consistent with the other gating modes.
    */
   if ((client_can_send_to_channel(sptr, chptr, 1) &&
-       !(chptr->mode.exmode & EXMODE_NONOTICES)) || IsChannelService(sptr)) {
+       (!(chptr->mode.exmode & EXMODE_NONOTICES) || IsServer(sptr)))
+      || IsChannelService(sptr)) {
     /* Set client msgid override so local clients get msgid tag. */
     char relay_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {

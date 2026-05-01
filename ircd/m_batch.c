@@ -1011,16 +1011,19 @@ process_multiline_batch(struct Client *sptr)
           sent++;
         }
 
-        /* Send truncation notice from user (consistent with preview PRIVMSGs) */
+        /* Send truncation notice from the server, not the user — the
+         * notice is a system signal that content was elided, not user
+         * speech.  Server source also dodges per-user CTCP/away/script
+         * filters that some clients apply to user notices. */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
           if (batch_paste_url) {
             /* URL outside the bracket so linkifiers don't grab the ']'. */
-            sendcmdto_one(sptr, CMD_NOTICE, target_server,
+            sendcmdto_one(&me, CMD_NOTICE, target_server,
                 "%C :[%d more lines] %s",
                 acptr, remaining, batch_paste_url);
           } else {
-            sendcmdto_one(sptr, CMD_NOTICE, target_server,
+            sendcmdto_one(&me, CMD_NOTICE, target_server,
                 "%C :[%d more lines - connect to a multiline-capable server to view]",
                 acptr, remaining);
           }
@@ -1127,16 +1130,16 @@ process_multiline_batch(struct Client *sptr)
           sent++;
         }
 
-        /* Send truncation notice if needed */
+        /* Send truncation notice from the server, not the user. */
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
           if (batch_paste_url) {
             /* URL outside the bracket so linkifiers don't grab the ']'. */
-            sendcmdto_one(from, CMD_NOTICE, server,
+            sendcmdto_one(&me, CMD_NOTICE, server,
                 "%H :[%d more lines] %s",
                 chptr, remaining, batch_paste_url);
           } else {
-            sendcmdto_one(from, CMD_NOTICE, server,
+            sendcmdto_one(&me, CMD_NOTICE, server,
                 "%H :[%d more lines - connect to a multiline-capable server to view]",
                 chptr, remaining);
           }
@@ -1846,12 +1849,13 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         if (total_lines > max_preview) {
           int remaining = total_lines - sent;
           if (s2s_paste_url) {
-            /* URL outside the bracket so linkifiers don't grab the ']'. */
-            sendcmdto_one(sptr, CMD_NOTICE, server,
+            /* URL outside the bracket so linkifiers don't grab the ']'.
+             * Server source — truncation is a system signal. */
+            sendcmdto_one(&me, CMD_NOTICE, server,
                 "%H :[%d more lines] %s",
                 chptr, remaining, s2s_paste_url);
           } else {
-            sendcmdto_one(sptr, CMD_NOTICE, server,
+            sendcmdto_one(&me, CMD_NOTICE, server,
                 "%H :[%d more lines - connect to a multiline-capable server to view]",
                 chptr, remaining);
           }
