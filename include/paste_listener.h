@@ -17,23 +17,36 @@
 #define PASTE_FILENAME_MAX 64
 
 /**
- * Initialize the paste HTTP listener.
- * Creates a TLS listener on the configured port.
- * @return 0 on success, -1 on error.
- */
-int paste_listener_init(void);
-
-/**
- * Shutdown the paste listener.
- * Closes all connections and the listening socket.
+ * Shutdown the paste subsystem.
+ * Closes all in-flight paste connections.  The listener fds are owned
+ * by struct Listener and reaped by close_listeners() in listener.c.
  */
 void paste_listener_shutdown(void);
 
 /**
- * Check if the paste listener is active.
- * @return 1 if active, 0 if not.
+ * Check if any paste listener is currently active.
+ * Walks ListenerPollList for an active LISTEN_PASTE listener.
+ * @return 1 if at least one active paste listener exists, 0 otherwise.
  */
 int paste_listener_active(void);
+
+/**
+ * Return the port of the first active paste listener.
+ * Used by paste_url() to construct externally-reachable URLs.
+ * @return Port number, or 0 if no active paste listener exists.
+ */
+int paste_listener_port(void);
+
+/**
+ * Hand an already-accepted connection fd to the paste subsystem.
+ * Called from listener.c::accept_connection() when the accepting
+ * Listener has the LISTEN_PASTE flag set, and from the legacy
+ * single-fd accept callback.  Sets the fd non-blocking, allocates
+ * a paste_conn, and registers it with the event system.  On any
+ * failure the fd is closed.
+ * @param[in] fd Accepted socket file descriptor.
+ */
+void paste_accept_connection(int fd);
 
 /**
  * Generate a paste URL from a paste_id.

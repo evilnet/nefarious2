@@ -35,6 +35,7 @@
 #include "ircd_string.h"
 #include "match.h"
 #include "numeric.h"
+#include "paste_listener.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_misc.h"
@@ -174,6 +175,8 @@ void show_ports(struct Client* sptr, const struct StatDesc* sd,
       flags[len++] = 'W';
     if (FlagHas(&listener->flags, LISTEN_WEBSOCKET_AUTO))
       flags[len++] = 'A';
+    if (FlagHas(&listener->flags, LISTEN_PASTE))
+      flags[len++] = 'P';
     flags[len] = '\0';
 
     if (irc_in_addr_unspec(&listener->addr.addr))
@@ -536,7 +539,9 @@ static void accept_connection(struct Event* ev)
       ++ServerStats->is_ac;
       /* nextping = CurrentTime; */
 #ifdef USE_SSL
-      if (listener_ssl(listener))
+      if (listener_paste(listener))
+        paste_accept_connection(fd);
+      else if (listener_ssl(listener))
         ssl_add_connection(listener, fd);
       else
         add_connection(listener, fd, NULL);

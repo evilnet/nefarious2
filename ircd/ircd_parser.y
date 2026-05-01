@@ -250,6 +250,7 @@ static void free_slist(struct SLink **link) {
 %token ENABLEOPTIONS
 %token TRUSTACCOUNT
 %token WEBSOCKET
+%token PASTE
 %token AUTO
 %token CERTIFICATE
 %token KEY
@@ -981,6 +982,22 @@ address_family:
 portblock: PORT '{' portitems '}' ';' {
   struct ListenerFlags flags_here;
   struct SLink *link;
+  int paste_invalid = 0;
+  if (FlagHas(&listen_flags, LISTEN_PASTE)) {
+    if (!FlagHas(&listen_flags, LISTEN_SSL)) {
+      parse_error("Port block has paste enabled but ssl is not set; paste requires ssl = yes.");
+      paste_invalid = 1;
+    }
+    if (FlagHas(&listen_flags, LISTEN_WEBSOCKET) ||
+        FlagHas(&listen_flags, LISTEN_WEBSOCKET_AUTO)) {
+      parse_error("Port block cannot combine paste with websocket.");
+      paste_invalid = 1;
+    }
+    if (FlagHas(&listen_flags, LISTEN_SERVER)) {
+      parse_error("Port block cannot combine paste with server.");
+      paste_invalid = 1;
+    }
+  }
   if (hosts == NULL) {
     struct SLink *link;
     link = make_link();
@@ -989,7 +1006,7 @@ portblock: PORT '{' portitems '}' ';' {
     link->next = hosts;
     hosts = link;
   }
-  for (link = hosts; link != NULL; link = link->next) {
+  for (link = paste_invalid ? NULL : hosts; link != NULL; link = link->next) {
     memcpy(&flags_here, &listen_flags, sizeof(flags_here));
     switch (link->flags & (USE_IPV4 | USE_IPV6)) {
     case USE_IPV4:
@@ -1014,7 +1031,7 @@ portblock: PORT '{' portitems '}' ';' {
   port = 0;
 };
 portitems: portitem portitems | portitem;
-portitem: portnumber | portvhost | portvhostnumber | portmask | portserver | porthidden | portssl | portwebsocket;
+portitem: portnumber | portvhost | portvhostnumber | portmask | portserver | porthidden | portssl | portwebsocket | portpaste;
 portnumber: PORT '=' address_family NUMBER ';'
 {
   if ($4 < 1 || $4 > 65535) {
@@ -1097,6 +1114,19 @@ portwebsocket: WEBSOCKET '=' YES ';'
 {
   FlagSet(&listen_flags, LISTEN_WEBSOCKET_AUTO);
   FlagClr(&listen_flags, LISTEN_WEBSOCKET);
+}
+
+portpaste: PASTE '=' YES ';'
+{
+#ifdef USE_SSL
+  FlagSet(&listen_flags, LISTEN_PASTE);
+#else
+  parse_error("Port block has paste enabled but I'm not built with SSL.  Check ./configure syntax/output.");
+  FlagClr(&listen_flags, LISTEN_PASTE);
+#endif /* USE_SSL */
+} | PASTE '=' NO ';'
+{
+  FlagClr(&listen_flags, LISTEN_PASTE);
 }
 
 clientblock: CLIENT

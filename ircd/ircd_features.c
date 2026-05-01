@@ -1187,10 +1187,8 @@ static struct FeatureDesc {
   F_B(UPING_ENABLE, FEAT_READ, 1, 0),
   F_I(UPING_PORT, FEAT_READ, UDP_PORT, 0),
 
-  /* Paste service (multiline HTTP fallback) */
-  F_B(PASTE_ENABLED, 0, 0, 0),
-  F_I(PASTE_PORT, 0, 8444, 0),
-  F_S(PASTE_BIND, 0, "*", 0),
+  /* Paste service (multiline HTTP fallback) — bind/port/enable come from
+   * Port { paste = yes; ssl = yes; } blocks, not features. */
   F_I(PASTE_TTL, 0, 14400, 0),              /* 4 hours - ephemeral */
   F_I(PASTE_MAX_SIZE, 0, 65536, 0),         /* 64KB max paste */
   F_I(PASTE_MAX_ENTRIES, 0, 100000, 0),

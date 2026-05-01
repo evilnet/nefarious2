@@ -1142,13 +1142,9 @@ int main(int argc, char **argv) {
   }
 #endif
 
-  /* Initialize paste HTTP listener (content is stored in ml_content via history's MDBX) */
-  if (feature_bool(FEAT_PASTE_ENABLED)) {
-    if (paste_listener_init() != 0) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "Failed to initialize paste listener");
-    }
-  }
+  /* Paste HTTP listeners are configured via Port { paste = yes; ssl = yes; }
+   * blocks in ircd.conf and started by add_listener() during init_conf().
+   * Paste content is stored in ml_content via history's MDBX. */
 
   /* Initialize bouncer session registry.
    * Always init even when FEAT_BOUNCER_ENABLE is off — connection classes

@@ -85,7 +85,7 @@ static const char *generate_paste_url(const char *msgid,
 {
   char paste_id[PASTE_ID_MAX];
 
-  if (!feature_bool(FEAT_PASTE_ENABLED))
+  if (!paste_listener_active())
     return NULL;
 
   paste_generate_secret(secret_out, secret_size);

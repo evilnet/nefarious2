@@ -458,10 +458,8 @@ enum Feature {
   FEAT_UPING_ENABLE,
   FEAT_UPING_PORT,
 
-  /* Paste service (multiline HTTP fallback) */
-  FEAT_PASTE_ENABLED,
-  FEAT_PASTE_PORT,
-  FEAT_PASTE_BIND,
+  /* Paste service (multiline HTTP fallback) — bind/port/enable are
+   * configured via Port { paste = yes; ssl = yes; } blocks in ircd.conf. */
   FEAT_PASTE_TTL,
   FEAT_PASTE_MAX_SIZE,
   FEAT_PASTE_MAX_ENTRIES,

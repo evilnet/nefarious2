@@ -58,6 +58,8 @@ enum ListenerFlag {
   LISTEN_WEBSOCKET,
   /** Port auto-detects WebSocket vs plain IRC connections. */
   LISTEN_WEBSOCKET_AUTO,
+  /** Port serves the multiline-paste HTTP/TLS service. */
+  LISTEN_PASTE,
   /** Sentinel for counting listener flags. */
   LISTEN_LAST_FLAG
 };
@@ -85,8 +87,10 @@ struct Listener {
 #define listener_ssl(LISTENER)    FlagHas(&(LISTENER)->flags, LISTEN_SSL)
 #define listener_websocket(LISTENER) FlagHas(&(LISTENER)->flags, LISTEN_WEBSOCKET)
 #define listener_websocket_auto(LISTENER) FlagHas(&(LISTENER)->flags, LISTEN_WEBSOCKET_AUTO)
+#define listener_paste(LISTENER)  FlagHas(&(LISTENER)->flags, LISTEN_PASTE)
 
-extern void        add_listener(int port, const char* vaddr_ip, 
+extern struct Listener *ListenerPollList;
+extern void        add_listener(int port, const char* vaddr_ip,
                                 const char* mask,
                                 const struct ListenerFlags *flags);
 extern void        close_listener(struct Listener* listener);

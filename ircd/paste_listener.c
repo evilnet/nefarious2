@@ -20,6 +20,7 @@
 #include "ircd_osdep.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "listener.h"
 #include "res.h"
 #include "s_bsd.h"
 #include "ssl.h"
@@ -133,17 +134,13 @@ struct paste_conn {
  * Global state
  * ---------------------------------------------------------------------------*/
 
-static int paste_listen_fd = -1;
-static struct Socket paste_listen_socket;
 static struct paste_conn *paste_conn_list = NULL;
 static int paste_conn_count = 0;
-static int paste_listener_running = 0;
 
 /* ---------------------------------------------------------------------------
  * Forward declarations
  * ---------------------------------------------------------------------------*/
 
-static void paste_accept_callback(struct Event *ev);
 static void paste_conn_callback(struct Event *ev);
 static void paste_timeout_callback(struct Event *ev);
 static void paste_conn_free(struct paste_conn *conn);
@@ -179,11 +176,22 @@ void paste_generate_secret(char *out, size_t len)
   out[i] = '\0';
 }
 
+/* Return the port of the first active paste listener, or 0 if none. */
+int paste_listener_port(void)
+{
+  struct Listener *l;
+  for (l = ListenerPollList; l; l = l->next) {
+    if (FlagHas(&l->flags, LISTEN_PASTE) && listener_active(l))
+      return l->addr.port;
+  }
+  return 0;
+}
+
 const char *paste_url(const char *paste_id)
 {
   static char url_buf[512];
   const char *url_base = feature_str(FEAT_PASTE_URL_BASE);
-  int port = feature_int(FEAT_PASTE_PORT);
+  int port = paste_listener_port();
 
   if (url_base && url_base[0]) {
     /* Use configured URL base */
@@ -989,41 +997,31 @@ static void paste_conn_callback(struct Event *ev)
  * Listener accept
  * ---------------------------------------------------------------------------*/
 
-static void paste_accept_callback(struct Event *ev)
+/* Per-fd connection setup, called from accept_connection() in listener.c
+ * for fds accepted on a Listener with the LISTEN_PASTE flag.
+ */
+void paste_accept_connection(int fd)
 {
-  struct irc_sockaddr addr;
-  unsigned int addrlen = sizeof(addr);
-  int new_fd;
   struct paste_conn *conn;
 
-  if (ev_type(ev) != ET_ACCEPT)
-    return;
-
-  new_fd = accept(paste_listen_fd, (struct sockaddr *)&addr.addr, &addrlen);
-  if (new_fd < 0) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "Paste listener: accept failed: %s", strerror(errno));
-    return;
-  }
-
   /* Set non-blocking */
-  if (fcntl(new_fd, F_SETFL, O_NONBLOCK) < 0) {
+  if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "Paste listener: fcntl failed: %s", strerror(errno));
-    close(new_fd);
+    close(fd);
     return;
   }
 
   /* Create connection */
-  conn = paste_conn_new(new_fd);
+  conn = paste_conn_new(fd);
   if (!conn) {
-    close(new_fd);
+    close(fd);
     return;
   }
 
   /* Register socket for events */
   if (!socket_add(&conn->socket, paste_conn_callback, conn,
-                  SS_CONNECTED, SOCK_EVENT_READABLE, new_fd)) {
+                  SS_CONNECTED, SOCK_EVENT_READABLE, fd)) {
     paste_conn_free(conn);
     return;
   }
@@ -1036,142 +1034,23 @@ static void paste_accept_callback(struct Event *ev)
  * Public API
  * ---------------------------------------------------------------------------*/
 
-int paste_listener_init(void)
-{
-  struct sockaddr_in6 addr6;
-  struct sockaddr_in addr4;
-  const char *bind_addr;
-  int port;
-  int opt = 1;
-  int use_ipv6 = 1;
-
-  if (paste_listener_running)
-    return 0;
-
-  if (!feature_bool(FEAT_PASTE_ENABLED)) {
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "Paste listener: disabled by configuration");
-    return 0;
-  }
-
-  port = feature_int(FEAT_PASTE_PORT);
-  bind_addr = feature_str(FEAT_PASTE_BIND);
-
-  /* Try IPv6 first, fall back to IPv4 */
-  paste_listen_fd = socket(AF_INET6, SOCK_STREAM, 0);
-  if (paste_listen_fd < 0) {
-    use_ipv6 = 0;
-    paste_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (paste_listen_fd < 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "Paste listener: socket failed: %s", strerror(errno));
-      return -1;
-    }
-  }
-
-  /* Set socket options */
-  setsockopt(paste_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-  if (use_ipv6) {
-    /* Allow IPv4 connections on IPv6 socket */
-    opt = 0;
-    setsockopt(paste_listen_fd, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
-  }
-
-  /* Bind */
-  if (use_ipv6) {
-    memset(&addr6, 0, sizeof(addr6));
-    addr6.sin6_family = AF_INET6;
-    addr6.sin6_port = htons(port);
-    if (bind_addr && bind_addr[0] && strcmp(bind_addr, "*") != 0) {
-      inet_pton(AF_INET6, bind_addr, &addr6.sin6_addr);
-    } else {
-      addr6.sin6_addr = in6addr_any;
-    }
-
-    if (bind(paste_listen_fd, (struct sockaddr *)&addr6, sizeof(addr6)) < 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "Paste listener: bind failed: %s", strerror(errno));
-      close(paste_listen_fd);
-      paste_listen_fd = -1;
-      return -1;
-    }
-  } else {
-    memset(&addr4, 0, sizeof(addr4));
-    addr4.sin_family = AF_INET;
-    addr4.sin_port = htons(port);
-    if (bind_addr && bind_addr[0] && strcmp(bind_addr, "*") != 0) {
-      inet_pton(AF_INET, bind_addr, &addr4.sin_addr);
-    } else {
-      addr4.sin_addr.s_addr = INADDR_ANY;
-    }
-
-    if (bind(paste_listen_fd, (struct sockaddr *)&addr4, sizeof(addr4)) < 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "Paste listener: bind failed: %s", strerror(errno));
-      close(paste_listen_fd);
-      paste_listen_fd = -1;
-      return -1;
-    }
-  }
-
-  /* Listen */
-  if (listen(paste_listen_fd, 5) < 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "Paste listener: listen failed: %s", strerror(errno));
-    close(paste_listen_fd);
-    paste_listen_fd = -1;
-    return -1;
-  }
-
-  /* Set non-blocking */
-  fcntl(paste_listen_fd, F_SETFL, O_NONBLOCK);
-
-  /* Register with event system */
-  if (!socket_add(&paste_listen_socket, paste_accept_callback, NULL,
-                  SS_LISTENING, SOCK_EVENT_READABLE, paste_listen_fd)) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "Paste listener: socket_add failed");
-    close(paste_listen_fd);
-    paste_listen_fd = -1;
-    return -1;
-  }
-
-  paste_listener_running = 1;
-
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "Paste listener: started on port %d (TLS)", port);
-  return 0;
-}
-
 void paste_listener_shutdown(void)
 {
   struct paste_conn *conn, *next;
 
-  if (!paste_listener_running)
-    return;
-
-  /* Close all connections */
+  /* Close all in-flight paste connections.  The listener fds themselves
+   * are owned by struct Listener and reaped by close_listeners(). */
   for (conn = paste_conn_list; conn; conn = next) {
     next = conn->next;
     paste_conn_free(conn);
   }
-
-  /* Close listener */
-  if (paste_listen_fd >= 0) {
-    socket_del(&paste_listen_socket);
-    close(paste_listen_fd);
-    paste_listen_fd = -1;
-  }
-
-  paste_listener_running = 0;
 
   log_write(LS_SYSTEM, L_INFO, 0, "Paste listener: shutdown");
 }
 
 int paste_listener_active(void)
 {
-  return paste_listener_running;
+  return paste_listener_port() != 0;
 }
 
 #else /* !USE_SSL */
@@ -1181,13 +1060,7 @@ int paste_listener_active(void)
 #include "paste_listener.h"
 #include "ircd_log.h"
 #include <string.h>
-
-int paste_listener_init(void)
-{
-  log_write(LS_SYSTEM, L_WARNING, 0,
-            "Paste listener: SSL not compiled in, paste listener disabled");
-  return -1;
-}
+#include <unistd.h>
 
 void paste_listener_shutdown(void)
 {
@@ -1196,6 +1069,17 @@ void paste_listener_shutdown(void)
 int paste_listener_active(void)
 {
   return 0;
+}
+
+int paste_listener_port(void)
+{
+  return 0;
+}
+
+void paste_accept_connection(int fd)
+{
+  /* Paste requires SSL; close any accidentally-dispatched connection. */
+  close(fd);
 }
 
 const char *paste_url(const char *paste_id)
