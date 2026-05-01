@@ -5112,46 +5112,51 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
     ircd_snprintf(0, alias_batchid, sizeof(alias_batchid), "%s%u",
                   NumNick(from), con_batch_seq(cli_connect(alias))++);
 
-    /* BATCH +id draft/multiline <target_nick> opener.  Server tags
-     * (msgid/time/account) ride on the opener via standard tagged
-     * sendcmdto path.  Client-only tags from the originating BATCH
-     * +id pass through if present. */
-    if (b->client_tags[0]) {
-      sendrawto_one(alias,
-                    "@%s:%s BATCH +%s draft/multiline %s",
-                    b->client_tags, cli_name(&me),
-                    alias_batchid, b->target_nick);
-    } else {
-      sendcmdto_one(&me, CMD_BATCH_CMD, alias,
-                    "+%s draft/multiline %s",
-                    alias_batchid, b->target_nick);
-    }
-
-    /* Inner messages carry @batch=<id>; wire :from is from_user, wire
-     * %s target is target_nick — alias's client routes accordingly. */
-    for (lp = b->messages; lp; lp = lp->next) {
-      int concat = lp->value.cp[0];
-      const char *text = lp->value.cp + 1;
-      if (concat) {
+    /* BATCH +id draft/multiline <target_nick> opener.  Per IRCv3
+     * multiline spec, the opener uses the user as source so the
+     * receiving client can target the conversation correctly — server
+     * source on the BATCH wrapper around user-originated content
+     * causes some clients to route the batch into status instead of
+     * the conversation window.  Client-only tags from the originating
+     * BATCH +id pass through if present.  All inner messages share
+     * the same user prefix. */
+    {
+      const char *from_host = IsHiddenHost(from) ? cli_user(from)->host
+                                                  : cli_user(from)->realhost;
+      if (b->client_tags[0]) {
         sendrawto_one(alias,
-                      "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
-                      alias_batchid, cli_name(from),
-                      cli_user(from)->username,
-                      IsHiddenHost(from) ? cli_user(from)->host
-                                          : cli_user(from)->realhost,
-                      cmd_str, b->target_nick, text);
+                      "@%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                      b->client_tags,
+                      cli_name(from), cli_user(from)->username, from_host,
+                      alias_batchid, b->target_nick);
       } else {
-        sendrawto_one(alias,
-                      "@batch=%s :%s!%s@%s %s %s :%s",
-                      alias_batchid, cli_name(from),
-                      cli_user(from)->username,
-                      IsHiddenHost(from) ? cli_user(from)->host
-                                          : cli_user(from)->realhost,
-                      cmd_str, b->target_nick, text);
+        sendcmdto_one(from, CMD_BATCH_CMD, alias,
+                      "+%s draft/multiline %s",
+                      alias_batchid, b->target_nick);
       }
-    }
 
-    sendcmdto_one(&me, CMD_BATCH_CMD, alias, "-%s", alias_batchid);
+      /* Inner messages carry @batch=<id>; wire :from is from_user, wire
+       * %s target is target_nick — alias's client routes accordingly. */
+      for (lp = b->messages; lp; lp = lp->next) {
+        int concat = lp->value.cp[0];
+        const char *text = lp->value.cp + 1;
+        if (concat) {
+          sendrawto_one(alias,
+                        "@batch=%s;draft/multiline-concat :%s!%s@%s %s %s :%s",
+                        alias_batchid, cli_name(from),
+                        cli_user(from)->username, from_host,
+                        cmd_str, b->target_nick, text);
+        } else {
+          sendrawto_one(alias,
+                        "@batch=%s :%s!%s@%s %s %s :%s",
+                        alias_batchid, cli_name(from),
+                        cli_user(from)->username, from_host,
+                        cmd_str, b->target_nick, text);
+        }
+      }
+
+      sendcmdto_one(from, CMD_BATCH_CMD, alias, "-%s", alias_batchid);
+    }
   } else {
     /* Bounded fallback: preview + truncation NOTICE.  route_to=alias,
      * wire_target=resolved target_nick so the truncated lines land in

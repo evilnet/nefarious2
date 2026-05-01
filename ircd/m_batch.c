@@ -235,11 +235,16 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
                      batch_timebuf, batch_base_msgid,
                      (label && label[0]) ? label : NULL,
                      con_ml_client_tags(con));
+      /* Per IRCv3 multiline spec, the BATCH +id opener uses the user
+       * as source, not the server — clients use the wrapper's source
+       * to route the batch to the correct conversation window. */
       if (taglen)
-        sendrawto_one(route_to, "%s:%s BATCH +%s draft/multiline %s",
-                      tagbuf, cli_name(&me), batchid, cli_name(wire_target));
+        sendrawto_one(route_to, "%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                      tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                      get_displayed_host(sptr),
+                      batchid, cli_name(wire_target));
       else
-        sendcmdto_one(&me, CMD_BATCH_CMD, route_to, "+%s draft/multiline %s",
+        sendcmdto_one(sptr, CMD_BATCH_CMD, route_to, "+%s draft/multiline %s",
                       batchid, cli_name(wire_target));
     }
 
@@ -261,7 +266,7 @@ static int deliver_multiline_dm_to_one(struct Client *sptr,
       }
     }
 
-    sendcmdto_one(&me, CMD_BATCH_CMD, route_to, "-%s", batchid);
+    sendcmdto_one(sptr, CMD_BATCH_CMD, route_to, "-%s", batchid);
     return 0;
   } else if (HasFlag(route_to, FLAG_MULTILINE_EXPAND)) {
     /* +M opt-in: expand without truncation. */
@@ -974,11 +979,13 @@ process_multiline_batch(struct Client *sptr)
           int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), to, sptr,
                          batch_timebuf, batch_base_msgid, NULL,
                          con_ml_client_tags(con));
+          /* User-source BATCH opener per IRCv3 multiline spec. */
           if (taglen)
-            sendrawto_one(to, "%s:%s BATCH +%s draft/multiline %s",
-                          tagbuf, cli_name(&me), batchid, chptr->chname);
+            sendrawto_one(to, "%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                          tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), batchid, chptr->chname);
           else
-            sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
+            sendcmdto_one(sptr, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
                           batchid, chptr->chname);
         }
 
@@ -997,7 +1004,7 @@ process_multiline_batch(struct Client *sptr)
           }
         }
 
-        sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
+        sendcmdto_one(sptr, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
         /* Fallback: send as individual messages to primary.  If
          * recipient has +M (multiline expand), send full expansion;
@@ -1068,11 +1075,13 @@ process_multiline_batch(struct Client *sptr)
             int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), sptr, sptr,
                            batch_timebuf, batch_base_msgid,
                            con_ml_label(con), con_ml_client_tags(con));
+            /* User-source BATCH opener per IRCv3 multiline spec. */
             if (taglen)
-              sendrawto_one(sptr, "%s:%s BATCH +%s draft/multiline %s",
-                            tagbuf, cli_name(&me), batchid, chptr->chname);
+              sendrawto_one(sptr, "%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                            tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                            get_displayed_host(sptr), batchid, chptr->chname);
             else
-              sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
+              sendcmdto_one(sptr, CMD_BATCH_CMD, sptr, "+%s draft/multiline %s",
                             batchid, chptr->chname);
           }
 
@@ -1091,7 +1100,7 @@ process_multiline_batch(struct Client *sptr)
             }
           }
 
-          sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
+          sendcmdto_one(sptr, CMD_BATCH_CMD, sptr, "-%s", batchid);
         } else {
           /* Sender doesn't have multiline - preview + truncation fallback */
           send_multiline_fallback(sptr, sptr, NULL, batch_base_msgid,
@@ -2147,11 +2156,13 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), to, sptr,
                          timebuf, batch_base_msgid, NULL,
                          batch->client_tags[0] ? batch->client_tags : NULL);
+          /* User-source BATCH opener per IRCv3 multiline spec. */
           if (taglen)
-            sendrawto_one(to, "%s:%s BATCH +%s draft/multiline %s",
-                          tagbuf, cli_name(&me), batchid, chptr->chname);
+            sendrawto_one(to, "%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                          tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                          get_displayed_host(sptr), batchid, chptr->chname);
           else
-            sendcmdto_one(&me, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
+            sendcmdto_one(sptr, CMD_BATCH_CMD, to, "+%s draft/multiline %s",
                           batchid, chptr->chname);
         }
 
@@ -2170,7 +2181,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
           }
         }
 
-        sendcmdto_one(&me, CMD_BATCH_CMD, to, "-%s", batchid);
+        sendcmdto_one(sptr, CMD_BATCH_CMD, to, "-%s", batchid);
       } else {
         /* Graceful fallback for S2S channel delivery */
         send_multiline_fallback(sptr, to, NULL, batch_base_msgid,
@@ -2197,11 +2208,13 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         int taglen = format_batch_open_tags(tagbuf, sizeof(tagbuf), acptr, sptr,
                        timebuf, batch_base_msgid, NULL,
                        batch->client_tags[0] ? batch->client_tags : NULL);
+        /* User-source BATCH opener per IRCv3 multiline spec. */
         if (taglen)
-          sendrawto_one(acptr, "%s:%s BATCH +%s draft/multiline %s",
-                        tagbuf, cli_name(&me), batchid, cli_name(acptr));
+          sendrawto_one(acptr, "%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                        tagbuf, cli_name(sptr), cli_user(sptr)->username,
+                        get_displayed_host(sptr), batchid, cli_name(acptr));
         else
-          sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
+          sendcmdto_one(sptr, CMD_BATCH_CMD, acptr, "+%s draft/multiline %s",
                         batchid, cli_name(acptr));
       }
 
@@ -2220,7 +2233,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
         }
       }
 
-      sendcmdto_one(&me, CMD_BATCH_CMD, acptr, "-%s", batchid);
+      sendcmdto_one(sptr, CMD_BATCH_CMD, acptr, "-%s", batchid);
     } else {
       /* Graceful fallback for S2S DM delivery */
       send_multiline_fallback(sptr, acptr, acptr, batch_base_msgid,
