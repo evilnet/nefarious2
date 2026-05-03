@@ -109,7 +109,7 @@ static int translate_mdbx_rc(int rc)
   case MDBX_TXN_FULL:   return DB_ERR_FULL;
   case MDBX_ENOMEM:     return DB_ERR_MEMORY;
   case MDBX_CORRUPTED:  return DB_ERR_CORRUPT;
-  case MDBX_PAGE_CHECKSUM:
+  case MDBX_PAGE_NOTFOUND:
   case MDBX_PROBLEM:    return DB_ERR_CORRUPT;
   case MDBX_EIO:        return DB_ERR_IO;
   default:
@@ -287,11 +287,24 @@ int db_env_sync(struct db_env *env)
 
 int db_env_compact(struct db_env *env, struct db_cf *cf)
 {
+  MDBX_defrag_result_t result;
   int rc;
   (void)cf; /* libmdbx defrag is env-wide, not per-DBI */
   if (!env || !env->env)
     return DB_ERR_OTHER;
-  rc = mdbx_env_defrag(env->env, /*pages_to_move=*/0);
+  /* No-budget defrag: run until done or naturally yields.  Callers
+   * that want a time/work budget should add a tuned variant. */
+  memset(&result, 0, sizeof result);
+  rc = mdbx_env_defrag(env->env,
+                       0,    /* defrag_atleast — no minimum */
+                       0,    /* time_atleast_16dot16 — no minimum */
+                       0,    /* defrag_enough — no upper goal */
+                       0,    /* time_limit_16dot16 — no time limit */
+                       -1,   /* acceptable_backlash — autopilot */
+                       0,    /* preferred_batch — no limit */
+                       NULL, /* progress_callback */
+                       NULL, /* ctx */
+                       &result);
   if (rc != MDBX_SUCCESS && rc != MDBX_RESULT_TRUE) {
     env_record_error(env, "env_defrag", rc);
     return translate_mdbx_rc(rc);
