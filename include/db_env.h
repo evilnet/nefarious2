@@ -149,6 +149,7 @@ extern const char *db_env_last_error(struct db_env *env);
 struct MDBX_env;
 struct MDBX_txn;
 struct db_writebatch;
+struct db_snapshot;
 /** Return the underlying MDBX_env* for an env opened via db_env_open.
  * Caller must NOT close the returned env; ownership stays with @a env. */
 extern struct MDBX_env *db_mdbx_unwrap_env(struct db_env *env);
@@ -164,6 +165,12 @@ extern unsigned int db_mdbx_unwrap_dbi(struct db_cf *cf);
  * The txn is begun lazily on the first put/del; calling this on an
  * empty writebatch returns NULL. */
 extern struct MDBX_txn *db_mdbx_unwrap_writebatch_txn(struct db_writebatch *wb);
+
+/** Return the underlying MDBX_txn* for a snapshot.  libmdbx's snapshot
+ * is a read-only txn; this lets transitional read-side code (still raw
+ * mdbx, e.g. ml_content_resolve) read through the same point-in-time
+ * view as a sibling db_iter.  Returns NULL if the snapshot is NULL. */
+extern struct MDBX_txn *db_mdbx_unwrap_snapshot_txn(struct db_snapshot *snap);
 #endif
 
 #endif /* INCLUDED_db_env_h */

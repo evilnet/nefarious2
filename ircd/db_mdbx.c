@@ -880,3 +880,8 @@ struct MDBX_txn *db_mdbx_unwrap_writebatch_txn(struct db_writebatch *wb)
     return NULL;
   return (struct MDBX_txn *)wb->txn;
 }
+
+struct MDBX_txn *db_mdbx_unwrap_snapshot_txn(struct db_snapshot *snap)
+{
+  return snap ? (struct MDBX_txn *)snap->txn : NULL;
+}
