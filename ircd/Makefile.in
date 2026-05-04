@@ -79,8 +79,7 @@ CRYPTO_SRC = \
 	ircd_crypt_smd5.c \
 	ircd_crypt_native.c \
 	ircd_crypt_bcrypt.c \
-	ircd_crypt_pbkdf2.c \
-	ircd_crypt_async.c
+	ircd_crypt_pbkdf2.c
 
 UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	ircd_alloc.c \
@@ -113,6 +112,7 @@ IRCD_SRC = \
 	ircd_compress.c \
 	ircd_crypt.c \
 	ircd_events.c \
+	ircd_crypt_async.c \
 	ircd_features.c \
 	ircd_geoip.c \
 	ircd_kc_adapter.c \
