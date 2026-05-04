@@ -703,7 +703,7 @@ int history_init(const char *dbpath)
   if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
     env_opts.sync_period_seconds = (unsigned int)feature_int(FEAT_CHATHISTORY_DB_SYNC_INTERVAL);
     log_write(LS_SYSTEM, L_INFO, 0,
-              "history: using MDBX_SAFE_NOSYNC with %u second sync interval",
+              "history: deferred-sync mode, %u second flush interval",
               env_opts.sync_period_seconds);
   }
 

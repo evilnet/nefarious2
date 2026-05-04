@@ -256,7 +256,7 @@ int metadata_lmdb_init(const char *dbpath)
   if (feature_bool(FEAT_METADATA_DB_NORDAHEAD)) {
     env_opts.random_access = 1;
     log_write(LS_SYSTEM, L_INFO, 0,
-              "metadata: using MDBX_NORDAHEAD for random-access pattern");
+              "metadata: random-access I/O hint enabled");
   }
 
   rc = db_env_open(dbpath, &env_opts, /*max_cfs=*/3, &metadata_db_env);
