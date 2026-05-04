@@ -2,7 +2,7 @@
  * @brief RocksDB backend for the storage abstraction (db_env.h /
  *        db_txn.h / db_cursor.h / db_types.h).
  *
- * Mirrors db_mdbx.c structurally.  Uses the librocksdb C API
+ * Uses the librocksdb C API
  * (rocksdb/c.h) so the entire codebase stays C even though RocksDB
  * itself is C++.  See `.claude/plans/rocksdb-migration.md` Phase 2.
  *

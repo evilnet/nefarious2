@@ -2,8 +2,8 @@
  * @brief Storage environment lifecycle, column families, sync, compact, stats.
  *
  * An "env" is a single on-disk database directory hosting one or more
- * named column families (CFs).  libmdbx maps env→MDBX_env, CF→MDBX_dbi.
- * RocksDB maps env→rocksdb_t*, CF→rocksdb_column_family_handle_t*.
+ * named column families (CFs).  RocksDB maps env→rocksdb_t*,
+ * CF→rocksdb_column_family_handle_t*.
  *
  * Nefarious uses three logical envs: history, metadata, webpush.
  * Each is opened independently with its own tuning parameters.
@@ -135,42 +135,5 @@ extern const char *db_strerror(int rc);
  * Pointer is owned by the env; do not free.  Valid until the next
  * call on @a env. */
 extern const char *db_env_last_error(struct db_env *env);
-
-/* -------------------------------------------------------------------- *
- * Transitional escape hatches for incremental Phase 0 conversion.
- *
- * These let modules that haven't yet been fully ported to the abstraction
- * reach into the libmdbx backend for advanced features (stats, defrag,
- * GC info) that the abstraction doesn't surface.  They exist only when
- * USE_ROCKSDB is the active backend; once Phase 4 (RocksDB migration)
- * deletes the libmdbx-specific code paths, these helpers retire.
- * -------------------------------------------------------------------- */
-#ifdef USE_ROCKSDB
-struct MDBX_env;
-struct MDBX_txn;
-struct db_writebatch;
-struct db_snapshot;
-/** Return the underlying MDBX_env* for an env opened via db_env_open.
- * Caller must NOT close the returned env; ownership stays with @a env. */
-extern struct MDBX_env *db_mdbx_unwrap_env(struct db_env *env);
-
-/** Return the underlying MDBX_dbi for a CF opened via db_cf_open.
- * Returns 0 if @a cf is NULL (libmdbx valid DBIs are positive). */
-extern unsigned int db_mdbx_unwrap_dbi(struct db_cf *cf);
-
-/** Return the underlying MDBX_txn* for a writebatch.  libmdbx's
- * writebatch IS an open mdbx txn; this lets transitional code that
- * still calls raw mdbx_* (e.g. DUPSORT puts on reply_index, libmdbx's
- * MAP_FULL retry loop) interleave with the abstraction's writebatch.
- * The txn is begun lazily on the first put/del; calling this on an
- * empty writebatch returns NULL. */
-extern struct MDBX_txn *db_mdbx_unwrap_writebatch_txn(struct db_writebatch *wb);
-
-/** Return the underlying MDBX_txn* for a snapshot.  libmdbx's snapshot
- * is a read-only txn; this lets transitional read-side code (still raw
- * mdbx, e.g. ml_content_resolve) read through the same point-in-time
- * view as a sibling db_iter.  Returns NULL if the snapshot is NULL. */
-extern struct MDBX_txn *db_mdbx_unwrap_snapshot_txn(struct db_snapshot *snap);
-#endif
 
 #endif /* INCLUDED_db_env_h */
