@@ -868,3 +868,15 @@ unsigned int db_mdbx_unwrap_dbi(struct db_cf *cf)
 {
   return cf ? cf->dbi : 0;
 }
+
+struct MDBX_txn *db_mdbx_unwrap_writebatch_txn(struct db_writebatch *wb)
+{
+  if (!wb)
+    return NULL;
+  /* Lazily begin the txn so callers can grab it before staging the
+   * first put — useful for code that wants to mix abstraction puts
+   * with raw mdbx calls (DUPSORT reply_index, MAP_FULL retry checks). */
+  if (wb_lazy_begin(wb) != DB_OK)
+    return NULL;
+  return (struct MDBX_txn *)wb->txn;
+}

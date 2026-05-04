@@ -743,17 +743,15 @@ int history_store_message(const char *msgid, const char *timestamp,
                           const char *account, enum HistoryMessageType type,
                           const char *content, const char *client_tags)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_writebatch *wb = NULL;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-  int keylen, vallen;
+  char idxkeybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  int keylen, idx_keylen, vallen;
   int rc;
   int retry = 0;
+  const void *vbuf;
+  size_t       vlen;
 
-  /* Dynamic buffer sizing based on actual content length.
-   * Stack fast-path for common single-line messages (<=HISTORY_VALUE_BUFSIZE),
-   * heap allocation for multiline content that exceeds it.
-   */
   size_t content_len = content ? strlen(content) : 0;
   size_t tags_len = client_tags ? strlen(client_tags) : 0;
   size_t bufsize = content_len + tags_len + HISTORY_SENDER_LEN + ACCOUNTLEN + 32;
@@ -776,9 +774,13 @@ int history_store_message(const char *msgid, const char *timestamp,
     goto store_cleanup;
   }
 
-  /* Build key: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
   if (keylen < 0) {
+    rc = -1;
+    goto store_cleanup;
+  }
+  idx_keylen = build_key(idxkeybuf, sizeof(idxkeybuf), target, timestamp, NULL);
+  if (idx_keylen < 0) {
     rc = -1;
     goto store_cleanup;
   }
@@ -792,57 +794,52 @@ int history_store_message(const char *msgid, const char *timestamp,
     for (int i = 0; i < preview_len; i++) {
       if (key_preview[i] == '\0') key_preview[i] = '.';
     }
-    log_write(LS_SYSTEM, L_INFO, 0, "history_store_message: storing key='%s' (len=%d) target='%s' ts='%s' msgid='%s'",
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history_store_message: storing key='%s' (len=%d) target='%s' ts='%s' msgid='%s'",
               key_preview, keylen, target, timestamp, msgid);
   }
 
-  /* Serialize value */
   vallen = serialize_message(valbuf, bufsize, type, sender, account, content,
                              client_tags);
   if (vallen < 0) {
     rc = -1;
     goto store_cleanup;
   }
-  /* Cap vallen — ircd_snprintf returns would-have-been length including overflow */
   if ((size_t)vallen >= bufsize)
     vallen = bufsize - 1;
 
-store_retry:
-  /* Begin write transaction */
-  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdbx_txn_begin failed: %s", mdbx_strerror(rc)));
-    rc = -1;
-    goto store_cleanup;
-  }
-
-  /* Store message (with optional compression) */
-  key.iov_len = keylen;
-  key.iov_base = keybuf;
 #ifdef USE_ZSTD
   if (compress_data((unsigned char *)valbuf, vallen,
                     compressed, comp_bufsize, &compressed_len) >= 0) {
-    data.iov_len = compressed_len;
-    data.iov_base = compressed;
+    vbuf = compressed;
+    vlen = compressed_len;
   } else {
-    data.iov_len = vallen;
-    data.iov_base = valbuf;
+    vbuf = valbuf;
+    vlen = (size_t)vallen;
   }
 #else
-  data.iov_len = vallen;
-  data.iov_base = valbuf;
+  vbuf = valbuf;
+  vlen = (size_t)vallen;
 #endif
 
-  /* Try MDBX_APPEND first — skips B-tree traversal when key is the global max.
-   * Messages arrive chronologically per-channel, so for the most active channel
-   * this often succeeds. Falls back to normal put on key mismatch. */
-  rc = mdbx_put(txn, history_dbi, &key, &data, MDBX_APPEND);
-  if (rc == MDBX_EKEYMISMATCH)
-    rc = mdbx_put(txn, history_dbi, &key, &data, 0);
-  if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdbx_put failed: %s", mdbx_strerror(rc)));
-    mdbx_txn_abort(txn);
-    if (rc == MDBX_MAP_FULL && retry == 0) {
+store_retry:
+  wb = db_writebatch_new(history_db_env);
+  if (!wb) {
+    rc = -1;
+    goto store_cleanup;
+  }
+
+  /* Main message store — APPEND-optimised since msgids are
+   * monotonic per channel.  libmdbx's MDBX_APPEND skips B-tree
+   * walk on max-key inserts; RocksDB's memtable already handles
+   * ordered inserts efficiently and treats put_append as a normal put. */
+  rc = db_writebatch_put_append(wb, history_cf_messages,
+                                keybuf, (size_t)keylen, vbuf, vlen);
+  if (rc != DB_OK) {
+    Debug((DEBUG_DEBUG, "history: writebatch_put failed: %s", db_strerror(rc)));
+    db_writebatch_destroy(wb);
+    wb = NULL;
+    if (rc == DB_ERR_FULL && retry == 0) {
       retry = 1;
       if (history_emergency_evict() > 0)
         goto store_retry;
@@ -851,72 +848,48 @@ store_retry:
     goto store_cleanup;
   }
 
-  /* Store msgid -> target\0timestamp index */
-  key.iov_len = strlen(msgid);
-  key.iov_base = (void *)msgid;
-  /* Value is target\0timestamp */
-  {
-    int idx_keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, NULL);
-    data.iov_len = idx_keylen;
-    data.iov_base = keybuf;
-  }
+  /* msgid → target\0timestamp index */
+  rc = db_writebatch_put(wb, history_cf_msgid,
+                         msgid, strlen(msgid),
+                         idxkeybuf, (size_t)idx_keylen);
+  if (rc != DB_OK) goto store_wb_fail;
 
-  rc = mdbx_put(txn, history_msgid_dbi, &key, &data, 0);
-  if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdbx_put(msgid) failed: %s", mdbx_strerror(rc)));
-    mdbx_txn_abort(txn);
-    if (rc == MDBX_MAP_FULL && retry == 0) {
-      retry = 1;
-      if (history_emergency_evict() > 0)
-        goto store_retry;
-    }
-    rc = -1;
-    goto store_cleanup;
-  }
-
-  /* Update target's last message timestamp */
-  key.iov_len = strlen(target);
-  key.iov_base = (void *)target;
-  data.iov_len = strlen(timestamp);
-  data.iov_base = (void *)timestamp;
-
-  rc = mdbx_put(txn, history_targets_dbi, &key, &data, 0);
-  if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdbx_put(target) failed: %s", mdbx_strerror(rc)));
-    mdbx_txn_abort(txn);
-    if (rc == MDBX_MAP_FULL && retry == 0) {
-      retry = 1;
-      if (history_emergency_evict() > 0)
-        goto store_retry;
-    }
-    rc = -1;
-    goto store_cleanup;
-  }
+  /* target → last-timestamp */
+  rc = db_writebatch_put(wb, history_cf_targets,
+                         target, strlen(target),
+                         timestamp, strlen(timestamp));
+  if (rc != DB_OK) goto store_wb_fail;
 
   /* Index reply references for draft/chathistory-context lookups.
-   * Check for +reply= in client_tags (reactions) and REDACT target msgid. */
+   * libmdbx-specific: reply_index uses MDBX_DUPSORT and the conversion
+   * to a flat-key encoding for portability is Phase 5 work.  For now
+   * we reach into the writebatch's underlying mdbx_txn to keep the
+   * existing reply_index_put working. */
+#ifdef USE_MDBX
   {
+    MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
     char parent_mid[HISTORY_MSGID_LEN];
     const char *parent = extract_reply_tag(client_tags, parent_mid, sizeof(parent_mid));
-    if (parent)
-      reply_index_put(txn, target, parent, timestamp, msgid);
-
+    if (parent && raw_txn)
+      reply_index_put(raw_txn, target, parent, timestamp, msgid);
     if (type == HISTORY_REDACT && content && content[0]) {
-      /* REDACT content format: "target_msgid [:reason]" */
       const char *space = strchr(content, ' ');
       size_t len = space ? (size_t)(space - content) : strlen(content);
-      if (len > 0 && len < sizeof(parent_mid)) {
+      if (len > 0 && len < sizeof(parent_mid) && raw_txn) {
         memcpy(parent_mid, content, len);
         parent_mid[len] = '\0';
-        reply_index_put(txn, target, parent_mid, timestamp, msgid);
+        reply_index_put(raw_txn, target, parent_mid, timestamp, msgid);
       }
     }
   }
+#endif
 
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0) {
-    Debug((DEBUG_DEBUG, "history: mdbx_txn_commit failed: %s", mdbx_strerror(rc)));
-    if (rc == MDBX_MAP_FULL && retry == 0) {
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  if (rc != DB_OK) {
+    Debug((DEBUG_DEBUG, "history: writebatch_commit failed: %s", db_strerror(rc)));
+    db_writebatch_destroy(wb);
+    wb = NULL;
+    if (rc == DB_ERR_FULL && retry == 0) {
       retry = 1;
       if (history_emergency_evict() > 0)
         goto store_retry;
@@ -924,18 +897,16 @@ store_retry:
     rc = -1;
     goto store_cleanup;
   }
+  db_writebatch_destroy(wb);
+  wb = NULL;
 
-  /* Update quota counter for this user (if enabled and account is known) */
+  /* Quota counter (separate small write outside the main batch) */
   if (feature_bool(FEAT_CHATHISTORY_USER_QUOTA) && account && account[0]) {
     int new_count = quota_increment(target, account);
-
-    /* Check if user just exceeded their quota and warn */
     if (new_count > 0) {
       int quota_pct = feature_int(FEAT_CHATHISTORY_USER_QUOTA_PCT);
       int channel_limit = feature_int(FEAT_CHATHISTORY_MAX);
       int max_allowed = (channel_limit * quota_pct) / 100;
-
-      /* Warn when first exceeding quota (at exactly max_allowed + 1) */
       if (quota_pct > 0 && quota_pct < 100 && new_count == max_allowed + 1) {
         log_write(LS_SYSTEM, L_WARNING, 0,
                   "history: user %s exceeded quota in %s (%d/%d messages, %d%%)",
@@ -945,8 +916,21 @@ store_retry:
   }
 
   rc = 0;
+  goto store_cleanup;
+
+store_wb_fail:
+  Debug((DEBUG_DEBUG, "history: writebatch op failed: %s", db_strerror(rc)));
+  db_writebatch_destroy(wb);
+  wb = NULL;
+  if (rc == DB_ERR_FULL && retry == 0) {
+    retry = 1;
+    if (history_emergency_evict() > 0)
+      goto store_retry;
+  }
+  rc = -1;
 
 store_cleanup:
+  if (wb) db_writebatch_destroy(wb);
   if (valbuf != valbuf_stack) MyFree(valbuf);
 #ifdef USE_ZSTD
   if (compressed != comp_stack) MyFree(compressed);
@@ -1088,8 +1072,6 @@ store_ml_retry:
 
 int history_has_msgid(const char *msgid)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
   int rc;
 
   if (!history_available)
@@ -1098,23 +1080,11 @@ int history_has_msgid(const char *msgid)
   if (!msgid || !msgid[0])
     return 0;
 
-  /* Begin read transaction */
-  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-  if (rc != 0)
-    return -1;
-
-  /* Look up msgid in the msgid index */
-  key.iov_len = strlen(msgid);
-  key.iov_base = (void *)msgid;
-
-  rc = mdbx_get(txn, history_msgid_dbi, &key, &data);
-  mdbx_txn_abort(txn);
-
-  if (rc == 0)
-    return 1;  /* Found */
-  if (rc == MDBX_NOTFOUND)
-    return 0;  /* Not found */
-  return -1;   /* Error */
+  rc = db_exists(history_db_env, history_cf_msgid,
+                 msgid, strlen(msgid), /*snap=*/NULL);
+  if (rc == DB_OK)        return 1;
+  if (rc == DB_NOTFOUND)  return 0;
+  return -1;
 }
 
 /** Internal query implementation with direction support.

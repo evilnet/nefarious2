@@ -147,6 +147,8 @@ extern const char *db_env_last_error(struct db_env *env);
  * -------------------------------------------------------------------- */
 #ifdef USE_MDBX
 struct MDBX_env;
+struct MDBX_txn;
+struct db_writebatch;
 /** Return the underlying MDBX_env* for an env opened via db_env_open.
  * Caller must NOT close the returned env; ownership stays with @a env. */
 extern struct MDBX_env *db_mdbx_unwrap_env(struct db_env *env);
@@ -154,6 +156,14 @@ extern struct MDBX_env *db_mdbx_unwrap_env(struct db_env *env);
 /** Return the underlying MDBX_dbi for a CF opened via db_cf_open.
  * Returns 0 if @a cf is NULL (libmdbx valid DBIs are positive). */
 extern unsigned int db_mdbx_unwrap_dbi(struct db_cf *cf);
+
+/** Return the underlying MDBX_txn* for a writebatch.  libmdbx's
+ * writebatch IS an open mdbx txn; this lets transitional code that
+ * still calls raw mdbx_* (e.g. DUPSORT puts on reply_index, libmdbx's
+ * MAP_FULL retry loop) interleave with the abstraction's writebatch.
+ * The txn is begun lazily on the first put/del; calling this on an
+ * empty writebatch returns NULL. */
+extern struct MDBX_txn *db_mdbx_unwrap_writebatch_txn(struct db_writebatch *wb);
 #endif
 
 #endif /* INCLUDED_db_env_h */
