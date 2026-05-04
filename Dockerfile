@@ -4,8 +4,7 @@ ENV GID=1234
 ENV UID=1234
 
 # Single merged apt-get layer + ccache.  librocksdb-dev pulls in the
-# Debian 13 build (8.x).  Both backends are available; the binary
-# selects one at configure time via --with-storage-backend.
+# Debian 13 build (8.x), the only storage backend.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get -y install \
       build-essential ccache libssl-dev autoconf automake flex \
@@ -24,20 +23,11 @@ COPY --from=libkc . /tmp/libkc
 WORKDIR /tmp/libkc
 RUN autoreconf -fi && ./configure --prefix=/usr && make -j$(nproc) && make install
 
-FROM base AS build-libmdbx
-COPY --from=libmdbx . /tmp/libmdbx
-WORKDIR /tmp/libmdbx
-RUN cmake -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
-      -DMDBX_BUILD_TOOLS=OFF -DMDBX_BUILD_CXX=OFF && \
-    cmake --build build -j$(nproc) && cmake --install build
-
 # --- Merge libraries into base ---
 
 FROM base AS libs
 COPY --from=build-libkc /usr/lib/libkc* /usr/lib/
 COPY --from=build-libkc /usr/include/kc/ /usr/include/kc/
-COPY --from=build-libmdbx /usr/lib/libmdbx* /usr/lib/
-COPY --from=build-libmdbx /usr/include/mdbx.h /usr/include/
 RUN ldconfig
 
 # --- Configure stage: only invalidated by autotools input changes ---
@@ -60,25 +50,15 @@ COPY include/ ./include/
 RUN touch ircd/ircd.c
 
 # Regenerate configure from configure.in.  The committed `configure` may
-# be stale relative to configure.in changes (e.g. new --with-storage-backend
-# option for the libmdbx → RocksDB migration).  autoreconf produces a
-# fresh configure that matches the current configure.in.
+# be stale relative to configure.in changes; autoreconf produces a fresh
+# configure that matches the current configure.in.
 RUN autoreconf -fi
 
-# MaxMindDB via pkg-config (handles Debian multiarch automatically)
-# Legacy GeoIP enabled as fallback — Debian ships free GeoLiteCountry .dat files
-# Pass --build-arg STORAGE_BACKEND=rocksdb to build the RocksDB-flavoured
-# binary; default stays mdbx so existing builds are unaffected.
-ARG STORAGE_BACKEND=mdbx
-RUN if [ "$STORAGE_BACKEND" = "rocksdb" ]; then \
-      ROCKSDB_FLAGS="--enable-rocksdb --with-rocksdb=/usr"; \
-    else \
-      ROCKSDB_FLAGS=""; \
-    fi && \
-    ./configure --prefix=/home/nefarious --libdir=/home/nefarious/ircd --enable-debug \
-      --with-maxcon=4096 --with-mdbx=/usr --with-zstd=/usr --enable-keycloak \
-      $ROCKSDB_FLAGS \
-      --with-geoip=/usr --with-storage-backend=${STORAGE_BACKEND}
+# MaxMindDB via pkg-config (handles Debian multiarch automatically).
+# Legacy GeoIP enabled as fallback — Debian ships free GeoLiteCountry .dat files.
+RUN ./configure --prefix=/home/nefarious --libdir=/home/nefarious/ircd --enable-debug \
+      --with-maxcon=4096 --with-rocksdb=/usr --with-zstd=/usr --enable-keycloak \
+      --with-geoip=/usr
 
 # --- Build stage: ccache makes incremental rebuilds fast ---
 

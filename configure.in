@@ -941,154 +941,54 @@ if test x"$unet_cv_enable_mmdb" = xyes; then
 fi
 
 dnl **
-dnl **  libmdbx checks (for chathistory, metadata, webpush storage)
+dnl **  RocksDB checks (chathistory, metadata, webpush storage)
 dnl **
-AC_MSG_CHECKING([whether to enable libmdbx storage support])
-AC_ARG_ENABLE([mdbx],
-[  --disable-mdbx          Disable libmdbx storage support],
-[unet_cv_enable_mdbx=$enable_mdbx],
-[AC_CACHE_VAL(unet_cv_enable_mdbx,
-[unet_cv_enable_mdbx=yes])])
-AC_MSG_RESULT([$unet_cv_enable_mdbx])
+AC_MSG_CHECKING([for RocksDB storage support])
+AC_ARG_WITH([rocksdb],
+AS_HELP_STRING([--with-rocksdb=dir], [Specify the installation prefix of RocksDB (default: /usr)]),
+[base_rocksdb_prefix=$withval],
+[base_rocksdb_prefix=/usr])
+AC_MSG_RESULT([$base_rocksdb_prefix])
 
-if test x"$unet_cv_enable_mdbx" = xyes; then
-  AC_ARG_WITH([mdbx],
-  AS_HELP_STRING([--with-mdbx=dir], [Specify the installation prefix of libmdbx (default: /usr)]),
-  [base_mdbx_prefix=$withval],
-  [base_mdbx_prefix=/usr])
+AC_MSG_CHECKING([for RocksDB includes])
+AC_ARG_WITH([rocksdb-includes],
+AS_HELP_STRING([--with-rocksdb-includes=dir], [Specify location of RocksDB header files (default: /usr/include)]),
+[unet_cv_with_rocksdb_inc_prefix=$withval],
+[unet_cv_with_rocksdb_inc_prefix=$base_rocksdb_prefix/include])
+AC_MSG_RESULT([$unet_cv_with_rocksdb_inc_prefix])
 
-  AC_MSG_CHECKING([for libmdbx includes])
-  AC_ARG_WITH([mdbx-includes],
-  AS_HELP_STRING([--with-mdbx-includes=dir], [Specify location of libmdbx header files (default: /usr/include)]),
-  [unet_cv_with_mdbx_inc_prefix=$withval],
-  [unet_cv_with_mdbx_inc_prefix=$base_mdbx_prefix/include])
-  AC_MSG_RESULT([$unet_cv_with_mdbx_inc_prefix])
+AC_MSG_CHECKING([for RocksDB libraries])
+AC_ARG_WITH([rocksdb-libs],
+AS_HELP_STRING([--with-rocksdb-libs=dir], [Specify location of RocksDB libs (default: /usr/lib)]),
+[unet_cv_with_rocksdb_prefix=$withval],
+[unet_cv_with_rocksdb_prefix=$base_rocksdb_prefix/lib])
+AC_MSG_RESULT([$unet_cv_with_rocksdb_prefix])
 
-  AC_MSG_CHECKING([for libmdbx libraries])
-  AC_ARG_WITH([mdbx-libs],
-  AS_HELP_STRING([--with-mdbx-libs=dir], [Specify location of libmdbx libs (default: /usr/lib)]),
-  [unet_cv_with_mdbx_prefix=$withval],
-  [unet_cv_with_mdbx_prefix=$base_mdbx_prefix/lib])
-  AC_MSG_RESULT([$unet_cv_with_mdbx_prefix])
+save_CFLAGS=$CFLAGS
+save_LIBS=$LIBS
+CFLAGS="-I$unet_cv_with_rocksdb_inc_prefix"
+dnl librocksdb is C++ but exposes a C API via rocksdb/c.h.  Linking
+dnl from a C executable requires libstdc++ + libpthread alongside
+dnl librocksdb itself.
+LIBS="-L$unet_cv_with_rocksdb_prefix -lrocksdb -lstdc++ -lpthread"
 
-  save_CFLAGS=$CFLAGS
-  save_LIBS=$LIBS
-
-  CFLAGS="-I$unet_cv_with_mdbx_inc_prefix"
-  LIBS="-L$unet_cv_with_mdbx_prefix -lmdbx"
-
-  AC_CHECK_LIB(mdbx, mdbx_env_create, [
-    AC_CHECK_HEADERS($unet_cv_with_mdbx_inc_prefix/mdbx.h, [
-      enable_mdbx="yes";
-      MDBX_LDFLAGS="-lmdbx"
-    ])
+AC_CHECK_LIB(rocksdb, rocksdb_open, [
+  AC_CHECK_HEADERS($unet_cv_with_rocksdb_inc_prefix/rocksdb/c.h, [
+    enable_rocksdb_found="yes";
+    ROCKSDB_LDFLAGS="-lrocksdb -lstdc++ -lpthread"
   ])
+])
 
-  LIBS=$save_LIBS
-  CFLAGS=$save_CFLAGS
+LIBS=$save_LIBS
+CFLAGS=$save_CFLAGS
 
-  if test "x$enable_mdbx" = xyes; then
-    LIBS="$LIBS -L$unet_cv_with_mdbx_prefix $MDBX_LDFLAGS"
-    CFLAGS="$CFLAGS -I$unet_cv_with_mdbx_inc_prefix"
-  else
-     AC_MSG_WARN([Unable to find libmdbx, chathistory/metadata/webpush features will not work without libmdbx. Disabling libmdbx support.])
-  fi
+if test "x$enable_rocksdb_found" = xyes; then
+  LIBS="$LIBS -L$unet_cv_with_rocksdb_prefix $ROCKSDB_LDFLAGS"
+  CFLAGS="$CFLAGS -I$unet_cv_with_rocksdb_inc_prefix"
+  AC_DEFINE([USE_ROCKSDB], , [Define if you are using RocksDB for storage])
+else
+  AC_MSG_ERROR([librocksdb not found.  Install librocksdb-dev or pass --with-rocksdb=PREFIX.])
 fi
-
-dnl **
-dnl **  RocksDB checks (Phase 2+ of libmdbx → RocksDB migration; default off
-dnl **  until db_rocksdb.c lands and the operator opts in via
-dnl **  --with-storage-backend=rocksdb).
-dnl **
-AC_MSG_CHECKING([whether to enable RocksDB storage support])
-AC_ARG_ENABLE([rocksdb],
-[  --enable-rocksdb        Enable RocksDB storage backend (default: no)],
-[unet_cv_enable_rocksdb=$enable_rocksdb],
-[AC_CACHE_VAL(unet_cv_enable_rocksdb,
-[unet_cv_enable_rocksdb=no])])
-AC_MSG_RESULT([$unet_cv_enable_rocksdb])
-
-if test x"$unet_cv_enable_rocksdb" = xyes; then
-  AC_ARG_WITH([rocksdb],
-  AS_HELP_STRING([--with-rocksdb=dir], [Specify the installation prefix of RocksDB (default: /usr)]),
-  [base_rocksdb_prefix=$withval],
-  [base_rocksdb_prefix=/usr])
-
-  AC_MSG_CHECKING([for RocksDB includes])
-  AC_ARG_WITH([rocksdb-includes],
-  AS_HELP_STRING([--with-rocksdb-includes=dir], [Specify location of RocksDB header files (default: /usr/include)]),
-  [unet_cv_with_rocksdb_inc_prefix=$withval],
-  [unet_cv_with_rocksdb_inc_prefix=$base_rocksdb_prefix/include])
-  AC_MSG_RESULT([$unet_cv_with_rocksdb_inc_prefix])
-
-  AC_MSG_CHECKING([for RocksDB libraries])
-  AC_ARG_WITH([rocksdb-libs],
-  AS_HELP_STRING([--with-rocksdb-libs=dir], [Specify location of RocksDB libs (default: /usr/lib)]),
-  [unet_cv_with_rocksdb_prefix=$withval],
-  [unet_cv_with_rocksdb_prefix=$base_rocksdb_prefix/lib])
-  AC_MSG_RESULT([$unet_cv_with_rocksdb_prefix])
-
-  save_CFLAGS=$CFLAGS
-  save_LIBS=$LIBS
-  CFLAGS="-I$unet_cv_with_rocksdb_inc_prefix"
-  dnl librocksdb is C++ but exposes a C API via rocksdb/c.h.  Linking
-  dnl from a C executable requires libstdc++ + libpthread alongside
-  dnl librocksdb itself.
-  LIBS="-L$unet_cv_with_rocksdb_prefix -lrocksdb -lstdc++ -lpthread"
-
-  AC_CHECK_LIB(rocksdb, rocksdb_open, [
-    AC_CHECK_HEADERS($unet_cv_with_rocksdb_inc_prefix/rocksdb/c.h, [
-      enable_rocksdb_found="yes";
-      ROCKSDB_LDFLAGS="-lrocksdb -lstdc++ -lpthread"
-    ])
-  ])
-
-  LIBS=$save_LIBS
-  CFLAGS=$save_CFLAGS
-
-  if test "x$enable_rocksdb_found" = xyes; then
-    LIBS="$LIBS -L$unet_cv_with_rocksdb_prefix $ROCKSDB_LDFLAGS"
-    CFLAGS="$CFLAGS -I$unet_cv_with_rocksdb_inc_prefix"
-  else
-     AC_MSG_ERROR([--enable-rocksdb requested but librocksdb not found.  Install librocksdb-dev or pass --with-rocksdb=PREFIX.])
-  fi
-fi
-
-dnl **
-dnl **  Storage backend selector
-dnl **
-dnl **  Defines which backend's #ifdef the abstraction layer activates.
-dnl **  Both libmdbx and librocksdb may be detected, but only one
-dnl **  USE_* gets defined — the corresponding db_<backend>.c compiles
-dnl **  to real symbols, the other compiles to nothing.  Defaults to
-dnl **  mdbx for backwards compatibility; flip to rocksdb once
-dnl **  db_rocksdb.c is implemented (Phase 2).
-dnl **
-AC_MSG_CHECKING([for storage backend selection])
-AC_ARG_WITH([storage-backend],
-AS_HELP_STRING([--with-storage-backend=mdbx|rocksdb],
-               [Pick which storage backend the abstraction uses (default: mdbx)]),
-[unet_cv_storage_backend=$withval],
-[unet_cv_storage_backend=mdbx])
-AC_MSG_RESULT([$unet_cv_storage_backend])
-
-case "$unet_cv_storage_backend" in
-  mdbx)
-    if test x"$enable_mdbx" != xyes; then
-      AC_MSG_ERROR([--with-storage-backend=mdbx requires libmdbx (currently disabled or not found)])
-    fi
-    AC_DEFINE([USE_MDBX], , [Define if you are using libmdbx for storage])
-    ;;
-  rocksdb)
-    if test x"$enable_rocksdb_found" != xyes; then
-      AC_MSG_ERROR([--with-storage-backend=rocksdb requires librocksdb (pass --enable-rocksdb)])
-    fi
-    AC_DEFINE([USE_ROCKSDB], , [Define if you are using RocksDB for storage])
-    ;;
-  *)
-    AC_MSG_ERROR([invalid --with-storage-backend=$unet_cv_storage_backend (use mdbx or rocksdb)])
-    ;;
-esac
 
 dnl **
 dnl **  Zstd compression checks (for chathistory/metadata compression)
