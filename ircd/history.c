@@ -31,8 +31,6 @@
  */
 #include "config.h"
 
-#ifdef USE_MDBX
-
 #include "db_cursor.h"
 #include "db_env.h"
 #include "db_txn.h"
@@ -50,7 +48,6 @@
 #include "s_debug.h"
 #include "s_stats.h"
 
-#include <mdbx.h>
 #include <string.h>
 #ifdef USE_ZSTD
 #include <zstd.h>
@@ -59,6 +56,10 @@
 #include <time.h>
 #include <stdint.h>
 #include <sys/time.h>
+
+#ifdef USE_MDBX
+#include <mdbx.h>
+#endif
 
 /* Forward declarations for quota functions */
 static int quota_increment(const char *channel, const char *account);
@@ -74,16 +75,14 @@ static struct db_cf  *history_cf_quotas = NULL;
 static struct db_cf  *history_cf_reply = NULL;  /* DUPSORT */
 
 /** Raw MDBX handles unwrapped from the abstraction.  Same underlying
- * env/dbi as the db_* statics above; exist because the function
- * bodies in this file haven't been fully converted off raw mdbx yet
- * (Phase 0g is incremental).  Phase 5 RocksDB migration completes
- * the conversion and deletes them. */
+ * env/dbi as the db_* statics above; used only by the libmdbx-specific
+ * stats / GC / defrag / sync reporters at the bottom of this file. */
+#ifdef USE_MDBX
 static MDBX_env *history_env = NULL;
 static MDBX_dbi history_dbi;
 static MDBX_dbi history_msgid_dbi;
 static MDBX_dbi history_targets_dbi;
-static MDBX_dbi history_quota_dbi;
-static MDBX_dbi history_reply_dbi;
+#endif
 
 /** Flag indicating if history is available */
 static int history_available = 0;
@@ -736,16 +735,14 @@ int history_init(const char *dbpath)
     return -1;
   }
 
-  /* Populate the legacy raw-mdbx handles so the function bodies that
-   * still use raw mdbx in this file (queries, store, eviction) keep
-   * working against the same underlying env/dbis.  Will be retired
-   * as the function bodies are converted in follow-up commits. */
+  /* Populate the legacy raw-mdbx handles used by the libmdbx-specific
+   * stats / GC / defrag / sync reporters at the bottom of this file. */
+#ifdef USE_MDBX
   history_env         = db_mdbx_unwrap_env(history_db_env);
   history_dbi         = db_mdbx_unwrap_dbi(history_cf_messages);
   history_msgid_dbi   = db_mdbx_unwrap_dbi(history_cf_msgid);
   history_targets_dbi = db_mdbx_unwrap_dbi(history_cf_targets);
-  history_quota_dbi   = db_mdbx_unwrap_dbi(history_cf_quotas);
-  history_reply_dbi   = db_mdbx_unwrap_dbi(history_cf_reply);
+#endif
 
   /* Open multiline content databases (shares this env) */
   if (ml_content_init(history_db_env) != 0) {
@@ -787,7 +784,9 @@ void history_shutdown(void)
   history_cf_targets = NULL;
   history_cf_quotas = NULL;
   history_cf_reply = NULL;
+#ifdef USE_MDBX
   history_env = NULL;  /* legacy raw handle, owned by db_env */
+#endif
   history_available = 0;
 
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage shutdown complete");
@@ -2775,38 +2774,43 @@ static int history_emergency_evict(void)
 
 int history_db_utilization(void)
 {
-  MDBX_envinfo info;
-  MDBX_stat envstat;
-  int rc;
-  size_t used_size;
-  int percent;
-
   if (!history_available)
     return -1;
 
-  /* Get environment info for map size */
-  rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
-  if (rc != MDBX_SUCCESS)
-    return -1;
+#ifdef USE_MDBX
+  {
+    MDBX_envinfo info;
+    MDBX_stat envstat;
+    int rc;
+    size_t used_size;
+    int percent;
 
-  /* Get environment stats for page size */
-  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
-  if (rc != MDBX_SUCCESS)
-    return -1;
+    rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
+    if (rc != MDBX_SUCCESS)
+      return -1;
 
-  /* Calculate used size: (last_pgno + 1) * page_size
-   * Note: mi_last_pgno is 0-indexed, so add 1 for count */
-  used_size = (info.mi_last_pgno + 1) * envstat.ms_psize;
+    rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
+    if (rc != MDBX_SUCCESS)
+      return -1;
 
-  /* Calculate percentage */
-  if (info.mi_geo.upper == 0)
-    return 0;
+    /* Calculate used size: (last_pgno + 1) * page_size */
+    used_size = (info.mi_last_pgno + 1) * envstat.ms_psize;
 
-  percent = (int)((used_size * 100) / info.mi_geo.upper);
-  if (percent > 100)
-    percent = 100;
+    if (info.mi_geo.upper == 0)
+      return 0;
 
-  return percent;
+    percent = (int)((used_size * 100) / info.mi_geo.upper);
+    if (percent > 100)
+      percent = 100;
+
+    return percent;
+  }
+#else
+  /* RocksDB has no fixed map size — utilization isn't a meaningful
+   * concept here.  The LSM compactor handles space; report 0% so the
+   * watermark eviction logic stays a no-op. */
+  return 0;
+#endif
 }
 
 enum HistoryStorageState history_storage_state(void)
@@ -2985,13 +2989,16 @@ void history_maintenance_tick(void)
   if (!history_available)
     return;
 
-  /* Clean up stale reader slots to prevent GC blockage */
+  /* Clean up stale reader slots to prevent GC blockage (libmdbx only;
+   * RocksDB doesn't have a reader slot table). */
+#ifdef USE_MDBX
   {
     int dead = 0;
     mdbx_reader_check(history_env, &dead);
     if (dead > 0)
       log_write(LS_SYSTEM, L_WARNING, 0, "history: cleared %d stale reader(s)", dead);
   }
+#endif
 
   now = time(NULL);
 
@@ -3046,6 +3053,7 @@ void history_last_eviction(int *count, time_t *timestamp)
     *timestamp = last_eviction_time;
 }
 
+#ifdef USE_MDBX
 void
 history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 {
@@ -3290,9 +3298,9 @@ history_report_defrag(struct Client *to)
 int
 history_sync(void)
 {
-  if (!history_available || !history_env)
+  if (!history_available)
     return -1;
-  return mdbx_env_sync_ex(history_env, 1, 0);
+  return db_env_sync(history_db_env);
 }
 
 /** \brief Report detailed GC info for the history database. */
@@ -3425,6 +3433,55 @@ history_report_mdbx_info(struct Client *to)
     mdbx_txn_abort(txn);
   }
 }
+
+#else  /* !USE_MDBX — RocksDB stubs.  These reports describe libmdbx-specific
+        * concepts (page geometry, GC reader-lag, B-tree depth) that don't
+        * map cleanly to LSM-tree storage.  Phase 5e will add a parallel
+        * RocksDB-flavoured set of reports (level 0 file count, pending
+        * compaction bytes, estimate-num-keys per CF). */
+
+void
+history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  (void)sd; (void)param;
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :CHATHISTORY Statistics");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  Backend: RocksDB (%s)",
+             history_available ? "available" : "unavailable");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "H :  Detailed stats not yet implemented for RocksDB backend");
+}
+
+int
+history_defrag(unsigned int time_limit_seconds)
+{
+  (void)time_limit_seconds;
+  return 0;  /* RocksDB does background compaction continuously — no-op. */
+}
+
+void
+history_report_defrag(struct Client *to)
+{
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :  Defrag: not applicable for RocksDB (background compaction)");
+}
+
+void
+history_report_gc(struct Client *to)
+{
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :  GC: not applicable for RocksDB (LSM compactor handles space)");
+}
+
+void
+history_report_mdbx_info(struct Client *to)
+{
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :  MDBX info: this build uses RocksDB, not libmdbx");
+}
+
+#endif /* USE_MDBX */
 
 
 /* ========== Per-User Quota Tracking ========== */
@@ -3588,260 +3645,3 @@ int history_quota_check(const char *channel, const char *account, int channel_li
 }
 
 
-#else /* !USE_MDBX */
-
-/* Stub implementations when LMDB is not available */
-#include "history.h"
-#include <stddef.h>
-#include <time.h>
-
-int history_init(const char *dbpath)
-{
-  (void)dbpath;
-  return -1;
-}
-
-void history_shutdown(void)
-{
-}
-
-int history_store_message(const char *msgid, const char *timestamp,
-                          const char *target, const char *sender,
-                          const char *account, enum HistoryMessageType type,
-                          const char *content, const char *client_tags)
-{
-  (void)msgid; (void)timestamp; (void)target; (void)sender;
-  (void)account; (void)type; (void)content; (void)client_tags;
-  return -1;
-}
-
-int history_has_msgid(const char *msgid)
-{
-  (void)msgid;
-  return -1;
-}
-
-int history_query_before(const char *target, enum HistoryRefType ref_type,
-                         const char *reference, int limit,
-                         struct HistoryMessage **result)
-{
-  (void)target; (void)ref_type; (void)reference; (void)limit;
-  *result = NULL;
-  return -1;
-}
-
-int history_query_after(const char *target, enum HistoryRefType ref_type,
-                        const char *reference, int limit,
-                        struct HistoryMessage **result)
-{
-  (void)target; (void)ref_type; (void)reference; (void)limit;
-  *result = NULL;
-  return -1;
-}
-
-int history_query_latest(const char *target, enum HistoryRefType ref_type,
-                         const char *reference, int limit,
-                         struct HistoryMessage **result)
-{
-  (void)target; (void)ref_type; (void)reference; (void)limit;
-  *result = NULL;
-  return -1;
-}
-
-int history_query_latest_after(const char *target, int limit,
-                               const char *after_timestamp,
-                               struct HistoryMessage **result)
-{
-  (void)target; (void)limit; (void)after_timestamp;
-  *result = NULL;
-  return -1;
-}
-
-int history_find_last_join(const char *channel, const char *nick,
-                           char *out_msgid, size_t msgid_len,
-                           char *out_timestamp, size_t timestamp_len)
-{
-  (void)channel; (void)nick;
-  (void)out_msgid; (void)msgid_len;
-  (void)out_timestamp; (void)timestamp_len;
-  return 0;
-}
-
-int history_query_around(const char *target, enum HistoryRefType ref_type,
-                         const char *reference, int limit,
-                         struct HistoryMessage **result)
-{
-  (void)target; (void)ref_type; (void)reference; (void)limit;
-  *result = NULL;
-  return -1;
-}
-
-int history_query_between(const char *target,
-                          enum HistoryRefType ref_type1, const char *reference1,
-                          enum HistoryRefType ref_type2, const char *reference2,
-                          int limit, struct HistoryMessage **result)
-{
-  (void)target; (void)ref_type1; (void)reference1;
-  (void)ref_type2; (void)reference2; (void)limit;
-  *result = NULL;
-  return -1;
-}
-
-int history_query_targets(const char *timestamp1, const char *timestamp2,
-                          int limit, struct HistoryTarget **result)
-{
-  (void)timestamp1; (void)timestamp2; (void)limit;
-  *result = NULL;
-  return -1;
-}
-
-void history_free_messages(struct HistoryMessage *list)
-{
-  (void)list;
-}
-
-void history_free_targets(struct HistoryTarget *list)
-{
-  (void)list;
-}
-
-int history_purge_old(unsigned long max_age_seconds)
-{
-  (void)max_age_seconds;
-  return -1;
-}
-
-int history_msgid_to_timestamp(const char *msgid, char *timestamp)
-{
-  (void)msgid; (void)timestamp;
-  return -1;
-}
-
-int history_lookup_message(const char *target, const char *msgid,
-                            struct HistoryMessage **msg)
-{
-  (void)target; (void)msgid;
-  *msg = NULL;
-  return -1;
-}
-
-int history_delete_message(const char *target, const char *msgid)
-{
-  (void)target; (void)msgid;
-  return -1;
-}
-
-int history_is_available(void)
-{
-  return 0;
-}
-
-void history_set_map_size(size_t size_mb)
-{
-  (void)size_mb;
-}
-
-size_t history_get_map_size(void)
-{
-  return 0;
-}
-
-int history_db_utilization(void)
-{
-  return -1;
-}
-
-enum HistoryStorageState history_storage_state(void)
-{
-  return HISTORY_STORAGE_SUSPENDED;
-}
-
-int history_evict_to_target(int target_percent)
-{
-  (void)target_percent;
-  return -1;
-}
-
-void history_maintenance_tick(void)
-{
-}
-
-void history_last_eviction(int *count, time_t *timestamp)
-{
-  if (count)
-    *count = 0;
-  if (timestamp)
-    *timestamp = 0;
-}
-
-void
-history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
-{
-  (void)sd; (void)param;
-  /* For stub version, we need send_reply - include the headers */
-  /* This function is only callable if stats are registered, which requires LMDB */
-}
-
-int history_enumerate_channels(history_channel_callback callback, void *data)
-{
-  (void)callback; (void)data;
-  return -1;
-}
-
-int history_has_channel(const char *target)
-{
-  (void)target;
-  return -1;
-}
-
-int history_channel_has_messages(const char *target)
-{
-  (void)target;
-  return -1;
-}
-
-void history_set_channel_removed_callback(history_channels_removed_cb cb)
-{
-  (void)cb;
-}
-
-int history_defrag(unsigned int time_limit_seconds)
-{
-  (void)time_limit_seconds;
-  return -1;
-}
-
-void history_report_defrag(struct Client *to)
-{
-  (void)to;
-}
-
-int history_sync(void)
-{
-  return -1;
-}
-
-void history_report_gc(struct Client *to)
-{
-  (void)to;
-}
-
-void history_report_mdbx_info(struct Client *to)
-{
-  (void)to;
-}
-
-/* Quota tracking stubs */
-int history_quota_get_count(const char *channel, const char *account)
-{
-  (void)channel; (void)account;
-  return 0;
-}
-
-int history_quota_check(const char *channel, const char *account, int channel_limit)
-{
-  (void)channel; (void)account; (void)channel_limit;
-  return 0;  /* Never over quota when no LMDB */
-}
-
-#endif /* USE_MDBX */
