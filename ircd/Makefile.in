@@ -98,6 +98,7 @@ IRCD_SRC = \
 	crule.c \
 	dbuf.c \
 	db_mdbx.c \
+	db_rocksdb.c \
 	destruct_event.c \
 	dnsbl.c \
 	fileio.c \
@@ -467,6 +468,10 @@ dbuf.o: dbuf.c ../config.h ../include/dbuf.h ../include/ircd_alloc.h \
   ../include/ircd_chattr.h ../include/ircd_features.h ../include/ircd_log.h \
   ../include/send.h ../include/sys.h
 db_mdbx.o: db_mdbx.c ../config.h ../include/client.h \
+  ../include/db_cursor.h ../include/db_env.h ../include/db_txn.h \
+  ../include/db_types.h ../include/ircd_alloc.h ../include/ircd_log.h \
+  ../include/ircd_snprintf.h
+db_rocksdb.o: db_rocksdb.c ../config.h ../include/client.h \
   ../include/db_cursor.h ../include/db_env.h ../include/db_txn.h \
   ../include/db_types.h ../include/ircd_alloc.h ../include/ircd_log.h \
   ../include/ircd_snprintf.h
