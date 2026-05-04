@@ -3065,46 +3065,41 @@ history_sync(void)
   return db_env_sync(history_db_env);
 }
 
+/** Backend label string for /STATS H reports. */
+static const char *history_backend_name(void)
+{
 #ifdef USE_MDBX
+  return "libmdbx";
+#elif defined(USE_ROCKSDB)
+  return "RocksDB";
+#else
+  return "none";
+#endif
+}
+
 void
 history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 {
-  MDBX_stat stat;
-  MDBX_stat envstat;
-  MDBX_envinfo info;
-  MDBX_txn *txn;
-  int rc;
+  struct db_env_stats env_stats;
+  struct db_cf_stats cf_stats;
   int util;
   enum HistoryStorageState state;
   const char *state_name;
-  size_t used_size;
+
+  (void)sd; (void)param;
 
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :CHATHISTORY Statistics");
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  LMDB Backend: %s",
-             history_available ? "Available" : "Unavailable");
+             "H :  Backend: %s (%s)",
+             history_backend_name(),
+             history_available ? "available" : "unavailable");
 
-  if (!history_available) {
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  (LMDB not initialized)");
-    return;
-  }
-
-  /* Get environment info and stats */
-  rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
-  if (rc != MDBX_SUCCESS)
+  if (!history_available)
     return;
 
-  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
-  if (rc != MDBX_SUCCESS)
-    return;
-
-  /* Calculate storage utilization */
-  used_size = (info.mi_last_pgno + 1) * envstat.ms_psize;
   util = history_db_utilization();
   state = history_storage_state();
-
   switch (state) {
     case HISTORY_STORAGE_WARNING:  state_name = "WARNING"; break;
     case HISTORY_STORAGE_CRITICAL: state_name = "CRITICAL"; break;
@@ -3112,13 +3107,26 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     default: state_name = "NORMAL"; break;
   }
 
+  /* Env-wide stats — backend-agnostic via abstraction. */
+  if (db_env_stats(history_db_env, &env_stats) == DB_OK) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  On-disk: %lu MB, ~%lu keys total",
+               (unsigned long)(env_stats.on_disk_bytes / (1024 * 1024)),
+               (unsigned long)env_stats.approx_keys_total);
+    if (env_stats.pending_compaction > 0)
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  Pending compaction: %lu MB",
+                 (unsigned long)(env_stats.pending_compaction / (1024 * 1024)));
+    if (env_stats.level0_files > 0)
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  L0 files: %u", env_stats.level0_files);
+    if (env_stats.active_readers > 0)
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  Active readers: %u", env_stats.active_readers);
+  }
+
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  Size: %lu MB / %lu MB (%d%%)",
-             (unsigned long)(used_size / (1024 * 1024)),
-             (unsigned long)(info.mi_geo.upper / (1024 * 1024)),
-             util);
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  State: %s", state_name);
+             "H :  State: %s (utilization %d%%)", state_name, util);
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "H :  Retention: %d days",
              feature_int(FEAT_CHATHISTORY_RETENTION));
@@ -3127,7 +3135,6 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
              feature_int(FEAT_CHATHISTORY_HIGH_WATERMARK),
              feature_int(FEAT_CHATHISTORY_LOW_WATERMARK));
 
-  /* Last eviction info */
   if (last_eviction_time > 0) {
     char timebuf[32];
     struct tm tm;
@@ -3141,81 +3148,65 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                "H :  Last eviction: never");
   }
 
-  /* Environment-level mdbx diagnostics */
+  /* Per-CF stats — backend-agnostic. */
+  if (db_cf_stats(history_db_env, history_cf_messages, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Messages: ~%lu keys, %lu KB, depth %u",
+               (unsigned long)cf_stats.approx_keys,
+               (unsigned long)(cf_stats.on_disk_bytes / 1024),
+               cf_stats.depth);
+  if (db_cf_stats(history_db_env, history_cf_targets, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  Channels: ~%lu",
+               (unsigned long)cf_stats.approx_keys);
+  if (db_cf_stats(history_db_env, history_cf_msgid, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "H :  MsgID index: ~%lu entries",
+               (unsigned long)cf_stats.approx_keys);
+
+#ifdef USE_MDBX
+  /* libmdbx-specific extras: page geometry + GC reader-lag.  No clean
+   * RocksDB analog, so they only print under USE_MDBX.  See
+   * history_report_mdbx_info / history_report_gc for the full detail. */
   {
-    size_t total_pages = (info.mi_last_pgno + 1);
-    size_t data_pages = envstat.ms_branch_pages + envstat.ms_leaf_pages + envstat.ms_overflow_pages;
-    size_t free_pages = total_pages > data_pages ? total_pages - data_pages : 0;
+    MDBX_envinfo info;
+    MDBX_stat envstat;
+    MDBX_txn *txn;
+    int rc;
 
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  Geometry: %lu / %lu / %lu MB (current/grow-to/max)",
-               (unsigned long)(info.mi_geo.current / (1024 * 1024)),
-               (unsigned long)(info.mi_geo.grow / (1024 * 1024)),
-               (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  Pages: branch=%lu leaf=%lu overflow=%lu free=%lu (psize=%u)",
-               (unsigned long)envstat.ms_branch_pages,
-               (unsigned long)envstat.ms_leaf_pages,
-               (unsigned long)envstat.ms_overflow_pages,
-               (unsigned long)free_pages,
-               envstat.ms_psize);
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "H :  Readers: %u active, nosync=%s",
-               info.mi_numreaders,
-               feature_bool(FEAT_CHATHISTORY_DB_NOSYNC) ? "yes" : "no");
-  }
-
-  /* Get per-database stats */
-  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-  if (rc == 0) {
-    /* Main message database */
-    rc = mdbx_dbi_stat(txn, history_dbi, &stat, sizeof(stat));
-    if (rc == 0) {
+    rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
+    if (rc == MDBX_SUCCESS &&
+        mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat))
+          == MDBX_SUCCESS) {
       send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  Messages: %lu entries, depth %u",
-                 (unsigned long)stat.ms_entries, stat.ms_depth);
+                 "H :  Geometry: %lu / %lu / %lu MB (cur/grow/max)",
+                 (unsigned long)(info.mi_geo.current / (1024 * 1024)),
+                 (unsigned long)(info.mi_geo.grow / (1024 * 1024)),
+                 (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "H :  Pages: branch=%lu leaf=%lu overflow=%lu (psize=%u)",
+                 (unsigned long)envstat.ms_branch_pages,
+                 (unsigned long)envstat.ms_leaf_pages,
+                 (unsigned long)envstat.ms_overflow_pages,
+                 envstat.ms_psize);
     }
 
-    /* Targets database */
-    rc = mdbx_dbi_stat(txn, history_targets_dbi, &stat, sizeof(stat));
+    rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
     if (rc == 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  Channels: %lu",
-                 (unsigned long)stat.ms_entries);
-    }
-
-    /* Message ID index */
-    rc = mdbx_dbi_stat(txn, history_msgid_dbi, &stat, sizeof(stat));
-    if (rc == 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  MsgID index: %lu entries",
-                 (unsigned long)stat.ms_entries);
-    }
-
-    /* GC (garbage collection) info */
-    {
       MDBX_gc_info_t gc;
       memset(&gc, 0, sizeof(gc));
       rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
-      if (rc == 0 || rc == MDBX_NOTFOUND) {
+      if ((rc == 0 || rc == MDBX_NOTFOUND) &&
+          (gc.max_reader_lag > 0 || gc.max_retained_pages > 0)) {
         send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                   "H :  GC: total=%lu backed=%lu alloc=%lu gc=%lu reclaimable=%lu",
-                   (unsigned long)gc.pages_total,
-                   (unsigned long)gc.pages_backed,
-                   (unsigned long)gc.pages_allocated,
-                   (unsigned long)gc.pages_gc,
-                   (unsigned long)gc.gc_reclaimable.pages);
-        if (gc.max_reader_lag > 0 || gc.max_retained_pages > 0) {
-          send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                     "H :  GC pressure: reader_lag=%lu retained=%lu pages",
-                     (unsigned long)gc.max_reader_lag,
-                     (unsigned long)gc.max_retained_pages);
-        }
+                   "H :  GC pressure: reader_lag=%lu retained=%lu pages",
+                   (unsigned long)gc.max_reader_lag,
+                   (unsigned long)gc.max_retained_pages);
       }
+      mdbx_txn_abort(txn);
     }
-
-    mdbx_txn_abort(txn);
   }
+#endif
 }
 
 /** \brief Defragment the history database.
@@ -3226,85 +3217,42 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 int
 history_defrag(unsigned int time_limit_seconds)
 {
-  MDBX_defrag_result_t result;
-  size_t time_16dot16;
   int rc;
+  (void)time_limit_seconds;  /* libmdbx-specific knob; abstraction's
+                              * compact takes no time limit.  RocksDB
+                              * compaction is self-paced anyway. */
 
-  if (!history_available || !history_env)
+  if (!history_available)
     return -1;
 
-  memset(&result, 0, sizeof(result));
-  /* Convert seconds to 16.16 fixed-point (seconds * 65536) */
-  time_16dot16 = time_limit_seconds ? (size_t)time_limit_seconds * 65536 : 0;
-
-  rc = mdbx_env_defrag(history_env,
-                        0,              /* defrag_atleast: no minimum */
-                        0,              /* time_atleast: no minimum time */
-                        0,              /* defrag_enough: no upper goal */
-                        time_16dot16,   /* time_limit */
-                        -1,             /* acceptable_backlash: autopilot */
-                        0,              /* preferred_batch: no limit */
-                        NULL, NULL,     /* no progress callback */
-                        &result);
-
+  rc = db_env_compact(history_db_env, /*cf=*/NULL);
   log_write(LS_SYSTEM, L_INFO, 0,
-            "history: defrag complete rc=%d shrinked=%ld moved=%lu cycles=%u reasons=0x%x",
-            rc, (long)result.pages_shrinked,
-            (unsigned long)result.pages_moved,
-            result.cycles, result.stopping_reasons);
-
-  return rc;
+            "history: compact rc=%d (%s)", rc, db_strerror(rc));
+  return (rc == DB_OK) ? 0 : -1;
 }
 
 /** \brief Report defrag results for history DB */
 void
 history_report_defrag(struct Client *to)
 {
-  MDBX_defrag_result_t result;
-  size_t time_16dot16;
   int rc;
 
-  if (!history_available || !history_env) {
+  if (!history_available) {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "D :  History: unavailable");
     return;
   }
 
-  memset(&result, 0, sizeof(result));
-  /* 5 second time limit for interactive defrag */
-  time_16dot16 = 5 * 65536;
-
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "D :  History: defragmenting (5s limit)...");
-
-  rc = mdbx_env_defrag(history_env,
-                        0, 0, 0,
-                        time_16dot16,
-                        -1, 0,
-                        NULL, NULL,
-                        &result);
-
+             "D :  History: compacting...");
+  rc = db_env_compact(history_db_env, /*cf=*/NULL);
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "D :  History: rc=%d shrinked=%ld moved=%lu left=%lu cycles=%u",
-             rc, (long)result.pages_shrinked,
-             (unsigned long)result.pages_moved,
-             (unsigned long)result.pages_left,
-             result.cycles);
-
-  if (result.stopping_reasons) {
-    char reasons[128];
-    reasons[0] = '\0';
-    if (result.stopping_reasons & 1) strcat(reasons, "threshold ");
-    if (result.stopping_reasons & 2) strcat(reasons, "time-limit ");
-    if (result.stopping_reasons & 4) strcat(reasons, "laggard-reader ");
-    if (result.stopping_reasons & 8) strcat(reasons, "large-chunk ");
-    if (result.stopping_reasons & 16) strcat(reasons, "user-break ");
-    if (result.stopping_reasons & 32) strcat(reasons, "error ");
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "D :  History: stopped: %s", reasons);
-  }
+             "D :  History: compact %s (%s)",
+             rc == DB_OK ? "done" : "failed",
+             db_strerror(rc));
 }
 
+#ifdef USE_MDBX
 /** \brief Report detailed GC info for the history database. */
 void
 history_report_gc(struct Client *to)
@@ -3436,51 +3384,82 @@ history_report_mdbx_info(struct Client *to)
   }
 }
 
-#else  /* !USE_MDBX — RocksDB stubs.  These reports describe libmdbx-specific
-        * concepts (page geometry, GC reader-lag, B-tree depth) that don't
-        * map cleanly to LSM-tree storage.  Phase 5e will add a parallel
-        * RocksDB-flavoured set of reports (level 0 file count, pending
-        * compaction bytes, estimate-num-keys per CF). */
-
-void
-history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
-{
-  (void)sd; (void)param;
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :CHATHISTORY Statistics");
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  Backend: RocksDB (%s)",
-             history_available ? "available" : "unavailable");
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "H :  Detailed stats not yet implemented for RocksDB backend");
-}
-
-int
-history_defrag(unsigned int time_limit_seconds)
-{
-  (void)time_limit_seconds;
-  return 0;  /* RocksDB does background compaction continuously — no-op. */
-}
-
-void
-history_report_defrag(struct Client *to)
-{
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :  Defrag: not applicable for RocksDB (background compaction)");
-}
+#else  /* !USE_MDBX — RocksDB stubs for the deeply-mdbx-flavoured
+        * reports.  history_report_gc and history_report_mdbx_info
+        * describe page geometry / GC reader-lag concepts that don't
+        * map cleanly to LSM-tree storage; the abstraction's stats
+        * (used by history_report_stats above) cover the genuinely
+        * cross-backend numbers like on-disk bytes and approx keys. */
 
 void
 history_report_gc(struct Client *to)
 {
+  struct db_env_stats env_stats;
+
+  if (!history_available) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  GC: history unavailable");
+    return;
+  }
+
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :  GC: not applicable for RocksDB (LSM compactor handles space)");
+             "X :  Compaction (RocksDB):");
+  if (db_env_stats(history_db_env, &env_stats) == DB_OK) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    Pending: %lu MB (%lu bytes)",
+               (unsigned long)(env_stats.pending_compaction / (1024 * 1024)),
+               (unsigned long)env_stats.pending_compaction);
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    L0 files: %u", env_stats.level0_files);
+  }
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "X :    Background compactor self-paces; no operator GC needed");
 }
 
 void
 history_report_mdbx_info(struct Client *to)
 {
+  struct db_env_stats env_stats;
+  struct db_cf_stats cf_stats;
+
+  if (!history_available) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :  History: unavailable");
+    return;
+  }
+
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :  MDBX info: this build uses RocksDB, not libmdbx");
+             "X :  History Environment (RocksDB):");
+
+  if (db_env_stats(history_db_env, &env_stats) == DB_OK) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    On-disk: %lu MB total",
+               (unsigned long)(env_stats.on_disk_bytes / (1024 * 1024)));
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    Approx keys (env-wide): %lu",
+               (unsigned long)env_stats.approx_keys_total);
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    Pending compaction: %lu MB  L0 files: %u",
+               (unsigned long)(env_stats.pending_compaction / (1024 * 1024)),
+               env_stats.level0_files);
+  }
+
+  if (db_cf_stats(history_db_env, history_cf_messages, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    messages: ~%lu keys, %lu KB, max-level %u",
+               (unsigned long)cf_stats.approx_keys,
+               (unsigned long)(cf_stats.on_disk_bytes / 1024),
+               cf_stats.depth);
+  if (db_cf_stats(history_db_env, history_cf_targets, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    targets: ~%lu keys, %lu KB",
+               (unsigned long)cf_stats.approx_keys,
+               (unsigned long)(cf_stats.on_disk_bytes / 1024));
+  if (db_cf_stats(history_db_env, history_cf_msgid, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "X :    msgid_index: ~%lu keys, %lu KB",
+               (unsigned long)cf_stats.approx_keys,
+               (unsigned long)(cf_stats.on_disk_bytes / 1024));
 }
 
 #endif /* USE_MDBX */

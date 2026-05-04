@@ -1693,96 +1693,104 @@ void metadata_burst_channel(struct Channel *chptr, struct Client *cptr)
 void
 metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
 {
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "M :METADATA Statistics");
+  struct db_env_stats env_stats;
+  struct db_cf_stats cf_stats;
+  const char *backend;
+
+  (void)sd; (void)param;
 
 #ifdef USE_MDBX
-  {
-    MDBX_stat stat;
+  backend = "libmdbx";
+#elif defined(USE_ROCKSDB)
+  backend = "RocksDB";
+#else
+  backend = "none";
+#endif
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "M :METADATA Statistics");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "M :  Backend: %s (%s)",
+             backend,
+             metadata_lmdb_available ? "available" : "unavailable");
+
+  if (!metadata_lmdb_available || !metadata_db_env)
+    return;
+
+  /* Env-wide stats — backend-agnostic via abstraction. */
+  if (db_env_stats(metadata_db_env, &env_stats) == DB_OK) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "M :  On-disk: %lu KB, ~%lu keys total",
+               (unsigned long)(env_stats.on_disk_bytes / 1024),
+               (unsigned long)env_stats.approx_keys_total);
+    if (env_stats.pending_compaction > 0)
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "M :  Pending compaction: %lu KB",
+                 (unsigned long)(env_stats.pending_compaction / 1024));
+    if (env_stats.level0_files > 0)
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "M :  L0 files: %u", env_stats.level0_files);
+    if (env_stats.active_readers > 0)
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "M :  Active readers: %u", env_stats.active_readers);
+  }
+
+  /* Per-CF stats — backend-agnostic. */
+  if (db_cf_stats(metadata_db_env, metadata_cf, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "M :  Account metadata: ~%lu keys, %lu KB, depth %u",
+               (unsigned long)cf_stats.approx_keys,
+               (unsigned long)(cf_stats.on_disk_bytes / 1024),
+               cf_stats.depth);
+  if (db_cf_stats(metadata_db_env, readmarkers_cf, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "M :  Read markers: ~%lu entries",
+               (unsigned long)cf_stats.approx_keys);
+  if (db_cf_stats(metadata_db_env, bouncer_cf, &cf_stats) == DB_OK)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "M :  Bouncer sessions: ~%lu entries",
+               (unsigned long)cf_stats.approx_keys);
+
+#ifdef USE_MDBX
+  /* libmdbx-specific extras: page geometry + GC reader-lag. */
+  if (metadata_env) {
     MDBX_envinfo info;
+    MDBX_stat envstat;
     MDBX_txn *txn;
     int rc;
 
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "M :  LMDB Backend: %s",
-               metadata_lmdb_available ? "Available" : "Unavailable");
-
-    if (metadata_lmdb_available && metadata_env) {
-      MDBX_stat envstat;
-
-      /* Get environment info */
-      rc = mdbx_env_info_ex(metadata_env, NULL, &info, sizeof(info));
-      if (rc == MDBX_SUCCESS) {
+    rc = mdbx_env_info_ex(metadata_env, NULL, &info, sizeof(info));
+    if (rc == MDBX_SUCCESS) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "M :  Geometry: %lu / %lu MB (cur/max)",
+                 (unsigned long)(info.mi_geo.current / (1024 * 1024)),
+                 (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
+    }
+    if (mdbx_env_stat_ex(metadata_env, NULL, &envstat, sizeof(envstat))
+          == MDBX_SUCCESS) {
+      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+                 "M :  Pages: branch=%lu leaf=%lu overflow=%lu (psize=%u)",
+                 (unsigned long)envstat.ms_branch_pages,
+                 (unsigned long)envstat.ms_leaf_pages,
+                 (unsigned long)envstat.ms_overflow_pages,
+                 envstat.ms_psize);
+    }
+    rc = mdbx_txn_begin(metadata_env, NULL, MDBX_RDONLY, &txn);
+    if (rc == 0) {
+      MDBX_gc_info_t gc;
+      memset(&gc, 0, sizeof(gc));
+      rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
+      if ((rc == 0 || rc == MDBX_NOTFOUND) &&
+          (gc.max_reader_lag > 0 || gc.max_retained_pages > 0)) {
         send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                   "M :  Geometry: %lu / %lu MB (current/max)",
-                   (unsigned long)(info.mi_geo.current / (1024 * 1024)),
-                   (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
-        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                   "M :  Readers: %u active",
-                   info.mi_numreaders);
+                   "M :  GC pressure: reader_lag=%lu retained=%lu pages",
+                   (unsigned long)gc.max_reader_lag,
+                   (unsigned long)gc.max_retained_pages);
       }
-
-      rc = mdbx_env_stat_ex(metadata_env, NULL, &envstat, sizeof(envstat));
-      if (rc == MDBX_SUCCESS) {
-        size_t total_pages = (info.mi_last_pgno + 1);
-        size_t data_pages = envstat.ms_branch_pages + envstat.ms_leaf_pages + envstat.ms_overflow_pages;
-        size_t free_pages = total_pages > data_pages ? total_pages - data_pages : 0;
-        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                   "M :  Pages: branch=%lu leaf=%lu overflow=%lu free=%lu",
-                   (unsigned long)envstat.ms_branch_pages,
-                   (unsigned long)envstat.ms_leaf_pages,
-                   (unsigned long)envstat.ms_overflow_pages,
-                   (unsigned long)free_pages);
-      }
-
-      /* Get database stats */
-      rc = mdbx_txn_begin(metadata_env, NULL, MDBX_RDONLY, &txn);
-      if (rc == 0) {
-        rc = mdbx_dbi_stat(txn, metadata_dbi, &stat, sizeof(stat));
-        if (rc == 0) {
-          send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                     "M :  Account metadata DB: %lu entries, depth %u",
-                     (unsigned long)stat.ms_entries, stat.ms_depth);
-        }
-        rc = mdbx_dbi_stat(txn, readmarkers_dbi, &stat, sizeof(stat));
-        if (rc == 0) {
-          send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                     "M :  Read markers DB: %lu entries",
-                     (unsigned long)stat.ms_entries);
-        }
-
-        /* GC (garbage collection) info */
-        {
-          MDBX_gc_info_t gc;
-          memset(&gc, 0, sizeof(gc));
-          rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
-          if (rc == 0 || rc == MDBX_NOTFOUND) {
-            send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                       "M :  GC: total=%lu backed=%lu alloc=%lu gc=%lu reclaimable=%lu",
-                       (unsigned long)gc.pages_total,
-                       (unsigned long)gc.pages_backed,
-                       (unsigned long)gc.pages_allocated,
-                       (unsigned long)gc.pages_gc,
-                       (unsigned long)gc.gc_reclaimable.pages);
-            if (gc.max_reader_lag > 0 || gc.max_retained_pages > 0) {
-              send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                         "M :  GC pressure: reader_lag=%lu retained=%lu pages",
-                         (unsigned long)gc.max_reader_lag,
-                         (unsigned long)gc.max_retained_pages);
-            }
-          }
-        }
-
-        mdbx_txn_abort(txn);
-      }
+      mdbx_txn_abort(txn);
     }
   }
-#else
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "M :  LMDB Backend: Not compiled in");
 #endif
-
-  /* Nefarious is now authoritative for metadata - no X3 dependency */
 }
 
 /** \brief Compact / defragment the metadata database. */
