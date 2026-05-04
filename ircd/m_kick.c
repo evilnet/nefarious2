@@ -101,7 +101,7 @@
 #include <sys/time.h>
 #include <time.h>
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
 /** Store a KICK event in the history database.
  * The message content is formatted as "kicked_nick :reason" per event-playback spec.
  * @param[in] sptr Client that did the kick.
@@ -169,7 +169,7 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
   history_store_message(msgid, timestamp, chptr->chname, sender,
                         account, HISTORY_KICK, kick_text, NULL);
 }
-#endif /* USE_MDBX */
+#endif /* USE_ROCKSDB */
 
 /*
  * m_kick - generic message handler
@@ -298,7 +298,7 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
     /* Store KICK event in history — same msgid as broadcast */
     store_kick_event(sptr, chptr, who, comment,
                      kick_msgid[0] ? kick_msgid : NULL);

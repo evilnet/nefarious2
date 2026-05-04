@@ -18,7 +18,7 @@
  */
 #include "config.h"
 
-#if defined(USE_MDBX) || defined(USE_ROCKSDB)
+#ifdef USE_ROCKSDB
 
 #include "db_cursor.h"
 #include "db_env.h"
@@ -422,4 +422,4 @@ const char *ml_content_paste_lookup(const char *paste_id)
   return msgid_buf;
 }
 
-#endif /* USE_MDBX || USE_ROCKSDB */
+#endif /* USE_ROCKSDB */

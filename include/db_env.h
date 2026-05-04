@@ -142,10 +142,10 @@ extern const char *db_env_last_error(struct db_env *env);
  * These let modules that haven't yet been fully ported to the abstraction
  * reach into the libmdbx backend for advanced features (stats, defrag,
  * GC info) that the abstraction doesn't surface.  They exist only when
- * USE_MDBX is the active backend; once Phase 4 (RocksDB migration)
+ * USE_ROCKSDB is the active backend; once Phase 4 (RocksDB migration)
  * deletes the libmdbx-specific code paths, these helpers retire.
  * -------------------------------------------------------------------- */
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
 struct MDBX_env;
 struct MDBX_txn;
 struct db_writebatch;

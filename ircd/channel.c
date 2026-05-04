@@ -80,7 +80,7 @@ static size_t bans_inuse;
 
 int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
 
 /** Store a channel event (JOIN, PART, etc.) in the history database.
  * If ext_msgid is provided, uses it; otherwise generates a new one.
@@ -150,7 +150,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   history_store_message(use_msgid, timestamp, chptr->chname, sender,
                         account, type, text ? text : "", NULL);
 }
-#endif /* USE_MDBX */
+#endif /* USE_ROCKSDB */
 
 #if !defined(NDEBUG)
 /** return the length (>=0) of a chain of links.
@@ -1082,7 +1082,7 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
                                        "%H %C :SSL-only channel (insecure session)",
                                        member->channel, member->user);
       sendcmdto_set_client_msgid(NULL);
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
       {
         char kick_text[512];
         ircd_snprintf(0, kick_text, sizeof(kick_text), "%s :SSL-only channel (insecure session)",
@@ -2714,7 +2714,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
 
       sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
       /* Store MODE event in history — same msgid as broadcast */
       if (MyUser(mbuf->mb_source)) {
         char mode_text[512];
@@ -5254,7 +5254,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                            (flags & CHFL_BANNED || !jbuf->jb_comment) ?
                            ":%H" : "%H :%s", chan, jbuf->jb_comment);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
       /* Store PART event in history (only from local users to avoid duplicates) */
       if (MyUser(jbuf->jb_source) && !(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
         store_channel_event(jbuf->jb_source, chan,
@@ -5365,7 +5365,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
           sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
       }
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
       /* Store JOIN event in history with the same msgid */
       if (MyUser(jbuf->jb_source))
         store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
@@ -5390,7 +5390,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       else
         sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
       /* Store DELJOINS JOIN event in history */
       if (MyUser(jbuf->jb_source))
         store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
@@ -5558,7 +5558,7 @@ void RevealDelayedJoin(struct Membership *member)
 
   sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
   if (MyUser(member->user))
     store_channel_event(member->user, member->channel, "", HISTORY_JOIN,
                         reveal_msgid[0] ? reveal_msgid : NULL);

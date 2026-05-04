@@ -1106,7 +1106,7 @@ int main(int argc, char **argv) {
   load_tunefile();
   geoip_init();
 
-#if defined(USE_MDBX) || defined(USE_ROCKSDB)
+#ifdef USE_ROCKSDB
   /* Initialize chathistory database (only if storage enabled) */
   if (feature_bool(FEAT_CHATHISTORY_STORE)) {
     /* Set map size from feature before init */

@@ -45,7 +45,7 @@
 #include <sys/time.h>
 #include <time.h>
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
 /** Store a TOPIC event in the history database.
  * @param[in] sptr Client that set the topic.
  * @param[in] chptr Channel where topic was set.
@@ -110,7 +110,7 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   history_store_message(msgid, timestamp, chptr->chname, sender,
                         account, HISTORY_TOPIC, topic ? topic : "", NULL);
 }
-#endif /* USE_MDBX */
+#endif /* USE_ROCKSDB */
 
 /** Set a channel topic or report an error.
  * @param[in] sptr Original topic setter.
@@ -210,7 +210,7 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
 
        sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
        /* Store TOPIC event in history — same msgid as broadcast */
        store_topic_event(sptr, chptr, chptr->topic,
                          topic_msgid[0] ? topic_msgid : NULL);

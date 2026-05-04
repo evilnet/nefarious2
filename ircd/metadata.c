@@ -70,7 +70,7 @@
 static struct MetadataEntry presence_entry;
 static char presence_value[AWAYLEN + 1];
 
-#if defined(USE_MDBX) || defined(USE_ROCKSDB)
+#ifdef USE_ROCKSDB
 #include "db_cursor.h"
 #include "db_env.h"
 #include "db_txn.h"
@@ -890,7 +890,7 @@ int metadata_account_purge_expired(void)
   return purged;
 }
 
-#else /* !defined(USE_MDBX) && !defined(USE_ROCKSDB) — no backend available */
+#else /* !defined(USE_ROCKSDB) — no backend available */
 
 /* Stub implementations when no storage backend is available */
 int metadata_lmdb_init(const char *dbpath) { return -1; }
@@ -910,7 +910,7 @@ int metadata_readmarker_set(const char *account, const char *target, const char 
 int metadata_defrag(unsigned int t) { (void)t; return -1; }
 int metadata_sync(void) { return -1; }
 
-#endif /* USE_MDBX || USE_ROCKSDB */
+#endif /* USE_ROCKSDB */
 
 /** Initialize the metadata subsystem. */
 void metadata_init(void)
@@ -921,7 +921,7 @@ void metadata_init(void)
 /** Shutdown the metadata subsystem. */
 void metadata_shutdown(void)
 {
-#if defined(USE_MDBX) || defined(USE_ROCKSDB)
+#ifdef USE_ROCKSDB
   metadata_lmdb_shutdown();
 #endif
 }

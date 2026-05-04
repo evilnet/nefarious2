@@ -1152,7 +1152,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
 
         sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
         /* Store NICK event in chathistory for each common channel.
          * cli_name(sptr) still has the OLD nick at this point. */
         if (MyUser(sptr) && history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)) {

@@ -16,7 +16,7 @@
 
 #include "config.h"
 
-#if defined(USE_MDBX) || defined(USE_ROCKSDB)  /* abstraction available */
+#ifdef USE_ROCKSDB  /* abstraction available */
 
 #include "db_cursor.h"
 #include "db_env.h"
@@ -582,4 +582,4 @@ int webpush_store_get_vapid_key(unsigned char *privkey, size_t *privkey_len)
 int webpush_store_get_stats(struct webpush_store_stats *stats)
 { (void)stats; return -1; }
 
-#endif /* USE_MDBX || USE_ROCKSDB */
+#endif /* USE_ROCKSDB */

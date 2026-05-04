@@ -22,7 +22,7 @@
 struct Client;
 struct HistoryMessage;
 
-#if defined(USE_MDBX) || defined(USE_ROCKSDB)
+#ifdef USE_ROCKSDB
 
 struct db_env;
 struct db_writebatch;
@@ -106,7 +106,7 @@ static inline char *ml_content_get(const char *msgid, size_t *content_len_out,
                                    const char **sender_out, const char **target_out)
 { (void)msgid; (void)content_len_out; (void)sender_out; (void)target_out; return NULL; }
 
-#endif /* USE_MDBX || USE_ROCKSDB */
+#endif /* USE_ROCKSDB */
 
 /** Multiline reference sentinel: \x1E + "ml" */
 #define ML_CONTENT_SENTINEL "\x1E" "ml"

@@ -123,7 +123,7 @@ static int check_utf8_text(struct Client *sptr, char *text, const char *command)
   return 1;
 }
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
 /** Store a channel message in the history database.
  * Stores the message with the provided msgid and timestamp.
  * @param[in] sptr Client that sent the message.
@@ -349,7 +349,7 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   history_store_message(msgid, timestamp, target, sender,
                         account, type, text, client_tags);
 }
-#endif /* USE_MDBX */
+#endif /* USE_ROCKSDB */
 
 /** Relay a local user's message to a channel.
  * Generates an error if the client cannot send to the channel.
@@ -438,7 +438,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
     char timestamp[32] = "";
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
     if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
@@ -496,7 +496,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
                                   "%H :%s", chptr, mytext);
         sendcmdto_set_client_msgid(NULL);
       } else {
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
         sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, msgid,
                                "%H :%s", chptr, mytext);
 #else
@@ -505,7 +505,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
       }
     }
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
     /* Store message in history database for draft/chathistory.
      * Include client-only tags (+reply, +draft/react) if present. */
     if (msgid[0]) {
@@ -595,7 +595,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
     char timestamp[32] = "";
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
     if (feature_bool(FEAT_MSGID)) {
       struct timeval tv;
       gettimeofday(&tv, NULL);
@@ -647,7 +647,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
                                   "%H :%s", chptr, mytext);
         sendcmdto_set_client_msgid(NULL);
       } else {
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
         sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, msgid,
                                "%H :%s", chptr, mytext);
 #else
@@ -656,7 +656,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
       }
     }
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
     /* Store notice in history database for draft/chathistory.
      * Include client-only tags (+reply, +draft/react) if present. */
     if (msgid[0]) {
@@ -748,7 +748,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
 
     sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
     /* Store server-relayed message in history database.
      * Uses the same msgid that was broadcast to clients above. */
     if (relay_msgid[0]) {
@@ -843,7 +843,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 
     sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
     /* Store server-relayed notice in history database.
      * Uses the same msgid that was broadcast to clients above. */
     if (relay_msgid[0]) {
@@ -1166,7 +1166,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   bounce_echo_pm_to_session(sptr, acptr, CMD_PRIVATE, mytext, pm_msgid);
 
   /* Echo private message back to sender if they have echo-message cap */
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
   {
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
@@ -1371,7 +1371,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   bounce_echo_pm_to_session(sptr, acptr, CMD_NOTICE, mytext, pm_msgid);
 
   /* Echo private notice back to sender if they have echo-message cap */
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
   {
     int need_echo = feature_bool(FEAT_CAP_echo_message) && CapOwnHas(sptr, CAP_ECHOMSG);
 
@@ -1502,7 +1502,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   /* Forward PM to all aliases of the target bouncer primary */
   bounce_forward_pm_to_aliases(from, acptr, CMD_PRIVATE, text, pm_msgid);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
   /* Store server-relayed private message in history database (if enabled) */
   if (pm_msgid[0])
     store_private_history(from, acptr, text, HISTORY_PRIVMSG, pm_msgid, pm_timestamp,
@@ -1627,7 +1627,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   /* Forward notice to all aliases of the target bouncer primary */
   bounce_forward_pm_to_aliases(from, acptr, CMD_NOTICE, text, pm_msgid);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
   /* Store server-relayed private notice in history database (if enabled) */
   if (pm_msgid[0])
     store_private_history(from, acptr, text, HISTORY_NOTICE, pm_msgid, pm_timestamp,

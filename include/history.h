@@ -168,7 +168,7 @@ extern int history_store_multiline(const char *msgid, const char *timestamp,
                                    const char *account, const char *content,
                                    size_t content_len, const char *paste_secret);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
 struct db_env;
 /** Get the history storage environment (for subsystems that share it). */
 extern struct db_env *history_get_env(void);

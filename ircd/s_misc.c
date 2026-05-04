@@ -183,7 +183,7 @@ const char* get_client_name(const struct Client* sptr, int showip)
   return nbuf;
 }
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
 /** Derive a per-channel msgid from a base msgid and channel name.
  * Deterministic: same (base, channel) -> same result on every server.
  * Used for QUIT events where one S2S msgid maps to N channel entries.
@@ -297,7 +297,7 @@ static void store_quit_events(struct Client *sptr, const char *comment,
                           account, HISTORY_QUIT, comment ? comment : "", NULL);
   }
 }
-#endif /* USE_MDBX */
+#endif /* USE_ROCKSDB */
 
 /**
  * Exit one client, local or remote. Assuming for local client that
@@ -392,7 +392,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
       sendcmdto_set_client_msgid(NULL);
 
-#ifdef USE_MDBX
+#ifdef USE_ROCKSDB
       /* Store QUIT events in history before removing from channels */
       store_quit_events(bcptr, comment, quit_msgid[0] ? quit_msgid : NULL);
 #endif
