@@ -20,6 +20,10 @@
 
 #ifdef USE_MDBX
 
+#include "db_cursor.h"
+#include "db_env.h"
+#include "db_txn.h"
+#include "db_types.h"
 #include "ml_content.h"
 #include "history.h"
 #include "ircd_alloc.h"
@@ -35,13 +39,15 @@
 #include <zstd.h>
 #endif
 
-/** MDBX environment (shared with history) */
+/** Storage environment (shared with history; not owned by us). */
+static struct db_env *ml_db_env = NULL;
+static struct db_cf  *ml_content_cf = NULL;
+static struct db_cf  *ml_paste_secrets_cf = NULL;
+
+/** Legacy raw mdbx handles unwrapped from the abstraction.  Same
+ * underlying state; will retire as function bodies convert. */
 static MDBX_env *ml_env = NULL;
-
-/** DBI handle for multiline content */
 static MDBX_dbi ml_content_dbi;
-
-/** DBI handle for paste secret -> msgid index */
 static MDBX_dbi ml_paste_secrets_dbi;
 
 /** Whether the module is initialized */
@@ -50,42 +56,51 @@ static int ml_available = 0;
 /** Stack buffer for serialized values (sender\0target\0content) */
 #define ML_VALUE_BUFSIZE 1024
 
-int ml_content_init(MDBX_env *env, MDBX_txn *txn)
+int ml_content_init(struct db_env *env)
 {
+  struct db_cf_opts cf_opts;
   int rc;
 
   if (ml_available)
     return 0;
+  if (!env)
+    return -1;
 
-  rc = mdbx_dbi_open(txn, "ml_content", MDBX_CREATE, &ml_content_dbi);
-  if (rc != 0) {
+  memset(&cf_opts, 0, sizeof cf_opts);
+  rc = db_cf_open(env, "ml_content", &cf_opts, &ml_content_cf);
+  if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "ml_content: mdbx_dbi_open(ml_content) failed: %s",
-              mdbx_strerror(rc));
+              "ml_content: db_cf_open(ml_content) failed: %s", db_strerror(rc));
+    return -1;
+  }
+  rc = db_cf_open(env, "ml_paste_secrets", &cf_opts, &ml_paste_secrets_cf);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "ml_content: db_cf_open(ml_paste_secrets) failed: %s", db_strerror(rc));
+    db_cf_close(env, ml_content_cf);
+    ml_content_cf = NULL;
     return -1;
   }
 
-  rc = mdbx_dbi_open(txn, "ml_paste_secrets", MDBX_CREATE, &ml_paste_secrets_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "ml_content: mdbx_dbi_open(ml_paste_secrets) failed: %s",
-              mdbx_strerror(rc));
-    return -1;
-  }
-
-  ml_env = env;
+  ml_db_env             = env;
+  ml_env                = db_mdbx_unwrap_env(env);
+  ml_content_dbi        = db_mdbx_unwrap_dbi(ml_content_cf);
+  ml_paste_secrets_dbi  = db_mdbx_unwrap_dbi(ml_paste_secrets_cf);
   ml_available = 1;
   log_write(LS_SYSTEM, L_INFO, 0, "ml_content: initialized");
   return 0;
 }
 
-void ml_content_shutdown(MDBX_env *env)
+void ml_content_shutdown(struct db_env *env)
 {
   if (!ml_available)
     return;
 
-  mdbx_dbi_close(env, ml_content_dbi);
-  mdbx_dbi_close(env, ml_paste_secrets_dbi);
+  db_cf_close(env, ml_content_cf);
+  db_cf_close(env, ml_paste_secrets_cf);
+  ml_content_cf = NULL;
+  ml_paste_secrets_cf = NULL;
+  ml_db_env = NULL;
   ml_env = NULL;
   ml_available = 0;
 }

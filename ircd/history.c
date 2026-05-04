@@ -33,6 +33,10 @@
 
 #ifdef USE_MDBX
 
+#include "db_cursor.h"
+#include "db_env.h"
+#include "db_txn.h"
+#include "db_types.h"
 #include "history.h"
 #include "ml_content.h"
 #include "ircd_alloc.h"
@@ -60,28 +64,25 @@
 static int quota_increment(const char *channel, const char *account);
 static int quota_decrement(const char *channel, const char *account);
 
-/** LMDB environment */
+/** Storage environment opened through the db_* abstraction.  Owns the
+ * underlying MDBX env / CF handles; closed via db_env_close. */
+static struct db_env *history_db_env = NULL;
+static struct db_cf  *history_cf_messages = NULL;
+static struct db_cf  *history_cf_msgid = NULL;
+static struct db_cf  *history_cf_targets = NULL;
+static struct db_cf  *history_cf_quotas = NULL;
+static struct db_cf  *history_cf_reply = NULL;  /* DUPSORT */
+
+/** Raw MDBX handles unwrapped from the abstraction.  Same underlying
+ * env/dbi as the db_* statics above; exist because the function
+ * bodies in this file haven't been fully converted off raw mdbx yet
+ * (Phase 0g is incremental).  Phase 5 RocksDB migration completes
+ * the conversion and deletes them. */
 static MDBX_env *history_env = NULL;
-
-/** Main message database */
 static MDBX_dbi history_dbi;
-
-/** Secondary index: msgid -> timestamp (for msgid lookups) */
 static MDBX_dbi history_msgid_dbi;
-
-/** Target tracking database for TARGETS query */
 static MDBX_dbi history_targets_dbi;
-
-/** Per-user quota counter database
- * Key: "channel\0account" -> count (uint32_t)
- */
 static MDBX_dbi history_quota_dbi;
-
-/** Reply/context index database (DUPSORT)
- * Key: "target\0parent_msgid"
- * Value: "timestamp\0child_msgid"
- * Used to find reactions/redacts that reference a given message.
- */
 static MDBX_dbi history_reply_dbi;
 
 /** Flag indicating if history is available */
@@ -625,167 +626,79 @@ int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
 
 int history_init(const char *dbpath)
 {
-  MDBX_txn *txn;
+  struct db_env_opts env_opts;
+  struct db_cf_opts  cf_opts;
   int rc;
 
   if (history_available)
     return 0; /* Already initialized */
 
-  /* Create LMDB environment */
-  rc = mdbx_env_create(&history_env);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_create failed: %s",
-              mdbx_strerror(rc));
-    return -1;
-  }
-
-  /* Set maximum number of databases */
-  rc = mdbx_env_set_maxdbs(history_env, HISTORY_MAX_DBS);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_set_maxdbs failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
-  /* Set database geometry (configurable, default 1GB upper limit) */
+  memset(&env_opts, 0, sizeof env_opts);
   if (feature_bool(FEAT_CHATHISTORY_DB_AUTOGROW)) {
-    intptr_t growth_step = feature_int(FEAT_CHATHISTORY_DB_GROWTH_STEP);
-    rc = mdbx_env_set_geometry(history_env, -1, -1, history_map_size,
-                               growth_step, growth_step, -1);
+    env_opts.size_floor = 0;
+    env_opts.size_max   = history_map_size;
   } else {
-    rc = mdbx_env_set_geometry(history_env, history_map_size, history_map_size,
-                               history_map_size, 0, 0, -1);
+    env_opts.size_floor = history_map_size;
+    env_opts.size_max   = history_map_size;
   }
-  if (rc != MDBX_SUCCESS) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_set_geometry failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
-  /* Open environment */
-  {
-    unsigned int env_flags = 0;
-    if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
-      env_flags |= MDBX_SAFE_NOSYNC;
-      log_write(LS_SYSTEM, L_INFO, 0, "history: using MDBX_SAFE_NOSYNC with %d second sync interval",
-                feature_int(FEAT_CHATHISTORY_DB_SYNC_INTERVAL));
-    }
-    rc = mdbx_env_open(history_env, dbpath, env_flags, 0644);
-  }
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_env_open(%s) failed: %s",
-              dbpath, mdbx_strerror(rc));
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
-  /* Configure built-in periodic sync when NOSYNC is enabled */
   if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
-    int sync_interval = feature_int(FEAT_CHATHISTORY_DB_SYNC_INTERVAL);
-    if (sync_interval > 0) {
-      /* MDBX_opt_sync_period uses 16.16 fixed-point seconds */
-      rc = mdbx_env_set_option(history_env, MDBX_opt_sync_period,
-                               (uint64_t)sync_interval * 65536);
-      if (rc != MDBX_SUCCESS)
-        log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_env_set_option(sync_period) failed: %s",
-                  mdbx_strerror(rc));
-    }
+    env_opts.sync_period_seconds = (unsigned int)feature_int(FEAT_CHATHISTORY_DB_SYNC_INTERVAL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history: using MDBX_SAFE_NOSYNC with %u second sync interval",
+              env_opts.sync_period_seconds);
   }
 
-  /* Open databases in a transaction */
-  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_txn_begin failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(history_env);
-    history_env = NULL;
+  rc = db_env_open(dbpath, &env_opts, HISTORY_MAX_DBS, &history_db_env);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: db_env_open(%s) failed: %s",
+              dbpath, db_strerror(rc));
     return -1;
   }
 
-  /* Open main message database */
-  rc = mdbx_dbi_open(txn, "messages", MDBX_CREATE, &history_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(messages) failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(history_env);
-    history_env = NULL;
+  /* Open the column families.  reply_index uses dupsort. */
+  memset(&cf_opts, 0, sizeof cf_opts);
+  if (db_cf_open(history_db_env, "messages", &cf_opts, &history_cf_messages) != DB_OK
+      || db_cf_open(history_db_env, "msgid_index", &cf_opts, &history_cf_msgid) != DB_OK
+      || db_cf_open(history_db_env, "targets", &cf_opts, &history_cf_targets) != DB_OK
+      || db_cf_open(history_db_env, "quotas", &cf_opts, &history_cf_quotas) != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: db_cf_open failed: %s",
+              db_env_last_error(history_db_env));
+    db_env_close(history_db_env);
+    history_db_env = NULL;
+    return -1;
+  }
+  cf_opts.dupsort = 1;
+  if (db_cf_open(history_db_env, "reply_index", &cf_opts, &history_cf_reply) != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history: db_cf_open(reply_index): %s",
+              db_env_last_error(history_db_env));
+    db_env_close(history_db_env);
+    history_db_env = NULL;
     return -1;
   }
 
-  /* Open msgid index database */
-  rc = mdbx_dbi_open(txn, "msgid_index", MDBX_CREATE, &history_msgid_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(msgid_index) failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
+  /* Populate the legacy raw-mdbx handles so the function bodies that
+   * still use raw mdbx in this file (queries, store, eviction) keep
+   * working against the same underlying env/dbis.  Will be retired
+   * as the function bodies are converted in follow-up commits. */
+  history_env         = db_mdbx_unwrap_env(history_db_env);
+  history_dbi         = db_mdbx_unwrap_dbi(history_cf_messages);
+  history_msgid_dbi   = db_mdbx_unwrap_dbi(history_cf_msgid);
+  history_targets_dbi = db_mdbx_unwrap_dbi(history_cf_targets);
+  history_quota_dbi   = db_mdbx_unwrap_dbi(history_cf_quotas);
+  history_reply_dbi   = db_mdbx_unwrap_dbi(history_cf_reply);
 
-  /* Open targets database */
-  rc = mdbx_dbi_open(txn, "targets", MDBX_CREATE, &history_targets_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(targets) failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
-  /* Open per-user quota counter database */
-  rc = mdbx_dbi_open(txn, "quotas", MDBX_CREATE, &history_quota_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(quotas) failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
-  /* Open reply/context index database (DUPSORT: one parent can have multiple children) */
-  rc = mdbx_dbi_open(txn, "reply_index", MDBX_CREATE | MDBX_DUPSORT, &history_reply_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_dbi_open(reply_index) failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
-  /* Open multiline content databases (ml_content + ml_paste_secrets) */
-  if (ml_content_init(history_env, txn) != 0) {
+  /* Open multiline content databases (shares this env) */
+  if (ml_content_init(history_db_env) != 0) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "history: ml_content_init failed, multiline content store unavailable");
     /* Non-fatal — history still works, just without separate multiline storage */
   }
 
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: mdbx_txn_commit failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(history_env);
-    history_env = NULL;
-    return -1;
-  }
-
   history_available = 1;
-  log_write(LS_SYSTEM, L_INFO, 0, "history: LMDB initialized at %s", dbpath);
+  log_write(LS_SYSTEM, L_INFO, 0, "history: storage initialized at %s", dbpath);
 
   /* Pre-fault database pages into OS page cache for faster initial queries */
-  rc = mdbx_env_warmup(history_env, NULL, MDBX_warmup_default, 0);
-  if (rc != MDBX_SUCCESS && rc != MDBX_RESULT_TRUE)
-    log_write(LS_SYSTEM, L_WARNING, 0, "history: mdbx_env_warmup failed: %s",
-              mdbx_strerror(rc));
+  db_env_warmup(history_db_env);
 
   return 0;
 }
@@ -798,20 +711,26 @@ void history_shutdown(void)
   /* Force sync before shutdown if NOSYNC mode was used */
   if (feature_bool(FEAT_CHATHISTORY_DB_NOSYNC)) {
     log_write(LS_SYSTEM, L_INFO, 0, "history: final sync before shutdown");
-    mdbx_env_sync_ex(history_env, true, false);
+    db_env_sync(history_db_env);
   }
 
-  ml_content_shutdown(history_env);
-  mdbx_dbi_close(history_env, history_dbi);
-  mdbx_dbi_close(history_env, history_msgid_dbi);
-  mdbx_dbi_close(history_env, history_targets_dbi);
-  mdbx_dbi_close(history_env, history_quota_dbi);
-  mdbx_dbi_close(history_env, history_reply_dbi);
-  mdbx_env_close(history_env);
-  history_env = NULL;
+  ml_content_shutdown(history_db_env);
+  db_cf_close(history_db_env, history_cf_messages);
+  db_cf_close(history_db_env, history_cf_msgid);
+  db_cf_close(history_db_env, history_cf_targets);
+  db_cf_close(history_db_env, history_cf_quotas);
+  db_cf_close(history_db_env, history_cf_reply);
+  db_env_close(history_db_env);
+  history_db_env = NULL;
+  history_cf_messages = NULL;
+  history_cf_msgid = NULL;
+  history_cf_targets = NULL;
+  history_cf_quotas = NULL;
+  history_cf_reply = NULL;
+  history_env = NULL;  /* legacy raw handle, owned by db_env */
   history_available = 0;
 
-  log_write(LS_SYSTEM, L_INFO, 0, "history: LMDB shutdown complete");
+  log_write(LS_SYSTEM, L_INFO, 0, "history: storage shutdown complete");
 }
 
 MDBX_env *history_get_env(void)

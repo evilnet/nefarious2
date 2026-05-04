@@ -25,22 +25,24 @@ struct HistoryMessage;
 #ifdef USE_MDBX
 #include <mdbx.h>
 
-/** Initialize ml_content databases within an existing MDBX environment.
- * Opens (or creates) the ml_content and ml_paste_secrets named databases.
- * @param[in] env  The MDBX environment (history's env).
- * @param[in] txn  An open write transaction for DBI creation.
+struct db_env;
+
+/** Initialize ml_content column families within history's storage env.
+ * Opens (or creates) the ml_content and ml_paste_secrets CFs.
+ * @param[in] env  The storage environment (history's db_env*).
  * @return 0 on success, -1 on error.
  */
-extern int ml_content_init(MDBX_env *env, MDBX_txn *txn);
+extern int ml_content_init(struct db_env *env);
 
-/** Shutdown ml_content databases.
- * Closes DBI handles. Called before mdbx_env_close().
- * @param[in] env  The MDBX environment.
+/** Shutdown ml_content column families.  Called before db_env_close.
+ * @param[in] env  The storage environment.
  */
-extern void ml_content_shutdown(MDBX_env *env);
+extern void ml_content_shutdown(struct db_env *env);
 
 /** Store multiline content and optional paste secret.
  * Called within an open write transaction for atomic history+content writes.
+ * Boundary commit keeps the raw MDBX_txn argument; later commits will
+ * convert this to db_writebatch.
  * @param[in] txn          Open write transaction.
  * @param[in] msgid        Base message ID.
  * @param[in] sender       Sender nick!user@host mask.
