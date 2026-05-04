@@ -448,80 +448,10 @@ static void reply_index_put(MDBX_txn *txn, const char *target,
   mdbx_put(txn, history_reply_dbi, &key, &val, 0);
 }
 
-/** Remove all reply index entries where child_msgid is the child.
- * Called during retention purge when a message is deleted.
- * @param[in] txn Active write transaction.
- * @param[in] target Channel or nick.
- * @param[in] child_msgid Msgid of the message being deleted.
- * @param[in] client_tags Client tags of the message (to find +reply=).
- * @param[in] type Message type.
- * @param[in] content Message content (for REDACT target extraction).
- */
-static void reply_index_del_child(MDBX_txn *txn, const char *target,
-                                  const char *child_msgid,
-                                  const char *client_tags,
-                                  enum HistoryMessageType type,
-                                  const char *content)
-{
-  char parent_mid[HISTORY_MSGID_LEN];
-  const char *parent = NULL;
-
-  /* Find the parent msgid this child references */
-  if (client_tags && client_tags[0])
-    parent = extract_reply_tag(client_tags, parent_mid, sizeof(parent_mid));
-
-  if (!parent && type == HISTORY_REDACT && content && content[0]) {
-    /* REDACT content starts with target_msgid */
-    const char *space = strchr(content, ' ');
-    size_t len = space ? (size_t)(space - content) : strlen(content);
-    if (len > 0 && len < sizeof(parent_mid)) {
-      memcpy(parent_mid, content, len);
-      parent_mid[len] = '\0';
-      parent = parent_mid;
-    }
-  }
-
-  if (parent) {
-    /* Build key: target\0parent_msgid, scan dup values for matching child_msgid */
-    char keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-    MDBX_val key, val;
-    MDBX_cursor *cursor;
-    int kpos = 0, rc;
-    size_t len;
-
-    len = strlen(target);
-    if (kpos + len + 1 >= sizeof(keybuf)) return;
-    memcpy(keybuf + kpos, target, len);
-    kpos += len;
-    keybuf[kpos++] = KEY_SEP;
-    len = strlen(parent);
-    if (kpos + len >= sizeof(keybuf)) return;
-    memcpy(keybuf + kpos, parent, len);
-    kpos += len;
-
-    key.iov_base = keybuf;
-    key.iov_len = kpos;
-
-    rc = mdbx_cursor_open(txn, history_reply_dbi, &cursor);
-    if (rc != 0) return;
-
-    rc = mdbx_cursor_get(cursor, &key, &val, MDBX_SET_KEY);
-    while (rc == 0) {
-      /* Value is timestamp\0child_msgid — check if child matches */
-      const char *sep = memchr(val.iov_base, KEY_SEP, val.iov_len);
-      if (sep) {
-        sep++;
-        size_t cmid_len = (char *)val.iov_base + val.iov_len - sep;
-        if (cmid_len == strlen(child_msgid) && memcmp(sep, child_msgid, cmid_len) == 0) {
-          mdbx_cursor_del(cursor, 0);
-          break;
-        }
-      }
-      rc = mdbx_cursor_get(cursor, &key, &val, MDBX_NEXT_DUP);
-    }
-    mdbx_cursor_close(cursor);
-  }
-}
+/* reply_index_del_child was an orphan-cleanup helper for retention purge,
+ * never wired up — the actual purge / delete paths just delete the
+ * parent-side entries directly (orphan child→parent links are harmless
+ * and clean themselves when the child row goes away).  Removed. */
 
 /*
  * Timestamp Conversion Functions
@@ -2061,9 +1991,7 @@ int history_purge_old(unsigned long max_age_seconds)
  */
 static int history_cleanup_empty_targets(void)
 {
-  MDBX_txn *txn;
-  MDBX_cursor *cursor;
-  MDBX_val key, val;
+  struct db_iter *it;
   char target[CHANNELLEN + 1];
   char *channels_to_remove[256];  /* Buffer for channel names to remove */
   int remove_count = 0;
@@ -2073,102 +2001,71 @@ static int history_cleanup_empty_targets(void)
   if (!history_available)
     return -1;
 
-  /* First pass: collect channels that have no more messages (read-only) */
-  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-  if (rc != 0)
+  /* First pass: collect channel names from targets CF.  We avoid the
+   * dance of "abort txn, check messages, reopen at next key" that the
+   * old libmdbx version did: under the abstraction the iter is on its
+   * own implicit snapshot, and history_channel_has_messages opens its
+   * own iter — they don't conflict, so we can keep this iter open
+   * across the inner check.  We still want to copy the target name out
+   * before stepping (the iter borrow is invalidated by db_iter_next). */
+  it = db_iter_open(history_db_env, history_db_cf_targets, NULL);
+  if (!it)
     return -1;
 
-  rc = mdbx_cursor_open(txn, history_targets_dbi, &cursor);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
-    return -1;
-  }
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it) && remove_count < 256;
+       rc = db_iter_next(it)) {
+    size_t klen;
+    const void *kbase = db_iter_key(it, &klen);
 
-  rc = mdbx_cursor_get(cursor, &key, &val, MDBX_FIRST);
-  while (rc == 0 && remove_count < 256) {
-    if (key.iov_len > 0 && key.iov_len <= CHANNELLEN) {
-      memcpy(target, key.iov_base, key.iov_len);
-      target[key.iov_len] = '\0';
+    if (klen == 0 || klen > CHANNELLEN)
+      continue;
+    memcpy(target, kbase, klen);
+    target[klen] = '\0';
 
-      /* Only process channels (start with # or &) */
-      if (target[0] == '#' || target[0] == '&') {
-        /* Check if this channel still has messages */
-        /* Need to abort current txn and check in a new one */
-        mdbx_cursor_close(cursor);
-        mdbx_txn_abort(txn);
+    /* Only process channels (start with # or &) */
+    if (target[0] != '#' && target[0] != '&')
+      continue;
 
-        if (history_channel_has_messages(target) == 0) {
-          /* No messages - add to removal list */
-          channels_to_remove[remove_count] = MyMalloc(strlen(target) + 1);
-          if (channels_to_remove[remove_count]) {
-            strcpy(channels_to_remove[remove_count], target);
-            remove_count++;
-          }
-        }
-
-        /* Re-open transaction and cursor to continue */
-        rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-        if (rc != 0)
-          goto cleanup_list;
-
-        rc = mdbx_cursor_open(txn, history_targets_dbi, &cursor);
-        if (rc != 0) {
-          mdbx_txn_abort(txn);
-          goto cleanup_list;
-        }
-
-        /* Position cursor after current key */
-        key.iov_len = strlen(target);
-        key.iov_base = target;
-        rc = mdbx_cursor_get(cursor, &key, &val, MDBX_SET_RANGE);
-        if (rc == 0) {
-          /* Skip if we landed on same key */
-          if (key.iov_len == strlen(target) &&
-              memcmp(key.iov_base, target, key.iov_len) == 0) {
-            rc = mdbx_cursor_get(cursor, &key, &val, MDBX_NEXT);
-          }
-        }
-        continue;
+    if (history_channel_has_messages(target) == 0) {
+      channels_to_remove[remove_count] = MyMalloc(strlen(target) + 1);
+      if (channels_to_remove[remove_count]) {
+        strcpy(channels_to_remove[remove_count], target);
+        remove_count++;
       }
     }
-    rc = mdbx_cursor_get(cursor, &key, &val, MDBX_NEXT);
   }
 
-  mdbx_cursor_close(cursor);
-  mdbx_txn_abort(txn);
+  db_iter_close(it);
 
-cleanup_list:
-  /* Second pass: remove collected targets and call callback */
+  /* Second pass: remove collected targets atomically and call callback */
   if (remove_count > 0) {
-    rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-    if (rc == 0) {
+    struct db_writebatch *wb = db_writebatch_new(history_db_env);
+    if (wb) {
       for (i = 0; i < remove_count; i++) {
-        key.iov_len = strlen(channels_to_remove[i]);
-        key.iov_base = channels_to_remove[i];
-        rc = mdbx_del(txn, history_targets_dbi, &key, NULL);
-        if (rc == 0) {
+        if (db_writebatch_del(wb, history_db_cf_targets,
+                              channels_to_remove[i],
+                              strlen(channels_to_remove[i])) == DB_OK) {
           removed++;
           Debug((DEBUG_DEBUG, "history: removed empty target %s", channels_to_remove[i]));
         }
       }
-      mdbx_txn_commit(txn);
+      db_writebatch_commit(wb, /*sync=*/0);
+      db_writebatch_destroy(wb);
     }
 
     /* Call callback with all removed channels at once (after DB commit) */
-    if (channel_removed_callback && remove_count > 0) {
+    if (channel_removed_callback && remove_count > 0)
       channel_removed_callback((const char **)channels_to_remove, remove_count);
-    }
   }
 
   /* Free allocated channel names */
-  for (i = 0; i < remove_count; i++) {
+  for (i = 0; i < remove_count; i++)
     MyFree(channels_to_remove[i]);
-  }
 
-  if (removed > 0) {
+  if (removed > 0)
     log_write(LS_SYSTEM, L_INFO, 0,
               "history: cleaned up %d empty channel targets", removed);
-  }
 
   return removed;
 }
@@ -2728,9 +2625,8 @@ static time_t last_maintenance_time = 0;
  */
 static int history_emergency_evict(void)
 {
-  MDBX_txn *txn;
-  MDBX_cursor *cursor;
-  MDBX_val key, data;
+  struct db_iter *it;
+  struct db_writebatch *wb;
   char msg_target[CHANNELLEN + 1];
   char msg_timestamp[HISTORY_TIMESTAMP_LEN];
   char msg_msgid[HISTORY_MSGID_LEN];
@@ -2750,39 +2646,50 @@ static int history_emergency_evict(void)
     return -1;
 
   log_write(LS_SYSTEM, L_WARNING, 0,
-            "history: emergency eviction triggered (MDBX_MAP_FULL)");
+            "history: emergency eviction triggered (MAP_FULL)");
 
-  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0) {
+  wb = db_writebatch_new(history_db_env);
+  if (!wb) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "history: emergency eviction txn_begin failed: %s",
-              mdbx_strerror(rc));
+              "history: emergency eviction writebatch_new failed");
     return -1;
   }
 
-  rc = mdbx_cursor_open(txn, history_dbi, &cursor);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
+  it = db_iter_open(history_db_env, history_db_cf_messages, NULL);
+  if (!it) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history: emergency eviction iter_open failed");
+    db_writebatch_destroy(wb);
     return -1;
   }
 
-  /* Evict oldest entries */
-  rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
-  while (rc == 0 && evicted < EMERGENCY_EVICT_BATCH) {
+  /* Evict oldest entries — collect-then-batch-delete pattern. */
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it) && evicted < EMERGENCY_EVICT_BATCH;
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbase = db_iter_key(it, &klen);
+    const void *vbase = db_iter_value(it, &vlen);
+
     /* Parse key to get target and msgid for index cleanup */
-    if (parse_key(key.iov_base, key.iov_len,
+    if (parse_key((void *)kbase, klen,
                   msg_target, msg_timestamp, msg_msgid) == 0) {
       if (msg_msgid[0] != '\0') {
-        MDBX_val msgid_key;
-        msgid_key.iov_len = strlen(msg_msgid);
-        msgid_key.iov_base = msg_msgid;
-        mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
-        ml_content_delete(txn, msg_msgid);
+        db_writebatch_del(wb, history_db_cf_msgid,
+                          msg_msgid, strlen(msg_msgid));
+
+        /* ml_content still uses raw mdbx; borrow the wb's underlying txn. */
+#ifdef USE_MDBX
+        {
+          MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
+          if (raw_txn)
+            ml_content_delete(raw_txn, msg_msgid);
+        }
+#endif
 
         /* Clean reply index entries where this msgid is the parent */
         {
           char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-          MDBX_val ri_key;
           int ri_kpos = 0;
           size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
           if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
@@ -2791,9 +2698,7 @@ static int history_emergency_evict(void)
             ri_keybuf[ri_kpos++] = KEY_SEP;
             memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
             ri_kpos += mlen;
-            ri_key.iov_base = ri_keybuf;
-            ri_key.iov_len = ri_kpos;
-            mdbx_del(txn, history_reply_dbi, &ri_key, NULL);
+            db_writebatch_del(wb, history_db_cf_reply, ri_keybuf, ri_kpos);
           }
         }
       }
@@ -2802,7 +2707,7 @@ static int history_emergency_evict(void)
     /* Collect account info for quota decrement after commit */
     if (quota_enabled && msg_target[0] != '\0' &&
         quota_update_count < EMERGENCY_EVICT_BATCH) {
-      if (deserialize_message(data.iov_base, data.iov_len, &msg) == 0 &&
+      if (deserialize_message((void *)vbase, vlen, &msg) == 0 &&
           msg.account[0] != '\0') {
         ircd_strncpy(quota_updates[quota_update_count].target, msg_target,
                      CHANNELLEN);
@@ -2812,25 +2717,24 @@ static int history_emergency_evict(void)
       }
     }
 
-    rc = mdbx_cursor_del(cursor, 0);
-    if (rc != 0)
-      break;
-
+    /* Stage delete of the message itself.  Iterator pointers are
+     * transient — writebatch copies the key, so this is safe. */
+    db_writebatch_del(wb, history_db_cf_messages, kbase, klen);
     evicted++;
-    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
   }
 
-  mdbx_cursor_close(cursor);
+  db_iter_close(it);
 
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0) {
+  rc = db_writebatch_commit(wb, /*sync=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "history: emergency eviction commit failed: %s",
-              mdbx_strerror(rc));
+              db_strerror(rc));
     return -1;
   }
 
-  /* Decrement quotas for evicted messages (now that main txn is committed) */
+  /* Decrement quotas for evicted messages (now that main commit landed) */
   for (int i = 0; i < quota_update_count; i++) {
     quota_decrement(quota_updates[i].target, quota_updates[i].account);
   }
@@ -2905,9 +2809,6 @@ enum HistoryStorageState history_storage_state(void)
 
 int history_evict_to_target(int target_percent)
 {
-  MDBX_txn *txn;
-  MDBX_cursor *cursor;
-  MDBX_val key, data;
   char msg_target[CHANNELLEN + 1];
   char msg_timestamp[HISTORY_TIMESTAMP_LEN];
   char msg_msgid[HISTORY_MSGID_LEN];
@@ -2916,7 +2817,7 @@ int history_evict_to_target(int target_percent)
   int current_util;
   int rc;
   int batch_count = 0;
-  int max_batch = 1000;  /* Limit per transaction */
+  int max_batch = 1000;  /* Limit per writebatch */
   int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
 
   /* Collect accounts to decrement quotas after commit (avoid nested txns) */
@@ -2947,39 +2848,49 @@ int history_evict_to_target(int target_percent)
     quota_updates = MyMalloc(quota_update_capacity * sizeof(*quota_updates));
   }
 
-  /* Evict oldest messages until we reach target */
+  /* Evict oldest messages in batches until we reach target. */
   while (current_util > target_percent) {
-    rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-    if (rc != 0)
+    struct db_iter *it;
+    struct db_writebatch *wb;
+
+    wb = db_writebatch_new(history_db_env);
+    if (!wb)
       break;
 
-    rc = mdbx_cursor_open(txn, history_dbi, &cursor);
-    if (rc != 0) {
-      mdbx_txn_abort(txn);
+    it = db_iter_open(history_db_env, history_db_cf_messages, NULL);
+    if (!it) {
+      db_writebatch_destroy(wb);
       break;
     }
 
     batch_count = 0;
     quota_update_count = 0;
 
-    /* Iterate from beginning (oldest entries) */
-    rc = mdbx_cursor_get(cursor, &key, &data, MDBX_FIRST);
-    while (rc == 0 && batch_count < max_batch) {
+    for (rc = db_iter_seek_first(it);
+         rc == DB_OK && db_iter_valid(it) && batch_count < max_batch;
+         rc = db_iter_next(it)) {
+      size_t klen, vlen;
+      const void *kbase = db_iter_key(it, &klen);
+      const void *vbase = db_iter_value(it, &vlen);
+
       /* Parse key to get msgid for index cleanup */
-      if (parse_key(key.iov_base, key.iov_len,
+      if (parse_key((void *)kbase, klen,
                     msg_target, msg_timestamp, msg_msgid) == 0) {
-        /* Delete from msgid index and ml_content if present */
         if (msg_msgid[0] != '\0') {
-          MDBX_val msgid_key;
-          msgid_key.iov_len = strlen(msg_msgid);
-          msgid_key.iov_base = msg_msgid;
-          mdbx_del(txn, history_msgid_dbi, &msgid_key, NULL);
-          ml_content_delete(txn, msg_msgid);
+          db_writebatch_del(wb, history_db_cf_msgid,
+                            msg_msgid, strlen(msg_msgid));
+
+#ifdef USE_MDBX
+          {
+            MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
+            if (raw_txn)
+              ml_content_delete(raw_txn, msg_msgid);
+          }
+#endif
 
           /* Clean reply index entries where this msgid is the parent */
           {
             char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-            MDBX_val ri_key;
             int ri_kpos = 0;
             size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
             if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
@@ -2988,9 +2899,7 @@ int history_evict_to_target(int target_percent)
               ri_keybuf[ri_kpos++] = KEY_SEP;
               memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
               ri_kpos += mlen;
-              ri_key.iov_base = ri_keybuf;
-              ri_key.iov_len = ri_kpos;
-              mdbx_del(txn, history_reply_dbi, &ri_key, NULL);
+              db_writebatch_del(wb, history_db_cf_reply, ri_keybuf, ri_kpos);
             }
           }
         }
@@ -2999,7 +2908,7 @@ int history_evict_to_target(int target_percent)
       /* Collect account info for quota decrement after commit */
       if (quota_enabled && quota_updates && msg_target[0] != '\0' &&
           quota_update_count < quota_update_capacity) {
-        if (deserialize_message(data.iov_base, data.iov_len, &msg) == 0 &&
+        if (deserialize_message((void *)vbase, vlen, &msg) == 0 &&
             msg.account[0] != '\0') {
           ircd_strncpy(quota_updates[quota_update_count].target, msg_target,
                        CHANNELLEN);
@@ -3009,26 +2918,19 @@ int history_evict_to_target(int target_percent)
         }
       }
 
-      /* Delete from main database */
-      rc = mdbx_cursor_del(cursor, 0);
-      if (rc != 0)
-        break;
-
+      /* Stage delete of the message itself */
+      db_writebatch_del(wb, history_db_cf_messages, kbase, klen);
       evicted++;
       batch_count++;
-
-      /* Move to next */
-      rc = mdbx_cursor_get(cursor, &key, &data, MDBX_GET_CURRENT);
-      if (rc == MDBX_NOTFOUND)
-        rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT);
     }
 
-    mdbx_cursor_close(cursor);
+    db_iter_close(it);
 
-    rc = mdbx_txn_commit(txn);
-    if (rc != 0) {
+    rc = db_writebatch_commit(wb, /*sync=*/0);
+    db_writebatch_destroy(wb);
+    if (rc != DB_OK) {
       log_write(LS_SYSTEM, L_ERROR, 0,
-                "history: eviction commit failed: %s", mdbx_strerror(rc));
+                "history: eviction commit failed: %s", db_strerror(rc));
       break;
     }
 
@@ -3529,8 +3431,8 @@ history_report_mdbx_info(struct Client *to)
  */
 static int quota_increment(const char *channel, const char *account)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_writebatch *wb;
+  struct db_val val = { NULL, 0 };
   char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
   uint32_t count = 0;
@@ -3546,34 +3448,30 @@ static int quota_increment(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.iov_base = keybuf;
-  key.iov_len = keylen;
-
   /* Get current count */
-  rc = mdbx_get(txn, history_quota_dbi, &key, &data);
-  if (rc == 0 && data.iov_len == sizeof(uint32_t)) {
-    memcpy(&count, data.iov_base, sizeof(uint32_t));
-  }
+  rc = db_get(history_db_env, history_db_cf_quotas,
+              keybuf, keylen, /*snap=*/NULL, &val);
+  if (rc == DB_OK && val.len == sizeof(uint32_t))
+    memcpy(&count, val.base, sizeof(uint32_t));
+  if (rc == DB_OK)
+    db_val_free(&val);
 
   /* Increment */
   count++;
 
-  /* Store new count */
-  data.iov_base = &count;
-  data.iov_len = sizeof(uint32_t);
-
-  rc = mdbx_put(txn, history_quota_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
+  /* Store new count atomically */
+  wb = db_writebatch_new(history_db_env);
+  if (!wb)
+    return -1;
+  rc = db_writebatch_put(wb, history_db_cf_quotas,
+                         keybuf, keylen, &count, sizeof(count));
+  if (rc != DB_OK) {
+    db_writebatch_destroy(wb);
     return -1;
   }
-
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0)
+  rc = db_writebatch_commit(wb, /*sync=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK)
     return -1;
 
   return (int)count;
@@ -3586,8 +3484,7 @@ static int quota_increment(const char *channel, const char *account)
  */
 static int quota_decrement(const char *channel, const char *account)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_val val = { NULL, 0 };
   char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
   uint32_t count = 0;
@@ -3601,32 +3498,31 @@ static int quota_decrement(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.iov_base = keybuf;
-  key.iov_len = keylen;
-
-  rc = mdbx_get(txn, history_quota_dbi, &key, &data);
-  if (rc == 0 && data.iov_len == sizeof(uint32_t)) {
-    memcpy(&count, data.iov_base, sizeof(uint32_t));
+  rc = db_get(history_db_env, history_db_cf_quotas,
+              keybuf, keylen, /*snap=*/NULL, &val);
+  if (rc == DB_OK && val.len == sizeof(uint32_t)) {
+    struct db_writebatch *wb;
+    memcpy(&count, val.base, sizeof(uint32_t));
+    db_val_free(&val);
     if (count > 0)
       count--;
 
-    data.iov_base = &count;
-    data.iov_len = sizeof(uint32_t);
-
-    rc = mdbx_put(txn, history_quota_dbi, &key, &data, 0);
-    if (rc != 0) {
-      mdbx_txn_abort(txn);
+    wb = db_writebatch_new(history_db_env);
+    if (!wb)
+      return -1;
+    rc = db_writebatch_put(wb, history_db_cf_quotas,
+                           keybuf, keylen, &count, sizeof(count));
+    if (rc != DB_OK) {
+      db_writebatch_destroy(wb);
       return -1;
     }
+    rc = db_writebatch_commit(wb, /*sync=*/0);
+    db_writebatch_destroy(wb);
+    if (rc != DB_OK)
+      return -1;
+  } else if (rc == DB_OK) {
+    db_val_free(&val);
   }
-
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0)
-    return -1;
 
   return (int)count;
 }
@@ -3638,8 +3534,7 @@ static int quota_decrement(const char *channel, const char *account)
  */
 int history_quota_get_count(const char *channel, const char *account)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_val val = { NULL, 0 };
   char keybuf[CHANNELLEN + ACCOUNTLEN + 2];
   int keylen, rc;
   uint32_t count = 0;
@@ -3650,19 +3545,14 @@ int history_quota_get_count(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-  if (rc != 0)
-    return 0;
-
-  key.iov_base = keybuf;
-  key.iov_len = keylen;
-
-  rc = mdbx_get(txn, history_quota_dbi, &key, &data);
-  if (rc == 0 && data.iov_len == sizeof(uint32_t)) {
-    memcpy(&count, data.iov_base, sizeof(uint32_t));
+  rc = db_get(history_db_env, history_db_cf_quotas,
+              keybuf, keylen, /*snap=*/NULL, &val);
+  if (rc == DB_OK) {
+    if (val.len == sizeof(uint32_t))
+      memcpy(&count, val.base, sizeof(uint32_t));
+    db_val_free(&val);
   }
 
-  mdbx_txn_abort(txn);
   return (int)count;
 }
 
