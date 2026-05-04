@@ -3053,6 +3053,18 @@ void history_last_eviction(int *count, time_t *timestamp)
     *timestamp = last_eviction_time;
 }
 
+/** \brief Force sync/flush the history database to disk.
+ * Backend-agnostic — db_env_sync dispatches to mdbx_env_sync_ex or
+ * rocksdb_flush_wal as appropriate.
+ * \return 0 on success, -1 on error */
+int
+history_sync(void)
+{
+  if (!history_available)
+    return -1;
+  return db_env_sync(history_db_env);
+}
+
 #ifdef USE_MDBX
 void
 history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
@@ -3291,16 +3303,6 @@ history_report_defrag(struct Client *to)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "D :  History: stopped: %s", reasons);
   }
-}
-
-/** \brief Force sync/flush the history database to disk.
- * \return 0 on success, -1 on error */
-int
-history_sync(void)
-{
-  if (!history_available)
-    return -1;
-  return db_env_sync(history_db_env);
 }
 
 /** \brief Report detailed GC info for the history database. */
