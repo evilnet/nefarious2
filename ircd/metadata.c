@@ -70,13 +70,15 @@
 static struct MetadataEntry presence_entry;
 static char presence_value[AWAYLEN + 1];
 
-#ifdef USE_MDBX
-#include <mdbx.h>
+#if defined(USE_MDBX) || defined(USE_ROCKSDB)
 #include "db_cursor.h"
 #include "db_env.h"
 #include "db_txn.h"
 #include "db_types.h"
 #include "history.h"
+#ifdef USE_MDBX
+#include <mdbx.h>
+#endif
 
 /** Storage environment opened through the db_* abstraction.  Owns the
  * underlying MDBX env and CF handles; closed via db_env_close at
@@ -86,15 +88,16 @@ static struct db_cf  *metadata_cf = NULL;
 static struct db_cf  *readmarkers_cf = NULL;
 static struct db_cf  *bouncer_cf = NULL;
 
-/** Raw MDBX handles unwrapped from the abstraction at init time.
- * These point at the same underlying state as metadata_db_env / *_cf
- * and exist only because the function bodies in this file haven't been
- * fully converted off raw mdbx yet (Phase 0e is incremental).  Phase 4
- * RocksDB migration completes the conversion and deletes them. */
+#ifdef USE_MDBX
+/** Raw MDBX handles unwrapped from the abstraction at init time, used
+ * only by the libmdbx-specific stats/GC/defrag-result reporting that
+ * has no portable equivalent.  Phase 4 cleanup retires these along
+ * with the libmdbx-specific reporting paths. */
 static MDBX_env *metadata_env = NULL;
 static MDBX_dbi metadata_dbi;
 static MDBX_dbi readmarkers_dbi;
 static MDBX_dbi bouncer_dbi;
+#endif
 
 /** Flag indicating if storage is available */
 static int metadata_lmdb_available = 0;
@@ -105,43 +108,11 @@ static int metadata_lmdb_available = 0;
 /** Key separator */
 #define KEY_SEP '\0'
 
-/** Default number of B-tree cache slots for metadata lookups */
-#define METADATA_CACHE_SLOTS_DEFAULT 128
-
-/** B-tree traversal cache for metadata lookups */
-static MDBX_cache_entry_t *metadata_cache = NULL;
-static uint32_t *metadata_cache_hash = NULL;
-static unsigned int metadata_cache_slots = 0;
-
-/** FNV-1a 32-bit hash for cache slot selection */
-static uint32_t cache_fnv1a(const void *data, size_t len)
-{
-  const unsigned char *p = (const unsigned char *)data;
-  uint32_t h = 2166136261u;
-  for (size_t i = 0; i < len; i++) {
-    h ^= p[i];
-    h *= 16777619u;
-  }
-  return h ? h : 1; /* avoid 0 so we can use 0 as "empty" */
-}
-
-/** Get cache entry for a key, re-initializing on hash collision */
-static MDBX_cache_entry_t *metadata_cache_slot(const MDBX_val *key)
-{
-  uint32_t h;
-  unsigned int slot;
-
-  if (!metadata_cache)
-    return NULL;
-
-  h = cache_fnv1a(key->iov_base, key->iov_len);
-  slot = h & (metadata_cache_slots - 1);
-  if (metadata_cache_hash[slot] != h) {
-    mdbx_cache_init(&metadata_cache[slot]);
-    metadata_cache_hash[slot] = h;
-  }
-  return &metadata_cache[slot];
-}
+/* The libmdbx-specific FNV B-tree-traversal cache (mdbx_cache_init /
+ * mdbx_cache_get_SingleThreaded) was retired alongside the conversion
+ * of metadata_account_get to the abstraction.  RocksDB has its own
+ * block cache that serves the same purpose; libmdbx's mmap means
+ * repeated key lookups are already cheap without the extra layer. */
 
 /** Build a lookup key for LMDB.
  * @param[out] key Output buffer.
@@ -327,31 +298,16 @@ int metadata_lmdb_init(const char *dbpath)
     return -1;
   }
 
-  /* Populate the legacy raw mdbx handles for the function bodies that
-   * haven't been converted off raw mdbx yet (stats, defrag, GC,
-   * non-converted CRUD).  Same underlying env/dbi as the abstraction. */
+#ifdef USE_MDBX
+  /* Populate raw mdbx handles for the libmdbx-specific reporting
+   * paths (stats/GC/defrag-result detail).  Phase 4 cleanup retires. */
   metadata_env     = db_mdbx_unwrap_env(metadata_db_env);
   metadata_dbi     = db_mdbx_unwrap_dbi(metadata_cf);
   readmarkers_dbi  = db_mdbx_unwrap_dbi(readmarkers_cf);
   bouncer_dbi      = db_mdbx_unwrap_dbi(bouncer_cf);
+#endif
 
   metadata_lmdb_available = 1;
-
-  /* Initialize B-tree traversal cache */
-  {
-    unsigned int slots = feature_int(FEAT_METADATA_CACHE_SLOTS);
-    if (slots > 0) {
-      /* Round up to next power of 2 */
-      unsigned int s = 1;
-      while (s < slots) s <<= 1;
-      metadata_cache_slots = s;
-      metadata_cache = (MDBX_cache_entry_t *)MyCalloc(s, sizeof(MDBX_cache_entry_t));
-      metadata_cache_hash = (uint32_t *)MyCalloc(s, sizeof(uint32_t));
-      for (unsigned int i = 0; i < s; i++)
-        mdbx_cache_init(&metadata_cache[i]);
-      log_write(LS_SYSTEM, L_INFO, 0, "metadata: B-tree cache initialized (%u slots)", s);
-    }
-  }
 
   log_write(LS_SYSTEM, L_INFO, 0, "metadata: storage initialized at %s", dbpath);
 
@@ -385,7 +341,9 @@ void metadata_lmdb_shutdown(void)
     metadata_cf = NULL;
     readmarkers_cf = NULL;
     bouncer_cf = NULL;
+#ifdef USE_MDBX
     metadata_env = NULL;  /* legacy raw handle, owned by db_env */
+#endif
     metadata_lmdb_available = 0;
   }
 }
@@ -404,8 +362,7 @@ int metadata_lmdb_is_available(void)
  */
 int metadata_account_get(const char *account, const char *key, char *value)
 {
-  MDBX_txn *txn;
-  MDBX_val mkey, mdata;
+  struct db_val val = { NULL, 0 };
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
   char decoded[METADATA_VALUE_LEN];
   int keylen;
@@ -424,49 +381,31 @@ int metadata_account_get(const char *account, const char *key, char *value)
   if (keylen < 0)
     return -1;
 
-  rc = mdbx_txn_begin(metadata_env, NULL, MDBX_RDONLY, &txn);
-  if (rc != 0)
-    return -1;
-
-  mkey.iov_base = keybuf;
-  mkey.iov_len = keylen;
-
-  {
-    MDBX_cache_entry_t *ce = metadata_cache_slot(&mkey);
-    if (ce) {
-      MDBX_cache_result_t cr = mdbx_cache_get_SingleThreaded(txn, metadata_dbi, &mkey, &mdata, ce);
-      rc = cr.errcode;
-    } else {
-      rc = mdbx_get(txn, metadata_dbi, &mkey, &mdata);
-    }
-  }
-  mdbx_txn_abort(txn);
-
-  if (rc == MDBX_NOTFOUND)
+  rc = db_get(metadata_db_env, metadata_cf, keybuf, (size_t)keylen,
+              /*snap=*/NULL, &val);
+  if (rc == DB_NOTFOUND)
     return 1;
-  if (rc != 0)
+  if (rc != DB_OK)
     return -1;
 
 #ifdef USE_ZSTD
-  /* Check if data is compressed and decompress if needed */
-  if (is_compressed(mdata.iov_base, mdata.iov_len)) {
-    if (decompress_data(mdata.iov_base, mdata.iov_len,
+  if (is_compressed(val.base, val.len)) {
+    if (decompress_data(val.base, val.len,
                         decompressed, sizeof(decompressed), &decompressed_len) < 0) {
+      db_val_free(&val);
       return -1;
     }
-    /* Decode TTL from decompressed data */
     rc = decode_ttl_value(decompressed, decompressed_len, decoded,
                           sizeof(decoded), &timestamp);
+    db_val_free(&val);
     if (rc < 0)
       return -1;
 
-    /* Check TTL */
     ttl = feature_int(FEAT_METADATA_CACHE_TTL);
     if (is_value_expired(timestamp, ttl)) {
       Debug((DEBUG_DEBUG, "metadata: cached value for %s.%s expired", account, key));
-      return 1; /* Treat as not found */
+      return 1;
     }
-
     if (strlen(decoded) >= METADATA_VALUE_LEN)
       return -1;
     strcpy(value, decoded);
@@ -474,17 +413,16 @@ int metadata_account_get(const char *account, const char *key, char *value)
   }
 #endif
 
-  /* Decode TTL from raw data */
-  rc = decode_ttl_value(mdata.iov_base, mdata.iov_len, decoded,
+  rc = decode_ttl_value(val.base, val.len, decoded,
                         sizeof(decoded), &timestamp);
+  db_val_free(&val);
   if (rc < 0)
     return -1;
 
-  /* Check TTL */
   ttl = feature_int(FEAT_METADATA_CACHE_TTL);
   if (is_value_expired(timestamp, ttl)) {
     Debug((DEBUG_DEBUG, "metadata: cached value for %s.%s expired", account, key));
-    return 1; /* Treat as not found */
+    return 1;
   }
 
   if (strlen(decoded) >= METADATA_VALUE_LEN)
@@ -505,8 +443,7 @@ int metadata_account_get(const char *account, const char *key, char *value)
 static int metadata_account_set_ts(const char *account, const char *key,
                                     const char *value, time_t timestamp)
 {
-  MDBX_txn *txn;
-  MDBX_val mkey, mdata;
+  struct db_writebatch *wb;
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
   char encoded[METADATA_VALUE_LEN + 32]; /* Extra space for TTL prefix */
   int keylen;
@@ -516,6 +453,8 @@ static int metadata_account_set_ts(const char *account, const char *key,
   unsigned char compressed[METADATA_VALUE_LEN + 64];
   size_t compressed_len;
 #endif
+  const void *vbuf = NULL;
+  size_t       vlen = 0;
 
   if (!metadata_lmdb_available || !account || !key)
     return -1;
@@ -524,48 +463,43 @@ static int metadata_account_set_ts(const char *account, const char *key,
   if (keylen < 0)
     return -1;
 
-  rc = mdbx_txn_begin(metadata_env, NULL, 0, &txn);
-  if (rc != 0)
+  wb = db_writebatch_new(metadata_db_env);
+  if (!wb)
     return -1;
 
-  mkey.iov_base = keybuf;
-  mkey.iov_len = keylen;
-
   if (value) {
-    /* Encode value with timestamp for TTL tracking (0 = permanent) */
     encoded_len = encode_ttl_value(encoded, sizeof(encoded), value, timestamp);
     if (encoded_len < 0) {
-      mdbx_txn_abort(txn);
+      db_writebatch_destroy(wb);
       return -1;
     }
-
 #ifdef USE_ZSTD
     if (compress_data((const unsigned char *)encoded, encoded_len,
                       compressed, sizeof(compressed), &compressed_len) >= 0) {
-      mdata.iov_base = compressed;
-      mdata.iov_len = compressed_len;
+      vbuf = compressed;
+      vlen = compressed_len;
     } else {
-      mdata.iov_base = encoded;
-      mdata.iov_len = encoded_len;
+      vbuf = encoded;
+      vlen = (size_t)encoded_len;
     }
 #else
-    mdata.iov_base = encoded;
-    mdata.iov_len = encoded_len;
+    vbuf = encoded;
+    vlen = (size_t)encoded_len;
 #endif
-    rc = mdbx_put(txn, metadata_dbi, &mkey, &mdata, 0);
+    rc = db_writebatch_put(wb, metadata_cf, keybuf, (size_t)keylen, vbuf, vlen);
   } else {
-    rc = mdbx_del(txn, metadata_dbi, &mkey, NULL);
-    if (rc == MDBX_NOTFOUND)
-      rc = 0; /* Deleting non-existent key is OK */
+    rc = db_writebatch_del(wb, metadata_cf, keybuf, (size_t)keylen);
+    if (rc == DB_NOTFOUND)
+      rc = DB_OK;
   }
-
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
+  if (rc != DB_OK) {
+    db_writebatch_destroy(wb);
     return -1;
   }
 
-  rc = mdbx_txn_commit(txn);
-  return (rc == 0) ? 0 : -1;
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  return (rc == DB_OK) ? 0 : -1;
 }
 
 /** Set account metadata in LMDB with TTL timestamp (CurrentTime).
@@ -596,8 +530,7 @@ int metadata_account_set_permanent(const char *account, const char *key, const c
 int metadata_account_set_raw(const char *account, const char *key,
                              const unsigned char *raw_value, size_t raw_len)
 {
-  MDBX_txn *txn;
-  MDBX_val mkey, mdata;
+  struct db_writebatch *wb;
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
   int keylen;
   int rc;
@@ -609,25 +542,18 @@ int metadata_account_set_raw(const char *account, const char *key,
   if (keylen < 0)
     return -1;
 
-  rc = mdbx_txn_begin(metadata_env, NULL, 0, &txn);
-  if (rc != 0)
+  wb = db_writebatch_new(metadata_db_env);
+  if (!wb)
     return -1;
-
-  mkey.iov_base = keybuf;
-  mkey.iov_len = keylen;
-
-  /* Store raw data directly without compression */
-  mdata.iov_base = (void *)raw_value;
-  mdata.iov_len = raw_len;
-
-  rc = mdbx_put(txn, metadata_dbi, &mkey, &mdata, 0);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
+  rc = db_writebatch_put(wb, metadata_cf, keybuf, (size_t)keylen,
+                         raw_value, raw_len);
+  if (rc != DB_OK) {
+    db_writebatch_destroy(wb);
     return -1;
   }
-
-  rc = mdbx_txn_commit(txn);
-  return (rc == 0) ? 0 : -1;
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  return (rc == DB_OK) ? 0 : -1;
 }
 
 /*
@@ -676,8 +602,7 @@ static int build_readmarker_key(char *key, int keysize,
  */
 int metadata_readmarker_get(const char *account, const char *target, char *timestamp)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_val val = { NULL, 0 };
   char keybuf[ACCOUNTLEN + CHANNELLEN + 4];
   int keylen;
   int rc;
@@ -689,26 +614,20 @@ int metadata_readmarker_get(const char *account, const char *target, char *times
   if (keylen < 0)
     return -1;
 
-  rc = mdbx_txn_begin(metadata_env, NULL, MDBX_RDONLY, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.iov_len = keylen;
-  key.iov_base = keybuf;
-
-  rc = mdbx_get(txn, readmarkers_dbi, &key, &data);
-  mdbx_txn_abort(txn);
-
-  if (rc == MDBX_NOTFOUND)
+  rc = db_get(metadata_db_env, readmarkers_cf, keybuf, (size_t)keylen,
+              /*snap=*/NULL, &val);
+  if (rc == DB_NOTFOUND)
     return 1;
-  if (rc != 0)
+  if (rc != DB_OK)
     return -1;
 
-  if (data.iov_len >= 32)
+  if (val.len >= 32) {
+    db_val_free(&val);
     return -1;
-  memcpy(timestamp, data.iov_base, data.iov_len);
-  timestamp[data.iov_len] = '\0';
-
+  }
+  memcpy(timestamp, val.base, val.len);
+  timestamp[val.len] = '\0';
+  db_val_free(&val);
   return 0;
 }
 
@@ -721,8 +640,8 @@ int metadata_readmarker_get(const char *account, const char *target, char *times
  */
 int metadata_readmarker_set(const char *account, const char *target, const char *timestamp)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_writebatch *wb;
+  struct db_val cur = { NULL, 0 };
   char keybuf[ACCOUNTLEN + CHANNELLEN + 4];
   char existing_ts[32];
   int keylen;
@@ -735,43 +654,35 @@ int metadata_readmarker_set(const char *account, const char *target, const char 
   if (keylen < 0)
     return -1;
 
-  rc = mdbx_txn_begin(metadata_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
-
-  key.iov_len = keylen;
-  key.iov_base = keybuf;
-
-  /* Check existing value - only update if new timestamp is greater */
-  rc = mdbx_get(txn, readmarkers_dbi, &key, &data);
-  if (rc == 0) {
-    if (data.iov_len < sizeof(existing_ts)) {
-      memcpy(existing_ts, data.iov_base, data.iov_len);
-      existing_ts[data.iov_len] = '\0';
+  /* Check existing value via a get; only update if new timestamp is greater. */
+  rc = db_get(metadata_db_env, readmarkers_cf, keybuf, (size_t)keylen,
+              /*snap=*/NULL, &cur);
+  if (rc == DB_OK) {
+    if (cur.len < sizeof existing_ts) {
+      memcpy(existing_ts, cur.base, cur.len);
+      existing_ts[cur.len] = '\0';
       if (strcmp(timestamp, existing_ts) <= 0) {
-        mdbx_txn_abort(txn);
+        db_val_free(&cur);
         return 1;
       }
     }
-  } else if (rc != MDBX_NOTFOUND) {
-    mdbx_txn_abort(txn);
+    db_val_free(&cur);
+  } else if (rc != DB_NOTFOUND) {
     return -1;
   }
 
-  data.iov_len = strlen(timestamp);
-  data.iov_base = (void *)timestamp;
-
-  rc = mdbx_put(txn, readmarkers_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
+  wb = db_writebatch_new(metadata_db_env);
+  if (!wb)
+    return -1;
+  rc = db_writebatch_put(wb, readmarkers_cf, keybuf, (size_t)keylen,
+                         timestamp, strlen(timestamp));
+  if (rc != DB_OK) {
+    db_writebatch_destroy(wb);
     return -1;
   }
-
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0)
-    return -1;
-
-  return 0;
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  return (rc == DB_OK) ? 0 : -1;
 }
 
 /** List all metadata for an account from LMDB.
@@ -781,9 +692,7 @@ int metadata_readmarker_set(const char *account, const char *target, const char 
  */
 struct MetadataEntry *metadata_account_list(const char *account)
 {
-  MDBX_txn *txn;
-  MDBX_cursor *cursor;
-  MDBX_val mkey, mdata;
+  struct db_iter *it;
   char prefix[ACCOUNTLEN + 2];
   int prefixlen;
   struct MetadataEntry *head = NULL, *tail = NULL, *entry;
@@ -802,81 +711,59 @@ struct MetadataEntry *metadata_account_list(const char *account)
   memcpy(prefix, account, prefixlen);
   prefix[prefixlen++] = KEY_SEP;
 
-  rc = mdbx_txn_begin(metadata_env, NULL, MDBX_RDONLY, &txn);
-  if (rc != 0)
+  it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
+  if (!it)
     return NULL;
 
-  rc = mdbx_cursor_open(txn, metadata_dbi, &cursor);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
-    return NULL;
-  }
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbuf = db_iter_key(it, &klen);
+    const void *vbuf = db_iter_value(it, &vlen);
 
-  mkey.iov_base = prefix;
-  mkey.iov_len = prefixlen;
-
-  rc = mdbx_cursor_get(cursor, &mkey, &mdata, MDBX_SET_RANGE);
-  while (rc == 0) {
-    /* Check if key still has our prefix */
-    if (mkey.iov_len < prefixlen ||
-        memcmp(mkey.iov_base, prefix, prefixlen) != 0)
+    if (klen < (size_t)prefixlen ||
+        memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
       break;
 
-    /* Extract the metadata key (after prefix) */
     entry = (struct MetadataEntry *)MyMalloc(sizeof(struct MetadataEntry));
     if (!entry)
       break;
 
-    if (mkey.iov_len - prefixlen >= METADATA_KEY_LEN) {
+    if (klen - prefixlen >= METADATA_KEY_LEN) {
       MyFree(entry);
       break;
     }
-    memcpy(entry->key, (char *)mkey.iov_base + prefixlen, mkey.iov_len - prefixlen);
-    entry->key[mkey.iov_len - prefixlen] = '\0';
+    memcpy(entry->key, (const char *)kbuf + prefixlen, klen - prefixlen);
+    entry->key[klen - prefixlen] = '\0';
 
 #ifdef USE_ZSTD
-    /* Check if data is compressed and decompress if needed */
-    if (is_compressed(mdata.iov_base, mdata.iov_len)) {
-      if (decompress_data(mdata.iov_base, mdata.iov_len,
+    if (is_compressed((const unsigned char *)vbuf, vlen)) {
+      if (decompress_data((const unsigned char *)vbuf, vlen,
                           decompressed, sizeof(decompressed), &decompressed_len) < 0) {
         MyFree(entry);
-        rc = mdbx_cursor_get(cursor, &mkey, &mdata, MDBX_NEXT);
         continue;
       }
       entry->value = (char *)MyMalloc(decompressed_len + 1);
-      if (!entry->value) {
-        MyFree(entry);
-        break;
-      }
+      if (!entry->value) { MyFree(entry); break; }
       memcpy(entry->value, decompressed, decompressed_len);
       entry->value[decompressed_len] = '\0';
     } else
 #endif
     {
-      entry->value = (char *)MyMalloc(mdata.iov_len + 1);
-      if (!entry->value) {
-        MyFree(entry);
-        break;
-      }
-      memcpy(entry->value, mdata.iov_base, mdata.iov_len);
-      entry->value[mdata.iov_len] = '\0';
+      entry->value = (char *)MyMalloc(vlen + 1);
+      if (!entry->value) { MyFree(entry); break; }
+      memcpy(entry->value, vbuf, vlen);
+      entry->value[vlen] = '\0';
     }
 
     entry->visibility = METADATA_VIS_PUBLIC;
     entry->next = NULL;
-
-    if (tail)
-      tail->next = entry;
-    else
-      head = entry;
+    if (tail) tail->next = entry; else head = entry;
     tail = entry;
-
-    rc = mdbx_cursor_get(cursor, &mkey, &mdata, MDBX_NEXT);
   }
 
-  mdbx_cursor_close(cursor);
-  mdbx_txn_abort(txn);
-
+  db_iter_close(it);
   return head;
 }
 
@@ -886,9 +773,8 @@ struct MetadataEntry *metadata_account_list(const char *account)
  */
 int metadata_account_clear(const char *account)
 {
-  MDBX_txn *txn;
-  MDBX_cursor *cursor;
-  MDBX_val mkey, mdata;
+  struct db_iter *it;
+  struct db_writebatch *wb;
   char prefix[ACCOUNTLEN + 2];
   int prefixlen;
   int rc;
@@ -902,33 +788,32 @@ int metadata_account_clear(const char *account)
   memcpy(prefix, account, prefixlen);
   prefix[prefixlen++] = KEY_SEP;
 
-  rc = mdbx_txn_begin(metadata_env, NULL, 0, &txn);
-  if (rc != 0)
+  /* Two-pass: iterate to collect matching keys, then delete via a
+   * single writebatch.  Mirrors the libmdbx cursor_del-during-scan
+   * pattern but uses portable abstraction primitives. */
+  wb = db_writebatch_new(metadata_db_env);
+  if (!wb)
     return -1;
-
-  rc = mdbx_cursor_open(txn, metadata_dbi, &cursor);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
+  it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
+  if (!it) {
+    db_writebatch_destroy(wb);
     return -1;
   }
-
-  mkey.iov_base = prefix;
-  mkey.iov_len = prefixlen;
-
-  rc = mdbx_cursor_get(cursor, &mkey, &mdata, MDBX_SET_RANGE);
-  while (rc == 0) {
-    if (mkey.iov_len < prefixlen ||
-        memcmp(mkey.iov_base, prefix, prefixlen) != 0)
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen;
+    const void *kbuf = db_iter_key(it, &klen);
+    if (klen < (size_t)prefixlen ||
+        memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
       break;
-
-    mdbx_cursor_del(cursor, 0);
-    rc = mdbx_cursor_get(cursor, &mkey, &mdata, MDBX_NEXT);
+    db_writebatch_del(wb, metadata_cf, kbuf, klen);
   }
+  db_iter_close(it);
 
-  mdbx_cursor_close(cursor);
-
-  rc = mdbx_txn_commit(txn);
-  return (rc == 0) ? 0 : -1;
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  return (rc == DB_OK) ? 0 : -1;
 }
 
 /** Store channel metadata to LMDB (for persistent channels).
@@ -957,9 +842,8 @@ struct MetadataEntry *metadata_channel_load(const char *channel)
  */
 int metadata_account_purge_expired(void)
 {
-  MDBX_txn *txn;
-  MDBX_cursor *cursor;
-  MDBX_val mkey, mdata;
+  struct db_iter *it;
+  struct db_writebatch *wb;
   int ttl;
   int purged = 0;
   int rc;
@@ -977,78 +861,71 @@ int metadata_account_purge_expired(void)
   if (ttl <= 0)
     return 0; /* TTL disabled, nothing to purge */
 
-  rc = mdbx_txn_begin(metadata_env, NULL, 0, &txn);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: purge mdbx_txn_begin failed: %s",
-              mdbx_strerror(rc));
+  wb = db_writebatch_new(metadata_db_env);
+  if (!wb)
+    return -1;
+  it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
+  if (!it) {
+    db_writebatch_destroy(wb);
     return -1;
   }
 
-  rc = mdbx_cursor_open(txn, metadata_dbi, &cursor);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: purge mdbx_cursor_open failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    return -1;
-  }
-
-  rc = mdbx_cursor_get(cursor, &mkey, &mdata, MDBX_FIRST);
-  while (rc == 0) {
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbuf = db_iter_key(it, &klen);
+    const void *vbuf = db_iter_value(it, &vlen);
     int decode_rc;
     int expired = 0;
 
 #ifdef USE_ZSTD
-    if (is_compressed(mdata.iov_base, mdata.iov_len)) {
-      if (decompress_data(mdata.iov_base, mdata.iov_len,
+    if (is_compressed((const unsigned char *)vbuf, vlen)) {
+      if (decompress_data((const unsigned char *)vbuf, vlen,
                           decompressed, sizeof(decompressed), &decompressed_len) >= 0) {
         decode_rc = decode_ttl_value(decompressed, decompressed_len, decoded,
                                      sizeof(decoded), &timestamp);
-        if (decode_rc >= 0 && is_value_expired(timestamp, ttl)) {
+        if (decode_rc >= 0 && is_value_expired(timestamp, ttl))
           expired = 1;
-        }
       }
     } else
 #endif
     {
-      decode_rc = decode_ttl_value(mdata.iov_base, mdata.iov_len, decoded,
+      decode_rc = decode_ttl_value(vbuf, vlen, decoded,
                                    sizeof(decoded), &timestamp);
-      if (decode_rc >= 0 && is_value_expired(timestamp, ttl)) {
+      if (decode_rc >= 0 && is_value_expired(timestamp, ttl))
         expired = 1;
-      }
     }
 
     if (expired) {
-      mdbx_cursor_del(cursor, 0);
+      db_writebatch_del(wb, metadata_cf, kbuf, klen);
       purged++;
     }
-
-    rc = mdbx_cursor_get(cursor, &mkey, &mdata, MDBX_NEXT);
   }
+  db_iter_close(it);
 
-  mdbx_cursor_close(cursor);
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: purge mdbx_txn_commit failed: %s",
-              mdbx_strerror(rc));
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "metadata: purge commit failed: %s", db_strerror(rc));
     return -1;
   }
-
-  if (purged > 0) {
+  if (purged > 0)
     log_write(LS_SYSTEM, L_INFO, 0, "metadata: purged %d expired cache entries", purged);
-  }
-
   return purged;
 }
 
-#else /* !USE_MDBX */
+#else /* !defined(USE_MDBX) && !defined(USE_ROCKSDB) — no backend available */
 
-/* Stub implementations when LMDB is not available */
+/* Stub implementations when no storage backend is available */
 int metadata_lmdb_init(const char *dbpath) { return -1; }
 void metadata_lmdb_shutdown(void) { }
 int metadata_lmdb_is_available(void) { return 0; }
 int metadata_account_get(const char *account, const char *key, char *value) { return -1; }
 int metadata_account_set(const char *account, const char *key, const char *value) { return -1; }
 int metadata_account_set_permanent(const char *account, const char *key, const char *value) { return -1; }
+int metadata_account_set_raw(const char *account, const char *key, const unsigned char *raw_value, size_t raw_len) { (void)account;(void)key;(void)raw_value;(void)raw_len; return -1; }
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_purge_expired(void) { return -1; }
@@ -1056,8 +933,10 @@ int metadata_channel_persist(const char *channel, const char *key, const char *v
 struct MetadataEntry *metadata_channel_load(const char *channel) { return NULL; }
 int metadata_readmarker_get(const char *account, const char *target, char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_readmarker_set(const char *account, const char *target, const char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
+int metadata_defrag(unsigned int t) { (void)t; return -1; }
+int metadata_sync(void) { return -1; }
 
-#endif /* USE_MDBX */
+#endif /* USE_MDBX || USE_ROCKSDB */
 
 /** Initialize the metadata subsystem. */
 void metadata_init(void)
@@ -1068,7 +947,7 @@ void metadata_init(void)
 /** Shutdown the metadata subsystem. */
 void metadata_shutdown(void)
 {
-#ifdef USE_MDBX
+#if defined(USE_MDBX) || defined(USE_ROCKSDB)
   metadata_lmdb_shutdown();
 #endif
 }
@@ -1906,38 +1785,20 @@ metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
   /* Nefarious is now authoritative for metadata - no X3 dependency */
 }
 
-/** \brief Defragment the metadata database. */
+/** \brief Compact / defragment the metadata database. */
 int
 metadata_defrag(unsigned int time_limit_seconds)
 {
-#ifdef USE_MDBX
-  MDBX_defrag_result_t result;
-  size_t time_16dot16;
   int rc;
+  (void)time_limit_seconds;  /* libmdbx-only knob; RocksDB compaction self-paces */
 
-  if (!metadata_lmdb_available || !metadata_env)
+  if (!metadata_lmdb_available || !metadata_db_env)
     return -1;
 
-  memset(&result, 0, sizeof(result));
-  time_16dot16 = time_limit_seconds ? (size_t)time_limit_seconds * 65536 : 0;
-
-  rc = mdbx_env_defrag(metadata_env,
-                        0, 0, 0,
-                        time_16dot16,
-                        -1, 0,
-                        NULL, NULL,
-                        &result);
-
+  rc = db_env_compact(metadata_db_env, /*cf=*/NULL);
   log_write(LS_SYSTEM, L_INFO, 0,
-            "metadata: defrag complete rc=%d shrinked=%ld moved=%lu cycles=%u reasons=0x%x",
-            rc, (long)result.pages_shrinked,
-            (unsigned long)result.pages_moved,
-            result.cycles, result.stopping_reasons);
-
-  return rc;
-#else
-  return -1;
-#endif
+            "metadata: compact complete rc=%d (%s)", rc, db_strerror(rc));
+  return (rc == DB_OK) ? 0 : -1;
 }
 
 /** \brief Report defrag results for metadata DB */
@@ -1997,13 +1858,9 @@ metadata_report_defrag(struct Client *to)
 int
 metadata_sync(void)
 {
-#ifdef USE_MDBX
-  if (!metadata_lmdb_available || !metadata_env)
+  if (!metadata_lmdb_available || !metadata_db_env)
     return -1;
-  return mdbx_env_sync_ex(metadata_env, 1, 0);
-#else
-  return -1;
-#endif
+  return (db_env_sync(metadata_db_env) == DB_OK) ? 0 : -1;
 }
 
 /** \brief Report detailed GC info for the metadata database. */
