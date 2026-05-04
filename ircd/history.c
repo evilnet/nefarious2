@@ -943,16 +943,15 @@ int history_store_multiline(const char *msgid, const char *timestamp,
                             const char *account, const char *content,
                             size_t content_len, const char *paste_secret)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_writebatch *wb = NULL;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-  int keylen, vallen;
+  char idxkeybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  int keylen, idx_keylen, vallen;
   int rc;
   int retry = 0;
+  const void *vbuf;
+  size_t       vlen;
 
-  /* Serialize the history entry with the \x1Eml sentinel as content.
-   * The actual multiline content goes in ml_content, not inline.
-   */
   char valbuf[HISTORY_VALUE_BUFSIZE];
 #ifdef USE_ZSTD
   unsigned char comp_buf[HISTORY_VALUE_BUFSIZE + 64];
@@ -962,99 +961,74 @@ int history_store_multiline(const char *msgid, const char *timestamp,
   if (!history_available)
     return -1;
 
-  /* Build key: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
-  if (keylen < 0)
-    return -1;
+  if (keylen < 0) return -1;
+  idx_keylen = build_key(idxkeybuf, sizeof(idxkeybuf), target, timestamp, NULL);
+  if (idx_keylen < 0) return -1;
 
-  /* Serialize with sentinel content */
   vallen = serialize_message(valbuf, sizeof(valbuf), HISTORY_PRIVMSG,
                              sender, account, ML_CONTENT_SENTINEL, NULL);
-  if (vallen < 0)
-    return -1;
-  if ((size_t)vallen >= sizeof(valbuf))
-    vallen = sizeof(valbuf) - 1;
+  if (vallen < 0) return -1;
+  if ((size_t)vallen >= sizeof(valbuf)) vallen = sizeof(valbuf) - 1;
 
-store_ml_retry:
-  rc = mdbx_txn_begin(history_env, NULL, 0, &txn);
-  if (rc != 0)
-    return -1;
-
-  /* Store multiline content in ml_content DBI */
-  if (ml_content_store(txn, msgid, sender, target,
-                       content, content_len, paste_secret) != 0) {
-    mdbx_txn_abort(txn);
-    return -1;
-  }
-
-  /* Store history entry with sentinel */
-  key.iov_len = keylen;
-  key.iov_base = keybuf;
 #ifdef USE_ZSTD
   if (compress_data((unsigned char *)valbuf, vallen,
                     comp_buf, sizeof(comp_buf), &compressed_len) >= 0) {
-    data.iov_len = compressed_len;
-    data.iov_base = comp_buf;
+    vbuf = comp_buf;
+    vlen = compressed_len;
   } else {
-    data.iov_len = vallen;
-    data.iov_base = valbuf;
+    vbuf = valbuf;
+    vlen = (size_t)vallen;
   }
 #else
-  data.iov_len = vallen;
-  data.iov_base = valbuf;
+  vbuf = valbuf;
+  vlen = (size_t)vallen;
 #endif
 
-  rc = mdbx_put(txn, history_dbi, &key, &data, MDBX_APPEND);
-  if (rc == MDBX_EKEYMISMATCH)
-    rc = mdbx_put(txn, history_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
-    if (rc == MDBX_MAP_FULL && retry == 0) {
-      retry = 1;
-      if (history_emergency_evict() > 0)
-        goto store_ml_retry;
-    }
-    return -1;
-  }
+store_ml_retry:
+  wb = db_writebatch_new(history_db_env);
+  if (!wb) return -1;
 
-  /* Store msgid index */
-  key.iov_len = strlen(msgid);
-  key.iov_base = (void *)msgid;
+  /* ml_content_store still takes a raw MDBX_txn (Phase 5 will convert
+   * it to db_writebatch).  Borrow the writebatch's underlying txn so
+   * the multiline content + history puts commit atomically. */
+#ifdef USE_MDBX
   {
-    int idx_keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, NULL);
-    data.iov_len = idx_keylen;
-    data.iov_base = keybuf;
-  }
-  rc = mdbx_put(txn, history_msgid_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
-    if (rc == MDBX_MAP_FULL && retry == 0) {
-      retry = 1;
-      if (history_emergency_evict() > 0)
-        goto store_ml_retry;
+    MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
+    if (!raw_txn || ml_content_store(raw_txn, msgid, sender, target,
+                                     content, content_len, paste_secret) != 0) {
+      db_writebatch_destroy(wb);
+      wb = NULL;
+      return -1;
     }
-    return -1;
   }
+#else
+  /* RocksDB: ml_content_store conversion pending Phase 5; without it
+   * multiline content isn't stored — message body still goes through
+   * the normal history.messages path with the \x1Eml sentinel, just
+   * without the inline-decompression backing.  Multiline messages
+   * appear truncated to the sentinel until Phase 5 lands. */
+#endif
 
-  /* Update target timestamp */
-  key.iov_len = strlen(target);
-  key.iov_base = (void *)target;
-  data.iov_len = strlen(timestamp);
-  data.iov_base = (void *)timestamp;
-  rc = mdbx_put(txn, history_targets_dbi, &key, &data, 0);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
-    if (rc == MDBX_MAP_FULL && retry == 0) {
-      retry = 1;
-      if (history_emergency_evict() > 0)
-        goto store_ml_retry;
-    }
-    return -1;
-  }
+  rc = db_writebatch_put_append(wb, history_cf_messages,
+                                keybuf, (size_t)keylen, vbuf, vlen);
+  if (rc != DB_OK) goto store_ml_fail;
 
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0) {
-    if (rc == MDBX_MAP_FULL && retry == 0) {
+  rc = db_writebatch_put(wb, history_cf_msgid,
+                         msgid, strlen(msgid),
+                         idxkeybuf, (size_t)idx_keylen);
+  if (rc != DB_OK) goto store_ml_fail;
+
+  rc = db_writebatch_put(wb, history_cf_targets,
+                         target, strlen(target),
+                         timestamp, strlen(timestamp));
+  if (rc != DB_OK) goto store_ml_fail;
+
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  wb = NULL;
+  if (rc != DB_OK) {
+    if (rc == DB_ERR_FULL && retry == 0) {
       retry = 1;
       if (history_emergency_evict() > 0)
         goto store_ml_retry;
@@ -1063,11 +1037,19 @@ store_ml_retry:
   }
 
   /* Update quota */
-  if (feature_bool(FEAT_CHATHISTORY_USER_QUOTA) && account && account[0]) {
+  if (feature_bool(FEAT_CHATHISTORY_USER_QUOTA) && account && account[0])
     quota_increment(target, account);
-  }
-
   return 0;
+
+store_ml_fail:
+  db_writebatch_destroy(wb);
+  wb = NULL;
+  if (rc == DB_ERR_FULL && retry == 0) {
+    retry = 1;
+    if (history_emergency_evict() > 0)
+      goto store_ml_retry;
+  }
+  return -1;
 }
 
 int history_has_msgid(const char *msgid)
