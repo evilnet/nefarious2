@@ -1040,7 +1040,7 @@ static int history_query_internal(const char *target,
   if (!snap)
     return -1;
 
-  it = db_iter_open(history_db_env, history_db_cf_messages, snap);
+  it = db_iter_open(history_db_env, history_cf_messages, snap);
   if (!it) {
     db_snapshot_destroy(snap);
     return -1;
@@ -1376,7 +1376,7 @@ int history_find_last_join(const char *channel, const char *nick,
   if (keylen < 0)
     return 0;
 
-  it = db_iter_open(history_db_env, history_db_cf_messages, NULL);
+  it = db_iter_open(history_db_env, history_cf_messages, NULL);
   if (!it)
     return 0;
 
@@ -1605,7 +1605,7 @@ int history_query_between(const char *target,
   if (!snap)
     return -1;
 
-  it = db_iter_open(history_db_env, history_db_cf_messages, snap);
+  it = db_iter_open(history_db_env, history_cf_messages, snap);
   if (!it) {
     db_snapshot_destroy(snap);
     return -1;
@@ -1699,7 +1699,7 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
     ts2 = tmp;
   }
 
-  it = db_iter_open(history_db_env, history_db_cf_targets, NULL);
+  it = db_iter_open(history_db_env, history_cf_targets, NULL);
   if (!it)
     return -1;
 
@@ -1786,7 +1786,7 @@ int history_enumerate_channels(history_channel_callback callback, void *data)
   if (!history_available || !callback)
     return -1;
 
-  it = db_iter_open(history_db_env, history_db_cf_targets, NULL);
+  it = db_iter_open(history_db_env, history_cf_targets, NULL);
   if (!it)
     return -1;
 
@@ -1822,7 +1822,7 @@ int history_has_channel(const char *target)
   if (!history_available || !target)
     return -1;
 
-  rc = db_exists(history_db_env, history_db_cf_targets,
+  rc = db_exists(history_db_env, history_cf_targets,
                  target, strlen(target), /*snap=*/NULL);
   if (rc == DB_OK)        return 1;
   if (rc == DB_NOTFOUND)  return 0;
@@ -1848,7 +1848,7 @@ int history_channel_has_messages(const char *target)
   prefix[prefix_len] = KEY_SEP;
   prefix_len++;
 
-  it = db_iter_open(history_db_env, history_db_cf_messages, NULL);
+  it = db_iter_open(history_db_env, history_cf_messages, NULL);
   if (!it)
     return -1;
 
@@ -1901,7 +1901,7 @@ int history_purge_old(unsigned long max_age_seconds)
     return -1;
   }
 
-  it = db_iter_open(history_db_env, history_db_cf_messages, NULL);
+  it = db_iter_open(history_db_env, history_cf_messages, NULL);
   if (!it) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: purge iter_open failed");
     db_writebatch_destroy(wb);
@@ -1927,7 +1927,7 @@ int history_purge_old(unsigned long max_age_seconds)
 
     /* Stage delete from msgid index and ml_content if we have a msgid */
     if (msg_msgid[0] != '\0') {
-      db_writebatch_del(wb, history_db_cf_msgid,
+      db_writebatch_del(wb, history_cf_msgid,
                         msg_msgid, strlen(msg_msgid));
 
       /* ml_content still uses raw mdbx; borrow the wb's underlying txn. */
@@ -1952,7 +1952,7 @@ int history_purge_old(unsigned long max_age_seconds)
           ri_keybuf[ri_kpos++] = KEY_SEP;
           memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
           ri_kpos += mlen;
-          db_writebatch_del(wb, history_db_cf_reply,
+          db_writebatch_del(wb, history_cf_reply,
                             ri_keybuf, ri_kpos);
         }
       }
@@ -1960,7 +1960,7 @@ int history_purge_old(unsigned long max_age_seconds)
 
     /* Stage delete of the message itself.  Borrow the key — writebatch
      * copies, so it's safe to use the iterator's transient pointer. */
-    db_writebatch_del(wb, history_db_cf_messages, kbase, klen);
+    db_writebatch_del(wb, history_cf_messages, kbase, klen);
     deleted++;
   }
 
@@ -2008,7 +2008,7 @@ static int history_cleanup_empty_targets(void)
    * own iter — they don't conflict, so we can keep this iter open
    * across the inner check.  We still want to copy the target name out
    * before stepping (the iter borrow is invalidated by db_iter_next). */
-  it = db_iter_open(history_db_env, history_db_cf_targets, NULL);
+  it = db_iter_open(history_db_env, history_cf_targets, NULL);
   if (!it)
     return -1;
 
@@ -2043,7 +2043,7 @@ static int history_cleanup_empty_targets(void)
     struct db_writebatch *wb = db_writebatch_new(history_db_env);
     if (wb) {
       for (i = 0; i < remove_count; i++) {
-        if (db_writebatch_del(wb, history_db_cf_targets,
+        if (db_writebatch_del(wb, history_cf_targets,
                               channels_to_remove[i],
                               strlen(channels_to_remove[i])) == DB_OK) {
           removed++;
@@ -2083,7 +2083,7 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
     return -1;
   }
 
-  rc = db_get(history_db_env, history_db_cf_msgid,
+  rc = db_get(history_db_env, history_cf_msgid,
               msgid, strlen(msgid), /*snap=*/NULL, &val);
   if (rc != DB_OK) {
     if (rc != DB_NOTFOUND)
@@ -2142,7 +2142,7 @@ int history_lookup_message(const char *target, const char *msgid,
     return -1;
 
   /* First, look up the msgid to get target and timestamp */
-  rc = db_get(history_db_env, history_db_cf_msgid,
+  rc = db_get(history_db_env, history_cf_msgid,
               msgid, strlen(msgid), snap, &val);
   if (rc == DB_NOTFOUND) {
     db_snapshot_destroy(snap);
@@ -2185,7 +2185,7 @@ int history_lookup_message(const char *target, const char *msgid,
     return -1;
   }
 
-  rc = db_get(history_db_env, history_db_cf_messages,
+  rc = db_get(history_db_env, history_cf_messages,
               keybuf, keylen, snap, &val);
   if (rc == DB_NOTFOUND) {
     db_snapshot_destroy(snap);
@@ -2247,7 +2247,7 @@ int history_delete_message(const char *target, const char *msgid)
     return -1;
 
   /* First, look up the msgid to get the timestamp */
-  rc = db_get(history_db_env, history_db_cf_msgid,
+  rc = db_get(history_db_env, history_cf_msgid,
               msgid, strlen(msgid), /*snap=*/NULL, &val);
   if (rc == DB_NOTFOUND)
     return 1; /* Not found */
@@ -2287,8 +2287,8 @@ int history_delete_message(const char *target, const char *msgid)
     return -1;
 
   /* Stage all deletes atomically. */
-  db_writebatch_del(wb, history_db_cf_msgid, msgid, strlen(msgid));
-  db_writebatch_del(wb, history_db_cf_messages, keybuf, keylen);
+  db_writebatch_del(wb, history_cf_msgid, msgid, strlen(msgid));
+  db_writebatch_del(wb, history_cf_messages, keybuf, keylen);
 
   /* ml_content still uses raw mdbx; borrow the wb's underlying txn. */
 #ifdef USE_MDBX
@@ -2310,7 +2310,7 @@ int history_delete_message(const char *target, const char *msgid)
       ri_keybuf[ri_kpos++] = KEY_SEP;
       memcpy(ri_keybuf + ri_kpos, msgid, mlen);
       ri_kpos += mlen;
-      db_writebatch_del(wb, history_db_cf_reply, ri_keybuf, ri_kpos);
+      db_writebatch_del(wb, history_cf_reply, ri_keybuf, ri_kpos);
     }
   }
 
@@ -2344,7 +2344,7 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
   if (!snap)
     return 0;
 
-  ri_it = db_iter_open(history_db_env, history_db_cf_reply, snap);
+  ri_it = db_iter_open(history_db_env, history_cf_reply, snap);
   if (!ri_it) {
     db_snapshot_destroy(snap);
     return 0;
@@ -2421,7 +2421,7 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
           if (main_keylen < 0)
             goto next_dup;
 
-          grc = db_get(history_db_env, history_db_cf_messages,
+          grc = db_get(history_db_env, history_cf_messages,
                        main_keybuf, main_keylen, snap, &main_val);
           if (grc != DB_OK)
             goto next_dup;
@@ -2469,7 +2469,7 @@ int history_redact_message(const char *target, const char *msgid)
     return -1;
 
   /* Look up msgid to get timestamp */
-  rc = db_get(history_db_env, history_db_cf_msgid,
+  rc = db_get(history_db_env, history_cf_msgid,
               msgid, strlen(msgid), /*snap=*/NULL, &val);
   if (rc == DB_NOTFOUND)
     return 1;
@@ -2503,7 +2503,7 @@ int history_redact_message(const char *target, const char *msgid)
     return -1;
 
   /* Fetch the current message to get sender and account */
-  rc = db_get(history_db_env, history_db_cf_messages,
+  rc = db_get(history_db_env, history_cf_messages,
               keybuf, keylen, /*snap=*/NULL, &val);
   if (rc == DB_NOTFOUND)
     return 1;
@@ -2544,15 +2544,15 @@ int history_redact_message(const char *target, const char *msgid)
       size_t comp_len;
       if (compress_data((unsigned char *)valbuf, vallen,
                         comp_buf, sizeof(comp_buf), &comp_len) >= 0) {
-        db_writebatch_put(wb, history_db_cf_messages,
+        db_writebatch_put(wb, history_cf_messages,
                           keybuf, keylen, comp_buf, comp_len);
       } else {
-        db_writebatch_put(wb, history_db_cf_messages,
+        db_writebatch_put(wb, history_cf_messages,
                           keybuf, keylen, valbuf, vallen);
       }
     }
 #else
-    db_writebatch_put(wb, history_db_cf_messages,
+    db_writebatch_put(wb, history_cf_messages,
                       keybuf, keylen, valbuf, vallen);
 #endif
   }
@@ -2655,7 +2655,7 @@ static int history_emergency_evict(void)
     return -1;
   }
 
-  it = db_iter_open(history_db_env, history_db_cf_messages, NULL);
+  it = db_iter_open(history_db_env, history_cf_messages, NULL);
   if (!it) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "history: emergency eviction iter_open failed");
@@ -2675,7 +2675,7 @@ static int history_emergency_evict(void)
     if (parse_key((void *)kbase, klen,
                   msg_target, msg_timestamp, msg_msgid) == 0) {
       if (msg_msgid[0] != '\0') {
-        db_writebatch_del(wb, history_db_cf_msgid,
+        db_writebatch_del(wb, history_cf_msgid,
                           msg_msgid, strlen(msg_msgid));
 
         /* ml_content still uses raw mdbx; borrow the wb's underlying txn. */
@@ -2698,7 +2698,7 @@ static int history_emergency_evict(void)
             ri_keybuf[ri_kpos++] = KEY_SEP;
             memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
             ri_kpos += mlen;
-            db_writebatch_del(wb, history_db_cf_reply, ri_keybuf, ri_kpos);
+            db_writebatch_del(wb, history_cf_reply, ri_keybuf, ri_kpos);
           }
         }
       }
@@ -2719,7 +2719,7 @@ static int history_emergency_evict(void)
 
     /* Stage delete of the message itself.  Iterator pointers are
      * transient — writebatch copies the key, so this is safe. */
-    db_writebatch_del(wb, history_db_cf_messages, kbase, klen);
+    db_writebatch_del(wb, history_cf_messages, kbase, klen);
     evicted++;
   }
 
@@ -2857,7 +2857,7 @@ int history_evict_to_target(int target_percent)
     if (!wb)
       break;
 
-    it = db_iter_open(history_db_env, history_db_cf_messages, NULL);
+    it = db_iter_open(history_db_env, history_cf_messages, NULL);
     if (!it) {
       db_writebatch_destroy(wb);
       break;
@@ -2877,7 +2877,7 @@ int history_evict_to_target(int target_percent)
       if (parse_key((void *)kbase, klen,
                     msg_target, msg_timestamp, msg_msgid) == 0) {
         if (msg_msgid[0] != '\0') {
-          db_writebatch_del(wb, history_db_cf_msgid,
+          db_writebatch_del(wb, history_cf_msgid,
                             msg_msgid, strlen(msg_msgid));
 
 #ifdef USE_MDBX
@@ -2899,7 +2899,7 @@ int history_evict_to_target(int target_percent)
               ri_keybuf[ri_kpos++] = KEY_SEP;
               memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
               ri_kpos += mlen;
-              db_writebatch_del(wb, history_db_cf_reply, ri_keybuf, ri_kpos);
+              db_writebatch_del(wb, history_cf_reply, ri_keybuf, ri_kpos);
             }
           }
         }
@@ -2919,7 +2919,7 @@ int history_evict_to_target(int target_percent)
       }
 
       /* Stage delete of the message itself */
-      db_writebatch_del(wb, history_db_cf_messages, kbase, klen);
+      db_writebatch_del(wb, history_cf_messages, kbase, klen);
       evicted++;
       batch_count++;
     }
@@ -3449,7 +3449,7 @@ static int quota_increment(const char *channel, const char *account)
                           channel, KEY_SEP, account);
 
   /* Get current count */
-  rc = db_get(history_db_env, history_db_cf_quotas,
+  rc = db_get(history_db_env, history_cf_quotas,
               keybuf, keylen, /*snap=*/NULL, &val);
   if (rc == DB_OK && val.len == sizeof(uint32_t))
     memcpy(&count, val.base, sizeof(uint32_t));
@@ -3463,7 +3463,7 @@ static int quota_increment(const char *channel, const char *account)
   wb = db_writebatch_new(history_db_env);
   if (!wb)
     return -1;
-  rc = db_writebatch_put(wb, history_db_cf_quotas,
+  rc = db_writebatch_put(wb, history_cf_quotas,
                          keybuf, keylen, &count, sizeof(count));
   if (rc != DB_OK) {
     db_writebatch_destroy(wb);
@@ -3498,7 +3498,7 @@ static int quota_decrement(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = db_get(history_db_env, history_db_cf_quotas,
+  rc = db_get(history_db_env, history_cf_quotas,
               keybuf, keylen, /*snap=*/NULL, &val);
   if (rc == DB_OK && val.len == sizeof(uint32_t)) {
     struct db_writebatch *wb;
@@ -3510,7 +3510,7 @@ static int quota_decrement(const char *channel, const char *account)
     wb = db_writebatch_new(history_db_env);
     if (!wb)
       return -1;
-    rc = db_writebatch_put(wb, history_db_cf_quotas,
+    rc = db_writebatch_put(wb, history_cf_quotas,
                            keybuf, keylen, &count, sizeof(count));
     if (rc != DB_OK) {
       db_writebatch_destroy(wb);
@@ -3545,7 +3545,7 @@ int history_quota_get_count(const char *channel, const char *account)
   keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
                           channel, KEY_SEP, account);
 
-  rc = db_get(history_db_env, history_db_cf_quotas,
+  rc = db_get(history_db_env, history_cf_quotas,
               keybuf, keylen, /*snap=*/NULL, &val);
   if (rc == DB_OK) {
     if (val.len == sizeof(uint32_t))
