@@ -74,7 +74,6 @@
 #include <assert.h>
 #include <errno.h>
 #include <sys/uio.h>
-#include <mdbx.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
