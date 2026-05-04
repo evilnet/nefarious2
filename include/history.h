@@ -169,9 +169,9 @@ extern int history_store_multiline(const char *msgid, const char *timestamp,
                                    size_t content_len, const char *paste_secret);
 
 #ifdef USE_MDBX
-#include <mdbx.h>
-/** Get the history MDBX environment (for subsystems that share it). */
-extern MDBX_env *history_get_env(void);
+struct db_env;
+/** Get the history storage environment (for subsystems that share it). */
+extern struct db_env *history_get_env(void);
 #endif
 
 /** Check if a message ID already exists in the history database.

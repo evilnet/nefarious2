@@ -733,9 +733,9 @@ void history_shutdown(void)
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage shutdown complete");
 }
 
-MDBX_env *history_get_env(void)
+struct db_env *history_get_env(void)
 {
-  return history_env;
+  return history_db_env;
 }
 
 int history_store_message(const char *msgid, const char *timestamp,
