@@ -613,6 +613,77 @@ int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
   return 0;
 }
 
+/* One-shot reply_index migration.  Older history DBs created reply_index
+ * with MDBX_DUPSORT (the value contained the timestamp + child msgid).
+ * We've reshaped to flat-key encoding — same data, but the timestamp +
+ * child msgid live in the key, value is empty, no DUPSORT needed.
+ *
+ * libmdbx refuses to reopen a DUPSORT dbi without the DUPSORT flag (it
+ * returns MDBX_INCOMPATIBLE).  So before the regular cf_open we peek at
+ * the existing dbi flags; if it's still DUPSORT, mdbx_drop it.  The
+ * subsequent db_cf_open then creates a fresh CF under the new shape.
+ *
+ * The migration is silent on already-migrated or fresh databases.  Old
+ * reply_index data is discarded (it's a derived index — context lookups
+ * for pre-migration messages will return zero children, but the message
+ * rows themselves are untouched and chathistory still works). */
+#ifdef USE_MDBX
+static void migrate_reply_index_legacy_dupsort(struct db_env *env)
+{
+  MDBX_env *raw_env = db_mdbx_unwrap_env(env);
+  MDBX_txn *txn;
+  MDBX_dbi  dbi;
+  unsigned int flags = 0, state = 0;
+  int rc;
+
+  if (!raw_env) return;
+
+  rc = mdbx_txn_begin(raw_env, NULL, 0, &txn);
+  if (rc != MDBX_SUCCESS) return;
+
+  /* Open without MDBX_CREATE — succeeds only if the dbi already exists. */
+  rc = mdbx_dbi_open(txn, "reply_index", 0, &dbi);
+  if (rc != MDBX_SUCCESS) {
+    mdbx_txn_abort(txn);
+    return;  /* fresh database, nothing to migrate */
+  }
+
+  rc = mdbx_dbi_flags_ex(txn, dbi, &flags, &state);
+  if (rc != MDBX_SUCCESS) {
+    mdbx_txn_abort(txn);
+    return;
+  }
+
+  if (!(flags & MDBX_DUPSORT)) {
+    /* Already migrated or never created with DUPSORT.  Done. */
+    mdbx_txn_abort(txn);
+    return;
+  }
+
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "history: migrating reply_index from DUPSORT to flat-key encoding "
+            "(old child→parent links discarded, message rows untouched)");
+
+  rc = mdbx_drop(txn, dbi, /*del=*/1);
+  if (rc != MDBX_SUCCESS) {
+    mdbx_txn_abort(txn);
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history: reply_index migration drop failed: %s",
+              mdbx_strerror(rc));
+    return;
+  }
+
+  rc = mdbx_txn_commit(txn);
+  if (rc != MDBX_SUCCESS) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "history: reply_index migration commit failed: %s",
+              mdbx_strerror(rc));
+    return;
+  }
+  log_write(LS_SYSTEM, L_INFO, 0, "history: reply_index migration complete");
+}
+#endif
+
 int history_init(const char *dbpath)
 {
   struct db_env_opts env_opts;
@@ -643,6 +714,12 @@ int history_init(const char *dbpath)
               dbpath, db_strerror(rc));
     return -1;
   }
+
+  /* One-time migration: drop reply_index if it still has the old
+   * DUPSORT shape, so the cf_open below can recreate it flat. */
+#ifdef USE_MDBX
+  migrate_reply_index_legacy_dupsort(history_db_env);
+#endif
 
   /* Open the column families.  reply_index uses flat-key encoding now —
    * each (parent, child) pair gets its own unique key, so no DUPSORT. */
