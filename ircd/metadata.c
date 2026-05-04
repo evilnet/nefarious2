@@ -1786,7 +1786,7 @@ metadata_report_gc(struct Client *to)
 
 /** \brief Report environment info for the metadata database. */
 void
-metadata_report_mdbx_info(struct Client *to)
+metadata_report_store_info(struct Client *to)
 {
   struct db_env_stats env_stats;
   struct db_cf_stats cf_stats;

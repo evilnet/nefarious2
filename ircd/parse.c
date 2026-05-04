@@ -762,12 +762,12 @@ struct Message msgtab[] = {
     ""
   },
   {
-    MSG_MDBX,
-    TOK_MDBX,
+    MSG_STORE,
+    TOK_STORE,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_unregistered, m_not_oper, m_ignore, mo_mdbx, m_ignore },
-    "<DEFRAG|SYNC|GC|INFO> [history|metadata|all] - MDBX database admin"
+    { m_unregistered, m_not_oper, m_ignore, mo_store, m_ignore },
+    "<DEFRAG|SYNC|GC|INFO> [history|metadata|all] - storage admin"
   },
   {
     MSG_PROTOCTL,

@@ -1,15 +1,15 @@
 /*
- * IRC - Internet Relay Chat, ircd/m_mdbx.c
+ * IRC - Internet Relay Chat, ircd/m_store.c
  * Copyright (C) 2026 Afternet Development
  *
- * MDBX database administration command for IRC operators.
+ * Storage database administration command for IRC operators.
  *
- * Usage: /MDBX <subcommand> [target]
+ * Usage: /STORE <subcommand> [target]
  *
  * Subcommands:
- *   DEFRAG [history|metadata|all]  - Defragment databases (default: all)
+ *   DEFRAG [history|metadata|all]  - Compact databases (default: all)
  *   SYNC   [history|metadata|all]  - Force flush to disk (default: all)
- *   GC     [history|metadata]      - Garbage collection info
+ *   GC     [history|metadata]      - Compaction state info
  *   INFO   [history|metadata]      - Detailed environment info
  *
  * Requires PRIV_REHASH privilege.
@@ -32,19 +32,19 @@
 #include <string.h>
 
 /* Forward declarations for subcommand handlers */
-static int mo_mdbx_defrag(struct Client *sptr, const char *target);
-static int mo_mdbx_sync(struct Client *sptr, const char *target);
-static int mo_mdbx_gc(struct Client *sptr, const char *target);
-static int mo_mdbx_info(struct Client *sptr, const char *target);
+static int mo_store_defrag(struct Client *sptr, const char *target);
+static int mo_store_sync(struct Client *sptr, const char *target);
+static int mo_store_gc(struct Client *sptr, const char *target);
+static int mo_store_info(struct Client *sptr, const char *target);
 
 /*
- * mo_mdbx - oper message handler
+ * mo_store - oper message handler
  *
  * parv[0] = sender prefix
  * parv[1] = subcommand (DEFRAG, SYNC, GC, INFO)
  * parv[2] = target (history, metadata, all) - optional, defaults to "all"
  */
-int mo_mdbx(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+int mo_store(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *subcmd;
   const char *target;
@@ -54,7 +54,7 @@ int mo_mdbx(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   if (parc < 2) {
     send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :Usage: MDBX <DEFRAG|SYNC|GC|INFO> [history|metadata|all]");
+               "X :Usage: STORE <DEFRAG|SYNC|GC|INFO> [history|metadata|all]");
     return 0;
   }
 
@@ -62,18 +62,18 @@ int mo_mdbx(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   target = (parc >= 3) ? parv[2] : "all";
 
   if (0 == ircd_strcmp(subcmd, "DEFRAG")) {
-    return mo_mdbx_defrag(sptr, target);
+    return mo_store_defrag(sptr, target);
   } else if (0 == ircd_strcmp(subcmd, "SYNC")) {
-    return mo_mdbx_sync(sptr, target);
+    return mo_store_sync(sptr, target);
   } else if (0 == ircd_strcmp(subcmd, "GC")) {
-    return mo_mdbx_gc(sptr, target);
+    return mo_store_gc(sptr, target);
   } else if (0 == ircd_strcmp(subcmd, "INFO")) {
-    return mo_mdbx_info(sptr, target);
+    return mo_store_info(sptr, target);
   } else {
     send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
                "X :Unknown subcommand: %s", subcmd);
     send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :Usage: MDBX <DEFRAG|SYNC|GC|INFO> [history|metadata|all]");
+               "X :Usage: STORE <DEFRAG|SYNC|GC|INFO> [history|metadata|all]");
     return 0;
   }
 }
@@ -81,7 +81,7 @@ int mo_mdbx(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 /* ========== DEFRAG ========== */
 
 static int
-mo_mdbx_defrag(struct Client *sptr, const char *target)
+mo_store_defrag(struct Client *sptr, const char *target)
 {
   int do_history = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "history"));
   int do_metadata = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "metadata"));
@@ -93,10 +93,10 @@ mo_mdbx_defrag(struct Client *sptr, const char *target)
   }
 
   send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :MDBX DEFRAG starting (5s limit per db)...");
+             "X :STORE DEFRAG starting (5s limit per db)...");
 
   sendto_opmask_butone(0, SNO_OLDSNO,
-                        "%C is running MDBX DEFRAG on %s", sptr, target);
+                        "%C is running STORE DEFRAG on %s", sptr, target);
 
   if (do_history)
     history_report_defrag(sptr);
@@ -104,14 +104,14 @@ mo_mdbx_defrag(struct Client *sptr, const char *target)
     metadata_report_defrag(sptr);
 
   send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :MDBX DEFRAG complete");
+             "X :STORE DEFRAG complete");
   return 0;
 }
 
 /* ========== SYNC ========== */
 
 static int
-mo_mdbx_sync(struct Client *sptr, const char *target)
+mo_store_sync(struct Client *sptr, const char *target)
 {
   int do_history = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "history"));
   int do_metadata = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "metadata"));
@@ -124,7 +124,7 @@ mo_mdbx_sync(struct Client *sptr, const char *target)
   }
 
   send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :MDBX SYNC starting...");
+             "X :STORE SYNC starting...");
 
   if (do_history) {
     rc = history_sync();
@@ -139,14 +139,14 @@ mo_mdbx_sync(struct Client *sptr, const char *target)
   }
 
   send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :MDBX SYNC complete");
+             "X :STORE SYNC complete");
   return 0;
 }
 
 /* ========== GC ========== */
 
 static int
-mo_mdbx_gc(struct Client *sptr, const char *target)
+mo_store_gc(struct Client *sptr, const char *target)
 {
   int do_history = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "history"));
   int do_metadata = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "metadata"));
@@ -158,7 +158,7 @@ mo_mdbx_gc(struct Client *sptr, const char *target)
   }
 
   send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :MDBX GC Information");
+             "X :STORE GC Information");
 
   if (do_history)
     history_report_gc(sptr);
@@ -171,7 +171,7 @@ mo_mdbx_gc(struct Client *sptr, const char *target)
 /* ========== INFO ========== */
 
 static int
-mo_mdbx_info(struct Client *sptr, const char *target)
+mo_store_info(struct Client *sptr, const char *target)
 {
   int do_history = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "history"));
   int do_metadata = (0 == ircd_strcmp(target, "all") || 0 == ircd_strcmp(target, "metadata"));
@@ -183,12 +183,12 @@ mo_mdbx_info(struct Client *sptr, const char *target)
   }
 
   send_reply(sptr, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :MDBX Environment Info");
+             "X :STORE Environment Info");
 
   if (do_history)
-    history_report_mdbx_info(sptr);
+    history_report_store_info(sptr);
   if (do_metadata)
-    metadata_report_mdbx_info(sptr);
+    metadata_report_store_info(sptr);
 
   return 0;
 }

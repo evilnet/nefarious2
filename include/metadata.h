@@ -367,7 +367,7 @@ extern void metadata_report_gc(struct Client *to);
 /** Report detailed MDBX environment info for the metadata database.
  * @param[in] to Client to send results to.
  */
-extern void metadata_report_mdbx_info(struct Client *to);
+extern void metadata_report_store_info(struct Client *to);
 
 /* ========== Bouncer Persistence Accessors ========== */
 
