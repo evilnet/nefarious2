@@ -16,7 +16,7 @@
 
 #include "config.h"
 
-#ifdef USE_MDBX  /* until phase 1 adds USE_ROCKSDB; tracks "abstraction available" */
+#if defined(USE_MDBX) || defined(USE_ROCKSDB)  /* abstraction available */
 
 #include "db_cursor.h"
 #include "db_env.h"
@@ -549,9 +549,8 @@ int webpush_store_get_stats(struct webpush_store_stats *stats)
   return 0;
 }
 
-#else /* !USE_MDBX */
+#else /* neither backend — stub implementations */
 
-/* Stub implementations when storage is not available */
 #include "webpush_store.h"
 
 int webpush_store_init(const char *dbpath) { (void)dbpath; return -1; }
@@ -583,4 +582,4 @@ int webpush_store_get_vapid_key(unsigned char *privkey, size_t *privkey_len)
 int webpush_store_get_stats(struct webpush_store_stats *stats)
 { (void)stats; return -1; }
 
-#endif /* USE_MDBX */
+#endif /* USE_MDBX || USE_ROCKSDB */
