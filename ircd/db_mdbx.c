@@ -24,6 +24,8 @@
  */
 #include "config.h"
 
+#ifdef USE_MDBX
+
 #include "client.h"
 #include "db_cursor.h"
 #include "db_env.h"
@@ -885,3 +887,5 @@ struct MDBX_txn *db_mdbx_unwrap_snapshot_txn(struct db_snapshot *snap)
 {
   return snap ? (struct MDBX_txn *)snap->txn : NULL;
 }
+
+#endif /* USE_MDBX */

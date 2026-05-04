@@ -3,7 +3,9 @@ FROM debian:13 AS base
 ENV GID=1234
 ENV UID=1234
 
-# Single merged apt-get layer + ccache
+# Single merged apt-get layer + ccache.  librocksdb-dev pulls in the
+# Debian 13 build (8.x).  Both backends are available; the binary
+# selects one at configure time via --with-storage-backend.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get -y install \
       build-essential ccache libssl-dev autoconf automake flex \
@@ -11,6 +13,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
       libzstd-dev libcmocka-dev valgrind libcurl4-openssl-dev libjansson-dev \
       libmaxminddb-dev libgeoip-dev pkg-config \
       libtool cmake nodejs npm \
+      librocksdb-dev \
       libgit2-dev openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
@@ -64,9 +67,18 @@ RUN autoreconf -fi
 
 # MaxMindDB via pkg-config (handles Debian multiarch automatically)
 # Legacy GeoIP enabled as fallback — Debian ships free GeoLiteCountry .dat files
-RUN ./configure --prefix=/home/nefarious --libdir=/home/nefarious/ircd --enable-debug \
+# Pass --build-arg STORAGE_BACKEND=rocksdb to build the RocksDB-flavoured
+# binary; default stays mdbx so existing builds are unaffected.
+ARG STORAGE_BACKEND=mdbx
+RUN if [ "$STORAGE_BACKEND" = "rocksdb" ]; then \
+      ROCKSDB_FLAGS="--enable-rocksdb --with-rocksdb=/usr"; \
+    else \
+      ROCKSDB_FLAGS=""; \
+    fi && \
+    ./configure --prefix=/home/nefarious --libdir=/home/nefarious/ircd --enable-debug \
       --with-maxcon=4096 --with-mdbx=/usr --with-zstd=/usr --enable-keycloak \
-      --with-geoip=/usr --with-storage-backend=mdbx
+      $ROCKSDB_FLAGS \
+      --with-geoip=/usr --with-storage-backend=${STORAGE_BACKEND}
 
 # --- Build stage: ccache makes incremental rebuilds fast ---
 
