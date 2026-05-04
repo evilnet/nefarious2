@@ -56,11 +56,17 @@ COPY include/ ./include/
 # AC_INIT(ircd/ircd.c) sanity check — touch instead of COPY to avoid cache bust on source changes
 RUN touch ircd/ircd.c
 
+# Regenerate configure from configure.in.  The committed `configure` may
+# be stale relative to configure.in changes (e.g. new --with-storage-backend
+# option for the libmdbx → RocksDB migration).  autoreconf produces a
+# fresh configure that matches the current configure.in.
+RUN autoreconf -fi
+
 # MaxMindDB via pkg-config (handles Debian multiarch automatically)
 # Legacy GeoIP enabled as fallback — Debian ships free GeoLiteCountry .dat files
 RUN ./configure --prefix=/home/nefarious --libdir=/home/nefarious/ircd --enable-debug \
       --with-maxcon=4096 --with-mdbx=/usr --with-zstd=/usr --enable-keycloak \
-      --with-geoip=/usr
+      --with-geoip=/usr --with-storage-backend=mdbx
 
 # --- Build stage: ccache makes incremental rebuilds fast ---
 
