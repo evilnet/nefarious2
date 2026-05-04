@@ -136,4 +136,24 @@ extern const char *db_strerror(int rc);
  * call on @a env. */
 extern const char *db_env_last_error(struct db_env *env);
 
+/* -------------------------------------------------------------------- *
+ * Transitional escape hatches for incremental Phase 0 conversion.
+ *
+ * These let modules that haven't yet been fully ported to the abstraction
+ * reach into the libmdbx backend for advanced features (stats, defrag,
+ * GC info) that the abstraction doesn't surface.  They exist only when
+ * USE_MDBX is the active backend; once Phase 4 (RocksDB migration)
+ * deletes the libmdbx-specific code paths, these helpers retire.
+ * -------------------------------------------------------------------- */
+#ifdef USE_MDBX
+struct MDBX_env;
+/** Return the underlying MDBX_env* for an env opened via db_env_open.
+ * Caller must NOT close the returned env; ownership stays with @a env. */
+extern struct MDBX_env *db_mdbx_unwrap_env(struct db_env *env);
+
+/** Return the underlying MDBX_dbi for a CF opened via db_cf_open.
+ * Returns 0 if @a cf is NULL (libmdbx valid DBIs are positive). */
+extern unsigned int db_mdbx_unwrap_dbi(struct db_cf *cf);
+#endif
+
 #endif /* INCLUDED_db_env_h */

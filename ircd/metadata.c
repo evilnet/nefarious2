@@ -72,21 +72,31 @@ static char presence_value[AWAYLEN + 1];
 
 #ifdef USE_MDBX
 #include <mdbx.h>
+#include "db_cursor.h"
+#include "db_env.h"
+#include "db_txn.h"
+#include "db_types.h"
 #include "history.h"
 
-/** LMDB environment (shared with history) */
+/** Storage environment opened through the db_* abstraction.  Owns the
+ * underlying MDBX env and CF handles; closed via db_env_close at
+ * shutdown. */
+static struct db_env *metadata_db_env = NULL;
+static struct db_cf  *metadata_cf = NULL;
+static struct db_cf  *readmarkers_cf = NULL;
+static struct db_cf  *bouncer_cf = NULL;
+
+/** Raw MDBX handles unwrapped from the abstraction at init time.
+ * These point at the same underlying state as metadata_db_env / *_cf
+ * and exist only because the function bodies in this file haven't been
+ * fully converted off raw mdbx yet (Phase 0e is incremental).  Phase 4
+ * RocksDB migration completes the conversion and deletes them. */
 static MDBX_env *metadata_env = NULL;
-
-/** Metadata database handle */
 static MDBX_dbi metadata_dbi;
-
-/** Read markers database handle (IRCv3 draft/read-marker) */
 static MDBX_dbi readmarkers_dbi;
-
-/** Bouncer sessions database handle (persistent bouncer state) */
 static MDBX_dbi bouncer_dbi;
 
-/** Flag indicating if LMDB is available */
+/** Flag indicating if storage is available */
 static int metadata_lmdb_available = 0;
 
 /** Maximum metadata database size (100MB) */
@@ -257,113 +267,73 @@ static int is_value_expired(time_t timestamp, int ttl)
  */
 int metadata_lmdb_init(const char *dbpath)
 {
-  MDBX_txn *txn;
+  struct db_env_opts env_opts;
+  struct db_cf_opts  cf_opts;
   int rc;
 
   if (metadata_lmdb_available)
     return 0;
 
-  /* Use existing history environment if available */
-  if (history_is_available()) {
-    /* History already initialized LMDB, we need to open our database */
-    /* For now, we'll initialize our own environment */
-  }
-
-  rc = mdbx_env_create(&metadata_env);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_env_create failed: %s",
-              mdbx_strerror(rc));
-    return -1;
-  }
-
-  rc = mdbx_env_set_maxdbs(metadata_env, 3);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_env_set_maxdbs failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
-    return -1;
-  }
-
+  memset(&env_opts, 0, sizeof env_opts);
   if (feature_bool(FEAT_METADATA_DB_AUTOGROW)) {
-    rc = mdbx_env_set_geometry(metadata_env, -1, -1, METADATA_MAP_SIZE,
-                               16 * 1024 * 1024, 16 * 1024 * 1024, -1);
+    env_opts.size_floor = 0;
+    env_opts.size_max   = METADATA_MAP_SIZE;
   } else {
-    rc = mdbx_env_set_geometry(metadata_env, METADATA_MAP_SIZE, METADATA_MAP_SIZE,
-                               METADATA_MAP_SIZE, 0, 0, -1);
+    env_opts.size_floor = METADATA_MAP_SIZE;
+    env_opts.size_max   = METADATA_MAP_SIZE;
   }
-  if (rc != MDBX_SUCCESS) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_env_set_geometry failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
+  if (feature_bool(FEAT_METADATA_DB_NORDAHEAD)) {
+    env_opts.random_access = 1;
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "metadata: using MDBX_NORDAHEAD for random-access pattern");
+  }
+
+  rc = db_env_open(dbpath, &env_opts, /*max_cfs=*/3, &metadata_db_env);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "metadata: db_env_open(%s) failed: %s", dbpath, db_strerror(rc));
     return -1;
   }
 
-  {
-    unsigned int env_flags = 0;
-    if (feature_bool(FEAT_METADATA_DB_NORDAHEAD)) {
-      env_flags |= MDBX_NORDAHEAD;
-      log_write(LS_SYSTEM, L_INFO, 0, "metadata: using MDBX_NORDAHEAD for random-access pattern");
-    }
-    rc = mdbx_env_open(metadata_env, dbpath, env_flags, 0644);
+  memset(&cf_opts, 0, sizeof cf_opts);
+  rc = db_cf_open(metadata_db_env, "metadata", &cf_opts, &metadata_cf);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "metadata: db_cf_open(metadata): %s", db_strerror(rc));
+    db_env_close(metadata_db_env);
+    metadata_db_env = NULL;
+    return -1;
   }
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_env_open(%s) failed: %s",
-              dbpath, mdbx_strerror(rc));
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
+  rc = db_cf_open(metadata_db_env, "readmarkers", &cf_opts, &readmarkers_cf);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "metadata: db_cf_open(readmarkers): %s", db_strerror(rc));
+    db_cf_close(metadata_db_env, metadata_cf);
+    db_env_close(metadata_db_env);
+    metadata_cf = NULL;
+    metadata_db_env = NULL;
+    return -1;
+  }
+  rc = db_cf_open(metadata_db_env, "bouncer_sessions", &cf_opts, &bouncer_cf);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "metadata: db_cf_open(bouncer_sessions): %s", db_strerror(rc));
+    db_cf_close(metadata_db_env, readmarkers_cf);
+    db_cf_close(metadata_db_env, metadata_cf);
+    db_env_close(metadata_db_env);
+    readmarkers_cf = NULL;
+    metadata_cf = NULL;
+    metadata_db_env = NULL;
     return -1;
   }
 
-  /* Open database in a transaction */
-  rc = mdbx_txn_begin(metadata_env, NULL, 0, &txn);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_txn_begin failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
-    return -1;
-  }
-
-  rc = mdbx_dbi_open(txn, "metadata", MDBX_CREATE, &metadata_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_dbi_open failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
-    return -1;
-  }
-
-  rc = mdbx_dbi_open(txn, "readmarkers", MDBX_CREATE, &readmarkers_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_dbi_open(readmarkers) failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
-    return -1;
-  }
-
-  rc = mdbx_dbi_open(txn, "bouncer_sessions", MDBX_CREATE, &bouncer_dbi);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_dbi_open(bouncer_sessions) failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
-    return -1;
-  }
-
-  rc = mdbx_txn_commit(txn);
-  if (rc != 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "metadata: mdbx_txn_commit failed: %s",
-              mdbx_strerror(rc));
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
-    return -1;
-  }
+  /* Populate the legacy raw mdbx handles for the function bodies that
+   * haven't been converted off raw mdbx yet (stats, defrag, GC,
+   * non-converted CRUD).  Same underlying env/dbi as the abstraction. */
+  metadata_env     = db_mdbx_unwrap_env(metadata_db_env);
+  metadata_dbi     = db_mdbx_unwrap_dbi(metadata_cf);
+  readmarkers_dbi  = db_mdbx_unwrap_dbi(readmarkers_cf);
+  bouncer_dbi      = db_mdbx_unwrap_dbi(bouncer_cf);
 
   metadata_lmdb_available = 1;
 
@@ -383,38 +353,39 @@ int metadata_lmdb_init(const char *dbpath)
     }
   }
 
-  log_write(LS_SYSTEM, L_INFO, 0, "metadata: LMDB initialized at %s", dbpath);
+  log_write(LS_SYSTEM, L_INFO, 0, "metadata: storage initialized at %s", dbpath);
 
   /* Pre-fault database pages into OS page cache */
-  rc = mdbx_env_warmup(metadata_env, NULL, MDBX_warmup_default, 0);
-  if (rc != MDBX_SUCCESS && rc != MDBX_RESULT_TRUE)
-    log_write(LS_SYSTEM, L_WARNING, 0, "metadata: mdbx_env_warmup failed: %s",
-              mdbx_strerror(rc));
+  db_env_warmup(metadata_db_env);
 
   return 0;
 }
 
-/** Get the MDBX environment handle (for bouncer persistence). */
-MDBX_env *metadata_get_env(void)
+/** Get the storage environment handle (for bouncer persistence). */
+struct db_env *metadata_get_env(void)
 {
-  return metadata_env;
+  return metadata_db_env;
 }
 
-/** Get the bouncer sessions DBI handle. */
-MDBX_dbi metadata_get_bouncer_dbi(void)
+/** Get the bouncer sessions CF handle (for bouncer persistence). */
+struct db_cf *metadata_get_bouncer_cf(void)
 {
-  return bouncer_dbi;
+  return bouncer_cf;
 }
 
-/** Shutdown LMDB metadata storage. */
+/** Shutdown metadata storage. */
 void metadata_lmdb_shutdown(void)
 {
-  if (metadata_env) {
-    mdbx_dbi_close(metadata_env, bouncer_dbi);
-    mdbx_dbi_close(metadata_env, readmarkers_dbi);
-    mdbx_dbi_close(metadata_env, metadata_dbi);
-    mdbx_env_close(metadata_env);
-    metadata_env = NULL;
+  if (metadata_db_env) {
+    db_cf_close(metadata_db_env, bouncer_cf);
+    db_cf_close(metadata_db_env, readmarkers_cf);
+    db_cf_close(metadata_db_env, metadata_cf);
+    db_env_close(metadata_db_env);
+    metadata_db_env = NULL;
+    metadata_cf = NULL;
+    readmarkers_cf = NULL;
+    bouncer_cf = NULL;
+    metadata_env = NULL;  /* legacy raw handle, owned by db_env */
     metadata_lmdb_available = 0;
   }
 }

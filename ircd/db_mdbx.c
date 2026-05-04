@@ -854,3 +854,17 @@ const void *db_iter_value(const struct db_iter *it, size_t *vlen)
   if (vlen) *vlen = it->cur_val.iov_len;
   return it->cur_val.iov_base;
 }
+
+/* -------------------------------------------------------------------- */
+/* Transitional escape hatches                                          */
+/* -------------------------------------------------------------------- */
+
+struct MDBX_env *db_mdbx_unwrap_env(struct db_env *env)
+{
+  return env ? (struct MDBX_env *)env->env : NULL;
+}
+
+unsigned int db_mdbx_unwrap_dbi(struct db_cf *cf)
+{
+  return cf ? cf->dbi : 0;
+}

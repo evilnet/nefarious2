@@ -371,14 +371,17 @@ extern void metadata_report_mdbx_info(struct Client *to);
 
 /* ========== Bouncer Persistence Accessors ========== */
 
-/** Get the MDBX environment handle (for bouncer session persistence).
- * @return MDBX_env pointer, or NULL if LMDB not initialized.
- */
-extern struct MDBX_env *metadata_get_env(void);
+struct db_env;
+struct db_cf;
 
-/** Get the bouncer_sessions DBI handle.
- * @return MDBX_dbi handle for the bouncer_sessions database.
+/** Get the storage environment handle (for bouncer session persistence).
+ * @return db_env pointer, or NULL if storage not initialized.
  */
-extern unsigned int metadata_get_bouncer_dbi(void);
+extern struct db_env *metadata_get_env(void);
+
+/** Get the bouncer_sessions CF handle.
+ * @return db_cf pointer for the bouncer_sessions column family.
+ */
+extern struct db_cf *metadata_get_bouncer_cf(void);
 
 #endif /* INCLUDED_metadata_h */

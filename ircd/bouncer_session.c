@@ -32,6 +32,10 @@
 #include "client.h"
 #include "history.h"
 #include "ircd.h"
+#include "db_cursor.h"
+#include "db_env.h"
+#include "db_txn.h"
+#include "db_types.h"
 #include "ircd_alloc.h"
 #include "ircd_osdep.h"
 #include "ircd_features.h"
@@ -1313,10 +1317,9 @@ static int is_local_session(struct BouncerSession *session)
  */
 static int bounce_db_put(struct BouncerSession *session)
 {
-  MDBX_env *env;
-  MDBX_dbi dbi;
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_env *env;
+  struct db_cf  *cf;
+  struct db_writebatch *wb;
   struct BounceSessionRecord rec;
   struct Client *ghost = session->hs_client;
   int rc;
@@ -1328,8 +1331,8 @@ static int bounce_db_put(struct BouncerSession *session)
     return 0;
 
   env = metadata_get_env();
-  dbi = metadata_get_bouncer_dbi();
-  if (!env)
+  cf  = metadata_get_bouncer_cf();
+  if (!env || !cf)
     return -1;
 
   /* Build record */
@@ -1400,31 +1403,24 @@ static int bounce_db_put(struct BouncerSession *session)
   memcpy(rec.bsr_history, session->hs_history,
          session->hs_histcount * sizeof(struct BounceConnHistory));
 
-  /* Write to MDBX */
-  rc = mdbx_txn_begin(env, NULL, 0, &txn);
-  if (rc != MDBX_SUCCESS) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: txn_begin failed: %s",
-              mdbx_strerror(rc));
+  /* Write through the abstraction */
+  wb = db_writebatch_new(env);
+  if (!wb)
     return -1;
-  }
-
-  key.iov_base = session->hs_sessid;
-  key.iov_len = strlen(session->hs_sessid);
-  data.iov_base = &rec;
-  data.iov_len = sizeof(rec);
-
-  rc = mdbx_put(txn, dbi, &key, &data, 0);
-  if (rc != MDBX_SUCCESS) {
+  rc = db_writebatch_put(wb, cf,
+                         session->hs_sessid, strlen(session->hs_sessid),
+                         &rec, sizeof rec);
+  if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: put(%s) failed: %s",
-              session->hs_sessid, mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
+              session->hs_sessid, db_strerror(rc));
+    db_writebatch_destroy(wb);
     return -1;
   }
-
-  rc = mdbx_txn_commit(txn);
-  if (rc != MDBX_SUCCESS) {
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: commit failed: %s",
-              mdbx_strerror(rc));
+              db_strerror(rc));
     return -1;
   }
 
@@ -1439,42 +1435,34 @@ static int bounce_db_put(struct BouncerSession *session)
  */
 static int bounce_db_del(const char *sessid)
 {
-  MDBX_env *env;
-  MDBX_dbi dbi;
-  MDBX_txn *txn;
-  MDBX_val key;
+  struct db_env *env;
+  struct db_cf  *cf;
+  struct db_writebatch *wb;
   int rc;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
     return 0;
 
   env = metadata_get_env();
-  dbi = metadata_get_bouncer_dbi();
-  if (!env)
+  cf  = metadata_get_bouncer_cf();
+  if (!env || !cf)
     return -1;
 
-  rc = mdbx_txn_begin(env, NULL, 0, &txn);
-  if (rc != MDBX_SUCCESS) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: txn_begin failed: %s",
-              mdbx_strerror(rc));
+  wb = db_writebatch_new(env);
+  if (!wb)
     return -1;
-  }
-
-  key.iov_base = (void *)sessid;
-  key.iov_len = strlen(sessid);
-
-  rc = mdbx_del(txn, dbi, &key, NULL);
-  if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+  rc = db_writebatch_del(wb, cf, sessid, strlen(sessid));
+  if (rc != DB_OK && rc != DB_NOTFOUND) {
     log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: del(%s) failed: %s",
-              sessid, mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
+              sessid, db_strerror(rc));
+    db_writebatch_destroy(wb);
     return -1;
   }
-
-  rc = mdbx_txn_commit(txn);
-  if (rc != MDBX_SUCCESS) {
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: commit failed: %s",
-              mdbx_strerror(rc));
+              db_strerror(rc));
     return -1;
   }
 
@@ -1648,11 +1636,9 @@ static void bounce_restore_channels(struct Client *ghost,
  */
 int bounce_db_restore(void)
 {
-  MDBX_env *env;
-  MDBX_dbi dbi;
-  MDBX_txn *txn;
-  MDBX_cursor *cursor;
-  MDBX_val key, data;
+  struct db_env *env;
+  struct db_cf  *cf;
+  struct db_iter *it;
   int rc;
   int restored = 0;
   int expired = 0;
@@ -1663,29 +1649,26 @@ int bounce_db_restore(void)
     return 0;
 
   env = metadata_get_env();
-  dbi = metadata_get_bouncer_dbi();
-  if (!env)
+  cf  = metadata_get_bouncer_cf();
+  if (!env || !cf)
     return -1;
 
   max_hold = feature_int(FEAT_BOUNCER_MAX_HOLD);
 
-  /* Read-only txn to scan all records */
-  rc = mdbx_txn_begin(env, NULL, MDBX_RDONLY, &txn);
-  if (rc != MDBX_SUCCESS) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: restore txn_begin failed: %s",
-              mdbx_strerror(rc));
+  /* Iterate through all persisted records */
+  it = db_iter_open(env, cf, /*snap=*/NULL);
+  if (!it) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "bouncer_persist: db_iter_open failed: %s",
+              db_env_last_error(env) ? db_env_last_error(env) : "unknown");
     return -1;
   }
 
-  rc = mdbx_cursor_open(txn, dbi, &cursor);
-  if (rc != MDBX_SUCCESS) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "bouncer_persist: cursor_open failed: %s",
-              mdbx_strerror(rc));
-    mdbx_txn_abort(txn);
-    return -1;
-  }
-
-  while ((rc = mdbx_cursor_get(cursor, &key, &data, MDBX_NEXT)) == MDBX_SUCCESS) {
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t vlen;
+    const void *vbuf = db_iter_value(it, &vlen);
     struct BounceSessionRecord *rec;
     struct BouncerSession *session;
     struct Client *ghost;
@@ -1695,10 +1678,10 @@ int bounce_db_restore(void)
     unsigned int seq;
     const char *dash;
 
-    if (data.iov_len != sizeof(struct BounceSessionRecord))
+    if (vlen != sizeof(struct BounceSessionRecord))
       continue; /* wrong size, skip */
 
-    rec = (struct BounceSessionRecord *)data.iov_base;
+    rec = (struct BounceSessionRecord *)vbuf;
 
     if (rec->bsr_version != BOUNCER_DB_VERSION)
       continue; /* version mismatch, skip */
@@ -1804,34 +1787,39 @@ int bounce_db_restore(void)
               session->hs_sessid, session->hs_account, cli_name(ghost), remaining);
   }
 
-  mdbx_cursor_close(cursor);
-  mdbx_txn_abort(txn);
+  db_iter_close(it);
 
   /* Update sessionSeq to avoid collision */
   if (max_seq >= sessionSeq)
     sessionSeq = max_seq + 1;
 
-  /* Clean up expired records in a write txn */
+  /* Clean up expired records: collect their sessids during a read pass,
+   * then delete via a writebatch.  Two passes (read-collect, write-batch)
+   * because the abstraction doesn't expose delete-during-iteration. */
   if (expired > 0) {
-    MDBX_txn *wtxn;
-    MDBX_cursor *wcursor;
-
-    rc = mdbx_txn_begin(env, NULL, 0, &wtxn);
-    if (rc == MDBX_SUCCESS) {
-      rc = mdbx_cursor_open(wtxn, dbi, &wcursor);
-      if (rc == MDBX_SUCCESS) {
-        while ((rc = mdbx_cursor_get(wcursor, &key, &data, MDBX_NEXT)) == MDBX_SUCCESS) {
-          struct BounceSessionRecord *rec = (struct BounceSessionRecord *)data.iov_base;
-          if (data.iov_len != sizeof(struct BounceSessionRecord) ||
-              rec->bsr_version != BOUNCER_DB_VERSION ||
-              CurrentTime - (time_t)rec->bsr_disconnect_time > max_hold) {
-            mdbx_cursor_del(wcursor, 0);
-          }
+    struct db_iter *eit = db_iter_open(env, cf, /*snap=*/NULL);
+    struct db_writebatch *ewb = db_writebatch_new(env);
+    if (eit && ewb) {
+      int erc;
+      for (erc = db_iter_seek_first(eit);
+           erc == DB_OK && db_iter_valid(eit);
+           erc = db_iter_next(eit)) {
+        size_t klen, vlen;
+        const void *kbuf = db_iter_key(eit, &klen);
+        const void *vbuf = db_iter_value(eit, &vlen);
+        struct BounceSessionRecord *rec = (struct BounceSessionRecord *)vbuf;
+        if (vlen != sizeof(struct BounceSessionRecord) ||
+            rec->bsr_version != BOUNCER_DB_VERSION ||
+            CurrentTime - (time_t)rec->bsr_disconnect_time > max_hold) {
+          db_writebatch_del(ewb, cf, kbuf, klen);
         }
-        mdbx_cursor_close(wcursor);
       }
-      mdbx_txn_commit(wtxn);
+      db_iter_close(eit);
+      db_writebatch_commit(ewb, /*sync_durably=*/0);
+    } else {
+      if (eit) db_iter_close(eit);
     }
+    if (ewb) db_writebatch_destroy(ewb);
     log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: cleaned up %d expired records", expired);
   }
 
