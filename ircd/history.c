@@ -57,32 +57,18 @@
 #include <stdint.h>
 #include <sys/time.h>
 
-#ifdef USE_MDBX
-#include <mdbx.h>
-#endif
-
 /* Forward declarations for quota functions */
 static int quota_increment(const char *channel, const char *account);
 static int quota_decrement(const char *channel, const char *account);
 
-/** Storage environment opened through the db_* abstraction.  Owns the
- * underlying MDBX env / CF handles; closed via db_env_close. */
+/** Storage environment opened through the db_* abstraction.
+ * Owns RocksDB env + per-CF handles; closed via db_env_close. */
 static struct db_env *history_db_env = NULL;
 static struct db_cf  *history_cf_messages = NULL;
 static struct db_cf  *history_cf_msgid = NULL;
 static struct db_cf  *history_cf_targets = NULL;
 static struct db_cf  *history_cf_quotas = NULL;
-static struct db_cf  *history_cf_reply = NULL;  /* DUPSORT */
-
-/** Raw MDBX handles unwrapped from the abstraction.  Same underlying
- * env/dbi as the db_* statics above; used only by the libmdbx-specific
- * stats / GC / defrag / sync reporters at the bottom of this file. */
-#ifdef USE_MDBX
-static MDBX_env *history_env = NULL;
-static MDBX_dbi history_dbi;
-static MDBX_dbi history_msgid_dbi;
-static MDBX_dbi history_targets_dbi;
-#endif
+static struct db_cf  *history_cf_reply = NULL;
 
 /** Flag indicating if history is available */
 static int history_available = 0;
@@ -612,77 +598,6 @@ int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen)
   return 0;
 }
 
-/* One-shot reply_index migration.  Older history DBs created reply_index
- * with MDBX_DUPSORT (the value contained the timestamp + child msgid).
- * We've reshaped to flat-key encoding — same data, but the timestamp +
- * child msgid live in the key, value is empty, no DUPSORT needed.
- *
- * libmdbx refuses to reopen a DUPSORT dbi without the DUPSORT flag (it
- * returns MDBX_INCOMPATIBLE).  So before the regular cf_open we peek at
- * the existing dbi flags; if it's still DUPSORT, mdbx_drop it.  The
- * subsequent db_cf_open then creates a fresh CF under the new shape.
- *
- * The migration is silent on already-migrated or fresh databases.  Old
- * reply_index data is discarded (it's a derived index — context lookups
- * for pre-migration messages will return zero children, but the message
- * rows themselves are untouched and chathistory still works). */
-#ifdef USE_MDBX
-static void migrate_reply_index_legacy_dupsort(struct db_env *env)
-{
-  MDBX_env *raw_env = db_mdbx_unwrap_env(env);
-  MDBX_txn *txn;
-  MDBX_dbi  dbi;
-  unsigned int flags = 0, state = 0;
-  int rc;
-
-  if (!raw_env) return;
-
-  rc = mdbx_txn_begin(raw_env, NULL, 0, &txn);
-  if (rc != MDBX_SUCCESS) return;
-
-  /* Open without MDBX_CREATE — succeeds only if the dbi already exists. */
-  rc = mdbx_dbi_open(txn, "reply_index", 0, &dbi);
-  if (rc != MDBX_SUCCESS) {
-    mdbx_txn_abort(txn);
-    return;  /* fresh database, nothing to migrate */
-  }
-
-  rc = mdbx_dbi_flags_ex(txn, dbi, &flags, &state);
-  if (rc != MDBX_SUCCESS) {
-    mdbx_txn_abort(txn);
-    return;
-  }
-
-  if (!(flags & MDBX_DUPSORT)) {
-    /* Already migrated or never created with DUPSORT.  Done. */
-    mdbx_txn_abort(txn);
-    return;
-  }
-
-  log_write(LS_SYSTEM, L_WARNING, 0,
-            "history: migrating reply_index from DUPSORT to flat-key encoding "
-            "(old child→parent links discarded, message rows untouched)");
-
-  rc = mdbx_drop(txn, dbi, /*del=*/1);
-  if (rc != MDBX_SUCCESS) {
-    mdbx_txn_abort(txn);
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "history: reply_index migration drop failed: %s",
-              mdbx_strerror(rc));
-    return;
-  }
-
-  rc = mdbx_txn_commit(txn);
-  if (rc != MDBX_SUCCESS) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "history: reply_index migration commit failed: %s",
-              mdbx_strerror(rc));
-    return;
-  }
-  log_write(LS_SYSTEM, L_INFO, 0, "history: reply_index migration complete");
-}
-#endif
-
 int history_init(const char *dbpath)
 {
   struct db_env_opts env_opts;
@@ -714,14 +629,8 @@ int history_init(const char *dbpath)
     return -1;
   }
 
-  /* One-time migration: drop reply_index if it still has the old
-   * DUPSORT shape, so the cf_open below can recreate it flat. */
-#ifdef USE_MDBX
-  migrate_reply_index_legacy_dupsort(history_db_env);
-#endif
-
-  /* Open the column families.  reply_index uses flat-key encoding now —
-   * each (parent, child) pair gets its own unique key, so no DUPSORT. */
+  /* Open the column families.  reply_index uses flat-key encoding —
+   * each (parent, child) pair gets its own unique key. */
   memset(&cf_opts, 0, sizeof cf_opts);
   if (db_cf_open(history_db_env, "messages", &cf_opts, &history_cf_messages) != DB_OK
       || db_cf_open(history_db_env, "msgid_index", &cf_opts, &history_cf_msgid) != DB_OK
@@ -734,15 +643,6 @@ int history_init(const char *dbpath)
     history_db_env = NULL;
     return -1;
   }
-
-  /* Populate the legacy raw-mdbx handles used by the libmdbx-specific
-   * stats / GC / defrag / sync reporters at the bottom of this file. */
-#ifdef USE_MDBX
-  history_env         = db_mdbx_unwrap_env(history_db_env);
-  history_dbi         = db_mdbx_unwrap_dbi(history_cf_messages);
-  history_msgid_dbi   = db_mdbx_unwrap_dbi(history_cf_msgid);
-  history_targets_dbi = db_mdbx_unwrap_dbi(history_cf_targets);
-#endif
 
   /* Open multiline content databases (shares this env) */
   if (ml_content_init(history_db_env) != 0) {
@@ -784,9 +684,6 @@ void history_shutdown(void)
   history_cf_targets = NULL;
   history_cf_quotas = NULL;
   history_cf_reply = NULL;
-#ifdef USE_MDBX
-  history_env = NULL;  /* legacy raw handle, owned by db_env */
-#endif
   history_available = 0;
 
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage shutdown complete");
@@ -2777,40 +2674,10 @@ int history_db_utilization(void)
   if (!history_available)
     return -1;
 
-#ifdef USE_MDBX
-  {
-    MDBX_envinfo info;
-    MDBX_stat envstat;
-    int rc;
-    size_t used_size;
-    int percent;
-
-    rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
-    if (rc != MDBX_SUCCESS)
-      return -1;
-
-    rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
-    if (rc != MDBX_SUCCESS)
-      return -1;
-
-    /* Calculate used size: (last_pgno + 1) * page_size */
-    used_size = (info.mi_last_pgno + 1) * envstat.ms_psize;
-
-    if (info.mi_geo.upper == 0)
-      return 0;
-
-    percent = (int)((used_size * 100) / info.mi_geo.upper);
-    if (percent > 100)
-      percent = 100;
-
-    return percent;
-  }
-#else
   /* RocksDB has no fixed map size — utilization isn't a meaningful
    * concept here.  The LSM compactor handles space; report 0% so the
    * watermark eviction logic stays a no-op. */
   return 0;
-#endif
 }
 
 enum HistoryStorageState history_storage_state(void)
@@ -2989,17 +2856,6 @@ void history_maintenance_tick(void)
   if (!history_available)
     return;
 
-  /* Clean up stale reader slots to prevent GC blockage (libmdbx only;
-   * RocksDB doesn't have a reader slot table). */
-#ifdef USE_MDBX
-  {
-    int dead = 0;
-    mdbx_reader_check(history_env, &dead);
-    if (dead > 0)
-      log_write(LS_SYSTEM, L_WARNING, 0, "history: cleared %d stale reader(s)", dead);
-  }
-#endif
-
   now = time(NULL);
 
   /* Check if maintenance interval has passed */
@@ -3068,13 +2924,7 @@ history_sync(void)
 /** Backend label string for /STATS H reports. */
 static const char *history_backend_name(void)
 {
-#ifdef USE_MDBX
-  return "libmdbx";
-#elif defined(USE_ROCKSDB)
   return "RocksDB";
-#else
-  return "none";
-#endif
 }
 
 void
@@ -3164,49 +3014,6 @@ history_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
                "H :  MsgID index: ~%lu entries",
                (unsigned long)cf_stats.approx_keys);
 
-#ifdef USE_MDBX
-  /* libmdbx-specific extras: page geometry + GC reader-lag.  No clean
-   * RocksDB analog, so they only print under USE_MDBX.  See
-   * history_report_mdbx_info / history_report_gc for the full detail. */
-  {
-    MDBX_envinfo info;
-    MDBX_stat envstat;
-    MDBX_txn *txn;
-    int rc;
-
-    rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
-    if (rc == MDBX_SUCCESS &&
-        mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat))
-          == MDBX_SUCCESS) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  Geometry: %lu / %lu / %lu MB (cur/grow/max)",
-                 (unsigned long)(info.mi_geo.current / (1024 * 1024)),
-                 (unsigned long)(info.mi_geo.grow / (1024 * 1024)),
-                 (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "H :  Pages: branch=%lu leaf=%lu overflow=%lu (psize=%u)",
-                 (unsigned long)envstat.ms_branch_pages,
-                 (unsigned long)envstat.ms_leaf_pages,
-                 (unsigned long)envstat.ms_overflow_pages,
-                 envstat.ms_psize);
-    }
-
-    rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-    if (rc == 0) {
-      MDBX_gc_info_t gc;
-      memset(&gc, 0, sizeof(gc));
-      rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
-      if ((rc == 0 || rc == MDBX_NOTFOUND) &&
-          (gc.max_reader_lag > 0 || gc.max_retained_pages > 0)) {
-        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                   "H :  GC pressure: reader_lag=%lu retained=%lu pages",
-                   (unsigned long)gc.max_reader_lag,
-                   (unsigned long)gc.max_retained_pages);
-      }
-      mdbx_txn_abort(txn);
-    }
-  }
-#endif
 }
 
 /** \brief Defragment the history database.
@@ -3252,144 +3059,6 @@ history_report_defrag(struct Client *to)
              db_strerror(rc));
 }
 
-#ifdef USE_MDBX
-/** \brief Report detailed GC info for the history database. */
-void
-history_report_gc(struct Client *to)
-{
-  MDBX_txn *txn;
-  MDBX_gc_info_t gc;
-  MDBX_stat envstat;
-  int rc;
-
-  if (!history_available || !history_env) {
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :  History GC: unavailable");
-    return;
-  }
-
-  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
-  if (rc != MDBX_SUCCESS)
-    return;
-
-  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-  if (rc != 0)
-    return;
-
-  memset(&gc, 0, sizeof(gc));
-  rc = mdbx_gc_info(txn, &gc, sizeof(gc), NULL, NULL);
-  if (rc == 0 || rc == MDBX_NOTFOUND) {
-    size_t page_size = envstat.ms_psize;
-
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :  History GC:");
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :    Pages: total=%lu backed=%lu allocated=%lu",
-               (unsigned long)gc.pages_total,
-               (unsigned long)gc.pages_backed,
-               (unsigned long)gc.pages_allocated);
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :    GC pages=%lu reclaimable=%lu",
-               (unsigned long)gc.pages_gc,
-               (unsigned long)gc.gc_reclaimable.pages);
-    if (page_size > 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "X :    Reclaimable: %lu KB (%lu MB)",
-                 (unsigned long)(gc.gc_reclaimable.pages * page_size / 1024),
-                 (unsigned long)(gc.gc_reclaimable.pages * page_size / (1024 * 1024)));
-    }
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :    Reader lag=%lu retained=%lu pages",
-               (unsigned long)gc.max_reader_lag,
-               (unsigned long)gc.max_retained_pages);
-  }
-
-  mdbx_txn_abort(txn);
-}
-
-/** \brief Report detailed MDBX environment info for the history database. */
-void
-history_report_mdbx_info(struct Client *to)
-{
-  MDBX_envinfo info;
-  MDBX_stat envstat;
-  MDBX_stat stat;
-  MDBX_txn *txn;
-  int rc;
-
-  if (!history_available || !history_env) {
-    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "X :  History: unavailable");
-    return;
-  }
-
-  rc = mdbx_env_info_ex(history_env, NULL, &info, sizeof(info));
-  if (rc != MDBX_SUCCESS)
-    return;
-
-  rc = mdbx_env_stat_ex(history_env, NULL, &envstat, sizeof(envstat));
-  if (rc != MDBX_SUCCESS)
-    return;
-
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :  History Environment:");
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :    Page size: %u bytes", envstat.ms_psize);
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :    Geometry: min=%lu cur=%lu max=%lu MB",
-             (unsigned long)(info.mi_geo.lower / (1024 * 1024)),
-             (unsigned long)(info.mi_geo.current / (1024 * 1024)),
-             (unsigned long)(info.mi_geo.upper / (1024 * 1024)));
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :    Growth=%lu MB  Shrink=%lu MB",
-             (unsigned long)(info.mi_geo.grow / (1024 * 1024)),
-             (unsigned long)(info.mi_geo.shrink / (1024 * 1024)));
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :    Last pgno=%lu  Readers=%u/%u",
-             (unsigned long)info.mi_last_pgno,
-             info.mi_numreaders, info.mi_maxreaders);
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :    Pages: branch=%lu leaf=%lu overflow=%lu",
-             (unsigned long)envstat.ms_branch_pages,
-             (unsigned long)envstat.ms_leaf_pages,
-             (unsigned long)envstat.ms_overflow_pages);
-  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-             "X :    B-tree depth: %u", envstat.ms_depth);
-
-  /* Per-database stats */
-  rc = mdbx_txn_begin(history_env, NULL, MDBX_RDONLY, &txn);
-  if (rc == 0) {
-    rc = mdbx_dbi_stat(txn, history_dbi, &stat, sizeof(stat));
-    if (rc == 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "X :    messages: %lu entries depth=%u branch=%lu leaf=%lu overflow=%lu",
-                 (unsigned long)stat.ms_entries, stat.ms_depth,
-                 (unsigned long)stat.ms_branch_pages,
-                 (unsigned long)stat.ms_leaf_pages,
-                 (unsigned long)stat.ms_overflow_pages);
-    }
-    rc = mdbx_dbi_stat(txn, history_targets_dbi, &stat, sizeof(stat));
-    if (rc == 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "X :    targets: %lu entries depth=%u",
-                 (unsigned long)stat.ms_entries, stat.ms_depth);
-    }
-    rc = mdbx_dbi_stat(txn, history_msgid_dbi, &stat, sizeof(stat));
-    if (rc == 0) {
-      send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-                 "X :    msgid_index: %lu entries depth=%u",
-                 (unsigned long)stat.ms_entries, stat.ms_depth);
-    }
-    mdbx_txn_abort(txn);
-  }
-}
-
-#else  /* !USE_MDBX — RocksDB stubs for the deeply-mdbx-flavoured
-        * reports.  history_report_gc and history_report_mdbx_info
-        * describe page geometry / GC reader-lag concepts that don't
-        * map cleanly to LSM-tree storage; the abstraction's stats
-        * (used by history_report_stats above) cover the genuinely
-        * cross-backend numbers like on-disk bytes and approx keys. */
 
 void
 history_report_gc(struct Client *to)
@@ -3461,8 +3130,6 @@ history_report_mdbx_info(struct Client *to)
                (unsigned long)cf_stats.approx_keys,
                (unsigned long)(cf_stats.on_disk_bytes / 1024));
 }
-
-#endif /* USE_MDBX */
 
 
 /* ========== Per-User Quota Tracking ========== */
