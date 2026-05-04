@@ -919,26 +919,15 @@ store_ml_retry:
   wb = db_writebatch_new(history_db_env);
   if (!wb) return -1;
 
-  /* ml_content_store still takes a raw MDBX_txn (Phase 5 will convert
-   * it to db_writebatch).  Borrow the writebatch's underlying txn so
-   * the multiline content + history puts commit atomically. */
-#ifdef USE_MDBX
-  {
-    MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
-    if (!raw_txn || ml_content_store(raw_txn, msgid, sender, target,
-                                     content, content_len, paste_secret) != 0) {
-      db_writebatch_destroy(wb);
-      wb = NULL;
-      return -1;
-    }
+  /* Stage the multiline content put on the same writebatch so it
+   * lands atomically with the history.messages / msgid_index / targets
+   * puts below. */
+  if (ml_content_store(wb, msgid, sender, target,
+                       content, content_len, paste_secret) != 0) {
+    db_writebatch_destroy(wb);
+    wb = NULL;
+    return -1;
   }
-#else
-  /* RocksDB: ml_content_store conversion pending Phase 5; without it
-   * multiline content isn't stored — message body still goes through
-   * the normal history.messages path with the \x1Eml sentinel, just
-   * without the inline-decompression backing.  Multiline messages
-   * appear truncated to the sentinel until Phase 5 lands. */
-#endif
 
   rc = db_writebatch_put_append(wb, history_cf_messages,
                                 keybuf, (size_t)keylen, vbuf, vlen);
@@ -1162,18 +1151,9 @@ static int history_query_internal(const char *target,
     }
 
     /* Resolve multiline content from ml_content store if needed.
-     * ml_content_resolve still takes a raw MDBX_txn; we borrow the
-     * snapshot's underlying txn so the resolve reads through the
-     * same point-in-time view as this iterator.  Once ml_content.c
-     * is converted (Phase 5) this #ifdef can be removed and we'll
-     * pass the snapshot directly. */
-#ifdef USE_MDBX
-    {
-      MDBX_txn *snap_txn = db_mdbx_unwrap_snapshot_txn(snap);
-      if (snap_txn)
-        ml_content_resolve(snap_txn, msg);
-    }
-#endif
+     * Reads through the same snapshot as this iterator for a coherent
+     * point-in-time view. */
+    ml_content_resolve(snap, msg);
 
     /* Add to list */
     msg->next = NULL;
@@ -1637,15 +1617,8 @@ int history_query_between(const char *target,
       continue;
     }
 
-    /* Resolve multiline content from ml_content store via the snapshot's
-     * underlying read txn (Phase 5 will convert ml_content.c). */
-#ifdef USE_MDBX
-    {
-      MDBX_txn *snap_txn = db_mdbx_unwrap_snapshot_txn(snap);
-      if (snap_txn)
-        ml_content_resolve(snap_txn, msg);
-    }
-#endif
+    /* Resolve multiline content via the snapshot for coherent reads. */
+    ml_content_resolve(snap, msg);
 
     msg->next = NULL;
     if (tail)
@@ -1930,14 +1903,7 @@ int history_purge_old(unsigned long max_age_seconds)
       db_writebatch_del(wb, history_cf_msgid,
                         msg_msgid, strlen(msg_msgid));
 
-      /* ml_content still uses raw mdbx; borrow the wb's underlying txn. */
-#ifdef USE_MDBX
-      {
-        MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
-        if (raw_txn)
-          ml_content_delete(raw_txn, msg_msgid);
-      }
-#endif
+      ml_content_delete(wb, msg_msgid);
 
       /* Delete reply index entries where this msgid is the parent.
        * Orphaned child entries (referencing deleted parents) are harmless
@@ -2220,14 +2186,8 @@ int history_lookup_message(const char *target, const char *msgid,
   ircd_strncpy(m->timestamp, timestamp, sizeof(m->timestamp) - 1);
   m->next = NULL;
 
-  /* Resolve multiline content from ml_content store via snapshot's txn. */
-#ifdef USE_MDBX
-  {
-    MDBX_txn *snap_txn = db_mdbx_unwrap_snapshot_txn(snap);
-    if (snap_txn)
-      ml_content_resolve(snap_txn, m);
-  }
-#endif
+  /* Resolve multiline content via the same snapshot. */
+  ml_content_resolve(snap, m);
 
   db_snapshot_destroy(snap);
   *msg = m;
@@ -2290,14 +2250,7 @@ int history_delete_message(const char *target, const char *msgid)
   db_writebatch_del(wb, history_cf_msgid, msgid, strlen(msgid));
   db_writebatch_del(wb, history_cf_messages, keybuf, keylen);
 
-  /* ml_content still uses raw mdbx; borrow the wb's underlying txn. */
-#ifdef USE_MDBX
-  {
-    MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
-    if (raw_txn)
-      ml_content_delete(raw_txn, msgid);
-  }
-#endif
+  ml_content_delete(wb, msgid);
 
   /* Clean reply index entries where this msgid is the parent */
   {
@@ -2557,15 +2510,8 @@ int history_redact_message(const char *target, const char *msgid)
 #endif
   }
 
-  /* Delete multiline content if any.  ml_content still uses raw mdbx;
-   * borrow the writebatch's underlying txn. */
-#ifdef USE_MDBX
-  {
-    MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
-    if (raw_txn)
-      ml_content_delete(raw_txn, msgid);
-  }
-#endif
+  /* Delete multiline content if any. */
+  ml_content_delete(wb, msgid);
 
   rc = db_writebatch_commit(wb, /*sync=*/0);
   db_writebatch_destroy(wb);
@@ -2678,14 +2624,7 @@ static int history_emergency_evict(void)
         db_writebatch_del(wb, history_cf_msgid,
                           msg_msgid, strlen(msg_msgid));
 
-        /* ml_content still uses raw mdbx; borrow the wb's underlying txn. */
-#ifdef USE_MDBX
-        {
-          MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
-          if (raw_txn)
-            ml_content_delete(raw_txn, msg_msgid);
-        }
-#endif
+        ml_content_delete(wb, msg_msgid);
 
         /* Clean reply index entries where this msgid is the parent */
         {
@@ -2880,13 +2819,7 @@ int history_evict_to_target(int target_percent)
           db_writebatch_del(wb, history_cf_msgid,
                             msg_msgid, strlen(msg_msgid));
 
-#ifdef USE_MDBX
-          {
-            MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
-            if (raw_txn)
-              ml_content_delete(raw_txn, msg_msgid);
-          }
-#endif
+          ml_content_delete(wb, msg_msgid);
 
           /* Clean reply index entries where this msgid is the parent */
           {

@@ -5,16 +5,16 @@
  * Unified multiline content store.
  *
  * Replaces the separate ml_storage (in-memory hash table) and paste_store
- * (standalone MDBX) systems with a single MDBX-backed store that lives
- * within history's MDBX environment.
+ * (standalone MDBX) systems with a single column-family pair living within
+ * history's storage environment.
  *
- * Two named databases:
+ * Two named CFs:
  *   ml_content       - msgid -> sender\0target\0content (compressed)
  *   ml_paste_secrets - paste_id -> msgid
  *
  * Content entries share history's retention lifecycle: when a history
  * entry is evicted or purged, the corresponding ml_content entry is
- * deleted in the same transaction.
+ * deleted in the same writebatch.
  */
 #include "config.h"
 
@@ -33,7 +33,6 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 
-#include <mdbx.h>
 #include <string.h>
 #ifdef USE_ZSTD
 #include <zstd.h>
@@ -43,12 +42,6 @@
 static struct db_env *ml_db_env = NULL;
 static struct db_cf  *ml_content_cf = NULL;
 static struct db_cf  *ml_paste_secrets_cf = NULL;
-
-/** Legacy raw mdbx handles unwrapped from the abstraction.  Same
- * underlying state; will retire as function bodies convert. */
-static MDBX_env *ml_env = NULL;
-static MDBX_dbi ml_content_dbi;
-static MDBX_dbi ml_paste_secrets_dbi;
 
 /** Whether the module is initialized */
 static int ml_available = 0;
@@ -82,10 +75,7 @@ int ml_content_init(struct db_env *env)
     return -1;
   }
 
-  ml_db_env             = env;
-  ml_env                = db_mdbx_unwrap_env(env);
-  ml_content_dbi        = db_mdbx_unwrap_dbi(ml_content_cf);
-  ml_paste_secrets_dbi  = db_mdbx_unwrap_dbi(ml_paste_secrets_cf);
+  ml_db_env = env;
   ml_available = 1;
   log_write(LS_SYSTEM, L_INFO, 0, "ml_content: initialized");
   return 0;
@@ -101,7 +91,6 @@ void ml_content_shutdown(struct db_env *env)
   ml_content_cf = NULL;
   ml_paste_secrets_cf = NULL;
   ml_db_env = NULL;
-  ml_env = NULL;
   ml_available = 0;
 }
 
@@ -134,12 +123,11 @@ static int ml_build_value(char *buf, size_t bufsize,
   return (int)total;
 }
 
-int ml_content_store(MDBX_txn *txn, const char *msgid,
+int ml_content_store(struct db_writebatch *wb, const char *msgid,
                      const char *sender, const char *target,
                      const char *content, size_t content_len,
                      const char *paste_secret)
 {
-  MDBX_val key, data;
   int rc;
 
   if (!ml_available)
@@ -161,6 +149,9 @@ int ml_content_store(MDBX_txn *txn, const char *msgid,
     return -1;
   }
 
+  const void *put_data = valbuf;
+  size_t put_len = vallen;
+
   /* Optional compression */
 #ifdef USE_ZSTD
   size_t comp_bufsize = ZSTD_compressBound(vallen) + 2;
@@ -171,25 +162,19 @@ int ml_content_store(MDBX_txn *txn, const char *msgid,
 
   if (compress_data((unsigned char *)valbuf, vallen,
                     compressed, comp_bufsize, &compressed_len) >= 0) {
-    data.iov_len = compressed_len;
-    data.iov_base = compressed;
-  } else {
-    data.iov_len = vallen;
-    data.iov_base = valbuf;
+    put_data = compressed;
+    put_len = compressed_len;
   }
-#else
-  data.iov_len = vallen;
-  data.iov_base = valbuf;
 #endif
 
-  /* Store content keyed by msgid */
-  key.iov_len = strlen(msgid);
-  key.iov_base = (void *)msgid;
-
-  rc = mdbx_put(txn, ml_content_dbi, &key, &data, 0);
-  if (rc != 0) {
+  /* Stage the put on the caller's writebatch.  The wb copies, so the
+   * scratch buffers can be freed immediately. */
+  rc = db_writebatch_put(wb, ml_content_cf,
+                         msgid, strlen(msgid),
+                         put_data, put_len);
+  if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "ml_content: mdbx_put(content) failed: %s", mdbx_strerror(rc));
+              "ml_content: writebatch_put(content) failed: %s", db_strerror(rc));
     goto store_done;
   }
 
@@ -198,17 +183,13 @@ int ml_content_store(MDBX_txn *txn, const char *msgid,
     char paste_id[128];
     ircd_snprintf(0, paste_id, sizeof(paste_id), "%s-%s", msgid, paste_secret);
 
-    MDBX_val paste_key, paste_val;
-    paste_key.iov_len = strlen(paste_id);
-    paste_key.iov_base = paste_id;
-    paste_val.iov_len = strlen(msgid);
-    paste_val.iov_base = (void *)msgid;
-
-    rc = mdbx_put(txn, ml_paste_secrets_dbi, &paste_key, &paste_val, 0);
-    if (rc != 0) {
+    rc = db_writebatch_put(wb, ml_paste_secrets_cf,
+                           paste_id, strlen(paste_id),
+                           msgid, strlen(msgid));
+    if (rc != DB_OK) {
       log_write(LS_SYSTEM, L_ERROR, 0,
-                "ml_content: mdbx_put(paste_secret) failed: %s",
-                mdbx_strerror(rc));
+                "ml_content: writebatch_put(paste_secret) failed: %s",
+                db_strerror(rc));
     }
   }
 
@@ -217,36 +198,27 @@ store_done:
 #ifdef USE_ZSTD
   if (compressed != comp_stack) MyFree(compressed);
 #endif
-  return (rc == 0) ? 0 : -1;
+  return (rc == DB_OK) ? 0 : -1;
 }
 
 char *ml_content_get(const char *msgid, size_t *content_len_out,
                      const char **sender_out, const char **target_out)
 {
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_val val = { NULL, 0 };
   char *result = NULL;
   int rc;
 
   if (!ml_available)
     return NULL;
 
-  rc = mdbx_txn_begin(ml_env, NULL, MDBX_TXN_RDONLY, &txn);
-  if (rc != 0)
+  rc = db_get(ml_db_env, ml_content_cf,
+              msgid, strlen(msgid), /*snap=*/NULL, &val);
+  if (rc != DB_OK)
     return NULL;
-
-  key.iov_len = strlen(msgid);
-  key.iov_base = (void *)msgid;
-
-  rc = mdbx_get(txn, ml_content_dbi, &key, &data);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
-    return NULL;
-  }
 
   /* Decompress if needed */
-  const char *raw = (const char *)data.iov_base;
-  size_t raw_len = data.iov_len;
+  const char *raw = (const char *)val.base;
+  size_t raw_len = val.len;
   char *decompressed = NULL;
   int decomp_dynamic = 0;
 
@@ -261,7 +233,7 @@ char *ml_content_get(const char *msgid, size_t *content_len_out,
         && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
         && frame_size > sizeof(decomp_stack)) {
       if (frame_size > COMPRESS_MAX_UNCOMPRESSED) {
-        mdbx_txn_abort(txn);
+        db_val_free(&val);
         return NULL;
       }
       decompressed = (char *)MyMalloc(frame_size + 1);
@@ -277,7 +249,7 @@ char *ml_content_get(const char *msgid, size_t *content_len_out,
                         (unsigned char *)decompressed, out_size,
                         &decompressed_len) < 0) {
       if (decomp_dynamic) MyFree(decompressed);
-      mdbx_txn_abort(txn);
+      db_val_free(&val);
       return NULL;
     }
     raw = decompressed;
@@ -307,15 +279,19 @@ char *ml_content_get(const char *msgid, size_t *content_len_out,
   if (target_out) *target_out = result + (tgt - raw);
   if (content_len_out) *content_len_out = clen;
 
+  /* Suppress unused warnings if neither paths use these aliases. */
+  (void)sender;
+  (void)content;
+
 get_done:
   if (decomp_dynamic) MyFree(decompressed);
-  mdbx_txn_abort(txn);
+  db_val_free(&val);
   return result;
 }
 
-int ml_content_resolve(MDBX_txn *txn, struct HistoryMessage *msg)
+int ml_content_resolve(struct db_snapshot *snap, struct HistoryMessage *msg)
 {
-  MDBX_val key, data;
+  struct db_val val = { NULL, 0 };
   int rc;
 
   if (!ml_available)
@@ -325,21 +301,18 @@ int ml_content_resolve(MDBX_txn *txn, struct HistoryMessage *msg)
   if (msg->content[0] != '\x1E' || msg->content[1] != 'm' || msg->content[2] != 'l')
     return 0;  /* Not a multiline ref — nothing to do */
 
-  /* Look up content by msgid */
-  key.iov_len = strlen(msg->msgid);
-  key.iov_base = msg->msgid;
-
-  rc = mdbx_get(txn, ml_content_dbi, &key, &data);
-  if (rc != 0) {
+  rc = db_get(ml_db_env, ml_content_cf,
+              msg->msgid, strlen(msg->msgid), snap, &val);
+  if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "ml_content: resolve failed for msgid=%s: %s",
-              msg->msgid, mdbx_strerror(rc));
+              msg->msgid, db_strerror(rc));
     return -1;
   }
 
   /* Decompress if needed */
-  const char *raw = (const char *)data.iov_base;
-  size_t raw_len = data.iov_len;
+  const char *raw = (const char *)val.base;
+  size_t raw_len = val.len;
   char *decompressed = NULL;
   int decomp_dynamic = 0;
 
@@ -353,7 +326,10 @@ int ml_content_resolve(MDBX_txn *txn, struct HistoryMessage *msg)
     if (frame_size != ZSTD_CONTENTSIZE_ERROR
         && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
         && frame_size > sizeof(decomp_stack)) {
-      if (frame_size > COMPRESS_MAX_UNCOMPRESSED) return -1;
+      if (frame_size > COMPRESS_MAX_UNCOMPRESSED) {
+        db_val_free(&val);
+        return -1;
+      }
       decompressed = (char *)MyMalloc(frame_size + 1);
       decomp_dynamic = 1;
       out_size = frame_size + 1;
@@ -367,6 +343,7 @@ int ml_content_resolve(MDBX_txn *txn, struct HistoryMessage *msg)
                         (unsigned char *)decompressed, out_size,
                         &decompressed_len) < 0) {
       if (decomp_dynamic) MyFree(decompressed);
+      db_val_free(&val);
       return -1;
     }
     raw = decompressed;
@@ -397,22 +374,19 @@ int ml_content_resolve(MDBX_txn *txn, struct HistoryMessage *msg)
 
 resolve_done:
   if (decomp_dynamic) MyFree(decompressed);
+  db_val_free(&val);
   return (msg->dyn_content != NULL) ? 0 : -1;
 }
 
-int ml_content_delete(MDBX_txn *txn, const char *msgid)
+int ml_content_delete(struct db_writebatch *wb, const char *msgid)
 {
-  MDBX_val key;
   int rc;
 
   if (!ml_available || !msgid || !msgid[0])
     return 0;
 
-  key.iov_len = strlen(msgid);
-  key.iov_base = (void *)msgid;
-
-  rc = mdbx_del(txn, ml_content_dbi, &key, NULL);
-  if (rc != 0 && rc != MDBX_NOTFOUND)
+  rc = db_writebatch_del(wb, ml_content_cf, msgid, strlen(msgid));
+  if (rc != DB_OK)
     return -1;
 
   /* Note: paste_secret entries are not cleaned up here because we don't
@@ -427,34 +401,24 @@ int ml_content_delete(MDBX_txn *txn, const char *msgid)
 const char *ml_content_paste_lookup(const char *paste_id)
 {
   static char msgid_buf[64];
-  MDBX_txn *txn;
-  MDBX_val key, data;
+  struct db_val val = { NULL, 0 };
   int rc;
 
   if (!ml_available)
     return NULL;
 
-  rc = mdbx_txn_begin(ml_env, NULL, MDBX_TXN_RDONLY, &txn);
-  if (rc != 0)
+  rc = db_get(ml_db_env, ml_paste_secrets_cf,
+              paste_id, strlen(paste_id), /*snap=*/NULL, &val);
+  if (rc != DB_OK)
     return NULL;
 
-  key.iov_len = strlen(paste_id);
-  key.iov_base = (void *)paste_id;
-
-  rc = mdbx_get(txn, ml_paste_secrets_dbi, &key, &data);
-  if (rc != 0) {
-    mdbx_txn_abort(txn);
-    return NULL;
-  }
-
-  /* Copy msgid to static buffer */
-  size_t len = data.iov_len;
+  size_t len = val.len;
   if (len >= sizeof(msgid_buf))
     len = sizeof(msgid_buf) - 1;
-  memcpy(msgid_buf, data.iov_base, len);
+  memcpy(msgid_buf, val.base, len);
   msgid_buf[len] = '\0';
 
-  mdbx_txn_abort(txn);
+  db_val_free(&val);
   return msgid_buf;
 }
 

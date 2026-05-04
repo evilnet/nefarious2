@@ -23,9 +23,10 @@ struct Client;
 struct HistoryMessage;
 
 #ifdef USE_MDBX
-#include <mdbx.h>
 
 struct db_env;
+struct db_writebatch;
+struct db_snapshot;
 
 /** Initialize ml_content column families within history's storage env.
  * Opens (or creates) the ml_content and ml_paste_secrets CFs.
@@ -40,10 +41,9 @@ extern int ml_content_init(struct db_env *env);
 extern void ml_content_shutdown(struct db_env *env);
 
 /** Store multiline content and optional paste secret.
- * Called within an open write transaction for atomic history+content writes.
- * Boundary commit keeps the raw MDBX_txn argument; later commits will
- * convert this to db_writebatch.
- * @param[in] txn          Open write transaction.
+ * Stages put(s) on @a wb so they land atomically with whatever else the
+ * caller is committing (history rows for the same msgid).
+ * @param[in] wb           Active writebatch.
  * @param[in] msgid        Base message ID.
  * @param[in] sender       Sender nick!user@host mask.
  * @param[in] target       Target channel or nick.
@@ -52,13 +52,13 @@ extern void ml_content_shutdown(struct db_env *env);
  * @param[in] paste_secret Paste secret string (NULL if paste not enabled).
  * @return 0 on success, -1 on error.
  */
-extern int ml_content_store(MDBX_txn *txn, const char *msgid,
+extern int ml_content_store(struct db_writebatch *wb, const char *msgid,
                             const char *sender, const char *target,
                             const char *content, size_t content_len,
                             const char *paste_secret);
 
 /** Retrieve multiline content by msgid.
- * Opens a read transaction internally.
+ * Reads the env's current state (no snapshot).
  * @param[in]  msgid           Message ID to look up.
  * @param[out] content_len_out Receives content length (may be NULL).
  * @param[out] sender_out      Receives pointer to sender within returned buffer (may be NULL).
@@ -69,25 +69,25 @@ extern int ml_content_store(MDBX_txn *txn, const char *msgid,
 extern char *ml_content_get(const char *msgid, size_t *content_len_out,
                             const char **sender_out, const char **target_out);
 
-/** Resolve multiline content for a history message (in-transaction).
+/** Resolve multiline content for a history message.
  * If msg->content starts with the \x1Eml sentinel, looks up the full content
- * from ml_content and sets msg->dyn_content. No-op for normal messages.
- * @param[in] txn  Open read or write transaction.
- * @param[in] msg  HistoryMessage with msgid and content fields populated.
+ * via @a snap (or the env's current state if @a snap is NULL) and sets
+ * msg->dyn_content. No-op for normal messages.
+ * @param[in] snap  Optional snapshot for coherent reads with sibling iter.
+ * @param[in] msg   HistoryMessage with msgid and content fields populated.
  * @return 0 on success (or if not a multiline ref), -1 on error.
  */
-extern int ml_content_resolve(MDBX_txn *txn, struct HistoryMessage *msg);
+extern int ml_content_resolve(struct db_snapshot *snap,
+                              struct HistoryMessage *msg);
 
-/** Delete a content entry within an open write transaction.
- * Called during history eviction/purge. Harmless no-op if no entry exists.
- * @param[in] txn    Open write transaction.
+/** Stage a delete on the writebatch.  Harmless no-op for a missing key.
+ * @param[in] wb     Active writebatch.
  * @param[in] msgid  Message ID to delete.
- * @return 0 on success or not found, -1 on error.
+ * @return 0 on success, -1 on error.
  */
-extern int ml_content_delete(MDBX_txn *txn, const char *msgid);
+extern int ml_content_delete(struct db_writebatch *wb, const char *msgid);
 
 /** Look up msgid from paste_id (for HTTP paste serving).
- * Opens a read transaction internally.
  * @param[in] paste_id  Paste ID (msgid-secret format).
  * @return Static buffer containing msgid, or NULL on miss.
  */
