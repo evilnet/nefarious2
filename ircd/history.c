@@ -408,50 +408,109 @@ static const char *extract_reply_tag(const char *client_tags, char *buf, size_t 
  * @param[in] timestamp Timestamp of the child message.
  * @param[in] child_msgid Msgid of the child (reaction/redact).
  */
-static void reply_index_put(MDBX_txn *txn, const char *target,
+/* Build a flat reply-index key:
+ *   target\0parent_msgid\0timestamp\0child_msgid
+ * Returns the length on success, -1 if the buffer is too small. */
+static int build_reply_index_key(char *buf, size_t bufsize,
+                                 const char *target,
+                                 const char *parent_msgid,
+                                 const char *timestamp,
+                                 const char *child_msgid)
+{
+  size_t kpos = 0;
+  size_t tl  = strlen(target);
+  size_t pl  = strlen(parent_msgid);
+  size_t tsl = strlen(timestamp);
+  size_t cl  = strlen(child_msgid);
+
+  if (kpos + tl  + 1 > bufsize) return -1;
+  memcpy(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
+  if (kpos + pl  + 1 > bufsize) return -1;
+  memcpy(buf + kpos, parent_msgid, pl); kpos += pl; buf[kpos++] = KEY_SEP;
+  if (kpos + tsl + 1 > bufsize) return -1;
+  memcpy(buf + kpos, timestamp, tsl); kpos += tsl; buf[kpos++] = KEY_SEP;
+  if (kpos + cl > bufsize) return -1;
+  memcpy(buf + kpos, child_msgid, cl); kpos += cl;
+  return (int)kpos;
+}
+
+/* Build the prefix used to scan all children of (target, parent_msgid):
+ *   target\0parent_msgid\0
+ * Returns length on success, -1 if buffer too small. */
+static int build_reply_index_prefix(char *buf, size_t bufsize,
+                                    const char *target,
+                                    const char *parent_msgid)
+{
+  size_t kpos = 0;
+  size_t tl = strlen(target);
+  size_t pl = strlen(parent_msgid);
+
+  if (kpos + tl + 1 > bufsize) return -1;
+  memcpy(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
+  if (kpos + pl + 1 > bufsize) return -1;
+  memcpy(buf + kpos, parent_msgid, pl); kpos += pl; buf[kpos++] = KEY_SEP;
+  return (int)kpos;
+}
+
+/* Stage a reply-index put on @a wb.  Flat-key encoding: the key embeds
+ * the child msgid + timestamp; value is empty.  Walking all children of
+ * a parent is a prefix scan on target\0parent_msgid\0. */
+static void reply_index_put(struct db_writebatch *wb, const char *target,
                             const char *parent_msgid,
                             const char *timestamp, const char *child_msgid)
 {
-  char keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-  char valbuf[HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 4];
-  MDBX_val key, val;
-  int kpos = 0, vpos = 0;
-  size_t len;
-
-  /* Key: target\0parent_msgid */
-  len = strlen(target);
-  if (kpos + len + 1 >= sizeof(keybuf)) return;
-  memcpy(keybuf + kpos, target, len);
-  kpos += len;
-  keybuf[kpos++] = KEY_SEP;
-  len = strlen(parent_msgid);
-  if (kpos + len >= sizeof(keybuf)) return;
-  memcpy(keybuf + kpos, parent_msgid, len);
-  kpos += len;
-
-  /* Value: timestamp\0child_msgid */
-  len = strlen(timestamp);
-  if (vpos + len + 1 >= sizeof(valbuf)) return;
-  memcpy(valbuf + vpos, timestamp, len);
-  vpos += len;
-  valbuf[vpos++] = KEY_SEP;
-  len = strlen(child_msgid);
-  if (vpos + len >= sizeof(valbuf)) return;
-  memcpy(valbuf + vpos, child_msgid, len);
-  vpos += len;
-
-  key.iov_base = keybuf;
-  key.iov_len = kpos;
-  val.iov_base = valbuf;
-  val.iov_len = vpos;
-
-  mdbx_put(txn, history_reply_dbi, &key, &val, 0);
+  char keybuf[CHANNELLEN + HISTORY_MSGID_LEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  int klen = build_reply_index_key(keybuf, sizeof(keybuf),
+                                   target, parent_msgid,
+                                   timestamp, child_msgid);
+  if (klen < 0) return;
+  db_writebatch_put(wb, history_cf_reply, keybuf, (size_t)klen, "", 0);
 }
 
 /* reply_index_del_child was an orphan-cleanup helper for retention purge,
  * never wired up — the actual purge / delete paths just delete the
  * parent-side entries directly (orphan child→parent links are harmless
  * and clean themselves when the child row goes away).  Removed. */
+
+/** Stage deletes for every reply-index row whose parent is (target, parent_msgid).
+ * Under the flat-key encoding we can't blind-delete a single key — each
+ * child has its own key.  Prefix-scan and batch-delete instead.
+ *
+ * Iter and wb both touch the same env.  On libmdbx this is safe because
+ * the iter holds its own read txn and the wb holds the write txn (MVCC);
+ * the iter sees the pre-batch state.  On RocksDB the iter has its own
+ * snapshot for the same reason.
+ */
+static void reply_index_del_children(struct db_writebatch *wb,
+                                     const char *target,
+                                     const char *parent_msgid)
+{
+  char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+  int plen;
+  struct db_iter *it;
+  int rc;
+
+  plen = build_reply_index_prefix(prefix, sizeof(prefix), target, parent_msgid);
+  if (plen < 0)
+    return;
+
+  it = db_iter_open(history_db_env, history_cf_reply, NULL);
+  if (!it)
+    return;
+
+  for (rc = db_iter_seek(it, prefix, plen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen;
+    const void *kbase = db_iter_key(it, &klen);
+    if (klen < (size_t)plen ||
+        memcmp(kbase, prefix, plen) != 0)
+      break;
+    db_writebatch_del(wb, history_cf_reply, kbase, klen);
+  }
+
+  db_iter_close(it);
+}
 
 /*
  * Timestamp Conversion Functions
@@ -585,21 +644,15 @@ int history_init(const char *dbpath)
     return -1;
   }
 
-  /* Open the column families.  reply_index uses dupsort. */
+  /* Open the column families.  reply_index uses flat-key encoding now —
+   * each (parent, child) pair gets its own unique key, so no DUPSORT. */
   memset(&cf_opts, 0, sizeof cf_opts);
   if (db_cf_open(history_db_env, "messages", &cf_opts, &history_cf_messages) != DB_OK
       || db_cf_open(history_db_env, "msgid_index", &cf_opts, &history_cf_msgid) != DB_OK
       || db_cf_open(history_db_env, "targets", &cf_opts, &history_cf_targets) != DB_OK
-      || db_cf_open(history_db_env, "quotas", &cf_opts, &history_cf_quotas) != DB_OK) {
+      || db_cf_open(history_db_env, "quotas", &cf_opts, &history_cf_quotas) != DB_OK
+      || db_cf_open(history_db_env, "reply_index", &cf_opts, &history_cf_reply) != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: db_cf_open failed: %s",
-              db_env_last_error(history_db_env));
-    db_env_close(history_db_env);
-    history_db_env = NULL;
-    return -1;
-  }
-  cf_opts.dupsort = 1;
-  if (db_cf_open(history_db_env, "reply_index", &cf_opts, &history_cf_reply) != DB_OK) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "history: db_cf_open(reply_index): %s",
               db_env_last_error(history_db_env));
     db_env_close(history_db_env);
     history_db_env = NULL;
@@ -791,28 +844,23 @@ store_retry:
   if (rc != DB_OK) goto store_wb_fail;
 
   /* Index reply references for draft/chathistory-context lookups.
-   * libmdbx-specific: reply_index uses MDBX_DUPSORT and the conversion
-   * to a flat-key encoding for portability is Phase 5 work.  For now
-   * we reach into the writebatch's underlying mdbx_txn to keep the
-   * existing reply_index_put working. */
-#ifdef USE_MDBX
+   * Flat-key encoding (target\0parent\0timestamp\0child) makes this
+   * backend-agnostic — no DUPSORT needed. */
   {
-    MDBX_txn *raw_txn = db_mdbx_unwrap_writebatch_txn(wb);
     char parent_mid[HISTORY_MSGID_LEN];
     const char *parent = extract_reply_tag(client_tags, parent_mid, sizeof(parent_mid));
-    if (parent && raw_txn)
-      reply_index_put(raw_txn, target, parent, timestamp, msgid);
+    if (parent)
+      reply_index_put(wb, target, parent, timestamp, msgid);
     if (type == HISTORY_REDACT && content && content[0]) {
       const char *space = strchr(content, ' ');
       size_t len = space ? (size_t)(space - content) : strlen(content);
-      if (len > 0 && len < sizeof(parent_mid) && raw_txn) {
+      if (len > 0 && len < sizeof(parent_mid)) {
         memcpy(parent_mid, content, len);
         parent_mid[len] = '\0';
-        reply_index_put(raw_txn, target, parent_mid, timestamp, msgid);
+        reply_index_put(wb, target, parent_mid, timestamp, msgid);
       }
     }
   }
-#endif
 
   rc = db_writebatch_commit(wb, /*sync_durably=*/0);
   if (rc != DB_OK) {
@@ -1908,20 +1956,7 @@ int history_purge_old(unsigned long max_age_seconds)
       /* Delete reply index entries where this msgid is the parent.
        * Orphaned child entries (referencing deleted parents) are harmless
        * and cleaned when the child itself is purged. */
-      {
-        char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-        int ri_kpos = 0;
-        size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
-        if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
-          memcpy(ri_keybuf, msg_target, tlen);
-          ri_kpos += tlen;
-          ri_keybuf[ri_kpos++] = KEY_SEP;
-          memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
-          ri_kpos += mlen;
-          db_writebatch_del(wb, history_cf_reply,
-                            ri_keybuf, ri_kpos);
-        }
-      }
+      reply_index_del_children(wb, msg_target, msg_msgid);
     }
 
     /* Stage delete of the message itself.  Borrow the key — writebatch
@@ -2253,19 +2288,7 @@ int history_delete_message(const char *target, const char *msgid)
   ml_content_delete(wb, msgid);
 
   /* Clean reply index entries where this msgid is the parent */
-  {
-    char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-    int ri_kpos = 0;
-    size_t tlen = strlen(target), mlen = strlen(msgid);
-    if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
-      memcpy(ri_keybuf, target, tlen);
-      ri_kpos += tlen;
-      ri_keybuf[ri_kpos++] = KEY_SEP;
-      memcpy(ri_keybuf + ri_kpos, msgid, mlen);
-      ri_kpos += mlen;
-      db_writebatch_del(wb, history_cf_reply, ri_keybuf, ri_kpos);
-    }
-  }
+  reply_index_del_children(wb, target, msgid);
 
   rc = db_writebatch_commit(wb, /*sync=*/0);
   db_writebatch_destroy(wb);
@@ -2304,102 +2327,98 @@ int history_attach_context(const char *target, struct HistoryMessage *messages)
   }
 
   for (msg = messages; msg; msg = msg->next) {
-    char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-    int ri_kpos = 0;
-    size_t tlen, mlen;
+    char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+    int plen;
 
     /* Skip context messages themselves (don't attach context to context) */
     if (msg->is_context)
       continue;
 
-    /* Build reply index key: target\0msgid */
-    tlen = strlen(target);
-    mlen = strlen(msg->msgid);
-    if (tlen + 1 + mlen >= sizeof(ri_keybuf))
+    /* Build prefix to scan all children of (target, msg->msgid):
+     *   target\0msgid\0
+     * Each child has its own flat key:
+     *   target\0parent\0timestamp\0child_msgid */
+    plen = build_reply_index_prefix(prefix, sizeof(prefix), target, msg->msgid);
+    if (plen < 0)
       continue;
-    memcpy(ri_keybuf, target, tlen);
-    ri_kpos = tlen;
-    ri_keybuf[ri_kpos++] = KEY_SEP;
-    memcpy(ri_keybuf + ri_kpos, msg->msgid, mlen);
-    ri_kpos += mlen;
 
-    /* Find all children for this parent.  Under libmdbx, reply_index is
-     * MDBX_DUPSORT — so seek + step iterates through dups before moving
-     * to the next key.  We stop once the current iter key no longer
-     * matches our ri_keybuf exactly. */
-    rc = db_iter_seek(ri_it, ri_keybuf, ri_kpos);
+    rc = db_iter_seek(ri_it, prefix, plen);
     while (rc == DB_OK && db_iter_valid(ri_it)) {
-      size_t klen, vlen;
+      size_t klen;
       const void *kbase = db_iter_key(ri_it, &klen);
-      const void *vbase = db_iter_value(ri_it, &vlen);
+      const char *child_part;
       const char *sep;
+      size_t ts_len, mid_len;
+      char child_ts[HISTORY_TIMESTAMP_LEN];
+      char child_mid[HISTORY_MSGID_LEN];
 
-      if (klen != (size_t)ri_kpos || memcmp(kbase, ri_keybuf, ri_kpos) != 0)
+      if (klen <= (size_t)plen ||
+          memcmp(kbase, prefix, plen) != 0)
         break;
 
-      /* Value is timestamp\0child_msgid */
-      sep = memchr(vbase, KEY_SEP, vlen);
-      if (sep) {
-        char child_ts[HISTORY_TIMESTAMP_LEN];
-        char child_mid[HISTORY_MSGID_LEN];
-        size_t ts_len = sep - (const char *)vbase;
-        size_t mid_len = (const char *)vbase + vlen - (sep + 1);
+      /* The bytes after prefix are: timestamp\0child_msgid */
+      child_part = (const char *)kbase + plen;
+      sep = memchr(child_part, KEY_SEP, klen - plen);
+      if (!sep)
+        goto next_child;
 
-        if (ts_len < sizeof(child_ts) && mid_len < sizeof(child_mid) && mid_len > 0) {
-          char main_keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-          int main_keylen;
-          struct HistoryMessage *ctx;
-          int dup_found = 0;
-          struct HistoryMessage *dup;
-          struct db_val main_val = { NULL, 0 };
-          int grc;
+      ts_len  = sep - child_part;
+      mid_len = (const char *)kbase + klen - (sep + 1);
 
-          memcpy(child_ts, vbase, ts_len);
-          child_ts[ts_len] = '\0';
-          memcpy(child_mid, sep + 1, mid_len);
-          child_mid[mid_len] = '\0';
+      if (ts_len < sizeof(child_ts) && mid_len < sizeof(child_mid) && mid_len > 0) {
+        char main_keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+        int main_keylen;
+        struct HistoryMessage *ctx;
+        int dup_found = 0;
+        struct HistoryMessage *dup;
+        struct db_val main_val = { NULL, 0 };
+        int grc;
 
-          /* Check if this child msgid is already in the primary list (avoid dup) */
-          for (dup = messages; dup; dup = dup->next) {
-            if (strcmp(dup->msgid, child_mid) == 0) {
-              dup_found = 1;
-              break;
-            }
+        memcpy(child_ts, child_part, ts_len);
+        child_ts[ts_len] = '\0';
+        memcpy(child_mid, sep + 1, mid_len);
+        child_mid[mid_len] = '\0';
+
+        /* Check if this child msgid is already in the primary list (avoid dup) */
+        for (dup = messages; dup; dup = dup->next) {
+          if (strcmp(dup->msgid, child_mid) == 0) {
+            dup_found = 1;
+            break;
           }
-          if (dup_found)
-            goto next_dup;
-
-          /* Fetch the full message from main CF */
-          main_keylen = build_key(main_keybuf, sizeof(main_keybuf), target, child_ts, child_mid);
-          if (main_keylen < 0)
-            goto next_dup;
-
-          grc = db_get(history_db_env, history_cf_messages,
-                       main_keybuf, main_keylen, snap, &main_val);
-          if (grc != DB_OK)
-            goto next_dup;
-
-          ctx = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
-          if (deserialize_message(main_val.base, main_val.len, ctx) != 0) {
-            MyFree(ctx);
-            db_val_free(&main_val);
-            goto next_dup;
-          }
-          db_val_free(&main_val);
-
-          /* Fill in key fields */
-          ircd_strncpy(ctx->target, target, sizeof(ctx->target));
-          ircd_strncpy(ctx->timestamp, child_ts, sizeof(ctx->timestamp));
-          ircd_strncpy(ctx->msgid, child_mid, sizeof(ctx->msgid));
-          ctx->is_context = 1;
-
-          /* Splice into list immediately after the parent */
-          ctx->next = msg->next;
-          msg->next = ctx;
-          added++;
         }
+        if (dup_found)
+          goto next_child;
+
+        /* Fetch the full message from main CF */
+        main_keylen = build_key(main_keybuf, sizeof(main_keybuf), target, child_ts, child_mid);
+        if (main_keylen < 0)
+          goto next_child;
+
+        grc = db_get(history_db_env, history_cf_messages,
+                     main_keybuf, main_keylen, snap, &main_val);
+        if (grc != DB_OK)
+          goto next_child;
+
+        ctx = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
+        if (deserialize_message(main_val.base, main_val.len, ctx) != 0) {
+          MyFree(ctx);
+          db_val_free(&main_val);
+          goto next_child;
+        }
+        db_val_free(&main_val);
+
+        /* Fill in key fields */
+        ircd_strncpy(ctx->target, target, sizeof(ctx->target));
+        ircd_strncpy(ctx->timestamp, child_ts, sizeof(ctx->timestamp));
+        ircd_strncpy(ctx->msgid, child_mid, sizeof(ctx->msgid));
+        ctx->is_context = 1;
+
+        /* Splice into list immediately after the parent */
+        ctx->next = msg->next;
+        msg->next = ctx;
+        added++;
       }
-next_dup:
+next_child:
       rc = db_iter_next(ri_it);
     }
   }
@@ -2627,19 +2646,7 @@ static int history_emergency_evict(void)
         ml_content_delete(wb, msg_msgid);
 
         /* Clean reply index entries where this msgid is the parent */
-        {
-          char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-          int ri_kpos = 0;
-          size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
-          if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
-            memcpy(ri_keybuf, msg_target, tlen);
-            ri_kpos += tlen;
-            ri_keybuf[ri_kpos++] = KEY_SEP;
-            memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
-            ri_kpos += mlen;
-            db_writebatch_del(wb, history_cf_reply, ri_keybuf, ri_kpos);
-          }
-        }
+        reply_index_del_children(wb, msg_target, msg_msgid);
       }
     }
 
@@ -2822,19 +2829,7 @@ int history_evict_to_target(int target_percent)
           ml_content_delete(wb, msg_msgid);
 
           /* Clean reply index entries where this msgid is the parent */
-          {
-            char ri_keybuf[CHANNELLEN + HISTORY_MSGID_LEN + 4];
-            int ri_kpos = 0;
-            size_t tlen = strlen(msg_target), mlen = strlen(msg_msgid);
-            if (ri_kpos + tlen + 1 + mlen < sizeof(ri_keybuf)) {
-              memcpy(ri_keybuf, msg_target, tlen);
-              ri_kpos += tlen;
-              ri_keybuf[ri_kpos++] = KEY_SEP;
-              memcpy(ri_keybuf + ri_kpos, msg_msgid, mlen);
-              ri_kpos += mlen;
-              db_writebatch_del(wb, history_cf_reply, ri_keybuf, ri_kpos);
-            }
-          }
+          reply_index_del_children(wb, msg_target, msg_msgid);
         }
       }
 
