@@ -352,6 +352,38 @@ int server_finish_burst(struct Client *cptr)
       char xxx_buf[25];
       char *s = umode_str(acptr);
 
+      /* Legacy-face suppression: if cptr is a non-IRCv3-aware peer and
+       * acptr's bouncer session has already had a face introduced toward
+       * cptr (typically by an earlier walk-step on a different session
+       * connection, or by an inbound burst that's already been forwarded
+       * here), skip the entire user introduction block.  Per design:
+       * legacy peers see exactly one N per session — BX-aware side may
+       * juggle primary/alias state internally without disturbing
+       * legacy's view.  The recorded face's local Client struct stays
+       * alive (becomes IsBouncerAlias on demote) and routing back to
+       * legacy resolves through it. */
+      if (!IsIRCv3Aware(cptr) && IsAccount(acptr)) {
+        if (bounce_account_legacy_face_for(cli_account(acptr),
+                                            cli_yxx(cptr))) {
+          Debug((DEBUG_INFO,
+                 "Bouncer: burst-suppressing N for %s to legacy %s "
+                 "— account already has a face there",
+                 cli_name(acptr), cli_name(cptr)));
+          continue;
+        }
+        {
+          struct BouncerSession *bs = bounce_get_session(acptr);
+          if (!bs)
+            bs = bounce_find_any_session(cli_account(acptr));
+          if (bs) {
+            char face_buf[6];
+            ircd_snprintf(0, face_buf, sizeof(face_buf), "%s%s",
+                          cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
+            bounce_session_record_legacy_intro(bs, cli_yxx(cptr), face_buf);
+          }
+        }
+      }
+
       /* Per redesign A.2: stage the bouncer session-id hint for the
        * outgoing N's ,S compact-tag segment.  No-op for non-bouncer
        * clients.  Bouncer-aware peers parse it for at-N-time

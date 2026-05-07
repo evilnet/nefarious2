@@ -1434,6 +1434,157 @@ int bounce_have_local_sessions(void)
   return 0;
 }
 
+/* ---------------------------------------------------------------- */
+/* Session state transition funnel — invariant + dispatch            */
+/* ---------------------------------------------------------------- */
+
+/** Verify the session invariant.  Non-fatal: logs drift to LS_USER
+ * and returns negative.  Returns 0 if invariant holds. */
+int bounce_session_assert_invariant(const struct BouncerSession *session,
+                                    const char *site)
+{
+  struct Client *p;
+  int i;
+
+  if (!session) {
+    log_write(LS_USER, L_WARNING, 0,
+              "session_invariant[%s]: NULL session", site ? site : "?");
+    return -1;
+  }
+
+  p = session->hs_client;
+
+  /* hs_client must be NULL only mid-transition or just-destroyed.  At
+   * rest, sessions in ACTIVE / HOLDING should have a Client. */
+  if (!p) {
+    /* Tolerated — funnel callers may pass through NULL during a
+     * two-step transition.  Aliases must still be self-consistent. */
+  } else {
+    /* If hs_client is set, it must be a User in one of the expected
+     * states for the session state. */
+    if (!IsUser(p)) {
+      log_write(LS_USER, L_WARNING, 0,
+                "session_invariant[%s]: session %s hs_client %s is not a User",
+                site ? site : "?", session->hs_sessid,
+                cli_name(p) ? cli_name(p) : "?");
+      return -2;
+    }
+    /* The canonical primary must NOT be flagged as alias.  An alias as
+     * hs_client means a prior demote/promote left the wrong pointer. */
+    if (IsBouncerAlias(p)) {
+      log_write(LS_USER, L_WARNING, 0,
+                "session_invariant[%s]: session %s hs_client %s is "
+                "IsBouncerAlias (should be primary or held ghost)",
+                site ? site : "?", session->hs_sessid, cli_name(p));
+      return -3;
+    }
+    /* HOLDING state implies hs_client is a held ghost (this server). */
+    if (session->hs_state == BOUNCE_HOLDING && !IsBouncerHold(p)) {
+      log_write(LS_USER, L_WARNING, 0,
+                "session_invariant[%s]: session %s state=HOLDING but "
+                "hs_client %s !IsBouncerHold",
+                site ? site : "?", session->hs_sessid, cli_name(p));
+      return -4;
+    }
+    /* ACTIVE state implies hs_client is a live (non-held) primary. */
+    if (session->hs_state == BOUNCE_ACTIVE && IsBouncerHold(p)) {
+      log_write(LS_USER, L_WARNING, 0,
+                "session_invariant[%s]: session %s state=ACTIVE but "
+                "hs_client %s IsBouncerHold (still ghost)",
+                site ? site : "?", session->hs_sessid, cli_name(p));
+      return -5;
+    }
+  }
+
+  /* Every alias entry must resolve to an IsBouncerAlias Client whose
+   * alias_primary points at hs_client (or NULL during transition). */
+  for (i = 0; i < session->hs_alias_count; i++) {
+    const struct BounceAlias *ba = &session->hs_aliases[i];
+    struct Client *a = findNUser(ba->ba_numeric);
+    if (!a)
+      continue; /* Alias is on a remote/disconnected server; can't validate locally. */
+    if (!IsBouncerAlias(a)) {
+      log_write(LS_USER, L_WARNING, 0,
+                "session_invariant[%s]: session %s alias %s is not "
+                "IsBouncerAlias (it's %s)",
+                site ? site : "?", session->hs_sessid, ba->ba_numeric,
+                cli_name(a));
+      return -6;
+    }
+    if (p && cli_alias_primary(a) != p) {
+      log_write(LS_USER, L_WARNING, 0,
+                "session_invariant[%s]: session %s alias %s "
+                "alias_primary != hs_client",
+                site ? site : "?", session->hs_sessid, ba->ba_numeric);
+      return -7;
+    }
+  }
+
+  return 0;
+}
+
+/** State transition funnel.  Phase-7 work-in-progress: the kinds and
+ * the invariant assertion are in place; per-kind implementations
+ * delegate to the existing entry-point functions while we convert
+ * call sites to go through this dispatch.  Eventually the existing
+ * entry points become static and only the funnel is the public API. */
+int bounce_session_transition(struct BouncerSession *session,
+                              enum bounce_transition_kind kind,
+                              const struct bounce_transition_params *params)
+{
+  int rc = -1;
+
+  if (!session || !params)
+    return -1;
+
+  bounce_session_assert_invariant(session, "transition.entry");
+
+  switch (kind) {
+  case BST_REVIVE:
+    /* Caller still uses bounce_revive() directly; will be migrated
+     * here in step 2 of the funnel rollout. */
+    rc = -2;
+    break;
+  case BST_ATTACH_LOCAL_ALIAS:
+    /* Caller still uses bounce_setup_local_alias(). */
+    rc = -2;
+    break;
+  case BST_DEMOTE_TO_ALIAS:
+    if (params->demoted_alias && params->peer_primary) {
+      if (0 == bounce_demote_live_primary_to_alias(params->demoted_alias,
+                                                    cli_user(params->peer_primary)
+                                                      ? cli_user(params->peer_primary)->server
+                                                      : NULL))
+        rc = bounce_finish_live_primary_demote(params->demoted_alias,
+                                                params->peer_primary);
+    }
+    break;
+  case BST_REBIND_TO_REMOTE:
+    /* bounce_rebind() handles this today. */
+    rc = -2;
+    break;
+  case BST_PROMOTE_ALIAS:
+    rc = bounce_promote_alias(session);
+    break;
+  case BST_RECEIVE_REMOTE_PRIMARY:
+    if (params->new_primary) {
+      session->hs_client = params->new_primary;
+      session->hs_state = BOUNCE_ACTIVE;
+      rc = 0;
+    }
+    break;
+  case BST_DESTROY:
+    bounce_broadcast(session, 'X', NULL);
+    bounce_destroy(session);
+    rc = 0;
+    /* session is freed; can't run exit invariant. */
+    return rc;
+  }
+
+  bounce_session_assert_invariant(session, "transition.exit");
+  return rc;
+}
+
 /** Force-release legacy-peer burst gates whose grace deadline has
  * passed.  Called once per second from a periodic timer.
  *
@@ -1479,11 +1630,240 @@ void bounce_legacy_burst_gate_tick(void)
 }
 
 /** Event-callback wrapper for the periodic 1-second tick.  Registered
- * from ircd.c as a TT_PERIODIC timer. */
+ * from ircd.c as a TT_PERIODIC timer.  Also drives the frontier-
+ * introducer pending-canon list. */
 void bounce_legacy_burst_gate_callback(struct Event *ev)
 {
   (void)ev;
   bounce_legacy_burst_gate_tick();
+  bounce_pending_canon_tick();
+}
+
+/* ---------------------------------------------------------------- */
+/* Frontier introducer: pending-canon list                           */
+/* ---------------------------------------------------------------- */
+
+/* When a bouncer-account user finishes registration on a BX-aware
+ * server, register_user emits N to BX-aware peers immediately (so the
+ * BX-aware ring can converge via D.2 at-N-time) but DEFERS the N
+ * emission to legacy peers.  After a brief settle window, if the
+ * client is still primary (not demoted to alias by the convergence),
+ * we emit N to legacy peers retroactively.  Per design intent #135
+ * + #254: legacy peers see exactly one face per session, and that
+ * face is the post-convergence canonical primary. */
+struct PendingCanon {
+  struct Client *cli;
+  time_t deadline;
+  struct PendingCanon *next;
+};
+static struct PendingCanon *pending_canons = NULL;
+
+#define BOUNCE_PENDING_CANON_SECS 5
+
+void bounce_pending_canon_register(struct Client *cli)
+{
+  struct PendingCanon *p;
+  if (!cli) return;
+  p = MyMalloc(sizeof *p);
+  if (!p) return;
+  p->cli      = cli;
+  p->deadline = CurrentTime + BOUNCE_PENDING_CANON_SECS;
+  p->next     = pending_canons;
+  pending_canons = p;
+}
+
+void bounce_pending_canon_unregister(struct Client *cli)
+{
+  struct PendingCanon **pp = &pending_canons;
+  while (*pp) {
+    if ((*pp)->cli == cli) {
+      struct PendingCanon *gone = *pp;
+      *pp = gone->next;
+      MyFree(gone);
+      return;
+    }
+    pp = &(*pp)->next;
+  }
+}
+
+/** Emit an N introduction toward locally-connected legacy (non-IRCv3-
+ * aware, non-services) peers for a single client.  Mirrors set_nick_name's
+ * pair of broadcasts (IPv6-aware variant + legacy-IP variant) but targets
+ * only legacy peers via direct sendcmdto_one.
+ *
+ * Per-peer legacy-face suppression: if the client's bouncer session
+ * already has a face recorded toward a peer, skip that peer.  Otherwise
+ * emit and record.  Result: legacy peers see exactly one N per session.
+ * Subsequent calls for other clients of the same session no-op for peers
+ * that already have a face. */
+void bounce_emit_legacy_n_intro(struct Client *cli)
+{
+  struct DLink *lp;
+  char *tmpstr;
+  char ip6_b64[25];
+  char ip4_b64[25];
+  struct User *user;
+  struct BouncerSession *bs;
+
+  if (!cli || !IsUser(cli) || IsBouncerAlias(cli))
+    return;
+  user = cli_user(cli);
+  if (!user)
+    return;
+
+  tmpstr = umode_str(cli);
+  iptobase64(ip6_b64, &cli_ip(cli), sizeof(ip6_b64), 1);
+  iptobase64(ip4_b64, &cli_ip(cli), sizeof(ip4_b64), 0);
+
+  if (!cli_serv(&me))
+    return;
+
+  /* Look up session for face-tracking.  May be NULL for non-bouncer
+   * clients; in that case fall through with no per-peer suppression
+   * (treat as a regular client). */
+  bs = bounce_get_session(cli);
+  if (!bs && IsAccount(cli))
+    bs = bounce_find_any_session(cli_account(cli));
+
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    struct Client *peer = lp->value.cptr;
+    const char *ip_b64;
+
+    if (!peer || !IsServer(peer)) continue;
+    if (IsIRCv3Aware(peer)) continue;     /* not legacy */
+    if (IsService(peer))    continue;     /* services exempt */
+    if (IsBurstGated(peer)) continue;     /* burst gate still active; will be drained later */
+
+    /* Skip if this peer already has a face for the session. */
+    if (bs && bounce_session_legacy_face_for(bs, cli_yxx(peer))) {
+      Debug((DEBUG_INFO,
+             "Bouncer: skipping legacy N to %s for %s — session %s "
+             "already has face %s",
+             cli_name(peer), cli_name(cli), bs->hs_sessid,
+             bounce_session_legacy_face_for(bs, cli_yxx(peer))));
+      continue;
+    }
+
+    ip_b64 = IsIPv6(peer) ? ip6_b64 : ip4_b64;
+    bounce_set_n_sessid_hint(cli);
+    sendcmdto_one(user->server, CMD_NICK, peer,
+                  "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
+                  cli_name(cli), cli_hopcount(cli) + 1,
+                  cli_lastnick(cli),
+                  user->username, user->realhost,
+                  *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
+                  ip_b64, NumNick(cli), cli_info(cli));
+
+    if (bs) {
+      char face_buf[6];
+      ircd_snprintf(0, face_buf, sizeof(face_buf), "%s%s",
+                    cli_yxx(user->server), cli_yxx(cli));
+      bounce_session_record_legacy_intro(bs, cli_yxx(peer), face_buf);
+    }
+  }
+}
+
+void bounce_pending_canon_tick(void)
+{
+  struct PendingCanon **pp = &pending_canons;
+  while (*pp) {
+    struct PendingCanon *p = *pp;
+    int drop = 0;
+    if (!p->cli || IsDead(p->cli) || HasFlag(p->cli, FLAG_KILLED)) {
+      drop = 1;
+    } else if (IsBouncerAlias(p->cli)) {
+      /* Convergence demoted us — IsBouncerAlias filter handles
+       * future emissions; nothing to release for legacy. */
+      drop = 1;
+    } else if (p->deadline <= CurrentTime) {
+      Debug((DEBUG_INFO,
+             "Bouncer: emitting deferred legacy N for %s "
+             "(canonical primary, frontier-introducer release)",
+             cli_name(p->cli)));
+      bounce_emit_legacy_n_intro(p->cli);
+      drop = 1;
+    }
+    if (drop) {
+      *pp = p->next;
+      MyFree(p);
+    } else {
+      pp = &p->next;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Legacy-face suppression                                           */
+/* ---------------------------------------------------------------- */
+
+const char *bounce_session_legacy_face_for(struct BouncerSession *session,
+                                            const char *peer_yxx)
+{
+  int i;
+  if (!session || !peer_yxx || !*peer_yxx)
+    return NULL;
+  for (i = 0; i < session->hs_legacy_intro_count; i++) {
+    if (0 == strcmp(session->hs_legacy_intros[i].bli_peer, peer_yxx))
+      return session->hs_legacy_intros[i].bli_face;
+  }
+  return NULL;
+}
+
+const char *bounce_account_legacy_face_for(const char *account,
+                                            const char *peer_yxx)
+{
+  struct AccountSessions *as;
+  struct BouncerSession  *s;
+  const char             *face;
+
+  if (!account || !*account || !peer_yxx || !*peer_yxx)
+    return NULL;
+  as = bounce_find_by_account(account);
+  if (!as)
+    return NULL;
+  for (s = as->as_sessions; s; s = s->hs_anext) {
+    face = bounce_session_legacy_face_for(s, peer_yxx);
+    if (face)
+      return face;
+  }
+  return NULL;
+}
+
+void bounce_session_record_legacy_intro(struct BouncerSession *session,
+                                         const char *peer_yxx,
+                                         const char *face_yxx)
+{
+  int i;
+  if (!session || !peer_yxx || !*peer_yxx || !face_yxx || !*face_yxx)
+    return;
+  for (i = 0; i < session->hs_legacy_intro_count; i++) {
+    if (0 == strcmp(session->hs_legacy_intros[i].bli_peer, peer_yxx))
+      return;  /* already recorded */
+  }
+  if (session->hs_legacy_intro_count >= BOUNCER_LEGACY_INTRO_MAX)
+    return;
+  ircd_strncpy(session->hs_legacy_intros[session->hs_legacy_intro_count].bli_peer,
+               peer_yxx, NICKLEN);
+  ircd_strncpy(session->hs_legacy_intros[session->hs_legacy_intro_count].bli_face,
+               face_yxx, 5);
+  session->hs_legacy_intro_count++;
+}
+
+void bounce_session_clear_legacy_face(struct BouncerSession *session,
+                                       const char *face_yxx)
+{
+  int i, j;
+  if (!session || !face_yxx || !*face_yxx)
+    return;
+  for (i = 0; i < session->hs_legacy_intro_count; ) {
+    if (0 == strcmp(session->hs_legacy_intros[i].bli_face, face_yxx)) {
+      for (j = i; j < session->hs_legacy_intro_count - 1; j++)
+        session->hs_legacy_intros[j] = session->hs_legacy_intros[j + 1];
+      session->hs_legacy_intro_count--;
+    } else {
+      i++;
+    }
+  }
 }
 
 /** Persist a bouncer session to MDBX.
@@ -3949,30 +4329,52 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
     return -1;
   }
 
-  /* Authorization gate: only the session's canonical origin may rebind
-   * our held ghost.  Without this, any peer reintroducing a user via N
-   * during burst — even a peer that doesn't run bouncer at all — hijacks
-   * the ghost as soon as the +r account matches.  On a single-bouncer-
-   * server network this is catastrophic: every restored hold session
-   * gets reframed as "remote primary on some peer", bounce_db_del runs,
-   * and the user can no longer revive their session normally (only
-   * /bouncer reset recovers).  The remote N is a regular user connection,
-   * not a bouncer primary, unless the introducing server is the actual
-   * origin we recorded for this session.
+  /* Authorization gate: rebind is allowed if either
+   *   (a) introducing server matches the session's recorded hs_origin
+   *       (legacy path; legacy peers do not carry the ,S sessid hint),
+   *       OR
+   *   (b) the introducing message carries a ,S<sessid> compact tag whose
+   *       value matches this session's hs_sessid.  Sessid is a UUIDv7 —
+   *       only servers that genuinely hold (or replicate) the session
+   *       know it, so the match is non-spoofable across BX-aware peers.
    *
-   * Per redesign C.2 (post-Phase-5): hs_origin is historical-only
-   * metadata, not a behavior gate.  Split-brain resolution between
-   * BX-aware peers happens via m_nick's deterministic D.2 tiebreaker
-   * at-N-time and cross-sessid sessid rename at BS C — not via this
-   * rebind path.  This origin check is now a security gate only:
-   * peer must be the recorded origin to rebind a held ghost. */
-  if (0 != strcmp(session->hs_origin, cli_yxx(server))) {
-    Debug((DEBUG_INFO,
-           "bounce_rebind: refusing — session %s origin %s != introducing "
-           "server %s (account %s); peer is not the canonical primary",
-           session->hs_sessid, session->hs_origin, cli_yxx(server),
-           cli_user(ghost)->account));
-    return -1;
+   * Without (a), any peer reintroducing a user via N during burst — even
+   * a peer that doesn't run bouncer at all — could hijack the ghost as
+   * soon as the +r account matched.  Without (b), held ghosts on this
+   * side reject continuation claims from BX-aware peers whose hs_origin
+   * we never observed (e.g. both sides restored the same session from
+   * MDBX with origin pointing at themselves), and the m_nick fallthrough
+   * collides+kills the peer's primary, cascading destroy via Invariant
+   * #12 (kill-of-session-member ⇒ session destroy).
+   *
+   * Per redesign A.2/C.2: sessid is the canonical session identity;
+   * hs_origin is historical-only metadata.  Sessid-match supersedes
+   * origin-match where present. */
+  {
+    struct Client *link = cli_from(server) ? cli_from(server) : server;
+    const char *wire_sessid = cli_s2s_sessid(link);
+    int origin_match = (0 == strcmp(session->hs_origin, cli_yxx(server)));
+    int sessid_match = (wire_sessid && wire_sessid[0]
+                        && 0 == strcmp(wire_sessid, session->hs_sessid));
+
+    if (!origin_match && !sessid_match) {
+      Debug((DEBUG_INFO,
+             "bounce_rebind: refusing — session %s origin %s != introducing "
+             "server %s and no sessid-tag match (wire ,S='%s', account %s); "
+             "peer is not the canonical primary",
+             session->hs_sessid, session->hs_origin, cli_yxx(server),
+             wire_sessid ? wire_sessid : "", cli_user(ghost)->account));
+      return -1;
+    }
+
+    if (!origin_match && sessid_match) {
+      Debug((DEBUG_INFO,
+             "bounce_rebind: authorizing via sessid-tag match — session %s "
+             "origin %s, introducing server %s carries matching ,S=%s "
+             "(account %s)",
+             session->hs_sessid, session->hs_origin, cli_yxx(server),
+             wire_sessid, cli_user(ghost)->account));
+    }
   }
 
   Debug((DEBUG_INFO,
@@ -4250,6 +4652,9 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
      * purely a peer-state retraction, not a destroy. */
     {
       struct DLink *dlp;
+      char demoted_face[6];
+      ircd_snprintf(0, demoted_face, sizeof(demoted_face), "%s%s",
+                    cli_yxx(&me), cli_yxx(demoted_alias));
       for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
         if (IsIRCv3Aware(dlp->value.cptr))
           continue;
@@ -4258,6 +4663,14 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
         sendcmdto_one(demoted_alias, CMD_QUIT, dlp->value.cptr,
                       ":Promoted to alias of %s", cli_name(new_primary));
       }
+      /* Clear the legacy-face record(s) for this demoted face: the Q
+       * just retracted it from legacy peers' view, so the next emit
+       * (pending-canon tick for the new primary, or a relay-path emit)
+       * is authorized to introduce a fresh face.  Without this clear,
+       * the recorded BjAAA face stays in hs_legacy_intros forever and
+       * future emits skip — legacy ends up with no representation of
+       * the session at all. */
+      bounce_session_clear_legacy_face(session, demoted_face);
     }
   }
 
@@ -5516,8 +5929,26 @@ track_alias:
   if (alias_modes && *alias_modes)
     user_apply_umode_str(alias, alias_modes);
 
-  /* Track alias in session replica */
+  /* Track alias in session replica.
+   *
+   * Cross-sessid race: peer's BX C may arrive with peer's *original*
+   * sessid (emitted before peer received our BS C and renamed to our
+   * lex-lower sessid).  Exact sessid match would miss the local
+   * session in that window.  Fall back to account-based lookup —
+   * BX C carries the account, and a single account has one local
+   * session post-convergence (cross-sessid rename converges sessid
+   * across the BX-aware ring), so account match is unambiguous here. */
   session = bounce_find_by_token_sessid(account, sessid);
+  if (!session) {
+    struct AccountSessions *as = bounce_find_by_account(account);
+    if (as && as->as_sessions) {
+      session = as->as_sessions;
+      Debug((DEBUG_INFO,
+             "BX C: sessid %s not found, using account-fallback "
+             "session %s for alias %s",
+             sessid, session->hs_sessid, alias_numeric));
+    }
+  }
   if (session && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
     struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
     ircd_strncpy(ba->ba_numeric, alias_numeric, sizeof(ba->ba_numeric));
@@ -6785,6 +7216,18 @@ void bounce_remove_pending_registration(struct Client *cli)
     }
     pp = &(*pp)->next;
   }
+}
+
+int bounce_is_pending_registration(const struct Client *cli)
+{
+  const struct PendingRegistration *p;
+  if (!cli)
+    return 0;
+  for (p = pending_registrations; p; p = p->next) {
+    if (p->client == cli)
+      return 1;
+  }
+  return 0;
 }
 
 void bounce_drain_pending_registrations(void)

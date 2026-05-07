@@ -75,6 +75,9 @@ struct Listener;
 #define BOUNCER_MAX_ALIASES     4
 /** Maximum connection history entries per session (unique hosts). */
 #define BOUNCER_MAX_CONN_HISTORY 10
+/** Maximum legacy-peer-face entries per session (one face per legacy
+ * peer — bounded; few legacy peers in any realistic mixed deployment). */
+#define BOUNCER_LEGACY_INTRO_MAX 8
 
 /** Hash table sizes for session lookups. */
 #define BOUNCE_TOKEN_HASHSIZE   1024
@@ -335,6 +338,28 @@ struct BouncerSession {
   /* Connection history (unique hosts, most recent first) */
   int hs_histcount;
   struct BounceConnHistory hs_history[BOUNCER_MAX_CONN_HISTORY];
+
+  /* Legacy-face suppression table.  Per design: legacy peers (non-IRCv3-
+   * aware) must see exactly one N introduction per bouncer session.  Once
+   * a face has been emitted toward a given legacy peer, subsequent N
+   * emits for any client of the same session toward that peer are
+   * suppressed at the wire layer.  BX-aware peers can demote/promote
+   * primary/alias state internally without disturbing the legacy view —
+   * the local Client struct of the recorded face stays alive (becomes
+   * IsBouncerAlias on demote) and routing back toward legacy uses that
+   * alias's numeric.
+   *
+   * If the recorded face exits, the corresponding entry is cleared so
+   * the next legacy emit re-introduces a fresh face (presumably a
+   * different session connection that's still alive).  If two N's
+   * leak through (race or pre-existing legacy state from before
+   * tracking was added), the recovery path is to emit Q to legacy for
+   * one of them — there is no other option once two faces are visible. */
+  struct {
+    char bli_peer[NICKLEN + 1];         /**< legacy peer's server numeric */
+    char bli_face[6];                   /**< full YYXXX of introduced client */
+  } hs_legacy_intros[BOUNCER_LEGACY_INTRO_MAX];
+  int hs_legacy_intro_count;
 };
 
 /** Per-account session list for enumeration and limit enforcement. */
@@ -814,8 +839,129 @@ extern void bounce_drain_pending_registrations(void);
  * disconnect-before-drain).  Idempotent; no-op if not queued. */
 extern void bounce_remove_pending_registration(struct Client *cli);
 
+/** Returns nonzero if the given client is currently waiting in the
+ * pending-registration queue (SASL completed during burst, register_user
+ * deferred until burst settles).  m_nick uses this to extend the
+ * "mid-SASL defer" branch through the post-SASL defer window — without
+ * it, an incoming peer N for the same nick would override-kill the
+ * still-Unknown deferred client. */
+extern int bounce_is_pending_registration(const struct Client *cli);
+
+/** Frontier introducer (per design intent #135 + #254): defer N
+ * emission to legacy peers for fresh bouncer-account users until
+ * BX-aware-ring convergence has had time to demote any loser side.
+ * Caller (register_user) sets sendcmdto_set_skip_legacy_canon before
+ * the N broadcast (BX-aware peers get it now), then registers the
+ * client here.  After BOUNCE_PENDING_CANON_SECS the periodic tick
+ * emits N to legacy peers if the client is still primary (i.e., didn't
+ * become IsBouncerAlias during convergence). */
+extern void bounce_pending_canon_register(struct Client *cli);
+/** Cleanup hook (exit_one_client / m_nick demote-to-alias). */
+extern void bounce_pending_canon_unregister(struct Client *cli);
+/** Walk the pending-canon list and emit / drop entries; called from
+ * the 1-second bounce_legacy_burst_gate_tick. */
+extern void bounce_pending_canon_tick(void);
+
+/* ---------------------------------------------------------------- */
+/* Legacy-face suppression                                           */
+/* ---------------------------------------------------------------- */
+
+/** Look up the recorded legacy face (full YYXXX) for a session toward a
+ * legacy peer.  Returns NULL if no face has been recorded yet for this
+ * (session, peer) pair — meaning the next emit toward that peer is
+ * authorized to introduce a fresh N.  Caller passes peer_yxx as the
+ * legacy peer server's two-character numeric (cli_yxx(peer)). */
+extern const char *bounce_session_legacy_face_for(
+    struct BouncerSession *session, const char *peer_yxx);
+
+/** Convenience: look up legacy face for any session of an account.  Used
+ * at relay-time before broadcasting an N for a remote bouncer client —
+ * bounce_get_session(cli) returns NULL when cli isn't this session's
+ * canonical primary, so account-level lookup is needed. */
+extern const char *bounce_account_legacy_face_for(const char *account,
+                                                   const char *peer_yxx);
+
+/** Record that this session has had a face introduced toward peer_yxx.
+ * No-op if the entry already exists.  Bounded by BOUNCER_LEGACY_INTRO_MAX
+ * (silently drops oversubscribed entries — exotic in practice). */
+extern void bounce_session_record_legacy_intro(struct BouncerSession *session,
+                                                const char *peer_yxx,
+                                                const char *face_yxx);
+
+/** Clear an entry — called from exit_one_client when the recorded face
+ * Client is exiting, so the next emit re-introduces a live face. */
+extern void bounce_session_clear_legacy_face(struct BouncerSession *session,
+                                              const char *face_yxx);
+
+/** Emit N to all directly-connected legacy peers that don't yet have a
+ * face for this client's session, recording each successful emit.
+ * No-op if the client is an alias or has no associated session.  Used
+ * by the pending-canon ticker (frontier-introducer post-defer release)
+ * and by direct emit paths that want per-peer face suppression. */
+extern void bounce_emit_legacy_n_intro(struct Client *cli);
+
 /* bounce_session_is_local retired in Phase 5; use session_has_local_holder
  * for the runtime "do we hold this locally?" check. */
+
+/* ---------------------------------------------------------------- */
+/* Session state transition funnel                                   */
+/* ---------------------------------------------------------------- */
+
+/** Transition kinds.  Every state-changing operation on a
+ * BouncerSession goes through bounce_session_transition() with one of
+ * these kinds.  The funnel asserts the session invariant on entry and
+ * exit; direct mutation of hs_client / hs_aliases[] / hs_state by
+ * other code is being phased out.  See .claude/plans/bouncer-state-funnel.md. */
+enum bounce_transition_kind {
+  BST_REVIVE,                /**< held ghost (this server) -> live primary (this server) */
+  BST_ATTACH_LOCAL_ALIAS,    /**< fresh local connection attached as alias of an existing primary */
+  BST_DEMOTE_TO_ALIAS,       /**< local primary -> alias of a remote primary */
+  BST_REBIND_TO_REMOTE,      /**< local held ghost -> remote-alias replica (peer's primary takes over) */
+  BST_PROMOTE_ALIAS,         /**< local alias -> primary (on prior primary's exit) */
+  BST_RECEIVE_REMOTE_PRIMARY,/**< peer's BS A says peer holds primary; install hs_client to remote */
+  BST_DESTROY                /**< end-of-session (KILL, hold-expiry, BX X) */
+};
+
+struct bounce_transition_params {
+  /** REVIVE / PROMOTE / REBIND / ATTACH_LOCAL_ALIAS / RECEIVE_REMOTE_PRIMARY:
+   * the Client to install as the new primary view.  For ATTACH the
+   * Client becomes an alias; for the others it becomes hs_client. */
+  struct Client *new_primary;
+  /** DEMOTE / REBIND: the local Client being flipped from primary/ghost to alias. */
+  struct Client *demoted_alias;
+  /** DEMOTE / REBIND: the remote primary the demoted_alias now mirrors. */
+  struct Client *peer_primary;
+  /** DESTROY: free-text reason for logs and Q broadcasts. */
+  const char *reason;
+};
+
+/** Apply a single state transition to a session.
+ *
+ * Asserts the session invariant before and after (see
+ * .claude/plans/bouncer-state-funnel.md):
+ *   - exactly one canonical primary at rest,
+ *   - all hs_aliases[] entries resolve to IsBouncerAlias Clients
+ *     pointing to that primary,
+ *   - hs_state is consistent with hs_client's flags.
+ *
+ * Emits the canonical wire signal for the kind (BX C / BX P / BX X /
+ * legacy Q + N as appropriate) and persists the post-transition state.
+ *
+ * Returns 0 on success, negative on rejected transition.  This is the
+ * sole supported API for changing session->hs_client, hs_aliases[],
+ * hs_state once the call-site conversion is complete (Phase 7). */
+extern int bounce_session_transition(
+    struct BouncerSession *session,
+    enum bounce_transition_kind kind,
+    const struct bounce_transition_params *params);
+
+/** Verify the session invariant.  Called at funnel entry/exit and
+ * from /CHECK / /BOUNCER STATUS audits.  Returns 0 if the invariant
+ * holds, negative with a diagnostic written to LS_USER otherwise.
+ * Non-fatal — the goal is observability of state-machine drift, not
+ * crashing on it. */
+extern int bounce_session_assert_invariant(
+    const struct BouncerSession *session, const char *site);
 
 /** Runtime check: do we currently hold this session locally?
  *

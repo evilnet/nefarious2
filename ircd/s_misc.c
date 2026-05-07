@@ -501,6 +501,32 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * freed Client.  Idempotent; no-op if not queued. */
     bounce_remove_pending_registration(bcptr);
   }
+  /* Frontier-introducer cleanup: dying primary mustn't leave a stale
+   * pending-canon entry that would later try to emit N to legacy peers
+   * for a freed Client*.  Idempotent. */
+  bounce_pending_canon_unregister(bcptr);
+
+  /* Legacy-face cleanup: if this Client was recorded as a session's
+   * legacy face on any peer, clear that entry so the next emit re-
+   * introduces a live face.  Walk all sessions for the account; for
+   * each, drop entries whose bli_face matches this client's full
+   * YYXXX.  Account is the only stable key — the session pointer may
+   * not match (for an alias being torn down, bounce_get_session returns
+   * the canonical primary's session, not necessarily the one that
+   * recorded this face). */
+  if (IsUser(bcptr) && IsAccount(bcptr) && cli_user(bcptr) &&
+      cli_user(bcptr)->server) {
+    struct AccountSessions *as_face =
+        bounce_find_by_account(cli_account(bcptr));
+    if (as_face) {
+      char face_buf[6];
+      struct BouncerSession *s_iter;
+      ircd_snprintf(0, face_buf, sizeof(face_buf), "%s%s",
+                    cli_yxx(cli_user(bcptr)->server), cli_yxx(bcptr));
+      for (s_iter = as_face->as_sessions; s_iter; s_iter = s_iter->hs_anext)
+        bounce_session_clear_legacy_face(s_iter, face_buf);
+    }
+  }
 
   /* Clean up bouncer session if this client is the primary.
    * If the session is ACTIVE and hs_client points to this client,

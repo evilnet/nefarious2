@@ -546,7 +546,14 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
     struct BouncerSession *bsess = bounce_get_session(acptr);
     if (bsess && bsess->hs_client == acptr) {
-      time_t our_first   = cli_firsttime(acptr);
+      /* Compare cli_lastnick to the wire's lastnick (parv[3]), not
+       * cli_firsttime — those are different fields and using
+       * cli_firsttime on one side while the wire carries lastnick
+       * on the other gives an asymmetric comparison (each side ends
+       * up "we lose" against the peer's persisted-old lastnick).
+       * cli_lastnick is the field both sides advertise to each other
+       * via the N introduction, so the comparison is like-for-like. */
+      time_t our_first   = cli_lastnick(acptr);
       time_t their_first = (time_t)atoi(parv[3]);
       int we_lose;
 
@@ -566,22 +573,29 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       }
 
       if (we_lose) {
-        if (0 == bounce_demote_live_primary_to_alias(acptr, sptr)) {
-          int rc;
-          struct Client *new_primary;
-          sendto_opmask_butone(0, SNO_OLDSNO,
-                               "Bouncer split-merge: demoted local "
-                               "primary %C to alias of %s on %C "
-                               "(account %s, D.2 tiebreaker)",
-                               acptr, parv[parc - 2], cptr, incoming_acct);
-          rc = set_nick_name(cptr, sptr, nick, parc, parv, 0);
-          new_primary = findNUser(parv[parc - 2]);
-          if (new_primary)
-            bounce_finish_live_primary_demote(acptr, new_primary);
-          return rc;
+        /* Through the state-transition funnel (Phase 7): single call
+         * combines demote + finish into one transition with invariant
+         * assertions before/after.  set_nick_name still runs to install
+         * the incoming N's Client struct, but the demote of the local
+         * client to alias-of-incoming is one funnel call. */
+        struct bounce_transition_params p;
+        int rc;
+        struct Client *new_primary;
+        rc = set_nick_name(cptr, sptr, nick, parc, parv, 0);
+        new_primary = findNUser(parv[parc - 2]);
+        if (new_primary) {
+          memset(&p, 0, sizeof p);
+          p.demoted_alias = acptr;
+          p.peer_primary  = new_primary;
+          if (0 == bounce_session_transition(bsess, BST_DEMOTE_TO_ALIAS, &p)) {
+            sendto_opmask_butone(0, SNO_OLDSNO,
+                                 "Bouncer split-merge: demoted local "
+                                 "primary %C to alias of %s on %C "
+                                 "(account %s, D.2 tiebreaker)",
+                                 acptr, parv[parc - 2], cptr, incoming_acct);
+          }
         }
-        /* Demote failed — fall through to standard collision rules
-         * rather than refuse, so the user isn't stranded. */
+        return rc;
       } else {
         /* We win — refuse incoming silently.  Peer will reach the
          * symmetric verdict and demote on their side. */
@@ -615,6 +629,26 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                            "%s from %C (nick %s, awaiting SASL)",
                            acptr, parv[parc - 2], cptr, nick);
       auth_defer_nick(cli_auth(acptr), nick);
+      if (cli_name(acptr)[0]) {
+        hRemClient(acptr);
+        cli_name(acptr)[0] = '\0';
+      }
+      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+    }
+    /* Post-SASL but pre-register_user: bounce_defer_registration
+     * queued this client because a peer link was mid-burst at SASL
+     * completion.  cli_auth has been destroyed but registration
+     * hasn't run yet — the client is still IsUnknown.  An incoming
+     * peer N reaching us before the EOB drain must NOT override-kill
+     * this client; let the deferred registration settle and the
+     * standard bouncer alias-attach path handle the same-account
+     * collision when register_user runs. */
+    if (bounce_is_pending_registration(acptr)) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Bouncer: deferring incoming %s from %C "
+                           "while %C waits for burst-settle drain "
+                           "(nick %s)",
+                           parv[parc - 2], cptr, acptr, nick);
       if (cli_name(acptr)[0]) {
         hRemClient(acptr);
         cli_name(acptr)[0] = '\0';

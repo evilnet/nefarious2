@@ -83,6 +83,12 @@ extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
  * S2S emit.  Per redesign A.2: bouncer-aware peers receive sessid for at-N-time
  * convergence dispatch in m_nick.  Auto-cleared after consumption. */
 extern void sendcmdto_set_s2s_sessid(const char *sessid);
+/** Set the frontier-introducer gate for the next S2S broadcast: the
+ * call after this skips non-IRCv3-aware non-services peers.  Used by
+ * register_user for fresh bouncer-account users so the BX-aware ring
+ * sees the introduction and converges via D.2 at-N-time before
+ * legacy peers see anything.  Auto-clears after use. */
+extern void sendcmdto_set_skip_legacy_canon(void);
 /* Pre-built S2S tag prefix for multi-msgid (batched CREATE/PART) */
 extern void sendcmdto_set_s2s_raw_tags(const char *tags);
 

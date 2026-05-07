@@ -708,15 +708,25 @@ static int check_auth_finished(struct AuthRequest *auth)
     memset(cli_passwd(auth->client), 0, sizeof(cli_passwd(auth->client)));
     res = auth_set_username(auth);
     if (res == 0) {
-      /* Defer registration during burst when this would create a fresh
-       * standalone primary that races peer's in-flight N for the same
-       * account.  See bounce_defer_registration for the rationale.
-       * On successful queue, return 0 to fall through to
-       * destroy_auth_request — register_user will run from the EOB
-       * drain (bounce_drain_pending_registrations). */
+      /* Defer registration during burst when this would create a
+       * fresh standalone primary that races peer's in-flight N for
+       * the same account at a non-bouncer-aware peer (which would
+       * KILL on same-user@host collision before the BX-aware ring
+       * could converge).  D.2 at-N-time handles BX-aware peers, but
+       * register_user broadcasts N network-wide synchronously — that
+       * N reaches legacy peers before any gate releases.  The defer
+       * holds register_user until burst settles; bounce_auto_resume
+       * then attaches as alias if peer already has the primary.
+       *
+       * Surface a NOTICE so the client knows SASL succeeded and we're
+       * waiting for burst-settle, not hung. */
       if (IsAccount(auth->client) && bounce_enabled_for(auth->client)
           && bounce_burst_in_progress()
           && bounce_defer_registration(auth->client) == 0) {
+        sendrawto_one(auth->client,
+                      "NOTICE * :*** Bouncer: SASL complete, waiting "
+                      "for burst convergence before registration "
+                      "(usually <30s)");
         res = 0;
       } else {
         res = register_user(auth->client, auth->client);
