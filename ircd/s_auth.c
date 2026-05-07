@@ -707,8 +707,21 @@ static int check_auth_finished(struct AuthRequest *auth)
            (void*)auth->client, cli_fd(auth->client), cli_name(auth->client)));
     memset(cli_passwd(auth->client), 0, sizeof(cli_passwd(auth->client)));
     res = auth_set_username(auth);
-    if (res == 0)
-      res = register_user(auth->client, auth->client);
+    if (res == 0) {
+      /* Defer registration during burst when this would create a fresh
+       * standalone primary that races peer's in-flight N for the same
+       * account.  See bounce_defer_registration for the rationale.
+       * On successful queue, return 0 to fall through to
+       * destroy_auth_request — register_user will run from the EOB
+       * drain (bounce_drain_pending_registrations). */
+      if (IsAccount(auth->client) && bounce_enabled_for(auth->client)
+          && bounce_burst_in_progress()
+          && bounce_defer_registration(auth->client) == 0) {
+        res = 0;
+      } else {
+        res = register_user(auth->client, auth->client);
+      }
+    }
   }
   else
     res = 0;

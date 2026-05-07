@@ -541,6 +541,96 @@ notfound:
 }
 
 /* ---------------------------------------------------------------- */
+/* Subcommand: ORESET (oper version of RESET, by account+sessid)     */
+/* ---------------------------------------------------------------- */
+
+/** Handle BOUNCER ORESET <account> [sessid] - oper command to destroy
+ * a session and exit all of its live connections, identified by the
+ * target's account name (and optionally a specific sessid when the
+ * target account has multiple sessions).
+ *
+ * Same destructive semantics as RESET, but the oper invoking the
+ * command is not the one being reset, so we don't need the "exit
+ * caller last" ordering trick — just exit every targeted connection
+ * directly.
+ *
+ * Without sessid: targets the first session on the account (matches
+ * RESET's "default" behaviour for the user's own session).  With
+ * sessid: requires exact match, fails with NO_SUCH_SESSION otherwise.
+ *
+ * Logged to the network notice channel so the action is visible in
+ * audit trails.
+ */
+static int bouncer_oreset(struct Client *cptr, struct Client *sptr,
+                          const char *account, const char *sessid)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *s = NULL;
+  struct Client *primary;
+  struct Client *aliases[BOUNCER_MAX_ALIASES];
+  int alias_count = 0;
+  int i;
+
+  if (!account || !*account) {
+    send_fail(sptr, "BOUNCER", "NEED_PARAM", "ORESET",
+              "Usage: BOUNCER ORESET <account> [sessid]");
+    return 0;
+  }
+
+  as = bounce_find_by_account(account);
+  if (!as)
+    goto notfound;
+
+  if (sessid && *sessid) {
+    for (s = as->as_sessions; s; s = s->hs_anext)
+      if (0 == strcmp(s->hs_sessid, sessid))
+        break;
+  } else {
+    s = as->as_sessions; /* first session on the account */
+  }
+
+  if (!s)
+    goto notfound;
+
+  /* Snapshot live connections before destroying the session record. */
+  primary = s->hs_client;
+  for (i = 0; i < s->hs_alias_count && alias_count < BOUNCER_MAX_ALIASES; i++) {
+    struct Client *al = findNUser(s->hs_aliases[i].ba_numeric);
+    if (al && IsBouncerAlias(al))
+      aliases[alias_count++] = al;
+  }
+
+  /* Audit trail: emit a server notice so other opers can see who did
+   * what.  Match the format used by other oper actions (KILL/GLINE). */
+  sendto_opmask_butone_global(&me, SNO_OLDSNO,
+                              "%s used BOUNCER ORESET on session %s "
+                              "(account %s)",
+                              cli_name(sptr), s->hs_sessid, account);
+
+  send_note(sptr, "BOUNCER", "SESSION_RESET", s->hs_sessid,
+            "Session reset by oper");
+
+  /* Destroy session record first so exit paths don't try to re-hold
+   * the primary or untrack against a vanishing session. */
+  bounce_broadcast(s, 'X', NULL);
+  bounce_destroy(s);
+
+  /* Exit all attached connections.  None of them is the caller (oper
+   * is on a different account), so plain order is fine. */
+  for (i = 0; i < alias_count; i++)
+    exit_client(cptr, aliases[i], &me, "Bouncer session reset by oper");
+  if (primary)
+    exit_client(cptr, primary, &me, "Bouncer session reset by oper");
+
+  return 0;
+
+notfound:
+  send_fail(sptr, "BOUNCER", "NO_SUCH_SESSION", sessid ? sessid : account,
+            "No such session");
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* Subcommand: SETNAME                                               */
 /* ---------------------------------------------------------------- */
 
@@ -1054,6 +1144,8 @@ static const struct BouncerHelpRow bouncer_help_rows[] = {
     "Server-wide accounting audit (UserStats vs walker counts)",    1 },
   { "DISCONNECT",   "<sessid>",
     "Destroy a session by its ID",                                  1 },
+  { "ORESET",       "<account> [sessid]",
+    "Force-reset another account's session and exit all attached",  1 },
   { "SETNAME",      "<sessid> <name>",
     "Assign a friendly name to a session",                          1 },
   { "SETTINGS",     "",
@@ -1215,6 +1307,17 @@ int m_bouncer(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
     return bouncer_disconnect(sptr, (parc >= 3) ? parv[2] : NULL);
+  }
+
+  if (0 == ircd_strcmp(subcmd, "ORESET")) {
+    if (!IsOper(sptr) && !IsAnOper(sptr)) {
+      send_fail(sptr, "BOUNCER", "NOPRIVS", "ORESET",
+                "Insufficient privileges");
+      return 0;
+    }
+    return bouncer_oreset(cptr, sptr,
+                          (parc >= 3) ? parv[2] : NULL,
+                          (parc >= 4) ? parv[3] : NULL);
   }
 
   if (0 == ircd_strcmp(subcmd, "SETNAME")) {

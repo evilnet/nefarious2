@@ -59,8 +59,14 @@ struct Listener;
 
 /** Maximum length of a bouncer session token (base64). */
 #define BOUNCER_TOKEN_LEN       64
-/** Maximum length of a session ID ("XX-NNNNN"). */
-#define BOUNCER_SESSID_LEN      16
+/** Maximum length of a session ID.  v8: hyphenated UUID v7
+ * (36 chars + null + slack).  v7 used "XX-NNNNN" form (shorter, but
+ * server-prefixed — replaced for global uniqueness per redesign A.1). */
+#define BOUNCER_SESSID_LEN      40
+/** Maximum length of a session ID in the v7 on-disk format ("XX-NNNNN").
+ * Used only by the historical-record migration path.  Do not use for
+ * new code — use BOUNCER_SESSID_LEN for the v8/current format. */
+#define BOUNCER_SESSID_V7_LEN   16
 /** Maximum length of a user-assigned session name. */
 #define BOUNCER_NAME_LEN        32
 /** Maximum channels tracked per session. */
@@ -91,10 +97,32 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 7
+#define BOUNCER_DB_VERSION 8
 
-/** On-disk representation of a bouncer session for MDBX persistence.
+/** Persisted alias roster entry (v8+).  Records "this session has an
+ * alias on server YY with numeric NNN, last active at T, with caps C."
+ * On restore, peers' BS A bursts confirm/repopulate runtime state;
+ * persisted entries serve as expectations to verify, not authoritative
+ * live state. */
+struct BounceSessionAliasRecord {
+  char     bsar_numeric[6];     /**< Alias YYXXX (5 chars + null) */
+  char     bsar_server[3];      /**< Server YY (2 chars + null) */
+  uint32_t bsar_caps;            /**< BX_CAP_* bitmask */
+  int64_t  bsar_last_active;     /**< Per-alias last-activity timestamp */
+};
+
+/** On-disk representation of a bouncer session for persistence.
  * Fixed-width, versioned. All IRC identifiers have known max lengths.
+ *
+ * Per redesign A.1: bsr_sessid is now a UUID v7 (hyphenated form).
+ * Per redesign B.1: bsr_last_active is the PRIMARY's last-active
+ *   (per-connection split — alias values live in bsr_aliases[]).
+ * Per redesign B.2 + B.6: bsr_aliases[] persists the alias roster
+ *   with per-alias last_active and caps.
+ * Per redesign C.1: bsr_origin is HISTORICAL METADATA ONLY and not
+ *   used for any authorization or behavior decision.  It records the
+ *   server that originally created the session, kept for debugging /
+ *   audit value.
  */
 struct BounceSessionRecord {
   uint32_t bsr_version;
@@ -103,12 +131,13 @@ struct BounceSessionRecord {
   char     bsr_sessid[BOUNCER_SESSID_LEN];
   char     bsr_token[BOUNCER_TOKEN_LEN + 1];
   char     bsr_name[BOUNCER_NAME_LEN];
-  char     bsr_origin[NICKLEN + 1];        /**< Server numeric that created this */
+  char     bsr_origin[NICKLEN + 1];        /**< Historical: server numeric that created this.
+                                            *   NOT used for authorization or behavior. */
   int32_t  bsr_hold_override;
   /* Timestamps */
   int64_t  bsr_created;
   int64_t  bsr_disconnect_time;
-  int64_t  bsr_last_active;
+  int64_t  bsr_last_active;                /**< Primary's last-active (per-connection split) */
   int64_t  bsr_last_msg_time;              /**< Last PRIVMSG time (user idle) */
   int64_t  bsr_total_active;
   uint32_t bsr_attach_count;
@@ -143,6 +172,54 @@ struct BounceSessionRecord {
     int32_t  join_tv_usec;      /**< Original JOIN time (microseconds) */
     char     join_msgid[16];    /**< Original JOIN msgid */
   } bsr_channels[BOUNCER_MAX_CHANNELS];
+  /* Alias roster (per-alias activity + caps, v8+) */
+  uint16_t bsr_aliascount;
+  struct BounceSessionAliasRecord bsr_aliases[BOUNCER_MAX_ALIASES];
+};
+
+/** Frozen v7 layout for migration reads.  Do not modify — must mirror
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=7.  Used
+ * exclusively by the v7→v8 migration path in bounce_db_restore. */
+struct BounceSessionRecord_v7 {
+  uint32_t bsr_version;
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_V7_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];
+  int32_t  bsr_hold_override;
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;
+  int64_t  bsr_last_msg_time;
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  struct irc_in_addr bsr_ip;
+  char     bsr_sock_ip[SOCKIPLEN + 1];
+  char     bsr_sockhost[HOSTLEN + 1];
+  uint16_t bsr_listener_port;
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[BOUNCER_MAX_CONN_HISTORY];
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+    int64_t  join_tv_sec;
+    int32_t  join_tv_usec;
+    char     join_msgid[16];
+  } bsr_channels[BOUNCER_MAX_CHANNELS];
 };
 
 /** Channel membership preserved in a held session. */
@@ -167,6 +244,12 @@ struct BounceAlias {
                                  because ba_caps == 0 is otherwise
                                  ambiguous (no relevant caps vs. no info
                                  received yet). */
+  time_t ba_last_active;    /**< Per-alias last-activity timestamp.  Per
+                                 redesign B.1 — primary's last_active
+                                 lives on hs_last_active; aliases each
+                                 carry their own last_active here.  Used
+                                 as the "most-active" disambiguator in
+                                 D.2 tiebreaker rules. */
 };
 
 /* BX_CAP_* — bouncer-relevant subset of client capabilities, sent
@@ -193,13 +276,21 @@ struct BouncerSession {
   struct BouncerSession **hs_aprev_p; /**< Prev pointer for O(1) removal */
 
   char hs_account[ACCOUNTLEN + 1];    /**< Owning account name */
-  char hs_sessid[BOUNCER_SESSID_LEN]; /**< Session ID (server-numeric + seq) */
+  char hs_sessid[BOUNCER_SESSID_LEN]; /**< Session ID (UUID v7 hyphenated form, v8+) */
   char hs_token[BOUNCER_TOKEN_LEN+1]; /**< Session token (base64) */
   char hs_name[BOUNCER_NAME_LEN];     /**< User-assigned name */
 
   enum BouncerState hs_state;         /**< Current state */
   struct Client *hs_client;           /**< Connected client (ghost if HOLDING) */
-  char hs_origin[NICKLEN + 1];        /**< Server numeric that created this */
+  char hs_origin[NICKLEN + 1];        /**< Historical: server numeric that
+                                       *   originally created this session.
+                                       *   Per redesign C.1: NOT used for
+                                       *   authorization or behavior.  Kept
+                                       *   for debugging / audit value only.
+                                       *   Authoritative replacement for
+                                       *   "is this session local?" queries
+                                       *   is session_has_local_holder()
+                                       *   (Phase 3). */
   char hs_ghost_numeric[6];           /**< Ghost client numeric during HOLDING */
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
@@ -217,6 +308,14 @@ struct BouncerSession {
   char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */
 
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
+  int hs_restore_pending;             /**< Set in bounce_db_restore; cleared on first
+                                           successful BX R reconciliation, on any client
+                                           attach (revive/alias-create), or when a
+                                           remote BX R declares us the loser.  Drives
+                                           the burst reconcile pass — only restore-
+                                           pending sessions emit BX R, and only
+                                           restore-pending sessions yield to a remote
+                                           winner. */
 
   time_t hs_created;                  /**< When session was created */
   time_t hs_last_active;              /**< Last activity timestamp */
@@ -335,6 +434,10 @@ extern void s2s_bxm_cleanup_link(struct Client *link);
  * since the source is gone. */
 extern void pending_bx_cleanup_link(struct Client *link);
 
+/* bounce_emit_burst_reconciles + BX R/F/J handlers retired in Phase 5
+ * — convergence runs at-N-time per redesign D.1/D.3 with deterministic
+ * tiebreaker, no coordination protocol. */
+
 /** Broadcast a BX U caps=<hex> message to all servers when a local
  * bouncer-session client's cap state changes.  Called from m_cap.c's
  * cap_req / cap_ack / cap_clear right after
@@ -409,6 +512,37 @@ extern int bounce_detach(struct BouncerSession *session);
  * @param[in] session Session to destroy.
  */
 extern void bounce_destroy(struct BouncerSession *session);
+
+/** Set the S2S sessid override for an outgoing N introduction so that
+ * bouncer-aware peers receive the session-identity hint via the
+ * compact-tag ,S segment (per redesign A.2).
+ *
+ * No-op for clients without a bouncer session.  The override
+ * auto-clears after format_s2s_tags_with_client consumes it during
+ * the next sendcmdto_* call.
+ *
+ * @param[in] cptr Client about to be N-introduced.
+ */
+extern void bounce_set_n_sessid_hint(struct Client *cptr);
+
+/** Record per-connection activity for bouncer-aware tiebreaking.
+ *
+ * Called from the general idle-update chokepoints (parse.c command
+ * dispatch, m_privmsg PRIVMSG/NOTICE) so that every non-trivial
+ * activity from a bouncer connection updates the connection-specific
+ * last-active timestamp.
+ *
+ * For primary connections: updates the session's hs_last_active.
+ * For aliases: updates the matching ba_last_active entry.
+ * For non-bouncer / non-account clients: no-op.
+ *
+ * Per redesign B.1: enables D.2's primary-identity tiebreaker (oldest
+ * cli_firsttime → highest last_active → lex on numeric) to operate on
+ * per-connection granularity.
+ *
+ * @param[in] from Source client whose activity to record.
+ */
+extern void bounce_record_activity(struct Client *from);
 
 /** Set a session's user-assigned name.
  * @param[in] session Session to rename.
@@ -621,6 +755,101 @@ extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                                                  const char *host,
                                                  const struct irc_in_addr *new_ip,
                                                  const char *info);
+
+/** Demote a live local primary into an alias of an incoming remote
+ * primary.  Used by m_nick during net-rejoin to merge two
+ * post-split-promote primaries gracefully without disconnecting the
+ * local user.
+ *
+ * Flips channel memberships from primary to alias (CHFL_ALIAS, counter
+ * fixup), sets IsBouncerAlias on the client, removes from nick hash,
+ * updates session origin, and adds the client to hs_aliases.
+ *
+ * alias_primary is left NULL — caller must invoke
+ * bounce_finish_live_primary_demote() after the new primary's Client
+ * struct exists (typically after set_nick_name's IsServer branch
+ * creates it).
+ *
+ * @param[in] acptr Live local primary to demote.
+ * @param[in] new_primary_server The introducing server (becomes session origin).
+ * @return 0 on success, -1 on no matching session or non-primary input.
+ */
+extern int bounce_demote_live_primary_to_alias(struct Client *acptr,
+                                               struct Client *new_primary_server);
+
+/** Patch up alias_primary and hs_client after the new primary is
+ * created by set_nick_name; broadcast BX C so peers learn about the
+ * newly-aliased local connection.
+ *
+ * @param[in] demoted_alias The freshly-demoted local client.
+ * @param[in] new_primary   The remote primary client that replaces it.
+ * @return 0 on success, -1 on mismatch.
+ */
+extern int bounce_finish_live_primary_demote(struct Client *demoted_alias,
+                                             struct Client *new_primary);
+
+/* bounce_resolve_pending_demotes retired in Phase 5 along with BX R. */
+
+/** Returns nonzero if any directly-connected server is mid-burst.
+ * Used to gate fresh-primary registration on burst settle so that a
+ * local SASL completion doesn't race a peer's not-yet-arrived N for
+ * the same account. */
+extern int bounce_burst_in_progress(void);
+
+/** Defer a client's register_user call until burst completes.  The
+ * caller (s_auth's check_auth_finished, after auth_set_username) MUST
+ * skip register_user when this returns DB_OK.  The client stays in
+ * unknown state with auth complete; on the EOB drain
+ * (bounce_drain_pending_registrations) register_user is invoked.
+ * Returns 0 on success, -1 on alloc failure (caller should fall
+ * through to immediate register_user). */
+extern int bounce_defer_registration(struct Client *cli);
+
+/** Drain queued post-burst registrations.  Called from
+ * ms_end_of_burst after ClearBurst, gated on no remaining peer
+ * having FLAG_BURST. */
+extern void bounce_drain_pending_registrations(void);
+
+/** Remove a client from the pending-registration queue (cleanup on
+ * disconnect-before-drain).  Idempotent; no-op if not queued. */
+extern void bounce_remove_pending_registration(struct Client *cli);
+
+/* bounce_session_is_local retired in Phase 5; use session_has_local_holder
+ * for the runtime "do we hold this locally?" check. */
+
+/** Runtime check: do we currently hold this session locally?
+ *
+ * Returns non-zero iff this server has a local Client* representing this
+ * session — either a live primary, a local held-ghost, or any local
+ * alias.  Independent of `hs_origin` (which is historical only per C.1).
+ *
+ * Use this for "do I own this session's persistence / bursting / channel
+ * sync responsibility?" decisions.
+ */
+extern int session_has_local_holder(struct BouncerSession *session);
+
+/** Are there any locally-held bouncer sessions on this server?
+ *
+ * Used to decide whether a fresh server link's burst needs to be gated
+ * for legacy-peer convergence.  No held sessions → no risk of two
+ * faces colliding on a legacy peer → no gate needed.
+ */
+extern int bounce_have_local_sessions(void);
+
+/** Periodic check that walks server connections and force-releases
+ * any legacy-peer burst gate whose deadline has expired.  Called once
+ * per second from a global timer initialized in bounce_init. */
+extern void bounce_legacy_burst_gate_tick(void);
+
+/** Event-callback wrapper for the periodic 1-second tick — registered
+ * from ircd.c as a TT_PERIODIC timer at server init. */
+struct Event;
+extern void bounce_legacy_burst_gate_callback(struct Event *ev);
+
+/** Per-link grace period in seconds for the legacy-peer burst gate.
+ * Long enough for typical BX-aware peer link establishment and BX R
+ * exchange to complete before legacy peers see N's. */
+#define BOUNCE_LEGACY_GATE_SECS 30
 
 /*
  * Utility

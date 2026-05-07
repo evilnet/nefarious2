@@ -569,9 +569,10 @@ static int completed_connection(struct Client* cptr)
   cli_lasttime(cptr) = CurrentTime;
   ClearPingSent(cptr);
 
-  /* Flag string: h=hub, 6=ipv6, o=oplevels, v=IRCv3-aware S2S extensions.
+  /* Flag string: h=hub, 6=ipv6, o=oplevels, v=IRCv3-aware S2S extensions,
+   * F=BX F (reconcile-end) handshake supported.
    * Legacy peers ignore unknown flag chars. */
-  sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%sv :%s",
+  sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%svF :%s",
                 cli_name(&me), cli_serv(&me)->timestamp, newts,
 		MAJOR_PROTOCOL, NumServCap(&me),
 		feature_bool(FEAT_HUB) ? "h" : "",
@@ -1630,24 +1631,22 @@ void client_sock_callback(struct Event* ev)
       return;
     }
 
-    /* Check if session has aliases — promote one instead of exiting */
-    if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
-      struct BouncerSession *bsess = bounce_get_session(cptr);
-      if (bsess && bsess->hs_alias_count > 0) {
-        if (bounce_promote_alias(bsess) == 0) {
-          exit_client(cptr, cptr, &me, "Session transferred");
-          return;
-        }
-        /* No viable alias — fall through to hold or exit */
-      }
-    }
-
     /* If client is already in bouncer HOLD (e.g., QUIT handler ran hold
      * before EOF arrived), don't exit — the ghost is already set up. */
     if (IsUser(cptr) && IsBouncerHold(cptr))
       return;
 
-    /* Check if client should enter bouncer HOLD mode instead of exiting */
+    /* Check if client should enter bouncer HOLD mode instead of exiting.
+     *
+     * No immediate-promote shortcut here: a primary disconnect with
+     * aliases attached must hold first, even when promote *looks* viable.
+     * Otherwise the alias's server may concurrently be tearing down the
+     * same alias (BX X) — promote and BX X cross on the wire and both
+     * sides converge to a session pointing at a destroyed numeric, with
+     * channel state lost.  Promotion runs only from bounce_hold_expire,
+     * after the network has settled and hs_alias_count reflects reality.
+     * Cooperative roaming (user alive on both ends) uses BX C session
+     * move instead — that path doesn't touch this disconnect handler. */
     if (IsUser(cptr) && bounce_should_hold(cptr)) {
       /* Transition to ghost/hold state - suppresses QUIT, keeps channels */
       if (bounce_hold_client(cptr, msg) == 0) {

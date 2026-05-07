@@ -144,6 +144,7 @@ static struct Timer ping_timer; /**< timer structure for check_pings() */
 static struct Timer destruct_event_timer; /**< timer structure for exec_expired_destruct_events() */
 static struct Timer history_purge_timer; /**< timer structure for history_purge_callback() */
 static struct Timer metadata_purge_timer; /**< timer structure for metadata_purge_callback() */
+static struct Timer bouncer_gate_timer; /**< timer structure for bounce_legacy_burst_gate_tick() */
 
 /** Daemon information. */
 static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
@@ -1069,6 +1070,10 @@ int main(int argc, char **argv) {
   timer_add(timer_init(&history_purge_timer), history_purge_callback, 0, TT_PERIODIC, 3600); /* Run every hour */
   timer_add(timer_init(&metadata_purge_timer), metadata_purge_callback, 0, TT_PERIODIC,
             feature_int(FEAT_METADATA_PURGE_FREQUENCY)); /* Default: hourly */
+  /* 1-second tick to release expired legacy-peer burst gates per
+   * design intent #135 + #254 (one face per session toward legacy). */
+  timer_add(timer_init(&bouncer_gate_timer),
+            bounce_legacy_burst_gate_callback, 0, TT_PERIODIC, 1);
   CurrentTime = time(NULL);
 
   SetMe(&me);

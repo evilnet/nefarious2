@@ -337,6 +337,22 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * (created via BX C in bounce_alias_create) bypass Count_newremoteclient
      * entirely, so they have nothing to decrement. */
     if (IsBouncerAlias(bcptr)) {
+      /* Network KILL on an alias ends the entire session per design
+       * intent invariant #12.  Propagate the KILL to the primary (if
+       * local) — the primary's exit will trigger the existing
+       * ACTIVE-killed session-end logic which handles sibling aliases
+       * and session destroy.  If the primary is remote, the KILL token
+       * has already been broadcast network-wide by m_kill and will
+       * reach the primary's home server, where session-end fires
+       * locally there. */
+      if (HasFlag(bcptr, FLAG_KILLED)) {
+        struct Client *primary = cli_alias_primary(bcptr);
+        if (primary && MyConnect(primary) && IsUser(primary)
+            && !HasFlag(primary, FLAG_KILLED)) {
+          SetFlag(primary, FLAG_KILLED);
+          exit_client(primary, primary, &me, "Session killed");
+        }
+      }
       if (MyConnect(bcptr)) {
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
@@ -346,6 +362,28 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         del_list_watch(bcptr);
       bounce_alias_untrack(bcptr);
       remove_user_from_all_channels(bcptr);
+      RemoveYXXClient(cli_user(bcptr)->server, cli_yxx(bcptr));
+      remove_client_from_list(bcptr);
+      return;
+    }
+
+    /* Bouncer held ghost: same minimal silent teardown as aliases.
+     * Held ghosts that get reconciled (BX R yield, BS C reconcile) are
+     * bouncer-internal cleanup events, not user activity — no QUIT to
+     * channels, no chathistory store.  Just channel + nick-hash + numeric
+     * + client-list removal.  S2S broadcast is via BX H (instead of Q),
+     * dispatched from exit_client below — see the IsBouncerHold check
+     * there mirroring the IsBouncerAlias one. */
+    if (IsBouncerHold(bcptr)) {
+      if (MyConnect(bcptr)) {
+        if (IsIPChecked(bcptr))
+          IPcheck_disconnect(bcptr);
+        Count_clientdisconnects(bcptr, UserStats);
+      }
+      if (MyUser(bcptr))
+        del_list_watch(bcptr);
+      remove_user_from_all_channels(bcptr);
+      hRemClient(bcptr);
       RemoveYXXClient(cli_user(bcptr)->server, cli_yxx(bcptr));
       remove_client_from_list(bcptr);
       return;
@@ -456,8 +494,13 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
 			 comment);
     return;                     /* ...must *never* exit self! */
   }
-  else if (IsUnknown(bcptr) || IsConnecting(bcptr) || IsHandshake(bcptr))
+  else if (IsUnknown(bcptr) || IsConnecting(bcptr) || IsHandshake(bcptr)) {
     Count_unknowndisconnects(UserStats);
+    /* If this client was deferred awaiting EOB-drain (SASL completed
+     * mid-burst), remove from the queue so the drain doesn't deref a
+     * freed Client.  Idempotent; no-op if not queued. */
+    bounce_remove_pending_registration(bcptr);
+  }
 
   /* Clean up bouncer session if this client is the primary.
    * If the session is ACTIVE and hs_client points to this client,
@@ -477,16 +520,41 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       if (bsess->hs_state == BOUNCE_HOLDING) {
         if (t_active(&bsess->hs_hold_timer))
           timer_del(&bsess->hs_hold_timer);
-        if (bsess->hs_alias_count > 0) {
-          /* Ghost exited externally (e.g., /KILL) while aliases exist.
-           * Promote before we lose the ghost reference — promote needs
-           * hs_client to remove ghost from channels silently. */
+        if (HasFlag(bcptr, FLAG_KILLED)) {
+          /* KILL of held ghost: per design intent invariant #12, network
+           * KILL ends the entire session.  Aliases on other servers do
+           * not survive a KILL of the held ghost — KILL is an oper
+           * assertion of "off the network" and applies to the whole
+           * session, not just the connection that received the KILL.
+           * Mirrors the ACTIVE-killed branch below. */
+          Debug((DEBUG_INFO, "Bouncer: destroy@exit-holding-killed sess=%s "
+                 "client=%s aliases=%d",
+                 bsess->hs_sessid, cli_name(bcptr), bsess->hs_alias_count));
+          bsess->hs_client = NULL;
+          if (bsess->hs_alias_count > 0) {
+            int i;
+            for (i = bsess->hs_alias_count - 1; i >= 0; i--) {
+              struct Client *alias = findNUser(bsess->hs_aliases[i].ba_numeric);
+              if (alias)
+                exit_client(alias, alias, &me, "Session killed");
+            }
+          }
+          bounce_broadcast(bsess, 'X', NULL);
+          bounce_destroy(bsess);
+        } else if (bsess->hs_alias_count > 0) {
+          /* Ghost exited via clean path (hold expiry, internal cleanup)
+           * while aliases exist.  Promote before we lose the ghost
+           * reference — promote needs hs_client to remove ghost from
+           * channels silently. */
           bounce_promote_alias(bsess);
           /* hs_client now points to the promoted alias, not the ghost.
            * exit_one_client continues: ghost has no channels → no QUIT. */
         } else {
           /* No aliases — ghost is the only thing keeping the session
            * alive.  Destroy to prevent dangling pointers. */
+          Debug((DEBUG_INFO, "Bouncer: destroy@exit-holding-no-aliases sess=%s "
+                 "client=%s",
+                 bsess->hs_sessid, cli_name(bcptr)));
           bsess->hs_client = NULL;
           bounce_broadcast(bsess, 'X', NULL);
           bounce_destroy(bsess);
@@ -495,6 +563,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         bsess->hs_client = NULL;
         if (HasFlag(bcptr, FLAG_KILLED)) {
           /* KILL: force-destroy session regardless of aliases */
+          Debug((DEBUG_INFO, "Bouncer: destroy@exit-active-killed sess=%s "
+                 "client=%s aliases=%d",
+                 bsess->hs_sessid, cli_name(bcptr), bsess->hs_alias_count));
           if (bsess->hs_alias_count > 0) {
             int i;
             for (i = bsess->hs_alias_count - 1; i >= 0; i--) {
@@ -508,6 +579,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         } else if (MyUser(bcptr) && bounce_enabled_for(bcptr)
             && bsess->hs_alias_count == 0) {
           /* Local client, no aliases — session is orphaned, destroy it */
+          Debug((DEBUG_INFO, "Bouncer: destroy@exit-active-orphan sess=%s "
+                 "client=%s",
+                 bsess->hs_sessid, cli_name(bcptr)));
           bounce_broadcast(bsess, 'X', NULL);
           bounce_destroy(bsess);
         }
@@ -748,6 +822,23 @@ int exit_client(struct Client *cptr,
      * is departing and surviving aliases exist. Sets hs_promoting to
      * suppress bounce_sync_alias_part() during exit_downlinks(). */
     bounce_prepare_squit_promotions(victim);
+
+    /* Execute promotions BEFORE the SQUIT broadcast loop below.
+     *
+     * BX P emitted by promote MUST arrive at peers (especially the
+     * uplink that's about to receive SQUIT) ahead of the SQUIT itself,
+     * because peers' BX P handler silently removes the old primary
+     * via FLAG_KILLED — without that, the SQUIT arrives first, peers
+     * cascade-exit the old primary normally, and channel-common QUIT
+     * fires for the (about-to-be-promoted-elsewhere) primary, which
+     * other clients on those peers see as the user quitting the
+     * network when really they're just being promoted on this side.
+     *
+     * The BX P handler comment explicitly says it relies on this
+     * ordering: "The originating server's S2S QUIT arrives later
+     * (TCP ordering) and is harmlessly ignored (numeric already
+     * freed)."  That assumption only holds if BX P is sent first. */
+    bounce_execute_squit_promotions(victim);
   }
 
   /*
@@ -755,15 +846,23 @@ int exit_client(struct Client *cptr,
    * except the source:
    */
 
-  /* Bouncer alias: send BX X instead of QUIT.  Aliases are introduced
-   * via BX C (not N token), so other servers don't have a nick-hash
-   * entry for them and must not receive a Q token. */
-  if (IsUser(victim) && IsBouncerAlias(victim)) {
-    char alias_full[6];
-    ircd_snprintf(0, alias_full, sizeof(alias_full), "%s%s",
+  /* Bouncer alias OR held ghost: send BX X instead of QUIT.
+   *
+   * Both are bouncer-managed clients whose destroy is internal cleanup,
+   * not user activity — channel scrollback shouldn't surface "ghost X
+   * has quit" or "alias X has quit" (especially jarring when ghost or
+   * alias.nick == the user's own active connection nick).  BX X carries
+   * the destroy semantics: peers do silent channel/list cleanup without
+   * firing a user-visible QUIT.  The IsBouncerAlias-vs-IsBouncerHold
+   * distinction is local-only state; over the wire it's just "destroy
+   * this numeric silently".  Q broadcast for both is suppressed below
+   * in the S2S loop. */
+  if (IsUser(victim) && (IsBouncerAlias(victim) || IsBouncerHold(victim))) {
+    char client_full[6];
+    ircd_snprintf(0, client_full, sizeof(client_full), "%s%s",
                   cli_yxx(cli_user(victim)->server), cli_yxx(victim));
     sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cli_from(killer),
-                          "X %s", alias_full);
+                          "X %s", client_full);
   }
 
   /* Pre-populate base msgid and time on local user QUITs for S2S tags.
@@ -782,7 +881,20 @@ int exit_client(struct Client *cptr,
 	sendcmdto_one(killer, CMD_SQUIT, dlp->value.cptr, "%s %Tu :%s",
 		      cli_name(victim), cli_serv(victim)->timestamp, comment);
       else if (IsUser(victim) && !HasFlag(victim, FLAG_KILLED)
-               && !IsBouncerAlias(victim)) {
+               && !IsBouncerInternalDestroy(victim)
+               && !IsBouncerAlias(victim)
+               && !(IsBouncerHold(victim) && IsIRCv3Aware(dlp->value.cptr))) {
+	/* Held ghosts: BX X already handled the silent destroy on
+	 * IRCv3-aware peers; non-IRCv3-aware peers don't process BX X
+	 * and need a regular Q to clean up the phantom Client struct
+	 * they created from the burst N (held ghosts are now bursted
+	 * to all peers — see server_finish_burst).  Aliases skip Q
+	 * unconditionally — they were never bursted to legacy, and
+	 * IRCv3-aware peers already got BX X.
+	 *
+	 * FLAG_BOUNCER_INTERNAL_DESTROY also suppresses Q here — same
+	 * effect as FLAG_KILLED for Q-suppression purposes, but without
+	 * the network-KILL session-destroy semantics (invariant #12). */
 	sendcmdto_set_s2s_cptr(victim);
 	sendcmdto_one(victim, CMD_QUIT, dlp->value.cptr, ":%s", comment);
       }
@@ -791,6 +903,13 @@ int exit_client(struct Client *cptr,
   /* Then remove the client structures */
   if (IsServer(victim)) {
     char netsplit_batch_id[32] = "";
+
+    /* (Alias promotions already executed before the SQUIT broadcast
+     * loop above.  bounce_promote_alias() removed the old primary
+     * from channels and updated session pointers — by the time
+     * exit_downlinks runs here, those clients have no channels and
+     * common-channel QUIT is a no-op for them.) */
+
     /* Start IRCv3 netsplit batch for local clients */
     send_netsplit_batch_start(victim, cli_serv(victim)->up,
                                netsplit_batch_id, sizeof(netsplit_batch_id));
@@ -800,10 +919,6 @@ int exit_client(struct Client *cptr,
     /* Clear active batch and end IRCv3 netsplit batch */
     set_active_network_batch(NULL);
     send_netsplit_batch_end(netsplit_batch_id);
-
-    /* Execute alias promotions: promote winning aliases, restore channel
-     * modes from session replica, broadcast BX P + BS T from winner. */
-    bounce_execute_squit_promotions(victim);
   }
   exit_one_client(victim, comment);
 

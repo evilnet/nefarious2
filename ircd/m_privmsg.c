@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "capab.h"
 #include "client.h"
 #include "ircd.h"
@@ -118,8 +119,10 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   ClrFlag(sptr, FLAG_TS8);
 
-  if (feature_bool(FEAT_IDLE_FROM_MSG))
+  if (feature_bool(FEAT_IDLE_FROM_MSG)) {
     cli_user(sptr)->last = CurrentTime;
+    bounce_record_activity(sptr);
+  }
 
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NORECIPIENT, MSG_PRIVATE);
@@ -234,8 +237,10 @@ int mo_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   ClrFlag(sptr, FLAG_TS8);
 
-  if (feature_bool(FEAT_IDLE_FROM_MSG))
+  if (feature_bool(FEAT_IDLE_FROM_MSG)) {
     cli_user(sptr)->last = CurrentTime;
+    bounce_record_activity(sptr);
+  }
 
   if (parc < 2 || EmptyString(parv[1]))
     return send_reply(sptr, ERR_NORECIPIENT, MSG_PRIVATE);

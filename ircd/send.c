@@ -135,6 +135,13 @@ static uint64_t s2s_time_override = 0;
 /** Override S2S msgid for forwarded command compact tags. */
 static char s2s_msgid_override[S2S_MSGID_BUFSIZE] = "";
 
+/** Override S2S session-id hint (compact-tag ,S segment) for the next
+ * S2S emit.  Used by N introduction sites to attach a bouncer session
+ * UUID v7 to the outgoing message so receiving bouncer-aware peers can
+ * dispatch m_nick's convergence rules at-N-time (per redesign A.2).
+ * Auto-cleared after use. */
+static char s2s_sessid_override[S2S_SESSID_BUFSIZE] = "";
+
 /** Override msgid for client-side channel broadcasts.
  * When non-empty, format_message_tags_ex includes msgid for clients with
  * message-tags capability. Auto-cleared after channel broadcast completes.
@@ -178,6 +185,18 @@ void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
     ircd_strncpy(s2s_msgid_override, msgid, sizeof(s2s_msgid_override));
   else
     s2s_msgid_override[0] = '\0';
+}
+
+/** Set the S2S session-id hint for the next S2S emit (per redesign A.2).
+ * Bouncer-aware peers receive this as a `,S<sessid>` compact-tag segment;
+ * legacy peers don't see it (they don't carry compact tags at all).
+ * Auto-cleared after the next format_s2s_tags_with_client call. */
+void sendcmdto_set_s2s_sessid(const char *sessid)
+{
+  if (sessid)
+    ircd_strncpy(s2s_sessid_override, sessid, sizeof(s2s_sessid_override));
+  else
+    s2s_sessid_override[0] = '\0';
 }
 
 /** Pre-built S2S tag prefix for multi-msgid scenarios (e.g. batched CREATE/PART).
@@ -434,13 +453,28 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
 {
   char time_b64[8];
   char msgidbuf[S2S_MSGID_BUFSIZE];
+  char sessidbuf[S2S_SESSID_BUFSIZE];
   uint64_t epoch_ms;
   const char *msgid_tag = NULL;
+  const char *sessid_tag = NULL;
   int has_ctags = (client_tags && *client_tags);
+  int has_sessid;
 
   /* Check if P10 message tags are enabled */
   if (!feature_bool(FEAT_P10_MESSAGE_TAGS))
     return NULL;
+
+  /* Sessid: prefer preserved from incoming, then explicit override.
+   * Empty → no ,S segment.  Per redesign A.2: bouncer session-identity
+   * hint for at-N-time recognition in m_nick. */
+  if (cptr && cli_s2s_sessid(cptr)[0]) {
+    sessid_tag = cli_s2s_sessid(cptr);
+  } else if (s2s_sessid_override[0]) {
+    ircd_strncpy(sessidbuf, s2s_sessid_override, sizeof(sessidbuf));
+    sessid_tag = sessidbuf;
+    s2s_sessid_override[0] = '\0';  /* auto-clear after consumption */
+  }
+  has_sessid = (sessid_tag && *sessid_tag);
 
   /* Msgid FIRST: generate before time so HLC is advanced when we read physical_ms.
    * Use preserved from incoming, override from caller, or generate new. */
@@ -466,9 +500,18 @@ char *format_s2s_tags_with_client(char *buf, size_t buflen,
     ircd_strncpy(msgid_out, msgid_tag, msgid_out_len);
   }
 
-  /* Compact format: @A<time_7><msgid_14>[,C<client_tags>] */
+  /* Compact format: @A<time_7><msgid_14>[,S<sessid>][,C<client_tags>]
+   *
+   * Segments are appended in order: ,S before ,C.  Receiver parses
+   * any number of segments in any order; emit order is conventional
+   * for readability in raw S2S logs. */
   inttobase64_64(time_b64, epoch_ms, 7);
-  if (has_ctags)
+  if (has_sessid && has_ctags)
+    snprintf(buf, buflen, "@A%s%s,S%s,C%s ", time_b64, msgid_tag,
+             sessid_tag, client_tags);
+  else if (has_sessid)
+    snprintf(buf, buflen, "@A%s%s,S%s ", time_b64, msgid_tag, sessid_tag);
+  else if (has_ctags)
     snprintf(buf, buflen, "@A%s%s,C%s ", time_b64, msgid_tag, client_tags);
   else
     snprintf(buf, buflen, "@A%s%s ", time_b64, msgid_tag);
@@ -1126,13 +1169,20 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   vd.vd_format = pattern; /* set up the struct VarData for %v */
   va_start(vd.vd_args, pattern);
 
-  /* For S2S messages, add compact tags */
+  /* For S2S messages, add compact tags.  Gate on FLAG_IRCV3AWARE so
+   * legacy peers (which don't speak the @A compact format) don't pay
+   * the prefix bytes against the 512-byte wire budget — they'd strip
+   * the @-prefixed tags but the bytes still count, risking content
+   * truncation on long messages.  Same gating discipline as 350769a
+   * applied to the v3-only S2S tokens. */
   if ((IsServer(to) || IsMe(to)) && feature_bool(FEAT_P10_MESSAGE_TAGS) &&
-      (s2s_msgid_override[0] ||
+      IsIRCv3Aware(to) &&
+      (s2s_msgid_override[0] || s2s_sessid_override[0] ||
        strcmp(tok, TOK_PRIVATE) == 0 || strcmp(tok, TOK_NOTICE) == 0 ||
        strcmp(tok, TOK_QUIT) == 0)) {
-    if (s2s_msgid_override[0]) {
-      /* Explicit tag override for forwarded commands / numeric relay */
+    if (s2s_msgid_override[0] && !s2s_sessid_override[0]) {
+      /* Explicit tag override for forwarded commands / numeric relay
+       * with no sessid component — fast path, builds tagbuf inline. */
       char time_b64[8];
       inttobase64_64(time_b64, s2s_time_override, 7);
       snprintf(s2s_tagbuf, sizeof(s2s_tagbuf), "@A%s%s ", time_b64, s2s_msgid_override);
@@ -1141,7 +1191,10 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
       s2s_cptr_override = NULL;
       mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
     } else {
-      /* Existing path: format_s2s_tags with cptr preservation */
+      /* General path: format_s2s_tags with cptr preservation.  Used
+       * when sessid override is set (so the ,S segment gets emitted)
+       * or for the channel-event tokens (PRIVMSG/NOTICE/QUIT) without
+       * an msgid override.  format_s2s_tags consumes overrides. */
       cptr = s2s_cptr_override ? s2s_cptr_override
            : (MyConnect(from) ? NULL : cli_from(from));
       s2s_cptr_override = NULL;
@@ -1154,6 +1207,7 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   } else {
     s2s_cptr_override = NULL;  /* Clear even if not used */
     s2s_msgid_override[0] = '\0';  /* Clear even if not used */
+    s2s_sessid_override[0] = '\0';  /* Clear even if not used */
     s2s_time_override = 0;
     mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
                    &vd);
@@ -1518,12 +1572,22 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
 
-  /* Consume s2s_want_tags flag (auto-clear) */
+  /* Two buffer variants per peer-class — see sendcmdto_serv_butone for
+   * full rationale.  Tagged variant for IRCV3-aware peers, untagged
+   * for legacy peers (so they don't pay @A bytes against the 512-byte
+   * limit on tags they'll just strip). */
   {
+    struct MsgBuf *mb_legacy = NULL;
+    struct MsgBuf *mb_alias_legacy = NULL;
     int want_tags = s2s_want_tags;
+    /* Sessid override (per redesign A.2) is also a tag-required signal:
+     * if the caller staged a bouncer sessid for this emit, we must
+     * generate the tagged variant so the ,S segment ships to
+     * IRCv3-aware peers. */
+    int has_sessid = (s2s_sessid_override[0] != '\0');
     s2s_want_tags = 0;
 
-    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    if ((want_tags || has_sessid) && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
       /* Check for pre-built raw tag string first */
       if (s2s_raw_tags[0]) {
         va_start(vd.vd_args, pattern);
@@ -1538,6 +1602,7 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
         s2s_raw_tags[0] = '\0';
         s2s_cptr_override = NULL;
         s2s_msgid_override[0] = '\0';
+        s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
       } else {
         char s2s_tagbuf[128];
@@ -1564,34 +1629,65 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
       s2s_cptr_override = NULL;
       s2s_raw_tags[0] = '\0';
       s2s_msgid_override[0] = '\0';
+      s2s_sessid_override[0] = '\0';
       s2s_time_override = 0;
     }
 
-    if (!mb) {
-      va_start(vd.vd_args, pattern);
-      mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
-      va_end(vd.vd_args);
+    /* Untagged variants for legacy peers — also serve as the only
+     * variant when tags are disabled or format failed. */
+    va_start(vd.vd_args, pattern);
+    mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
 
-      if (alias_from) {
-        va_start(vd.vd_args, pattern);
-        mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
-        va_end(vd.vd_args);
+    if (alias_from) {
+      va_start(vd.vd_args, pattern);
+      mb_alias_legacy = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+      va_end(vd.vd_args);
+    }
+
+    /* If we never built a tagged variant, the legacy buffer is the
+     * only buffer and gets used for everyone. */
+    if (!mb) {
+      mb = mb_legacy;
+      mb_legacy = NULL;
+      if (mb_alias_legacy) {
+        if (mb_alias)
+          msgq_clean(mb_alias);
+        mb_alias = mb_alias_legacy;
+        mb_alias_legacy = NULL;
       }
     }
-  }
 
-  /* send it to our downlinks */
-  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
-    if (one && lp->value.cptr == cli_from(one))
-      continue;
-    if ((require < FLAG_LAST_FLAG) && !HasFlag(lp->value.cptr, require))
-      continue;
-    if ((forbid < FLAG_LAST_FLAG) && HasFlag(lp->value.cptr, forbid))
-      continue;
-    if (mb_alias && lp->value.cptr == primary_dir)
-      send_buffer(lp->value.cptr, mb_alias, 0);
-    else
-      send_buffer(lp->value.cptr, mb, 0);
+    /* send it to our downlinks */
+    for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+      struct MsgBuf *send_mb;
+      struct MsgBuf *send_mb_alias;
+
+      if (one && lp->value.cptr == cli_from(one))
+        continue;
+      if ((require < FLAG_LAST_FLAG) && !HasFlag(lp->value.cptr, require))
+        continue;
+      if ((forbid < FLAG_LAST_FLAG) && HasFlag(lp->value.cptr, forbid))
+        continue;
+
+      if (mb_legacy && !IsIRCv3Aware(lp->value.cptr)) {
+        send_mb = mb_legacy;
+        send_mb_alias = mb_alias_legacy;
+      } else {
+        send_mb = mb;
+        send_mb_alias = mb_alias;
+      }
+
+      if (send_mb_alias && lp->value.cptr == primary_dir)
+        send_buffer(lp->value.cptr, send_mb_alias, 0);
+      else
+        send_buffer(lp->value.cptr, send_mb, 0);
+    }
+
+    if (mb_legacy)
+      msgq_clean(mb_legacy);
+    if (mb_alias_legacy)
+      msgq_clean(mb_alias_legacy);
   }
 
   msgq_clean(mb);
@@ -1636,12 +1732,25 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
 
   vd.vd_format = pattern; /* set up the struct VarData for %v */
 
-  /* Consume s2s_want_tags flag (auto-clear) */
+  /* Two buffer variants: mb (with @A tag prefix, for IRCV3-aware peers)
+   * and mb_legacy (no prefix, for legacy peers).  Legacy peers parse-
+   * strip @-prefixed tags, but those bytes still count toward the
+   * 512-byte wire budget — long PRIVMSG/NOTICE/JOIN-with-comment can
+   * truncate.  Picking per-peer in the loop avoids the truncation
+   * without losing tags for IRCV3-aware peers.  Same for alias
+   * variant. */
   {
+    struct MsgBuf *mb_legacy = NULL;
+    struct MsgBuf *mb_alias_legacy = NULL;
     int want_tags = s2s_want_tags;
+    /* Sessid override (per redesign A.2) is also a tag-required signal:
+     * if the caller staged a bouncer sessid for this emit, we must
+     * generate the tagged variant so the ,S segment ships to
+     * IRCv3-aware peers. */
+    int has_sessid = (s2s_sessid_override[0] != '\0');
     s2s_want_tags = 0;
 
-    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+    if ((want_tags || has_sessid) && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
       /* Check for pre-built raw tag string (multi-msgid CREATE/PART) */
       if (s2s_raw_tags[0]) {
         va_start(vd.vd_args, pattern);
@@ -1656,6 +1765,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         s2s_raw_tags[0] = '\0';
         s2s_cptr_override = NULL;
         s2s_msgid_override[0] = '\0';
+        s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
       } else {
         char s2s_tagbuf[128];
@@ -1680,29 +1790,59 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         s2s_time_override = 0;
       }
     }
-  }
 
-  if (!mb) {
-    /* No tags or tags disabled — existing untagged path */
+    /* Untagged variants for legacy peers — also serve as the only
+     * variant when tags are disabled or format failed. */
     va_start(vd.vd_args, pattern);
-    mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    mb_legacy = msgq_make(&me, "%C %s %v", from, tok, &vd);
     va_end(vd.vd_args);
 
     if (alias_from) {
       va_start(vd.vd_args, pattern);
-      mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+      mb_alias_legacy = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
       va_end(vd.vd_args);
     }
-  }
 
-  /* send it to our downlinks */
-  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
-    if (one && lp->value.cptr == cli_from(one))
-      continue;
-    if (mb_alias && lp->value.cptr == primary_dir)
-      send_buffer(lp->value.cptr, mb_alias, 0);
-    else
-      send_buffer(lp->value.cptr, mb, 0);
+    /* If we never built a tagged variant, the legacy buffer is the
+     * only buffer and gets used for everyone. */
+    if (!mb) {
+      mb = mb_legacy;
+      mb_legacy = NULL;
+      if (mb_alias_legacy) {
+        if (mb_alias)
+          msgq_clean(mb_alias);
+        mb_alias = mb_alias_legacy;
+        mb_alias_legacy = NULL;
+      }
+    }
+
+    /* send it to our downlinks */
+    for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+      struct MsgBuf *send_mb;
+      struct MsgBuf *send_mb_alias;
+
+      if (one && lp->value.cptr == cli_from(one))
+        continue;
+
+      /* Pick tagged or legacy variant per-peer. */
+      if (mb_legacy && !IsIRCv3Aware(lp->value.cptr)) {
+        send_mb = mb_legacy;
+        send_mb_alias = mb_alias_legacy;
+      } else {
+        send_mb = mb;
+        send_mb_alias = mb_alias;
+      }
+
+      if (send_mb_alias && lp->value.cptr == primary_dir)
+        send_buffer(lp->value.cptr, send_mb_alias, 0);
+      else
+        send_buffer(lp->value.cptr, send_mb, 0);
+    }
+
+    if (mb_legacy)
+      msgq_clean(mb_legacy);
+    if (mb_alias_legacy)
+      msgq_clean(mb_alias_legacy);
   }
 
   msgq_clean(mb);
@@ -1770,6 +1910,7 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
         s2s_raw_tags[0] = '\0';
         s2s_cptr_override = NULL;
         s2s_msgid_override[0] = '\0';
+        s2s_sessid_override[0] = '\0';
         s2s_time_override = 0;
       } else {
         char s2s_tagbuf[128];

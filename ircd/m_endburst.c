@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
@@ -128,8 +129,25 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
 
   ClearBurst(sptr);
   SetBurstAck(sptr);
+
+  /* (BX R retired in Phase 5; convergence is at-N-time per redesign
+   * D.1 + D.3 — no EOB demote-retry pass.) */
+
+  /* Drain any deferred local-user registrations.  These were queued by
+   * check_auth_finished when SASL completed mid-burst — registering
+   * immediately would have created a fresh standalone primary racing
+   * peer's in-flight N for the same account.  Only drain when no peer
+   * is still bursting; otherwise wait for the last EOB to fire. */
+  if (!bounce_burst_in_progress())
+    bounce_drain_pending_registrations();
+
   if (MyConnect(sptr)) {
     sendcmdto_one(&me, CMD_END_OF_BURST_ACK, sptr, "");
+
+    /* (BX R reconcile moved to pre-burst — see server_estab.  Post-
+     * EOB is too late: by then peer's N for hold ghosts has already
+     * been processed and any colliding ghosts have already been
+     * killed by m_nick.) */
 
     /* Advertise chathistory storage capability (CH A S) to newly linked server.
      * Only advertise if we have CHATHISTORY_STORE enabled - this indicates we

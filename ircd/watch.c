@@ -137,6 +137,18 @@ void check_status_watch(struct Client *cptr, int raw)
   if (!wptr)
     return;			/* Not this in some notify */
 
+  /* Suppress LOGOFF/MONOFFLINE when the nick is still online via another
+   * live client.  Happens during bouncer session transfer (primary exits,
+   * promoted alias takes over the same nick), and during nick collision
+   * resolution where two clients briefly share a nick before one dies.
+   * From the watcher's perspective the nick never left the network — the
+   * "X went offline" notification would be a lie. */
+  if (raw == RPL_NOWOFF || raw == RPL_LOGOFF) {
+    struct Client *holder = FindClient(cli_name(cptr));
+    if (holder && holder != cptr && IsUser(holder))
+      return;
+  }
+
   wt_lasttime(wptr) = TStime();
 
   /* Determine MONITOR equivalent numeric.

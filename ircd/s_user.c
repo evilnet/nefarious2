@@ -799,6 +799,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
     ++UserStats.opers;
 
   tmpstr = umode_str(sptr);
+  /* Per redesign A.2: stage the bouncer session-id hint for the
+   * outgoing N's ,S compact-tag segment.  Bouncer-aware peers parse
+   * it for at-N-time convergence dispatch.  Set before each broadcast
+   * because the override auto-clears after consumption. */
+  bounce_set_n_sessid_hint(sptr);
   /* Send full IP address to IPv6-grokking servers. */
   sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
                              FLAG_IPV6, FLAG_LAST_FLAG,
@@ -809,6 +814,7 @@ int register_user(struct Client *cptr, struct Client *sptr)
                              *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
                              iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 1),
                              NumNick(sptr), cli_info(sptr));
+  bounce_set_n_sessid_hint(sptr);
   /* Send fake IPv6 addresses to pre-IPv6 servers. */
   sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
                              FLAG_LAST_FLAG, FLAG_IPV6,

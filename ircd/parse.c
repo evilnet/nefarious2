@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "parse.h"
+#include "bouncer_session.h"
 #include "capab.h"
 #include "class.h"
 #include "crdt_hlc.h"
@@ -1659,8 +1660,10 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
   assert(0 != handler);
 
   if (!feature_bool(FEAT_IDLE_FROM_MSG) && IsUser(cptr) &&
-      handler != m_ping && handler != m_ignore)
+      handler != m_ping && handler != m_ignore) {
     cli_user(from)->last = CurrentTime;
+    bounce_record_activity(from);
+  }
 
   {
     int result = (*handler) (cptr, from, i, para);
@@ -1707,6 +1710,7 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
   cli_s2s_msgid(cptr)[0] = '\0';
   cli_s2s_multi_msgid(cptr)[0] = '\0';
   cli_s2s_client_tags(cptr)[0] = '\0';
+  cli_s2s_sessid(cptr)[0] = '\0';
 
   if (*ch == '@') {
     /* Find the end of tags (first space after @) */
@@ -1786,6 +1790,20 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
                   data_len < sizeof(con_s2s_client_tags(cli_connect(cptr)))) {
                 memcpy(cli_s2s_client_tags(cptr), seg_data, data_len);
                 cli_s2s_client_tags(cptr)[data_len] = '\0';
+              }
+              break;
+            }
+            case 'S': {
+              /* Bouncer session-identity hint (per redesign A.2).
+               * Carries the session UUID v7 for the message's source
+               * client.  Used by m_nick at-N-time recognition to
+               * dispatch convergence rules vs. standard P10 collision.
+               * Bouncer-aware peers only — legacy peers don't see this. */
+              size_t data_len = seg_end - seg_data;
+              if (data_len > 0 &&
+                  data_len < sizeof(con_s2s_sessid(cli_connect(cptr)))) {
+                memcpy(cli_s2s_sessid(cptr), seg_data, data_len);
+                cli_s2s_sessid(cptr)[data_len] = '\0';
               }
               break;
             }

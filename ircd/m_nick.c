@@ -212,8 +212,16 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * primary on this server, broadcasts NICK from primary source, and
    * BX N (when sptr is local-MyUser) syncs aliases on other servers.
    * Local aliases on this server are renamed in set_nick_name's
-   * local-alias rename pass. */
+   * local-alias rename pass.
+   *
+   * S2S routing: toward the primary's home server we must source the
+   * NICK from the alias's numeric (so the home server processes the
+   * rename request via standard alias→primary rewrite); away from the
+   * primary we source from the primary's numeric (peers see the
+   * canonical rename).  sendcmdto_set_alias_source() arms the upcoming
+   * sendcmdto_serv_butone in set_nick_name to do the split delivery. */
   if (IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+    struct Client *alias_source = sptr;
     sptr = cli_alias_primary(sptr);
     /* Synthesize parv[2] timestamp so set_nick_name's
      * cli_lastnick(sptr) = (sptr == cptr) ? TStime() : atoi(parv[2])
@@ -225,6 +233,7 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     rewrite_parv[2] = ts_buf;
     parv = rewrite_parv;
     parc = 3;
+    sendcmdto_set_alias_source(alias_source);
   }
 
   if (!(acptr = SeekClient(nick))) {
@@ -286,6 +295,21 @@ int m_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * the message below.
    */
   if (IsUnknown(acptr) && MyConnect(acptr)) {
+    /* Mid-SASL bouncer-class client?  Defer rather than kill:
+     * after SASL completes, if accounts match the new owner of the
+     * nick, the bouncer alias path takes over.  Otherwise late 433. */
+    if (cli_auth(acptr) && bounce_enabled_for(acptr)) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Bouncer: deferring mid-auth %C on local NICK "
+                           "%s collision (awaiting SASL)",
+                           acptr, nick);
+      auth_defer_nick(cli_auth(acptr), nick);
+      if (cli_name(acptr)[0]) {
+        hRemClient(acptr);
+        cli_name(acptr)[0] = '\0';
+      }
+      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+    }
     ServerStats->is_ref++;
     if (!find_except_conf(acptr, EFLAG_IPCHECK))
       IPcheck_connect_fail(acptr, 0);
@@ -442,51 +466,136 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * user@host — they aren't independent clients, they're one user in
    * two representational states.
    */
-  if (IsServer(sptr) && IsBouncerHold(acptr) && parc > 7
-      && cli_user(acptr) && cli_user(acptr)->account[0]) {
-    const char *acct = NULL;
-    char acct_buf[ACCOUNTLEN + 1];
+  /* Extract account from incoming N (parv[6] umode flags + arg list).
+   * Used by both the BouncerHold-ghost rebind and the live-primary
+   * split-merge blocks below.  Empty if the incoming N has no +r. */
+  const char *incoming_acct = NULL;
+  char incoming_acct_buf[ACCOUNTLEN + 1];
+  if (IsServer(sptr) && parc > 7 && parv[6] && *parv[6] == '+') {
     /* Walk parv[6] flag string, counting arg-taking flags before 'r'.
      * Argument order in N matches umode_str() output order: r, h, f, C, c.
      * Args occupy parv[7..parc-4]; parv[parc-3..parc-1] are ip/numeric/info. */
-    if (parv[6] && *parv[6] == '+') {
-      const char *m;
-      int argi = 7;
-      for (m = parv[6] + 1; *m; m++) {
-        if (*m == 'r' || *m == 'h' || *m == 'f' || *m == 'C' || *m == 'c') {
-          if (argi >= parc - 3)
-            break;
-          if (*m == 'r') {
-            const char *a = parv[argi];
-            const char *colon = strchr(a, ':');
-            size_t alen = colon ? (size_t)(colon - a) : strlen(a);
-            if (alen > ACCOUNTLEN)
-              alen = ACCOUNTLEN;
-            memcpy(acct_buf, a, alen);
-            acct_buf[alen] = '\0';
-            acct = acct_buf;
-            break;
-          }
-          argi++;
+    const char *m;
+    int argi = 7;
+    for (m = parv[6] + 1; *m; m++) {
+      if (*m == 'r' || *m == 'h' || *m == 'f' || *m == 'C' || *m == 'c') {
+        if (argi >= parc - 3)
+          break;
+        if (*m == 'r') {
+          const char *a = parv[argi];
+          const char *colon = strchr(a, ':');
+          size_t alen = colon ? (size_t)(colon - a) : strlen(a);
+          if (alen > ACCOUNTLEN)
+            alen = ACCOUNTLEN;
+          memcpy(incoming_acct_buf, a, alen);
+          incoming_acct_buf[alen] = '\0';
+          incoming_acct = incoming_acct_buf;
+          break;
         }
+        argi++;
       }
     }
-    if (acct && 0 == ircd_strcmp(acct, cli_user(acptr)->account)) {
-      struct irc_in_addr ip;
-      base64toip(parv[parc - 3], &ip);
-      if (0 == bounce_rebind_ghost_to_remote_primary(acptr, sptr,
-                                                     parv[parc - 2],
-                                                     lastnick, parv[4],
-                                                     parv[5], &ip,
-                                                     parv[parc - 1])) {
+  }
+
+  /* Bouncer ghost rebind: incoming primary takes the place of our
+   * held ghost (no kill, no S2S broadcast).  Only when acptr is a
+   * BouncerHold ghost on this server.  See bouncer/m_nick.c history. */
+  if (IsServer(sptr) && IsBouncerHold(acptr) && parc > 7
+      && cli_user(acptr) && cli_user(acptr)->account[0]
+      && incoming_acct
+      && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
+    struct irc_in_addr ip;
+    int rebind_rc;
+    base64toip(parv[parc - 3], &ip);
+    rebind_rc = bounce_rebind_ghost_to_remote_primary(acptr, sptr,
+                                                      parv[parc - 2],
+                                                      lastnick, parv[4],
+                                                      parv[5], &ip,
+                                                      parv[parc - 1]);
+    if (rebind_rc == 0) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Bouncer rebind: %C ghost rebound to %s on %C "
+                           "(account %s)", acptr, parv[parc - 2], cptr,
+                           incoming_acct);
+      return 0;
+    }
+    /* rebind_rc == -1: not a rebind case, fall through.  (rc == -3
+     * was the BX R-winner short-circuit, retired in Phase 5.) */
+  }
+
+  /* Live-primary split-merge: acptr is a live local primary (not a
+   * hold ghost), peer is introducing a different primary for the
+   * same account.
+   *
+   * Per redesign D.1 + D.2: convergence runs at-N-time, deterministic.
+   * Both sides see the same incoming N (parv[3] = lastnick TS of the
+   * peer's primary) and compute the same answer locally:
+   *
+   *   1. Older cli_firsttime wins (stability — established connection
+   *      stays primary).  Lower lastnick TS = older.
+   *   2. Equal: lex on numeric (deterministic on both sides — the
+   *      symmetric numeric pair compares the same way from either end).
+   *
+   * Loser side flips its primary to alias of the winner.  Winner side
+   * refuses the incoming N (set_nick_name not called → no propagation).
+   * No coordination protocol — same inputs + same algorithm → same
+   * answer on both sides. */
+  if (IsServer(sptr) && incoming_acct
+      && !IsBouncerAlias(acptr) && !IsBouncerHold(acptr)
+      && IsAccount(acptr) && IsUser(acptr)
+      && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
+    struct BouncerSession *bsess = bounce_get_session(acptr);
+    if (bsess && bsess->hs_client == acptr) {
+      time_t our_first   = cli_firsttime(acptr);
+      time_t their_first = (time_t)atoi(parv[3]);
+      int we_lose;
+
+      if (our_first > their_first) {
+        we_lose = 1;
+      } else if (our_first < their_first) {
+        we_lose = 0;
+      } else {
+        /* Equal — lex on numeric.  parv[parc-2] is the incoming numeric;
+         * cli_yxx returns this server's prefix-relative numeric for our
+         * primary, so concatenate with our server's prefix to form the
+         * full YYXXX both sides compare. */
+        char our_full[6];
+        ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
+                      cli_yxx(&me), cli_yxx(acptr));
+        we_lose = (strcmp(our_full, parv[parc - 2]) > 0);
+      }
+
+      if (we_lose) {
+        if (0 == bounce_demote_live_primary_to_alias(acptr, sptr)) {
+          int rc;
+          struct Client *new_primary;
+          sendto_opmask_butone(0, SNO_OLDSNO,
+                               "Bouncer split-merge: demoted local "
+                               "primary %C to alias of %s on %C "
+                               "(account %s, D.2 tiebreaker)",
+                               acptr, parv[parc - 2], cptr, incoming_acct);
+          rc = set_nick_name(cptr, sptr, nick, parc, parv, 0);
+          new_primary = findNUser(parv[parc - 2]);
+          if (new_primary)
+            bounce_finish_live_primary_demote(acptr, new_primary);
+          return rc;
+        }
+        /* Demote failed — fall through to standard collision rules
+         * rather than refuse, so the user isn't stranded. */
+      } else {
+        /* We win — refuse incoming silently.  Peer will reach the
+         * symmetric verdict and demote on their side. */
         sendto_opmask_butone(0, SNO_OLDSNO,
-                             "Bouncer rebind: %C ghost rebound to %s on %C "
-                             "(account %s)", acptr, parv[parc - 2], cptr,
-                             acct);
+                             "Bouncer split-merge: refusing incoming "
+                             "%s on %C — local %C wins (account %s, "
+                             "D.2 tiebreaker, our_first=%ld their=%ld)",
+                             parv[parc - 2], cptr, acptr, incoming_acct,
+                             (long)our_first, (long)their_first);
         return 0;
       }
-      /* Fall through to existing collision logic on rebind failure. */
     }
+    /* No session match or demote failed: fall through to standard
+     * collision logic. */
   }
   /*
    * If the older one is "non-person", the new entry is just
@@ -496,6 +605,22 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    */
   if (IsUnknown(acptr) && MyConnect(acptr))
   {
+    /* Mid-SASL bouncer-class client?  Defer rather than kill —
+     * remote N may turn out to be the same account we're SASLing
+     * into, in which case the bouncer alias path takes over after
+     * SASL completes.  Otherwise check_auth_finished sends late 433. */
+    if (cli_auth(acptr) && bounce_enabled_for(acptr)) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Bouncer: deferring mid-auth %C on incoming "
+                           "%s from %C (nick %s, awaiting SASL)",
+                           acptr, parv[parc - 2], cptr, nick);
+      auth_defer_nick(cli_auth(acptr), nick);
+      if (cli_name(acptr)[0]) {
+        hRemClient(acptr);
+        cli_name(acptr)[0] = '\0';
+      }
+      return set_nick_name(cptr, sptr, nick, parc, parv, 0);
+    }
     ServerStats->is_ref++;
     if (!find_except_conf(acptr, EFLAG_IPCHECK))
       IPcheck_connect_fail(acptr, 0);
@@ -550,7 +675,61 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 			 "%C (%C %Tu <- %C %Tu)", sptr, acptr, cli_from(acptr),
 			 cli_lastnick(acptr), cptr, lastnick);
   }
+  /* Account-asymmetry override: if our local acptr is account-authenticated
+   * (e.g., a bouncer-managed alias or primary) and the incoming sptr is
+   * not, the incoming has a weaker identity claim regardless of timestamp.
+   * Same-IP/username (differ=0) is what makes them collide; same IP can
+   * just mean two connection paths from the same person, and the
+   * authenticated side is the canonical one.
+   *
+   * Prevents a legacy-server-introduced unauthenticated user from
+   * KILLing our local account-bearing user via standard same-user@host
+   * rules when timestamps disfavor us — the "held ghost nick collision"
+   * symptom in chathistory replay (real local user killed because
+   * upstream's nick claim arrived with a newer lastnick).
+   *
+   * Only applies for incoming server-introduced N's against a local
+   * account-bearing acptr; doesn't change handling of other-account
+   * collisions (different accounts → real collision, standard rules
+   * apply via differ=1). */
+  if (IsServer(sptr) && parc > 7
+      && IsAccount(acptr) && IsUser(acptr)) {
+    int incoming_has_account = 0;
+    if (parv[6] && *parv[6] == '+') {
+      const char *m;
+      for (m = parv[6] + 1; *m; m++) {
+        if (*m == 'r') { incoming_has_account = 1; break; }
+        /* Skip past arg-taking flags' positions; we don't need their
+         * values, just whether 'r' is set anywhere in the flag list. */
+      }
+    }
+    if (!incoming_has_account) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Account-asymmetry override: refusing to kill "
+                           "account-bearing %C for unauth incoming %s on "
+                           "%C (would be a hijack of an authenticated user)",
+                           acptr, parv[parc - 2], cptr);
+      sendcmdto_serv_butone(&me, CMD_KILL, cptr,
+                            "%s :%s (Unauthenticated nick collides with "
+                            "authenticated user)",
+                            parv[parc - 2],
+                            feature_str(FEAT_HIS_SERVERNAME));
+      return 0;
+    }
+  }
+
   type = differ ? "overruled by older nick" : "nick collision from same user@host";
+  Debug((DEBUG_INFO, "m_nick collision: acptr=%C(numeric=%s,lastnick=%lu,user@host=%s@%s) "
+         "incoming=%s lastnick=%lu user@host=%s@%s differ=%d cptr=%C sptr=%s",
+         acptr, IsUser(acptr) ? cli_yxx(acptr) : "?",
+         (unsigned long)cli_lastnick(acptr),
+         IsUser(acptr) && cli_user(acptr) ? cli_user(acptr)->username : "?",
+         IsUser(acptr) && cli_user(acptr) ? cli_user(acptr)->host : "?",
+         IsServer(sptr) ? parv[parc - 2] : cli_name(sptr),
+         (unsigned long)lastnick,
+         IsServer(sptr) ? parv[4] : (cli_user(sptr) ? cli_username(sptr) : "?"),
+         IsServer(sptr) ? parv[5] : (cli_user(sptr) ? cli_user(sptr)->host : "?"),
+         differ, cptr, IsServer(sptr) ? cli_name(sptr) : cli_name(sptr)));
   /*
    * Now remove (kill) the nick on our side if it is the youngest.
    * If no timestamp was received, we ignore the incoming nick

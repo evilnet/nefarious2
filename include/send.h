@@ -79,6 +79,10 @@ extern void sendcmdto_set_client_msgid(const char *msgid);
 extern void sendcmdto_set_client_time(const char *timestr);
 /* Override S2S compact tag time/msgid for forwarded commands (auto-cleared) */
 extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
+/* Override S2S compact tag bouncer session-id hint (,S segment) for the next
+ * S2S emit.  Per redesign A.2: bouncer-aware peers receive sessid for at-N-time
+ * convergence dispatch in m_nick.  Auto-cleared after consumption. */
+extern void sendcmdto_set_s2s_sessid(const char *sessid);
 /* Pre-built S2S tag prefix for multi-msgid (batched CREATE/PART) */
 extern void sendcmdto_set_s2s_raw_tags(const char *tags);
 

@@ -65,6 +65,7 @@
 #include "s_debug.h"
 #include "handlers.h"
 #include "s_misc.h"
+#include "s_serv.h"
 #include "s_user.h"
 #include "msgq.h"
 #include "struct.h"
@@ -98,9 +99,6 @@ static struct BouncerSession *tokenHash[BOUNCE_TOKEN_HASHSIZE];
 
 /** Account hash table - for per-account enumeration. */
 static struct AccountSessions *accountHash[BOUNCE_ACCOUNT_HASHSIZE];
-
-/** Per-server sequence counter for session IDs. */
-static unsigned int sessionSeq = 0;
 
 /* Forward declarations for MDBX persistence (defined after bounce_snapshot_channels) */
 static int bounce_db_put(struct BouncerSession *session);
@@ -206,7 +204,6 @@ static int dirty_persist_timer_active;
 
 /* Forward declarations for persistence functions */
 static int bounce_db_put(struct BouncerSession *session);
-static int is_local_session(struct BouncerSession *session);
 
 /** Timer callback: persist all dirty ACTIVE sessions.
  * Iterates all sessions, snapshots and persists those marked dirty,
@@ -238,7 +235,9 @@ static void bounce_dirty_persist_cb(struct Event *ev)
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (s = tokenHash[i]; s; s = s->hs_tnext) {
-      if (!is_local_session(s))
+      /* Per redesign C.2: persistence is keyed on actual local holding,
+       * not historical hs_origin. */
+      if (!session_has_local_holder(s))
         continue;
 
       /* Only persist ACTIVE sessions that are dirty */
@@ -374,15 +373,65 @@ static void generate_token(char *buf)
   buf[BOUNCER_TOKEN_LEN] = '\0';
 }
 
-/** Generate a session ID from server numeric + sequence.
- * Format: "XX-NNNNN" where XX is 2-char server numeric.
+/** Generate a UUID v7 (RFC 9562 §5.7) and write its hyphenated string
+ * representation to @a buf.
+ *
+ * Format: 36 chars `xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx` plus null.
+ * - Bits 0-47: Unix timestamp in milliseconds (big-endian).
+ * - Bits 48-51: version = 0111 (7).
+ * - Bits 52-63: random.
+ * - Bits 64-65: variant = 10 (RFC 4122).
+ * - Bits 66-127: random.
+ *
+ * Per redesign A.1: globally unique session identity, server-independent.
+ * Sortable by creation time via the timestamp prefix, useful for
+ * debugging and audit.
+ *
  * @param[out] buf Buffer of at least BOUNCER_SESSID_LEN bytes.
  */
 static void generate_sessid(char *buf)
 {
-  const char *yxx = cli_yxx(&me);
-  ircd_snprintf(0, buf, BOUNCER_SESSID_LEN, "%c%c-%u",
-                yxx[0], yxx[1], ++sessionSeq);
+  unsigned char b[16];
+  uint64_t ms;
+  struct timeval tv;
+  int i;
+
+  /* Get current time in milliseconds since the Unix epoch. */
+  gettimeofday(&tv, NULL);
+  ms = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
+
+  /* Random fill — overwritten in the timestamp + version + variant
+   * positions below. */
+#ifdef USE_SSL
+  if (RAND_bytes(b, sizeof(b)) != 1) {
+    for (i = 0; i < (int)sizeof(b); i++)
+      b[i] = (unsigned char)(ircrandom() & 0xFF);
+  }
+#else
+  for (i = 0; i < (int)sizeof(b); i++)
+    b[i] = (unsigned char)(ircrandom() & 0xFF);
+#endif
+
+  /* Timestamp: 48 bits big-endian into bytes 0-5. */
+  b[0] = (unsigned char)((ms >> 40) & 0xFF);
+  b[1] = (unsigned char)((ms >> 32) & 0xFF);
+  b[2] = (unsigned char)((ms >> 24) & 0xFF);
+  b[3] = (unsigned char)((ms >> 16) & 0xFF);
+  b[4] = (unsigned char)((ms >> 8) & 0xFF);
+  b[5] = (unsigned char)(ms & 0xFF);
+
+  /* Version 7: high nibble of byte 6 is 0111. */
+  b[6] = (unsigned char)(0x70 | (b[6] & 0x0F));
+
+  /* RFC 4122 variant: high two bits of byte 8 are 10. */
+  b[8] = (unsigned char)(0x80 | (b[8] & 0x3F));
+
+  /* Format as hyphenated 36-char string. */
+  ircd_snprintf(0, buf, BOUNCER_SESSID_LEN,
+                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
+                "%02x%02x%02x%02x%02x%02x",
+                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
 }
 
 /* ---------------------------------------------------------------- */
@@ -547,15 +596,28 @@ static void bounce_hold_expire(struct Event *ev)
     /* Aliases exist — promote instead of destroy.
      * Promote removes ghost from channels (silent), sends BX P + BS T.
      * Session continues under the promoted alias's server. */
+    int promoted;
     Debug((DEBUG_INFO, "Bouncer: hold expired with %d aliases, promoting for %s",
            session->hs_alias_count, session->hs_account));
-    bounce_promote_alias(session);
-    /* Session now points to promoted alias as hs_client.
-     * Exit ghost with FLAG_KILLED — BX P already told the network. */
+    promoted = bounce_promote_alias(session);
+    /* Exit ghost.  FLAG_BOUNCER_INTERNAL_DESTROY is set ONLY when promote
+     * actually broadcast BX P — that's the wire event legacy uses (numeric
+     * swap) and IRCv3-aware peers use (membership transfer) to retire
+     * the old numeric.  When promote fails (no usable winner alias,
+     * etc.), no BX P went out, so we MUST allow exit_client's normal
+     * Q broadcast to fire so peers (legacy and IRCv3-aware alike) can
+     * clean up the held-ghost phantom.
+     *
+     * Use the bouncer-internal-destroy flag rather than FLAG_KILLED:
+     * this is internal cleanup, not a network KILL, and per invariant
+     * #12 a network KILL would end the entire session — which is not
+     * what we want here (we're doing a successful promote-and-retire). */
     if (ghost && IsBouncerHold(ghost)) {
       ClearBouncerHold(ghost);
-      SetFlag(ghost, FLAG_KILLED);
-      exit_client(ghost, ghost, &me, "Session transferred");
+      if (promoted == 0)
+        SetBouncerInternalDestroy(ghost);
+      exit_client(ghost, ghost, &me,
+                  promoted == 0 ? "Session transferred" : "Session expired");
     }
   } else {
     /* No aliases — session truly expired.
@@ -581,7 +643,6 @@ void bounce_init(void)
 {
   memset(tokenHash, 0, sizeof(tokenHash));
   memset(accountHash, 0, sizeof(accountHash));
-  sessionSeq = 0;
 }
 
 /** Check if bouncer feature is enabled. */
@@ -747,8 +808,14 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
   /* Try to find a held session to resume */
   session = bounce_find_best_held(account);
   if (session) {
-    /* Check if session is on a remote server */
-    if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
+    /* Per redesign C.2: hs_origin is historical-only.  The runtime
+     * "is the primary on a remote server?" question is answered by
+     * checking whether hs_client (the held ghost or live primary) is
+     * locally connected.  A held ghost made by bounce_create_ghost()
+     * has MyConnect()==TRUE because make_client(NULL,...) allocates a
+     * Connection; so this branch fires only when the session has no
+     * local Client* at all (hs_client NULL or its MyConnect is false). */
+    if (!session->hs_client || !MyConnect(session->hs_client)) {
       struct Client *managing_server = FindNServer(session->hs_origin);
       /* Resolve ghost from numeric if hs_client is NULL (e.g., BS D
        * arrived before ghost numeric was resolvable). */
@@ -849,8 +916,10 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
               session->hs_sessid, account, session->hs_origin,
               cli_yxx(&me), (void*)session->hs_client,
               session->hs_alias_count);
-    /* Check if session is on a remote server */
-    if (0 != strcmp(session->hs_origin, cli_yxx(&me))) {
+    /* Per redesign C.2: hs_origin is historical-only.  Use runtime
+     * Client locality — primary is "remote" iff hs_client lives on
+     * another server (or is NULL). */
+    if (!session->hs_client || !MyConnect(session->hs_client)) {
       struct Client *managing_server = FindNServer(session->hs_origin);
       if (managing_server && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
@@ -1071,6 +1140,10 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   if (session->hs_state == BOUNCE_ACTIVE && session->hs_client)
     return -1; /* Already attached */
 
+  /* Active client attach — clear restore-pending so any incoming
+   * BX R sees us as firm. */
+  session->hs_restore_pending = 0;
+
   /* Cancel hold timer if running */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
@@ -1218,6 +1291,8 @@ int bounce_detach(struct BouncerSession *session)
   /* Check if hold is enabled for this session */
   if (session->hs_hold_override == 0) {
     /* Explicit no-hold override */
+    Debug((DEBUG_INFO, "Bouncer: destroy@detach-no-hold-override sess=%s",
+           session->hs_sessid));
     bounce_broadcast(session, 'X', NULL);
     bounce_destroy(session);
     return 0;
@@ -1226,6 +1301,8 @@ int bounce_detach(struct BouncerSession *session)
   if (session->hs_hold_override < 0 &&
       !feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)) {
     /* No override, and network default is no-hold */
+    Debug((DEBUG_INFO, "Bouncer: destroy@detach-default-no-hold sess=%s",
+           session->hs_sessid));
     bounce_broadcast(session, 'X', NULL);
     bounce_destroy(session);
     return 0;
@@ -1303,10 +1380,110 @@ void bounce_snapshot_channels(struct BouncerSession *session,
 /* MDBX persistence (FEAT_BOUNCER_PERSIST)                            */
 /* ---------------------------------------------------------------- */
 
-/** Check if a session is local (originated on this server). */
-static int is_local_session(struct BouncerSession *session)
+/* is_local_session / bounce_session_is_local retired in Phase 5.  Per
+ * redesign C.2 hs_origin is historical-only metadata; behavior gates
+ * use session_has_local_holder() instead. */
+
+/** Per redesign C.2: runtime "do we hold this session?" check.
+ *
+ * A session is held locally when this server has any Client* for it —
+ * the primary (live or held ghost), or any alias on the local server. */
+int session_has_local_holder(struct BouncerSession *session)
 {
-  return (0 == strcmp(session->hs_origin, cli_yxx(&me)));
+  int i;
+  const char *me_yxx;
+
+  if (!session)
+    return 0;
+
+  /* Primary lives on this server (live or held ghost — both have a
+   * local Connection so MyConnect() is true). */
+  if (session->hs_client && MyConnect(session->hs_client))
+    return 1;
+
+  /* Any persisted alias hosted here. */
+  me_yxx = cli_yxx(&me);
+  for (i = 0; i < session->hs_alias_count; i++) {
+    if (0 == strcmp(session->hs_aliases[i].ba_server, me_yxx))
+      return 1;
+  }
+
+  return 0;
+}
+
+/** Per redesign C.2 + design intent #135 + #254: do we have any
+ * locally-held bouncer sessions on this server?
+ *
+ * Returns non-zero iff at least one session has a local holder
+ * (primary or alias).  Used by server_estab to decide whether a
+ * legacy peer's burst needs to be gated for convergence — when no
+ * held sessions exist, there's no risk of two faces colliding on
+ * the legacy peer's wire, and the burst can run normally.
+ */
+int bounce_have_local_sessions(void)
+{
+  unsigned int i;
+  struct BouncerSession *s;
+
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (s = tokenHash[i]; s; s = s->hs_tnext) {
+      if (session_has_local_holder(s))
+        return 1;
+    }
+  }
+  return 0;
+}
+
+/** Force-release legacy-peer burst gates whose grace deadline has
+ * passed.  Called once per second from a periodic timer.
+ *
+ * Per design intent #135 + #254: legacy peers must see exactly one
+ * face per bouncer session.  When two BX-aware servers each restore
+ * a held ghost for the same account during a partition, both want to
+ * burst their primary as N to a shared legacy peer — that's the
+ * cascade-kill scenario.  server_estab gates the legacy-peer burst
+ * to give BX R convergence time to settle (loser's primary becomes
+ * IsBouncerAlias, which the N-burst filter at server_finish_burst
+ * skips, so only the winner's face propagates).  This tick is the
+ * fallback timer that releases the gate if BX R never settles
+ * (e.g., no BX-aware peer ever links).
+ */
+void bounce_legacy_burst_gate_tick(void)
+{
+  struct DLink *dlp;
+  struct DLink *next;
+
+  if (!cli_serv(&me))
+    return;
+
+  for (dlp = cli_serv(&me)->down; dlp; dlp = next) {
+    struct Client *peer;
+    next = dlp->next;
+    peer = dlp->value.cptr;
+    if (!peer || !IsServer(peer))
+      continue;
+    if (!IsBurstGated(peer))
+      continue;
+    if (cli_burst_gate_deadline(peer) == 0)
+      continue; /* gate set without deadline (shouldn't happen) */
+    if (cli_burst_gate_deadline(peer) > CurrentTime)
+      continue; /* not yet expired */
+
+    Debug((DEBUG_INFO,
+           "Bouncer: burst gate expired for %s — releasing",
+           cli_name(peer)));
+    cli_burst_gate_deadline(peer) = 0;
+    ClearBurstGated(peer);
+    server_finish_burst(peer);
+  }
+}
+
+/** Event-callback wrapper for the periodic 1-second tick.  Registered
+ * from ircd.c as a TT_PERIODIC timer. */
+void bounce_legacy_burst_gate_callback(struct Event *ev)
+{
+  (void)ev;
+  bounce_legacy_burst_gate_tick();
 }
 
 /** Persist a bouncer session to MDBX.
@@ -1326,7 +1503,9 @@ static int bounce_db_put(struct BouncerSession *session)
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
     return 0;
 
-  if (!is_local_session(session))
+  /* Per redesign C.2: persist iff we hold a Client locally; hs_origin
+   * is historical-only and not authoritative here. */
+  if (!session_has_local_holder(session))
     return 0;
 
   env = metadata_get_env();
@@ -1401,6 +1580,27 @@ static int bounce_db_put(struct BouncerSession *session)
   rec.bsr_histcount = (uint16_t)session->hs_histcount;
   memcpy(rec.bsr_history, session->hs_history,
          session->hs_histcount * sizeof(struct BounceConnHistory));
+
+  /* Alias roster (per redesign B.2 + B.6).  Persisted as expectations
+   * to verify on next link establishment, not authoritative live
+   * state — peers' BS A bursts confirm or repudiate. */
+  rec.bsr_aliascount = (uint16_t)session->hs_alias_count;
+  if (rec.bsr_aliascount > BOUNCER_MAX_ALIASES)
+    rec.bsr_aliascount = BOUNCER_MAX_ALIASES;
+  {
+    int i;
+    for (i = 0; i < rec.bsr_aliascount; i++) {
+      ircd_strncpy(rec.bsr_aliases[i].bsar_numeric,
+                   session->hs_aliases[i].ba_numeric,
+                   sizeof(rec.bsr_aliases[i].bsar_numeric));
+      ircd_strncpy(rec.bsr_aliases[i].bsar_server,
+                   session->hs_aliases[i].ba_server,
+                   sizeof(rec.bsr_aliases[i].bsar_server));
+      rec.bsr_aliases[i].bsar_caps = session->hs_aliases[i].ba_caps;
+      rec.bsr_aliases[i].bsar_last_active =
+        (int64_t)session->hs_aliases[i].ba_last_active;
+    }
+  }
 
   /* Write through the abstraction */
   wb = db_writebatch_new(env);
@@ -1484,7 +1684,8 @@ void bounce_db_shutdown(void)
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
     for (s = tokenHash[i]; s; s = s->hs_tnext) {
-      if (!is_local_session(s))
+      /* Per redesign C.2: shutdown-persist sessions we hold locally. */
+      if (!session_has_local_holder(s))
         continue;
 
       /* Snapshot ACTIVE sessions — they have a live client with channels */
@@ -1641,7 +1842,7 @@ int bounce_db_restore(void)
   int rc;
   int restored = 0;
   int expired = 0;
-  unsigned int max_seq = 0;
+  int migrated_v7 = 0;
   time_t max_hold;
 
   if (!feature_bool(FEAT_BOUNCER_PERSIST) || !metadata_lmdb_is_available())
@@ -1651,6 +1852,19 @@ int bounce_db_restore(void)
   cf  = metadata_get_bouncer_cf();
   if (!env || !cf)
     return -1;
+
+  /* Don't restore persisted sessions when the bouncer feature is globally
+   * disabled.  Restoring would create ghost clients with no enabled
+   * subsystem to manage their lifecycle — they'd sit in HOLDING forever,
+   * collide with peer N introductions on the same account, and require
+   * /bouncer reset (or a full session destroy) to clean up.  The records
+   * stay on disk; if the feature is re-enabled later, restore picks them
+   * up at next boot. */
+  if (!bounce_enabled()) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "bouncer_persist: skipping restore — FEAT_BOUNCER_ENABLE is off");
+    return 0;
+  }
 
   max_hold = feature_int(FEAT_BOUNCER_MAX_HOLD);
 
@@ -1668,36 +1882,89 @@ int bounce_db_restore(void)
        rc = db_iter_next(it)) {
     size_t vlen;
     const void *vbuf = db_iter_value(it, &vlen);
+    struct BounceSessionRecord rec_buf;
     struct BounceSessionRecord *rec;
     struct BouncerSession *session;
     struct Client *ghost;
     struct AccountSessions *as;
     time_t elapsed;
     time_t remaining;
-    unsigned int seq;
-    const char *dash;
+    uint32_t version;
 
-    if (vlen != sizeof(struct BounceSessionRecord))
-      continue; /* wrong size, skip */
+    /* Records start with a uint32 version field at offset 0 in every
+     * schema version.  Read it without struct overlay to dispatch on
+     * version regardless of total record size. */
+    if (vlen < sizeof(uint32_t))
+      continue;
+    memcpy(&version, vbuf, sizeof(version));
 
-    rec = (struct BounceSessionRecord *)vbuf;
-
-    if (rec->bsr_version != BOUNCER_DB_VERSION)
-      continue; /* version mismatch, skip */
+    if (version == BOUNCER_DB_VERSION) {
+      /* v8: current schema, parse directly from on-disk bytes. */
+      if (vlen != sizeof(struct BounceSessionRecord))
+        continue;
+      rec = (struct BounceSessionRecord *)vbuf;
+    } else if (version == 7) {
+      /* v7: legacy schema.  Read with the frozen v7 struct, then
+       * construct a v8 record in-place by copying matching fields and
+       * minting a UUID v7 for the new sessid format (per redesign
+       * A.1).  New v8-only fields (alias roster) default to empty —
+       * peers' BS A bursts repopulate them on next link. */
+      const struct BounceSessionRecord_v7 *v7;
+      if (vlen != sizeof(struct BounceSessionRecord_v7))
+        continue;
+      v7 = (const struct BounceSessionRecord_v7 *)vbuf;
+      memset(&rec_buf, 0, sizeof(rec_buf));
+      rec_buf.bsr_version = BOUNCER_DB_VERSION;
+      ircd_strncpy(rec_buf.bsr_account, v7->bsr_account, ACCOUNTLEN + 1);
+      /* Mint a fresh UUID v7 for the v7→v8 sessid migration (per G.1). */
+      generate_sessid(rec_buf.bsr_sessid);
+      ircd_strncpy(rec_buf.bsr_token, v7->bsr_token, BOUNCER_TOKEN_LEN + 1);
+      ircd_strncpy(rec_buf.bsr_name, v7->bsr_name, BOUNCER_NAME_LEN);
+      ircd_strncpy(rec_buf.bsr_origin, v7->bsr_origin, NICKLEN + 1);
+      rec_buf.bsr_hold_override = v7->bsr_hold_override;
+      rec_buf.bsr_created = v7->bsr_created;
+      rec_buf.bsr_disconnect_time = v7->bsr_disconnect_time;
+      rec_buf.bsr_last_active = v7->bsr_last_active;
+      rec_buf.bsr_last_msg_time = v7->bsr_last_msg_time;
+      rec_buf.bsr_total_active = v7->bsr_total_active;
+      rec_buf.bsr_attach_count = v7->bsr_attach_count;
+      rec_buf.bsr_connect_count = v7->bsr_connect_count;
+      ircd_strncpy(rec_buf.bsr_nick, v7->bsr_nick, NICKLEN + 1);
+      ircd_strncpy(rec_buf.bsr_username, v7->bsr_username, USERLEN + 1);
+      ircd_strncpy(rec_buf.bsr_realhost, v7->bsr_realhost, HOSTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_host, v7->bsr_host, HOSTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_realname, v7->bsr_realname, REALLEN + 1);
+      ircd_strncpy(rec_buf.bsr_account_name, v7->bsr_account_name,
+                   ACCOUNTLEN + 1);
+      rec_buf.bsr_acc_create = v7->bsr_acc_create;
+      memcpy(&rec_buf.bsr_ip, &v7->bsr_ip, sizeof(rec_buf.bsr_ip));
+      ircd_strncpy(rec_buf.bsr_sock_ip, v7->bsr_sock_ip, SOCKIPLEN + 1);
+      ircd_strncpy(rec_buf.bsr_sockhost, v7->bsr_sockhost, HOSTLEN + 1);
+      rec_buf.bsr_listener_port = v7->bsr_listener_port;
+      rec_buf.bsr_agg_sendB = v7->bsr_agg_sendB;
+      rec_buf.bsr_agg_receiveB = v7->bsr_agg_receiveB;
+      rec_buf.bsr_agg_sendM = v7->bsr_agg_sendM;
+      rec_buf.bsr_agg_receiveM = v7->bsr_agg_receiveM;
+      rec_buf.bsr_histcount = v7->bsr_histcount;
+      memcpy(rec_buf.bsr_history, v7->bsr_history, sizeof(rec_buf.bsr_history));
+      rec_buf.bsr_chancount = v7->bsr_chancount;
+      memcpy(rec_buf.bsr_channels, v7->bsr_channels,
+             sizeof(rec_buf.bsr_channels));
+      /* bsr_aliascount + bsr_aliases[] left zeroed — peers refill. */
+      rec = &rec_buf;
+      migrated_v7++;
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "bouncer_persist: migrated v7 record (account=%s) → v8 sessid=%s",
+                rec->bsr_account, rec->bsr_sessid);
+    } else {
+      continue; /* unknown version, skip */
+    }
 
     /* Check expiry */
     elapsed = CurrentTime - (time_t)rec->bsr_disconnect_time;
     if (elapsed > max_hold) {
       expired++;
       continue;
-    }
-
-    /* Track max session sequence number */
-    dash = strchr(rec->bsr_sessid, '-');
-    if (dash) {
-      seq = (unsigned int)strtoul(dash + 1, NULL, 10);
-      if (seq > max_seq)
-        max_seq = seq;
     }
 
     /* Create ghost client */
@@ -1720,6 +1987,7 @@ int bounce_db_restore(void)
     ircd_strncpy(session->hs_origin, rec->bsr_origin, NICKLEN + 1);
     session->hs_hold_override = rec->bsr_hold_override;
     session->hs_state = BOUNCE_HOLDING;
+    session->hs_restore_pending = 1;  /* cleared by burst-time BX R or by attach */
     session->hs_client = ghost;
     ircd_strncpy(session->hs_ghost_numeric, cli_yxx(ghost),
                  sizeof(session->hs_ghost_numeric) - 1);
@@ -1761,6 +2029,43 @@ int bounce_db_restore(void)
       }
     }
 
+    /* Restore persisted alias roster (per redesign B.2 + B.6).
+     *
+     * Local aliases (ba_server == our numeric) reference Client structs
+     * that are GONE after restart — their sockets closed, the numerics
+     * are released back to the pool.  Restoring them produces stale
+     * entries (findNUser returns NULL) that accumulate across cycles
+     * because shutdown order persists with hs_aliases populated, then
+     * close_connections empties them locally — but the persisted record
+     * keeps the pre-cleanup snapshot.  Skip those.
+     *
+     * Remote aliases (ba_server != us) reference Client structs that
+     * peer servers will re-introduce via burst N's.  Keep them — peer
+     * BS A bursts confirm liveness, missing aliases are pruned at
+     * convergence time. */
+    session->hs_alias_count = 0;
+    {
+      int i;
+      const char *me_yxx = cli_yxx(&me);
+      for (i = 0; i < rec->bsr_aliascount && i < BOUNCER_MAX_ALIASES; i++) {
+        if (0 == strcmp(rec->bsr_aliases[i].bsar_server, me_yxx))
+          continue;  /* local alias — Client is gone, skip */
+        ircd_strncpy(session->hs_aliases[session->hs_alias_count].ba_numeric,
+                     rec->bsr_aliases[i].bsar_numeric,
+                     sizeof(session->hs_aliases[0].ba_numeric));
+        ircd_strncpy(session->hs_aliases[session->hs_alias_count].ba_server,
+                     rec->bsr_aliases[i].bsar_server,
+                     sizeof(session->hs_aliases[0].ba_server));
+        session->hs_aliases[session->hs_alias_count].ba_caps =
+          rec->bsr_aliases[i].bsar_caps;
+        session->hs_aliases[session->hs_alias_count].ba_caps_known =
+          (rec->bsr_aliases[i].bsar_caps != 0);
+        session->hs_aliases[session->hs_alias_count].ba_last_active =
+          (time_t)rec->bsr_aliases[i].bsar_last_active;
+        session->hs_alias_count++;
+      }
+    }
+
     /* Register in hash tables */
     token_hash_add(session);
     as = account_sessions_get(session->hs_account, 1);
@@ -1788,14 +2093,15 @@ int bounce_db_restore(void)
 
   db_iter_close(it);
 
-  /* Update sessionSeq to avoid collision */
-  if (max_seq >= sessionSeq)
-    sessionSeq = max_seq + 1;
-
-  /* Clean up expired records: collect their sessids during a read pass,
-   * then delete via a writebatch.  Two passes (read-collect, write-batch)
-   * because the abstraction doesn't expose delete-during-iteration. */
-  if (expired > 0) {
+  /* Clean up expired and unknown-version records: collect their sessids
+   * during a read pass, then delete via a writebatch.  Two passes
+   * (read-collect, write-batch) because the abstraction doesn't expose
+   * delete-during-iteration.  v7 records are NOT deleted here even if
+   * successfully migrated — the next bounce_db_put for the session
+   * (e.g., on next persist sweep) overwrites them with the v8 form
+   * keyed by the new UUID sessid; the old v7 key remains until cleaned
+   * up explicitly.  Below loop also evicts those stale v7 keys. */
+  if (expired > 0 || migrated_v7 > 0) {
     struct db_iter *eit = db_iter_open(env, cf, /*snap=*/NULL);
     struct db_writebatch *ewb = db_writebatch_new(env);
     if (eit && ewb) {
@@ -1806,12 +2112,31 @@ int bounce_db_restore(void)
         size_t klen, vlen;
         const void *kbuf = db_iter_key(eit, &klen);
         const void *vbuf = db_iter_value(eit, &vlen);
-        struct BounceSessionRecord *rec = (struct BounceSessionRecord *)vbuf;
-        if (vlen != sizeof(struct BounceSessionRecord) ||
-            rec->bsr_version != BOUNCER_DB_VERSION ||
-            CurrentTime - (time_t)rec->bsr_disconnect_time > max_hold) {
-          db_writebatch_del(ewb, cf, kbuf, klen);
+        uint32_t version;
+        int should_delete = 0;
+        if (vlen < sizeof(uint32_t)) {
+          should_delete = 1;
+        } else {
+          memcpy(&version, vbuf, sizeof(version));
+          if (version == 7 && vlen == sizeof(struct BounceSessionRecord_v7)) {
+            const struct BounceSessionRecord_v7 *v7 = vbuf;
+            /* Evict v7 records — successfully-migrated ones live under
+             * new UUID keys now; expired/unmigrated ones aren't worth
+             * keeping. */
+            (void)v7;
+            should_delete = 1;
+          } else if (version == BOUNCER_DB_VERSION
+                     && vlen == sizeof(struct BounceSessionRecord)) {
+            const struct BounceSessionRecord *r = vbuf;
+            if (CurrentTime - (time_t)r->bsr_disconnect_time > max_hold)
+              should_delete = 1;
+          } else {
+            /* Unknown version or wrong size — evict. */
+            should_delete = 1;
+          }
         }
+        if (should_delete)
+          db_writebatch_del(ewb, cf, kbuf, klen);
       }
       db_iter_close(eit);
       db_writebatch_commit(ewb, /*sync_durably=*/0);
@@ -1819,11 +2144,29 @@ int bounce_db_restore(void)
       if (eit) db_iter_close(eit);
     }
     if (ewb) db_writebatch_destroy(ewb);
-    log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: cleaned up %d expired records", expired);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "bouncer_persist: cleaned up %d expired + %d migrated-v7 records",
+              expired, migrated_v7);
   }
 
-  log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: restored %d sessions, sessionSeq=%u",
-            restored, sessionSeq);
+  /* If we migrated any v7 records, persist their v8 forms now under the
+   * new UUID keys.  Otherwise the migrated state is in-memory only and
+   * would be lost without the runtime triggering a session-write. */
+  if (migrated_v7 > 0) {
+    struct AccountSessions *as_iter;
+    struct BouncerSession *s;
+    unsigned int b;
+    for (b = 0; b < BOUNCE_ACCOUNT_HASHSIZE; b++) {
+      for (as_iter = accountHash[b]; as_iter; as_iter = as_iter->as_hnext) {
+        for (s = as_iter->as_sessions; s; s = s->hs_anext)
+          (void)bounce_db_put(s);
+      }
+    }
+  }
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "bouncer_persist: restored %d sessions (%d migrated from v7)",
+            restored, migrated_v7);
   return restored;
 }
 
@@ -1960,13 +2303,21 @@ void bounce_burst(struct Client *cptr)
        * for alias support.  Applies to both HOLDING (ghost) and
        * ACTIVE (live primary) sessions — without this, leaves
        * can't activate the alias path for held sessions and get
-       * nick collisions instead. */
+       * nick collisions instead.
+       *
+       * Extended format (per redesign C.3 + B.1): carries the primary's
+       * last_active and caps so the receiver can populate per-connection
+       * activity for D.2 tiebreaking.  Primary doesn't track per-conn
+       * caps separately (caps live on session-level umode flags); pass
+       * 0.  Receiver parses last_active into hs_last_active when the
+       * numeric matches the primary (not in hs_aliases roster). */
       if (s->hs_client)
         sendcmdto_one(&me, CMD_BOUNCER_SESSION,
                       cptr,
-                      "A %s %s %s",
+                      "A %s %s %s %lu 0",
                       s->hs_account, s->hs_sessid,
-                      cli_yxx(s->hs_client));
+                      cli_yxx(s->hs_client),
+                      (unsigned long)s->hs_last_active);
 
       /* Burst existing aliases via BX C so the new server learns about
        * alias Client identities before the channel BURST references
@@ -2011,9 +2362,18 @@ void bounce_burst(struct Client *cptr)
             if (chans_len > 0
                 && chans_len < (int)sizeof(alias_chans) - 1)
               alias_chans[chans_len++] = ' ';
-            chans_len += ircd_snprintf(0, alias_chans + chans_len,
-                                       sizeof(alias_chans) - chans_len,
-                                       "%s", memb->channel->chname);
+            /* Per redesign F.2: ride-along JOIN msgid as
+             * "<chan>@<msgid>" so receivers replicate single-msgid
+             * invariant on alias rejoin during burst. */
+            if (memb->join_msgid[0])
+              chans_len += ircd_snprintf(0, alias_chans + chans_len,
+                                         sizeof(alias_chans) - chans_len,
+                                         "%s@%s", memb->channel->chname,
+                                         memb->join_msgid);
+            else
+              chans_len += ircd_snprintf(0, alias_chans + chans_len,
+                                         sizeof(alias_chans) - chans_len,
+                                         "%s", memb->channel->chname);
           }
 
           alias_modes = umode_str(alias);
@@ -2026,6 +2386,41 @@ void bounce_burst(struct Client *cptr)
                         *alias_modes ? "+" : "+",
                         alias_modes,
                         alias_chans);
+
+          /* Emit current caps for aliases hosted locally — peers
+           * receive BX C without caps via the standard burst path,
+           * so without this they fall back to IsMultiline proxy and
+           * may pick the wrong dispatch (BX M vs BX E) for routing.
+           * Only authoritative for locally-hosted aliases; ba_caps
+           * for remote-hosted aliases is replicated state and could
+           * be stale. */
+          if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))
+              && s->hs_aliases[a].ba_caps_known) {
+            char hex[12];
+            ircd_snprintf(0, hex, sizeof(hex), "%x",
+                          s->hs_aliases[a].ba_caps);
+            sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
+                          "U %s caps=%s",
+                          s->hs_aliases[a].ba_numeric, hex);
+          }
+
+          /* Per redesign C.3 + B.1 + B.6: emit BS A per alias to carry
+           * per-alias last_active + caps so the receiver can populate
+           * its alias-roster ba_last_active + ba_caps for D.2
+           * tiebreaking and BX M dispatch.  Only emit for locally-
+           * hosted aliases — remote-hosted aliases will be bursted by
+           * their home server's BS A. */
+          if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))) {
+            /* ba_numeric is YYXXX; BS A carries the XXX suffix.  The
+             * receiver constructs full = sptr's YY + XXX which is
+             * correct since sender == alias's home. */
+            sendcmdto_one(&me, CMD_BOUNCER_SESSION, cptr,
+                          "A %s %s %s %lu %x",
+                          s->hs_account, s->hs_sessid,
+                          s->hs_aliases[a].ba_numeric + 2,
+                          (unsigned long)s->hs_aliases[a].ba_last_active,
+                          s->hs_aliases[a].ba_caps);
+          }
         }
       }
     }
@@ -2052,12 +2447,35 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
     break;
 
   case 'A': /* Attach */
+  {
+    /* Per redesign C.3 + B.1: extended BS A carries the attaching
+     * connection's per-conn last_active + caps.  Look up the matching
+     * alias entry in hs_aliases by full numeric (our YY + extra XXX);
+     * if found, use ba_last_active + ba_caps.  Otherwise treat as a
+     * primary attach — use session-level hs_last_active, caps=0. */
+    time_t la = session->hs_last_active;
+    unsigned int caps = 0;
+    if (extra && *extra) {
+      char full_numeric[6];
+      int i;
+      ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                    cli_yxx(&me), extra);
+      for (i = 0; i < session->hs_alias_count; i++) {
+        if (0 == strcmp(session->hs_aliases[i].ba_numeric, full_numeric)) {
+          la = session->hs_aliases[i].ba_last_active;
+          caps = session->hs_aliases[i].ba_caps;
+          break;
+        }
+      }
+    }
     sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
                           NULL,
-                          "A %s %s %s",
+                          "A %s %s %s %lu %x",
                           session->hs_account, session->hs_sessid,
-                          extra ? extra : "");
+                          extra ? extra : "",
+                          (unsigned long)la, caps);
     break;
+  }
 
   case 'D': /* Detach */
     build_channel_string(session, chanbuf, sizeof(chanbuf));
@@ -2158,46 +2576,129 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
     /* Reconcile against an existing local session for the same token.
      *
-     * Stale local-origin HOLDING vs remote ACTIVE: leaf restored a ghost
-     * from MDBX while hub already had the session live. Without this,
-     * leaf keeps its stale ghost and every reconnect revives it instead
-     * of attaching as alias to hub's active session. The remote ACTIVE
-     * is authoritative — drop the ghost and become a remote replica.
+     * Original goal: stale local-origin HOLDING vs remote ACTIVE — leaf
+     * restored a ghost from MDBX while hub already had the session live.
+     * Without reconcile, leaf would keep its stale ghost and every
+     * reconnect would revive it instead of attaching as alias to hub's
+     * active session.
+     *
+     * Authorization gate: only yield to BS C from a peer whose origin
+     * matches the existing session's recorded origin.  Without this,
+     * any peer that obtained the token (legitimately or not) can claim
+     * to be the new authority and force-destroy our ghost — same
+     * hijack shape as f6f05e5's rebind fix.  In a single-bouncer-server
+     * topology this branch should never fire at all (only one server
+     * has the token); the gate makes that explicit.
      *
      * Same-state replicas (both holding or both active) are simple
      * dedup: keep what we have. */
     {
       struct BouncerSession *existing = bounce_find_by_token(token);
       if (existing) {
-        int existing_local = is_local_session(existing);
+        /* Per redesign C.2: "do we hold this locally?" is a runtime
+         * question — session_has_local_holder reads actual Client
+         * presence rather than the historical hs_origin attribute. */
+        int existing_local = session_has_local_holder(existing);
         if (existing_local && existing->hs_state == BOUNCE_HOLDING
             && !is_holding) {
-          struct Client *ghost = existing->hs_client;
-          log_write(LS_USER, L_INFO, 0,
-                    "Bouncer reconcile: dropping stale local HOLDING ghost "
-                    "for session %s — remote %s is ACTIVE",
-                    sessid, cli_name(sptr));
-          /* Repoint origin to authoritative server, transition to ACTIVE,
-           * and drop hs_client (the ghost) so we become a remote replica. */
-          ircd_strncpy(existing->hs_origin, cli_yxx(sptr),
-                       sizeof(existing->hs_origin) - 1);
-          existing->hs_origin[sizeof(existing->hs_origin) - 1] = '\0';
-          existing->hs_state = BOUNCE_ACTIVE;
-          existing->hs_disconnect_time = 0;
-          existing->hs_client = NULL;
-          if (t_active(&existing->hs_hold_timer))
-            timer_del(&existing->hs_hold_timer);
-          /* Drop the persisted record — we're no longer the origin. */
-          bounce_db_del(existing->hs_sessid);
-          /* Exit the ghost so it doesn't linger as a phantom user.
-           * SetFlag(KILLED) suppresses the QUIT broadcast — the ghost
-           * was never visible to peers (no N for it propagated). */
-          if (ghost) {
-            SetFlag(ghost, FLAG_KILLED);
-            exit_client(cptr, ghost, &me, "Bouncer session moved");
+          /* Only the session's recorded origin may claim ownership.
+           * For a local-origin HOLDING session, the recorded origin is
+           * us — so any incoming BS C "active" claim from a peer is
+           * unauthorized.  Skip the destructive reconcile.  If a real
+           * migration is needed it must go through the BS T transfer
+           * handshake, which is auditable and explicit. */
+          if (0 != strcmp(existing->hs_origin, cli_yxx(sptr))) {
+            log_write(LS_USER, L_WARNING, 0,
+                      "Bouncer reconcile: refusing to yield local HOLDING "
+                      "session %s to %s — origin mismatch (origin=%s, "
+                      "introducing=%s); use BS T for legitimate migration",
+                      sessid, cli_name(sptr), existing->hs_origin,
+                      cli_yxx(sptr));
+            return 0;
+          }
+          {
+            struct Client *ghost = existing->hs_client;
+            log_write(LS_USER, L_INFO, 0,
+                      "Bouncer reconcile: dropping stale local HOLDING ghost "
+                      "for session %s — remote %s is ACTIVE",
+                      sessid, cli_name(sptr));
+            /* Repoint origin to authoritative server, transition to ACTIVE,
+             * and drop hs_client (the ghost) so we become a remote replica. */
+            ircd_strncpy(existing->hs_origin, cli_yxx(sptr),
+                         sizeof(existing->hs_origin) - 1);
+            existing->hs_origin[sizeof(existing->hs_origin) - 1] = '\0';
+            existing->hs_state = BOUNCE_ACTIVE;
+            existing->hs_disconnect_time = 0;
+            existing->hs_client = NULL;
+            if (t_active(&existing->hs_hold_timer))
+              timer_del(&existing->hs_hold_timer);
+            /* Drop the persisted record — we're no longer the origin. */
+            bounce_db_del(existing->hs_sessid);
+            /* Exit the ghost so it doesn't linger as a phantom user.
+             *
+             * Burst-order invariant (see project_bx_r_yield_burst_order):
+             * server_estab emits BS C reconciles before the N loop, but
+             * by the time we (loser) process the peer's authoritative
+             * BS C, our own N for the ghost has already shipped over the
+             * same link.  The peer therefore HAS the ghost as a Client
+             * struct.  Letting exit_client broadcast Q normally cleans
+             * up the peer's phantom — suppressing it (formerly via
+             * FLAG_KILLED) leaves a stale ghost client visible in NAMES
+             * and propagating to subsequently linked servers. */
+            if (ghost)
+              exit_client(cptr, ghost, &me, "Bouncer session moved");
           }
         }
         return 0;
+      }
+    }
+
+    /* Cross-sessid convergence: if we have an existing local session
+     * for this account with a DIFFERENT sessid, don't create a
+     * duplicate.  Instead, deterministically pick a winning sessid
+     * (UUID v7 lex-lower wins — the older creation timestamp) and
+     * rename our local session to that sessid if peer's wins.
+     * Both sides see the same sessids, both compute the same winner,
+     * both end up agreeing on a single sessid for the logical session.
+     *
+     * Per redesign D.3: convergence is deterministic — same inputs +
+     * same algorithm → same answer on both sides.  No coordination
+     * protocol needed. */
+    {
+      struct AccountSessions *as_existing =
+          bounce_find_by_account(account);
+      if (as_existing && as_existing->as_sessions) {
+        struct BouncerSession *local = as_existing->as_sessions;
+        /* If sessid already matches some local session, normal
+         * single-session-per-account path handles it (we don't get
+         * here since bounce_find_by_token would have caught it). */
+        if (0 == strcmp(local->hs_sessid, sessid))
+          goto bsc_forward;
+
+        if (strcmp(sessid, local->hs_sessid) < 0) {
+          /* Peer's sessid is lex-lower (older UUID v7) — peer wins.
+           * Rename our local session to peer's sessid so future BX C
+           * / BS A by-sessid lookups resolve to our state. */
+          Debug((DEBUG_INFO,
+                 "BS C: cross-sessid convergence — renaming local "
+                 "session %s → %s for account %s (peer wins)",
+                 local->hs_sessid, sessid, account));
+          bounce_db_del(local->hs_sessid);
+          ircd_strncpy(local->hs_sessid, sessid,
+                       sizeof(local->hs_sessid) - 1);
+          local->hs_sessid[sizeof(local->hs_sessid) - 1] = '\0';
+          /* Re-persist under new sessid if we still hold it locally. */
+          if (session_has_local_holder(local))
+            bounce_db_put(local);
+        } else {
+          /* We win — peer will rename when it processes our BS C.
+           * Skip creating duplicate; forward peer's BS C downstream. */
+          Debug((DEBUG_INFO,
+                 "BS C: cross-sessid convergence — local session %s "
+                 "wins over peer's %s (account %s); skipping replica",
+                 local->hs_sessid, sessid, account));
+        }
+        goto bsc_forward;
       }
     }
 
@@ -2251,6 +2752,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     as = account_sessions_get(session->hs_account, 1);
     account_add_session(as, session);
 
+bsc_forward:
     /* Forward to other servers — preserve all parameters verbatim so
      * downstream servers get full metadata (attach_count, total_active). */
     if (is_holding) {
@@ -2282,7 +2784,16 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     /* Resolve primary client from numeric so remote servers can use
      * session->hs_client for alias creation.
      * BS A sends the 3-char client numeric (XXX); combine with the
-     * session origin (YY) to get the full YYXXX for findNUser(). */
+     * session origin (YY) to get the full YYXXX for findNUser().
+     *
+     * Always update hs_ghost_numeric to the new XXX too — after a
+     * managing-server restart the ghost gets a freshly-assigned
+     * numeric, and the persisted hs_ghost_numeric on this side is
+     * stale.  bounce_auto_resume's fallback path (when hs_client
+     * happens to be NULL) reads hs_ghost_numeric to do its own
+     * findNUser; without this refresh, that lookup would resolve to
+     * the old (now-recycled or non-existent) numeric and reattach
+     * fails, forcing /bouncer reset. */
     if (parc >= 5 && parv[4][0]) {
       char full_numeric[6];
       struct Client *primary;
@@ -2291,6 +2802,40 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       primary = findNUser(full_numeric);
       if (primary && IsUser(primary))
         session->hs_client = primary;
+      ircd_strncpy(session->hs_ghost_numeric, parv[4],
+                   sizeof(session->hs_ghost_numeric) - 1);
+      session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+    }
+
+    /* Per redesign C.3 + B.1 + B.6: extended BS A carries per-conn
+     * last_active + caps after the numeric.  Find the matching alias
+     * entry in hs_aliases by full numeric (sptr's YY + parv[4] XXX);
+     * if found, update ba_last_active + ba_caps.  If not found, the
+     * attaching client is the primary — update session-level
+     * hs_last_active.  Older 3-arg form (parc < 7) doesn't carry the
+     * new fields; receiver leaves existing values intact. */
+    if (parc >= 7 && parv[4][0]) {
+      time_t la = (time_t)strtoul(parv[5], NULL, 10);
+      unsigned int caps = (unsigned int)strtoul(parv[6], NULL, 16);
+      char full_numeric[6];
+      int i;
+      int matched_alias = 0;
+      ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                    cli_yxx(sptr), parv[4]);
+      for (i = 0; i < session->hs_alias_count; i++) {
+        if (0 == strcmp(session->hs_aliases[i].ba_numeric, full_numeric)) {
+          session->hs_aliases[i].ba_last_active = la;
+          session->hs_aliases[i].ba_caps = caps;
+          session->hs_aliases[i].ba_caps_known = (caps != 0);
+          matched_alias = 1;
+          break;
+        }
+      }
+      if (!matched_alias) {
+        /* Not in alias roster — primary attach.  Caps for primary not
+         * separately tracked (they're on the Client's umode flags). */
+        session->hs_last_active = la;
+      }
     }
 
     /* During burst, BS A just associates the session with its ghost
@@ -2307,12 +2852,19 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       session->hs_disconnect_time = 0;
     }
 
-    /* Forward */
-    sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
-                          cptr,
-                          "A %s %s %s",
-                          account, sessid,
-                          (parc >= 5) ? parv[4] : "");
+    /* Forward — preserve extended fields when present (per C.3) */
+    if (parc >= 7) {
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
+                            cptr,
+                            "A %s %s %s %s %s",
+                            account, sessid, parv[4], parv[5], parv[6]);
+    } else {
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
+                            cptr,
+                            "A %s %s %s",
+                            account, sessid,
+                            (parc >= 5) ? parv[4] : "");
+    }
     break;
   }
 
@@ -2388,8 +2940,11 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
   {
     /* BS X <account> <sessid> — destroy session */
     session = bounce_find_by_token_sessid(account, sessid);
-    if (session)
+    if (session) {
+      Debug((DEBUG_INFO, "Bouncer: destroy@bs-x-handler sess=%s from=%C",
+             session->hs_sessid, sptr));
       bounce_destroy(session);
+    }
 
     /* Forward */
     sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
@@ -2643,18 +3198,21 @@ int bounce_promote_alias(struct BouncerSession *session)
 
   /* Update session to point to promoted alias.
    * Transition to ACTIVE — the promoted alias is a live connection. */
-  session->hs_client = alias;
-  session->hs_state = BOUNCE_ACTIVE;
-  session->hs_last_active = CurrentTime;
-  session->hs_disconnect_time = 0;
   {
-    int was_local = is_local_session(session);
+    /* Per redesign C.2: detect "we held the primary locally → we no
+     * longer hold any local Client" via runtime checks, not hs_origin.
+     * Snapshot pre-update; the swap to `alias` happens next. */
+    int we_were_holding_primary = (old_primary && MyConnect(old_primary));
+    session->hs_client = alias;
+    session->hs_state = BOUNCE_ACTIVE;
+    session->hs_last_active = CurrentTime;
+    session->hs_disconnect_time = 0;
     ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
                   sizeof(session->hs_origin) - 1);
     /* Session moved to a different server — delete stale MDBX record.
      * Without this, both servers persist the session and both restore
      * a ghost on restart, causing a nick collision on link. */
-    if (was_local && !is_local_session(session))
+    if (we_were_holding_primary && !session_has_local_holder(session))
       bounce_db_del(session->hs_sessid);
   }
 
@@ -2728,20 +3286,31 @@ void bounce_prepare_squit_promotions(struct Client *server)
         }
       }
 
-      /* If any aliases survive, mark for promotion */
+      /* If any aliases survive, mark for promotion.
+       *
+       * Do NOT null hs_client here.  The original ordering called
+       * execute_squit_promotions AFTER exit_downlinks (which would
+       * free the primary), and the nulling was necessary to avoid a
+       * dangling-pointer dereference inside promote.  With the new
+       * ordering (execute BEFORE exit_downlinks, see s_misc.c),
+       * promote runs while the primary is still alive — keeping
+       * hs_client lets promote take its normal old_primary path:
+       *   - construct old_numeric for BX P broadcast
+       *   - remove_user_from_all_channels(old_primary), which is the
+       *     critical step that prevents exit_downlinks's eventual
+       *     exit_one_client(primary) from broadcasting a phantom-self
+       *     QUIT to the promoted alias's user. */
       if (session->hs_alias_count > 0) {
         session->hs_promoting = 1;
-        /* Null hs_client BEFORE exit_downlinks frees the old primary.
-         * bounce_promote_alias() checks old_primary for NULL to handle
-         * the SQUIT path correctly (skip numeric construction, skip
-         * channel removal since exit_downlinks already cleaned up). */
-        session->hs_client = NULL;
         Debug((DEBUG_INFO, "bounce_prepare_squit: session %s/%s has %d "
                "surviving aliases, marking for promotion",
                session->hs_account, session->hs_sessid,
                session->hs_alias_count));
       } else {
-        /* No surviving aliases — session enters HOLDING from MDBX on reconnect */
+        /* No surviving aliases — session enters HOLDING from MDBX on
+         * reconnect.  hs_client gets cleared here because there's no
+         * promote to consume it; exit_downlinks will free the primary
+         * and we don't want a dangling pointer in the session record. */
         session->hs_client = NULL;
         Debug((DEBUG_INFO, "bounce_prepare_squit: session %s/%s has no "
                "surviving aliases", session->hs_account, session->hs_sessid));
@@ -2960,6 +3529,11 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
 
   if (!session)
     return -1;
+
+  /* Active client is taking over the session — it's no longer a
+   * tentative restore.  Clear the reconcile-pending flag so any
+   * incoming BX R for this session treats us as firm. */
+  session->hs_restore_pending = 0;
 
   ghost = session->hs_client;
   if (!ghost || !MyUser(ghost))
@@ -3248,7 +3822,15 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   /* Recompute session union caps */
   bounce_recompute_session_caps(ghost);
 
-  /* Broadcast session attach to other servers */
+  /* Broadcast session attach to other servers.  Hold ghosts are
+   * bursted as standard N to all peers (legacy and IRCv3-aware
+   * alike — see server_finish_burst), and pre-burst BX R reconcile
+   * resolves any cross-server collision before either side's N
+   * tokens fire.  Peers already have a Client struct for the ghost's
+   * numeric AND its channel memberships from channel B; the
+   * hold→active transition is local-only state on this server.  No
+   * post-revive N or JOIN replay needed; BS A links the session to
+   * hs_client, and that's it. */
   bounce_broadcast(session, 'A', cli_yxx(ghost));
 
   log_write(LS_USER, L_TRACE, 0,
@@ -3367,6 +3949,32 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
     return -1;
   }
 
+  /* Authorization gate: only the session's canonical origin may rebind
+   * our held ghost.  Without this, any peer reintroducing a user via N
+   * during burst — even a peer that doesn't run bouncer at all — hijacks
+   * the ghost as soon as the +r account matches.  On a single-bouncer-
+   * server network this is catastrophic: every restored hold session
+   * gets reframed as "remote primary on some peer", bounce_db_del runs,
+   * and the user can no longer revive their session normally (only
+   * /bouncer reset recovers).  The remote N is a regular user connection,
+   * not a bouncer primary, unless the introducing server is the actual
+   * origin we recorded for this session.
+   *
+   * Per redesign C.2 (post-Phase-5): hs_origin is historical-only
+   * metadata, not a behavior gate.  Split-brain resolution between
+   * BX-aware peers happens via m_nick's deterministic D.2 tiebreaker
+   * at-N-time and cross-sessid sessid rename at BS C — not via this
+   * rebind path.  This origin check is now a security gate only:
+   * peer must be the recorded origin to rebind a held ghost. */
+  if (0 != strcmp(session->hs_origin, cli_yxx(server))) {
+    Debug((DEBUG_INFO,
+           "bounce_rebind: refusing — session %s origin %s != introducing "
+           "server %s (account %s); peer is not the canonical primary",
+           session->hs_sessid, session->hs_origin, cli_yxx(server),
+           cli_user(ghost)->account));
+    return -1;
+  }
+
   Debug((DEBUG_INFO,
          "bounce_rebind: ghost %s account %s -> remote primary %s on %s",
          cli_name(ghost), cli_user(ghost)->account, new_numeric,
@@ -3463,6 +4071,200 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
 }
 
 /* ---------------------------------------------------------------- */
+/* Live primary → alias demotion (split-merge)                       */
+/* ---------------------------------------------------------------- */
+
+int bounce_demote_live_primary_to_alias(struct Client *acptr,
+                                        struct Client *new_primary_server)
+{
+  struct BouncerSession *session;
+  struct Membership *member;
+  char alias_full[6];
+
+  if (!acptr || !new_primary_server)
+    return -1;
+  if (!IsUser(acptr) || !IsAccount(acptr))
+    return -1;
+  if (IsBouncerAlias(acptr) || IsBouncerHold(acptr))
+    return -1;
+  /* Refuse to demote a dying socket: alias-exit path skips hold logic
+   * and broadcasts BX X, which would destroy the session network-wide.
+   * Letting exit_client run on the still-primary Client takes the
+   * normal hold path (transition to HOLDING ghost), preserving the
+   * session for peer's view. */
+  if (IsDead(acptr) || HasFlag(acptr, FLAG_KILLED))
+    return -1;
+
+  session = bounce_get_session(acptr);
+  if (!session || session->hs_client != acptr)
+    return -1;
+
+  Debug((DEBUG_INFO,
+         "bounce_demote_live: %s (account %s, session %s) demoting to "
+         "alias of remote primary on %s",
+         cli_name(acptr), cli_user(acptr)->account,
+         session->hs_sessid, cli_name(new_primary_server)));
+
+  /* Flip channel memberships from primary to alias.  Adjust the
+   * channel-side counters (users / aliases / nonsslusers / authusers)
+   * AND the user->joined counter — the inverse of bounce_promote_alias's
+   * promotion path.  Missing the joined decrement leaves stale state
+   * that crashes free_user's `0 == user->joined` assertion when the
+   * client eventually exits, since remove_member_from_channel skips
+   * the joined decrement for alias members on the way out. */
+  for (member = cli_user(acptr)->channel; member;
+       member = member->next_channel) {
+    struct Channel *chptr = member->channel;
+    if (!IsMemberAlias(member)) {
+      member->status |= CHFL_ALIAS;
+      if (chptr->users > 0)
+        --chptr->users;
+      ++chptr->aliases;
+      if (cli_user(acptr)->joined > 0)
+        --(cli_user(acptr)->joined);
+      if (!IsSSL(acptr) && !IsChannelService(acptr)) {
+        if (chptr->nonsslusers > 0)
+          --chptr->nonsslusers;
+      }
+      if (IsAccount(acptr) && chptr->authusers > 0)
+        --chptr->authusers;
+    }
+  }
+
+  /* Promote the Client to alias: flag, NULL alias_primary (caller
+   * patches via bounce_finish_live_primary_demote), drop from nick
+   * hash (aliases share their primary's nick and aren't hashed). */
+  SetBouncerAlias(acptr);
+  cli_user(acptr)->alias_primary = NULL;
+  hRemClient(acptr);
+
+  /* Session moves to peer's authority.  hs_origin → introducing
+   * server's numeric, hs_client → NULL pending caller patch.  Add
+   * acptr to hs_aliases.  Drop persisted MDBX record — we no longer
+   * own the session as primary. */
+  ircd_strncpy(session->hs_origin, cli_yxx(new_primary_server),
+               sizeof(session->hs_origin) - 1);
+  session->hs_origin[sizeof(session->hs_origin) - 1] = '\0';
+  session->hs_client = NULL;
+
+  if (session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+    struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
+    ircd_snprintf(0, alias_full, sizeof(alias_full), "%s%s",
+                  cli_yxx(&me), cli_yxx(acptr));
+    ircd_strncpy(ba->ba_numeric, alias_full, sizeof(ba->ba_numeric));
+    ircd_strncpy(ba->ba_server, cli_yxx(&me), sizeof(ba->ba_server));
+    ba->ba_caps = 0;
+    ba->ba_caps_known = 0;
+  }
+
+  bounce_db_del(session->hs_sessid);
+
+  return 0;
+}
+
+int bounce_finish_live_primary_demote(struct Client *demoted_alias,
+                                      struct Client *new_primary)
+{
+  struct BouncerSession *session;
+
+  if (!demoted_alias || !new_primary)
+    return -1;
+  if (!IsAccount(demoted_alias) || !IsAccount(new_primary))
+    return -1;
+  if (0 != ircd_strcmp(cli_user(demoted_alias)->account,
+                       cli_user(new_primary)->account))
+    return -1;
+
+  session = bounce_find_any_session(cli_user(demoted_alias)->account);
+  if (!session || session->hs_client != NULL)
+    return -1;
+
+  session->hs_client = new_primary;
+  cli_user(demoted_alias)->alias_primary = new_primary;
+
+  /* Broadcast BX C so other peers learn about the newly-aliased
+   * local connection — they'll create a remote-alias replica with
+   * primary pointing at new_primary, channel memberships reflecting
+   * the demoted_alias's channel list. */
+  {
+    char primary_full[6];
+    char alias_full[6];
+    char chanlist_buf[512];
+    char *alias_modes;
+    struct Membership *m;
+    int len = 0;
+
+    ircd_snprintf(0, primary_full, sizeof(primary_full), "%s%s",
+                  cli_yxx(cli_user(new_primary)->server),
+                  cli_yxx(new_primary));
+    ircd_snprintf(0, alias_full, sizeof(alias_full), "%s%s",
+                  cli_yxx(&me), cli_yxx(demoted_alias));
+
+    chanlist_buf[0] = '\0';
+    for (m = cli_user(demoted_alias)->channel; m; m = m->next_channel) {
+      if (!m->channel)
+        continue;
+      if (len > 0 && len < (int)sizeof(chanlist_buf) - 1)
+        chanlist_buf[len++] = ' ';
+      /* Per redesign F.2: per-channel JOIN msgid rides along as
+       * "<chan>@<msgid>" so receivers can populate the alias's
+       * Membership::join_msgid.  Single-msgid invariant: the alias's
+       * cross-server join echo carries the same msgid as the primary's
+       * original JOIN. */
+      if (m->join_msgid[0])
+        len += ircd_snprintf(0, chanlist_buf + len,
+                             sizeof(chanlist_buf) - len,
+                             "%s@%s", m->channel->chname, m->join_msgid);
+      else
+        len += ircd_snprintf(0, chanlist_buf + len,
+                             sizeof(chanlist_buf) - len,
+                             "%s", m->channel->chname);
+    }
+
+    alias_modes = umode_str(demoted_alias);
+    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                          "C %s %s %s %s %s%s :%s",
+                          primary_full, alias_full,
+                          session->hs_account, session->hs_sessid,
+                          *alias_modes ? "+" : "+", alias_modes,
+                          chanlist_buf);
+
+    /* Legacy peers: present the demote as a QUIT for the old primary.
+     *
+     * BX C is bouncer-aware-only; legacy peers see it as Unknown and
+     * drop it.  Without further signal they'd retain the demoted client
+     * as a regular primary — and when the winner side's primary N
+     * arrives via mesh forwarding, legacy's m_nick fires same-user@host
+     * collision rules and one or both sides die.  Send Q for the
+     * demoted client over LEGACY links only ("Promoted to alias" reason
+     * — legacy interprets as a normal QUIT, removes from its view).
+     *
+     * Skip legacy peers still under the burst gate — their N hasn't
+     * been emitted yet (server_estab gated their server_finish_burst),
+     * so a retraction Q would be for a phantom they never saw.  When
+     * the gate releases later, the IsBouncerAlias filter on the N loop
+     * skips this client correctly.
+     *
+     * The local Client struct stays alive on this server (it's now an
+     * alias and continues to handle the user's connection).  Q here is
+     * purely a peer-state retraction, not a destroy. */
+    {
+      struct DLink *dlp;
+      for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+        if (IsIRCv3Aware(dlp->value.cptr))
+          continue;
+        if (IsBurstGated(dlp->value.cptr))
+          continue;
+        sendcmdto_one(demoted_alias, CMD_QUIT, dlp->value.cptr,
+                      ":Promoted to alias of %s", cli_name(new_primary));
+      }
+    }
+  }
+
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* Alias channel auto-sync                                           */
 /* ---------------------------------------------------------------- */
 
@@ -3487,29 +4289,95 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
   for (session = as->as_sessions; session; session = session->hs_anext) {
     for (i = 0; i < session->hs_alias_count; i++) {
       struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
-      if (alias && IsBouncerAlias(alias)
-          && cli_alias_primary(alias) == who
-          && !find_member_link(chptr, alias)) {
-        /* Skip +Z channels for non-TLS aliases */
-        if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
-          sendcmdto_one(&me, CMD_NOTICE, alias,
-            "%C :Not joining %s \xe2\x80\x94 channel requires TLS (+Z) "
-            "but your connection is plaintext. Reconnect with TLS to join.",
-            alias, chptr->chname);
-          continue;
+      struct Membership *pmem;
+      struct Membership *amem;
+      unsigned int aflags = CHFL_ALIAS;
+      unsigned short aoplevel = MAXOPLEVEL;
+
+      if (!(alias && IsBouncerAlias(alias)
+            && cli_alias_primary(alias) == who
+            && !find_member_link(chptr, alias)))
+        continue;
+
+      /* Skip +Z channels for non-TLS aliases */
+      if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
+        sendcmdto_one(&me, CMD_NOTICE, alias,
+          "%C :Not joining %s \xe2\x80\x94 channel requires TLS (+Z) "
+          "but your connection is plaintext. Reconnect with TLS to join.",
+          alias, chptr->chname);
+        continue;
+      }
+
+      /* Copy primary's channel mode flags so operator commands and
+       * @#channel delivery work for the alias. */
+      pmem = find_member_link(chptr, who);
+      if (pmem) {
+        aflags |= (pmem->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
+        aoplevel = OpLevel(pmem);
+      }
+      add_user_to_channel(chptr, alias, aflags, aoplevel);
+      amem = find_member_link(chptr, alias);
+
+      /* Inherit primary's join_msgid/join_tv so chathistory dedup
+       * treats the alias's join echo as the same logical event as
+       * the primary's.  Without this, a late-arriving alias attach
+       * gets a fresh msgid and chathistory replay shows two distinct
+       * JOIN entries for what is one connection event. */
+      if (amem && pmem && pmem->join_msgid[0]) {
+        memcpy(amem->join_msgid, pmem->join_msgid, sizeof(amem->join_msgid));
+        amem->join_tv = pmem->join_tv;
+      }
+
+      /* (BX J retired in Phase 5.  Mid-session alias auto-attach
+       * after BX C-with-chanlist relies on the standard P10 join
+       * propagation that fires when add_user_to_channel runs through
+       * the regular code path; the prior BX J wire was a fallback
+       * for burst-race scenarios that no longer apply with the
+       * tightened burst gate.) */
+
+      /* Send post-join replies to the freshly-attached alias.  Without
+       * this the alias's client sees no NAMES/TOPIC for the channel,
+       * which manifests as an "empty room".  This path runs when the
+       * primary joins a channel AFTER alias setup completed (e.g.
+       * channel B burst arrives after bounce_setup_local_alias's
+       * bounce_send_channel_state already iterated an empty channel
+       * list on the alias side).
+       *
+       * Send the JOIN echo with the primary's join_msgid + timestamp
+       * (set above) so clients that key off JOIN msgid for chathistory
+       * see a stable identity. */
+      if (MyConnect(alias)) {
+        const char *join_msgid = (pmem && pmem->join_msgid[0])
+                                 ? pmem->join_msgid : NULL;
+        if (pmem && pmem->join_tv.tv_sec) {
+          char timebuf[40];
+          struct tm tm;
+          gmtime_r(&pmem->join_tv.tv_sec, &tm);
+          ircd_snprintf(0, timebuf, sizeof(timebuf),
+                        "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                        tm.tm_hour, tm.tm_min, tm.tm_sec,
+                        (long)(pmem->join_tv.tv_usec / 1000));
+          sendcmdto_set_client_time(timebuf);
         }
-        /* Copy primary's channel mode flags so operator commands and
-         * @#channel delivery work for the alias. */
-        {
-          struct Membership *pmem = find_member_link(chptr, who);
-          unsigned int aflags = CHFL_ALIAS;
-          unsigned short aoplevel = MAXOPLEVEL;
-          if (pmem) {
-            aflags |= (pmem->status & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
-            aoplevel = OpLevel(pmem);
-          }
-          add_user_to_channel(chptr, alias, aflags, aoplevel);
+        if (CapRecipientHas(alias, CAP_EXTJOIN))
+          sendcmdto_one_tags_ext(alias, CMD_JOIN, alias, join_msgid,
+                                 "%H %s :%s", chptr,
+                                 IsAccount(alias) ? cli_account(alias) : "*",
+                                 cli_info(alias));
+        else
+          sendcmdto_one_tags_ext(alias, CMD_JOIN, alias, join_msgid,
+                                 ":%H", chptr);
+        sendcmdto_set_client_time(NULL);
+        if (chptr->topic[0]) {
+          send_reply(alias, RPL_TOPIC, chptr->chname, chptr->topic);
+          send_reply(alias, RPL_TOPICWHOTIME, chptr->chname,
+                     chptr->topic_nick, chptr->topic_time);
         }
+        send_markread_on_join(alias, chptr->chname);
+        if (!CapRecipientHas(alias, CAP_NOIMPLICITNAMES) &&
+            !CapRecipientHas(alias, CAP_NOIMPLICITNAMES_LEGACY))
+          do_names(alias, chptr, NAMES_ALL|NAMES_EON);
       }
     }
   }
@@ -3972,6 +4840,9 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr, int par
 static int bounce_alias_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+/* BX R / BX F / BX J retired in Phase 5 (cluster-B coordination protocol
+ * removed per redesign D.3 — deterministic convergence supersedes it).
+ * Receivers drop silently; we no longer emit them. */
 
 /* Pending BX queue helpers — defers BX subcommands targeting an alias
  * whose BX C hasn't been processed yet on this server (burst race).
@@ -4024,6 +4895,10 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
     return bounce_alias_multiline_echo(cptr, sptr, parc, parv);
   case 'K':
     return bounce_alias_snomask(cptr, sptr, parc, parv);
+  case 'R': /* retired Phase 5 — silent drop */
+  case 'J': /* retired Phase 5 — silent drop */
+  case 'F': /* retired Phase 5 — silent drop */
+    return 0;
   default:
     Debug((DEBUG_INFO, "BX: unknown subcommand '%c' from %C", subcmd, sptr));
     /* Forward unknown subcommands for future compatibility */
@@ -4164,12 +5039,19 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
   }
 
   /* C3: Remove old_client from channels silently, then exit with
-   * FLAG_KILLED to suppress S2S QUIT propagation to upstream servers
-   * that don't understand alias promotion (they'd desync if they saw
-   * the QUIT).  The originating server's S2S QUIT arrives later (TCP
-   * ordering) and is harmlessly ignored (numeric already freed). */
+   * FLAG_BOUNCER_INTERNAL_DESTROY to suppress S2S QUIT propagation —
+   * BX P (the actual wire event for this transfer) has already gone
+   * out and upstream servers don't need a Q on top of it (they'd
+   * desync if they saw the QUIT).  The originating server's S2S QUIT
+   * arrives later (TCP ordering) and is harmlessly ignored (numeric
+   * already freed).
+   *
+   * Bouncer-internal-destroy flag rather than FLAG_KILLED: this is
+   * internal cleanup tied to a successful BX P, not a network KILL.
+   * Per invariant #12, network KILL would end the entire session
+   * which is the opposite of what BX P-mediated transfer wants. */
   remove_user_from_all_channels(old_client);
-  SetFlag(old_client, FLAG_KILLED);
+  SetBouncerInternalDestroy(old_client);
   exit_client(old_client, old_client, &me, "Session transferred");
 
   /* Forward to other servers */
@@ -4363,12 +5245,19 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
         }
       }
 
-      /* Append to channel list for BX C (only joined channels) */
+      /* Append to channel list for BX C (only joined channels).
+       * Per redesign F.2: ride-along JOIN msgid as "<chan>@<msgid>"
+       * so peers can keep msgid parity for the alias's join echo. */
       if (chanlist_len > 0 && chanlist_len < (int)sizeof(chanlist_buf) - 1)
         chanlist_buf[chanlist_len++] = ' ';
-      chanlist_len += ircd_snprintf(0, chanlist_buf + chanlist_len,
-                                    sizeof(chanlist_buf) - chanlist_len,
-                                    "%s", chptr->chname);
+      if (member->join_msgid[0])
+        chanlist_len += ircd_snprintf(0, chanlist_buf + chanlist_len,
+                                      sizeof(chanlist_buf) - chanlist_len,
+                                      "%s@%s", chptr->chname, member->join_msgid);
+      else
+        chanlist_len += ircd_snprintf(0, chanlist_buf + chanlist_len,
+                                      sizeof(chanlist_buf) - chanlist_len,
+                                      "%s", chptr->chname);
     }
 
     /* --- Step 8: Broadcast BX C to network --- */
@@ -4633,6 +5522,13 @@ track_alias:
     struct BounceAlias *ba = &session->hs_aliases[session->hs_alias_count++];
     ircd_strncpy(ba->ba_numeric, alias_numeric, sizeof(ba->ba_numeric));
     ircd_strncpy(ba->ba_server, alias_numeric, sizeof(ba->ba_server));
+    ba->ba_last_active = CurrentTime;
+    ba->ba_caps = 0;
+    ba->ba_caps_known = 0;
+    /* Persist the updated roster (per redesign B.2 + 1b lifecycle
+     * hook) so alias presence survives restart and feeds peers'
+     * deterministic-dedup convergence on next link establishment. */
+    bounce_db_put(session);
   }
 
   /* Add alias to each of the primary's channels with CHFL_ALIAS */
@@ -4644,7 +5540,17 @@ track_alias:
     for (chan_name = ircd_strtok(&chan_tok, chan_copy, " ");
          chan_name;
          chan_name = ircd_strtok(&chan_tok, NULL, " ")) {
-      struct Channel *chptr = FindChannel(chan_name);
+      struct Channel *chptr;
+      const char *chan_msgid = NULL;
+      char *at;
+      /* Per redesign F.2: each token is "<chan>" or "<chan>@<msgid>".
+       * Split on '@' to separate channel name from optional msgid. */
+      at = strchr(chan_name, '@');
+      if (at) {
+        *at = '\0';
+        chan_msgid = at + 1;
+      }
+      chptr = FindChannel(chan_name);
       if (!chptr) {
         Debug((DEBUG_INFO, "BX C: channel '%s' not found on this server", chan_name));
         continue;
@@ -4662,6 +5568,7 @@ track_alias:
       /* Copy primary's channel mode flags so alias inherits op/voice status */
       {
         struct Membership *pmem = find_member_link(chptr, primary);
+        struct Membership *amem;
         unsigned int aflags = CHFL_ALIAS;
         unsigned short aoplevel = MAXOPLEVEL;
         if (pmem) {
@@ -4669,9 +5576,26 @@ track_alias:
           aoplevel = OpLevel(pmem);
         }
         add_user_to_channel(chptr, alias, aflags, aoplevel);
+        /* Single-msgid invariant: alias's Membership inherits the JOIN
+         * msgid that rode along on the BX C wire (or, if absent, falls
+         * back to the primary's local membership msgid). */
+        amem = find_member_link(chptr, alias);
+        if (amem) {
+          if (chan_msgid && *chan_msgid) {
+            ircd_strncpy(amem->join_msgid, chan_msgid,
+                         sizeof(amem->join_msgid));
+          } else if (pmem && pmem->join_msgid[0]) {
+            memcpy(amem->join_msgid, pmem->join_msgid,
+                   sizeof(amem->join_msgid));
+          }
+          if (pmem && pmem->join_tv.tv_sec)
+            amem->join_tv = pmem->join_tv;
+        }
       }
-      Debug((DEBUG_INFO, "BX C: added alias %s to channel %s (members=%d aliases=%d)",
-             alias_numeric, chan_name, chptr->users, chptr->aliases));
+      Debug((DEBUG_INFO, "BX C: added alias %s to channel %s msgid=%s (members=%d aliases=%d)",
+             alias_numeric, chan_name,
+             chan_msgid ? chan_msgid : "(none)",
+             chptr->users, chptr->aliases));
     }
     MyFree(chan_copy);
   } else {
@@ -4707,18 +5631,27 @@ forward:
    * has no channels, so exit_one_client sends no visible QUIT.
    *
    * Wire ordering: BX C (forwarded above) → BX P + BS T (from promote)
-   * → ghost exits with FLAG_KILLED (no S2S D token).
-   * Result: other IRC clients see no QUIT/JOIN — seamless transfer. */
+   * → ghost exits with FLAG_BOUNCER_INTERNAL_DESTROY (no S2S D token).
+   * Result: other IRC clients see no QUIT/JOIN — seamless transfer.
+   *
+   * FLAG_BOUNCER_INTERNAL_DESTROY is gated on promote success: if
+   * promote returns nonzero, no BX P went out and exit_client's Q
+   * broadcast must fire so peers can clean up the held-ghost phantom.
+   *
+   * Bouncer-internal-destroy flag rather than FLAG_KILLED: this is
+   * internal cleanup, not a network KILL.  Per invariant #12, network
+   * KILL would end the entire session which is wrong for a successful
+   * session-move. */
   if (session && session->hs_state == BOUNCE_HOLDING
       && primary && MyConnect(primary) && IsBouncerHold(primary)) {
+    int promoted;
     Debug((DEBUG_INFO, "BX C: session move — promoting alias, retiring ghost %s",
            cli_name(primary)));
-    /* Promote BEFORE exit: promote removes ghost from channels (silent),
-     * sends BX P + BS T.  Then exit ghost — no channels, no visible QUIT. */
-    bounce_promote_alias(session);
-    /* Suppress S2S quit — BX P already told the network. */
-    SetFlag(primary, FLAG_KILLED);
-    exit_client(primary, primary, &me, "Session transferred");
+    promoted = bounce_promote_alias(session);
+    if (promoted == 0)
+      SetBouncerInternalDestroy(primary);
+    exit_client(primary, primary, &me,
+                promoted == 0 ? "Session transferred" : "Session expired");
   }
 
   /* Drain any BX subcommands that were deferred waiting for this
@@ -4771,6 +5704,9 @@ void bounce_alias_untrack(struct Client *alias)
           memmove(&session->hs_aliases[i], &session->hs_aliases[i + 1],
                   (session->hs_alias_count - 1 - i) * sizeof(struct BounceAlias));
         session->hs_alias_count--;
+        /* Persist the updated (shrunk) roster.  Alias is no longer
+         * tracked; on next restart the session won't expect it. */
+        bounce_db_put(session);
         /* Membership shrunk — re-aggregate effective away. A present
          * alias departing may flip the session back to away (if all
          * remaining connections are away). */
@@ -4792,43 +5728,64 @@ void bounce_alias_untrack(struct Client *alias)
 static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
                                 int parc, char *parv[])
 {
-  struct Client *alias;
-  const char *alias_numeric;
+  struct Client *target;
+  const char *target_numeric;
+  int was_alias;
 
   if (parc < 3)
-    return protocol_violation(sptr, "BX X requires alias_numeric");
+    return protocol_violation(sptr, "BX X requires client numeric");
 
-  alias_numeric = parv[2];
-  alias = findNUser(alias_numeric);
+  target_numeric = parv[2];
+  target = findNUser(target_numeric);
 
-  if (!alias || !IsBouncerAlias(alias)) {
-    Debug((DEBUG_INFO, "BX X: alias %s not found or not alias", alias_numeric));
+  /* BX X is the silent-destroy command for any bouncer-managed client:
+   * alias or held ghost.  The two are distinguishable on the originating
+   * server (IsBouncerAlias vs IsBouncerHold are local-only flags), but
+   * over the wire BX X is just "destroy this numeric without firing a
+   * user-visible QUIT."  Receiving peers may not have either flag set
+   * (held ghosts arrive via burst N as regular remote users — the flag
+   * is local to the originating server only); the only check we can
+   * meaningfully do here is that the numeric resolves to a Client. */
+  if (!target) {
+    Debug((DEBUG_INFO, "BX X: client %s not found", target_numeric));
     goto forward;
   }
 
-  Debug((DEBUG_INFO, "BX X: destroying alias %s (%s) for primary %s",
-         alias_numeric, cli_name(alias),
-         cli_alias_primary(alias) ? cli_name(cli_alias_primary(alias)) : "?"));
+  was_alias = IsBouncerAlias(target);
 
-  /* Remove alias from session replica tracking */
-  bounce_alias_untrack(alias);
+  Debug((DEBUG_INFO, "BX X: destroying %s %s (%s)%s%s",
+         was_alias ? "alias" : "client",
+         target_numeric, cli_name(target),
+         was_alias && cli_alias_primary(target) ? " for primary " : "",
+         was_alias && cli_alias_primary(target)
+           ? cli_name(cli_alias_primary(target)) : ""));
+
+  /* Alias-only: remove from session replica tracking.  Held ghosts
+   * aren't tracked in hs_aliases. */
+  if (was_alias)
+    bounce_alias_untrack(target);
 
   /* Remove from all channels silently.
    * Note: counter behavior (users vs aliases) is symmetrically wrong
    * here and in BX C until counter guards are added to
    * add_user_to_channel/remove_member_from_channel. */
-  remove_user_from_all_channels(alias);
+  remove_user_from_all_channels(target);
+
+  /* Held ghosts ARE in the nick hash (introduced via N); aliases are not.
+   * hRemClient is needed for ghosts, harmless extra for aliases (returns
+   * an error code we don't act on). */
+  if (!was_alias)
+    hRemClient(target);
 
   /* Remove from P10 numeric space */
-  RemoveYXXClient(cli_user(alias)->server, cli_yxx(alias));
+  RemoveYXXClient(cli_user(target)->server, cli_yxx(target));
 
-  /* Remove from global client list — frees User and Client structs.
-   * Skip hRemClient: alias was never added to the nick hash. */
-  remove_client_from_list(alias);
+  /* Remove from global client list — frees User and Client structs. */
+  remove_client_from_list(target);
 
 forward:
   sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                        "X %s", alias_numeric);
+                        "X %s", target_numeric);
   return 0;
 }
 
@@ -4979,6 +5936,10 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
             if (0 == strcmp(sess->hs_aliases[i].ba_numeric, full_numeric)) {
               sess->hs_aliases[i].ba_caps = (unsigned int)caps;
               sess->hs_aliases[i].ba_caps_known = 1;
+              /* Persist updated caps (per redesign B.6 lifecycle hook)
+               * so post-restart we know each alias's caps without
+               * waiting for peer's BX U on next link. */
+              bounce_db_put(sess);
             }
           }
         }
@@ -5206,27 +6167,45 @@ defer_bx_for_alias(const char *alias_numeric,
  * up; by then findNUser succeeds for the alias and replay can either
  * deliver locally or forward as appropriate.
  *
- * Replays are issued in array order; for BX M the protocol's
- * insertion-order arrival means M+ runs before its M/Mc/M-
- * continuations, which matches what create_s2s_bxm_batch expects.
+ * Replays MUST be issued in insertion order so a BX M start token
+ * (M+) runs before its continuation tokens — create_s2s_bxm_batch
+ * keys on the start frame and continuations dropped before the start
+ * are unrecoverable.  The pending array uses FIFO eviction at insert
+ * time but slot indices are reused, so iterating by slot index can
+ * interleave the order.  Walk by buffered_at instead: repeatedly
+ * pick the oldest matching entry, replay, free, until none remain.
  */
 static void
 drain_pending_bx_for_alias(const char *alias_numeric)
 {
-  int i;
   if (!alias_numeric || !*alias_numeric)
     return;
 
   bx_drain_in_progress = 1;
-  for (i = 0; i < MAXCONNECTIONS; i++) {
-    struct PendingBxEntry *entry = pending_bx[i];
+  for (;;) {
+    int i;
+    int oldest_i = -1;
+    time_t oldest_t = 0;
+    struct PendingBxEntry *entry;
     struct Client *cptr;
     struct Client *sptr;
 
-    if (!entry)
-      continue;
-    if (strcmp(entry->alias_numeric, alias_numeric) != 0)
-      continue;
+    /* Find the oldest entry matching this alias. */
+    for (i = 0; i < MAXCONNECTIONS; i++) {
+      if (!pending_bx[i])
+        continue;
+      if (strcmp(pending_bx[i]->alias_numeric, alias_numeric) != 0)
+        continue;
+      if (oldest_i < 0 || pending_bx[i]->buffered_at < oldest_t) {
+        oldest_t = pending_bx[i]->buffered_at;
+        oldest_i = i;
+      }
+    }
+    if (oldest_i < 0)
+      break;
+
+    entry = pending_bx[oldest_i];
+    pending_bx[oldest_i] = NULL;
 
     /* Re-resolve cptr / sptr from server numerics — the original
      * Client*'s could be stale if a server SQUITed in the meantime. */
@@ -5235,8 +6214,9 @@ drain_pending_bx_for_alias(const char *alias_numeric)
 
     if (cptr && sptr) {
       Debug((DEBUG_INFO,
-             "BX: replaying deferred subcmd %c for alias %s",
-             entry->subcmd_char, alias_numeric));
+             "BX: replaying deferred subcmd %c for alias %s (buffered_at %lu)",
+             entry->subcmd_char, alias_numeric,
+             (unsigned long)entry->buffered_at));
       bounce_handle_bt(cptr, sptr, entry->parc, entry->parv);
     } else {
       Debug((DEBUG_INFO,
@@ -5245,7 +6225,6 @@ drain_pending_bx_for_alias(const char *alias_numeric)
              entry->subcmd_char, alias_numeric));
     }
     free_pending_bx_entry(entry);
-    pending_bx[i] = NULL;
   }
   bx_drain_in_progress = 0;
 }
@@ -5745,6 +6724,91 @@ bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
   }
 }
 
+
+/* ---------------------------------------------------------------- */
+/* Pending registration during burst                                 */
+/* ---------------------------------------------------------------- */
+
+/* When an account-bearing local user finishes SASL while a peer link
+ * is mid-burst, registering immediately would create a fresh standalone
+ * primary that races the peer's in-flight N for the same account.
+ * Each side ends up with a primary, m_nick collision kills one (or
+ * both), session state diverges.
+ *
+ * Defer the register_user call until all bursts are done.  By then
+ * peer's N for this account (if any) has been processed, the local
+ * session table reflects reality, and bounce_auto_resume can find the
+ * correct alias target instead of falling through to standalone-primary
+ * creation. */
+struct PendingRegistration {
+  struct Client            *client;
+  struct PendingRegistration *next;
+};
+static struct PendingRegistration *pending_registrations = NULL;
+
+int bounce_burst_in_progress(void)
+{
+  int i;
+  for (i = 0; i <= HighestFd; i++) {
+    struct Client *cli = LocalClientArray[i];
+    if (cli && IsServer(cli) && IsBurst(cli))
+      return 1;
+  }
+  return 0;
+}
+
+int bounce_defer_registration(struct Client *cli)
+{
+  struct PendingRegistration *p;
+  if (!cli)
+    return -1;
+  p = MyMalloc(sizeof *p);
+  if (!p)
+    return -1;
+  p->client = cli;
+  p->next = pending_registrations;
+  pending_registrations = p;
+  Debug((DEBUG_INFO, "Bouncer: deferring registration for %s until burst settles",
+         cli_name(cli)));
+  return 0;
+}
+
+void bounce_remove_pending_registration(struct Client *cli)
+{
+  struct PendingRegistration **pp = &pending_registrations;
+  while (*pp) {
+    if ((*pp)->client == cli) {
+      struct PendingRegistration *gone = *pp;
+      *pp = gone->next;
+      MyFree(gone);
+      return;
+    }
+    pp = &(*pp)->next;
+  }
+}
+
+void bounce_drain_pending_registrations(void)
+{
+  struct PendingRegistration *list = pending_registrations;
+  pending_registrations = NULL;
+  while (list) {
+    struct PendingRegistration *next = list->next;
+    struct Client *cli = list->client;
+    /* Skip clients that died waiting (KILL, timeout, SQUIT-via-burst etc.) */
+    if (cli && !IsDead(cli) && cli_fd(cli) >= 0
+        && !HasFlag(cli, FLAG_KILLED)) {
+      Debug((DEBUG_INFO, "Bouncer: draining deferred registration for %s",
+             cli_name(cli)));
+      register_user(cli, cli);
+    } else {
+      Debug((DEBUG_INFO, "Bouncer: dropping deferred registration for %s "
+             "(client no longer eligible)",
+             cli ? cli_name(cli) : "?"));
+    }
+    MyFree(list);
+    list = next;
+  }
+}
 /* ---------------------------------------------------------------- */
 /* BX K: Sync snomask to alias                                       */
 /* ---------------------------------------------------------------- */
@@ -5828,6 +6892,8 @@ struct BouncerSession *bounce_get_session(struct Client *cptr)
 {
   struct AccountSessions *as;
   struct BouncerSession *s;
+  struct BouncerSession *fallback = NULL;
+  const char *me_yxx;
 
   if (!cptr || !IsAccount(cptr))
     return NULL;
@@ -5836,11 +6902,27 @@ struct BouncerSession *bounce_get_session(struct Client *cptr)
   if (!as)
     return NULL;
 
+  /* Cross-sessid split-brain leaves multiple sessions for the same
+   * account, both with hs_client pointing at the same primary
+   * (the one that won reconcile + the post-BS-C replica from peer).
+   * The first in linked-list order wins, but list is prepended on
+   * add — so the LATEST-created session shadows ours.  Prefer the
+   * session where we have a local presence (an alias on this server)
+   * since that's the one /CHECK / channel-state / persistence
+   * actually care about.  Fall back to first hs_client match. */
+  me_yxx = cli_yxx(&me);
   for (s = as->as_sessions; s; s = s->hs_anext) {
-    if (s->hs_client == cptr)
-      return s;
+    if (s->hs_client == cptr) {
+      int i;
+      if (!fallback)
+        fallback = s;
+      for (i = 0; i < s->hs_alias_count; i++) {
+        if (0 == strcmp(s->hs_aliases[i].ba_server, me_yxx))
+          return s;
+      }
+    }
   }
-  return NULL;
+  return fallback;
 }
 
 /** Find any session for an account (ACTIVE or HOLDING). */
@@ -5850,6 +6932,78 @@ struct BouncerSession *bounce_find_any_session(const char *account)
   if (!as)
     return NULL;
   return as->as_sessions; /* Return first session, regardless of state */
+}
+
+/** Set the S2S sessid override for an outgoing N introduction.
+ *
+ * Looks up the client's bouncer session (if any) and stages the
+ * sessid for inclusion as the ,S compact-tag segment on the next
+ * S2S emit.  No-op for non-bouncer clients (no session → no override
+ * → no ,S segment in tag).  Per redesign A.2: bouncer-aware peers
+ * use this hint at-N-time for convergence dispatch in m_nick.
+ */
+void bounce_set_n_sessid_hint(struct Client *cptr)
+{
+  struct BouncerSession *sess;
+
+  if (!cptr || !IsAccount(cptr))
+    return;
+
+  sess = bounce_get_session(cptr);
+  if (sess && sess->hs_sessid[0])
+    sendcmdto_set_s2s_sessid(sess->hs_sessid);
+}
+
+/** Record per-connection activity for bouncer-aware tiebreaking.
+ *
+ * Per redesign B.1: D.2's primary-identity tiebreaker operates on
+ * per-connection granularity (oldest cli_firsttime → highest
+ * last_active → lex on numeric).  This requires tracking last_active
+ * per connection — primary's value lives on session->hs_last_active,
+ * each alias's on its hs_aliases[i].ba_last_active entry.
+ *
+ * Called from the general idle-update chokepoints so every non-trivial
+ * activity from a bouncer connection bumps the right slot.
+ */
+void bounce_record_activity(struct Client *from)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *sess;
+
+  if (!from || !IsUser(from) || !IsAccount(from))
+    return;
+
+  as = bounce_find_by_account(cli_account(from));
+  if (!as)
+    return;
+
+  if (IsBouncerAlias(from)) {
+    /* Alias: walk the account's sessions, find the matching alias
+     * entry by full YYXXX numeric, bump ba_last_active. */
+    char full_numeric[6];
+    int i;
+    if (!cli_user(from) || !cli_user(from)->server)
+      return;
+    ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                  cli_yxx(cli_user(from)->server), cli_yxx(from));
+    for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
+      for (i = 0; i < sess->hs_alias_count; i++) {
+        if (0 == strcmp(sess->hs_aliases[i].ba_numeric, full_numeric)) {
+          sess->hs_aliases[i].ba_last_active = CurrentTime;
+          return;
+        }
+      }
+    }
+  } else {
+    /* Primary: find session whose hs_client is this client, bump
+     * hs_last_active.  Reuse bounce_get_session's matching logic. */
+    for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
+      if (sess->hs_client == from) {
+        sess->hs_last_active = CurrentTime;
+        return;
+      }
+    }
+  }
 }
 
 /** Compute effective away state across all session connections.
@@ -5984,35 +7138,61 @@ void bounce_recompute_session_away(struct BouncerSession *session)
       user_set_away(cli_user(al), new_effective ? (char *)eff_msg : NULL);
   }
 
-  /* Broadcast. butone=NULL — no specific connection initiated this
-   * (membership-change driven), so every local channel member of
-   * primary needs to know, including primary's own IRC client. */
+  /* Broadcast.  Pick the source carefully:
+   *
+   * - If primary is local, use primary directly.
+   * - If primary is remote, using primary as `from` would send primary's
+   *   numeric to primary's own home server, producing a "Fake direction"
+   *   protocol violation.  Substitute a local alias as the from instead;
+   *   the auto-rewrite branch in sendcmdto_serv_butone then does split
+   *   delivery (alias numeric to primary's direction, primary numeric
+   *   elsewhere), which is the correct alias-aware S2S routing.
+   * - If primary is remote and we have no local alias, skip the
+   *   broadcast — there's no local connection authoritative enough to
+   *   speak for the session here.  Primary's home server will handle.
+   *
+   * butone=NULL: every channel member of primary needs to know,
+   * including primary's own IRC client. */
   {
-    char away_msgid[64] = "";
-    uint64_t away_time_ms = 0;
-    if (feature_bool(FEAT_MSGID)) {
-      struct timeval tv;
-      generate_msgid(away_msgid, sizeof(away_msgid));
-      gettimeofday(&tv, NULL);
-      away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-      sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+    struct Client *broadcaster = MyConnect(primary) ? primary : NULL;
+    if (!broadcaster) {
+      int j;
+      for (j = 0; j < session->hs_alias_count; j++) {
+        struct Client *al = findNUser(session->hs_aliases[j].ba_numeric);
+        if (al && IsBouncerAlias(al) && MyConnect(al)) {
+          broadcaster = al;
+          break;
+        }
+      }
     }
 
-    if (new_effective == 0) {
-      sendcmdto_serv_butone(primary, CMD_AWAY, NULL, "");
-      if (away_msgid[0])
-        sendcmdto_set_client_msgid(away_msgid);
-      sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
-                                             CAP_AWAYNOTIFY, CAP_NONE, "");
-    } else {
-      sendcmdto_serv_butone(primary, CMD_AWAY, NULL, ":%s", eff_msg);
-      if (away_msgid[0])
-        sendcmdto_set_client_msgid(away_msgid);
-      sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
-                                             CAP_AWAYNOTIFY, CAP_NONE,
-                                             ":%s", eff_msg);
+    if (broadcaster) {
+      char away_msgid[64] = "";
+      uint64_t away_time_ms = 0;
+      if (feature_bool(FEAT_MSGID)) {
+        struct timeval tv;
+        generate_msgid(away_msgid, sizeof(away_msgid));
+        gettimeofday(&tv, NULL);
+        away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+        sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+      }
+
+      if (new_effective == 0) {
+        sendcmdto_serv_butone(broadcaster, CMD_AWAY, NULL, "");
+        if (away_msgid[0])
+          sendcmdto_set_client_msgid(away_msgid);
+        sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
+                                               CAP_AWAYNOTIFY, CAP_NONE, "");
+      } else {
+        sendcmdto_serv_butone(broadcaster, CMD_AWAY, NULL, ":%s", eff_msg);
+        if (away_msgid[0])
+          sendcmdto_set_client_msgid(away_msgid);
+        sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
+                                               CAP_AWAYNOTIFY, CAP_NONE,
+                                               ":%s", eff_msg);
+      }
+      sendcmdto_set_client_msgid(NULL);
     }
-    sendcmdto_set_client_msgid(NULL);
   }
 
   session->hs_effective_away = new_effective;

@@ -118,23 +118,15 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsBouncerAlias(sptr))
     return exit_client(cptr, sptr, sptr, "Quit");
 
-  /* Try alias promotion first — if the session has aliases, promote
-   * one to primary rather than going HOLDING.  This mirrors the
-   * s_bsd.c disconnect handler which also tries promotion first.
-   * Clients routinely send QUIT on disconnect, so this is the
-   * primary path for graceful disconnects with aliases attached. */
-  if (IsUser(sptr) && bounce_enabled_for(sptr) && IsAccount(sptr)) {
-    struct BouncerSession *bsess = bounce_get_session(sptr);
-    if (bsess && bsess->hs_alias_count > 0) {
-      if (bounce_promote_alias(bsess) == 0)
-        return exit_client(cptr, sptr, sptr, "Session transferred");
-      /* No viable alias — fall through to hold or exit */
-    }
-  }
-
   /* Fix #25: Check if client should enter bouncer HOLD mode instead of
    * quitting.  Clients routinely send QUIT on disconnect — the whole
-   * purpose of hold is to survive that and keep channels alive. */
+   * purpose of hold is to survive that and keep channels alive.
+   *
+   * No immediate-promote shortcut: a primary QUIT with aliases attached
+   * holds first (same reasoning as s_bsd.c — promote and a concurrent
+   * BX X for the chosen alias race on the wire).  Promotion runs only
+   * from bounce_hold_expire after the network has settled.  Cooperative
+   * roaming uses BX C session move instead. */
   if (IsUser(sptr) && bounce_should_hold(sptr)) {
     const char *comment = (parc > 1 && !BadPtr(parv[parc - 1]))
                           ? parv[parc - 1] : "Quit";

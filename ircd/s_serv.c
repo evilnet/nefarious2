@@ -120,7 +120,6 @@ int a_kills_b_too(struct Client *a, struct Client *b)
  */
 int server_estab(struct Client *cptr, struct ConfItem *aconf)
 {
-  struct SLink*  lp = NULL;
   struct Client* acptr = 0;
   const char*    inpath;
   int            i;
@@ -135,11 +134,12 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       sendrawto_one(cptr, MSG_PASS " :%s", aconf->passwd);
     /*
      *  Pass my info to the new server.
-     *  Flag string: h=hub, 6=ipv6, o=oplevels, v=IRCv3-aware S2S extensions.
+     *  Flag string: h=hub, 6=ipv6, o=oplevels, v=IRCv3-aware S2S extensions,
+     *               F=BX F (reconcile-end) handshake supported.
      *  Legacy peers ignore unknown flag chars (set_server_flags has no
      *  default in its switch).
      */
-    sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%sv :%s",
+    sendrawto_one(cptr, MSG_SERVER " %s 1 %Tu %Tu J%s %s%s +%s6%svF :%s",
 		  cli_name(&me), cli_serv(&me)->timestamp,
 		  cli_serv(cptr)->timestamp, MAJOR_PROTOCOL, NumServCap(&me),
 		  feature_bool(FEAT_HUB) ? "h" : "",
@@ -196,11 +196,12 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
     if (!match(cli_name(&me), cli_name(cptr)))
       continue;
     sendcmdto_one(&me, CMD_SERVER, acptr,
-		  "%s 2 0 %Tu J%02u %s%s +%s%s%s%s%s :%s", cli_name(cptr),
+		  "%s 2 0 %Tu J%02u %s%s +%s%s%s%s%s%s :%s", cli_name(cptr),
 		  cli_serv(cptr)->timestamp, Protocol(cptr), NumServCap(cptr),
 		  IsHub(cptr) ? "h" : "", IsService(cptr) ? "s" : "",
 		  IsIPv6(cptr) ? "6" : "", IsOpLevels(cptr) ? "o" : "",
 		  IsIRCv3Aware(cptr) ? "v" : "",
+		  IsBxfAware(cptr) ? "F" : "",
                   cli_info(cptr));
   }
 
@@ -268,33 +269,94 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       if (0 == match(cli_name(&me), cli_name(acptr)))
         continue;
       sendcmdto_one(cli_serv(acptr)->up, CMD_SERVER, cptr,
-		    "%s %d 0 %Tu %s%u %s%s +%s%s%s%s%s :%s", cli_name(acptr),
+		    "%s %d 0 %Tu %s%u %s%s +%s%s%s%s%s%s :%s", cli_name(acptr),
 		    cli_hopcount(acptr) + 1, cli_serv(acptr)->timestamp,
 		    protocol_str, Protocol(acptr), NumServCap(acptr),
 		    IsHub(acptr) ? "h" : "", IsService(acptr) ? "s" : "",
 		    IsIPv6(acptr) ? "6" : "", IsOpLevels(acptr) ? "o" : "",
 		    IsIRCv3Aware(acptr) ? "v" : "",
+		    IsBxfAware(acptr) ? "F" : "",
                     cli_info(acptr));
     }
   }
+
+  /* Per redesign D.3: no coordination protocol.  Convergence is
+   * deterministic (m_nick at-N-time, sessid lex via cross-sessid BS C
+   * rename), so we just need to defer N-emission long enough for
+   * loser-side demotes to flip to IsBouncerAlias before our own
+   * server_finish_burst's N loop fires.  The legacy-peer burst gate
+   * does this with a timer fallback — no BX F handshake.
+   *
+   * The same gate applies regardless of peer flavor when we hold
+   * local bouncer sessions: BX-aware peers will exchange their state
+   * via BS C / BX C in their own server_finish_burst, and at-N-time
+   * m_nick handles the symmetric election locally on each side.
+   * Legacy peers see only the surviving face per design intent #135 +
+   * #254 (alias-side N is filtered by IsBouncerAlias). */
+  if (feature_bool(FEAT_BOUNCER_ENABLE) && bounce_have_local_sessions()) {
+    SetBurstGated(cptr);
+    cli_burst_gate_deadline(cptr) = CurrentTime + BOUNCE_LEGACY_GATE_SECS;
+    Debug((DEBUG_INFO,
+           "Bouncer: gating peer %s burst until %lld "
+           "(local sessions present, deterministic convergence)",
+           cli_name(cptr),
+           (long long)cli_burst_gate_deadline(cptr)));
+    return 0;
+  }
+
+  return server_finish_burst(cptr);
+}
+
+/** Send the deferred-able tail of the burst: N tokens for users,
+ * BS for bouncer sessions, channel BURST modes, EB.
+ *
+ * For IRCv3-aware peers this runs from the BX F handler after both
+ * sides' reconcile is complete; for legacy peers it runs inline at the
+ * end of server_estab.  Either way, by the time we reach this point any
+ * active-vs-active demote has flipped its loser to alias state, so the
+ * IsBouncerAlias filter on the N loop (and on bounce_burst's session
+ * iteration) keeps duplicate racing-nick N's off the wire.
+ */
+int server_finish_burst(struct Client *cptr)
+{
+  struct Client *acptr;
+  struct SLink *lp;
 
   for (acptr = &me; acptr; acptr = cli_prev(acptr))
   {
     /* acptr->from == acptr for acptr == cptr */
     if (cli_from(acptr) == cptr)
       continue;
-    /* Skip bouncer-held ghosts: they're local-only representations of
-     * a HOLDING session (no real connection backing them).  Their
-     * existence on the network is communicated via BS C, not N.
-     * Without this filter, a peer that already revived the same
-     * session collides with our ghost-N (same nick, same user@host,
-     * same persisted lastnick) and the standard collision logic kills
-     * both — exactly the bug bouncer-burst-revive was meant to prevent. */
-    if (IsUser(acptr) && !IsBouncerAlias(acptr) && !IsBouncerHold(acptr))
+    /* Burst users.  Aliases (IsBouncerAlias) are filtered out — they
+     * are introduced via BX C, not N, and never N-bursted to anyone.
+     *
+     * Held ghosts (IsBouncerHold) ARE bursted as standard N to all
+     * peers, including non-IRCv3-aware ones.  Held ghosts represent
+     * a real user in absentia (account-anchored, persisted across
+     * restart) — legacy peers see them as regular users, and when
+     * the ghost is destroyed without an alias to take over (no
+     * promotion), exit_client emits a normal Q on legacy after
+     * ClearBouncerHold (the IsBouncerHold suppression in exit_client
+     * is dropped by the time Q broadcasts run, see bounce_hold_expire).
+     * Routing PRIVMSGs to the held nick + chathistory storage works
+     * naturally because legacy peers route by nick to its home server,
+     * which has the ghost as a local Client struct with the bouncer
+     * hold flag still set.
+     *
+     * Multi-bouncer collision (both peers have a hold ghost for the
+     * same session) is resolved at-N-time by m_nick's deterministic
+     * D.2 tiebreaker; the loser-side primary is flipped to alias
+     * before any N-burst is filtered through IsBouncerAlias here. */
+    if (IsUser(acptr) && !IsBouncerAlias(acptr))
     {
       char xxx_buf[25];
       char *s = umode_str(acptr);
 
+      /* Per redesign A.2: stage the bouncer session-id hint for the
+       * outgoing N's ,S compact-tag segment.  No-op for non-bouncer
+       * clients.  Bouncer-aware peers parse it for at-N-time
+       * convergence dispatch in m_nick. */
+      bounce_set_n_sessid_hint(acptr);
       sendcmdto_one(cli_user(acptr)->server, CMD_NICK, cptr,
 		    "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
 		    cli_name(acptr), cli_hopcount(acptr) + 1, cli_lastnick(acptr),
@@ -402,6 +464,17 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
       send_channel_modes(cptr, chptr);
   }
   sendcmdto_one(&me, CMD_END_OF_BURST, cptr, "");
+  /* Pair EA with EB so the EOB handshake completes symmetrically even
+   * when our EB is delayed relative to peer's (e.g., legacy-peer burst
+   * gate).  In normal symmetric flow, peer's m_endburst_ack on receiving
+   * this trailing EA clears its FLAG_BURST_ACK on us — when EBs were
+   * close in time the clear lines up with their set.  When our EB is
+   * late, peer's BURST_ACK on us was set when our EB arrived; their
+   * earlier EA (from their m_endburst processing our peer-EB-before-
+   * gate) was sent before that set existed and so cleared nothing.
+   * The trailing EA here is the correction that lands after peer's
+   * BURST_ACK is set, clearing the ! marker in /MAP and /STATS u. */
+  sendcmdto_one(&me, CMD_END_OF_BURST_ACK, cptr, "");
   return 0;
 }
 

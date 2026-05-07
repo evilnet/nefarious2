@@ -192,6 +192,15 @@ enum Flag
     FLAG_OPLEVELS,                  /**< server has oplevels support */
     FLAG_MULTILINE,                 /**< server supports P10 multiline batches */
     FLAG_IRCV3AWARE,                /**< server speaks IRCv3 message-tag wire extensions */
+    FLAG_BXF_AWARE,                 /**< server speaks BX F (reconcile-end)
+                                         marker — gates the burst N tail on
+                                         peer's BX F arrival.  Strictly a
+                                         superset of FLAG_IRCV3AWARE: a peer
+                                         with v but without F is an older
+                                         IRCv3-aware build that doesn't yet
+                                         emit BX F, so we must NOT gate on
+                                         it (gate would hang the burst).
+                                         Advertised via 'F' in SERVER flags. */
     FLAG_GOTID,                     /**< successful ident lookup achieved */
     FLAG_DOID,                      /**< I-lines say must use ident return */
     FLAG_NONL,                      /**< No \n in buffer */
@@ -200,6 +209,11 @@ enum Flag
     FLAG_JUNCTION,                  /**< Junction causing the net.burst. */
     FLAG_BURST,                     /**< Server is receiving a net.burst */
     FLAG_BURST_ACK,                 /**< Server is waiting for eob ack */
+    FLAG_BURST_GATED,               /**< Outbound burst is gated on peer's
+                                         BX F (reconcile-end) for bouncer
+                                         active-vs-active resolution.
+                                         Cleared on BX F arrival; the deferred
+                                         server_finish_burst then runs. */
     FLAG_IPCHECK,                   /**< Added or updated IPregistry data */
     FLAG_LOCOP,                     /**< Local operator -- SRB */
     FLAG_SERVNOTICE,                /**< server notices such as kill */
@@ -276,6 +290,12 @@ enum Flag
 
     FLAG_BOUNCER_HOLD,              /**< Client is in bouncer HOLDING state (ghost) */
     FLAG_BOUNCER_ALIAS,             /**< Client is an alias numeric for multi-server bouncer presence */
+    FLAG_BOUNCER_INTERNAL_DESTROY,  /**< Client is being destroyed via bouncer-internal cleanup
+                                     *   (silent ghost destroy, BX P-handled retire, etc.).
+                                     *   Suppresses standard QUIT broadcast like FLAG_KILLED, but
+                                     *   does NOT trigger session-destroy semantics — only an
+                                     *   actual network KILL (FLAG_KILLED) ends the entire session
+                                     *   per design intent invariant #12. */
 
     FLAG_DNSBL_EXEMPT,              /**< Client is exempt from blocks (native DNSBL whitelist hit) */
 
@@ -395,6 +415,8 @@ struct Connection
 #define S2S_MULTI_MSGID_BUFSIZE 256  /**< Multi-msgid: up to 15 x (14+1) = 225 chars */
   char                con_s2s_multi_msgid[S2S_MULTI_MSGID_BUFSIZE]; /**< Full multi-msgid string (+-separated, empty if single) */
   char                con_s2s_client_tags[4096]; /**< S2S compact-tag ,C<client_tags> segment (IRCv3: 4094 max) */
+#define S2S_SESSID_BUFSIZE 40  /**< Session ID buffer (UUID v7 hyphenated form + slack) */
+  char                con_s2s_sessid[S2S_SESSID_BUFSIZE]; /**< S2S compact-tag ,S<sessid> segment from incoming message — bouncer session identity hint per redesign A.2 */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
@@ -424,6 +446,13 @@ struct Connection
   char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
   int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
   int                 con_ws_frag_opcode; /**< Opcode of first fragment */
+  time_t              con_burst_gate_deadline; /**< Deadline at which to force-release a
+                                                  burst gate held on a non-BXF-aware (legacy)
+                                                  peer.  Only meaningful while IsBurstGated().
+                                                  Enforces design intent #135 + #254 (legacy
+                                                  peer sees one face per bouncer session) by
+                                                  withholding bouncer-account N's until BX R
+                                                  convergence with BXF-aware peers can settle. */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -561,6 +590,8 @@ struct Client {
 #define cli_s2s_multi_msgid(cli) con_s2s_multi_msgid(cli_connect(cli))
 /** Get client-only tags from compact-tag ,C segment of incoming S2S message */
 #define cli_s2s_client_tags(cli) con_s2s_client_tags(cli_connect(cli))
+/** Get bouncer session ID hint from compact-tag ,S segment of incoming S2S message (per redesign A.2) */
+#define cli_s2s_sessid(cli)      con_s2s_sessid(cli_connect(cli))
 /** Get S2S batch ID from server */
 #define cli_s2s_batch_id(cli)	con_s2s_batch_id(cli_connect(cli))
 /** Get S2S batch type from server */
@@ -789,6 +820,10 @@ struct Client {
 #define con_receiveB(con)	((con)->con_receiveB)
 /** Get listener that accepted the connection. */
 #define con_listener(con)	((con)->con_listener)
+/** Burst-gate deadline (legacy peers gated for bouncer convergence). */
+#define con_burst_gate_deadline(con)	((con)->con_burst_gate_deadline)
+/** As above, accessed by Client (forwards to its Connection). */
+#define cli_burst_gate_deadline(cli)	con_burst_gate_deadline(cli_connect(cli))
 /** Get list of ConfItems attached to the connection. */
 #define con_confs(con)		((con)->con_confs)
 /** Get command handler for the connection. */
@@ -851,6 +886,8 @@ struct Client {
 #define con_s2s_multi_msgid(con) ((con)->con_s2s_multi_msgid)
 /** Get the client-only tags from compact-tag ,C segment of incoming S2S message. */
 #define con_s2s_client_tags(con) ((con)->con_s2s_client_tags)
+/** Get the bouncer session ID hint from compact-tag ,S segment of incoming S2S message. */
+#define con_s2s_sessid(con)      ((con)->con_s2s_sessid)
 /** Get the S2S batch ID from server. */
 #define con_s2s_batch_id(con)	((con)->con_s2s_batch_id)
 /** Get the S2S batch type from server. */
@@ -987,6 +1024,8 @@ struct Client {
 #define IsBurstAck(x)           HasFlag(x, FLAG_BURST_ACK)
 /** Return non-zero if we are still bursting to the client. */
 #define IsBurstOrBurstAck(x)    (HasFlag(x, FLAG_BURST) || HasFlag(x, FLAG_BURST_ACK))
+/** Return non-zero if the outbound burst is gated awaiting peer's BX F. */
+#define IsBurstGated(x)         HasFlag(x, FLAG_BURST_GATED)
 /** Return non-zero if the client has set mode +k (channel service). */
 #define IsChannelService(x)     HasFlag(x, FLAG_CHSERV)
 /** Return non-zero if the client's socket is disconnected. */
@@ -1008,6 +1047,14 @@ struct Client {
 #define IsBouncerAlias(x)       HasFlag(x, FLAG_BOUNCER_ALIAS)
 #define SetBouncerAlias(x)      SetFlag(x, FLAG_BOUNCER_ALIAS)
 #define ClearBouncerAlias(x)    ClrFlag(x, FLAG_BOUNCER_ALIAS)
+/** Return non-zero if client is being destroyed via bouncer-internal cleanup
+ *  (silent ghost destroy, BX P-handled retire, etc.).  Suppresses standard
+ *  QUIT broadcast on exit like FLAG_KILLED does, but does NOT trigger
+ *  session-destroy semantics — only an actual network KILL (FLAG_KILLED)
+ *  ends the entire session per design intent invariant #12. */
+#define IsBouncerInternalDestroy(x)    HasFlag(x, FLAG_BOUNCER_INTERNAL_DESTROY)
+#define SetBouncerInternalDestroy(x)   SetFlag(x, FLAG_BOUNCER_INTERNAL_DESTROY)
+#define ClearBouncerInternalDestroy(x) ClrFlag(x, FLAG_BOUNCER_INTERNAL_DESTROY)
 /** Return non-zero if the client has been IP-checked for clones. */
 #define IsIPChecked(x)          HasFlag(x, FLAG_IPCHECK)
 /** Return non-zero if we have received an ident response for the client. */
@@ -1048,6 +1095,8 @@ struct Client {
 #define IsMultiline(x)          HasFlag(x, FLAG_MULTILINE)
 /** Return non-zero if the server speaks IRCv3 message-tag wire extensions. */
 #define IsIRCv3Aware(x)         HasFlag(x, FLAG_IRCV3AWARE)
+/** Return non-zero if the server emits BX F (reconcile-end) markers. */
+#define IsBxfAware(x)           HasFlag(x, FLAG_BXF_AWARE)
 /** Return non-zero if the client has an account stamp. */
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
@@ -1147,6 +1196,8 @@ struct Client {
 #define SetBurst(x)             SetFlag(x, FLAG_BURST)
 /** Mark a client as being between EOB and EOB ACK. */
 #define SetBurstAck(x)          SetFlag(x, FLAG_BURST_ACK)
+/** Mark a server's outbound burst as gated on peer's BX F. */
+#define SetBurstGated(x)        SetFlag(x, FLAG_BURST_GATED)
 /** Mark a client as having mode +k (channel service). */
 #define SetChannelService(x)    SetFlag(x, FLAG_CHSERV)
 /** Mark a client as having mode +d (deaf). */
@@ -1192,6 +1243,8 @@ struct Client {
 #define SetMultiline(x)         SetFlag(x, FLAG_MULTILINE)
 /** Mark a server as speaking IRCv3 message-tag wire extensions. */
 #define SetIRCv3Aware(x)        SetFlag(x, FLAG_IRCV3AWARE)
+/** Mark a server as supporting the BX F handshake. */
+#define SetBxfAware(x)          SetFlag(x, FLAG_BXF_AWARE)
 /** Mark a client as having an account stamp. */
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */
@@ -1290,6 +1343,8 @@ struct Client {
 #define ClearBurst(x)           ClrFlag(x, FLAG_BURST)
 /** Clear the client's between EOB and EOB ACK flag. */
 #define ClearBurstAck(x)        ClrFlag(x, FLAG_BURST_ACK)
+/** Clear the burst-gated flag (peer sent BX F; finish bursting now). */
+#define ClearBurstGated(x)      ClrFlag(x, FLAG_BURST_GATED)
 /** Remove mode +k (channel service) from the client. */
 #define ClearChannelService(x)  ClrFlag(x, FLAG_CHSERV)
 /** Remove mode +d (deaf) from the client. */
