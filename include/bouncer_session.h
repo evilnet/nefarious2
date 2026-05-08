@@ -401,6 +401,12 @@ extern struct AccountSessions *bounce_find_by_account(const char *account);
  * @param[in] cb   Callback invoked once per session.
  * @param[in] data Opaque pointer passed through to callback.
  */
+/** Walk all sessions and drop alias entries whose ba_numeric does not
+ * resolve to a live Client tagged IsBouncerAlias for the same account.
+ * Call from end-of-burst to clean stale entries that accumulate when
+ * peers restart, change numeric pool, or BX X cleanup is missed. */
+extern void bounce_prune_stale_aliases(void);
+
 extern void bounce_walk_sessions(void (*cb)(struct BouncerSession *,
                                             void *),
                                  void *data);

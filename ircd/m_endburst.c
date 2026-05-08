@@ -141,6 +141,16 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
   if (!bounce_burst_in_progress())
     bounce_drain_pending_registrations();
 
+  /* Prune stale alias entries from all sessions.  A peer's burst is
+   * the authoritative source of which numerics it currently holds;
+   * any alias entry pointing at an unknown numeric on this peer is
+   * stale (peer restarted with a new numeric pool, BX X for the old
+   * numeric was never received, or restore-from-DB seeded entries
+   * that don't match post-restart state).  Without this prune /CHECK
+   * shows "not found" entries forever and session state keeps
+   * desyncing across reboot cycles. */
+  bounce_prune_stale_aliases();
+
   if (MyConnect(sptr)) {
     sendcmdto_one(&me, CMD_END_OF_BURST_ACK, sptr, "");
 

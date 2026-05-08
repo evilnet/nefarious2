@@ -1120,6 +1120,57 @@ void bounce_walk_sessions(void (*cb)(struct BouncerSession *, void *),
   }
 }
 
+/** Prune alias entries whose ba_numeric no longer resolves to a Client.
+ *
+ * Stale alias entries accumulate when:
+ *   - A peer restarts and rejoins with new numeric pool: the OLD numeric
+ *     tracked in hs_aliases never gets a BX X (peer doesn't know the old
+ *     numeric anymore) so the entry persists.
+ *   - SQUIT cleanup misses an entry (rare but possible).
+ *   - Restored from DB and the recorded numeric isn't valid post-restart.
+ *
+ * Called from end-of-burst to validate the alias list against the
+ * post-burst nick hash.  After the peer's burst completes any aliases
+ * the peer claims are in the hash; any entry we hold whose numeric
+ * isn't there is stale and gets dropped.
+ */
+void bounce_prune_stale_aliases(void)
+{
+  int h;
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+
+  for (h = 0; h < BOUNCE_ACCOUNT_HASHSIZE; h++) {
+    for (as = accountHash[h]; as; as = as->as_hnext) {
+      for (s = as->as_sessions; s; s = s->hs_anext) {
+        int i = 0;
+        while (i < s->hs_alias_count) {
+          struct Client *cli =
+              findNUser(s->hs_aliases[i].ba_numeric);
+          if (!cli || !IsUser(cli) || !IsBouncerAlias(cli)
+              || !cli_user(cli)
+              || 0 != ircd_strcmp(cli_user(cli)->account, s->hs_account)) {
+            Debug((DEBUG_INFO,
+                   "Bouncer: pruning stale alias %s on %s (account %s, "
+                   "session %s) — no matching live alias Client",
+                   s->hs_aliases[i].ba_numeric,
+                   s->hs_aliases[i].ba_server,
+                   s->hs_account, s->hs_sessid));
+            if (i < s->hs_alias_count - 1)
+              memmove(&s->hs_aliases[i], &s->hs_aliases[i + 1],
+                      (s->hs_alias_count - 1 - i)
+                      * sizeof(struct BounceAlias));
+            s->hs_alias_count--;
+            /* don't advance i — shifted entry now at i */
+          } else {
+            i++;
+          }
+        }
+      }
+    }
+  }
+}
+
 /** Attach a client to an existing session (resume).
  *
  * For same-server resume: if a ghost exists locally, transfer its channel
