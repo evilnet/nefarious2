@@ -454,13 +454,23 @@ int m_who(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         }
       }
     }
-    /* Loop through all clients :-\, if we still have something to match to 
+    /* Loop through all clients :-\, if we still have something to match to
        and we can show more clients */
     if ((!(counter < 1)) && matchsel) {
       int matchmark = 0;
       for (acptr = cli_prev(&me); acptr; acptr = cli_prev(acptr))
       {
         if (!(IsUser(acptr) && Process(acptr)))
+          continue;
+        /* Bouncer aliases are internal session mirrors of a primary
+         * connection — they share nick/account/host with the primary
+         * and are not user-facing identities.  /WHO showing both the
+         * primary and its alias produces a duplicate entry that the
+         * user reads as "two ibutsus on different servers, one of
+         * them not really a bouncer", masking the actual session
+         * topology.  Skip aliases from the global-walk WHO output.
+         * Channel-scoped WHO already filters via IsMemberAlias above. */
+        if (IsBouncerAlias(acptr))
           continue;
 	if ((bitsel & WHOSELECT_OPER) && !SeeOper(sptr,acptr))
 	  continue;

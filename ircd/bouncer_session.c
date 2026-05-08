@@ -7405,14 +7405,46 @@ struct BouncerSession *bounce_get_session(struct Client *cptr)
    * since that's the one /CHECK / channel-state / persistence
    * actually care about.  Fall back to first hs_client match. */
   me_yxx = cli_yxx(&me);
+
+  /* If cptr is an alias (locally demoted, or a peer's primary
+   * represented locally as an alias), follow the alias→primary link
+   * first so we look for hs_client == primary, not == alias. */
+  if (IsBouncerAlias(cptr) && cli_alias_primary(cptr))
+    cptr = cli_alias_primary(cptr);
+
   for (s = as->as_sessions; s; s = s->hs_anext) {
+    int i;
+
+    /* Primary match (current/usual case for the canonical hs_client). */
     if (s->hs_client == cptr) {
-      int i;
       if (!fallback)
         fallback = s;
       for (i = 0; i < s->hs_alias_count; i++) {
         if (0 == strcmp(s->hs_aliases[i].ba_server, me_yxx))
           return s;
+      }
+      continue;
+    }
+
+    /* Alias match: cptr is recorded as a session alias (full numeric
+     * compare against ba_numeric).  This catches /CHECK on a demoted
+     * primary, on a peer's primary that we mirror as alias, and any
+     * other "Client struct that participates in the session as an
+     * alias" lookup.  Without this, bounce_get_session returned NULL
+     * for those Clients and the caller (m_check, etc.) thought the
+     * Client wasn't in any session despite hs_aliases[] saying it was. */
+    {
+      char full[6];
+      if (cli_user(cptr) && cli_user(cptr)->server) {
+        ircd_snprintf(0, full, sizeof(full), "%s%s",
+                      cli_yxx(cli_user(cptr)->server), cli_yxx(cptr));
+        for (i = 0; i < s->hs_alias_count; i++) {
+          if (0 == strcmp(s->hs_aliases[i].ba_numeric, full)) {
+            if (!fallback)
+              fallback = s;
+            break;
+          }
+        }
       }
     }
   }
