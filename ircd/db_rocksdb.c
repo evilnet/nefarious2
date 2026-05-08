@@ -264,16 +264,6 @@ int db_env_open(const char *path,
   env->db_opts = rocksdb_options_create();
   rocksdb_options_set_create_if_missing(env->db_opts, 1);
   rocksdb_options_set_create_missing_column_families(env->db_opts, 1);
-  /* Skip eager SST table-properties / stats reads at DB::Open.  Each
-   * SST file's properties block is otherwise read synchronously during
-   * Open via ReadTablePropertiesHelper — allocation-heavy path that
-   * dominates startup time under valgrind (memcheck intercepts every
-   * malloc, ~30× slowdown on alloc-bound paths).  With these enabled,
-   * properties load lazily on first access; aggregate stat updates
-   * happen in background.  Safe in normal operation (no correctness
-   * impact, just slightly stale stats until first query). */
-  rocksdb_options_set_skip_stats_update_on_db_open(env->db_opts, 1);
-  rocksdb_options_set_skip_checking_sst_file_sizes_on_db_open(env->db_opts, 1);
   if (opts && opts->write_buffer_bytes)
     rocksdb_options_set_write_buffer_size(env->db_opts, opts->write_buffer_bytes);
   if (opts && opts->random_access)

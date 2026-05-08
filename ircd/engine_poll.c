@@ -283,14 +283,7 @@ engine_loop(struct Generators* gen)
   struct Socket *sock;
 
   while (running) {
-    /* Clamp to 0 on already-expired timer; see engine_epoll.c for the
-     * full rationale (negative-timeout bug → indefinite sleep). */
-    if (timer_next(gen)) {
-      time_t delay = timer_next(gen) - CurrentTime;
-      wait = (delay <= 0) ? 0 : (int)(delay * 1000);
-    } else {
-      wait = -1;
-    }
+    wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
 
     Debug((DEBUG_INFO, "poll: delay: %Tu (%Tu) %d", timer_next(gen),
 	   CurrentTime, wait));

@@ -273,14 +273,8 @@ engine_loop(struct Generators* gen)
     read_set = global_read_set; /* all hail structure copy!! */
     write_set = global_write_set;
 
-    /* set up the sleep time — clamp to 0 on already-expired timer.
-     * See engine_epoll.c for the rationale (negative-timeout bug). */
-    if (timer_next(gen)) {
-      time_t delay = timer_next(gen) - CurrentTime;
-      wait.tv_sec = (delay <= 0) ? 0 : delay;
-    } else {
-      wait.tv_sec = -1;
-    }
+    /* set up the sleep time */
+    wait.tv_sec = timer_next(gen) ? (timer_next(gen) - CurrentTime) : -1;
     wait.tv_usec = 0;
 
     Debug((DEBUG_INFO, "select: delay: %Tu (%Tu) %Tu", timer_next(gen),

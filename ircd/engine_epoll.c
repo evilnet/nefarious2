@@ -284,22 +284,7 @@ engine_loop(struct Generators *gen)
       events_count = tmp;
     }
 
-    /* Compute epoll_wait timeout from the next pending timer.  Clamp
-     * to 0 if a timer has already expired — otherwise the subtraction
-     * goes negative, the int cast keeps it negative, and epoll_wait
-     * blocks indefinitely until some unrelated fd fires.  This bites
-     * hardest right after server startup: timers added at TT_RELATIVE 1
-     * (try_connections, check_pings, bouncer-gate ticker) all expire
-     * during the multi-second init between timer_add and event_loop()
-     * entry (libkc + JWKS + webhook listener + store restores), and
-     * the first iteration would otherwise sleep forever waiting for
-     * an HTTP keepalive close on the libkc fd to wake it. */
-    if (timer_next(gen)) {
-      time_t delay = timer_next(gen) - CurrentTime;
-      wait = (delay <= 0) ? 0 : (int)(delay * 1000);
-    } else {
-      wait = -1;
-    }
+    wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
     Debug((DEBUG_ENGINE, "epoll: delay: %d (%d) %d", timer_next(gen),
            CurrentTime, wait));
     events_used = epoll_wait(epoll_fd, events, events_count, wait);
