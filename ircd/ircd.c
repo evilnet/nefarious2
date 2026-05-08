@@ -77,6 +77,7 @@
 #include "metadata.h"
 #include "webpush.h"
 #include "webpush_store.h"
+#include "listener.h"
 #include "paste_listener.h"
 #include "sasl_auth.h"
 #include "sasl_webhook.h"
@@ -102,6 +103,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef USE_ROCKSDB
+#include <pthread.h>
+#endif
 
 
 
@@ -110,6 +114,25 @@
  *--------------------------------------------------------------------------*/
 extern void init_counters(void);
 extern void mem_dbg_initialise(void);
+
+#ifdef USE_ROCKSDB
+struct db_init_arg { const char *path; int rc; };
+static void *history_init_worker(void *arg) {
+  struct db_init_arg *a = arg;
+  a->rc = history_init(a->path);
+  return NULL;
+}
+static void *metadata_init_worker(void *arg) {
+  struct db_init_arg *a = arg;
+  a->rc = metadata_lmdb_init(a->path);
+  return NULL;
+}
+static void *webpush_init_worker(void *arg) {
+  struct db_init_arg *a = arg;
+  a->rc = webpush_store_init(a->path);
+  return NULL;
+}
+#endif
 
 /*----------------------------------------------------------------------------
  * Constants / Enums
@@ -151,6 +174,16 @@ static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
 
 /** Non-zero until we want to exit. */
 int running = 1;
+
+/** Set non-zero after all subsystem init completes (just before
+ * event_loop() entry).  accept_connection() in listener.c gates on
+ * this so client connections are not pulled out of the kernel listen
+ * backlog while stores (RocksDB history/metadata/webpush, bouncer
+ * persistence) are still being opened.  Without the gate, clients
+ * connecting during startup complete TCP handshake but receive no
+ * IRC welcome until the event loop runs, and several seconds of
+ * "connected but unresponsive" surface as client-side timeouts. */
+int server_boot_complete = 0;
 
 /** Counter for generating unique message IDs. */
 unsigned long MsgIdCounter = 0;
@@ -1121,38 +1154,74 @@ int main(int argc, char **argv) {
   geoip_init();
 
 #ifdef USE_ROCKSDB
-  /* Initialize chathistory database (only if storage enabled) */
-  if (feature_bool(FEAT_CHATHISTORY_STORE)) {
-    /* Set map size from feature before init */
-    history_set_map_size((size_t)feature_int(FEAT_HISTORY_MAP_SIZE_MB));
-#ifdef USE_ZSTD
-    /* Initialize compression with configured threshold and level */
-    compress_init((size_t)feature_int(FEAT_COMPRESS_THRESHOLD),
-                  feature_int(FEAT_COMPRESS_LEVEL));
-#endif
-    if (history_init(feature_str(FEAT_CHATHISTORY_DB)) != 0) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "Failed to initialize chathistory database, feature disabled");
-    } else {
-      /* Register chathistory callbacks (for CH A - broadcasts on eviction) */
-      chathistory_init_callbacks();
-    }
-  }
+  /* Open the three RocksDB stores (history, metadata, webpush) in
+   * parallel.  Each DB::Open is independent — separate paths, separate
+   * env structs, separate background thread pools — so there is no
+   * shared mutable state between them.  Sequentially they take ~30s
+   * under valgrind (10s each, dominated by SST property-block reads
+   * during column-family open); in parallel the wall-clock time
+   * collapses to roughly the slowest single open.
+   *
+   * Workers only call the init function and store a return code;
+   * post-init bookkeeping (chathistory_init_callbacks(), warning
+   * logging on failure) runs serially on the main thread after join,
+   * which avoids any concern about log_write or callback-registration
+   * thread-safety. */
+  {
+    struct db_init_arg hist_arg = { NULL, 0 };
+    struct db_init_arg meta_arg = { NULL, 0 };
+    struct db_init_arg web_arg  = { NULL, 0 };
+    pthread_t hist_th, meta_th, web_th;
+    int hist_started = 0, meta_started = 0, web_started = 0;
 
-  /* Initialize metadata LMDB database */
-  if (feature_bool(FEAT_CAP_draft_metadata_2)) {
-    if (metadata_lmdb_init(feature_str(FEAT_METADATA_DB)) != 0) {
+    if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+      /* Map size and zstd compression must be configured before
+       * history_init() runs. */
+      history_set_map_size((size_t)feature_int(FEAT_HISTORY_MAP_SIZE_MB));
+#ifdef USE_ZSTD
+      compress_init((size_t)feature_int(FEAT_COMPRESS_THRESHOLD),
+                    feature_int(FEAT_COMPRESS_LEVEL));
+#endif
+      hist_arg.path = feature_str(FEAT_CHATHISTORY_DB);
+      if (pthread_create(&hist_th, NULL, history_init_worker, &hist_arg) == 0)
+        hist_started = 1;
+      else
+        hist_arg.rc = history_init(hist_arg.path);
+    }
+
+    if (feature_bool(FEAT_CAP_draft_metadata_2)) {
+      meta_arg.path = feature_str(FEAT_METADATA_DB);
+      if (pthread_create(&meta_th, NULL, metadata_init_worker, &meta_arg) == 0)
+        meta_started = 1;
+      else
+        meta_arg.rc = metadata_lmdb_init(meta_arg.path);
+    }
+
+    if (feature_bool(FEAT_CAP_draft_webpush)) {
+      web_arg.path = feature_str(FEAT_WEBPUSH_DB);
+      if (pthread_create(&web_th, NULL, webpush_init_worker, &web_arg) == 0)
+        web_started = 1;
+      else
+        web_arg.rc = webpush_store_init(web_arg.path);
+    }
+
+    if (hist_started) pthread_join(hist_th, NULL);
+    if (meta_started) pthread_join(meta_th, NULL);
+    if (web_started)  pthread_join(web_th, NULL);
+
+    if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+      if (hist_arg.rc != 0)
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "Failed to initialize chathistory database, feature disabled");
+      else
+        chathistory_init_callbacks();
+    }
+    if (feature_bool(FEAT_CAP_draft_metadata_2) && meta_arg.rc != 0)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize metadata database");
-    }
-  }
-
-  /* Initialize webpush LMDB storage */
-  if (feature_bool(FEAT_CAP_draft_webpush)) {
-    if (webpush_store_init(feature_str(FEAT_WEBPUSH_DB)) != 0) {
+    if (feature_bool(FEAT_CAP_draft_webpush) && web_arg.rc != 0)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize webpush database");
-    }
   }
 #endif
 
@@ -1226,6 +1295,15 @@ int main(int argc, char **argv) {
 
   Debug((DEBUG_NOTICE, "Server ready..."));
   log_write(LS_SYSTEM, L_NOTICE, 0, "Server Ready");
+
+  /* Open the gate: listener sockets were created+bound during init_conf()
+   * but listen(2) was deferred so the kernel rejects (RST) any client
+   * that tries to connect during the slow tail of init (rocksdb
+   * DB::Open, bouncer restore, libkc/JWKS).  Now that all stored data
+   * is loaded and we're about to enter event_loop(), it's safe to
+   * start accepting. */
+  server_boot_complete = 1;
+  start_all_listeners();
 
   event_loop();
 

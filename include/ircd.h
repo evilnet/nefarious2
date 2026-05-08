@@ -54,6 +54,7 @@ extern char*          configfile;
 extern int            debuglevel;
 extern char*          debugmode;
 extern int	      running;
+extern int            server_boot_complete; /**< Subsystem init finished, accept_connection may pull from listen backlog */
 extern unsigned long  MsgIdCounter;   /**< Counter for unique message IDs */
 
 /** SASL mechanism list received from services (dynamic, for CAP LS) */

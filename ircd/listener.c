@@ -259,10 +259,19 @@ static int inetport(struct Listener* listener, int family)
   fd = os_socket(&listener->addr, SOCK_STREAM, get_listener_name(listener), family);
   if (fd < 0)
     return -1;
-  if (!os_set_listen(fd, HYBRID_SOMAXCONN)) {
-    report_error(LISTEN_ERROR_MSG, get_listener_name(listener), errno);
-    close(fd);
-    return -1;
+  /* listen(2) is deferred to start_all_listeners() if we're still in
+   * pre-event-loop init.  Until then the socket is bound but not
+   * listening, so kernel returns RST → clients get ECONNREFUSED and
+   * retry naturally instead of TCP-handshaking into a backlog that
+   * userspace can't drain (rocksdb DB::Open keeps the main thread
+   * busy for tens of seconds under valgrind).  After boot it's safe
+   * to listen() immediately. */
+  if (server_boot_complete) {
+    if (!os_set_listen(fd, HYBRID_SOMAXCONN)) {
+      report_error(LISTEN_ERROR_MSG, get_listener_name(listener), errno);
+      close(fd);
+      return -1;
+    }
   }
   if (!set_listener_options(listener, fd, family))
     return -1;
@@ -275,6 +284,22 @@ static int inetport(struct Listener* listener, int family)
   }
 
   return fd;
+}
+
+/** Issue listen(2) on every listener fd that hasn't been listened on
+ * yet.  Called once at the end of init, just before event_loop(),
+ * after slow subsystem opens (rocksdb DB::Open, libkc init, bouncer
+ * restore) have completed.  Safe to call multiple times — listen()
+ * on an already-listening socket is a no-op. */
+void start_all_listeners(void)
+{
+  struct Listener* listener;
+  for (listener = ListenerPollList; listener; listener = listener->next) {
+    if (listener->fd_v4 >= 0 && !os_set_listen(listener->fd_v4, HYBRID_SOMAXCONN))
+      report_error(LISTEN_ERROR_MSG, get_listener_name(listener), errno);
+    if (listener->fd_v6 >= 0 && !os_set_listen(listener->fd_v6, HYBRID_SOMAXCONN))
+      report_error(LISTEN_ERROR_MSG, get_listener_name(listener), errno);
+  }
 }
 
 /** Find the listener (if any) for a particular port and address.

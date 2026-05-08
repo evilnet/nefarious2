@@ -101,6 +101,7 @@ extern void        mark_listeners_closing(void);
 extern void show_ports(struct Client* client, const struct StatDesc* sd,
                        char* param);
 extern void        release_listener(struct Listener* listener);
+extern void        start_all_listeners(void);
 
 #endif /* INCLUDED_listener_h */
 
