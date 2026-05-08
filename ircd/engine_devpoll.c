@@ -307,9 +307,15 @@ engine_loop(struct Generators* gen)
     dopoll.dp_fds = polls; /* set up the struct dvpoll */
     dopoll.dp_nfds = polls_count;
 
-    /* calculate the proper timeout */
-    dopoll.dp_timeout = timer_next(gen) ?
-      (timer_next(gen) - CurrentTime) * 1000 : -1;
+    /* calculate the proper timeout — clamp to 0 on already-expired
+     * timer.  See engine_epoll.c for the rationale (negative-timeout
+     * bug → indefinite sleep). */
+    if (timer_next(gen)) {
+      time_t delay = timer_next(gen) - CurrentTime;
+      dopoll.dp_timeout = (delay <= 0) ? 0 : (int)(delay * 1000);
+    } else {
+      dopoll.dp_timeout = -1;
+    }
 
     Debug((DEBUG_ENGINE, "devpoll: delay: %Tu (%Tu) %d", timer_next(gen),
 	   CurrentTime, dopoll.dp_timeout));
