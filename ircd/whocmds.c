@@ -190,8 +190,7 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
         *(p1++) = '!';
       if (IsDelayedJoin(chan))
         *(p1++) = '<';
-      if (IsMemberHolding(chan))
-        *(p1++) = '~';  /* Bouncer hold (ghost) */
+      /* Bouncer-hold marker not emitted — see m_names.c for rationale. */
     }
     else {
       if (IsChanOp(chan))
@@ -204,8 +203,6 @@ void do_who(struct Client* sptr, struct Client* acptr, struct Channel* repchan,
         *(p1++) = '!';
       else if (IsDelayedJoin(chan))
         *(p1++) = '<';
-      else if (IsMemberHolding(chan))
-        *(p1++) = '~';
     }
     if (IsDeaf(acptr))
       *(p1++) = 'd';

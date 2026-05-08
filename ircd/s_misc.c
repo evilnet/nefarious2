@@ -417,8 +417,19 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * (Note: The notice is to the local clients *only*)
      */
     /* Generate one msgid for both the live broadcast and chathistory storage
-     * so clients can deduplicate cached messages against history queries. */
-    {
+     * so clients can deduplicate cached messages against history queries.
+     *
+     * IsBouncerInternalDestroy gates BOTH the live channel broadcast and
+     * the history store: this exit is bouncer-internal cleanup tied to a
+     * successful BX P (numeric transfer) — channel members already saw
+     * the BX P swap (or for legacy peers, will see it natively via their
+     * BX handler), the user remains present under the new numeric, and
+     * a "user has quit (Session transferred)" notice is exactly the
+     * cross-server desync we're trying to avoid.  s_misc.c:910's S2S
+     * loop also skips when this flag is set; without the same skip on
+     * the common-channel broadcast at this point, the QUIT routed via
+     * channel members reaches legacy peers anyway. */
+    if (!IsBouncerInternalDestroy(bcptr)) {
       char quit_msgid[64] = "";
       if (feature_bool(FEAT_MSGID)) {
         if (cli_s2s_msgid(bcptr)[0])

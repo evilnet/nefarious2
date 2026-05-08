@@ -198,12 +198,13 @@ void do_names(struct Client* sptr, struct Channel* chptr, int filter)
         done_prefix = 1;
       }
     }
-    if (IsMemberHolding(member)) {
-      if ((IsNamesX(sptr) || CapRecipientHas(sptr, CAP_NAMESX)) || !done_prefix) {
-        buf[idx++] = '~';  /* Bouncer hold (ghost) */
-        done_prefix = 1;
-      }
-    }
+    /* Bouncer-hold marker (`~`) intentionally NOT emitted: it is not
+     * advertised in ISUPPORT PREFIX, conflicts with the conventional
+     * channel-owner prefix on other IRCds (Unreal/Inspircd `q` mode),
+     * doesn't propagate to legacy peers (causing cross-server display
+     * desync), and several clients parse unknown leading symbols as
+     * part of the nick.  The CHFL_HOLDING membership flag itself is
+     * still used internally for revival cleanup and persistence. */
     strcpy(buf + idx, cli_name(c2ptr));
     idx += strlen(cli_name(c2ptr));
 

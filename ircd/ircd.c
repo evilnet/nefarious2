@@ -644,11 +644,20 @@ static void check_pings(struct Event* ev) {
                              "No response from %s, closing link",
                              cli_name(cptr));
 
-      /* Try alias promotion first — if aliases exist, promote one */
+      /* Try alias promotion first — if aliases exist, promote one.
+       * On successful promote the user is now represented by the
+       * promoted alias's numeric; this exit is bouncer-internal
+       * cleanup, not a real disconnect.  SetBouncerInternalDestroy
+       * gates s_misc.c's per-channel and per-server QUIT broadcasts
+       * so peers / channel members don't see "user has quit (Session
+       * transferred)" for what is, end-to-end, an in-place numeric
+       * swap (BX P handles the wire-level swap on bouncer-aware peers
+       * — including the production upstream). */
       if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
         struct BouncerSession *bsess = bounce_get_session(cptr);
         if (bsess && bsess->hs_alias_count > 0) {
           if (bounce_promote_alias(bsess) == 0) {
+            SetBouncerInternalDestroy(cptr);
             exit_client_msg(cptr, cptr, &me, "Session transferred");
             continue;
           }
