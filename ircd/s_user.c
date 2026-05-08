@@ -799,56 +799,51 @@ int register_user(struct Client *cptr, struct Client *sptr)
     ++UserStats.opers;
 
   tmpstr = umode_str(sptr);
-  /* Frontier introducer (per design intent #135 + #254): for fresh
-   * bouncer-account users (local OR relayed-in from another BX-aware
-   * peer), defer N to legacy peers until the BX-aware ring has had
-   * time to converge via D.2 at-N-time.  The deferred legacy emission
-   * is driven by bounce_pending_canon_tick after BOUNCE_PENDING_CANON_SECS.
-   * If convergence demotes us to alias before that, IsBouncerAlias
-   * filters the deferred emission.  Per-session legacy-face suppression
-   * inside bounce_emit_legacy_n_intro additionally guarantees that
-   * legacy peers see exactly one N per session — even if multiple
-   * candidate primaries on different servers all drive their pending-
-   * canon timer to fire, only the first emit reaches a given legacy
-   * peer; subsequent calls observe the recorded face and skip. */
-  {
-    int frontier = IsAccount(sptr) && bounce_enabled_for(sptr);
-    if (frontier) {
-      sendcmdto_set_skip_legacy_canon();
-    }
-    /* Per redesign A.2: stage the bouncer session-id hint for the
-     * outgoing N's ,S compact-tag segment.  Bouncer-aware peers parse
-     * it for at-N-time convergence dispatch.  Set before each broadcast
-     * because the override auto-clears after consumption. */
-    bounce_set_n_sessid_hint(sptr);
-    /* Send full IP address to IPv6-grokking servers. */
-    sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
-                               FLAG_IPV6, FLAG_LAST_FLAG,
-                               "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
-                               cli_name(sptr), cli_hopcount(sptr) + 1,
-                               cli_lastnick(sptr),
-                               user->username, user->realhost,
-                               *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
-                               iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 1),
-                               NumNick(sptr), cli_info(sptr));
-    if (frontier) {
-      sendcmdto_set_skip_legacy_canon();
-    }
-    bounce_set_n_sessid_hint(sptr);
-    /* Send fake IPv6 addresses to pre-IPv6 servers. */
-    sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
-                               FLAG_LAST_FLAG, FLAG_IPV6,
-                               "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
-                               cli_name(sptr), cli_hopcount(sptr) + 1,
-                               cli_lastnick(sptr),
-                               user->username, user->realhost,
-                               *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
-                               iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 0),
-                               NumNick(sptr), cli_info(sptr));
-    if (frontier) {
-      bounce_pending_canon_register(sptr);
-    }
-  }
+  /* Per redesign A.2: stage the bouncer session-id hint for the outgoing
+   * N's ,S compact-tag segment so BX-aware peers can use it for at-N-time
+   * convergence dispatch.  Set before each broadcast because the
+   * override auto-clears after consumption.  No-op for non-bouncer
+   * users.
+   *
+   * The frontier-introducer defer-to-legacy mechanism (skip_legacy_canon
+   * + pending_canon_register) was REMOVED 2026-05-08: it broke fresh
+   * bouncer-account primaries on production by suppressing the N token
+   * to legacy (non-IRCv3-aware) peers for ~5 seconds, during which the
+   * user could JOIN channels and PRIVMSG.  Channel joins propagated
+   * normally to all peers, but the user's N had not yet reached legacy
+   * peers — so server_relay_channel_message on those peers had no
+   * Membership for the source numeric (no JOIN-target user known) and
+   * replied ERR_CANNOTSENDTOCHAN back to the home server, surfacing as
+   * "Cannot send to channel" while other members still saw the message.
+   *
+   * The defer was a cascade-prevention measure for testnet's specific
+   * multi-bouncer-server topology and was incorrect to apply to plain
+   * single-primary bouncer accounts in production.  Always emit N
+   * unconditionally to all peers; cascade-prevention happens elsewhere
+   * (D.2 at-N-time dispatch on the receive side handles the multi-
+   * server convergence cases without needing to defer the introduction). */
+  bounce_set_n_sessid_hint(sptr);
+  /* Send full IP address to IPv6-grokking servers. */
+  sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
+                             FLAG_IPV6, FLAG_LAST_FLAG,
+                             "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
+                             cli_name(sptr), cli_hopcount(sptr) + 1,
+                             cli_lastnick(sptr),
+                             user->username, user->realhost,
+                             *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
+                             iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 1),
+                             NumNick(sptr), cli_info(sptr));
+  bounce_set_n_sessid_hint(sptr);
+  /* Send fake IPv6 addresses to pre-IPv6 servers. */
+  sendcmdto_flag_serv_butone(user->server, CMD_NICK, cptr,
+                             FLAG_LAST_FLAG, FLAG_IPV6,
+                             "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
+                             cli_name(sptr), cli_hopcount(sptr) + 1,
+                             cli_lastnick(sptr),
+                             user->username, user->realhost,
+                             *tmpstr ? "+" : "", tmpstr, *tmpstr ? " " : "",
+                             iptobase64(ip_base64, &cli_ip(sptr), sizeof(ip_base64), 0),
+                             NumNick(sptr), cli_info(sptr));
 
   /* Broadcast BS A for a newly created bouncer session.  Must come AFTER
    * the N token above so that receiving servers can findNUser() the
