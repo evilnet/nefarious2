@@ -1655,6 +1655,7 @@ process_multiline_batch(struct Client *sptr)
       /* Store content in unified ml_content + history sentinel atomically */
       int store_result = history_store_multiline(batch_base_msgid, timestamp,
                           is_channel ? chptr->chname : cli_name(acptr),
+                          is_channel ? NULL : cli_name(acptr),
                           sender_mask,
                           cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
                           history_content, content_len,
@@ -2382,6 +2383,7 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       /* Store content in unified ml_content + history sentinel atomically */
       history_store_multiline(batch_base_msgid, timestamp,
                               is_channel ? chptr->chname : cli_name(acptr),
+                              is_channel ? NULL : cli_name(acptr),
                               sender_mask,
                               cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
                               history_content, content_len,

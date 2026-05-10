@@ -216,7 +216,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
 
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {
-    history_store_message(msgid, timestamp, chptr->chname, sender,
+    history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
                           account, HISTORY_GAP, "", NULL);
     return;
   }
@@ -225,7 +225,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   int is_new_channel = (history_has_channel(chptr->chname) == 0);
 
   /* Store in database */
-  if (history_store_message(msgid, timestamp, chptr->chname, sender,
+  if (history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
                             account, type, text, client_tags) == 0) {
     /* Layer 1: Broadcast CH A + if this is the first message in the channel */
     if (is_new_channel) {
@@ -333,20 +333,24 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
 
   /* Check opt-out — store gap marker if either party opted out */
   if (has_pm_optout(sptr) || has_pm_optout(acptr)) {
-    history_store_message(msgid, timestamp, target, sender,
+    history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
                           account, HISTORY_GAP, "", NULL);
     return;
   }
 
   /* Check +Y no-storage — store gap marker */
   if (IsNoStorage(sptr)) {
-    history_store_message(msgid, timestamp, target, sender,
+    history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
                           account, HISTORY_GAP, "", NULL);
     return;
   }
 
-  /* Store in database */
-  history_store_message(msgid, timestamp, target, sender,
+  /* Store in database — for PMs, original_target is the actual recipient
+   * nick at send time (one of the two parties in the canonical pair-key
+   * `target`). Replay code uses this to attribute each historical
+   * PRIVMSG to the correct conversation, instead of stamping the literal
+   * pair-key as the per-message target. */
+  history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
                         account, type, text, client_tags);
 }
 #endif /* USE_ROCKSDB */

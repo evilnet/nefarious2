@@ -1199,7 +1199,8 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
             if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)
               continue;
             history_store_message(nick_msgid, timestamp, chan->channel->chname,
-                                  old_sender, account, HISTORY_NICK, nick, NULL);
+                                  NULL, old_sender, account, HISTORY_NICK,
+                                  nick, NULL);
           }
         }
 #endif

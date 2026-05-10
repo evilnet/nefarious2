@@ -293,8 +293,9 @@ static void store_quit_events(struct Client *sptr, const char *comment,
     if (member->channel->mode.exmode & EXMODE_NOSTORAGE)
       continue;
 
-    history_store_message(msgid, timestamp, member->channel->chname, sender,
-                          account, HISTORY_QUIT, comment ? comment : "", NULL);
+    history_store_message(msgid, timestamp, member->channel->chname, NULL,
+                          sender, account, HISTORY_QUIT,
+                          comment ? comment : "", NULL);
   }
 }
 #endif /* USE_ROCKSDB */

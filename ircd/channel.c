@@ -147,7 +147,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
             ? cli_user(sptr)->account : NULL;
 
   /* Store in database */
-  history_store_message(use_msgid, timestamp, chptr->chname, sender,
+  history_store_message(use_msgid, timestamp, chptr->chname, NULL, sender,
                         account, type, text ? text : "", NULL);
 }
 #endif /* USE_ROCKSDB */

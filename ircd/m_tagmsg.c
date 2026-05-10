@@ -189,7 +189,7 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
 
   /* Store locally or forward to STORE server */
   if (feature_bool(FEAT_CHATHISTORY_STORE)) {
-    history_store_message(msgid, timestamp, chptr->chname, sender,
+    history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
                           account, HISTORY_TAGMSG, "", client_tags);
   } else if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
     /* Encode client tags with \x06 sentinel for transparent forwarding */

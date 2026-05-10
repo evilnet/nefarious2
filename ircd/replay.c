@@ -187,8 +187,41 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
       rs->current = msg->next;
       rs->total_replayed += gap_count;
     } else {
+      const char *per_msg_target = rs->target;
+
       cmd = (msg->type <= HISTORY_REDACT) ? msg_type_cmd[msg->type] : "PRIVMSG";
-      send_history_message(sptr, msg, rs->target, batchid, time_str, cmd);
+
+      /* For PM batches, the BATCH-level target (rs->target = other party's
+       * nick) is correct for the BATCH start line and for the replaying
+       * client's outgoing messages, but incoming messages need the
+       * client's own nick as the per-message PRIVMSG target.  Prefer the
+       * stored original_target (set on new entries); fall back to
+       * direction reconstruction from msg->sender for legacy entries
+       * predating the original_target field.
+       */
+      if (rs->is_pm) {
+        if (msg->original_target[0]) {
+          per_msg_target = msg->original_target;
+        } else {
+          const char *bang = strchr(msg->sender, '!');
+          size_t sender_nick_len = bang ? (size_t)(bang - msg->sender)
+                                         : strlen(msg->sender);
+          const char *mynick = cli_name(sptr);
+          size_t mynick_len = strlen(mynick);
+
+          if (sender_nick_len == mynick_len &&
+              ircd_strncmp(msg->sender, mynick, sender_nick_len) == 0) {
+            /* Outgoing — sender is the replaying client; recipient is
+             * the other party. */
+            per_msg_target = rs->other_nick;
+          } else {
+            /* Incoming — sender is the other party; recipient was self. */
+            per_msg_target = mynick;
+          }
+        }
+      }
+
+      send_history_message(sptr, msg, per_msg_target, batchid, time_str, cmd);
       rs->current = msg->next;
       if (!msg->is_context)
         rs->total_replayed++;
@@ -243,6 +276,8 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
     rs->messages = messages;
     rs->current = messages;
     ircd_strncpy(rs->target, channame, sizeof(rs->target));
+    rs->other_nick[0] = '\0';
+    rs->is_pm = 0;
     rs->chan_count++;
 
     replay_open_batch(sptr, rs);
@@ -277,10 +312,47 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
       continue;
     }
 
-    /* Set up new batch */
+    /* Set up new batch.
+     *
+     * Storage key is the canonical pair "lowerNick:higherNick".  The
+     * BATCH chathistory target on the wire must be the OTHER party's
+     * nick (not the storage key), per the IRCv3 chathistory spec —
+     * a literal `nick1:nick2` would not parse as a valid IRC target
+     * and would render as a fractured query tab in IRCv3 clients.
+     */
+    {
+      const char *colon = strchr(tgt->target, ':');
+      const char *mynick = cli_name(sptr);
+      size_t mynick_len = strlen(mynick);
+      size_t nick1_len = colon ? (size_t)(colon - tgt->target) : 0;
+      const char *other_nick;
+      char other_nick_buf[CHANNELLEN + 1];
+
+      if (colon && nick1_len == mynick_len &&
+          ircd_strncmp(tgt->target, mynick, nick1_len) == 0) {
+        /* Self is on the left of the pair; other party on the right. */
+        other_nick = colon + 1;
+      } else if (colon) {
+        /* Self is on the right; other party on the left — copy out the
+         * left half since it isn't NUL-terminated in the storage key. */
+        size_t copy_len = nick1_len < sizeof(other_nick_buf)
+                            ? nick1_len : sizeof(other_nick_buf) - 1;
+        memcpy(other_nick_buf, tgt->target, copy_len);
+        other_nick_buf[copy_len] = '\0';
+        other_nick = other_nick_buf;
+      } else {
+        /* No colon — shouldn't happen for PM keys, but fall back
+         * gracefully to the raw storage value. */
+        other_nick = tgt->target;
+      }
+
+      ircd_strncpy(rs->target, other_nick, sizeof(rs->target));
+      ircd_strncpy(rs->other_nick, other_nick, sizeof(rs->other_nick));
+      rs->is_pm = 1;
+    }
+
     rs->messages = messages;
     rs->current = messages;
-    ircd_strncpy(rs->target, tgt->target, sizeof(rs->target));
     rs->pm_count++;
 
     replay_open_batch(sptr, rs);

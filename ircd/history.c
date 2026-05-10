@@ -149,22 +149,47 @@ static int build_key(char *key, int keysize, const char *target,
 static int serialize_message(char *buf, int bufsize,
                              enum HistoryMessageType type,
                              const char *sender, const char *account,
-                             const char *content, const char *client_tags)
+                             const char *content, const char *client_tags,
+                             const char *original_target)
 {
-  /* When client_tags is present, prefix content with \x06tags\x06 sentinel.
-   * \x06 (ACK) is unused by any IRC formatting or control code.
-   * Old data without sentinel deserializes with empty client_tags. */
-  if (client_tags && client_tags[0])
-    return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|\x06%s\x06%s",
-                         (int)type,
-                         sender ? sender : "",
-                         account ? account : "",
-                         client_tags,
-                         content ? content : "");
-  return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s",
+  /* The content field can carry up to two stacked sentinel sections,
+   * always in this order at the very start of the field:
+   *
+   *   [\x05<original_target>\x05][\x06<client_tags>\x06]<actual_content>
+   *
+   * Sentinels are bytes \x05 (ENQ) and \x06 (ACK), neither of which
+   * occur in normal IRC payloads or in channel/nick names.  Old data
+   * predates these sentinels and deserializes with the corresponding
+   * fields empty, so the format is fully backward compatible.
+   *
+   * original_target is only persisted for PM-pair-keyed messages where
+   * the storage key (`nick1:nick2`) does not identify the actual
+   * recipient.  Channel messages omit it.
+   */
+  const char *ot_open = "";
+  const char *ot_value = "";
+  const char *ot_close = "";
+  const char *ct_open = "";
+  const char *ct_value = "";
+  const char *ct_close = "";
+
+  if (original_target && original_target[0]) {
+    ot_open = "\x05";
+    ot_value = original_target;
+    ot_close = "\x05";
+  }
+  if (client_tags && client_tags[0]) {
+    ct_open = "\x06";
+    ct_value = client_tags;
+    ct_close = "\x06";
+  }
+
+  return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s%s%s%s%s%s%s",
                        (int)type,
                        sender ? sender : "",
                        account ? account : "",
+                       ot_open, ot_value, ot_close,
+                       ct_open, ct_value, ct_close,
                        content ? content : "");
 }
 
@@ -244,13 +269,32 @@ static int deserialize_message(const char *data, int datalen,
   msg->account[field - p] = '\0';
   p = field + 1;
 
-  /* Parse content (rest of string), extracting client_tags if sentinel present.
-   * New format: \x06client_tags\x06content
-   * Old format: content (no sentinel) */
+  /* Parse content (rest of string), extracting optional sentinel-bracketed
+   * fields that may appear in this order at the very start of the field:
+   *   [\x05original_target\x05][\x06client_tags\x06]content
+   * Both are optional and absent in legacy entries (which deserialize with
+   * the corresponding msg fields empty).
+   */
   {
     size_t content_len = end - p;
+    msg->original_target[0] = '\0';
     msg->client_tags[0] = '\0';
 
+    /* Optional original_target sentinel (\x05<value>\x05) */
+    if (content_len > 2 && p[0] == '\x05') {
+      const char *ot_end = memchr(p + 1, '\x05', content_len - 1);
+      if (ot_end) {
+        size_t ot_len = ot_end - (p + 1);
+        if (ot_len >= sizeof(msg->original_target))
+          ot_len = sizeof(msg->original_target) - 1;
+        memcpy(msg->original_target, p + 1, ot_len);
+        msg->original_target[ot_len] = '\0';
+        p = ot_end + 1;
+        content_len = end - p;
+      }
+    }
+
+    /* Optional client_tags sentinel (\x06<value>\x06) */
     if (content_len > 2 && p[0] == '\x06') {
       const char *tag_end = memchr(p + 1, '\x06', content_len - 1);
       if (tag_end) {
@@ -695,8 +739,9 @@ struct db_env *history_get_env(void)
 }
 
 int history_store_message(const char *msgid, const char *timestamp,
-                          const char *target, const char *sender,
-                          const char *account, enum HistoryMessageType type,
+                          const char *target, const char *original_target,
+                          const char *sender, const char *account,
+                          enum HistoryMessageType type,
                           const char *content, const char *client_tags)
 {
   struct db_writebatch *wb = NULL;
@@ -756,7 +801,7 @@ int history_store_message(const char *msgid, const char *timestamp,
   }
 
   vallen = serialize_message(valbuf, bufsize, type, sender, account, content,
-                             client_tags);
+                             client_tags, original_target);
   if (vallen < 0) {
     rc = -1;
     goto store_cleanup;
@@ -890,7 +935,8 @@ store_cleanup:
 }
 
 int history_store_multiline(const char *msgid, const char *timestamp,
-                            const char *target, const char *sender,
+                            const char *target, const char *original_target,
+                            const char *sender,
                             const char *account, const char *content,
                             size_t content_len, const char *paste_secret)
 {
@@ -918,7 +964,8 @@ int history_store_multiline(const char *msgid, const char *timestamp,
   if (idx_keylen < 0) return -1;
 
   vallen = serialize_message(valbuf, sizeof(valbuf), HISTORY_PRIVMSG,
-                             sender, account, ML_CONTENT_SENTINEL, NULL);
+                             sender, account, ML_CONTENT_SENTINEL, NULL,
+                             original_target);
   if (vallen < 0) return -1;
   if ((size_t)vallen >= sizeof(valbuf)) vallen = sizeof(valbuf) - 1;
 
@@ -2477,7 +2524,8 @@ int history_redact_message(const char *target, const char *msgid)
     db_val_free(&val);
 
     vallen = serialize_message(valbuf, sizeof(valbuf), orig.type,
-                               orig.sender, orig.account, "", NULL);
+                               orig.sender, orig.account, "", NULL,
+                               orig.original_target);
     if (vallen < 0 || (size_t)vallen >= sizeof(valbuf)) {
       db_writebatch_destroy(wb);
       return -1;

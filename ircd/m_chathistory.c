@@ -2278,8 +2278,11 @@ static void process_write_forward(const char *target, const char *msgid,
   /* Check if this is a new channel for Layer 1 advertisement */
   int is_new_channel = (history_has_channel(target) == 0);
 
-  /* Store the message */
-  if (history_store_message(msgid, timestamp, target, sender,
+  /* Store the message.  original_target is NULL on the federation
+   * write-forward path — the federated source doesn't (yet) carry that
+   * field, so replay's direction-reconstruction fallback handles PMs
+   * stored via this path. */
+  if (history_store_message(msgid, timestamp, target, NULL, sender,
                             (account[0] == '*') ? NULL : account,
                             type, content, NULL) == 0) {
     /* Layer 1: Broadcast CH A + if this is the first message in the channel */

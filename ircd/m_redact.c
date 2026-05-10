@@ -298,7 +298,7 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         ircd_snprintf(0, redact_content, sizeof(redact_content),
                       "%s", msgid);
 
-      history_store_message(redact_msgid, timestamp, target, sender,
+      history_store_message(redact_msgid, timestamp, target, NULL, sender,
                             cli_user(sptr)->account[0] ? cli_user(sptr)->account : "",
                             HISTORY_REDACT, redact_content, NULL);
 
@@ -407,7 +407,7 @@ int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
             ircd_snprintf(0, redact_content, sizeof(redact_content),
                           "%s", msgid);
 
-          history_store_message(redact_msgid, timestamp, target, sender,
+          history_store_message(redact_msgid, timestamp, target, NULL, sender,
                                 (cli_user(sptr) && cli_user(sptr)->account[0])
                                   ? cli_user(sptr)->account : "",
                                 HISTORY_REDACT, redact_content, NULL);

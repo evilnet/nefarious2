@@ -166,7 +166,7 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
                 cli_name(who), comment ? comment : "");
 
   /* Store in database */
-  history_store_message(msgid, timestamp, chptr->chname, sender,
+  history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
                         account, HISTORY_KICK, kick_text, NULL);
 }
 #endif /* USE_ROCKSDB */

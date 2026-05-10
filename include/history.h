@@ -79,7 +79,13 @@ enum HistoryMessageType {
 struct HistoryMessage {
   char msgid[HISTORY_MSGID_LEN];       /**< Unique message ID */
   char timestamp[HISTORY_TIMESTAMP_LEN]; /**< Unix timestamp (seconds.milliseconds) */
-  char target[CHANNELLEN + 1];         /**< Channel name or nick */
+  char target[CHANNELLEN + 1];         /**< Storage key: channel name or PM pair "nick1:nick2" */
+  /** For PMs: the actual recipient nick at send time (one of the two
+   * parties in `target`). Empty for channel messages (target IS the
+   * recipient).  Also empty when reading legacy entries stored before
+   * this field was added — callers must derive from sender direction
+   * in that case. */
+  char original_target[CHANNELLEN + 1];
   char sender[HISTORY_SENDER_LEN];     /**< nick!user@host of sender */
   char account[ACCOUNTLEN + 1];        /**< Sender's account name (or empty) */
   enum HistoryMessageType type;        /**< Message type */
@@ -138,7 +144,9 @@ extern void history_shutdown(void);
 /** Store a message in the history database.
  * @param[in] msgid Unique message ID.
  * @param[in] timestamp Unix timestamp (seconds.milliseconds as string).
- * @param[in] target Channel or nick.
+ * @param[in] target Storage key (channel name or PM pair "nick1:nick2").
+ * @param[in] original_target For PMs: actual recipient nick at send time.
+ *   Pass NULL for channel messages (target IS the recipient).
  * @param[in] sender Full sender mask (nick!user@host).
  * @param[in] account Sender's account name (may be NULL).
  * @param[in] type Message type.
@@ -146,8 +154,9 @@ extern void history_shutdown(void);
  * @return 0 on success, -1 on error.
  */
 extern int history_store_message(const char *msgid, const char *timestamp,
-                                  const char *target, const char *sender,
-                                  const char *account, enum HistoryMessageType type,
+                                  const char *target, const char *original_target,
+                                  const char *sender, const char *account,
+                                  enum HistoryMessageType type,
                                   const char *content, const char *client_tags);
 
 /** Store a multiline message with content in the unified content store.
@@ -164,8 +173,9 @@ extern int history_store_message(const char *msgid, const char *timestamp,
  * @return 0 on success, -1 on error.
  */
 extern int history_store_multiline(const char *msgid, const char *timestamp,
-                                   const char *target, const char *sender,
-                                   const char *account, const char *content,
+                                   const char *target, const char *original_target,
+                                   const char *sender, const char *account,
+                                   const char *content,
                                    size_t content_len, const char *paste_secret);
 
 #ifdef USE_ROCKSDB

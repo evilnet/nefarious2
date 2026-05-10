@@ -54,7 +54,15 @@ struct ReplayState {
   /* === Message-level iteration (current batch) === */
   struct HistoryMessage *messages;    /**< Owned linked list */
   struct HistoryMessage *current;     /**< Current send position */
-  char target[CHANNELLEN + 1];       /**< Current batch target */
+  char target[CHANNELLEN + 1];       /**< BATCH target. Channel name for channel batches; the OTHER party's nick for PM batches (NOT the storage pair-key). */
+  /** For PM batches: the other party's nick — used as the per-message
+   * target for the replaying client's outgoing messages.  Empty for
+   * channel batches (where target IS the per-message target). */
+  char other_nick[CHANNELLEN + 1];
+  /** 1 when the current batch is a PM batch (per-message target is
+   * derived from msg->original_target / sender direction).  0 for
+   * channel batches. */
+  int is_pm;
   char batch_id[REPLAY_BATCH_ID_LEN]; /**< Current batch ID */
   int batch_open;                     /**< Whether BATCH + has been sent */
   int ops_override;                   /**< Whether :full override active */
