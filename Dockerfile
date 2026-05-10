@@ -1,3 +1,10 @@
+# --- libkc: pulled from GHCR by default; override LIBKC_IMAGE to redirect ---
+# Forks: --build-arg LIBKC_IMAGE=ghcr.io/<your-org>/libkc:<tag>
+# Local dev: --build-context libkc=docker-image://local/libkc:dev (shadows this)
+# Declared before any FROM so the value is in global scope and can be used
+# in `FROM ${LIBKC_IMAGE}` below.
+ARG LIBKC_IMAGE=ghcr.io/evilnet/libkc:sha-10aa335
+
 FROM debian:13 AS base
 
 ENV GID=1234
@@ -16,18 +23,16 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
       libgit2-dev openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
-# --- Build libraries in parallel using multi-stage ---
-
-FROM base AS build-libkc
-COPY --from=libkc . /tmp/libkc
-WORKDIR /tmp/libkc
-RUN autoreconf -fi && ./configure --prefix=/usr && make -j$(nproc) && make install
+FROM ${LIBKC_IMAGE} AS libkc
 
 # --- Merge libraries into base ---
 
 FROM base AS libs
-COPY --from=build-libkc /usr/lib/libkc* /usr/lib/
-COPY --from=build-libkc /usr/include/kc/ /usr/include/kc/
+# Copy with /. trailing form so the libkc.so→libkc.so.0.0.0 symlink chain
+# is preserved (a glob like /usr/lib/libkc* dereferences and we'd end up
+# with three identical .so files instead of two symlinks + one real lib).
+COPY --from=libkc /usr/lib/.     /usr/lib/
+COPY --from=libkc /usr/include/. /usr/include/
 RUN ldconfig
 
 # --- Configure stage: only invalidated by autotools input changes ---

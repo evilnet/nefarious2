@@ -109,6 +109,22 @@ Exposed Ports:
 
 SSL certificates are auto-generated on first run if not provided.
 
+Building From Source:
+
+  docker build .
+
+The Dockerfile pulls libkc as a prebuilt OCI image from GHCR, so no
+submodule checkout is required for a basic build. To use a different
+libkc (e.g. when working from a fork):
+
+  docker build --build-arg LIBKC_IMAGE=ghcr.io/<your-org>/libkc:<tag> .
+
+For transient local builds without publishing to a registry, build a
+local libkc image and shadow the named stage with --build-context:
+
+  docker build -t local/libkc:dev /path/to/libkc/
+  docker build --build-context libkc=docker-image://local/libkc:dev .
+
 RUNNING THIS SERVER ON LINUX
 
 If you run Linux 2.6 or above (or 2.4 with appropriate patches), Nefarious 2
