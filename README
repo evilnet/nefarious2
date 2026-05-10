@@ -1,17 +1,72 @@
 
             Welcome to Nefarious 2, the Evilnet IRC daemon
 
-Current features include:
-  - A completely rewritten network event engine, which make full use
-    of the asynchronous event engines available in FreeBSD (kqueue)
-    and Solaris (/dev/poll), resulting in dramaticaly improved
-    performance.
-  - New F: (feature) lines in ircd.conf, and the GET/SET commands allow
-    many settings to be changed dynamically, rather than by with compile-
-    time configuration.
-  - The new "account" feature added to the P10 protocol, allows people to
-    remain logged in to service bots (i.e., gnuworld) during a netsplit.
-    This means people will not have to login again once the network rejoins.
+  STATUS: PRE-RELEASE / TESTING ONLY
+  The ircv3.2-upgrade branch is actively under development and is NOT
+  production-ready. It is intended for testnet experimentation and
+  protocol/feature validation only. Expect breaking changes, incomplete
+  features, and rough edges. Do not run this on a public IRC network
+  without understanding what you're signing up for.
+
+Nefarious 2 is a P10 IRC daemon descended from ircu/Undernet, with extensive
+modernization on the ircv3.2-upgrade branch covering IRCv3.2+ client
+capabilities, persistent message storage, multi-session bouncer support, and
+modern authentication. Highlights:
+
+  CORE
+  - Asynchronous network event engines: epoll (Linux), kqueue (FreeBSD),
+    /dev/poll (Solaris), with poll/select fallback.
+  - Dynamic configuration via F: (feature) lines and GET/SET commands —
+    most settings can be changed without restart.
+  - Account persistence across netsplits — clients stay logged in to
+    service bots during link partitions.
+
+  IRCv3 CLIENT CAPABILITIES
+  Ratified: cap-notify, sasl, server-time, message-tags, batch,
+    labeled-response, echo-message, account-tag, account-notify,
+    away-notify, chghost, extended-join, invite-notify, setname,
+    standard-replies, multi-prefix, userhost-in-names, no-implicit-names,
+    tls (when built with SSL).
+  Drafts: chathistory, multiline, message-redaction, read-marker,
+    metadata-2, webpush, bouncer, event-playback, channel-rename,
+    pre-away, extended-isupport, account-registration.
+
+  AUTHENTICATION & SASL
+  - SASL mechanisms: PLAIN, EXTERNAL, OAUTHBEARER, SCRAM-SHA-256,
+    ECDSA-NIST256P-CHALLENGE.
+  - Local SASL via libkc (Keycloak ROPC + JWT) — bypasses the services
+    relay for the common cases. Falls back to IAuth and P10 SASL relay
+    transparently when local auth is unavailable.
+  - CRFLAG_REQUIRE_SASL connection class flag gates clients until SASL
+    is reachable; useful for SASL-only ports.
+
+  PERSISTENT STORAGE
+  - RocksDB backend (--with-rocksdb) for chathistory, metadata, webpush
+    subscriptions, and bouncer session state. zstd compression for
+    chathistory and metadata above a tunable threshold.
+  - Configurable retention windows, history caps, federation policy.
+
+  BOUNCER
+  - Multi-connection sessions per account, with per-connection CAP state
+    and channel membership flags. Aliases (multiple concurrent clients
+    bound to one account) are first-class and replicate across the
+    network via P10 BX tokens.
+  - Session restore from RocksDB after restart; ghost clients hold
+    presence during reconnects.
+
+  S2S / PROTOCOL
+  - IRCv3-aware S2S framework with link-time capability negotiation —
+    new tokens (MD/MDQ for metadata, MR for read markers, TG for TAGMSG,
+    BX for bouncer ops, CI for cache invalidation, SASL for auth relay)
+    are gated on peer capability and silently ignored by legacy peers.
+  - Compact ,C<client_tags> segment piggybacks IRCv3 client tags on
+    existing P10 messages without inflating the wire format.
+  - Federated chathistory with msgid consistency; multiline limits
+    enforced at S2S boundaries.
+
+  NOTIFICATIONS
+  - Web Push (RFC 8030) with VAPID-based key provisioning, for offline
+    clients with registered push subscriptions.
 
 INSTALLATION
 
@@ -77,6 +132,7 @@ Nefarious is available as a Docker image from GitHub Container Registry:
   docker pull ghcr.io/evilnet/nefarious2:latest   # Latest release
   docker pull ghcr.io/evilnet/nefarious2:edge     # Latest master branch
   docker pull ghcr.io/evilnet/nefarious2:dev      # Latest develop branch
+  docker pull ghcr.io/evilnet/nefarious2:ircv3    # Latest ircv3.2-upgrade branch
 
 Environment Variables:
 
