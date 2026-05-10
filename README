@@ -68,6 +68,52 @@ modern authentication. Highlights:
   - Web Push (RFC 8030) with VAPID-based key provisioning, for offline
     clients with registered push subscriptions.
 
+DEPENDENCIES
+
+Build tools (all required):
+  - C compiler (gcc or clang)
+  - GNU make
+  - autoconf, automake, libtool
+  - flex, byacc (or bison)
+  - pkg-config
+
+Required libraries:
+  - OpenSSL                          (libssl-dev)
+  - RocksDB                          (librocksdb-dev) — persistent storage
+                                     for chathistory, metadata, webpush
+                                     subscriptions, and bouncer sessions
+
+Optional libraries (enabled when present, or via configure flag):
+  - libkc                            — Keycloak SASL via OIDC ROPC
+                                     (--enable-keycloak; built from
+                                     github.com/evilnet/libkc, also
+                                     available as a prebuilt OCI image
+                                     ghcr.io/evilnet/libkc)
+  - libzstd                          — compression for chathistory/metadata
+  - libmaxminddb                     — GeoIP2 lookups
+  - libGeoIP                         — legacy GeoIP lookups
+  - libcurl                          — required when libkc is enabled
+  - libjansson                       — required when libkc is enabled
+  - libgit2                          — gitsync (git-based config sync)
+
+Runtime extras:
+  - Node.js (>= 18)                  — required for iauthd-ts, the
+                                     TypeScript IAuth daemon
+  - GeoIP databases                  — runtime GeoIP data
+
+Debian / Ubuntu one-liner for a full build + runtime environment:
+
+  apt-get install -y \
+    build-essential autoconf automake libtool flex byacc pkg-config cmake \
+    libssl-dev librocksdb-dev libzstd-dev \
+    libcurl4-openssl-dev libjansson-dev \
+    libmaxminddb-dev libgeoip-dev libgit2-dev \
+    nodejs npm
+
+(libkc is not packaged for any distribution; build from source or pull
+the prebuilt OCI image — see "Building From Source" in the DOCKER
+section below.)
+
 INSTALLATION
 
 Please see the INSTALL file for installation instructions, for hints on how to
