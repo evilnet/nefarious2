@@ -10,6 +10,7 @@ on:
     branches:
       - master
       - develop
+      - ircv3.2-upgrade
 
 env:
   REGISTRY: ghcr.io
@@ -62,6 +63,10 @@ jobs:
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             # Tag with commit SHA for develop branch commits
             type=sha,prefix={{branch}}-,enable=${{ github.ref == 'refs/heads/develop' }}
+            # Tag as 'ircv3' for ircv3.2-upgrade branch commits
+            type=raw,value=ircv3,enable=${{ github.ref == 'refs/heads/ircv3.2-upgrade' && github.event_name == 'push' }}
+            # Tag with commit SHA for ircv3.2-upgrade branch commits
+            type=sha,prefix={{branch}}-,enable=${{ github.ref == 'refs/heads/ircv3.2-upgrade' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -113,6 +118,10 @@ jobs:
             type=raw,value=dev,enable=${{ github.ref == 'refs/heads/develop' && github.event_name == 'push' }}
             # Tag with commit SHA for develop branch commits
             type=sha,prefix={{branch}}-,enable=${{ github.ref == 'refs/heads/develop' }}
+            # Tag as 'ircv3' for ircv3.2-upgrade branch commits
+            type=raw,value=ircv3,enable=${{ github.ref == 'refs/heads/ircv3.2-upgrade' && github.event_name == 'push' }}
+            # Tag with commit SHA for ircv3.2-upgrade branch commits
+            type=sha,prefix={{branch}}-,enable=${{ github.ref == 'refs/heads/ircv3.2-upgrade' }}
 
       - name: Build and push Linesync Docker image
         uses: docker/build-push-action@v5
