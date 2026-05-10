@@ -685,10 +685,24 @@ static void check_pings(struct Event* ev) {
        * so peers / channel members don't see "user has quit (Session
        * transferred)" for what is, end-to-end, an in-place numeric
        * swap (BX P handles the wire-level swap on bouncer-aware peers
-       * — including the production upstream). */
-      if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)) {
+       * — including the production upstream).
+       *
+       * MUST gate on cptr being the actual primary (bsess->hs_client
+       * == cptr).  bounce_get_session() returns the same session for
+       * the primary AND any of its aliases (alias→primary follow), so
+       * without this guard a timing-out ALIAS would trigger
+       * bounce_promote_alias on the session, which picks the oldest
+       * alias and overwrites hs_client with it.  The original primary
+       * (still alive) is then silently displaced — no exit, no
+       * detach — leaving it session-disjoint while alive: the
+       * "ibutsu / ibutsu_ orphan" symptom.  When cptr is an alias,
+       * fall through to normal exit_client which handles alias
+       * untrack + remove without touching hs_client. */
+      if (IsUser(cptr) && bounce_enabled_for(cptr) && IsAccount(cptr)
+          && !IsBouncerAlias(cptr)) {
         struct BouncerSession *bsess = bounce_get_session(cptr);
-        if (bsess && bsess->hs_alias_count > 0) {
+        if (bsess && bsess->hs_client == cptr
+            && bsess->hs_alias_count > 0) {
           if (bounce_promote_alias(bsess) == 0) {
             SetBouncerInternalDestroy(cptr);
             exit_client_msg(cptr, cptr, &me, "Session transferred");
