@@ -1111,12 +1111,48 @@ static int check_history_access(struct Client *sptr, const char *target,
       ircd_strncpy(normalized_target, target, normalized_len - 1);
     return 0;
   } else {
-    /* Private message history - must be authenticated */
-    if (!IsAccount(sptr))
-      return -1;
-    if (normalize_pm_target(sptr, target, normalized_target, normalized_len) != 0)
-      return -1;
-    return 0;
+    /* Private message history.  Two participant-check paths:
+     *
+     *   - Authed sptr: account-based.  normalize_pm_target verifies the
+     *     sender's nick matches one half of the canonical pair-key.
+     *
+     *   - Ephemeral sptr (no account): session_id-based.  The stored
+     *     PM record's client_tags carry a server-injected
+     *     `+afternet.org/sid=<sessid>` tag for the ephemeral
+     *     participant (see ircd_relay.c store_private_history).  Auth
+     *     requires that the caller's cli_session_id matches that tag
+     *     in at least one record under the canonical pair-key.
+     *
+     *     Why sessid and not nick: nicks aren't owned for ephemerals,
+     *     so a nick-only check would let "Mallory takes Alice's nick"
+     *     read Alice's PM history.  Binding to session_id ensures only
+     *     the same connection that participated can query — and the
+     *     UUID v7 minting in bouncer_session.c's generate_sessid
+     *     defends against collision.
+     *
+     *     Consequence: ephemerals see only PM history from their
+     *     current session.  Disconnect = lose access.  By design — if
+     *     persistent identity is needed, register an account. */
+    if (IsAccount(sptr)) {
+      if (normalize_pm_target(sptr, target, normalized_target, normalized_len) != 0)
+        return -1;
+      return 0;
+    }
+    if (cli_session_id(sptr)[0]) {
+      char canonical[NICKLEN * 2 + 2];
+      if (normalize_pm_target(sptr, target, canonical, sizeof(canonical)) != 0)
+        return -1;
+      if (!history_pm_target_has_sessid(canonical, cli_session_id(sptr)))
+        return -1;
+      if (normalized_target && normalized_len > 0) {
+        ircd_strncpy(normalized_target, canonical, normalized_len - 1);
+        normalized_target[normalized_len - 1] = '\0';
+      }
+      return 0;
+    }
+    /* Neither account nor session_id — shouldn't happen post-Phase A
+     * (every Client gets a session_id at make_client) but fail safe. */
+    return -1;
   }
 }
 

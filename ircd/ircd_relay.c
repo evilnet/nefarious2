@@ -353,13 +353,39 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
     return;
   }
 
-  /* Store in database — for PMs, original_target is the actual recipient
-   * nick at send time (one of the two parties in the canonical pair-key
-   * `target`). Replay code uses this to attribute each historical
-   * PRIVMSG to the correct conversation, instead of stamping the literal
-   * pair-key as the per-message target. */
-  history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
-                        account, type, text, client_tags);
+  /* If either party is ephemeral, embed their session_id as a vendor
+   * tag so the chathistory query path can authorize the ephemeral
+   * party's future history access (Phase 5a — sessid-based participant
+   * check, see check_history_access's PM branch).  Without this tag
+   * the record is queryable only by the authed counterparty; with it
+   * the ephemeral can match their cli_session_id against the stored
+   * tag to prove "I'm the same session as the one that participated."
+   *
+   * Stored as `+afternet.org/sid=<sessid>` in client_tags.  Tag is
+   * server-injected and trusted (not echoed from the client's own
+   * tags), so the auth check can rely on it. */
+  {
+    char tagbuf[768];
+    const char *eph_sessid = NULL;
+    if (!IsAccount(sptr) && cli_session_id(sptr)[0])
+      eph_sessid = cli_session_id(sptr);
+    else if (!IsAccount(acptr) && cli_session_id(acptr)[0])
+      eph_sessid = cli_session_id(acptr);
+
+    if (eph_sessid) {
+      ircd_snprintf(0, tagbuf, sizeof(tagbuf),
+                    "+afternet.org/sid=%s%s%s",
+                    eph_sessid,
+                    (client_tags && *client_tags) ? ";" : "",
+                    client_tags ? client_tags : "");
+      history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
+                            account, type, text, tagbuf);
+    } else {
+      /* Both parties authed (or sessid unavailable) — store as before. */
+      history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
+                            account, type, text, client_tags);
+    }
+  }
 }
 #endif /* USE_ROCKSDB */
 

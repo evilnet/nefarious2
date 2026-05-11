@@ -2101,6 +2101,46 @@ static int history_cleanup_empty_targets(void)
   return removed;
 }
 
+int history_pm_target_has_sessid(const char *target, const char *sessid)
+{
+  struct HistoryMessage *messages = NULL;
+  struct HistoryMessage *m;
+  int count;
+  int found = 0;
+  char needle[64];
+
+  if (!target || !*target || !sessid || !*sessid)
+    return 0;
+  if (!history_available)
+    return 0;
+
+  /* The vendor-tag form prepended at store time: see
+   * ircd_relay.c store_private_history's Phase 5a block. */
+  ircd_snprintf(0, needle, sizeof(needle), "+afternet.org/sid=%s", sessid);
+
+  /* Scan up to 100 most recent records under target.  PM records
+   * involving an ephemeral participant always carry that participant's
+   * sessid (recorded at store time), so the latest record is
+   * sufficient unless the conversation has churned through >100 newer
+   * messages between someone else and the same nick-pair — which
+   * shouldn't happen because the pair-key only matches the two
+   * specific nicks involved. */
+  count = history_query_latest(target, HISTORY_REF_NONE, NULL,
+                                100, &messages);
+  if (count <= 0 || !messages)
+    return 0;
+
+  for (m = messages; m; m = m->next) {
+    if (m->client_tags[0] && strstr(m->client_tags, needle)) {
+      found = 1;
+      break;
+    }
+  }
+
+  history_free_messages(messages);
+  return found;
+}
+
 int history_msgid_to_timestamp(const char *msgid, char *timestamp)
 {
   struct db_val val = { NULL, 0 };
