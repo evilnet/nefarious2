@@ -33,6 +33,7 @@
 #include "destruct_event.h"
 #include "hash.h"
 #include "bouncer_session.h"
+#include "chathistory_presence.h"
 #include "history.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
@@ -781,6 +782,12 @@ static void history_purge_callback(struct Event* ev)
 
   max_age_seconds = (unsigned long)retention_days * 24 * 60 * 60;
   history_purge_old(max_age_seconds);
+
+  /* Strict-presence chathistory: prune intervals fully older than the
+   * retention horizon.  Cheap (in-memory walk + a single CF scan of a
+   * small CF) and bounded — happens once per retention pass alongside
+   * the existing chathistory purge. */
+  presence_retention_sweep();
 }
 
 /** Periodic callback to purge expired metadata cache entries.

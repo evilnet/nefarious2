@@ -33,6 +33,7 @@
 
 #include "capab.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"
@@ -956,6 +957,14 @@ static void send_history_batch(struct Client *sptr, const char *target,
   }
 }
 
+/* Forward declaration — definition further down, after the per-subcommand
+ * helpers it co-locates with.  Used here by chathistory_auto_replay. */
+static int presence_filter_and_replay(struct Client *sptr,
+                                       const char *target,
+                                       struct HistoryMessage **head,
+                                       int count, int ops_override,
+                                       const char *label);
+
 /** Replay chathistory to a client since a given timestamp.
  * Used by bouncer auto-replay for legacy clients without draft/chathistory.
  * Queries history_query_after and sends messages using send_history_batch.
@@ -986,7 +995,7 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
     /* Attach context messages (reactions, redacts) to their parents */
     history_attach_context(target, messages);
     /* Ownership of messages transfers to replay_start_batch */
-    replay_start_batch(sptr, target, messages, count, 0, NULL);
+    count = presence_filter_and_replay(sptr, target, &messages, count, 0, NULL);
   }
 
   return count;
@@ -1177,6 +1186,42 @@ static int should_federate(const char *target, int local_count, int limit)
   return 0;
 }
 
+/** Single convergence point for chathistory result delivery.
+ *
+ * Combines the user-requested @a ops_override (parsed `:full`) with the
+ * caller's real privilege via has_ops_override() — a non-op who passes
+ * `:full` gets the filtered result like everyone else.  Then runs the
+ * strict-presence filter (no-op unless FEAT_CHATHISTORY_STRICT_PRESENCE
+ * is enabled, the target is a non-+H channel, and the override was
+ * denied).  Finally hands the (possibly shortened) list to the replay
+ * engine.
+ *
+ * Used by every local subcommand path (LATEST/BEFORE/AFTER/AROUND/
+ * BETWEEN) and by the federation merge step — single funnel for
+ * filter + ops semantics.
+ *
+ * @param head  Address of the message-list head; presence filter may
+ *              unlink entries.  Ownership of the (possibly-shortened)
+ *              list transfers to the replay engine on return.
+ * @return     The post-filter message count.
+ */
+static int presence_filter_and_replay(struct Client *sptr,
+                                       const char *target,
+                                       struct HistoryMessage **head,
+                                       int count, int ops_override,
+                                       const char *label)
+{
+  int real_override = 0;
+  if (ops_override) {
+    struct Channel *chptr =
+        (target && IsChannelName(target)) ? FindChannel(target) : NULL;
+    real_override = has_ops_override(sptr, chptr);
+  }
+  count = presence_filter_messages(sptr, target, head, count, real_override);
+  replay_start_batch(sptr, target, *head, count, real_override, label);
+  return count;
+}
+
 /** Handle CHATHISTORY LATEST subcommand.
  * @param[in] sptr Client sending the command.
  * @param[in] target Target channel or nick.
@@ -1241,7 +1286,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
   if (cli_replay(sptr) && count < limit)
     cli_replay(sptr)->is_last_page = 1;
 
@@ -1305,7 +1350,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
   if (cli_replay(sptr) && count < limit)
     cli_replay(sptr)->is_last_page = 1;
 
@@ -1369,7 +1414,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
   if (cli_replay(sptr) && count < limit)
     cli_replay(sptr)->is_last_page = 1;
 
@@ -1433,7 +1478,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
   if (cli_replay(sptr) && count < limit)
     cli_replay(sptr)->is_last_page = 1;
 
@@ -1497,7 +1542,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  replay_start_batch(sptr, lookup_target, messages, count, ops_override, cli_label(sptr));
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
   if (cli_replay(sptr) && count < limit)
     cli_replay(sptr)->is_last_page = 1;
 
@@ -3319,7 +3364,7 @@ static void send_fed_response(struct FedRequest *req)
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(req->target, merged);
   /* Async replay — ownership of merged list transfers to ReplayState */
-  replay_start_batch(client, req->target, merged, total, req->ops_override, req->label);
+  total = presence_filter_and_replay(client, req->target, &merged, total, req->ops_override, req->label);
   if (cli_replay(client) && total < req->limit)
     cli_replay(client)->is_last_page = 1;
 }

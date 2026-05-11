@@ -31,6 +31,7 @@
  */
 #include "config.h"
 
+#include "chathistory_presence.h"
 #include "db_cursor.h"
 #include "db_env.h"
 #include "db_txn.h"
@@ -79,8 +80,10 @@ static size_t history_map_size = 1UL * 1024 * 1024 * 1024;
 /** Callback for channel removal notifications (for CH A - broadcasts) */
 static history_channels_removed_cb channel_removed_callback = NULL;
 
-/** Maximum number of named databases */
-#define HISTORY_MAX_DBS 10
+/** Maximum number of named databases.  Currently: 5 history CFs
+ * (messages, msgid_index, targets, quotas, reply_index) + 4 ml_content
+ * CFs + 1 presence CF = 10.  Bumped to 16 for headroom. */
+#define HISTORY_MAX_DBS 16
 
 /** Key separator character */
 #define KEY_SEP '\0'
@@ -695,6 +698,12 @@ int history_init(const char *dbpath)
     /* Non-fatal — history still works, just without separate multiline storage */
   }
 
+  /* Open the presence CF (strict-mode chathistory).  Reads history's
+   * env via history_get_env(); silent if FEAT_CHATHISTORY_STRICT_PRESENCE
+   * is never enabled.  Non-fatal on failure — session-anchored presence
+   * remains usable in-memory. */
+  (void)presence_init();
+
   history_available = 1;
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage initialized at %s", dbpath);
 
@@ -715,6 +724,7 @@ void history_shutdown(void)
     db_env_sync(history_db_env);
   }
 
+  presence_shutdown();
   ml_content_shutdown(history_db_env);
   db_cf_close(history_db_env, history_cf_messages);
   db_cf_close(history_db_env, history_cf_msgid);

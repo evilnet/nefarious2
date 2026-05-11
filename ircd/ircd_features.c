@@ -1119,6 +1119,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
   F_B(CHATHISTORY_REQUIRE_AUTH, 0, 1, 0),   /* Require auth for channel history (non-+H) */
+  F_B(CHATHISTORY_STRICT_PRESENCE, 0, 0, 0), /* Filter chathistory to caller's presence windows (strict mode) */
   F_I(MULTILINE_MAX_BYTES, 0, 16384, feature_notify_multiline),
   F_I(MULTILINE_MAX_LINES, 0, 100, feature_notify_multiline),
   F_I(MULTILINE_LAG_DISCOUNT, 0, 50, 0),

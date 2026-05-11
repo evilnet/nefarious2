@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "chathistory_presence.h"
 #include "IPcheck.h"
 #include "capab.h"
 #include "channel.h"
@@ -7663,10 +7664,11 @@ void bounce_set_n_sessid_hint(struct Client *cptr)
 
 /** Purge per-Client ephemeral session-scoped state on exit.
  *
- * See bouncer_session.h for the contract.  Skeleton in Phase A — no
- * consumers yet.  Subsequent phases will dispatch into:
- *   - chathistory_ephemeral_purge(cli)  (Phase C)
- *   - readmarker_ephemeral_purge(cli)   (Phase E)
+ * See bouncer_session.h for the contract.  Dispatches to each ephemeral
+ * subsystem that maintains session-anchored state.  No-op for clients
+ * whose state is owned by a persistent backing (bouncer-attached
+ * accounts continue to hold their state in the bouncer record /
+ * account-anchored CFs).
  *
  * METADATA state is keyed by Client* (cli_metadata) and freed alongside
  * the Client struct itself, so no explicit purge hook is needed there.
@@ -7675,6 +7677,8 @@ void ephemeral_purge_session(struct Client *cli)
 {
   if (!cli || !IsUser(cli))
     return;
+  if (cli_session_id(cli)[0])
+    presence_purge_session(cli_session_id(cli));
   /* TODO Phase C: chathistory_ephemeral_purge(cli); */
   /* TODO Phase E: readmarker_ephemeral_purge(cli);  */
 }

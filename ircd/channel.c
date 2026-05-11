@@ -25,6 +25,7 @@
 
 #include "bouncer_session.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "class.h"
 #include "client.h"
 #include "destruct_event.h"
@@ -788,6 +789,10 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
       ++chptr->aliases;
     }
 
+    /* Strict-presence chathistory: open a presence interval for this
+     * client's anchor in this channel (no-op if a sibling connection
+     * was already a member, or if the feature is disabled). */
+    presence_on_channel_add(who, chptr);
   }
 }
 
@@ -888,6 +893,12 @@ void remove_user_from_channel(struct Client* cptr, struct Channel* chptr)
     /* Auto-sync: remove aliases of this user from the channel first */
     if (!IsMemberAlias(member))
       bounce_sync_alias_part(chptr, cptr);
+    /* Strict-presence chathistory: close the presence interval for this
+     * client's anchor in this channel (no-op if a sibling connection
+     * is still a member, or if the feature is disabled).  Called
+     * BEFORE remove_member_from_channel because the implementation
+     * walks chptr->members with @a cptr excluded. */
+    presence_on_channel_remove(cptr, chptr);
     if (remove_member_from_channel(member)) {
       if (channel_all_zombies(chptr)) {
         /*
