@@ -1870,8 +1870,20 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     }
   }
 
-  if (IsServer(sptr) || sptr != acptr)
+  /* Aliases share their primary's session identity; a user on an
+   * alias connection sending /MODE for their primary's nick (which is
+   * the alias's effective nick post-attach) is acting on their own
+   * user state.  Pre-fix, this hit ERR_USERSDONTMATCH because the
+   * Client structs differ.  Treat (sptr is alias of acptr) as
+   * equivalent to (sptr == acptr) so /MODE -o, /MODE -i etc. work
+   * from any session member; the bounce_sync_session_umodes call at
+   * the end of this function then propagates the change to other
+   * session members. */
   {
+    int _alias_of_target = (sptr != acptr && cli_user(sptr)
+                            && cli_user(sptr)->alias_primary == acptr);
+    if (IsServer(sptr) || (sptr != acptr && !_alias_of_target))
+    {
     if (IsServer(sptr)) {
       if (!MyConnect(acptr)) {
         /* Just propagate and ignore */
@@ -1918,6 +1930,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     else {
       send_reply(sptr, ERR_USERSDONTMATCH);
       return 0;
+    }
     }
   }
 
