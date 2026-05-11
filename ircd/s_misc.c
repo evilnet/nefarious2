@@ -327,6 +327,13 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     pending_bx_cleanup_link(bcptr);
   }
   if (IsUser(bcptr)) {
+    /* Purge per-Client ephemeral session-scoped state before the rest
+     * of the teardown sequence — cli_session_id is still valid here,
+     * which lets future subsystems (chathistory PM ring, read-marker
+     * session table) look up state keyed on it.  No-op skeleton in
+     * Phase A; consumers wire in during Phases C / E. */
+    ephemeral_purge_session(bcptr);
+
     /* Bouncer aliases: minimal silent teardown.
      * No QUIT to channels, no chathistory.
      * Just remove from channels, numeric space, and client list.

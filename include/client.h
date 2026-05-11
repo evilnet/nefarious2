@@ -415,7 +415,7 @@ struct Connection
 #define S2S_MULTI_MSGID_BUFSIZE 256  /**< Multi-msgid: up to 15 x (14+1) = 225 chars */
   char                con_s2s_multi_msgid[S2S_MULTI_MSGID_BUFSIZE]; /**< Full multi-msgid string (+-separated, empty if single) */
   char                con_s2s_client_tags[4096]; /**< S2S compact-tag ,C<client_tags> segment (IRCv3: 4094 max) */
-#define S2S_SESSID_BUFSIZE 40  /**< Session ID buffer (UUID v7 hyphenated form + slack) */
+#define S2S_SESSID_BUFSIZE 40  /**< Session ID buffer (sized for either 22-char base64 UUID v7 or legacy 36-char hyphenated form + slack) */
   char                con_s2s_sessid[S2S_SESSID_BUFSIZE]; /**< S2S compact-tag ,S<sessid> segment from incoming message — bouncer session identity hint per redesign A.2 */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
@@ -515,6 +515,16 @@ struct Client {
   struct MetadataSub*   cli_metadatasub; /**< Client metadata subscriptions */
   time_t                cli_metadata_lastcmd;  /**< Time of last metadata command */
   int                   cli_metadata_cmdcnt;   /**< Metadata commands this second */
+
+  /* Per-Client session identity (UUID v7, 22-char base64).
+   * Generated at make_client for local clients; adopted from a bouncer
+   * session's stored sessid on resume; for remote clients, populated by
+   * the ,S S2S compact tag (currently bouncer-only senders, extended to
+   * all clients in a future phase).  Empty string if not yet generated.
+   * Used as the presence anchor for ephemeral METADATA / READ_MARKER /
+   * CHATHISTORY (PM) and as the source of truth for the wire-emitted
+   * ,S<sessid> compact tag on outgoing N introductions. */
+  char                  cli_session_id[S2S_SESSID_BUFSIZE];
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -592,6 +602,8 @@ struct Client {
 #define cli_s2s_client_tags(cli) con_s2s_client_tags(cli_connect(cli))
 /** Get bouncer session ID hint from compact-tag ,S segment of incoming S2S message (per redesign A.2) */
 #define cli_s2s_sessid(cli)      con_s2s_sessid(cli_connect(cli))
+/** Get per-Client session ID (UUID v7 base64 — generated at make_client, adopted by bouncer on resume). */
+#define cli_session_id(cli)      ((cli)->cli_session_id)
 /** Get S2S batch ID from server */
 #define cli_s2s_batch_id(cli)	con_s2s_batch_id(cli_connect(cli))
 /** Get S2S batch type from server */

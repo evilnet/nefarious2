@@ -47,6 +47,7 @@
 #include "struct.h"
 #include "whowas.h"
 #include "metadata.h"
+#include "bouncer_session.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stddef.h>  /* offsetof */
@@ -234,8 +235,37 @@ struct Client* make_client(struct Client *from, int status)
     cli_connect(cptr) = con; /* set the connection and other fields */
     cli_since(cptr) = cli_lasttime(cptr) = cli_firsttime(cptr) = CurrentTime;
     cli_lastnick(cptr) = TStime();
-  } else
+
+    /* Mint a per-Client session ID up front for local clients.  This
+     * is the source of truth for the session-identity wire tag and the
+     * presence anchor for ephemeral METADATA / READ_MARKER / CHATHISTORY
+     * (PM).  A bouncer session — if one is created or resumed for this
+     * client — adopts this value (or, on resume, overwrites it with the
+     * bouncer's stored sessid so session-id continuity follows the
+     * bouncer session, not the underlying socket). */
+    generate_sessid(cli_session_id(cptr));
+  } else {
     cli_connect(cptr) = cli_connect(from); /* use 'from's connection */
+
+    /* Remote clients inherit a session ID at introduction time:
+     *   1. If the incoming S2S message carried a ,S<sessid> compact tag
+     *      (bouncer-aware peer), adopt that — the sessid is globally
+     *      agreed-upon and lets cross-server presence lookups line up.
+     *   2. Otherwise (origin was a legacy peer that doesn't emit ,S),
+     *      mint one locally.  bounce_set_n_sessid_hint attaches this
+     *      value to every outgoing N relay (every CMD_NICK introduction
+     *      site has been audited), so bouncer-aware peers downstream
+     *      of us adopt our minted sessid in turn — the network agrees
+     *      on a single sessid for the client even when its origin
+     *      server didn't supply one.  parse.c clears cli_s2s_sessid at
+     *      the start of each incoming message, so reading it here gives
+     *      the carrying-message's value, never stale. */
+    if (cli_s2s_sessid(cptr)[0])
+      ircd_strncpy(cli_session_id(cptr), cli_s2s_sessid(cptr),
+                   S2S_SESSID_BUFSIZE);
+    else
+      generate_sessid(cli_session_id(cptr));
+  }
 
   assert(con_verify(cli_connect(cptr)));
 

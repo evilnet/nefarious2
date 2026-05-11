@@ -373,28 +373,36 @@ static void generate_token(char *buf)
   buf[BOUNCER_TOKEN_LEN] = '\0';
 }
 
-/** Generate a UUID v7 (RFC 9562 §5.7) and write its hyphenated string
- * representation to @a buf.
+/** Generate a UUID v7 (RFC 9562 §5.7) and write a compact 22-char
+ * base64 encoding of its 16 raw bytes to @a buf.
  *
- * Format: 36 chars `xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx` plus null.
- * - Bits 0-47: Unix timestamp in milliseconds (big-endian).
- * - Bits 48-51: version = 0111 (7).
- * - Bits 52-63: random.
- * - Bits 64-65: variant = 10 (RFC 4122).
- * - Bits 66-127: random.
+ * Wire format: 22 base64 chars + nul.  16 bytes × 8 bits / 6 bits/char
+ * = 21.33, rounded up to 22; the top 4 bits of the last char are zero
+ * (the 8-bit input doesn't align with the 6-bit chars at the tail).
+ * No padding.  Alphabet: A-Z a-z 0-9 + / (standard base64, matches
+ * generate_token() in this file).
+ *
+ * The raw bytes carry the standard UUID v7 layout:
+ *   - Bits   0..47: Unix timestamp in milliseconds (big-endian).
+ *   - Bits  48..51: version = 0111 (7).
+ *   - Bits  52..63: random.
+ *   - Bits  64..65: variant = 10 (RFC 4122).
+ *   - Bits  66..127: random.
  *
  * Per redesign A.1: globally unique session identity, server-independent.
- * Sortable by creation time via the timestamp prefix, useful for
- * debugging and audit.
+ * Sortable by creation time via the timestamp prefix (the leading bytes
+ * encode first in big-endian-emitted base64), useful for debugging
+ * and audit.
  *
- * @param[out] buf Buffer of at least BOUNCER_SESSID_LEN bytes.
+ * @param[out] buf Buffer of at least 23 bytes (22 chars + nul).
  */
-static void generate_sessid(char *buf)
+void generate_sessid(char *buf)
 {
   unsigned char b[16];
   uint64_t ms;
   struct timeval tv;
-  int i;
+  int i, j;
+  unsigned int triplet;
 
   /* Get current time in milliseconds since the Unix epoch. */
   gettimeofday(&tv, NULL);
@@ -426,12 +434,21 @@ static void generate_sessid(char *buf)
   /* RFC 4122 variant: high two bits of byte 8 are 10. */
   b[8] = (unsigned char)(0x80 | (b[8] & 0x3F));
 
-  /* Format as hyphenated 36-char string. */
-  ircd_snprintf(0, buf, BOUNCER_SESSID_LEN,
-                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
-                "%02x%02x%02x%02x%02x%02x",
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+  /* Encode 16 bytes as 22 base64 chars: 5 full triplets (15 bytes →
+   * 20 chars) followed by the trailing byte (8 bits → 2 chars, with
+   * 4 zero bits of slack in the second char). */
+  for (i = 0, j = 0; i < 15; i += 3) {
+    triplet = ((unsigned int)b[i]     << 16)
+            | ((unsigned int)b[i + 1] <<  8)
+            |  (unsigned int)b[i + 2];
+    buf[j++] = b64chars[(triplet >> 18) & 0x3F];
+    buf[j++] = b64chars[(triplet >> 12) & 0x3F];
+    buf[j++] = b64chars[(triplet >>  6) & 0x3F];
+    buf[j++] = b64chars[ triplet        & 0x3F];
+  }
+  buf[j++] = b64chars[(b[15] >> 2) & 0x3F];
+  buf[j++] = b64chars[(b[15] << 4) & 0x3F];
+  buf[j]   = '\0';
 }
 
 /* ---------------------------------------------------------------- */
@@ -1026,7 +1043,15 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   /* Allocate and initialize */
   session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
   ircd_strncpy(session->hs_account, cli_account(cptr), ACCOUNTLEN + 1);
-  generate_sessid(session->hs_sessid);
+  /* Adopt the Client's pre-existing sessid (minted at make_client) so
+   * cli_session_id and hs_sessid agree.  Defensive mint if the Client
+   * came via a path that didn't populate cli_session_id. */
+  if (cli_session_id(cptr)[0])
+    ircd_strncpy(session->hs_sessid, cli_session_id(cptr), BOUNCER_SESSID_LEN);
+  else {
+    generate_sessid(session->hs_sessid);
+    ircd_strncpy(cli_session_id(cptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
+  }
   generate_token(session->hs_token);
   session->hs_name[0] = '\0';
   session->hs_state = BOUNCE_ACTIVE;
@@ -1251,6 +1276,10 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
 
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_client = cptr;
+  /* Session-identity continuity follows the bouncer session, not the
+   * underlying socket: the freshly-minted cli_session_id from
+   * make_client is superseded by the bouncer's durable sessid. */
+  ircd_strncpy(cli_session_id(cptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
   session->hs_attach_count++;
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
@@ -1796,7 +1825,11 @@ void bounce_emit_legacy_n_intro(struct Client *cli)
     }
 
     ip_b64 = IsIPv6(peer) ? ip6_b64 : ip4_b64;
-    bounce_set_n_sessid_hint(cli);
+    /* No bounce_set_n_sessid_hint here — this loop is gated to legacy
+     * peers only (IsIRCv3Aware skipped above), which strip @-prefixed
+     * tags at parse.  An override set here would never be consumed and
+     * would leak into the next IRCv3-aware emission with a stale
+     * sessid pointed at an unrelated client. */
     sendcmdto_one(user->server, CMD_NICK, peer,
                   "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
                   cli_name(cli), cli_hopcount(cli) + 1,
@@ -2706,6 +2739,11 @@ void bounce_burst(struct Client *cptr)
   struct BouncerSession *s;
   char chanbuf[512];
 
+  /* BS / BX are IRCv3-aware extensions — legacy peers (X3, vanilla ircu)
+   * log PARSE ERROR on receipt.  No-op burst for non-aware peers. */
+  if (!IsIRCv3Aware(cptr))
+    return;
+
   /* No gate check — sessions may exist via CRFLAG_BOUNCER class even when
    * the global bouncer feature is off.  Empty hash = no-op loop. */
 
@@ -3118,6 +3156,24 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
           ircd_strncpy(local->hs_sessid, sessid,
                        sizeof(local->hs_sessid) - 1);
           local->hs_sessid[sizeof(local->hs_sessid) - 1] = '\0';
+          /* Keep cli_session_id of the bound primary in sync with the
+           * renamed bouncer sessid — they must agree post-convergence.
+           * Aliases are tracked in hs_aliases[] which records numerics
+           * rather than Client pointers; this resolves each alias's
+           * Client and updates its cli_session_id in lockstep. */
+          if (local->hs_client && IsUser(local->hs_client))
+            ircd_strncpy(cli_session_id(local->hs_client), sessid,
+                         S2S_SESSID_BUFSIZE);
+          {
+            int ai;
+            for (ai = 0; ai < local->hs_alias_count; ai++) {
+              struct Client *al =
+                findNUser(local->hs_aliases[ai].ba_numeric);
+              if (al && IsUser(al))
+                ircd_strncpy(cli_session_id(al), sessid,
+                             S2S_SESSID_BUFSIZE);
+            }
+          }
           /* Re-persist under new sessid if we still hold it locally. */
           if (session_has_local_holder(local))
             bounce_db_put(local);
@@ -5610,6 +5666,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
   ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
 
+  /* Inherit the session's sessid so this alias's cli_session_id agrees
+   * with the primary's and with the bouncer session record.  Supersedes
+   * the freshly-minted value from make_client. */
+  ircd_strncpy(cli_session_id(sptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
+
   /* --- Step 3: Set alias flags --- */
   SetBouncerAlias(sptr);
   SetUser(sptr);
@@ -5915,6 +5976,9 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
     ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
     ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+    /* Inherit the session's sessid so this alias's cli_session_id
+     * agrees with the primary's and with the bouncer session record. */
+    ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
     SetBouncerAlias(alias);
     if (IsHiddenHost(primary))
       SetHiddenHost(alias);
@@ -5949,6 +6013,13 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
   ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
   ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+
+  /* Inherit the session's sessid so this alias's cli_session_id agrees
+   * with the primary's and with the bouncer session record.  Remote
+   * aliases share the alias_server's Connection (from != NULL path in
+   * make_client), so cli_session_id was not minted at allocation — we
+   * populate it explicitly from the BX C-announced sessid here. */
+  ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
 
   /* Register in P10 numeric space — NOT in nick hash */
   SetRemoteNumNick(alias, alias_numeric);
@@ -7470,14 +7541,39 @@ struct BouncerSession *bounce_find_any_session(const char *account)
  */
 void bounce_set_n_sessid_hint(struct Client *cptr)
 {
-  struct BouncerSession *sess;
-
-  if (!cptr || !IsAccount(cptr))
+  if (!cptr || !IsUser(cptr))
     return;
 
-  sess = bounce_get_session(cptr);
-  if (sess && sess->hs_sessid[0])
-    sendcmdto_set_s2s_sessid(sess->hs_sessid);
+  /* Use the unified per-Client session ID populated at make_client.
+   * After Phase A this is always non-empty for clients that went
+   * through make_client — bouncer-attached clients hold hs_sessid here,
+   * non-bouncer authed clients hold their locally-minted sessid,
+   * ephemerals hold their locally-minted sessid.  When we relay an N
+   * for a client whose origin server sent ,S (bouncer-aware peer),
+   * format_s2s_tags_with_client prefers cli_s2s_sessid over this
+   * override — so this fallback only fires when the upstream didn't
+   * carry a sessid (legacy peer, or non-bouncer client before this
+   * generalization), letting our minted value propagate downstream. */
+  if (cli_session_id(cptr)[0])
+    sendcmdto_set_s2s_sessid(cli_session_id(cptr));
+}
+
+/** Purge per-Client ephemeral session-scoped state on exit.
+ *
+ * See bouncer_session.h for the contract.  Skeleton in Phase A — no
+ * consumers yet.  Subsequent phases will dispatch into:
+ *   - chathistory_ephemeral_purge(cli)  (Phase C)
+ *   - readmarker_ephemeral_purge(cli)   (Phase E)
+ *
+ * METADATA state is keyed by Client* (cli_metadata) and freed alongside
+ * the Client struct itself, so no explicit purge hook is needed there.
+ */
+void ephemeral_purge_session(struct Client *cli)
+{
+  if (!cli || !IsUser(cli))
+    return;
+  /* TODO Phase C: chathistory_ephemeral_purge(cli); */
+  /* TODO Phase E: readmarker_ephemeral_purge(cli);  */
 }
 
 /** Record per-connection activity for bouncer-aware tiebreaking.

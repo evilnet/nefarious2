@@ -59,9 +59,11 @@ struct Listener;
 
 /** Maximum length of a bouncer session token (base64). */
 #define BOUNCER_TOKEN_LEN       64
-/** Maximum length of a session ID.  v8: hyphenated UUID v7
- * (36 chars + null + slack).  v7 used "XX-NNNNN" form (shorter, but
- * server-prefixed — replaced for global uniqueness per redesign A.1). */
+/** Maximum length of a session ID.  Current: 22-char base64 of UUID v7
+ * raw bytes (22 chars + null + slack).  Buffer is sized to also fit the
+ * legacy 36-char hyphenated form so old persisted records load without
+ * truncation.  v7 used "XX-NNNNN" (server-prefixed — replaced for
+ * global uniqueness per redesign A.1). */
 #define BOUNCER_SESSID_LEN      40
 /** Maximum length of a session ID in the v7 on-disk format ("XX-NNNNN").
  * Used only by the historical-record migration path.  Do not use for
@@ -117,7 +119,7 @@ struct BounceSessionAliasRecord {
 /** On-disk representation of a bouncer session for persistence.
  * Fixed-width, versioned. All IRC identifiers have known max lengths.
  *
- * Per redesign A.1: bsr_sessid is now a UUID v7 (hyphenated form).
+ * Per redesign A.1: bsr_sessid is a UUID v7 (22-char base64 of raw bytes).
  * Per redesign B.1: bsr_last_active is the PRIMARY's last-active
  *   (per-connection split — alias values live in bsr_aliases[]).
  * Per redesign B.2 + B.6: bsr_aliases[] persists the alias roster
@@ -279,7 +281,7 @@ struct BouncerSession {
   struct BouncerSession **hs_aprev_p; /**< Prev pointer for O(1) removal */
 
   char hs_account[ACCOUNTLEN + 1];    /**< Owning account name */
-  char hs_sessid[BOUNCER_SESSID_LEN]; /**< Session ID (UUID v7 hyphenated form, v8+) */
+  char hs_sessid[BOUNCER_SESSID_LEN]; /**< Session ID — 22-char base64 of UUID v7 raw bytes (no padding) */
   char hs_token[BOUNCER_TOKEN_LEN+1]; /**< Session token (base64) */
   char hs_name[BOUNCER_NAME_LEN];     /**< User-assigned name */
 
@@ -555,6 +557,32 @@ extern void bounce_destroy(struct BouncerSession *session);
  * @param[in] cptr Client about to be N-introduced.
  */
 extern void bounce_set_n_sessid_hint(struct Client *cptr);
+
+/** Generate a UUID v7 session ID and write its 22-char base64 form
+ * (followed by nul) to @a buf.  Exposed so list.c can mint a per-Client
+ * session ID at make_client time; bouncer-session adoption reuses the
+ * Client's value rather than minting independently.
+ *
+ * @param[out] buf Buffer of at least 23 bytes (typically sized to
+ *                 BOUNCER_SESSID_LEN / S2S_SESSID_BUFSIZE).
+ */
+extern void generate_sessid(char *buf);
+
+/** Purge per-Client ephemeral session-scoped state on exit.
+ *
+ * Hook called once from exit_one_client() during teardown.  Ephemeral
+ * subsystems (CHATHISTORY PM ring, READ_MARKER session table, etc.)
+ * each register their cleanup here as those phases land.  Bouncer-
+ * backed clients have their persistent state owned by the bouncer
+ * record; each subsystem short-circuits in that case based on its
+ * own key.
+ *
+ * Skeleton in Phase A — no consumers yet.  Phases C / D / E fill in
+ * the dispatched calls.
+ *
+ * @param[in] cli Client being exited.
+ */
+extern void ephemeral_purge_session(struct Client *cli);
 
 /** Record per-connection activity for bouncer-aware tiebreaking.
  *

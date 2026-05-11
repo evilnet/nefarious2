@@ -388,10 +388,14 @@ int server_finish_burst(struct Client *cptr)
       }
 
       /* Per redesign A.2: stage the bouncer session-id hint for the
-       * outgoing N's ,S compact-tag segment.  No-op for non-bouncer
-       * clients.  Bouncer-aware peers parse it for at-N-time
-       * convergence dispatch in m_nick. */
-      bounce_set_n_sessid_hint(acptr);
+       * outgoing N's ,S compact-tag segment, so bouncer-aware peers
+       * can dispatch at-N-time convergence in m_nick.  Gated on
+       * IsIRCv3Aware because the override is a one-shot global cleared
+       * by format_s2s_tags_with_client — legacy peers don't reach that
+       * codepath, so the override would persist into a subsequent
+       * unrelated IRCv3-aware emit with a stale sessid. */
+      if (IsIRCv3Aware(cptr))
+        bounce_set_n_sessid_hint(acptr);
       sendcmdto_one(cli_user(acptr)->server, CMD_NICK, cptr,
 		    "%s %d %Tu %s %s %s%s%s%s %s%s :%s",
 		    cli_name(acptr), cli_hopcount(acptr) + 1, cli_lastnick(acptr),
