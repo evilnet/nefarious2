@@ -26,6 +26,7 @@
 
 #include "bouncer_session.h"
 #include "chathistory_presence.h"
+#include "session_markread.h"
 #include "IPcheck.h"
 #include "capab.h"
 #include "channel.h"
@@ -7677,10 +7678,11 @@ void ephemeral_purge_session(struct Client *cli)
 {
   if (!cli || !IsUser(cli))
     return;
-  if (cli_session_id(cli)[0])
+  if (cli_session_id(cli)[0]) {
     presence_purge_session(cli_session_id(cli));
+    readmarker_ephemeral_purge(cli_session_id(cli));
+  }
   /* TODO Phase C: chathistory_ephemeral_purge(cli); */
-  /* TODO Phase E: readmarker_ephemeral_purge(cli);  */
 }
 
 /** Record per-connection activity for bouncer-aware tiebreaking.

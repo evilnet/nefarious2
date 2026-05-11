@@ -36,11 +36,13 @@
 #include "config.h"
 
 #include "capab.h"
+#include "channel.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"
 #include "metadata.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -51,12 +53,127 @@
 #include "numnicks.h"
 #include "s_user.h"
 #include "send.h"
+#include "session_markread.h"
 
 #include <string.h>
 #include <stdlib.h>
 
 /** Maximum timestamp length */
 #define MARKREAD_TS_LEN 32
+
+/* ---------------------------------------------------------------- */
+/* Session-anchored (ephemeral) read-marker store                    */
+/* ---------------------------------------------------------------- */
+/* Ephemeral clients (no account) can still use MARKREAD; their
+ * markers live in this in-memory hash keyed on (session_id, target).
+ * No persistence, no S2S broadcast — the markers disappear with the
+ * session.  Account-anchored markers continue through the existing
+ * metadata_readmarker_* path (LMDB-persisted, S2S-broadcast via MR).
+ *
+ * Same shape as the chathistory_presence session store: small fixed
+ * bucket array, chained collisions, FNV-1a hash.  Bounded by the
+ * number of ephemeral clients currently connected times the number
+ * of targets each has marked. */
+
+#define SESSION_MR_HASH_BITS 10
+#define SESSION_MR_HASH_SIZE (1u << SESSION_MR_HASH_BITS)
+#define SESSION_MR_HASH_MASK (SESSION_MR_HASH_SIZE - 1u)
+
+struct session_markread_entry {
+  struct session_markread_entry *hnext;
+  char session_id[S2S_SESSID_BUFSIZE];
+  char target[CHANNELLEN + 1];
+  char timestamp[MARKREAD_TS_LEN];
+};
+
+static struct session_markread_entry *sm_buckets[SESSION_MR_HASH_SIZE];
+
+static unsigned int sm_hash(const char *session_id, const char *target)
+{
+  unsigned int h = 2166136261u;
+  const char *p;
+  for (p = session_id; *p; p++) {
+    h ^= (unsigned char)*p;
+    h *= 16777619u;
+  }
+  h ^= 0;
+  h *= 16777619u;
+  for (p = target; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    h ^= c;
+    h *= 16777619u;
+  }
+  return h & SESSION_MR_HASH_MASK;
+}
+
+static struct session_markread_entry *
+sm_find(const char *session_id, const char *target)
+{
+  unsigned int b = sm_hash(session_id, target);
+  struct session_markread_entry *e;
+  for (e = sm_buckets[b]; e; e = e->hnext) {
+    if (0 == strcmp(e->session_id, session_id)
+        && 0 == ircd_strcmp(e->target, target))
+      return e;
+  }
+  return NULL;
+}
+
+/** Store @a timestamp for (session_id, target).  Returns 0 if the
+ *  marker was newer than (or absent from) the existing value and was
+ *  stored, 1 if the existing value was >= new and nothing changed.
+ *  Mirrors metadata_readmarker_set's "only update if newer" semantics
+ *  on the client-facing path. */
+static int session_markread_set(const char *session_id, const char *target,
+                                 const char *timestamp)
+{
+  struct session_markread_entry *e = sm_find(session_id, target);
+  if (e) {
+    if (strcmp(timestamp, e->timestamp) <= 0)
+      return 1;
+  } else {
+    unsigned int b = sm_hash(session_id, target);
+    e = (struct session_markread_entry *)MyCalloc(1, sizeof(*e));
+    ircd_strncpy(e->session_id, session_id, sizeof(e->session_id));
+    ircd_strncpy(e->target, target, sizeof(e->target));
+    e->hnext = sm_buckets[b];
+    sm_buckets[b] = e;
+  }
+  ircd_strncpy(e->timestamp, timestamp, sizeof(e->timestamp));
+  return 0;
+}
+
+/** Retrieve the marker for (session_id, target).  Returns 0 on found
+ *  (fills @a out_ts), 1 on not found. */
+static int session_markread_get(const char *session_id, const char *target,
+                                 char *out_ts)
+{
+  struct session_markread_entry *e = sm_find(session_id, target);
+  if (!e)
+    return 1;
+  ircd_strncpy(out_ts, e->timestamp, MARKREAD_TS_LEN);
+  return 0;
+}
+
+void readmarker_ephemeral_purge(const char *session_id)
+{
+  unsigned int i;
+  if (!session_id || !*session_id)
+    return;
+  for (i = 0; i < SESSION_MR_HASH_SIZE; i++) {
+    struct session_markread_entry **pp = &sm_buckets[i];
+    while (*pp) {
+      if (0 == strcmp((*pp)->session_id, session_id)) {
+        struct session_markread_entry *doomed = *pp;
+        *pp = doomed->hnext;
+        MyFree(doomed);
+      } else {
+        pp = &(*pp)->hnext;
+      }
+    }
+  }
+}
 
 /** Parse timestamp= parameter from client argument.
  * Extracts ISO 8601 timestamp and converts to Unix timestamp for internal use.
@@ -171,20 +288,30 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   char timestamp[MARKREAD_TS_LEN];
   char stored_ts[MARKREAD_TS_LEN];
   int rc;
+  int is_session;   /* 0 = account-anchored (LMDB + S2S); 1 = ephemeral (in-memory) */
 
   /* Must have draft/read-marker capability */
   if (!CapActive(sptr, CAP_DRAFT_READMARKER)) {
     return send_reply(sptr, ERR_UNKNOWNCOMMAND, "MARKREAD");
   }
 
-  /* Must be logged in */
-  if (!cli_user(sptr) || !cli_user(sptr)->account[0]) {
+  /* Resolve the anchor: account if authed, else session_id.  Ephemeral
+   * markers use an in-memory store and don't broadcast S2S; account
+   * markers use the persistent metadata-LMDB path with MR broadcast.
+   * is_session toggles between the two paths in the SET/GET blocks
+   * below. */
+  if (cli_user(sptr) && cli_user(sptr)->account[0]) {
+    account = cli_user(sptr)->account;
+    is_session = 0;
+  } else if (cli_session_id(sptr)[0]) {
+    account = cli_session_id(sptr);
+    is_session = 1;
+  } else {
     send_fail(sptr, "MARKREAD", "ACCOUNT_REQUIRED", NULL,
-              "You must be logged in to use MARKREAD");
+              "MARKREAD requires either an authenticated account or "
+              "a session ID");
     return 0;
   }
-
-  account = cli_user(sptr)->account;
 
   /* Need at least target */
   if (parc < 2 || EmptyString(parv[1])) {
@@ -205,51 +332,80 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
-    /* SET operation: store in metadata LMDB and broadcast to other servers */
-    if (!metadata_lmdb_is_available()) {
-      send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
-                "Read marker storage is not available");
-      return 0;
+    /* SET operation.  Ephemeral path: in-memory session store, no
+     * persistence, no S2S broadcast (session_id is local-only).
+     * Account path: LMDB + MR broadcast as before. */
+    if (is_session) {
+      rc = session_markread_set(account, target, timestamp);
+      if (rc == 0) {
+        /* Newer timestamp accepted — notify owning client only.
+         * Other servers don't know about this session, so no
+         * sendcmdto_serv_butone.  notify_local_clients walks every
+         * local client matching the account; for session anchors the
+         * "account" key is the session_id and no other Client shares
+         * it, so the notify naturally hits just sptr. */
+        notify_local_clients(account, target, timestamp);
+      } else if (rc == 1) {
+        /* Not newer — echo current stored value. */
+        if (session_markread_get(account, target, stored_ts) == 0)
+          send_markread(sptr, target, stored_ts);
+        else
+          send_markread(sptr, target, timestamp);
+      }
+    } else {
+      if (!metadata_lmdb_is_available()) {
+        send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
+                  "Read marker storage is not available");
+        return 0;
+      }
+
+      rc = metadata_readmarker_set(account, target, timestamp);
+      if (rc == 0) {
+        /* Successfully updated - notify local clients and broadcast */
+        notify_local_clients(account, target, timestamp);
+
+        /* Broadcast to other servers: MR <account> <target> <timestamp> */
+        sendcmdto_serv_butone_v3(&me, CMD_MARKREAD, cptr, "%s %s %s",
+                              account, target, timestamp);
+      } else if (rc == 1) {
+        /* Timestamp was not newer - respond with current stored value */
+        rc = metadata_readmarker_get(account, target, stored_ts);
+        if (rc == 0) {
+          send_markread(sptr, target, stored_ts);
+        } else {
+          send_markread(sptr, target, timestamp);
+        }
+      } else {
+        /* Error storing */
+        send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
+                  "Could not store read marker");
+      }
     }
+  } else {
+    /* GET operation.  Same anchor-dispatch as SET. */
+    if (is_session) {
+      rc = session_markread_get(account, target, stored_ts);
+      if (rc == 0)
+        send_markread(sptr, target, stored_ts);
+      else
+        send_markread(sptr, target, "*");
+    } else {
+      if (!metadata_lmdb_is_available()) {
+        send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
+                  "Read marker storage is not available");
+        return 0;
+      }
 
-    rc = metadata_readmarker_set(account, target, timestamp);
-    if (rc == 0) {
-      /* Successfully updated - notify local clients and broadcast */
-      notify_local_clients(account, target, timestamp);
-
-      /* Broadcast to other servers: MR <account> <target> <timestamp> */
-      sendcmdto_serv_butone_v3(&me, CMD_MARKREAD, cptr, "%s %s %s",
-                            account, target, timestamp);
-    } else if (rc == 1) {
-      /* Timestamp was not newer - respond with current stored value */
       rc = metadata_readmarker_get(account, target, stored_ts);
       if (rc == 0) {
         send_markread(sptr, target, stored_ts);
+      } else if (rc == 1) {
+        /* Not found - send "*" */
+        send_markread(sptr, target, "*");
       } else {
-        send_markread(sptr, target, timestamp);
+        send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
+                  "Could not retrieve read marker");
       }
-    } else {
-      /* Error storing */
-      send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
-                "Could not store read marker");
-    }
-  } else {
-    /* GET operation: query current timestamp from metadata LMDB */
-    if (!metadata_lmdb_is_available()) {
-      send_fail(sptr, "MARKREAD", "TEMPORARILY_UNAVAILABLE", target,
-                "Read marker storage is not available");
-      return 0;
-    }
-
-    rc = metadata_readmarker_get(account, target, stored_ts);
-    if (rc == 0) {
-      send_markread(sptr, target, stored_ts);
-    } else if (rc == 1) {
-      /* Not found - send "*" */
-      send_markread(sptr, target, "*");
-    } else {
-      send_fail(sptr, "MARKREAD", "INTERNAL_ERROR", target,
-                "Could not retrieve read marker");
     }
   }
 

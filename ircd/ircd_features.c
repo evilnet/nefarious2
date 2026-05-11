@@ -1096,7 +1096,7 @@ static struct FeatureDesc {
   F_I(REDACT_OPER_WINDOW, 0, 0, 0),
   F_B(REDACT_CHANOP_OTHERS, 0, 1, 0),
   F_I(CHATHISTORY_MAX, 0, 100, feature_notify_chathistory_caps),
-  F_B(CHATHISTORY_PRIVATE, 0, 0, feature_notify_chathistory_caps),
+  F_B(CHATHISTORY_PRIVATE, 0, 1, feature_notify_chathistory_caps),
   F_S(CHATHISTORY_DB, 0, "history", 0),
   F_B(CHATHISTORY_DB_AUTOGROW, 0, 1, 0),
   F_I(CHATHISTORY_DB_GROWTH_STEP, 0, 16777216, 0),  /* 16MB default growth step */
@@ -1118,7 +1118,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_OPS_OVERRIDE, 0, 1, 0),
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
-  F_B(CHATHISTORY_REQUIRE_AUTH, 0, 1, 0),   /* Require auth for channel history (non-+H) */
+  F_B(CHATHISTORY_REQUIRE_AUTH, 0, 0, 0),   /* Require auth for channel history (non-+H) — default off so unauthed/ephemeral clients can use CHATHISTORY out of the box; Afternet sets this to 1 in ircd.conf */
   F_B(CHATHISTORY_STRICT_PRESENCE, 0, 0, 0), /* Filter chathistory to caller's presence windows (strict mode) */
   F_I(MULTILINE_MAX_BYTES, 0, 16384, feature_notify_multiline),
   F_I(MULTILINE_MAX_LINES, 0, 100, feature_notify_multiline),

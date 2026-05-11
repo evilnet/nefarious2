@@ -261,8 +261,14 @@ static int has_pm_optout(struct Client *cptr)
  */
 static int should_store_pm(struct Client *sender, struct Client *recipient)
 {
-  /* Both must have accounts */
-  if (!IsAccount(sender) || !IsAccount(recipient))
+  /* At least one party must have an account.  LMDB persistence uses the
+   * account as the anchor, so a fully-ephemeral pair has no durable
+   * identity to key against — storage is skipped (a session-anchored
+   * in-memory ring for ephemeral↔ephemeral PMs is on the deferred list).
+   * Ephemeral↔account conversations are stored under the account's
+   * anchor and remain queryable from both sides via the canonical
+   * nick1:nick2 pair-key. */
+  if (!IsAccount(sender) && !IsAccount(recipient))
     return 0;
 
   /* Check opt-out */
@@ -302,8 +308,10 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   if (!feature_bool(FEAT_CHATHISTORY_PRIVATE))
     return;
 
-  /* Policy check: both must have accounts (no gap marker — not opt-out) */
-  if (!IsAccount(sptr) || !IsAccount(acptr))
+  /* Policy check: at least one party must have an account (the storage
+   * anchor) — fully-ephemeral pairs are skipped here (no gap marker).
+   * Mirrors should_store_pm's relaxed gate. */
+  if (!IsAccount(sptr) && !IsAccount(acptr))
     return;
 
   /* Build sender string: nick!user@host (needed for gap markers below) */
