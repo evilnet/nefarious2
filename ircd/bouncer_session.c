@@ -3540,6 +3540,12 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
  * @param[in] session Session whose primary is departing.
  * @return 0 on success, -1 if no aliases available.
  */
+/* Forward decl — definition is further down, alongside the umode-sync
+ * helpers it groups with logically.  Used here by the promote path
+ * to re-grant oper to the new primary. */
+static void bounce_apply_oper_grant(struct Client *cptr,
+                                     struct BouncerSession *sess);
+
 int bounce_promote_alias(struct BouncerSession *session)
 {
   int j, k;
@@ -3701,6 +3707,14 @@ int bounce_promote_alias(struct BouncerSession *session)
      * a ghost on restart, causing a nick collision on link. */
     if (we_were_holding_primary && !session_has_local_holder(session))
       bounce_db_del(session->hs_sessid);
+    /* If the session has an oper grant and the new primary isn't yet
+     * opered (e.g. alias predated the grant, or grant survived a
+     * primary-disconnect-and-cleanup gap), re-grant from the local
+     * O:line matching hs_oper_name.  No-op when the alias is already
+     * opered (Step 1's sync helper kept it in lockstep) or when the
+     * new primary is remote (the remote server runs its own grant
+     * recovery against its own O:line config). */
+    bounce_apply_oper_grant(alias, session);
   }
 
   /* A2: Update remaining aliases' alias_primary to point to new primary.
@@ -5297,41 +5311,130 @@ static void bounce_copy_umodes(struct Client *from, struct Client *to)
   }
 }
 
-/** Synchronize user mode flags from the primary to all its aliases.
- * Call after any mode change on the primary.
- * @param[in] primary The primary client whose modes changed.
- */
-void bounce_sync_alias_umodes(struct Client *primary)
+/** Look up the global O:line config item by name (CONF_OPERATOR only).
+ * Returns NULL if no matching opername is configured locally.  Used by
+ * the session-grant restoration path on alias promotion: when the new
+ * primary inherits IsOper from the session's hs_oper_grant, we re-apply
+ * privs/snomask/handler from the local O:line keyed by the stored
+ * opername.  This is a simpler lookup than find_conf_exact() because
+ * we trust the grant — no host/password verification is needed; the
+ * grant came from an earlier successful /OPER on a session member. */
+static struct ConfItem *find_oper_conf_by_name(const char *opername)
+{
+  struct ConfItem *aconf;
+  if (!opername || !*opername)
+    return NULL;
+  for (aconf = GlobalConfList; aconf; aconf = aconf->next) {
+    if ((aconf->status & CONF_OPERATOR) && aconf->name
+        && 0 == strcmp(aconf->name, opername))
+      return aconf;
+  }
+  return NULL;
+}
+
+/** Re-apply the session's oper grant to @a cptr, which has just become
+ * a local primary (via promote or revival).  No-op if the session has
+ * no grant, @a cptr isn't local, or no local O:line matches the grant
+ * opername (config may have changed since the grant was made — fail
+ * open: the new primary stays non-oper, the session retains the grant
+ * for any future server that does have a matching O:line). */
+static void bounce_apply_oper_grant(struct Client *cptr,
+                                     struct BouncerSession *sess)
+{
+  struct ConfItem *aconf;
+  if (!cptr || !sess || !MyConnect(cptr) || !IsUser(cptr))
+    return;
+  if (!sess->hs_oper_name[0])
+    return;
+  if (IsOper(cptr))
+    return;   /* already opered — sync path will have populated privs */
+  aconf = find_oper_conf_by_name(sess->hs_oper_name);
+  if (!aconf)
+    return;
+  client_set_privs(cptr, aconf);
+  if (HasPriv(cptr, PRIV_PROPAGATE)) {
+    SetOper(cptr);
+    if (HasPriv(cptr, PRIV_ADMIN))
+      SetAdmin(cptr);
+  } else {
+    SetLocOp(cptr);
+  }
+  cli_handler(cptr) = OPER_HANDLER;
+  if (cli_user(cptr)) {
+    if (cli_user(cptr)->opername)
+      MyFree(cli_user(cptr)->opername);
+    DupString(cli_user(cptr)->opername, sess->hs_oper_name);
+  }
+}
+
+/** Sync umode (and oper privileges, handler, snomask) across all
+ * members of @a source's bouncer session, treating @a source as the
+ * canonical state.  Used by /OPER, /DEOPER, and the general
+ * umode-change paths so that flag changes on any one connection of a
+ * session propagate to the primary and sibling aliases.
+ *
+ * The earlier `bounce_sync_alias_umodes` assumed the caller was the
+ * primary and short-circuited when the caller was a bouncer alias —
+ * which meant /OPER on an alias never reached the primary or sibling
+ * aliases.  Now any session member can be the source; the function
+ * walks primary + alias_count and propagates from source to all
+ * others.
+ *
+ * Cross-server BX K (snomask) emission is gated on IsIRCv3Aware:
+ * legacy peers don't see bouncer aliases at all, and BX is a v3
+ * extension; emitting to legacy would be wasted bytes at best and a
+ * misrouted command at worst. */
+void bounce_sync_session_umodes(struct Client *source)
 {
   struct BouncerSession *sess;
+  struct Client *primary;
   int i;
 
-  if (!IsUser(primary) || IsBouncerAlias(primary))
+  if (!source || !IsUser(source))
     return;
 
-  sess = bounce_get_session(primary);
-  if (!sess || sess->hs_alias_count <= 0)
+  sess = bounce_get_session(source);
+  if (!sess)
     return;
 
+  primary = sess->hs_client;
+
+  /* Apply source's umode/privs/snomask to one target Client.  Self
+   * (source == target) is skipped — bounce_copy_umodes would be wasted
+   * work. */
+#define APPLY_TO(target) do {                                              \
+  struct Client *_t = (target);                                            \
+  if (_t && _t != source && IsUser(_t)) {                                  \
+    bounce_copy_umodes(source, _t);                                        \
+    if (MyConnect(_t)) {                                                   \
+      if (IsOper(source)) {                                                \
+        memcpy(&cli_privs(_t), &cli_privs(source), sizeof(cli_privs(_t))); \
+        cli_handler(_t) = OPER_HANDLER;                                    \
+      }                                                                    \
+      set_snomask(_t, cli_snomask(source), SNO_SET);                       \
+    } else {                                                               \
+      struct Client *_peer = cli_from(_t);                                 \
+      if (_peer && IsServer(_peer) && IsIRCv3Aware(_peer)) {               \
+        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, _t,                       \
+                      "K %s %u", cli_yxx(_t),                              \
+                      cli_snomask(source));                                \
+      }                                                                    \
+    }                                                                      \
+  }                                                                        \
+} while (0)
+
+  /* Primary covers the case where source is an alias.  When source IS
+   * the primary, APPLY_TO short-circuits on source==target. */
+  APPLY_TO(primary);
+
+  /* Every alias except source. */
   for (i = 0; i < sess->hs_alias_count; i++) {
     struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
-    if (alias && IsBouncerAlias(alias)) {
-      bounce_copy_umodes(primary, alias);
-      if (MyConnect(alias)) {
-        /* Local alias: sync oper privileges, handler, and snomask directly */
-        if (IsOper(primary)) {
-          memcpy(&cli_privs(alias), &cli_privs(primary), sizeof(cli_privs(alias)));
-          cli_handler(alias) = OPER_HANDLER;
-        }
-        set_snomask(alias, cli_snomask(primary), SNO_SET);
-      } else {
-        /* Remote alias: tell its server to set snomask via BX K */
-        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, alias,
-                      "K %s %u", sess->hs_aliases[i].ba_numeric,
-                      cli_snomask(primary));
-      }
-    }
+    if (alias && IsBouncerAlias(alias))
+      APPLY_TO(alias);
   }
+
+#undef APPLY_TO
 }
 
 /* ---------------------------------------------------------------- */

@@ -269,9 +269,23 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
     }
   }
 
-  /* Sync oper mode flags to all aliases of this primary.
-   * Must be after all mode and ConfUmode changes are applied. */
-  bounce_sync_alias_umodes(sptr);
+  /* Record the oper grant on the session record so the state survives
+   * primary changes (promote/demote) and server restart.  No-op for
+   * clients without a bouncer session (oper without an account). */
+  {
+    struct BouncerSession *sess = bounce_get_session(sptr);
+    if (sess) {
+      ircd_strncpy(sess->hs_oper_name, aconf->name,
+                   sizeof(sess->hs_oper_name));
+      sess->hs_oper_granted_at = CurrentTime;
+      sess->hs_dirty = 1;
+    }
+  }
+
+  /* Sync oper mode flags across all members of this client's bouncer
+   * session — handles /OPER on alias as well as on primary.  Must be
+   * after all mode and ConfUmode changes are applied. */
+  bounce_sync_session_umodes(sptr);
 
   send_reply(sptr, RPL_YOUREOPER);
 

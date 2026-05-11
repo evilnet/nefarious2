@@ -1907,7 +1907,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
                 }
               }
             }
-            bounce_sync_alias_umodes(acptr);
+            bounce_sync_session_umodes(acptr);
           }
         }
 
@@ -1991,6 +1991,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         if (what == MODE_ADD)
           SetOper(acptr);
         else {
+          struct BouncerSession *_oper_sess;
           ClrFlag(acptr, FLAG_OPER);
           ClrFlag(acptr, FLAG_LOCOP);
           ClrFlag(acptr, FLAG_ADMIN);
@@ -2002,6 +2003,16 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
             if (MyUser(acptr))
               cli_handler(acptr) = CLIENT_HANDLER;
           }
+          /* Clear the session-level oper grant.  Mirrors the do_oper
+           * grant-set: state survives across primary changes, so we
+           * must explicitly clear it on /DEOPER so a subsequent
+           * promote/demote/revival doesn't re-grant. */
+          _oper_sess = bounce_get_session(acptr);
+          if (_oper_sess && _oper_sess->hs_oper_name[0]) {
+            _oper_sess->hs_oper_name[0] = '\0';
+            _oper_sess->hs_oper_granted_at = 0;
+            _oper_sess->hs_dirty = 1;
+          }
         }
         break;
       case 'O':
@@ -2009,6 +2020,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetLocOp(acptr);
         else
         {
+          struct BouncerSession *_oper_sess;
           ClrFlag(acptr, FLAG_OPER);
           ClrFlag(acptr, FLAG_LOCOP);
           ClrFlag(acptr, FLAG_OPERED_LOCAL);
@@ -2018,6 +2030,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
             tmpmask = cli_snomask(acptr) & ~SNO_OPER;
             if (MyUser(acptr))
               cli_handler(acptr) = CLIENT_HANDLER;
+          }
+          _oper_sess = bounce_get_session(acptr);
+          if (_oper_sess && _oper_sess->hs_oper_name[0]) {
+            _oper_sess->hs_oper_name[0] = '\0';
+            _oper_sess->hs_oper_granted_at = 0;
+            _oper_sess->hs_dirty = 1;
           }
         }
         break;
@@ -2467,7 +2485,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
   /* Sync user mode flags to all aliases of this primary.
    * Must be after mode application so aliases reflect the new state. */
-  bounce_sync_alias_umodes(acptr);
+  bounce_sync_session_umodes(acptr);
 
   return 0;
 }

@@ -312,6 +312,16 @@ struct BouncerSession {
   int hs_effective_away;               /**< Last computed effective away: 0=present, 1=away, 2=all-star */
   char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */
 
+  /* Session-anchored oper state.  Set when any session member runs
+   * /OPER; cleared on /DEOPER.  Persisted in BounceSessionRecord so
+   * the grant survives restart, and applied to the new primary on
+   * revival / promote / demote.  The opername labels the grant for
+   * audit; the actual privs are derived per-server from the local
+   * O:line config at the time of inheritance.  Empty opername means
+   * the session is not opered. */
+  char hs_oper_name[NICKLEN + 1];
+  time_t hs_oper_granted_at;
+
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   int hs_restore_pending;             /**< Set in bounce_db_restore; cleared on first
                                            successful BX R reconciliation, on any client
@@ -493,7 +503,7 @@ extern void bounce_emit_alias_update(struct Client *primary,
  * Call after mode changes on the primary so aliases stay in sync.
  * @param[in] primary The primary client whose modes changed.
  */
-extern void bounce_sync_alias_umodes(struct Client *primary);
+extern void bounce_sync_session_umodes(struct Client *source);
 
 /** Echo an outgoing PM/NOTICE to all other members of the sender's session.
  * @param[in] sender  Client that sent the PM (primary or alias).
