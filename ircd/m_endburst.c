@@ -163,8 +163,10 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * Only advertise if we have CHATHISTORY_STORE enabled - this indicates we
      * actually store messages locally, not just handle queries.
      * The retention value tells the remote server how far back our history goes.
-     */
-    if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+     *
+     * Gate on IsIRCv3Aware(sptr) — legacy peers (X3, vanilla ircu) don't
+     * implement the CH token and log "PARSE ERROR" on receipt. */
+    if (feature_bool(FEAT_CHATHISTORY_STORE) && IsIRCv3Aware(sptr)) {
       int retention = feature_int(FEAT_CHATHISTORY_RETENTION);
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "A S %d", retention);
 

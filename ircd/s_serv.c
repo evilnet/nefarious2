@@ -221,12 +221,15 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   /* Bouncer sessions are burst AFTER client introduction (below) so that
    * BS A can resolve ghost numerics via findNUser(). */
 
-  /* Advertise multiline capability - legacy servers ignore, modern sets flag.
+  /* Advertise multiline capability — legacy servers (X3, vanilla ircu)
+   * log PARSE ERROR on ML.  Gate on IsIRCv3Aware(cptr).  Comment about
+   * "legacy servers ignore" was wrong: X3 explicitly errors on unknown
+   * tokens.
    * Also burst ML capability for all known ML-capable servers so that when
    * server C links to B after A already linked to B, C learns about A's
    * capability (not just B's).
    */
-  if (feature_bool(FEAT_CAP_draft_multiline)) {
+  if (feature_bool(FEAT_CAP_draft_multiline) && IsIRCv3Aware(cptr)) {
     struct Client *srv;
     sendcmdto_one(&me, CMD_MULTILINE, cptr, "%d %d",
                   feature_int(FEAT_MULTILINE_MAX_BYTES),
@@ -467,8 +470,9 @@ int server_finish_burst(struct Client *cptr)
 
       client_send_privs(cli_user(acptr)->server, cptr, acptr);
 
-      /* Burst user metadata if enabled */
-      if (feature_bool(FEAT_METADATA_BURST)) {
+      /* Burst user metadata if enabled.  MD is an IRCv3-aware extension —
+       * legacy peers (X3, vanilla ircu) log PARSE ERROR on receipt. */
+      if (feature_bool(FEAT_METADATA_BURST) && IsIRCv3Aware(cptr)) {
         struct MetadataEntry *entry;
         for (entry = cli_metadata(acptr); entry; entry = entry->next) {
           sendcmdto_one(cli_user(acptr)->server, CMD_METADATA, cptr, "%C %s %s :%s",
