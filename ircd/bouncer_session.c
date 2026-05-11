@@ -375,6 +375,38 @@ static void generate_token(char *buf)
   buf[BOUNCER_TOKEN_LEN] = '\0';
 }
 
+/** Test whether @a sessid is already in use locally — i.e. assigned to
+ * any active Client or persisted bouncer session record this server
+ * knows about.  Returns 1 on collision (don't mint this value), 0 if
+ * safe to use.  Called from generate_sessid()'s retry loop; cheap
+ * because session minting is rare.  See "UUID collision defense"
+ * comment on generate_sessid() for the threat model. */
+static int sessid_in_use_locally(const char *sessid)
+{
+  struct Client *acptr;
+
+  /* Active clients on this server's view of the network. */
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!IsUser(acptr) || !cli_session_id(acptr)[0])
+      continue;
+    if (0 == strcmp(cli_session_id(acptr), sessid))
+      return 1;
+  }
+
+  /* Persisted bouncer sessions (HOLDING records keyed by sessid).
+   * Catches the rare case of minting a value that collides with an
+   * existing offline session record. */
+  if (feature_bool(FEAT_BOUNCER_PERSIST) && metadata_lmdb_is_available()) {
+    struct db_env *env = metadata_get_env();
+    struct db_cf  *cf  = metadata_get_bouncer_cf();
+    if (env && cf
+        && db_exists(env, cf, sessid, strlen(sessid), NULL) == DB_OK)
+      return 1;
+  }
+
+  return 0;
+}
+
 /** Generate a UUID v7 (RFC 9562 §5.7) and write a compact 22-char
  * base64 encoding of its 16 raw bytes to @a buf.
  *
@@ -384,17 +416,47 @@ static void generate_token(char *buf)
  * No padding.  Alphabet: A-Z a-z 0-9 + / (standard base64, matches
  * generate_token() in this file).
  *
- * The raw bytes carry the standard UUID v7 layout:
+ * UUID v7 raw byte layout (per RFC 9562):
  *   - Bits   0..47: Unix timestamp in milliseconds (big-endian).
  *   - Bits  48..51: version = 0111 (7).
- *   - Bits  52..63: random.
+ *   - Bits  52..63: server numeric (12 bits — see "UUID collision
+ *                   defense" below).  RFC defines this as random;
+ *                   we substitute deterministic data without breaking
+ *                   uniqueness because the random space at bits 66+
+ *                   still dominates same-server collision probability.
  *   - Bits  64..65: variant = 10 (RFC 4122).
  *   - Bits  66..127: random.
  *
- * Per redesign A.1: globally unique session identity, server-independent.
- * Sortable by creation time via the timestamp prefix (the leading bytes
- * encode first in big-endian-emitted base64), useful for debugging
- * and audit.
+ * ## UUID collision defense
+ *
+ * "A UUID collision may be extremely unlikely, but it's never 0."  Two
+ * layers of defense:
+ *
+ *   1. **Cross-server determinism via embedded P10 server numeric.**
+ *      Bits 52..63 carry `cli_yxx(&me)` (the local server's 12-bit
+ *      P10 numeric, which is unique on the network by P10 design).
+ *      Two different servers can therefore *never* produce the same
+ *      UUID — their numerics differ, so the bit patterns differ.
+ *      This eliminates the entire cross-server collision vector,
+ *      not just makes it improbable.
+ *
+ *   2. **Same-server retry against an active+persisted collision
+ *      check.**  After encoding, sessid_in_use_locally() walks active
+ *      Clients and the bouncer-persist CF; on collision we regenerate.
+ *      The retry is bounded (8 attempts); a sustained collision implies
+ *      a broken RNG and we log loudly.  Same-server statistical
+ *      collision in 62 random bits is already astronomical (birthday
+ *      floor ≈ 2^31 same-ms mints) but this closes the residual gap.
+ *
+ * The "ephemeral sessid in chathistory record collides with future
+ * ephemeral mint" leak vector is *not* addressed here — it's
+ * structurally prevented by the policy invariant that ephemeral sessid
+ * is display-only and never an authorization key.  See
+ * project_chathistory_design_intent.md and the ephemeral plan.
+ *
+ * Per redesign A.1: globally unique session identity.  Sortable by
+ * creation time via the timestamp prefix (the leading bytes encode
+ * first in big-endian-emitted base64), useful for debugging and audit.
  *
  * @param[out] buf Buffer of at least 23 bytes (22 chars + nul).
  */
@@ -405,52 +467,76 @@ void generate_sessid(char *buf)
   struct timeval tv;
   int i, j;
   unsigned int triplet;
+  unsigned int retries = 0;
 
-  /* Get current time in milliseconds since the Unix epoch. */
-  gettimeofday(&tv, NULL);
-  ms = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
+  do {
+    /* Get current time in milliseconds since the Unix epoch. */
+    gettimeofday(&tv, NULL);
+    ms = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
 
-  /* Random fill — overwritten in the timestamp + version + variant
-   * positions below. */
+    /* Random fill — overwritten in the timestamp / version / numeric /
+     * variant positions below.  Bytes 8-15 retain 62 random bits after
+     * the 2-bit variant marker. */
 #ifdef USE_SSL
-  if (RAND_bytes(b, sizeof(b)) != 1) {
+    if (RAND_bytes(b, sizeof(b)) != 1) {
+      for (i = 0; i < (int)sizeof(b); i++)
+        b[i] = (unsigned char)(ircrandom() & 0xFF);
+    }
+#else
     for (i = 0; i < (int)sizeof(b); i++)
       b[i] = (unsigned char)(ircrandom() & 0xFF);
-  }
-#else
-  for (i = 0; i < (int)sizeof(b); i++)
-    b[i] = (unsigned char)(ircrandom() & 0xFF);
 #endif
 
-  /* Timestamp: 48 bits big-endian into bytes 0-5. */
-  b[0] = (unsigned char)((ms >> 40) & 0xFF);
-  b[1] = (unsigned char)((ms >> 32) & 0xFF);
-  b[2] = (unsigned char)((ms >> 24) & 0xFF);
-  b[3] = (unsigned char)((ms >> 16) & 0xFF);
-  b[4] = (unsigned char)((ms >> 8) & 0xFF);
-  b[5] = (unsigned char)(ms & 0xFF);
+    /* Timestamp: 48 bits big-endian into bytes 0-5. */
+    b[0] = (unsigned char)((ms >> 40) & 0xFF);
+    b[1] = (unsigned char)((ms >> 32) & 0xFF);
+    b[2] = (unsigned char)((ms >> 24) & 0xFF);
+    b[3] = (unsigned char)((ms >> 16) & 0xFF);
+    b[4] = (unsigned char)((ms >> 8) & 0xFF);
+    b[5] = (unsigned char)(ms & 0xFF);
 
-  /* Version 7: high nibble of byte 6 is 0111. */
-  b[6] = (unsigned char)(0x70 | (b[6] & 0x0F));
+    /* Version 7 in high nibble of byte 6 + 12-bit server numeric in
+     * low nibble of byte 6 (top 4 bits of numeric) + byte 7 (bottom
+     * 8 bits of numeric).  This is what guarantees deterministic
+     * cross-server uniqueness — see function comment. */
+    {
+      const char *yxx = cli_yxx(&me);
+      unsigned int numeric =
+          (yxx && yxx[0] && yxx[1]) ? base64toint(yxx) : 0;
+      b[6] = (unsigned char)(0x70 | ((numeric >> 8) & 0x0F));
+      b[7] = (unsigned char)(numeric & 0xFF);
+    }
 
-  /* RFC 4122 variant: high two bits of byte 8 are 10. */
-  b[8] = (unsigned char)(0x80 | (b[8] & 0x3F));
+    /* RFC 4122 variant: high two bits of byte 8 are 10. */
+    b[8] = (unsigned char)(0x80 | (b[8] & 0x3F));
 
-  /* Encode 16 bytes as 22 base64 chars: 5 full triplets (15 bytes →
-   * 20 chars) followed by the trailing byte (8 bits → 2 chars, with
-   * 4 zero bits of slack in the second char). */
-  for (i = 0, j = 0; i < 15; i += 3) {
-    triplet = ((unsigned int)b[i]     << 16)
-            | ((unsigned int)b[i + 1] <<  8)
-            |  (unsigned int)b[i + 2];
-    buf[j++] = b64chars[(triplet >> 18) & 0x3F];
-    buf[j++] = b64chars[(triplet >> 12) & 0x3F];
-    buf[j++] = b64chars[(triplet >>  6) & 0x3F];
-    buf[j++] = b64chars[ triplet        & 0x3F];
-  }
-  buf[j++] = b64chars[(b[15] >> 2) & 0x3F];
-  buf[j++] = b64chars[(b[15] << 4) & 0x3F];
-  buf[j]   = '\0';
+    /* Encode 16 bytes as 22 base64 chars: 5 full triplets (15 bytes →
+     * 20 chars) followed by the trailing byte (8 bits → 2 chars, with
+     * 4 zero bits of slack in the second char). */
+    for (i = 0, j = 0; i < 15; i += 3) {
+      triplet = ((unsigned int)b[i]     << 16)
+              | ((unsigned int)b[i + 1] <<  8)
+              |  (unsigned int)b[i + 2];
+      buf[j++] = b64chars[(triplet >> 18) & 0x3F];
+      buf[j++] = b64chars[(triplet >> 12) & 0x3F];
+      buf[j++] = b64chars[(triplet >>  6) & 0x3F];
+      buf[j++] = b64chars[ triplet        & 0x3F];
+    }
+    buf[j++] = b64chars[(b[15] >> 2) & 0x3F];
+    buf[j++] = b64chars[(b[15] << 4) & 0x3F];
+    buf[j]   = '\0';
+
+    if (!sessid_in_use_locally(buf))
+      return;
+  } while (++retries < 8);
+
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "generate_sessid: %u same-server collisions in a row — RNG suspect",
+            retries);
+  /* Returning with the last-generated sessid; cross-server uniqueness
+   * still holds via the numeric encoding, so this is at worst a local-
+   * server identity confusion (the cross-sessid convergence path in
+   * bounce_handle_bsc can still reconcile). */
 }
 
 /* ---------------------------------------------------------------- */
