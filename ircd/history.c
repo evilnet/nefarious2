@@ -530,14 +530,66 @@ static void reply_index_del_children(struct db_writebatch *wb,
   if (!it)
     return;
 
+  /* For each (target, parent_msgid) entry in the reply index, parse out
+   * the child's timestamp + msgid (encoded in the key after the
+   * `target\0parent_msgid\0` prefix as `timestamp\0child_msgid`) and
+   * cascade-delete the child's message + msgid-index + ml_content
+   * records, plus the reply-index entry itself.
+   *
+   * Single-level cascade: a grand-child (a reply-to-a-reply, or a
+   * reaction on a reply) becomes orphaned by this pass and will be
+   * cleaned up by its own retention horizon or by Phase B's defensive
+   * filter at query time.  Multi-level recursion would risk
+   * unbounded walks under adversarial reply-chains; not worth it for
+   * the cleanup-of-tidiness benefit. */
   for (rc = db_iter_seek(it, prefix, plen);
        rc == DB_OK && db_iter_valid(it);
        rc = db_iter_next(it)) {
     size_t klen;
     const void *kbase = db_iter_key(it, &klen);
+    const char *tail;
+    const char *sep;
+    size_t tail_len, ts_len, msgid_len;
+
     if (klen < (size_t)plen ||
         memcmp(kbase, prefix, plen) != 0)
       break;
+
+    /* Extract (timestamp, child_msgid) from the tail of the key. */
+    tail = (const char *)kbase + plen;
+    tail_len = klen - plen;
+    sep = memchr(tail, KEY_SEP, tail_len);
+    if (sep) {
+      char child_ts[HISTORY_TIMESTAMP_LEN];
+      char child_msgid[HISTORY_MSGID_LEN];
+      char child_key[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+      int child_klen;
+
+      ts_len = sep - tail;
+      msgid_len = tail_len - ts_len - 1;
+
+      if (ts_len > 0 && ts_len < sizeof(child_ts)
+          && msgid_len > 0 && msgid_len < sizeof(child_msgid)) {
+        memcpy(child_ts, tail, ts_len);
+        child_ts[ts_len] = '\0';
+        memcpy(child_msgid, sep + 1, msgid_len);
+        child_msgid[msgid_len] = '\0';
+
+        /* Cascade-delete the child's message + msgid-index + multi-line
+         * content blob.  All three deletions are idempotent (already-
+         * absent rows just return DB_NOTFOUND, which writebatch_del
+         * tolerates). */
+        child_klen = build_key(child_key, sizeof(child_key),
+                                target, child_ts, child_msgid);
+        if (child_klen > 0)
+          db_writebatch_del(wb, history_cf_messages,
+                            child_key, (size_t)child_klen);
+        db_writebatch_del(wb, history_cf_msgid,
+                          child_msgid, msgid_len);
+        ml_content_delete(wb, child_msgid);
+      }
+    }
+
     db_writebatch_del(wb, history_cf_reply, kbase, klen);
   }
 
