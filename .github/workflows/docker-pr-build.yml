@@ -51,14 +51,3 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}/pull/${{ inputs.pr_number }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Build and push Linesync Docker image
-        uses: docker/build-push-action@v7
-        with:
-          context: ./tools/linesync
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-linesync:pr-${{ inputs.pr_number }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}/pull/${{ inputs.pr_number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
