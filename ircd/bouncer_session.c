@@ -2068,6 +2068,13 @@ static int bounce_db_put(struct BouncerSession *session)
     }
   }
 
+  /* Oper grant (v9+).  Empty hs_oper_name means not opered — the
+   * record fields stay zero by default; on revive bounce_apply_oper_grant
+   * is a no-op when bsr_oper_name is empty. */
+  ircd_strncpy(rec.bsr_oper_name, session->hs_oper_name,
+               sizeof(rec.bsr_oper_name));
+  rec.bsr_oper_granted_at = (int64_t)session->hs_oper_granted_at;
+
   /* Write through the abstraction */
   wb = db_writebatch_new(env);
   if (!wb)
@@ -2174,6 +2181,13 @@ void bounce_db_shutdown(void)
  * @param[in] rec Persisted session record.
  * @return Ghost client, or NULL on failure.
  */
+/* Forward decl — definition is further down, alongside the umode-sync
+ * helpers it groups with logically.  Used by both bounce_db_restore
+ * (revive) and bounce_promote_alias (in-server promote) to re-grant
+ * oper to the new primary from the session's stored grant. */
+static void bounce_apply_oper_grant(struct Client *cptr,
+                                     struct BouncerSession *sess);
+
 static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
 {
   struct Client *ghost;
@@ -2365,10 +2379,67 @@ int bounce_db_restore(void)
     memcpy(&version, vbuf, sizeof(version));
 
     if (version == BOUNCER_DB_VERSION) {
-      /* v8: current schema, parse directly from on-disk bytes. */
+      /* v9: current schema, parse directly from on-disk bytes. */
       if (vlen != sizeof(struct BounceSessionRecord))
         continue;
       rec = (struct BounceSessionRecord *)vbuf;
+    } else if (version == 8) {
+      /* v8: legacy schema.  Read with the frozen v8 struct, then build
+       * a v9 record in-place; v9 only adds oper-grant fields (left
+       * zero — pre-v9 sessions weren't opered as far as we know). */
+      const struct BounceSessionRecord_v8 *v8;
+      if (vlen != sizeof(struct BounceSessionRecord_v8))
+        continue;
+      v8 = (const struct BounceSessionRecord_v8 *)vbuf;
+      memset(&rec_buf, 0, sizeof(rec_buf));
+      /* All v8 fields appear in v9 with the same names/types — copy
+       * field-by-field rather than a struct-overlay memcpy because the
+       * outer struct's layout has the oper fields appended after
+       * bsr_aliases. */
+      rec_buf.bsr_version = BOUNCER_DB_VERSION;
+      ircd_strncpy(rec_buf.bsr_account, v8->bsr_account, ACCOUNTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_sessid, v8->bsr_sessid, BOUNCER_SESSID_LEN);
+      ircd_strncpy(rec_buf.bsr_token, v8->bsr_token, BOUNCER_TOKEN_LEN + 1);
+      ircd_strncpy(rec_buf.bsr_name, v8->bsr_name, BOUNCER_NAME_LEN);
+      ircd_strncpy(rec_buf.bsr_origin, v8->bsr_origin, NICKLEN + 1);
+      rec_buf.bsr_hold_override = v8->bsr_hold_override;
+      rec_buf.bsr_created = v8->bsr_created;
+      rec_buf.bsr_disconnect_time = v8->bsr_disconnect_time;
+      rec_buf.bsr_last_active = v8->bsr_last_active;
+      rec_buf.bsr_last_msg_time = v8->bsr_last_msg_time;
+      rec_buf.bsr_total_active = v8->bsr_total_active;
+      rec_buf.bsr_attach_count = v8->bsr_attach_count;
+      rec_buf.bsr_connect_count = v8->bsr_connect_count;
+      ircd_strncpy(rec_buf.bsr_nick, v8->bsr_nick, NICKLEN + 1);
+      ircd_strncpy(rec_buf.bsr_username, v8->bsr_username, USERLEN + 1);
+      ircd_strncpy(rec_buf.bsr_realhost, v8->bsr_realhost, HOSTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_host, v8->bsr_host, HOSTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_realname, v8->bsr_realname, REALLEN + 1);
+      ircd_strncpy(rec_buf.bsr_account_name, v8->bsr_account_name,
+                   ACCOUNTLEN + 1);
+      rec_buf.bsr_acc_create = v8->bsr_acc_create;
+      memcpy(&rec_buf.bsr_ip, &v8->bsr_ip, sizeof(rec_buf.bsr_ip));
+      ircd_strncpy(rec_buf.bsr_sock_ip, v8->bsr_sock_ip, SOCKIPLEN + 1);
+      ircd_strncpy(rec_buf.bsr_sockhost, v8->bsr_sockhost, HOSTLEN + 1);
+      rec_buf.bsr_listener_port = v8->bsr_listener_port;
+      rec_buf.bsr_agg_sendB = v8->bsr_agg_sendB;
+      rec_buf.bsr_agg_receiveB = v8->bsr_agg_receiveB;
+      rec_buf.bsr_agg_sendM = v8->bsr_agg_sendM;
+      rec_buf.bsr_agg_receiveM = v8->bsr_agg_receiveM;
+      rec_buf.bsr_histcount = v8->bsr_histcount;
+      memcpy(rec_buf.bsr_history, v8->bsr_history, sizeof(rec_buf.bsr_history));
+      rec_buf.bsr_chancount = v8->bsr_chancount;
+      memcpy(rec_buf.bsr_channels, v8->bsr_channels,
+             sizeof(rec_buf.bsr_channels));
+      rec_buf.bsr_aliascount = v8->bsr_aliascount;
+      memcpy(rec_buf.bsr_aliases, v8->bsr_aliases,
+             sizeof(rec_buf.bsr_aliases));
+      /* bsr_oper_name + bsr_oper_granted_at left zero — pre-v9 sessions
+       * had no session-level oper grant. */
+      rec = &rec_buf;
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "bouncer_persist: migrated v8 record (account=%s) → v9",
+                rec->bsr_account);
     } else if (version == 7) {
       /* v7: legacy schema.  Read with the frozen v7 struct, then
        * construct a v8 record in-place by copying matching fields and
@@ -2420,8 +2491,9 @@ int bounce_db_restore(void)
       rec = &rec_buf;
       migrated_v7++;
       log_write(LS_SYSTEM, L_INFO, 0,
-                "bouncer_persist: migrated v7 record (account=%s) → v8 sessid=%s",
-                rec->bsr_account, rec->bsr_sessid);
+                "bouncer_persist: migrated v7 record (account=%s) → "
+                "v%d sessid=%s",
+                rec->bsr_account, BOUNCER_DB_VERSION, rec->bsr_sessid);
     } else {
       continue; /* unknown version, skip */
     }
@@ -2470,6 +2542,21 @@ int bounce_db_restore(void)
     session->hs_attach_count = rec->bsr_attach_count;
     session->hs_connect_count = rec->bsr_connect_count;
     session->hs_total_active = (time_t)rec->bsr_total_active;
+
+    /* Restore the session-anchored oper grant (v9+).  bsr_oper_name is
+     * empty for v8-and-earlier records (migration leaves it zero) and
+     * for sessions that weren't opered when persisted — in both cases
+     * bounce_apply_oper_grant below short-circuits cleanly. */
+    ircd_strncpy(session->hs_oper_name, rec->bsr_oper_name,
+                 sizeof(session->hs_oper_name));
+    session->hs_oper_granted_at = (time_t)rec->bsr_oper_granted_at;
+
+    /* If the session had an oper grant when persisted, re-apply it to
+     * the just-created ghost so the held identity carries oper rights
+     * across restart.  No-op when the grant is empty or no local
+     * O:line matches hs_oper_name. */
+    if (session->hs_oper_name[0])
+      bounce_apply_oper_grant(ghost, session);
 
     /* Session-level aggregate counters */
     session->hs_agg_sendB    = rec->bsr_agg_sendB;
@@ -3542,12 +3629,6 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
  * @param[in] session Session whose primary is departing.
  * @return 0 on success, -1 if no aliases available.
  */
-/* Forward decl — definition is further down, alongside the umode-sync
- * helpers it groups with logically.  Used here by the promote path
- * to re-grant oper to the new primary. */
-static void bounce_apply_oper_grant(struct Client *cptr,
-                                     struct BouncerSession *sess);
-
 int bounce_promote_alias(struct BouncerSession *session)
 {
   int j, k;

@@ -102,7 +102,7 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 8
+#define BOUNCER_DB_VERSION 9
 
 /** Persisted alias roster entry (v8+).  Records "this session has an
  * alias on server YY with numeric NNN, last active at T, with caps C."
@@ -178,6 +178,60 @@ struct BounceSessionRecord {
     char     join_msgid[16];    /**< Original JOIN msgid */
   } bsr_channels[BOUNCER_MAX_CHANNELS];
   /* Alias roster (per-alias activity + caps, v8+) */
+  uint16_t bsr_aliascount;
+  struct BounceSessionAliasRecord bsr_aliases[BOUNCER_MAX_ALIASES];
+  /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
+   * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
+   * keyed on bsr_oper_name (looked up in the local O:line config). */
+  char     bsr_oper_name[NICKLEN + 1];
+  int64_t  bsr_oper_granted_at;
+};
+
+/** Frozen v8 layout for migration reads.  Do not modify — must mirror
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=8.  Used
+ * exclusively by the v8→v9 migration path in bounce_db_restore (adds
+ * the oper-grant fields, zero-initialised — pre-v9 sessions weren't
+ * opered as far as we know). */
+struct BounceSessionRecord_v8 {
+  uint32_t bsr_version;
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];
+  int32_t  bsr_hold_override;
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;
+  int64_t  bsr_last_msg_time;
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  struct irc_in_addr bsr_ip;
+  char     bsr_sock_ip[SOCKIPLEN + 1];
+  char     bsr_sockhost[HOSTLEN + 1];
+  uint16_t bsr_listener_port;
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[BOUNCER_MAX_CONN_HISTORY];
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+    int64_t  join_tv_sec;
+    int32_t  join_tv_usec;
+    char     join_msgid[16];
+  } bsr_channels[BOUNCER_MAX_CHANNELS];
   uint16_t bsr_aliascount;
   struct BounceSessionAliasRecord bsr_aliases[BOUNCER_MAX_ALIASES];
 };
