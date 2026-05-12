@@ -44,13 +44,16 @@
 #include <time.h>
 
 /** Hard structural cap on closed intervals per (anchor, channel)
- * record.  Locked because each record's `intervals` array is sized
- * inline and persisted bytewise to LMDB — raising this would
- * invalidate existing records.  The runtime feature
- * FEAT_CHATHISTORY_PRESENCE_MAX_INTERVALS provides a *soft* cap
- * (clamped to this value) so operators can tune the effective limit
- * downward without a schema migration. */
-#define PRESENCE_MAX_INTERVALS 64
+ * record.  Sized to provide reasonable headroom for the runtime
+ * feature FEAT_CHATHISTORY_PRESENCE_MAX_INTERVALS to be tuned within
+ * (default 64, max = this value).  Each record persists bytewise to
+ * the store, so changing this is a schema-version bump — old-sized
+ * records get treated as missing by acct_load's size check and are
+ * rebuilt from fresh JOIN/PART events.  At 256 intervals, one
+ * (anchor, channel) record is ~4KB; a server with 10k users in 50
+ * channels each maxing out their intervals tops out around 2GB
+ * presence footprint, well within MDBX/RocksDB working set. */
+#define PRESENCE_MAX_INTERVALS 256
 
 /** Effective per-record cap clamped to the structural limit.  Reading
  * the feature on each insert is cheap (single int lookup) and avoids
