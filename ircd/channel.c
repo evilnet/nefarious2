@@ -113,12 +113,20 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Skip storage if no authenticated members and channel isn't +H (public history) */
-  if (chptr->authusers == 0 && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+  /* Storage gate: when CHATHISTORY_REQUIRE_AUTH is on, unauthed
+   * clients can never query, so storing into a channel with no
+   * authed member would be dead bytes nobody can read.  Skip in that
+   * case (unless +H makes the channel public-history).  When
+   * REQUIRE_AUTH is off, store unconditionally — admin has chosen
+   * open history.  STRICT_PRESENCE only filters at replay, never
+   * gates storage.  Mirrors store_channel_history (ircd_relay.c).
+   *
+   * Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
+   * not channel events (JOIN/PART/etc) which are metadata. */
+  if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
+      && chptr->authusers == 0
+      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
     return;
-
-  /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
-   * not channel events (JOIN/PART/etc) which are metadata */
 
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);

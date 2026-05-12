@@ -210,10 +210,17 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Always store when CHATHISTORY_STORE is enabled.
-   * Messages must be stored for REDACT to look up msgids, even for
-   * unauthenticated channels. The +P (NOSTORAGE) mode above handles
-   * channels that explicitly opt out of storage. */
+  /* Storage gate: when CHATHISTORY_REQUIRE_AUTH is on, no unauthed
+   * client can ever query — storing into a channel with no authed
+   * member would be dead bytes that nobody can read.  Skip in that
+   * case (unless +H makes the channel public-history).  When
+   * REQUIRE_AUTH is off, store unconditionally — the admin has opted
+   * into open history and unauthed clients may pull these records.
+   * STRICT_PRESENCE only filters at replay, never gates storage. */
+  if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
+      && chptr->authusers == 0
+      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+    return;
 
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {
