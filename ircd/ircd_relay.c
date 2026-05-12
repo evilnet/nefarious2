@@ -318,10 +318,15 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
 
   /* Policy check: at least one party must have an account (the storage
    * anchor) — fully-ephemeral pairs go to the in-memory ring instead
-   * of LMDB (Phase C).  No gap marker for the LMDB side; the ring
-   * carries the conversation in full as long as either ephemeral
-   * stays connected. */
+   * of LMDB (Phase C).  Mirroring the channel-storage gate: if
+   * CHATHISTORY_REQUIRE_AUTH is on, neither ephemeral can ever query,
+   * so writing to the ring would be dead bytes that nobody can read
+   * — skip storage entirely.  When at least one party is authed, the
+   * authed counterpart can always pull the record regardless of
+   * REQUIRE_AUTH, so we still hit the LMDB path below. */
   if (!IsAccount(sptr) && !IsAccount(acptr)) {
+    if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH))
+      return;
     chathistory_ephemeral_store_pair(sptr, acptr, text, type, msgid,
                                       timestamp, client_tags);
     return;

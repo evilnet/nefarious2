@@ -2274,6 +2274,13 @@ void bounce_db_shutdown(void)
  * oper to the new primary from the session's stored grant. */
 static void bounce_apply_oper_grant(struct Client *cptr,
                                      struct BouncerSession *sess);
+/* Forward decl — defined alongside its siblings further down.  Used
+ * by bounce_handle_bs's case 'O' to apply (or clear) a session's
+ * oper grant on every locally-attached member when the change
+ * arrives over BS O from another server. */
+static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
+                                            const char *opername,
+                                            time_t granted_at);
 
 static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
 {
@@ -2944,6 +2951,19 @@ void bounce_burst(struct Client *cptr)
                       s->hs_attach_count, s->hs_total_active,
                       chanbuf);
       }
+      /* Follow with BS O if this session carries an oper grant, so
+       * the newly-linked peer records it on its session.  Without
+       * the burst replay, a grant set before the link existed would
+       * never reach the new peer, and the peer would silently demote
+       * the session if it later took over as primary or restarted.
+       * Empty grant: nothing to send (default state). */
+      if (s->hs_oper_name[0])
+        sendcmdto_one(&me, CMD_BOUNCER_SESSION,
+                      cptr,
+                      "O %s %s %Tu %s",
+                      s->hs_account, s->hs_sessid,
+                      s->hs_oper_granted_at, s->hs_oper_name);
+
       /* Follow with BS A so the receiver can resolve hs_client
        * for alias support.  Applies to both HOLDING (ghost) and
        * ACTIVE (live primary) sessions — without this, leaves
@@ -3147,6 +3167,23 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
                           session->hs_account, session->hs_sessid,
                           extra ? extra : "");
     break;
+
+  case 'O': /* Oper grant set/clear.  @a extra is the opername; pass
+             * NULL or empty to clear.  Receivers apply the grant to
+             * any local session members and persist it on the local
+             * session record so server-restart restores it. */
+    if (extra && *extra)
+      sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
+                            NULL,
+                            "O %s %s %Tu %s",
+                            session->hs_account, session->hs_sessid,
+                            session->hs_oper_granted_at, extra);
+    else
+      sendcmdto_serv_butone_v3(&me, CMD_BOUNCER_SESSION,
+                            NULL,
+                            "O %s %s",
+                            session->hs_account, session->hs_sessid);
+    break;
   }
 }
 
@@ -3158,6 +3195,7 @@ void bounce_broadcast(struct BouncerSession *session, char subcmd,
  *   BS D <account> <sessid> <disconnect-time> :<channels>
  *   BS X <account> <sessid>
  *   BS U <account> <sessid> <field>=<value>
+ *   BS O <account> <sessid> [<granted_at> <opername>]  (oper grant set/clear)
  *   BS T <account> <sessid> <new-origin>  (session ownership transfer)
  */
 int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
@@ -3638,6 +3676,41 @@ bsc_forward:
                           cptr,
                           "U %s %s %s",
                           account, sessid, field);
+    break;
+  }
+
+  case 'O': /* Oper grant set or clear (cross-server propagation) */
+  {
+    /* Wire forms:
+     *   BS O <account> <sessid> <granted_at> <opername>  (set)
+     *   BS O <account> <sessid>                          (clear)
+     */
+    time_t granted_at = 0;
+    const char *opername = NULL;
+
+    if (parc >= 6) {
+      granted_at = (time_t)atol(parv[4]);
+      opername = parv[5];
+    } else if (parc != 4) {
+      break;  /* malformed */
+    }
+
+    session = bounce_find_by_token_sessid(account, sessid);
+    if (session)
+      bounce_apply_remote_oper_grant(session, opername, granted_at);
+
+    /* Forward to other peers (this server bounces it onward like the
+     * other BS subcommands). */
+    if (opername && *opername)
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
+                            cptr,
+                            "O %s %s %Tu %s",
+                            account, sessid, granted_at, opername);
+    else
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
+                            cptr,
+                            "O %s %s",
+                            account, sessid);
     break;
   }
 
@@ -5551,6 +5624,80 @@ static void bounce_apply_oper_grant(struct Client *cptr,
     if (cli_user(cptr)->opername)
       MyFree(cli_user(cptr)->opername);
     DupString(cli_user(cptr)->opername, sess->hs_oper_name);
+  }
+}
+
+/** Inverse of bounce_apply_oper_grant — clear oper state on a local
+ * Client.  Mirrors set_user_mode's -o bookkeeping (s_user.c:2417+) so
+ * UserStats.opers tracks across cross-server grant clears.  No-op for
+ * remote Clients (the P10 MODE -o path handles those) and for
+ * Clients that aren't currently opered. */
+static void bounce_clear_oper_locally(struct Client *cptr)
+{
+  if (!cptr || !MyConnect(cptr) || !IsUser(cptr))
+    return;
+  if (!IsOper(cptr) && !IsLocOp(cptr))
+    return;
+  if (IsOper(cptr) && !IsHideOper(cptr) && !IsChannelService(cptr)
+      && !IsBot(cptr)) {
+    assert(UserStats.opers > 0);
+    --UserStats.opers;
+  }
+  ClearOper(cptr);
+  ClearLocOp(cptr);
+  ClearAdmin(cptr);
+  client_set_privs(cptr, NULL);   /* clears propagate privilege */
+  clear_privs(cptr);
+  cli_handler(cptr) = CLIENT_HANDLER;
+  if (cli_user(cptr) && cli_user(cptr)->opername) {
+    MyFree(cli_user(cptr)->opername);
+    cli_user(cptr)->opername = NULL;
+  }
+}
+
+/** Apply or clear a session's oper grant on every locally-attached
+ * member (primary if local, plus all local aliases).  Called from the
+ * BS O receive path; @a opername NULL or empty clears the grant. */
+static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
+                                            const char *opername,
+                                            time_t granted_at)
+{
+  struct Client *primary;
+  int i;
+
+  if (!sess)
+    return;
+
+  /* Update the session record itself so /CHECK and a future server
+   * restart see the right state. */
+  if (opername && *opername) {
+    ircd_strncpy(sess->hs_oper_name, opername, sizeof(sess->hs_oper_name) - 1);
+    sess->hs_oper_granted_at = granted_at ? granted_at : CurrentTime;
+  } else {
+    sess->hs_oper_name[0] = '\0';
+    sess->hs_oper_granted_at = 0;
+  }
+  sess->hs_dirty = 1;
+
+  /* Apply to local primary, if any.  Remote primaries are handled by
+   * the P10 MODE +o / -o that arrives in the same TCP stream from the
+   * originating server. */
+  primary = sess->hs_client;
+  if (primary && MyConnect(primary)) {
+    if (sess->hs_oper_name[0])
+      bounce_apply_oper_grant(primary, sess);
+    else
+      bounce_clear_oper_locally(primary);
+  }
+  /* Plus every local alias. */
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+    if (!alias || !IsBouncerAlias(alias) || !MyConnect(alias))
+      continue;
+    if (sess->hs_oper_name[0])
+      bounce_apply_oper_grant(alias, sess);
+    else
+      bounce_clear_oper_locally(alias);
   }
 }
 

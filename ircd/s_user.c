@@ -2019,12 +2019,16 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           /* Clear the session-level oper grant.  Mirrors the do_oper
            * grant-set: state survives across primary changes, so we
            * must explicitly clear it on /DEOPER so a subsequent
-           * promote/demote/revival doesn't re-grant. */
+           * promote/demote/revival doesn't re-grant.  Cross-server:
+           * propagate the clear via BS O so other servers' session
+           * records don't keep a stale grant that'd re-light +o on
+           * restart there. */
           _oper_sess = bounce_get_session(acptr);
           if (_oper_sess && _oper_sess->hs_oper_name[0]) {
             _oper_sess->hs_oper_name[0] = '\0';
             _oper_sess->hs_oper_granted_at = 0;
             _oper_sess->hs_dirty = 1;
+            bounce_broadcast(_oper_sess, 'O', NULL);
           }
         }
         break;
@@ -2049,6 +2053,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
             _oper_sess->hs_oper_name[0] = '\0';
             _oper_sess->hs_oper_granted_at = 0;
             _oper_sess->hs_dirty = 1;
+            bounce_broadcast(_oper_sess, 'O', NULL);
           }
         }
         break;

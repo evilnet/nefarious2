@@ -271,7 +271,11 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
 
   /* Record the oper grant on the session record so the state survives
    * primary changes (promote/demote) and server restart.  No-op for
-   * clients without a bouncer session (oper without an account). */
+   * clients without a bouncer session (oper without an account).
+   * Propagate the grant to every other server so cross-server alias
+   * promote / server restart elsewhere can apply it without rerunning
+   * /OPER.  P10 MODE +o (via send_umode_out above) already covers the
+   * live flag on remote primaries — BS O is for the session record. */
   {
     struct BouncerSession *sess = bounce_get_session(sptr);
     if (sess) {
@@ -279,6 +283,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
                    sizeof(sess->hs_oper_name));
       sess->hs_oper_granted_at = CurrentTime;
       sess->hs_dirty = 1;
+      bounce_broadcast(sess, 'O', aconf->name);
     }
   }
 
