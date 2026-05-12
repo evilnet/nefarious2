@@ -43,11 +43,27 @@
 #include <string.h>
 #include <time.h>
 
-/** Maximum closed intervals per (anchor, channel) record.  Hard FIFO
- * drop on overflow — fail-safe.  64 events covers ~2000 join/part
- * cycles per retention window for a normal user; pathological
- * kick-spam loses oldest visibility, never gains unintended. */
+/** Hard structural cap on closed intervals per (anchor, channel)
+ * record.  Locked because each record's `intervals` array is sized
+ * inline and persisted bytewise to LMDB — raising this would
+ * invalidate existing records.  The runtime feature
+ * FEAT_CHATHISTORY_PRESENCE_MAX_INTERVALS provides a *soft* cap
+ * (clamped to this value) so operators can tune the effective limit
+ * downward without a schema migration. */
 #define PRESENCE_MAX_INTERVALS 64
+
+/** Effective per-record cap clamped to the structural limit.  Reading
+ * the feature on each insert is cheap (single int lookup) and avoids
+ * needing a rehash-time notification handler. */
+static unsigned int effective_max_intervals(void)
+{
+  int v = feature_int(FEAT_CHATHISTORY_PRESENCE_MAX_INTERVALS);
+  if (v <= 0)
+    return PRESENCE_MAX_INTERVALS;
+  if (v > PRESENCE_MAX_INTERVALS)
+    return PRESENCE_MAX_INTERVALS;
+  return (unsigned int)v;
+}
 
 /** A closed presence interval.  Stored compactly in the record. */
 struct presence_interval {
@@ -279,10 +295,21 @@ static void record_apply_part(struct presence_record *r, time_t when)
     r->open_since = 0;
     return;
   }
-  if (r->count >= PRESENCE_MAX_INTERVALS) {
-    memmove(&r->intervals[0], &r->intervals[1],
-            sizeof(r->intervals[0]) * (PRESENCE_MAX_INTERVALS - 1u));
-    r->count = (uint8_t)(PRESENCE_MAX_INTERVALS - 1u);
+  {
+    unsigned int cap = effective_max_intervals();
+    /* Trim down if the runtime cap was lowered below the current
+     * count — drop oldest intervals first, then make room for the
+     * new one if we're still at the cap. */
+    while (r->count > cap) {
+      memmove(&r->intervals[0], &r->intervals[1],
+              sizeof(r->intervals[0]) * (r->count - 1u));
+      r->count--;
+    }
+    if (r->count >= cap) {
+      memmove(&r->intervals[0], &r->intervals[1],
+              sizeof(r->intervals[0]) * (cap - 1u));
+      r->count = (uint8_t)(cap - 1u);
+    }
   }
   r->intervals[r->count].start = r->open_since;
   r->intervals[r->count].end = end;

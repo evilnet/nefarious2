@@ -525,6 +525,12 @@ struct Client {
    * CHATHISTORY (PM) and as the source of truth for the wire-emitted
    * ,S<sessid> compact tag on outgoing N introductions. */
   char                  cli_session_id[S2S_SESSID_BUFSIZE];
+
+  /* Phase C: in-memory PM ring for ephemeral↔ephemeral conversations.
+   * NULL until first insert; freed in ephemeral_purge_session.  Defined
+   * opaque here to avoid pulling chathistory_ephemeral.h everywhere
+   * that includes client.h; full type lives in that header. */
+  struct EphemeralPmRing *cli_ephemeral_pm;
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -708,6 +714,8 @@ struct Client {
 #define cli_metadata_lastcmd(cli) ((cli)->cli_metadata_lastcmd)
 /** Get metadata command count for current second. */
 #define cli_metadata_cmdcnt(cli)  ((cli)->cli_metadata_cmdcnt)
+/** Get/set the ephemeral PM ring pointer. */
+#define cli_ephemeral_pm(cli)    ((cli)->cli_ephemeral_pm)
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))

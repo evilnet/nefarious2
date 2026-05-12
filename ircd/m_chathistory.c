@@ -33,6 +33,7 @@
 
 #include "capab.h"
 #include "channel.h"
+#include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
 #include "client.h"
 #include "hash.h"
@@ -1142,7 +1143,14 @@ static int check_history_access(struct Client *sptr, const char *target,
       char canonical[NICKLEN * 2 + 2];
       if (normalize_pm_target(sptr, target, canonical, sizeof(canonical)) != 0)
         return -1;
-      if (!history_pm_target_has_sessid(canonical, cli_session_id(sptr)))
+      /* Two sources for ephemerals:
+       *   - LMDB records bearing our sessid tag (Phase 5a — applies
+       *     when the counterparty was authed at message time)
+       *   - The in-memory ring (Phase C — applies for
+       *     ephemeral↔ephemeral conversations, which never reach LMDB)
+       * If either source has data, the sender clearly participated. */
+      if (!history_pm_target_has_sessid(canonical, cli_session_id(sptr))
+          && !chathistory_ephemeral_has_target(sptr, canonical))
         return -1;
       if (normalized_target && normalized_len > 0) {
         ircd_strncpy(normalized_target, canonical, normalized_len - 1);
@@ -1306,6 +1314,20 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     return 0;
   }
 
+  /* Phase C: for ephemeral↔ephemeral PMs, the conversation lives only
+   * in the per-Client ring (LMDB has nothing under this target).  The
+   * ring and LMDB hold disjoint target sets, so a zero-count result
+   * here is the cue to consult the ring. */
+  if (count == 0 && !IsAccount(sptr) && cli_session_id(sptr)[0]
+      && !IsChannelName(target)) {
+    count = chathistory_ephemeral_query(sptr, lookup_target, limit, &messages);
+    if (count > 0) {
+      /* Skip federation when we satisfied the query from a local
+       * ephemeral ring — no peer has these records. */
+      goto skip_federation;
+    }
+  }
+
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "LATEST",
@@ -1319,6 +1341,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     /* Federation failed to start, fall through to local-only response */
   }
 
+skip_federation:
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */

@@ -105,6 +105,7 @@ IRCD_SRC = \
 	gitsync.c \
 	hash.c \
 	history.c \
+	chathistory_ephemeral.c \
 	chathistory_presence.c \
 	ircd.c \
 	ircd_alloc.c \

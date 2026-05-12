@@ -48,6 +48,7 @@
 #include "ircd_relay.h"
 #include "capab.h"
 #include "channel.h"
+#include "chathistory_ephemeral.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"
@@ -309,10 +310,15 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
     return;
 
   /* Policy check: at least one party must have an account (the storage
-   * anchor) — fully-ephemeral pairs are skipped here (no gap marker).
-   * Mirrors should_store_pm's relaxed gate. */
-  if (!IsAccount(sptr) && !IsAccount(acptr))
+   * anchor) — fully-ephemeral pairs go to the in-memory ring instead
+   * of LMDB (Phase C).  No gap marker for the LMDB side; the ring
+   * carries the conversation in full as long as either ephemeral
+   * stays connected. */
+  if (!IsAccount(sptr) && !IsAccount(acptr)) {
+    chathistory_ephemeral_store_pair(sptr, acptr, text, type, msgid,
+                                      timestamp, client_tags);
     return;
+  }
 
   /* Build sender string: nick!user@host (needed for gap markers below) */
   if (cli_user(sptr))

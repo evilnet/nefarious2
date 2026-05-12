@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
 #include "session_markread.h"
 #include "IPcheck.h"
@@ -7866,7 +7867,10 @@ void ephemeral_purge_session(struct Client *cli)
     presence_purge_session(cli_session_id(cli));
     readmarker_ephemeral_purge(cli_session_id(cli));
   }
-  /* TODO Phase C: chathistory_ephemeral_purge(cli); */
+  /* Phase C: free the per-Client PM ring.  Safe to call even when the
+   * ring was never allocated (no-op).  Doesn't need cli_session_id
+   * because the ring is keyed by Client* directly. */
+  chathistory_ephemeral_purge(cli);
 }
 
 /** Record per-connection activity for bouncer-aware tiebreaking.
