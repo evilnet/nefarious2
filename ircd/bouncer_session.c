@@ -5520,11 +5520,28 @@ static void bounce_apply_oper_grant(struct Client *cptr,
   aconf = find_oper_conf_by_name(sess->hs_oper_name);
   if (!aconf)
     return;
+  /* client_set_privs() early-returns if the client isn't already
+   * IsAnOper.  do_oper() works around this by SetOper/ClearOper
+   * bracketing the call; mirror that here.  Without the bracket, no
+   * privs land on @a cptr, HasPriv(PRIV_PROPAGATE) is false below, the
+   * else branch runs SetLocOp, and the resumed session comes back as
+   * LocalOp (+O) instead of global oper (+o) — silently demoted on
+   * every restart.  mo_oper short-circuits subsequent /OPER attempts
+   * to a bare RPL_YOUREOPER (m_oper.c:557), so the user has no way to
+   * recover their original grant. */
+  SetOper(cptr);
   client_set_privs(cptr, aconf);
+  ClearOper(cptr);
   if (HasPriv(cptr, PRIV_PROPAGATE)) {
     SetOper(cptr);
     if (HasPriv(cptr, PRIV_ADMIN))
       SetAdmin(cptr);
+    /* Match do_oper's UserStats.opers bookkeeping — without this,
+     * a subsequent /MODE -o trips the UserStats.opers > 0 assert in
+     * s_user.c:2420 because the counter was never bumped at grant
+     * time. */
+    if (!IsHideOper(cptr) && !IsChannelService(cptr) && !IsBot(cptr))
+      ++UserStats.opers;
   } else {
     SetLocOp(cptr);
   }
