@@ -84,9 +84,11 @@ RUN --mount=type=cache,target=/root/.ccache \
 RUN --mount=type=cache,target=/root/.ccache \
     make test
 
-# make install runs an interactive SSL generator - pre-create pem to skip, then remove so entrypoint generates fresh one
-RUN touch /home/nefarious/ircd/ircd.pem && make install && \
-    rm /home/nefarious/ircd/ircd.pem
+# make install no longer auto-generates a cert (the makepem call was
+# removed from ircd/Makefile.in — admins supply their own or run the
+# tool manually).  Docker's entrypoint handles cert generation if the
+# file is missing at container start.
+RUN make install
 
 # --- Build iauthd-ts (npm install cached unless package.json changes) ---
 
@@ -128,10 +130,13 @@ COPY --from=build-iauthd --chown=nefarious:nefarious /iauthd-ts-prod/ /home/nefa
 # Symlink ircd.log to stdout so docker logs captures it
 RUN ln -sf /dev/stdout /home/nefarious/ircd/ircd.log
 
-# Install nodejs runtime (needed for iauthd-ts) + minimal runtime tools + GeoIP database
+# Install nodejs runtime (needed for iauthd-ts) + minimal runtime tools + GeoIP database.
+# gdb included so post-mortem and live attach work via `docker exec` without
+# sidecar timing races (sidecar pull/install can't catch a 30s startup window).
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
     apt-get -y install --no-install-recommends nodejs openssl procps net-tools \
-      geoip-database libmaxminddb0 libgeoip1t64 && \
+      geoip-database libmaxminddb0 libgeoip1t64 \
+      gdb && \
     rm -rf /var/lib/apt/lists/*
 
 USER nefarious
