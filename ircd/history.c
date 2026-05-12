@@ -2552,112 +2552,25 @@ next_child:
 
 int history_redact_message(const char *target, const char *msgid)
 {
-  struct db_writebatch *wb;
-  struct db_val val = { NULL, 0 };
-  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
-  char timestamp[HISTORY_TIMESTAMP_LEN];
-  int keylen;
-  int rc;
-
-  if (!history_available)
-    return -1;
-
-  /* Look up msgid to get timestamp */
-  rc = db_get(history_db_env, history_cf_msgid,
-              msgid, strlen(msgid), /*snap=*/NULL, &val);
-  if (rc == DB_NOTFOUND)
-    return 1;
-  if (rc != DB_OK)
-    return -1;
-
-  /* Extract timestamp from value (target\0timestamp[\0]) */
-  {
-    const char *sep = memchr(val.base, KEY_SEP, val.len);
-    size_t copy_len;
-    if (!sep) {
-      db_val_free(&val);
-      return -1;
-    }
-    sep++;
-    copy_len = (char *)val.base + val.len - sep;
-    if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
-      copy_len--;
-    if (copy_len >= HISTORY_TIMESTAMP_LEN) {
-      db_val_free(&val);
-      return -1;
-    }
-    memcpy(timestamp, sep, copy_len);
-    timestamp[copy_len] = '\0';
-  }
-  db_val_free(&val);
-
-  /* Build full key for main database */
-  keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
-  if (keylen < 0)
-    return -1;
-
-  /* Fetch the current message to get sender and account */
-  rc = db_get(history_db_env, history_cf_messages,
-              keybuf, keylen, /*snap=*/NULL, &val);
-  if (rc == DB_NOTFOUND)
-    return 1;
-  if (rc != DB_OK)
-    return -1;
-
-  /* Deserialize to get type, sender, account; re-serialize with empty
-   * content and no client_tags; stage as a put. */
-  wb = db_writebatch_new(history_db_env);
-  if (!wb) {
-    db_val_free(&val);
-    return -1;
-  }
-
-  {
-    struct HistoryMessage orig;
-    char valbuf[HISTORY_VALUE_BUFSIZE];
-    int vallen;
-
-    memset(&orig, 0, sizeof(orig));
-    if (deserialize_message(val.base, val.len, &orig) != 0) {
-      db_val_free(&val);
-      db_writebatch_destroy(wb);
-      return -1;
-    }
-    db_val_free(&val);
-
-    vallen = serialize_message(valbuf, sizeof(valbuf), orig.type,
-                               orig.sender, orig.account, "", NULL,
-                               orig.original_target);
-    if (vallen < 0 || (size_t)vallen >= sizeof(valbuf)) {
-      db_writebatch_destroy(wb);
-      return -1;
-    }
-
-#ifdef USE_ZSTD
-    {
-      unsigned char comp_buf[HISTORY_VALUE_BUFSIZE + 64];
-      size_t comp_len;
-      if (compress_data((unsigned char *)valbuf, vallen,
-                        comp_buf, sizeof(comp_buf), &comp_len) >= 0) {
-        db_writebatch_put(wb, history_cf_messages,
-                          keybuf, keylen, comp_buf, comp_len);
-      } else {
-        db_writebatch_put(wb, history_cf_messages,
-                          keybuf, keylen, valbuf, vallen);
-      }
-    }
-#else
-    db_writebatch_put(wb, history_cf_messages,
-                      keybuf, keylen, valbuf, vallen);
-#endif
-  }
-
-  /* Delete multiline content if any. */
-  ml_content_delete(wb, msgid);
-
-  rc = db_writebatch_commit(wb, /*sync=*/0);
-  db_writebatch_destroy(wb);
-  return (rc == DB_OK) ? 0 : -1;
+  /* Earlier implementation cleared the stored content and deleted the
+   * multiline payload here.  Design intent (per audit framing) is to
+   * retain the original message for operator-visible audit until
+   * normal retention eviction removes it, while filtering it out of
+   * regular CHATHISTORY replay via the reply-index relationship to
+   * its REDACT child (handled in the replay path).
+   *
+   * The function is preserved as a no-op for now — callers don't need
+   * to change, and a future commit can add explicit "mark
+   * inaccessible" metadata here (e.g. a per-record flag) if we want
+   * to distinguish audit-visible-but-hidden from genuinely-purged.
+   *
+   * @return 0 (success): the redact relationship is captured by the
+   *         child REDACT record stored separately by the caller, so
+   *         no per-record mutation is required here.
+   */
+  (void)target;
+  (void)msgid;
+  return 0;
 }
 
 /** Build a readmarker key from account and target.

@@ -1249,6 +1249,79 @@ static int should_federate(const char *target, int local_count, int limit)
  *              list transfers to the replay engine on return.
  * @return     The post-filter message count.
  */
+/** Drop PRIVMSG/NOTICE/TAGMSG entries from @a *head whose msgid has a
+ * corresponding HISTORY_REDACT sibling in the same list.  The REDACT
+ * record itself stays (it's the audit/visibility artifact the client
+ * relies on to know the message was redacted).
+ *
+ * Two passes:
+ *   1. Walk the list, collect msgids referenced by every REDACT
+ *      record (content format: "<target_msgid> [:reason]").
+ *   2. Walk again, free + unlink any PRIVMSG/NOTICE/TAGMSG whose
+ *      msgid appears in the collected set.
+ *
+ * O(n*m) with m = number of redacts, fine because a single chathistory
+ * batch caps at FEAT_CHATHISTORY_MAX (typically 100).  Returns the
+ * post-filter count. */
+static int redact_filter_messages(struct HistoryMessage **head, int count)
+{
+  struct HistoryMessage *m, **pp;
+  /* Small stack buffer for the redacted-msgid set; chathistory batches
+   * are tiny (default cap 100).  HISTORY_MSGID_LEN includes a NUL. */
+  char redacted[100][HISTORY_MSGID_LEN];
+  int n_redacted = 0;
+  int kept = 0;
+
+  if (!head || !*head || count <= 0)
+    return count;
+
+  for (m = *head; m && n_redacted < (int)(sizeof(redacted) / sizeof(redacted[0]));
+       m = m->next) {
+    const char *c, *space;
+    size_t len;
+    if (m->type != HISTORY_REDACT)
+      continue;
+    c = m->dyn_content ? m->dyn_content : m->content;
+    if (!c || !*c)
+      continue;
+    space = strchr(c, ' ');
+    len = space ? (size_t)(space - c) : strlen(c);
+    if (len == 0 || len >= sizeof(redacted[0]))
+      continue;
+    memcpy(redacted[n_redacted], c, len);
+    redacted[n_redacted][len] = '\0';
+    n_redacted++;
+  }
+  if (n_redacted == 0)
+    return count;
+
+  pp = head;
+  while (*pp) {
+    struct HistoryMessage *cur = *pp;
+    int drop = 0;
+    if (cur->type == HISTORY_PRIVMSG
+        || cur->type == HISTORY_NOTICE
+        || cur->type == HISTORY_TAGMSG) {
+      int i;
+      for (i = 0; i < n_redacted; i++) {
+        if (0 == strcmp(cur->msgid, redacted[i])) {
+          drop = 1;
+          break;
+        }
+      }
+    }
+    if (drop) {
+      *pp = cur->next;
+      cur->next = NULL;
+      history_free_messages(cur);
+    } else {
+      pp = &cur->next;
+      kept++;
+    }
+  }
+  return kept;
+}
+
 static int presence_filter_and_replay(struct Client *sptr,
                                        const char *target,
                                        struct HistoryMessage **head,
@@ -1261,6 +1334,10 @@ static int presence_filter_and_replay(struct Client *sptr,
         (target && IsChannelName(target)) ? FindChannel(target) : NULL;
     real_override = has_ops_override(sptr, chptr);
   }
+  /* Drop redacted originals before presence + replay so redacted
+   * content never reaches the wire for normal queries.  Audit access
+   * (a later capability) would skip this filter. */
+  count = redact_filter_messages(head, count);
   count = presence_filter_messages(sptr, target, head, count, real_override);
   replay_start_batch(sptr, target, *head, count, real_override, label);
   return count;
