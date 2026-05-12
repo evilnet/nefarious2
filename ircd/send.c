@@ -1384,15 +1384,18 @@ void sendcmdto_one_tags_with_client(struct Client *from,
     }
   } else {
     /* Local-client destination — use per-recipient cap-aware tag
-     * formatting (msgid via ext_msgid, plus client_tags if recipient
-     * has CAP_MSGTAGS). */
-    tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to,
-                                           has_ctags ? client_tags : NULL);
-    /* format_message_tags_with_client only handles the client-tag side;
-     * the ext_msgid still needs to fold in via the existing _for_ex
-     * path when no client_tags. Fall back when no client_tags so we
-     * don't drop ext_msgid. */
-    if (!has_ctags)
+     * formatting.  When client tags are present, format_message_tags_
+     * with_client handles label + tags together.  When absent, fall
+     * through to format_message_tags_for_ex so msgid lands properly
+     * and the label isn't double-consumed: the _with_client path
+     * side-effects cli_label_responded via its label branch even
+     * when its return value gets discarded, so calling both eats
+     * the label on the first send and emits it on neither (regression
+     * caught by irctest testLabeledPrivmsgResponsesToSelf). */
+    if (has_ctags)
+      tags = format_message_tags_with_client(tagbuf, sizeof(tagbuf), from, to,
+                                             client_tags);
+    else
       tags = format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, ext_msgid);
     if (tags)
       mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
