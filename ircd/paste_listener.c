@@ -908,6 +908,55 @@ static void paste_timeout_callback(struct Event *ev)
   paste_conn_free(conn);
 }
 
+/* Drain anything readable from SSL — both the kernel buffer and OpenSSL's
+ * own decrypted buffer.  OpenSSL can decrypt several application records
+ * out of a single TLS record (and TLS 1.3 clients routinely coalesce
+ * Finished + the HTTP GET into one TCP segment), so after SSL_accept
+ * completes — and after every successful SSL_read — there may be data
+ * sitting in SSL_pending() that will never trigger a fresh ET_READ on
+ * the level-triggered epoll fd.  Mirrors the SSL_pending drain pattern
+ * in s_bsd.c::read_packet.
+ */
+static void paste_drain_read(struct paste_conn *conn)
+{
+  int rc;
+
+  for (;;) {
+    rc = SSL_read(conn->ssl,
+                  conn->request + conn->request_len,
+                  sizeof(conn->request) - conn->request_len - 1);
+    if (rc <= 0) {
+      int err = SSL_get_error(conn->ssl, rc);
+      if (err == SSL_ERROR_WANT_READ)
+        socket_events(&conn->socket, SOCK_EVENT_READABLE);
+      else if (err == SSL_ERROR_WANT_WRITE)
+        socket_events(&conn->socket, SOCK_EVENT_WRITABLE);
+      else
+        paste_conn_free(conn);
+      return;
+    }
+
+    conn->request_len += rc;
+    conn->request[conn->request_len] = '\0';
+
+    if (strstr(conn->request, "\r\n\r\n")) {
+      paste_handle_request(conn);
+      if (conn->state == PASTE_CONN_WRITING)
+        socket_events(&conn->socket, SOCK_EVENT_WRITABLE);
+      return;
+    }
+
+    if (conn->request_len >= (int)sizeof(conn->request) - 1) {
+      paste_send_error(conn, 413, "Request Too Large");
+      socket_events(&conn->socket, SOCK_EVENT_WRITABLE);
+      return;
+    }
+
+    if (SSL_pending(conn->ssl) <= 0)
+      return;  /* kernel + SSL buffers drained; wait for next ET_READ */
+  }
+}
+
 static void paste_conn_callback(struct Event *ev)
 {
   struct paste_conn *conn = (struct paste_conn *)s_data(ev_socket(ev));
@@ -929,9 +978,12 @@ static void paste_conn_callback(struct Event *ev)
         /* Complete SSL handshake */
         rc = SSL_accept(conn->ssl);
         if (rc == 1) {
-          /* Handshake complete */
+          /* Handshake complete — the same TCP segment may have carried
+           * the HTTP request piggybacked behind the client's Finished,
+           * so drain SSL_pending() before yielding to epoll. */
           conn->state = PASTE_CONN_READING;
           socket_events(&conn->socket, SOCK_EVENT_READABLE);
+          paste_drain_read(conn);
         } else {
           int err = SSL_get_error(conn->ssl, rc);
           if (err == SSL_ERROR_WANT_READ) {
@@ -944,30 +996,7 @@ static void paste_conn_callback(struct Event *ev)
           }
         }
       } else if (conn->state == PASTE_CONN_READING) {
-        /* Read request */
-        rc = SSL_read(conn->ssl,
-                      conn->request + conn->request_len,
-                      sizeof(conn->request) - conn->request_len - 1);
-        if (rc > 0) {
-          conn->request_len += rc;
-          conn->request[conn->request_len] = '\0';
-
-          /* Check for end of HTTP headers */
-          if (strstr(conn->request, "\r\n\r\n")) {
-            paste_handle_request(conn);
-            if (conn->state == PASTE_CONN_WRITING) {
-              socket_events(&conn->socket, SOCK_EVENT_WRITABLE);
-            }
-          } else if (conn->request_len >= (int)sizeof(conn->request) - 1) {
-            paste_send_error(conn, 413, "Request Too Large");
-            socket_events(&conn->socket, SOCK_EVENT_WRITABLE);
-          }
-        } else {
-          int err = SSL_get_error(conn->ssl, rc);
-          if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
-            paste_conn_free(conn);
-          }
-        }
+        paste_drain_read(conn);
       }
       break;
 
@@ -978,6 +1007,7 @@ static void paste_conn_callback(struct Event *ev)
         if (rc == 1) {
           conn->state = PASTE_CONN_READING;
           socket_events(&conn->socket, SOCK_EVENT_READABLE);
+          paste_drain_read(conn);
         } else {
           int err = SSL_get_error(conn->ssl, rc);
           if (err == SSL_ERROR_WANT_READ) {
