@@ -78,6 +78,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <sys/uio.h>
+#include <sys/ioctl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -1092,6 +1093,21 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
    * If sessions already exist (all ACTIVE), this is just a second connection
    * to the same account — don't create a duplicate session. */
   if (bounce_count(account) == 0) {
+    /* Steady-state BS C race guard: if any peer has unread inbound
+     * bytes, the in-flight data might carry a BS C announcing the
+     * very session for this account.  Creating a fresh local session
+     * now would race ahead and produce a parallel primary, which
+     * downstream resolves via classic-collision kills.  Defer the
+     * decision; bounce_drain_pending_registrations re-runs us once
+     * the peer data has been processed (the BS C handler triggers
+     * the drain). */
+    if (bounce_peer_has_inbound_data()) {
+      Debug((DEBUG_INFO,
+             "bounce_auto_resume: peer has inbound bytes, deferring "
+             "new-session decision for %s (avoid steady-state BS C race)",
+             account));
+      return BOUNCE_RESUME_DEFER_PEER_INBOUND;
+    }
     max_sessions = feature_int(FEAT_BOUNCER_MAX_SESSIONS);
     if (max_sessions > 0) {
       if (bounce_create(cptr, &session) == 0) {
@@ -3724,6 +3740,14 @@ bsc_forward:
                             attach_count, total_active,
                             channels ? channels : "");
     }
+    /* A new session just landed (or an existing one was renamed via
+     * cross-sessid).  If any pending registrations were deferred at
+     * bounce_auto_resume waiting for exactly this signal (steady-state
+     * BS C race guard, BOUNCE_RESUME_DEFER_PEER_INBOUND), retry them
+     * now — bounce_auto_resume's second pass will find the session
+     * and take the alias-attach path instead of creating a parallel
+     * primary. */
+    bounce_drain_pending_registrations();
     break;
   }
 
@@ -8079,6 +8103,46 @@ int bounce_burst_in_progress(void)
   for (i = 0; i <= HighestFd; i++) {
     struct Client *cli = LocalClientArray[i];
     if (cli && IsServer(cli) && IsBurst(cli))
+      return 1;
+  }
+  return 0;
+}
+
+/** Does any peer's socket have unread inbound bytes (kernel recvbuf
+ * or parsed-but-unprocessed dbuf)?
+ *
+ * Used to detect the steady-state BS C race: peer X creates a fresh
+ * bouncer session, broadcasts BS C; meanwhile a second SASL'd client
+ * arrives on local server Y for the same account.  If Y's
+ * bounce_auto_resume runs BEFORE Y has read the BS C off the wire,
+ * Y sees no session and creates a parallel primary — split-brain.
+ *
+ * bounce_burst_in_progress() catches the link-establishment burst
+ * case via IsBurst.  This helper catches the steady-state case where
+ * IsBurst is clear but data may still be in the kernel buffer
+ * unprocessed.
+ *
+ * Strategy: FIONREAD for the kernel recvbuf + DBufLength for any
+ * already-parsed-but-not-yet-dispatched bytes.  Cheap (one ioctl per
+ * peer) and avoids reentrant read_packet calls.
+ */
+int bounce_peer_has_inbound_data(void)
+{
+  struct DLink *dlp;
+
+  if (!cli_serv(&me))
+    return 0;
+
+  for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+    struct Client *peer = dlp->value.cptr;
+    int avail;
+    if (!peer || !IsServer(peer))
+      continue;
+    if (cli_fd(peer) < 0)
+      continue;
+    if (DBufLength(&cli_recvQ(peer)) > 0)
+      return 1;
+    if (ioctl(cli_fd(peer), FIONREAD, &avail) == 0 && avail > 0)
       return 1;
   }
   return 0;

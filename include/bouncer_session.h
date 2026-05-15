@@ -495,6 +495,13 @@ extern int bounce_convergence_pending(struct Client *exclude_peer);
  * over, rather than running the 1-second timer fallback to expiry. */
 extern void bounce_release_idle_gates(void);
 
+/** Does any peer's socket have unread inbound bytes (kernel recvbuf
+ * or parsed-but-unprocessed dbuf)?  Used by bounce_auto_resume to
+ * avoid creating a parallel primary when peer might be in the middle
+ * of broadcasting BS C for the very session this account is about to
+ * attach to (steady-state BS C race). */
+extern int bounce_peer_has_inbound_data(void);
+
 extern void bounce_walk_sessions(void (*cb)(struct BouncerSession *,
                                             void *),
                                  void *data);
@@ -1193,6 +1200,11 @@ extern struct BouncerSession *bounce_find_best_held(const char *account);
 #define BOUNCE_RESUME_ALIAS_REMOTE   4
 #define BOUNCE_RESUME_ALIAS_LOCAL    5
 #define BOUNCE_RESUME_REJECT_DUPLICATE 6
+/** Defer-and-retry: a peer has unread inbound bytes that may carry a
+ * BS C announcing the very session this account is about to attach to.
+ * Caller (register_user) should bounce_defer_registration and let the
+ * drain-on-BS-C path retry the auto_resume once peer data is processed. */
+#define BOUNCE_RESUME_DEFER_PEER_INBOUND 7
 extern int bounce_auto_resume(struct Client *cptr,
                                struct BouncerSession **out_session,
                                time_t *out_since_time);

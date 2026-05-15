@@ -592,6 +592,21 @@ int register_user(struct Client *cptr, struct Client *sptr)
                          "Account already has an active session on this network");
     }
 
+    /* Steady-state BS C race guard: peer has inbound bytes that may
+     * carry a BS C for this account.  Defer registration; the drain
+     * triggered by BS C processing (or EB) will retry auto_resume
+     * once the peer data has been consumed.  See
+     * project_bsc_n_ordering_race memory for full discussion. */
+    if (auto_resumed == BOUNCE_RESUME_DEFER_PEER_INBOUND) {
+      if (bounce_defer_registration(sptr) == 0) {
+        sendrawto_one(sptr,
+                      "NOTICE * :*** Bouncer: waiting for peer session "
+                      "announcement to settle before registering");
+        return 0;
+      }
+      /* defer failed (OOM?) — fall through to create as best-effort */
+    }
+
     SetLocalNumNick(sptr);
 
     /* cli_name must be set by NICK before registration proceeds.
