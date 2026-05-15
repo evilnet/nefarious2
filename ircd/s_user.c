@@ -1096,7 +1096,7 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       struct Membership *member;
       if ((channel_name = find_no_nickchange_channel(sptr))
           && !IsXtraOp(sptr) && !svsnick) {
-        return send_reply(cptr, ERR_BANNICKCHANGE, channel_name);
+        return send_reply(sptr, ERR_BANNICKCHANGE, channel_name);
       }
       /*
        * Refuse nick change if the last nick change was less
@@ -1105,29 +1105,34 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
        * If someone didn't change their nick for more then 60 seconds
        * however, allow to do two nick changes immediately after another
        * before limiting the nick flood. -Run
+       *
+       * Use sptr, not cptr: the MyUser block operates on the user, but
+       * cptr can be the incoming server link rather than the user when
+       * an alias-source NICK was rewritten to its local primary (see
+       * m_nick.c:401), or under SVSNICK / oper-forced rename paths.
        */
       {
         int nick_delay = feature_int(FEAT_NICKDELAY);
-        if (nick_delay > 0 && CurrentTime < cli_nextnick(cptr))
+        if (nick_delay > 0 && CurrentTime < cli_nextnick(sptr))
         {
-          cli_nextnick(cptr) += 2;
-          send_reply(cptr, ERR_NICKTOOFAST, parv[1],
-                     cli_nextnick(cptr) - CurrentTime);
+          cli_nextnick(sptr) += 2;
+          send_reply(sptr, ERR_NICKTOOFAST, parv[1],
+                     cli_nextnick(sptr) - CurrentTime);
           /* Send error message */
-          sendcmdto_one(cptr, CMD_NICK, cptr, "%s", cli_name(cptr));
+          sendcmdto_one(sptr, CMD_NICK, sptr, "%s", cli_name(sptr));
           /* bounce NICK to user */
           return 0;                /* ignore nick change! */
         }
         else if (nick_delay > 0) {
           /* Limit total to 1 change per NICKDELAY seconds: */
-          cli_nextnick(cptr) += nick_delay;
+          cli_nextnick(sptr) += nick_delay;
           /* However allow _maximal_ 1 extra consecutive nick change: */
-          if (cli_nextnick(cptr) < CurrentTime)
-            cli_nextnick(cptr) = CurrentTime;
+          if (cli_nextnick(sptr) < CurrentTime)
+            cli_nextnick(sptr) = CurrentTime;
         }
       }
       /* Invalidate all bans against the user so we check them again */
-      for (member = (cli_user(cptr))->channel; member;
+      for (member = (cli_user(sptr))->channel; member;
 	   member = member->next_channel) {
         ClearBanValid(member);
         ClearBanValidNick(member);
