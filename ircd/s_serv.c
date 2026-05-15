@@ -356,34 +356,37 @@ int server_finish_burst(struct Client *cptr)
       char *s = umode_str(acptr);
 
       /* Legacy-face suppression: if cptr is a non-IRCv3-aware peer and
-       * acptr's bouncer session has already had a face introduced toward
-       * cptr (typically by an earlier walk-step on a different session
-       * connection, or by an inbound burst that's already been forwarded
-       * here), skip the entire user introduction block.  Per design:
-       * legacy peers see exactly one N per session — BX-aware side may
-       * juggle primary/alias state internally without disturbing
-       * legacy's view.  The recorded face's local Client struct stays
-       * alive (becomes IsBouncerAlias on demote) and routing back to
-       * legacy resolves through it. */
+       * acptr is bouncer-bound to a session that has already had a face
+       * introduced toward cptr (typically by an earlier walk-step on a
+       * different session connection, or by an inbound burst that's
+       * already been forwarded here), skip the entire user introduction
+       * block.  Per design: legacy peers see exactly one N per bouncer
+       * session — BX-aware side may juggle primary/alias state
+       * internally without disturbing legacy's view.  The recorded
+       * face's local Client struct stays alive (becomes IsBouncerAlias
+       * on demote) and routing back to legacy resolves through it.
+       *
+       * Scope this to the acptr's own session, not all sessions for the
+       * account.  An account-bearing but non-bouncer-bound client (no
+       * cli_session_id, or session opt-out via bouncer/hold=0) is a
+       * legitimately independent presence and must get its own N to
+       * legacy peers — even if some bouncer client happens to share
+       * the account.  Future multi-session-per-account work falls out
+       * of session-keying for free; nothing changes here. */
       if (!IsIRCv3Aware(cptr) && IsAccount(acptr)) {
-        if (bounce_account_legacy_face_for(cli_account(acptr),
-                                            cli_yxx(cptr))) {
+        struct BouncerSession *bs = bounce_get_session(acptr);
+        if (bs && bounce_session_legacy_face_for(bs, cli_yxx(cptr))) {
           Debug((DEBUG_INFO,
                  "Bouncer: burst-suppressing N for %s to legacy %s "
-                 "— account already has a face there",
-                 cli_name(acptr), cli_name(cptr)));
+                 "— session %s already has a face there",
+                 cli_name(acptr), cli_name(cptr), bs->hs_sessid));
           continue;
         }
-        {
-          struct BouncerSession *bs = bounce_get_session(acptr);
-          if (!bs)
-            bs = bounce_find_any_session(cli_account(acptr));
-          if (bs) {
-            char face_buf[6];
-            ircd_snprintf(0, face_buf, sizeof(face_buf), "%s%s",
-                          cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
-            bounce_session_record_legacy_intro(bs, cli_yxx(cptr), face_buf);
-          }
+        if (bs) {
+          char face_buf[6];
+          ircd_snprintf(0, face_buf, sizeof(face_buf), "%s%s",
+                        cli_yxx(cli_user(acptr)->server), cli_yxx(acptr));
+          bounce_session_record_legacy_intro(bs, cli_yxx(cptr), face_buf);
         }
       }
 
