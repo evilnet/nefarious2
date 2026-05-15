@@ -3996,8 +3996,22 @@ int bounce_promote_alias(struct BouncerSession *session)
   ClearBouncerAlias(alias);
   cli_user(alias)->alias_primary = NULL;
 
-  /* Update nick timestamp for collision resolution */
-  cli_lastnick(alias) = CurrentTime;
+  /* Preserve cli_lastnick across the promote.  Earlier this site reset
+   * cli_lastnick to CurrentTime under the rationale "ensures promoted
+   * alias wins over stale ghosts from reconnect" — but that defense
+   * only worked under the classic same-user@host rule (newer wins) and
+   * destroyed the session's age signal in every cross-server compare.
+   *
+   * The same-account override in m_nick.c flips collision resolution
+   * to older-wins for matching accounts (so a bouncer session that's
+   * existed for 20 minutes correctly beats a freshly-attached peer
+   * connection on the other side of a link).  Bumping to CurrentTime
+   * here would invert that — the just-promoted alias would lose every
+   * cross-server collision against any peer with a stable older TS.
+   *
+   * The alias's lastnick at this point is the value inherited from
+   * primary at bounce_setup_local_alias time (line 6172 in this file),
+   * which is the session's original age.  Keep it. */
 
   /* Add to nick hash (aliases aren't in nick hash) */
   hAddClient(alias);
