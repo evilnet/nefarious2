@@ -1000,6 +1000,26 @@ extern void bounce_session_record_legacy_intro(struct BouncerSession *session,
 extern void bounce_session_clear_legacy_face(struct BouncerSession *session,
                                               const char *face_yxx);
 
+/** Clear all legacy_face entries (across every session) keyed by a
+ * departing peer's two-character server numeric.  Called from the SQUIT
+ * path so that when the peer reconnects — even reusing the same numeric —
+ * we re-emit a fresh N to it instead of suppressing under a stale face
+ * record from the prior link.  Without this, restart-on-the-same-numeric
+ * leaves the local side believing the peer has already seen the
+ * introduction, and the burst goes out with channel members referencing
+ * unannounced numerics. */
+extern void bounce_clear_legacy_faces_for_peer(const char *peer_yxx);
+
+/** Null any session's hs_client that points at this dying client, across
+ * the full tokenHash.  exit_one_client's primary BOUNCER_ACTIVE / HOLDING
+ * cleanup is gated on bsess->hs_client == bcptr; if a session's view of
+ * its primary is stale (pre-existing burst-desync bug), that gate misses
+ * and the dying client's pointer is left dangling in hs_client, causing
+ * UAF in any subsequent recompute / lookup that reads hs_client.  Call
+ * after the gated cleanup so any session still pointing at the corpse
+ * gets nulled. */
+extern void bounce_null_hs_client_pointing_at(struct Client *cli);
+
 /** Emit N to all directly-connected legacy peers that don't yet have a
  * face for this client's session, recording each successful emit.
  * No-op if the client is an alias or has no associated session.  Used

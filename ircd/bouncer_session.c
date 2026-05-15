@@ -2154,6 +2154,41 @@ void bounce_session_clear_legacy_face(struct BouncerSession *session,
   }
 }
 
+void bounce_clear_legacy_faces_for_peer(const char *peer_yxx)
+{
+  int i, j, k;
+  struct BouncerSession *s;
+  if (!peer_yxx || !*peer_yxx)
+    return;
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (s = tokenHash[i]; s; s = s->hs_tnext) {
+      for (j = 0; j < s->hs_legacy_intro_count; ) {
+        if (0 == strcmp(s->hs_legacy_intros[j].bli_peer, peer_yxx)) {
+          for (k = j; k < s->hs_legacy_intro_count - 1; k++)
+            s->hs_legacy_intros[k] = s->hs_legacy_intros[k + 1];
+          s->hs_legacy_intro_count--;
+        } else {
+          j++;
+        }
+      }
+    }
+  }
+}
+
+void bounce_null_hs_client_pointing_at(struct Client *cli)
+{
+  int i;
+  struct BouncerSession *s;
+  if (!cli)
+    return;
+  for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
+    for (s = tokenHash[i]; s; s = s->hs_tnext) {
+      if (s->hs_client == cli)
+        s->hs_client = NULL;
+    }
+  }
+}
+
 /** Persist a bouncer session to MDBX.
  * Only persists local sessions. Guarded by FEAT_BOUNCER_PERSIST.
  * @param[in] session Session to persist.
@@ -8343,6 +8378,17 @@ void bounce_recompute_session_away(struct BouncerSession *session)
     return;
 
   primary = session->hs_client;
+  /* Defensive: if exit_one_client failed to null hs_client when the
+   * primary was freed (pre-existing burst-desync can leave hs_client !=
+   * dying bcptr, so the session-owner cleanup branch skips), MyConnect /
+   * cli_user reads below would deref freed memory.  IsUser is a cheap
+   * sanity gate — a freed Client has cli_status zeroed in the typical
+   * free path.  Not bulletproof against full UAF (reused memory could
+   * pass), but pairs with the tokenHash sweep in exit_one_client. */
+  if (!IsUser(primary) || !cli_user(primary)) {
+    session->hs_client = NULL;
+    return;
+  }
   prev_effective = session->hs_effective_away;
   bounce_compute_effective_away(session, &new_effective, new_msg);
 

@@ -636,6 +636,15 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     }
   }
 
+  /* Defense-in-depth: the cleanup above only fires when this client's
+   * own bouncer session has hs_client == bcptr.  Stale sessions on
+   * other accounts (or a session whose view of its primary is desynced
+   * from the pre-existing burst-desync bug) can leave hs_client pointing
+   * at bcptr from elsewhere.  Walk every session and null any hs_client
+   * pointing at the dying Client so subsequent recompute/lookup paths
+   * don't UAF-deref. */
+  bounce_null_hs_client_pointing_at(bcptr);
+
   /*
    * Update IPregistry
    */
@@ -862,6 +871,13 @@ int exit_client(struct Client *cptr,
 			   get_client_name(killer, HIDE_IP));
     sendto_opmask_butone(0, SNO_NETWORK, "Net break: %C %C (%s)",
 			 cli_serv(victim)->up, victim, comment);
+
+    /* Clear legacy_face records keyed by the departing peer's YXX.
+     * Without this, a peer that reconnects on the same numeric is treated
+     * as having already received our N introductions — bounce_emit_
+     * legacy_n_intro skips the emit and the peer's burst arrives with
+     * channel members referencing unannounced numerics. */
+    bounce_clear_legacy_faces_for_peer(cli_yxx(victim));
 
     /* Prepare alias promotions: mark sessions where the managing server
      * is departing and surviving aliases exist. Sets hs_promoting to
