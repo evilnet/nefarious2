@@ -358,7 +358,13 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (primary && MyConnect(primary) && IsUser(primary)
             && !HasFlag(primary, FLAG_KILLED)) {
           SetFlag(primary, FLAG_KILLED);
-          exit_client(primary, primary, &me, "Session killed");
+          /* Forward the alias's exit comment so the primary's local
+           * connection sees the actual KILL reason ("Killed (server
+           * (overruled by older nick))" or similar) rather than a
+           * generic "Session killed".  Without context the user can't
+           * tell why their session was terminated. */
+          exit_client(primary, primary, &me,
+                      comment && *comment ? comment : "Session killed");
         }
       }
       if (MyConnect(bcptr)) {
@@ -581,7 +587,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
             for (i = bsess->hs_alias_count - 1; i >= 0; i--) {
               struct Client *alias = findNUser(bsess->hs_aliases[i].ba_numeric);
               if (alias)
-                exit_client(alias, alias, &me, "Session killed");
+                exit_client(alias, alias, &me,
+                            comment && *comment ? comment : "Session killed");
             }
           }
           bounce_broadcast(bsess, 'X', NULL);
@@ -616,7 +623,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
             for (i = bsess->hs_alias_count - 1; i >= 0; i--) {
               struct Client *alias = findNUser(bsess->hs_aliases[i].ba_numeric);
               if (alias)
-                exit_client(alias, alias, &me, "Session killed");
+                exit_client(alias, alias, &me,
+                            comment && *comment ? comment : "Session killed");
             }
           }
           bounce_broadcast(bsess, 'X', NULL);
