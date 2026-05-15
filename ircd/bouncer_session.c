@@ -5228,6 +5228,38 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
   session->hs_client = new_primary;
   cli_user(demoted_alias)->alias_primary = new_primary;
 
+  /* Adopt the primary's nick.  Aliases share the primary's nick for
+   * outgoing message attribution and identity-routing.  Without this:
+   *   - demoted_alias's cli_name stays at the old (now-stale) nick
+   *   - hRemClient (in bounce_demote_live_primary_to_alias) left the
+   *     old nick unhashed → /WHOIS <old_nick> on this server returns
+   *     no-such-nick, even though the user is still connected
+   *   - any PRIVMSG the user sends goes out attributed to the old nick,
+   *     which exists on no other server's view (the network now sees
+   *     them as the primary's nick)
+   *
+   * Same pattern as bounce_setup_local_alias which renames at attach
+   * time.  Send the NICK echo to the local fd so the user's client
+   * UI updates.  No need to broadcast NICK to channel members — the
+   * BX C above is the network-side identity update; channel members
+   * on this server see the alias as a CHFL_ALIAS membership which is
+   * already filtered out of /NAMES rendering. */
+  if (MyConnect(demoted_alias)
+      && 0 != ircd_strcmp(cli_name(demoted_alias), cli_name(new_primary))) {
+    char old_nick[NICKLEN + 1];
+    ircd_strncpy(old_nick, cli_name(demoted_alias), NICKLEN + 1);
+    ircd_strncpy(cli_name(demoted_alias), cli_name(new_primary), NICKLEN + 1);
+    /* :old_nick!user@host NICK new_nick — local client expects this
+     * shape from a self-rename. */
+    sendcmdto_one(demoted_alias, CMD_NICK, demoted_alias, "%s",
+                  cli_name(demoted_alias));
+    Debug((DEBUG_INFO,
+           "bounce_finish_live: renamed local alias %s -> %s "
+           "(primary on %s)",
+           old_nick, cli_name(demoted_alias),
+           cli_name(cli_user(new_primary)->server)));
+  }
+
   /* Broadcast BX C so other peers learn about the newly-aliased
    * local connection — they'll create a remote-alias replica with
    * primary pointing at new_primary, channel memberships reflecting
