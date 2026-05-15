@@ -55,13 +55,14 @@
 #define CHECK_OPSONLY   0x04 /* -o */
 #define CHECK_SHOWIPS   0x08 /* -i */
 #define CHECK_CIDRMASK  0x10 /* automatically detected when performing a hostmask /CHECK */
+#define CHECK_BOUNCER   0x20 /* -b: verbose bouncer detail (per-alias + legacy_face dumps) */
 
 #define HEADERLINE "--------------------------------------------------------------------"
 #define COLOR_OFF  '\017'
 
 void checkChannel(struct Client *sptr, struct Channel *chptr);
 void checkUsers(struct Client *sptr, struct Channel *chptr, int flags);
-void checkClient(struct Client *sptr, struct Client *acptr);
+void checkClient(struct Client *sptr, struct Client *acptr, int flags);
 void checkServer(struct Client *sptr, struct Client *acptr);
 signed int checkHostmask(struct Client *sptr, char *hoststr, int flags);
 
@@ -131,6 +132,10 @@ int mo_check(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
          flags |= CHECK_SHOWIPS;
          break;
 
+       case 'b':
+         flags |= CHECK_BOUNCER;
+         break;
+
        default:
          /* might want to raise some sort of error here? */
          break;
@@ -159,7 +164,7 @@ int mo_check(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
          return 0;
       }
 
-    checkClient(sptr, acptr);
+    checkClient(sptr, acptr, flags);
    }
    else if ((acptr = FindServer(parv[1]))) { /* server */
      checkServer(sptr, acptr);
@@ -386,7 +391,7 @@ void checkChannel(struct Client *sptr, struct Channel *chptr)
    /* Don't send 'END OF CHECK' message, it's sent in checkUsers, which is called after this. */
 }
 
-void checkClient(struct Client *sptr, struct Client *acptr)
+void checkClient(struct Client *sptr, struct Client *acptr, int flags)
 {
    struct Channel *chptr;
    struct Membership *lp;
@@ -888,6 +893,66 @@ void checkClient(struct Client *sptr, struct Client *acptr)
                                 asvr ? cli_name(asvr) : ba->ba_server,
                                 alias ? "not an alias" : "not found");
                }
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
+         }
+
+         /* -b: machine-parseable verbose detail for harness use.
+          *
+          * Single-line format, one entry per line, fields space-separated:
+          *   BouncerPrimary:: <numeric> <nick> <lastnick> <sessid> <server> <locality>
+          *   BouncerAlias:: <idx> <numeric> <nick> <lastnick> <sessid> <server> <locality> <primary_numeric>
+          *   BouncerFace:: <idx> <peer_yxx> <face_numeric>
+          * locality is "local" or "remote".  primary_numeric is the alias's
+          * cli_alias_primary numeric, or "-" if unresolved.
+          */
+         if (flags & CHECK_BOUNCER) {
+            int ai;
+            const char *prim_loc = MyConnect(acptr) ? "local" : "remote";
+            const char *prim_svr_name = cli_user(acptr) && cli_user(acptr)->server
+                                         ? cli_name(cli_user(acptr)->server)
+                                         : "?";
+            send_reply(sptr, RPL_DATASTR, " ");
+            ircd_snprintf(0, outbuf, sizeof(outbuf),
+                          "BouncerPrimary:: %s%s %s %Tu %s %s %s",
+                          NumNick(acptr),
+                          cli_name(acptr),
+                          cli_lastnick(acptr),
+                          cli_session_id(acptr)[0] ? cli_session_id(acptr) : "-",
+                          prim_svr_name,
+                          prim_loc);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+
+            for (ai = 0; ai < session->hs_alias_count; ai++) {
+               struct BounceAlias *ba = &session->hs_aliases[ai];
+               struct Client *alias = findNUser(ba->ba_numeric);
+               struct Client *asvr = FindNServer(ba->ba_server);
+               const char *aloc = (alias && MyConnect(alias)) ? "local" : "remote";
+               const char *anick = alias ? cli_name(alias) : "-";
+               time_t alast = alias ? cli_lastnick(alias) : 0;
+               const char *asid = (alias && cli_session_id(alias)[0])
+                                    ? cli_session_id(alias) : "-";
+               char prim_num[12] = "-";
+               if (alias && cli_alias_primary(alias)) {
+                  struct Client *pcli = cli_alias_primary(alias);
+                  ircd_snprintf(0, prim_num, sizeof(prim_num), "%s%s",
+                                NumNick(pcli));
+               }
+               ircd_snprintf(0, outbuf, sizeof(outbuf),
+                             "BouncerAlias:: %d %s %s %Tu %s %s %s %s",
+                             ai + 1, ba->ba_numeric, anick,
+                             alast, asid,
+                             asvr ? cli_name(asvr) : ba->ba_server,
+                             aloc, prim_num);
+               send_reply(sptr, RPL_DATASTR, outbuf);
+            }
+
+            for (ai = 0; ai < session->hs_legacy_intro_count; ai++) {
+               ircd_snprintf(0, outbuf, sizeof(outbuf),
+                             "BouncerFace:: %d %s %s",
+                             ai + 1,
+                             session->hs_legacy_intros[ai].bli_peer,
+                             session->hs_legacy_intros[ai].bli_face);
                send_reply(sptr, RPL_DATASTR, outbuf);
             }
          }
