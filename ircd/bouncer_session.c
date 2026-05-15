@@ -2860,6 +2860,18 @@ int bounce_db_restore(void)
     session->hs_state = BOUNCE_HOLDING;
     session->hs_restore_pending = 1;  /* cleared by burst-time BX R or by attach */
     session->hs_client = ghost;
+    /* Sync ghost's cli_session_id to the bouncer's durable hs_sessid
+     * NOW — at make_client time bounce_create_ghost minted a fresh
+     * cli_session_id, which is the value bounce_set_n_sessid_hint
+     * propagates to peers via the ,S compact tag on any subsequent
+     * N introduction.  We do bursts BEFORE the ghost reaches
+     * bounce_revive (which has its own sync), so if we delay the sync
+     * to revive, peers receive the ghost's N during burst with the
+     * fresh-minted sessid and never observe the persisted one — every
+     * downstream code path keyed on cli_session_id <=> hs_sessid
+     * agreement (post-burst reconcile, alias attribution, etc.) then
+     * silently misses. */
+    ircd_strncpy(cli_session_id(ghost), session->hs_sessid, S2S_SESSID_BUFSIZE);
     ircd_strncpy(session->hs_ghost_numeric, cli_yxx(ghost),
                  sizeof(session->hs_ghost_numeric) - 1);
     session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
