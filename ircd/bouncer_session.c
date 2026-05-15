@@ -7181,6 +7181,13 @@ static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr,
     for (i = 0; i < session->hs_alias_count; i++) {
       struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
       if (alias && IsBouncerAlias(alias) && cli_alias_primary(alias) == primary) {
+        /* If the alias is on our server, notify its socket BEFORE we
+         * overwrite cli_name — same lockstep echo as the local-rename
+         * pass in set_nick_name (s_user.c).  Without this, an alias
+         * whose remote primary rules over the rename sees no signal of
+         * its own nick change and the client UI drifts. */
+        if (MyConnect(alias))
+          sendcmdto_one(alias, CMD_NICK, alias, ":%s", new_nick);
         ircd_strncpy(cli_name(alias), new_nick, NICKLEN);
       }
     }

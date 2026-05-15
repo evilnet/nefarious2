@@ -1277,6 +1277,14 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
               if (sib_alias && IsBouncerAlias(sib_alias)
                   && cli_alias_primary(sib_alias) == sptr
                   && MyConnect(sib_alias)) {
+                /* Notify the alias's own socket of the rename FIRST,
+                 * while cli_name(sib_alias) still holds the OLD nick so
+                 * the line prefix carries it.  Without this echo, the
+                 * alias's IRC client retains the old nick in its UI even
+                 * though the server's cli_name is already up to date —
+                 * violating the lockstep invariant from the alias's POV
+                 * (bouncer-design-intent.md §"Nick lockstep invariant"). */
+                sendcmdto_one(sib_alias, CMD_NICK, sib_alias, ":%s", nick);
                 ircd_strncpy(cli_name(sib_alias), nick, NICKLEN);
                 cli_name(sib_alias)[NICKLEN] = '\0';
               }
