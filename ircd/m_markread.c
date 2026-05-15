@@ -229,12 +229,12 @@ static void send_markread(struct Client *to, const char *target, const char *uni
    * The timestamp can be "*" if unknown.
    */
   if (!unix_ts || !*unix_ts || *unix_ts == '*') {
-    sendrawto_one(to, "MARKREAD %s timestamp=*", target);
+    sendrawto_one(to, ":%s MARKREAD %s timestamp=*", cli_name(&me), target);
   } else if (history_unix_to_iso(unix_ts, iso_ts, sizeof(iso_ts)) == 0) {
-    sendrawto_one(to, "MARKREAD %s timestamp=%s", target, iso_ts);
+    sendrawto_one(to, ":%s MARKREAD %s timestamp=%s", cli_name(&me), target, iso_ts);
   } else {
     /* Conversion failed - send as-is (might already be ISO or invalid) */
-    sendrawto_one(to, "MARKREAD %s timestamp=%s", target, unix_ts);
+    sendrawto_one(to, ":%s MARKREAD %s timestamp=%s", cli_name(&me), target, unix_ts);
   }
 }
 
