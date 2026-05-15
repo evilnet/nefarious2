@@ -539,8 +539,18 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * Loser side flips its primary to alias of the winner.  Winner side
    * refuses the incoming N (set_nick_name not called → no propagation).
    * No coordination protocol — same inputs + same algorithm → same
-   * answer on both sides. */
-  if (IsServer(sptr) && incoming_acct
+   * answer on both sides.
+   *
+   * Legacy peer gate: the symmetric-demote contract only holds if the
+   * introducing peer also runs D.2.  Against a legacy peer (pre-IRCv3-
+   * aware build, no `v` SERVER flag), our "we win" branch returns 0
+   * silently, but the peer has no equivalent code to demote its primary
+   * on its end — so the same-account collision sits unresolved, each
+   * side keeping a primary the other doesn't know about, until the next
+   * link bounce or oper KILL.  When sptr is a legacy server, skip D.2
+   * entirely and fall through to classic nick-collision semantics
+   * (TS-based, both sides KILL the loser). */
+  if (IsServer(sptr) && incoming_acct && IsIRCv3Aware(sptr)
       && !IsBouncerAlias(acptr) && !IsBouncerHold(acptr)
       && IsAccount(acptr) && IsUser(acptr)
       && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)) {
@@ -743,12 +753,45 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                            "account-bearing %C for unauth incoming %s on "
                            "%C (would be a hijack of an authenticated user)",
                            acptr, parv[parc - 2], cptr);
-      sendcmdto_serv_butone(&me, CMD_KILL, cptr,
-                            "%s :%s (Unauthenticated nick collides with "
-                            "authenticated user)",
-                            parv[parc - 2],
-                            feature_str(FEAT_HIS_SERVERNAME));
+      /* Send KILL TO upstream — the server that owns the offending
+       * unauth user.  Original code used sendcmdto_serv_butone with
+       * butone=cptr, which excludes upstream from the broadcast and
+       * leaves the offender alive there — upstream's own collision
+       * logic then evicts our local user via the symmetric path.
+       * sendcmdto_one targets cptr (the introducing link) directly,
+       * matching the pattern used at m_nick.c:813 for the standard
+       * server-introduced-new-client kill case. */
+      sendcmdto_one(&me, CMD_KILL, cptr,
+                    "%s :%s (Unauthenticated nick collides with "
+                    "authenticated user)",
+                    parv[parc - 2],
+                    feature_str(FEAT_HIS_SERVERNAME));
       return 0;
+    }
+
+    /* Same-account override: both clients are authenticated and the
+     * incoming N carries the same account as our local acptr.  We only
+     * reach this point when D.2 was skipped (source is a legacy peer
+     * with no symmetric alias-attach support), so the natural answer
+     * "alias them together" isn't available.  Default classic rule for
+     * !differ (same user@host) kills the older as a reconnect ghost —
+     * but here both are legitimate live sessions, and killing the
+     * older invites the loser's bouncer to auto-reconnect with a fresh
+     * (newer) TS, which then wins the next round and KILLs our local.
+     * Thrash loop.  Promote to differ=1 (older-wins / stability) so the
+     * established session keeps the nick; the legacy-side loser stays
+     * killed and its bouncer's reconnect-with-newer-TS would still lose
+     * the next round, giving a stable convergence signal. */
+    if (incoming_has_account && incoming_acct
+        && 0 == ircd_strcmp(incoming_acct, cli_user(acptr)->account)
+        && !differ) {
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Same-account override: bouncer-account dual "
+                           "session %C vs incoming %s on %C — applying "
+                           "older-wins (stability) instead of newer-wins "
+                           "(reconnect ghost)",
+                           acptr, parv[parc - 2], cptr);
+      differ = 1;
     }
   }
 
