@@ -1240,15 +1240,20 @@ ssl_read_again:
       return exit_client(cptr, cptr, &me, "dbuf_put fail");
 
     /*
-     * Check for buffer flood.  Allow extra buffer space for multiline-
-     * capable clients so a TCP burst containing BATCH + plus content
-     * can be read and parsed.  After the parse loop below, a second
-     * check enforces the strict (unboosted) limit if no batch was
-     * actually opened — prevents abuse of the boosted recvQ for
-     * non-batch traffic.
+     * Check for buffer flood.  CLIENT_FLOOD is sized for legacy 512-byte
+     * traffic; clients with size-extending IRCv3 caps get a per-message
+     * boost so one legal max-size message fits without tripping the cap.
+     * The boosts are per-message-worth, not per-burst — the parse loop
+     * below drains them within this same I/O turn, so a flooder still
+     * gets killed at recvQ > CLIENT_FLOOD + (one max legal message).
+     *
+     * Multiline boost is whole-batch (temporally extended); a post-parse
+     * recheck below re-enforces the strict cap if no batch was opened.
      */
     {
       unsigned int max_recvq = get_recvq(cptr);
+      if (CapActive(cptr, CAP_MSGTAGS))
+        max_recvq += IRCV3_TAG_MAX;
       if (cli_ml_batch_id(cptr)[0] || CapActive(cptr, CAP_DRAFT_MULTILINE))
         max_recvq += feature_int(FEAT_MULTILINE_MAX_BYTES);
       if (DBufLength(&(cli_recvQ(cptr))) > max_recvq)
