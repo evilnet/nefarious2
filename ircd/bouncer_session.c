@@ -5675,6 +5675,13 @@ static const int umode_sync_flags[] = {
   FLAG_XTRAOP, FLAG_NOLINK, FLAG_MULTILINE_EXPAND, FLAG_NOSTORAGE,
   FLAG_OPERED_LOCAL, FLAG_OPERED_REMOTE,
   FLAG_CLOAKIP, FLAG_CLOAKHOST, FLAG_SSL,
+  /* FLAG_SERVNOTICE gates ALL server-notice delivery via
+   * sendto_opmask_butone's opsarray walk.  Without it, an alias has
+   * an inherited snomask but lands in NO bucket, so /OPER + cross-
+   * server SNO_NETWORK / SNO_OLDSNO traffic is silently dropped on
+   * that connection.  Sync alongside FLAG_WALLOP/FLAG_DEBUG so all
+   * three oper-routing flags travel together. */
+  FLAG_SERVNOTICE,
   -1
 };
 
@@ -5760,6 +5767,24 @@ static void bounce_apply_oper_grant(struct Client *cptr,
     SetLocOp(cptr);
   }
   cli_handler(cptr) = OPER_HANDLER;
+  /* Mirror do_oper (m_oper.c:222-229): the oper umode flags and snomask
+   * are part of the oper grant, not just FLAG_OPER + privs.  Without
+   * them the granted user has no server-notice routing, no wallops
+   * delivery, and no debug snomask — they're opered but can't see any
+   * of the SNO_NETWORK / SNO_OLDSNO traffic (SQUIT, Net break, KILL
+   * notices) that opers normally rely on.  Applies to BS O receivers,
+   * ghost revivals, and any other non-/OPER grant entry. */
+  SetFlag(cptr, FLAG_WALLOP);
+  SetFlag(cptr, FLAG_SERVNOTICE);
+  SetFlag(cptr, FLAG_DEBUG);
+  {
+    unsigned int snomask = ConfSnoMask(aconf) & SNO_ALL;
+    snomask |= aconf->snomask & SNO_ALL;
+    if (snomask)
+      set_snomask(cptr, snomask, SNO_ADD);
+    else
+      set_snomask(cptr, feature_int(FEAT_SNOMASK_OPERDEFAULT), SNO_ADD);
+  }
   if (cli_user(cptr)) {
     if (cli_user(cptr)->opername)
       MyFree(cli_user(cptr)->opername);
