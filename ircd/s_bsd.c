@@ -626,6 +626,20 @@ void close_connection(struct Client *cptr)
   if (-1 < cli_fd(cptr)) {
     flush_connections(cptr);
     LocalClientArray[cli_fd(cptr)] = 0;
+
+    /* Drain any data sitting in the recv buffer before close.  Linux's
+     * close() sends RST (not FIN) when there's unread data in the kernel
+     * recv buffer at close time, even if shutdown(SHUT_RDWR) was called
+     * first — RST then discards data still in flight in both directions,
+     * including the KILL message and ERROR :Closing Link we just queued.
+     * Symptom: TCP RST instead of clean FIN; client sees "Disconnected
+     * (transport error)" with no visible KILL or ERROR rendered. */
+    {
+      char drainbuf[1024];
+      while (recv(cli_fd(cptr), drainbuf, sizeof(drainbuf), MSG_DONTWAIT) > 0)
+        ;
+    }
+
     /* Use shutdown() instead of close() to send FIN gracefully.
      * close() on a socket with unread data in the recv buffer sends RST,
      * which discards pending data at the remote end's recv buffer (on Linux).

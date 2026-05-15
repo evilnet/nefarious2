@@ -43,6 +43,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <stdio.h>
 #include <string.h>
@@ -476,8 +477,18 @@ int ssl_accept(struct Client *cptr)
 
           Debug((DEBUG_ERROR, "SSL_accept: %s", cli_sslerror(cptr)));
 
+          /* Skip ssl_smart_shutdown on a failed-handshake SSL.  The
+           * handshake is by definition not finished here (SSL_accept
+           * returned <= 0 with SSL_ERROR_SSL), so calling SSL_shutdown
+           * would emit a TLS alert into the listener's CTX in an
+           * unexpected state.  Empirically that leaves the listener
+           * unable to complete future SSL_accept calls — every
+           * subsequent server-link reconnect after a failed handshake
+           * fails with the same "Internal OpenSSL error or protocol
+           * error" until the process is restarted.  SSL_set_shutdown
+           * still marks the state for the upcoming SSL_free; we just
+           * don't try to send an alert. */
           SSL_set_shutdown(cli_socket(cptr).ssl, SSL_RECEIVED_SHUTDOWN);
-          ssl_smart_shutdown(cli_socket(cptr).ssl);
           SSL_free(cli_socket(cptr).ssl);
           cli_socket(cptr).ssl = NULL;
 
@@ -751,8 +762,24 @@ int ssl_murder(void *ssl, int fd, const char *buf)
   } else {
     if (buf)
       SSL_write((SSL *) ssl, buf, strlen(buf));
+    /* Send TLS close_notify before SSL_free so the peer sees a clean
+     * shutdown rather than a truncated record.  Pre-registration kill
+     * path (called from s_bsd.c throttle/glineship/zline/early-reject
+     * sites) — same close_notify rationale as ssl_free above.  Skip
+     * for a half-handshaked SSL: SSL_shutdown before init_finished
+     * emits alerts that can confuse OpenSSL's session-cache / CTX
+     * state and trip subsequent SSL_accept on the listener with
+     * "Internal OpenSSL error or protocol error". */
+    if (SSL_is_init_finished((SSL *) ssl))
+      ssl_smart_shutdown((SSL *) ssl);
     SSL_free((SSL *) ssl);
   }
+  /* Graceful TCP close: send FIN via shutdown(SHUT_RDWR) so any
+   * buffered TLS close_notify and rejection message actually reach the
+   * peer, rather than getting discarded by an RST that close() on a
+   * socket with unread data can trigger on Linux.  Mirrors the pattern
+   * in close_connection (s_bsd.c). */
+  shutdown(fd, SHUT_RDWR);
   close(fd);
   return 0;
 }
@@ -761,6 +788,24 @@ void ssl_free(struct Socket *socketh)
 {
   if (!socketh->ssl)
     return;
+  /* Send TLS close_notify before tearing down the SSL state.  Without
+   * this the peer's TLS stack sees a truncated session and the
+   * application layer typically reports the close as a transport error
+   * (e.g. HexChat: "No such device or address") instead of rendering
+   * any application-layer messages (ERROR, KILL) that arrived in the
+   * trailing TLS records.  Pairs with the TCP-level graceful close in
+   * close_connection — shutdown(SHUT_RDWR) sends FIN, this sends the
+   * TLS close_notify that should precede it.
+   *
+   * Skip the SSL_shutdown if the handshake hasn't finished.  Calling
+   * SSL_shutdown on a half-handshaked SSL emits a TLS alert in a state
+   * the listener's CTX wasn't expecting, which leaves stale state that
+   * trips subsequent SSL_accept calls on the same listener with
+   * "Internal OpenSSL error or protocol error" — silently breaking
+   * server-link reconnects after a SQUIT cascade tears down a mid-
+   * handshake session. */
+  if (SSL_is_init_finished(socketh->ssl))
+    ssl_smart_shutdown(socketh->ssl);
   SSL_free(socketh->ssl);
   socketh->ssl = NULL;
 }
