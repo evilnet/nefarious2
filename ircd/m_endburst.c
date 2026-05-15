@@ -151,6 +151,17 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
    * desyncing across reboot cycles. */
   bounce_prune_stale_aliases();
 
+  /* Post-burst session reconcile: a peer's burst can introduce a
+   * primary for the same bouncer session as one of our locals (e.g.,
+   * post-crash MDBX desync where each side restored a primary, or
+   * any post-split rejoin where both sides held a primary).  The N
+   * + BS C burst preserves both as primaries because nicks differ
+   * (so m_nick's at-N-time D.2 split-merge doesn't fire) and cross-
+   * sessid convergence only renames the session ID without
+   * restructuring clients.  Merge same-session multi-primary into
+   * one primary + alias here; older lastnick wins the primary slot. */
+  bounce_post_burst_reconcile();
+
   if (MyConnect(sptr)) {
     sendcmdto_one(&me, CMD_END_OF_BURST_ACK, sptr, "");
 

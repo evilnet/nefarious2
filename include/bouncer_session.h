@@ -473,6 +473,15 @@ extern struct AccountSessions *bounce_find_by_account(const char *account);
  * peers restart, change numeric pool, or BX X cleanup is missed. */
 extern void bounce_prune_stale_aliases(void);
 
+/** Post-burst reconcile: detect multi-primary-same-session states
+ * (e.g., a peer's primary for our session arrived during burst alongside
+ * our own local primary) and merge them by demoting the newer to alias
+ * of the older.  Called from end-of-burst once peer's N tokens are in
+ * the hash so cli_session_id from ,S compact tags is observable.  Both
+ * sides run the same algorithm on the same inputs → deterministic
+ * convergence without coordination. */
+extern void bounce_post_burst_reconcile(void);
+
 extern void bounce_walk_sessions(void (*cb)(struct BouncerSession *,
                                             void *),
                                  void *data);

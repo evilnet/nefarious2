@@ -1285,6 +1285,121 @@ void bounce_prune_stale_aliases(void)
   }
 }
 
+/** Post-burst reconcile: detect multi-primary-same-session states and
+ * merge them by demoting the newer primary to an alias of the older.
+ *
+ * Triggered after a peer's EB so all of the peer's N tokens are in the
+ * client hash and cli_session_id values from ,S compact tags have been
+ * adopted.  Both sides run the same algorithm on the same inputs →
+ * deterministic convergence; no coordination protocol needed.
+ *
+ * Scope: only acts on local primaries (hs_client where MyConnect is
+ * true).  Cross-side demote is handled by the peer's own symmetric run.
+ *
+ * Same-session test: a candidate co-primary's cli_session_id must
+ * match the local session's hs_sessid.  This is set on remote clients
+ * from the N message's ,S compact tag (bouncer-aware peer's emit-side
+ * runs bounce_set_n_sessid_hint), so a remote primary belonging to
+ * the same bouncer session has the same sessid; a non-bouncer
+ * account-bearing client minted its own sessid and won't match —
+ * legitimately independent presences are left alone.
+ *
+ * Tie-break: older cli_lastnick wins the primary slot.  Equal: lex on
+ * full numeric (same rule as D.2 at m_nick.c:580+).
+ */
+void bounce_post_burst_reconcile(void)
+{
+  int h;
+  struct AccountSessions *as;
+  struct BouncerSession *s, *next_s;
+  struct Client *acptr, *peer_primary;
+  struct Client *local_primary;
+  int multiple_candidates;
+
+  for (h = 0; h < BOUNCE_ACCOUNT_HASHSIZE; h++) {
+    for (as = accountHash[h]; as; as = as->as_hnext) {
+      for (s = as->as_sessions; s; s = next_s) {
+        next_s = s->hs_anext;
+
+        if (!s->hs_client || !MyConnect(s->hs_client)
+            || IsBouncerAlias(s->hs_client) || !IsUser(s->hs_client))
+          continue;
+        local_primary = s->hs_client;
+
+        /* Walk the client list for a co-session primary candidate.
+         * Match rule: same account, same cli_session_id as our session,
+         * IsUser, !IsBouncerAlias, !IsBouncerHold, not ourselves. */
+        peer_primary = NULL;
+        multiple_candidates = 0;
+        for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+          if (acptr == local_primary) continue;
+          if (!IsUser(acptr) || !IsAccount(acptr)) continue;
+          if (IsBouncerAlias(acptr) || IsBouncerHold(acptr)) continue;
+          if (0 != ircd_strcmp(cli_account(acptr), s->hs_account)) continue;
+          if (!cli_session_id(acptr)[0]) continue;
+          if (0 != strcmp(cli_session_id(acptr), s->hs_sessid)) continue;
+          if (peer_primary) {
+            multiple_candidates = 1;
+            break;
+          }
+          peer_primary = acptr;
+        }
+
+        if (multiple_candidates) {
+          Debug((DEBUG_INFO,
+                 "bounce_post_burst_reconcile: multiple co-session "
+                 "primaries for session %s account %s — ambiguous, "
+                 "skipping merge",
+                 s->hs_sessid, s->hs_account));
+          continue;
+        }
+        if (!peer_primary)
+          continue;
+
+        /* Older lastnick wins primary slot.  Equal: lex on full numeric. */
+        {
+          time_t our_t = cli_lastnick(local_primary);
+          time_t their_t = cli_lastnick(peer_primary);
+          int we_lose;
+
+          if (our_t > their_t) {
+            we_lose = 1;
+          } else if (our_t < their_t) {
+            we_lose = 0;
+          } else {
+            char our_full[6], their_full[6];
+            ircd_snprintf(0, our_full, sizeof(our_full), "%s%s",
+                          cli_yxx(&me), cli_yxx(local_primary));
+            ircd_snprintf(0, their_full, sizeof(their_full), "%s%s",
+                          cli_yxx(cli_user(peer_primary)->server),
+                          cli_yxx(peer_primary));
+            we_lose = (strcmp(our_full, their_full) > 0);
+          }
+
+          if (we_lose) {
+            struct bounce_transition_params p;
+            memset(&p, 0, sizeof p);
+            p.demoted_alias = local_primary;
+            p.peer_primary  = peer_primary;
+            if (0 == bounce_session_transition(s, BST_DEMOTE_TO_ALIAS, &p)) {
+              sendto_opmask_butone(0, SNO_OLDSNO,
+                "Bouncer post-burst reconcile: demoted local primary "
+                "%C to alias of %C (account %s, session %s)",
+                local_primary, peer_primary,
+                s->hs_account, s->hs_sessid);
+            }
+            /* local_primary is now an alias; session struct may have
+             * moved or its hs_client changed.  Refresh next_s defensively. */
+            next_s = s->hs_anext;
+          }
+          /* Otherwise: we win.  Peer reaches the symmetric verdict and
+           * demotes on its end.  No local action. */
+        }
+      }
+    }
+  }
+}
+
 /** Attach a client to an existing session (resume).
  *
  * For same-server resume: if a ghost exists locally, transfer its channel
@@ -4558,6 +4673,17 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
+
+  /* Sync ghost's cli_session_id to the bouncer's durable hs_sessid.
+   * MDBX-restored ghosts come from bounce_create_ghost, which mints a
+   * fresh cli_session_id at make_client time; it doesn't match the
+   * persisted hs_sessid.  Without this sync the post-revive ghost
+   * carries a sessid that disagrees with the BouncerSession it's
+   * bound to — same hazard as bounce_attach's sync at line 1486 (per
+   * the contract in list.c:240-246: "on resume, overwrites it with
+   * the bouncer's stored sessid so session-id continuity follows the
+   * bouncer session, not the underlying socket"). */
+  ircd_strncpy(cli_session_id(ghost), session->hs_sessid, S2S_SESSID_BUFSIZE);
 
   /* Session is live again — remove persisted state (only HOLDING sessions persist) */
   if (was_holding)
