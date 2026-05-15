@@ -130,6 +130,11 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
   ClearBurst(sptr);
   SetBurstAck(sptr);
 
+  /* Convergence-completion event: a gated peer waiting only because
+   * this one was IsBurst can release its gate now (subject to the
+   * other condition, hs_restore_pending, also being clear). */
+  bounce_release_idle_gates();
+
   /* (BX R retired in Phase 5; convergence is at-N-time per redesign
    * D.1 + D.3 — no EOB demote-retry pass.) */
 

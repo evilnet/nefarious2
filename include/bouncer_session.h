@@ -482,6 +482,19 @@ extern void bounce_prune_stale_aliases(void);
  * convergence without coordination. */
 extern void bounce_post_burst_reconcile(void);
 
+/** Is any bouncer-relevant convergence work in flight that should
+ * defer a newly-linked peer's burst-emit?  True iff any session has
+ * hs_restore_pending OR any peer (other than exclude_peer) is IsBurst.
+ * Called from server_estab to decide whether to gate the new peer's
+ * burst, and from bounce_release_idle_gates to re-check gated peers. */
+extern int bounce_convergence_pending(struct Client *exclude_peer);
+
+/** Walk gated peers and release any whose convergence wait is now
+ * complete.  Called event-driven from hs_restore_pending=0 sites and
+ * from ClearBurst sites so the gate releases as soon as the wait is
+ * over, rather than running the 1-second timer fallback to expiry. */
+extern void bounce_release_idle_gates(void);
+
 extern void bounce_walk_sessions(void (*cb)(struct BouncerSession *,
                                             void *),
                                  void *data);

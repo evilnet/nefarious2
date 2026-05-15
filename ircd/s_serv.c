@@ -287,21 +287,26 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
    * deterministic (m_nick at-N-time, sessid lex via cross-sessid BS C
    * rename), so we just need to defer N-emission long enough for
    * loser-side demotes to flip to IsBouncerAlias before our own
-   * server_finish_burst's N loop fires.  The legacy-peer burst gate
-   * does this with a timer fallback — no BX F handshake.
+   * server_finish_burst's N loop fires.
    *
-   * The same gate applies regardless of peer flavor when we hold
-   * local bouncer sessions: BX-aware peers will exchange their state
-   * via BS C / BX C in their own server_finish_burst, and at-N-time
-   * m_nick handles the symmetric election locally on each side.
-   * Legacy peers see only the surviving face per design intent #135 +
-   * #254 (alias-side N is filtered by IsBouncerAlias). */
-  if (feature_bool(FEAT_BOUNCER_ENABLE) && bounce_have_local_sessions()) {
+   * Gate dynamically: only defer when bouncer convergence is actually
+   * in flight (any session with hs_restore_pending, or another peer
+   * currently IsBurst).  Stable state means our local primary/alias
+   * decisions are final and burst-emit is safe to run immediately —
+   * no point deferring 30s for no benefit.
+   *
+   * The 1-second timer (bounce_legacy_burst_gate_tick) plus the
+   * event-driven release at convergence-completion sites
+   * (bounce_release_idle_gates from hs_restore_pending=0 and
+   * ClearBurst) together cover gated-peer release without coordination.
+   * BOUNCE_LEGACY_GATE_SECS remains as the stall-fallback ceiling. */
+  if (feature_bool(FEAT_BOUNCER_ENABLE) && bounce_have_local_sessions()
+      && bounce_convergence_pending(cptr)) {
     SetBurstGated(cptr);
     cli_burst_gate_deadline(cptr) = CurrentTime + BOUNCE_LEGACY_GATE_SECS;
     Debug((DEBUG_INFO,
            "Bouncer: gating peer %s burst until %lld "
-           "(local sessions present, deterministic convergence)",
+           "(convergence in flight: hs_restore_pending or peer IsBurst)",
            cli_name(cptr),
            (long long)cli_burst_gate_deadline(cptr)));
     return 0;

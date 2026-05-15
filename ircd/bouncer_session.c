@@ -1424,6 +1424,10 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
    * BX R sees us as firm. */
   session->hs_restore_pending = 0;
 
+  /* Convergence-completion event: any peer that was waiting on a
+   * pending-restore session can release its gate now. */
+  bounce_release_idle_gates();
+
   /* Cancel hold timer if running */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
@@ -1867,6 +1871,91 @@ int bounce_session_transition(struct BouncerSession *session,
 
   bounce_session_assert_invariant(session, "transition.exit");
   return rc;
+}
+
+/** Is any bouncer-relevant convergence work in flight that should defer
+ * a newly-linked peer's burst-emit?
+ *
+ * Two signals:
+ *   1. Any session with hs_restore_pending — restored from MDBX,
+ *      awaiting first BX R / attach / yield to settle.
+ *   2. Any other peer currently IsBurst — that peer's N's may still
+ *      flip our local primary/alias state before we emit to the new
+ *      linker.
+ *
+ * exclude_peer (typically the newly-linking peer being evaluated) is
+ * skipped on the IsBurst check so a self-reference doesn't count.
+ *
+ * Both signals are observed at server_estab gate-set time and at every
+ * subsequent convergence-completion event (attach, revive, EB), so the
+ * gate releases as soon as the wait is over rather than running the
+ * timer fallback.
+ */
+int bounce_convergence_pending(struct Client *exclude_peer)
+{
+  int h;
+  struct AccountSessions *as;
+  struct BouncerSession *s;
+  struct DLink *dlp;
+
+  for (h = 0; h < BOUNCE_ACCOUNT_HASHSIZE; h++)
+    for (as = accountHash[h]; as; as = as->as_hnext)
+      for (s = as->as_sessions; s; s = s->hs_anext)
+        if (s->hs_restore_pending)
+          return 1;
+
+  if (cli_serv(&me)) {
+    for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+      struct Client *peer = dlp->value.cptr;
+      if (!peer || peer == exclude_peer || !IsServer(peer))
+        continue;
+      if (IsBurst(peer))
+        return 1;
+    }
+  }
+
+  return 0;
+}
+
+/** Walk gated peers; release any whose convergence wait is complete.
+ *
+ * Called event-driven from convergence-completion sites (hs_restore_
+ * pending cleared, ClearBurst on a peer).  The 1-second timer remains
+ * as a fallback for stalled-convergence cases.
+ *
+ * For each gated peer, re-check bounce_convergence_pending — if it
+ * now returns 0, clear the gate and run server_finish_burst.  Safe
+ * iteration via cached `next`; server_finish_burst doesn't add/remove
+ * down-list entries.
+ */
+void bounce_release_idle_gates(void)
+{
+  struct DLink *dlp;
+  struct DLink *next;
+
+  if (!cli_serv(&me))
+    return;
+
+  for (dlp = cli_serv(&me)->down; dlp; dlp = next) {
+    struct Client *peer;
+    next = dlp->next;
+    peer = dlp->value.cptr;
+    if (!peer || !IsServer(peer))
+      continue;
+    if (!IsBurstGated(peer))
+      continue;
+    if (bounce_convergence_pending(peer))
+      continue;
+
+    Debug((DEBUG_INFO,
+           "Bouncer: convergence settled, releasing gate on %s "
+           "(deadline was %lds away)",
+           cli_name(peer),
+           (long)(cli_burst_gate_deadline(peer) - CurrentTime)));
+    cli_burst_gate_deadline(peer) = 0;
+    ClearBurstGated(peer);
+    server_finish_burst(peer);
+  }
 }
 
 /** Force-release legacy-peer burst gates whose grace deadline has
@@ -4442,6 +4531,10 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * tentative restore.  Clear the reconcile-pending flag so any
    * incoming BX R for this session treats us as firm. */
   session->hs_restore_pending = 0;
+
+  /* Convergence-completion event: any peer that was waiting on a
+   * pending-restore session can release its gate now. */
+  bounce_release_idle_gates();
 
   ghost = session->hs_client;
   if (!ghost || !MyUser(ghost))
