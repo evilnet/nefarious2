@@ -704,7 +704,7 @@ static void check_pings(struct Event* ev) {
         struct BouncerSession *bsess = bounce_get_session(cptr);
         if (bsess && bsess->hs_client == cptr
             && bsess->hs_alias_count > 0) {
-          if (bounce_promote_alias(bsess) == 0) {
+          if (bounce_promote_alias(bsess, 0) == 0) {
             SetBouncerInternalDestroy(cptr);
             exit_client_msg(cptr, cptr, &me, "Session transferred");
             continue;

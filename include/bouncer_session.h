@@ -619,7 +619,23 @@ extern void bounce_execute_squit_promotions(struct Client *server);
  * @param[in] session Session whose primary is departing.
  * @return 0 on success, -1 if no aliases available.
  */
-extern int bounce_promote_alias(struct BouncerSession *session);
+/** Promote an alias to primary for a bouncer session.
+ *
+ * @param[in] session     Session whose primary is departing.
+ * @param[in] local_only  When non-zero, only promote if a local-server
+ *                        alias is available.  Returns -1 without
+ *                        broadcasting BX P if every alias is on a
+ *                        remote server.  Used by the immediate-promote
+ *                        path in m_quit.c — for the cross-server case
+ *                        (only remote alias), we defer to the existing
+ *                        hold-then-expire path so we don't broadcast
+ *                        BX P that could race a concurrent BX X from
+ *                        the alias's home server.
+ * @return 0 on success, -1 if no eligible alias (caller falls through
+ *         to bounce_hold_client).
+ */
+extern int bounce_promote_alias(struct BouncerSession *session,
+                                int local_only);
 
 /** Attach a client to an existing session (resume).
  * @param[in] session Session to attach to.

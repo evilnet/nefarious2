@@ -598,7 +598,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
            * while aliases exist.  Promote before we lose the ghost
            * reference — promote needs hs_client to remove ghost from
            * channels silently. */
-          bounce_promote_alias(bsess);
+          bounce_promote_alias(bsess, 0);
           /* hs_client now points to the promoted alias, not the ghost.
            * exit_one_client continues: ghost has no channels → no QUIT. */
         } else {

@@ -122,17 +122,35 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * quitting.  Clients routinely send QUIT on disconnect — the whole
    * purpose of hold is to survive that and keep channels alive.
    *
-   * No immediate-promote shortcut: a primary QUIT with aliases attached
-   * holds first (same reasoning as s_bsd.c — promote and a concurrent
-   * BX X for the chosen alias race on the wire).  Promotion runs only
-   * from bounce_hold_expire after the network has settled.  Cooperative
-   * roaming uses BX C session move instead. */
+   * Immediate-promote (design intent: clean primary QUIT with alias
+   * remaining → BX P numeric swap, NO HOLDING transition).  We only
+   * promote inline if the chosen alias is on THIS server — same-server
+   * alias state is synchronously authoritative, so the BX P broadcast
+   * can't race a concurrent BX X from the alias's home server (we ARE
+   * that server).  When every alias is on a remote server, fall
+   * through to bounce_hold_client; the existing hold-expire path
+   * still promotes, just with the safety of network-settled state.
+   * (Cross-server immediate-promote without a race window is a v2.)
+   *
+   * On successful inline promote: the session continues under the new
+   * primary, the old primary's channels are silently stripped by
+   * bounce_promote_alias, and we fall through to normal exit_client
+   * which produces no visible QUIT to channels (none left to send to).
+   * Peers see BX P + BS T then the primary's clean Q. */
   if (IsUser(sptr) && bounce_should_hold(sptr)) {
     const char *comment = (parc > 1 && !BadPtr(parv[parc - 1]))
                           ? parv[parc - 1] : "Quit";
-    if (bounce_hold_client(sptr, comment) == 0)
+    struct BouncerSession *bsess = bounce_get_session(sptr);
+    int promoted = -1;
+    if (bsess && bsess->hs_client == sptr && bsess->hs_alias_count > 0)
+      promoted = bounce_promote_alias(bsess, 1 /* local_only */);
+    if (promoted == 0) {
+      /* Inline local promote succeeded; fall through to exit_client.
+       * Channels already stripped, BX P + BS T already broadcast. */
+    } else if (bounce_hold_client(sptr, comment) == 0) {
       return 0; /* Entered hold — don't exit */
-    /* If hold failed, fall through to normal quit */
+    }
+    /* If hold failed too, fall through to normal quit */
   }
 
   if (cli_user(sptr)) {

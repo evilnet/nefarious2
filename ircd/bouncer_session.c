@@ -706,7 +706,7 @@ static void bounce_hold_expire(struct Event *ev)
     int promoted;
     Debug((DEBUG_INFO, "Bouncer: hold expired with %d aliases, promoting for %s",
            session->hs_alias_count, session->hs_account));
-    promoted = bounce_promote_alias(session);
+    promoted = bounce_promote_alias(session, 0);
     /* Exit ghost.  FLAG_BOUNCER_INTERNAL_DESTROY is set ONLY when promote
      * actually broadcast BX P — that's the wire event legacy uses (numeric
      * swap) and IRCv3-aware peers use (membership transfer) to retire
@@ -1921,7 +1921,7 @@ int bounce_session_transition(struct BouncerSession *session,
     rc = -2;
     break;
   case BST_PROMOTE_ALIAS:
-    rc = bounce_promote_alias(session);
+    rc = bounce_promote_alias(session, 0);
     break;
   case BST_RECEIVE_REMOTE_PRIMARY:
     if (params->new_primary) {
@@ -4114,10 +4114,19 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
  * to propagate S2S QUIT and free the numeric.  The old primary is already
  * removed from all channels here, so exit_client produces no visible QUIT.
  *
- * @param[in] session Session whose primary is departing.
- * @return 0 on success, -1 if no aliases available.
+ * @param[in] session     Session whose primary is departing.
+ * @param[in] local_only  Non-zero: only consider local-server aliases.
+ *                        Returns -1 (caller falls through to
+ *                        bounce_hold_client) if no local alias exists.
+ *                        Used by m_quit.c to do an immediate promote
+ *                        only when the chosen alias is on this server
+ *                        — same-server alias state is synchronously
+ *                        authoritative, so the BX P broadcast can't
+ *                        race a concurrent BX X from the alias's
+ *                        home server (we ARE the home server).
+ * @return 0 on success, -1 if no eligible alias.
  */
-int bounce_promote_alias(struct BouncerSession *session)
+int bounce_promote_alias(struct BouncerSession *session, int local_only)
 {
   int j, k;
   const char *winner_numeric = NULL;
@@ -4130,6 +4139,7 @@ int bounce_promote_alias(struct BouncerSession *session)
   struct Membership *member;
   int winner_idx = -1;
   time_t oldest_time = 0;
+  const char *me_yxx;
 
   if (session->hs_alias_count <= 0)
     return -1;
@@ -4141,10 +4151,19 @@ int bounce_promote_alias(struct BouncerSession *session)
     ircd_snprintf(0, old_numeric, sizeof(old_numeric), "%s%s",
                   cli_yxx(cli_user(old_primary)->server), cli_yxx(old_primary));
 
-  /* A0: Tiebreaker — oldest connection (lowest cli_firsttime) */
+  /* A0: Tiebreaker — oldest connection (lowest cli_firsttime).  When
+   * `local_only` is set, candidates on remote servers are skipped — the
+   * caller has decided that a cross-server promote is unsafe in its
+   * call context (typical: m_quit's immediate-promote path, which
+   * can't safely emit BX P against an alias whose home server may be
+   * concurrently emitting BX X for it). */
+  me_yxx = cli_yxx(&me);
   for (j = 0; j < session->hs_alias_count; j++) {
     struct Client *candidate = findNUser(session->hs_aliases[j].ba_numeric);
     if (!candidate || !IsBouncerAlias(candidate))
+      continue;
+    if (local_only
+        && 0 != ircd_strcmp(session->hs_aliases[j].ba_server, me_yxx))
       continue;
     if (!winner_numeric || cli_firsttime(candidate) < oldest_time) {
       oldest_time = cli_firsttime(candidate);
@@ -4425,7 +4444,7 @@ void bounce_execute_squit_promotions(struct Client *server)
 
       session->hs_promoting = 0;
 
-      if (bounce_promote_alias(session) != 0) {
+      if (bounce_promote_alias(session, 0) != 0) {
         /* No viable alias — session becomes orphaned */
         session->hs_client = NULL;
         Debug((DEBUG_INFO, "bounce_execute_squit: no alias to promote "
@@ -7051,7 +7070,7 @@ forward:
     int promoted;
     Debug((DEBUG_INFO, "BX C: session move — promoting alias, retiring ghost %s",
            cli_name(primary)));
-    promoted = bounce_promote_alias(session);
+    promoted = bounce_promote_alias(session, 0);
     if (promoted == 0)
       SetBouncerInternalDestroy(primary);
     exit_client(primary, primary, &me,
