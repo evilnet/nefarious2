@@ -1646,6 +1646,59 @@ void bounce_destroy(struct BouncerSession *session)
   MyFree(session);
 }
 
+/** Force-destroy a session due to a network KILL (invariant #12).
+ *
+ * Terminates every alias of the session, broadcasts BX X to clear
+ * peer state, and destroys the BouncerSession.  The primary's own
+ * exit is handled by the caller (m_kill → exit_client_msg); this
+ * helper just cleans up the rest of the session's connections and
+ * state so the caller's subsequent exit_one_client lookup misses
+ * cleanly (hs_client cleared, session freed).
+ *
+ * Used by m_kill.c::do_kill() in the local-cptr-local-victim case
+ * where FLAG_KILLED isn't set on the victim (no S2S relay), so the
+ * usual FLAG_KILLED-gated cleanup in exit_one_client can't tell the
+ * exit is a KILL.  In every other KILL path (S2S-relayed KILL, or
+ * local oper killing a remote user) FLAG_KILLED IS set and the
+ * existing cleanup handles destroy — this helper is the gap-fill.
+ *
+ * @param session The session being killed.  Caller's primary
+ *                Client must be `session->hs_client` (asserted).
+ * @param comment KILL reason to propagate as the exit message for
+ *                aliases; defaults to "Session killed" when NULL.
+ */
+void bounce_kill_session(struct BouncerSession *session, const char *comment)
+{
+  int i;
+
+  assert(0 != session);
+
+  Debug((DEBUG_INFO, "Bouncer: kill-destroy session %s for %s (aliases=%d)",
+         session->hs_sessid, session->hs_account, session->hs_alias_count));
+
+  /* Exit every alias.  Iterate top-down so the array compaction
+   * inside bounce_remove_alias (driven by exit_client → exit_one_client
+   * → bouncer cleanup) doesn't shift entries we haven't visited yet. */
+  if (session->hs_alias_count > 0) {
+    for (i = session->hs_alias_count - 1; i >= 0; i--) {
+      struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+      if (alias)
+        exit_client(alias, alias, &me,
+                    comment && *comment ? (char *)comment : "Session killed");
+    }
+  }
+
+  /* Clear hs_client so the primary's subsequent exit_one_client pass
+   * (in m_kill's exit_client_msg) sees the session as already
+   * unanchored and skips its own cleanup branch. */
+  session->hs_client = NULL;
+
+  /* Broadcast 'X' so IRCv3-aware peers tear down their session view. */
+  bounce_broadcast(session, 'X', NULL);
+
+  bounce_destroy(session);
+}
+
 /** Set a session's user-assigned name. */
 void bounce_setname(struct BouncerSession *session, const char *name)
 {
@@ -8204,16 +8257,27 @@ void bounce_drain_pending_registrations(void)
   while (list) {
     struct PendingRegistration *next = list->next;
     struct Client *cli = list->client;
-    /* Skip clients that died waiting (KILL, timeout, SQUIT-via-burst etc.) */
+    /* Skip clients that died waiting (KILL, timeout, SQUIT-via-burst
+     * etc.).  ALSO skip clients that haven't received NICK yet — the
+     * s_auth.c:725 defer fires the moment SASL completes during a
+     * burst, regardless of whether the client has sent NICK.  If we
+     * register_user(no-nick) here, the s_user.c:615 assertion
+     * `*(cli_name(sptr))` fires before any guard.  These half-
+     * registered clients will get their register_user call naturally
+     * once NICK arrives (m_nick.c → register_user), so dropping the
+     * deferred entry is the right move — natural NICK processing may
+     * re-defer if burst is still in progress. */
     if (cli && !IsDead(cli) && cli_fd(cli) >= 0
-        && !HasFlag(cli, FLAG_KILLED)) {
+        && !HasFlag(cli, FLAG_KILLED)
+        && cli_name(cli)[0] != '\0') {
       Debug((DEBUG_INFO, "Bouncer: draining deferred registration for %s",
              cli_name(cli)));
       register_user(cli, cli);
     } else {
       Debug((DEBUG_INFO, "Bouncer: dropping deferred registration for %s "
-             "(client no longer eligible)",
-             cli ? cli_name(cli) : "?"));
+             "(client no longer eligible%s)",
+             cli && cli_name(cli)[0] ? cli_name(cli) : "?",
+             (cli && cli_name(cli)[0] == '\0') ? " — NICK not set yet" : ""));
     }
     MyFree(list);
     list = next;

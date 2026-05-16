@@ -639,6 +639,25 @@ extern int bounce_detach(struct BouncerSession *session);
  */
 extern void bounce_destroy(struct BouncerSession *session);
 
+/** Force-destroy a session because its primary was network-KILLed
+ * (invariant #12: KILL ends the whole session).  Exits every alias
+ * with the provided comment, broadcasts BX X for peer cleanup, then
+ * calls bounce_destroy.
+ *
+ * Used by m_kill.c to plug the FLAG_KILLED gap for local-cptr-local-
+ * victim KILLs, where m_kill skips FLAG_KILLED so the existing
+ * FLAG_KILLED-gated cleanup in exit_one_client doesn't fire.
+ *
+ * Callers must NOT touch the session pointer after this returns
+ * (it is freed by bounce_destroy).
+ *
+ * @param[in] session Session to kill-destroy.  Must be non-NULL.
+ * @param[in] comment KILL reason text for alias exits; defaulted to
+ *                    "Session killed" if NULL or empty.
+ */
+extern void bounce_kill_session(struct BouncerSession *session,
+                                const char *comment);
+
 /** Set the S2S sessid override for an outgoing N introduction so that
  * bouncer-aware peers receive the session-identity hint via the
  * compact-tag ,S segment (per redesign A.2).

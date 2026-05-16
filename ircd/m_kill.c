@@ -81,6 +81,7 @@
  */
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -154,6 +155,23 @@ static int do_kill(struct Client* cptr, struct Client* sptr,
     sendcmdto_one(feature_bool(FEAT_HIS_KILLWHO) ? &his : sptr, CMD_KILL,
 		  victim, "%C :%s %s", victim, feature_bool(FEAT_HIS_KILLWHO)
 		  ? feature_str(FEAT_HIS_SERVERNAME) : cli_name(sptr), msg);
+
+  /* Invariant #12 — network KILL ends the entire bouncer session.  The
+   * existing FLAG_KILLED-gated cleanup in exit_one_client handles every
+   * KILL path where the flag is set (S2S-relayed KILL, local oper
+   * killing a remote victim).  For local-cptr-local-victim, the block
+   * above skipped FLAG_KILLED (no S2S relay needed), so that cleanup
+   * can't tell this exit is a KILL — fire the session destroy here
+   * before exit_client_msg.  bounce_kill_session clears hs_client so
+   * the upcoming exit_one_client pass skips its bouncer branch
+   * cleanly. */
+  if (!IsServer(cptr) && MyConnect(victim) && IsUser(victim)
+      && IsAccount(victim)) {
+    struct BouncerSession *bsess = bounce_get_session(victim);
+    if (bsess && bsess->hs_client == victim)
+      bounce_kill_session(bsess, msg);
+  }
+
   return exit_client_msg(cptr, victim, feature_bool(FEAT_HIS_KILLWHO)
 			 ? &me : sptr, "Killed (%s %s)",
 			 feature_bool(FEAT_HIS_KILLWHO) ?
