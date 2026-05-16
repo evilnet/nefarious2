@@ -92,8 +92,13 @@ static int bouncer_token(struct Client *sptr)
     return 0;
   }
 
-  /* Broadcast creation to all servers */
+  /* Broadcast creation to all servers, then BS A so peers can resolve
+   * hs_client to this primary's Client struct.  Without BS A a peer
+   * receiving the BS C has hs_client = NULL and cannot route a
+   * cross-server alias attach through bounce_setup_local_alias (see
+   * matching emit + comment in the BOUNCER SET HOLD on path below). */
   bounce_broadcast(session, 'C', NULL);
+  bounce_broadcast(session, 'A', cli_yxx(sptr));
 
   /* Send token to client */
   sendrawto_one(sptr, ":%s %d %s %s :%s",
@@ -713,6 +718,17 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
         struct BouncerSession *session = NULL;
         if (bounce_create(sptr, &session) == 0 && session) {
           bounce_broadcast(session, 'C', NULL);
+          /* BS A is what makes peer servers resolve hs_client to the
+           * primary's Client struct on their side — without it, a peer
+           * receiving BS C has session->hs_client = NULL and cannot
+           * route a subsequent local SASL connection through
+           * bounce_setup_local_alias (it falls back to creating a
+           * parallel primary or treating the connection as a regular
+           * user).  register_user's BS A emit site at s_user.c only
+           * fires when register_user itself created the session — for
+           * sessions created here (post-registration via BOUNCER SET
+           * HOLD on), we must emit BS A explicitly. */
+          bounce_broadcast(session, 'A', cli_yxx(sptr));
 
           send_note(sptr, "BOUNCER", "SESSION_CREATED", session->hs_sessid,
                     "Hold mode enabled, session created");
