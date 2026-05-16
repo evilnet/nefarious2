@@ -1629,9 +1629,11 @@ void bounce_destroy(struct BouncerSession *session)
 {
   assert(0 != session);
 
-  /* Cancel timer if active */
+  /* Cancel timers if active */
   if (t_active(&session->hs_hold_timer))
     timer_del(&session->hs_hold_timer);
+  if (t_active(&session->hs_promote_timer))
+    timer_del(&session->hs_promote_timer);
 
   /* Remove from hash tables */
   token_hash_remove(session);
@@ -4354,6 +4356,98 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
   return 0;
 }
 
+/** Timer callback for cross-server deferred promote.
+ *
+ * Fires from the 0-tick timer armed by
+ * `bounce_schedule_cross_server_promote`.  Re-evaluates the alias
+ * list (which may have shifted in the intervening tick — concurrent
+ * BX X messages have had a chance to land) and promotes any-server
+ * winner.  If the session has revived (state == ACTIVE) between
+ * schedule and fire, this is a no-op.  If no alias remains alive,
+ * the session stays HOLDING and the regular hold-expire path will
+ * eventually destroy or promote it.
+ */
+static void bounce_finish_cross_server_promote(struct Event *ev)
+{
+  struct BouncerSession *session;
+  struct Client *ghost;
+  int promoted;
+
+  assert(0 != ev_timer(ev));
+  assert(0 != t_data(ev_timer(ev)));
+
+  if (ev_type(ev) == ET_DESTROY)
+    return;
+
+  session = (struct BouncerSession *)t_data(ev_timer(ev));
+  if (!session)
+    return;
+
+  /* Session may have revived via SASL (BOUNCE_ACTIVE), been moved
+   * (BOUNCE_DESTROYING), or had its primary returned by some other
+   * path between schedule and fire.  Only promote from a still-
+   * holding session. */
+  if (session->hs_state != BOUNCE_HOLDING) {
+    Debug((DEBUG_INFO,
+           "Bouncer: deferred-promote skipped — session %s no longer "
+           "HOLDING (state=%d)", session->hs_sessid, session->hs_state));
+    return;
+  }
+
+  ghost = session->hs_client;
+  if (!ghost || !IsBouncerHold(ghost)) {
+    Debug((DEBUG_INFO,
+           "Bouncer: deferred-promote skipped — session %s ghost gone",
+           session->hs_sessid));
+    return;
+  }
+
+  if (session->hs_alias_count <= 0) {
+    Debug((DEBUG_INFO,
+           "Bouncer: deferred-promote skipped — session %s has no aliases "
+           "(all dropped while deferred); hold-expire will handle",
+           session->hs_sessid));
+    return;
+  }
+
+  /* Now safe to promote.  Pick any alias — by this tick, in-flight
+   * BX X for any pre-selected winner has had its chance to land and
+   * the alias_count reflects current truth. */
+  promoted = bounce_promote_alias(session, 0 /* any */);
+  if (promoted == 0) {
+    /* Promote succeeded.  Exit ghost cleanly — same pattern as
+     * bounce_hold_expire's promote-and-retire branch. */
+    ClearBouncerHold(ghost);
+    SetBouncerInternalDestroy(ghost);
+    exit_client(ghost, ghost, &me, "Session transferred");
+    Debug((DEBUG_INFO,
+           "Bouncer: deferred-promote completed for session %s",
+           session->hs_sessid));
+  } else {
+    Debug((DEBUG_INFO,
+           "Bouncer: deferred-promote — no eligible alias for session %s; "
+           "leaving HOLDING (hold-expire will handle)",
+           session->hs_sessid));
+  }
+}
+
+void bounce_schedule_cross_server_promote(struct BouncerSession *session)
+{
+  assert(0 != session);
+
+  if (t_active(&session->hs_promote_timer))
+    return; /* already scheduled; idempotent */
+
+  Debug((DEBUG_INFO,
+         "Bouncer: scheduling cross-server promote for session %s "
+         "(aliases=%d) at next tick",
+         session->hs_sessid, session->hs_alias_count));
+
+  timer_init(&session->hs_promote_timer);
+  timer_add(&session->hs_promote_timer, bounce_finish_cross_server_promote,
+            (void *)session, TT_RELATIVE, 0);
+}
+
 /** Prepare bouncer sessions for SQUIT promotion.
  * Called from exit_client() BEFORE exit_downlinks().
  *
@@ -4707,6 +4801,10 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     /* Cancel hold timer if running */
     if (t_active(&session->hs_hold_timer))
       timer_del(&session->hs_hold_timer);
+    /* Cancel deferred-promote timer too — the session has been revived
+     * (a new client attached), so the promote is no longer wanted. */
+    if (t_active(&session->hs_promote_timer))
+      timer_del(&session->hs_promote_timer);
   }
 
   /* Step 1: Steal the temp client's fd and SSL.

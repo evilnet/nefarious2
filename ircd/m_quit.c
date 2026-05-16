@@ -148,7 +148,15 @@ int m_quit(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* Inline local promote succeeded; fall through to exit_client.
        * Channels already stripped, BX P + BS T already broadcast. */
     } else if (bounce_hold_client(sptr, comment) == 0) {
-      return 0; /* Entered hold — don't exit */
+      /* Entered HOLDING.  If a remote alias is available, schedule a
+       * 0-tick deferred promote — any concurrent BX X for the chosen
+       * winner has a chance to land during the intervening tick, and
+       * the timer's re-evaluation picks a still-live alias.  See
+       * bounce_schedule_cross_server_promote and Layer 2 of
+       * .claude/plans/alias-promote-race-fix.md. */
+      if (bsess && bsess->hs_alias_count > 0)
+        bounce_schedule_cross_server_promote(bsess);
+      return 0; /* Held (will promote at next tick or hold-expire) */
     }
     /* If hold failed too, fall through to normal quit */
   }

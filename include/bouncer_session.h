@@ -394,6 +394,15 @@ struct BouncerSession {
   unsigned int hs_connect_count;      /**< Total connections (resumes + alias attaches) */
   time_t hs_total_active;             /**< Cumulative active time (seconds) */
   struct Timer hs_hold_timer;         /**< Expiry timer for HOLDING state */
+  struct Timer hs_promote_timer;      /**< 0-tick deferred-promote timer
+                                       *   (cross-server clean-QUIT path)
+                                       *   — fires at next event-loop
+                                       *   iteration so in-flight BX X
+                                       *   for the chosen winner has a
+                                       *   chance to settle before we
+                                       *   emit BX P.  See
+                                       *   bounce_schedule_cross_server_promote.
+                                       */
 
   /* Session-level aggregate counters (lifetime totals from dead connections) */
   uint64_t     hs_agg_sendB;         /**< Lifetime bytes sent (dead connections) */
@@ -636,6 +645,25 @@ extern void bounce_execute_squit_promotions(struct Client *server);
  */
 extern int bounce_promote_alias(struct BouncerSession *session,
                                 int local_only);
+
+/** Schedule a cross-server alias promotion for the next event-loop
+ * tick.  Used by m_quit.c after bounce_hold_client when every alias
+ * is on a remote server: we don't promote inline (would race a
+ * concurrent BX X from the alias's home server), but we don't want
+ * to wait for hold-expire either.  A 0-tick `TT_RELATIVE` timer
+ * fires after the current tick's I/O is dispatched, giving any
+ * already-queued BX X for the chosen winner a chance to land first.
+ * The timer callback re-evaluates the alias list and either runs
+ * `bounce_promote_alias(session, 0)` (any alias, including remote)
+ * or leaves the session HOLDING for the regular hold-expire path if
+ * no live alias remains.
+ *
+ * Idempotent: a second call before the timer fires is a no-op.
+ *
+ * @param[in] session Session in BOUNCE_HOLDING state with at least
+ *                    one (remote) alias entry.
+ */
+extern void bounce_schedule_cross_server_promote(struct BouncerSession *session);
 
 /** Attach a client to an existing session (resume).
  * @param[in] session Session to attach to.
