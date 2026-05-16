@@ -82,6 +82,77 @@ static int is_pm_target_for_client(const char *target, struct Client *cptr)
   return 0;
 }
 
+/** Translate a PM storage-key target ("nick1:nick2") into the wire
+ * target (the OTHER party's nick) and stash both in the ReplayState.
+ *
+ * For channel targets (no ':' present) this is a no-op apart from
+ * copying through `rs->target`.  For PMs it sets `rs->is_pm = 1`,
+ * `rs->other_nick` = derived other party, `rs->target` =
+ * `rs->other_nick`, so BATCH and per-message wire output never carry
+ * the literal `nick1:nick2` storage key.
+ *
+ * Shared between the bouncer auto-replay path (replay_next_pm) and
+ * the on-demand CHATHISTORY query path (replay_start_batch).
+ */
+static void replay_set_target_from_storage(struct Client *sptr,
+                                            struct ReplayState *rs,
+                                            const char *storage_target)
+{
+  const char *colon;
+  const char *mynick;
+  size_t mynick_len, nick1_len;
+  const char *other_nick;
+  char other_nick_buf[CHANNELLEN + 1];
+
+  if (!storage_target || !*storage_target) {
+    rs->target[0] = '\0';
+    rs->other_nick[0] = '\0';
+    rs->is_pm = 0;
+    return;
+  }
+
+  colon = strchr(storage_target, ':');
+  if (!colon || IsChannelName(storage_target)) {
+    /* Channel target — pass through unchanged. */
+    ircd_strncpy(rs->target, storage_target, sizeof(rs->target));
+    rs->other_nick[0] = '\0';
+    rs->is_pm = 0;
+    return;
+  }
+
+  /* PM storage key: nick1:nick2 (sorted lex-lower first).  Pick the
+   * half that isn't us; if neither half matches us, fall back to the
+   * left half (server-side query for someone else's history would not
+   * normally reach here, but degrade gracefully rather than leak the
+   * pair-key). */
+  mynick = cli_name(sptr);
+  mynick_len = strlen(mynick);
+  nick1_len = (size_t)(colon - storage_target);
+
+  if (nick1_len == mynick_len &&
+      ircd_strncmp(storage_target, mynick, nick1_len) == 0) {
+    other_nick = colon + 1;
+  } else if (ircd_strcmp(colon + 1, mynick) == 0) {
+    size_t copy_len = nick1_len < sizeof(other_nick_buf)
+                        ? nick1_len : sizeof(other_nick_buf) - 1;
+    memcpy(other_nick_buf, storage_target, copy_len);
+    other_nick_buf[copy_len] = '\0';
+    other_nick = other_nick_buf;
+  } else {
+    /* Neither half is us — degrade to left half (clean nick, just may
+     * not be the right party).  Avoids leaking the pair-key colon. */
+    size_t copy_len = nick1_len < sizeof(other_nick_buf)
+                        ? nick1_len : sizeof(other_nick_buf) - 1;
+    memcpy(other_nick_buf, storage_target, copy_len);
+    other_nick_buf[copy_len] = '\0';
+    other_nick = other_nick_buf;
+  }
+
+  ircd_strncpy(rs->target, other_nick, sizeof(rs->target));
+  ircd_strncpy(rs->other_nick, other_nick, sizeof(rs->other_nick));
+  rs->is_pm = 1;
+}
+
 /** Open a chathistory batch for the current target.
  * Handles labeled-response on the first batch if applicable.
  * If is_last_page is set, includes @draft/chathistory-end tag
@@ -312,44 +383,11 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
       continue;
     }
 
-    /* Set up new batch.
-     *
-     * Storage key is the canonical pair "lowerNick:higherNick".  The
-     * BATCH chathistory target on the wire must be the OTHER party's
-     * nick (not the storage key), per the IRCv3 chathistory spec —
-     * a literal `nick1:nick2` would not parse as a valid IRC target
-     * and would render as a fractured query tab in IRCv3 clients.
-     */
-    {
-      const char *colon = strchr(tgt->target, ':');
-      const char *mynick = cli_name(sptr);
-      size_t mynick_len = strlen(mynick);
-      size_t nick1_len = colon ? (size_t)(colon - tgt->target) : 0;
-      const char *other_nick;
-      char other_nick_buf[CHANNELLEN + 1];
-
-      if (colon && nick1_len == mynick_len &&
-          ircd_strncmp(tgt->target, mynick, nick1_len) == 0) {
-        /* Self is on the left of the pair; other party on the right. */
-        other_nick = colon + 1;
-      } else if (colon) {
-        /* Self is on the right; other party on the left — copy out the
-         * left half since it isn't NUL-terminated in the storage key. */
-        size_t copy_len = nick1_len < sizeof(other_nick_buf)
-                            ? nick1_len : sizeof(other_nick_buf) - 1;
-        memcpy(other_nick_buf, tgt->target, copy_len);
-        other_nick_buf[copy_len] = '\0';
-        other_nick = other_nick_buf;
-      } else {
-        /* No colon — shouldn't happen for PM keys, but fall back
-         * gracefully to the raw storage value. */
-        other_nick = tgt->target;
-      }
-
-      ircd_strncpy(rs->target, other_nick, sizeof(rs->target));
-      ircd_strncpy(rs->other_nick, other_nick, sizeof(rs->other_nick));
-      rs->is_pm = 1;
-    }
+    /* Set up new batch.  Storage key is "lowerNick:higherNick" — the
+     * wire target must be the OTHER party's nick.  Shared helper with
+     * replay_start_batch ensures both auto-replay and on-demand
+     * CHATHISTORY queries use the same translation. */
+    replay_set_target_from_storage(sptr, rs, tgt->target);
 
     rs->messages = messages;
     rs->current = messages;
@@ -523,10 +561,21 @@ void replay_start_batch(struct Client *sptr, const char *target,
                          int ops_override, const char *label)
 {
   struct ReplayState *rs;
+  /* Translate `target` (may be a PM storage key "nick1:nick2") to the
+   * wire form (other party's nick).  Without this, on-demand
+   * CHATHISTORY queries on PMs leak the storage-key colon into the
+   * BATCH tag and every per-message PRIVMSG target — see project
+   * memory project_pm_replay_storage_key_leak. */
+  struct ReplayState tmp_rs;
 
   /* Cancel any existing replay */
   if (cli_replay(sptr))
     replay_cancel(sptr);
+
+  /* Pre-translate the wire target for the empty-batch path which
+   * doesn't allocate a full ReplayState. */
+  memset(&tmp_rs, 0, sizeof(tmp_rs));
+  replay_set_target_from_storage(sptr, &tmp_rs, target);
 
   if (!messages || count == 0) {
     /* Send empty batch synchronously — always last page */
@@ -538,11 +587,11 @@ void replay_start_batch(struct Client *sptr, const char *target,
       if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
           CapRecipientHas(sptr, CAP_LABELEDRESP)) {
         sendrawto_one(sptr, "@draft/chathistory-end;label=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
-                      label, cli_name(&me), batchid, target);
+                      label, cli_name(&me), batchid, tmp_rs.target);
         cli_label_responded(sptr) = 1;
       } else {
         sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s chathistory %s",
-                      cli_name(&me), batchid, target);
+                      cli_name(&me), batchid, tmp_rs.target);
       }
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
     }
@@ -555,7 +604,7 @@ void replay_start_batch(struct Client *sptr, const char *target,
   rs = MyCalloc(1, sizeof(struct ReplayState));
   rs->messages = messages;
   rs->current = messages;
-  ircd_strncpy(rs->target, target, sizeof(rs->target));
+  replay_set_target_from_storage(sptr, rs, target);
   rs->ops_override = ops_override;
   if (label && label[0])
     ircd_strncpy(rs->label, label, sizeof(rs->label));
