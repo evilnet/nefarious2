@@ -144,4 +144,57 @@ extern int persistence_profile_list(const char *account,
                                      persistence_profile_list_cb cb,
                                      void *cookie);
 
+/** ---- Channel-list operations (Phase 4 / M3) ----
+ *
+ * A profile's channel list is stored as a comma-separated string under
+ * the `channels` key.  An absent or empty channel list means "no
+ * filter" — every channel is visible to clients on this profile (M3
+ * view-only semantics).  M4's reconciler reinterprets this to mean
+ * "the profile wants nothing"; until then, the permissive empty-list
+ * semantic makes legacy clients (using the default profile) work
+ * transparently.
+ */
+
+/** Add a channel to a profile's channel list.  No-op if the channel
+ * is already present.  Channel comparison is case-insensitive
+ * (RFC 1459 / ircu strcmp).
+ * @return 0 on success, -1 on error.
+ */
+extern int persistence_profile_channels_add(const char *account,
+                                             const char *profile,
+                                             const char *channel);
+
+/** Remove a channel from a profile's channel list.  No-op if absent.
+ * @return 0 on success, -1 on error.
+ */
+extern int persistence_profile_channels_remove(const char *account,
+                                                const char *profile,
+                                                const char *channel);
+
+/** Clear a profile's channel list entirely (deletes the `channels`
+ * key).  Wire: PROFILE SET <name> channels DEFAULT.
+ * @return 0 on success, -1 on error.
+ */
+extern int persistence_profile_channels_clear(const char *account,
+                                               const char *profile);
+
+/** Test whether `channel` is in `profile`'s channel list for `account`.
+ * Does NOT walk inheritance — the M3 model treats each profile's
+ * channels as authoritative.  M5 will add inheritance for channel
+ * sets.
+ * @return 1 if present, 0 if absent or list empty / unset, -1 on error.
+ */
+extern int persistence_profile_channels_has(const char *account,
+                                             const char *profile,
+                                             const char *channel);
+
+/** Test whether `channel` is visible to `cptr` under its active
+ * profile's channel list.  Empty / unset list = all channels visible
+ * (M3 view-only filter default).  Non-empty list = only listed
+ * channels visible.  Convenience wrapper around channels_has.
+ * @return 1 if visible (deliver), 0 if filtered out (drop).
+ */
+extern int persistence_channel_visible(struct Client *cptr,
+                                        const char *channel);
+
 #endif /* INCLUDED_persistence_profile_h */

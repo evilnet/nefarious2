@@ -22,17 +22,20 @@
 
 #include "client.h"
 #include "ircd_alloc.h"
+#include "ircd_chattr.h"
 #include "ircd_log.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
 #include "persistence_profile.h"
+#include "struct.h"
 
 #include <ctype.h>
 #include <string.h>
 
 #define PROFILE_KEY_PREFIX "bouncer/profile/"
 #define PROFILE_PARENT_KEY "parent"
+#define PROFILE_CHANNELS_KEY "channels"
 #define PROFILE_NAME_LEN_MAX PERSISTENCE_PROFILE_NAME_MAX
 
 /* Maximum depth of an inheritance chain we'll walk; protects against
@@ -472,4 +475,229 @@ int persistence_profile_list(const char *account,
     list = next;
   }
   return 0;
+}
+
+/* ---- Channel-list operations (Phase 4 / M3) ----
+ *
+ * Storage: bouncer/profile/<name>/channels = comma-separated channel
+ * names.  Empty / unset = no filter (all channels visible to clients
+ * on this profile — M3 permissive default).
+ */
+
+/** Compare two channel names case-insensitively.  Channel names use
+ * the RFC 1459 / ircu casemap (lowercased via ToLower).  Stops at
+ * delimiter or NUL.
+ */
+static int channel_name_eq(const char *a, const char *b)
+{
+  if (!a || !b)
+    return 0;
+  return ircd_strcmp(a, b) == 0;
+}
+
+/** Append `channel` to `buf` (which already contains `existing_len`
+ * bytes of comma-separated channels), inserting a leading comma if
+ * needed.  Returns the new length, or -1 on overflow.
+ */
+static int append_channel(char *buf, size_t buflen, size_t existing_len,
+                           const char *channel)
+{
+  size_t cn_len = strlen(channel);
+  size_t need = existing_len + (existing_len ? 1 : 0) + cn_len + 1;
+  if (need > buflen)
+    return -1;
+  if (existing_len) {
+    buf[existing_len++] = ',';
+  }
+  memcpy(buf + existing_len, channel, cn_len);
+  existing_len += cn_len;
+  buf[existing_len] = '\0';
+  return (int)existing_len;
+}
+
+/** Test whether `channel` appears in the comma-separated `list`.
+ * Case-insensitive on channel names. */
+static int channel_list_contains(const char *list, const char *channel)
+{
+  const char *p = list;
+  size_t cn_len;
+
+  if (!list || !*list || !channel)
+    return 0;
+  cn_len = strlen(channel);
+
+  while (*p) {
+    const char *comma = strchr(p, ',');
+    size_t seg_len = comma ? (size_t)(comma - p) : strlen(p);
+    if (seg_len == cn_len) {
+      /* Case-insensitive compare on seg_len bytes. */
+      size_t i;
+      int eq = 1;
+      for (i = 0; i < seg_len; ++i) {
+        if (ToLower((unsigned char)p[i]) != ToLower((unsigned char)channel[i])) {
+          eq = 0;
+          break;
+        }
+      }
+      if (eq)
+        return 1;
+    }
+    if (!comma) break;
+    p = comma + 1;
+  }
+  return 0;
+}
+
+/** Remove the first occurrence of `channel` from the comma-separated
+ * list at `buf`.  Returns the new length (which may equal the old
+ * length if not present). */
+static size_t channel_list_remove(char *buf, const char *channel)
+{
+  size_t cn_len;
+  char *p = buf;
+  if (!buf || !*buf || !channel)
+    return buf ? strlen(buf) : 0;
+  cn_len = strlen(channel);
+
+  while (*p) {
+    char *comma = strchr(p, ',');
+    size_t seg_len = comma ? (size_t)(comma - p) : strlen(p);
+    if (seg_len == cn_len) {
+      size_t i;
+      int eq = 1;
+      for (i = 0; i < seg_len; ++i) {
+        if (ToLower((unsigned char)p[i]) != ToLower((unsigned char)channel[i])) {
+          eq = 0;
+          break;
+        }
+      }
+      if (eq) {
+        /* Remove this segment.  If there's a following comma, swallow
+         * it with the segment.  If there's a preceding comma, swallow
+         * the preceding one instead. */
+        if (comma) {
+          memmove(p, comma + 1, strlen(comma + 1) + 1);
+        } else if (p > buf && p[-1] == ',') {
+          p[-1] = '\0';
+        } else {
+          *p = '\0';
+        }
+        return strlen(buf);
+      }
+    }
+    if (!comma) break;
+    p = comma + 1;
+  }
+  return strlen(buf);
+}
+
+int persistence_profile_channels_add(const char *account,
+                                      const char *profile,
+                                      const char *channel)
+{
+  char value[METADATA_VALUE_LEN];
+  int rc;
+  size_t existing_len = 0;
+  int new_len;
+
+  if (!account || !profile || !channel || !*channel)
+    return -1;
+
+  rc = persistence_profile_get_own(account, profile, PROFILE_CHANNELS_KEY,
+                                    value, sizeof(value));
+  if (rc == 0)
+    existing_len = strlen(value);
+  else if (rc < 0)
+    return -1;
+  else
+    value[0] = '\0';
+
+  if (channel_list_contains(value, channel))
+    return 0; /* already present */
+
+  new_len = append_channel(value, sizeof(value), existing_len, channel);
+  if (new_len < 0)
+    return -1;
+
+  return persistence_profile_set(account, profile, PROFILE_CHANNELS_KEY,
+                                  value);
+}
+
+int persistence_profile_channels_remove(const char *account,
+                                         const char *profile,
+                                         const char *channel)
+{
+  char value[METADATA_VALUE_LEN];
+  int rc;
+  size_t new_len;
+
+  if (!account || !profile || !channel || !*channel)
+    return -1;
+
+  rc = persistence_profile_get_own(account, profile, PROFILE_CHANNELS_KEY,
+                                    value, sizeof(value));
+  if (rc != 0)
+    return 0; /* no list — nothing to remove */
+
+  new_len = channel_list_remove(value, channel);
+  if (new_len == 0)
+    return persistence_profile_set(account, profile,
+                                    PROFILE_CHANNELS_KEY, NULL);
+  return persistence_profile_set(account, profile,
+                                  PROFILE_CHANNELS_KEY, value);
+}
+
+int persistence_profile_channels_clear(const char *account,
+                                        const char *profile)
+{
+  if (!account || !profile)
+    return -1;
+  return persistence_profile_set(account, profile,
+                                  PROFILE_CHANNELS_KEY, NULL);
+}
+
+int persistence_profile_channels_has(const char *account,
+                                      const char *profile,
+                                      const char *channel)
+{
+  char value[METADATA_VALUE_LEN];
+  int rc;
+
+  if (!account || !profile || !channel)
+    return -1;
+
+  rc = persistence_profile_get_own(account, profile, PROFILE_CHANNELS_KEY,
+                                    value, sizeof(value));
+  if (rc == 0)
+    return channel_list_contains(value, channel) ? 1 : 0;
+  if (rc < 0)
+    return -1;
+  return 0;
+}
+
+int persistence_channel_visible(struct Client *cptr, const char *channel)
+{
+  const char *profile;
+  char value[METADATA_VALUE_LEN];
+  int rc;
+
+  if (!cptr || !channel)
+    return 1; /* fail-open: undefined input means we don't filter */
+
+  /* Servers and non-account clients have no profile and aren't
+   * subject to filtering. */
+  if (!MyConnect(cptr) || !IsAccount(cptr))
+    return 1;
+
+  profile = cli_active_profile(cptr);
+  if (!profile || !profile[0])
+    profile = PERSISTENCE_PROFILE_DEFAULT;
+
+  rc = persistence_profile_get_own(cli_account(cptr), profile,
+                                    PROFILE_CHANNELS_KEY,
+                                    value, sizeof(value));
+  if (rc != 0 || !value[0])
+    return 1; /* no list or empty list = no filter (M3 permissive) */
+
+  return channel_list_contains(value, channel) ? 1 : 0;
 }

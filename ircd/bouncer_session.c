@@ -54,6 +54,7 @@
 #include "match.h"
 #include "metadata.h"
 #include "msg.h"
+#include "persistence_profile.h"
 #include "numeric.h"
 #include "numnicks.h"
 #include "send.h"
@@ -8968,6 +8969,11 @@ void bounce_send_channel_state(struct Client *cptr)
     struct Channel *chptr = member->channel;
 
     if (IsZombie(member) || IsDelayedJoin(member))
+      continue;
+
+    /* draft/persistence M3 filter: skip channels not visible to this
+     * client's active profile.  Empty / unset list = all visible. */
+    if (!persistence_channel_visible(cptr, chptr->chname))
       continue;
 
     /* Send JOIN with original msgid and timestamp.  First try the

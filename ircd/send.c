@@ -42,6 +42,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "parse.h"
+#include "persistence_profile.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -2261,7 +2262,8 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
-        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST)))
+        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
+        || !persistence_channel_visible(member->user, to->chname))
         continue;
     flags = get_client_tag_flags(member->user, from, 0);
     if (flags) {
@@ -2339,7 +2341,8 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member)&& !HasVoice(member))
-        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST)))
+        || (skip & SKIP_CHGHOST && CapActive(member->user, CAP_CHGHOST))
+        || !persistence_channel_visible(member->user, to->chname))
         continue;
     if ((withcap != CAP_NONE) && !CapActive(member->user, withcap))
         continue;
@@ -2415,7 +2418,8 @@ void sendcmdto_channel_client_tags(struct Client *from, const char *cmd,
         || (skip & SKIP_NONOPS && !IsChanOp(member))
         || (skip & SKIP_NONHOPS && !IsChanOp(member) && !IsHalfOp(member))
         || (skip & SKIP_NONVOICES && !IsChanOp(member) && !IsHalfOp(member) && !HasVoice(member))
-        || !wants_message_tags(member->user))
+        || !wants_message_tags(member->user)
+        || !persistence_channel_visible(member->user, to->chname))
         continue;
 
     /* Build message with client-only tags for this recipient */
@@ -2620,6 +2624,8 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
     cli_sentalong(member->user) = sentalong_marker;
 
     if (MyConnect(member->user)) { /* pick right buffer to send */
+      if (!persistence_channel_visible(member->user, to->chname))
+        continue;
       tflags = get_client_tag_flags(member->user, from, 0);
       if (tflags) {
         /* Build cached message buffer for this flag combination if needed */
@@ -2803,6 +2809,8 @@ void sendcmdto_channel_butone_with_client_tags(struct Client *from,
     cli_sentalong(member->user) = sentalong_marker;
 
     if (MyConnect(member->user)) {
+      if (!persistence_channel_visible(member->user, to->chname))
+        continue;
       /* For clients with message-tags cap, include client-only tags */
       if (CapOwnHas(member->user, CAP_MSGTAGS) && client_tags && *client_tags) {
         /* Build message with client-only tags + server tags for this recipient */

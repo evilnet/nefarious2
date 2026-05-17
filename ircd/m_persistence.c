@@ -441,6 +441,42 @@ static int persistence_cmd_profile_set(struct Client *sptr,
                   "PROFILE SET %s %s", name, key);
     return 0;
   }
+
+  /* Special-case the `channels` key — set operations (+#x / -#x) and
+   * DEFAULT (clear), not whole-value replacement. */
+  if (0 == ircd_strcmp(key, "channels")) {
+    int rc;
+    if (value == NULL) {
+      rc = persistence_profile_channels_clear(cli_account(sptr), name);
+    } else if (value[0] == '+') {
+      rc = persistence_profile_channels_add(cli_account(sptr), name,
+                                             value + 1);
+    } else if (value[0] == '-') {
+      rc = persistence_profile_channels_remove(cli_account(sptr), name,
+                                                value + 1);
+    } else {
+      send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                    "channels value must be +<channel>, -<channel>, "
+                    "or DEFAULT",
+                    "PROFILE SET %s channels %s", name, value);
+      return 0;
+    }
+    if (rc < 0) {
+      send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
+                    "Profile channels edit failed",
+                    "PROFILE SET %s channels %s",
+                    name, value ? value : "DEFAULT");
+      return 0;
+    }
+    if (value)
+      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s channels %s",
+                    cli_name(&me), name, value);
+    else
+      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s channels",
+                    cli_name(&me), name);
+    return 0;
+  }
+
   if (persistence_profile_set(cli_account(sptr), name, key, value) < 0) {
     send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
                   "Profile set failed (cycle, invalid value, or storage error)",
