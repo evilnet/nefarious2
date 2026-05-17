@@ -127,8 +127,18 @@ m_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
     else if (sptr != acptr)
     {
-      send_reply(sptr, ERR_USERSDONTMATCH);
-      return 0;
+      /* Aliases share their primary's session identity.  An alias
+       * sending MODE for the primary's nick (which is the alias's
+       * effective post-attach nick) is acting on its own user state.
+       * set_user_mode has the matching carve-out at the parc < 3 and
+       * parc >= 3 paths — but this earlier gate in m_mode also has to
+       * let the alias through.  Pre-fix, MODE from an alias for the
+       * primary's nick got ERR_USERSDONTMATCH here before ever
+       * reaching set_user_mode. */
+      if (!(cli_user(sptr) && cli_user(sptr)->alias_primary == acptr)) {
+        send_reply(sptr, ERR_USERSDONTMATCH);
+        return 0;
+      }
     }
 
     if (!IsAnOper(sptr) && IsRestrictUMode(sptr))
