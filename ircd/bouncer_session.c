@@ -4991,6 +4991,15 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   memcpy(con_active(ghost_con), con_active_own(temp_con), sizeof(struct CapSet));
   con_capab_version(ghost_con) = con_capab_version(temp_con);
 
+  /* draft/persistence M2: copy the per-connection active-profile name.
+   * The reviving client may have done PERSISTENCE ATTACH pre-CAP-END;
+   * that value lives on temp_con and must follow the transplanted
+   * socket onto ghost_con.  Without this, ATTACH appears to "stick"
+   * during pre-CAP-END but reverts to default once the bouncer takes
+   * over the connection. */
+  ircd_strncpy(con_active_profile(ghost_con), con_active_profile(temp_con),
+               sizeof(con_active_profile(ghost_con)));
+
   /* Step 9: Update timing */
   con_lasttime(ghost_con) = con_lasttime(temp_con);
   con_since(ghost_con) = con_since(temp_con);

@@ -40,6 +40,8 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "metadata.h"
+#include "persistence_profile.h"
 #include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
@@ -377,6 +379,27 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
           && !HasPriv(sptr, PRIV_CHAN_LIMIT)) {
         send_reply(sptr, ERR_TOOMANYCHANNELS, name);
         break; /* no point processing the other channels */
+      }
+
+      /* draft/persistence M4: pre-grow the active profile's channel
+       * list BEFORE do_join, so the JOIN broadcast through the M3
+       * per-delivery filter doesn't drop the joiner's own JOIN echo.
+       * Only when filtering is active (list non-empty); empty list =
+       * no filter, leave alone (legacy / default-profile semantic).
+       * Uses alias_source if the JOIN was issued by an alias — the
+       * active profile is a per-connection attribute. */
+      if (MyConnect(alias_source ? alias_source : sptr)
+          && IsAccount(alias_source ? alias_source : sptr)) {
+        struct Client *src = alias_source ? alias_source : sptr;
+        const char *prof = cli_active_profile(src);
+        char curval[METADATA_VALUE_LEN];
+        if (!prof || !prof[0])
+          prof = PERSISTENCE_PROFILE_DEFAULT;
+        if (persistence_profile_get_own(cli_account(src), prof,
+                                         "channels", curval,
+                                         sizeof(curval)) == 0
+            && curval[0])
+          persistence_profile_channels_add(cli_account(src), prof, name);
       }
 
       do_join(cptr, sptr, &join, &create, name, key, 0);

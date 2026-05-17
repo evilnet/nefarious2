@@ -89,8 +89,10 @@
 #include "ircd_features.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "metadata.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "persistence_profile.h"
 #include "send.h"
 #include "bouncer_session.h"
 
@@ -195,6 +197,25 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       flags |= CHFL_DELAYED;
 
     joinbuf_join(&parts, chptr, flags); /* part client from channel */
+
+    /* draft/persistence M4: auto-shrink active profile's channel list
+     * to match the user's intent.  Only when filtering is active
+     * (list non-empty); leaves the default profile / no-filter case
+     * unchanged. */
+    if (MyConnect(alias_source ? alias_source : sptr)
+        && IsAccount(alias_source ? alias_source : sptr)) {
+      struct Client *src = alias_source ? alias_source : sptr;
+      const char *prof = cli_active_profile(src);
+      char curval[METADATA_VALUE_LEN];
+      if (!prof || !prof[0])
+        prof = PERSISTENCE_PROFILE_DEFAULT;
+      if (persistence_profile_get_own(cli_account(src), prof,
+                                       "channels", curval,
+                                       sizeof(curval)) == 0
+          && curval[0])
+        persistence_profile_channels_remove(cli_account(src), prof,
+                                             chptr->chname);
+    }
   }
 
   return joinbuf_flush(&parts); /* flush channel parts */
