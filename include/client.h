@@ -421,6 +421,11 @@ struct Connection
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */
   unsigned char       con_pre_away;   /**< Pre-registration away state: 0=none, 1=away, 2=away-star */
   char                con_pre_away_msg[AWAYLEN + 1]; /**< Pre-registration away message */
+  /* draft/persistence active profile (Phase 4 / M2).
+   * Set via PERSISTENCE ATTACH pre-CAP-END or implicitly to
+   * "default" at registration if not specified.  Per-connection
+   * (aliases each have their own value). */
+  char                con_active_profile[33]; /* PERSISTENCE_PROFILE_NAME_MAX + 1 */
   /* Multiline batch state (draft/multiline) */
   char                con_ml_batch_id[65]; /**< Active multiline batch ID (IRCv3 allows up to 64 chars) */
   char                con_ml_target[CHANNELLEN + 1]; /**< Multiline batch target (channel or nick) */
@@ -916,6 +921,9 @@ struct Client {
 #define con_pre_away(con)	((con)->con_pre_away)
 /** Get the pre-registration away message. */
 #define con_pre_away_msg(con)	((con)->con_pre_away_msg)
+/** Get the active draft/persistence profile name (per-connection). */
+#define con_active_profile(con)	((con)->con_active_profile)
+#define cli_active_profile(cli)	con_active_profile(cli_connect(cli))
 /** Get the multiline batch ID. */
 #define con_ml_batch_id(con)	((con)->con_ml_batch_id)
 /** Get the multiline batch target. */

@@ -1064,9 +1064,11 @@ struct Message msgtab[] = {
     MSG_PERSISTENCE,
     TOK_PERSISTENCE,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
-    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_ignore, m_persistence, m_ignore, m_persistence, m_ignore },
-    "STATUS|GET|SET ON|OFF|DEFAULT - draft/persistence (bouncer hold preference)"
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE.  UNREG must accept ATTACH
+     * during the SASL-success/pre-CAP-END window so clients can pin
+     * an active profile before registration completes. */
+    { m_persistence, m_persistence, m_ignore, m_persistence, m_ignore },
+    "STATUS|GET|SET|PROFILE|ATTACH - draft/persistence (profiles, hold, replay)"
   },
   {
     MSG_BOUNCER_SESSION,

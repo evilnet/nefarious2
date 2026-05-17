@@ -54,18 +54,42 @@
 
 #include <string.h>
 
+/** Resolve the connection's active profile name.
+ * Falls back to PERSISTENCE_PROFILE_DEFAULT when the connection didn't
+ * explicitly ATTACH.  Returns a pointer to either the stashed name on
+ * the Connection or the constant "default" — never NULL.
+ */
+static const char *active_profile_for(struct Client *cptr)
+{
+  if (!cptr || !cli_connect(cptr))
+    return PERSISTENCE_PROFILE_DEFAULT;
+  {
+    const char *p = cli_active_profile(cptr);
+    if (p && p[0])
+      return p;
+  }
+  return PERSISTENCE_PROFILE_DEFAULT;
+}
+
 /** Compute the effective persistence state for a client.
- * Reads `bouncer/hold` for the client's account, falling back to
- * FEAT_BOUNCER_DEFAULT_HOLD when no preference is recorded.
- * @param[in] cptr Client to inspect (must be IsAccount).
+ * Resolution order (most-specific first), per the Phase 4 design:
+ *   1. Active profile's `hold` (walks parent chain through default)
+ *   2. Account-global `bouncer/hold` (the `PERSISTENCE SET` target)
+ *   3. FEAT_BOUNCER_DEFAULT_HOLD
  * @return 1 if persistence is effectively ON, 0 if OFF.
  */
 static int persistence_effective_state(struct Client *cptr)
 {
-  char hold_val[8];
+  char hold_val[METADATA_VALUE_LEN];
 
   if (!cptr || !IsAccount(cptr))
     return 0;
+
+  if (persistence_profile_get_effective(cli_account(cptr),
+                                         active_profile_for(cptr),
+                                         "hold",
+                                         hold_val, sizeof(hold_val)) == 0)
+    return (hold_val[0] != '0');
 
   if (metadata_account_get(cli_account(cptr), "bouncer/hold", hold_val) == 0)
     return (hold_val[0] != '0');
@@ -432,6 +456,65 @@ static int persistence_cmd_profile_set(struct Client *sptr,
   return 0;
 }
 
+/** Resolve the account name for this client's pending or current
+ * authentication.  Pre-CAP-END, FLAG_ACCOUNT isn't set yet (only
+ * SASLComplete) — but cli_saslaccount holds the authenticated name.
+ * Returns NULL if the client isn't authenticated at all.
+ */
+static const char *persistence_account_for(struct Client *sptr)
+{
+  if (!sptr)
+    return NULL;
+  if (IsAccount(sptr) && cli_user(sptr) && cli_account(sptr)[0])
+    return cli_account(sptr);
+  if (IsSASLComplete(sptr) && cli_saslaccount(sptr)[0])
+    return cli_saslaccount(sptr);
+  return NULL;
+}
+
+/** Handle PERSISTENCE ATTACH <profile> — pin the active profile for
+ * this connection.  Only valid during registration (between SASL
+ * success and CAP END / first NICK+USER); refused once the client is
+ * fully registered (Q1 — no mid-session profile swap for v1).
+ */
+static int persistence_cmd_attach(struct Client *sptr, int parc, char *parv[])
+{
+  const char *name;
+  const char *account;
+
+  if (IsUser(sptr)) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "ATTACH",
+              "PERSISTENCE ATTACH is only valid during registration");
+    return 0;
+  }
+  account = persistence_account_for(sptr);
+  if (!account) {
+    send_fail(sptr, "PERSISTENCE", "ACCOUNT_REQUIRED", "ATTACH",
+              "You must SASL-authenticate before PERSISTENCE ATTACH");
+    return 0;
+  }
+  if (parc < 3) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "ATTACH",
+              "Usage: PERSISTENCE ATTACH <profile>");
+    return 0;
+  }
+  name = parv[2];
+  if (!persistence_profile_name_valid(name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Invalid profile name", "ATTACH %s", name);
+    return 0;
+  }
+  if (!persistence_profile_exists(account, name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "No such profile", "ATTACH %s", name);
+    return 0;
+  }
+  ircd_strncpy(cli_active_profile(sptr), name,
+               sizeof(con_active_profile(cli_connect(sptr))));
+  send_persistence_reply(sptr, "ATTACH", name);
+  return 0;
+}
+
 static int persistence_cmd_profile(struct Client *sptr, int parc, char *parv[])
 {
   const char *sub;
@@ -495,6 +578,9 @@ int m_persistence(struct Client *cptr, struct Client *sptr,
 
   if (0 == ircd_strcmp(sub, "PROFILE"))
     return persistence_cmd_profile(sptr, parc, parv);
+
+  if (0 == ircd_strcmp(sub, "ATTACH"))
+    return persistence_cmd_attach(sptr, parc, parv);
 
   send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
                 "Unknown PERSISTENCE subcommand",
