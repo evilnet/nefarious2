@@ -591,17 +591,199 @@ static size_t channel_list_remove(char *buf, const char *channel)
   return strlen(buf);
 }
 
+/** Build the inheritance chain leaf-first (chain[0] is `profile`,
+ * chain[1] is its parent, …, chain[depth-1] is the root).  Stops
+ * when a profile has no parent.  Caps at PROFILE_INHERIT_MAX_DEPTH.
+ * @return 0 on success, -1 on error.
+ */
+static int build_inheritance_chain(const char *account, const char *profile,
+                                    char chain[][PROFILE_NAME_LEN_MAX + 1],
+                                    int max_depth, int *depth_out)
+{
+  char current[PROFILE_NAME_LEN_MAX + 1];
+  char parent[PROFILE_NAME_LEN_MAX + 1];
+  int d = 0;
+
+  if (!profile || !*profile || !depth_out)
+    return -1;
+  ircd_strncpy(current, profile, sizeof(current));
+
+  while (d < max_depth) {
+    ircd_strncpy(chain[d], current, sizeof(chain[d]));
+    d++;
+    if (profile_read_parent(account, current, parent, sizeof(parent)) != 0)
+      break;
+    if (!parent[0])
+      break;
+    ircd_strncpy(current, parent, sizeof(current));
+  }
+  *depth_out = d;
+  return 0;
+}
+
+/** Parse one segment of a channels list at `p`.  Sets `*is_neg` if
+ * the entry starts with `-`, `*chan_start` to the first non-`-` byte,
+ * `*chan_len` to the channel-name length, and returns a pointer to
+ * the next segment start (after the comma) or NULL at end of input.
+ */
+static const char *parse_channel_entry(const char *p, int *is_neg,
+                                        const char **chan_start, size_t *chan_len)
+{
+  const char *comma = strchr(p, ',');
+  size_t seg_len = comma ? (size_t)(comma - p) : strlen(p);
+
+  if (seg_len > 0 && p[0] == '-') {
+    *is_neg = 1;
+    *chan_start = p + 1;
+    *chan_len = seg_len - 1;
+  } else {
+    *is_neg = 0;
+    *chan_start = p;
+    *chan_len = seg_len;
+  }
+  return comma ? comma + 1 : NULL;
+}
+
+static int channel_eq_ci(const char *a, size_t a_len, const char *b)
+{
+  size_t i;
+  size_t b_len = strlen(b);
+  if (a_len != b_len)
+    return 0;
+  for (i = 0; i < a_len; ++i) {
+    if (ToLower((unsigned char)a[i]) != ToLower((unsigned char)b[i]))
+      return 0;
+  }
+  return 1;
+}
+
+int persistence_profile_channels_effective_has(const char *account,
+                                                const char *profile,
+                                                const char *channel)
+{
+  char chain[PROFILE_INHERIT_MAX_DEPTH][PROFILE_NAME_LEN_MAX + 1];
+  int depth = 0;
+  int i;
+  int in_set = 0;
+
+  if (!account || !profile || !channel)
+    return -1;
+  if (build_inheritance_chain(account, profile, chain,
+                               PROFILE_INHERIT_MAX_DEPTH, &depth) < 0)
+    return -1;
+
+  /* Apply from root (chain[depth-1]) down to leaf (chain[0]). */
+  for (i = depth - 1; i >= 0; --i) {
+    char value[METADATA_VALUE_LEN];
+    const char *p;
+    int rc = persistence_profile_get_own(account, chain[i],
+                                          PROFILE_CHANNELS_KEY,
+                                          value, sizeof(value));
+    if (rc < 0)
+      return -1;
+    if (rc != 0)
+      continue; /* no channels at this level */
+    p = value;
+    while (p && *p) {
+      int is_neg;
+      const char *chan_start;
+      size_t chan_len;
+      const char *next = parse_channel_entry(p, &is_neg, &chan_start, &chan_len);
+      if (chan_len > 0 && channel_eq_ci(chan_start, chan_len, channel))
+        in_set = is_neg ? 0 : 1;
+      p = next;
+    }
+  }
+  return in_set;
+}
+
+int persistence_profile_channels_effective(const char *account,
+                                            const char *profile,
+                                            char *out, size_t out_len)
+{
+  char chain[PROFILE_INHERIT_MAX_DEPTH][PROFILE_NAME_LEN_MAX + 1];
+  int depth = 0;
+  int i;
+  /* Build the effective set as a comma-separated string in `set_buf`,
+   * applying adds and removes from root to leaf. */
+  char set_buf[METADATA_VALUE_LEN];
+
+  if (!account || !profile || !out || out_len == 0)
+    return -1;
+  if (build_inheritance_chain(account, profile, chain,
+                               PROFILE_INHERIT_MAX_DEPTH, &depth) < 0)
+    return -1;
+
+  set_buf[0] = '\0';
+
+  for (i = depth - 1; i >= 0; --i) {
+    char value[METADATA_VALUE_LEN];
+    const char *p;
+    int rc = persistence_profile_get_own(account, chain[i],
+                                          PROFILE_CHANNELS_KEY,
+                                          value, sizeof(value));
+    if (rc < 0)
+      return -1;
+    if (rc != 0)
+      continue;
+    p = value;
+    while (p && *p) {
+      int is_neg;
+      const char *chan_start;
+      size_t chan_len;
+      const char *next = parse_channel_entry(p, &is_neg, &chan_start, &chan_len);
+      if (chan_len > 0) {
+        char one[CHANNELLEN + 2];
+        size_t cp = chan_len < sizeof(one) - 1 ? chan_len : sizeof(one) - 1;
+        memcpy(one, chan_start, cp);
+        one[cp] = '\0';
+        if (is_neg) {
+          channel_list_remove(set_buf, one);
+        } else {
+          if (!channel_list_contains(set_buf, one)) {
+            int new_len = append_channel(set_buf, sizeof(set_buf),
+                                          strlen(set_buf), one);
+            if (new_len < 0)
+              return -1;
+          }
+        }
+      }
+      p = next;
+    }
+  }
+  ircd_strncpy(out, set_buf, out_len);
+  return 0;
+}
+
+/** Test whether the inheritance chain UNDER `profile` (parent and
+ * upward) already covers `channel`.  Used by add/remove to decide
+ * whether an explicit own-entry is necessary.
+ */
+static int parent_chain_has_channel(const char *account, const char *profile,
+                                     const char *channel)
+{
+  char parent_name[PROFILE_NAME_LEN_MAX + 1];
+  if (profile_read_parent(account, profile, parent_name, sizeof(parent_name)) != 0)
+    return 0;
+  if (!parent_name[0])
+    return 0;
+  return persistence_profile_channels_effective_has(account, parent_name, channel) == 1;
+}
+
 int persistence_profile_channels_add(const char *account,
                                       const char *profile,
                                       const char *channel)
 {
   char value[METADATA_VALUE_LEN];
+  char neg_entry[CHANNELLEN + 2];
   int rc;
-  size_t existing_len = 0;
-  int new_len;
+  size_t existing_len;
+  int parent_has;
 
   if (!account || !profile || !channel || !*channel)
     return -1;
+
+  parent_has = parent_chain_has_channel(account, profile, channel);
 
   rc = persistence_profile_get_own(account, profile, PROFILE_CHANNELS_KEY,
                                     value, sizeof(value));
@@ -609,18 +791,31 @@ int persistence_profile_channels_add(const char *account,
     existing_len = strlen(value);
   else if (rc < 0)
     return -1;
-  else
+  else {
     value[0] = '\0';
+    existing_len = 0;
+  }
 
-  if (channel_list_contains(value, channel))
-    return 0; /* already present */
+  /* Strip any explicit `-channel` subtract — we're saying we want the
+   * channel, so the override is no longer relevant. */
+  ircd_snprintf(0, neg_entry, sizeof(neg_entry), "-%s", channel);
+  if (channel_list_contains(value, neg_entry)) {
+    channel_list_remove(value, neg_entry);
+    existing_len = strlen(value);
+  }
 
-  new_len = append_channel(value, sizeof(value), existing_len, channel);
-  if (new_len < 0)
-    return -1;
+  /* If the parent chain already has it, no need to add explicitly. */
+  if (!parent_has && !channel_list_contains(value, channel)) {
+    int new_len = append_channel(value, sizeof(value), existing_len, channel);
+    if (new_len < 0)
+      return -1;
+  }
 
-  return persistence_profile_set(account, profile, PROFILE_CHANNELS_KEY,
-                                  value);
+  if (value[0] == '\0')
+    return persistence_profile_set(account, profile,
+                                    PROFILE_CHANNELS_KEY, NULL);
+  return persistence_profile_set(account, profile,
+                                  PROFILE_CHANNELS_KEY, value);
 }
 
 int persistence_profile_channels_remove(const char *account,
@@ -628,19 +823,39 @@ int persistence_profile_channels_remove(const char *account,
                                          const char *channel)
 {
   char value[METADATA_VALUE_LEN];
+  char neg_entry[CHANNELLEN + 2];
   int rc;
-  size_t new_len;
+  int parent_has;
 
   if (!account || !profile || !channel || !*channel)
     return -1;
 
+  parent_has = parent_chain_has_channel(account, profile, channel);
+
   rc = persistence_profile_get_own(account, profile, PROFILE_CHANNELS_KEY,
                                     value, sizeof(value));
+  if (rc < 0)
+    return -1;
   if (rc != 0)
-    return 0; /* no list — nothing to remove */
+    value[0] = '\0';
 
-  new_len = channel_list_remove(value, channel);
-  if (new_len == 0)
+  /* Drop any positive own-entry — either the channel was added here
+   * directly (now removed) or it was inherited (we'll mark it -). */
+  channel_list_remove(value, channel);
+
+  if (parent_has) {
+    /* Inheritance still injects the channel; record an explicit
+     * subtract so the effective set excludes it. */
+    ircd_snprintf(0, neg_entry, sizeof(neg_entry), "-%s", channel);
+    if (!channel_list_contains(value, neg_entry)) {
+      int new_len = append_channel(value, sizeof(value),
+                                    strlen(value), neg_entry);
+      if (new_len < 0)
+        return -1;
+    }
+  }
+
+  if (value[0] == '\0')
     return persistence_profile_set(account, profile,
                                     PROFILE_CHANNELS_KEY, NULL);
   return persistence_profile_set(account, profile,
@@ -678,8 +893,7 @@ int persistence_profile_channels_has(const char *account,
 int persistence_channel_visible(struct Client *cptr, const char *channel)
 {
   const char *profile;
-  char value[METADATA_VALUE_LEN];
-  int rc;
+  char effective[METADATA_VALUE_LEN];
 
   if (!cptr || !channel)
     return 1; /* fail-open: undefined input means we don't filter */
@@ -693,11 +907,11 @@ int persistence_channel_visible(struct Client *cptr, const char *channel)
   if (!profile || !profile[0])
     profile = PERSISTENCE_PROFILE_DEFAULT;
 
-  rc = persistence_profile_get_own(cli_account(cptr), profile,
-                                    PROFILE_CHANNELS_KEY,
-                                    value, sizeof(value));
-  if (rc != 0 || !value[0])
-    return 1; /* no list or empty list = no filter (M3 permissive) */
+  if (persistence_profile_channels_effective(cli_account(cptr), profile,
+                                              effective, sizeof(effective)) < 0)
+    return 1; /* error path: fail-open */
+  if (!effective[0])
+    return 1; /* effectively empty list = no filter (M3 permissive) */
 
-  return channel_list_contains(value, channel) ? 1 : 0;
+  return channel_list_contains(effective, channel) ? 1 : 0;
 }

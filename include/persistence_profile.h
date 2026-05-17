@@ -191,10 +191,42 @@ extern int persistence_profile_channels_has(const char *account,
 /** Test whether `channel` is visible to `cptr` under its active
  * profile's channel list.  Empty / unset list = all channels visible
  * (M3 view-only filter default).  Non-empty list = only listed
- * channels visible.  Convenience wrapper around channels_has.
+ * channels visible.  Inheritance is honoured — channels inherited
+ * from a parent profile count as part of the effective set unless an
+ * explicit "-<channel>" entry in the active profile (or any
+ * intermediate ancestor) subtracts them.  See
+ * `persistence_profile_channels_effective_has`.
  * @return 1 if visible (deliver), 0 if filtered out (drop).
  */
 extern int persistence_channel_visible(struct Client *cptr,
                                         const char *channel);
+
+/** Compute the effective channel-list membership for `channel` in
+ * `profile`, walking inheritance from the root downward and applying
+ * the M5 set-merge semantic:
+ *   - root's channel list seeds the set
+ *   - each descendant's `<chan>` entry adds, `-<chan>` removes
+ * Stops at the first profile lacking a parent.
+ * Does NOT apply the empty-list-means-no-filter semantic — that's
+ * for the delivery-filter callers (persistence_channel_visible) to
+ * decide based on whether the effective set is empty.
+ * @return 1 if present, 0 if absent, -1 on error.
+ */
+extern int persistence_profile_channels_effective_has(const char *account,
+                                                       const char *profile,
+                                                       const char *channel);
+
+/** Compute the effective channel set as a comma-separated string, in
+ * the same shape as the raw stored format minus any `-` markers.
+ * The result is suitable for emitting on the wire from PROFILE GET.
+ * @param[out] out Buffer; receives effective channel list (or "" if
+ *                 effectively empty).
+ * @param[in] out_len Buffer size.
+ * @return 0 on success, -1 on error.
+ */
+extern int persistence_profile_channels_effective(const char *account,
+                                                   const char *profile,
+                                                   char *out,
+                                                   size_t out_len);
 
 #endif /* INCLUDED_persistence_profile_h */

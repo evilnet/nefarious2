@@ -393,6 +393,27 @@ static int persistence_cmd_profile_get(struct Client *sptr,
                   "No such profile", "PROFILE GET %s %s", name, key);
     return 0;
   }
+  /* `channels` is a set-merge key under M5 — return the effective
+   * channel list (parent inheritance applied, `-chan` subtracts
+   * honoured).  All other keys use normal shadow-resolve through
+   * the parent chain. */
+  if (0 == ircd_strcmp(key, "channels")) {
+    if (persistence_profile_channels_effective(cli_account(sptr), name,
+                                                value, sizeof(value)) < 0) {
+      send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
+                    "Profile channels lookup failed",
+                    "PROFILE GET %s %s", name, key);
+      return 0;
+    }
+    if (value[0])
+      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
+                    cli_name(&me), name, key, value);
+    else
+      sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s",
+                    cli_name(&me), name, key);
+    return 0;
+  }
+
   rc = persistence_profile_get_effective(cli_account(sptr), name, key,
                                           value, sizeof(value));
   if (rc < 0) {

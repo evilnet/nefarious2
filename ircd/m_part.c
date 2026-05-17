@@ -198,21 +198,23 @@ int m_part(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     joinbuf_join(&parts, chptr, flags); /* part client from channel */
 
-    /* draft/persistence M4: auto-shrink active profile's channel list
-     * to match the user's intent.  Only when filtering is active
-     * (list non-empty); leaves the default profile / no-filter case
-     * unchanged. */
+    /* draft/persistence M4a: auto-shrink active profile's channel
+     * list.  Only when filtering is active (effective set non-empty);
+     * default / empty case left alone.  M5: effective check honours
+     * inheritance, and the remove helper writes an explicit `-chan`
+     * marker when the channel comes from a parent (so the subtract
+     * persists across reconnects). */
     if (MyConnect(alias_source ? alias_source : sptr)
         && IsAccount(alias_source ? alias_source : sptr)) {
       struct Client *src = alias_source ? alias_source : sptr;
       const char *prof = cli_active_profile(src);
-      char curval[METADATA_VALUE_LEN];
+      char effective[METADATA_VALUE_LEN];
       if (!prof || !prof[0])
         prof = PERSISTENCE_PROFILE_DEFAULT;
-      if (persistence_profile_get_own(cli_account(src), prof,
-                                       "channels", curval,
-                                       sizeof(curval)) == 0
-          && curval[0])
+      if (persistence_profile_channels_effective(cli_account(src), prof,
+                                                  effective,
+                                                  sizeof(effective)) == 0
+          && effective[0])
         persistence_profile_channels_remove(cli_account(src), prof,
                                              chptr->chname);
     }
