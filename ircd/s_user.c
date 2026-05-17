@@ -1977,12 +1977,19 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         *m++ = userModeList[i].c;
     }
     *m = '\0';
-    send_reply(acptr, RPL_UMODEIS, buf);
-    if (HasFlag(acptr, FLAG_SERVNOTICE) && MyConnect(acptr)
+    /* RPL_UMODEIS goes to the REQUESTER (sptr), not the target
+     * (acptr).  These are the same in the canonical self-query case
+     * (sptr == acptr) but differ when the requester is an alias of
+     * the target — see the _alias_of_target carve-out above.  Without
+     * this fix, `MODE primaryNick` from an alias's connection sent the
+     * reply to the primary's socket and the alias never saw its own
+     * umode query response. */
+    send_reply(sptr, RPL_UMODEIS, buf);
+    if (HasFlag(acptr, FLAG_SERVNOTICE) && MyConnect(sptr)
         && cli_snomask(acptr) !=
         (unsigned int)(IsOper(acptr) ? feature_int(FEAT_SNOMASK_OPERDEFAULT) :
          feature_int(FEAT_SNOMASK_DEFAULT)))
-      send_reply(acptr, RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
+      send_reply(sptr, RPL_SNOMASK, cli_snomask(acptr), cli_snomask(acptr));
     return 0;
   }
 
