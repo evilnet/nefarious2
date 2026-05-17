@@ -708,6 +708,17 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
     /* Account-wide hold preference - stored in metadata */
     if (0 == ircd_strcmp(parv[3], "on")) {
       metadata_set_client(sptr, "bouncer/hold", "1", METADATA_VIS_PRIVATE);
+      /* Propagate to peers — metadata_set_client only handles local
+       * memory + LMDB persistence; the S2S broadcast happens in
+       * m_metadata.c's user-facing path which we bypass here.  Without
+       * this, peer servers don't see the user's hold preference and
+       * their bounce_auto_resume rejects subsequent cross-server alias
+       * attaches at the "no preference + DEFAULT_HOLD off" early
+       * return.  Visibility "P" mirrors the wire format
+       * m_metadata.c::metadata_cmd_set uses for PRIVATE metadata —
+       * target is the client's nick, key is bouncer/hold. */
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
+                            cli_name(sptr), "bouncer/hold");
 
       /* Auto-create session if this client doesn't own one — turning hold on
        * should be sufficient to get bouncer behavior without needing TOKEN.
@@ -742,6 +753,10 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
       }
     } else if (0 == ircd_strcmp(parv[3], "off")) {
       metadata_set_client(sptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+      /* Propagate "off" to peers — see comment in the "on" branch
+       * above.  Without this, peers retain a stale "1" preference. */
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                            cli_name(sptr), "bouncer/hold");
 
       /* Fix #24: Active teardown — user no longer wants bouncer behavior.
        * Destroy the session (disconnects all aliases) so the primary
