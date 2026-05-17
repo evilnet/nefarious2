@@ -449,6 +449,7 @@ enum Feature {
   FEAT_BOUNCER_PERSIST,
   FEAT_BOUNCER_PERSIST_INTERVAL,
   FEAT_CAP_draft_bouncer,
+  FEAT_CAP_draft_persistence,
   FEAT_HISTORY_MAP_SIZE_MB,
 #ifdef USE_SSL
   FEAT_CAP_tls,

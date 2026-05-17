@@ -685,6 +685,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     m_lusers(sptr, sptr, 1, parv);
     update_load();
+
+    /* IRCv3 draft/persistence: unsolicited STATUS once the client has
+     * negotiated the cap AND is authenticated.  Lands after the 005
+     * block and before MOTD so the client knows its effective hold
+     * state at registration time without having to ask. */
+    if (CapActive(sptr, CAP_DRAFT_PERSISTENCE) && IsAccount(sptr))
+      persistence_send_status(sptr);
+
     motd_signon(sptr);
 
     /* IRCv3 draft/metadata-2: burst client's own metadata after registration.

@@ -698,6 +698,18 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* Refuse direct SET on server-managed keys (bouncer/, session/, system/).
+   * These prefixes are written exclusively by server-side logic — e.g.
+   * the bouncer session machinery and the draft/persistence command.
+   * The "*account" oper branch above is left intact so cleanup tooling
+   * can still wipe stale entries on offline accounts. */
+  if (metadata_key_is_server_managed(key)) {
+    send_fail_ctx(sptr, "METADATA", "KEY_NO_PERMISSION",
+                  "Key is server-managed and cannot be set directly",
+                  "%s %s", target, key);
+    return 0;
+  }
+
   if (!can_see_target(sptr, target, &is_channel, &target_client, &target_channel)) {
     send_fail(sptr, "METADATA", "INVALID_TARGET", target,
               "Invalid target");

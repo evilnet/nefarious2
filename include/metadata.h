@@ -219,16 +219,29 @@ extern struct MetadataEntry *metadata_list_channel(struct Channel *chptr);
 extern void metadata_clear_channel(struct Channel *chptr);
 
 /** Count metadata entries for a client.
+ * Server-managed entries (bouncer/, session/, system/) are excluded from
+ * the count so they do not consume the user-facing key budget.
  * @param[in] cptr Client to count.
- * @return Number of metadata entries.
+ * @return Number of user-managed metadata entries.
  */
 extern int metadata_count_client(struct Client *cptr);
 
 /** Count metadata entries for a channel.
+ * Server-managed entries are excluded from the count.
  * @param[in] chptr Channel to count.
- * @return Number of metadata entries.
+ * @return Number of user-managed metadata entries.
  */
 extern int metadata_count_channel(struct Channel *chptr);
+
+/** Test whether a metadata key is server-managed.
+ * Server-managed keys live under reserved prefixes (bouncer/, session/,
+ * system/).  They are written exclusively by server-side logic, never
+ * by direct METADATA SET from a client, and do not count against the
+ * per-target key-count limit.
+ * @param[in] key Metadata key name.
+ * @return Non-zero if the key is server-managed.
+ */
+extern int metadata_key_is_server_managed(const char *key);
 
 /** Check if a viewer can see a metadata entry.
  * @param[in] viewer Client viewing the metadata.

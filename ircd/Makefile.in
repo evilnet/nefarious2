@@ -198,6 +198,7 @@ IRCD_SRC = \
 	m_register.c \
 	m_markread.c \
 	m_metadata.c \
+	m_persistence.c \
 	m_rename.c \
 	m_webpush.c \
 	metadata.c \

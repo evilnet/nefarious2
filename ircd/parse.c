@@ -1061,6 +1061,14 @@ struct Message msgtab[] = {
     "TOKEN|RESUME|LISTSESSIONS|DISCONNECT|SETNAME|SET|SETTINGS - Bouncer session management"
   },
   {
+    MSG_PERSISTENCE,
+    TOK_PERSISTENCE,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_persistence, m_ignore, m_persistence, m_ignore },
+    "STATUS|GET|SET ON|OFF|DEFAULT - draft/persistence (bouncer hold preference)"
+  },
+  {
     MSG_BOUNCER_SESSION,
     TOK_BOUNCER_SESSION,
     0, MAXPARA, 0, 0, NULL,

@@ -547,6 +547,7 @@ DEFINE_CAP_NOTIFY("draft/read-marker", draft_read_marker)
 DEFINE_CAP_NOTIFY("draft/channel-rename", draft_channel_rename)
 DEFINE_CAP_NOTIFY("draft/metadata-2", draft_metadata_2)
 DEFINE_CAP_NOTIFY("draft/bouncer", draft_bouncer)
+DEFINE_CAP_NOTIFY("draft/persistence", draft_persistence)
 DEFINE_CAP_NOTIFY("tls", tls)
 
 /** Notify clients when STS feature flag changes.
@@ -1178,6 +1179,7 @@ static struct FeatureDesc {
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
   F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, 0),    /* periodic persist interval (seconds) */
   F_B(CAP_draft_bouncer, 0, 1, feature_notify_cap_draft_bouncer),
+  F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, feature_notify_cap_tls),

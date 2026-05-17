@@ -1265,9 +1265,39 @@ void metadata_clear_client(struct Client *cptr)
   }
 }
 
-/** Count metadata entries for a client.
+/** Reserved prefixes for server-managed metadata.
+ * Keys under these prefixes are written exclusively by server-side logic
+ * (bouncer session state, persistence preferences, etc.) and are exempt
+ * from the user-facing key-count budget.  Direct METADATA SET from a
+ * client is refused for keys matching these prefixes.
+ */
+static const char *const server_managed_prefixes[] = {
+  "bouncer/",
+  "session/",
+  "system/",
+  NULL
+};
+
+int metadata_key_is_server_managed(const char *key)
+{
+  const char *const *p;
+  size_t klen;
+
+  if (!key)
+    return 0;
+  klen = strlen(key);
+  for (p = server_managed_prefixes; *p; ++p) {
+    size_t plen = strlen(*p);
+    if (klen >= plen && strncasecmp(key, *p, plen) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+/** Count user-managed metadata entries for a client.
+ * Server-managed entries (see metadata_key_is_server_managed) are skipped.
  * @param[in] cptr Client to count.
- * @return Number of metadata entries.
+ * @return Number of user-managed metadata entries.
  */
 int metadata_count_client(struct Client *cptr)
 {
@@ -1277,8 +1307,11 @@ int metadata_count_client(struct Client *cptr)
   if (!cptr)
     return 0;
 
-  for (entry = cli_metadata(cptr); entry; entry = entry->next)
+  for (entry = cli_metadata(cptr); entry; entry = entry->next) {
+    if (metadata_key_is_server_managed(entry->key))
+      continue;
     count++;
+  }
 
   return count;
 }
@@ -1434,8 +1467,11 @@ int metadata_count_channel(struct Channel *chptr)
   if (!chptr)
     return 0;
 
-  for (entry = chptr->metadata; entry; entry = entry->next)
+  for (entry = chptr->metadata; entry; entry = entry->next) {
+    if (metadata_key_is_server_managed(entry->key))
+      continue;
     count++;
+  }
 
   return count;
 }
