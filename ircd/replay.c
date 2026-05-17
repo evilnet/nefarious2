@@ -153,14 +153,44 @@ static void replay_set_target_from_storage(struct Client *sptr,
   rs->is_pm = 1;
 }
 
+/** Lazily emit the outer evilnet.github.io/bouncer-replay batch on first
+ * inner-batch open.  Only relevant when wants_outer_batch is set.
+ * Suppressed for empty replays because no inner batch ever opens.
+ */
+static void replay_emit_outer_batch_if_needed(struct Client *sptr,
+                                               struct ReplayState *rs)
+{
+  if (!rs->wants_outer_batch || rs->outer_batch_open)
+    return;
+  if (!CapRecipientHas(sptr, CAP_BATCH))
+    return;
+  generate_batch_id(rs->outer_batch_id, sizeof(rs->outer_batch_id), sptr);
+  sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s evilnet.github.io/bouncer-replay",
+                rs->outer_batch_id);
+  rs->outer_batch_open = 1;
+}
+
 /** Open a chathistory batch for the current target.
  * Handles labeled-response on the first batch if applicable.
  * If is_last_page is set, includes @draft/chathistory-end tag
  * on the BATCH start line to signal no more pages available.
+ * When wants_outer_batch is set, also emits the outer
+ * `evilnet.github.io/bouncer-replay` batch lazily on the first inner
+ * open and tags subsequent inner BATCH starts with @batch=<outer>.
  */
 static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
 {
+  const char *outer_tag = "";
+  char outer_buf[64];
+
   generate_batch_id(rs->batch_id, sizeof(rs->batch_id), sptr);
+
+  replay_emit_outer_batch_if_needed(sptr, rs);
+
+  if (rs->outer_batch_open) {
+    ircd_snprintf(0, outer_buf, sizeof(outer_buf), "batch=%s;", rs->outer_batch_id);
+    outer_tag = outer_buf;
+  }
 
   if (CapRecipientHas(sptr, CAP_BATCH)) {
     const char *end_tag = rs->is_last_page ? "draft/chathistory-end;" : "";
@@ -168,12 +198,15 @@ static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
     if (!rs->label_used && rs->label[0] &&
         feature_bool(FEAT_CAP_labeled_response) &&
         CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-      sendrawto_one(sptr, "@%slabel=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
-                    end_tag, rs->label, cli_name(&me), rs->batch_id, rs->target);
+      sendrawto_one(sptr, "@%s%slabel=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                    outer_tag, end_tag, rs->label, cli_name(&me),
+                    rs->batch_id, rs->target);
       cli_label_responded(sptr) = 1;
       rs->label_used = 1;
-    } else if (rs->is_last_page) {
-      sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s chathistory %s",
+    } else if (rs->is_last_page || outer_tag[0]) {
+      sendrawto_one(sptr, "@%s%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                    outer_tag,
+                    rs->is_last_page ? "draft/chathistory-end" : "",
                     cli_name(&me), rs->batch_id, rs->target);
     } else {
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s chathistory %s",
@@ -187,9 +220,23 @@ static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
 static void replay_close_batch(struct Client *sptr, struct ReplayState *rs)
 {
   if (rs->batch_open && CapRecipientHas(sptr, CAP_BATCH)) {
-    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", rs->batch_id);
+    if (rs->outer_batch_open)
+      sendrawto_one(sptr, "@batch=%s :%s " MSG_BATCH_CMD " -%s",
+                    rs->outer_batch_id, cli_name(&me), rs->batch_id);
+    else
+      sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", rs->batch_id);
   }
   rs->batch_open = 0;
+}
+
+/** Close the outer bouncer-replay batch if it was opened. */
+static void replay_close_outer_batch(struct Client *sptr, struct ReplayState *rs)
+{
+  if (!rs->outer_batch_open)
+    return;
+  if (CapRecipientHas(sptr, CAP_BATCH))
+    sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", rs->outer_batch_id);
+  rs->outer_batch_open = 0;
 }
 
 /** Send messages from the current batch until sendQ threshold is hit.
@@ -546,6 +593,10 @@ void replay_continue(struct Client *sptr)
     }
 
     if (rs->phase == REPLAY_PHASE_DONE) {
+      /* Close the outer bouncer-replay batch before the summary NOTICE
+       * so the user-facing summary lives outside the batch wrapper. */
+      if (rs->outer_batch_open && !IsDead(sptr))
+        replay_close_outer_batch(sptr, rs);
       replay_send_summary(sptr, rs);
       replay_cancel(sptr);
       return;
@@ -654,6 +705,13 @@ void replay_start_bouncer(struct Client *sptr, time_t since_time, int limit)
 
   rs = MyCalloc(1, sizeof(struct ReplayState));
   rs->phase = REPLAY_PHASE_CHANNELS;
+  /* Bouncer replay wraps in the evilnet.github.io/bouncer-replay outer
+   * batch when the client has negotiated draft/persistence + batch.
+   * The outer batch is emitted lazily on the first inner batch open so
+   * empty replays don't ship an empty wrapper. */
+  rs->wants_outer_batch =
+      CapRecipientHas(sptr, CAP_DRAFT_PERSISTENCE)
+      && CapRecipientHas(sptr, CAP_BATCH);
   rs->replay_limit = (limit > 0) ? limit : feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
   if (rs->replay_limit <= 0)
     rs->replay_limit = 100;
@@ -691,6 +749,10 @@ void replay_cancel(struct Client *sptr)
   /* Close open batch */
   if (rs->batch_open && !IsDead(sptr))
     replay_close_batch(sptr, rs);
+
+  /* Close outer bouncer-replay wrapper if it was emitted */
+  if (rs->outer_batch_open && !IsDead(sptr))
+    replay_close_outer_batch(sptr, rs);
 
   /* Free message list */
   if (rs->messages)

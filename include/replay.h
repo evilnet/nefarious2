@@ -85,6 +85,11 @@ struct ReplayState {
   /* PM targets (bouncer replay) */
   struct HistoryTarget *pm_targets;  /**< Owned list (queried at PM phase start) */
   struct HistoryTarget *pm_cursor;   /**< Current PM target */
+
+  /* === Outer batch for draft/persistence (bouncer replay only) === */
+  char outer_batch_id[REPLAY_BATCH_ID_LEN]; /**< Outer batch id when wants_outer_batch */
+  int outer_batch_open;                     /**< Whether outer BATCH + has been sent */
+  int wants_outer_batch;                    /**< Client negotiated draft/persistence+batch */
 };
 
 /* --- Public API --- */

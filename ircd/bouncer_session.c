@@ -8942,10 +8942,27 @@ void bounce_build_union_caps(struct BouncerSession *session, struct CapSet *out)
 void bounce_send_channel_state(struct Client *cptr)
 {
   struct Membership *member;
+  int wrap_in_persistence_batch;
 
   assert(0 != cptr);
   if (!cli_user(cptr))
     return;
+
+  /* Wrap the JOIN/TOPIC/NAMES burst in a draft/persistence batch when
+   * the client has negotiated both draft/persistence and batch.  This
+   * lets clients distinguish server-initiated channel restoration from
+   * a live JOIN burst.  cli_batch_id is expected to be clear here
+   * (callers run during registration before any other batch could be
+   * open); send_batch_start would overwrite it otherwise.  */
+  wrap_in_persistence_batch =
+      MyConnect(cptr)
+      && CapRecipientHas(cptr, CAP_DRAFT_PERSISTENCE)
+      && CapRecipientHas(cptr, CAP_BATCH)
+      && cli_user(cptr)->channel != NULL
+      && cli_batch_id(cptr)[0] == '\0';
+
+  if (wrap_in_persistence_batch)
+    send_batch_start(cptr, "draft/persistence");
 
   for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
     struct Channel *chptr = member->channel;
@@ -9033,4 +9050,7 @@ void bounce_send_channel_state(struct Client *cptr)
         !CapRecipientHas(cptr, CAP_NOIMPLICITNAMES_LEGACY))
       do_names(cptr, chptr, NAMES_ALL|NAMES_EON);
   }
+
+  if (wrap_in_persistence_batch)
+    send_batch_end(cptr);
 }
