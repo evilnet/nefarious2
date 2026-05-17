@@ -904,12 +904,25 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
 
   /* Check per-account hold preference via metadata.
    * Explicit opt-out (bouncer/hold=0) is always respected, even on
-   * bouncer-class ports — no session will be created or resumed. */
+   * bouncer-class ports — no session will be created or resumed.
+   *
+   * `bouncer/hold` is METADATA_VIS_PRIVATE — it doesn't propagate S2S,
+   * so peer servers don't see the preference set elsewhere on the
+   * network.  But the *existence* of a session for this account on
+   * the local server is itself a sufficient signal: an active or held
+   * session means hold was enabled by SOME server and broadcast via
+   * BS C, and the design intent is "any peer holding the session can
+   * route alias attaches into it."  So when we see no local metadata
+   * preference, we still bypass the early-return if an account-side
+   * session exists — that path then routes through the alias-attach
+   * branches below. */
   if (metadata_account_get(account, "bouncer/hold", hold_val) == 0) {
     if (hold_val[0] == '0')
       return 0; /* User opted out */
-  } else if (!class_bouncer && !feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)) {
-    return 0; /* No preference set and network default is no-hold */
+  } else if (!class_bouncer && !feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)
+             && !bounce_has_sessions(account)) {
+    return 0; /* No preference set, network default is no-hold,
+                 and no session exists for this account. */
   }
 
   /* Try to find a held session to resume */
