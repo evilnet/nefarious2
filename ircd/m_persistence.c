@@ -50,6 +50,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "bouncer_session.h"
+#include "persistence_profile.h"
 
 #include <string.h>
 
@@ -198,6 +199,275 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
+/* ---- PROFILE subcommand (Phase 4 / M1) ---- */
+
+struct persistence_list_ctx {
+  struct Client *to;
+  int count;
+};
+
+static void persistence_list_cb(const char *name, const char *parent, void *cookie)
+{
+  struct persistence_list_ctx *ctx = (struct persistence_list_ctx *)cookie;
+  if (parent && parent[0])
+    sendrawto_one(ctx->to, ":%s PERSISTENCE PROFILE %s parent=%s",
+                  cli_name(&me), name, parent);
+  else
+    sendrawto_one(ctx->to, ":%s PERSISTENCE PROFILE %s",
+                  cli_name(&me), name);
+  ctx->count++;
+}
+
+static int persistence_cmd_profile_list(struct Client *sptr)
+{
+  struct persistence_list_ctx ctx;
+  ctx.to = sptr;
+  ctx.count = 0;
+  if (persistence_profile_list(cli_account(sptr),
+                                persistence_list_cb, &ctx) < 0) {
+    send_fail(sptr, "PERSISTENCE", "INTERNAL_ERROR", "PROFILE LIST",
+              "Failed to enumerate profiles");
+    return 0;
+  }
+  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE ENDOFLIST",
+                cli_name(&me));
+  return 0;
+}
+
+static int persistence_cmd_profile_create(struct Client *sptr,
+                                           int parc, char *parv[])
+{
+  const char *name;
+  const char *parent = NULL;
+
+  if (parc < 4) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE CREATE",
+              "Usage: PROFILE CREATE <name> [FROM <parent>]");
+    return 0;
+  }
+  name = parv[3];
+  if (parc >= 6 && ircd_strcmp(parv[4], "FROM") == 0)
+    parent = parv[5];
+
+  if (!persistence_profile_name_valid(name)
+      || 0 == ircd_strcmp(name, PERSISTENCE_PROFILE_DEFAULT)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Invalid profile name", "PROFILE CREATE %s", name);
+    return 0;
+  }
+  if (parent && !persistence_profile_name_valid(parent)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Invalid parent profile name",
+                  "PROFILE CREATE %s FROM %s", name, parent);
+    return 0;
+  }
+  if (persistence_profile_create(cli_account(sptr), name, parent) < 0) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
+                  "Profile create failed (already exists, invalid parent, or storage error)",
+                  "PROFILE CREATE %s", name);
+    return 0;
+  }
+  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE CREATED %s parent=%s",
+                cli_name(&me), name,
+                (parent && parent[0]) ? parent : PERSISTENCE_PROFILE_DEFAULT);
+  return 0;
+}
+
+static int persistence_cmd_profile_delete(struct Client *sptr,
+                                           int parc, char *parv[])
+{
+  const char *name;
+
+  if (parc < 4) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE DELETE",
+              "Usage: PROFILE DELETE <name>");
+    return 0;
+  }
+  name = parv[3];
+  if (!persistence_profile_name_valid(name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Invalid profile name", "PROFILE DELETE %s", name);
+    return 0;
+  }
+  if (0 == ircd_strcmp(name, PERSISTENCE_PROFILE_DEFAULT)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Cannot delete the implicit default profile",
+                  "PROFILE DELETE %s", name);
+    return 0;
+  }
+  if (persistence_profile_delete(cli_account(sptr), name) < 0) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
+                  "Profile delete failed (default, not found, or has children)",
+                  "PROFILE DELETE %s", name);
+    return 0;
+  }
+  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE DELETED %s",
+                cli_name(&me), name);
+  return 0;
+}
+
+static int persistence_cmd_profile_rename(struct Client *sptr,
+                                           int parc, char *parv[])
+{
+  const char *old_name;
+  const char *new_name;
+
+  if (parc < 5) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE RENAME",
+              "Usage: PROFILE RENAME <old> <new>");
+    return 0;
+  }
+  old_name = parv[3];
+  new_name = parv[4];
+  if (!persistence_profile_name_valid(old_name)
+      || !persistence_profile_name_valid(new_name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Invalid profile name",
+                  "PROFILE RENAME %s %s", old_name, new_name);
+    return 0;
+  }
+  if (0 == ircd_strcmp(old_name, PERSISTENCE_PROFILE_DEFAULT)
+      || 0 == ircd_strcmp(new_name, PERSISTENCE_PROFILE_DEFAULT)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "The default profile cannot be renamed",
+                  "PROFILE RENAME %s %s", old_name, new_name);
+    return 0;
+  }
+  if (persistence_profile_rename(cli_account(sptr), old_name, new_name) < 0) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
+                  "Profile rename failed",
+                  "PROFILE RENAME %s %s", old_name, new_name);
+    return 0;
+  }
+  sendrawto_one(sptr, ":%s PERSISTENCE PROFILE RENAMED %s %s",
+                cli_name(&me), old_name, new_name);
+  return 0;
+}
+
+static int persistence_cmd_profile_get(struct Client *sptr,
+                                        int parc, char *parv[])
+{
+  const char *name;
+  const char *key;
+  char value[METADATA_VALUE_LEN];
+  int rc;
+
+  if (parc < 5) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE GET",
+              "Usage: PROFILE GET <name> <key>");
+    return 0;
+  }
+  name = parv[3];
+  key = parv[4];
+  if (!persistence_profile_name_valid(name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Invalid profile name", "PROFILE GET %s %s", name, key);
+    return 0;
+  }
+  if (!persistence_profile_exists(cli_account(sptr), name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "No such profile", "PROFILE GET %s %s", name, key);
+    return 0;
+  }
+  rc = persistence_profile_get_effective(cli_account(sptr), name, key,
+                                          value, sizeof(value));
+  if (rc < 0) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
+                  "Profile lookup failed",
+                  "PROFILE GET %s %s", name, key);
+    return 0;
+  }
+  if (rc == 0)
+    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
+                  cli_name(&me), name, key, value);
+  else
+    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s",
+                  cli_name(&me), name, key);
+  return 0;
+}
+
+static int persistence_cmd_profile_set(struct Client *sptr,
+                                        int parc, char *parv[])
+{
+  const char *name;
+  const char *key;
+  const char *value = NULL;
+
+  if (parc < 6) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE SET",
+              "Usage: PROFILE SET <name> <key> <value>|DEFAULT");
+    return 0;
+  }
+  name = parv[3];
+  key = parv[4];
+  if (0 == ircd_strcmp(parv[5], "DEFAULT"))
+    value = NULL;
+  else
+    value = parv[5];
+
+  if (!persistence_profile_name_valid(name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "Invalid profile name",
+                  "PROFILE SET %s %s", name, key);
+    return 0;
+  }
+  if (!persistence_profile_exists(cli_account(sptr), name)) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                  "No such profile (CREATE first)",
+                  "PROFILE SET %s %s", name, key);
+    return 0;
+  }
+  if (persistence_profile_set(cli_account(sptr), name, key, value) < 0) {
+    send_fail_ctx(sptr, "PERSISTENCE", "INTERNAL_ERROR",
+                  "Profile set failed (cycle, invalid value, or storage error)",
+                  "PROFILE SET %s %s", name, key);
+    return 0;
+  }
+  if (value)
+    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s :%s",
+                  cli_name(&me), name, key, value);
+  else
+    sendrawto_one(sptr, ":%s PERSISTENCE PROFILE %s %s",
+                  cli_name(&me), name, key);
+  return 0;
+}
+
+static int persistence_cmd_profile(struct Client *sptr, int parc, char *parv[])
+{
+  const char *sub;
+
+  if (!IsAccount(sptr)) {
+    send_fail(sptr, "PERSISTENCE", "ACCOUNT_REQUIRED", "PROFILE",
+              "You must be authenticated to manage profiles");
+    return 0;
+  }
+  if (parc < 3) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "PROFILE",
+              "PROFILE requires a sub-subcommand "
+              "(LIST|CREATE|DELETE|RENAME|GET|SET)");
+    return 0;
+  }
+  sub = parv[2];
+
+  if (0 == ircd_strcmp(sub, "LIST"))
+    return persistence_cmd_profile_list(sptr);
+  if (0 == ircd_strcmp(sub, "CREATE"))
+    return persistence_cmd_profile_create(sptr, parc, parv);
+  if (0 == ircd_strcmp(sub, "DELETE"))
+    return persistence_cmd_profile_delete(sptr, parc, parv);
+  if (0 == ircd_strcmp(sub, "RENAME"))
+    return persistence_cmd_profile_rename(sptr, parc, parv);
+  if (0 == ircd_strcmp(sub, "GET"))
+    return persistence_cmd_profile_get(sptr, parc, parv);
+  if (0 == ircd_strcmp(sub, "SET"))
+    return persistence_cmd_profile_set(sptr, parc, parv);
+
+  send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                "Unknown PROFILE sub-subcommand",
+                "PROFILE %s", sub);
+  return 0;
+}
+
 /** Top-level dispatch for the PERSISTENCE command (registered users).
  * @param[in] cptr Connection that sent the command.
  * @param[in] sptr Source of the command.
@@ -222,6 +492,9 @@ int m_persistence(struct Client *cptr, struct Client *sptr,
 
   if (0 == ircd_strcmp(sub, "SET"))
     return persistence_cmd_set(sptr, parc, parv);
+
+  if (0 == ircd_strcmp(sub, "PROFILE"))
+    return persistence_cmd_profile(sptr, parc, parv);
 
   send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
                 "Unknown PERSISTENCE subcommand",
