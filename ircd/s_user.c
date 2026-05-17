@@ -538,8 +538,11 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* Replay channel state */
         bounce_send_channel_state(ghost);
 
-        /* Async auto-replay missed messages for legacy clients */
-        if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)) {
+        /* Async auto-replay missed messages for legacy clients,
+         * unless the user has disabled it via PERSISTENCE REPLAY SET
+         * OFF on their active profile or account-global. */
+        if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)
+            && persistence_replay_enabled_for(ghost)) {
           replay_start_bouncer(ghost, saved_since_time, 0);
         }
 
@@ -765,8 +768,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
       if (auto_resumed == 1)
         bounce_send_channel_state(sptr);
 
-      /* Async auto-replay for legacy clients (no chathistory CAP). */
-      if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY))
+      /* Async auto-replay for legacy clients (no chathistory CAP),
+       * unless the user has disabled it via PERSISTENCE REPLAY. */
+      if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+          && persistence_replay_enabled_for(sptr))
         replay_start_bouncer(sptr, saved_since_time, 0);
     }
   }

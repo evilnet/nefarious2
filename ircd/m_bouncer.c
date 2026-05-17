@@ -56,6 +56,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "handlers.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -169,8 +170,10 @@ static int bouncer_resume(struct Client *sptr, const char *token)
   send_note(sptr, "BOUNCER", "SESSION_RESUMED", session->hs_sessid,
             "Session resumed");
 
-  /* Async auto-replay for clients without draft/chathistory. */
-  if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
+  /* Async auto-replay for clients without draft/chathistory, gated
+   * by PERSISTENCE REPLAY (account-global or active-profile). */
+  if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+      && persistence_replay_enabled_for(sptr)) {
     replay_start_bouncer(sptr, since_time, 0);
   }
 

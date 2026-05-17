@@ -362,6 +362,14 @@ struct BouncerSession {
   int hs_alias_count;
 
   int hs_promoting;                    /**< Nonzero during SQUIT promotion (suppresses alias sync) */
+  int hs_enforced;                     /**< Phase 3: set when any connection on a
+                                            CRFLAG_BOUNCER class attaches to (or creates)
+                                            this session.  PERSISTENCE DETACH refuses while
+                                            this is set — the class enforces persistence,
+                                            so the user can't opt out.  Cleared when the
+                                            session transitions to HELD (no live connection),
+                                            so a subsequent non-enforced attach can detach
+                                            a stale-enforced session. */
 
   int hs_effective_away;               /**< Last computed effective away: 0=present, 1=away, 2=all-star */
   char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */

@@ -1195,6 +1195,15 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   /* Record initial connect event in connection history */
   bounce_history_connect(session, cli_sock_ip(cptr), cli_sockhost(cptr));
 
+  /* Phase 3 hs_enforced: when a CRFLAG_BOUNCER class creates this
+   * session, mark it enforced — the user can't DETACH it while a
+   * class-enforced connection holds it open. */
+  {
+    struct ConnectionClass *cls = get_client_class_conf(cptr);
+    if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+      session->hs_enforced = 1;
+  }
+
   /* Persist to MDBX (session created but no channels yet) */
   bounce_db_put(session);
 
@@ -1628,6 +1637,7 @@ int bounce_detach(struct BouncerSession *session)
 
   /* Enter HOLDING state */
   session->hs_state = BOUNCE_HOLDING;
+  session->hs_enforced = 0; /* Phase 3: no live connection = no class enforcement */
 
   /* Start hold timer with adaptive duration */
   hold_time = bounce_compute_hold_time(session);
@@ -3758,6 +3768,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
 
     if (is_holding) {
       session->hs_state = BOUNCE_HOLDING;
+      session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
       session->hs_disconnect_time = disconnect_time;
       /* No hold timer on remote replicas — the managing server owns the
        * timer and sends BS X when it expires.  Running a local timer risks
@@ -3933,6 +3944,7 @@ bsc_forward:
     channels = parv[parc - 1];
 
     session->hs_state = BOUNCE_HOLDING;
+    session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
     session->hs_disconnect_time = disc_time;
     ircd_strncpy(session->hs_ghost_numeric, ghost_numeric,
                  sizeof(session->hs_ghost_numeric) - 1);
@@ -4666,6 +4678,7 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    * Save ghost numeric for cross-server transfer.
    */
   session->hs_state = BOUNCE_HOLDING;
+  session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
   session->hs_disconnect_time = CurrentTime;
   ircd_strncpy(session->hs_ghost_numeric, cli_yxx(cptr), sizeof(session->hs_ghost_numeric) - 1);
   session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
@@ -5044,6 +5057,15 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
   session->hs_disconnect_time = 0;
+
+  /* Phase 3 hs_enforced: a reviving client on a CRFLAG_BOUNCER class
+   * re-enforces the session.  temp_con (now transplanted) is the
+   * Connection that holds the class. */
+  {
+    struct ConnectionClass *cls = get_client_class_conf(ghost);
+    if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+      session->hs_enforced = 1;
+  }
 
   /* Sync ghost's cli_session_id to the bouncer's durable hs_sessid.
    * MDBX-restored ghosts come from bounce_create_ghost, which mints a
@@ -6829,8 +6851,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * 2. No local store but federation available: use chathistory_auto_replay_fed()
    *    which issues CHATHISTORY LATEST * queries to storage servers.
    *    Follows IRCv3 chathistory client pseudocode pattern. */
+  /* The FEAT_* gate stays as the operator-level kill switch.  The
+   * per-user PERSISTENCE REPLAY SET (account-global or active-profile)
+   * gates on top of it via persistence_replay_enabled_for. */
   if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY)
-      && !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)) {
+      && !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+      && persistence_replay_enabled_for(sptr)) {
     time_t since = session->hs_last_active;
     if (since == 0)
       since = session->hs_created;
@@ -6864,6 +6890,14 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * decide BX M vs BX E for this alias without waiting for a
    * subsequent CAP REQ from the client. */
   bounce_emit_alias_caps(sptr);
+
+  /* Phase 3 hs_enforced: an alias attaching on a CRFLAG_BOUNCER
+   * class enforces the session. */
+  {
+    struct ConnectionClass *cls = get_client_class_conf(sptr);
+    if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+      session->hs_enforced = 1;
+  }
 
   return 0;
 }

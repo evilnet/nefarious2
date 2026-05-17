@@ -97,6 +97,36 @@ static int persistence_effective_state(struct Client *cptr)
   return feature_bool(FEAT_BOUNCER_DEFAULT_HOLD) ? 1 : 0;
 }
 
+/** Resolve auto-replay state for a client.
+ * Resolution chain (most-specific first):
+ *   1. Active profile's `auto-replay` (walks parent chain)
+ *   2. Account-global `bouncer/auto-replay`
+ *   3. FEAT_BOUNCER_AUTO_REPLAY
+ * Values: "0" / "off" = OFF; anything else (including absent) =
+ * default to FEAT_*.  Empty string treated as absent.
+ * @return 1 if auto-replay effectively ON, 0 if OFF.
+ */
+static int persistence_effective_replay(struct Client *cptr)
+{
+  char val[METADATA_VALUE_LEN];
+
+  if (!cptr || !IsAccount(cptr))
+    return 0;
+
+  if (persistence_profile_get_effective(cli_account(cptr),
+                                         active_profile_for(cptr),
+                                         "auto-replay",
+                                         val, sizeof(val)) == 0
+      && val[0])
+    return (val[0] != '0');
+
+  if (metadata_account_get(cli_account(cptr), "bouncer/auto-replay", val) == 0
+      && val[0])
+    return (val[0] != '0');
+
+  return feature_bool(FEAT_BOUNCER_AUTO_REPLAY) ? 1 : 0;
+}
+
 /** Render the effective state as the wire keyword. */
 static const char *persistence_state_keyword(struct Client *cptr)
 {
@@ -117,6 +147,15 @@ static void send_persistence_reply(struct Client *to, const char *what,
     return;
   sendrawto_one(to, ":%s PERSISTENCE %s %s",
                 cli_name(&me), what, state);
+}
+
+/** Public accessor for the resolved auto-replay state.  Used by
+ * replay_start_bouncer call sites in s_user.c and bouncer_session.c
+ * to gate the missed-message replay batch.
+ */
+int persistence_replay_enabled_for(struct Client *cptr)
+{
+  return persistence_effective_replay(cptr);
 }
 
 /** Send `:server PERSISTENCE STATUS ON|OFF` to a client.
@@ -529,6 +568,109 @@ static const char *persistence_account_for(struct Client *sptr)
   return NULL;
 }
 
+/** Resolve the user's explicitly-set client-setting for auto-replay
+ * (the value before FEAT_* fallthrough).  Returns "ON" / "OFF" /
+ * "DEFAULT" into `out`.
+ */
+static void persistence_replay_client_setting(struct Client *cptr,
+                                               char *out, size_t out_len)
+{
+  char val[METADATA_VALUE_LEN];
+
+  if (persistence_profile_get_effective(cli_account(cptr),
+                                         active_profile_for(cptr),
+                                         "auto-replay",
+                                         val, sizeof(val)) == 0
+      && val[0]) {
+    ircd_strncpy(out, val[0] != '0' ? "ON" : "OFF", out_len);
+    return;
+  }
+  if (metadata_account_get(cli_account(cptr), "bouncer/auto-replay", val) == 0
+      && val[0]) {
+    ircd_strncpy(out, val[0] != '0' ? "ON" : "OFF", out_len);
+    return;
+  }
+  ircd_strncpy(out, "DEFAULT", out_len);
+}
+
+/** Emit the REPLAY STATUS line with both client-setting and resolved
+ * effective state.  Wire form:
+ *   :srv PERSISTENCE REPLAY STATUS <CLIENT> <EFFECTIVE>
+ * where <CLIENT> is ON|OFF|DEFAULT and <EFFECTIVE> is ON|OFF.
+ */
+static void persistence_send_replay_status(struct Client *to)
+{
+  char client_setting[16];
+  const char *eff;
+  if (!to || !MyConnect(to) || !IsAccount(to))
+    return;
+  persistence_replay_client_setting(to, client_setting, sizeof(client_setting));
+  eff = persistence_effective_replay(to) ? "ON" : "OFF";
+  sendrawto_one(to, ":%s PERSISTENCE REPLAY STATUS %s %s",
+                cli_name(&me), client_setting, eff);
+}
+
+/** Handle PERSISTENCE REPLAY {GET|SET ON|OFF|DEFAULT}. */
+static int persistence_cmd_replay(struct Client *sptr, int parc, char *parv[])
+{
+  const char *sub;
+
+  if (!IsAccount(sptr)) {
+    send_fail(sptr, "PERSISTENCE", "ACCOUNT_REQUIRED", "REPLAY",
+              "You must be authenticated to use PERSISTENCE REPLAY");
+    return 0;
+  }
+  if (parc < 3) {
+    send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "REPLAY",
+              "REPLAY requires GET or SET");
+    return 0;
+  }
+  sub = parv[2];
+
+  if (0 == ircd_strcmp(sub, "GET")) {
+    persistence_send_replay_status(sptr);
+    return 0;
+  }
+
+  if (0 == ircd_strcmp(sub, "SET")) {
+    const char *arg;
+    if (parc < 4) {
+      send_fail(sptr, "PERSISTENCE", "INVALID_PARAMETERS", "REPLAY SET",
+                "REPLAY SET requires ON, OFF, or DEFAULT");
+      return 0;
+    }
+    arg = parv[3];
+    if (0 == ircd_strcmp(arg, "ON")) {
+      metadata_set_client(sptr, "bouncer/auto-replay", "1",
+                          METADATA_VIS_PRIVATE);
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
+                               cli_name(sptr), "bouncer/auto-replay");
+    } else if (0 == ircd_strcmp(arg, "OFF")) {
+      metadata_set_client(sptr, "bouncer/auto-replay", "0",
+                          METADATA_VIS_PRIVATE);
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                               cli_name(sptr), "bouncer/auto-replay");
+    } else if (0 == ircd_strcmp(arg, "DEFAULT")) {
+      metadata_set_client(sptr, "bouncer/auto-replay", NULL,
+                          METADATA_VIS_PRIVATE);
+      sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s",
+                               cli_name(sptr), "bouncer/auto-replay");
+    } else {
+      send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                    "REPLAY SET argument must be ON, OFF, or DEFAULT",
+                    "REPLAY SET %s", arg);
+      return 0;
+    }
+    send_persistence_reply(sptr, "REPLAY SET", arg);
+    persistence_send_replay_status(sptr);
+    return 0;
+  }
+
+  send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                "Unknown REPLAY subcommand", "REPLAY %s", sub);
+  return 0;
+}
+
 /** Handle PERSISTENCE ATTACH <profile> — pin the active profile for
  * this connection.  Only valid during registration (between SASL
  * success and CAP END / first NICK+USER); refused once the client is
@@ -608,6 +750,60 @@ static int persistence_cmd_profile(struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
+/** Handle PERSISTENCE DETACH — disconnect the session from this
+ * account so the caller proceeds as a normal non-persistent client.
+ *
+ * Refused with FAIL CANNOT_DETACH when `hs_enforced` is set (the
+ * connecting class has CRFLAG_BOUNCER — the user cannot opt out of
+ * a class-enforced session).
+ *
+ * On success: destroys the bouncer session (which exits all aliases
+ * and drops the held state); clears the caller's STATUS so subsequent
+ * connections see hold=OFF until the user opts back in.
+ */
+static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
+{
+  struct BouncerSession *session;
+
+  if (!IsAccount(sptr)) {
+    send_fail(sptr, "PERSISTENCE", "ACCOUNT_REQUIRED", "DETACH",
+              "You must be authenticated to use PERSISTENCE DETACH");
+    return 0;
+  }
+  (void)parc; (void)parv;  /* Phase 3 v1 ignores the optional <session-id> arg —
+                            * one identity per account, only one session. */
+
+  session = bounce_get_session(sptr);
+  if (!session) {
+    send_persistence_reply(sptr, "DETACH", "NOSESSION");
+    return 0;
+  }
+
+  if (session->hs_enforced) {
+    send_fail(sptr, "PERSISTENCE", "CANNOT_DETACH", "DETACH",
+              "Connection class enforces persistence; cannot detach");
+    return 0;
+  }
+
+  /* Mirror PERSISTENCE SET OFF's tear-down: clear account-global hold
+   * preference, broadcast to peers, then destroy the session. */
+  metadata_set_client(sptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+  sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
+                           cli_name(sptr), "bouncer/hold");
+
+  /* Detach our primary from the session before destroy so
+   * exit_one_client cleanup doesn't try to operate on a destroyed
+   * session later (matches the SET OFF path). */
+  session->hs_client = NULL;
+  bounce_broadcast(session, 'X', NULL);
+  bounce_destroy(session);
+
+  send_persistence_reply(sptr, "DETACH", "OK");
+  /* STATUS now resolves to OFF (no session, hold=0). */
+  persistence_send_status(sptr);
+  return 0;
+}
+
 /** Top-level dispatch for the PERSISTENCE command (registered users).
  * @param[in] cptr Connection that sent the command.
  * @param[in] sptr Source of the command.
@@ -638,6 +834,12 @@ int m_persistence(struct Client *cptr, struct Client *sptr,
 
   if (0 == ircd_strcmp(sub, "ATTACH"))
     return persistence_cmd_attach(sptr, parc, parv);
+
+  if (0 == ircd_strcmp(sub, "REPLAY"))
+    return persistence_cmd_replay(sptr, parc, parv);
+
+  if (0 == ircd_strcmp(sub, "DETACH"))
+    return persistence_cmd_detach(sptr, parc, parv);
 
   send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
                 "Unknown PERSISTENCE subcommand",

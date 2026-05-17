@@ -327,6 +327,7 @@ extern int ms_bouncer_session(struct Client*, struct Client*, int, char*[]);
 extern int ms_bouncer_transfer(struct Client*, struct Client*, int, char*[]);
 extern int m_persistence(struct Client*, struct Client*, int, char*[]);
 extern void persistence_send_status(struct Client *to);
+extern int persistence_replay_enabled_for(struct Client *cptr);
 
 #endif /* INCLUDED_handlers_h */
 
