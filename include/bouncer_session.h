@@ -309,6 +309,12 @@ struct BounceAlias {
                                  carry their own last_active here.  Used
                                  as the "most-active" disambiguator in
                                  D.2 tiebreaker rules. */
+  char ba_active_profile[33]; /**< Phase 4 M4b: alias's active draft/persistence
+                                   profile name (PERSISTENCE_PROFILE_NAME_MAX + NUL).
+                                   Empty string resolves to "default" by the
+                                   reconciler.  Replicated via BX U profile=<name>
+                                   after BX C / on link-up burst.  Drives the
+                                   network-membership reconciler's union math. */
 };
 
 /* BX_CAP_* — bouncer-relevant subset of client capabilities, sent
@@ -478,6 +484,43 @@ extern struct BouncerSession *bounce_find_by_token(const char *token);
  * @return AccountSessions pointer, or NULL if no sessions.
  */
 extern struct AccountSessions *bounce_find_by_account(const char *account);
+
+/** M4b reconciler: test whether any profile across the account
+ * (active or HOLD-sticky inactive) effectively wants `channel`.
+ * Returns 0 immediately when the account is not held — under the
+ * "non-held = not a bouncer session" semantic, profiles are
+ * irrelevant for non-held accounts and the reconciler bails.
+ *
+ * When held, walks every profile defined for the account (via
+ * persistence_profile_list) and consults the effective channel set
+ * (inheritance-aware).  Any hit returns 1.
+ *
+ * @param[in] account Account name.
+ * @param[in] channel Channel name.
+ * @param[in] exclude_profile If non-NULL, this profile is skipped
+ *                            in the walk — useful for the m_part
+ *                            decision "would the union still want
+ *                            the channel if my profile dropped it?"
+ * @return 1 if the union contains `channel`, 0 otherwise.
+ */
+extern int bounce_account_wants_channel(const char *account,
+                                         const char *channel,
+                                         const char *exclude_profile);
+
+/** M4b: visibility-membership update for an alias.  Adds or removes
+ * the alias's CHFL_ALIAS membership for the channel locally and
+ * broadcasts BX V to peers so their local replicas of the alias do
+ * the same.  Used when a profile-level channel-list change should
+ * affect specific aliases without disturbing the primary's
+ * network-level membership.
+ *
+ * @param[in] alias_full Full YYXXX numeric of the alias.
+ * @param[in] channel Channel name (must include leading prefix).
+ * @param[in] add Non-zero to add CHFL_ALIAS membership; zero to remove.
+ */
+extern void bounce_visibility_membership(const char *alias_full,
+                                          const char *channel,
+                                          int add);
 
 /** Walk every session known to this server and invoke a callback.
  * Callback must not destroy, rehash, or free the session being visited.

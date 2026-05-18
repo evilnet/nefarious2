@@ -36,6 +36,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
@@ -405,7 +406,39 @@ int m_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
           persistence_profile_channels_add(cli_account(src), prof, name);
       }
 
-      do_join(cptr, sptr, &join, &create, name, key, 0);
+      /* M4b: snapshot whether the primary is already a channel
+       * member BEFORE do_join.  If yes, do_join short-circuits and
+       * we owe the joining alias a synthetic JOIN + single-channel
+       * state burst (the user typed /JOIN; their client expects
+       * feedback even though the network membership didn't change). */
+      {
+        struct Channel *snap_chptr = FindChannel(name);
+        int already_member = snap_chptr && find_member_link(snap_chptr, sptr);
+
+        do_join(cptr, sptr, &join, &create, name, key, 0);
+
+        if (already_member && alias_source && MyConnect(alias_source)) {
+          struct Channel *chptr2 = FindChannel(name);
+          if (chptr2 && IsBouncerAlias(alias_source)) {
+            char alias_full[6];
+            ircd_snprintf(0, alias_full, sizeof(alias_full), "%s%s",
+                          cli_yxx(&me), cli_yxx(alias_source));
+            bounce_visibility_membership(alias_full, chptr2->chname, 1);
+            /* Single-channel state burst so the joining alias sees
+             * the same TOPIC + NAMES it would after a fresh JOIN. */
+            if (chptr2->topic[0]) {
+              send_reply(alias_source, RPL_TOPIC,
+                         chptr2->chname, chptr2->topic);
+              send_reply(alias_source, RPL_TOPICWHOTIME,
+                         chptr2->chname, chptr2->topic_nick,
+                         chptr2->topic_time);
+            }
+            if (!CapRecipientHas(alias_source, CAP_NOIMPLICITNAMES)
+                && !CapRecipientHas(alias_source, CAP_NOIMPLICITNAMES_LEGACY))
+              do_names(alias_source, chptr2, NAMES_ALL|NAMES_EON);
+          }
+        }
+      }
     }
 
     joinbuf_flush(&join); /* must be first, if there's a JOIN 0 */

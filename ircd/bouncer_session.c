@@ -773,6 +773,132 @@ int bounce_enabled_for(struct Client *cptr)
   return bounce_enabled();
 }
 
+/* ---------------------------------------------------------------- */
+/* M4b reconciler helpers                                            */
+/* ---------------------------------------------------------------- */
+
+/** Cookie + callback for the persistence_profile_list walk used by
+ * bounce_account_wants_channel.  Stops walking at the first match. */
+struct wants_channel_ctx {
+  const char *account;
+  const char *channel;
+  const char *exclude_profile;
+  int found;
+};
+
+static void wants_channel_cb(const char *name, const char *parent, void *cookie)
+{
+  struct wants_channel_ctx *ctx = cookie;
+  (void)parent;
+  if (ctx->found)
+    return; /* already matched; remaining iterations are no-ops */
+  if (ctx->exclude_profile
+      && ircd_strcmp(name, ctx->exclude_profile) == 0)
+    return;
+  if (persistence_profile_channels_effective_has(ctx->account, name,
+                                                  ctx->channel) == 1)
+    ctx->found = 1;
+}
+
+int bounce_account_wants_channel(const char *account, const char *channel,
+                                  const char *exclude_profile)
+{
+  struct wants_channel_ctx ctx;
+  char hold[METADATA_VALUE_LEN];
+  int account_held;
+
+  if (!account || !channel || !*account || !*channel)
+    return 0;
+
+  /* Non-held accounts aren't bouncer sessions — profiles are
+   * irrelevant.  Return 0 so the caller falls back to normal IRC
+   * semantics (no PART suppression, no /JOIN-already-member dance). */
+  if (metadata_account_get(account, "bouncer/hold", hold) == 0)
+    account_held = (hold[0] != '0');
+  else
+    account_held = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+  if (!account_held)
+    return 0;
+
+  ctx.account = account;
+  ctx.channel = channel;
+  ctx.exclude_profile = exclude_profile;
+  ctx.found = 0;
+  persistence_profile_list(account, wants_channel_cb, &ctx);
+  return ctx.found;
+}
+
+/** Apply a CHFL_ALIAS visibility-membership change locally for one
+ * alias on one channel.  Caller is responsible for broadcasting
+ * BX V to peers separately (so the same code path handles both the
+ * originator and the BX V receiver).
+ *
+ * @param[in] alias An alias client (IsBouncerAlias).
+ * @param[in] chptr Channel.
+ * @param[in] add Non-zero to add CHFL_ALIAS membership; zero to remove.
+ */
+static void bounce_visibility_apply_local(struct Client *alias,
+                                           struct Channel *chptr,
+                                           int add)
+{
+  struct Membership *primary_mem;
+  struct Client *primary;
+
+  if (!alias || !chptr)
+    return;
+  if (!IsBouncerAlias(alias))
+    return;
+
+  if (add) {
+    if (find_member_link(chptr, alias))
+      return; /* already a member */
+    primary = cli_alias_primary(alias);
+    primary_mem = primary ? find_member_link(chptr, primary) : NULL;
+    {
+      unsigned int aflags = CHFL_ALIAS;
+      unsigned short aoplevel = MAXOPLEVEL;
+      if (primary_mem) {
+        aflags |= (primary_mem->status
+                   & (CHFL_CHANOP | CHFL_HALFOP | CHFL_VOICE));
+        aoplevel = OpLevel(primary_mem);
+      }
+      add_user_to_channel(chptr, alias, aflags, aoplevel);
+    }
+  } else {
+    if (!find_member_link(chptr, alias))
+      return; /* not a member; nothing to remove */
+    remove_user_from_channel(alias, chptr);
+  }
+
+  /* User-facing echo on the alias's home server only — synthetic
+   * JOIN or PART so the local client gets UI feedback. */
+  if (MyConnect(alias) && IsUser(alias)) {
+    if (add)
+      sendcmdto_one_tags(alias, CMD_JOIN, alias, ":%H", chptr);
+    else
+      sendcmdto_one_tags(alias, CMD_PART, alias, ":%H", chptr);
+  }
+}
+
+void bounce_visibility_membership(const char *alias_full,
+                                   const char *channel, int add)
+{
+  struct Client *alias;
+  struct Channel *chptr;
+
+  if (!alias_full || !channel || !*alias_full || !*channel)
+    return;
+
+  /* Broadcast to peers first so they apply concurrently. */
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "V %s %c%s", alias_full, add ? '+' : '-', channel);
+
+  alias = findNUser(alias_full);
+  chptr = FindChannel(channel);
+  if (alias && chptr)
+    bounce_visibility_apply_local(alias, chptr, add);
+}
+
 /** Get number of sessions for an account. */
 int bounce_count(const char *account)
 {
@@ -3388,15 +3514,22 @@ void bounce_burst(struct Client *cptr)
           }
 
           alias_modes = umode_str(alias);
-          sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
-                        "C %s %s %s %s %s%s :%s",
-                        primary_full,
-                        s->hs_aliases[a].ba_numeric,
-                        s->hs_account,
-                        s->hs_sessid,
-                        *alias_modes ? "+" : "+",
-                        alias_modes,
-                        alias_chans);
+          {
+            const char *alias_profile =
+              s->hs_aliases[a].ba_active_profile[0]
+                ? s->hs_aliases[a].ba_active_profile
+                : PERSISTENCE_PROFILE_DEFAULT;
+            sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
+                          "C %s %s %s %s %s%s %s :%s",
+                          primary_full,
+                          s->hs_aliases[a].ba_numeric,
+                          s->hs_account,
+                          s->hs_sessid,
+                          *alias_modes ? "+" : "+",
+                          alias_modes,
+                          alias_profile,
+                          alias_chans);
+          }
 
           /* Emit current caps for aliases hosted locally — peers
            * receive BX C without caps via the standard burst path,
@@ -5606,6 +5739,19 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
   struct AccountSessions *as;
   struct BouncerSession *session;
   int i;
+  /* M4b: when the account is held, filter aliases by whether their
+   * effective profile wants this channel.  Non-held accounts keep
+   * the legacy "all aliases mirror primary" behaviour. */
+  int account_held = 0;
+  {
+    char hold[METADATA_VALUE_LEN];
+    if (IsAccount(who) && cli_user(who)) {
+      if (metadata_account_get(cli_user(who)->account, "bouncer/hold", hold) == 0)
+        account_held = (hold[0] != '0');
+      else
+        account_held = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
+    }
+  }
 
   if (!IsAccount(who) || IsBouncerAlias(who))
     return;
@@ -5626,6 +5772,31 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
             && cli_alias_primary(alias) == who
             && !find_member_link(chptr, alias)))
         continue;
+
+      /* M4b filter: when held, only add aliases whose effective
+       * profile wants this channel.  This is what makes per-profile
+       * channel-list divergence actually divergent at the membership
+       * level — otherwise bounce_sync_alias_join would undo every
+       * BX V -#chan immediately.
+       *
+       * Permissive-default rule (matches M3): an empty effective
+       * channel list means "no filter" — the alias mirrors the
+       * primary like in the pre-M4b behaviour.  Only filter when
+       * the alias's profile has a non-empty effective list AND the
+       * channel is not in it. */
+      if (account_held) {
+        const char *prof = session->hs_aliases[i].ba_active_profile[0]
+                             ? session->hs_aliases[i].ba_active_profile
+                             : PERSISTENCE_PROFILE_DEFAULT;
+        char eff[METADATA_VALUE_LEN];
+        if (persistence_profile_channels_effective(cli_user(who)->account,
+                                                    prof, eff,
+                                                    sizeof(eff)) == 0
+            && eff[0]
+            && persistence_profile_channels_effective_has(
+                 cli_user(who)->account, prof, chptr->chname) != 1)
+          continue;
+      }
 
       /* Skip +Z channels for non-TLS aliases */
       if ((chptr->mode.exmode & EXMODE_SSLONLY) && !IsSSL(alias)) {
@@ -6373,6 +6544,7 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr, int par
 static int bounce_alias_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
+static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr, int parc, char *parv[]);
 /* BX R / BX F / BX J retired in Phase 5 (cluster-B coordination protocol
  * removed per redesign D.3 — deterministic convergence supersedes it).
  * Receivers drop silently; we no longer emit them. */
@@ -6428,6 +6600,8 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
     return bounce_alias_multiline_echo(cptr, sptr, parc, parv);
   case 'K':
     return bounce_alias_snomask(cptr, sptr, parc, parv);
+  case 'V':
+    return bounce_alias_visibility(cptr, sptr, parc, parv);
   case 'R': /* retired Phase 5 — silent drop */
   case 'J': /* retired Phase 5 — silent drop */
   case 'F': /* retired Phase 5 — silent drop */
@@ -6749,6 +6923,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
       ba = &session->hs_aliases[session->hs_alias_count++];
       ircd_strncpy(ba->ba_numeric, alias_full, sizeof(ba->ba_numeric));
       ircd_strncpy(ba->ba_server, cli_yxx(&me), sizeof(ba->ba_server));
+      /* Phase 4 M4b: snapshot the connecting alias's active-profile
+       * name from cli_active_profile (set by PERSISTENCE ATTACH
+       * pre-CAP-END).  Empty string means "default" at the reconciler. */
+      ircd_strncpy(ba->ba_active_profile, cli_active_profile(sptr),
+                   sizeof(ba->ba_active_profile));
     }
 
     /* --- Step 7: Add to primary's channels with CHFL_ALIAS ---
@@ -6798,17 +6977,24 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
                                       "%s", chptr->chname);
     }
 
-    /* --- Step 8: Broadcast BX C to network --- */
+    /* --- Step 8: Broadcast BX C to network ---
+     * M4b: extended with active_profile positional after modes.  Old
+     * peers parse the modes-version and ignore the profile token;
+     * new peers consume both. */
     {
       char *alias_modes = umode_str(sptr);
+      const char *alias_profile = cli_active_profile(sptr)[0]
+                                    ? cli_active_profile(sptr)
+                                    : PERSISTENCE_PROFILE_DEFAULT;
       sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
-                             "C %s %s %s %s %s%s :%s",
+                             "C %s %s %s %s %s%s %s :%s",
                              primary_full,
                              alias_full,
                              session->hs_account,
                              session->hs_sessid,
                              *alias_modes ? "+" : "+",
                              alias_modes,
+                             alias_profile,
                              chanlist_buf);
     }
   } /* end YYXXX numeric scope */
@@ -6891,6 +7077,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * subsequent CAP REQ from the client. */
   bounce_emit_alias_caps(sptr);
 
+  /* Note: the alias's active draft/persistence profile is replicated
+   * to peers in the BX C wire emit above (M4b — positional param
+   * after modes), not via a separate update.  Q1: profile is fixed
+   * at registration, so no UPDATE wire is needed. */
+
   /* Phase 3 hs_enforced: an alias attaching on a CRFLAG_BOUNCER
    * class enforces the session. */
   {
@@ -6928,6 +7119,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   const char *sessid;
   const char *chanlist;
   const char *alias_modes = NULL;
+  const char *alias_profile = NULL;  /* M4b */
   char *chan_copy;
   char *chan_name;
   char *chan_tok;
@@ -6939,7 +7131,13 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   alias_numeric = parv[3];
   account = parv[4];
   sessid = parv[5];
-  if (parc >= 8) {
+  if (parc >= 9) {
+    /* M4b format: BX C <primary> <alias> <account> <sessid> <modes>
+     *             <profile> :<channels> */
+    alias_modes = parv[6];
+    alias_profile = parv[7];
+    chanlist = parv[parc - 1];
+  } else if (parc >= 8) {
     /* New format: BX C <primary> <alias> <account> <sessid> <modes> :<channels> */
     alias_modes = parv[6];
     chanlist = parv[parc - 1];
@@ -7103,6 +7301,17 @@ track_alias:
     ba->ba_last_active = CurrentTime;
     ba->ba_caps = 0;
     ba->ba_caps_known = 0;
+    /* M4b: record the alias's active draft/persistence profile,
+     * received as the positional field after modes.  Old peers
+     * don't send this; default to empty (= "default" at the
+     * reconciler).  Treat literal "default" verbatim — same as
+     * empty for resolution purposes but more readable in logs. */
+    if (alias_profile && *alias_profile
+        && ircd_strcmp(alias_profile, PERSISTENCE_PROFILE_DEFAULT) != 0)
+      ircd_strncpy(ba->ba_active_profile, alias_profile,
+                   sizeof(ba->ba_active_profile));
+    else
+      ba->ba_active_profile[0] = '\0';
     /* Persist the updated roster (per redesign B.2 + 1b lifecycle
      * hook) so alias presence survives restart and feeds peers'
      * deterministic-dedup convergence on next link establishment. */
@@ -8507,6 +8716,67 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
   if (!is_replay)
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "K %s %s", parv[2], parv[3]);
+  return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* BX V: Visibility (M4b)                                            */
+/* ---------------------------------------------------------------- */
+
+/** Handle BX V (Visibility membership).
+ *
+ * Wire format: <server> BX V <alias_numeric> <sign><channel>
+ *   where <sign> is '+' (add CHFL_ALIAS membership) or '-' (remove).
+ *
+ * Carries an alias-scoped channel-membership change driven by the
+ * Phase 4 reconciler.  When a profile loses a channel (auto-shrink
+ * via /PART, or PROFILE SET -#x) and the union still wants the
+ * channel (another profile has it / account-hold-sticky), the
+ * affected aliases' CHFL_ALIAS memberships are removed via BX V
+ * without disturbing the primary's network membership.  Symmetric
+ * +<channel> for /JOIN-already-member: alias gains CHFL_ALIAS
+ * membership locally + on each peer.
+ *
+ * Distinct from BX C (creates alias + bulk channel list) and BX X
+ * (destroys alias entirely).  BX V is per-channel scoped.
+ */
+static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr,
+                                    int parc, char *parv[])
+{
+  struct Client *alias;
+  struct Channel *chptr;
+  const char *signed_chan;
+  int add;
+  int is_replay = bx_drain_in_progress;
+
+  if (parc < 4)
+    return protocol_violation(sptr, "BX V requires 2 parameters");
+
+  signed_chan = parv[3];
+  if (signed_chan[0] != '+' && signed_chan[0] != '-')
+    return protocol_violation(sptr, "BX V channel arg must be +#chan or -#chan");
+  add = (signed_chan[0] == '+');
+
+  alias = findNUser(parv[2]);
+  if (!alias || !IsBouncerAlias(alias)) {
+    /* Burst race: alias not yet present locally.  Defer for replay
+     * when BX C arrives.  Forward on first arrival. */
+    if (!is_replay)
+      defer_bx_for_alias(parv[2], cptr, sptr, parc, parv);
+    if (!is_replay)
+      sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                            "V %s %s", parv[2], parv[3]);
+    return 0;
+  }
+
+  chptr = FindChannel(signed_chan + 1);
+  if (chptr)
+    bounce_visibility_apply_local(alias, chptr, add);
+
+  /* Forward only on first arrival. */
+  if (!is_replay)
+    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "V %s %s", parv[2], parv[3]);
   return 0;
 }
 
