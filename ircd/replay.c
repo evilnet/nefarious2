@@ -709,9 +709,12 @@ void replay_start_bouncer(struct Client *sptr, time_t since_time, int limit)
    * batch when the client has negotiated draft/persistence + batch.
    * The outer batch is emitted lazily on the first inner batch open so
    * empty replays don't ship an empty wrapper. */
-  rs->wants_outer_batch =
-      CapRecipientHas(sptr, CAP_DRAFT_PERSISTENCE)
-      && CapRecipientHas(sptr, CAP_BATCH);
+  /* Cap gate is `batch` only.  Unknown batch types (including
+   * vendor-scoped ones like evilnet.github.io/bouncer-replay) are
+   * tolerated by the batch spec; clients that understand the type
+   * use it for grouping semantics, others process inner messages
+   * normally. */
+  rs->wants_outer_batch = CapRecipientHas(sptr, CAP_BATCH);
   rs->replay_limit = (limit > 0) ? limit : feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
   if (rs->replay_limit <= 0)
     rs->replay_limit = 100;

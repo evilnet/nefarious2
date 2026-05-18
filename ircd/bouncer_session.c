@@ -9262,15 +9262,19 @@ void bounce_send_channel_state(struct Client *cptr)
   if (!cli_user(cptr))
     return;
 
-  /* Wrap the JOIN/TOPIC/NAMES burst in a draft/persistence batch when
-   * the client has negotiated both draft/persistence and batch.  This
-   * lets clients distinguish server-initiated channel restoration from
-   * a live JOIN burst.  cli_batch_id is expected to be clear here
-   * (callers run during registration before any other batch could be
-   * open); send_batch_start would overwrite it otherwise.  */
+  /* Wrap the JOIN/TOPIC/NAMES burst in a draft/persistence batch
+   * whenever the client has negotiated `batch` and has at least one
+   * channel to restore.  The cap gate is `batch` only — the batch
+   * envelope is what requires client understanding, and unknown batch
+   * types are tolerated per the batch spec.  Clients that additionally
+   * negotiate `draft/persistence` know to treat the batch contents as
+   * restoration rather than live activity; clients with only `batch`
+   * still benefit from the grouping signal.
+   * cli_batch_id is expected to be clear here (callers run during
+   * registration before any other batch could be open);
+   * send_batch_start would overwrite it otherwise. */
   wrap_in_persistence_batch =
       MyConnect(cptr)
-      && CapRecipientHas(cptr, CAP_DRAFT_PERSISTENCE)
       && CapRecipientHas(cptr, CAP_BATCH)
       && cli_user(cptr)->channel != NULL
       && cli_batch_id(cptr)[0] == '\0';
