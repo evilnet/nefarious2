@@ -26,9 +26,9 @@
  *   :<server> PERSISTENCE STATUS ON|OFF
  *   :<server> PERSISTENCE SET ON|OFF|DEFAULT
  *
- * Storage is the existing `bouncer/hold` metadata key (PRIVATE):
- *   ON      -> bouncer/hold = "1"
- *   OFF     -> bouncer/hold = "0"
+ * Storage is the existing `draft/persistence/hold` metadata key (PRIVATE):
+ *   ON      -> draft/persistence/hold = "1"
+ *   OFF     -> draft/persistence/hold = "0"
  *   DEFAULT -> key deleted; falls back to FEAT_BOUNCER_DEFAULT_HOLD
  *
  * The `bouncer/` prefix is registered as server-managed (see
@@ -74,7 +74,7 @@ static const char *active_profile_for(struct Client *cptr)
 /** Compute the effective persistence state for a client.
  * Resolution order (most-specific first), per the Phase 4 design:
  *   1. Active profile's `hold` (walks parent chain through default)
- *   2. Account-global `bouncer/hold` (the `PERSISTENCE SET` target)
+ *   2. Account-global `draft/persistence/hold` (the `PERSISTENCE SET` target)
  *   3. FEAT_BOUNCER_DEFAULT_HOLD
  * @return 1 if persistence is effectively ON, 0 if OFF.
  */
@@ -91,7 +91,7 @@ static int persistence_effective_state(struct Client *cptr)
                                          hold_val, sizeof(hold_val)) == 0)
     return (hold_val[0] != '0');
 
-  if (metadata_account_get(cli_account(cptr), "bouncer/hold", hold_val) == 0)
+  if (metadata_account_get(cli_account(cptr), "draft/persistence/hold", hold_val) == 0)
     return (hold_val[0] != '0');
 
   return feature_bool(FEAT_BOUNCER_DEFAULT_HOLD) ? 1 : 0;
@@ -100,7 +100,7 @@ static int persistence_effective_state(struct Client *cptr)
 /** Resolve auto-replay state for a client.
  * Resolution chain (most-specific first):
  *   1. Active profile's `auto-replay` (walks parent chain)
- *   2. Account-global `bouncer/auto-replay`
+ *   2. Account-global `draft/persistence/auto-replay`
  *   3. FEAT_BOUNCER_AUTO_REPLAY
  * Values: "0" / "off" = OFF; anything else (including absent) =
  * default to FEAT_*.  Empty string treated as absent.
@@ -120,7 +120,7 @@ static int persistence_effective_replay(struct Client *cptr)
       && val[0])
     return (val[0] != '0');
 
-  if (metadata_account_get(cli_account(cptr), "bouncer/auto-replay", val) == 0
+  if (metadata_account_get(cli_account(cptr), "draft/persistence/auto-replay", val) == 0
       && val[0])
     return (val[0] != '0');
 
@@ -184,7 +184,7 @@ static int persistence_cmd_status(struct Client *sptr)
 /** Handle SET subcommand.
  * `PERSISTENCE SET ON|OFF|DEFAULT`
  *
- * ON / OFF: write `bouncer/hold` metadata via the same path as
+ * ON / OFF: write `draft/persistence/hold` metadata via the same path as
  * `BOUNCER SET HOLD on/off` in m_bouncer.c (metadata_set_client +
  * explicit S2S broadcast).  ON also auto-creates a session if the
  * client doesn't already own one; OFF tears the session down.
@@ -213,9 +213,9 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   arg = parv[2];
 
   if (0 == ircd_strcmp(arg, "ON")) {
-    metadata_set_client(sptr, "bouncer/hold", "1", METADATA_VIS_PRIVATE);
+    metadata_set_client(sptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
     sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
-                             cli_name(sptr), "bouncer/hold");
+                             cli_name(sptr), "draft/persistence/hold");
 
     if (!bounce_get_session(sptr)) {
       struct BouncerSession *session = NULL;
@@ -230,9 +230,9 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   }
 
   if (0 == ircd_strcmp(arg, "OFF")) {
-    metadata_set_client(sptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+    metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
     sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                             cli_name(sptr), "bouncer/hold");
+                             cli_name(sptr), "draft/persistence/hold");
 
     {
       struct BouncerSession *session = bounce_get_session(sptr);
@@ -248,9 +248,9 @@ static int persistence_cmd_set(struct Client *sptr, int parc, char *parv[])
   }
 
   if (0 == ircd_strcmp(arg, "DEFAULT")) {
-    metadata_set_client(sptr, "bouncer/hold", NULL, METADATA_VIS_PRIVATE);
+    metadata_set_client(sptr, "draft/persistence/hold", NULL, METADATA_VIS_PRIVATE);
     sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s",
-                             cli_name(sptr), "bouncer/hold");
+                             cli_name(sptr), "draft/persistence/hold");
     send_persistence_reply(sptr, "SET", "DEFAULT");
     persistence_send_status(sptr);
     return 0;
@@ -585,7 +585,7 @@ static void persistence_replay_client_setting(struct Client *cptr,
     ircd_strncpy(out, val[0] != '0' ? "ON" : "OFF", out_len);
     return;
   }
-  if (metadata_account_get(cli_account(cptr), "bouncer/auto-replay", val) == 0
+  if (metadata_account_get(cli_account(cptr), "draft/persistence/auto-replay", val) == 0
       && val[0]) {
     ircd_strncpy(out, val[0] != '0' ? "ON" : "OFF", out_len);
     return;
@@ -641,20 +641,20 @@ static int persistence_cmd_replay(struct Client *sptr, int parc, char *parv[])
     }
     arg = parv[3];
     if (0 == ircd_strcmp(arg, "ON")) {
-      metadata_set_client(sptr, "bouncer/auto-replay", "1",
+      metadata_set_client(sptr, "draft/persistence/auto-replay", "1",
                           METADATA_VIS_PRIVATE);
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
-                               cli_name(sptr), "bouncer/auto-replay");
+                               cli_name(sptr), "draft/persistence/auto-replay");
     } else if (0 == ircd_strcmp(arg, "OFF")) {
-      metadata_set_client(sptr, "bouncer/auto-replay", "0",
+      metadata_set_client(sptr, "draft/persistence/auto-replay", "0",
                           METADATA_VIS_PRIVATE);
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                               cli_name(sptr), "bouncer/auto-replay");
+                               cli_name(sptr), "draft/persistence/auto-replay");
     } else if (0 == ircd_strcmp(arg, "DEFAULT")) {
-      metadata_set_client(sptr, "bouncer/auto-replay", NULL,
+      metadata_set_client(sptr, "draft/persistence/auto-replay", NULL,
                           METADATA_VIS_PRIVATE);
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s",
-                               cli_name(sptr), "bouncer/auto-replay");
+                               cli_name(sptr), "draft/persistence/auto-replay");
     } else {
       send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
                     "REPLAY SET argument must be ON, OFF, or DEFAULT",
@@ -787,9 +787,9 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
 
   /* Mirror PERSISTENCE SET OFF's tear-down: clear account-global hold
    * preference, broadcast to peers, then destroy the session. */
-  metadata_set_client(sptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+  metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
   sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                           cli_name(sptr), "bouncer/hold");
+                           cli_name(sptr), "draft/persistence/hold");
 
   /* Detach our primary from the session before destroy so
    * exit_one_client cleanup doesn't try to operate on a destroyed

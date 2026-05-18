@@ -373,7 +373,7 @@ int server_finish_burst(struct Client *cptr)
        *
        * Scope this to the acptr's own session, not all sessions for the
        * account.  An account-bearing but non-bouncer-bound client (no
-       * cli_session_id, or session opt-out via bouncer/hold=0) is a
+       * cli_session_id, or session opt-out via draft/persistence/hold=0) is a
        * legitimately independent presence and must get its own N to
        * legacy peers — even if some bouncer client happens to share
        * the account.  Future multi-session-per-account work falls out

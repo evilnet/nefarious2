@@ -1131,7 +1131,7 @@ static const struct {
   { "umode.privdeaf",        FLAG_PRIVDEAF,          0 },
   { "chathistory.nostorage", FLAG_NOSTORAGE,        0 },
   { "chathistory.pm",        FLAG_PM_OPTOUT,        1 },
-  { "bouncer/hold",         FLAG_BNC_HOLDPREF,     0 },
+  { "draft/persistence/hold", FLAG_BNC_HOLDPREF,   0 },
   { NULL, 0, 0 }
 };
 
@@ -1272,9 +1272,7 @@ void metadata_clear_client(struct Client *cptr)
  * client is refused for keys matching these prefixes.
  */
 static const char *const server_managed_prefixes[] = {
-  "bouncer/",
-  "session/",
-  "system/",
+  "draft/persistence/",
   NULL
 };
 

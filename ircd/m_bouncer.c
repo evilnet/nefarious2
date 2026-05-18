@@ -710,7 +710,7 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
   if (0 == ircd_strcmp(parv[2], "HOLD")) {
     /* Account-wide hold preference - stored in metadata */
     if (0 == ircd_strcmp(parv[3], "on")) {
-      metadata_set_client(sptr, "bouncer/hold", "1", METADATA_VIS_PRIVATE);
+      metadata_set_client(sptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
       /* Propagate to peers — metadata_set_client only handles local
        * memory + LMDB persistence; the S2S broadcast happens in
        * m_metadata.c's user-facing path which we bypass here.  Without
@@ -719,9 +719,9 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
        * attaches at the "no preference + DEFAULT_HOLD off" early
        * return.  Visibility "P" mirrors the wire format
        * m_metadata.c::metadata_cmd_set uses for PRIVATE metadata —
-       * target is the client's nick, key is bouncer/hold. */
+       * target is the client's nick, key is draft/persistence/hold. */
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :1",
-                            cli_name(sptr), "bouncer/hold");
+                            cli_name(sptr), "draft/persistence/hold");
 
       /* Auto-create session if this client doesn't own one — turning hold on
        * should be sufficient to get bouncer behavior without needing TOKEN.
@@ -755,11 +755,11 @@ static int bouncer_set(struct Client *sptr, int parc, char *parv[])
                   "Hold mode enabled");
       }
     } else if (0 == ircd_strcmp(parv[3], "off")) {
-      metadata_set_client(sptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+      metadata_set_client(sptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
       /* Propagate "off" to peers — see comment in the "on" branch
        * above.  Without this, peers retain a stale "1" preference. */
       sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s P :0",
-                            cli_name(sptr), "bouncer/hold");
+                            cli_name(sptr), "draft/persistence/hold");
 
       /* Fix #24: Active teardown — user no longer wants bouncer behavior.
        * Destroy the session (disconnects all aliases) so the primary
@@ -850,7 +850,7 @@ static int bouncer_settings(struct Client *sptr)
     hold_src = "mode";
   } else {
     char hold_val[64];
-    if (metadata_account_get(cli_account(sptr), "bouncer/hold", hold_val) == 0) {
+    if (metadata_account_get(cli_account(sptr), "draft/persistence/hold", hold_val) == 0) {
       hold = (hold_val[0] == '1') ? 1 : 0;
       hold_src = "account";
     } else {
@@ -982,7 +982,7 @@ static int bouncer_info(struct Client *sptr)
     hold_src = "account";
   } else {
     char hold_val[64];
-    if (metadata_account_get(cli_account(sptr), "bouncer/hold", hold_val) == 0) {
+    if (metadata_account_get(cli_account(sptr), "draft/persistence/hold", hold_val) == 0) {
       hold = (hold_val[0] == '1') ? 1 : 0;
       hold_src = "account";
     } else {

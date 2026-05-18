@@ -2228,7 +2228,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       case 'b':
         if (what == MODE_ADD) {
           SetBncHoldPref(acptr);
-          metadata_set_client(acptr, "bouncer/hold", "1", METADATA_VIS_PRIVATE);
+          metadata_set_client(acptr, "draft/persistence/hold", "1", METADATA_VIS_PRIVATE);
           /* Auto-create bouncer session if local client doesn't have one */
           if (MyUser(acptr) && IsAccount(acptr) && !bounce_get_session(acptr)) {
             struct BouncerSession *session = NULL;
@@ -2237,7 +2237,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           }
         } else {
           ClearBncHoldPref(acptr);
-          metadata_set_client(acptr, "bouncer/hold", "0", METADATA_VIS_PRIVATE);
+          metadata_set_client(acptr, "draft/persistence/hold", "0", METADATA_VIS_PRIVATE);
           /* Destroy bouncer session if local client has one */
           if (MyUser(acptr)) {
             struct BouncerSession *session = bounce_get_session(acptr);

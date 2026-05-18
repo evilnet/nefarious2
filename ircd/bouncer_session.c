@@ -813,7 +813,7 @@ int bounce_account_wants_channel(const char *account, const char *channel,
   /* Non-held accounts aren't bouncer sessions — profiles are
    * irrelevant.  Return 0 so the caller falls back to normal IRC
    * semantics (no PART suppression, no /JOIN-already-member dance). */
-  if (metadata_account_get(account, "bouncer/hold", hold) == 0)
+  if (metadata_account_get(account, "draft/persistence/hold", hold) == 0)
     account_held = (hold[0] != '0');
   else
     account_held = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);
@@ -1030,10 +1030,10 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
   account = cli_account(cptr);
 
   /* Check per-account hold preference via metadata.
-   * Explicit opt-out (bouncer/hold=0) is always respected, even on
+   * Explicit opt-out (draft/persistence/hold=0) is always respected, even on
    * bouncer-class ports — no session will be created or resumed.
    *
-   * `bouncer/hold` is METADATA_VIS_PRIVATE — it doesn't propagate S2S,
+   * `draft/persistence/hold` is METADATA_VIS_PRIVATE — it doesn't propagate S2S,
    * so peer servers don't see the preference set elsewhere on the
    * network.  But the *existence* of a session for this account on
    * the local server is itself a sufficient signal: an active or held
@@ -1043,7 +1043,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
    * preference, we still bypass the early-return if an account-side
    * session exists — that path then routes through the alias-attach
    * branches below. */
-  if (metadata_account_get(account, "bouncer/hold", hold_val) == 0) {
+  if (metadata_account_get(account, "draft/persistence/hold", hold_val) == 0) {
     if (hold_val[0] == '0')
       return 0; /* User opted out */
   } else if (!class_bouncer && !feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)
@@ -4753,13 +4753,13 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
       if (s->hs_hold_override >= 0) {
         should_hold = s->hs_hold_override;
       } else if (IsBncHoldPref(cptr)) {
-        /* User has +b mode set (synced with $bouncer/hold metadata) */
+        /* User has +b mode set (synced with $draft/persistence/hold metadata) */
         should_hold = 1;
       } else {
         /* Check persistent metadata — cli_metadata may not be populated
          * after a restart; metadata_account_get reads from mdbx. */
         char hold_val[64];
-        if (metadata_account_get(cli_account(cptr), "bouncer/hold", hold_val) == 0) {
+        if (metadata_account_get(cli_account(cptr), "draft/persistence/hold", hold_val) == 0) {
           should_hold = (hold_val[0] != '0');
         } else {
           /* Bouncer class defaults to hold; normal class follows feature flag */
@@ -5746,7 +5746,7 @@ void bounce_sync_alias_join(struct Channel *chptr, struct Client *who)
   {
     char hold[METADATA_VALUE_LEN];
     if (IsAccount(who) && cli_user(who)) {
-      if (metadata_account_get(cli_user(who)->account, "bouncer/hold", hold) == 0)
+      if (metadata_account_get(cli_user(who)->account, "draft/persistence/hold", hold) == 0)
         account_held = (hold[0] != '0');
       else
         account_held = feature_bool(FEAT_BOUNCER_DEFAULT_HOLD);

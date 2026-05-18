@@ -17,15 +17,15 @@
  *
  * Profiles are named bundles of bouncer preferences (hold, auto-replay,
  * channel list, …) scoped to one account.  Storage uses the existing
- * account-metadata LMDB tree under the server-managed `bouncer/profile/`
+ * account-metadata LMDB tree under the server-managed `draft/persistence/profile/`
  * prefix:
  *
- *   bouncer/profile/<name>/parent  -> parent profile name
+ *   draft/persistence/profile/<name>/parent  -> parent profile name
  *                                     (absent on the implicit `default`;
  *                                      defaults to "default" for any
  *                                      custom profile that didn't CREATE
  *                                      … FROM)
- *   bouncer/profile/<name>/<key>   -> any preference value
+ *   draft/persistence/profile/<name>/<key>   -> any preference value
  *
  * Effective-value lookup walks the inheritance chain:
  *   active profile -> parent -> ... -> default -> account-global -> FEAT_*
@@ -80,7 +80,7 @@ extern int persistence_profile_exists(const char *account, const char *name);
  * the caller's responsibility once this returns "not set".
  * @param[in] account Account name.
  * @param[in] profile Profile name (may be "default").
- * @param[in] key Key name (without the `bouncer/profile/<name>/` prefix).
+ * @param[in] key Key name (without the `draft/persistence/profile/<name>/` prefix).
  * @param[out] value Buffer for resolved value.
  * @param[in] value_len Buffer size.
  * @return 0 on success, 1 if no profile in the chain has the key,
@@ -122,7 +122,7 @@ extern int persistence_profile_create(const char *account,
 
 /** Delete a profile.  Refuses to delete `default`, or any profile that
  * is the parent of another existing profile.  Removes all
- * `bouncer/profile/<name>/*` keys.
+ * `draft/persistence/profile/<name>/*` keys.
  * @return 0 on success, -1 on error.
  */
 extern int persistence_profile_delete(const char *account, const char *name);

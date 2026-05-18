@@ -33,7 +33,7 @@
 #include <ctype.h>
 #include <string.h>
 
-#define PROFILE_KEY_PREFIX "bouncer/profile/"
+#define PROFILE_KEY_PREFIX "draft/persistence/profile/"
 #define PROFILE_PARENT_KEY "parent"
 #define PROFILE_CHANNELS_KEY "channels"
 #define PROFILE_NAME_LEN_MAX PERSISTENCE_PROFILE_NAME_MAX
@@ -43,7 +43,7 @@
  * prevent real cycles. */
 #define PROFILE_INHERIT_MAX_DEPTH 16
 
-/** Build the full metadata key for `bouncer/profile/<name>/<key>`.
+/** Build the full metadata key for `draft/persistence/profile/<name>/<key>`.
  * @return Number of bytes written (excluding NUL), or -1 on overflow.
  */
 static int build_profile_key(char *out, size_t outlen,
@@ -479,7 +479,7 @@ int persistence_profile_list(const char *account,
 
 /* ---- Channel-list operations (Phase 4 / M3) ----
  *
- * Storage: bouncer/profile/<name>/channels = comma-separated channel
+ * Storage: draft/persistence/profile/<name>/channels = comma-separated channel
  * names.  Empty / unset = no filter (all channels visible to clients
  * on this profile — M3 permissive default).
  */
