@@ -8915,19 +8915,45 @@ struct BouncerSession *bounce_find_any_session(const char *account)
  */
 void bounce_set_n_sessid_hint(struct Client *cptr)
 {
+  struct BouncerSession *bs;
+
   if (!cptr || !IsUser(cptr))
     return;
 
-  /* Use the unified per-Client session ID populated at make_client.
-   * After Phase A this is always non-empty for clients that went
-   * through make_client — bouncer-attached clients hold hs_sessid here,
-   * non-bouncer authed clients hold their locally-minted sessid,
-   * ephemerals hold their locally-minted sessid.  When we relay an N
-   * for a client whose origin server sent ,S (bouncer-aware peer),
+  /* Prefer the bouncer session's hs_sessid when this user is bound to
+   * a session — either directly (bounce_attached as primary or alias)
+   * or via account-match.  The account-match lookup catches the
+   * burst-time case where a local user registered *before* a remote
+   * BS C arrived announcing their account's bouncer session: the
+   * Client's cli_session_id is its make_client mint (unrelated to the
+   * session), but the receiver-side rebind needs sessid_match against
+   * the held ghost's hs_sessid.  Without this, the rebind auth gate
+   * fell back to acc_create_match — too coarse, can rebind unrelated
+   * non-bouncer connections that happen to share an account.  See
+   * .claude/para/projects/bouncer-burst-rebind-sessid-gap.md.
+   *
+   * For non-bouncer authed clients (account exists but no session
+   * record on the network), we fall through to cli_session_id which
+   * is the locally-minted per-Client identifier — receiver won't
+   * sessid_match any existing session and won't rebind. */
+  if (IsAccount(cptr)) {
+    bs = bounce_get_session(cptr);
+    if (!bs && cli_user(cptr) && cli_user(cptr)->account[0])
+      bs = bounce_find_any_session(cli_user(cptr)->account);
+    if (bs && bs->hs_sessid[0]) {
+      sendcmdto_set_s2s_sessid(bs->hs_sessid);
+      return;
+    }
+  }
+
+  /* Fall back to the unified per-Client session ID populated at
+   * make_client.  After Phase A this is always non-empty for clients
+   * that went through make_client — locally-minted for non-bouncer
+   * authed clients and ephemerals.  When we relay an N for a client
+   * whose origin server sent ,S (bouncer-aware peer),
    * format_s2s_tags_with_client prefers cli_s2s_sessid over this
    * override — so this fallback only fires when the upstream didn't
-   * carry a sessid (legacy peer, or non-bouncer client before this
-   * generalization), letting our minted value propagate downstream. */
+   * carry a sessid, letting our minted value propagate downstream. */
   if (cli_session_id(cptr)[0])
     sendcmdto_set_s2s_sessid(cli_session_id(cptr));
 }
