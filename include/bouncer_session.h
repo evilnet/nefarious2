@@ -1020,7 +1020,8 @@ extern int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                                                  const char *username,
                                                  const char *host,
                                                  const struct irc_in_addr *new_ip,
-                                                 const char *info);
+                                                 const char *info,
+                                                 time_t incoming_acc_ts);
 
 /** Demote a live local primary into an alias of an incoming remote
  * primary.  Used by m_nick during net-rejoin to merge two

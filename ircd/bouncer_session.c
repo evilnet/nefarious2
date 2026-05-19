@@ -5323,7 +5323,8 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                                           const char *username,
                                           const char *host,
                                           const struct irc_in_addr *new_ip,
-                                          const char *info)
+                                          const char *info,
+                                          time_t incoming_acc_ts)
 {
   struct BouncerSession *session;
   struct Membership *member;
@@ -5345,7 +5346,7 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
     return -1;
   }
 
-  /* Authorization gate: rebind is allowed if either
+  /* Authorization gate: rebind is allowed if any of
    *   (a) introducing server matches the session's recorded hs_origin
    *       (legacy path; legacy peers do not carry the ,S sessid hint),
    *       OR
@@ -5353,15 +5354,23 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
    *       value matches this session's hs_sessid.  Sessid is a UUIDv7 —
    *       only servers that genuinely hold (or replicate) the session
    *       know it, so the match is non-spoofable across BX-aware peers.
+   *       OR
+   *   (c) the incoming account-timestamp matches the held ghost's
+   *       cli_user->acc_create.  Account TS is set by services on
+   *       account REGISTER and never changes for a live account — it's
+   *       a stable per-account identity hash carried in the +r flag.
+   *       This covers the leaf-re-links-during-burst case where neither
+   *       (a) nor (b) holds: the held ghost was created on a different
+   *       server than the peer reintroducing the user, and the peer's
+   *       burst-time N for its local user doesn't propagate ,S (the
+   *       compact-tag emission only carries forward an *incoming* tag,
+   *       which is empty for an originating burst).
    *
-   * Without (a), any peer reintroducing a user via N during burst — even
-   * a peer that doesn't run bouncer at all — could hijack the ghost as
-   * soon as the +r account matched.  Without (b), held ghosts on this
-   * side reject continuation claims from BX-aware peers whose hs_origin
-   * we never observed (e.g. both sides restored the same session from
-   * MDBX with origin pointing at themselves), and the m_nick fallthrough
-   * collides+kills the peer's primary, cascading destroy via Invariant
-   * #12 (kill-of-session-member ⇒ session destroy).
+   * Without (a)+(b)+(c), any peer reintroducing a user via N during
+   * burst — even a peer that doesn't run bouncer at all — could hijack
+   * the ghost as soon as the +r account matched.  (c) still gates on a
+   * per-account TS the attacker would have to forge; on an operator-
+   * controlled bus this is acceptable.
    *
    * Per redesign A.2/C.2: sessid is the canonical session identity;
    * hs_origin is historical-only metadata.  Sessid-match supersedes
@@ -5372,14 +5381,20 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
     int origin_match = (0 == strcmp(session->hs_origin, cli_yxx(server)));
     int sessid_match = (wire_sessid && wire_sessid[0]
                         && 0 == strcmp(wire_sessid, session->hs_sessid));
+    int acc_ts_match = (incoming_acc_ts != 0
+                        && cli_user(ghost)->acc_create != 0
+                        && incoming_acc_ts == cli_user(ghost)->acc_create);
 
-    if (!origin_match && !sessid_match) {
+    if (!origin_match && !sessid_match && !acc_ts_match) {
       Debug((DEBUG_INFO,
              "bounce_rebind: refusing — session %s origin %s != introducing "
-             "server %s and no sessid-tag match (wire ,S='%s', account %s); "
-             "peer is not the canonical primary",
+             "server %s, no sessid-tag match (wire ,S='%s'), no account-TS "
+             "match (incoming=%ld ghost=%ld, account %s); peer is not the "
+             "canonical primary",
              session->hs_sessid, session->hs_origin, cli_yxx(server),
-             wire_sessid ? wire_sessid : "", cli_user(ghost)->account));
+             wire_sessid ? wire_sessid : "",
+             (long)incoming_acc_ts, (long)cli_user(ghost)->acc_create,
+             cli_user(ghost)->account));
       return -1;
     }
 
@@ -5390,6 +5405,12 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
              "(account %s)",
              session->hs_sessid, session->hs_origin, cli_yxx(server),
              wire_sessid, cli_user(ghost)->account));
+    } else if (!origin_match && !sessid_match && acc_ts_match) {
+      Debug((DEBUG_INFO,
+             "bounce_rebind: authorizing via account-TS match — session %s "
+             "origin %s, introducing server %s, account %s, TS=%ld",
+             session->hs_sessid, session->hs_origin, cli_yxx(server),
+             cli_user(ghost)->account, (long)incoming_acc_ts));
     }
   }
 

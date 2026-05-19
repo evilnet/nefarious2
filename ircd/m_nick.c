@@ -471,6 +471,7 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * split-merge blocks below.  Empty if the incoming N has no +r. */
   const char *incoming_acct = NULL;
   char incoming_acct_buf[ACCOUNTLEN + 1];
+  time_t incoming_acc_ts = 0;
   if (IsServer(sptr) && parc > 7 && parv[6] && *parv[6] == '+') {
     /* Walk parv[6] flag string, counting arg-taking flags before 'r'.
      * Argument order in N matches umode_str() output order: r, h, f, C, c.
@@ -490,6 +491,11 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           memcpy(incoming_acct_buf, a, alen);
           incoming_acct_buf[alen] = '\0';
           incoming_acct = incoming_acct_buf;
+          /* +r value is "account[:ts]"; capture the TS so the bouncer
+           * rebind auth gate can use it as a per-account identity
+           * signal when neither origin nor sessid match. */
+          if (colon)
+            incoming_acc_ts = (time_t)strtoll(colon + 1, NULL, 10);
           break;
         }
         argi++;
@@ -511,7 +517,8 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                                                       parv[parc - 2],
                                                       lastnick, parv[4],
                                                       parv[5], &ip,
-                                                      parv[parc - 1]);
+                                                      parv[parc - 1],
+                                                      incoming_acc_ts);
     if (rebind_rc == 0) {
       sendto_opmask_butone(0, SNO_OLDSNO,
                            "Bouncer rebind: %C ghost rebound to %s on %C "
