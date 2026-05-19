@@ -1684,6 +1684,19 @@ void client_sock_callback(struct Event* ev)
       /* If hold failed, fall through to normal exit */
     }
 
+    /* Re-entrancy guard.  Nefarious's event model is synchronous
+     * (event_add == event_execute).  If we got here via an ET_ERROR
+     * synthesised from inside engine_set_events on epoll_ctl failure —
+     * which can happen when send_buffer → update_write → socket_events
+     * tries to MOD a dead fd — then the outer frame is already inside
+     * exit_client (FLAG_CLOSING set at s_misc.c:768).  A recursive
+     * exit_client_msg here would run remove_client_from_list, zero
+     * cli_connect, and return into the outer send_buffer mid-line,
+     * which then NULL-derefs at `++cli_sendM(to)`.  Let the outer
+     * frame finish the teardown; we've already marked DEADSOCKET. */
+    if (HasFlag(cptr, FLAG_CLOSING))
+      return;
+
     exit_client_msg(cptr, cptr, &me, fmt, msg);
   }
 }
