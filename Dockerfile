@@ -80,9 +80,12 @@ ENV PATH="/usr/lib/ccache:${PATH}"
 RUN --mount=type=cache,target=/root/.ccache \
     make -j$(nproc)
 
-# Run unit tests during build (they require the built object files)
+# Run unit tests during build (they require the built object files).
+# `make test` runs the legacy print-based tests; `make test-cmocka` runs
+# the assertion-based cmocka suites (libcmocka-dev installed in the
+# `libs` stage).  Both must pass for the build to succeed.
 RUN --mount=type=cache,target=/root/.ccache \
-    make test
+    make test && (cd ircd/test && make cmocka && make test-cmocka)
 
 # make install no longer auto-generates a cert (the makepem call was
 # removed from ircd/Makefile.in — admins supply their own or run the

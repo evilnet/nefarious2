@@ -458,6 +458,15 @@ struct Connection
                                                   peer sees one face per bouncer session) by
                                                   withholding bouncer-account N's until BX R
                                                   convergence with BXF-aware peers can settle. */
+  /* Per-class recv classifier state — see
+   * .claude/para/projects/per-class-recvq-buffers.md.  Tracks the
+   * shape of the in-flight (un-terminated) wire line so per-class
+   * byte caps (tag region, msg region) can be enforced at byte-append
+   * time rather than recomputed from CAP arithmetic at flood-check time.
+   * Counters reset on \r\n; state is resumable across read() boundaries. */
+  unsigned char       con_recv_state;     /**< RECV_TAGS or RECV_MSG */
+  unsigned int        con_recv_tag_bytes; /**< Bytes of @-region in current line (incl. @) */
+  unsigned int        con_recv_msg_bytes; /**< Bytes of message region in current line */
 };
 
 /** Magic constant to identify valid Connection structures. */
@@ -661,6 +670,12 @@ struct Client {
 #define cli_ws_frag_len(cli)	con_ws_frag_len(cli_connect(cli))
 /** Get WebSocket first fragment opcode. */
 #define cli_ws_frag_opcode(cli)	con_ws_frag_opcode(cli_connect(cli))
+/** Get per-class recv classifier state. */
+#define cli_recv_state(cli)     con_recv_state(cli_connect(cli))
+/** Get tag-region byte count for the in-flight wire line. */
+#define cli_recv_tag_bytes(cli) con_recv_tag_bytes(cli_connect(cli))
+/** Get message-region byte count for the in-flight wire line. */
+#define cli_recv_msg_bytes(cli) con_recv_msg_bytes(cli_connect(cli))
 /** Get client name. */
 #define cli_name(cli)		((cli)->cli_name)
 /** Get client username (ident). */
@@ -966,6 +981,16 @@ struct Client {
 #define con_ws_frag_len(con)	((con)->con_ws_frag_len)
 /** Get WebSocket first fragment opcode. */
 #define con_ws_frag_opcode(con)	((con)->con_ws_frag_opcode)
+/** Get per-class recv classifier state. */
+#define con_recv_state(con)     ((con)->con_recv_state)
+/** Get tag-region byte count for the in-flight wire line. */
+#define con_recv_tag_bytes(con) ((con)->con_recv_tag_bytes)
+/** Get message-region byte count for the in-flight wire line. */
+#define con_recv_msg_bytes(con) ((con)->con_recv_msg_bytes)
+
+/* recv classifier states (con_recv_state) */
+#define RECV_TAGS 0  /**< Inside @-region; before first SPACE on the line. */
+#define RECV_MSG  1  /**< Inside message region; until \r\n. */
 
 #define STAT_CONNECTING         0x001 /**< connecting to another server */
 #define STAT_HANDSHAKE          0x002 /**< pass - server sent */

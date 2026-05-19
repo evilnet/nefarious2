@@ -42,6 +42,7 @@
 #include "ircd.h"
 #include "list.h"
 #include "listener.h"
+#include "recv_classify.h"
 #include "msg.h"
 #include "msgq.h"
 #include "numeric.h"
@@ -933,9 +934,7 @@ static int read_packet(struct Client *cptr, int socket_ready)
 ssl_read_again:
 #endif
   if (socket_ready &&
-      !(IsUser(cptr) &&
-	DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr) +
-	((cli_ml_batch_id(cptr)[0] || CapActive(cptr, CAP_DRAFT_MULTILINE)) ? feature_int(FEAT_MULTILINE_MAX_BYTES) : 0))) {
+      !(IsUser(cptr) && DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr) + FULL_MSG_SIZE)) {
 #ifdef USE_SSL
     switch (client_recv(cptr, readbuf, sizeof(readbuf), &length)) {
 #else
@@ -984,6 +983,11 @@ ssl_read_again:
    * worrying about the time of day or anything :)
    */
   if (length > 0 && IsServer(cptr)) {
+    int classify = recv_classify(cptr, readbuf, length);
+    if (classify == RECV_CLASSIFY_TAG_OVERRUN)
+      return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
+    if (classify == RECV_CLASSIFY_MSG_OVERRUN)
+      return exit_client(cptr, cptr, &me, "Excess Flood: S2S body exceeds 512");
     int result = server_dopacket(cptr, readbuf, length);
 #ifdef USE_SSL
     /* Check for more SSL-buffered data after processing */
@@ -993,6 +997,11 @@ ssl_read_again:
     return result;
   }
   else if (length > 0 && (IsHandshake(cptr) || IsConnecting(cptr))) {
+    int classify = recv_classify(cptr, readbuf, length);
+    if (classify == RECV_CLASSIFY_TAG_OVERRUN)
+      return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
+    if (classify == RECV_CLASSIFY_MSG_OVERRUN)
+      return exit_client(cptr, cptr, &me, "Excess Flood: S2S body exceeds 512");
     int result = connect_dopacket(cptr, readbuf, length);
 #ifdef USE_SSL
     /* Check for more SSL-buffered data after processing */
@@ -1219,6 +1228,13 @@ ssl_read_again:
                   ws_payload[ws_len - 1] != '\n') {
                 ws_payload[ws_len++] = '\n';
               }
+              {
+                int classify = recv_classify(cptr, (const char *)ws_payload, ws_len);
+                if (classify == RECV_CLASSIFY_TAG_OVERRUN)
+                  return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
+                if (classify == RECV_CLASSIFY_MSG_OVERRUN)
+                  return exit_client(cptr, cptr, &me, "Excess Flood: message region too large");
+              }
               if (dbuf_put(&(cli_recvQ(cptr)), ws_payload, ws_len) == 0)
                 return exit_client(cptr, cptr, &me, "dbuf_put fail");
             }
@@ -1236,27 +1252,31 @@ ssl_read_again:
      * it on the end of the receive queue and do it when its
      * turn comes around.
      */
-    if (length > 0 && dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
-      return exit_client(cptr, cptr, &me, "dbuf_put fail");
+    if (length > 0) {
+      int classify = recv_classify(cptr, readbuf, length);
+      if (classify == RECV_CLASSIFY_TAG_OVERRUN)
+        return exit_client(cptr, cptr, &me, "Excess Flood: tag region too large");
+      if (classify == RECV_CLASSIFY_MSG_OVERRUN)
+        return exit_client(cptr, cptr, &me, "Excess Flood: message region too large");
+      if (dbuf_put(&(cli_recvQ(cptr)), readbuf, length) == 0)
+        return exit_client(cptr, cptr, &me, "dbuf_put fail");
+    }
 
     /*
-     * Check for buffer flood.  CLIENT_FLOOD is sized for legacy 512-byte
-     * traffic; clients with size-extending IRCv3 caps get a per-message
-     * boost so one legal max-size message fits without tripping the cap.
-     * The boosts are per-message-worth, not per-burst — the parse loop
-     * below drains them within this same I/O turn, so a flooder still
-     * gets killed at recvQ > CLIENT_FLOOD + (one max legal message).
-     *
-     * Multiline boost is whole-batch (temporally extended); a post-parse
-     * recheck below re-enforces the strict cap if no batch was opened.
+     * Sustained-flood check.  Per-line per-class caps are enforced by
+     * recv_classify above; this guards against pipelined-message
+     * saturation where each individual line is well-formed but the
+     * client never drains.  The +FULL_MSG_SIZE allowance is one
+     * max-legal in-flight line — the recvQ may legitimately hold a
+     * single large IRCv3 message (e.g. SASL OAUTHBEARER, a big-tag
+     * PRIVMSG) at this point because the parse loop below runs AFTER
+     * this check.  No per-CAP arithmetic: every client gets the same
+     * one-message-worth of headroom regardless of which caps are
+     * active.  Multiline batches are budgeted at the parser layer
+     * (FEAT_MULTILINE_MAX_BYTES in m_batch.c) — recv path stays out.
      */
     {
-      unsigned int max_recvq = get_recvq(cptr);
-      if (CapActive(cptr, CAP_MSGTAGS))
-        max_recvq += IRCV3_TAG_MAX;
-      if (cli_ml_batch_id(cptr)[0] || CapActive(cptr, CAP_DRAFT_MULTILINE))
-        max_recvq += feature_int(FEAT_MULTILINE_MAX_BYTES);
-      if (DBufLength(&(cli_recvQ(cptr))) > max_recvq)
+      if (DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr) + FULL_MSG_SIZE)
         return exit_client(cptr, cptr, &me, "Excess Flood");
     }
 
@@ -1307,17 +1327,6 @@ ssl_read_again:
         }
       }
     }
-
-    /*
-     * Post-parse safety: if the client got the boosted recvQ limit
-     * due to multiline CAP but did NOT open a batch, enforce the
-     * strict limit now.  This prevents a multiline-capable client
-     * from abusing the inflated buffer for regular (non-batch) flood.
-     */
-    if (IsUser(cptr) && !cli_ml_batch_id(cptr)[0]
-        && CapActive(cptr, CAP_DRAFT_MULTILINE)
-        && DBufLength(&(cli_recvQ(cptr))) > get_recvq(cptr))
-      return exit_client(cptr, cptr, &me, "Excess Flood");
 
     /* If there's still data to process, wait 2 seconds first */
     if (DBufLength(&(cli_recvQ(cptr))) && !NoNewLine(cptr) &&
