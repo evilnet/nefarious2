@@ -1432,16 +1432,30 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     char *tag_end;
     char *tag_start = ch + 1;  /* Skip the @ */
 
-    /* Registered clients must have ACKed `message-tags` before they may
-     * send @-prefixed lines.  Without the negotiation, the tag region
-     * would be a non-negotiated bytes channel — pair the recv-side
-     * 4095 byte cap (recv_classify) with a parse-side rejection so the
-     * tag region is also semantically gated, not just byte-bounded.
+    /* Registered clients must have negotiated *some* tag-using CAP
+     * before they may send @-prefixed lines.  Without any such CAP,
+     * the tag region would be a non-negotiated bytes channel — pair
+     * the recv-side 4095 byte cap (recv_classify) with a parse-side
+     * rejection so the tag region is semantically gated, not just
+     * byte-bounded.
+     *
+     * Caps that imply legitimate client-to-server tag emission:
+     *   - message-tags: the canonical "I speak @-tags" cap.
+     *   - batch: clients SHOULD send `@batch=<reftag>` on lines
+     *     belonging to a batch even without message-tags (the batch
+     *     reference is the spec-required tag for batched delivery,
+     *     including multiline).
+     *   - labeled-response: clients send `@label=<value>` on commands
+     *     they want correlated.
+     *
      * Servers, handshakes, and pre-registration clients are exempt:
      * server-direction traffic and pre-CAP-END labelling legitimately
      * use the tag surface before any CAP is fully active. */
-    if (IsUser(cptr) && !CapActive(cptr, CAP_MSGTAGS)) {
-      Debug((DEBUG_DEBUG, "Rejecting @-tagged line from non-CAP client %s",
+    if (IsUser(cptr)
+        && !CapActive(cptr, CAP_MSGTAGS)
+        && !CapActive(cptr, CAP_BATCH)
+        && !CapActive(cptr, CAP_LABELEDRESP)) {
+      Debug((DEBUG_DEBUG, "Rejecting @-tagged line from non-tag-CAP client %s",
              cli_name(cptr)));
       ServerStats->is_ref++;
       return -1;
