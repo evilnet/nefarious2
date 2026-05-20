@@ -1065,7 +1065,22 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
     if (!session->hs_client || !MyConnect(session->hs_client)) {
       struct Client *managing_server = FindNServer(session->hs_origin);
       /* Resolve ghost from numeric if hs_client is NULL (e.g., BS D
-       * arrived before ghost numeric was resolvable). */
+       * arrived before ghost numeric was resolvable).
+       *
+       * Composition risk: hs_ghost_numeric stores a 3-char numeric
+       * relative to whichever server last wrote it (BS A or BS D
+       * sender, or local create).  hs_origin is the recorded session
+       * origin and may diverge from where the ghost actually lives
+       * after a cross-server rebind.  In practice this branch fires
+       * only for HOLDING sessions; HOLDING-on-this-server has
+       * hs_origin == cli_yxx(&me) by construction, and HOLDING-as-
+       * replica is created with hs_origin == sender's prefix (BS C
+       * line 3892), matching its hs_ghost_numeric source.  So the
+       * fields stay aligned for the cases that reach this path.
+       *
+       * If you change either BS A or BS D to store ghost_numeric
+       * differently, or you add a path that mutates hs_origin without
+       * also updating hs_ghost_numeric, audit this site. */
       if (!session->hs_client && session->hs_ghost_numeric[0]) {
         char full_numeric[6];
         ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
@@ -3972,8 +3987,24 @@ bsc_forward:
 
     /* Resolve primary client from numeric so remote servers can use
      * session->hs_client for alias creation.
-     * BS A sends the 3-char client numeric (XXX); combine with the
-     * session origin (YY) to get the full YYXXX for findNUser().
+     * BS A sends the 3-char client numeric (XXX) relative to the
+     * *sender's* server prefix (sptr's YY).  Combine with sptr's YY
+     * for findNUser().
+     *
+     * The earlier version of this code prepended session->hs_origin
+     * which is the *recorded historical* origin and may be stale
+     * after a cross-server rebind (bounce_rebind_ghost_to_remote_primary
+     * explicitly preserves hs_origin "as-is" per its comment).  When
+     * stale, the resolution targets the wrong server's local numeric
+     * space.  If a leftover ghost happens to occupy that numeric
+     * (e.g. another session restored at startup from MDBX with a
+     * different account), session->hs_client gets pointed at it, and
+     * a subsequent register_user drain for the rebound primary's
+     * account revives the wrong ghost — silently hijacking the
+     * connecting user's socket onto an unrelated account's ghost.
+     *
+     * Same handler at the alias-roster lookup below already uses
+     * cli_yxx(sptr); this site should match.
      *
      * Always update hs_ghost_numeric to the new XXX too — after a
      * managing-server restart the ghost gets a freshly-assigned
@@ -3987,7 +4018,7 @@ bsc_forward:
       char full_numeric[6];
       struct Client *primary;
       ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
-                    session->hs_origin, parv[4]);
+                    cli_yxx(sptr), parv[4]);
       primary = findNUser(full_numeric);
       if (primary && IsUser(primary))
         session->hs_client = primary;
@@ -4086,12 +4117,17 @@ bsc_forward:
     /* Resolve ghost client from numeric so that bounce_auto_resume()
      * can check hs_client for the alias path.  Without this, a new
      * client connecting to a different server can't take the alias path
-     * because hs_client would be NULL. */
+     * because hs_client would be NULL.
+     *
+     * Use cli_yxx(sptr) as the prefix — the wire ghost_numeric is the
+     * 3-char numeric on the *sending* server.  session->hs_origin is
+     * historical metadata and may be stale after a cross-server rebind
+     * (see BS A handler above for the full discussion). */
     {
       char full_numeric[6];
       struct Client *ghost;
       ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
-                    session->hs_origin, ghost_numeric);
+                    cli_yxx(sptr), ghost_numeric);
       ghost = findNUser(full_numeric);
       session->hs_client = (ghost && IsUser(ghost)) ? ghost : NULL;
     }
