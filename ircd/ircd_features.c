@@ -1125,10 +1125,11 @@ static struct FeatureDesc {
   F_I(EPHEMERAL_HISTORY_BYTES, 0, 65536, 0), /* Per-Client byte cap on the ephemeral↔ephemeral PM ring (64KB default) */
   F_I(MULTILINE_MAX_BYTES, 0, 16384, feature_notify_multiline),
   F_I(MULTILINE_MAX_LINES, 0, 100, feature_notify_multiline),
-  F_I(MULTILINE_LAG_DISCOUNT, 0, 50, 0),
-  F_I(MULTILINE_CHANNEL_LAG_DISCOUNT, 0, 75, 0),
-  F_I(MULTILINE_MAX_LAG, 0, 30, 0),
-  F_B(MULTILINE_RECIPIENT_DISCOUNT, 0, 1, 0),
+  /* Multiline cooldown: percent of (base + total_bytes/bytes_per_sec) seconds
+   * applied as a multiline-only cooldown at BATCH -close.  50 = "half the raw
+   * cooldown is enforced" (default, livable).  100 = full cost.  0 = no
+   * cooldown (free pass, dangerous). */
+  F_I(MULTILINE_COOLDOWN_DISCOUNT, 0, 50, 0),
   F_I(MULTILINE_LEGACY_THRESHOLD, 0, 3, 0),
   F_I(MULTILINE_LEGACY_MAX_LINES, 0, 5, 0),
   F_B(MULTILINE_FALLBACK_NOTIFY, 0, 1, 0),

@@ -621,6 +621,72 @@ int ms_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
  * Helper functions for multiline batch handling
  */
 
+/** Apply multiline cooldown for a *successfully-delivered* batch.
+ *
+ * Two-meter design (replaces the old per-line lag accumulation + close-time
+ * discount which was applied to cli_since and froze the whole connection):
+ *
+ *   1. con_ml_cooldown_until is set to (now + raw_cooldown * DISCOUNT/100).
+ *      Multiline-only — checked at the next BATCH +draft/multiline open.
+ *      A user inside the cooldown can still /whois, /part, /privmsg, etc.;
+ *      they just can't start another multiline batch yet.
+ *
+ *   2. A small flat MULTILINE_COOLDOWN_BASE charge (~one regular message
+ *      worth) IS applied to cli_since, so multiline isn't a complete
+ *      bypass of general fakelag.
+ *
+ * Raw cooldown formula:
+ *   raw     = MULTILINE_COOLDOWN_BASE + total_bytes / MULTILINE_COOLDOWN_BYTES_PER_SEC
+ *   applied = raw * MULTILINE_COOLDOWN_DISCOUNT / 100
+ *
+ * Constants chosen so a worst-case 16KB batch with 50% discount yields
+ * ~65 seconds cooldown — livable, doesn't freeze the connection.  A
+ * 4KB batch yields ~17 seconds.  Defaults retunable when FILEHOST
+ * ratifies and recommended MULTILINE_MAX_BYTES drops.
+ *
+ * Called ONLY from process_multiline_batch's success path.  Reject paths
+ * (oversize, blank, no-such-channel, batch-timeout, replaced-by-new)
+ * clear state via clear_multiline_batch without invoking this — failed
+ * batches are not a delivery that should incur a cooldown.
+ *
+ * Spec note: IRCv3 multiline's "batched lines are one logical message,
+ * charge as one" framing is sender-UX, not network-cost — legacy fanout
+ * expansion, S2S per-line wire, and per-line history storage all bill
+ * by line.  The cooldown design splits the difference: the user feels
+ * a per-batch cooldown (matches their mental model of "one big thing"),
+ * but the math is byte-based (matches network cost). */
+#define MULTILINE_COOLDOWN_BASE          2       /* seconds, flat per-batch component */
+#define MULTILINE_COOLDOWN_BYTES_PER_SEC 128     /* roughly 1 sec per 128 bytes of batch */
+
+static void
+multiline_apply_cooldown(struct Connection *con)
+{
+  int discount = feature_int(FEAT_MULTILINE_COOLDOWN_DISCOUNT);
+  int total_bytes = con_ml_total_bytes(con);
+  int raw_cooldown;
+  int applied;
+
+  if (discount < 0)
+    discount = 0;
+  else if (discount > 100)
+    discount = 100;
+
+  if (discount == 0)
+    return;  /* Operator override: no cooldown, no flat charge. */
+
+  raw_cooldown = MULTILINE_COOLDOWN_BASE
+               + (total_bytes / MULTILINE_COOLDOWN_BYTES_PER_SEC);
+  applied = (raw_cooldown * discount) / 100;
+
+  if (applied > 0)
+    con_ml_cooldown_until(con) = CurrentTime + applied;
+
+  /* Small flat cli_since charge — keeps multiline batches from being
+   * a complete bypass of general fakelag accounting.  Independent of
+   * batch size; ~one regular-message worth. */
+  con_since(con) += MULTILINE_COOLDOWN_BASE;
+}
+
 /** Clear the multiline batch state for a connection */
 static void
 clear_multiline_batch(struct Connection *con)
@@ -635,55 +701,13 @@ clear_multiline_batch(struct Connection *con)
     free_link(lp);
   }
 
-  /* Apply accumulated lag from the batch with a configurable discount.
-   * Per IRCv3 multiline spec, we should be lenient for batched messages,
-   * but we can't ignore lag entirely or malicious clients could abuse
-   * multiline batches to flood channels (recipients who don't support
-   * multiline still receive each line as a separate PRIVMSG).
-   *
-   * MULTILINE_LAG_DISCOUNT controls what percentage of lag is applied for DMs:
-   *   100 = full lag (no benefit to multiline, like regular messages)
-   *   50  = 50% lag (default - rewards multiline while preventing abuse)
-   *   0   = no lag (dangerous - allows unlimited multiline flooding)
-   *
-   * MULTILINE_CHANNEL_LAG_DISCOUNT is used for channel messages (typically
-   * higher than DM discount since channels affect more users).
-   *
-   * MULTILINE_RECIPIENT_DISCOUNT: when enabled, halve the lag discount
-   * percentage unconditionally for any multiline batch.  Truncation
-   * fallback is bounded (capped at FEAT_MULTILINE_LEGACY_MAX_LINES) so
-   * it doesn't flood; +M opt-in expansion is the recipient's choice
-   * and shouldn't penalise the sender; cross-server alias mirror is
-   * the sender's own bouncer setup and shouldn't penalise them either.
-   * The base discount (50% DM / 75% channel) stays in place as the
-   * anti-flood floor; halving rewards multiline use without worrying
-   * about which path each recipient ended up on.
-   */
-  if (con_ml_lag_accum(con) > 0) {
-    int discount;
-    int discounted_lag;
-
-    /* Use different discount for channels vs DMs */
-    if (con_ml_target(con)[0] && IsChannelName(con_ml_target(con)))
-      discount = feature_int(FEAT_MULTILINE_CHANNEL_LAG_DISCOUNT);
-    else
-      discount = feature_int(FEAT_MULTILINE_LAG_DISCOUNT);
-
-    if (feature_bool(FEAT_MULTILINE_RECIPIENT_DISCOUNT))
-      discount = discount / 2;
-
-    /* Clamp discount to valid range */
-    if (discount < 0)
-      discount = 0;
-    else if (discount > 100)
-      discount = 100;
-
-    discounted_lag = (con_ml_lag_accum(con) * discount) / 100;
-    if (discounted_lag < 2 && discount > 0)
-      discounted_lag = 2;  /* Minimum one message worth (unless fully disabled) */
-    con_since(con) += discounted_lag;
-  }
-  con_ml_lag_accum(con) = 0;
+  /* NOTE: cooldown application is NOT done here.  clear_multiline_batch
+   * is called from many paths — successful delivery, blank-line reject,
+   * no-such-channel, can't-send-to-channel, oversize, batch-timeout,
+   * replaced-by-new-batch — and only successful delivery should incur
+   * cooldown.  process_multiline_batch calls multiline_apply_cooldown
+   * just before clearing on the success path; all other callers reach
+   * this function with no cooldown side-effect. */
 
   con_ml_batch_id(con)[0] = '\0';
   con_ml_target(con)[0] = '\0';
@@ -1669,6 +1693,11 @@ process_multiline_batch(struct Client *sptr)
   /* Clear the time override set at the start of this function */
   sendcmdto_set_client_time(NULL);
 
+  /* Apply multiline cooldown — this is the only path where the batch
+   * was actually delivered.  Reject paths above (blank, no-channel,
+   * oversize, etc.) skip this and just clear state. */
+  multiline_apply_cooldown(con);
+
   clear_multiline_batch(con);
   return 0;
 }
@@ -1772,6 +1801,21 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       return 0;
     }
 
+    /* Multiline cooldown gate.  Set by the previous batch's close to
+     * `(now + raw_cooldown * DISCOUNT/100)` based on that batch's
+     * total_bytes.  Scoped to multiline batches only — does not affect
+     * other commands, which makes large batches usable without freezing
+     * the connection.  See clear_multiline_batch for the formula. */
+    if (con_ml_cooldown_until(con) > CurrentTime) {
+      char remaining[16];
+      ircd_snprintf(0, remaining, sizeof(remaining), "%ld",
+                    (long)(con_ml_cooldown_until(con) - CurrentTime));
+      send_fail_ctx(sptr, "BATCH", "MULTILINE_COOLDOWN",
+                    "Multiline batch cooldown active; retry after the listed "
+                    "seconds", "%s", remaining);
+      return 0;
+    }
+
     /* Batch rate limiting (FEAT_BATCH_RATE_LIMIT) */
     {
       int rate_limit = feature_int(FEAT_BATCH_RATE_LIMIT);
@@ -1810,7 +1854,6 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_ml_msg_count(con) = 0;
     con_ml_total_bytes(con) = 0;
     con_ml_batch_start(con) = CurrentTime;
-    con_ml_lag_accum(con) = 0;  /* Reset lag accumulator for new batch */
 
     /* Save the label from BATCH +id for labeled-response echo.
      * Suppress generic ACK — the label will be attached to the echo batch

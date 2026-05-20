@@ -433,7 +433,7 @@ struct Connection
   int                 con_ml_msg_count; /**< Number of messages in batch */
   int                 con_ml_total_bytes; /**< Total bytes in batch */
   time_t              con_ml_batch_start; /**< When batch was started (for timeout) */
-  int                 con_ml_lag_accum;   /**< Accumulated fake lag during batch (applied at end) */
+  time_t              con_ml_cooldown_until; /**< Multiline-only cooldown gate.  Set at BATCH -close to (now + (cooldown_base + total_bytes/cooldown_bytes_per_sec) * MULTILINE_COOLDOWN_DISCOUNT/100).  Checked at BATCH +open; rejects with FAIL BATCH MULTILINE_COOLDOWN until expired.  Multiline-scoped — does NOT block regular commands. */
   char                con_ml_label[64];   /**< Label from BATCH +id for labeled-response on WARN */
   char                con_ml_client_tags[512]; /**< Client-only tags from BATCH open command */
   /* Batch rate limiting (FEAT_BATCH_RATE_LIMIT) */
@@ -641,7 +641,7 @@ struct Client {
 /** Get multiline batch start time. */
 #define cli_ml_batch_start(cli)	con_ml_batch_start(cli_connect(cli))
 /** Get accumulated lag during batch. */
-#define cli_ml_lag_accum(cli)	con_ml_lag_accum(cli_connect(cli))
+#define cli_ml_cooldown_until(cli) con_ml_cooldown_until(cli_connect(cli))
 /** Get label from BATCH +id for labeled-response. */
 #define cli_ml_label(cli)	con_ml_label(cli_connect(cli))
 /** Get client-only tags from BATCH open command. */
@@ -952,7 +952,7 @@ struct Client {
 /** Get the multiline batch start time. */
 #define con_ml_batch_start(con)	((con)->con_ml_batch_start)
 /** Get the accumulated lag during batch (to apply at batch end). */
-#define con_ml_lag_accum(con)	((con)->con_ml_lag_accum)
+#define con_ml_cooldown_until(con) ((con)->con_ml_cooldown_until)
 /** Get the label from BATCH +id for labeled-response on WARN. */
 #define con_ml_label(con)	((con)->con_ml_label)
 /** Get client-only tags from BATCH open command. */
