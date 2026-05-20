@@ -1447,6 +1447,14 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
      *     including multiline).
      *   - labeled-response: clients send `@label=<value>` on commands
      *     they want correlated.
+     *   - server-time: strict IRCv3 reads server-time as server→client
+     *     only (the server adds `@time=` to messages it generates).
+     *     But a client that negotiated server-time has demonstrated
+     *     tag-awareness, and some relay/bouncer-style clients do
+     *     forward `@time=` tags on backfill.  Accepting it as a
+     *     bypass costs nothing (the tag-region byte cap still bounds
+     *     abuse) and avoids rejecting clients that negotiate only the
+     *     older time-stamping cap.
      *
      * Servers, handshakes, and pre-registration clients are exempt:
      * server-direction traffic and pre-CAP-END labelling legitimately
@@ -1454,7 +1462,8 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
     if (IsUser(cptr)
         && !CapActive(cptr, CAP_MSGTAGS)
         && !CapActive(cptr, CAP_BATCH)
-        && !CapActive(cptr, CAP_LABELEDRESP)) {
+        && !CapActive(cptr, CAP_LABELEDRESP)
+        && !CapActive(cptr, CAP_SERVERTIME)) {
       Debug((DEBUG_DEBUG, "Rejecting @-tagged line from non-tag-CAP client %s",
              cli_name(cptr)));
       ServerStats->is_ref++;

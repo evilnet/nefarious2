@@ -778,24 +778,31 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   send_keyvalue(sptr, target, key, value,
                 visibility == METADATA_VIS_PRIVATE ? "private" : "*");
 
+  /* Expand "*" to client's nick.  Used for both local subscriber
+   * notifications and the S2S broadcast — `*` is meaningful only in
+   * the client→server direction (means "the sender's self") and has
+   * no defined meaning in server→server traffic.  If we forwarded the
+   * literal `*` peers would FindUser("*") → NULL and silently drop
+   * the metadata, producing the bug where cross-server self-metadata
+   * was unreachable. */
+  const char *wire_target = (target[0] == '*' && !target[1]
+                             && !is_channel && target_client)
+                             ? cli_name(target_client) : target;
+
   /* Notify local subscribers (only for public metadata) */
   if (visibility == METADATA_VIS_PUBLIC) {
-    /* Expand "*" to client's nick for subscriber notifications */
-    const char *notify_target = (target[0] == '*' && !target[1]
-                                 && !is_channel && target_client)
-                                 ? cli_name(target_client) : target;
-    notify_subscribers(notify_target, key, value);
+    notify_subscribers(wire_target, key, value);
   }
 
   /* Propagate to other servers with visibility */
   if (value) {
     sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s %s :%s",
-                          target, key,
+                          wire_target, key,
                           visibility == METADATA_VIS_PRIVATE ? "P" : "*",
                           value);
   } else {
     sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s",
-                          target, key);
+                          wire_target, key);
   }
 
   return 0;
