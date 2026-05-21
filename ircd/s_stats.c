@@ -622,7 +622,7 @@ struct StatDesc statsinfo[] = {
   { 'A', "chathistoryads", (STAT_FLAG_OPERFEAT | STAT_FLAG_CASESENS), FEAT_LAST_F,
     chathistory_report_ads, 0,
     "Chathistory federation advertisements." },
-  { 'a', "nameservers", STAT_FLAG_OPERFEAT|STAT_FLAG_LOCONLY, FEAT_HIS_STATS_a,
+  { 'a', "nameservers", STAT_FLAG_OPERFEAT|STAT_FLAG_LOCONLY|STAT_FLAG_CASESENS, FEAT_HIS_STATS_a,
     report_dns_servers, 0,
     "DNS servers." },
   { 'c', "connect", STAT_FLAG_OPERFEAT, FEAT_HIS_STATS_c,

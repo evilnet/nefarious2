@@ -3626,10 +3626,20 @@ static int count_storage_servers(const char *target, time_t query_time)
     if (query_time != 0 && !server_retention_covers(server, query_time))
       continue;
 
-    /* Layer 1: If server has channel-level ads, check if it has this target */
-    if (target && has_channel_advertisement(server) &&
-        !server_advertises_channel(server, target))
-      continue;
+    /* Layer 1 channel-list filter is intentionally NOT applied here:
+     * CH A F is emitted once at burst-time and not refreshed when new
+     * channels are created.  Filtering by it would render every
+     * post-burst channel unreachable via federation — the test
+     * channel "client1 creates #X on primary, client2 queries from
+     * leaf" always fails because #X didn't exist when primary sent
+     * its CH A F.  The plan for a properly-refreshed channel
+     * presence filter is the bloom-filter design at
+     * .claude/plans/federation-dedup-s2s-msgid.md (deferred).  Until
+     * that lands, we federate to every storage-capable peer and let
+     * the remote return an empty batch if it has nothing for the
+     * channel — a small extra cost vs. silently breaking federation
+     * for new channels. */
+    (void)target;  /* parameter retained for future bloom-filter path */
 
     count++;
   }
