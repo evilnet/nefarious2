@@ -316,20 +316,29 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   if (!feature_bool(FEAT_CHATHISTORY_PRIVATE))
     return;
 
-  /* Policy check: at least one party must have an account (the storage
-   * anchor) — fully-ephemeral pairs go to the in-memory ring instead
-   * of LMDB (Phase C).  Mirroring the channel-storage gate: if
-   * CHATHISTORY_REQUIRE_AUTH is on, neither ephemeral can ever query,
-   * so writing to the ring would be dead bytes that nobody can read
-   * — skip storage entirely.  When at least one party is authed, the
-   * authed counterpart can always pull the record regardless of
-   * REQUIRE_AUTH, so we still hit the LMDB path below. */
-  if (!IsAccount(sptr) && !IsAccount(acptr)) {
-    if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH))
+  /* Opt-out check: honored regardless of which storage backend would
+   * receive the message.  Previously this only gated the LMDB path
+   * below — the ephemeral-ring path skipped past it and stored
+   * unconditionally, leaking PMs that an opted-out party hadn't
+   * consented to keep.  Now: if EITHER party opts out (chathistory.pm
+   * = "0" or "" via metadata), drop storage entirely; for the LMDB
+   * path we still write a gap marker so the conversation pair-key
+   * has a presence-witness, but for the ephemeral path there's no
+   * gap marker concept — we just don't store. */
+  {
+    int either_optout = has_pm_optout(sptr) || has_pm_optout(acptr);
+
+    /* Fully-ephemeral pair: in-memory ring only.  Skip both opt-out
+     * and the LMDB path. */
+    if (!IsAccount(sptr) && !IsAccount(acptr)) {
+      if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH))
+        return;  /* nobody can query an account-less storage anyway */
+      if (either_optout)
+        return;  /* honor opt-out, ephemeral ring receives nothing */
+      chathistory_ephemeral_store_pair(sptr, acptr, text, type, msgid,
+                                        timestamp, client_tags);
       return;
-    chathistory_ephemeral_store_pair(sptr, acptr, text, type, msgid,
-                                      timestamp, client_tags);
-    return;
+    }
   }
 
   /* Build sender string: nick!user@host (needed for gap markers below) */
@@ -357,7 +366,9 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
-  /* Check opt-out — store gap marker if either party opted out */
+  /* Check opt-out — store gap marker if either party opted out
+   * (LMDB path: at least one party authed, so we have an anchor for
+   * the gap marker and a queryable party who can see it). */
   if (has_pm_optout(sptr) || has_pm_optout(acptr)) {
     history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
                           account, HISTORY_GAP, "", NULL);
