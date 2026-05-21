@@ -7076,6 +7076,15 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 #endif
 
   m_lusers(sptr, sptr, 1, parv);
+
+  /* IRCv3 draft/persistence: mirror normal-path emit so freshly-set-up
+   * aliases also see the unsolicited STATUS line between 005 and
+   * MOTD-END.  Same rationale as the local-revive path in
+   * register_user(); without this aliases never learn their effective
+   * hold state at attach time. */
+  if (CapActive(sptr, CAP_DRAFT_PERSISTENCE) && IsAccount(sptr))
+    persistence_send_status(sptr);
+
   motd_signon(sptr);
 
   /* Informational NOTE */

@@ -528,6 +528,15 @@ int register_user(struct Client *cptr, struct Client *sptr)
 #endif
 
         m_lusers(ghost, ghost, 1, parv);
+
+        /* IRCv3 draft/persistence: mirror normal-path emit so revived
+         * bouncer sessions also see the unsolicited STATUS line between
+         * 005 and MOTD-END.  Without this, clients reattaching to a
+         * held ghost never learn their effective hold state at attach
+         * time and have to issue an explicit PERSISTENCE STATUS. */
+        if (CapActive(ghost, CAP_DRAFT_PERSISTENCE) && IsAccount(ghost))
+          persistence_send_status(ghost);
+
         motd_signon(ghost);
 
         /* Notify client if their nick changed (ghost had different nick) */
