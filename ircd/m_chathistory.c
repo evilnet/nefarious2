@@ -3778,10 +3778,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
       if (query_time != 0 && !server_retention_covers(server, query_time))
         continue;
 
-      /* Layer 1: If server has channel-level ads, check if it has this target */
-      if (has_channel_advertisement(server) && !server_advertises_channel(server, target))
-        continue;
-
+      /* Layer 1 channel-list filter intentionally NOT applied here —
+       * see the matching rationale in count_storage_servers(): CH A F
+       * is burst-time only and silently breaks federation for any
+       * channel created post-burst.  Keep this loop in sync with the
+       * counter; the bloom-filter design at
+       * .claude/plans/federation-dedup-s2s-msgid.md will revive a
+       * principled per-target filter when it lands. */
       sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s",
                     target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx);
     }
