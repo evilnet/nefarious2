@@ -660,6 +660,13 @@ void replay_start_batch(struct Client *sptr, const char *target,
   if (label && label[0])
     ircd_strncpy(rs->label, label, sizeof(rs->label));
   rs->phase = REPLAY_PHASE_SINGLE;
+  /* Single-shot on-demand chathistory query — no pagination continuation,
+   * so the BATCH we're about to open IS the last page.  Setting this
+   * before replay_open_batch ensures the @draft/chathistory-end tag
+   * lands on the BATCH start line.  Without it, callers like
+   * chathistory_latest set is_last_page only AFTER replay_open_batch
+   * has already emitted the BATCH start, and the end-tag is lost. */
+  rs->is_last_page = 1;
 
   cli_replay(sptr) = rs;
 
