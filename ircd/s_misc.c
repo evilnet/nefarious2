@@ -371,21 +371,6 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
         Count_clientdisconnects(bcptr, UserStats);
-        /* Mirror exit_one_client's normal-path UserStats decrements
-         * (s_misc.c:493/497) so opered/invisible aliases don't leak
-         * the counters that bounce_apply_oper_grant /
-         * Count_unknownbecomesclient incremented at create-time.  The
-         * MyConnect gate matches both the create-time gates
-         * (bounce_apply_oper_grant guards on MyConnect) and the
-         * normal exit-path gates. */
-        if (IsInvisible(bcptr)) {
-          assert(UserStats.inv_clients > 0);
-          --UserStats.inv_clients;
-        }
-        if (IsOper(bcptr) && !IsHideOper(bcptr) && !IsChannelService(bcptr) && !IsBot(bcptr)) {
-          assert(UserStats.opers > 0);
-          --UserStats.opers;
-        }
       }
       if (MyUser(bcptr))
         del_list_watch(bcptr);
@@ -408,18 +393,6 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
         Count_clientdisconnects(bcptr, UserStats);
-        /* Mirror exit_one_client's normal-path UserStats decrements
-         * (s_misc.c:493/497) for held ghosts that were opered or
-         * invisible while live.  Same rationale as the alias branch
-         * above. */
-        if (IsInvisible(bcptr)) {
-          assert(UserStats.inv_clients > 0);
-          --UserStats.inv_clients;
-        }
-        if (IsOper(bcptr) && !IsHideOper(bcptr) && !IsChannelService(bcptr) && !IsBot(bcptr)) {
-          assert(UserStats.opers > 0);
-          --UserStats.opers;
-        }
       }
       if (MyUser(bcptr))
         del_list_watch(bcptr);
