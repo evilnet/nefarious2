@@ -5156,6 +5156,17 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   memcpy(&cli_connectip(ghost), &cli_connectip(temp), sizeof(cli_connectip(ghost)));
   ircd_strncpy(cli_connecthost(ghost), cli_connecthost(temp), HOSTLEN + 1);
 
+  /* Refresh connection-derived identity fields that the original ghost
+   * inherited from a prior session.  cli_user->realhost is the resolved
+   * PTR / IAuth-spoofhost of the *current* connection; without
+   * refreshing it here, shun_lookup (parse.c:1587) and other match
+   * paths that consult realhost evaluate against the first connection's
+   * value forever, even across IP changes / 16 resumes.  /CHECK exposes
+   * this as `Real User/Host: user@stale.host (current.ip)`. */
+  if (cli_user(ghost) && cli_user(temp))
+    ircd_strncpy(cli_user(ghost)->realhost,
+                 cli_user(temp)->realhost, HOSTLEN + 1);
+
   /* Re-apply GeoIP data based on the new connection's IP */
   geoip_apply(ghost);
 
