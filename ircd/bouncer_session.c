@@ -5124,7 +5124,32 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * The ghost's IP, sockhost, port, listener, and confs may be stale
    * (from the original connection) or zeroed (MDBX-restored ghost).
    * Update them to reflect the actual reconnecting client's socket. */
+
+  /* IPcheck rebalance for IP transplant.
+   *
+   * The original primary's connect ran IPcheck on its OLD IP (entry-
+   * >connected ++).  bounce_hold_client did not symmetrically
+   * IPcheck_disconnect when its socket closed, so the OLD IP entry
+   * still holds that +1.  After this memcpy, cli_ip(ghost) points at
+   * the temp's NEW IP — and a later exit_one_client(ghost) would call
+   * IPcheck_disconnect against the NEW IP and miss the orphaned OLD
+   * IP +1 entirely.  Worse, if the NEW IP's entry was reaped by
+   * ip_registry_expire (no `connected` clients for 600 s) between
+   * revive and exit, the IPcheck_disconnect on the NEW IP fires
+   * `assert(entry)` in ip_registry_disconnect and SIGABRTs the whole
+   * server.  See project_bouncer_ipcheck_assert.md.
+   *
+   * Release the orphaned OLD IP entry here, before we overwrite
+   * cli_ip.  The NEW IP entry's +1 is donated by temp — we skip
+   * IPcheck_disconnect(temp) below, just ClearIPChecked(temp).  Ghost
+   * ends up accurately accounted on the NEW IP. */
+  if (IsIPChecked(ghost)) {
+    IPcheck_disconnect(ghost);
+    ClearIPChecked(ghost);
+  }
   memcpy(&cli_ip(ghost), &cli_ip(temp), sizeof(cli_ip(ghost)));
+  if (IsIPChecked(temp))
+    SetIPChecked(ghost);
   ircd_strncpy(con_sock_ip(ghost_con), con_sock_ip(temp_con), SOCKIPLEN + 1);
   ircd_strncpy(cli_sockhost(ghost), cli_sockhost(temp), HOSTLEN + 1);
   cli_port(ghost) = cli_port(temp);
@@ -5309,15 +5334,20 @@ void bounce_free_temp_client(struct Client *temp)
    * (entry->connected++).  remove_client_from_list/free_client touch none
    * of those counters, and we're skipping exit_one_client entirely, so
    * without explicit decrements every successful revive leaks +1 each in
-   * UserStats.local_clients, UserStats.clients, and the per-IP IPcheck slot.
+   * UserStats.local_clients and UserStats.clients.
    * Must run while cli_status is still STAT_USER and cli_user is intact —
-   * Count_clientdisconnects reads cli_sockhost via the macro. */
+   * Count_clientdisconnects reads cli_sockhost via the macro.
+   *
+   * IPcheck is NOT decremented here — bounce_revive transferred the
+   * temp's +1 to the ghost (Step 6a) by SetIPChecked(ghost) on the
+   * new IP without releasing temp's entry.  Decrementing here would
+   * double-release: ghost's later exit would underflow / miss the
+   * entry.  Just clear the flag so any later code doesn't think temp
+   * still owns an entry. */
   if (MyConnect(temp) && IsUser(temp))
     Count_clientdisconnects(temp, UserStats);
-  if (IsIPChecked(temp)) {
-    IPcheck_disconnect(temp);
+  if (IsIPChecked(temp))
     ClearIPChecked(temp);
-  }
 
   /* Remove from nick hash if present.
    * Temp client was added by m_nick during registration. */
@@ -7086,6 +7116,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
     persistence_send_status(sptr);
 
   motd_signon(sptr);
+
+  /* IRCv3 draft/metadata-2: mirror normal-path self-burst.  Aliases
+   * inherit the primary's account-scoped metadata at attach time, so
+   * the new local socket should learn its keys without an explicit
+   * METADATA SUB round-trip. */
+  metadata_burst_self_to_client(sptr);
 
   /* Informational NOTE */
   sendrawto_one(sptr,
