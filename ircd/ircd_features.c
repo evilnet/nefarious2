@@ -596,6 +596,17 @@ feature_notify_chathistory_retention(void)
 
   retention = feature_int(FEAT_CHATHISTORY_RETENTION);
 
+  /* feature_set fires this notify during initial conf parse from
+   * init_conf() -- but make_server(&me) hasn't run yet, so
+   * cli_serv(&me) is NULL and sendcmdto_serv_butone_v3 walks a NULL
+   * down-link list and SIGSEGVs.  Hit by `ircd -k` (conf check) and
+   * by any normal start where the conf value differs from the
+   * compiled-in default.  Skip the broadcast pre-server-init; the
+   * post-init burst path (CH A S/R at server_estab time) handles
+   * advertising the configured retention to peers when links come up. */
+  if (!cli_serv(&me))
+    return;
+
   /* Send CH A R <retention> to all peer servers */
   sendcmdto_serv_butone_v3(&me, CMD_CHATHISTORY, NULL, "A R %d", retention);
 
