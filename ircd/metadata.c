@@ -33,6 +33,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "capab.h"
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
@@ -1240,6 +1241,39 @@ struct MetadataEntry *metadata_list_client(struct Client *cptr)
   if (!cptr)
     return NULL;
   return cli_metadata(cptr);
+}
+
+void metadata_burst_self_to_client(struct Client *to)
+{
+  struct MetadataEntry *md;
+  unsigned int seq;
+
+  if (!to || !MyConnect(to))
+    return;
+  if (!CapActive(to, CAP_DRAFT_METADATA2))
+    return;
+
+  md = metadata_list_client(to);
+  if (!md)
+    return;
+
+  /* Manual batch open with target parameter (send_batch_start doesn't
+   * support the per-batch-type target arg the metadata spec requires). */
+  seq = con_batch_seq(cli_connect(to))++;
+  ircd_snprintf(NULL, cli_batch_id(to),
+                sizeof(con_batch_id(cli_connect(to))),
+                "%s%u", cli_yxx(to), seq);
+
+  sendrawto_one(to, ":%s BATCH +%s metadata %s",
+                cli_name(&me), cli_batch_id(to), cli_name(to));
+  while (md) {
+    sendrawto_one(to, "@batch=%s :%s METADATA %s %s %s :%s",
+                  cli_batch_id(to), cli_name(&me),
+                  cli_name(to), md->key,
+                  get_visibility_str(md), md->value);
+    md = md->next;
+  }
+  send_batch_end(to);
 }
 
 /** Clear all metadata for a client.

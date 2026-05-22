@@ -186,6 +186,18 @@ extern int metadata_set_client(struct Client *cptr, const char *key, const char 
  */
 extern struct MetadataEntry *metadata_list_client(struct Client *cptr);
 
+/** Emit the draft/metadata-2 self-metadata BATCH to @a to.
+ *
+ * Caller-side cap/account gating is folded in: if @a to does not
+ * have CAP_DRAFT_METADATA2 active, this is a no-op.  Used by
+ * register_user (normal path) and the bouncer-revive / alias-setup
+ * fast paths so each emit point doesn't have to repeat the BATCH
+ * open / METADATA loop / batch end sequence.
+ *
+ * @param[in] to Client receiving the burst (must be local).
+ */
+extern void metadata_burst_self_to_client(struct Client *to);
+
 /** Clear all metadata for a client.
  * @param[in] cptr Client to clear.
  */

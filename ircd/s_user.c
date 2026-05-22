@@ -539,6 +539,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
         motd_signon(ghost);
 
+        /* IRCv3 draft/metadata-2: mirror the normal-path self-metadata
+         * BATCH so a reviving client sees its persisted keys at attach
+         * time rather than waiting for an explicit METADATA SUB.  See
+         * project_bouncer_revive_alias_emit_gaps.md. */
+        metadata_burst_self_to_client(ghost);
+
         /* Notify client if their nick changed (ghost had different nick) */
         if (ircd_strcmp(original_nick, cli_name(ghost)) != 0) {
           sendcmdto_one(ghost, CMD_NICK, ghost, "%s", cli_name(ghost));
@@ -708,29 +714,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
     motd_signon(sptr);
 
     /* IRCv3 draft/metadata-2: burst client's own metadata after registration.
-     * Spec requires METADATA commands in a metadata batch with target param. */
-    if (CapActive(sptr, CAP_DRAFT_METADATA2)) {
-      struct MetadataEntry *md = metadata_list_client(sptr);
-      if (md) {
-        /* Manual batch open with target parameter (send_batch_start doesn't support it) */
-        {
-          unsigned int seq = con_batch_seq(cli_connect(sptr))++;
-          ircd_snprintf(NULL, cli_batch_id(sptr),
-                        sizeof(con_batch_id(cli_connect(sptr))),
-                        "%s%u", cli_yxx(sptr), seq);
-        }
-        sendrawto_one(sptr, ":%s BATCH +%s metadata %s",
-                      cli_name(&me), cli_batch_id(sptr), cli_name(sptr));
-        while (md) {
-          sendrawto_one(sptr, "@batch=%s :%s METADATA %s %s %s :%s",
-                        cli_batch_id(sptr), cli_name(&me),
-                        cli_name(sptr), md->key,
-                        get_visibility_str(md), md->value);
-          md = md->next;
-        }
-        send_batch_end(sptr);
-      }
-    }
+     * Spec requires METADATA commands in a metadata batch with target param.
+     * Same helper is invoked from the bouncer-revive and alias-setup fast
+     * paths so all three registration tails stay in sync. */
+    metadata_burst_self_to_client(sptr);
 
     if (cli_snomask(sptr) & SNO_NOISY)
       set_snomask(sptr, cli_snomask(sptr) & SNO_NOISY, SNO_ADD);
