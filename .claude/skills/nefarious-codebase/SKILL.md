@@ -29,7 +29,7 @@ Audit rule: a bare `LEN` constant where the buffer is `LEN+1`, or a non-NUL-term
 `ircd_kc_adapter.c` bridges libkc's curl_multi socket API with Nefarious's `ircd_events.h`.
 
 - **FD recycling**: curl closes the DNS socket and opens the TCP socket with the same fd. Use `socket_reattach()` (ircd_events.c) to re-register with epoll — it preserves `gh_ref`/`gh_flags` and is safe during callbacks.
-- **`socket_del` during callbacks is UNSAFE**: Nefarious's `event_add` == `event_execute` (synchronous, non-threaded). `socket_del` clears `GEN_ACTIVE`, and the assertion fails in `gen_ref_dec`.
+- **`socket_del` during callbacks is UNSAFE**: Nefarious's `event_add` == `event_execute` (synchronous, non-threaded). Calling `socket_del` mid-dispatch tears the socket down while `engine_loop` still holds a `gen_ref`, corrupting the synchronous ET_DESTROY chain. (`socket_del` sets `GEN_DESTROY`; `GEN_ACTIVE` is cleared in `event_execute` (ircd_events.c) on the ET_DESTROY event, and the `gh_flags & GEN_ACTIVE` assertion lives there too.)
 - **Simple removal**: defer to a 0-second timer (`TT_RELATIVE, 0`). `timer_run()` executes after `engine_loop`'s event dispatch, once all `gen_ref`s are released.
 - **Never `memset` a Socket struct that has pending gen_refs** — it zeroes `gh_ref` and corrupts the synchronous ET_DESTROY event chain.
 
@@ -52,6 +52,6 @@ Audit rule: a bare `LEN` constant where the buffer is `LEN+1`, or a non-NUL-term
 
 - Build with autotools: `./configure --enable-debug --with-maxcon=4096 && make`. `make install` installs to `$HOME/bin`, `$HOME/lib` by default; `--prefix=PATH` to relocate.
 - `./configure --help` lists options; common ones: `--enable-debug`, `--with-maxcon=N`, `--with-zstd` (S2S compression).
-- C unit tests live in `ircd/test/` (CMocka): build via its `Makefile`, run with `ircd/test/run-tests.sh`.
+- C unit tests live in `ircd/test/` (CMocka): build with `make cmocka` and run with `make test-cmocka` (or `make test-all`) from `ircd/test/`. Note `ircd/test/run-tests.sh` is a *separate* functional harness — it boots a real ircd and runs `.cmd` scripts via `test-driver.pl`; it does NOT run the CMocka unit tests.
 - Config-check without starting the daemon: `ircd -k` runs the conf parser and exits (note: feature-notify callbacks fire during init before `make_server(&me)`, so a notify that dereferences `cli_serv(&me)` will SIGSEGV under `-k` — guard with `if (!cli_serv(&me)) return;`).
 - For stalls/hangs ("why isn't X firing"), attach `gdb`/`strace` to the running PID before theorizing.

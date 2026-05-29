@@ -16,7 +16,7 @@ Use the `p10-protocol` skill for message/numeric format, token meanings, IP enco
 ## Method
 1. Identify the actors: map each 2-char server numeric and 5-char user numeric to a name where possible (from SERVER/N introductions in the log). Keep a legend.
 2. Build a chronological, per-entity timeline of the relevant tokens. Decode each: source numeric, token, params, and what state change it implies.
-3. Spot the anomaly: a token referencing an unknown/stale numeric (e.g. `GetUserN(...) couldn't find user`), a missing introduction before a reference, ordering violations (a reference before its N/BX C), a Q where a BX X was expected for an alias, truncated/garbled params.
+3. Spot the anomaly: a token whose source numeric resolves via `findNUser()` to NULL (surfacing upstream as the KILL reason `"(Unknown numeric nick)"`, ircd/parse.c), a missing introduction before a reference, ordering violations (a reference before its N/BX C), a Q where a BX X was expected for an alias, truncated/garbled params.
 4. Tie the anomaly to a mechanism — but stay in your lane: report the wire-level finding and hand off code-cause questions to the bouncer-analyst or main session rather than guessing deep into C internals.
 
 ## Output

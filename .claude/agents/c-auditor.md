@@ -12,7 +12,7 @@ You are a C codebase auditor for Nefarious IRCd and X3. Given a pattern or invar
 - Don't trust a prior sweep's claim of completeness; re-verify.
 
 ## Method
-1. Enumerate call sites / instances precisely. For function-call audits, do NOT rely on single-line `grep` — a call's arguments often wrap across lines (this is exactly how the `ircd_strncpy` straggler at m_account.c:264 hid). Paren-balance each call and extract the argument you care about. A small `python3` script over the `.c` files is the right tool.
+1. Enumerate call sites / instances precisely. For function-call audits, do NOT rely on single-line `grep` — a call's arguments often wrap across lines (this is exactly how the `ircd_strncpy` straggler in `m_account.c` hid: its bare `ACCOUNTLEN` size argument wrapped to the next line). Paren-balance each call and extract the argument you care about. A small `python3` script over the `.c` files is the right tool.
 2. For each instance, resolve the facts needed to judge it: the destination buffer's declared size (trace the struct/array declaration in `include/`), the source's null-termination, the relevant constant's value.
 3. Classify each: CORRECT (with the reason), BUG (with the precise off-by-one / mismatch), or REVIEW (genuinely ambiguous — explain why).
 4. Cross-check against the `nefarious-codebase` skill for known semantics (e.g. `ircd_strncpy` takes full buffer size, copies n-1; accessor indirection rules).

@@ -14,7 +14,7 @@ You are a bouncer-subsystem analyst for Nefarious IRCd. The bouncer is where the
 ## Required context
 Always ground yourself in:
 - The `bouncer-architecture` skill — especially its "Hard Invariants & Audit Rules" section. Check any proposed or suspect change against ALL of them.
-- The `p10-protocol` skill for BS/BX/N/Q token semantics.
+- The `p10-protocol` skill for N/Q token semantics; the `bouncer-architecture` skill for BS/BX bouncer-token flows (the p10-protocol skill does not document BS/BX). Raw token defs are in `include/msg.h` (`TOK_BOUNCER_SESSION "BS"`, `TOK_BOUNCER_TRANSFER "BX"`).
 - The `nefarious-codebase` skill for Client-vs-Connection accessors and `ircd_strncpy` semantics.
 - Core files: `ircd/bouncer_session.c`, `include/bouncer_session.h`, `ircd/s_user.c` (register_user / bounce_auto_resume), `ircd/send.c` (CapRouteContext), `ircd/m_nick.c`, `ircd/s_serv.c` (burst/convergence).
 

@@ -13,20 +13,23 @@ Reference for Nefarious's local SASL path (direct Keycloak auth via libkc) and i
 - Three-tier dispatch in `m_authenticate.c`: **local Keycloak → IAuth → P10 relay**.
 - `sasl_local_available()` checks `sasl_local_initialized && FEAT_SASL_LOCAL && kc_sasl_healthy`.
 - Health tracking via `sasl_health_cb` — toggles CAP NEW/DEL for the `sasl` capability.
-- libkc `CURLOPT_POSTFIELDSIZE` must be set **before** `CURLOPT_COPYPOSTFIELDS` (per curl docs).
+- libkc HTTP detail (lives in the external libkc library, not this repo): `CURLOPT_POSTFIELDSIZE` must be set **before** `CURLOPT_COPYPOSTFIELDS` (per curl docs). Not verifiable from the Nefarious tree.
 
 ## Mechanism Support
 
-- **PLAIN** — works via SASL_LOCAL, iauthd-ts, and services (X3) relay.
-- **OAUTHBEARER** — SASL_LOCAL only.
-- **EXTERNAL** — services (X3) relay only.
-- **SCRAM / ECDSA** — not implemented anywhere yet; advertised but non-functional.
+The local handlers all live in `sasl_auth.c` and are dispatched by `sasl_start()`. Which mechanisms get *advertised* is gated by `FEAT_SASL_LOCAL_MECHANISMS` (default `"PLAIN,OAUTHBEARER"`), so the off-by-default ones must be added there to appear in CAP.
+
+- **PLAIN** — SASL_LOCAL, iauthd-ts, and services (X3) relay. Advertised by default.
+- **OAUTHBEARER** — SASL_LOCAL only. Advertised by default.
+- **EXTERNAL** — SASL_LOCAL has a real handler (`sasl_handle_external`): matches the TLS client-cert fingerprint `cli_sslclifp()` against Keycloak's `x509_fingerprints` attribute via `kc_user_search`. Also available via the services relay. iauthd-ts does NOT support it (PLAIN only). Off by default.
+- **SCRAM-SHA-256** — fully implemented in SASL_LOCAL (`sasl_scram_*`, HMAC-SHA256 ClientProof verification against Keycloak-stored creds). Off by default.
+- **ECDSA-NIST256P-CHALLENGE** — fully implemented in SASL_LOCAL (`sasl_handle_ecdsa`, 32-byte challenge + `EVP_DigestVerify`). Off by default.
 
 ## Caches & Cross-Server Coherence
 
 - Auth caches: SipHash-2-4 negative/positive; webhook handler with deauth via `AC U`.
-- CI token for cross-server cache coherence; multi-URL webhook delivery.
-- **CI token**: `CACHEINVAL` / `CI` — a new P10 token, silently ignored by legacy servers. Handled by `ms_cacheinval()` in `sasl_webhook.c`.
+- **Webhook**: a single *inbound* HTTP listener (`sasl_webhook_init(port, secret)`, on top of libkc's `kc_webhook` server) that receives Keycloak events (password change / account delete / disable / logout). Configured by `FEAT_WEBHOOK_PORT` + `FEAT_WEBHOOK_SECRET` — one port, no URL list, no outbound delivery.
+- **CI token**: `CACHEINVAL` / `CI` — a P10 token for cross-server cache coherence, silently ignored by legacy servers. Handled by `ms_cacheinval()` in `sasl_webhook.c`.
 
 ## Transition Architecture
 

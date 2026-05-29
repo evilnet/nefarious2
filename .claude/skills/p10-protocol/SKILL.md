@@ -69,7 +69,8 @@ The numeric is derived from the server's position in the network and uses a base
 | `SJ` | SVSJOIN | Force channel join |
 | `SP` | SVSPART | Force channel part |
 | `SX` | SVSQUIT | Force quit |
-| `SE` | SETNAME | Change user realname (GECOS) |
+| `SR` | SETNAME | Change user realname (GECOS) |
+| `SE` | SETTIME | Set network time |
 
 ### Administrative
 | Token | Full Command | Purpose |
@@ -108,10 +109,10 @@ SASL <target> <source>!<fd>.<cookie> <subcmd> <data> [ext]
 |------|-----------|---------|-------------|------------|
 | `S` | Nef→X3 | Start (mechanism name) | Outbound only | `handle_sasl_input()` |
 | `H` | Nef→X3 | Host info (`user@host:ip`) | Outbound only | `handle_sasl_input()` |
-| `C` | Both | Continue (base64 auth data) | `m_sasl.c:178` | `handle_sasl_input()` |
-| `D` | Both | Done (`S`=success, `F`=fail, `A`=abort) | `m_sasl.c:197` | `handle_sasl_input()` |
-| `L` | X3→Nef | Login (account name, timestamp) | `m_sasl.c:181` | Outbound only |
-| `M` | X3→Nef | Mechanisms list (for 908 numeric) | `m_sasl.c:212` | Outbound only |
+| `C` | Both | Continue (base64 auth data) | `m_sasl.c:237` | `handle_sasl_input()` |
+| `D` | Both | Done (`S`=success, `F`=fail, `A`=abort) | `m_sasl.c:245` | `handle_sasl_input()` |
+| `L` | X3→Nef | Login (account name, timestamp) | `m_sasl.c:240` | Outbound only |
+| `M` | X3→Nef | Mechanisms list (for 908 numeric) | `m_sasl.c:267` | Outbound only |
 
 **Important**: X3 may send `I` (Impersonation) but Nefarious does NOT handle it - silently ignored.
 
@@ -235,7 +236,7 @@ AB FA ABAAB user.vhost.network
 |------|---------|
 | `src/proto-p10.c` | P10 protocol implementation, all `irc_*()` functions |
 | `src/nickserv.c` | SASL handling (`sasl_packet()`, `handle_sasl_input()`) |
-| `src/nickserv.c:6416` | `struct SASLSession` definition |
+| `src/nickserv.c` | `struct SASLSession` definition (~`nickserv.c:5736`) |
 
 ## X3 SASL Session Structure
 
@@ -247,25 +248,25 @@ struct SASLSession {
     char* buf, *p;              // Message buffer
     int buflen;
     char uid[128];              // Client identifier (server!fd.cookie)
-    char mech[16];              // Mechanism (PLAIN, EXTERNAL, OAUTHBEARER)
+    char mech[10];              // Mechanism (PLAIN, EXTERNAL, OAUTHBEARER)
     char* sslclifp;             // SSL client fingerprint
     char* hostmask;             // user@host:ip from H subcmd
     int flags;                  // SDFLAG_STALE etc.
 };
 ```
 
-## SETNAME (SE) P10 Command
+## SETNAME (SR) P10 Command
 
-The SETNAME command allows users to change their realname (GECOS field) mid-session.
+The SETNAME command allows users to change their realname (GECOS field) mid-session. Its P10 token is `SR` (`TOK_SETNAME`); do not confuse it with `SE`, which is SETTIME.
 
 ### P10 Message Format
 ```
-[USER_NUMERIC] SE :[NEW_REALNAME]
+[USER_NUMERIC] SR :[NEW_REALNAME]
 ```
 
 ### Example
 ```
-ABAAB SE :This is my new realname
+ABAAB SR :This is my new realname
 ```
 
 ### Direction
@@ -490,7 +491,7 @@ Specifies SASL provider server.
 
 ### FEAT_SASL_TIMEOUT
 
-**Default**: 8 (seconds)
+**Default**: 10 (seconds)
 
 SASL authentication timeout. After expiry, sends `D A` (abort) to services.
 
@@ -610,18 +611,18 @@ All IRC messages sent to clients supporting `message-tags` capability MUST inclu
 
 | Tag | Required When | Format | Example |
 |-----|---------------|--------|---------|
-| `msgid` | Client has `message-tags` | `msgid=<unique-id>` | `msgid=Bj-1703345678-42` |
+| `msgid` | Client has `message-tags` | `msgid=<unique-id>` | `msgid=ABAAAAAAAAAAAB` |
 | `time` | Client has `server-time` | `time=<ISO8601>` | `time=2025-12-30T12:58:45.101Z` |
 | `batch` | Inside a batch | `batch=<batchid>` | `batch=Bj127598488` |
 
 ### msgid Format
 
-The server generates msgids in the format:
+`generate_msgid()` (send.c) produces a contiguous 14-char HLC-seeded token — no separators, no startup timestamp:
 ```
-<server_numeric>-<startup_ts>-<counter>
+<server_numeric:2><hlc_logical_b64:3><counter_b64:9>
 ```
 
-Example: `Bj-1703345678-42`
+Example: `ABAAAAAAAAAAAB` (2-char `cli_yxx(&me)` + 3-char base64 HLC logical + 9-char base64 `++MsgIdCounter`).
 
 ### Implementation in m_batch.c
 
