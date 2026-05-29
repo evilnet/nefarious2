@@ -2199,17 +2199,19 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
   const char *sep;
   int rc;
 
-  log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: looking up msgid=%s", msgid);
-
   if (!history_available) {
-    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: history not available");
+    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: history not available (msgid=%s)", msgid);
     return -1;
   }
 
   rc = db_get(history_db_env, history_cf_msgid,
               msgid, strlen(msgid), /*snap=*/NULL, &val);
   if (rc != DB_OK) {
-    if (rc != DB_NOTFOUND)
+    if (rc == DB_NOTFOUND)
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "history_msgid_to_timestamp: msgid=%s NOT FOUND in cf_msgid index "
+                "(message never stored locally or evicted)", msgid);
+    else
       log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: db_get failed for msgid=%s: %s",
                 msgid, db_strerror(rc));
     return -1;
@@ -2235,7 +2237,6 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
     }
     memcpy(timestamp, sep, copy_len);
     timestamp[copy_len] = '\0';
-    log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: extracted timestamp='%s' (len=%zu)", timestamp, copy_len);
   }
 
   db_val_free(&val);

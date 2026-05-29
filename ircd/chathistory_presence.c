@@ -673,7 +673,15 @@ int presence_filter_messages(struct Client *requestor,
       dropped++;
     }
   }
-  (void)dropped;
+  /* Diagnostic: when a full sweep drops everything, the user sees an
+   * empty batch and has no way to tell strict-presence apart from
+   * msgid-not-found.  Log the breakdown once per call so prod can
+   * grep for it.  Silent on the common all-kept case. */
+  if (dropped > 0)
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence_filter_messages: target=%s anchor=%s%s kept=%d dropped=%d",
+              target, anchor, is_session ? " (session)" : " (account)",
+              kept, dropped);
   return kept;
 }
 
