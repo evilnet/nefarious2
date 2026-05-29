@@ -51,3 +51,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}/pull/${{ inputs.pr_number }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Always rebuild configure + build (stale cached configure
+          # layer drops USE_ROCKSDB and breaks history.c). See
+          # docker-publish.yml for the full rationale.
+          no-cache-filters: configure,build

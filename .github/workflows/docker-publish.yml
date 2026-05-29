@@ -77,3 +77,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Always rebuild the configure + build stages: their cache
+          # validity isn't captured by the COPY'd inputs (a stale
+          # autoreconf/configure layer silently drops USE_ROCKSDB and
+          # breaks history.c). apt/base layers still cache normally.
+          no-cache-filters: configure,build
