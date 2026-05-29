@@ -450,8 +450,31 @@ static void sni_free_certs(void)
 void ssl_abort(struct Client *cptr)
 {
   Debug((DEBUG_DEBUG, "SSL: aborted"));
-  if (cli_socket(cptr).ssl)
+  if (cli_socket(cptr).ssl) {
+    /* Same close_notify discipline as ssl_free (ssl.c:807): emit a
+     * graceful shutdown when the handshake has finished so the peer's
+     * TLS stack renders trailing ERROR/KILL records instead of
+     * reporting "unexpected eof while reading" / "transport error".
+     * On a half-handshaked SSL we instead mark the state shut so
+     * SSL_free's destruction doesn't emit an alert into the listener's
+     * CTX in an unexpected state — same hazard the comment in
+     * ssl_accept (ssl.c:480-490) warns about for the listener-CTX
+     * stale-state problem.
+     *
+     * Reachable on the re-entrancy path 271ef19c guards: ET_ERROR
+     * synthesised from engine_set_events on a dead fd lands here
+     * mid-exit_client, and the guard suppresses exit_client_msg —
+     * leaving this as the only SSL-teardown site in that frame.  The
+     * deferred ET_DESTROY → ssl_free runs later with ssl=NULL and
+     * no-ops, so close_notify must be emitted here or the peer never
+     * sees it. */
+    if (SSL_is_init_finished(cli_socket(cptr).ssl))
+      ssl_smart_shutdown(cli_socket(cptr).ssl);
+    else
+      SSL_set_shutdown(cli_socket(cptr).ssl,
+                       SSL_RECEIVED_SHUTDOWN | SSL_SENT_SHUTDOWN);
     SSL_free(cli_socket(cptr).ssl);
+  }
   cli_socket(cptr).ssl = NULL;
 }
 
