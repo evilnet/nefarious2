@@ -6367,17 +6367,68 @@ static const int umode_sync_flags[] = {
 
 /** Copy user mode flags from one client to another.
  * Only copies the flags listed in umode_sync_flags[].
+ *
+ * On MyConnect destinations, mirror set_user_mode's UserStats.opers /
+ * UserStats.inv_clients bookkeeping for FLAG_OPER and FLAG_INVISIBLE
+ * transitions (s_user.c:2440+).  Without this, an alias created with
+ * +o or +i via the raw SetFlag here is never counted, leaving the
+ * later exit_one_client normal-path decrement (s_misc.c:492-499) free
+ * to underflow the network-wide counter.
+ *
  * @param[in]  from Source client (usually the primary).
  * @param[out] to   Destination client (usually an alias).
  */
 static void bounce_copy_umodes(struct Client *from, struct Client *to)
 {
   int i;
+  int was_oper = HasFlag(to, FLAG_OPER);
+  int was_inv  = HasFlag(to, FLAG_INVISIBLE);
+  int was_hide = HasFlag(to, FLAG_HIDE_OPER);
+  int was_csv  = HasFlag(to, FLAG_CHSERV);
+  int was_bot  = HasFlag(to, FLAG_BOT);
+
   for (i = 0; umode_sync_flags[i] >= 0; i++) {
     if (HasFlag(from, umode_sync_flags[i]))
       SetFlag(to, umode_sync_flags[i]);
     else
       ClrFlag(to, umode_sync_flags[i]);
+  }
+
+  /* Counter discipline only on local destinations.  Remote aliases
+   * follow whatever counter path their home server emits (umode_str
+   * via BX C, or P10 MODE post-burst). */
+  if (MyConnect(to) && IsRegistered(to)) {
+    int now_oper = HasFlag(to, FLAG_OPER);
+    int now_inv  = HasFlag(to, FLAG_INVISIBLE);
+    int now_hide = HasFlag(to, FLAG_HIDE_OPER);
+    int now_csv  = HasFlag(to, FLAG_CHSERV);
+    int now_bot  = HasFlag(to, FLAG_BOT);
+    int was_visible = (!was_hide && !was_csv && !was_bot);
+    int now_visible = (!now_hide && !now_csv && !now_bot);
+
+    if (!was_oper && now_oper) {
+      if (now_visible)
+        ++UserStats.opers;
+    } else if (was_oper && !now_oper) {
+      if (was_visible) {
+        assert(UserStats.opers > 0);
+        --UserStats.opers;
+      }
+    } else if (was_oper && now_oper) {
+      if (was_visible && !now_visible) {
+        assert(UserStats.opers > 0);
+        --UserStats.opers;
+      } else if (!was_visible && now_visible) {
+        ++UserStats.opers;
+      }
+    }
+
+    if (!was_inv && now_inv) {
+      ++UserStats.inv_clients;
+    } else if (was_inv && !now_inv) {
+      assert(UserStats.inv_clients > 0);
+      --UserStats.inv_clients;
+    }
   }
 }
 

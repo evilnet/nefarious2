@@ -371,6 +371,22 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
         Count_clientdisconnects(bcptr, UserStats);
+        /* Mirror normal-path UserStats decrements (s_misc.c:492-499)
+         * for FLAG_OPER / FLAG_INVISIBLE.  Local aliases get counted
+         * at create time in bounce_copy_umodes (and at oper-grant time
+         * in bounce_apply_oper_grant) — must release the slot here or
+         * the counter drifts upward across every alias lifecycle.
+         * MyConnect gates this because remote aliases never had their
+         * ++ on this server. */
+        if (IsInvisible(bcptr)) {
+          assert(UserStats.inv_clients > 0);
+          --UserStats.inv_clients;
+        }
+        if (IsOper(bcptr) && !IsHideOper(bcptr)
+            && !IsChannelService(bcptr) && !IsBot(bcptr)) {
+          assert(UserStats.opers > 0);
+          --UserStats.opers;
+        }
       }
       if (MyUser(bcptr))
         del_list_watch(bcptr);
@@ -393,6 +409,19 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
         Count_clientdisconnects(bcptr, UserStats);
+        /* Held ghosts created by bounce_create_ghost are MyConnect by
+         * construction and may carry FLAG_OPER from a restored oper
+         * grant (bounce_apply_oper_grant ++s under MyConnect+!IsOper).
+         * Mirror the normal-path decrement so the counter rebalances. */
+        if (IsInvisible(bcptr)) {
+          assert(UserStats.inv_clients > 0);
+          --UserStats.inv_clients;
+        }
+        if (IsOper(bcptr) && !IsHideOper(bcptr)
+            && !IsChannelService(bcptr) && !IsBot(bcptr)) {
+          assert(UserStats.opers > 0);
+          --UserStats.opers;
+        }
       }
       if (MyUser(bcptr))
         del_list_watch(bcptr);
