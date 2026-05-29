@@ -4,17 +4,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Nefarious IRCd** is an IRC server daemon based on ircu (the Undernet IRC daemon). This is a C codebase using GNU Autotools for building. It implements the P10 protocol and includes features like:
+**Nefarious IRCd** is an IRC server daemon based on ircu (the Undernet IRC daemon), extended on the `ircv3.2-upgrade` branch with a full IRCv3.2+ feature set. C codebase, GNU Autotools build, P10 server-to-server protocol. Core ircu features:
 - Asynchronous event engines (epoll on Linux, kqueue on BSD, /dev/poll on Solaris)
-- Account persistence during netsplits
 - Dynamic configuration via F: (feature) lines
 - SSL/TLS support for server-to-server and client connections
+
+### IRCv3.2+ fork enhancements
+
+- **Bouncer subsystem** — persistent, account-anchored sessions with a multi-connection alias model and cross-server convergence (the modern replacement for plain netsplit account-persistence). Core in `ircd/bouncer_session.c`; read the `bouncer-architecture` skill before touching `bounce_*` / BS/BX paths.
+- **IRCv3 capabilities** — CAP/SASL, `draft/chathistory`, `draft/metadata-2`, `draft/multiline`, message-redaction, read-marker, event-playback, setname, echo-message, labeled-response, server-time, message-tags/msgid, batch.
+- **Storage** — RocksDB backend (migrated off libmdbx) for chathistory, metadata, multiline content, and bouncer-session persistence. Built under `USE_ROCKSDB` (configure `--with-rocksdb`); the db abstraction is in `ircd/db_*.c` / `include/db_*.h`. Optional zstd compression (`--with-zstd`, `USE_ZSTD`).
+- **SASL / Keycloak** — local SASL via Keycloak ROPC through libkc, three-tier AUTHENTICATE dispatch (local Keycloak / IAuth / P10 relay). `--enable-keycloak`; read the `sasl-keycloak` skill.
+- **P10 extensions** — bouncer BS/BX tokens, metadata MD/MDQ, read-marker MR, TAGMSG TG, SASL relay, cache-invalidation CI. Read the `p10-protocol` skill.
+
+## Claude Code skills & agents
+
+Repo-local Claude knowledge lives in `.claude/` — read the relevant skill before modifying a subsystem:
+- **Skills** (`.claude/skills/`): `bouncer-architecture`, `nefarious-codebase`, `sasl-keycloak`, `p10-protocol`.
+- **Agents** (`.claude/agents/`): `bouncer-analyst` (read-only bouncer race/invariant analysis), `c-auditor` (codebase-wide C pattern sweeps), `p10-log-tracer` (S2S wire-log reconstruction).
+
+A synced copy of these lives in the Afternet testnet superproject; when editing one, mirror the other.
 
 ## Build Commands
 
 ```bash
-# Configure the build
-./configure --enable-debug --with-maxcon=4096
+# Configure the build. RocksDB is REQUIRED — chathistory/metadata/
+# bouncer storage call ml_content_*/db_* unconditionally, and history.c
+# fails to compile without USE_ROCKSDB defined.
+./configure --enable-debug --with-maxcon=4096 \
+    --with-rocksdb=/usr --with-zstd=/usr --enable-keycloak
 
 # Compile
 make
@@ -34,19 +52,25 @@ Configuration options can be viewed with `./configure --help`. Common options:
 
 ## Docker Build
 
-Docker support is in `tools/docker/`:
+The multi-stage `Dockerfile` is at the repo root (GitHub Actions `docker-publish.yml` builds it on push):
 
 ```bash
-# Build Docker image
 docker build -t nefarious .
 
 # The Dockerfile:
-# - Uses Debian 12 base
-# - Installs build dependencies and Perl modules for iauthd
+# - Debian (trixie) base; installs librocksdb-dev, libzstd-dev,
+#   libcurl/libjansson (libkc), libgit2, GeoIP/MaxMindDB, cmocka
+# - Runs `autoreconf -fi` to regenerate configure from configure.in
+#   (the committed `configure` is treated as stale), then
+#   ./configure --with-rocksdb=/usr --with-zstd=/usr --enable-keycloak ...
 # - Runs as non-root user (UID/GID 1234)
-# - Configures with --enable-debug --with-maxcon=4096
-# - Removes build tools after compilation to reduce image size
 ```
+
+Note: the build relies on `autoreconf -fi` producing a configure with the
+RocksDB stanza. A stale `cache-from` buildx layer can reuse a configure
+where `USE_ROCKSDB` was never defined, which then fails at `history.c`
+(`implicit declaration of ml_content_*`). If that happens, clear the
+Actions build cache and rebuild fresh.
 
 ## Configuration System
 
@@ -92,7 +116,14 @@ IRC commands are implemented in `ircd/m_*.c` files (e.g., `m_join.c`, `m_privmsg
 - **Protocol**: `ircd_relay.c`, `m_*.c` - P10 protocol implementation
 - **Features**: `ircd_features.c` - Dynamic runtime configuration (F: lines)
 - **DNS resolution**: `ircd_res.c`, `ircd_reslib.c` - Asynchronous DNS
-- **Authentication**: Tools include `iauthd.pl` for external authentication
+- **Authentication**: `iauthd.pl` (external IAuth), plus local SASL via `sasl_auth.c` / `m_authenticate.c` (libkc/Keycloak)
+
+### Fork subsystems (see `.claude/skills/`)
+- **Bouncer**: `bouncer_session.c`, `m_bouncer.c` - persistent sessions, aliases, BS/BX P10 tokens
+- **Chathistory / storage**: `history.c`, `chathistory_presence.c`, `ml_content.c`, `db_*.c`, `m_chathistory.c` - RocksDB-backed history + strict-presence replay
+- **Metadata / read-marker**: `metadata.c`, `m_metadata.c`, `m_markread.c`
+- **SASL / Keycloak**: `sasl_auth.c`, `sasl_webhook.c`, `ircd_kc_adapter.c`
+- **Multiline / redaction / batch**: `m_batch.c`, `m_redact.c`
 
 ### Helper Tools
 Located in `tools/`:
