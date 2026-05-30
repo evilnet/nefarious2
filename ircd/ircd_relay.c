@@ -956,7 +956,21 @@ void relay_directed_message(struct Client* sptr, char* name, char* server, const
    */
   if (!IsMe(acptr))
   {
-    sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%s :%s", name, text);
+    /* Alias source rewrite — emit from the primary numeric so a legacy /
+     * non-BX-aware services server (which was never told about the alias
+     * via BX C) can resolve the source.  Without this, X3 / similar pseudo
+     * targets silently drop commands from a bouncer alias, leaving the
+     * client with no reply (no ERR_SERVICESDOWN, no 421).  Keep the alias
+     * numeric only when the primary's wire direction IS this very server
+     * — sending from primary toward primary's own server would be fake
+     * direction.  Mirrors relay_private_message (~:1200-1206). */
+    struct Client *from = sptr;
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      from = cli_user(sptr)->alias_primary;
+      if (!MyUser(from) && cli_from(from) == acptr)
+        from = sptr;
+    }
+    sendcmdto_one(from, CMD_PRIVATE, acptr, "%s :%s", name, text);
     return;
   }
   /*
@@ -1017,8 +1031,21 @@ void relay_directed_message(struct Client* sptr, char* name, char* server, const
     return;
   }
 
-  if (!(is_silenced(sptr, acptr, 0)))
-    sendcmdto_one(sptr, CMD_PRIVATE, acptr, "%s :%s", name, text);
+  if (!(is_silenced(sptr, acptr, 0))) {
+    /* Alias source rewrite — same pattern as relay_private_message.
+     * acptr is asserted MyUser above, so the !MyConnect guard never
+     * fires; from always resolves to the primary, giving the local
+     * recipient the same source numeric they would see from any other
+     * PM path. */
+    struct Client *from = sptr;
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      from = cli_user(sptr)->alias_primary;
+      if (!MyUser(from) && !MyConnect(acptr)
+          && cli_from(from) == cli_from(acptr))
+        from = sptr;
+    }
+    sendcmdto_one(from, CMD_PRIVATE, acptr, "%s :%s", name, text);
+  }
 }
 
 /** Relay a directed notice.
@@ -1046,7 +1073,17 @@ void relay_directed_notice(struct Client* sptr, char* name, char* server, const 
    * NICK[%host]@server addressed? See if <server> is me first
    */
   if (!IsMe(acptr)) {
-    sendcmdto_one(sptr, CMD_NOTICE, acptr, "%s :%s", name, text);
+    /* Alias source rewrite — see relay_directed_message for the full
+     * rationale.  Without this, NOTICEs from a bouncer alias addressed
+     * to nick@services-server arrive at the service with an unknown
+     * source numeric and get dropped. */
+    struct Client *from = sptr;
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      from = cli_user(sptr)->alias_primary;
+      if (!MyUser(from) && cli_from(from) == acptr)
+        from = sptr;
+    }
+    sendcmdto_one(from, CMD_NOTICE, acptr, "%s :%s", name, text);
     return;
   }
   /*
@@ -1090,8 +1127,17 @@ void relay_directed_notice(struct Client* sptr, char* name, char* server, const 
     return;
   }
 
-  if (!(is_silenced(sptr, acptr, 0)))
-    sendcmdto_one(sptr, CMD_NOTICE, acptr, "%s :%s", name, text);
+  if (!(is_silenced(sptr, acptr, 0))) {
+    /* Alias source rewrite — see relay_directed_message IsMe branch. */
+    struct Client *from = sptr;
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      from = cli_user(sptr)->alias_primary;
+      if (!MyUser(from) && !MyConnect(acptr)
+          && cli_from(from) == cli_from(acptr))
+        from = sptr;
+    }
+    sendcmdto_one(from, CMD_NOTICE, acptr, "%s :%s", name, text);
+  }
 }
 
 /** Relay a private message from a local user.
