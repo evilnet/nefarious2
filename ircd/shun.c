@@ -236,6 +236,57 @@ do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
       }
 
       /* ok, here's one that got Shunned */
+
+      /* Diagnostic: print which field actually matched, so opers can
+       * tell at-a-glance whether the shun hit cli_sockhost (DNS PTR or
+       * IAuth override), the raw IP, the realname, or the CTCP version.
+       * Pinned-down troubleshooting tool — without this, a spurious
+       * "Shun active for [@IP]" notice is unattributable to a specific
+       * field, which has cost us hours of investigation in the past.
+       * Logged at INFO so it lands in the regular ircd log; not sent to
+       * opers (the existing SNO_GLINE notice below already handles
+       * oper visibility, and we don't want to spam the snomask with
+       * field details on every match). */
+      {
+        const char *matched = "?";
+        const char *matched_val = "";
+        if (ShunIsRealName(shun)) {
+          matched = "cli_info";
+          matched_val = cli_info(acptr);
+        } else if (ShunIsVersion(shun)) {
+          matched = "cli_version";
+          matched_val = cli_version(acptr);
+        } else if (ShunIsIpMask(shun)) {
+          matched = "cli_ip(ipmask)";
+          matched_val = ircd_ntoa(&cli_ip(acptr));
+        } else {
+          /* Non-IPmask host shun.  Disambiguate sockhost-vs-IP. */
+          if (match(shun->sh_host, cli_sockhost(acptr)) == 0) {
+            matched = "cli_sockhost";
+            matched_val = cli_sockhost(acptr);
+          } else {
+            matched = "ircd_ntoa(cli_ip)";
+            matched_val = ircd_ntoa(&cli_ip(acptr));
+          }
+        }
+        log_write(LS_GLINE, L_INFO, 0,
+                  "Shun match: mask=%s reason=%s "
+                  "victim=%s!%s@%s ip=%s sockhost=%s host=%s realhost=%s "
+                  "matched_via=%s matched_value=%s",
+                  shun->sh_host ? shun->sh_host : "?",
+                  shun->sh_reason ? shun->sh_reason : "?",
+                  cli_name(acptr) ? cli_name(acptr) : "(noname)",
+                  (cli_user(acptr) && cli_user(acptr)->username[0])
+                    ? cli_user(acptr)->username : "(nouser)",
+                  cli_user(acptr) ? cli_user(acptr)->host : "(nouser)",
+                  ircd_ntoa(&cli_ip(acptr)),
+                  cli_sockhost(acptr) ? cli_sockhost(acptr) : "(null)",
+                  cli_user(acptr) ? cli_user(acptr)->host : "(nouser)",
+                  cli_user(acptr) ? cli_user(acptr)->realhost : "(nouser)",
+                  matched,
+                  matched_val ? matched_val : "(null)");
+      }
+
       if (!feature_bool(FEAT_HIS_SHUN_REASON))
         sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :You are shunned: %s", acptr,
              shun->sh_reason);
