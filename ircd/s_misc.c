@@ -428,6 +428,21 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
       remove_user_from_all_channels(bcptr);
       hRemClient(bcptr);
       RemoveYXXClient(cli_user(bcptr)->server, cli_yxx(bcptr));
+      /* Defensive: if any session still holds a back-pointer to this
+       * ghost, null it before remove_client_from_list dealloc's the
+       * Client.  Without this, bounce_dirty_persist_cb (and any other
+       * iterator that touches session->hs_client) faults later when
+       * cli_connect on the freed Client reads as NULL and MyConnect()
+       * NULL-derefs.  The m_kill path now routes IsBouncerHold victims
+       * through bounce_kill_session (which already destroys the session
+       * and nulls hs_client), but other paths that exit a held ghost
+       * may not — keep this defensive null so a single missed null in
+       * any caller doesn't UAF the persist timer. */
+      {
+        struct BouncerSession *bsess = bounce_get_session(bcptr);
+        if (bsess && bsess->hs_client == bcptr)
+          bsess->hs_client = NULL;
+      }
       remove_client_from_list(bcptr);
       return;
     }

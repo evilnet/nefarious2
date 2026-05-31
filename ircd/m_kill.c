@@ -165,7 +165,8 @@ static int do_kill(struct Client* cptr, struct Client* sptr,
    * before exit_client_msg.  bounce_kill_session clears hs_client so
    * the upcoming exit_one_client pass skips its bouncer branch
    * cleanly. */
-  if (!IsServer(cptr) && MyConnect(victim) && IsUser(victim)
+  if (!IsServer(cptr) && MyConnect(victim)
+      && (IsUser(victim) || IsBouncerHold(victim))
       && IsAccount(victim)) {
     struct BouncerSession *bsess = bounce_get_session(victim);
     if (bsess && bsess->hs_client == victim)
