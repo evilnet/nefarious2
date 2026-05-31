@@ -1890,7 +1890,7 @@ void bounce_snapshot_channels(struct BouncerSession *session,
        member && i < BOUNCER_MAX_CHANNELS;
        member = member->next_channel) {
     ircd_strncpy(session->hs_channels[i].name,
-                 member->channel->chname, CHANNELLEN);
+                 member->channel->chname, CHANNELLEN + 1);
     session->hs_channels[i].modes = member->status;
     session->hs_channels[i].join_tv_sec = member->join_tv.tv_sec;
     session->hs_channels[i].join_tv_usec = member->join_tv.tv_usec;
@@ -2456,9 +2456,9 @@ void bounce_session_record_legacy_intro(struct BouncerSession *session,
   if (session->hs_legacy_intro_count >= BOUNCER_LEGACY_INTRO_MAX)
     return;
   ircd_strncpy(session->hs_legacy_intros[session->hs_legacy_intro_count].bli_peer,
-               peer_yxx, NICKLEN);
+               peer_yxx, NICKLEN + 1);
   ircd_strncpy(session->hs_legacy_intros[session->hs_legacy_intro_count].bli_face,
-               face_yxx, 5);
+               face_yxx, 6);    /* bli_face is char[6]; full 5-char YYXXX + NUL */
   session->hs_legacy_intro_count++;
 }
 
@@ -6244,19 +6244,19 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
      * so without this pass our own local aliases stay stale. */
     if (alias && IsBouncerAlias(alias) && MyConnect(alias)) {
       if (0 == ircd_strcmp(field, "host"))
-        ircd_strncpy(cli_user(alias)->host, value, HOSTLEN);
+        ircd_strncpy(cli_user(alias)->host, value, HOSTLEN + 1);
       else if (0 == ircd_strcmp(field, "realhost"))
-        ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN);
+        ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN + 1);
       else if (0 == ircd_strcmp(field, "realname"))
-        ircd_strncpy(cli_info(alias), value, REALLEN);
+        ircd_strncpy(cli_info(alias), value, REALLEN + 1);
       else if (0 == ircd_strcmp(field, "fakehost"))
-        ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN);
+        ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN + 1);
       else if (0 == ircd_strcmp(field, "cloakhost"))
-        ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN);
+        ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN + 1);
       else if (0 == ircd_strcmp(field, "cloakip"))
-        ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN);
+        ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN + 1);
       else if (0 == ircd_strcmp(field, "username"))
-        ircd_strncpy(cli_user(alias)->username, value, USERLEN);
+        ircd_strncpy(cli_user(alias)->username, value, USERLEN + 1);
     }
 
     sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
@@ -6986,21 +6986,21 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 
   /* --- Step 2: Overwrite identity from primary ---
    * Same pattern as bounce_alias_create() for remote aliases. */
-  ircd_strncpy(cli_name(sptr), cli_name(primary), NICKLEN);
-  ircd_strncpy(user->username, cli_user(primary)->username, USERLEN);
-  ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN);
+  ircd_strncpy(cli_name(sptr), cli_name(primary), NICKLEN + 1);
+  ircd_strncpy(user->username, cli_user(primary)->username, USERLEN + 1);
+  ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN + 1);
   /* Do NOT overwrite realhost — the alias has its own real connection host,
    * needed for oper WHOIS, gline matching, and stays correct on promotion. */
-  ircd_strncpy(cli_info(sptr), cli_info(primary), REALLEN);
-  ircd_strncpy(user->account, cli_user(primary)->account, ACCOUNTLEN);
+  ircd_strncpy(cli_info(sptr), cli_info(primary), REALLEN + 1);
+  ircd_strncpy(user->account, cli_user(primary)->account, ACCOUNTLEN + 1);
   user->acc_create = cli_user(primary)->acc_create;
 
   /* Copy cloaked/fake host (controls what other users see).
    * Do NOT overwrite cli_ip — the alias has its own real socket IP,
    * needed for IPcheck, ban matching, and logging. */
-  ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
-  ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
-  ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+  ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
+  ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN + 1);
+  ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN + 1);
 
   /* Inherit the session's sessid so this alias's cli_session_id agrees
    * with the primary's and with the bouncer session record.  Supersedes
@@ -7351,18 +7351,18 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     if (!user)
       goto forward;
     hRemClient(alias);
-    ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN);
-    ircd_strncpy(user->username, cli_user(primary)->username, USERLEN);
-    ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN);
-    ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN);
-    ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN);
-    ircd_strncpy(user->account, account, ACCOUNTLEN);
+    ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN + 1);
+    ircd_strncpy(user->username, cli_user(primary)->username, USERLEN + 1);
+    ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN + 1);
+    ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN + 1);
+    ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
+    ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
     user->acc_create = cli_user(primary)->acc_create;
     user->alias_primary = primary;
     memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
-    ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
-    ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
-    ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+    ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
+    ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN + 1);
+    ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN + 1);
     /* Inherit the session's sessid so this alias's cli_session_id
      * agrees with the primary's and with the bouncer session record. */
     ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
@@ -7385,21 +7385,21 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     goto forward;
 
   /* Copy identity from primary */
-  ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN);
-  ircd_strncpy(user->username, cli_user(primary)->username, USERLEN);
-  ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN);
-  ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN);
-  ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN);
-  ircd_strncpy(user->account, account, ACCOUNTLEN);
+  ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN + 1);
+  ircd_strncpy(user->username, cli_user(primary)->username, USERLEN + 1);
+  ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN + 1);
+  ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN + 1);
+  ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
+  ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
   user->acc_create = cli_user(primary)->acc_create;
   user->server = alias_server;
   user->alias_primary = primary;
 
   /* Copy IP and cloaked/fake host from primary */
   memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
-  ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN);
-  ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN);
-  ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN);
+  ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
+  ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN + 1);
+  ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN + 1);
 
   /* Inherit the session's sessid so this alias's cli_session_id agrees
    * with the primary's and with the bouncer session record.  Remote
@@ -7788,7 +7788,7 @@ static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr,
          * its own nick change and the client UI drifts. */
         if (MyConnect(alias))
           sendcmdto_one(alias, CMD_NICK, alias, ":%s", new_nick);
-        ircd_strncpy(cli_name(alias), new_nick, NICKLEN);
+        ircd_strncpy(cli_name(alias), new_nick, NICKLEN + 1);
       }
     }
   }
@@ -7855,21 +7855,21 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
 
   /* Apply update based on field name */
   if (0 == ircd_strcmp(field, "host")) {
-    ircd_strncpy(cli_user(alias)->host, value, HOSTLEN);
+    ircd_strncpy(cli_user(alias)->host, value, HOSTLEN + 1);
   } else if (0 == ircd_strcmp(field, "realhost")) {
-    ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN);
+    ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN + 1);
   } else if (0 == ircd_strcmp(field, "realname")) {
-    ircd_strncpy(cli_info(alias), value, REALLEN);
+    ircd_strncpy(cli_info(alias), value, REALLEN + 1);
   } else if (0 == ircd_strcmp(field, "fakehost")) {
-    ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN);
+    ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN + 1);
   } else if (0 == ircd_strcmp(field, "cloakhost")) {
-    ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN);
+    ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN + 1);
   } else if (0 == ircd_strcmp(field, "cloakip")) {
-    ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN);
+    ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN + 1);
   } else if (0 == ircd_strcmp(field, "username")) {
-    ircd_strncpy(cli_user(alias)->username, value, USERLEN);
+    ircd_strncpy(cli_user(alias)->username, value, USERLEN + 1);
   } else if (0 == ircd_strcmp(field, "account")) {
-    ircd_strncpy(cli_user(alias)->account, value, ACCOUNTLEN);
+    ircd_strncpy(cli_user(alias)->account, value, ACCOUNTLEN + 1);
     if (value[0] != '\0')
       SetAccount(alias);
     else
