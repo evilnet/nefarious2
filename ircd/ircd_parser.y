@@ -52,6 +52,7 @@
 #include "s_debug.h"
 #include "dnsbl.h"
 #include "s_misc.h"
+#include "sasl_conf.h"
 #include "send.h"
 #include "struct.h"
 #include "sys.h"
@@ -256,6 +257,18 @@ static void free_slist(struct SLink **link) {
 %token KEY
 %token REQUIRE_SASL
 %token BOUNCER
+%token WEBHOOK
+%token KEYCLOAK
+%token SECRET
+%token URL
+%token REALM
+%token CLIENT_ID
+%token CLIENT_SECRET
+%token PATH
+%token MAXCONNECTIONS
+%token MAXREQUESTSIZE
+%token QUEUEMAX
+%token BATCHSIZE
 /* and now a lot of privileges... */
 %token TPRIV_CHAN_LIMIT TPRIV_MODE_LCHAN TPRIV_DEOP_LCHAN TPRIV_WALK_LCHAN
 %token TPRIV_LOCAL_KILL TPRIV_REHASH TPRIV_RESTART TPRIV_GITSYNC TPRIV_DIE
@@ -288,7 +301,9 @@ block: adminblock | generalblock | classblock | connectblock |
        uworldblock | operblock | portblock | jupeblock | clientblock |
        killblock | cruleblock | motdblock | featuresblock | quarantineblock |
        pseudoblock | iauthblock | forwardsblock | webircblock | spoofhostblock |
-       exceptblock | sslblock | dnsblblock | include | error ';';
+       exceptblock | sslblock | dnsblblock |
+       webhookblock | keycloakblock |
+       include | error ';';
 
 /* The timespec, sizespec and expr was ripped straight from
  * ircd-hybrid-7. */
@@ -2096,4 +2111,85 @@ sslkeyfile: KEY '=' QSTRING ';'
 {
   MyFree(origin);
   origin = $3;
+};
+
+/* ---------------------------------------------------------------- */
+/* Webhook { } — Keycloak webhook listener configuration.           */
+/* Replaces FEAT_WEBHOOK_PORT/FEAT_WEBHOOK_SECRET.  Driven by libkc; */
+/* see ircd/sasl_conf.c for state management.                       */
+/* ---------------------------------------------------------------- */
+webhookblock: WEBHOOK
+{
+  sasl_conf_webhook_begin();
+} '{' webhookitems '}' ';' ;
+webhookitems: webhookitem webhookitems | webhookitem;
+webhookitem: webhookport | webhooksecret | webhookvhost | webhookpath
+           | webhookmaxconn | webhookmaxreqsize
+           | webhookqueuemax | webhookbatchsize;
+webhookport: PORT '=' NUMBER ';'
+{
+  sasl_conf_webhook_set_port($3);
+};
+webhooksecret: SECRET '=' QSTRING ';'
+{
+  sasl_conf_webhook_set_secret($3);
+  MyFree($3);
+};
+webhookvhost: VHOST '=' QSTRING ';'
+{
+  sasl_conf_webhook_set_vhost($3);
+  MyFree($3);
+};
+webhookpath: PATH '=' QSTRING ';'
+{
+  sasl_conf_webhook_set_path($3);
+  MyFree($3);
+};
+webhookmaxconn: MAXCONNECTIONS '=' NUMBER ';'
+{
+  sasl_conf_webhook_set_max_connections($3);
+};
+webhookmaxreqsize: MAXREQUESTSIZE '=' sizespec ';'
+{
+  sasl_conf_webhook_set_max_request_size($3);
+};
+webhookqueuemax: QUEUEMAX '=' NUMBER ';'
+{
+  sasl_conf_webhook_set_queue_max($3);
+};
+webhookbatchsize: BATCHSIZE '=' NUMBER ';'
+{
+  sasl_conf_webhook_set_batch_size($3);
+};
+
+/* ---------------------------------------------------------------- */
+/* Keycloak { } — Keycloak REST API configuration.                  */
+/* Replaces FEAT_KEYCLOAK_URL/REALM/CLIENT_ID/CLIENT_SECRET.        */
+/* ---------------------------------------------------------------- */
+keycloakblock: KEYCLOAK
+{
+  sasl_conf_keycloak_begin();
+} '{' keycloakitems '}' ';' ;
+keycloakitems: keycloakitem keycloakitems | keycloakitem;
+keycloakitem: keycloakurl | keycloakrealm
+            | keycloakclientid | keycloakclientsecret;
+keycloakurl: URL '=' QSTRING ';'
+{
+  sasl_conf_keycloak_set_url($3);
+  MyFree($3);
+};
+keycloakrealm: REALM '=' QSTRING ';'
+{
+  sasl_conf_keycloak_set_realm($3);
+  MyFree($3);
+};
+keycloakclientid: CLIENT_ID '=' QSTRING ';'
+{
+  sasl_conf_keycloak_set_client_id($3);
+  MyFree($3);
+};
+keycloakclientsecret: CLIENT_SECRET '=' QSTRING ';'
+{
+  sasl_conf_keycloak_set_client_secret($3);
+  MyFree($3);
 };

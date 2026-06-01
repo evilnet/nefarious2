@@ -24,6 +24,7 @@
 #include "config.h"
 
 #include "s_conf.h"
+#include "sasl_conf.h"
 #include "dnsbl.h"
 #include "IPcheck.h"
 #include "class.h"
@@ -1268,11 +1269,13 @@ int read_configuration_file(void)
   conf_error = 0;
   feature_unmark(); /* unmark all features for resetting later */
   clear_nameservers(); /* clear previous list of DNS servers */
+  sasl_conf_reset_pending(); /* clear Webhook{} / Keycloak{} pending */
   if (!init_lexer())
     return 0;
   yyparse();
   deinit_lexer();
   feature_mark(); /* reset unmarked features */
+  sasl_conf_apply(); /* push pending Webhook{}/Keycloak{} into libkc */
   conf_already_read = 1;
   return 1;
 }

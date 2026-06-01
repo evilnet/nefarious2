@@ -81,6 +81,7 @@
 #include "listener.h"
 #include "paste_listener.h"
 #include "sasl_auth.h"
+#include "sasl_conf.h"
 #include "sasl_webhook.h"
 #ifdef USE_LIBKC
 #include "ircd_kc_adapter.h"
@@ -1310,7 +1311,11 @@ int main(int argc, char **argv) {
 
 #ifdef USE_LIBKC
   {
-    /* Initialize libkc transport — needed by webpush, local SASL, and webhooks */
+    /* Initialize libkc transport — needed by webpush, local SASL, and webhooks.
+     * The Keycloak{} and Webhook{} blocks are the source of truth (with the
+     * deprecated FEAT_KEYCLOAK_x / FEAT_WEBHOOK_x features as fallback); the
+     * parser has already stashed the parsed values in sasl_conf, and we apply
+     * them right after kc_init() lands. */
     int kc_needed = feature_bool(FEAT_CAP_draft_webpush)
                  || feature_bool(FEAT_SASL_LOCAL)
                  || feature_int(FEAT_WEBHOOK_PORT) > 0;
@@ -1321,28 +1326,10 @@ int main(int argc, char **argv) {
         log_write(LS_SYSTEM, L_WARNING, 0,
                   "Failed to initialize libkc HTTP transport");
       } else {
-        /* Initialize Keycloak REST API layer if SASL_LOCAL is configured */
-        if (feature_bool(FEAT_SASL_LOCAL)) {
-          struct kc_config kc_cfg;
-          memset(&kc_cfg, 0, sizeof(kc_cfg));
-          kc_cfg.base_url      = feature_str(FEAT_KEYCLOAK_URL);
-          kc_cfg.realm          = feature_str(FEAT_KEYCLOAK_REALM);
-          kc_cfg.client_id      = feature_str(FEAT_KEYCLOAK_CLIENT_ID);
-          kc_cfg.client_secret  = feature_str(FEAT_KEYCLOAK_CLIENT_SECRET);
-
-          if (kc_keycloak_init(&kc_cfg) != 0) {
-            log_write(LS_SYSTEM, L_WARNING, 0,
-                      "Failed to initialize Keycloak REST API — local SASL unavailable");
-          } else {
-            sasl_local_init();
-          }
-        }
-
-        /* Initialize webhook listener if configured */
-        if (feature_int(FEAT_WEBHOOK_PORT) > 0) {
-          sasl_webhook_init(feature_int(FEAT_WEBHOOK_PORT),
-                            feature_str(FEAT_WEBHOOK_SECRET));
-        }
+        /* Apply parsed Keycloak{} + Webhook{} blocks (or fall back to features).
+         * Re-initialises libkc's Keycloak REST API + arms local SASL on first
+         * arrival, and starts the webhook listener if configured. */
+        sasl_conf_boot_apply();
 
         /* Initialize webpush if enabled */
         if (feature_bool(FEAT_CAP_draft_webpush))
