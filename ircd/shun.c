@@ -218,6 +218,20 @@ do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
             continue;
         Debug((DEBUG_DEBUG,"Matched!"));
       } else { /* Host/IP shun */
+        /* Defer when the shun has a specific (non-wildcard) ident but
+         * the client's username is unknown yet (pre-USER mid-
+         * registration — cli_user is allocated by make_user on first
+         * input, but cli_user->username[] isn't populated until the
+         * USER command is parsed).  Without this guard the wildcard
+         * host check below would match the client and emit a spurious
+         * SNO_GLINE "Shun active for <victim>" notice — wrongly
+         * attributing a shun to a user whose ident doesn't (yet)
+         * match.  The post-registration shun check via shun_lookup
+         * correctly handles such clients once their USER lands, since
+         * its ident match runs unconditionally; this only fixes the
+         * add-time apply loop's mirror behaviour. */
+        if (shun->sh_user[0] != '*' && !*(cli_user(acptr)->username))
+          continue;
         if (*(cli_user(acptr)->username) &&
             match(shun->sh_user, (cli_user(acptr))->username) != 0)
           continue;
