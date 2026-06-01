@@ -134,6 +134,10 @@ extern int sasl_local_init(void);
 /** Periodic health check callback — call from a timer to probe Keycloak liveness. */
 extern void sasl_health_check(void);
 
+/** Restart the health retry timer with the current FEAT_SASL_HEALTH_INTERVAL.
+ * No-op when the timer isn't running (Keycloak is healthy). */
+extern void sasl_health_restart_timer(void);
+
 /* ---- Auth cache API (for webhook invalidation and stats) ---- */
 
 /** Auth cache statistics. */

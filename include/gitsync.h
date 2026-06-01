@@ -62,8 +62,18 @@ struct GitsyncStats {
 /** Initialize gitsync subsystem */
 extern void gitsync_init(void);
 
-/** Start the gitsync timer after config is loaded */
+/** Start the gitsync timer after config is loaded.
+ * Idempotent: no-op if the timer is already active or if
+ * FEAT_GITSYNC_ENABLE is false. */
 extern void gitsync_start_timer(void);
+
+/** Stop the gitsync timer if it is currently active. */
+extern void gitsync_stop_timer(void);
+
+/** Restart the gitsync timer with the current FEAT_GITSYNC_INTERVAL.
+ * No-op if the timer is not currently running — callers that want
+ * the timer to start regardless should use gitsync_start_timer(). */
+extern void gitsync_restart_timer(void);
 
 /** Trigger a gitsync
  * @param sptr Client triggering the sync (NULL for timer)

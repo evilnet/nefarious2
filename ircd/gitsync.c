@@ -1154,6 +1154,12 @@ gitsync_start_timer(void)
   if (!feature_bool(FEAT_GITSYNC_ENABLE))
     return;
 
+  /* Idempotent: skip if timer is already armed.  Notify callbacks may
+   * fire during init_conf() before ircd.c calls us at boot, and may
+   * also fire on a runtime feature change while we're already running. */
+  if (t_active(&gitsync_timer))
+    return;
+
   /* Ensure gitsync.conf exists so include directive doesn't fail */
   conf_file = feature_str(FEAT_GITSYNC_CONF_FILE);
   if (!conf_file || !*conf_file)
@@ -1178,6 +1184,27 @@ gitsync_start_timer(void)
             NULL, TT_PERIODIC, interval);
 
   Debug((DEBUG_INFO, "GitSync: Timer started with interval %d seconds", interval));
+}
+
+void
+gitsync_stop_timer(void)
+{
+  if (t_active(&gitsync_timer))
+    timer_del(&gitsync_timer);
+}
+
+void
+gitsync_restart_timer(void)
+{
+  /* Only restart if the timer is already armed — during boot the notify
+   * callback fires from init_conf() before gitsync_start_timer() runs,
+   * and we don't want to start the timer ahead of the rest of the boot
+   * sequence.  The boot path will start it with the (already-up-to-date)
+   * interval value. */
+  if (!t_active(&gitsync_timer))
+    return;
+  timer_del(&gitsync_timer);
+  gitsync_start_timer();
 }
 
 enum GitsyncStatus

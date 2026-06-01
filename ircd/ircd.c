@@ -170,6 +170,11 @@ static struct Timer history_purge_timer; /**< timer structure for history_purge_
 static struct Timer metadata_purge_timer; /**< timer structure for metadata_purge_callback() */
 static struct Timer bouncer_gate_timer; /**< timer structure for bounce_legacy_burst_gate_tick() */
 
+/* Forward declarations so the *_restart_timer helpers below can refer to
+ * the callbacks before their definitions. */
+static void history_purge_callback(struct Event* ev);
+static void metadata_purge_callback(struct Event* ev);
+
 /** Daemon information. */
 static struct Daemon thisServer  = { 0, 0, 0, 0, 0, 0, -1 };
 
@@ -790,6 +795,43 @@ static void history_purge_callback(struct Event* ev)
   presence_retention_sweep();
 }
 
+/** Compute the effective interval for the history_purge_timer.
+ * Honours FEAT_CHATHISTORY_MAINTENANCE_INTERVAL with a one-minute floor. */
+static int history_purge_interval(void)
+{
+  int v = feature_int(FEAT_CHATHISTORY_MAINTENANCE_INTERVAL);
+  if (v < 60)
+    v = 60;
+  return v;
+}
+
+/** Restart the history_purge_timer with the current FEAT_CHATHISTORY_MAINTENANCE_INTERVAL.
+ * No-op if the timer is not currently armed — the boot path arms it once
+ * the IRCd is past init_conf(). */
+void history_purge_restart_timer(void)
+{
+  if (!t_active(&history_purge_timer))
+    return;
+  timer_del(&history_purge_timer);
+  timer_add(timer_init(&history_purge_timer), history_purge_callback, 0,
+            TT_PERIODIC, history_purge_interval());
+}
+
+/** Restart the metadata_purge_timer with the current FEAT_METADATA_PURGE_FREQUENCY.
+ * No-op if the timer is not currently armed. */
+void metadata_purge_restart_timer(void)
+{
+  int interval;
+  if (!t_active(&metadata_purge_timer))
+    return;
+  interval = feature_int(FEAT_METADATA_PURGE_FREQUENCY);
+  if (interval < 60)
+    interval = 60;
+  timer_del(&metadata_purge_timer);
+  timer_add(timer_init(&metadata_purge_timer), metadata_purge_callback, 0,
+            TT_PERIODIC, interval);
+}
+
 /** Periodic callback to purge expired metadata cache entries.
  * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL.
  * @param[in] ev Timer event (ignored).
@@ -1130,7 +1172,8 @@ int main(int argc, char **argv) {
   timer_add(timer_init(&connect_timer), try_connections, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&ping_timer), check_pings, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&destruct_event_timer), exec_expired_destruct_events, 0, TT_PERIODIC, 60);
-  timer_add(timer_init(&history_purge_timer), history_purge_callback, 0, TT_PERIODIC, 3600); /* Run every hour */
+  timer_add(timer_init(&history_purge_timer), history_purge_callback, 0,
+            TT_PERIODIC, history_purge_interval());
   timer_add(timer_init(&metadata_purge_timer), metadata_purge_callback, 0, TT_PERIODIC,
             feature_int(FEAT_METADATA_PURGE_FREQUENCY)); /* Default: hourly */
   /* 1-second tick to release expired legacy-peer burst gates per

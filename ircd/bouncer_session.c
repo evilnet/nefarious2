@@ -295,6 +295,28 @@ static void bounce_start_dirty_persist_timer(void)
   dirty_persist_timer_active = 1;
 }
 
+/** Apply a runtime change to FEAT_BOUNCER_PERSIST_INTERVAL to the live timer.
+ * If the timer is armed, re-arm it for the new interval so the next fire
+ * happens at the updated cadence rather than waiting for the previously
+ * scheduled tick.  No-op when the timer isn't running (no dirty sessions). */
+void bounce_dirty_persist_restart_timer(void)
+{
+  int interval;
+
+  if (!dirty_persist_timer_active)
+    return;
+
+  interval = feature_int(FEAT_BOUNCER_PERSIST_INTERVAL);
+  if (interval <= 0) {
+    timer_del(&dirty_persist_timer);
+    dirty_persist_timer_active = 0;
+    return;
+  }
+
+  /* TT_RELATIVE accepts timer_chg (only TT_PERIODIC is asserted against). */
+  timer_chg(&dirty_persist_timer, TT_RELATIVE, interval);
+}
+
 /** Mark a bouncer session as dirty (needs periodic persist).
  * Called from channel.c on JOIN/PART/KICK and MODE changes.
  * @param[in] cptr Client whose session to mark dirty.

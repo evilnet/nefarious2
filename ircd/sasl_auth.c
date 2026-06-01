@@ -2146,6 +2146,20 @@ static void sasl_stop_health_retry(void)
             "SASL LOCAL: Health retry timer stopped — Keycloak is healthy");
 }
 
+/** Restart the health retry timer with the current FEAT_SASL_HEALTH_INTERVAL.
+ * No-op if the timer is not currently running — the timer is only armed
+ * while Keycloak is unhealthy, so the new interval naturally takes effect
+ * on the next failure when start_health_retry re-reads the feature. */
+void sasl_health_restart_timer(void)
+{
+  if (!sasl_health_retry_timer_active)
+    return;
+
+  timer_del(&sasl_health_retry_timer);
+  sasl_health_retry_timer_active = 0;
+  sasl_start_health_retry();
+}
+
 /** Periodic health retry timer callback — probes Keycloak when unhealthy. */
 static void sasl_health_retry_timer_cb(struct Event *ev)
 {

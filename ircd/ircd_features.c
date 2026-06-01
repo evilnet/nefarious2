@@ -53,6 +53,9 @@
 #include "sys.h"    /* FALSE bleah */
 #include "webpush.h"
 #include "whowas.h"	/* whowas_realloc */
+#include "gitsync.h"
+#include "bouncer_session.h"
+#include "sasl_auth.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -682,6 +685,67 @@ feature_notify_webpush_vapid_privkey(void)
   webpush_setup();
 }
 
+/** Handle FEAT_METADATA_PURGE_FREQUENCY change — re-arm the
+ * metadata cache purge timer at the new cadence.
+ */
+static void
+feature_notify_metadata_purge_frequency(void)
+{
+  metadata_purge_restart_timer();
+}
+
+/** Handle FEAT_CHATHISTORY_MAINTENANCE_INTERVAL change — re-arm the
+ * history purge / maintenance timer at the new cadence.
+ */
+static void
+feature_notify_chathistory_maintenance_interval(void)
+{
+  history_purge_restart_timer();
+}
+
+/** Handle FEAT_BOUNCER_PERSIST_INTERVAL change — re-arm the dirty-persist
+ * timer to fire at the new interval (no-op if no sessions are dirty).
+ */
+static void
+feature_notify_bouncer_persist_interval(void)
+{
+  bounce_dirty_persist_restart_timer();
+}
+
+#ifdef USE_LIBKC
+/** Handle FEAT_SASL_HEALTH_INTERVAL change — re-arm the Keycloak
+ * health retry timer at the new cadence (no-op if Keycloak is healthy).
+ */
+static void
+feature_notify_sasl_health_interval(void)
+{
+  sasl_health_restart_timer();
+}
+#endif /* USE_LIBKC */
+
+#ifdef USE_LIBGIT2
+/** Handle FEAT_GITSYNC_ENABLE change — start or stop the periodic
+ * gitsync timer to match the new value.
+ */
+static void
+feature_notify_gitsync_enable(void)
+{
+  if (feature_bool(FEAT_GITSYNC_ENABLE))
+    gitsync_start_timer();
+  else
+    gitsync_stop_timer();
+}
+
+/** Handle FEAT_GITSYNC_INTERVAL change — re-arm the periodic
+ * gitsync timer so the new interval takes effect without a restart.
+ */
+static void
+feature_notify_gitsync_interval(void)
+{
+  gitsync_restart_timer();
+}
+#endif /* USE_LIBGIT2 */
+
 /** Sets a feature to the given value.
  * @param[in] from Client trying to set parameters.
  * @param[in] fields Array of parameters to set.
@@ -961,7 +1025,11 @@ static struct FeatureDesc {
   F_S(KEYCLOAK_CLIENT_SECRET, FEAT_NODISP, "", 0),
   F_I(SASL_NEGCACHE_TTL, 0, 60, 0),
   F_I(SASL_POSCACHE_TTL, 0, 300, 0),
+#ifdef USE_LIBKC
+  F_I(SASL_HEALTH_INTERVAL, 0, 30, feature_notify_sasl_health_interval),
+#else
   F_I(SASL_HEALTH_INTERVAL, 0, 30, 0),
+#endif
   F_I(WEBHOOK_PORT, 0, 0, 0),
   F_S(WEBHOOK_SECRET, FEAT_NODISP, "", 0),
   F_B(WEBHOOK_KILL_ON_DISABLE, 0, 0, 0),
@@ -1111,10 +1179,8 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_PRIVATE, 0, 1, feature_notify_chathistory_caps),
   F_S(CHATHISTORY_DB, 0, "history", 0),
   F_B(CHATHISTORY_DB_AUTOGROW, 0, 1, 0),
-  F_I(CHATHISTORY_DB_GROWTH_STEP, 0, 16777216, 0),  /* 16MB default growth step */
   F_B(CHATHISTORY_DB_NOSYNC, 0, 1, 0),
   F_I(CHATHISTORY_DB_SYNC_INTERVAL, 0, 10, 0),      /* seconds between syncs when nosync enabled */
-  F_I(CHATHISTORY_DB_PARK_INTERVAL, 0, 50, 0),      /* park read txn every N messages; 0 = disable */
   F_I(CHATHISTORY_RETENTION, 0, 7, feature_notify_chathistory_retention),
   F_B(CHATHISTORY_FEDERATION, 0, 1, 0),
   F_I(CHATHISTORY_TIMEOUT, 0, 5, 0),
@@ -1124,7 +1190,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_STORE_REGISTERED, 0, 1, 0),
   F_I(CHATHISTORY_HIGH_WATERMARK, 0, 85, 0),
   F_I(CHATHISTORY_LOW_WATERMARK, 0, 75, 0),
-  F_I(CHATHISTORY_MAINTENANCE_INTERVAL, 0, 300, 0),
+  F_I(CHATHISTORY_MAINTENANCE_INTERVAL, 0, 300, feature_notify_chathistory_maintenance_interval),
   F_I(CHATHISTORY_EVICT_BATCH_SIZE, 0, 1000, 0),
 
   F_B(CHATHISTORY_OPS_OVERRIDE, 0, 1, 0),
@@ -1170,7 +1236,7 @@ static struct FeatureDesc {
   F_B(METADATA_DB_NORDAHEAD, 0, 1, 0),
   F_I(METADATA_CACHE_SLOTS, 0, 128, 0),
   F_I(METADATA_CACHE_TTL, 0, 14400, 0),
-  F_I(METADATA_PURGE_FREQUENCY, 0, 3600, 0),
+  F_I(METADATA_PURGE_FREQUENCY, 0, 3600, feature_notify_metadata_purge_frequency),
 #ifdef USE_ZSTD
   F_I(COMPRESS_THRESHOLD, 0, 256, feature_notify_compress_threshold),
   F_I(COMPRESS_LEVEL, 0, 3, feature_notify_compress_level),
@@ -1189,7 +1255,7 @@ static struct FeatureDesc {
   F_I(BOUNCER_MAX_HOLD, 0, 1209600, 0),      /* 14 days */
   F_I(BOUNCER_HOLD_DECAY_PERCENT, 0, 50, 0), /* decay starts at 50% of hold */
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
-  F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, 0),    /* periodic persist interval (seconds) */
+  F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, feature_notify_bouncer_persist_interval), /* periodic persist interval (seconds) */
   F_B(CAP_draft_bouncer, 0, 1, feature_notify_cap_draft_bouncer),
   F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
@@ -1225,8 +1291,13 @@ static struct FeatureDesc {
 
 #ifdef USE_LIBGIT2
   /* GitSync FEAT_'s */
+#ifdef USE_LIBGIT2
+  F_B(GITSYNC_ENABLE, 0, 0, feature_notify_gitsync_enable),
+  F_I(GITSYNC_INTERVAL, 0, 300, feature_notify_gitsync_interval),
+#else
   F_B(GITSYNC_ENABLE, 0, 0, 0),
   F_I(GITSYNC_INTERVAL, 0, 300, 0),
+#endif
   F_S(GITSYNC_REPOSITORY, 0, "", 0),
   F_S(GITSYNC_BRANCH, 0, "master", 0),
   F_S(GITSYNC_SSH_KEY, 0, "", 0),

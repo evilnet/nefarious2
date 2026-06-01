@@ -466,6 +466,12 @@ struct AccountSessions {
 /** Initialize the bouncer session subsystem. */
 extern void bounce_init(void);
 
+/** Apply a runtime change to FEAT_BOUNCER_PERSIST_INTERVAL to the
+ * dirty-persist timer.  No-op if the timer is not currently armed
+ * (no dirty sessions); the next mark_session_dirty will pick up the
+ * new interval via bounce_start_dirty_persist_timer. */
+extern void bounce_dirty_persist_restart_timer(void);
+
 /** Create a new session for an authenticated client.
  * @param[in] cptr Client creating the session.
  * @param[out] session Pointer to created session (on success).

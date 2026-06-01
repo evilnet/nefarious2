@@ -44,6 +44,9 @@ extern void server_die(const char* message);
 extern void server_panic(const char* message);
 extern void server_restart(const char* message);
 
+extern void history_purge_restart_timer(void);
+extern void metadata_purge_restart_timer(void);
+
 extern struct Client  me;
 extern time_t         CurrentTime;
 extern struct Client* GlobalClientList;
