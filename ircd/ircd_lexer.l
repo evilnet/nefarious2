@@ -81,7 +81,7 @@ static struct lexer_token {
   TOKEN(SERVER),
   TOKEN(YES),
   TOKEN(NO),
-  TOKEN(AUTO),
+  TOKEN(AUTODETECT),
   TOKEN(HUB),
   TOKEN(LEAF),
   TOKEN(UWORLD),
@@ -175,6 +175,14 @@ static struct lexer_token {
   { "ssl", SSLTOK },
   { "administrator", ADMIN },
   { "apass_opmode", TPRIV_APASS_OPMODE },
+  /* "auto" is the legacy short form for `autoconnect` in Connect blocks.
+   * It used to collide with the Port-block `websocket = auto;` keyword
+   * (TOKEN(AUTO) and this entry both case-insensitively claimed "auto",
+   * so bsearch returned whichever qsort happened to place first — any
+   * reordering churn flipped the winning rule).  Resolved by renaming
+   * the Port-block keyword to "autodetect" (TOKEN(AUTODETECT) above);
+   * "auto" is now unambiguously the Connect-block AUTOCONNECT short
+   * form, with the full word handled by TOKEN(AUTOCONNECT). */
   { "auto", AUTOCONNECT },
   { "b", BYTES },
   { "badchan", TPRIV_BADCHAN },
