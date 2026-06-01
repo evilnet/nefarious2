@@ -375,7 +375,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         SetAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, cli_loc(acptr)->account,
-                        ACCOUNTLEN);
+                        ACCOUNTLEN + 1);
 
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
