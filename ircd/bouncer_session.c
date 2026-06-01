@@ -1083,9 +1083,11 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * also updating hs_ghost_numeric, audit this site. */
       if (!session->hs_client && session->hs_ghost_numeric[0]) {
         char full_numeric[6];
+        struct Client *candidate;
         ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                       session->hs_origin, session->hs_ghost_numeric);
-        session->hs_client = findNUser(full_numeric);
+        candidate = findNUser(full_numeric);
+        bounce_hs_client_assign_checked(session, candidate, "HELD resume");
       }
       if (managing_server && session->hs_client
           && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
@@ -1963,8 +1965,11 @@ int bounce_have_local_sessions(void)
 /* ---------------------------------------------------------------- */
 
 /** Verify the session invariant.  Non-fatal: logs drift to LS_USER
- * and returns negative.  Returns 0 if invariant holds. */
-int bounce_session_assert_invariant(const struct BouncerSession *session,
+ * and returns negative.  Returns 0 if invariant holds.
+ *
+ * Takes a non-const session because the heap-aliasing check below
+ * defensively nulls hs_client on detected mismatch — see the -6 branch. */
+int bounce_session_assert_invariant(struct BouncerSession *session,
                                     const char *site)
 {
   struct Client *p;
@@ -2001,6 +2006,27 @@ int bounce_session_assert_invariant(const struct BouncerSession *session,
                 "IsBouncerAlias (should be primary or held ghost)",
                 site ? site : "?", session->hs_sessid, cli_name(p));
       return -3;
+    }
+    /* The pointed-to Client's account must match the session's account.
+     * Mismatch indicates a heap-aliased dangling pointer: the original
+     * primary was freed without sweeping hs_client, and the slot got
+     * reused for a different account.  This was the observed prod-test
+     * failure mode (foreign remote NICK landing in a held-ghost's heap
+     * slot after burst-time yield). */
+    if (!IsAccount(p)
+        || 0 != ircd_strcmp(cli_account(p), session->hs_account)) {
+      log_write(LS_USER, L_WARNING, 0,
+                "session_invariant[%s]: session %s (account=%s) hs_client "
+                "%s has account=%s — heap-aliased dangling pointer; "
+                "nulling defensively",
+                site ? site : "?", session->hs_sessid, session->hs_account,
+                cli_name(p),
+                IsAccount(p) ? cli_account(p) : "<none>");
+      /* Defensive null — can't recover the right primary from here, but
+       * we can at least stop pointing at the wrong Client.  Next
+       * resume_check will hit the orphan-reclaim branch. */
+      session->hs_client = NULL;
+      return -6;
     }
     /* HOLDING state implies hs_client is a held ghost (this server). */
     if (session->hs_state == BOUNCE_HOLDING && !IsBouncerHold(p)) {
@@ -2512,6 +2538,51 @@ void bounce_null_hs_client_pointing_at(struct Client *cli)
         s->hs_client = NULL;
     }
   }
+}
+
+/** Guarded `session->hs_client = candidate` for assignment paths that
+ * resolve a Client via numeric lookup (findNUser, BS A/H/D handlers,
+ * the HELD-resume composed-numeric site at bounce_resume_check).
+ *
+ * Refuses the install if candidate's account does not match the session's
+ * account.  Numeric reuse across the network (or a stale persisted
+ * ghost_numeric after restart) can cause a lookup to return a perfectly
+ * valid Client that simply belongs to someone else; that misassignment
+ * was the M2/M3 class in the audit.
+ *
+ * Returns 1 if the install was accepted, 0 if refused.  When refused the
+ * session's hs_client is left at its prior value (typically NULL); the
+ * caller can treat that as "no primary resolvable yet" and fall through
+ * to the orphan-reclaim branch on the next reconnect.
+ *
+ * @param[in,out] session The session being modified.
+ * @param[in]     candidate Client about to be installed as hs_client.
+ * @param[in]     site_label Short tag for the log line on mismatch
+ *                ("BS A", "BS H", "HELD resume", "BS D" ...).
+ */
+int bounce_hs_client_assign_checked(struct BouncerSession *session,
+                                    struct Client *candidate,
+                                    const char *site_label)
+{
+  if (!session)
+    return 0;
+  if (!candidate) {
+    session->hs_client = NULL;
+    return 1;
+  }
+  if (!IsAccount(candidate)
+      || 0 != ircd_strcmp(cli_account(candidate), session->hs_account)) {
+    log_write(LS_USER, L_WARNING, 0,
+              "Bouncer: refusing %s hs_client install for session %s "
+              "(account=%s) — candidate %s has account=%s",
+              site_label ? site_label : "?",
+              session->hs_sessid, session->hs_account,
+              cli_name(candidate),
+              IsAccount(candidate) ? cli_account(candidate) : "<none>");
+    return 0;
+  }
+  session->hs_client = candidate;
+  return 1;
 }
 
 /** Persist a bouncer session to MDBX.
@@ -4021,7 +4092,7 @@ bsc_forward:
                     cli_yxx(sptr), parv[4]);
       primary = findNUser(full_numeric);
       if (primary && IsUser(primary))
-        session->hs_client = primary;
+        bounce_hs_client_assign_checked(session, primary, "BS A");
       ircd_strncpy(session->hs_ghost_numeric, parv[4],
                    sizeof(session->hs_ghost_numeric) - 1);
       session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
@@ -4129,7 +4200,10 @@ bsc_forward:
       ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
                     cli_yxx(sptr), ghost_numeric);
       ghost = findNUser(full_numeric);
-      session->hs_client = (ghost && IsUser(ghost)) ? ghost : NULL;
+      if (ghost && IsUser(ghost))
+        bounce_hs_client_assign_checked(session, ghost, "BS H");
+      else
+        session->hs_client = NULL;
     }
 
     /* Update channels if provided (BURST-style: #chan1:ov,#chan2:o,#chan3) */

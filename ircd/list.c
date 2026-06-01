@@ -310,6 +310,15 @@ void free_client(struct Client* cptr)
   assert(cli_next(cptr) == 0);
   assert(cli_prev(cptr) == 0);
 
+  /* Bouncer-session sweep — backstop for callers that reach free_client
+   * without going through remove_client_from_list (e.g. server-connect
+   * failure cleanup at s_bsd.c:1415/1427, bounce_free_temp_client after
+   * a successful revive).  The companion sweep in
+   * remove_client_from_list catches the common path; this catches the
+   * stragglers.  Idempotent — a second sweep is a fast token-hash walk
+   * that finds nothing. */
+  bounce_null_hs_client_pointing_at(cptr);
+
   Debug((DEBUG_LIST, "Freeing client %s [%p], connection %p", cli_name(cptr),
 	 cptr, cli_connect(cptr)));
 
@@ -478,6 +487,25 @@ void remove_client_from_list(struct Client *cptr)
   assert(!cli_prev(cptr) || cli_verify(cli_prev(cptr)));
   assert(!cli_next(cptr) || cli_verify(cli_next(cptr)));
   assert(!IsMe(cptr));
+
+  /* Bouncer-session sweep — universal hs_client invariant guard.
+   *
+   * Several free paths reach this function without going through the tail
+   * of exit_one_client (which has its own sweep at the bottom): BX X /
+   * bounce_alias_destroy silent-destroy, bounce_free_temp_client after
+   * revive, the IsBouncerAlias / IsBouncerHold early-returns in
+   * exit_one_client itself, server-connect-failure cleanup, etc.  Each
+   * such bypass risks leaving a BouncerSession with hs_client dangling
+   * at a Client struct that is about to be freed; the next make_client
+   * landing in that heap slot then makes hs_client silently point at a
+   * stranger.  This was the observed prod-test failure mode: burst-time
+   * ghost yield freed without sweep, slot reused by a remote NICK, and
+   * the session sat with a foreign-account hs_client for hours.
+   *
+   * Doing the sweep here (before any teardown side effects) makes the
+   * invariant unbypassable by construction — every Client free in the
+   * codebase routes through remove_client_from_list or free_client. */
+  bounce_null_hs_client_pointing_at(cptr);
 
   /* Only try remove cptr from the list if it IS in the list.
    * cli_next(cptr) cannot be NULL here, as &me is always the end

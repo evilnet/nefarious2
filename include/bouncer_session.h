@@ -1155,6 +1155,15 @@ extern void bounce_clear_legacy_faces_for_peer(const char *peer_yxx);
  * gets nulled. */
 extern void bounce_null_hs_client_pointing_at(struct Client *cli);
 
+/** Guarded install of session->hs_client from a numeric-lookup result.
+ * Refuses the install if `candidate`'s cli_account doesn't match the
+ * session's hs_account, logging a warning that names the call site.
+ * Returns 1 if accepted, 0 if refused (session->hs_client unchanged
+ * unless candidate is NULL, in which case it is cleared). */
+extern int bounce_hs_client_assign_checked(struct BouncerSession *session,
+                                           struct Client *candidate,
+                                           const char *site_label);
+
 /** Emit N to all directly-connected legacy peers that don't yet have a
  * face for this client's session, recording each successful emit.
  * No-op if the client is an alias or has no associated session.  Used
@@ -1223,7 +1232,7 @@ extern int bounce_session_transition(
  * Non-fatal — the goal is observability of state-machine drift, not
  * crashing on it. */
 extern int bounce_session_assert_invariant(
-    const struct BouncerSession *session, const char *site);
+    struct BouncerSession *session, const char *site);
 
 /** Runtime check: do we currently hold this session locally?
  *
