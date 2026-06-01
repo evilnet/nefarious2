@@ -163,22 +163,22 @@ void geoip_apply(struct Client* cptr)
       if (result.found_entry) {
         status = MMDB_get_value(&result.entry, &entry_data, "country", "iso_code", NULL);
         if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
-          ircd_strncpy((char *)&cli_countrycode(cptr), entry_data.utf8_string, (entry_data.data_size > 3 ? 3 : entry_data.data_size));
+          ircd_strncpy((char *)&cli_countrycode(cptr), entry_data.utf8_string, (entry_data.data_size + 1 > 3 ? 3 : entry_data.data_size + 1));
         else
           ircd_strncpy((char *)&cli_countrycode(cptr), "--", 3);
         status = MMDB_get_value(&result.entry, &entry_data, "country", "names", "en", NULL);
         if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
-          ircd_strncpy((char *)&cli_countryname(cptr), entry_data.utf8_string, (entry_data.data_size > 256 ? 256 : entry_data.data_size));
+          ircd_strncpy((char *)&cli_countryname(cptr), entry_data.utf8_string, (entry_data.data_size + 1 > 256 ? 256 : entry_data.data_size + 1));
         else
           ircd_strncpy((char *)&cli_countryname(cptr), "Unknown", 8);
         status = MMDB_get_value(&result.entry, &entry_data, "continent", "code", NULL);
         if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
-          ircd_strncpy((char *)&cli_continentcode(cptr), entry_data.utf8_string, (entry_data.data_size > 3 ? 3 : entry_data.data_size));
+          ircd_strncpy((char *)&cli_continentcode(cptr), entry_data.utf8_string, (entry_data.data_size + 1 > 3 ? 3 : entry_data.data_size + 1));
         else
           ircd_strncpy((char *)&cli_continentcode(cptr), "--", 3);
         status = MMDB_get_value(&result.entry, &entry_data, "continent", "names", "en", NULL);
         if ((MMDB_SUCCESS == status) && (entry_data.has_data) && (entry_data.type == MMDB_DATA_TYPE_UTF8_STRING))
-          ircd_strncpy((char *)&cli_continentname(cptr), entry_data.utf8_string, (entry_data.data_size > 256 ? 256 : entry_data.data_size));
+          ircd_strncpy((char *)&cli_continentname(cptr), entry_data.utf8_string, (entry_data.data_size + 1 > 256 ? 256 : entry_data.data_size + 1));
         else
           ircd_strncpy((char *)&cli_continentname(cptr), "Unknown", 8);
         SetGeoIP(cptr);
