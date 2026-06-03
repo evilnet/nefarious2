@@ -7280,7 +7280,29 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
     /* --- Step 8: Broadcast BX C to network ---
      * M4b: extended with active_profile positional after modes.  Old
      * peers parse the modes-version and ignore the profile token;
-     * new peers consume both. */
+     * new peers consume both.
+     *
+     * BX C goes to all peers; modern peers process via bounce_alias_create
+     * to convert sptr in place to an alias of `primary`.  Legacy peers
+     * (evilnet/nefarious2 master with m_bouncer_transfer.c) silently drop
+     * BX C — but they already counted sptr via Count_newremoteclient when
+     * its N arrived earlier in this connection, so their UserStats.clients
+     * and nick-hash now have a stranded entry that BX C alone can't clean
+     * up.
+     *
+     * Paired BX P emission to legacy peers (see
+     * .claude/para/projects/legacy-bx-p-in-place-conversion.md): the
+     * legacy BX P swap path finds both `alias_full` (old, the N-introduced
+     * client) and `primary_full` (new, the existing primary) on the legacy
+     * peer, transfers any channels from old to new, and exit_client's
+     * old with "Bouncer transfer".  Net: legacy peer's count decrements,
+     * nick-hash entry clears, no spurious user-visible QUIT (old and new
+     * share channels in our case).
+     *
+     * Both emissions are sourced from &me — the server itself, not the
+     * alias — so the alias→primary egress rewrite (invariant #10) does
+     * not apply here.  IsIRCv3Aware predicate inside the helpers selects
+     * the right peer set. */
     {
       char *alias_modes = umode_str(sptr);
       const char *alias_profile = cli_active_profile(sptr)[0]
@@ -7296,6 +7318,12 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
                              alias_modes,
                              alias_profile,
                              chanlist_buf);
+      sendcmdto_legacy_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                             "P %s %s %s %s",
+                             alias_full,         /* old: the N-introduced numeric */
+                             primary_full,       /* new: the existing primary */
+                             session->hs_sessid,
+                             cli_name(primary));
     }
   } /* end YYXXX numeric scope */
 
@@ -7755,6 +7783,27 @@ forward:
     sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
                           "C %s %s %s %s :%s",
                           primary_numeric, alias_numeric, account, sessid, chanlist);
+
+  /* Paired BX P emission to legacy peers downstream of us — without
+   * this, a legacy peer two hops out (legacy ← modern relay ← we)
+   * would never see BX P at all, leaving its UserStats.clients +
+   * nick-hash stranded.  Only emit when `primary` is non-NULL: the
+   * goto-forward paths at the top of this function (primary not
+   * found, alias_server not found) reach this label without a known
+   * primary, in which case we can't construct a meaningful BX P.
+   *
+   * Legacy peers that don't have the alias's numeric as a previously
+   * N-introduced user hit the `if (!old_client) goto relay;` branch
+   * in their handler — no harm done, the BX P just relays through
+   * unchanged.  See
+   * .claude/para/projects/legacy-bx-p-in-place-conversion.md. */
+  if (primary && IsUser(primary))
+    sendcmdto_legacy_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                          "P %s %s %s %s",
+                          alias_numeric,    /* old: the N-introduced numeric */
+                          primary_numeric,  /* new: the existing primary */
+                          sessid,
+                          cli_name(primary));
 
   /* Session move: if the primary is a local HOLDING ghost, promote the
    * alias to primary BEFORE exiting the ghost.  This ensures the ghost's

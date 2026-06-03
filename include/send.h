@@ -142,6 +142,23 @@ extern void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
 				     const char *tok, struct Client *one,
 				     const char *pattern, ...);
 
+/* Send command to all NON-IRCv3-aware (legacy) servers except one.
+ *
+ * Inverse of sendcmdto_serv_butone_v3.  Use ONLY for wire shapes that
+ * legacy peers can process — currently this means BX P (the legacy
+ * bouncer-transfer handler at evilnet/nefarious2's m_bouncer_transfer.c).
+ * It is a hard bug to send BX C / BX X / BX A / BX K / BX U / BX M / BX E
+ * through this helper: legacy peers silently drop those subcommands and
+ * the emission is wasted.
+ *
+ * Intended use site: at every BX C emission, also emit a paired BX P
+ * through this helper so legacy peers reconcile their nick-hash and
+ * UserStats.clients count via the existing BX P swap path (see
+ * .claude/para/projects/legacy-bx-p-in-place-conversion.md). */
+extern void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
+				         const char *tok, struct Client *one,
+				         const char *pattern, ...);
+
 /* Format the S2S compact-tag prefix with optional client-tags segment. */
 extern char *format_s2s_tags_with_client(char *buf, size_t buflen,
                                          struct Client *cptr,

@@ -2007,6 +2007,126 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
     msgq_clean(mb_alias);
 }
 
+/** Send a (prefixed) command to all NON-IRCv3-aware (legacy) servers but one.
+ *
+ * Inverse of sendcmdto_serv_butone_v3 — the dispatch loop SKIPS peers that
+ * advertise IRCv3 awareness, so only legacy peers receive the emission.
+ *
+ * The ONLY currently-supported wire shape through this helper is BX P
+ * (`CMD_BOUNCER_TRANSFER` with subcommand 'P').  Legacy peers'
+ * m_bouncer_transfer.c handler processes BX P natively (in-place numeric
+ * swap or membership transfer-and-kill, depending on whether the target
+ * numeric exists).  Every other BX subcommand (C, X, A, K, U, M, E) is
+ * silently dropped by legacy peers — DO NOT send those through here.
+ *
+ * Use site: at every BX C emission in the bouncer subsystem, also emit a
+ * paired BX P through this helper so legacy peers reconcile their
+ * UserStats.clients count and nick-hash table for the converted client.
+ * See .claude/para/projects/legacy-bx-p-in-place-conversion.md for the
+ * rationale and full transition table.
+ *
+ * Implementation note: mirrors sendcmdto_serv_butone_v3 exactly except for
+ * the inverted IsIRCv3Aware filter at the dispatch step.  The alias-source
+ * egress rewrite block (s2s_alias_source / IsBouncerAlias preamble) is
+ * preserved verbatim — invariant #10 from the bouncer-architecture skill
+ * applies to every S2S helper that accepts arbitrary `from` clients.
+ */
+void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
+                                  const char *tok, struct Client *one,
+                                  const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb = NULL;
+  struct MsgBuf *mb_alias = NULL;
+  struct DLink *lp;
+  struct Client *alias_from = NULL;
+  struct Client *primary_dir = NULL;
+
+  if (s2s_alias_source) {
+    alias_from = s2s_alias_source;
+    s2s_alias_source = NULL;
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  } else if (IsBouncerAlias(from) && cli_alias_primary(from)) {
+    alias_from = from;
+    from = cli_alias_primary(from);
+    primary_dir = MyConnect(from) ? NULL : cli_from(from);
+  }
+
+  vd.vd_format = pattern;
+
+  {
+    int want_tags = s2s_want_tags;
+    s2s_want_tags = 0;
+
+    if (want_tags && feature_bool(FEAT_P10_MESSAGE_TAGS)) {
+      if (s2s_raw_tags[0]) {
+        va_start(vd.vd_args, pattern);
+        mb = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, from, tok, &vd);
+        va_end(vd.vd_args);
+        if (alias_from) {
+          va_start(vd.vd_args, pattern);
+          mb_alias = msgq_make(&me, "%s%C %s %v", s2s_raw_tags, alias_from, tok, &vd);
+          va_end(vd.vd_args);
+        }
+        s2s_raw_tags[0] = '\0';
+        s2s_cptr_override = NULL;
+        s2s_msgid_override[0] = '\0';
+        s2s_sessid_override[0] = '\0';
+        s2s_time_override = 0;
+      } else {
+        char s2s_tagbuf[128];
+        struct Client *tag_cptr = s2s_cptr_override ? s2s_cptr_override
+                                : (MyConnect(from) ? NULL : cli_from(from));
+        s2s_cptr_override = NULL;
+        if (format_s2s_tags(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr, NULL, 0)) {
+          va_start(vd.vd_args, pattern);
+          mb = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, from, tok, &vd);
+          va_end(vd.vd_args);
+          if (alias_from) {
+            va_start(vd.vd_args, pattern);
+            mb_alias = msgq_make(&me, "%s%C %s %v", s2s_tagbuf, alias_from, tok, &vd);
+            va_end(vd.vd_args);
+          }
+        }
+        s2s_msgid_override[0] = '\0';
+        s2s_time_override = 0;
+      }
+    }
+  }
+
+  if (!mb) {
+    va_start(vd.vd_args, pattern);
+    mb = msgq_make(&me, "%C %s %v", from, tok, &vd);
+    va_end(vd.vd_args);
+    if (alias_from) {
+      va_start(vd.vd_args, pattern);
+      mb_alias = msgq_make(&me, "%C %s %v", alias_from, tok, &vd);
+      va_end(vd.vd_args);
+    }
+  }
+
+  /* Legacy-only downlink dispatch: skip IRCv3-aware peers entirely
+   * (they receive the corresponding BX C through the unconditional or
+   * _v3 path; this helper exists solely to feed legacy peers the BX P
+   * they can process). */
+  for (lp = cli_serv(&me)->down; lp; lp = lp->next) {
+    if (one && lp->value.cptr == cli_from(one))
+      continue;
+    if (IsIRCv3Aware(lp->value.cptr))
+      continue;
+    if (IsBurstGated(lp->value.cptr))
+      continue;
+    if (mb_alias && lp->value.cptr == primary_dir)
+      send_buffer(lp->value.cptr, mb_alias, 0);
+    else
+      send_buffer(lp->value.cptr, mb, 0);
+  }
+
+  msgq_clean(mb);
+  if (mb_alias)
+    msgq_clean(mb_alias);
+}
+
 /** Safely increment the sentalong marker.
  * This increments the sentalong marker.  Since new connections will
  * have con_sentalong() == 0, and to avoid confusion when the counter
