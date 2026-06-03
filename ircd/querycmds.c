@@ -87,6 +87,13 @@ void save_tunefile(void)
   }
   fprintf(tunefile, "%d\n", UserStats.local_clients_max);
   fprintf(tunefile, "%d\n", UserStats.clients_max);
+  /* Announced-count maxes appended for backwards compatibility:
+   * an older nefarious binary reading this tunefile sees the first
+   * two lines and silently ignores the rest.  A new binary reading
+   * an older tunefile gets zero defaults for the announced fields
+   * (load_tunefile checks fgets return value). */
+  fprintf(tunefile, "%d\n", UserStats.local_announced_clients_max);
+  fprintf(tunefile, "%d\n", UserStats.announced_clients_max);
   fclose(tunefile);
 }
 
@@ -110,6 +117,13 @@ void load_tunefile(void)
   UserStats.local_clients_max = atol(buf);
   (void)!fgets(buf, 1023, tunefile);
   UserStats.clients_max = atol(buf);
+  /* Announced-count maxes — absent in pre-fork tunefiles; default
+   * to 0 in that case (the new counters will accumulate fresh
+   * peaks after the upgrade). */
+  if (fgets(buf, 1023, tunefile))
+    UserStats.local_announced_clients_max = atol(buf);
+  if (fgets(buf, 1023, tunefile))
+    UserStats.announced_clients_max = atol(buf);
   fclose(tunefile);
 }
 

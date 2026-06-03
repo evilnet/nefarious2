@@ -2920,12 +2920,29 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
    * so this is balanced. */
   ++UserStats.local_clients;
   ++UserStats.clients;
+  /* Held ghosts remain N-visible on the network (no Q was emitted at
+   * the original primary's socket-drop — that's the whole point of
+   * BOUNCE_HOLDING).  So announced counters track them the same way
+   * as live primaries.  Count_clientdisconnects in the ghost-exit
+   * path symmetrically decrements both (gated on !IsBouncerAlias —
+   * a ghost is IsBouncerHold, not IsBouncerAlias, so the gate
+   * passes). */
+  ++UserStats.local_announced_clients;
+  ++UserStats.announced_clients;
   if (UserStats.local_clients > UserStats.local_clients_max) {
     UserStats.local_clients_max = UserStats.local_clients;
     save_tunefile();
   }
   if (UserStats.clients > UserStats.clients_max) {
     UserStats.clients_max = UserStats.clients;
+    save_tunefile();
+  }
+  if (UserStats.local_announced_clients > UserStats.local_announced_clients_max) {
+    UserStats.local_announced_clients_max = UserStats.local_announced_clients;
+    save_tunefile();
+  }
+  if (UserStats.announced_clients > UserStats.announced_clients_max) {
+    UserStats.announced_clients_max = UserStats.announced_clients;
     save_tunefile();
   }
 
@@ -4568,6 +4585,27 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
   ++(cli_serv(cli_user(alias)->server)->clients);
   /* UserStats.local_clients: local aliases already counted at register;
    * remote aliases are not local.  Either way, do not bump here. */
+  /* Announced counters: the promoted alias is becoming a primary, so
+   * it's now N-visible to the network (BX P is emitted to peers; on
+   * legacy peers this is the in-place numeric swap).
+   *
+   *  - Remote alias (!MyUser): announced_clients was never bumped for
+   *    this client (BX C arrived without bumping); now bump it.
+   *  - Local alias (MyUser): announced_clients/local_announced_clients
+   *    were bumped at register_user but then decremented by
+   *    bounce_setup_local_alias when SetBouncerAlias ran.  Re-bump
+   *    here to restore the slot the promotion just earned back. */
+  ++UserStats.announced_clients;
+  if (MyUser(alias))
+    ++UserStats.local_announced_clients;
+  if (UserStats.announced_clients > UserStats.announced_clients_max) {
+    UserStats.announced_clients_max = UserStats.announced_clients;
+    save_tunefile();
+  }
+  if (UserStats.local_announced_clients > UserStats.local_announced_clients_max) {
+    UserStats.local_announced_clients_max = UserStats.local_announced_clients;
+    save_tunefile();
+  }
   if (IsInvisible(alias))
     ++UserStats.inv_clients;
   if (IsOper(alias) && !IsHideOper(alias) && !IsChannelService(alias) && !IsBot(alias))
@@ -7114,6 +7152,23 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   cli_lastnick(sptr) = cli_lastnick(primary);
   cli_handler(sptr) = CLIENT_HANDLER;
 
+  /* Announced-count adjustment: the client just transitioned from
+   * primary (counted at register_user via Count_unknownbecomesclient)
+   * to alias (which is BX-C'd, not N'd).  Peer servers receiving the
+   * BX C broadcast from Step 8 below do their own conversion-decrement
+   * in bounce_alias_create's "convert existing N-counted client to
+   * alias" branch.  Locally we mirror that decrement here.
+   *
+   * No legacy-wire emission is added yet — see
+   * .claude/para/projects/rpl-localusers-announced-count.md for the
+   * deferred Q-to-legacy work (legacy peers still see the original N
+   * and will stay drifted until that lands or the upstream BX P
+   * handler is extended to handle in-place conversion gracefully). */
+  if (UserStats.local_announced_clients > 0)
+    --UserStats.local_announced_clients;
+  if (UserStats.announced_clients > 0)
+    --UserStats.announced_clients;
+
   /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
   bounce_copy_umodes(primary, sptr);
 
@@ -7446,28 +7501,58 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     user = cli_user(alias);
     if (!user)
       goto forward;
-    hRemClient(alias);
-    ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN + 1);
-    ircd_strncpy(user->username, cli_user(primary)->username, USERLEN + 1);
-    ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN + 1);
-    ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN + 1);
-    ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
-    ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
-    user->acc_create = cli_user(primary)->acc_create;
-    user->alias_primary = primary;
-    memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
-    ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
-    ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN + 1);
-    ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN + 1);
-    /* Inherit the session's sessid so this alias's cli_session_id
-     * agrees with the primary's and with the bouncer session record. */
-    ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
-    SetBouncerAlias(alias);
-    if (IsHiddenHost(primary))
-      SetHiddenHost(alias);
-    cli_lastnick(alias) = cli_lastnick(primary);
-    /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
-    bounce_copy_umodes(primary, alias);
+    {
+      /* Stash original server pointer BEFORE conversion overwrites
+       * anything — needed for the per-peer decrement below.  The
+       * conversion block in this function doesn't currently rewrite
+       * user->server, but keep this defensive in case that changes. */
+      struct Client *original_server = user->server;
+
+      hRemClient(alias);
+      ircd_strncpy(cli_name(alias), cli_name(primary), NICKLEN + 1);
+      ircd_strncpy(user->username, cli_user(primary)->username, USERLEN + 1);
+      ircd_strncpy(user->host, cli_user(primary)->host, HOSTLEN + 1);
+      ircd_strncpy(user->realhost, cli_user(primary)->realhost, HOSTLEN + 1);
+      ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
+      ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
+      user->acc_create = cli_user(primary)->acc_create;
+      user->alias_primary = primary;
+      memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
+      ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
+      ircd_strncpy(user->cloakhost, cli_user(primary)->cloakhost, HOSTLEN + 1);
+      ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN + 1);
+      /* Inherit the session's sessid so this alias's cli_session_id
+       * agrees with the primary's and with the bouncer session record. */
+      ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
+      SetBouncerAlias(alias);
+      if (IsHiddenHost(primary))
+        SetHiddenHost(alias);
+      cli_lastnick(alias) = cli_lastnick(primary);
+      /* Copy user mode flags from primary (oper, wallops, invisible, etc.) */
+      bounce_copy_umodes(primary, alias);
+
+      /* Announced-count + per-peer reconcile: this Client was previously
+       * N-counted on this server (via Count_newremoteclient if remote,
+       * or Count_unknownbecomesclient if local — the local case happens
+       * for the alias-host server seeing its own emitted BX C echo
+       * back, though typically that goes through the "already alias"
+       * branch above).
+       *
+       * The conversion removes the client from N-announce semantics —
+       * peers no longer should count this numeric as a network user
+       * (it's now an alias).  Mirror what Count_remoteclientquits
+       * would do, minus the channel-state side effects (the alias
+       * keeps its channel memberships, just under the primary's
+       * identity). */
+      if (UserStats.announced_clients > 0)
+        --UserStats.announced_clients;
+      if (MyConnect(alias) && UserStats.local_announced_clients > 0)
+        --UserStats.local_announced_clients;
+      if (original_server && original_server != &me
+          && cli_serv(original_server)
+          && cli_serv(original_server)->clients > 0)
+        --(cli_serv(original_server)->clients);
+    }
     goto track_alias;
   }
 

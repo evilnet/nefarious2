@@ -126,11 +126,21 @@ int m_lusers(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     send_reply(sptr, RPL_LUSERUNKNOWN, UserStats.unknowns);
   if (longoutput && UserStats.channels > 0)
     send_reply(sptr, RPL_LUSERCHANNELS, UserStats.channels);
+  /* RPL_LUSERME: "I have X clients" — sockets is the right unit
+   * here ("clients" implies actual connections).  Includes
+   * bouncer aliases since each alias has its own socket. */
   send_reply(sptr, RPL_LUSERME, UserStats.local_clients,
 	     UserStats.local_servers);
 
-  send_reply(sptr, RPL_CURRENT_LOCAL, UserStats.local_clients, UserStats.local_clients_max);
-  send_reply(sptr, RPL_CURRENT_GLOBAL, UserStats.clients, UserStats.clients_max);
+  /* RPL_CURRENT_LOCAL / RPL_CURRENT_GLOBAL: network-visible user
+   * count.  Excludes bouncer aliases (which are introduced via
+   * BX C, not N, so peers don't see them as users); includes
+   * held ghosts (still N-visible until destroyed).  See
+   * .claude/para/projects/rpl-localusers-announced-count.md. */
+  send_reply(sptr, RPL_CURRENT_LOCAL, UserStats.local_announced_clients,
+             UserStats.local_announced_clients_max);
+  send_reply(sptr, RPL_CURRENT_GLOBAL, UserStats.announced_clients,
+             UserStats.announced_clients_max);
 
   sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :Highest connection count: "
 		"%d (%d clients)", sptr, max_connection_count,
@@ -169,8 +179,10 @@ int ms_lusers(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   send_reply(sptr, RPL_LUSERME, UserStats.local_clients,
 	     UserStats.local_servers);
 
-  send_reply(sptr, RPL_CURRENT_LOCAL, UserStats.local_clients, UserStats.local_clients_max);
-  send_reply(sptr, RPL_CURRENT_GLOBAL, UserStats.clients, UserStats.clients_max);
+  send_reply(sptr, RPL_CURRENT_LOCAL, UserStats.local_announced_clients,
+             UserStats.local_announced_clients_max);
+  send_reply(sptr, RPL_CURRENT_GLOBAL, UserStats.announced_clients,
+             UserStats.announced_clients_max);
 
   /* Echo compact tag for labeled-response correlation */
   if (!MyUser(sptr) && feature_bool(FEAT_P10_MESSAGE_TAGS) &&
