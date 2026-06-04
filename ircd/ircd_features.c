@@ -452,6 +452,24 @@ set_isupport_network(void)
     add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
 }
 
+/** Set draft/ICON from FEAT_NETWORK_ICON.  Empty value removes the
+ * token so clients don't see a meaningless `draft/ICON=` advert.
+ * Without this notify callback wired on the feature, a runtime
+ * `/SET NETWORK_ICON ...` would update the in-memory feature value
+ * but the cached ISUPPORT line (built once at init_conf time in
+ * register_user → send_supported) would stay stale until a
+ * /REHASH — which itself re-reads ircd.conf and would clobber the
+ * /SET-only value if it isn't also in the conf. */
+static void
+set_isupport_network_icon(void)
+{
+    const char *icon_url = feature_str(FEAT_NETWORK_ICON);
+    if (icon_url && *icon_url)
+        add_isupport_s("draft/ICON", icon_url);
+    else
+        del_isupport("draft/ICON");
+}
+
 #ifdef USE_ZSTD
 /** Update compression threshold from feature. */
 static void
@@ -959,7 +977,7 @@ static struct FeatureDesc {
   F_S(NETWORK, 0, "Nefarious", set_isupport_network),
   F_S(URL_CLIENTS, 0, "http://www.ircreviews.org/clients/", 0),
   F_S(URLREG, 0, "http://sourceforge.net/projects/evilnet/", 0),
-  F_S(NETWORK_ICON, 0, "", 0),
+  F_S(NETWORK_ICON, 0, "", set_isupport_network_icon),
   F_B(UTF8ONLY, 0, 0, 0),
   F_B(UTF8ONLY_STRICT, 0, 0, 0),
 
