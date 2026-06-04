@@ -2071,7 +2071,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           if (_oper_sess && _oper_sess->hs_oper_name[0]) {
             _oper_sess->hs_oper_name[0] = '\0';
             _oper_sess->hs_oper_granted_at = 0;
-            _oper_sess->hs_dirty = 1;
+            /* bounce_mark_dirty arms the persist timer; a manual
+             * hs_dirty=1 alone leaves the grant-clear unflushed
+             * until either another dirty event or a graceful
+             * shutdown — abrupt termination would lose the clear. */
+            bounce_mark_dirty(acptr);
             bounce_broadcast(_oper_sess, 'O', NULL);
           }
         }
@@ -2096,7 +2100,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           if (_oper_sess && _oper_sess->hs_oper_name[0]) {
             _oper_sess->hs_oper_name[0] = '\0';
             _oper_sess->hs_oper_granted_at = 0;
-            _oper_sess->hs_dirty = 1;
+            /* bounce_mark_dirty arms the persist timer (see -o
+             * branch above). */
+            bounce_mark_dirty(acptr);
             bounce_broadcast(_oper_sess, 'O', NULL);
           }
         }

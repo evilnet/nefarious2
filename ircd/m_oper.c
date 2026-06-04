@@ -275,14 +275,22 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
    * Propagate the grant to every other server so cross-server alias
    * promote / server restart elsewhere can apply it without rerunning
    * /OPER.  P10 MODE +o (via send_umode_out above) already covers the
-   * live flag on remote primaries — BS O is for the session record. */
+   * live flag on remote primaries — BS O is for the session record.
+   *
+   * Use bounce_mark_dirty (not a manual hs_dirty=1) so the periodic
+   * persist timer actually arms.  Without the timer arming, the
+   * record on disk holds the pre-OPER state until either some other
+   * dirty event (JOIN/PART/KICK/MODE) triggers persist or a graceful
+   * shutdown (`/RESTART`, `/DIE`, SIGTERM) runs bounce_db_shutdown.
+   * Abrupt termination (SIGKILL, container kill, OOM) between /OPER
+   * and the next dirty event would lose the grant. */
   {
     struct BouncerSession *sess = bounce_get_session(sptr);
     if (sess) {
       ircd_strncpy(sess->hs_oper_name, aconf->name,
                    sizeof(sess->hs_oper_name));
       sess->hs_oper_granted_at = CurrentTime;
-      sess->hs_dirty = 1;
+      bounce_mark_dirty(sptr);
       bounce_broadcast(sess, 'O', aconf->name);
     }
   }

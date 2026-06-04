@@ -6707,7 +6707,15 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
     sess->hs_oper_name[0] = '\0';
     sess->hs_oper_granted_at = 0;
   }
+  /* Mark dirty AND arm the persist timer.  Without arming, an
+   * abrupt termination between this BS O receive and the next
+   * dirty event (channel JOIN/PART/etc.) would lose the cross-
+   * server grant propagation here.  bounce_mark_dirty gates on
+   * BOUNCE_ACTIVE; this code path can run for HOLDING sessions
+   * too (peer broadcasts an oper grant while our local primary is
+   * in hold), so call the timer-arm directly. */
   sess->hs_dirty = 1;
+  bounce_start_dirty_persist_timer();
 
   /* Apply to local primary, if any.  Remote primaries are handled by
    * the P10 MODE +o / -o that arrives in the same TCP stream from the
