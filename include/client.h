@@ -290,6 +290,11 @@ enum Flag
 
     FLAG_BOUNCER_HOLD,              /**< Client is in bouncer HOLDING state (ghost) */
     FLAG_BOUNCER_ALIAS,             /**< Client is an alias numeric for multi-server bouncer presence */
+    FLAG_NO_LC_DECREMENT,           /**< local_clients already settled (decremented at hold, or
+                                      *  never bumped for boot-spawned ghost).  Tells
+                                      *  Count_clientdisconnects NOT to decrement local_clients
+                                      *  on this Client's destroy.  Cleared by bounce_revive when
+                                      *  a new socket attaches and bumps local_clients again. */
     FLAG_BOUNCER_INTERNAL_DESTROY,  /**< Client is being destroyed via bouncer-internal cleanup
                                      *   (silent ghost destroy, BX P-handled retire, etc.).
                                      *   Suppresses standard QUIT broadcast like FLAG_KILLED, but
@@ -1100,6 +1105,15 @@ struct Client {
 #define IsBouncerAlias(x)       HasFlag(x, FLAG_BOUNCER_ALIAS)
 #define SetBouncerAlias(x)      SetFlag(x, FLAG_BOUNCER_ALIAS)
 #define ClearBouncerAlias(x)    ClrFlag(x, FLAG_BOUNCER_ALIAS)
+/** Return non-zero if local_clients should NOT be decremented when this
+ *  Client is destroyed.  Set by bounce_hold_client after the inline
+ *  --local_clients (so destroy doesn't double-decrement), and by
+ *  bounce_create_ghost at boot (so destroy doesn't decrement a counter
+ *  that was never bumped).  Cleared by bounce_revive when a new socket
+ *  attaches and bumps local_clients again. */
+#define IsNoLcDecrement(x)      HasFlag(x, FLAG_NO_LC_DECREMENT)
+#define SetNoLcDecrement(x)     SetFlag(x, FLAG_NO_LC_DECREMENT)
+#define ClearNoLcDecrement(x)   ClrFlag(x, FLAG_NO_LC_DECREMENT)
 /** Return non-zero if client is being destroyed via bouncer-internal cleanup
  *  (silent ghost destroy, BX P-handled retire, etc.).  Suppresses standard
  *  QUIT broadcast on exit like FLAG_KILLED does, but does NOT trigger

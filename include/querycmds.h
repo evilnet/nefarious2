@@ -162,21 +162,38 @@ void count_unknowns_underflow(const char *file, int line, const char *what);
   do { DEC_UNKNOWNS_GUARDED("becomesserver"); ++UserStats.local_servers; ++UserStats.servers; } while(0)
 /** Update counters when \a cptr (a local user) disconnects.
  *
- * Decrements local_clients/clients (sockets/identity) unconditionally.
- * Announced counters decrement only if cptr is NOT a bouncer alias —
- * aliases got their announced bump at register_user time but had it
+ * `local_clients` and `current_load.local_count` are socket-side
+ * counters — gated on `!IsNoLcDecrement(cptr)`.  The flag is set
+ * when local_clients is already settled for this Client (decremented
+ * at bounce_hold_client, or never bumped for boot-spawned ghosts),
+ * and cleared by bounce_revive when a fresh socket attaches and
+ * bumps local_clients again.  Without this gate, destroy paths
+ * for held ghosts would double-decrement (once at hold, again at
+ * destroy via this macro).  Cannot use cli_fd >= 0 as the gate —
+ * exit_client closes the socket before reaching this macro, so
+ * cli_fd is -1 by the time we get here for every destroy.
+ *
+ * `clients` is the registered-user count (network-wide identity
+ * tally) and decrements unconditionally on every destroy — ghosts
+ * ARE counted there from their creation through destroy.
+ *
+ * Announced counters decrement only if cptr is NOT a bouncer alias
+ * — aliases got their announced bump at register_user but had it
  * removed by bounce_setup_local_alias when they were converted.
  * Held ghosts (IsBouncerHold) ARE still announced and need the
  * decrement on destroy. */
 #define Count_clientdisconnects(cptr, UserStats) \
   do \
   { \
-    --UserStats.local_clients; --UserStats.clients; \
+    --UserStats.clients; \
+    if (!IsNoLcDecrement(cptr)) \
+      --UserStats.local_clients; \
     if (!IsBouncerAlias(cptr)) { \
       --UserStats.local_announced_clients; \
       --UserStats.announced_clients; \
     } \
-    if (match(feature_str(FEAT_DOMAINNAME), cli_sockhost(cptr)) == 0) \
+    if (!IsNoLcDecrement(cptr) \
+        && match(feature_str(FEAT_DOMAINNAME), cli_sockhost(cptr)) == 0) \
       --current_load.local_count; \
   } while(0)
 /** Update counters when a local server disconnects. */

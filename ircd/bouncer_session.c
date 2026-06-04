@@ -2903,6 +2903,12 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
   SetAccount(ghost);
   SetHiddenHost(ghost);
   SetBouncerHold(ghost);
+  /* Mark ghost as not-counted-in-local_clients (no socket, no
+   * register_user bump fired).  Cleared by bounce_revive when a
+   * socket attaches; if the ghost is destroyed without revive,
+   * Count_clientdisconnects sees this flag and skips the lc
+   * decrement, avoiding underflow. */
+  SetNoLcDecrement(ghost);
 
   /* Set creation timestamp to original time (wins nick collisions: older wins) */
   cli_lastnick(ghost) = (time_t)rec->bsr_created;
@@ -2914,25 +2920,29 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
    * closed; without the matching ++ here we under-count by 1 per ghost.
    *
    * unknowns is NOT touched: the ghost was never a STAT_UNKNOWN TCP
-   * connection on this server (it's spawned synthetically). When the ghost
-   * eventually exits via exit_one_client → IsUser branch →
-   * Count_clientdisconnects, only local_clients/clients are decremented,
-   * so this is balanced. */
-  ++UserStats.local_clients;
-  ++UserStats.clients;
-  /* Held ghosts remain N-visible on the network (no Q was emitted at
-   * the original primary's socket-drop — that's the whole point of
-   * BOUNCE_HOLDING).  So announced counters track them the same way
+   * connection on this server (it's spawned synthetically).
+   *
+   * local_clients is NOT bumped — the ghost has no TCP socket.
+   * RPL_LUSERME ("I have X clients") tracks live sockets only;
+   * ghosts should not appear there.  FLAG_NO_LC_DECREMENT set
+   * above ensures the destroy path doesn't try to decrement a
+   * counter we never bumped.  When the ghost is later revived,
+   * bounce_revive bumps local_clients as the socket attaches.
+   *
+   * clients IS bumped — it counts all registered users (network
+   * identity tally), and the ghost is a real registered user with
+   * a numeric and an identity, just not a live socket on this
+   * server.  Matches Count_unknownbecomesclient's bump shape.
+   *
+   * Held ghosts remain N-visible on the network (no Q was emitted
+   * at the original primary's socket-drop — that's the point of
+   * BOUNCE_HOLDING).  So announced counters track them the same
    * as live primaries.  Count_clientdisconnects in the ghost-exit
-   * path symmetrically decrements both (gated on !IsBouncerAlias —
-   * a ghost is IsBouncerHold, not IsBouncerAlias, so the gate
-   * passes). */
+   * path decrements them (gated on !IsBouncerAlias — a ghost is
+   * IsBouncerHold, not IsBouncerAlias, so the gate passes). */
+  ++UserStats.clients;
   ++UserStats.local_announced_clients;
   ++UserStats.announced_clients;
-  if (UserStats.local_clients > UserStats.local_clients_max) {
-    UserStats.local_clients_max = UserStats.local_clients;
-    save_tunefile();
-  }
   if (UserStats.clients > UserStats.clients_max) {
     UserStats.clients_max = UserStats.clients;
     save_tunefile();
@@ -5002,6 +5012,21 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
    */
   close_connection(cptr);
 
+  /* Socket-side counter adjustment: the TCP connection just died.
+   * RPL_LUSERME ("I have X clients") reflects live sockets only,
+   * so drop local_clients now.  Announced and clients counters
+   * stay — the user is still N-visible to peers as a held ghost
+   * (no Q was emitted, that's the whole point of BOUNCE_HOLDING).
+   * On revive, bounce_revive bumps local_clients back up.
+   *
+   * Set FLAG_NO_LC_DECREMENT so Count_clientdisconnects at eventual
+   * destroy (whether via the IsBouncerHold branch or via the
+   * normal IsUser branch after ClearBouncerHold) skips the lc
+   * decrement — we've already done it here. */
+  if (UserStats.local_clients > 0)
+    --UserStats.local_clients;
+  SetNoLcDecrement(cptr);
+
   /* Log the hold */
   log_write(LS_USER, L_TRACE, 0, "Bouncer HOLD: %s (%s@%s) session %s - %s",
             cli_name(cptr), cli_user(cptr)->username,
@@ -5389,6 +5414,26 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     }
   }
   ClrFlag(ghost, FLAG_DEADSOCKET);
+
+  /* Socket-side counter accounting: the ghost just gained a live
+   * TCP socket via the Step 6-7 transplant.  RPL_LUSERME tracks
+   * live sockets only, so bump local_clients.
+   *
+   * Clear FLAG_NO_LC_DECREMENT so the eventual destroy macro fires
+   * the lc decrement normally (we just bumped lc; future destroy
+   * must rebalance).
+   *
+   * Pair: bounce_free_temp_client calls Count_clientdisconnects
+   * which decrements temp's lc bump (temp's FLAG_NO_LC_DECREMENT
+   * is unset — it was a regular client that registered normally,
+   * so the macro fires the decrement).  Net across temp+ghost:
+   * one socket, one count. */
+  ++UserStats.local_clients;
+  ClearNoLcDecrement(ghost);
+  if (UserStats.local_clients > UserStats.local_clients_max) {
+    UserStats.local_clients_max = UserStats.local_clients;
+    save_tunefile();
+  }
 
   /* Step 13: Update session state (hs_state already set to ACTIVE earlier) */
   session->hs_client = ghost;
