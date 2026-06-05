@@ -123,6 +123,7 @@ extern void user_setcloaked(struct Client *cptr);
 
 extern void init_isupport(void);
 extern void del_isupport(const char *name);
+extern void add_isupport(const char *name);
 extern void add_isupport_s(const char *name, const char *value);
 extern void add_isupport_i(const char *name, int value);
 extern void send_isupport_update(void);

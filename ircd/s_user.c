@@ -3038,7 +3038,6 @@ get_clean_isupport(const char *name)
 /** Declare support for a feature with no parameter.
  * @param[in] name Name of ISUPPORT feature to announce.
  */
-static
 void add_isupport(const char *name)
 {
   get_clean_isupport(name);

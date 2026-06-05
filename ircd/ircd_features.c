@@ -470,6 +470,31 @@ set_isupport_network_icon(void)
         del_isupport("draft/ICON");
 }
 
+/** Set UTF8ONLY from FEAT_UTF8ONLY.  The token is value-less — its
+ * mere presence in RPL_ISUPPORT signals UTF-8 enforcement.  Empty
+ * (feature false) removes the token. */
+static void
+set_isupport_utf8only(void)
+{
+    if (feature_bool(FEAT_UTF8ONLY))
+        add_isupport("UTF8ONLY");
+    else
+        del_isupport("UTF8ONLY");
+}
+
+/** Set CLIENTTAGDENY from FEAT_CLIENTTAGDENY.  IRCv3 token
+ * advertising blocked client-only tag patterns; empty value
+ * removes the advert. */
+static void
+set_isupport_clienttagdeny(void)
+{
+    const char *deny_list = feature_str(FEAT_CLIENTTAGDENY);
+    if (deny_list && *deny_list)
+        add_isupport_s("CLIENTTAGDENY", deny_list);
+    else
+        del_isupport("CLIENTTAGDENY");
+}
+
 #ifdef USE_ZSTD
 /** Update compression threshold from feature. */
 static void
@@ -978,7 +1003,7 @@ static struct FeatureDesc {
   F_S(URL_CLIENTS, 0, "http://www.ircreviews.org/clients/", 0),
   F_S(URLREG, 0, "http://sourceforge.net/projects/evilnet/", 0),
   F_S(NETWORK_ICON, 0, "", set_isupport_network_icon),
-  F_B(UTF8ONLY, 0, 0, 0),
+  F_B(UTF8ONLY, 0, 0, set_isupport_utf8only),
   F_B(UTF8ONLY_STRICT, 0, 0, 0),
 
   /* Nefarious FEAT_'s */
@@ -1168,7 +1193,7 @@ static struct FeatureDesc {
   F_B(SETNAME_STRICT_LENGTH, 0, 0, 0),
   F_B(CAP_standard_replies, 0, 1, feature_notify_cap_standard_replies),
   F_B(CAP_message_tags, 0, 1, feature_notify_cap_message_tags),
-  F_S(CLIENTTAGDENY, FEAT_NULL, 0, 0),
+  F_S(CLIENTTAGDENY, FEAT_NULL, 0, set_isupport_clienttagdeny),
   F_B(CAP_no_implicit_names, 0, 1, feature_notify_cap_no_implicit_names),
   F_A(CAP_draft_no_implicit_names, CAP_no_implicit_names),
   F_B(CAP_draft_extended_isupport, 0, 1, feature_notify_cap_draft_extended_isupport),
