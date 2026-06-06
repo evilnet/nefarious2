@@ -179,7 +179,11 @@ static struct lexer_token {
   TOKEN(CLIENT_ID),
   TOKEN(CLIENT_SECRET),
   TOKEN(PATH),
-  TOKEN(MAXCONNECTIONS),
+  /* Explicit entry rather than TOKEN(...) because the bison token symbol
+   * is T_MAXCONNECTIONS (see ircd_parser.y) — the prefix avoids
+   * collision with config.h's MAXCONNECTIONS macro.  Conf keyword
+   * stays the user-facing "MAXCONNECTIONS". */
+  { "MAXCONNECTIONS", T_MAXCONNECTIONS },
   TOKEN(MAXREQUESTSIZE),
   TOKEN(QUEUEMAX),
   TOKEN(BATCHSIZE),

@@ -265,7 +265,9 @@ static void free_slist(struct SLink **link) {
 %token CLIENT_ID
 %token CLIENT_SECRET
 %token PATH
-%token MAXCONNECTIONS
+/* T_ prefix avoids collision with config.h's MAXCONNECTIONS (= 4096).
+ * Conf keyword stays "MAXCONNECTIONS" via the explicit lexer entry. */
+%token T_MAXCONNECTIONS
 %token MAXREQUESTSIZE
 %token QUEUEMAX
 %token BATCHSIZE
@@ -2145,7 +2147,7 @@ webhookpath: PATH '=' QSTRING ';'
   sasl_conf_webhook_set_path($3);
   MyFree($3);
 };
-webhookmaxconn: MAXCONNECTIONS '=' NUMBER ';'
+webhookmaxconn: T_MAXCONNECTIONS '=' NUMBER ';'
 {
   sasl_conf_webhook_set_max_connections($3);
 };
