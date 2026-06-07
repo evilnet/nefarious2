@@ -576,6 +576,11 @@ extern int history_quota_check(const char *channel, const char *account, int cha
 extern int chathistory_auto_replay(struct Client *sptr, const char *target,
                                    const char *since_timestamp, int limit);
 
+/** Free partial federation chunk reassembly buffers (CH B read responses and
+ *  CH WB writes) that arrived from a server link that is now exiting, so they
+ *  don't leak when a peer squits mid-stream. Call from exit_one_client. */
+extern void chathistory_fed_cleanup_link(struct Client *link);
+
 /** Start a federated REDACT query (exact message lookup via CH Q X).
  * Used by m_redact on non-storing servers to look up message metadata
  * from storage servers for authorization before propagating REDACT.

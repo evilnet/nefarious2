@@ -325,6 +325,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     s2s_multiline_cleanup_link(bcptr);
     s2s_bxm_cleanup_link(bcptr);
     pending_bx_cleanup_link(bcptr);
+    chathistory_fed_cleanup_link(bcptr);
   }
   if (IsUser(bcptr)) {
     /* Purge per-Client ephemeral session-scoped state before the rest

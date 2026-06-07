@@ -2231,6 +2231,7 @@ struct ChunkEntry {
   char *b64_data;          /**< Accumulated base64 */
   size_t b64_len;
   size_t b64_alloc;
+  struct Client *link;     /**< origin link, for per-link cleanup */
 };
 
 /** Global array of pending chunks */
@@ -2266,6 +2267,7 @@ struct WriteChunkEntry {
   char *b64_data;          /**< Accumulated base64 */
   size_t b64_len;
   size_t b64_alloc;
+  struct Client *link;     /**< origin link, for per-link cleanup */
 };
 
 /** Global array of pending write chunks */
@@ -3225,6 +3227,23 @@ static void free_chunk(struct ChunkEntry *chunk)
     }
   }
   MyFree(chunk);
+}
+
+/** Free all pending read/write federation chunks that arrived from a dying
+ *  link.  Without this, partial chunk reassembly leaks when a peer squits
+ *  mid-stream (the continuation/end pieces never arrive).  Mirrors the
+ *  per-link cleanup that multiline (s2s_multiline_cleanup_link) already does. */
+void chathistory_fed_cleanup_link(struct Client *link)
+{
+  int i;
+  if (!link)
+    return;
+  for (i = 0; i < MAX_PENDING_CHUNKS; i++)
+    if (pending_chunks[i] && pending_chunks[i]->link == link)
+      free_chunk(pending_chunks[i]);
+  for (i = 0; i < MAX_PENDING_WRITE_CHUNKS; i++)
+    if (pending_write_chunks[i] && pending_write_chunks[i]->link == link)
+      free_write_chunk(pending_write_chunks[i]);
 }
 
 /** Create a new chunk entry */
@@ -4703,6 +4722,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       if (!chunk)
         return 0;  /* No slots available */
     }
+    chunk->link = cptr;   /* track origin link for per-link cleanup */
 
     /* Append base64 data */
     append_chunk_data(chunk, b64_data);
@@ -5015,6 +5035,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         return 0;
       }
     }
+    chunk->link = cptr;   /* track origin link for per-link cleanup */
 
     /* Append base64 data */
     append_write_chunk_data(chunk, b64_data);
