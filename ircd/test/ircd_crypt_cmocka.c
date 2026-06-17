@@ -266,9 +266,16 @@ char* ircd_crypt(const char* key, const char* salt)
 
             memset(hashed_pass, 0, sizeof(char)*strlen(temp_hashed_pass)
                 +crypt_mech->mech->crypt_token_size + 1);
+            /* ircd_strncpy is strlcpy: writes N-1 chars + NULL.  Production
+             * ircd_crypt at ircd/ircd_crypt.c:192-194 uses `+1` on both
+             * lengths to preserve the full token / hash; this inline stub
+             * must mirror that or the prefix gets truncated mid-token and
+             * the round-trip tests assert against "$PLAIN" instead of
+             * "$PLAIN$..." */
             ircd_strncpy(hashed_pass, crypt_mech->mech->crypt_token,
-                crypt_mech->mech->crypt_token_size);
-            ircd_strncpy(hashed_pass + crypt_mech->mech->crypt_token_size, temp_hashed_pass, strlen(temp_hashed_pass));
+                crypt_mech->mech->crypt_token_size + 1);
+            ircd_strncpy(hashed_pass + crypt_mech->mech->crypt_token_size,
+                temp_hashed_pass, strlen(temp_hashed_pass) + 1);
         } else {
             crypt_mech = crypt_mech->next;
             continue;
