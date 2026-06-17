@@ -406,6 +406,30 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * dispatched from exit_client below — see the IsBouncerHold check
      * there mirroring the IsBouncerAlias one. */
     if (IsBouncerHold(bcptr)) {
+      /* Invariant #12 (extended for held ghosts): a network KILL that
+       * lands on a held ghost must destroy the entire bouncer session
+       * record, not just the Client.  Without this, S2S-relayed /KILLs
+       * (where do_kill's local hook at m_kill.c:168 was skipped because
+       * !IsServer(cptr) was false) leave the session orphaned in
+       * HOLDING state with hs_client=NULL — every subsequent reconnect
+       * fires bounce_auto_resume's "HELD remote alias unavailable" log
+       * and falls through, with the held session unrescuable until
+       * hold-expiry.  Drive the destroy at the universal exit point so
+       * future KILL paths can't miss it.  The local-cptr-local-victim
+       * hook at m_kill.c:168 is subsumed by this (kept harmless — its
+       * pre-emptive bounce_kill_session leaves hs_client=NULL and the
+       * FLAG_KILLED gate below sees the session already gone via
+       * bounce_get_session returning NULL).
+       *
+       * Gating on FLAG_KILLED keeps clean-exit paths (hold expiry
+       * timer, BX H teardown, BX R yield) on their existing session
+       * lifecycle — only NETWORK KILL of a held ghost destroys the
+       * record. */
+      if (HasFlag(bcptr, FLAG_KILLED)) {
+        struct BouncerSession *bsess = bounce_get_session(bcptr);
+        if (bsess && bsess->hs_client == bcptr)
+          bounce_kill_session(bsess, comment);
+      }
       if (MyConnect(bcptr)) {
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);

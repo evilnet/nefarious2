@@ -156,15 +156,25 @@ static int do_kill(struct Client* cptr, struct Client* sptr,
 		  victim, "%C :%s %s", victim, feature_bool(FEAT_HIS_KILLWHO)
 		  ? feature_str(FEAT_HIS_SERVERNAME) : cli_name(sptr), msg);
 
-  /* Invariant #12 — network KILL ends the entire bouncer session.  The
-   * existing FLAG_KILLED-gated cleanup in exit_one_client handles every
-   * KILL path where the flag is set (S2S-relayed KILL, local oper
-   * killing a remote victim).  For local-cptr-local-victim, the block
-   * above skipped FLAG_KILLED (no S2S relay needed), so that cleanup
-   * can't tell this exit is a KILL — fire the session destroy here
-   * before exit_client_msg.  bounce_kill_session clears hs_client so
-   * the upcoming exit_one_client pass skips its bouncer branch
-   * cleanly. */
+  /* Invariant #12 — network KILL ends the entire bouncer session.
+   *
+   * Split coverage by victim shape:
+   *   - IsBouncerHold victim: handled by the FLAG_KILLED gate in
+   *     exit_one_client's IsBouncerHold branch (see s_misc.c).
+   *     Covers BOTH local-cptr-local-victim and S2S-relayed kills.
+   *   - IsUser victim (live primary) with local-cptr-local-victim:
+   *     no FLAG_KILLED is set (do_kill at line 134-144 above skipped
+   *     it because no S2S relay was needed), so exit_one_client can't
+   *     tell this exit is a KILL — fire the session destroy here.
+   *
+   * The S2S-relayed case for live primaries is covered by the same
+   * FLAG_KILLED-gated cleanup in exit_one_client (which DOES destroy
+   * the session for IsUser when FLAG_KILLED is set — that's been
+   * correct since invariant #12 was introduced).
+   *
+   * bounce_kill_session clears hs_client so the upcoming
+   * exit_one_client pass sees the session as already unanchored and
+   * skips its own bouncer branch cleanly. */
   if (!IsServer(cptr) && MyConnect(victim)
       && (IsUser(victim) || IsBouncerHold(victim))
       && IsAccount(victim)) {
