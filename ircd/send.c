@@ -2783,7 +2783,12 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   cap_route_ctx.stc_active = 0;
 
   msgq_clean(user_mb);
-  for (tflags = 0; tflags < 16; tflags++) {
+  /* Walk the full 32-slot cache: TAGS_MSGID (0x10) bit means valid
+   * tflags values reach 31.  A `< 16` bound here leaked every cached
+   * MsgBuf whose tflags included TAGS_MSGID — fired on every
+   * channel PRIVMSG to a recipient with CAP_MSGTAGS when the relay
+   * had a msgid override staged. */
+  for (tflags = 0; tflags < 32; tflags++) {
     if (user_mb_cache[tflags])
       msgq_clean(user_mb_cache[tflags]);
   }
