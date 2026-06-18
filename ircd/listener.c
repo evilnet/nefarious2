@@ -535,7 +535,15 @@ static void accept_connection(struct Event* ev)
       if (fd > MAXCLIENTS - 1)
       {
         ++ServerStats->is_ref;
-        send(fd, "ERROR :All connections in use\r\n", 32, 0);
+        /* Skip the plaintext ERROR on SSL/paste listeners — the client
+         * is mid-TLS-ClientHello, and writing "ERROR :..." into the raw
+         * fd makes OpenSSL parse those bytes as a TLS record (`E` 0x45
+         * isn't a valid content type, length parses as ~20000 > 16384)
+         * and surface a confusing "wrong version number" /
+         * "packet length too long" error.  A clean close gives the TLS
+         * client an unambiguous reset instead. */
+        if (!(listener_ssl(listener) || listener_paste(listener)))
+          send(fd, "ERROR :All connections in use\r\n", 32, 0);
         close(fd);
         return;
       }
@@ -547,7 +555,9 @@ static void accept_connection(struct Event* ev)
       if (!listener_active(listener))
       {
         ++ServerStats->is_ref;
-        send(fd, "ERROR :Use another port\r\n", 25, 0);
+        /* Same SSL/paste plaintext guard as the MAXCLIENTS branch above. */
+        if (!(listener_ssl(listener) || listener_paste(listener)))
+          send(fd, "ERROR :Use another port\r\n", 25, 0);
         close(fd);
         continue;
       }
