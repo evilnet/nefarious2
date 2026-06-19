@@ -649,8 +649,24 @@ void close_connection(struct Client *cptr)
      * callback via socket_del(), giving remote clients time to read any
      * queued messages (ERROR, MONITOR 731 notifications, etc.). */
     shutdown(cli_fd(cptr), SHUT_RDWR);
-    socket_del(&(cli_socket(cptr))); /* queue deferred socket destroy + close */
+    close(cli_fd(cptr));
+    socket_del(&(cli_socket(cptr))); /* queue Socket struct destroy */
     cli_fd(cptr) = -1;
+    /* Why inline close() despite the surrounding "deferred close" comment
+     * block above: cli_fd is a macro for cli_connect(cptr)->con_socket.s_fd,
+     * the SAME field client_sock_callback's ET_DESTROY branch
+     * (s_bsd.c:1536) reads to decide whether to close the deferred fd.
+     * Nulling cli_fd at the end of this if-block also wipes s_fd, so
+     * ET_DESTROY's `if (s_fd >= 0) close(...)` is always false — meaning
+     * every shutdown'd fd would leak until process exit (~3 FDs/sec/worker
+     * under bare connect/QUIT churn).  Upstream nefarious-upstream
+     * (s_bsd.c:462) keeps close() inline for exactly this reason; the
+     * deferred-close refactor in fork commit b4acfe2 dropped it and
+     * regressed.  shutdown(SHUT_RDWR) still gives the graceful FIN this
+     * code path wanted; close() then relinquishes the user-space fd while
+     * the kernel finishes the TCP teardown via the standard linger /
+     * TIME_WAIT machinery — the trailing ERROR/KILL bytes already in the
+     * send buffer drain normally. */
   }
   SetFlag(cptr, FLAG_DEADSOCKET);
 
