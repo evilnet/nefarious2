@@ -817,10 +817,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
    */
   if (IsHiddenHost(sptr))
     hide_hostmask(sptr);
-  if (IsInvisible(sptr))
-    ++UserStats.inv_clients;
-  if (IsOper(sptr) && !IsHideOper(sptr) && !IsChannelService(sptr) && !IsBot(sptr))
-    ++UserStats.opers;
+  /* Count this newly-registered user's +o/+i (flag-keyed source of truth so the
+   * matching exit decrement can't mismatch). */
+  userstats_count_sync(sptr);
 
   tmpstr = umode_str(sptr);
   /* Per redesign A.2: stage the bouncer session-id hint for the outgoing
@@ -1847,6 +1846,74 @@ unhide_hostmask(struct Client *cptr)
   return 0;
 }
 
+/** Whether @a cptr should currently be counted in UserStats.opers.
+ * A registered user that is +o (and not hidden/chanserv/bot), excluding REMOTE
+ * bouncer aliases — those aren't in the nick hash and peers don't see them as
+ * users (local aliases ARE counted: they're real sockets here). */
+static int userstats_should_count_oper(const struct Client *cptr)
+{
+  if (!IsUser(cptr))
+    return 0;
+  if (IsBouncerAlias(cptr) && !MyConnect(cptr))
+    return 0;
+  return IsOper(cptr) && !IsHideOper(cptr)
+      && !IsChannelService(cptr) && !IsBot(cptr);
+}
+
+/** Whether @a cptr should currently be counted in UserStats.inv_clients. */
+static int userstats_should_count_inv(const struct Client *cptr)
+{
+  if (!IsUser(cptr))
+    return 0;
+  if (IsBouncerAlias(cptr) && !MyConnect(cptr))
+    return 0;
+  return IsInvisible(cptr) ? 1 : 0;
+}
+
+/* See querycmds.h for the rationale (single source of truth for oper/inv
+ * counting; the FLAG_COUNTED_* flags make every ++ have exactly one --). */
+void userstats_count_sync(struct Client *cptr)
+{
+  if (!cptr)
+    return;
+  if (userstats_should_count_oper(cptr)) {
+    if (!HasFlag(cptr, FLAG_COUNTED_OPER)) {
+      ++UserStats.opers;
+      SetFlag(cptr, FLAG_COUNTED_OPER);
+    }
+  } else if (HasFlag(cptr, FLAG_COUNTED_OPER)) {
+    assert(UserStats.opers > 0);
+    --UserStats.opers;
+    ClrFlag(cptr, FLAG_COUNTED_OPER);
+  }
+  if (userstats_should_count_inv(cptr)) {
+    if (!HasFlag(cptr, FLAG_COUNTED_INV)) {
+      ++UserStats.inv_clients;
+      SetFlag(cptr, FLAG_COUNTED_INV);
+    }
+  } else if (HasFlag(cptr, FLAG_COUNTED_INV)) {
+    assert(UserStats.inv_clients > 0);
+    --UserStats.inv_clients;
+    ClrFlag(cptr, FLAG_COUNTED_INV);
+  }
+}
+
+void userstats_count_clear(struct Client *cptr)
+{
+  if (!cptr)
+    return;
+  if (HasFlag(cptr, FLAG_COUNTED_OPER)) {
+    assert(UserStats.opers > 0);
+    --UserStats.opers;
+    ClrFlag(cptr, FLAG_COUNTED_OPER);
+  }
+  if (HasFlag(cptr, FLAG_COUNTED_INV)) {
+    assert(UserStats.inv_clients > 0);
+    --UserStats.inv_clients;
+    ClrFlag(cptr, FLAG_COUNTED_INV);
+  }
+}
+
 /** Set a user's mode.  This function checks that \a cptr is trying to
  * set his own mode, prevents local users from setting inappropriate
  * modes through this function, and applies any other side effects of
@@ -2445,9 +2512,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
   if (IsRegistered(acptr)) {
     if (!FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
-      /* user now oper */
-      if (!IsHideOper(acptr) && !IsChannelService(acptr) && !IsBot(acptr))
-        ++UserStats.opers;
+      /* user now oper (UserStats counted by userstats_count_sync below) */
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;
       if (MyUser(acptr))
@@ -2470,11 +2535,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       prop = 1;
     }
     if (FlagHas(&setflags, FLAG_OPER) && !IsOper(acptr)) {
-      /* user no longer oper */
-      if (!FlagHas(&setflags, FLAG_HIDE_OPER) && !FlagHas(&setflags, FLAG_CHSERV) && !FlagHas(&setflags, FLAG_BOT)) {
-        assert(UserStats.opers > 0);
-        --UserStats.opers;
-      }
+      /* user no longer oper (UserStats counted by userstats_count_sync below) */
       if (IsHiddenHost(acptr))
         do_host_hiding = 1;
       client_set_privs(acptr, NULL); /* will clear propagate privilege */
@@ -2488,33 +2549,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       if (MyUser(acptr))
         cli_handler(acptr) = CLIENT_HANDLER;
     }
-    if (!FlagHas(&setflags, FLAG_HIDE_OPER) &&
-        !FlagHas(&setflags, FLAG_CHSERV) &&
-        !FlagHas(&setflags, FLAG_BOT) &&
-        (IsHideOper(acptr) || IsChannelService(acptr) || IsBot(acptr))) {
-      if (FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
-        --UserStats.opers;
-      }
-    }
-    if ((FlagHas(&setflags, FLAG_HIDE_OPER) ||
-         FlagHas(&setflags, FLAG_CHSERV) ||
-         FlagHas(&setflags, FLAG_BOT)) &&
-        !IsHideOper(acptr) && !IsChannelService(acptr) && !IsBot(acptr)) {
-      if (FlagHas(&setflags, FLAG_OPER) && IsOper(acptr)) {
-        ++UserStats.opers;
-      }
-    }
+    /* +H/+k/+B (hide-oper) transitions while opered change oper visibility;
+     * UserStats is reconciled by userstats_count_sync below. */
     if ((!FlagHas(&setflags, FLAG_HIDE_OPER) && IsHideOper(acptr)) ||
         (FlagHas(&setflags, FLAG_HIDE_OPER) && !IsHideOper(acptr))) {
       do_host_hiding = 1;
     }
-    if (FlagHas(&setflags, FLAG_INVISIBLE) && !IsInvisible(acptr)) {
-      assert(UserStats.inv_clients > 0);
-      --UserStats.inv_clients;
-    }
-    if (!FlagHas(&setflags, FLAG_INVISIBLE) && IsInvisible(acptr)) {
-      ++UserStats.inv_clients;
-    }
+    /* +i/-i: UserStats reconciled by userstats_count_sync below. */
     if (FlagHas(&setflags, FLAG_SETHOST) && !IsSetHost(acptr)) {
       FlagClr(&setflags, FLAG_SETHOST); /* Dont let the user see -h */
       if (IsHiddenHost(acptr) && !IsFakeHost(acptr)) {
@@ -2530,6 +2571,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     if (!FlagHas(&setflags, FLAG_HIDDENHOST) && IsHiddenHost(acptr)) {
       do_host_hiding = 1;
     }
+
+    /* Reconcile UserStats.opers / inv_clients to acptr's final mode state.
+     * Single source of truth (flag-keyed, idempotent) — replaces the per-
+     * transition ++/-- above whose gates didn't all match the exit decrement. */
+    userstats_count_sync(acptr);
 
     assert(UserStats.opers <= UserStats.clients + UserStats.unknowns);
     assert(UserStats.inv_clients <= UserStats.clients + UserStats.unknowns);

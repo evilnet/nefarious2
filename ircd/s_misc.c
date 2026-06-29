@@ -372,23 +372,12 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
         Count_clientdisconnects(bcptr, UserStats);
-        /* Mirror normal-path UserStats decrements (s_misc.c:492-499)
-         * for FLAG_OPER / FLAG_INVISIBLE.  Local aliases get counted
-         * at create time in bounce_copy_umodes (and at oper-grant time
-         * in bounce_apply_oper_grant) — must release the slot here or
-         * the counter drifts upward across every alias lifecycle.
-         * MyConnect gates this because remote aliases never had their
-         * ++ on this server. */
-        if (IsInvisible(bcptr)) {
-          assert(UserStats.inv_clients > 0);
-          --UserStats.inv_clients;
-        }
-        if (IsOper(bcptr) && !IsHideOper(bcptr)
-            && !IsChannelService(bcptr) && !IsBot(bcptr)) {
-          assert(UserStats.opers > 0);
-          --UserStats.opers;
-        }
       }
+      /* Release this alias's oper/inv count.  Flag-keyed (FLAG_COUNTED_*):
+       * decrements iff this client was actually counted — a no-op for a remote
+       * alias that was never counted, the right decrement for a local one.  No
+       * MyConnect gate needed (the flag carries that information). */
+      userstats_count_clear(bcptr);
       if (MyUser(bcptr))
         del_list_watch(bcptr);
       bounce_alias_untrack(bcptr);
@@ -434,20 +423,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         if (IsIPChecked(bcptr))
           IPcheck_disconnect(bcptr);
         Count_clientdisconnects(bcptr, UserStats);
-        /* Held ghosts created by bounce_create_ghost are MyConnect by
-         * construction and may carry FLAG_OPER from a restored oper
-         * grant (bounce_apply_oper_grant ++s under MyConnect+!IsOper).
-         * Mirror the normal-path decrement so the counter rebalances. */
-        if (IsInvisible(bcptr)) {
-          assert(UserStats.inv_clients > 0);
-          --UserStats.inv_clients;
-        }
-        if (IsOper(bcptr) && !IsHideOper(bcptr)
-            && !IsChannelService(bcptr) && !IsBot(bcptr)) {
-          assert(UserStats.opers > 0);
-          --UserStats.opers;
-        }
       }
+      /* Release the held ghost's oper/inv count (flag-keyed). */
+      userstats_count_clear(bcptr);
       if (MyUser(bcptr))
         del_list_watch(bcptr);
       remove_user_from_all_channels(bcptr);
@@ -558,14 +536,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     if (MyUser(bcptr))
       set_snomask(bcptr, ~0, SNO_DEL);
 
-    if (IsInvisible(bcptr)) {
-      assert(UserStats.inv_clients > 0);
-      --UserStats.inv_clients;
-    }
-    if (IsOper(bcptr) && !IsHideOper(bcptr) && !IsChannelService(bcptr) && !IsBot(bcptr)) {
-      assert(UserStats.opers > 0);
-      --UserStats.opers;
-    }
+    /* Release this user's oper/inv count (flag-keyed source of truth — every
+     * ++ via userstats_count_sync has exactly one matching -- here). */
+    userstats_count_clear(bcptr);
     if (MyConnect(bcptr))
       Count_clientdisconnects(bcptr, UserStats);
     else

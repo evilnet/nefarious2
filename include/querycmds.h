@@ -48,6 +48,22 @@ struct UserStatistics {
 
 extern struct UserStatistics UserStats;
 
+/* Unified UserStats.opers / inv_clients accounting — single source of truth.
+ * Rather than ++/-- at each transition (whose gates — MyConnect vs IsRegistered
+ * vs unconditional — didn't all match across register/copy_umodes/promote/mode/
+ * exit, so any race tipped the counter over or under and tripped the
+ * opers>0 / opers<=clients+unknowns asserts), counting is keyed off the per-client
+ * FLAG_COUNTED_OPER / FLAG_COUNTED_INV flags:
+ *   - userstats_count_sync(cli): reconcile the counters to whether @a cli should
+ *     currently be counted (idempotent — safe after ANY state change: +o/-o, +i/-i,
+ *     registration, alias conversion, promote).
+ *   - userstats_count_clear(cli): force-uncount @a cli (decrement iff its flag is
+ *     set), used at exit / free.  Because the decrement keys off the flag and not a
+ *     re-derived gate, every ++ has exactly one matching -- over the client's
+ *     lifetime — no leak, no underflow. */
+extern void userstats_count_sync(struct Client *cptr);
+extern void userstats_count_clear(struct Client *cptr);
+
 /*
  * Macros
  */

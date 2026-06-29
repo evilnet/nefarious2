@@ -304,6 +304,15 @@ enum Flag
 
     FLAG_DNSBL_EXEMPT,              /**< Client is exempt from blocks (native DNSBL whitelist hit) */
 
+    FLAG_COUNTED_OPER,             /**< This client currently contributes +1 to UserStats.opers.
+                                     *   Source of truth for oper counting: set/cleared ONLY by
+                                     *   userstats_count_sync()/userstats_count_clear() so every ++
+                                     *   has exactly one matching -- regardless of which path set/
+                                     *   cleared +o or created/destroyed the client (idempotent,
+                                     *   race-proof). Never set/cleared directly elsewhere. */
+    FLAG_COUNTED_INV,              /**< This client currently contributes +1 to UserStats.inv_clients.
+                                     *   Same discipline as FLAG_COUNTED_OPER. */
+
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
     FLAG_GLOBAL_UMODES = FLAG_OPER  /**< First global mode flag */

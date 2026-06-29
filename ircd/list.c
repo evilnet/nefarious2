@@ -36,6 +36,7 @@
 #include "listener.h"
 #include "match.h"
 #include "numeric.h"
+#include "querycmds.h"
 #include "res.h"
 #include "s_auth.h"
 #include "s_bsd.h"
@@ -301,6 +302,16 @@ void free_client(struct Client* cptr)
 {
   if (!cptr)
     return;
+  /* UserStats backstop: free_client is the single guaranteed teardown every client
+   * funnels through.  Several bouncer paths free a client via remove_client_from_list
+   * directly, intentionally bypassing exit_one_client to suppress its QUIT broadcast
+   * (bounce_alias_destroy's BX X target reap, bounce_dematerialize/temp-client).
+   * Those skip exit_one_client's userstats_count_clear, so a +o/+i client torn down
+   * that way leaks its UserStats.opers/inv_clients contribution -> the over-count that
+   * trips the opers<=clients+unknowns assert.  Release it here, flag-keyed and
+   * idempotent: a no-op for the common exit path (flags already cleared), the correct
+   * release for every direct-free path. */
+  userstats_count_clear(cptr);
   /*
    * forget to remove the client from the hash table?
    */

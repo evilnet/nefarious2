@@ -4616,10 +4616,13 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
     UserStats.local_announced_clients_max = UserStats.local_announced_clients;
     save_tunefile();
   }
-  if (IsInvisible(alias))
-    ++UserStats.inv_clients;
-  if (IsOper(alias) && !IsHideOper(alias) && !IsChannelService(alias) && !IsBot(alias))
-    ++UserStats.opers;
+  /* opers / inv_clients: ClearBouncerAlias above made @a alias a real primary,
+   * so reconcile its counting.  Flag-keyed + idempotent: a LOCAL alias was
+   * already counted when created (no-op here); a REMOTE alias was never counted
+   * (copy_umodes skipped the ineligible remote alias) and is bumped now that it
+   * is an eligible primary.  Replaces the old unconditional ++ which double-
+   * counted local aliases. */
+  userstats_count_sync(alias);
 
   /* Remove promoted alias from hs_aliases[] */
   if (winner_idx < session->hs_alias_count - 1)
@@ -6560,11 +6563,6 @@ static const int umode_sync_flags[] = {
 static void bounce_copy_umodes(struct Client *from, struct Client *to)
 {
   int i;
-  int was_oper = HasFlag(to, FLAG_OPER);
-  int was_inv  = HasFlag(to, FLAG_INVISIBLE);
-  int was_hide = HasFlag(to, FLAG_HIDE_OPER);
-  int was_csv  = HasFlag(to, FLAG_CHSERV);
-  int was_bot  = HasFlag(to, FLAG_BOT);
 
   for (i = 0; umode_sync_flags[i] >= 0; i++) {
     if (HasFlag(from, umode_sync_flags[i]))
@@ -6573,42 +6571,12 @@ static void bounce_copy_umodes(struct Client *from, struct Client *to)
       ClrFlag(to, umode_sync_flags[i]);
   }
 
-  /* Counter discipline only on local destinations.  Remote aliases
-   * follow whatever counter path their home server emits (umode_str
-   * via BX C, or P10 MODE post-burst). */
-  if (MyConnect(to) && IsRegistered(to)) {
-    int now_oper = HasFlag(to, FLAG_OPER);
-    int now_inv  = HasFlag(to, FLAG_INVISIBLE);
-    int now_hide = HasFlag(to, FLAG_HIDE_OPER);
-    int now_csv  = HasFlag(to, FLAG_CHSERV);
-    int now_bot  = HasFlag(to, FLAG_BOT);
-    int was_visible = (!was_hide && !was_csv && !was_bot);
-    int now_visible = (!now_hide && !now_csv && !now_bot);
-
-    if (!was_oper && now_oper) {
-      if (now_visible)
-        ++UserStats.opers;
-    } else if (was_oper && !now_oper) {
-      if (was_visible) {
-        assert(UserStats.opers > 0);
-        --UserStats.opers;
-      }
-    } else if (was_oper && now_oper) {
-      if (was_visible && !now_visible) {
-        assert(UserStats.opers > 0);
-        --UserStats.opers;
-      } else if (!was_visible && now_visible) {
-        ++UserStats.opers;
-      }
-    }
-
-    if (!was_inv && now_inv) {
-      ++UserStats.inv_clients;
-    } else if (was_inv && !now_inv) {
-      assert(UserStats.inv_clients > 0);
-      --UserStats.inv_clients;
-    }
-  }
+  /* Reconcile UserStats oper/inv counting to @a to's new mode + alias state.
+   * Idempotent and flag-keyed (FLAG_COUNTED_*), so it is correct regardless of
+   * MyConnect / registration timing / which path set +o|+i, and self-balances the
+   * convert-in-place case (an already-counted client converted to a remote alias
+   * becomes ineligible and releases its prior count). */
+  userstats_count_sync(to);
 }
 
 /** Look up the global O:line config item by name (CONF_OPERATOR only).
@@ -6667,12 +6635,8 @@ static void bounce_apply_oper_grant(struct Client *cptr,
     SetOper(cptr);
     if (HasPriv(cptr, PRIV_ADMIN))
       SetAdmin(cptr);
-    /* Match do_oper's UserStats.opers bookkeeping — without this,
-     * a subsequent /MODE -o trips the UserStats.opers > 0 assert in
-     * s_user.c:2420 because the counter was never bumped at grant
-     * time. */
-    if (!IsHideOper(cptr) && !IsChannelService(cptr) && !IsBot(cptr))
-      ++UserStats.opers;
+    /* Count the grant (flag-keyed source of truth, matched at exit/-o). */
+    userstats_count_sync(cptr);
   } else {
     SetLocOp(cptr);
   }
@@ -6713,14 +6677,12 @@ static void bounce_clear_oper_locally(struct Client *cptr)
     return;
   if (!IsOper(cptr) && !IsLocOp(cptr))
     return;
-  if (IsOper(cptr) && !IsHideOper(cptr) && !IsChannelService(cptr)
-      && !IsBot(cptr)) {
-    assert(UserStats.opers > 0);
-    --UserStats.opers;
-  }
   ClearOper(cptr);
   ClearLocOp(cptr);
   ClearAdmin(cptr);
+  /* Reconcile the counter now that +o is cleared (flag-keyed: decrements iff
+   * this client was actually counted). */
+  userstats_count_sync(cptr);
   client_set_privs(cptr, NULL);   /* clears propagate privilege */
   clear_privs(cptr);
   cli_handler(cptr) = CLIENT_HANDLER;
@@ -7030,6 +6992,29 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
     cli_user(new_client)->alias_primary = NULL;
     /* C1: Add promoted alias to nick hash (aliases aren't in nick hash) */
     hAddClient(new_client);
+    /* Reconcile opers/inv counting: ClearBouncerAlias made new_client an eligible
+     * primary.  Flag-keyed + idempotent — a remote alias (was uncounted) is bumped
+     * now (without this it exits +o uncounted -> opers underflow assert), the
+     * alias's home leaf (already counted) is a no-op.  old_client is exited below
+     * (count released by userstats_count_clear in exit_one_client). */
+    userstats_count_sync(new_client);
+    /* UserStats.clients (NOT flag-keyed — the core Count_* counter): a REMOTE alias
+     * was never counted in clients (BX C bypasses UserStats accounting), but it just
+     * became a real nick-hash primary, so pick it up here — mirror of
+     * bounce_promote_alias's originating-side ++.  Without this, old_client's exit
+     * below (--clients) runs with no matching ++ on this node, so clients drifts -1
+     * per cross-node promote and eventually UNDERFLOWS to UINT_MAX.  MyConnect (the
+     * alias's home leaf) already counted it at register, so skip there. */
+    if (!MyConnect(new_client)) {
+      ++UserStats.clients;
+      if (UserStats.clients > UserStats.clients_max) {
+        UserStats.clients_max = UserStats.clients;
+        save_tunefile();
+      }
+      if (cli_user(new_client)->server && cli_user(new_client)->server != &me
+          && cli_serv(cli_user(new_client)->server))
+        ++(cli_serv(cli_user(new_client)->server)->clients);
+    }
   } else {
     /* Swap path: new_client has no channel memberships.
      * Transfer memberships from old to new (legacy/sequential). */
@@ -7576,7 +7561,39 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     }
     /* Existing non-alias client — convert to alias in place.
      * This happens when BX C arrives for a client that was introduced
-     * via N token (e.g., local alias setup already done, or burst ordering). */
+     * via N token (e.g., local alias setup already done, or burst ordering).
+     *
+     * The burst-side N filter at s_serv.c (`IsUser(acptr) &&
+     * !IsBouncerAlias(acptr)` in server_finish_burst) structurally
+     * prevents this in steady-state burst, so this branch should
+     * effectively never fire in normal operation.  When it DOES
+     * fire it indicates either (a) a race window between SetUser
+     * and SetBouncerAlias in register_user that happened to align
+     * with a server link, (b) a SQUIT + rejoin path that
+     * re-introduces an alias through a non-standard sequence, or
+     * (c) a regression in the burst filter.
+     *
+     * Canary snotice below surfaces every occurrence to opers
+     * subscribed to SNO_NETWORK so we can investigate when prod-test
+     * (or any deployment) hits this path.
+     *
+     * KNOWN OPEN ISSUE if the canary does fire: this conversion is
+     * silent on the wire — no QUIT, NICK, or PART is emitted to
+     * common channels.  Any channel member that saw the
+     * pre-conversion N is left with the alias's old nick stuck in
+     * their channel-state cache, and the eventual silent
+     * IsBouncerAlias destroy in s_misc.c never cleans it up.
+     * Mitigation sketch: sendcmdto_common_channels_butone(alias,
+     * CMD_QUIT, "Session converging") here before hRemClient.  Not
+     * implemented pending evidence of real-world occurrence.  See
+     * `.claude/para/projects/legacy-bx-p-in-place-conversion.md`
+     * (Open questions — "Client-side ghost on in-place conversion"). */
+    sendto_opmask_butone(0, SNO_NETWORK,
+        "BX C convert-in-place fired: alias_numeric=%s old_nick=%s "
+        "primary_numeric=%s primary_nick=%s — investigate path that "
+        "introduced N for the alias (see bouncer_session.c comment "
+        "block above this notice)",
+        alias_numeric, cli_name(alias), primary_numeric, cli_name(primary));
     Debug((DEBUG_INFO, "BX C: converting existing client %s (%s) to alias of %s",
            alias_numeric, cli_name(alias), cli_name(primary)));
     user = cli_user(alias);
