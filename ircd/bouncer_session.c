@@ -7599,6 +7599,18 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     user = cli_user(alias);
     if (!user)
       goto forward;
+    /* Client-visible cleanup for the convert-in-place ghost: this client was
+     * N-introduced with its OWN nick (burst-ordering — its N arrived before the
+     * BX C revealing it is an alias of `primary`), and is about to be SILENTLY
+     * relabeled to the primary's nick + absorbed as a hidden alias.  The
+     * conversion emits no QUIT/NICK on the wire, so local clients sharing a
+     * channel with this nick would keep it cached forever (a ghost).  Emit a QUIT
+     * for the old nick to its common channels FIRST so observers clean it up.
+     * Local-only (sendcmdto_common_channels_butone targets local clients), so
+     * each server does this for its own clients when it processes the BX C — no
+     * upstream/peer dependency.  Skip when the nick is unchanged (no delta). */
+    if (0 != ircd_strcmp(cli_name(alias), cli_name(primary)))
+      sendcmdto_common_channels_butone(alias, CMD_QUIT, NULL, ":Session converging");
     {
       /* Stash original server pointer BEFORE conversion overwrites
        * anything — needed for the per-peer decrement below.  The
