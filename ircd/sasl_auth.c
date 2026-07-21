@@ -52,6 +52,24 @@ static void sasl_local_timeout_cb(struct Event *ev);
 static void sasl_health_cb(int result, const struct kc_access_token *token, void *data);
 #endif
 
+/* ==================================================================
+ * Login identity resolution — SASL authzid allowlist gate (F-A1)
+ * ================================================================== */
+
+/** Resolve the identity to authenticate as, enforcing the authzid allowlist.
+ * Honors a client-asserted authzid only when it differs from the KC-verified
+ * id AND that verified id is on FEAT_SASL_TRUSTED_AUTHZID; otherwise ignores
+ * the authzid and authenticates as the verified id (closes F-A1). */
+static const char *sasl_resolve_login_identity(struct SASLSession *session,
+                                               const char *verified_id)
+{
+  if (session->authzid[0]
+      && 0 != ircd_strcmp(session->authzid, verified_id)
+      && authzid_in_allowlist(feature_str(FEAT_SASL_TRUSTED_AUTHZID), verified_id))
+    return session->authzid;
+  return verified_id;
+}
+
 /* ---- Health tracking ---- */
 
 /** Whether the Keycloak SASL backend is currently healthy. */
@@ -689,15 +707,16 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
   }
 
   if (result == KC_SUCCESS) {
-    const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
+    const char *login_as = sasl_resolve_login_identity(session, session->authcid);
 
     /* Successful auth confirms Keycloak is reachable */
     if (!kc_sasl_healthy)
       sasl_mark_healthy();
 
-    /* Update auth caches */
+    /* Update auth caches.  Store the verified authcid (never the asserted
+     * authzid) so a cache hit can never resolve to an impersonated account. */
     if (session->cred_hash_valid) {
-      poscache_insert(session->authcid, login_as, session->cred_hash,
+      poscache_insert(session->authcid, session->authcid, session->cred_hash,
                       token ? token->created_at : 0);
       negcache_remove(session->cred_hash);
     }
@@ -825,7 +844,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
       time_t cached_created_at = 0;
       if (poscache_check(cred_hash, cached_account, sizeof(cached_account),
                          &cached_created_at)) {
-        const char *login_as = session->authzid[0] ? session->authzid : cached_account;
+        const char *login_as = sasl_resolve_login_identity(session, cached_account);
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
                   authcid_str, sptr);
@@ -1056,8 +1075,8 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
     /* Successful introspect confirms Keycloak is reachable */
     if (!kc_sasl_healthy)
       sasl_mark_healthy();
-    /* Use authzid if set, otherwise username from token */
-    const char *login_as = session->authzid[0] ? session->authzid : info->username;
+    /* Resolve authzid vs the KC-verified username per the allowlist gate (F-A1) */
+    const char *login_as = sasl_resolve_login_identity(session, info->username);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: Introspect success for %s (client %C)",
               login_as, acptr);
@@ -1114,7 +1133,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
 
   rc = kc_jwt_validate_local(realm, token_nul, &info);
   if (rc == KC_SUCCESS && info && info->username) {
-    const char *login_as = session->authzid[0] ? session->authzid : info->username;
+    const char *login_as = sasl_resolve_login_identity(session, info->username);
     {
       time_t jwt_created_at = info->created_at ? info->created_at : 0;
       log_write(LS_SYSTEM, L_INFO, 0,
@@ -1551,7 +1570,7 @@ static int sasl_scram_client_final(struct Client *sptr,
 static int sasl_scram_complete(struct Client *sptr)
 {
   struct SASLSession *session = cli_saslsession(sptr);
-  const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
+  const char *login_as = sasl_resolve_login_identity(session, session->authcid);
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "SASL SCRAM: Successful authentication for %s (client %C)",
@@ -1725,7 +1744,7 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
   struct SASLSession *session = cli_saslsession(sptr);
 
   if (sasl_ecdsa_verify(sptr, decoded, len) == 0) {
-    const char *login_as = session->authzid[0] ? session->authzid : session->authcid;
+    const char *login_as = sasl_resolve_login_identity(session, session->authcid);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL ECDSA: Successful authentication for %s (client %C)",
               login_as, sptr);

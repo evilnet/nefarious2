@@ -484,6 +484,30 @@ int ircd_strncmp(const char *a, const char *b, size_t n)
   return (ToLower(*ra) - ToLower(*rb));
 }
 
+/** Is @a authcid on the comma/space-separated @a csv allowlist (case-insensitive)?
+ * Empty/NULL csv denies all.  Pure: caller passes feature_str(...) in. */
+int authzid_in_allowlist(const char* csv, const char* authcid)
+{
+  const char *p;
+  size_t alen;
+  if (!csv || !*csv || !authcid || !*authcid)
+    return 0;
+  alen = strlen(authcid);
+  for (p = csv; *p; ) {
+    const char *start;
+    size_t tlen;
+    while (*p == ',' || *p == ' ' || *p == '\t')
+      p++;
+    start = p;
+    while (*p && *p != ',' && *p != ' ' && *p != '\t')
+      p++;
+    tlen = (size_t)(p - start);
+    if (tlen == alen && 0 == ircd_strncmp(start, authcid, alen))
+      return 1;
+  }
+  return 0;
+}
+
 /** Fill a vector of distinct names from a delimited input list.
  * Empty tokens (when \a token occurs at the start or end of \a list,
  * or when \a token occurs adjacent to itself) are ignored.  When

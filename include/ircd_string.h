@@ -33,6 +33,7 @@ extern int str_appendf(char* buf, size_t buflen, size_t* pos,
                        const char* fmt, ...);
 extern int         ircd_strcmp(const char *a, const char *b);
 extern int         ircd_strncmp(const char *a, const char *b, size_t n);
+extern int authzid_in_allowlist(const char* csv, const char* authcid);
 extern int         unique_name_vector(char* names, char token,
                                       char** vector, int size);
 extern int         token_vector(char* names, char token,

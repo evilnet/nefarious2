@@ -416,6 +416,26 @@ static void test_str_appendf_noop_when_pos_at_end(void **state)
 }
 
 
+/* ========== authzid_in_allowlist ========== */
+
+static void test_authzid_allowlist_empty_denies(void **state)
+{
+    (void)state;
+    assert_int_equal(authzid_in_allowlist(NULL, "svc"), 0);
+    assert_int_equal(authzid_in_allowlist("", "svc"), 0);
+}
+
+static void test_authzid_allowlist_match_and_case(void **state)
+{
+    (void)state;
+    assert_int_equal(authzid_in_allowlist("bnc,svc,relay", "svc"), 1);
+    assert_int_equal(authzid_in_allowlist("bnc,svc,relay", "SVC"), 1); /* ci */
+    assert_int_equal(authzid_in_allowlist("bnc svc relay", "relay"), 1); /* space-sep */
+    assert_int_equal(authzid_in_allowlist("bnc,svc", "mallory"), 0);
+    assert_int_equal(authzid_in_allowlist("bnc,svc", "sv"), 0);       /* no prefix match */
+}
+
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -465,6 +485,10 @@ int main(void)
         cmocka_unit_test(test_str_appendf_basic),
         cmocka_unit_test(test_str_appendf_clamps_at_buffer_end),
         cmocka_unit_test(test_str_appendf_noop_when_pos_at_end),
+
+        /* authzid_in_allowlist */
+        cmocka_unit_test(test_authzid_allowlist_empty_denies),
+        cmocka_unit_test(test_authzid_allowlist_match_and_case),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
