@@ -26,9 +26,11 @@
 #include "ircd_defs.h"
 #include "ircd_chattr.h"
 #include "ircd_log.h"
+#include "ircd_snprintf.h"
 #include "res.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+#include <stdarg.h>
 #include <string.h>
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -400,6 +402,36 @@ char* ircd_strncpy(char* s1, const char* s2, size_t n)
     *dst = '\0';
   }
   return s1;
+}
+
+/** Append a formatted string at buf[*pos], clamping to buflen.
+ * Advances *pos by the number of bytes ACTUALLY written (never the
+ * would-be length that ircd_vsnprintf returns), and is a safe no-op once
+ * the buffer is full.  buf stays NUL-terminated within buflen.
+ * Use this instead of the unguarded `x += ircd_snprintf(0, buf+x,
+ * buflen-x, ...)` idiom, which overflows once x reaches buflen.
+ */
+int str_appendf(char* buf, size_t buflen, size_t* pos, const char* fmt, ...)
+{
+  va_list args;
+  int would;
+  size_t remaining, wrote;
+
+  if (!buf || !pos || *pos >= buflen)
+    return 0;                       /* full or invalid: no-op */
+
+  remaining = buflen - *pos;        /* >= 1 */
+  va_start(args, fmt);
+  would = ircd_vsnprintf(0, buf + *pos, remaining, fmt, args);
+  va_end(args);
+
+  if (would <= 0)
+    return 0;
+  /* ircd_vsnprintf writes at most remaining-1 chars + NUL and returns the
+   * would-be length; the bytes actually written are min(would, remaining-1). */
+  wrote = ((size_t)would < remaining) ? (size_t)would : (remaining - 1);
+  *pos += wrote;
+  return (int)wrote;
 }
 
 #ifndef FORCEINLINE

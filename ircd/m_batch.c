@@ -117,7 +117,7 @@ static int format_batch_open_tags(char *buf, size_t buflen,
                                    const char *timebuf, const char *msgid,
                                    const char *label, const char *ctags)
 {
-  int pos = 0;
+  size_t pos = 0;
   int use_tags = CapOwnHas(to, CAP_MSGTAGS);
   int has_label = (label && *label && CapOwnHas(to, CAP_LABELEDRESP));
   int has_ctags = (ctags && *ctags && use_tags);
@@ -127,36 +127,28 @@ static int format_batch_open_tags(char *buf, size_t buflen,
   if (!use_tags && !has_label)
     return 0;
 
-  buf[pos++] = '@';
-
-  if (has_label) {
-    pos += ircd_snprintf(0, buf + pos, buflen - pos, "label=%s", label);
-  }
-
+  buf[0] = '\0';
+  str_appendf(buf, buflen, &pos, "@");
+  if (has_label)
+    str_appendf(buf, buflen, &pos, "label=%s", label);
   if (use_tags && timebuf && *timebuf) {
-    if (pos > 1) buf[pos++] = ';';
-    pos += ircd_snprintf(0, buf + pos, buflen - pos, "time=%s", timebuf);
+    if (pos > 1) str_appendf(buf, buflen, &pos, ";");
+    str_appendf(buf, buflen, &pos, "time=%s", timebuf);
   }
-
   if (use_tags && msgid && *msgid) {
-    if (pos > 1) buf[pos++] = ';';
-    pos += ircd_snprintf(0, buf + pos, buflen - pos, "msgid=%s", msgid);
+    if (pos > 1) str_appendf(buf, buflen, &pos, ";");
+    str_appendf(buf, buflen, &pos, "msgid=%s", msgid);
   }
-
   if (has_account) {
-    if (pos > 1) buf[pos++] = ';';
-    pos += ircd_snprintf(0, buf + pos, buflen - pos, "account=%s",
-                         cli_user(from)->account);
+    if (pos > 1) str_appendf(buf, buflen, &pos, ";");
+    str_appendf(buf, buflen, &pos, "account=%s", cli_user(from)->account);
   }
-
   if (has_ctags) {
-    if (pos > 1) buf[pos++] = ';';
-    pos += ircd_snprintf(0, buf + pos, buflen - pos, "%s", ctags);
+    if (pos > 1) str_appendf(buf, buflen, &pos, ";");
+    str_appendf(buf, buflen, &pos, "%s", ctags);
   }
-
-  buf[pos++] = ' ';
-  buf[pos] = '\0';
-  return pos;
+  str_appendf(buf, buflen, &pos, " ");
+  return (int)pos;
 }
 
 /* Forward declarations: deliver_multiline_dm_to_one calls helpers

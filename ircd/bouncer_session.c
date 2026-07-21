@@ -3614,7 +3614,7 @@ void bounce_burst(struct Client *cptr)
           struct Client *alias;
           struct Membership *memb;
           char alias_chans[512];
-          int chans_len = 0;
+          size_t chans_len = 0;
           const char *alias_modes;
 
           alias = findNUser(s->hs_aliases[a].ba_numeric);
@@ -3631,21 +3631,17 @@ void bounce_burst(struct Client *cptr)
                memb = memb->next_channel) {
             if (IsZombie(memb) || IsDelayedJoin(memb))
               continue;
-            if (chans_len > 0
-                && chans_len < (int)sizeof(alias_chans) - 1)
-              alias_chans[chans_len++] = ' ';
+            if (chans_len > 0)
+              str_appendf(alias_chans, sizeof(alias_chans), &chans_len, " ");
             /* Per redesign F.2: ride-along JOIN msgid as
              * "<chan>@<msgid>" so receivers replicate single-msgid
              * invariant on alias rejoin during burst. */
             if (memb->join_msgid[0])
-              chans_len += ircd_snprintf(0, alias_chans + chans_len,
-                                         sizeof(alias_chans) - chans_len,
-                                         "%s@%s", memb->channel->chname,
-                                         memb->join_msgid);
+              str_appendf(alias_chans, sizeof(alias_chans), &chans_len,
+                          "%s@%s", memb->channel->chname, memb->join_msgid);
             else
-              chans_len += ircd_snprintf(0, alias_chans + chans_len,
-                                         sizeof(alias_chans) - chans_len,
-                                         "%s", memb->channel->chname);
+              str_appendf(alias_chans, sizeof(alias_chans), &chans_len,
+                          "%s", memb->channel->chname);
           }
 
           alias_modes = umode_str(alias);
@@ -5922,7 +5918,7 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
     char chanlist_buf[512];
     char *alias_modes;
     struct Membership *m;
-    int len = 0;
+    size_t len = 0;
 
     ircd_snprintf(0, primary_full, sizeof(primary_full), "%s%s",
                   cli_yxx(cli_user(new_primary)->server),
@@ -5934,21 +5930,19 @@ int bounce_finish_live_primary_demote(struct Client *demoted_alias,
     for (m = cli_user(demoted_alias)->channel; m; m = m->next_channel) {
       if (!m->channel)
         continue;
-      if (len > 0 && len < (int)sizeof(chanlist_buf) - 1)
-        chanlist_buf[len++] = ' ';
+      if (len > 0)
+        str_appendf(chanlist_buf, sizeof(chanlist_buf), &len, " ");
       /* Per redesign F.2: per-channel JOIN msgid rides along as
        * "<chan>@<msgid>" so receivers can populate the alias's
        * Membership::join_msgid.  Single-msgid invariant: the alias's
        * cross-server join echo carries the same msgid as the primary's
        * original JOIN. */
       if (m->join_msgid[0])
-        len += ircd_snprintf(0, chanlist_buf + len,
-                             sizeof(chanlist_buf) - len,
-                             "%s@%s", m->channel->chname, m->join_msgid);
+        str_appendf(chanlist_buf, sizeof(chanlist_buf), &len,
+                    "%s@%s", m->channel->chname, m->join_msgid);
       else
-        len += ircd_snprintf(0, chanlist_buf + len,
-                             sizeof(chanlist_buf) - len,
-                             "%s", m->channel->chname);
+        str_appendf(chanlist_buf, sizeof(chanlist_buf), &len,
+                    "%s", m->channel->chname);
     }
 
     alias_modes = umode_str(demoted_alias);
@@ -7115,7 +7109,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   struct Membership *member;
   struct BounceAlias *ba;
   char chanlist_buf[512];
-  int chanlist_len = 0;
+  size_t chanlist_len = 0;
   char *parv[2] = { NULL, NULL };
 
   assert(sptr != NULL);
@@ -7303,16 +7297,14 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
       /* Append to channel list for BX C (only joined channels).
        * Per redesign F.2: ride-along JOIN msgid as "<chan>@<msgid>"
        * so peers can keep msgid parity for the alias's join echo. */
-      if (chanlist_len > 0 && chanlist_len < (int)sizeof(chanlist_buf) - 1)
-        chanlist_buf[chanlist_len++] = ' ';
+      if (chanlist_len > 0)
+        str_appendf(chanlist_buf, sizeof(chanlist_buf), &chanlist_len, " ");
       if (member->join_msgid[0])
-        chanlist_len += ircd_snprintf(0, chanlist_buf + chanlist_len,
-                                      sizeof(chanlist_buf) - chanlist_len,
-                                      "%s@%s", chptr->chname, member->join_msgid);
+        str_appendf(chanlist_buf, sizeof(chanlist_buf), &chanlist_len,
+                    "%s@%s", chptr->chname, member->join_msgid);
       else
-        chanlist_len += ircd_snprintf(0, chanlist_buf + chanlist_len,
-                                      sizeof(chanlist_buf) - chanlist_len,
-                                      "%s", chptr->chname);
+        str_appendf(chanlist_buf, sizeof(chanlist_buf), &chanlist_len,
+                    "%s", chptr->chname);
     }
 
     /* --- Step 8: Broadcast BX C to network ---

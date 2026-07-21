@@ -29,6 +29,8 @@ extern int string_contains_non_ascii (const char* str);
 extern int string_character_structure_is_sane(const char* str);
 
 extern char*       ircd_strncpy(char* dest, const char* src, size_t len);
+extern int str_appendf(char* buf, size_t buflen, size_t* pos,
+                       const char* fmt, ...);
 extern int         ircd_strcmp(const char *a, const char *b);
 extern int         ircd_strncmp(const char *a, const char *b, size_t n);
 extern int         unique_name_vector(char* names, char token,

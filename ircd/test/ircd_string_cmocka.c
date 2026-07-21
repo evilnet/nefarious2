@@ -376,6 +376,46 @@ static void test_valid_hostname(void **state)
  * The underlying character classification is tested in ircd_chattr_cmocka.c */
 
 
+/* ========== str_appendf ========== */
+
+static void test_str_appendf_basic(void **state)
+{
+    (void)state;
+    char buf[16];
+    size_t pos = 0;
+    buf[0] = '\0';
+    assert_int_equal(str_appendf(buf, sizeof(buf), &pos, "%s", "ab"), 2);
+    assert_int_equal(str_appendf(buf, sizeof(buf), &pos, "%d", 34), 2);
+    assert_string_equal(buf, "ab34");
+    assert_int_equal((int)pos, 4);
+}
+
+static void test_str_appendf_clamps_at_buffer_end(void **state)
+{
+    (void)state;
+    char buf[8];              /* 7 usable + NUL */
+    size_t pos = 0;
+    buf[0] = '\0';
+    /* would-be 11 chars, but only 7 fit; pos must clamp to 7, not 11 */
+    str_appendf(buf, sizeof(buf), &pos, "%s", "hello world");
+    assert_true(pos <= sizeof(buf) - 1);
+    assert_int_equal(buf[sizeof(buf) - 1], '\0');
+    /* a further append must be a safe no-op, never writing past the buffer */
+    assert_int_equal(str_appendf(buf, sizeof(buf), &pos, "%s", "XYZ"), 0);
+    assert_true(pos <= sizeof(buf) - 1);
+}
+
+static void test_str_appendf_noop_when_pos_at_end(void **state)
+{
+    (void)state;
+    char buf[4] = "abc";
+    size_t pos = 3;
+    assert_int_equal(str_appendf(buf, sizeof(buf), &pos, "z"), 0);
+    assert_string_equal(buf, "abc");
+    assert_int_equal((int)pos, 3);
+}
+
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -420,6 +460,11 @@ int main(void)
         /* Username/hostname validation */
         cmocka_unit_test(test_valid_username),
         cmocka_unit_test(test_valid_hostname),
+
+        /* str_appendf */
+        cmocka_unit_test(test_str_appendf_basic),
+        cmocka_unit_test(test_str_appendf_clamps_at_buffer_end),
+        cmocka_unit_test(test_str_appendf_noop_when_pos_at_end),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
