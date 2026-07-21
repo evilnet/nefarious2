@@ -36,8 +36,10 @@ static void test_ircd_strncpy_truncation(void **state)
     (void)state;
     char dest[8];
 
-    /* Source longer than dest - should truncate */
-    ircd_strncpy(dest, "hello world", sizeof(dest) - 1);
+    /* Source longer than dest - should truncate.  ircd_strncpy is strlcpy-like:
+     * the size arg is the FULL buffer size and it writes at most size-1 chars
+     * + NUL, so an 8-byte dest yields a 7-char result. */
+    ircd_strncpy(dest, "hello world", sizeof(dest));
     assert_int_equal(strlen(dest), 7);
 }
 

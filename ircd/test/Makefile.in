@@ -175,9 +175,9 @@ test-cmocka: ${CMOCKA_TESTPROGS}
 	@failed=0; \
 	for t in ${CMOCKA_TESTPROGS}; do \
 		echo "  Running $$t..."; \
-		if ./$$t 2>&1 | tee $$t.log; then \
-			: ; \
-		else \
+		./$$t > $$t.log 2>&1; rc=$$?; \
+		cat $$t.log; \
+		if [ $$rc -ne 0 ]; then \
 			failed=1; \
 		fi; \
 	done; \
