@@ -1199,6 +1199,19 @@ SASL_TIMEOUT
 
 Specifies the number of seconds before an SASL request should timeout.
 
+SASL_TRUSTED_AUTHZID
+  * Type: string
+  * Default: (none)
+
+Comma- or space-separated list of account names permitted to assert a SASL
+authorization identity (authzid) different from the authenticated identity
+(authcid) -- i.e. accounts allowed to log in on behalf of another account,
+such as a service/bouncer gateway. When empty (the default), any asserted
+authzid that differs from the authcid is ignored and the client is logged in
+as the authenticated authcid. Matching is case-insensitive and exact (no
+prefix match). Leave this empty unless you operate a trusted service that
+must impersonate users.
+
 NOMULTITARGETS
   * Type: boolean
   * Default: FALSE

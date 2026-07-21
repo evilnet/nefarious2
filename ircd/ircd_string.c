@@ -484,15 +484,16 @@ int ircd_strncmp(const char *a, const char *b, size_t n)
   return (ToLower(*ra) - ToLower(*rb));
 }
 
-/** Is @a authcid on the comma/space-separated @a csv allowlist (case-insensitive)?
- * Empty/NULL csv denies all.  Pure: caller passes feature_str(...) in. */
-int authzid_in_allowlist(const char* csv, const char* authcid)
+/** Is @a token a member of the comma/space/tab-separated @a csv list
+ * (case-insensitive, exact token match, no prefix match)?  Empty/NULL csv
+ * or token denies.  Pure helper; the SASL layer passes feature_str(...) in. */
+int csv_contains_token(const char* csv, const char* token)
 {
   const char *p;
-  size_t alen;
-  if (!csv || !*csv || !authcid || !*authcid)
+  size_t nlen;
+  if (!csv || !*csv || !token || !*token)
     return 0;
-  alen = strlen(authcid);
+  nlen = strlen(token);
   for (p = csv; *p; ) {
     const char *start;
     size_t tlen;
@@ -502,7 +503,7 @@ int authzid_in_allowlist(const char* csv, const char* authcid)
     while (*p && *p != ',' && *p != ' ' && *p != '\t')
       p++;
     tlen = (size_t)(p - start);
-    if (tlen == alen && 0 == ircd_strncmp(start, authcid, alen))
+    if (tlen == nlen && 0 == ircd_strncmp(start, token, nlen))
       return 1;
   }
   return 0;

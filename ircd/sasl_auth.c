@@ -65,7 +65,7 @@ static const char *sasl_resolve_login_identity(struct SASLSession *session,
 {
   if (session->authzid[0]
       && 0 != ircd_strcmp(session->authzid, verified_id)
-      && authzid_in_allowlist(feature_str(FEAT_SASL_TRUSTED_AUTHZID), verified_id))
+      && csv_contains_token(feature_str(FEAT_SASL_TRUSTED_AUTHZID), verified_id))
     return session->authzid;
   return verified_id;
 }
@@ -811,9 +811,12 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
       return -1;
     }
     ircd_strncpy(session->authzid, authzid_str, sizeof(session->authzid));
-    /* TODO: Validate authcid is authorized to assert authzid (service account check) */
+    /* An asserted authzid is honored only when authcid is on
+     * FEAT_SASL_TRUSTED_AUTHZID (see sasl_resolve_login_identity); otherwise
+     * it is ignored and the client authenticates as authcid. */
     log_write(LS_SYSTEM, L_INFO, 0,
-              "SASL PLAIN: authzid impersonation: %s acting as %s (client %C)",
+              "SASL PLAIN: authcid %s asserted authzid %s (honored only if "
+              "trusted; client %C)",
               authcid_str, authzid_str, sptr);
   }
 

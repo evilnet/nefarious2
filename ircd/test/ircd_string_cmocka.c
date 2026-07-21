@@ -415,24 +415,38 @@ static void test_str_appendf_noop_when_pos_at_end(void **state)
     assert_int_equal((int)pos, 3);
 }
 
-
-/* ========== authzid_in_allowlist ========== */
-
-static void test_authzid_allowlist_empty_denies(void **state)
+static void test_str_appendf_guard_pos_at_or_past_buflen(void **state)
 {
     (void)state;
-    assert_int_equal(authzid_in_allowlist(NULL, "svc"), 0);
-    assert_int_equal(authzid_in_allowlist("", "svc"), 0);
+    char buf[8] = "abcdefg";        /* full: 7 chars + NUL */
+    size_t pos = sizeof(buf);       /* pos == buflen: initial guard must no-op */
+    assert_int_equal(str_appendf(buf, sizeof(buf), &pos, "X"), 0);
+    assert_int_equal((int)pos, (int)sizeof(buf));
+    assert_string_equal(buf, "abcdefg");
+
+    pos = sizeof(buf) + 5;          /* pos > buflen: still a safe no-op */
+    assert_int_equal(str_appendf(buf, sizeof(buf), &pos, "X"), 0);
+    assert_string_equal(buf, "abcdefg");
 }
 
-static void test_authzid_allowlist_match_and_case(void **state)
+
+/* ========== csv_contains_token ========== */
+
+static void test_csv_contains_token_empty_denies(void **state)
 {
     (void)state;
-    assert_int_equal(authzid_in_allowlist("bnc,svc,relay", "svc"), 1);
-    assert_int_equal(authzid_in_allowlist("bnc,svc,relay", "SVC"), 1); /* ci */
-    assert_int_equal(authzid_in_allowlist("bnc svc relay", "relay"), 1); /* space-sep */
-    assert_int_equal(authzid_in_allowlist("bnc,svc", "mallory"), 0);
-    assert_int_equal(authzid_in_allowlist("bnc,svc", "sv"), 0);       /* no prefix match */
+    assert_int_equal(csv_contains_token(NULL, "svc"), 0);
+    assert_int_equal(csv_contains_token("", "svc"), 0);
+}
+
+static void test_csv_contains_token_match_and_case(void **state)
+{
+    (void)state;
+    assert_int_equal(csv_contains_token("bnc,svc,relay", "svc"), 1);
+    assert_int_equal(csv_contains_token("bnc,svc,relay", "SVC"), 1); /* ci */
+    assert_int_equal(csv_contains_token("bnc svc relay", "relay"), 1); /* space-sep */
+    assert_int_equal(csv_contains_token("bnc,svc", "mallory"), 0);
+    assert_int_equal(csv_contains_token("bnc,svc", "sv"), 0);       /* no prefix match */
 }
 
 
@@ -485,10 +499,11 @@ int main(void)
         cmocka_unit_test(test_str_appendf_basic),
         cmocka_unit_test(test_str_appendf_clamps_at_buffer_end),
         cmocka_unit_test(test_str_appendf_noop_when_pos_at_end),
+        cmocka_unit_test(test_str_appendf_guard_pos_at_or_past_buflen),
 
-        /* authzid_in_allowlist */
-        cmocka_unit_test(test_authzid_allowlist_empty_denies),
-        cmocka_unit_test(test_authzid_allowlist_match_and_case),
+        /* csv_contains_token */
+        cmocka_unit_test(test_csv_contains_token_empty_denies),
+        cmocka_unit_test(test_csv_contains_token_match_and_case),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
