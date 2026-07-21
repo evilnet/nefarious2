@@ -532,6 +532,25 @@ static int check_auth_finished(struct AuthRequest *auth)
     {
       Debug((DEBUG_INFO, "Auth %p [%d] still has flag %d", auth,
              cli_fd(auth->client), flag));
+      /* DIAGNOSTIC: SASL-then-stall investigation.  When a SASL'd
+       * client gets 900/903 but never receives 001, we're returning 0
+       * from here with one of the AR_* PENDING flags still set.
+       * Promote to INFO when the auth has been alive >5s so we see it
+       * under minimal logging.  flag values: 0=AUTH(ident), 1=DNS,
+       * 2=CAP, 3=NEEDS_PONG, 4=NEEDS_USER, 5=NEEDS_NICK, 6=SASL. */
+      if (cli_firsttime(cptr) > 0
+          && CurrentTime - cli_firsttime(cptr) > 5) {
+        log_write(LS_USER, L_INFO, 0,
+                  "check_auth_finished: auth %p (fd %d, nick=%s, "
+                  "acct=%s) BLOCKED on flag %d after %ds — "
+                  "SASL-stall diagnostic",
+                  (void*)auth, cli_fd(cptr),
+                  cli_name(cptr)[0] ? cli_name(cptr) : "*",
+                  (cli_user(cptr) && cli_user(cptr)->account[0])
+                    ? cli_user(cptr)->account : "*",
+                  (int)flag,
+                  (int)(CurrentTime - cli_firsttime(cptr)));
+      }
       return 0;
     }
 
@@ -626,6 +645,16 @@ static int check_auth_finished(struct AuthRequest *auth)
   {
     Debug((DEBUG_INFO, "Auth %p [%d] still has flag AR_DNSBL_PENDING", auth,
            cli_fd(auth->client)));
+    if (cli_firsttime(cptr) > 0 && CurrentTime - cli_firsttime(cptr) > 5) {
+      log_write(LS_USER, L_INFO, 0,
+                "check_auth_finished: auth %p BLOCKED on AR_DNSBL_PENDING "
+                "after %ds (fd %d, nick=%s, acct=%s) — SASL-stall diag",
+                (void*)auth, (int)(CurrentTime - cli_firsttime(cptr)),
+                cli_fd(cptr),
+                cli_name(cptr)[0] ? cli_name(cptr) : "*",
+                (cli_user(cptr) && cli_user(cptr)->account[0])
+                  ? cli_user(cptr)->account : "*");
+    }
     return 0;
   }
 
@@ -696,6 +725,16 @@ static int check_auth_finished(struct AuthRequest *auth)
 
     Debug((DEBUG_INFO, "Auth %p [%d] still has flag %d", auth,
            cli_fd(auth->client), AR_IAUTH_PENDING));
+    if (cli_firsttime(cptr) > 0 && CurrentTime - cli_firsttime(cptr) > 5) {
+      log_write(LS_USER, L_INFO, 0,
+                "check_auth_finished: auth %p BLOCKED on AR_IAUTH_PENDING "
+                "after %ds (fd %d, nick=%s, acct=%s) — SASL-stall diag",
+                (void*)auth, (int)(CurrentTime - cli_firsttime(cptr)),
+                cli_fd(cptr),
+                cli_name(cptr)[0] ? cli_name(cptr) : "*",
+                (cli_user(cptr) && cli_user(cptr)->account[0])
+                  ? cli_user(cptr)->account : "*");
+    }
     return 0;
   }
   else
@@ -729,7 +768,18 @@ static int check_auth_finished(struct AuthRequest *auth)
                       "(usually <30s)");
         res = 0;
       } else {
+        log_write(LS_USER, L_INFO, 0,
+                  "check_auth_finished: calling register_user for %p "
+                  "(fd %d, nick=%s, acct=%s) — SASL-stall diag entry",
+                  (void*)auth, cli_fd(cptr),
+                  cli_name(cptr)[0] ? cli_name(cptr) : "*",
+                  (cli_user(cptr) && cli_user(cptr)->account[0])
+                    ? cli_user(cptr)->account : "*");
         res = register_user(auth->client, auth->client);
+        log_write(LS_USER, L_INFO, 0,
+                  "check_auth_finished: register_user returned %d for %p "
+                  "(fd %d) — SASL-stall diag exit",
+                  res, (void*)auth, cli_fd(cptr));
       }
     }
   }
