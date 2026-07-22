@@ -425,6 +425,19 @@ void free_client(struct Client* cptr)
   }
 
   if (cli_from(cptr) == cptr) { /* in other words, we're local */
+    /* F-DS1 backstop: never pool a LOCAL client that is still registered
+     * in the fd-indexed LocalClientArray.  Direct-free paths that skip
+     * close_connection() — bounce_alias_destroy() on a local alias is the
+     * proven case — otherwise strand LocalClientArray[cli_fd] at a Client
+     * whose cli_connect we null just below, and every later
+     * LocalClientArray walk (send.c WALL_ / DESYNCH loops) NULL-derefs
+     * con_client.  Identity-guarded so a legitimately reassigned slot (fd
+     * transplanted to a ghost in bounce_revive) is left intact; a no-op
+     * for the common close_connection()'d path (cli_fd already -1) and
+     * for the EBADF producer (slot cleared at its own site). */
+    if (-1 < cli_fd(cptr) && LocalClientArray[cli_fd(cptr)] == cptr)
+      LocalClientArray[cli_fd(cptr)] = 0;
+
     cli_from(cptr) = 0;
     /* timer must be marked as not active */
     if (!cli_freeflag(cptr) && !t_active(&(cli_proc(cptr)))) {

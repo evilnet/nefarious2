@@ -75,6 +75,7 @@
 #include "struct.h"
 #include "motd.h"
 #include "version.h"
+#include "watch.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -8065,6 +8066,30 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
   }
 
   was_alias = IsBouncerAlias(target);
+
+  /* F-DS1: on the alias's OWNING server, BX X targets our OWN local
+   * alias (MyConnect, real socket) — not a remote stub.  The bare
+   * removal below assumed the target was always remote and left the
+   * fd-indexed LocalClientArray slot dangling at a soon-to-be-pooled
+   * Client (which then crashes every LocalClientArray walk — the send.c
+   * WALL_ broadcast / DESYNCH loops NULL-deref con_client), and also
+   * leaked the IPcheck entry and the local-client / oper / invis counts.
+   * Mirror the canonical local-alias teardown (the exit_one_client
+   * IsBouncerAlias branch in s_misc.c): release accounting, then
+   * close_connection() to clear the array slot, shut the socket and
+   * queue the Connection free.  Every gate is a no-op for a genuinely
+   * remote target (userstats_count_clear is flag-keyed), so the remote
+   * BX X path is unchanged. */
+  if (MyConnect(target)) {
+    if (IsIPChecked(target))
+      IPcheck_disconnect(target);
+    Count_clientdisconnects(target, UserStats);
+  }
+  userstats_count_clear(target);
+  if (MyUser(target))
+    del_list_watch(target);
+  if (MyConnect(target))
+    close_connection(target);
 
   Debug((DEBUG_INFO, "BX X: destroying %s %s (%s)%s%s",
          was_alias ? "alias" : "client",
