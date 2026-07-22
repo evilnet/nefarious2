@@ -358,12 +358,17 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
         struct Client *primary = cli_alias_primary(bcptr);
         if (primary && MyConnect(primary) && IsUser(primary)
             && !HasFlag(primary, FLAG_KILLED)) {
+          /* F-CN2: remove this alias from the session roster BEFORE
+           * exiting the primary.  The primary's KILL-cascade sibling
+           * loop (s_misc.c ~663-671) iterates hs_aliases[] and would
+           * exit_client() us again — freeing bcptr while this
+           * exit_one_client() frame is still unwinding it (UAF +
+           * double free).  After untrack the loop can't construct our
+           * numeric, so bcptr is torn down exactly once, by the code
+           * below.  The bounce_alias_untrack() call further down (~383)
+           * stays as a safe idempotent no-op. */
+          bounce_alias_untrack(bcptr);
           SetFlag(primary, FLAG_KILLED);
-          /* Forward the alias's exit comment so the primary's local
-           * connection sees the actual KILL reason ("Killed (server
-           * (overruled by older nick))" or similar) rather than a
-           * generic "Session killed".  Without context the user can't
-           * tell why their session was terminated. */
           exit_client(primary, primary, &me,
                       comment && *comment ? comment : "Session killed");
         }
