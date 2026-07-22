@@ -1008,7 +1008,9 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
  *
  * @param[in] sptr Client requesting history (their nick is the other party).
  * @param[in] target Target name (plain nick or already nick:nick format).
- * @param[out] normalized Buffer to store normalized target (at least NICKLEN*2+2).
+ * @param[out] normalized Buffer to store normalized target (minimum
+ *             NICKLEN*2+2; callers now pass the shared CHANNELLEN+1-sized
+ *             lookup buffer, which dominates).
  * @param[in] buflen Size of normalized buffer.
  * @return 0 on success, -1 on error (invalid nick, user not found, etc.)
  */
@@ -1076,9 +1078,12 @@ static int normalize_pm_target(struct Client *sptr, const char *target,
 /** Check if client can access history for a target.
  * @param[in] sptr Client requesting history.
  * @param[in] target Target name (channel, plain nick, or nick:nick format).
- * @param[out] normalized_target If non-NULL and target is a PM, receives
- *             the normalized nick1:nick2 format for LMDB lookup.
- * @param[in] normalized_len Size of normalized_target buffer.
+ * @param[out] normalized_target If non-NULL, receives the LMDB lookup key:
+ *             the raw channel name if target is a channel, or the
+ *             normalized nick1:nick2 format if target is a PM.
+ * @param[in] normalized_len Size of normalized_target buffer; must be at
+ *            least CHANNELLEN + 1 to hold a channel name without truncation
+ *            (this also covers the smaller NICKLEN*2+2 PM case).
  * @return 0 if allowed, -1 if not.
  */
 static int check_history_access(struct Client *sptr, const char *target,
@@ -1087,6 +1092,11 @@ static int check_history_access(struct Client *sptr, const char *target,
   struct Channel *chptr;
 
   if (IsChannelName(target)) {
+    /* A future undersized caller would silently truncate channel names
+     * sharing a long prefix, cross-leaking history between channels
+     * (F-CH2).  Fail loudly in debug builds instead. */
+    assert(normalized_len == 0 || normalized_len >= CHANNELLEN + 1);
+
     chptr = FindChannel(target);
     if (!chptr)
       return -1;
@@ -1094,7 +1104,7 @@ static int check_history_access(struct Client *sptr, const char *target,
     /* Check if channel has +H (public history) - bypass all access checks */
     if (chptr->mode.exmode & EXMODE_PUBLICHISTORY) {
       if (normalized_target && normalized_len > 0)
-        ircd_strncpy(normalized_target, target, normalized_len - 1);
+        ircd_strncpy(normalized_target, target, normalized_len);
       return 0;  /* Public history - allow access */
     }
 
@@ -1109,7 +1119,7 @@ static int check_history_access(struct Client *sptr, const char *target,
 
     /* For channels, normalized target is same as input */
     if (normalized_target && normalized_len > 0)
-      ircd_strncpy(normalized_target, target, normalized_len - 1);
+      ircd_strncpy(normalized_target, target, normalized_len);
     return 0;
   } else {
     /* Private message history.  Two participant-check paths:
@@ -1359,7 +1369,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  char lookup_target[NICKLEN * 2 + 2];  /* Normalized target for LMDB lookup */
+  char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
+                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
 
   /* Parse reference */
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0) {
@@ -1445,7 +1456,8 @@ static int chathistory_before(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  char lookup_target[NICKLEN * 2 + 2];
+  char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
+                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -1509,7 +1521,8 @@ static int chathistory_after(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  char lookup_target[NICKLEN * 2 + 2];
+  char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
+                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -1573,7 +1586,8 @@ static int chathistory_around(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
-  char lookup_target[NICKLEN * 2 + 2];
+  char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
+                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -1638,7 +1652,8 @@ static int chathistory_between(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type1, ref_type2;
   const char *ref_value1, *ref_value2;
   int limit, count, max_limit;
-  char lookup_target[NICKLEN * 2 + 2];
+  char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
+                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref1_str, &ref_type1, &ref_value1) != 0 ||
       ref_type1 == HISTORY_REF_NONE) {
