@@ -7138,6 +7138,35 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
             "bounce_setup_local_alias: converting %s to alias of %s (session %s)",
             cli_name(sptr), cli_name(primary), session->hs_sessid);
 
+  /* --- Reserve the local P10 numeric FIRST (the only fallible step) ---
+   * SetLocalNumNick() is the sole operation in alias setup that can fail
+   * (numeric pool exhausted).  Do it BEFORE any nick-hash removal,
+   * identity overwrite, alias-flag set, or count adjustment below, so a
+   * failure leaves sptr a pristine, plain, non-alias user.  register_user
+   * (s_user.c) then SetFlag(FLAG_KILLED)+exit_client's it down the normal
+   * non-alias teardown — the exact state/behaviour of the sibling
+   * BOUNCE_RESUME_REJECT_DUPLICATE rejection.  This avoids the
+   * poisoned-half-alias: no whole-session KILL cascade (invariant #6,
+   * exit_one_client alias branch), no announced/oper/inv imbalance
+   * (invariant #9), and no dangling nick-hash entry.
+   *
+   * Any future early-failure return added below this point MUST release
+   * the reserved numeric (RemoveYXXClient(&me, cli_yxx(sptr))) before
+   * returning, or the client_list slot leaks.
+   *
+   * user->server is already &me for a local registrant (set during
+   * authentication); set it explicitly here because SetLocalNumNick()
+   * asserts cli_user(sptr)->server == &me. */
+  user->server = &me;
+  if (!SetLocalNumNick(sptr)) {
+    log_write(LS_USER, L_INFO, 0,
+              "bounce_setup_local_alias: SetLocalNumNick failed (numeric pool "
+              "exhausted) for session %s", session->hs_sessid);
+    /* Nothing to unwind: no hRemClient, no identity overwrite, no alias
+     * flags, and no count decrements have run yet. */
+    return -1;
+  }
+
   /* --- Step 0: Complete IPcheck connect ---
    * The alias keeps its own real socket IP (not overwritten from primary),
    * so IPcheck_connect_succeeded() can find the registry entry normally.
@@ -7180,7 +7209,6 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   if (IsHiddenHost(primary))
     SetHiddenHost(sptr);
   user->alias_primary = primary;
-  user->server = &me;  /* Required before SetLocalNumNick (asserts this) */
   cli_lastnick(sptr) = cli_lastnick(primary);
   cli_handler(sptr) = CLIENT_HANDLER;
 
@@ -7226,17 +7254,10 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
     ClearSSL(sptr);
 #endif
 
-  /* --- Step 4: Allocate local P10 numeric --- */
-  if (!SetLocalNumNick(sptr)) {
-    log_write(LS_USER, L_INFO, 0,
-              "bounce_setup_local_alias: SetLocalNumNick failed (numeric pool "
-              "exhausted) for session %s", session->hs_sessid);
-    /* Restore nick hash entry since we removed it in step 1 */
-    hAddClient(sptr);
-    return -1;
-  }
-
-  /* --- Step 5: User cloaking --- */
+  /* --- Step 5: User cloaking ---
+   * (The old Step 4 numeric allocation was hoisted to the top of the
+   * function, before any identity/flag mutation, so a numeric-pool
+   * failure can no longer leave a half-transformed poisoned alias.) */
   user_setcloaked(sptr);
   if (IsHiddenHost(sptr))
     hide_hostmask(sptr);
