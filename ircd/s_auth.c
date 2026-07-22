@@ -1234,6 +1234,25 @@ int auth_ping_timeout(struct Client *cptr)
     return check_auth_finished(auth);
   }
 
+  /* Check for native DNSBL timeout.  The DNSBL is advisory (it blocks known-
+   * bad sources); if the lookup has not completed by the registration
+   * timeout, cancel it and let the client proceed rather than blocking
+   * registration indefinitely.  Without this branch AR_DNSBL_PENDING (which
+   * is past AR_LAST_SCAN, so the scan loop above never clears it) falls
+   * through to the assert() below and abort()s on a --enable-debug build. */
+  if (FlagHas(&auth->flags, AR_DNSBL_PENDING)) {
+    if (auth->dnsbl_request) {
+      dnsbl_cancel(auth->dnsbl_request);
+      auth->dnsbl_request = NULL;
+    }
+    FlagClr(&auth->flags, AR_DNSBL_PENDING);
+    log_write(LS_USER, L_INFO, 0,
+              "auth_ping_timeout: native DNSBL lookup did not complete for %s; "
+              "proceeding without it",
+              cli_name(cptr)[0] ? cli_name(cptr) : "*");
+    return check_auth_finished(auth);
+  }
+
   assert(0 && "Unexpectedly reached end of auth_ping_timeout()");
   return 0;
 }
