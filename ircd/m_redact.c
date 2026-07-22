@@ -315,6 +315,9 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     /* Propagate to channel members with capability */
     propagate_redact_to_channel(sptr, chptr, target, msgid, reason);
 
+    /* Clear msgid override so it doesn't leak into the next tagged send */
+    sendcmdto_set_client_msgid(NULL);
+
     /* Set S2S tags for server relay */
     sendcmdto_set_s2s_tags(time_ms, redact_msgid);
     sendcmdto_want_s2s_tags(1);
@@ -419,6 +422,9 @@ int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
         /* Propagate to channel members with capability */
         propagate_redact_to_channel(sptr, chptr, target, msgid, reason);
+
+        /* Clear msgid override so it doesn't leak into the next tagged send */
+        sendcmdto_set_client_msgid(NULL);
 
         /* Set S2S tags for server relay */
         sendcmdto_set_s2s_tags(time_ms, redact_msgid);
