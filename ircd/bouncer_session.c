@@ -8297,7 +8297,7 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
   if (parc < 8)
     return protocol_violation(sptr, "BX E requires 7 parameters");
 
-  target = findNUser(parv[2]);
+  target = bx_find_user_strict(parv[2]);
   if (!target || !IsUser(target)) {
     /* Burst race: BX C for this alias may not have arrived yet.  Defer
      * and replay when it does; falls through to silent drop only if
@@ -8315,7 +8315,7 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
     return 0;
   }
 
-  from = findNUser(parv[3]);
+  from = bx_find_user_strict(parv[3]);
   if (!from)
     return 0;
 
@@ -8781,7 +8781,7 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
   if (!b)
     return;
 
-  alias = findNUser(b->alias_numeric);
+  alias = bx_find_user_strict(b->alias_numeric);
   if (!alias) {
     Debug((DEBUG_INFO,
            "BX M: deliver dropped — alias %s not found locally",
@@ -8807,7 +8807,7 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
    * delivery target; sender-side filtering already restricts BX M
    * emission to session members (hs_aliases + primary). */
 
-  from = findNUser(b->from_numeric);
+  from = bx_find_user_strict(b->from_numeric);
   if (!from)
     from = &me;  /* graceful fallback if from-user vanished mid-batch */
 
@@ -8958,7 +8958,7 @@ bounce_alias_multiline_echo(struct Client *cptr, struct Client *sptr,
   if (!*bid)
     return 0;  /* malformed; drop */
 
-  alias = findNUser(parv[3]);
+  alias = bx_find_user_strict(parv[3]);
   if (!alias || !IsUser(alias)) {
     /* Burst race: defer until BX C arrives.  Applies to all BX M
      * variants (start / cont / concat / end) — the alias_numeric is
