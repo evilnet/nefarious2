@@ -1369,6 +1369,7 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
     return;
   }
 
+  MyFree(session->scram_salt_b64);          /* free prior before re-dup (F-SW3) */
   DupString(session->scram_salt_b64, user->scram_salt);
   session->scram_iterations = user->scram_iterations;
   session->acc_created_at = user->created_at;
@@ -1395,12 +1396,14 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
   }
   MyFree(nonce_b64);
 
+  MyFree(session->scram_combined_nonce);    /* free prior before re-dup (F-SW3) */
   DupString(session->scram_combined_nonce, combined_nonce);
 
   /* Build server-first message: r=<combined>,s=<salt>,i=<iterations> */
   snprintf(server_first, sizeof(server_first), "r=%s,s=%s,i=%d",
            combined_nonce, session->scram_salt_b64, session->scram_iterations);
 
+  MyFree(session->scram_server_first);      /* free prior before re-dup (F-SW3) */
   DupString(session->scram_server_first, server_first);
 
   /* Base64 encode and send as AUTHENTICATE challenge */
@@ -1490,6 +1493,7 @@ static int sasl_scram_client_first(struct Client *sptr,
 
   /* Save authcid and client-first-message-bare for later verification */
   ircd_strncpy(session->authcid, username, sizeof(session->authcid));
+  MyFree(session->scram_client_first_bare); /* free prior before re-dup (F-SW3) */
   DupString(session->scram_client_first_bare, bare);
 
   /* Async fetch user from Keycloak to get SCRAM credentials */
@@ -1693,6 +1697,7 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
     sasl_mark_healthy();
 
   /* Save the public key PEM for later verification */
+  MyFree(session->scram_client_first_bare); /* free prior before re-dup (F-SW3) */
   DupString(session->scram_client_first_bare, user->ecdsa_pubkey);
   /* (Reusing scram_client_first_bare to store ecdsa_pubkey — it's just a string slot) */
   session->acc_created_at = user->created_at;
