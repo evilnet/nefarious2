@@ -264,6 +264,9 @@ static void free_slist(struct SLink **link) {
 %token REALM
 %token CLIENT_ID
 %token CLIENT_SECRET
+%token ISSUER
+%token ALLOWED_CLIENTS
+%token INSECURE_TOKEN_VALIDATION
 %token PATH
 /* T_ prefix avoids collision with config.h's MAXCONNECTIONS (= 4096).
  * Conf keyword stays "MAXCONNECTIONS" via the explicit lexer entry. */
@@ -2174,7 +2177,9 @@ keycloakblock: KEYCLOAK
 } '{' keycloakitems '}' ';' ;
 keycloakitems: keycloakitem keycloakitems | keycloakitem;
 keycloakitem: keycloakurl | keycloakrealm
-            | keycloakclientid | keycloakclientsecret;
+            | keycloakclientid | keycloakclientsecret
+            | keycloakissuer | keycloakallowedclients
+            | keycloakinsecure;
 keycloakurl: URL '=' QSTRING ';'
 {
   sasl_conf_keycloak_set_url($3);
@@ -2194,4 +2199,18 @@ keycloakclientsecret: CLIENT_SECRET '=' QSTRING ';'
 {
   sasl_conf_keycloak_set_client_secret($3);
   MyFree($3);
+};
+keycloakissuer: ISSUER '=' QSTRING ';'
+{
+  sasl_conf_keycloak_set_issuer($3);
+  MyFree($3);
+};
+keycloakallowedclients: ALLOWED_CLIENTS '=' QSTRING ';'
+{
+  sasl_conf_keycloak_set_allowed_clients($3);
+  MyFree($3);
+};
+keycloakinsecure: INSECURE_TOKEN_VALIDATION '=' yesorno ';'
+{
+  sasl_conf_keycloak_set_insecure_token_validation($3);
 };

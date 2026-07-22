@@ -1053,6 +1053,9 @@ static int oauthbearer_parse(const unsigned char *data, size_t len,
   return -1;  /* No bearer token found */
 }
 
+static int oauth_token_policy_ok(const struct kc_token_info *info,
+                                 struct Client *sptr);
+
 /** Callback from kc_token_introspect() for OAUTHBEARER fallback. */
 static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *info, void *data)
 {
@@ -1075,11 +1078,26 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
   }
 
   if (result == KC_SUCCESS && info && info->active && info->username) {
+    const char *login_as;
+
     /* Successful introspect confirms Keycloak is reachable */
     if (!kc_sasl_healthy)
       sasl_mark_healthy();
+
+    /* F-K3: apply the SAME issuer/allowed-client policy as the local JWKS
+     * path -- the introspection response carries iss/azp too, so a token from
+     * the wrong issuer/client must not slip through the fallback.  Hard fail
+     * (like the local path), skipped only in insecure mode. */
+    if (!feature_bool(FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION) &&
+        !oauth_token_policy_ok(info, acptr)) {
+      sendrawto_one(acptr, MSG_AUTHENTICATE " "
+                    "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
+      session->state = SASL_STATE_FAILED;
+      return;
+    }
+
     /* Resolve authzid vs the KC-verified username per the allowlist gate (F-A1) */
-    const char *login_as = sasl_resolve_login_identity(session, info->username);
+    login_as = sasl_resolve_login_identity(session, info->username);
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: Introspect success for %s (client %C)",
               login_as, acptr);
@@ -1098,6 +1116,43 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
                   "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
     session->state = SASL_STATE_FAILED;
   }
+}
+
+/** F-K3: enforce the deployment-specific OAUTHBEARER token policy after a
+ * token's signature has been verified locally.  The JWKS signature proves the
+ * token was issued by the realm, but not that it came from the expected issuer
+ * URL or an allowed client (Keycloak sets aud="account" for every client, so
+ * azp is the only claim that identifies the issuing client).  Enforces:
+ *   - iss == FEAT_KEYCLOAK_ISSUER
+ *   - azp in FEAT_KEYCLOAK_ALLOWED_CLIENTS (case-insensitive CSV membership)
+ * Fails closed: if either feature is unconfigured the corresponding check
+ * rejects, so an operator must configure them (Keycloak {} block) or set
+ * FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION (dev/testnet only).  Returns 1 if the
+ * token satisfies policy, 0 otherwise (logging the reason). */
+static int oauth_token_policy_ok(const struct kc_token_info *info,
+                                 struct Client *sptr)
+{
+  const char *want_iss = feature_str(FEAT_KEYCLOAK_ISSUER);
+  const char *allowed  = feature_str(FEAT_KEYCLOAK_ALLOWED_CLIENTS);
+
+  if (EmptyString(want_iss) || !info->iss || 0 != strcmp(info->iss, want_iss)) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL OAUTHBEARER: token issuer %s rejected for %C (expected %s; "
+              "configure Keycloak issuer or insecure-token-validation)",
+              info->iss ? info->iss : "(none)", sptr,
+              EmptyString(want_iss) ? "(unconfigured)" : want_iss);
+    return 0;
+  }
+  if (EmptyString(allowed) || !info->azp ||
+      !csv_contains_token(allowed, info->azp)) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL OAUTHBEARER: token azp %s rejected for %C (not in "
+              "allowed-clients; configure Keycloak allowed-clients or "
+              "insecure-token-validation)",
+              info->azp ? info->azp : "(none)", sptr);
+    return 0;
+  }
+  return 1;
 }
 
 /** Handle decoded OAUTHBEARER data. */
@@ -1136,7 +1191,21 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
 
   rc = kc_jwt_validate_local(realm, token_nul, &info);
   if (rc == KC_SUCCESS && info && info->username) {
-    const char *login_as = sasl_resolve_login_identity(session, info->username);
+    const char *login_as;
+
+    /* F-K3: enforce deployment token policy (issuer + allowed client) unless
+     * the operator opted into insecure validation.  A policy violation is a
+     * hard failure, NOT a fall-through to introspection (Strategy 2 would
+     * re-accept a cryptographically-valid token from the wrong issuer/client). */
+    if (!feature_bool(FEAT_KEYCLOAK_INSECURE_TOKEN_VALIDATION) &&
+        !oauth_token_policy_ok(info, sptr)) {
+      MyFree(token_nul);
+      kc_jwt_token_info_free(info);
+      send_reply(sptr, ERR_SASLFAIL, ": token rejected by server policy");
+      return -1;
+    }
+
+    login_as = sasl_resolve_login_identity(session, info->username);
     {
       time_t jwt_created_at = info->created_at ? info->created_at : 0;
       log_write(LS_SYSTEM, L_INFO, 0,

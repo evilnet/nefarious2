@@ -178,6 +178,9 @@ static struct lexer_token {
   TOKEN(REALM),
   TOKEN(CLIENT_ID),
   TOKEN(CLIENT_SECRET),
+  TOKEN(ISSUER),
+  TOKEN(ALLOWED_CLIENTS),
+  TOKEN(INSECURE_TOKEN_VALIDATION),
   TOKEN(PATH),
   /* Explicit entry rather than TOKEN(...) because the bison token symbol
    * is T_MAXCONNECTIONS (see ircd_parser.y) — the prefix avoids

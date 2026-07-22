@@ -43,6 +43,9 @@ extern void sasl_conf_keycloak_set_url(const char *s);
 extern void sasl_conf_keycloak_set_realm(const char *s);
 extern void sasl_conf_keycloak_set_client_id(const char *s);
 extern void sasl_conf_keycloak_set_client_secret(const char *s);
+extern void sasl_conf_keycloak_set_issuer(const char *s);
+extern void sasl_conf_keycloak_set_allowed_clients(const char *s);
+extern void sasl_conf_keycloak_set_insecure_token_validation(int v);
 
 /** Mark that a Webhook {} block was parsed (called on block entry). */
 extern void sasl_conf_webhook_begin(void);

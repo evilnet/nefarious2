@@ -1212,6 +1212,49 @@ as the authenticated authcid. Matching is case-insensitive and exact (no
 prefix match). Leave this empty unless you operate a trusted service that
 must impersonate users.
 
+KEYCLOAK_ISSUER
+  * Type: string
+  * Default: (none)
+
+Expected iss (issuer) claim for OAUTHBEARER JWT access tokens. When set, a
+locally-validated token whose issuer does not exactly match this value is
+rejected. This is Keycloak's front-end issuer URL (e.g.
+https://kc.example.net/realms/myrealm), which is NOT necessarily the internal
+KEYCLOAK_URL the server connects to. Also settable as "issuer" in a Keycloak {}
+block. Ignored when KEYCLOAK_INSECURE_TOKEN_VALIDATION is enabled. When empty
+and insecure validation is off, OAUTHBEARER local validation fails closed.
+
+Note: if a Keycloak {} block is present, put ALL Keycloak settings inside it.
+The block overwrites the KEYCLOAK_* features (including any left unset in the
+block, which reset to empty), so do not split Keycloak configuration between a
+Keycloak {} block and KEYCLOAK_* F: feature lines.
+
+KEYCLOAK_ALLOWED_CLIENTS
+  * Type: string
+  * Default: (none)
+
+Comma- or space-separated list of Keycloak client identifiers (the token azp /
+authorized-party claim) permitted to authenticate via OAUTHBEARER. Keycloak
+sets the JWT audience to "account" for every client, so azp is the only claim
+that identifies the issuing client. A locally-validated token whose azp is not
+in this list is rejected. Matching is case-insensitive. Also settable as
+"allowed_clients" in a Keycloak {} block. Ignored when
+KEYCLOAK_INSECURE_TOKEN_VALIDATION is enabled. When empty and insecure
+validation is off, OAUTHBEARER local validation fails closed.
+
+KEYCLOAK_INSECURE_TOKEN_VALIDATION
+  * Type: boolean
+  * Default: FALSE
+
+DEVELOPMENT/TEST ONLY -- do not enable in production. When TRUE, OAUTHBEARER
+JWT validation skips the issuer (KEYCLOAK_ISSUER) and authorized-client
+(KEYCLOAK_ALLOWED_CLIENTS) checks. The JWKS signature, expiry (exp) and
+not-before (nbf) checks are still enforced. This exists so a test network whose
+Keycloak issues tokens with an unstable issuer URL (e.g. a container IP) can use
+OAUTHBEARER without pinning issuer/client. Enabling it re-opens the hole where a
+token issued to any client in the realm can authenticate as its subject. Also
+settable as "insecure_token_validation" in a Keycloak {} block.
+
 NOMULTITARGETS
   * Type: boolean
   * Default: FALSE

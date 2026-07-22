@@ -49,6 +49,8 @@
 #define SC_WH_SECRET_LEN    256
 #define SC_VHOST_LEN        128
 #define SC_PATH_LEN         128
+#define SC_ISSUER_LEN       256
+#define SC_ALLOWED_LEN      256
 
 /* ---- Keycloak state ---- */
 struct keycloak_state {
@@ -57,6 +59,9 @@ struct keycloak_state {
   char realm[SC_REALM_LEN];
   char client_id[SC_CLIENT_ID_LEN];
   char client_secret[SC_CLIENT_SECRET_LEN];
+  char issuer[SC_ISSUER_LEN];             /* expected JWT iss (OAUTHBEARER policy) */
+  char allowed_clients[SC_ALLOWED_LEN];   /* CSV of allowed JWT azp values */
+  int  insecure_token_validation;         /* dev-only: skip iss+azp checks */
 };
 static struct keycloak_state kc_pending;
 static struct keycloak_state kc_active;
@@ -129,6 +134,12 @@ void sasl_conf_keycloak_set_client_id(const char *s)
                                            { copy_str(kc_pending.client_id, sizeof kc_pending.client_id, s); kc_pending.seen = 1; }
 void sasl_conf_keycloak_set_client_secret(const char *s)
                                            { copy_str(kc_pending.client_secret, sizeof kc_pending.client_secret, s); kc_pending.seen = 1; }
+void sasl_conf_keycloak_set_issuer(const char *s)
+                                           { copy_str(kc_pending.issuer, sizeof kc_pending.issuer, s); kc_pending.seen = 1; }
+void sasl_conf_keycloak_set_allowed_clients(const char *s)
+                                           { copy_str(kc_pending.allowed_clients, sizeof kc_pending.allowed_clients, s); kc_pending.seen = 1; }
+void sasl_conf_keycloak_set_insecure_token_validation(int v)
+                                           { kc_pending.insecure_token_validation = v; kc_pending.seen = 1; }
 
 void sasl_conf_webhook_begin(void)         { wh_pending.seen = 1; }
 void sasl_conf_webhook_set_port(int port)  { wh_pending.port = port; wh_pending.seen = 1; }
@@ -182,6 +193,10 @@ static void mirror_keycloak_to_features(void)
   push_feature_str("KEYCLOAK_REALM",         kc_pending.realm);
   push_feature_str("KEYCLOAK_CLIENT_ID",     kc_pending.client_id);
   push_feature_str("KEYCLOAK_CLIENT_SECRET", kc_pending.client_secret);
+  push_feature_str("KEYCLOAK_ISSUER",          kc_pending.issuer);
+  push_feature_str("KEYCLOAK_ALLOWED_CLIENTS", kc_pending.allowed_clients);
+  push_feature_str("KEYCLOAK_INSECURE_TOKEN_VALIDATION",
+                   kc_pending.insecure_token_validation ? "TRUE" : "FALSE");
 }
 
 /** Mirror Webhook{} block values into the legacy features. */
