@@ -120,8 +120,8 @@ static int is_valid_key(const char *key)
       return 0;
   }
 
-  /* Check length */
-  if (strlen(key) > METADATA_KEY_LEN)
+  /* key buffers are char[METADATA_KEY_LEN]; the last byte is the NUL */
+  if (strlen(key) >= METADATA_KEY_LEN)
     return 0;
 
   return 1;
