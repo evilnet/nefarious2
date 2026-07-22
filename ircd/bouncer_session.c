@@ -8420,7 +8420,7 @@ defer_bx_for_alias(const char *alias_numeric,
   entry = (struct PendingBxEntry *)MyMalloc(sizeof(*entry));
   memset(entry, 0, sizeof(*entry));
   ircd_strncpy(entry->alias_numeric, alias_numeric,
-               sizeof(entry->alias_numeric) - 1);
+               sizeof(entry->alias_numeric));
   /* Server numerics are 2 chars + null (3 bytes).  cptr is always a
    * server for S2S BX traffic; sptr is too. */
   if (cptr && IsServer(cptr))
