@@ -180,8 +180,13 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   fd = atoi(fdstr);
   cookie = atoi(cookiestr);
 
-  /* Could not find a matching client, ignore the message */
-  if (!(acptr = LocalClientArray[fd])) {
+  /* Bounds-check the wire-supplied fd before indexing.  LocalClientArray is
+   * [MAXCONNECTIONS], indexed by raw socket fd; os_set_fdlimit() caps real
+   * fds below MAXCONNECTIONS, so that is the structural bound (not HighestFd,
+   * a mutable high-water mark).  fd is unsigned, so this single >= test also
+   * rejects a negative atoi() result (wrapped to a huge value).  An in-bounds
+   * but unused slot is still rejected by the NULL check that follows. */
+  if (fd >= MAXCONNECTIONS || !(acptr = LocalClientArray[fd])) {
     log_write(LS_DEBUG, L_DEBUG, 0, "SASL: Client for fd %u not found (from %C, cookie %u)",
               fd, sptr, cookie);
     return 0;

@@ -122,7 +122,11 @@ static struct Client *decode_auth_id(const char *id)
   cookie = atoi(cookiestr + 1);
   Debug((DEBUG_DEBUG, "ACCOUNT auth id fd=%u cookie=%u", fd, cookie));
 
-  if (!(cptr = LocalClientArray[fd]) || !cli_loc(cptr) || cli_loc(cptr)->cookie != cookie)
+  /* Bounds-check the wire-supplied fd before indexing LocalClientArray
+   * [MAXCONNECTIONS] (fd is unsigned, so >= also catches a negative-wrapped
+   * value); MAXCONNECTIONS is the array bound, not HighestFd. */
+  if (fd >= MAXCONNECTIONS || !(cptr = LocalClientArray[fd]) || !cli_loc(cptr)
+      || cli_loc(cptr)->cookie != cookie)
     return NULL;
   return cptr;
 }

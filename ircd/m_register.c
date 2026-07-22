@@ -326,6 +326,13 @@ static struct Client *find_prereg_client(const char *token)
 
   Debug((DEBUG_DEBUG, "find_prereg_client: token=%s fd=%d cookie=%u", token, fd, cookie));
 
+  /* Bounds-check the wire-supplied fd before indexing LocalClientArray
+   * [MAXCONNECTIONS].  fd is signed here, so guard both ends -- a negative
+   * atoi() result would otherwise be a negative (out-of-bounds) array index
+   * that is then dereferenced via cli_saslcookie() below. */
+  if (fd < 0 || fd >= MAXCONNECTIONS)
+    return NULL;
+
   /* Find client by fd and verify cookie */
   acptr = LocalClientArray[fd];
   if (!acptr) {
