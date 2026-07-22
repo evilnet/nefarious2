@@ -372,6 +372,10 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
            * stays as a safe idempotent no-op. */
           bounce_alias_untrack(bcptr);
           SetFlag(primary, FLAG_KILLED);
+          /* Forward the alias's exit comment so the primary's local
+           * connection sees the actual KILL reason (e.g. "Killed
+           * (server (overruled by older nick))") rather than a generic
+           * "Session killed" — without it the user can't tell why. */
           exit_client(primary, primary, &me,
                       comment && *comment ? comment : "Session killed");
         }
