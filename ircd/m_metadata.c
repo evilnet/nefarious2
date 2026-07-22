@@ -1551,13 +1551,15 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   if (value) {
     const char *cache_key = NULL;
 
-    if (!is_channel) {
-      /* For users, get the account name for cache key */
-      if (target_client && IsAccount(target_client)) {
-        /* Online registered user - cache under their account */
-        cache_key = cli_account(target_client);
-      }
-    } else if (target_channel) {
+    /* User targets: nothing to do here.  metadata_set_client() above
+     * already persisted the row PERMANENTLY for authed users
+     * (metadata_account_set_permanent).  This block used to re-write
+     * the same account\0key row via metadata_account_set() — a
+     * TTL-stamped write that silently downgraded permanent user
+     * metadata to a 4h cache entry, which the purge sweep then
+     * deleted.  Channels keep the cache write below: it is their only
+     * persistence path. */
+    if (target_channel) {
       /* Channel - cache under channel name */
       cache_key = target;
     }
