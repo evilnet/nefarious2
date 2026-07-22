@@ -26,6 +26,7 @@ CMOCKA_TESTPROGS = \
 	ircd_crypt_cmocka \
 	crule_cmocka \
 	history_cmocka \
+	chathistory_presence_cmocka \
 	recv_classify_cmocka
 
 CMOCKA_LIBS = -lcmocka
@@ -47,6 +48,7 @@ DEP_SRC = \
 	ircd_crypt_cmocka.c \
 	crule_cmocka.c \
 	history_cmocka.c \
+	chathistory_presence_cmocka.c \
 	recv_classify_cmocka.c \
 	test_stub.c
 
@@ -137,6 +139,16 @@ crule_cmocka: $(CRULE_CMOCKA_OBJS)
 HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../ircd_string.o
 history_cmocka: $(HISTORY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# chathistory_presence tests - links the REAL chathistory_presence.o (built
+# by the top-level `make` before this runs, same as ../ircd_string.o et al)
+# to regression-test the uint8_t presence_record.count overflow fix
+# (F-CH3).  db_*/history_get_env/feature_int/feature_bool are stubbed
+# in chathistory_presence_cmocka.c itself since the in-memory
+# session-anchored path under test never reaches the persistence layer.
+CHATHISTORY_PRESENCE_CMOCKA_OBJS = chathistory_presence_cmocka.o test_stub.o ../chathistory_presence.o ../ircd_alloc.o ../ircd_string.o
+chathistory_presence_cmocka: $(CHATHISTORY_PRESENCE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CHATHISTORY_PRESENCE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # recv_classify tests - per-class recv-path byte classifier
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o

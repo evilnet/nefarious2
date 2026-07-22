@@ -55,6 +55,13 @@
  * presence footprint, well within MDBX/RocksDB working set. */
 #define PRESENCE_MAX_INTERVALS 256
 
+/** Hard ceiling on effective_max_intervals(): must stay <= 255 because
+ * presence_record.count is uint8_t and record_apply_part() does count++ right
+ * after writing intervals[count]; a cap of 256 lets count overflow 255->0 and
+ * orphan every earlier interval.  PRESENCE_MAX_INTERVALS (the array dimension)
+ * stays 256 for headroom; only the count-driving cap is held back. */
+#define PRESENCE_MAX_INTERVALS_SAFE (PRESENCE_MAX_INTERVALS - 1)
+
 /** Effective per-record cap clamped to the structural limit.  Reading
  * the feature on each insert is cheap (single int lookup) and avoids
  * needing a rehash-time notification handler. */
@@ -62,9 +69,9 @@ static unsigned int effective_max_intervals(void)
 {
   int v = feature_int(FEAT_CHATHISTORY_PRESENCE_MAX_INTERVALS);
   if (v <= 0)
-    return PRESENCE_MAX_INTERVALS;
-  if (v > PRESENCE_MAX_INTERVALS)
-    return PRESENCE_MAX_INTERVALS;
+    return PRESENCE_MAX_INTERVALS_SAFE;
+  if (v > PRESENCE_MAX_INTERVALS_SAFE)
+    return PRESENCE_MAX_INTERVALS_SAFE;
   return (unsigned int)v;
 }
 
