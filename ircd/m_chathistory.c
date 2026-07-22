@@ -2352,6 +2352,26 @@ static struct WriteChunkEntry *create_write_chunk(const char *target, const char
 static void append_write_chunk_data(struct WriteChunkEntry *chunk, const char *b64)
 {
   size_t add_len = strlen(b64);
+  /* Cap reassembly at the largest a single legitimate message can be, base64-
+   * expanded (+slack).  A peer streaming unbounded continuation lines would
+   * otherwise grow this without limit until MyRealloc's exit(2) crashes the
+   * daemon. */
+  int cfg_max = feature_int(FEAT_MULTILINE_MAX_BYTES);
+  size_t max_content = (cfg_max > 0) ? (size_t)cfg_max : 0;
+  size_t ceiling;
+  if (max_content < HISTORY_CONTENT_LEN)
+    max_content = HISTORY_CONTENT_LEN;
+  ceiling = max_content + max_content / 3 + 512;   /* base64 4/3 expansion + slack */
+  if (chunk->b64_len + add_len + 1 > ceiling) {
+    /* Malformed/abusive: refuse to grow further.  This function is void and
+     * its two callers (CH B / CH WB continuation handlers) already call it
+     * fire-and-forget with no return-value check; the !has_more finalize
+     * path they both fall through to already handles a corrupt/incomplete
+     * b64 blob safely (ch_base64_decode's own failure check) and always
+     * frees the chunk regardless.  So matching the existing convention here
+     * means simply declining to append further growth. */
+    return;
+  }
   if (chunk->b64_len + add_len + 1 > chunk->b64_alloc) {
     chunk->b64_alloc = (chunk->b64_len + add_len + 1) * 2;
     chunk->b64_data = MyRealloc(chunk->b64_data, chunk->b64_alloc);
@@ -3297,6 +3317,26 @@ static struct ChunkEntry *create_chunk(const char *reqid, const char *msgid,
 static void append_chunk_data(struct ChunkEntry *chunk, const char *b64)
 {
   size_t add_len = strlen(b64);
+  /* Cap reassembly at the largest a single legitimate message can be, base64-
+   * expanded (+slack).  A peer streaming unbounded continuation lines would
+   * otherwise grow this without limit until MyRealloc's exit(2) crashes the
+   * daemon. */
+  int cfg_max = feature_int(FEAT_MULTILINE_MAX_BYTES);
+  size_t max_content = (cfg_max > 0) ? (size_t)cfg_max : 0;
+  size_t ceiling;
+  if (max_content < HISTORY_CONTENT_LEN)
+    max_content = HISTORY_CONTENT_LEN;
+  ceiling = max_content + max_content / 3 + 512;   /* base64 4/3 expansion + slack */
+  if (chunk->b64_len + add_len + 1 > ceiling) {
+    /* Malformed/abusive: refuse to grow further.  This function is void and
+     * its two callers (CH B / CH WB continuation handlers) already call it
+     * fire-and-forget with no return-value check; the !has_more finalize
+     * path they both fall through to already handles a corrupt/incomplete
+     * b64 blob safely (ch_base64_decode's own failure check) and always
+     * frees the chunk regardless.  So matching the existing convention here
+     * means simply declining to append further growth. */
+    return;
+  }
   if (chunk->b64_len + add_len + 1 > chunk->b64_alloc) {
     chunk->b64_alloc = (chunk->b64_len + add_len + 1) * 2;
     chunk->b64_data = MyRealloc(chunk->b64_data, chunk->b64_alloc);
