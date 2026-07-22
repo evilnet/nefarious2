@@ -5191,6 +5191,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     if (cli_fd(ghost) >= 0) {
       LocalClientArray[cli_fd(ghost)] = 0;
       close(cli_fd(ghost));
+      cli_fd(ghost) = -1;
     }
 
     /* Free ghost's old SSL object (should be NULL from close_connection) */
@@ -5210,6 +5211,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   if (cli_fd(ghost) >= 0) {
     LocalClientArray[cli_fd(ghost)] = 0;
     close(cli_fd(ghost));
+    cli_fd(ghost) = -1;
   }
 #endif
 
