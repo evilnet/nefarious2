@@ -567,7 +567,9 @@ static void accept_connection(struct Event* ev)
       if (!ipmask_check(&addr.addr, &listener->mask, listener->mask_bits))
       {
         ++ServerStats->is_ref;
-        send(fd, "ERROR :Use another port\r\n", 25, 0);
+        /* Same SSL/paste plaintext guard as the MAXCLIENTS branch above. */
+        if (!(listener_ssl(listener) || listener_paste(listener)))
+          send(fd, "ERROR :Use another port\r\n", 25, 0);
         close(fd);
         continue;
       }
