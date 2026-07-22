@@ -7633,6 +7633,20 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     user = cli_user(alias);
     if (!user)
       goto forward;
+    /* F-BW1: refuse convert-in-place unless the existing client already
+     * belongs to this session's account.  The block below overwrites
+     * its entire identity; without this a malformed/hostile BX C
+     * hijacks an unrelated user's Client slot.  Aliases are
+     * account-anchored, so a legitimate convert target always has the
+     * matching account set; a mismatch is drop-worthy + canaried. */
+    if (!IsAccount(alias) || 0 != ircd_strcmp(user->account, account)) {
+      sendto_opmask_butone(0, SNO_NETWORK,
+          "BX C convert-in-place REFUSED (account mismatch): alias=%s "
+          "old_nick=%s old_acct=%s bx_acct=%s primary=%s",
+          alias_numeric, cli_name(alias),
+          IsAccount(alias) ? user->account : "*", account, primary_numeric);
+      goto forward;
+    }
     /* Client-visible cleanup for the convert-in-place ghost: this client was
      * N-introduced with its OWN nick (burst-ordering — its N arrived before the
      * BX C revealing it is an alias of `primary`), and is about to be SILENTLY
