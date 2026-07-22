@@ -1340,7 +1340,7 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   session->hs_name[0] = '\0';
   session->hs_state = BOUNCE_ACTIVE;
   session->hs_client = cptr;
-  ircd_strncpy(session->hs_origin, cli_yxx(&me), sizeof(session->hs_origin) - 1);
+  ircd_strncpy(session->hs_origin, cli_yxx(&me), sizeof(session->hs_origin));
   session->hs_hold_override = -1; /* Use default */
   session->hs_effective_away = 0;
   session->hs_effective_away_msg[0] = '\0';
@@ -1895,7 +1895,7 @@ void bounce_setname(struct BouncerSession *session, const char *name)
 {
   assert(0 != session);
   if (name)
-    ircd_strncpy(session->hs_name, name, BOUNCER_NAME_LEN - 1);
+    ircd_strncpy(session->hs_name, name, BOUNCER_NAME_LEN);
   else
     session->hs_name[0] = '\0';
 }
@@ -3229,8 +3229,8 @@ int bounce_db_restore(void)
      * silently misses. */
     ircd_strncpy(cli_session_id(ghost), session->hs_sessid, S2S_SESSID_BUFSIZE);
     ircd_strncpy(session->hs_ghost_numeric, cli_yxx(ghost),
-                 sizeof(session->hs_ghost_numeric) - 1);
-    session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+                 sizeof(session->hs_ghost_numeric));
+    session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
     session->hs_effective_away = 0;
     session->hs_effective_away_msg[0] = '\0';
     session->hs_created = (time_t)rec->bsr_created;
@@ -3918,8 +3918,8 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
             /* Repoint origin to authoritative server, transition to ACTIVE,
              * and drop hs_client (the ghost) so we become a remote replica. */
             ircd_strncpy(existing->hs_origin, cli_yxx(sptr),
-                         sizeof(existing->hs_origin) - 1);
-            existing->hs_origin[sizeof(existing->hs_origin) - 1] = '\0';
+                         sizeof(existing->hs_origin));
+            existing->hs_origin[sizeof(existing->hs_origin) - 1] = '\0';  /* redundant: strlcpy already terminates */
             existing->hs_state = BOUNCE_ACTIVE;
             existing->hs_disconnect_time = 0;
             existing->hs_client = NULL;
@@ -3978,8 +3978,8 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
                  local->hs_sessid, sessid, account));
           bounce_db_del(local->hs_sessid);
           ircd_strncpy(local->hs_sessid, sessid,
-                       sizeof(local->hs_sessid) - 1);
-          local->hs_sessid[sizeof(local->hs_sessid) - 1] = '\0';
+                       sizeof(local->hs_sessid));
+          local->hs_sessid[sizeof(local->hs_sessid) - 1] = '\0';  /* redundant: strlcpy already terminates */
           /* Keep cli_session_id of the bound primary in sync with the
            * renamed bouncer sessid — they must agree post-convergence.
            * Aliases are tracked in hs_aliases[] which records numerics
@@ -4016,12 +4016,12 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     /* Create session from remote data */
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
     ircd_strncpy(session->hs_account, account, ACCOUNTLEN + 1);
-    ircd_strncpy(session->hs_sessid, sessid, BOUNCER_SESSID_LEN - 1);
+    ircd_strncpy(session->hs_sessid, sessid, BOUNCER_SESSID_LEN);
     ircd_strncpy(session->hs_token, token, BOUNCER_TOKEN_LEN + 1);
     session->hs_name[0] = '\0';
     session->hs_client = NULL; /* Remote session */
     ircd_strncpy(session->hs_origin, cli_yxx(sptr),
-                 sizeof(session->hs_origin) - 1);
+                 sizeof(session->hs_origin));
     session->hs_hold_override = -1;
     session->hs_effective_away = 0;
     session->hs_effective_away_msg[0] = '\0';
@@ -4048,7 +4048,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
       char *tok, *saveptr;
       int i = 0;
 
-      ircd_strncpy(chanlist, channels, sizeof(chanlist) - 1);
+      ircd_strncpy(chanlist, channels, sizeof(chanlist));
       for (tok = strtok_r(chanlist, ",", &saveptr);
            tok && i < BOUNCER_MAX_CHANNELS;
            tok = strtok_r(NULL, ",", &saveptr)) {
@@ -4139,8 +4139,8 @@ bsc_forward:
       if (primary && IsUser(primary))
         bounce_hs_client_assign_checked(session, primary, "BS A");
       ircd_strncpy(session->hs_ghost_numeric, parv[4],
-                   sizeof(session->hs_ghost_numeric) - 1);
-      session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+                   sizeof(session->hs_ghost_numeric));
+      session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
     }
 
     /* Per redesign C.3 + B.1 + B.6: extended BS A carries per-conn
@@ -4227,8 +4227,8 @@ bsc_forward:
     session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
     session->hs_disconnect_time = disc_time;
     ircd_strncpy(session->hs_ghost_numeric, ghost_numeric,
-                 sizeof(session->hs_ghost_numeric) - 1);
-    session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+                 sizeof(session->hs_ghost_numeric));
+    session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
 
     /* Resolve ghost client from numeric so that bounce_auto_resume()
      * can check hs_client for the alias path.  Without this, a new
@@ -4257,7 +4257,7 @@ bsc_forward:
       char *tok, *saveptr;
       int i = 0;
 
-      ircd_strncpy(chanlist, channels, sizeof(chanlist) - 1);
+      ircd_strncpy(chanlist, channels, sizeof(chanlist));
       for (tok = strtok_r(chanlist, ",", &saveptr);
            tok && i < BOUNCER_MAX_CHANNELS;
            tok = strtok_r(NULL, ",", &saveptr)) {
@@ -4373,7 +4373,7 @@ bsc_forward:
     session = bounce_find_by_token_sessid(account, sessid);
     if (session) {
       ircd_strncpy(session->hs_origin, new_origin,
-                    sizeof(session->hs_origin) - 1);
+                    sizeof(session->hs_origin));
       Debug((DEBUG_INFO, "BS T: session %s/%s ownership transferred to %s",
              account, sessid, new_origin));
     }
@@ -4645,7 +4645,7 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
     session->hs_last_active = CurrentTime;
     session->hs_disconnect_time = 0;
     ircd_strncpy(session->hs_origin, cli_yxx(cli_user(alias)->server),
-                  sizeof(session->hs_origin) - 1);
+                  sizeof(session->hs_origin));
     /* Session moved to a different server — delete stale MDBX record.
      * Without this, both servers persist the session and both restore
      * a ghost on restart, causing a nick collision on link. */
@@ -4992,8 +4992,8 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   session->hs_state = BOUNCE_HOLDING;
   session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
   session->hs_disconnect_time = CurrentTime;
-  ircd_strncpy(session->hs_ghost_numeric, cli_yxx(cptr), sizeof(session->hs_ghost_numeric) - 1);
-  session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';
+  ircd_strncpy(session->hs_ghost_numeric, cli_yxx(cptr), sizeof(session->hs_ghost_numeric));
+  session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
   /* hs_client still points to cptr (now a ghost) */
 
   /* Start hold timer */
@@ -5839,8 +5839,8 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
    * acptr to hs_aliases.  Drop persisted MDBX record — we no longer
    * own the session as primary. */
   ircd_strncpy(session->hs_origin, cli_yxx(new_primary_server),
-               sizeof(session->hs_origin) - 1);
-  session->hs_origin[sizeof(session->hs_origin) - 1] = '\0';
+               sizeof(session->hs_origin));
+  session->hs_origin[sizeof(session->hs_origin) - 1] = '\0';  /* redundant: strlcpy already terminates */
   session->hs_client = NULL;
 
   if (session->hs_alias_count < BOUNCER_MAX_ALIASES) {
@@ -6704,7 +6704,7 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
   /* Update the session record itself so /CHECK and a future server
    * restart see the right state. */
   if (opername && *opername) {
-    ircd_strncpy(sess->hs_oper_name, opername, sizeof(sess->hs_oper_name) - 1);
+    ircd_strncpy(sess->hs_oper_name, opername, sizeof(sess->hs_oper_name));
     sess->hs_oper_granted_at = granted_at ? granted_at : CurrentTime;
   } else {
     sess->hs_oper_name[0] = '\0';

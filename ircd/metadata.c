@@ -1022,7 +1022,8 @@ int metadata_valid_key(const char *key)
   }
 
   /* Check length */
-  if (strlen(key) > METADATA_KEY_LEN)
+  /* key buffers are char[METADATA_KEY_LEN]; last byte is the NUL */
+  if (strlen(key) >= METADATA_KEY_LEN)
     return 0;
 
   return 1;
@@ -1037,8 +1038,8 @@ static struct MetadataEntry *create_entry(const char *key, const char *value)
   if (!entry)
     return NULL;
 
-  ircd_strncpy(entry->key, key, METADATA_KEY_LEN - 1);
-  entry->key[METADATA_KEY_LEN - 1] = '\0';
+  ircd_strncpy(entry->key, key, METADATA_KEY_LEN);
+  entry->key[METADATA_KEY_LEN - 1] = '\0';  /* redundant: strlcpy already NUL-terminates within bounds */
 
   if (value) {
     entry->value = (char *)MyMalloc(strlen(value) + 1);
@@ -1596,8 +1597,8 @@ static struct MetadataSub *create_sub(const char *key)
   if (!sub)
     return NULL;
 
-  ircd_strncpy(sub->key, key, METADATA_KEY_LEN - 1);
-  sub->key[METADATA_KEY_LEN - 1] = '\0';
+  ircd_strncpy(sub->key, key, METADATA_KEY_LEN);
+  sub->key[METADATA_KEY_LEN - 1] = '\0';  /* redundant: strlcpy already NUL-terminates within bounds */
   sub->next = NULL;
 
   return sub;

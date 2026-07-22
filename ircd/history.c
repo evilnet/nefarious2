@@ -1835,7 +1835,7 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
       }
       memcpy(tgt->target, kbase, klen);
       tgt->target[klen] = '\0';
-      ircd_strncpy(tgt->last_timestamp, last_ts, sizeof(tgt->last_timestamp) - 1);
+      ircd_strncpy(tgt->last_timestamp, last_ts, sizeof(tgt->last_timestamp));
       tgt->next = NULL;
 
       if (tail)
@@ -2339,9 +2339,9 @@ int history_lookup_message(const char *target, const char *msgid,
   db_val_free(&val);
 
   /* Fill in the key fields */
-  ircd_strncpy(m->msgid, msgid, sizeof(m->msgid) - 1);
-  ircd_strncpy(m->target, target, sizeof(m->target) - 1);
-  ircd_strncpy(m->timestamp, timestamp, sizeof(m->timestamp) - 1);
+  ircd_strncpy(m->msgid, msgid, sizeof(m->msgid));
+  ircd_strncpy(m->target, target, sizeof(m->target));
+  ircd_strncpy(m->timestamp, timestamp, sizeof(m->timestamp));
   m->next = NULL;
 
   /* Resolve multiline content via the same snapshot. */
