@@ -144,7 +144,10 @@ static int translate_errptr(const char *errptr)
     return DB_NOTFOUND;
   if (strstr(errptr, "Corruption"))
     return DB_ERR_CORRUPT;
-  if (strstr(errptr, "IOError") || strstr(errptr, "No space"))
+  if (strstr(errptr, "No space") || strstr(errptr, "Disk quota")
+      || strstr(errptr, "ENOSPC"))
+    return DB_ERR_FULL;
+  if (strstr(errptr, "IOError"))
     return DB_ERR_IO;
   if (strstr(errptr, "MemoryAllocation"))
     return DB_ERR_MEMORY;
@@ -428,9 +431,10 @@ int db_env_sync(struct db_env *env)
   rocksdb_flush(env->db, fopts, &err);
   rocksdb_flushoptions_destroy(fopts);
   if (err) {
+    int rc = translate_errptr(err);
     env_record_error(env, "flush", err);
     rocksdb_free(err);
-    return DB_ERR_IO;
+    return rc;
   }
   return DB_OK;
 }
@@ -729,9 +733,10 @@ int db_writebatch_commit(struct db_writebatch *wb, int sync_durably)
   wopts = sync_durably ? wb->env->wopts_sync : wb->env->wopts_normal;
   rocksdb_write(wb->env->db, wopts, wb->wb, &err);
   if (err) {
+    int rc = translate_errptr(err);
     env_record_error(wb->env, "write", err);
     rocksdb_free(err);
-    return DB_ERR_IO;
+    return rc;
   }
   /* WriteBatch is usable after a successful write but contains all
    * its previous ops.  Clear it to match libmdbx's commit-clears
