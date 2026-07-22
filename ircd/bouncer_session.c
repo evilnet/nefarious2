@@ -6907,6 +6907,18 @@ int bounce_handle_bt(struct Client *cptr, struct Client *sptr,
   }
 }
 
+/** Resolve a wire numeric to a user ONLY if it is a syntactically
+ * valid 5-char P10 user numeric.  findNUser()'s non-5-char else-branch
+ * mis-resolves short/malformed numerics to an arbitrary client_list
+ * slot, so every BX handler that mutates/converts/exits the resolved
+ * Client must gate on exact length first (F-BW2). */
+static struct Client *bx_find_user_strict(const char *numeric)
+{
+  if (!numeric || strlen(numeric) != 5)
+    return NULL;
+  return findNUser(numeric);
+}
+
 /* ---------------------------------------------------------------- */
 /* BX P: Promote/transfer — dual-mode handler                       */
 /* ---------------------------------------------------------------- */
@@ -6941,8 +6953,8 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
   sessid = parv[4];
   nick = parv[5];
 
-  old_client = findNUser(old_numeric);
-  new_client = findNUser(new_numeric);
+  old_client = bx_find_user_strict(old_numeric);
+  new_client = bx_find_user_strict(new_numeric);
 
   if (!old_client || !new_client) {
     Debug((DEBUG_INFO, "BX P: client not found - old=%s new=%s",
@@ -7540,8 +7552,17 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
     chanlist = parv[6];
   }
 
+  /* F-BW2: both numerics must be well-formed 5-char P10 user numerics
+   * before we resolve or byte-index them (the svr_yy extraction below
+   * reads alias_numeric[1] directly). */
+  if (strlen(primary_numeric) != 5 || strlen(alias_numeric) != 5) {
+    Debug((DEBUG_INFO, "BX C: malformed numeric primary=%s alias=%s",
+           primary_numeric, alias_numeric));
+    goto forward;
+  }
+
   /* Find the primary client */
-  primary = findNUser(primary_numeric);
+  primary = bx_find_user_strict(primary_numeric);
   if (!primary) {
     Debug((DEBUG_INFO, "BX C: primary %s not found", primary_numeric));
     goto forward;
@@ -7561,7 +7582,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   }
 
   /* Check if alias numeric already exists */
-  alias = findNUser(alias_numeric);
+  alias = bx_find_user_strict(alias_numeric);
   Debug((DEBUG_INFO, "BX C: processing alias=%s primary=%s account=%s chanlist='%s' existing=%s",
          alias_numeric, primary_numeric, account,
          chanlist ? chanlist : "?",
@@ -8012,7 +8033,7 @@ static int bounce_alias_destroy(struct Client *cptr, struct Client *sptr,
     return protocol_violation(sptr, "BX X requires client numeric");
 
   target_numeric = parv[2];
-  target = findNUser(target_numeric);
+  target = bx_find_user_strict(target_numeric);
 
   /* BX X is the silent-destroy command for any bouncer-managed client:
    * alias or held ghost.  The two are distinguishable on the originating
@@ -8092,7 +8113,7 @@ static int bounce_alias_nicksync(struct Client *cptr, struct Client *sptr,
   new_nick = parv[3];
   /* parv[4] = ts (for collision resolution) */
 
-  primary = findNUser(primary_numeric);
+  primary = bx_find_user_strict(primary_numeric);
   if (!primary || !IsAccount(primary))
     goto forward;
 
@@ -8151,7 +8172,7 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
   alias_numeric = parv[2];
   field_value = parv[3];
 
-  alias = findNUser(alias_numeric);
+  alias = bx_find_user_strict(alias_numeric);
   if (!alias || !IsBouncerAlias(alias)) {
     /* Burst race: defer the local identity update for replay when
      * BX C arrives.  Forward immediately on first arrival so other
@@ -9176,7 +9197,7 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
   if (parc < 4)
     return protocol_violation(sptr, "BX K requires 2 parameters");
 
-  alias = findNUser(parv[2]);
+  alias = bx_find_user_strict(parv[2]);
   if (!alias || !IsBouncerAlias(alias)) {
     /* Burst race: defer the local snomask-set for replay when BX C
      * arrives for this alias.  Forward to other servers immediately
@@ -9246,7 +9267,7 @@ static int bounce_alias_visibility(struct Client *cptr, struct Client *sptr,
     return protocol_violation(sptr, "BX V channel arg must be +#chan or -#chan");
   add = (signed_chan[0] == '+');
 
-  alias = findNUser(parv[2]);
+  alias = bx_find_user_strict(parv[2]);
   if (!alias || !IsBouncerAlias(alias)) {
     /* Burst race: alias not yet present locally.  Defer for replay
      * when BX C arrives.  Forward on first arrival. */
