@@ -430,6 +430,10 @@ struct Connection
   char                con_s2s_multi_msgid[S2S_MULTI_MSGID_BUFSIZE]; /**< Full multi-msgid string (+-separated, empty if single) */
   char                con_s2s_client_tags[4096]; /**< S2S compact-tag ,C<client_tags> segment (IRCv3: 4094 max) */
 #define S2S_SESSID_BUFSIZE 40  /**< Session ID buffer (sized for either 22-char base64 UUID v7 or legacy 36-char hyphenated form + slack) */
+/** Buffer for a DM history pair-key "idA:idB", where each id is an
+ *  account (<=ACCOUNTLEN) or, for an unauthenticated party, a session
+ *  id (<=S2S_SESSID_BUFSIZE-1).  Worst case: two session-id halves. */
+#define PM_PAIRKEY_BUFSIZE (2 * S2S_SESSID_BUFSIZE + 2)   /* = 82 */
   char                con_s2s_sessid[S2S_SESSID_BUFSIZE]; /**< S2S compact-tag ,S<sessid> segment from incoming message — bouncer session identity hint per redesign A.2 */
   char                con_s2s_batch_id[32]; /**< Active S2S batch ID from server */
   char                con_s2s_batch_type[16]; /**< Active S2S batch type (netjoin, netsplit) */

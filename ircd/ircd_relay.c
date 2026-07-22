@@ -124,6 +124,38 @@ static int check_utf8_text(struct Client *sptr, char *text, const char *command)
   return 1;
 }
 
+/* Effective DM-history identity: account when authenticated, else the
+ * per-connection session id.  NEVER the nick — a nick is reusable and
+ * keying on it lets a later holder read the prior holder's DM history
+ * (F-CH1).  cli_session_id is always populated from make_client
+ * (list.c:247) so the unauth branch never yields "".
+ *
+ * Declared unconditionally in ircd_relay.h and called unconditionally
+ * from replay.c / m_chathistory.c / chathistory_ephemeral.c (none of
+ * which are USE_ROCKSDB-guarded — the ephemeral ring in particular is
+ * explicitly the non-RocksDB storage path), so the definition must
+ * live outside the USE_ROCKSDB block below or a non-RocksDB build
+ * link-fails. */
+static const char *pm_effective_identity(struct Client *cli)
+{
+  if (IsAccount(cli) && cli_user(cli) && cli_user(cli)->account[0])
+    return cli_user(cli)->account;
+  return cli_session_id(cli);
+}
+
+void history_pm_identity(struct Client *cli, char *buf, size_t buflen)
+{
+  ircd_strncpy(buf, pm_effective_identity(cli), buflen);
+}
+
+/* Match the caller's SINGLE effective identity against one pair-key half.
+ * No nick fallback (that reopens F-CH1). */
+int history_pm_identity_matches(struct Client *cli, const char *half, size_t half_len)
+{
+  const char *id = pm_effective_identity(cli);
+  return strlen(id) == half_len && ircd_strncmp(id, half, half_len) == 0;
+}
+
 #ifdef USE_ROCKSDB
 /** Store a channel message in the history database.
  * Stores the message with the provided msgid and timestamp.
@@ -301,7 +333,7 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
                                    const char *client_tags)
 {
   char sender[HISTORY_SENDER_LEN];
-  char target[NICKLEN * 2 + 2];  /* nick1:nick2 */
+  char target[PM_PAIRKEY_BUFSIZE];  /* identity pair-key */
   const char *account;
   const char *nick1, *nick2;
 
@@ -353,14 +385,14 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   /* Build target as sorted pair for consistent lookups
    * Format: lowerNick:higherNick (case-insensitive comparison)
    */
-  if (ircd_strcmp(cli_name(sptr), cli_name(acptr)) < 0) {
-    nick1 = cli_name(sptr);
-    nick2 = cli_name(acptr);
-  } else {
-    nick1 = cli_name(acptr);
-    nick2 = cli_name(sptr);
+  {
+    char id_s[S2S_SESSID_BUFSIZE], id_a[S2S_SESSID_BUFSIZE];
+    history_pm_identity(sptr,  id_s, sizeof(id_s));
+    history_pm_identity(acptr, id_a, sizeof(id_a));
+    if (ircd_strcmp(id_s, id_a) < 0) { nick1 = id_s; nick2 = id_a; }
+    else                            { nick1 = id_a; nick2 = id_s; }
+    ircd_snprintf(0, target, sizeof(target), "%s:%s", nick1, nick2);
   }
-  ircd_snprintf(0, target, sizeof(target), "%s:%s", nick1, nick2);
 
   /* Get account name if logged in */
   account = (cli_user(sptr) && cli_user(sptr)->account[0])

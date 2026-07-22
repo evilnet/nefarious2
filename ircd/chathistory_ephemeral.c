@@ -23,6 +23,7 @@
 #include "history.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
+#include "ircd_relay.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "s_user.h"
@@ -61,12 +62,12 @@ static size_t entry_bytes(const char *content, const char *tags)
 static void build_pair_target(const struct Client *a, const struct Client *b,
                               char *out, size_t outsz)
 {
+  char ida[S2S_SESSID_BUFSIZE], idb[S2S_SESSID_BUFSIZE];
   const char *n1, *n2;
-  if (ircd_strcmp(cli_name(a), cli_name(b)) < 0) {
-    n1 = cli_name(a); n2 = cli_name(b);
-  } else {
-    n1 = cli_name(b); n2 = cli_name(a);
-  }
+  history_pm_identity((struct Client *)a, ida, sizeof(ida));
+  history_pm_identity((struct Client *)b, idb, sizeof(idb));
+  if (ircd_strcmp(ida, idb) < 0) { n1 = ida; n2 = idb; }
+  else                           { n1 = idb; n2 = ida; }
   ircd_snprintf(0, out, outsz, "%s:%s", n1, n2);
 }
 

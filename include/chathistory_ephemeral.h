@@ -18,6 +18,15 @@
 #include "history.h"      /* enum HistoryMessageType, struct HistoryMessage */
 #endif
 
+/* PM_PAIRKEY_BUFSIZE sizes struct EphemeralPmEntry::target below.  This
+ * header is included before client.h in several translation units
+ * (ircd_relay.c, m_chathistory.c, bouncer_session.c, this file's own
+ * .c), so it must pull client.h itself rather than rely on include
+ * order for the macro's visibility. */
+#ifndef INCLUDED_client_h
+#include "client.h"       /* PM_PAIRKEY_BUFSIZE */
+#endif
+
 struct Client;
 
 /** Single ring entry — same fields as we'd populate in a HistoryMessage
@@ -28,7 +37,7 @@ struct EphemeralPmEntry {
   struct EphemeralPmEntry *next;       /**< Singly-linked, oldest-first */
   char  msgid[HISTORY_MSGID_LEN];
   char  timestamp[HISTORY_TIMESTAMP_LEN];
-  char  target[NICKLEN * 2 + 2];       /**< Canonical "nick1:nick2" key */
+  char  target[PM_PAIRKEY_BUFSIZE];    /**< Canonical identity pair-key */
   char  original_target[CHANNELLEN + 1]; /**< Receiver nick at send time */
   char  sender[HISTORY_SENDER_LEN];    /**< nick!user@host */
   enum HistoryMessageType type;

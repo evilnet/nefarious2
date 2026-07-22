@@ -37,6 +37,7 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
+#include "ircd_relay.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
@@ -65,20 +66,35 @@ extern const char *msg_type_cmd[];
 static int is_pm_target_for_client(const char *target, struct Client *cptr)
 {
   const char *colon = strchr(target, ':');
-  const char *mynick = cli_name(cptr);
-  size_t mynick_len, nick1_len;
-
   if (!colon)
     return 0;
-
-  mynick_len = strlen(mynick);
-  nick1_len = colon - target;
-
-  if (nick1_len == mynick_len && ircd_strncmp(target, mynick, nick1_len) == 0)
+  if (history_pm_identity_matches(cptr, target, (size_t)(colon - target)))
     return 1;
-  if (ircd_strcmp(colon + 1, mynick) == 0)
+  if (history_pm_identity_matches(cptr, colon + 1, strlen(colon + 1)))
     return 1;
+  return 0;
+}
 
+/* Recover the counterparty DISPLAY nick from the batch's messages.
+ * `me` tiebreak uses current nick — display-only (access already
+ * authorized), so a mutable nick is acceptable here.  Returns 1+fills
+ * buf, else 0. */
+static int pm_other_nick_from_messages(struct Client *sptr,
+                                       const struct HistoryMessage *msgs,
+                                       char *buf, size_t buflen)
+{
+  const char *me = cli_name(sptr);
+  const struct HistoryMessage *m;
+  for (m = msgs; m; m = m->next) {
+    char snick[NICKLEN + 1];
+    const char *bang = strchr(m->sender, '!');
+    size_t n = bang ? (size_t)(bang - m->sender) : strlen(m->sender);
+    if (n >= sizeof(snick)) n = sizeof(snick) - 1;
+    memcpy(snick, m->sender, n);
+    snick[n] = '\0';
+    if (0 != ircd_strcmp(snick, me)) { ircd_strncpy(buf, snick, buflen); return 1; }
+    if (m->original_target[0])       { ircd_strncpy(buf, m->original_target, buflen); return 1; }
+  }
   return 0;
 }
 
@@ -120,37 +136,25 @@ static void replay_set_target_from_storage(struct Client *sptr,
     return;
   }
 
-  /* PM storage key: nick1:nick2 (sorted lex-lower first).  Pick the
-   * half that isn't us; if neither half matches us, fall back to the
-   * left half (server-side query for someone else's history would not
-   * normally reach here, but degrade gracefully rather than leak the
-   * pair-key). */
-  mynick = cli_name(sptr);
-  mynick_len = strlen(mynick);
-  nick1_len = (size_t)(colon - storage_target);
-
-  if (nick1_len == mynick_len &&
-      ircd_strncmp(storage_target, mynick, nick1_len) == 0) {
-    other_nick = colon + 1;
-  } else if (ircd_strcmp(colon + 1, mynick) == 0) {
-    size_t copy_len = nick1_len < sizeof(other_nick_buf)
-                        ? nick1_len : sizeof(other_nick_buf) - 1;
-    memcpy(other_nick_buf, storage_target, copy_len);
-    other_nick_buf[copy_len] = '\0';
-    other_nick = other_nick_buf;
-  } else {
-    /* Neither half is us — degrade to left half (clean nick, just may
-     * not be the right party).  Avoids leaking the pair-key colon. */
-    size_t copy_len = nick1_len < sizeof(other_nick_buf)
-                        ? nick1_len : sizeof(other_nick_buf) - 1;
-    memcpy(other_nick_buf, storage_target, copy_len);
-    other_nick_buf[copy_len] = '\0';
-    other_nick = other_nick_buf;
-  }
-
-  ircd_strncpy(rs->target, other_nick, sizeof(rs->target));
-  ircd_strncpy(rs->other_nick, other_nick, sizeof(rs->other_nick));
   rs->is_pm = 1;
+  if (pm_other_nick_from_messages(sptr, rs->messages,
+                                  rs->other_nick, sizeof(rs->other_nick))) {
+    /* real nick from the stream */
+  } else {
+    /* Empty batch: fall back to the non-caller identity half of the key.
+     * May surface an account/session id on an EMPTY PM batch — cosmetic,
+     * no content, never leaks the colon. */
+    size_t left_len = (size_t)(colon - storage_target);
+    if (history_pm_identity_matches(sptr, storage_target, left_len))
+      ircd_strncpy(rs->other_nick, colon + 1, sizeof(rs->other_nick));
+    else {
+      size_t cl = left_len < sizeof(rs->other_nick) ? left_len
+                                                    : sizeof(rs->other_nick) - 1;
+      memcpy(rs->other_nick, storage_target, cl);
+      rs->other_nick[cl] = '\0';
+    }
+  }
+  ircd_strncpy(rs->target, rs->other_nick, sizeof(rs->target));
 }
 
 /** Lazily emit the outer evilnet.github.io/bouncer-replay batch on first
@@ -433,11 +437,13 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
     /* Set up new batch.  Storage key is "lowerNick:higherNick" — the
      * wire target must be the OTHER party's nick.  Shared helper with
      * replay_start_batch ensures both auto-replay and on-demand
-     * CHATHISTORY queries use the same translation. */
-    replay_set_target_from_storage(sptr, rs, tgt->target);
-
+     * CHATHISTORY queries use the same translation.  rs->messages must
+     * be populated BEFORE this call — replay_set_target_from_storage
+     * derives the display nick from the message stream. */
     rs->messages = messages;
     rs->current = messages;
+    replay_set_target_from_storage(sptr, rs, tgt->target);
+
     rs->pm_count++;
 
     replay_open_batch(sptr, rs);

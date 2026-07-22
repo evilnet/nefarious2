@@ -44,6 +44,7 @@
 #include "ircd_events.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_relay.h"
 #include "ircd_reply.h"
 #include "metadata.h"
 #include "ircd_snprintf.h"
@@ -1021,54 +1022,45 @@ static int normalize_pm_target(struct Client *sptr, const char *target,
   const char *colon = strchr(target, ':');
 
   if (colon) {
-    /* Already in nick:nick format - just validate and optionally copy */
     char n1[NICKLEN + 1], n2[NICKLEN + 1];
     size_t len1 = colon - target;
+    int self_is_n1, self_is_n2;
     if (len1 > NICKLEN || len1 == 0)
       return -1;
-
     memcpy(n1, target, len1);
     n1[len1] = '\0';
     ircd_strncpy(n2, colon + 1, NICKLEN + 1);
     if (!n2[0])
       return -1;
 
-    /* Verify sender is one of the nicks */
-    if (ircd_strcmp(cli_name(sptr), n1) != 0 &&
-        ircd_strcmp(cli_name(sptr), n2) != 0)
+    self_is_n1 = history_pm_identity_matches(sptr, n1, strlen(n1));
+    self_is_n2 = history_pm_identity_matches(sptr, n2, strlen(n2));
+    if (!self_is_n1 && !self_is_n2)
       return -1;
 
-    /* Write normalized target if buffer provided */
     if (normalized && buflen > 0) {
-      /* Ensure consistent sorting (lowerNick:higherNick) */
-      if (ircd_strcmp(n1, n2) < 0) {
-        nick1 = n1;
-        nick2 = n2;
-      } else {
-        nick1 = n2;
-        nick2 = n1;
-      }
-      ircd_snprintf(0, normalized, buflen, "%s:%s", nick1, nick2);
+      char self_id[S2S_SESSID_BUFSIZE], other_id[S2S_SESSID_BUFSIZE];
+      const char *other_typed = self_is_n1 ? n2 : n1;
+      struct Client *oc = FindUser(other_typed);
+      const char *a, *b;
+      history_pm_identity(sptr, self_id, sizeof(self_id));
+      if (oc) history_pm_identity(oc, other_id, sizeof(other_id));
+      else    ircd_strncpy(other_id, other_typed, sizeof(other_id));
+      if (ircd_strcmp(self_id, other_id) < 0) { a = self_id; b = other_id; }
+      else                                    { a = other_id; b = self_id; }
+      ircd_snprintf(0, normalized, buflen, "%s:%s", a, b);
     }
   } else {
-    /* Plain nickname - construct nick1:nick2 from sender + target */
     struct Client *target_client = FindUser(target);
-    if (!target_client) {
-      /* Target user not found - could be offline. For now, still allow
-       * the query (history might exist from when they were online). */
-    }
-
-    /* Write normalized target if buffer provided */
     if (normalized && buflen > 0) {
-      /* Sort nicks for consistent key format */
-      if (ircd_strcmp(cli_name(sptr), target) < 0) {
-        nick1 = cli_name(sptr);
-        nick2 = target;
-      } else {
-        nick1 = target;
-        nick2 = cli_name(sptr);
-      }
-      ircd_snprintf(0, normalized, buflen, "%s:%s", nick1, nick2);
+      char self_id[S2S_SESSID_BUFSIZE], other_id[S2S_SESSID_BUFSIZE];
+      const char *a, *b;
+      history_pm_identity(sptr, self_id, sizeof(self_id));
+      if (target_client) history_pm_identity(target_client, other_id, sizeof(other_id));
+      else               ircd_strncpy(other_id, target, sizeof(other_id));
+      if (ircd_strcmp(self_id, other_id) < 0) { a = self_id; b = other_id; }
+      else                                    { a = other_id; b = self_id; }
+      ircd_snprintf(0, normalized, buflen, "%s:%s", a, b);
     }
   }
 
@@ -1150,7 +1142,7 @@ static int check_history_access(struct Client *sptr, const char *target,
       return 0;
     }
     if (cli_session_id(sptr)[0]) {
-      char canonical[NICKLEN * 2 + 2];
+      char canonical[PM_PAIRKEY_BUFSIZE];
       if (normalize_pm_target(sptr, target, canonical, sizeof(canonical)) != 0)
         return -1;
       /* Two sources for ephemerals:
@@ -1162,10 +1154,8 @@ static int check_history_access(struct Client *sptr, const char *target,
       if (!history_pm_target_has_sessid(canonical, cli_session_id(sptr))
           && !chathistory_ephemeral_has_target(sptr, canonical))
         return -1;
-      if (normalized_target && normalized_len > 0) {
-        ircd_strncpy(normalized_target, canonical, normalized_len - 1);
-        normalized_target[normalized_len - 1] = '\0';
-      }
+      if (normalized_target && normalized_len > 0)
+        ircd_strncpy(normalized_target, canonical, normalized_len);
       return 0;
     }
     /* Neither account nor session_id — shouldn't happen post-Phase A
@@ -1370,7 +1360,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   const char *ref_value;
   int limit, count, max_limit;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
-                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
+                                       * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
   /* Parse reference */
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0) {
@@ -1457,7 +1447,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
   const char *ref_value;
   int limit, count, max_limit;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
-                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
+                                       * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -1522,7 +1512,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
   const char *ref_value;
   int limit, count, max_limit;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
-                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
+                                       * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -1587,7 +1577,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   const char *ref_value;
   int limit, count, max_limit;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
-                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
+                                       * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref_str, &ref_type, &ref_value) != 0 ||
       ref_type == HISTORY_REF_NONE) {
@@ -1653,7 +1643,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
   const char *ref_value1, *ref_value2;
   int limit, count, max_limit;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
-                                       * "nick:nick" PM pair (NICKLEN*2+2); CHANNELLEN+1 dominates */
+                                       * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
   if (parse_reference(ref1_str, &ref_type1, &ref_value1) != 0 ||
       ref_type1 == HISTORY_REF_NONE) {
