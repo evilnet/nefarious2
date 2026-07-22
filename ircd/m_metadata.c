@@ -582,6 +582,57 @@ static int parse_visibility(const char *vis)
   return METADATA_VIS_PUBLIC;
 }
 
+/* Result codes for metadata_check_limits(). */
+enum {
+  METADATA_LIMIT_OK    = 0,
+  METADATA_LIMIT_UTF8  = -1,   /* value is not valid UTF-8 */
+  METADATA_LIMIT_VALUE = -2,   /* value longer than FEAT_METADATA_MAX_VALUE_BYTES */
+  METADATA_LIMIT_KEYS  = -3    /* new key would exceed FEAT_METADATA_MAX_KEYS */
+};
+
+/* Validate a metadata write against the configured limits.  Returns
+ * METADATA_LIMIT_OK if allowed, else the code of the failed check.
+ * Deletes (value == NULL) are always allowed.  Server-managed keys
+ * (draft/persistence/...) are exempt: they are server-written state
+ * with their own lifecycle, are already excluded from
+ * metadata_count_client()'s budget, and gating them here would let a
+ * user's vanity-key count block bouncer/persistence S2S sync.
+ * Negative feature values are clamped to 0 (fail closed) rather than
+ * sign-converting into "unlimited" in the size_t comparison. */
+static int metadata_check_limits(struct Client *target_client,
+                                 struct Channel *target_channel,
+                                 int is_channel,
+                                 const char *key, const char *value)
+{
+  int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+  int max_value_bytes = feature_int(FEAT_METADATA_MAX_VALUE_BYTES);
+
+  if (!value)
+    return METADATA_LIMIT_OK;
+  if (metadata_key_is_server_managed(key))
+    return METADATA_LIMIT_OK;
+  if (max_keys < 0)
+    max_keys = 0;
+  if (max_value_bytes < 0)
+    max_value_bytes = 0;
+
+  if (!string_is_valid_utf8(value))
+    return METADATA_LIMIT_UTF8;
+  if (strlen(value) > (size_t)max_value_bytes)
+    return METADATA_LIMIT_VALUE;
+
+  if (is_channel) {
+    if (target_channel && !metadata_get_channel(target_channel, key)
+        && metadata_count_channel(target_channel) >= max_keys)
+      return METADATA_LIMIT_KEYS;
+  } else if (target_client) {
+    if (!metadata_get_client(target_client, key)
+        && metadata_count_client(target_client) >= max_keys)
+      return METADATA_LIMIT_KEYS;
+  }
+  return METADATA_LIMIT_OK;
+}
+
 /** Handle SET subcommand.
  * METADATA SET <target> <key> [<visibility>] [<value>]
  * If no value, deletes the key.
@@ -602,8 +653,6 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   int is_channel = 0;
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
-  int max_keys, max_value_bytes;
-  int current_count;
   int rc;
 
   if (parc < 4) {
@@ -670,7 +719,53 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
      * directly to LMDB for the offline case. */
     {
       struct Client *acptr;
+      struct Client *first_online = NULL;
       int fd, found_online = 0;
+
+      for (fd = HighestFd; fd >= 0; --fd) {
+        if (!(acptr = LocalClientArray[fd]))
+          continue;
+        if (!IsAccount(acptr))
+          continue;
+        if (ircd_strcmp(cli_account(acptr), account_name) == 0) {
+          first_online = acptr;
+          break;
+        }
+      }
+
+      /* Enforce the same limits every other write path obeys.  For an
+       * online account, check against the live client; for an offline
+       * account, check value constraints plus the persisted-row count. */
+      if (value) {
+        int limit_rc;
+        if (first_online) {
+          limit_rc = metadata_check_limits(first_online, NULL, 0, key, value);
+        } else {
+          limit_rc = metadata_check_limits(NULL, NULL, 0, key, value);  /* UTF-8 + length only */
+          if (limit_rc == METADATA_LIMIT_OK
+              && !metadata_key_is_server_managed(key)) {
+            char scratch[METADATA_VALUE_LEN];
+            int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+            if (max_keys < 0)
+              max_keys = 0;
+            /* Updates to an existing key are always allowed at cap. */
+            if (metadata_account_get(account_name, key, scratch) != 0
+                && metadata_account_count_keys(account_name) >= max_keys)
+              limit_rc = METADATA_LIMIT_KEYS;
+          }
+        }
+        switch (limit_rc) {
+        case METADATA_LIMIT_UTF8:
+          send_fail(sptr, "METADATA", "VALUE_INVALID", NULL, "value is not valid UTF-8");
+          return 0;
+        case METADATA_LIMIT_VALUE:
+          send_fail(sptr, "METADATA", "VALUE_INVALID", NULL, "value is too long");
+          return 0;
+        case METADATA_LIMIT_KEYS:
+          send_fail(sptr, "METADATA", "LIMIT_REACHED", key, "Maximum number of metadata keys reached");
+          return 0;
+        }
+      }
 
       for (fd = HighestFd; fd >= 0; --fd) {
         if (!(acptr = LocalClientArray[fd]))
@@ -726,39 +821,16 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   }
 
   /* Check limits */
-  max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
-  max_value_bytes = feature_int(FEAT_METADATA_MAX_VALUE_BYTES);
-
-  if (value) {
-    if (!string_is_valid_utf8(value)) {
-      send_fail(sptr, "METADATA", "VALUE_INVALID", NULL,
-                "value is not valid UTF-8");
-      return 0;
-    }
-    if (strlen(value) > max_value_bytes) {
-      send_fail(sptr, "METADATA", "VALUE_INVALID", NULL,
-                "value is too long");
-      return 0;
-    }
-  }
-
-  /* Check key count limit if setting new key */
-  if (value) {
-    if (is_channel) {
-      current_count = metadata_count_channel(target_channel);
-      if (!metadata_get_channel(target_channel, key) && current_count >= max_keys) {
-        send_fail(sptr, "METADATA", "LIMIT_REACHED", key,
-                  "Maximum number of metadata keys reached");
-        return 0;
-      }
-    } else {
-      current_count = metadata_count_client(target_client);
-      if (!metadata_get_client(target_client, key) && current_count >= max_keys) {
-        send_fail(sptr, "METADATA", "LIMIT_REACHED", key,
-                  "Maximum number of metadata keys reached");
-        return 0;
-      }
-    }
+  switch (metadata_check_limits(target_client, target_channel, is_channel, key, value)) {
+  case METADATA_LIMIT_UTF8:
+    send_fail(sptr, "METADATA", "VALUE_INVALID", NULL, "value is not valid UTF-8");
+    return 0;
+  case METADATA_LIMIT_VALUE:
+    send_fail(sptr, "METADATA", "VALUE_INVALID", NULL, "value is too long");
+    return 0;
+  case METADATA_LIMIT_KEYS:
+    send_fail(sptr, "METADATA", "LIMIT_REACHED", key, "Maximum number of metadata keys reached");
+    return 0;
   }
 
   /* Perform the set/delete */
@@ -1363,6 +1435,15 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   unsigned char raw_data[METADATA_VALUE_LEN + 64];
   size_t raw_len = 0;
 
+  /* Plain-text form of the value, materialized once below (after target
+   * resolution) for the limit check, in-memory apply, and subscriber
+   * notify.  The raw/possibly-compressed form in raw_data and value is
+   * kept as-is for the LMDB passthrough cache and onward relay. */
+  const char *plain_value;
+#ifdef USE_ZSTD
+  char decompressed[METADATA_VALUE_LEN];
+#endif
+
   if (parc < 3)
     return 0;
 
@@ -1419,29 +1500,51 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       return 0;
   }
 
-  /* Apply the change with visibility (always decompress for in-memory storage) */
-  if (!is_compressed) {
-    if (is_channel) {
-      metadata_set_channel(target_channel, key, value, visibility);
-    } else if (target_client) {
-      metadata_set_client(target_client, key, value, visibility);
-    }
-  } else if (raw_len > 0) {
-    /* For compressed data, decompress and store in memory for online users */
+  /* Materialize the plain-text value once: validation, in-memory apply
+   * and subscriber notify all need it.  The raw compressed form is kept
+   * for the LMDB passthrough cache and onward relay. */
+  plain_value = value;
+  if (is_compressed && raw_len > 0) {
 #ifdef USE_ZSTD
-    char decompressed[METADATA_VALUE_LEN];
     size_t decompressed_len;
     if (decompress_data(raw_data, raw_len,
                         (unsigned char *)decompressed, sizeof(decompressed) - 1,
                         &decompressed_len) >= 0) {
       decompressed[decompressed_len] = '\0';
-      if (is_channel) {
-        metadata_set_channel(target_channel, key, decompressed, visibility);
-      } else if (target_client) {
-        metadata_set_client(target_client, key, decompressed, visibility);
-      }
+      plain_value = decompressed;
+    } else {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "ms_metadata: dropping undecompressable metadata %s/%s from %s",
+                target, key, cli_name(sptr));
+      return 0;   /* cannot validate what we cannot read — do not store or relay */
     }
+#else
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "ms_metadata: dropping compressed metadata %s/%s from %s (no zstd)",
+              target, key, cli_name(sptr));
+    return 0;
 #endif
+  }
+
+  /* Enforce the same limits every other write path obeys.  On violation
+   * nothing happens: no apply, no cache, no notify, no relay.  This
+   * stops the flood at the first hop; caps are uniform across the
+   * network so a compliant origin never triggers this. */
+  if (value
+      && metadata_check_limits(target_client, target_channel, is_channel,
+                               key, plain_value) != METADATA_LIMIT_OK) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "ms_metadata: limit exceeded for %s/%s from %s — dropped, not relayed",
+              target, key, cli_name(sptr));
+    return 0;
+  }
+
+  /* Apply the change with visibility (plain_value is already
+   * decompressed above, so both arms use it directly). */
+  if (is_channel) {
+    metadata_set_channel(target_channel, key, plain_value, visibility);
+  } else if (target_client) {
+    metadata_set_client(target_client, key, plain_value, visibility);
   }
 
   /* Cache S2S metadata to LMDB (Nefarious is authoritative) */
@@ -1492,21 +1595,7 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   /* Notify local subscribers (only for public metadata) */
   if (visibility == METADATA_VIS_PUBLIC) {
-    if (is_compressed && raw_len > 0) {
-#ifdef USE_ZSTD
-      /* Decompress for subscribers */
-      char decompressed[METADATA_VALUE_LEN];
-      size_t decompressed_len;
-      if (decompress_data(raw_data, raw_len,
-                          (unsigned char *)decompressed, sizeof(decompressed) - 1,
-                          &decompressed_len) >= 0) {
-        decompressed[decompressed_len] = '\0';
-        notify_subscribers(target, key, decompressed);
-      }
-#endif
-    } else {
-      notify_subscribers(target, key, value);
-    }
+    notify_subscribers(target, key, plain_value);
   }
 
   /* Propagate to other servers - forward compressed if received compressed */

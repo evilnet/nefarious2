@@ -245,6 +245,18 @@ extern int metadata_count_client(struct Client *cptr);
  */
 extern int metadata_count_channel(struct Channel *chptr);
 
+/** Count persisted metadata keys for an account, excluding
+ * server-managed keys.  Used to enforce FEAT_METADATA_MAX_KEYS against
+ * LMDB-persisted rows for offline accounts (the oper "*account" SET
+ * path), where there is no in-memory MetadataEntry list to walk.
+ * Bounded: stops counting at FEAT_METADATA_MAX_KEYS + 1 so a
+ * pathological account cannot make the scan unbounded.
+ * @param[in] account Account name.
+ * @return Number of keys (possibly capped at max_keys + 1), or 0 on
+ *         storage unavailable/error.
+ */
+extern int metadata_account_count_keys(const char *account);
+
 /** Test whether a metadata key is server-managed.
  * Server-managed keys live under reserved prefixes (bouncer/, session/,
  * system/).  They are written exclusively by server-side logic, never

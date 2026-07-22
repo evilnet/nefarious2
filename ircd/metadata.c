@@ -791,6 +791,74 @@ int metadata_account_clear(const char *account)
   return (rc == DB_OK) ? 0 : -1;
 }
 
+/** Count persisted metadata keys for an account, excluding
+ * server-managed keys.  Bounded: stops counting at
+ * FEAT_METADATA_MAX_KEYS + 1 so a pathological account cannot make the
+ * scan unbounded.  Counts TTL-cached rows too (cheap approximation —
+ * decoding every value to check expiry is not worth it; after the
+ * commit that stops TTL-downgrading user rows, user rows are
+ * effectively all permanent).
+ * @param[in] account Account name.
+ * @return number of keys (possibly capped at max_keys + 1), or 0 on
+ *         storage unavailable/error.
+ */
+int metadata_account_count_keys(const char *account)
+{
+  struct db_iter *it;
+  char prefix[ACCOUNTLEN + 2];
+  int prefixlen;
+  int max_keys;
+  int count = 0;
+  int rc;
+
+  if (!metadata_lmdb_available || !account)
+    return 0;
+
+  max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+  if (max_keys < 0)
+    max_keys = 0;
+
+  prefixlen = strlen(account);
+  if (prefixlen >= ACCOUNTLEN)
+    return 0;
+  memcpy(prefix, account, prefixlen);
+  prefix[prefixlen++] = KEY_SEP;
+
+  it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
+  if (!it)
+    return 0;
+
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, kpartlen;
+    const void *rawkey = db_iter_key(it, &klen);
+    char kbuf[METADATA_KEY_LEN];
+
+    if (klen < (size_t)prefixlen ||
+        memcmp(rawkey, prefix, (size_t)prefixlen) != 0)
+      break;
+
+    /* The iterator key is not NUL-terminated; bound the copy and skip
+     * anything that couldn't be a real key rather than misreading
+     * adjacent memory. */
+    kpartlen = klen - (size_t)prefixlen;
+    if (kpartlen >= sizeof(kbuf))
+      continue;
+    memcpy(kbuf, (const char *)rawkey + prefixlen, kpartlen);
+    kbuf[kpartlen] = '\0';
+
+    if (metadata_key_is_server_managed(kbuf))
+      continue;
+
+    if (++count > max_keys)
+      break;
+  }
+  db_iter_close(it);
+
+  return count;
+}
+
 /** Store channel metadata to LMDB (for persistent channels).
  * @param[in] channel Channel name.
  * @param[in] key Metadata key.
@@ -903,6 +971,7 @@ int metadata_account_set_permanent(const char *account, const char *key, const c
 int metadata_account_set_raw(const char *account, const char *key, const unsigned char *raw_value, size_t raw_len) { (void)account;(void)key;(void)raw_value;(void)raw_len; return -1; }
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_clear(const char *account) { return -1; }
+int metadata_account_count_keys(const char *account) { return 0; }
 int metadata_account_purge_expired(void) { return -1; }
 int metadata_channel_persist(const char *channel, const char *key, const char *value) { return -1; }
 struct MetadataEntry *metadata_channel_load(const char *channel) { return NULL; }
