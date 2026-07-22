@@ -1980,6 +1980,19 @@ find_s2s_multiline_batch(const char *batch_id)
   return NULL;
 }
 
+/* Forward declaration: create_s2s_multiline_batch's F-MB3 reap sweep
+ * below calls this before its normal definition further down (which
+ * s2s_multiline_cleanup_link also needs to see). */
+static void free_s2s_multiline_batch(struct S2SMultilineBatch *batch);
+
+/* F-MB3: bound the S2S multiline batch table against a peer that opens
+ * batches without ever sending the terminating "-".  The per-link cap
+ * is the hard DoS bound (cap * #direct-links << MAXCONNECTIONS); the
+ * timeout is opportunistic hygiene, swept when a new batch is created
+ * (no dedicated event timer — an idle server accumulates nothing). */
+#define S2S_ML_MAX_BATCHES_PER_LINK 64
+#define S2S_ML_BATCH_TIMEOUT_S      60
+
 /** Create a new S2S multiline batch.
  * @param[in] link The directly-connected S2S link cptr the batch
  *                 arrived on.  Recorded so we can free the entry on
@@ -1992,7 +2005,32 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
                            const char *msgid, uint64_t time_ms)
 {
   int i;
+  int link_count = 0;
   struct S2SMultilineBatch *batch;
+
+  /* F-MB3: opportunistically reap timed-out batches and count how many
+   * this link already holds, so one peer can't exhaust the table. */
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (!s2s_ml_batches[i])
+      continue;
+    if (CurrentTime - s2s_ml_batches[i]->start_time > S2S_ML_BATCH_TIMEOUT_S) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "S2S multiline batch %s timed out (%ld s) — reaping",
+                s2s_ml_batches[i]->batch_id,
+                (long)(CurrentTime - s2s_ml_batches[i]->start_time));
+      free_s2s_multiline_batch(s2s_ml_batches[i]);
+      continue;
+    }
+    if (s2s_ml_batches[i]->link == link)
+      link_count++;
+  }
+  if (link_count >= S2S_ML_MAX_BATCHES_PER_LINK) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "S2S multiline: link %s at batch cap (%d) — refusing new batch",
+              link && IsServer(link) ? cli_name(link) : "?",
+              S2S_ML_MAX_BATCHES_PER_LINK);
+    return NULL;
+  }
 
   /* Find an empty slot */
   for (i = 0; i < MAXCONNECTIONS; i++) {
@@ -2003,10 +2041,8 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
     return NULL;  /* No available slot */
 
   batch = (struct S2SMultilineBatch *)MyMalloc(sizeof(struct S2SMultilineBatch));
-  ircd_strncpy(batch->batch_id, batch_id, sizeof(batch->batch_id) - 1);
-  batch->batch_id[sizeof(batch->batch_id) - 1] = '\0';
-  ircd_strncpy(batch->target, target, sizeof(batch->target) - 1);
-  batch->target[sizeof(batch->target) - 1] = '\0';
+  ircd_strncpy(batch->batch_id, batch_id, sizeof(batch->batch_id));
+  ircd_strncpy(batch->target, target, sizeof(batch->target));
   batch->sender = sender;
   batch->link = link;
   batch->messages = NULL;
@@ -2030,8 +2066,6 @@ create_s2s_multiline_batch(const char *batch_id, const char *target,
   return batch;
 }
 
-static void free_s2s_multiline_batch(struct S2SMultilineBatch *batch);
-
 /** Free any S2S multiline batches buffered against \a link.
  *
  * Called from exit_one_client when a directly-connected server exits,
@@ -2045,6 +2079,23 @@ void s2s_multiline_cleanup_link(struct Client *link)
     return;
   for (i = 0; i < MAXCONNECTIONS; i++) {
     if (s2s_ml_batches[i] && s2s_ml_batches[i]->link == link)
+      free_s2s_multiline_batch(s2s_ml_batches[i]);
+  }
+}
+
+/** Free any S2S multiline batches whose original sender is exiting.
+ *
+ * Called from exit_one_client for every exiting user (not just the
+ * directly-linked server), so a batch whose sender QUITs mid-stream —
+ * before its terminating "-" arrives — doesn't leave batch->sender
+ * dangling for deliver_s2s_multiline_batch to read (UAF). */
+void s2s_multiline_cleanup_sender(struct Client *sender)
+{
+  int i;
+  if (!sender)
+    return;
+  for (i = 0; i < MAXCONNECTIONS; i++) {
+    if (s2s_ml_batches[i] && s2s_ml_batches[i]->sender == sender)
       free_s2s_multiline_batch(s2s_ml_batches[i]);
   }
 }

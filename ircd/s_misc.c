@@ -334,6 +334,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * session table) look up state keyed on it.  No-op skeleton in
      * Phase A; consumers wire in during Phases C / E. */
     ephemeral_purge_session(bcptr);
+    /* F-MB2: drop any S2S multiline batch this user was the sender of,
+     * before teardown frees the Client (deliver reads batch->sender). */
+    s2s_multiline_cleanup_sender(bcptr);
 
     /* Bouncer aliases: minimal silent teardown.
      * No QUIT to channels, no chathistory.
