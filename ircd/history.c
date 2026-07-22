@@ -249,7 +249,7 @@ static int deserialize_message(const char *data, int datalen,
   end = data + datalen;
 
   /* Parse type */
-  field = strchr(p, '|');
+  field = memchr(p, '|', end - p);
   if (!field || field >= end) goto deser_cleanup;
   type = atoi(p);
   if (type < 0 || type > HISTORY_REDACT) goto deser_cleanup;
@@ -257,7 +257,7 @@ static int deserialize_message(const char *data, int datalen,
   p = field + 1;
 
   /* Parse sender */
-  field = strchr(p, '|');
+  field = memchr(p, '|', end - p);
   if (!field || field >= end) goto deser_cleanup;
   if ((size_t)(field - p) >= sizeof(msg->sender)) goto deser_cleanup;
   memcpy(msg->sender, p, field - p);
@@ -265,7 +265,7 @@ static int deserialize_message(const char *data, int datalen,
   p = field + 1;
 
   /* Parse account */
-  field = strchr(p, '|');
+  field = memchr(p, '|', end - p);
   if (!field || field >= end) goto deser_cleanup;
   if ((size_t)(field - p) >= sizeof(msg->account)) goto deser_cleanup;
   memcpy(msg->account, p, field - p);
