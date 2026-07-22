@@ -1575,8 +1575,19 @@ void client_sock_callback(struct Event* ev)
     /* If the OS told us we have a bad file descriptor, we should
      * record that for future reference.
      */
-    if (cli_error(cptr) == EBADF)
+    if (cli_error(cptr) == EBADF) {
+      /* F-DS1: deregister from LocalClientArray BEFORE dropping the fd
+       * index.  The array is fd-indexed and close_connection() gates its
+       * slot-clear on cli_fd >= 0, so once cli_fd is -1 the slot can never
+       * be recovered — the client is later pooled (cli_connect == NULL)
+       * yet still registered here, and every LocalClientArray walk
+       * (the send.c WALL_ broadcast/desynch loops) then derefs
+       * NULL->con_client and crashes.  Same clear-then-null idiom as
+       * close_connection() and bounce_revive(). */
+      if (-1 < cli_fd(cptr))
+        LocalClientArray[cli_fd(cptr)] = 0;
       cli_fd(cptr) = -1;
+    }
     if (s_state(&(con_socket(con))) == SS_CONNECTING) {
       completed_connection(cptr);
       /* for some reason, the os_get_sockerr() in completed_connect()
