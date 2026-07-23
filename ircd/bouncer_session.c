@@ -8836,14 +8836,19 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
 
   from = bx_find_user_strict(b->from_numeric);
   if (!from)
-    from = &me;  /* graceful fallback if from-user vanished mid-batch */
+    from = &me;  /* sender vanished mid-batch: route to the &me-safe fallback below */
 
   /* The wire %C target on the inner messages is the original PM
    * target — resolve to a Client* for the helpers that take it. */
   wire_target = FindUser(b->target_nick);
   cmd_str = b->is_notice ? MSG_NOTICE : MSG_PRIVATE;
 
-  if (CapActive(alias, CAP_DRAFT_MULTILINE) && CapActive(alias, CAP_BATCH)) {
+  /* The multiline BATCH path derefs cli_user(from) (batch-id, host, inner
+   * prefixes) and REQUIRES a real user source per the multiline spec — so it
+   * must NOT run when the sender vanished (from == &me, cli_user NULL).  Gate on
+   * IsUser(from); a vanished sender falls through to send_multiline_fallback,
+   * which is server-source-safe (renders &me as the source, no cli_user deref). */
+  if (IsUser(from) && CapActive(alias, CAP_DRAFT_MULTILINE) && CapActive(alias, CAP_BATCH)) {
     char alias_batchid[16];
     ircd_snprintf(0, alias_batchid, sizeof(alias_batchid), "%s%u",
                   NumNick(from), con_batch_seq(cli_connect(alias))++);
