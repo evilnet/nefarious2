@@ -843,10 +843,6 @@ static void metadata_purge_callback(struct Event* ev)
 {
   (void)ev; /* unused */
 
-  /* Only run if metadata caching is enabled */
-  if (!feature_bool(FEAT_METADATA_CACHE_ENABLED))
-    return;
-
   if (!metadata_lmdb_is_available())
     return;
 

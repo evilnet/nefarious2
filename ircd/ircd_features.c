@@ -1276,12 +1276,10 @@ static struct FeatureDesc {
   F_B(PRESENCE_AGGREGATION, 0, 0, 0),
   F_S(AWAY_STAR_MSG, FEAT_NULL, "Away", 0),
   F_I(AWAY_THROTTLE, 0, 0, 0),
-  F_B(METADATA_CACHE_ENABLED, 0, 1, 0),
   F_B(METADATA_BURST, 0, 1, 0),
   F_S(METADATA_DB, 0, "metadata", 0),
   F_B(METADATA_DB_AUTOGROW, 0, 1, 0),
   F_B(METADATA_DB_NORDAHEAD, 0, 1, 0),
-  F_I(METADATA_CACHE_SLOTS, 0, 128, 0),
   F_I(METADATA_CACHE_TTL, 0, 14400, 0),
   F_I(METADATA_PURGE_FREQUENCY, 0, 3600, feature_notify_metadata_purge_frequency),
 #ifdef USE_ZSTD
