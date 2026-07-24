@@ -64,7 +64,6 @@ static int metadata_cmd_sub(struct Client *sptr, int parc, char *parv[]);
 static int metadata_cmd_unsub(struct Client *sptr, int parc, char *parv[]);
 static int metadata_cmd_subs(struct Client *sptr, int parc, char *parv[]);
 static int metadata_cmd_sync(struct Client *sptr, int parc, char *parv[]);
-static void notify_subscribers(const char *target, const char *key, const char *value);
 
 /** Check if key is valid per IRCv3 spec (letters, digits, hyphens, underscores, dots, forward slashes)
  * and doesn't start with a digit.
@@ -160,11 +159,6 @@ static int can_modify_target(struct Client *sptr, const char *target, int is_cha
   }
 }
 
-/** Notify all clients subscribed to a metadata key about a change.
- * @param[in] target Target name (nick or channel).
- * @param[in] key Metadata key that changed.
- * @param[in] value New value (NULL if deleted).
- */
 /** Check if two clients share at least one common channel. */
 static int shares_channel(struct Client *a, struct Client *b)
 {
@@ -176,11 +170,23 @@ static int shares_channel(struct Client *a, struct Client *b)
   return 0;
 }
 
-static void notify_subscribers(const char *target, const char *key, const char *value)
+/** Notify all clients subscribed to a metadata key about a change.
+ * PUBLIC: subscribed viewers sharing a channel with / being the target user
+ * (or any member, for a channel target).  PRIVATE: only the target's own
+ * subscribed sessions (same account, covering bouncer aliases — see
+ * metadata.h for the full contract).
+ * @param[in] target Target name (nick or channel).
+ * @param[in] key Metadata key that changed.
+ * @param[in] value New value (NULL if deleted).
+ * @param[in] visibility METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
+ */
+void metadata_notify_subscribers(const char *target, const char *key,
+                                 const char *value, int visibility)
 {
   struct Client *acptr;
   struct Client *target_cli = NULL;
   struct Channel *target_chptr = NULL;
+  const char *target_account = NULL;
   int fd;
 
   /* Resolve target for visibility checks */
@@ -188,6 +194,25 @@ static void notify_subscribers(const char *target, const char *key, const char *
     target_chptr = FindChannel(target);
   else
     target_cli = FindUser(target);
+
+  if (visibility == METADATA_VIS_PRIVATE) {
+    /* Private: deliver ONLY to the target's own (subscribed) sessions — no
+     * channel-share fan-out.  A channel target has no session "owner"
+     * (matches can_view_metadata(): a channel's private entries pass
+     * owner==NULL, visible only to opers) so there is nothing to notify. */
+    if (!target_cli)
+      return;
+    /* Match by account only for a NON-EMPTY account.  WEBIRC TRUSTACCOUNT
+     * (m_webirc.c) sets IsAccount() from a caller-supplied account string
+     * that CAN be empty (no non-empty guard there, unlike the bouncer alias
+     * path) — without the [0] check two empty-account clients would
+     * ircd_strcmp("","")==0 and an unrelated client would pass the owner
+     * filter and receive the private value.  An empty-account target falls
+     * through to the pointer-identity branch below (exact Client* only),
+     * which is correct — nobody but that literal client is "the owner". */
+    if (IsAccount(target_cli) && cli_account(target_cli)[0])
+      target_account = cli_account(target_cli);
+  }
 
   /* Iterate over all local clients */
   for (fd = HighestFd; fd >= 0; --fd) {
@@ -202,12 +227,31 @@ static void notify_subscribers(const char *target, const char *key, const char *
     if (!metadata_sub_check(acptr, key))
       continue;
 
-    /* Visibility: for user metadata, only notify if they share a channel
-     * or are the target themselves. For channel metadata, only if member. */
-    if (target_cli) {
+    if (visibility == METADATA_VIS_PRIVATE) {
+      /* Self-sessions only.  Account-anchored targets match by cli_account
+       * so every bouncer alias / other concurrent login under the SAME
+       * account is reached — aliases are removed from the nick hash, so a
+       * plain acptr==target_cli check would see only the primary and
+       * undercount.  target_account is guaranteed non-empty here (set above
+       * only when cli_account[0]), so a recipient that is IsAccount but has
+       * an EMPTY account fails ircd_strcmp(nonempty,"")!=0 and is correctly
+       * skipped — the WEBIRC empty-account cross-delivery hole is closed on
+       * both the target and recipient sides.  Empty-account / unauthenticated
+       * targets have no multi-session concept: exact identity is the whole
+       * story (the else-if pointer check). */
+      if (target_account) {
+        if (!IsAccount(acptr) || ircd_strcmp(cli_account(acptr), target_account) != 0)
+          continue;
+      } else if (acptr != target_cli) {
+        continue;
+      }
+    } else if (target_cli) {
+      /* Visibility: for user metadata, only notify if they share a channel
+       * or are the target themselves. */
       if (acptr != target_cli && !shares_channel(acptr, target_cli))
         continue;
     } else if (target_chptr) {
+      /* For channel metadata, only if member. */
       if (!find_member_link(target_chptr, acptr))
         continue;
     }
@@ -816,10 +860,11 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
                              && !is_channel && target_client)
                              ? cli_name(target_client) : target;
 
-  /* Notify local subscribers (only for public metadata) */
-  if (visibility == METADATA_VIS_PUBLIC) {
-    notify_subscribers(wire_target, key, value);
-  }
+  /* Notify local subscribers.  Vis-aware (Task 5, §A6): public reaches
+   * subscribed viewers under the existing channel-share/self scoping;
+   * private reaches only the target's own subscribed sessions — see
+   * metadata_notify_subscribers. */
+  metadata_notify_subscribers(wire_target, key, value, visibility);
 
   /* Propagate to other servers with visibility */
   if (value) {
@@ -1366,10 +1411,8 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     }
   }
 
-  /* Notify local subscribers (only for public metadata) */
-  if (visibility == METADATA_VIS_PUBLIC) {
-    notify_subscribers(target, key, value);
-  }
+  /* Notify local subscribers (vis-aware — see metadata_notify_subscribers). */
+  metadata_notify_subscribers(target, key, value, visibility);
 
   /* Propagate to other servers */
   if (value) {
