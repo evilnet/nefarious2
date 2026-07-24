@@ -539,17 +539,6 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
-/** Parse visibility string.
- * @param[in] vis Visibility string ("*" or "private").
- * @return METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
- */
-static int parse_visibility(const char *vis)
-{
-  if (vis && ircd_strcmp(vis, "private") == 0)
-    return METADATA_VIS_PRIVATE;
-  return METADATA_VIS_PUBLIC;
-}
-
 /* Result codes for metadata_check_limits(). */
 enum {
   METADATA_LIMIT_OK    = 0,

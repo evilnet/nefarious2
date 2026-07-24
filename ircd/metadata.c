@@ -822,21 +822,11 @@ int metadata_account_count_keys(const char *account)
   return count;
 }
 
-/** Store channel metadata to LMDB (for persistent channels).
- * @param[in] channel Channel name.
- * @param[in] key Metadata key.
- * @param[in] value Value to set (NULL to delete).
- * @return 0 on success, -1 on error.
- */
-int metadata_channel_persist(const char *channel, const char *key, const char *value)
-{
-  return metadata_account_set(channel, key, value);
-}
-
 /** Load channel metadata from LMDB.
  * @param[in] channel Channel name.
  * @return Head of metadata list, or NULL if none/error.
  */
+/* deliberately kept unwired: revived by metadata-era2-completion.md §B3 (P2) */
 struct MetadataEntry *metadata_channel_load(const char *channel)
 {
   return metadata_account_list(channel);
@@ -935,20 +925,13 @@ struct MetadataEntry *metadata_account_list(const char *account) { return NULL; 
 int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_count_keys(const char *account) { return 0; }
 int metadata_account_purge_expired(void) { return -1; }
-int metadata_channel_persist(const char *channel, const char *key, const char *value) { return -1; }
+int metadata_account_foreach_key(void (*cb)(const void *key, size_t klen, void *arg), void *arg) { (void)cb; (void)arg; return -1; }
 struct MetadataEntry *metadata_channel_load(const char *channel) { return NULL; }
 int metadata_readmarker_get(const char *account, const char *target, char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_readmarker_set(const char *account, const char *target, const char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
-int metadata_defrag(unsigned int t) { (void)t; return -1; }
 int metadata_sync(void) { return -1; }
 
 #endif /* USE_ROCKSDB */
-
-/** Initialize the metadata subsystem. */
-void metadata_init(void)
-{
-  /* LMDB init is called separately from ircd.c */
-}
 
 /** Shutdown the metadata subsystem. */
 void metadata_shutdown(void)
@@ -956,39 +939,6 @@ void metadata_shutdown(void)
 #ifdef USE_ROCKSDB
   metadata_lmdb_shutdown();
 #endif
-}
-
-/** Validate a metadata key name.
- * Keys must be alphanumeric with hyphens, underscores, dots, colons, forward slashes.
- * Cannot start with a digit.
- */
-int metadata_valid_key(const char *key)
-{
-  const char *p;
-
-  if (!key || !*key)
-    return 0;
-
-  /* Cannot start with a digit */
-  if (*key >= '0' && *key <= '9')
-    return 0;
-
-  /* Check all characters */
-  for (p = key; *p; p++) {
-    if ((*p >= 'a' && *p <= 'z') ||
-        (*p >= 'A' && *p <= 'Z') ||
-        (*p >= '0' && *p <= '9') ||
-        *p == '-' || *p == '_' || *p == '.' || *p == ':' || *p == '/')
-      continue;
-    return 0;
-  }
-
-  /* Check length */
-  /* key buffers are char[METADATA_KEY_LEN]; last byte is the NUL */
-  if (strlen(key) >= METADATA_KEY_LEN)
-    return 0;
-
-  return 1;
 }
 
 /** Create a new metadata entry. */
@@ -1692,75 +1642,7 @@ void metadata_sub_free(struct Client *cptr)
 
 /* ========== Cache-Aware Metadata Operations ========== */
 
-/** Get metadata for a client with cache-through behavior.
- * Checks in-memory first, then LMDB cache for logged-in users.
- * If found in LMDB but not in memory, loads it into memory.
- */
-struct MetadataEntry *metadata_get_client_cached(struct Client *cptr, const char *key)
-{
-  struct MetadataEntry *entry;
-  const char *account;
-  char value[METADATA_VALUE_LEN];
-
-  if (!cptr || !key)
-    return NULL;
-
-  /* Check if caching is enabled */
-  if (!feature_bool(FEAT_METADATA_CACHE_ENABLED)) {
-    return metadata_get_client(cptr, key);
-  }
-
-  /* First check in-memory (includes virtual keys like presence) */
-  entry = metadata_get_client(cptr, key);
-  if (entry)
-    return entry;
-
-  /* If not logged in, nothing more to check */
-  if (!cli_user(cptr) || !cli_user(cptr)->account[0])
-    return NULL;
-
-  /* Skip virtual keys - they're handled by metadata_get_client */
-  if (key[0] == '$')
-    return NULL;
-
-  account = cli_user(cptr)->account;
-
-  /* Check LMDB cache */
-  if (metadata_lmdb_is_available()) {
-    if (metadata_account_get(account, key, value) == 0) {
-      /* Found in LMDB - load into memory */
-      if (metadata_set_client(cptr, key, value, METADATA_VIS_PUBLIC) == 0) {
-        return metadata_get_client(cptr, key);
-      }
-    }
-  }
-
-  return NULL;
-}
-
 /* ========== Netburst Metadata ========== */
-
-/** Burst all metadata for a client to a server.
- * This is a stub - the actual implementation requires send.h
- * and will be called from s_user.c during burst.
- */
-void metadata_burst_client(struct Client *sptr, struct Client *cptr)
-{
-  /* Stub - actual implementation in s_user.c */
-  (void)sptr;
-  (void)cptr;
-}
-
-/** Burst all metadata for a channel to a server.
- * This is a stub - the actual implementation requires send.h
- * and will be called from channel.c during burst.
- */
-void metadata_burst_channel(struct Channel *chptr, struct Client *cptr)
-{
-  /* Stub - actual implementation in channel.c */
-  (void)chptr;
-  (void)cptr;
-}
 
 /* MDQ removed - Nefarious answers GET from local LMDB only */
 
@@ -1813,22 +1695,6 @@ metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "M :  Bouncer sessions: ~%lu entries",
                (unsigned long)cf_stats.approx_keys);
-}
-
-/** \brief Compact / defragment the metadata database. */
-int
-metadata_defrag(unsigned int time_limit_seconds)
-{
-  int rc;
-  (void)time_limit_seconds;  /* libmdbx-only knob; RocksDB compaction self-paces */
-
-  if (!metadata_lmdb_available || !metadata_db_env)
-    return -1;
-
-  rc = db_env_compact(metadata_db_env, /*cf=*/NULL);
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "metadata: compact complete rc=%d (%s)", rc, db_strerror(rc));
-  return (rc == DB_OK) ? 0 : -1;
 }
 
 /** \brief Report compaction (defrag) results for metadata DB */

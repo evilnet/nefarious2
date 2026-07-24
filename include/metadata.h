@@ -36,12 +36,6 @@ struct Channel;
 /** Maximum length of a metadata value */
 #define METADATA_VALUE_LEN 1024
 
-/** Maximum number of metadata entries per target */
-#define METADATA_MAX_KEYS 20
-
-/** Maximum number of subscriptions per client */
-#define METADATA_MAX_SUBS 50
-
 /** Visibility levels for metadata */
 #define METADATA_VIS_PUBLIC  0  /* Anyone can see */
 #define METADATA_VIS_PRIVATE 1  /* Only owner can see */
@@ -60,9 +54,6 @@ struct MetadataSub {
   char key[METADATA_KEY_LEN];           /**< Key being subscribed to */
   struct MetadataSub *next;             /**< Next subscription in list */
 };
-
-/** Initialize the metadata subsystem */
-extern void metadata_init(void);
 
 /** Shutdown the metadata subsystem */
 extern void metadata_shutdown(void);
@@ -146,12 +137,6 @@ extern int metadata_account_purge_expired(void);
  * @param[in] account Account name.
  */
 extern void metadata_load_account(struct Client *cptr, const char *account);
-
-/** Validate a metadata key name.
- * @param[in] key Key name to validate.
- * @return 1 if valid, 0 if invalid.
- */
-extern int metadata_valid_key(const char *key);
 
 /** Get metadata for a client.
  * @param[in] cptr Client to get metadata from.
@@ -334,29 +319,9 @@ extern void metadata_send_join_notifications(struct Client *joiner, struct Chann
 
 /* ========== Cache-Aware Metadata Operations ========== */
 
-/** Get metadata for a client with cache-through behavior.
- * Checks in-memory first, then LMDB cache for logged-in users.
- * @param[in] cptr Client to get metadata from.
- * @param[in] key Key name.
- * @return Metadata entry or NULL if not found.
- */
-extern struct MetadataEntry *metadata_get_client_cached(struct Client *cptr, const char *key);
-
 /* X3 dependency removed - Nefarious is now authoritative for metadata */
 
 /* ========== Netburst Metadata ========== */
-
-/** Burst all metadata for a client to a server.
- * @param[in] sptr Client whose metadata to send.
- * @param[in] cptr Server to send metadata to.
- */
-extern void metadata_burst_client(struct Client *sptr, struct Client *cptr);
-
-/** Burst all metadata for a channel to a server.
- * @param[in] chptr Channel whose metadata to send.
- * @param[in] cptr Server to send metadata to.
- */
-extern void metadata_burst_channel(struct Channel *chptr, struct Client *cptr);
 
 /* MDQ removed - Nefarious answers GET from local LMDB only */
 
@@ -368,12 +333,6 @@ struct StatDesc;
  * @param[in] param Extra parameter (unused).
  */
 extern void metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
-
-/** Defragment the metadata database environment.
- * @param[in] time_limit_seconds Maximum wall-clock time to spend (0 = no limit).
- * @return 0 on success, negative on error.
- */
-extern int metadata_defrag(unsigned int time_limit_seconds);
 
 /** Report defrag results for the metadata database.
  * @param[in] to Client to send results to.
