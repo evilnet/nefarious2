@@ -72,7 +72,23 @@ extern void metadata_lmdb_shutdown(void);
  */
 extern int metadata_lmdb_is_available(void);
 
-/** Get account metadata from LMDB.
+/** Get account metadata from LMDB, decoding the visibility prefix and
+ * stripping it from the returned value.
+ * @param[in] account Account name.
+ * @param[in] key Metadata key.
+ * @param[out] value Buffer for the STRIPPED value.
+ * @param[in] value_len Size of the value buffer.
+ * @param[out] visibility Decoded visibility (METADATA_VIS_PUBLIC/PRIVATE),
+ *             or NULL if the caller doesn't need it.
+ * @return 0 on success, 1 if not found or expired, -1 on error.
+ */
+extern int metadata_account_get_vis(const char *account, const char *key,
+                                    char *value, size_t value_len, int *visibility);
+
+/** Get account metadata from LMDB. Equivalent to
+ * metadata_account_get_vis(account, key, value, METADATA_VALUE_LEN, NULL) —
+ * the visibility prefix is decoded and stripped; the caller only sees the
+ * raw value.
  * @param[in] account Account name.
  * @param[in] key Metadata key.
  * @param[out] value Buffer for value (at least METADATA_VALUE_LEN).
@@ -81,15 +97,24 @@ extern int metadata_lmdb_is_available(void);
 extern int metadata_account_get(const char *account, const char *key, char *value);
 
 /** Set account metadata in LMDB.
+ * Store-row encoding (see metadata_account_set_ts in metadata.c): non-exempt
+ * permanent rows (metadata_account_set_permanent) always carry a P:/ *:
+ * prefix; non-exempt TTL rows (metadata_account_set) carry the prefix only
+ * when @a visibility is METADATA_VIS_PRIVATE (bare = public); server-managed
+ * keys (metadata_key_is_server_managed) are always stored bare regardless of
+ * @a visibility.
  * @param[in] account Account name.
  * @param[in] key Metadata key.
- * @param[in] value Value to set (NULL to delete).
+ * @param[in] value Value to set (NULL to delete; @a visibility is ignored).
+ * @param[in] visibility METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
  * @return 0 on success, -1 on error.
  */
-extern int metadata_account_set(const char *account, const char *key, const char *value);
-extern int metadata_account_set_permanent(const char *account, const char *key, const char *value);
+extern int metadata_account_set(const char *account, const char *key, const char *value, int visibility);
+extern int metadata_account_set_permanent(const char *account, const char *key, const char *value, int visibility);
 
-/** List all metadata for an account from LMDB.
+/** List all metadata for an account from LMDB. Each entry's value is the
+ * STRIPPED form and entry->visibility carries the decoded/rule visibility
+ * (see metadata_account_get_vis).
  * @param[in] account Account name.
  * @return Head of metadata list (caller must free).
  */

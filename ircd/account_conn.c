@@ -462,7 +462,7 @@ static void persist_last_present(const char *account, time_t when)
     return;
 
   ircd_snprintf(0, value, sizeof(value), "%lu", (unsigned long)when);
-  metadata_account_set(account, "last_present", value);
+  metadata_account_set(account, "last_present", value, METADATA_VIS_PUBLIC);
 }
 
 /** Load last_present timestamp from LMDB.

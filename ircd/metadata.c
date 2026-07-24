@@ -329,17 +329,55 @@ int metadata_lmdb_is_available(void)
   return metadata_lmdb_available;
 }
 
-/** Get account metadata from LMDB.
+/** Decode the visibility prefix from a just-decoded (post-TTL-strip) row
+ * value, per the class rule that metadata_account_set_ts encodes by:
+ *   - server-managed keys are always stored bare -> read PRIVATE by rule.
+ *   - a "P:" / "*:" prefix on any other row is authoritative for that row.
+ *   - a bare non-exempt row is either legacy/pre-A2 data or a TTL-class
+ *     public row (bare by design) -> reads PUBLIC.
+ * @param[in] key Metadata key (used only for the server-managed check).
+ * @param[in] decoded The post-TTL-strip value (NUL-terminated).
+ * @param[out] stripped Set to the prefix-stripped value pointer (either
+ *             @a decoded itself, or @a decoded + 2).
+ * @return The decoded visibility.
+ */
+static int metadata_decode_visibility(const char *key, char *decoded,
+                                      const char **stripped)
+{
+  if (metadata_key_is_server_managed(key)) {
+    *stripped = decoded;
+    return METADATA_VIS_PRIVATE;
+  }
+  if (decoded[0] == 'P' && decoded[1] == ':') {
+    *stripped = decoded + 2;
+    return METADATA_VIS_PRIVATE;
+  }
+  if (decoded[0] == '*' && decoded[1] == ':') {
+    *stripped = decoded + 2;
+    return METADATA_VIS_PUBLIC;
+  }
+  *stripped = decoded;
+  return METADATA_VIS_PUBLIC;
+}
+
+/** Get account metadata from LMDB, decoding the visibility prefix.
  * @param[in] account Account name.
  * @param[in] key Metadata key.
- * @param[out] value Buffer for value (at least METADATA_VALUE_LEN).
+ * @param[out] value Buffer for the STRIPPED value.
+ * @param[in] value_len Size of the value buffer.
+ * @param[out] visibility Decoded visibility, or NULL if not needed.
  * @return 0 on success, 1 if not found or expired, -1 on error.
  */
-int metadata_account_get(const char *account, const char *key, char *value)
+int metadata_account_get_vis(const char *account, const char *key,
+                             char *value, size_t value_len, int *visibility)
 {
   struct db_val val = { NULL, 0 };
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
   char decoded[METADATA_VALUE_LEN];
+  const void *raw;
+  size_t rawlen;
+  const char *stripped;
+  int vis;
   int keylen;
   int rc;
   time_t timestamp;
@@ -349,7 +387,7 @@ int metadata_account_get(const char *account, const char *key, char *value)
   size_t decompressed_len;
 #endif
 
-  if (!metadata_lmdb_available || !account || !key || !value)
+  if (!metadata_lmdb_available || !account || !key || !value || !value_len)
     return -1;
 
   keylen = build_lmdb_key(keybuf, sizeof(keybuf), account, key);
@@ -363,6 +401,8 @@ int metadata_account_get(const char *account, const char *key, char *value)
   if (rc != DB_OK)
     return -1;
 
+  raw = val.base;
+  rawlen = val.len;
 #ifdef USE_ZSTD
   if (is_compressed(val.base, val.len)) {
     if (decompress_data(val.base, val.len,
@@ -370,26 +410,12 @@ int metadata_account_get(const char *account, const char *key, char *value)
       db_val_free(&val);
       return -1;
     }
-    rc = decode_ttl_value(decompressed, decompressed_len, decoded,
-                          sizeof(decoded), &timestamp);
-    db_val_free(&val);
-    if (rc < 0)
-      return -1;
-
-    ttl = feature_int(FEAT_METADATA_CACHE_TTL);
-    if (is_value_expired(timestamp, ttl)) {
-      Debug((DEBUG_DEBUG, "metadata: cached value for %s.%s expired", account, key));
-      return 1;
-    }
-    if (strlen(decoded) >= METADATA_VALUE_LEN)
-      return -1;
-    strcpy(value, decoded);
-    return 0;
+    raw = decompressed;
+    rawlen = decompressed_len;
   }
 #endif
 
-  rc = decode_ttl_value(val.base, val.len, decoded,
-                        sizeof(decoded), &timestamp);
+  rc = decode_ttl_value(raw, rawlen, decoded, sizeof(decoded), &timestamp);
   db_val_free(&val);
   if (rc < 0)
     return -1;
@@ -400,27 +426,59 @@ int metadata_account_get(const char *account, const char *key, char *value)
     return 1;
   }
 
-  if (strlen(decoded) >= METADATA_VALUE_LEN)
+  vis = metadata_decode_visibility(key, decoded, &stripped);
+  if (strlen(stripped) >= value_len)
     return -1;
-  strcpy(value, decoded);
+  strcpy(value, stripped);
+  if (visibility)
+    *visibility = vis;
   return 0;
+}
+
+/** Get account metadata from LMDB.
+ * @param[in] account Account name.
+ * @param[in] key Metadata key.
+ * @param[out] value Buffer for value (at least METADATA_VALUE_LEN).
+ * @return 0 on success, 1 if not found or expired, -1 on error.
+ */
+int metadata_account_get(const char *account, const char *key, char *value)
+{
+  return metadata_account_get_vis(account, key, value, METADATA_VALUE_LEN, NULL);
 }
 
 /** Set account metadata in LMDB.
  * @param[in] account Account name.
  * @param[in] key Metadata key.
  * @param[in] value Value to set (NULL to delete).
+ * @param[in] visibility METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE.
  * @return 0 on success, -1 on error.
  */
 /** Internal helper for metadata_account_set with explicit timestamp.
  * Pass timestamp=0 for permanent values (no TTL expiry).
+ *
+ * Store-row encoding (innermost->outermost): [vis prefix][raw value] ->
+ * encode_ttl_value -> zstd.  The vis prefix is the ONLY encode site — no
+ * other caller anywhere may pre-prefix a value with "P:"/"*:".
+ *   - server-managed keys (metadata_key_is_server_managed) are exempt:
+ *     always stored bare, regardless of @a visibility.
+ *   - non-exempt permanent rows (timestamp==0) are ALWAYS prefixed: "P:"
+ *     for private, "*:" for public — every value round-trips byte-exact.
+ *   - non-exempt TTL rows (timestamp!=0) are prefixed ONLY when private;
+ *     a public TTL row stays bare (preserves the pre-A2 channel-cache and
+ *     last_present on-disk shape exactly).
+ * The prefixed buffer feeds encode_ttl_value.  (On the crdt-mesh branch the
+ * same buffer also feeds the CRDT doc mirror at this chokepoint, so the doc
+ * value carries visibility — no doc on this branch.)
  */
 static int metadata_account_set_ts(const char *account, const char *key,
-                                    const char *value, time_t timestamp)
+                                    const char *value, time_t timestamp,
+                                    int visibility)
 {
   struct db_writebatch *wb;
   char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
+  char prefixed[METADATA_VALUE_LEN + 8]; /* room for the 2-byte P:/ *: prefix */
   char encoded[METADATA_VALUE_LEN + 32]; /* Extra space for TTL prefix */
+  const char *stored_value;
   int keylen;
   int encoded_len;
   int rc;
@@ -442,8 +500,23 @@ static int metadata_account_set_ts(const char *account, const char *key,
   if (!wb)
     return -1;
 
-  if (value) {
-    encoded_len = encode_ttl_value(encoded, sizeof(encoded), value, timestamp);
+  stored_value = value;
+  if (value && !metadata_key_is_server_managed(key)
+      && (timestamp == 0 || visibility == METADATA_VIS_PRIVATE)) {
+    const char *pfx = (visibility == METADATA_VIS_PRIVATE) ? "P:" : "*:";
+    size_t vlen_raw = strlen(value);
+
+    if (vlen_raw + 2 >= sizeof(prefixed)) {
+      db_writebatch_destroy(wb);
+      return -1;
+    }
+    memcpy(prefixed, pfx, 2);
+    memcpy(prefixed + 2, value, vlen_raw + 1); /* + NUL */
+    stored_value = prefixed;
+  }
+
+  if (stored_value) {
+    encoded_len = encode_ttl_value(encoded, sizeof(encoded), stored_value, timestamp);
     if (encoded_len < 0) {
       db_writebatch_destroy(wb);
       return -1;
@@ -481,17 +554,17 @@ static int metadata_account_set_ts(const char *account, const char *key,
  * Values will expire after METADATA_CACHE_TTL seconds.
  * For permanent values (user preferences), use metadata_account_set_permanent().
  */
-int metadata_account_set(const char *account, const char *key, const char *value)
+int metadata_account_set(const char *account, const char *key, const char *value, int visibility)
 {
-  return metadata_account_set_ts(account, key, value, CurrentTime);
+  return metadata_account_set_ts(account, key, value, CurrentTime, visibility);
 }
 
 /** Set account metadata in LMDB with no TTL (timestamp 0 = permanent).
  * Used for user preferences that should survive indefinitely.
  */
-int metadata_account_set_permanent(const char *account, const char *key, const char *value)
+int metadata_account_set_permanent(const char *account, const char *key, const char *value, int visibility)
 {
-  return metadata_account_set_ts(account, key, value, 0);
+  return metadata_account_set_ts(account, key, value, 0, visibility);
 }
 
 /*
@@ -679,6 +752,7 @@ struct MetadataEntry *metadata_account_list(const char *account)
       const unsigned char *raw = (const unsigned char *)vbuf;
       size_t rawlen = vlen;
       char decoded[METADATA_VALUE_LEN];
+      const char *stripped;
       time_t timestamp;
       int ttl;
 #ifdef USE_ZSTD
@@ -708,12 +782,14 @@ struct MetadataEntry *metadata_account_list(const char *account)
         MyFree(entry);
         continue;
       }
-      entry->value = (char *)MyMalloc(strlen(decoded) + 1);
+      /* Decode the vis prefix (same class rule as metadata_account_get_vis)
+       * and store the STRIPPED value — entry->value is never prefixed. */
+      entry->visibility = metadata_decode_visibility(entry->key, decoded, &stripped);
+      entry->value = (char *)MyMalloc(strlen(stripped) + 1);
       if (!entry->value) { MyFree(entry); break; }
-      strcpy(entry->value, decoded);
+      strcpy(entry->value, stripped);
     }
 
-    entry->visibility = METADATA_VIS_PUBLIC;
     entry->next = NULL;
     if (tail) tail->next = entry; else head = entry;
     tail = entry;
@@ -937,8 +1013,9 @@ int metadata_lmdb_init(const char *dbpath) { return -1; }
 void metadata_lmdb_shutdown(void) { }
 int metadata_lmdb_is_available(void) { return 0; }
 int metadata_account_get(const char *account, const char *key, char *value) { return -1; }
-int metadata_account_set(const char *account, const char *key, const char *value) { return -1; }
-int metadata_account_set_permanent(const char *account, const char *key, const char *value) { return -1; }
+int metadata_account_get_vis(const char *account, const char *key, char *value, size_t value_len, int *visibility) { (void)account; (void)key; (void)value; (void)value_len; (void)visibility; return -1; }
+int metadata_account_set(const char *account, const char *key, const char *value, int visibility) { (void)visibility; return -1; }
+int metadata_account_set_permanent(const char *account, const char *key, const char *value, int visibility) { (void)visibility; return -1; }
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_count_keys(const char *account) { return 0; }
@@ -1194,7 +1271,7 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
      * Values set via metadata_set_client are user preferences, not cache
      * entries, and should not expire after METADATA_CACHE_TTL. */
     if (account && metadata_lmdb_is_available()) {
-      metadata_account_set_permanent(account, key, value);
+      metadata_account_set_permanent(account, key, value, visibility);
     }
   } else {
     /* Delete */
@@ -1206,9 +1283,9 @@ int metadata_set_client(struct Client *cptr, const char *key, const char *value,
       metadata_free_entry(entry);
     }
 
-    /* Delete from LMDB for logged-in users */
+    /* Delete from LMDB for logged-in users (visibility ignored — no value to encode) */
     if (account && metadata_lmdb_is_available()) {
-      metadata_account_set(account, key, NULL);
+      metadata_account_set(account, key, NULL, visibility);
     }
   }
 

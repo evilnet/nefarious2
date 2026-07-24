@@ -437,16 +437,15 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       }
 
       if (account && metadata_lmdb_is_available()) {
-        if (metadata_account_get(account, key, value_buf) == 0) {
+        int vis = METADATA_VIS_PUBLIC;
+        /* A2 forward-pull: fetch the decoded visibility via the out-param
+         * instead of locally parsing "P:" — metadata_account_get() now
+         * returns the value already stripped, so the old local parse would
+         * never match.  Task 2 restructures this promotion further. */
+        if (metadata_account_get_vis(account, key, value_buf, sizeof(value_buf), &vis) == 0) {
           /* Found in LMDB cache */
-          const char *vis_str = "*";
+          const char *vis_str = (vis == METADATA_VIS_PRIVATE) ? "private" : "*";
           const char *val = value_buf;
-
-          /* Parse visibility prefix */
-          if (val[0] == 'P' && val[1] == ':') {
-            vis_str = "private";
-            val = val + 2;
-          }
 
           /* Check visibility for private metadata from LMDB */
           if (vis_str[0] == 'p') {
@@ -482,15 +481,13 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
 
       /* First check LMDB cache (works for both existing and non-existent channels) */
       if (metadata_lmdb_is_available()) {
-        if (metadata_account_get(target, key, value_buf) == 0) {
+        int vis = METADATA_VIS_PUBLIC;
+        /* A2 forward-pull: see the matching comment in the user GET fallback
+         * above — decoded visibility comes from the out-param now. */
+        if (metadata_account_get_vis(target, key, value_buf, sizeof(value_buf), &vis) == 0) {
           /* Found in LMDB cache - load into channel memory */
-          const char *vis_str = "*";
+          const char *vis_str = (vis == METADATA_VIS_PRIVATE) ? "private" : "*";
           const char *val = value_buf;
-
-          if (val[0] == 'P' && val[1] == ':') {
-            vis_str = "private";
-            val = val + 2;
-          }
 
           /* Check visibility for private channel metadata from LMDB */
           if (vis_str[0] == 'p') {
@@ -734,7 +731,7 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
       }
 
       if (!found_online) {
-        int rc = metadata_account_set(account_name, key, value);
+        int rc = metadata_account_set(account_name, key, value, visibility);
         if (rc < 0) {
           send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
                     "Failed to set account metadata");
@@ -1357,14 +1354,10 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     }
 
     if (cache_key && metadata_lmdb_is_available()) {
-      /* Store with visibility prefix (will compress automatically) */
-      char stored_value[METADATA_VALUE_LEN + 3];
-      if (visibility == METADATA_VIS_PRIVATE) {
-        ircd_snprintf(0, stored_value, sizeof(stored_value), "P:%s", value);
-      } else {
-        ircd_strncpy(stored_value, value, METADATA_VALUE_LEN + 1);
-      }
-      metadata_account_set(cache_key, key, stored_value);
+      /* TTL-class row: metadata_account_set_ts prefixes only when private
+       * (bare = public), preserving this cache's on-disk shape exactly —
+       * the P:/ *: encode lives wholly in set_ts now, not here. */
+      metadata_account_set(cache_key, key, value, visibility);
       log_write(LS_DEBUG, L_DEBUG, 0,
                 "ms_metadata: Cached metadata %s/%s in LMDB", cache_key, key);
     }

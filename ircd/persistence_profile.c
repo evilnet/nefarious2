@@ -229,10 +229,13 @@ int persistence_profile_set(const char *account, const char *profile,
 
   /* metadata_account_set_permanent stores without TTL — profiles are
    * preferences, not cache entries.  The same call handles delete when
-   * value is NULL. */
+   * value is NULL.  All profile keys live under draft/persistence/profile/,
+   * which is server-managed (metadata_key_is_server_managed) and therefore
+   * always stored bare regardless of the visibility argument — PRIVATE here
+   * is documentary, matching the conceptual privacy of profile config. */
   if (value)
-    return metadata_account_set_permanent(account, full_key, value);
-  return metadata_account_set(account, full_key, NULL);
+    return metadata_account_set_permanent(account, full_key, value, METADATA_VIS_PRIVATE);
+  return metadata_account_set(account, full_key, NULL, METADATA_VIS_PUBLIC);
 }
 
 int persistence_profile_create(const char *account, const char *name,
@@ -319,7 +322,7 @@ int persistence_profile_delete(const char *account, const char *name)
   list = metadata_account_list(account);
   for (e = list; e; e = e->next) {
     if (e->key && strncmp(e->key, prefix, prefix_len) == 0) {
-      if (metadata_account_set(account, e->key, NULL) < 0) {
+      if (metadata_account_set(account, e->key, NULL, METADATA_VIS_PUBLIC) < 0) {
         rc = -1;
         /* keep going — best-effort cleanup */
       }
@@ -380,7 +383,7 @@ int persistence_profile_rename(const char *account,
       rc = -1;
       continue;
     }
-    if (metadata_account_set_permanent(account, new_key, decoded) < 0)
+    if (metadata_account_set_permanent(account, new_key, decoded, METADATA_VIS_PRIVATE) < 0)
       rc = -1;
   }
 
@@ -402,7 +405,7 @@ int persistence_profile_rename(const char *account,
       if (metadata_account_get(account, k, decoded) != 0)
         continue;
       if (profile_name_eq(decoded, old_name)) {
-        if (metadata_account_set_permanent(account, k, new_name) < 0)
+        if (metadata_account_set_permanent(account, k, new_name, METADATA_VIS_PRIVATE) < 0)
           rc = -1;
       }
     }
@@ -411,7 +414,7 @@ int persistence_profile_rename(const char *account,
   /* Phase 3: delete old_name's keys. */
   for (e = list; e; e = e->next) {
     if (e->key && strncmp(e->key, old_prefix, old_prefix_len) == 0) {
-      if (metadata_account_set(account, e->key, NULL) < 0)
+      if (metadata_account_set(account, e->key, NULL, METADATA_VIS_PUBLIC) < 0)
         rc = -1;
     }
   }
