@@ -68,38 +68,6 @@ static int metadata_cmd_subs(struct Client *sptr, int parc, char *parv[]);
 static int metadata_cmd_sync(struct Client *sptr, int parc, char *parv[]);
 static void notify_subscribers(const char *target, const char *key, const char *value);
 
-/** Decode base64 data for compression passthrough.
- * @param[in] input Base64 encoded string.
- * @param[out] output Buffer for decoded data.
- * @param[in] output_size Size of output buffer.
- * @param[out] decoded_len Actual decoded length.
- * @return 1 on success, 0 on error.
- */
-static int base64_decode(const char *input, unsigned char *output,
-                         size_t output_size, size_t *decoded_len)
-{
-  int inlen = strlen(input);
-  int outlen;
-
-  /* EVP_DecodeBlock requires output buffer of at least 3/4 of input */
-  if ((size_t)inlen * 3 / 4 > output_size)
-    return 0;
-
-  outlen = EVP_DecodeBlock(output, (const unsigned char *)input, inlen);
-  if (outlen < 0)
-    return 0;
-
-  /* EVP_DecodeBlock doesn't account for padding, adjust for = characters */
-  if (inlen > 0 && input[inlen - 1] == '=') {
-    outlen--;
-    if (inlen > 1 && input[inlen - 2] == '=')
-      outlen--;
-  }
-
-  *decoded_len = outlen;
-  return 1;
-}
-
 /** Check if key is valid per IRCv3 spec (letters, digits, hyphens, underscores, dots, forward slashes)
  * and doesn't start with a digit.
  */
@@ -1275,11 +1243,7 @@ int m_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  * parv[1] = target
  * parv[2] = key
  * parv[3] = visibility ("*" or "P") (optional for backwards compat)
- * parv[4] = "Z" if compressed passthrough, or value
- * parv[5] = base64 value (if Z flag present)
- *
- * For compression passthrough:
- *   Format: target key visibility Z :base64_compressed_data
+ * parv[4] = value (optional)
  *
  * For backwards compatibility, if parv[3] is present but not a visibility
  * token, treat it as the value.
@@ -1296,22 +1260,8 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   const char *value = NULL;
   int visibility = METADATA_VIS_PUBLIC;
   int is_channel = 0;
-  int is_compressed = 0;
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
-
-  /* Buffers for compressed data handling */
-  unsigned char raw_data[METADATA_VALUE_LEN + 64];
-  size_t raw_len = 0;
-
-  /* Plain-text form of the value, materialized once below (after target
-   * resolution) for the limit check, in-memory apply, and subscriber
-   * notify.  The raw/possibly-compressed form in raw_data and value is
-   * kept as-is for the LMDB passthrough cache and onward relay. */
-  const char *plain_value;
-#ifdef USE_ZSTD
-  char decompressed[METADATA_VALUE_LEN];
-#endif
 
   if (parc < 3)
     return 0;
@@ -1319,8 +1269,7 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   target = parv[1];
   key = parv[2];
 
-  /* Parse visibility, Z flag, and value.
-   * Compressed format: target key visibility Z :base64_data
+  /* Parse visibility and value.
    * Normal format: target key [visibility] [:value]
    * Old format: target key [:value]
    */
@@ -1330,14 +1279,8 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
         (parv[3][0] == 'P' && parv[3][1] == '\0')) {
       visibility = (parv[3][0] == 'P') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC;
 
-      /* Check for Z flag (compression passthrough) */
-      if (parc >= 5 && parv[4][0] == 'Z' && parv[4][1] == '\0') {
-        is_compressed = 1;
-        if (parc >= 6)
-          value = parv[5]; /* Base64-encoded compressed data */
-      } else if (parc >= 5) {
+      if (parc >= 5)
         value = parv[4];
-      }
     } else {
       /* Old format or no visibility - parv[3] is value */
       value = parv[3];
@@ -1346,16 +1289,6 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   if (!is_valid_key(key))
     return 0;
-
-  /* Handle compressed data - decode base64 now */
-  if (is_compressed && value) {
-    if (!base64_decode(value, raw_data, sizeof(raw_data), &raw_len)) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "ms_metadata: Failed to decode compressed data for %s/%s",
-                target, key);
-      is_compressed = 0; /* Fall back to treating as plain value */
-    }
-  }
 
   /* Find target */
   if (IsChannelName(target)) {
@@ -1369,51 +1302,24 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       return 0;
   }
 
-  /* Materialize the plain-text value once: validation, in-memory apply
-   * and subscriber notify all need it.  The raw compressed form is kept
-   * for the LMDB passthrough cache and onward relay. */
-  plain_value = value;
-  if (is_compressed && raw_len > 0) {
-#ifdef USE_ZSTD
-    size_t decompressed_len;
-    if (decompress_data(raw_data, raw_len,
-                        (unsigned char *)decompressed, sizeof(decompressed) - 1,
-                        &decompressed_len) >= 0) {
-      decompressed[decompressed_len] = '\0';
-      plain_value = decompressed;
-    } else {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "ms_metadata: dropping undecompressable metadata %s/%s from %s",
-                target, key, cli_name(sptr));
-      return 0;   /* cannot validate what we cannot read — do not store or relay */
-    }
-#else
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "ms_metadata: dropping compressed metadata %s/%s from %s (no zstd)",
-              target, key, cli_name(sptr));
-    return 0;
-#endif
-  }
-
   /* Enforce the same limits every other write path obeys.  On violation
    * nothing happens: no apply, no cache, no notify, no relay.  This
    * stops the flood at the first hop; caps are uniform across the
    * network so a compliant origin never triggers this. */
   if (value
       && metadata_check_limits(target_client, target_channel, is_channel,
-                               key, plain_value) != METADATA_LIMIT_OK) {
+                               key, value) != METADATA_LIMIT_OK) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "ms_metadata: limit exceeded for %s/%s from %s — dropped, not relayed",
               target, key, cli_name(sptr));
     return 0;
   }
 
-  /* Apply the change with visibility (plain_value is already
-   * decompressed above, so both arms use it directly). */
+  /* Apply the change with visibility */
   if (is_channel) {
-    metadata_set_channel(target_channel, key, plain_value, visibility);
+    metadata_set_channel(target_channel, key, value, visibility);
   } else if (target_client) {
-    metadata_set_client(target_client, key, plain_value, visibility);
+    metadata_set_client(target_client, key, value, visibility);
   }
 
   /* Cache S2S metadata to LMDB (Nefarious is authoritative) */
@@ -1434,31 +1340,14 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     }
 
     if (cache_key && metadata_lmdb_is_available()) {
-      if (is_compressed && raw_len > 0) {
-        /* Store raw compressed data directly - no recompression needed! */
-        /* Prepend visibility if private */
-        if (visibility == METADATA_VIS_PRIVATE) {
-          unsigned char prefixed[METADATA_VALUE_LEN + 64];
-          prefixed[0] = 'P';
-          prefixed[1] = ':';
-          memcpy(prefixed + 2, raw_data, raw_len);
-          metadata_account_set_raw(cache_key, key, prefixed, raw_len + 2);
-        } else {
-          metadata_account_set_raw(cache_key, key, raw_data, raw_len);
-        }
-        log_write(LS_SYSTEM, L_DEBUG, 0,
-                  "ms_metadata: Stored compressed metadata for %s/%s (%zu bytes)",
-                  cache_key, key, raw_len);
+      /* Store with visibility prefix (will compress automatically) */
+      char stored_value[METADATA_VALUE_LEN + 3];
+      if (visibility == METADATA_VIS_PRIVATE) {
+        ircd_snprintf(0, stored_value, sizeof(stored_value), "P:%s", value);
       } else {
-        /* Store with visibility prefix (will compress automatically) */
-        char stored_value[METADATA_VALUE_LEN + 3];
-        if (visibility == METADATA_VIS_PRIVATE) {
-          ircd_snprintf(0, stored_value, sizeof(stored_value), "P:%s", value);
-        } else {
-          ircd_strncpy(stored_value, value, METADATA_VALUE_LEN + 1);
-        }
-        metadata_account_set(cache_key, key, stored_value);
+        ircd_strncpy(stored_value, value, METADATA_VALUE_LEN + 1);
       }
+      metadata_account_set(cache_key, key, stored_value);
       log_write(LS_DEBUG, L_DEBUG, 0,
                 "ms_metadata: Cached metadata %s/%s in LMDB", cache_key, key);
     }
@@ -1466,23 +1355,15 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   /* Notify local subscribers (only for public metadata) */
   if (visibility == METADATA_VIS_PUBLIC) {
-    notify_subscribers(target, key, plain_value);
+    notify_subscribers(target, key, value);
   }
 
-  /* Propagate to other servers - forward compressed if received compressed */
+  /* Propagate to other servers */
   if (value) {
-    if (is_compressed) {
-      /* Forward compressed with Z flag */
-      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s Z :%s",
-                            target, key,
-                            visibility == METADATA_VIS_PRIVATE ? "P" : "*",
-                            value);
-    } else {
-      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
-                            target, key,
-                            visibility == METADATA_VIS_PRIVATE ? "P" : "*",
-                            value);
-    }
+    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
+                          target, key,
+                          visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                          value);
   } else {
     sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s",
                           target, key);

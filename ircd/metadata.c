@@ -494,43 +494,6 @@ int metadata_account_set_permanent(const char *account, const char *key, const c
   return metadata_account_set_ts(account, key, value, 0);
 }
 
-/** Set account metadata in LMDB without compression (raw passthrough).
- * Used for compression passthrough when data is already compressed.
- * @param[in] account Account name.
- * @param[in] key Metadata key.
- * @param[in] raw_value Raw (possibly compressed) data.
- * @param[in] raw_len Length of raw data.
- * @return 0 on success, -1 on error.
- */
-int metadata_account_set_raw(const char *account, const char *key,
-                             const unsigned char *raw_value, size_t raw_len)
-{
-  struct db_writebatch *wb;
-  char keybuf[ACCOUNTLEN + METADATA_KEY_LEN + 2];
-  int keylen;
-  int rc;
-
-  if (!metadata_lmdb_available || !account || !key || !raw_value || raw_len == 0)
-    return -1;
-
-  keylen = build_lmdb_key(keybuf, sizeof(keybuf), account, key);
-  if (keylen < 0)
-    return -1;
-
-  wb = db_writebatch_new(metadata_db_env);
-  if (!wb)
-    return -1;
-  rc = db_writebatch_put(wb, metadata_cf, keybuf, (size_t)keylen,
-                         raw_value, raw_len);
-  if (rc != DB_OK) {
-    db_writebatch_destroy(wb);
-    return -1;
-  }
-  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
-  db_writebatch_destroy(wb);
-  return (rc == DB_OK) ? 0 : -1;
-}
-
 /*
  * Read Marker API (IRCv3 draft/read-marker)
  *
@@ -968,7 +931,6 @@ int metadata_lmdb_is_available(void) { return 0; }
 int metadata_account_get(const char *account, const char *key, char *value) { return -1; }
 int metadata_account_set(const char *account, const char *key, const char *value) { return -1; }
 int metadata_account_set_permanent(const char *account, const char *key, const char *value) { return -1; }
-int metadata_account_set_raw(const char *account, const char *key, const unsigned char *raw_value, size_t raw_len) { (void)account;(void)key;(void)raw_value;(void)raw_len; return -1; }
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_count_keys(const char *account) { return 0; }
