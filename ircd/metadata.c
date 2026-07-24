@@ -1282,10 +1282,10 @@ void metadata_clear_client(struct Client *cptr)
 }
 
 /** Reserved prefixes for server-managed metadata.
- * Keys under these prefixes are written exclusively by server-side logic
- * (bouncer session state, persistence preferences, etc.) and are exempt
- * from the user-facing key-count budget.  Direct METADATA SET from a
- * client is refused for keys matching these prefixes.
+ * Keys under these prefixes (currently just draft/persistence/...) are
+ * written exclusively by server-side logic and are exempt from the
+ * user-facing key-count budget.  Direct METADATA SET from a client is
+ * refused for keys matching these prefixes.
  */
 static const char *const server_managed_prefixes[] = {
   "draft/persistence/",
@@ -1640,11 +1640,8 @@ void metadata_sub_free(struct Client *cptr)
 
 /* X3 dependency removed - Nefarious is now authoritative for metadata */
 
-/* ========== Cache-Aware Metadata Operations ========== */
-
-/* ========== Netburst Metadata ========== */
-
-/* MDQ removed - Nefarious answers GET from local LMDB only */
+/* MDQ removed entirely (protocol + responder) - Nefarious answers GET
+ * from local LMDB only */
 
 void
 metadata_report_stats(struct Client *to, const struct StatDesc *sd, char *param)

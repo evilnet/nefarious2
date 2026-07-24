@@ -205,7 +205,7 @@ extern struct MetadataEntry *metadata_list_channel(struct Channel *chptr);
 extern void metadata_clear_channel(struct Channel *chptr);
 
 /** Count metadata entries for a client.
- * Server-managed entries (bouncer/, session/, system/) are excluded from
+ * Server-managed entries (draft/persistence/...) are excluded from
  * the count so they do not consume the user-facing key budget.
  * @param[in] cptr Client to count.
  * @return Number of user-managed metadata entries.
@@ -232,8 +232,8 @@ extern int metadata_count_channel(struct Channel *chptr);
 extern int metadata_account_count_keys(const char *account);
 
 /** Test whether a metadata key is server-managed.
- * Server-managed keys live under reserved prefixes (bouncer/, session/,
- * system/).  They are written exclusively by server-side logic, never
+ * Server-managed keys live under the reserved prefix (draft/persistence/...).
+ * They are written exclusively by server-side logic, never
  * by direct METADATA SET from a client, and do not count against the
  * per-target key-count limit.
  * @param[in] key Metadata key name.
@@ -317,13 +317,10 @@ extern void metadata_sub_free(struct Client *cptr);
  */
 extern void metadata_send_join_notifications(struct Client *joiner, struct Channel *chptr);
 
-/* ========== Cache-Aware Metadata Operations ========== */
-
 /* X3 dependency removed - Nefarious is now authoritative for metadata */
 
-/* ========== Netburst Metadata ========== */
-
-/* MDQ removed - Nefarious answers GET from local LMDB only */
+/* MDQ removed entirely (protocol + responder) - Nefarious answers GET
+ * from local LMDB only */
 
 struct StatDesc;
 

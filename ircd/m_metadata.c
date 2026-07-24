@@ -50,12 +50,10 @@
 #include "s_bsd.h"
 #include "s_user.h"
 #include "send.h"
-#include "ircd_compress.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include <openssl/evp.h>
 
 /* Forward declarations */
 static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[]);
@@ -337,8 +335,8 @@ static void send_keyvalue(struct Client *to, const char *target, const char *key
  *
  * Flow:
  * 1. If target is online user/channel, get from memory
- * 2. If target is offline, check LMDB cache
- * 3. If not in LMDB, send MDQ to X3 (response will be async)
+ * 2. If not found in memory, check the local metadata store
+ * 3. If still not found, reply RPL_KEYNOTSET (766)
  */
 static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
 {
@@ -424,7 +422,7 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       }
     }
 
-    /* For registered users/channels, if not in memory, check LMDB cache then X3 */
+    /* For registered users/channels, if not in memory, check LMDB cache */
     if (!found && !is_channel) {
       /* Get account name for cache lookup */
       const char *account = NULL;
@@ -478,7 +476,7 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       /* Nefarious is authoritative - no X3 query, just report not set */
     }
 
-    /* For channels, check LMDB cache and X3 for registered channel metadata */
+    /* For channels, check LMDB cache for registered channel metadata */
     if (!found && is_channel) {
       char value_buf[METADATA_VALUE_LEN + 1];
 
@@ -750,9 +748,9 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Refuse direct SET on server-managed keys (bouncer/, session/, system/).
-   * These prefixes are written exclusively by server-side logic — e.g.
-   * the bouncer session machinery and the draft/persistence command.
+  /* Refuse direct SET on server-managed keys (draft/persistence/...).
+   * These keys are written exclusively by server-side logic — e.g.
+   * the bouncer session/persistence-preference machinery.
    * The "*account" oper branch above is left intact so cleanup tooling
    * can still wipe stale entries on offline accounts. */
   if (metadata_key_is_server_managed(key)) {
