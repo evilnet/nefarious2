@@ -675,24 +675,42 @@ struct MetadataEntry *metadata_account_list(const char *account)
     memcpy(entry->key, (const char *)kbuf + prefixlen, klen - prefixlen);
     entry->key[klen - prefixlen] = '\0';
 
+    {
+      const unsigned char *raw = (const unsigned char *)vbuf;
+      size_t rawlen = vlen;
+      char decoded[METADATA_VALUE_LEN];
+      time_t timestamp;
+      int ttl;
 #ifdef USE_ZSTD
-    if (is_compressed((const unsigned char *)vbuf, vlen)) {
-      if (decompress_data((const unsigned char *)vbuf, vlen,
-                          decompressed, sizeof(decompressed), &decompressed_len) < 0) {
+      if (is_compressed((const unsigned char *)vbuf, vlen)) {
+        if (decompress_data((const unsigned char *)vbuf, vlen,
+                            decompressed, sizeof(decompressed), &decompressed_len) < 0) {
+          MyFree(entry);
+          continue;
+        }
+        raw = decompressed;
+        rawlen = decompressed_len;
+      }
+#endif
+      /* Strip the TTL wrapper (T<ts>|value) exactly like metadata_account_get,
+       * and skip an expired cache row rather than loading a stale value into
+       * memory. This function backs metadata_load_account (the eager auth-time
+       * memory fill); before this fix it returned the raw "T0|..." store form
+       * undecoded, so a reconnecting user saw the wrapper prefix — the
+       * s5c_restore regression caught exactly that. Pre-existing gap,
+       * independent of the M8 CLEAR fix. */
+      if (decode_ttl_value(raw, rawlen, decoded, sizeof(decoded), &timestamp) < 0) {
         MyFree(entry);
         continue;
       }
-      entry->value = (char *)MyMalloc(decompressed_len + 1);
+      ttl = feature_int(FEAT_METADATA_CACHE_TTL);
+      if (is_value_expired(timestamp, ttl)) {
+        MyFree(entry);
+        continue;
+      }
+      entry->value = (char *)MyMalloc(strlen(decoded) + 1);
       if (!entry->value) { MyFree(entry); break; }
-      memcpy(entry->value, decompressed, decompressed_len);
-      entry->value[decompressed_len] = '\0';
-    } else
-#endif
-    {
-      entry->value = (char *)MyMalloc(vlen + 1);
-      if (!entry->value) { MyFree(entry); break; }
-      memcpy(entry->value, vbuf, vlen);
-      entry->value[vlen] = '\0';
+      strcpy(entry->value, decoded);
     }
 
     entry->visibility = METADATA_VIS_PUBLIC;
@@ -1079,7 +1097,14 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
   /* Fall through to persistent store for logged-in users.
    * After a restart the client struct is fresh — load the value
    * from mdbx on first access.  Create the in-memory entry directly
-   * (don't call metadata_set_client which would re-persist to mdbx). */
+   * (don't call metadata_set_client which would re-persist to mdbx).
+   * NOTE: this lazy fill is load-bearing — metadata_load_account is NOT
+   * called on every account-attach path (pre-registration SASL, WEBIRC,
+   * IAuth, MODE +r, bouncer-ghost, mesh-materialized users all skip it),
+   * so for those this is the only restore path. It is not a resurrection
+   * vector: METADATA CLEAR now broadcasts a per-key unset that removes the
+   * store row on every node (see metadata_cmd_clear), so a cleared key has
+   * nothing left to promote. (clocktest M8 finding, 2026-07-24.) */
   if (cli_user(cptr) && cli_user(cptr)->account[0] && key[0] != '$'
       && metadata_lmdb_is_available()) {
     char value[METADATA_VALUE_LEN];

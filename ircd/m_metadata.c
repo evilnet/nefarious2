@@ -915,6 +915,36 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* Broadcast a per-key unset for every key we are about to clear, BEFORE
+   * clearing (the clear frees the list we enumerate). CLEAR previously
+   * emitted NOTHING to other servers: the SET path broadcasts and populates
+   * the target's in-memory metadata on EVERY server, but no layer ever
+   * invalidated those remote copies, so remote nodes kept serving deleted
+   * values until the user quit (clocktest M8 finding, 2026-07-24). The
+   * value-less "MD <target> <key>" form is the existing unset wire format;
+   * ms_metadata applies it under the doc-mirror suspend guard and relays it
+   * onward. For USER targets metadata_set_client(NULL) clears both memory
+   * and the store row (so the restored GET store-promotion has nothing to
+   * re-animate). For CHANNEL targets metadata_set_channel(NULL) clears only
+   * memory — channel rows are not doc-converged and metadata_clear_channel
+   * never deletes the store either, a pre-existing channel-metadata store
+   * leak (tracked separately); this at least propagates the memory clear.
+   * Enumeration source is the in-memory list, so a key that is in the store
+   * but was never hydrated into this origin's memory is not broadcast — a
+   * narrow residual (offline SET + a no-load_account attach); the common
+   * in-session SET/CLEAR path is fully covered. Bounded by the key budget. */
+  {
+    const char *wire_target = (target[0] == '*' && !target[1]
+                               && !is_channel && target_client)
+                               ? cli_name(target_client) : target;
+    struct MetadataEntry *entry = is_channel
+                                    ? metadata_list_channel(target_channel)
+                                    : metadata_list_client(target_client);
+    for (; entry; entry = entry->next)
+      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s",
+                               wire_target, entry->key);
+  }
+
   if (is_channel) {
     metadata_clear_channel(target_channel);
   } else {
