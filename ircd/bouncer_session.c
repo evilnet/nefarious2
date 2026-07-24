@@ -2902,6 +2902,15 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
   SetUser(ghost);
   cli_handler(ghost) = CLIENT_HANDLER;
   SetAccount(ghost);
+  /* P1 A3 residue: ghost restore from the bouncer DB at startup.  Init
+   * order is contractual (metadata_lmdb_init precedes bounce_db_restore —
+   * see ircd.c) so the store is up here.  This load is required because
+   * ghost REVIVE does NOT transfer cli_metadata from the reviving temp
+   * client onto the ghost that survives — without it, a restored ghost
+   * has empty cli_metadata until a lazy GET finds it (or forever, if one
+   * never comes before the next restart). */
+  if (user->account[0])
+    metadata_load_account(ghost, user->account);
   SetHiddenHost(ghost);
   SetBouncerHold(ghost);
   /* Mark ghost as not-counted-in-local_clients (no socket, no

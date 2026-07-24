@@ -37,6 +37,7 @@
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
+#include "metadata.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -417,6 +418,11 @@ int ms_regreply(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
         ircd_strncpy(cli_user(acptr)->account, account,
                      sizeof(cli_user(acptr)->account) - 1);
         SetAccount(acptr);
+        /* P1 A3 residue: post-reg REGISTER success attaches an account to
+         * an already-registered client outside the register_user
+         * chokepoint (that already ran at initial registration) — load
+         * the account's metadata here. */
+        metadata_load_account(acptr, cli_user(acptr)->account);
         /* Notify the user and other clients */
         sendrawto_one(acptr, "REGISTER SUCCESS %s :%s", account, message);
         /* Send ACCOUNT to clients with account-notify */

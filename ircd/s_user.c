@@ -408,6 +408,26 @@ int register_user(struct Client *cptr, struct Client *sptr)
   parv[0] = cli_name(sptr);
   parv[1] = parv[2] = NULL;
 
+  /* IRCv3 draft/metadata-2 (P1 A3): eager metadata load at the account-
+   * attach chokepoint.  By the time register_user runs, every inbound
+   * path that stamps an account onto this client has already completed:
+   * pre-reg SASL (auth_complete_sasl), IAuth D-with-account, WEBIRC
+   * account, and pre-reg REGISTER (all funnel through auth_complete_sasl
+   * before register_user is called for MyConnect clients) — plus remote
+   * N-burst intros, where set_nick_name applies the +r stamp via
+   * set_user_mode immediately before calling register_user.  Placed
+   * before the MyConnect/remote split (not after the require-sasl gate a
+   * few lines below, which lives inside the MyConnect-only branch and
+   * would miss remote N-burst intros — the client isn't IsRegistered yet
+   * at that point, so the set_user_mode +r residue below deliberately
+   * skips them and relies on this hook instead) so one call covers both
+   * paths.  metadata_load_account replaces cli_metadata wholesale from
+   * the store; it self-guards on metadata_lmdb_is_available() and is
+   * idempotent if a flow happens to also touch one of the residue hooks
+   * (wasted store iteration only, never wrong data). */
+  if (IsAccount(sptr) && user->account[0])
+    metadata_load_account(sptr, user->account);
+
   if (MyConnect(sptr))
   {
     assert(cptr == sptr);
@@ -2490,6 +2510,17 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 	      cli_user(acptr)->acc_create));
       }
       ircd_strncpy(cli_user(acptr)->account, account, len);
+      /* P1 A3 residue: eager metadata load for a live client that just
+       * attached an account via SVSMODE/server MODE +r.  Guarded on
+       * IsRegistered so a client mid N-burst-intro (not yet registered —
+       * set_nick_name applies burst umodes here BEFORE calling
+       * register_user) is skipped here and hits the register_user
+       * chokepoint moments later instead, avoiding a double load.  Must
+       * run AFTER the strncpy above: cli_user(acptr)->account is the
+       * ts-trimmed value, while the raw `account` variable used above
+       * still carries "name:ts". */
+      if (IsRegistered(acptr))
+        metadata_load_account(acptr, cli_user(acptr)->account);
   }
 
   if (!FlagHas(&setflags, FLAG_CLOAKIP) && IsCloakIP(acptr))

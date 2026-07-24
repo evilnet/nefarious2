@@ -1231,13 +1231,21 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
    * from mdbx on first access.  Create the in-memory entry directly via
    * metadata_memory_put (don't call metadata_set_client which would
    * re-persist to mdbx and re-mint a doc op).
-   * NOTE: this lazy fill is load-bearing — metadata_load_account is NOT
-   * called on every account-attach path (pre-registration SASL, WEBIRC,
-   * IAuth, MODE +r, bouncer-ghost, mesh-materialized users all skip it),
-   * so for those this is the only restore path. It is not a resurrection
-   * vector: METADATA CLEAR now broadcasts a per-key unset that removes the
-   * store row on every node (see metadata_cmd_clear), so a cleared key has
-   * nothing left to promote. (clocktest M8 finding, 2026-07-24.) */
+   * NOTE: this lazy fill is now a BACKSTOP, not the primary restore path.
+   * P1 A3 (2026-07-24) made metadata_load_account fire at every account-
+   * attach site: the register_user chokepoint (s_user.c — before the
+   * MyConnect/remote split, covering pre-reg SASL, IAuth D-with-account,
+   * WEBIRC, pre-reg REGISTER, and remote N-burst intros) plus residues at
+   * the SVSMODE/server MODE +r stamp (set_user_mode, s_user.c), post-reg
+   * REGISTER (m_register.c), mesh materialization (crdt_shadow.c), and
+   * bouncer ghost restore (bouncer_session.c) — on top of the original
+   * four call sites (m_account.c's AC R/M/legacy-AC and LOC-reply
+   * branches, sasl_auth.c's post-reg reauth). This path now only
+   * backstops an attach flow that predates that sweep or one we missed.
+   * It is not a resurrection vector: METADATA CLEAR now broadcasts a
+   * per-key unset that removes the store row on every node (see
+   * metadata_cmd_clear), so a cleared key has nothing left to promote.
+   * (clocktest M8 finding, 2026-07-24.) */
   if (cli_user(cptr) && cli_user(cptr)->account[0] && key[0] != '$'
       && metadata_lmdb_is_available()) {
     char value[METADATA_VALUE_LEN];
@@ -1486,8 +1494,19 @@ int metadata_count_client(struct Client *cptr)
   return count;
 }
 
-/** Load metadata from LMDB for a logged-in user.
- * Called when a user logs into an account (via SASL or account-notify).
+/** Load metadata from LMDB for a logged-in user.  REPLACES cli_metadata
+ * wholesale from the store — a full replace, so redundant/double calls
+ * are idempotent (wasted store iteration only, never wrong data).
+ * Self-guards on metadata_lmdb_is_available().
+ * Called at every point an account attaches to a client (P1 A3,
+ * 2026-07-24): the register_user chokepoint (s_user.c — pre-reg SASL,
+ * IAuth D-with-account, WEBIRC account, pre-reg REGISTER, and remote
+ * N-burst intros), the SVSMODE/server MODE +r stamp in set_user_mode
+ * (s_user.c), post-reg REGISTER on an already-registered client
+ * (m_register.c), S2S ACCOUNT R/M/legacy-AC and the pre-reg LOC reply
+ * (m_account.c), SASL reauth on an already-registered client
+ * (sasl_auth.c), mesh materialization of a remote user (crdt_shadow.c),
+ * and bouncer ghost restore at startup (bouncer_session.c).
  * @param[in] cptr Client that just logged in.
  * @param[in] account Account name.
  */
