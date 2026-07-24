@@ -487,8 +487,8 @@ int server_finish_burst(struct Client *cptr)
       if (feature_bool(FEAT_METADATA_BURST) && IsIRCv3Aware(cptr)) {
         struct MetadataEntry *entry;
         for (entry = cli_metadata(acptr); entry; entry = entry->next) {
-          sendcmdto_one(cli_user(acptr)->server, CMD_METADATA, cptr, "%C %s %s :%s",
-                        acptr, entry->key,
+          sendcmdto_one(cli_user(acptr)->server, CMD_METADATA, cptr, "%s %s %s :%s",
+                        cli_name(acptr), entry->key,
                         entry->visibility == METADATA_VIS_PRIVATE ? "P" : "*",
                         entry->value ? entry->value : "");
         }
