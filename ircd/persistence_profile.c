@@ -261,8 +261,9 @@ int persistence_profile_create(const char *account, const char *name,
 }
 
 /** Find profiles that have `name` as their parent.
- * metadata_account_list returns raw TTL-encoded values; we must fetch
- * the decoded value via metadata_account_get for each candidate key.
+ * metadata_account_list already returns the decoded, vis-stripped value
+ * (TTL-decoded since fdf93a5, vis-stripped since the P1 A2 encoding work)
+ * — e->value is used directly, no re-fetch needed.
  */
 static int has_children(const char *account, const char *name)
 {
@@ -275,7 +276,6 @@ static int has_children(const char *account, const char *name)
   for (e = list; e; e = e->next) {
     const char *k = e->key;
     size_t klen;
-    char decoded[METADATA_VALUE_LEN];
     if (!k || strncmp(k, PROFILE_KEY_PREFIX, prefix_len) != 0)
       continue;
     klen = strlen(k);
@@ -283,9 +283,7 @@ static int has_children(const char *account, const char *name)
       continue;
     if (strcmp(k + klen - parent_suffix_len, "/" PROFILE_PARENT_KEY) != 0)
       continue;
-    if (metadata_account_get(account, k, decoded) != 0)
-      continue;
-    if (profile_name_eq(decoded, name)) {
+    if (profile_name_eq(e->value, name)) {
       found = 1;
       break;
     }
@@ -366,12 +364,13 @@ int persistence_profile_rename(const char *account,
   list = metadata_account_list(account);
 
   /* Phase 1: copy old_name's keys to new_name.  metadata_account_list
-   * returns raw TTL-encoded values; re-read each via metadata_account_get
-   * to get the decoded value before re-writing — otherwise the encoded
-   * "T0|..." prefix gets stored twice. */
+   * already returns the decoded, vis-stripped value (TTL-decoded since
+   * fdf93a5, vis-stripped since the P1 A2 encoding work) — e->value is
+   * the value to re-write, no re-fetch needed. Using the list snapshot
+   * also drops a TOCTOU window against a concurrent delete of the same
+   * key between the list scan and a since-removed per-key re-get. */
   for (e = list; e; e = e->next) {
     const char *suffix;
-    char decoded[METADATA_VALUE_LEN];
     if (!e->key || strncmp(e->key, old_prefix, old_prefix_len) != 0)
       continue;
     suffix = e->key + old_prefix_len;
@@ -379,22 +378,18 @@ int persistence_profile_rename(const char *account,
       rc = -1;
       continue;
     }
-    if (metadata_account_get(account, e->key, decoded) != 0) {
-      rc = -1;
-      continue;
-    }
-    if (metadata_account_set_permanent(account, new_key, decoded, METADATA_VIS_PRIVATE) < 0)
+    if (metadata_account_set_permanent(account, new_key, e->value, METADATA_VIS_PRIVATE) < 0)
       rc = -1;
   }
 
-  /* Phase 2: update any child profile's parent reference from old to new. */
+  /* Phase 2: update any child profile's parent reference from old to new.
+   * e->value is already decoded/stripped — see the Phase 1 comment. */
   {
     size_t parent_suffix_len = strlen("/" PROFILE_PARENT_KEY);
     size_t kp_len = strlen(PROFILE_KEY_PREFIX);
     for (e = list; e; e = e->next) {
       const char *k = e->key;
       size_t klen;
-      char decoded[METADATA_VALUE_LEN];
       if (!k || strncmp(k, PROFILE_KEY_PREFIX, kp_len) != 0)
         continue;
       klen = strlen(k);
@@ -402,9 +397,7 @@ int persistence_profile_rename(const char *account,
         continue;
       if (strcmp(k + klen - parent_suffix_len, "/" PROFILE_PARENT_KEY) != 0)
         continue;
-      if (metadata_account_get(account, k, decoded) != 0)
-        continue;
-      if (profile_name_eq(decoded, old_name)) {
+      if (profile_name_eq(e->value, old_name)) {
         if (metadata_account_set_permanent(account, k, new_name, METADATA_VIS_PRIVATE) < 0)
           rc = -1;
       }
@@ -445,7 +438,6 @@ int persistence_profile_list(const char *account,
     const char *k = e->key;
     size_t klen;
     char name[PROFILE_NAME_LEN_MAX + 1];
-    char decoded_parent[METADATA_VALUE_LEN];
     size_t name_len;
     if (!k || strncmp(k, PROFILE_KEY_PREFIX, prefix_len) != 0)
       continue;
@@ -461,11 +453,9 @@ int persistence_profile_list(const char *account,
     name[name_len] = '\0';
     if (profile_name_eq(name, PERSISTENCE_PROFILE_DEFAULT))
       default_seen = 1; /* should not happen, but be safe */
-    /* metadata_account_list returns raw TTL-encoded values; fetch the
-     * decoded parent value via metadata_account_get. */
-    if (metadata_account_get(account, k, decoded_parent) != 0)
-      decoded_parent[0] = '\0';
-    cb(name, decoded_parent, cookie);
+    /* metadata_account_list already returns the decoded, vis-stripped
+     * value — e->value is the parent name, no re-fetch needed. */
+    cb(name, e->value ? e->value : "", cookie);
   }
 
   /* `default` is implicit — always advertise it even if no keys are set. */

@@ -179,6 +179,20 @@ extern struct MetadataEntry *metadata_get_client(struct Client *cptr, const char
  */
 extern int metadata_set_client(struct Client *cptr, const char *key, const char *value, int visibility);
 
+/** Insert or update a client's in-memory metadata entry only — no store
+ * write, no doc mirror.  The read-path counterpart to metadata_set_client:
+ * use this to cache a value a read already fetched from the store (GET
+ * fallback promotion, lazy fill) so the read never re-enters the write
+ * chokepoint.
+ * @param[in] cptr Client whose in-memory cache gets the entry.
+ * @param[in] key Key name.
+ * @param[in] value Value to cache (non-NULL).
+ * @param[in] visibility Visibility level, decoded from the store row.
+ * @return The new-or-updated entry, or NULL on bad args / allocation failure.
+ */
+extern struct MetadataEntry *metadata_memory_put(struct Client *cptr, const char *key,
+                                                  const char *value, int visibility);
+
 /** List all metadata for a client.
  * @param[in] cptr Client to list metadata for.
  * @return Head of metadata list (read-only).

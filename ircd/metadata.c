@@ -1088,6 +1088,61 @@ static void free_entry_list(struct MetadataEntry *head)
   }
 }
 
+/** Insert or update a client's in-memory metadata entry WITHOUT touching
+ * the persistent store or the CRDT doc — the pure-memory half of
+ * metadata_set_client(), split out so read paths (GET-fallback promotion,
+ * the lazy fill below) can cache a value they already fetched from the
+ * store without re-entering the write chokepoint.  Re-entering it is
+ * exactly the "reads stop writing" hole this closes: promoting a GET
+ * result used to call metadata_set_client(), which re-persists the row as
+ * permanent and re-mints a doc op — upgrading a TTL cache row into
+ * permanent mesh state on a mere read.
+ *
+ * No mode-flag sync either (metadata_set_client's SetFlag/ClrFlag dance) —
+ * this is a cache fill, not a semantic SET, matching the existing
+ * lazy-fill precedent this function replaces below.
+ *
+ * @param[in] cptr Client whose in-memory cache gets the entry.
+ * @param[in] key Key name.
+ * @param[in] value Value to cache (non-NULL — promotion of a found value,
+ *                   never a delete).
+ * @param[in] visibility Visibility level, decoded from the store row.
+ * @return The new-or-updated entry, or NULL on bad args / allocation failure.
+ */
+struct MetadataEntry *metadata_memory_put(struct Client *cptr, const char *key,
+                                          const char *value, int visibility)
+{
+  struct MetadataEntry *entry;
+
+  if (!cptr || !key || !value)
+    return NULL;
+
+  for (entry = cli_metadata(cptr); entry; entry = entry->next) {
+    if (ircd_strcmp(entry->key, key) == 0)
+      break;
+  }
+
+  if (entry) {
+    char *newval = (char *)MyMalloc(strlen(value) + 1);
+    if (!newval)
+      return NULL;
+    strcpy(newval, value);
+    if (entry->value)
+      MyFree(entry->value);
+    entry->value = newval;
+    entry->visibility = visibility;
+  } else {
+    entry = create_entry(key, value);
+    if (!entry)
+      return NULL;
+    entry->visibility = visibility;
+    entry->next = cli_metadata(cptr);
+    cli_metadata(cptr) = entry;
+  }
+
+  return entry;
+}
+
 /** Get metadata for a client.
  * First checks in-memory cache, then LMDB for logged-in users.
  * @param[in] cptr Client to get metadata from.
@@ -1173,8 +1228,9 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
 
   /* Fall through to persistent store for logged-in users.
    * After a restart the client struct is fresh — load the value
-   * from mdbx on first access.  Create the in-memory entry directly
-   * (don't call metadata_set_client which would re-persist to mdbx).
+   * from mdbx on first access.  Create the in-memory entry directly via
+   * metadata_memory_put (don't call metadata_set_client which would
+   * re-persist to mdbx and re-mint a doc op).
    * NOTE: this lazy fill is load-bearing — metadata_load_account is NOT
    * called on every account-attach path (pre-registration SASL, WEBIRC,
    * IAuth, MODE +r, bouncer-ghost, mesh-materialized users all skip it),
@@ -1185,14 +1241,12 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
   if (cli_user(cptr) && cli_user(cptr)->account[0] && key[0] != '$'
       && metadata_lmdb_is_available()) {
     char value[METADATA_VALUE_LEN];
-    if (metadata_account_get(cli_user(cptr)->account, key, value) == 0) {
-      entry = create_entry(key, value);
-      if (entry) {
-        entry->visibility = METADATA_VIS_PRIVATE;
-        entry->next = cli_metadata(cptr);
-        cli_metadata(cptr) = entry;
+    int vis = METADATA_VIS_PUBLIC;
+    if (metadata_account_get_vis(cli_user(cptr)->account, key, value,
+                                 sizeof(value), &vis) == 0) {
+      entry = metadata_memory_put(cptr, key, value, vis);
+      if (entry)
         return entry;
-      }
     }
   }
 

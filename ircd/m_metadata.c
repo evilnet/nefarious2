@@ -438,10 +438,9 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
 
       if (account && metadata_lmdb_is_available()) {
         int vis = METADATA_VIS_PUBLIC;
-        /* A2 forward-pull: fetch the decoded visibility via the out-param
-         * instead of locally parsing "P:" — metadata_account_get() now
-         * returns the value already stripped, so the old local parse would
-         * never match.  Task 2 restructures this promotion further. */
+        /* Fetch the decoded visibility via the out-param instead of locally
+         * parsing "P:" — metadata_account_get_vis() returns the value
+         * already stripped, so a local parse would never match. */
         if (metadata_account_get_vis(account, key, value_buf, sizeof(value_buf), &vis) == 0) {
           /* Found in LMDB cache */
           const char *vis_str = (vis == METADATA_VIS_PRIVATE) ? "private" : "*";
@@ -463,10 +462,12 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
             send_keyvalue(sptr, target, key, val, vis_str);
             found = 1;
 
-            /* For online users, also load into memory for faster subsequent access */
+            /* For online users, also cache into memory for faster subsequent
+             * access — memory-only: this is a read, it must not re-persist
+             * to the store or re-mint a doc op (metadata_memory_put, not
+             * metadata_set_client). */
             if (target_client) {
-              metadata_set_client(target_client, key, val,
-                                  (vis_str[0] == 'p') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC);
+              metadata_memory_put(target_client, key, val, vis);
             }
           }
         }
@@ -482,8 +483,8 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       /* First check LMDB cache (works for both existing and non-existent channels) */
       if (metadata_lmdb_is_available()) {
         int vis = METADATA_VIS_PUBLIC;
-        /* A2 forward-pull: see the matching comment in the user GET fallback
-         * above — decoded visibility comes from the out-param now. */
+        /* Decoded visibility comes from the out-param — see the matching
+         * comment in the user GET fallback above. */
         if (metadata_account_get_vis(target, key, value_buf, sizeof(value_buf), &vis) == 0) {
           /* Found in LMDB cache - load into channel memory */
           const char *vis_str = (vis == METADATA_VIS_PRIVATE) ? "private" : "*";
@@ -508,10 +509,12 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
             send_keyvalue(sptr, target, key, val, vis_str);
             found = 1;
 
-            /* Load into channel's in-memory metadata (if channel exists) */
+            /* Load into channel's in-memory metadata (if channel exists).
+             * metadata_set_channel is memory-only (no store write, no doc
+             * mirror) — safe to call from a read path as-is; vis comes from
+             * the decoded out-param above, not a local "P:" parse. */
             if (target_channel) {
-              metadata_set_channel(target_channel, key, val,
-                                   (vis_str[0] == 'p') ? METADATA_VIS_PRIVATE : METADATA_VIS_PUBLIC);
+              metadata_set_channel(target_channel, key, val, vis);
             }
           }
         }
