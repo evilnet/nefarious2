@@ -498,8 +498,21 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
               can_view = 1;
             else if (IsAccount(sptr) && ircd_strcmp(cli_account(sptr), account) == 0)
               can_view = 1;
-            if (!can_view)
+            if (!can_view) {
+              /* Existence-leak fix (spec "Known deferrals" #3): reply
+               * exactly as the absent case does (display-expansion
+               * pattern below, matching :578) instead of silently
+               * skipping, so a denied private key is indistinguishable
+               * from a key that doesn't exist at all.  VALUE is still
+               * never sent here — this only closes the exists-vs-absent
+               * side channel (the A2 VALUE-hiding guarantee is untouched). */
+              send_reply(sptr, RPL_KEYNOTSET,
+                         (target[0] == '*' && !target[1]
+                          && IsUser(sptr) && cli_name(sptr)[0])
+                         ? cli_name(sptr) : target,
+                         key);
               continue;  /* Skip to next key, don't reveal private data */
+            }
           }
 
           if (*val) {
@@ -545,8 +558,16 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
               if (member && IsChanOp(member))
                 can_view = 1;
             }
-            if (!can_view)
+            if (!can_view) {
+              /* Existence-leak fix, same as the user-branch fix above:
+               * reply 766 instead of silently skipping so denied == absent. */
+              send_reply(sptr, RPL_KEYNOTSET,
+                         (target[0] == '*' && !target[1]
+                          && IsUser(sptr) && cli_name(sptr)[0])
+                         ? cli_name(sptr) : target,
+                         key);
               continue;  /* Skip, don't reveal private channel data */
+            }
           }
 
           if (*val) {
@@ -1396,39 +1417,17 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     metadata_set_client(target_client, key, value, visibility);
   }
 
-  /* Cache S2S metadata to LMDB (Nefarious is authoritative) */
-  if (value) {
-    const char *cache_key = NULL;
-
-    /* User targets: nothing to do here.  metadata_set_client() above
-     * already persisted the row PERMANENTLY for authed users
-     * (metadata_account_set_permanent).  This block used to re-write
-     * the same account\0key row via metadata_account_set() — a
-     * TTL-stamped write that silently downgraded permanent user
-     * metadata to a 4h cache entry, which the purge sweep then
-     * deleted.  +R channel targets are the same story since B1:
-     * metadata_set_channel() above now persists PERMANENTLY too (its
-     * own metadata_account_set_permanent call, gated on
-     * MODE_REGISTERED), so caching here with a TTL would immediately
-     * downgrade the row it just wrote — the exact bug this comment
-     * already describes, reintroduced for channels if this stayed
-     * unconditional.  Only a non-+R channel still needs the cache
-     * write below: metadata_set_channel() is memory-only for it, so
-     * this remains its only persistence path (unchanged). */
-    if (target_channel && !(target_channel->mode.mode & MODE_REGISTERED)) {
-      /* Channel - cache under channel name */
-      cache_key = target;
-    }
-
-    if (cache_key && metadata_lmdb_is_available()) {
-      /* TTL-class row: metadata_account_set_ts prefixes only when private
-       * (bare = public), preserving this cache's on-disk shape exactly —
-       * the P:/ *: encode lives wholly in set_ts now, not here. */
-      metadata_account_set(cache_key, key, value, visibility);
-      log_write(LS_DEBUG, L_DEBUG, 0,
-                "ms_metadata: Cached metadata %s/%s in LMDB", cache_key, key);
-    }
-  }
+  /* B5: no separate LMDB cache step here.  metadata_set_client() above
+   * already persists PERMANENTLY for authed users
+   * (metadata_account_set_permanent); for a +R channel
+   * metadata_set_channel() does the same (B1, gated on MODE_REGISTERED).
+   * An unregistered channel is memory+relay only by design (spec §C3) —
+   * this block used to TTL-cache its rows under the plain channel name
+   * via metadata_account_set(), the era-1 "remote TTL channel cache" B5
+   * retires: nothing ever reloaded those rows (metadata_channel_load only
+   * hydrates on +R), so they were pure store debris that the read-only
+   * GET channel fallback below could still resurrect into memory. The
+   * store now keeps no row at all for an unregistered channel. */
 
   /* Notify local subscribers (vis-aware — see metadata_notify_subscribers). */
   metadata_notify_subscribers(target, key, value, visibility);
