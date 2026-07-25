@@ -837,6 +837,8 @@ void metadata_purge_restart_timer(void)
 
 /** Periodic callback to purge expired metadata cache entries.
  * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL.
+ * Era-2 note: reclaims only pre-era-2 legacy TTL rows — no live writer
+ * mints new ones (see metadata_account_purge_expired's header).
  * @param[in] ev Timer event (ignored).
  */
 static void metadata_purge_callback(struct Event* ev)

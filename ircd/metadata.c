@@ -983,6 +983,12 @@ void metadata_channel_load(struct Channel *chptr)
 
 /** Purge expired metadata entries from LMDB.
  * Called periodically to enforce METADATA_CACHE_TTL.
+ * LEGACY-AGER ONLY as of era-2 (P0-P2; writer survey 2026-07-25): no live
+ * code path mints new TTL-stamped rows — every reachable non-NULL write is
+ * metadata_account_set_permanent (ts=0). This sweep exists solely to
+ * physically reclaim pre-era-2 rows (old last_present, the retired remote
+ * channel cache) that read-time expiry only masks. Do NOT add a TTL writer
+ * on the assumption this machinery is load-bearing for current data.
  * @return Number of entries purged, or -1 on error.
  */
 int metadata_account_purge_expired(void)

@@ -1,6 +1,6 @@
 ---
 name: p10-protocol
-description: P10 server-to-server protocol reference for Nefarious and X3 — message and numeric format, command tokens, IP encoding, the SASL flow, and IRCv3 S2S extensions (MD/MDQ metadata, MR read markers, TG tagmsg). Use when parsing or emitting P10, debugging BURST/SQUIT, or adding S2S commands.
+description: P10 server-to-server protocol reference for Nefarious and X3 — message and numeric format, command tokens, IP encoding, the SASL flow, and IRCv3 S2S extensions (MD metadata — MDQ retired on crdt-mesh era-2, prod fork retains until cherry-pick — MR read markers, TG tagmsg). Use when parsing or emitting P10, debugging BURST/SQUIT, or adding S2S commands.
 ---
 
 # P10 Protocol Skill

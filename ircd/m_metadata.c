@@ -381,6 +381,9 @@ static void send_keyvalue(struct Client *to, const char *target, const char *key
  * 1. If target is online user/channel, get from memory
  * 2. If not found in memory, check the local metadata store
  * 3. If still not found, reply RPL_KEYNOTSET (766)
+ * A key that EXISTS but is private-denied to this viewer ALSO answers 766
+ * (era-2 deliberate: denied is indistinguishable from absent, so key
+ * existence never leaks — see the can_view branches below).
  */
 static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
 {

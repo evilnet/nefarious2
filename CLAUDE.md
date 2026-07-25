@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **IRCv3 capabilities** — CAP/SASL, `draft/chathistory`, `draft/metadata-2`, `draft/multiline`, message-redaction, read-marker, event-playback, setname, echo-message, labeled-response, server-time, message-tags/msgid, batch.
 - **Storage** — RocksDB backend (migrated off libmdbx) for chathistory, metadata, multiline content, and bouncer-session persistence. Built under `USE_ROCKSDB` (configure `--with-rocksdb`); the db abstraction is in `ircd/db_*.c` / `include/db_*.h`. Optional zstd compression (`--with-zstd`, `USE_ZSTD`).
 - **SASL / Keycloak** — local SASL via Keycloak ROPC through libkc, three-tier AUTHENTICATE dispatch (local Keycloak / IAuth / P10 relay). `--enable-keycloak`; read the `sasl-keycloak` skill.
-- **P10 extensions** — bouncer BS/BX tokens, metadata MD/MDQ, read-marker MR, TAGMSG TG, SASL relay, cache-invalidation CI. Read the `p10-protocol` skill.
+- **P10 extensions** — bouncer BS/BX tokens, metadata MD (MDQ retired in the era-2 overhaul), read-marker MR, TAGMSG TG, SASL relay, cache-invalidation CI. Read the `p10-protocol` skill.
 
 ## Claude Code skills & agents
 
