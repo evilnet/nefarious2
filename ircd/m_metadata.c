@@ -1003,10 +1003,16 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
    * ms_metadata applies it under the doc-mirror suspend guard and relays it
    * onward. For USER targets metadata_set_client(NULL) clears both memory
    * and the store row (so the restored GET store-promotion has nothing to
-   * re-animate). For CHANNEL targets metadata_set_channel(NULL) clears only
-   * memory — channel rows are not doc-converged and metadata_clear_channel
-   * never deletes the store either, a pre-existing channel-metadata store
-   * leak (tracked separately); this at least propagates the memory clear.
+   * re-animate). For CHANNEL targets, metadata_set_channel(NULL) on each
+   * RELAY deletes that relay's own +R store row too (the +R persist leg,
+   * mint self-skipped under the suspend guard) — only the ORIGIN was left
+   * out: metadata_clear_channel() below is memory-only and is never routed
+   * through metadata_set_channel(), so the origin's own store rows leaked
+   * and no doc tombstone was ever minted. The doc still held the SETs, so
+   * reconcile_metadata_set_cb (doc-present + store-missing) re-healed the
+   * "cleared" values back into every store within ~30s — mesh-wide
+   * resurrection for any +R channel CLEAR. Closed below (Metadata P2 final
+   * review finding).
    * Enumeration source is the in-memory list, so a key that is in the store
    * but was never hydrated into this origin's memory is not broadcast — a
    * narrow residual (offline SET + a no-load_account attach); the common
@@ -1025,6 +1031,37 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
 
   if (is_channel) {
     metadata_clear_channel(target_channel);
+
+    /* Close the resurrection gap the comment above describes: wipe the
+     * ORIGIN's own leaked "#chan\0*" store rows (metadata_account_clear —
+     * the same call channel.c's -R hook, mode_channel_registered_hook(),
+     * uses for the exact same wipe; on crdt-mesh it also mints the per-key
+     * doc tombstones there).
+     *
+     * This is scoped to THIS call site rather than folded into
+     * metadata_clear_channel() itself, deliberately: that function has a
+     * SECOND caller — metadata_free_channel() (metadata.c), reached from
+     * destruct_channel() on ordinary empty-channel GC (sub1_from_channel(),
+     * every node, whenever the channel's local membership independently
+     * drains to 0 — not a CLEAR, and not origin-gated). channel.c's own
+     * mode_channel_registered_hook() header already documents that exact
+     * call site as one that "MUST stay unhooked" from a store wipe: a +R
+     * channel going momentarily empty must not destroy its persisted
+     * metadata. Folding this into metadata_clear_channel() would have
+     * silently re-created that hazard (every node wiping a registered
+     * channel's permanent store the moment it emptied out) instead of
+     * fixing the narrower CLEAR-only bug.
+     *
+     * Minting only here is single-writer-correct: metadata_cmd_clear runs
+     * exclusively on the node that received the client's CLEAR — CLEAR has
+     * no wire form of its own (it degrades to the per-key MD unsets
+     * broadcast above, which every relay applies to its own store under
+     * its own suspend bracket, per the comment above) — so exactly one
+     * node ever mints these tombstones and every other node just
+     * LWW-converges to them. */
+    if ((target_channel->mode.mode & MODE_REGISTERED) &&
+        metadata_lmdb_is_available())
+      metadata_account_clear(target_channel->chname);
   } else {
     metadata_clear_client(target_client);
   }

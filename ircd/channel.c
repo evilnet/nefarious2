@@ -4859,7 +4859,7 @@ mode_channel_registered_hook(struct Channel *chptr, struct Client *cptr,
      * owner — exactly like the reconcile path). */
     struct MetadataEntry *md;
     while ((md = chptr->metadata) != NULL) {
-      char mkey[METADATA_KEY_LEN];
+      char mkey[METADATA_KEY_LEN + 1];
       int vis = md->visibility;
 
       ircd_strncpy(mkey, md->key, sizeof(mkey));
