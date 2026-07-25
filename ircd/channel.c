@@ -4774,6 +4774,28 @@ mode_parse_exmode(struct ParseState *state, int *flag_p)
  * in any per-flag apply arm (contrast +l/+k/+L, which write mode.mode
  * directly).  So this one call site covers every MODE/OPMODE/BURST ±R apply.
  *
+ * Known R flip sites NOT covered by this hook (traced Task 4 + review; each
+ * safe — do not re-derive):
+ *   - SetAutoChanModes (channel.c) — flips R only if 'R' is (nonsensically)
+ *     listed in FEAT_AUTOCHANMODES_LIST; channel is brand-new with empty
+ *     memory; healed by the next real ±R or the GET-fallback promotion.
+ *   - sub1_from_channel (channel.c) — the empty-channel reset zeroes ALL
+ *     modes incl. R; MUST stay unhooked: a -R store wipe here would destroy
+ *     a registered channel's persistent metadata merely because it went
+ *     momentarily empty.
+ *   - m_burst.c (net-ride wipeout) + m_join.c (TS-loss wipeout in the
+ *     JOIN-create path) — both `&= MODE_BURSTADDED|MODE_WASDELJOINS`; the
+ *     winning side's modes are re-applied through mode_parse, so a net +R
+ *     re-fires this hook (idempotently) at the flush; rare, and any
+ *     latent-stale window self-heals via the doc reconcile.
+ *   - crdt_shadow.c apply_mode_snap + the channel materialize (`|= s->mode`;
+ *     CRDT_MODE_MASK carries MODE_REGISTERED) — doc-DRIVEN R flips are
+ *     CORRECTLY unhooked: the metadata doc reconcile independently drives
+ *     store+memory from the doc, and minting doc ops from a doc-driven
+ *     apply would break single-writer.
+ *   - CLEARMODE (m_clearmode.c) cannot flip R at all — 'R' is absent from
+ *     do_clearmode's flag table (verified).
+ *
  * mode_parse runs on EVERY node applying the mode, so the hook fires
  * everywhere — which is exactly right on this branch: each node
  * materializes its OWN store from the relayed mode.  (On crdt-mesh the
@@ -4787,8 +4809,15 @@ mode_parse_exmode(struct ParseState *state, int *flag_p)
  * only the load half runs: the restart-hydration path.
  *
  * -R (!adding): wipe THIS node's store rows for the channel
- * (metadata_account_clear).  chptr->metadata is deliberately left intact —
- * the channel still exists, its metadata simply reverts to ephemeral.
+ * (metadata_account_clear) — THEN clear chptr->metadata with per-key unset
+ * notifies, on EVERY node (Task-4 review fix).  Memory must not be kept:
+ * the mode relays everywhere, so every node wipes its OWN store rows here,
+ * and retained memory would diverge LIST across nodes; worse, a later +R
+ * on such a node would re-persist the retained entries via the persist
+ * half above (resurrection of cleared metadata).  So the hook clears
+ * memory itself with an explicit unset notify per key.  (The spec's
+ * "-R: memory stays" line is amended per its own AC U account-unregister
+ * analogy, which clears live memory on the account side.)
  *
  * @param[in] chptr  Channel whose MODE_REGISTERED bit just changed.
  * @param[in] cptr   Connection the MODE arrived on (unused on this branch).
@@ -4813,8 +4842,30 @@ mode_channel_registered_hook(struct Channel *chptr, struct Client *cptr,
                                      md->visibility);
     metadata_channel_load(chptr);
   } else {
-    /* Store wipe; memory kept. */
+    /* Store wipe; memory cleared below. */
     metadata_account_clear(chptr->chname);
+  }
+
+  if (!adding) {
+    /* -R memory clear + unset notifies — EVERY node, entry and relay alike
+     * (see the function header for why memory must not be kept).
+     * Walk-safe by construction: each iteration re-reads the list
+     * head, copies its key + visibility, then deletes by key —
+     * metadata_channel_memory_del splices out the (matching) head, so the
+     * list strictly shrinks and no saved next pointer ever dangles.  The
+     * notify mirrors metadata_apply_converged's channel delete shape: NULL
+     * value (unset), the removed entry's own visibility for delivery scope
+     * (a PRIVATE channel entry notifies nobody — channels have no session
+     * owner — exactly like the reconcile path). */
+    struct MetadataEntry *md;
+    while ((md = chptr->metadata) != NULL) {
+      char mkey[METADATA_KEY_LEN];
+      int vis = md->visibility;
+
+      ircd_strncpy(mkey, md->key, sizeof(mkey));
+      metadata_channel_memory_del(chptr, mkey);
+      metadata_notify_subscribers(chptr->chname, mkey, NULL, vis);
+    }
   }
 }
 
