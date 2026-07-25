@@ -193,6 +193,27 @@ extern int metadata_set_client(struct Client *cptr, const char *key, const char 
 extern struct MetadataEntry *metadata_memory_put(struct Client *cptr, const char *key,
                                                   const char *value, int visibility);
 
+/** Insert or update a channel's in-memory metadata entry only — no store
+ * write, no doc mirror.  The channel counterpart to metadata_memory_put:
+ * use this to cache a value a read already fetched from the store (GET
+ * fallback promotion) so the read never re-enters metadata_set_channel,
+ * which is now the +R persist chokepoint (B1).
+ * @param[in] chptr Channel whose in-memory cache gets the entry.
+ * @param[in] key Key name.
+ * @param[in] value Value to cache (non-NULL).
+ * @param[in] visibility Visibility level, decoded from the store row.
+ * @return The new-or-updated entry, or NULL on bad args / allocation failure.
+ */
+extern struct MetadataEntry *metadata_channel_memory_put(struct Channel *chptr, const char *key,
+                                                          const char *value, int visibility);
+
+/** Remove a channel's in-memory metadata entry only — no store write, no
+ * doc mirror.  The channel counterpart to metadata_memory_del.
+ * @param[in] chptr Channel whose in-memory cache loses the entry.
+ * @param[in] key Key name to remove.
+ * @return 1 if an entry was removed, 0 if none matched / bad args.
+ */
+extern int metadata_channel_memory_del(struct Channel *chptr, const char *key);
 /** List all metadata for a client.
  * @param[in] cptr Client to list metadata for.
  * @return Head of metadata list (read-only).
@@ -223,7 +244,12 @@ extern void metadata_clear_client(struct Client *cptr);
  */
 extern struct MetadataEntry *metadata_get_channel(struct Channel *chptr, const char *key);
 
-/** Set metadata for a channel.
+/** Set metadata for a channel. THE persist chokepoint for +R (registered)
+ * channel metadata (B1): memory half always runs (metadata_channel_memory_put/
+ * _del); for a MODE_REGISTERED channel the change is also persisted via
+ * metadata_account_set_permanent(chptr->chname, ...), which doc-mirrors it
+ * at the single chokepoint (metadata_account_set_ts -> crdt_shadow_metadata_set).
+ * Not +R: memory only. See metadata.c for the full contract.
  * @param[in] chptr Channel to set metadata on.
  * @param[in] key Key name.
  * @param[in] value Value to set (NULL to delete).

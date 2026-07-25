@@ -553,12 +553,17 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
             send_keyvalue(sptr, target, key, val, vis_str);
             found = 1;
 
-            /* Load into channel's in-memory metadata (if channel exists).
-             * metadata_set_channel is memory-only (no store write, no doc
-             * mirror) — safe to call from a read path as-is; vis comes from
-             * the decoded out-param above, not a local "P:" parse. */
+            /* Load into channel's in-memory metadata (if channel exists) —
+             * cache-fill only.  metadata_set_channel is now the +R persist
+             * chokepoint (B1): calling it here would re-persist and
+             * doc-mint a value this read merely fetched from the TTL
+             * cache.  metadata_channel_memory_put is the memory-only
+             * counterpart — reads never write (Global Constraints) —
+             * mirroring metadata_memory_put's use in the user GET-fallback
+             * above; vis comes from the decoded out-param above, not a
+             * local "P:" parse. */
             if (target_channel) {
-              metadata_set_channel(target_channel, key, val, vis);
+              metadata_channel_memory_put(target_channel, key, val, vis);
             }
           }
         }
@@ -1401,9 +1406,16 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
      * the same account\0key row via metadata_account_set() — a
      * TTL-stamped write that silently downgraded permanent user
      * metadata to a 4h cache entry, which the purge sweep then
-     * deleted.  Channels keep the cache write below: it is their only
-     * persistence path. */
-    if (target_channel) {
+     * deleted.  +R channel targets are the same story since B1:
+     * metadata_set_channel() above now persists PERMANENTLY too (its
+     * own metadata_account_set_permanent call, gated on
+     * MODE_REGISTERED), so caching here with a TTL would immediately
+     * downgrade the row it just wrote — the exact bug this comment
+     * already describes, reintroduced for channels if this stayed
+     * unconditional.  Only a non-+R channel still needs the cache
+     * write below: metadata_set_channel() is memory-only for it, so
+     * this remains its only persistence path (unchanged). */
+    if (target_channel && !(target_channel->mode.mode & MODE_REGISTERED)) {
       /* Channel - cache under channel name */
       cache_key = target;
     }
