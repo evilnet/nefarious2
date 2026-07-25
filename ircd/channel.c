@@ -4762,6 +4762,62 @@ mode_parse_exmode(struct ParseState *state, int *flag_p)
   assert(0 == (state->exadd & state->exdel));
 }
 
+/** B3 (metadata-era2-completion §B3): the channel-metadata side of a
+ * MODE_REGISTERED (±R) transition.  Fired from mode_parse's apply flush
+ * (below), AFTER the bit flips and ONLY when it actually changed — the
+ * caller compares the pre-flush bit against the new one, so re-applying +R
+ * to an already-+R channel (or -R to a non-registered one) does not fire.
+ *
+ * NB on placement: MODE_REGISTERED is a *simple* mode.  mode_parse_mode()
+ * accumulates it into state->add/state->del; it lands in chptr->mode.mode at
+ * the single bulk flush in mode_parse (state.chptr->mode.mode = t_mode), NOT
+ * in any per-flag apply arm (contrast +l/+k/+L, which write mode.mode
+ * directly).  So this one call site covers every MODE/OPMODE/BURST ±R apply.
+ *
+ * mode_parse runs on EVERY node applying the mode, so the hook fires
+ * everywhere — which is exactly right on this branch: each node
+ * materializes its OWN store from the relayed mode.  (On crdt-mesh the
+ * same hook additionally gates a doc-op mint to the entry node via a
+ * suspend bracket; no doc here.)
+ *
+ * +R (adding): persist-memory-first — walk chptr->metadata and persist each
+ * entry permanently (metadata_account_set_permanent, each entry's own
+ * visibility) — then hydrate any stored rows not already in memory
+ * (metadata_channel_load).  At burst/restart chptr->metadata is empty, so
+ * only the load half runs: the restart-hydration path.
+ *
+ * -R (!adding): wipe THIS node's store rows for the channel
+ * (metadata_account_clear).  chptr->metadata is deliberately left intact —
+ * the channel still exists, its metadata simply reverts to ephemeral.
+ *
+ * @param[in] chptr  Channel whose MODE_REGISTERED bit just changed.
+ * @param[in] cptr   Connection the MODE arrived on (unused on this branch).
+ * @param[in] adding Non-zero for +R, zero for -R.
+ */
+static void
+mode_channel_registered_hook(struct Channel *chptr, struct Client *cptr,
+                             int adding)
+{
+  (void)cptr;
+
+  if (!chptr || !metadata_lmdb_is_available())
+    return;
+
+  if (adding) {
+    struct MetadataEntry *md;
+    /* Persist the channel's current ephemeral memory permanently
+     * (memory -> store), then hydrate any store-only rows back into
+     * memory. */
+    for (md = chptr->metadata; md; md = md->next)
+      metadata_account_set_permanent(chptr->chname, md->key, md->value,
+                                     md->visibility);
+    metadata_channel_load(chptr);
+  } else {
+    /* Store wipe; memory kept. */
+    metadata_account_clear(chptr->chname);
+  }
+}
+
 /**
  * This routine is intended to parse MODE or OPMODE commands and effect the
  * changes (or just build the bounce buffer).
@@ -5142,12 +5198,23 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
   }
 
   if (state.flags & MODE_PARSE_SET) { /* set the channel modes */
+    /* B3: capture the MODE_REGISTERED bit BEFORE the flush so the ±R
+     * metadata hook fires only on an ACTUAL change (re-applying +R to an
+     * already-+R channel must not re-fire). */
+    unsigned int reg_before = state.chptr->mode.mode & MODE_REGISTERED;
+
     if ((state.chptr->mode.mode & MODE_INVITEONLY) &&
 	!(t_mode & MODE_INVITEONLY))
       mode_invite_clear(state.chptr);
 
     state.chptr->mode.mode = t_mode;
     state.chptr->mode.exmode = t_exmode;
+
+    /* B3: fire the channel-metadata ±R hook AFTER the flip (so the persist
+     * leg observes the new bit).  See mode_channel_registered_hook. */
+    if (reg_before != (t_mode & MODE_REGISTERED))
+      mode_channel_registered_hook(state.chptr, state.cptr,
+                                   (t_mode & MODE_REGISTERED) ? 1 : 0);
   }
 
   if (state.flags & MODE_PARSE_WIPEOUT) {

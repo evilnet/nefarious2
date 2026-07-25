@@ -71,6 +71,11 @@
 static struct MetadataEntry presence_entry;
 static char presence_value[AWAYLEN + 1];
 
+/** Forward decl: free an entire MetadataEntry list.  Defined below, OUTSIDE
+ * the USE_ROCKSDB block; declared here so metadata_channel_load (B3), which
+ * lives inside that block, can free the transient list it fetches. */
+static void free_entry_list(struct MetadataEntry *head);
+
 #ifdef USE_ROCKSDB
 #include "db_cursor.h"
 #include "db_env.h"
@@ -729,7 +734,11 @@ struct MetadataEntry *metadata_account_list(const char *account)
     return NULL;
 
   prefixlen = strlen(account);
-  if (prefixlen >= CHANNELLEN)
+  /* '>' not '>=': a name of EXACTLY CHANNELLEN bytes is valid (buffer is
+   * CHANNELLEN + 2, room for the name + KEY_SEP).  The old '>=' silently
+   * rejected a full-length (200-char) +R channel — this backs
+   * metadata_channel_load, so it must accept a full channel name. */
+  if (prefixlen > CHANNELLEN)
     return NULL;
   memcpy(prefix, account, prefixlen);
   prefix[prefixlen++] = KEY_SEP;
@@ -819,7 +828,10 @@ int metadata_account_clear(const char *account)
 {
   struct db_iter *it;
   struct db_writebatch *wb;
-  char prefix[ACCOUNTLEN + 2];
+  /* CHANNELLEN, not ACCOUNTLEN: this now also wipes a channel's "#chan\0*"
+   * rows (B3 -R hook via metadata_account_clear(chptr->chname)), so the
+   * prefix buffer must hold a full channel name (<=CHANNELLEN=200) + KEY_SEP. */
+  char prefix[CHANNELLEN + 2];
   int prefixlen;
   int rc;
 
@@ -827,7 +839,9 @@ int metadata_account_clear(const char *account)
     return -1;
 
   prefixlen = strlen(account);
-  if (prefixlen >= ACCOUNTLEN)
+  /* '>' not '>=' (off-by-one), widened to CHANNELLEN: a full-length +R
+   * channel name must clear its store rows, not silently no-op. */
+  if (prefixlen > CHANNELLEN)
     return -1;
   memcpy(prefix, account, prefixlen);
   prefix[prefixlen++] = KEY_SEP;
@@ -874,7 +888,9 @@ int metadata_account_clear(const char *account)
 int metadata_account_count_keys(const char *account)
 {
   struct db_iter *it;
-  char prefix[ACCOUNTLEN + 2];
+  /* CHANNELLEN, not ACCOUNTLEN: the account slot now also carries channel
+   * names (B1/B3 +R channel metadata), so size + gate on the wider cap. */
+  char prefix[CHANNELLEN + 2];
   int prefixlen;
   int max_keys;
   int count = 0;
@@ -888,7 +904,9 @@ int metadata_account_count_keys(const char *account)
     max_keys = 0;
 
   prefixlen = strlen(account);
-  if (prefixlen >= ACCOUNTLEN)
+  /* '>' not '>=' (off-by-one), widened to CHANNELLEN — see the sibling
+   * length checks in metadata_account_list / metadata_account_clear. */
+  if (prefixlen > CHANNELLEN)
     return 0;
   memcpy(prefix, account, prefixlen);
   prefix[prefixlen++] = KEY_SEP;
@@ -928,14 +946,39 @@ int metadata_account_count_keys(const char *account)
   return count;
 }
 
-/** Load channel metadata from LMDB.
- * @param[in] channel Channel name.
- * @return Head of metadata list, or NULL if none/error.
+/** Hydrate a channel's in-memory metadata (chptr->metadata) from the
+ * persistent store — the LOAD half of the B3 ±R transition hook
+ * (metadata-era2-completion §B3, revived from its long-unwired stub).
+ *
+ * For every stored "#chan\0key" row NOT already present in chptr->metadata,
+ * insert it via metadata_channel_memory_put (memory-only — NO notify: this
+ * is hydration, not a change event, the same adjudication as the read-only
+ * GET-fallback promotion).  A key already live in memory is left untouched:
+ * the +R hook's persist half has just written memory -> store, so an
+ * in-memory value is already consistent and may be fresher than the store.
+ *
+ * At burst/restart chptr->metadata is empty, so this materializes the whole
+ * persisted set — the restart-hydration path.  At a live +R it only fills
+ * rows the ephemeral memory did not already carry.
+ *
+ * Frees the transient list metadata_account_list() returns, per that API's
+ * caller-frees contract.
+ * @param[in] chptr Channel to hydrate.
  */
-/* deliberately kept unwired: revived by metadata-era2-completion.md §B3 (P2) */
-struct MetadataEntry *metadata_channel_load(const char *channel)
+void metadata_channel_load(struct Channel *chptr)
 {
-  return metadata_account_list(channel);
+  struct MetadataEntry *list, *entry;
+
+  if (!chptr)
+    return;
+
+  list = metadata_account_list(chptr->chname);
+  for (entry = list; entry; entry = entry->next) {
+    if (!metadata_get_channel(chptr, entry->key))
+      metadata_channel_memory_put(chptr, entry->key, entry->value,
+                                  entry->visibility);
+  }
+  free_entry_list(list);
 }
 
 /** Purge expired metadata entries from LMDB.
@@ -1033,7 +1076,7 @@ int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_count_keys(const char *account) { return 0; }
 int metadata_account_purge_expired(void) { return -1; }
 int metadata_account_foreach_key(void (*cb)(const void *key, size_t klen, void *arg), void *arg) { (void)cb; (void)arg; return -1; }
-struct MetadataEntry *metadata_channel_load(const char *channel) { return NULL; }
+void metadata_channel_load(struct Channel *chptr) { (void)chptr; }
 int metadata_readmarker_get(const char *account, const char *target, char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_readmarker_set(const char *account, const char *target, const char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_sync(void) { return -1; }

@@ -258,6 +258,17 @@ extern struct MetadataEntry *metadata_get_channel(struct Channel *chptr, const c
  */
 extern int metadata_set_channel(struct Channel *chptr, const char *key, const char *value, int visibility);
 
+/** Hydrate a channel's in-memory metadata (chptr->metadata) from the
+ * persistent store — the LOAD half of the B3 ±R transition hook.  Inserts
+ * every stored "#chan\0key" row not already present in memory via
+ * metadata_channel_memory_put (memory-only, NO notify — hydration, not a
+ * change event); rows already in memory are left untouched.  Frees the
+ * transient list it fetches.  At burst/restart memory is empty, so this
+ * materializes the full persisted set (the restart-hydration path).
+ * @param[in] chptr Channel to hydrate.
+ */
+extern void metadata_channel_load(struct Channel *chptr);
+
 /** List all metadata for a channel.
  * @param[in] chptr Channel to list metadata for.
  * @return Head of metadata list (read-only).
