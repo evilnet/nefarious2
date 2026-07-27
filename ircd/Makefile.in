@@ -332,7 +332,7 @@ all:
 # that seam, so it is a build error.  See
 # .claude/para/projects/libkc-ircd-merge.md.
 check-kc-boundary:
-	@bad=`grep -l -E '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"](ircd|client|s_debug|struct|msgq|dbuf)' ${srcdir}/kc/*.c ${srcdir}/kc/*.h 2>/dev/null`; \
+	@bad=`grep -l -E '^[[:space:]]*#[[:space:]]*include[[:space:]]*("|<ircd)' ${srcdir}/kc/*.c ${srcdir}/kc/*.h 2>/dev/null`; \
 	if [ -n "$$bad" ]; then \
 		echo "ERROR: ircd/kc must not include ircd headers:"; \
 		for f in $$bad; do echo "  $$f"; done; \
