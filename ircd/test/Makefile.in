@@ -30,12 +30,14 @@ CMOCKA_TESTPROGS = \
 	recv_classify_cmocka \
 	kc_url_cmocka \
 	kc_base64_cmocka \
-	kc_cache_cmocka
+	kc_cache_cmocka \
+	kc_jwt_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
 CURL_LIBS = -lcurl
 JANSSON_LIBS = -ljansson
+SSL_LIBS = -lssl -lcrypto
 
 DEP_SRC = \
 	ircd_chattr_t.c \
@@ -58,6 +60,7 @@ DEP_SRC = \
 	kc_url_cmocka.c \
 	kc_base64_cmocka.c \
 	kc_cache_cmocka.c \
+	kc_jwt_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -180,6 +183,14 @@ kc_base64_cmocka: $(KC_BASE64_CMOCKA_OBJS)
 KC_CACHE_CMOCKA_OBJS = kc_cache_cmocka.o ../kc/kc_cache.o
 kc_cache_cmocka: $(KC_CACHE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_CACHE_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS)
+
+# kc_jwt tests - claim policy (F-K3 exp/nbf).  Uses the #include .c
+# approach to reach static jwt_parse_claims, so ../kc/kc_jwt.o must NOT
+# be linked (duplicate symbols).  kc_http_sync.o satisfies the JWKS
+# fetch reference, which no test actually calls.
+KC_JWT_CMOCKA_OBJS = kc_jwt_cmocka.o ../kc/kc_base64.o ../kc/kc_http_sync.o
+kc_jwt_cmocka: $(KC_JWT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(KC_JWT_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(CURL_LIBS) $(SSL_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
