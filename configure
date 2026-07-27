@@ -642,6 +642,8 @@ ac_includes_default="\
 ac_header_c_list=
 ac_subst_vars='LTLIBOBJS
 LIBOBJS
+KC_CMOCKA_TESTPROGS
+KC_SRC
 PKG_CONFIG
 DPATH
 IRCDGRP
@@ -754,18 +756,14 @@ enable_mmdb
 with_mmdb
 with_mmdb_includes
 with_mmdb_libs
-enable_mdbx
-with_mdbx
-with_mdbx_includes
-with_mdbx_libs
+with_rocksdb
+with_rocksdb_includes
+with_rocksdb_libs
 enable_zstd
 with_zstd
 with_zstd_includes
 with_zstd_libs
 enable_keycloak
-with_keycloak
-with_keycloak_includes
-with_keycloak_libs
 with_libgit2
 with_libgit2_includes
 with_libgit2_libs
@@ -1415,7 +1413,6 @@ Optional Features:
   --disable-ssl           Disable Secure Sockets Layer support
   --disable-geoip         Disable GeoIP support
   --disable-mmdb         Disable MaxMindDB support
-  --disable-mdbx          Disable libmdbx storage support
   --disable-zstd          Disable zstd compression support
   --disable-keycloak      Disable Keycloak (libkc) support
 
@@ -1454,23 +1451,18 @@ Optional Packages:
                           /usr/local/include)
   --with-mmdb-libs=dir    Specify location of MaxMindDB libs (default:
                           /usr/local/lib)
-  --with-mdbx=dir         Specify the installation prefix of libmdbx (default:
+  --with-rocksdb=dir      Specify the installation prefix of RocksDB (default:
                           /usr)
-  --with-mdbx-includes=dir
-                          Specify location of libmdbx header files (default:
+  --with-rocksdb-includes=dir
+                          Specify location of RocksDB header files (default:
                           /usr/include)
-  --with-mdbx-libs=dir    Specify location of libmdbx libs (default: /usr/lib)
+  --with-rocksdb-libs=dir Specify location of RocksDB libs (default: /usr/lib)
   --with-zstd=dir         Specify the installation prefix of zstd (default:
                           /usr)
   --with-zstd-includes=dir
                           Specify location of zstd header files (default:
                           /usr/include)
   --with-zstd-libs=dir    Specify location of zstd libs (default: /usr/lib)
-  --with-keycloak=dir     Specify the installation prefix of libkc
-  --with-keycloak-includes=dir
-                          Specify location of libkc header files
-  --with-keycloak-libs=dir
-                          Specify location of libkc library
   --with-libgit2          Enable libgit2 for gitsync feature
   --with-libgit2-includes=dir
                           Specify location of libgit2 header files
@@ -9043,83 +9035,64 @@ printf "%s\n" "$as_me: WARNING: Unable to find MaxMindDB, MaxMindDB features wil
   fi
 fi
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable libmdbx storage support" >&5
-printf %s "checking whether to enable libmdbx storage support... " >&6; }
-# Check whether --enable-mdbx was given.
-if test ${enable_mdbx+y}
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for RocksDB storage support" >&5
+printf %s "checking for RocksDB storage support... " >&6; }
+
+# Check whether --with-rocksdb was given.
+if test ${with_rocksdb+y}
 then :
-  enableval=$enable_mdbx; unet_cv_enable_mdbx=$enable_mdbx
+  withval=$with_rocksdb; base_rocksdb_prefix=$withval
 else case e in #(
-  e) if test ${unet_cv_enable_mdbx+y}
-then :
-  printf %s "(cached) " >&6
-else case e in #(
-  e) unet_cv_enable_mdbx=yes ;;
-esac
-fi
- ;;
+  e) base_rocksdb_prefix=/usr ;;
 esac
 fi
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_mdbx" >&5
-printf "%s\n" "$unet_cv_enable_mdbx" >&6; }
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $base_rocksdb_prefix" >&5
+printf "%s\n" "$base_rocksdb_prefix" >&6; }
 
-if test x"$unet_cv_enable_mdbx" = xyes; then
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for RocksDB includes" >&5
+printf %s "checking for RocksDB includes... " >&6; }
 
-# Check whether --with-mdbx was given.
-if test ${with_mdbx+y}
+# Check whether --with-rocksdb-includes was given.
+if test ${with_rocksdb_includes+y}
 then :
-  withval=$with_mdbx; base_mdbx_prefix=$withval
+  withval=$with_rocksdb_includes; unet_cv_with_rocksdb_inc_prefix=$withval
 else case e in #(
-  e) base_mdbx_prefix=/usr ;;
+  e) unet_cv_with_rocksdb_inc_prefix=$base_rocksdb_prefix/include ;;
 esac
 fi
 
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_rocksdb_inc_prefix" >&5
+printf "%s\n" "$unet_cv_with_rocksdb_inc_prefix" >&6; }
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for libmdbx includes" >&5
-printf %s "checking for libmdbx includes... " >&6; }
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for RocksDB libraries" >&5
+printf %s "checking for RocksDB libraries... " >&6; }
 
-# Check whether --with-mdbx-includes was given.
-if test ${with_mdbx_includes+y}
+# Check whether --with-rocksdb-libs was given.
+if test ${with_rocksdb_libs+y}
 then :
-  withval=$with_mdbx_includes; unet_cv_with_mdbx_inc_prefix=$withval
+  withval=$with_rocksdb_libs; unet_cv_with_rocksdb_prefix=$withval
 else case e in #(
-  e) unet_cv_with_mdbx_inc_prefix=$base_mdbx_prefix/include ;;
+  e) unet_cv_with_rocksdb_prefix=$base_rocksdb_prefix/lib ;;
 esac
 fi
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mdbx_inc_prefix" >&5
-printf "%s\n" "$unet_cv_with_mdbx_inc_prefix" >&6; }
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_rocksdb_prefix" >&5
+printf "%s\n" "$unet_cv_with_rocksdb_prefix" >&6; }
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for libmdbx libraries" >&5
-printf %s "checking for libmdbx libraries... " >&6; }
+save_CFLAGS=$CFLAGS
+save_LIBS=$LIBS
+CFLAGS="-I$unet_cv_with_rocksdb_inc_prefix"
+LIBS="-L$unet_cv_with_rocksdb_prefix -lrocksdb -lstdc++ -lpthread"
 
-# Check whether --with-mdbx-libs was given.
-if test ${with_mdbx_libs+y}
-then :
-  withval=$with_mdbx_libs; unet_cv_with_mdbx_prefix=$withval
-else case e in #(
-  e) unet_cv_with_mdbx_prefix=$base_mdbx_prefix/lib ;;
-esac
-fi
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_mdbx_prefix" >&5
-printf "%s\n" "$unet_cv_with_mdbx_prefix" >&6; }
-
-  save_CFLAGS=$CFLAGS
-  save_LIBS=$LIBS
-
-  CFLAGS="-I$unet_cv_with_mdbx_inc_prefix"
-  LIBS="-L$unet_cv_with_mdbx_prefix -lmdbx"
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for mdbx_env_create in -lmdbx" >&5
-printf %s "checking for mdbx_env_create in -lmdbx... " >&6; }
-if test ${ac_cv_lib_mdbx_mdbx_env_create+y}
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for rocksdb_open in -lrocksdb" >&5
+printf %s "checking for rocksdb_open in -lrocksdb... " >&6; }
+if test ${ac_cv_lib_rocksdb_rocksdb_open+y}
 then :
   printf %s "(cached) " >&6
 else case e in #(
   e) ac_check_lib_save_LIBS=$LIBS
-LIBS="-lmdbx  $LIBS"
+LIBS="-lrocksdb  $LIBS"
 cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 /* end confdefs.h.  */
 
@@ -9132,20 +9105,20 @@ cat confdefs.h - <<_ACEOF >conftest.$ac_ext
 #ifdef __cplusplus
 extern "C"
 #endif
-char mdbx_env_create (void);
+char rocksdb_open (void);
 int
 main (void)
 {
-return mdbx_env_create ();
+return rocksdb_open ();
   ;
   return 0;
 }
 _ACEOF
 if ac_fn_c_try_link "$LINENO"
 then :
-  ac_cv_lib_mdbx_mdbx_env_create=yes
+  ac_cv_lib_rocksdb_rocksdb_open=yes
 else case e in #(
-  e) ac_cv_lib_mdbx_mdbx_env_create=no ;;
+  e) ac_cv_lib_rocksdb_rocksdb_open=no ;;
 esac
 fi
 rm -f core conftest.err conftest.$ac_objext conftest.beam \
@@ -9153,12 +9126,12 @@ rm -f core conftest.err conftest.$ac_objext conftest.beam \
 LIBS=$ac_check_lib_save_LIBS ;;
 esac
 fi
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_mdbx_mdbx_env_create" >&5
-printf "%s\n" "$ac_cv_lib_mdbx_mdbx_env_create" >&6; }
-if test "x$ac_cv_lib_mdbx_mdbx_env_create" = xyes
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_rocksdb_rocksdb_open" >&5
+printf "%s\n" "$ac_cv_lib_rocksdb_rocksdb_open" >&6; }
+if test "x$ac_cv_lib_rocksdb_rocksdb_open" = xyes
 then :
 
-           for ac_header in $unet_cv_with_mdbx_inc_prefix/mdbx.h
+         for ac_header in $unet_cv_with_rocksdb_inc_prefix/rocksdb/c.h
 do :
   as_ac_Header=`printf "%s\n" "ac_cv_header_$ac_header" | sed "$as_sed_sh"`
 ac_fn_c_check_header_compile "$LINENO" "$ac_header" "$as_ac_Header" "$ac_includes_default"
@@ -9168,8 +9141,8 @@ then :
 #define `printf "%s\n" "HAVE_$ac_header" | sed "$as_sed_cpp"` 1
 _ACEOF
 
-      enable_mdbx="yes";
-      MDBX_LDFLAGS="-lmdbx"
+    enable_rocksdb_found="yes";
+    ROCKSDB_LDFLAGS="-lrocksdb -lstdc++ -lpthread"
 
 fi
 
@@ -9178,19 +9151,17 @@ done
 fi
 
 
-  LIBS=$save_LIBS
-  CFLAGS=$save_CFLAGS
+LIBS=$save_LIBS
+CFLAGS=$save_CFLAGS
 
-  if test "x$enable_mdbx" = xyes; then
+if test "x$enable_rocksdb_found" = xyes; then
+  LIBS="$LIBS -L$unet_cv_with_rocksdb_prefix $ROCKSDB_LDFLAGS"
+  CFLAGS="$CFLAGS -I$unet_cv_with_rocksdb_inc_prefix"
 
-printf "%s\n" "#define USE_MDBX /**/" >>confdefs.h
+printf "%s\n" "#define USE_ROCKSDB /**/" >>confdefs.h
 
-    LIBS="$LIBS -L$unet_cv_with_mdbx_prefix $MDBX_LDFLAGS"
-    CFLAGS="$CFLAGS -I$unet_cv_with_mdbx_inc_prefix"
-  else
-     { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Unable to find libmdbx, chathistory/metadata/webpush features will not work without libmdbx. Disabling libmdbx support." >&5
-printf "%s\n" "$as_me: WARNING: Unable to find libmdbx, chathistory/metadata/webpush features will not work without libmdbx. Disabling libmdbx support." >&2;}
-  fi
+else
+  as_fn_error $? "librocksdb not found.  Install librocksdb-dev or pass --with-rocksdb=PREFIX." "$LINENO" 5
 fi
 
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable zstd compression support" >&5
@@ -9364,65 +9335,131 @@ fi
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_keycloak" >&5
 printf "%s\n" "$unet_cv_enable_keycloak" >&6; }
 
+KC_SRC=""
+KC_CMOCKA_TESTPROGS=""
+
 if test x"$unet_cv_enable_keycloak" = xyes; then
-
-# Check whether --with-keycloak was given.
-if test ${with_keycloak+y}
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curl_multi_init in -lcurl" >&5
+printf %s "checking for curl_multi_init in -lcurl... " >&6; }
+if test ${ac_cv_lib_curl_curl_multi_init+y}
 then :
-  withval=$with_keycloak; base_keycloak_prefix=$withval
+  printf %s "(cached) " >&6
 else case e in #(
-  e) base_keycloak_prefix= ;;
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-lcurl  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char curl_multi_init (void);
+int
+main (void)
+{
+return curl_multi_init ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_curl_curl_multi_init=yes
+else case e in #(
+  e) ac_cv_lib_curl_curl_multi_init=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curl_curl_multi_init" >&5
+printf "%s\n" "$ac_cv_lib_curl_curl_multi_init" >&6; }
+if test "x$ac_cv_lib_curl_curl_multi_init" = xyes
+then :
+  printf "%s\n" "#define HAVE_LIBCURL 1" >>confdefs.h
+
+  LIBS="-lcurl $LIBS"
+
+else case e in #(
+  e) as_fn_error $? "libcurl is required for --enable-keycloak" "$LINENO" 5 ;;
+esac
+fi
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for json_object in -ljansson" >&5
+printf %s "checking for json_object in -ljansson... " >&6; }
+if test ${ac_cv_lib_jansson_json_object+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-ljansson  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char json_object (void);
+int
+main (void)
+{
+return json_object ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_jansson_json_object=yes
+else case e in #(
+  e) ac_cv_lib_jansson_json_object=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_jansson_json_object" >&5
+printf "%s\n" "$ac_cv_lib_jansson_json_object" >&6; }
+if test "x$ac_cv_lib_jansson_json_object" = xyes
+then :
+  printf "%s\n" "#define HAVE_LIBJANSSON 1" >>confdefs.h
+
+  LIBS="-ljansson $LIBS"
+
+else case e in #(
+  e) as_fn_error $? "libjansson is required for --enable-keycloak" "$LINENO" 5 ;;
 esac
 fi
 
 
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for Keycloak includes" >&5
-printf %s "checking for Keycloak includes... " >&6; }
-
-# Check whether --with-keycloak-includes was given.
-if test ${with_keycloak_includes+y}
-then :
-  withval=$with_keycloak_includes; unet_cv_with_keycloak_inc_prefix=$withval
-else case e in #(
-  e) if test -n "$base_keycloak_prefix"; then
-    unet_cv_with_keycloak_inc_prefix=$base_keycloak_prefix/include
-  else
-    unet_cv_with_keycloak_inc_prefix=/usr/local/include
-  fi ;;
-esac
-fi
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_keycloak_inc_prefix" >&5
-printf "%s\n" "$unet_cv_with_keycloak_inc_prefix" >&6; }
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for Keycloak libraries" >&5
-printf %s "checking for Keycloak libraries... " >&6; }
-
-# Check whether --with-keycloak-libs was given.
-if test ${with_keycloak_libs+y}
-then :
-  withval=$with_keycloak_libs; unet_cv_with_keycloak_prefix=$withval
-else case e in #(
-  e) if test -n "$base_keycloak_prefix"; then
-    unet_cv_with_keycloak_prefix=$base_keycloak_prefix/lib
-  else
-    unet_cv_with_keycloak_prefix=/usr/local/lib
-  fi ;;
-esac
-fi
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_with_keycloak_prefix" >&5
-printf "%s\n" "$unet_cv_with_keycloak_prefix" >&6; }
+  KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c"
+  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka"
 
 
 printf "%s\n" "#define USE_LIBKC /**/" >>confdefs.h
 
-  LIBS="$LIBS -L$unet_cv_with_keycloak_prefix -lkc -lcurl -ljansson"
-  CFLAGS="$CFLAGS -I$unet_cv_with_keycloak_inc_prefix"
-
-  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: Keycloak (libkc) support enabled" >&5
-printf "%s\n" "$as_me: Keycloak (libkc) support enabled" >&6;}
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: Keycloak support enabled (in-tree ircd/kc)" >&5
+printf "%s\n" "$as_me: Keycloak support enabled (in-tree ircd/kc)" >&6;}
 fi
+
+
+
 
 enable_libgit2="no"
 

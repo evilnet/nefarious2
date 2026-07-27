@@ -87,6 +87,13 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	memdebug.c \
 	umkpasswd.c
 
+# @KC_SRC@ below is the nine vendored ircd/kc/*.c sources.  configure
+# substitutes them only under --enable-keycloak, and nothing otherwise:
+# unlike every other optional consumer (sasl_auth.c, ircd_kc_adapter.c,
+# ...) the kc/ sources are verbatim from evilnet/libkc and carry no
+# #ifdef USE_LIBKC, so they must be gated at the source-list level or a
+# default (keycloak-disabled) build fails to link against libcurl and
+# libjansson.  See configure.in's Keycloak block.
 IRCD_SRC = \
 	bouncer_session.c \
 	IPcheck.c \
@@ -127,15 +134,7 @@ IRCD_SRC = \
 	ircd_snprintf.c \
 	ircd_string.c \
 	jupe.c \
-	kc/kc.c \
-	kc/kc_base64.c \
-	kc/kc_cache.c \
-	kc/kc_http.c \
-	kc/kc_http_sync.c \
-	kc/kc_jwt.c \
-	kc/kc_keycloak.c \
-	kc/kc_url.c \
-	kc/kc_webhook.c \
+	@KC_SRC@ \
 	lex.yy.c \
 	list.c \
 	listener.c \
@@ -326,17 +325,71 @@ all:
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
 
-# The kc/ subtree is the vendored libkc.  It talks to the ircd only through
-# the kc_event_ops / kc_log_ops adapters (ircd_kc_adapter.c) — exactly as it
-# did when it was a separate .so.  Including an ircd header here collapses
-# that seam, so it is a build error.  See
-# .claude/para/projects/libkc-ircd-merge.md.
+# The kc/ subtree is the vendored libkc (sources ircd/kc/*.c, headers
+# include/kc/*.h).  It talks to the ircd only through the kc_event_ops /
+# kc_log_ops adapters (ircd_kc_adapter.c) — exactly as it did when it was a
+# separate .so.  Including an ircd header here collapses that seam, so it is
+# a build error.  See .claude/para/projects/libkc-ircd-merge.md in the
+# testnet superproject.
+#
+# The rule is an ALLOW-LIST, not a deny-list: an ircd header is
+# structurally indistinguishable from a system header (<client.h> vs
+# <stdlib.h>), so anything not explicitly permitted is a violation.  kc code
+# may include, in angle form only:
+#
+#   <kc/...>                       its own headers
+#   <curl/...>  <openssl/...>      its two library dependencies
+#   <jansson.h>                    ditto
+#   <sys/...> <arpa/...> <netinet/...> <net/...>
+#                                  POSIX namespaced headers
+#   the C standard + top-level POSIX headers in KC_ALLOWED_STD_HDRS below
+#
+# Everything else — every quoted include, and every angle include naming an
+# ircd header (<client.h>, <s_conf.h>, <send.h>, ...) — fails the build.  A
+# new C-library header genuinely needed by kc code is added to
+# KC_ALLOWED_STD_HDRS; an ircd header is never added.  include/ has no
+# subdirectory but kc/, and no header there collides with a name below, so
+# the list needs no upkeep as include/ grows.
+KC_ALLOWED_STD_HDRS = \
+	assert.h complex.h ctype.h errno.h fenv.h float.h inttypes.h \
+	iso646.h limits.h locale.h math.h setjmp.h signal.h stdalign.h \
+	stdarg.h stdatomic.h stdbool.h stddef.h stdint.h stdio.h stdlib.h \
+	stdnoreturn.h string.h tgmath.h threads.h time.h uchar.h wchar.h \
+	wctype.h \
+	dirent.h dlfcn.h fcntl.h grp.h netdb.h poll.h pthread.h pwd.h \
+	regex.h sched.h semaphore.h strings.h syslog.h termios.h unistd.h
+
+KC_BOUNDARY_FILES = ${srcdir}/kc/*.c ${srcdir}/kc/*.h ${top_srcdir}/include/kc/*.h
+
 check-kc-boundary:
-	@bad=`grep -l -E '^[[:space:]]*#[[:space:]]*include[[:space:]]*("|<ircd)' ${srcdir}/kc/*.c ${srcdir}/kc/*.h 2>/dev/null`; \
+	@bad=''; \
+	for f in ${KC_BOUNDARY_FILES}; do \
+		[ -f "$$f" ] || continue; \
+		incs=`sed -n \
+		    -e 's|^[[:space:]]*#[[:space:]]*include[[:space:]]*<\([^>]*\)>.*|A:\1|p' \
+		    -e 's|^[[:space:]]*#[[:space:]]*include[[:space:]]*"\([^"]*\)".*|Q:\1|p' \
+		    "$$f"`; \
+		for i in $$incs; do \
+			h=$${i#??}; \
+			ok=no; \
+			case "$$i" in \
+			A:kc/*|A:curl/*|A:openssl/*|A:sys/*|A:arpa/*|A:netinet/*|A:net/*) \
+				ok=yes ;; \
+			A:jansson.h) \
+				ok=yes ;; \
+			A:*) \
+				for s in ${KC_ALLOWED_STD_HDRS}; do \
+					if [ "$$h" = "$$s" ]; then ok=yes; break; fi; \
+				done ;; \
+			esac; \
+			if [ "$$ok" = no ]; then bad="$$bad $$f:$$h"; fi; \
+		done; \
+	done; \
 	if [ -n "$$bad" ]; then \
-		echo "ERROR: ircd/kc must not include ircd headers:"; \
-		for f in $$bad; do echo "  $$f"; done; \
+		echo "ERROR: ircd/kc may not include these headers:"; \
+		for b in $$bad; do echo "  $$b"; done; \
 		echo "kc/ talks to the ircd only via kc_event_ops/kc_log_ops."; \
+		echo "The permitted set is documented above check-kc-boundary in ircd/Makefile.in."; \
 		exit 1; \
 	fi
 

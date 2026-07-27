@@ -35,10 +35,27 @@ Audit rule: a bare `LEN` constant where the buffer is `LEN+1`, or a non-NUL-term
 
 ## The ircd/kc boundary
 
-`ircd/kc/*.c` is vendored libkc (formerly `evilnet/libkc`, merged 2026-07).
-It reaches the ircd **only** through `kc_event_ops` / `kc_log_ops`;
+`ircd/kc/*.c` + `include/kc/*.h` are vendored libkc (formerly `evilnet/libkc`,
+merged 2026-07) and stay **verbatim** — no `#ifdef USE_LIBKC` inside them.
+They reach the ircd **only** through `kc_event_ops` / `kc_log_ops`;
 `ircd_kc_adapter.c` is the sole translation layer. Including an ircd header
-from `kc/` is a build error, enforced by `make check-kc-boundary`.
+from `kc/` is a build error, enforced by `make check-kc-boundary` (first
+prerequisite of `ircd/Makefile`'s `build:`, so a plain `make` runs it).
+
+The guard is an **allow-list**, not a deny-list — `<client.h>` and `<stdlib.h>`
+are structurally identical, so only an explicit permit-set can work. kc code
+may include, angle-form only: `<kc/…>`, `<curl/…>`, `<openssl/…>`,
+`<jansson.h>`, `<sys/…> <arpa/…> <netinet/…> <net/…>`, and the C-standard /
+top-level POSIX headers in `KC_ALLOWED_STD_HDRS` (`ircd/Makefile.in`).
+Everything else fails — every quoted include, and every angle include naming
+an ircd header. It covers **both** directories (sources and headers). A new
+C-library header goes into `KC_ALLOWED_STD_HDRS`; an ircd header never does.
+
+Because the files carry no `#ifdef`, `--enable-keycloak` gates them at the
+*source-list* level: `configure.in` substitutes `@KC_SRC@` into `IRCD_SRC` and
+`@KC_CMOCKA_TESTPROGS@` into the test `CMOCKA_TESTPROGS`, both empty when
+Keycloak is disabled. Adding a `kc/*.c` file or a kc cmocka suite means adding
+it to `KC_SRC` / `KC_CMOCKA_TESTPROGS` in `configure.in`, not to the Makefiles.
 
 If kc code needs something from the ircd, add it to the adapter interface in
 `include/kc/kc_event.h` — do not reach across.

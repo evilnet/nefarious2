@@ -45,6 +45,12 @@
 /* Define to 1 if you have the 'kqueue' function. */
 #undef HAVE_KQUEUE
 
+/* Define to 1 if you have the 'curl' library (-lcurl). */
+#undef HAVE_LIBCURL
+
+/* Define to 1 if you have the 'jansson' library (-ljansson). */
+#undef HAVE_LIBJANSSON
+
 /* Define to 1 if you have the 'nsl' library (-lnsl). */
 #undef HAVE_LIBNSL
 
@@ -56,6 +62,12 @@
 
 /* Define to 1 if you have the <poll.h> header file. */
 #undef HAVE_POLL_H
+
+/* Define if pthreads is available */
+#undef HAVE_PTHREAD
+
+/* Define to 1 if you have the <pthread.h> header file. */
+#undef HAVE_PTHREAD_H
 
 /* Define to 1 if system calls automatically restart after interruption by a
    signal. */
@@ -232,11 +244,11 @@
 /* Define to enable the kqueue engine */
 #undef USE_KQUEUE
 
-/* Define if you are using RocksDB for storage */
-#undef USE_ROCKSDB
-
 /* Define if you are using libgit2 for gitsync */
 #undef USE_LIBGIT2
+
+/* Define if Keycloak support (in-tree ircd/kc) is built */
+#undef USE_LIBKC
 
 /* Define if you are using MaxMindDB */
 #undef USE_MMDB
@@ -244,11 +256,11 @@
 /* Specify whether or not to use poll() */
 #undef USE_POLL
 
+/* Define if you are using RocksDB for storage */
+#undef USE_ROCKSDB
+
 /* Define if you are using OpenSSL */
 #undef USE_SSL
-
-/* Define if you are using Keycloak (libkc) */
-#undef USE_LIBKC
 
 /* Define if you are using zstd compression */
 #undef USE_ZSTD

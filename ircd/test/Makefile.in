@@ -14,7 +14,14 @@ TESTPROGS = \
 	ircd_string_t
 
 # CMocka test programs (proper assertions)
+#
+# @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka
+# kc_jwt_cmocka under --enable-keycloak, and empty otherwise: those four
+# link ../kc/*.o, which ircd/Makefile only builds when Keycloak is
+# enabled (see configure.in's Keycloak block).  Their build rules stay
+# defined below either way; they are simply never requested.
 CMOCKA_TESTPROGS = \
+	@KC_CMOCKA_TESTPROGS@ \
 	ircd_chattr_cmocka \
 	ircd_match_cmocka \
 	ircd_string_cmocka \
@@ -27,11 +34,7 @@ CMOCKA_TESTPROGS = \
 	crule_cmocka \
 	history_cmocka \
 	chathistory_presence_cmocka \
-	recv_classify_cmocka \
-	kc_url_cmocka \
-	kc_base64_cmocka \
-	kc_cache_cmocka \
-	kc_jwt_cmocka
+	recv_classify_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
