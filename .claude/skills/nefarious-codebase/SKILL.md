@@ -33,6 +33,16 @@ Audit rule: a bare `LEN` constant where the buffer is `LEN+1`, or a non-NUL-term
 - **Simple removal**: defer to a 0-second timer (`TT_RELATIVE, 0`). `timer_run()` executes after `engine_loop`'s event dispatch, once all `gen_ref`s are released.
 - **Never `memset` a Socket struct that has pending gen_refs** — it zeroes `gh_ref` and corrupts the synchronous ET_DESTROY event chain.
 
+## The ircd/kc boundary
+
+`ircd/kc/*.c` is vendored libkc (formerly `evilnet/libkc`, merged 2026-07).
+It reaches the ircd **only** through `kc_event_ops` / `kc_log_ops`;
+`ircd_kc_adapter.c` is the sole translation layer. Including an ircd header
+from `kc/` is a build error, enforced by `make check-kc-boundary`.
+
+If kc code needs something from the ircd, add it to the adapter interface in
+`include/kc/kc_event.h` — do not reach across.
+
 ## Config File Parsing
 
 ### Block ordering (CRITICAL)

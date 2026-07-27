@@ -326,7 +326,21 @@ all:
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
 
-build: ircd convert-conf
+# The kc/ subtree is the vendored libkc.  It talks to the ircd only through
+# the kc_event_ops / kc_log_ops adapters (ircd_kc_adapter.c) — exactly as it
+# did when it was a separate .so.  Including an ircd header here collapses
+# that seam, so it is a build error.  See
+# .claude/para/projects/libkc-ircd-merge.md.
+check-kc-boundary:
+	@bad=`grep -l -E '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"](ircd|client|s_debug|struct|msgq|dbuf)' ${srcdir}/kc/*.c ${srcdir}/kc/*.h 2>/dev/null`; \
+	if [ -n "$$bad" ]; then \
+		echo "ERROR: ircd/kc must not include ircd headers:"; \
+		for f in $$bad; do echo "  $$f"; done; \
+		echo "kc/ talks to the ircd only via kc_event_ops/kc_log_ops."; \
+		exit 1; \
+	fi
+
+build: check-kc-boundary ircd convert-conf
 
 ircd: ${OBJS} ../include/patchlevel.h version.o
 	${PURIFY} ${CC} ${OBJS} version.o ${RINGLOG_O} ${LDFLAGS} ${LIBS} \
@@ -336,7 +350,7 @@ ircd: ${OBJS} ../include/patchlevel.h version.o
 convert-conf: ${CONVERT_CONF_OBJS}
 	${PURIFY} ${CC} ${CONVERT_CONF_OBJS} ${LDFLAGS} -o convert-conf
 
-.PHONY: version.c
+.PHONY: version.c check-kc-boundary
 version.c: version.c.SH ${top_srcdir}/include/patchlist.h umkpasswd
 	${SHELL} ${srcdir}/version.c.SH ${top_srcdir}
 
