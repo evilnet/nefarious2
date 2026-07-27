@@ -4386,6 +4386,44 @@ int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time, int limi
  * parv[1] = subcommand (Q, R, Z, or E)
  * parv[2+] = parameters based on subcommand
  */
+/* Forward a federation reply (R/B/Z/T/E) that matches no local FedRequest
+ * toward the origin server encoded in the reqid prefix (reqid = <yy><counter>,
+ * minted by start_fed_query). Replies carry no destination field, so
+ * multi-hop topologies need this hop-by-hop relay; without it a reply dies at
+ * the first intermediate server and federation only works between directly
+ * linked pairs. Drops (matching prior behavior) when the origin is unknown,
+ * local (stale reply after timeout), or would bounce back out the arrival
+ * link. */
+static void forward_fed_reply(struct Client *sptr, struct Client *cptr,
+                              int parc, char *parv[])
+{
+  struct Client *origin;
+  char yy[3];
+  char buf[BUFSIZE];
+  char *out = buf;
+  char *end = buf + sizeof(buf);
+  int i;
+
+  /* parv[2] = reqid for every reply subcommand; shortest frame is E (parc 4) */
+  if (parc < 4 || EmptyString(parv[2]) || strlen(parv[2]) < 3)
+    return;
+  yy[0] = parv[2][0];
+  yy[1] = parv[2][1];
+  yy[2] = '\0';
+  origin = FindNServer(yy);
+  if (!origin || origin == &me || !IsServer(origin))
+    return;
+  if (cli_from(origin) == cptr)
+    return;
+
+  /* Rebuild "<sub> <p2> ... :<last>" faithfully; only the trailing param can
+   * contain spaces, so param positions and parc survive the round trip. */
+  for (i = 1; i < parc - 1; i++)
+    out += ircd_snprintf(0, out, end - out, "%s%s", i > 1 ? " " : "", parv[i]);
+  ircd_snprintf(0, out, end - out, " :%s", parv[parc - 1]);
+  sendcmdto_one(sptr, CMD_CHATHISTORY, origin, "%s", buf);
+}
+
 int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   char *subcmd;
@@ -4625,8 +4663,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Find the request */
     req = find_fed_request(reqid);
-    if (!req)
-      return 0;  /* Request not found or already completed */
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
+      return 0;
+    }
 
     /* Add message to federated results */
     add_fed_message(req, msgid, timestamp, type, sender, account, content);
@@ -4652,8 +4692,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Find the request */
     req = find_fed_request(reqid);
-    if (!req)
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
+    }
 
 #ifdef USE_ZSTD
     /* Decode base64 then decompress */
@@ -4726,8 +4768,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Find the request */
     req = find_fed_request(reqid);
-    if (!req)
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
+    }
 
     /* Determine message format based on parc:
      * parc=5: continuation "B <reqid> <msgid> :<b64>" (final)
@@ -4798,8 +4842,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     last_timestamp = parv[4];
 
     req = find_fed_request(reqid);
-    if (!req)
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
+    }
 
     add_fed_target(req, target, last_timestamp);
   }
@@ -4817,8 +4863,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Find the request */
     req = find_fed_request(reqid);
-    if (!req)
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
+    }
 
     /* Decrement pending count */
     req->servers_pending--;
