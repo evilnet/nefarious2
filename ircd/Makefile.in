@@ -127,6 +127,15 @@ IRCD_SRC = \
 	ircd_snprintf.c \
 	ircd_string.c \
 	jupe.c \
+	kc/kc.c \
+	kc/kc_base64.c \
+	kc/kc_cache.c \
+	kc/kc_http.c \
+	kc/kc_http_sync.c \
+	kc/kc_jwt.c \
+	kc/kc_keycloak.c \
+	kc/kc_url.c \
+	kc/kc_webhook.c \
 	lex.yy.c \
 	list.c \
 	listener.c \
