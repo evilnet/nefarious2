@@ -768,10 +768,21 @@ static int check_auth_finished(struct AuthRequest *auth)
                       "(usually <30s)");
         res = 0;
       } else {
+        /* register_user() can exit the client (SASL-required class, alias
+         * attach failure, duplicate account session, no nickname, wrong
+         * NICK direction, host throttle — s_user.c:427/596/609/640/783/806).
+         * Its teardown deliberately NULLs cli_connect (list.c:446/461/465)
+         * so MyConnect() on a freed Client reads false instead of dangling.
+         * cli_fd() is con_fd(cli_connect(cli)), so touching cptr after the
+         * call reads through NULL: that is the SIGSEGV at 0x23e0
+         * (offsetof(Connection,con_socket) 9128 + offsetof(Socket,s_fd) 56).
+         * Capture the fd up front; never deref cptr after register_user. */
+        int diag_fd = cli_fd(cptr);
+
         log_write(LS_USER, L_INFO, 0,
                   "check_auth_finished: calling register_user for %p "
                   "(fd %d, nick=%s, acct=%s) — SASL-stall diag entry",
-                  (void*)auth, cli_fd(cptr),
+                  (void*)auth, diag_fd,
                   cli_name(cptr)[0] ? cli_name(cptr) : "*",
                   (cli_user(cptr) && cli_user(cptr)->account[0])
                     ? cli_user(cptr)->account : "*");
@@ -779,7 +790,7 @@ static int check_auth_finished(struct AuthRequest *auth)
         log_write(LS_USER, L_INFO, 0,
                   "check_auth_finished: register_user returned %d for %p "
                   "(fd %d) — SASL-stall diag exit",
-                  res, (void*)auth, cli_fd(cptr));
+                  res, (void*)auth, diag_fd);
       }
     }
   }
