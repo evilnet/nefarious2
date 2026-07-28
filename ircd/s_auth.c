@@ -776,7 +776,16 @@ static int check_auth_finished(struct AuthRequest *auth)
          * cli_fd() is con_fd(cli_connect(cli)), so touching cptr after the
          * call reads through NULL: that is the SIGSEGV at 0x23e0
          * (offsetof(Connection,con_socket) 9128 + offsetof(Socket,s_fd) 56).
-         * Capture the fd up front; never deref cptr after register_user. */
+         * Capture the fd up front; never deref cptr after register_user.
+         *
+         * The `if (res == 0) destroy_auth_request(auth)` tail below is safe
+         * only because THIS call passes the same client as both cptr and
+         * sptr: exit_client() returns CPTR_KILLED when cptr == victim and 0
+         * otherwise (s_misc.c:244), so every exiting path above returns
+         * non-zero here and the tail is skipped — which matters because the
+         * client's own teardown already freed this auth request
+         * (list.c:336-337).  If this call is ever changed to pass distinct
+         * cptr/sptr, an exiting path would return 0 and double-free it. */
         int diag_fd = cli_fd(cptr);
 
         log_write(LS_USER, L_INFO, 0,
