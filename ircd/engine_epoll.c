@@ -285,6 +285,16 @@ engine_loop(struct Generators *gen)
     }
 
     wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
+    /* An OVERDUE next-timer yields a NEGATIVE wait, and epoll_wait treats
+     * every negative timeout as INFINITE — with no fd traffic the loop then
+     * sleeps forever and no timer ever fires again.  Trivially reached under
+     * a slow (valgrind) boot: the first timers expire before the loop is
+     * entered, and a quiet node with no clients or inbound links has no
+     * packet to break the wait, so it boots into a coma until the first
+     * external connect (live capture: epoll_wait blocked with timeout=-5000
+     * for 91 minutes).  Clamp overdue to "poll now". */
+    if (wait < -1)
+      wait = 0;
     Debug((DEBUG_ENGINE, "epoll: delay: %d (%d) %d", timer_next(gen),
            CurrentTime, wait));
     events_used = epoll_wait(epoll_fd, events, events_count, wait);
