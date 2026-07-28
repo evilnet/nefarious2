@@ -284,6 +284,13 @@ engine_loop(struct Generators* gen)
 
   while (running) {
     wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
+    /* An OVERDUE next-timer yields a negative wait, and poll() treats every
+     * negative timeout as INFINITE — so a quiet node with no fd traffic would
+     * sleep forever and the timer never fires (the engine_epoll coma, same
+     * class).  Clamp overdue (< -1) to "poll now"; -1 (no timers) stays the
+     * infinite sentinel. */
+    if (wait < -1)
+      wait = 0;
 
     Debug((DEBUG_INFO, "poll: delay: %Tu (%Tu) %d", timer_next(gen),
 	   CurrentTime, wait));

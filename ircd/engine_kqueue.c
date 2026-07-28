@@ -326,6 +326,13 @@ engine_loop(struct Generators* gen)
     /* set up the sleep time */
     wait.tv_sec = timer_next(gen) ? (timer_next(gen) - CurrentTime) : -1;
     wait.tv_nsec = 0;
+    /* kevent() below passes NULL (infinite) when tv_sec < 0.  An OVERDUE
+     * next-timer makes (timer_next - CurrentTime) negative, sentinel'd to
+     * infinite — a quiet node sleeps forever, timer never fires (the
+     * engine_epoll coma class).  Clamp an overdue timer to 0 (poll now);
+     * the no-timers case keeps tv_sec = -1 (the infinite sentinel). */
+    if (timer_next(gen) && wait.tv_sec < 0)
+      wait.tv_sec = 0;
 
     Debug((DEBUG_ENGINE, "kqueue: delay: %Tu (%Tu) %Tu", timer_next(gen),
 	   CurrentTime, wait.tv_sec));
