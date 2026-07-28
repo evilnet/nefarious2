@@ -247,8 +247,9 @@ extern struct MetadataEntry *metadata_get_channel(struct Channel *chptr, const c
 /** Set metadata for a channel. THE persist chokepoint for +R (registered)
  * channel metadata (B1): memory half always runs (metadata_channel_memory_put/
  * _del); for a MODE_REGISTERED channel the change is also persisted via
- * metadata_account_set_permanent(chptr->chname, ...), which doc-mirrors it
- * at the single chokepoint (metadata_account_set_ts -> crdt_shadow_metadata_set).
+ * metadata_account_set_permanent(chptr->chname, ...) through the single
+ * store chokepoint, metadata_account_set_ts (on crdt-mesh the CRDT doc
+ * mirror also rides that chokepoint).
  * Not +R: memory only. See metadata.c for the full contract.
  * @param[in] chptr Channel to set metadata on.
  * @param[in] key Key name.

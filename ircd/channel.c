@@ -4853,7 +4853,7 @@ mode_channel_registered_hook(struct Channel *chptr, struct Client *cptr,
      * head, copies its key + visibility, then deletes by key —
      * metadata_channel_memory_del splices out the (matching) head, so the
      * list strictly shrinks and no saved next pointer ever dangles.  The
-     * notify mirrors metadata_apply_converged's channel delete shape: NULL
+     * notify shape: NULL
      * value (unset), the removed entry's own visibility for delivery scope
      * (a PRIVATE channel entry notifies nobody — channels have no session
      * owner — exactly like the reconcile path). */
