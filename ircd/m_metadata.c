@@ -746,12 +746,17 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
      * which handles both in-memory and LMDB persistence.  Otherwise write a
      * PERMANENT row for the offline case (metadata_account_set_permanent,
      * not the TTL metadata_account_set) so it no longer silently decays
-     * after the ~4h TTL purge sweep.  There is no S2S MD broadcast for the
-     * offline case — an offline account has no FindUser-resolvable target,
-     * so ms_metadata on peers would just drop it.  The write is therefore
-     * NODE-LOCAL: a documented limitation on this branch (era-2 spec §A4;
-     * on crdt-mesh the storage-chokepoint doc mirror is the propagation
-     * path), unchanged from before except it no longer evaporates in 4h. */
+     * after the ~4h TTL purge sweep.
+     *
+     * The write also broadcasts in the account-target wire form
+     * ("MD *account key [vis] [:value]") so every peer updates its own
+     * store and any locally-online clients on the account — closing the
+     * era-2 §A4 NODE-LOCAL limitation, whose live consequence was a peer
+     * retaining a stale draft/persistence/hold row after pool cleanup ran
+     * through an oper on one server only (Gap B, bouncer-promotion scope).
+     * ms_metadata's account-form branch consumes it; an older peer
+     * FindUser()s the literal "*account", gets NULL, and drops it
+     * harmlessly. */
     {
       struct Client *acptr;
       struct Client *first_online = NULL;
@@ -821,6 +826,19 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
           return 0;
         }
       }
+
+      /* Relay in the account-target form (see the branch comment above).
+       * Broadcast for the online-local case too: metadata_set_client never
+       * emits S2S itself, so before this the *account write was node-local
+       * in BOTH branches. */
+      if (value)
+        sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "*%s %s %s :%s",
+                                 account_name, key,
+                                 visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                                 value);
+      else
+        sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "*%s %s",
+                                 account_name, key);
     }
 
     send_keyvalue(sptr, target, key, value,
@@ -1424,6 +1442,51 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   if (!is_valid_key(key))
     return 0;
+
+  /* Account-target form ("*account"): an oper's account write relayed from
+   * mo_metadata's account branch.  There is no FindUser-resolvable target;
+   * apply to any locally-online clients on the account, else persist a
+   * PERMANENT store row directly, then relay the form onward.  Bare "*"
+   * never appears S2S (mo_metadata expands it to a nick before emit), so
+   * target[1] != '\0' is unambiguous. */
+  if (target[0] == '*' && target[1] != '\0') {
+    const char *account_name = target + 1;
+    struct Client *acptr;
+    int fd, found_online = 0;
+
+    /* Same first-hop flood stop as the nick form below: UTF-8 + length
+     * only (no client context; the origin already enforced key counts). */
+    if (value
+        && metadata_check_limits(NULL, NULL, 0, key, value) != METADATA_LIMIT_OK) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "ms_metadata: account-form limit exceeded for %s/%s from %s "
+                "— dropped, not relayed", target, key, cli_name(sptr));
+      return 0;
+    }
+
+    for (fd = HighestFd; fd >= 0; --fd) {
+      if (!(acptr = LocalClientArray[fd]))
+        continue;
+      if (!IsAccount(acptr))
+        continue;
+      if (ircd_strcmp(cli_account(acptr), account_name) == 0) {
+        metadata_set_client(acptr, key, value, visibility);
+        found_online = 1;
+      }
+    }
+    if (!found_online && metadata_lmdb_is_available())
+      metadata_account_set_permanent(account_name, key, value, visibility);
+
+    if (value)
+      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s %s :%s",
+                               target, key,
+                               visibility == METADATA_VIS_PRIVATE ? "P" : "*",
+                               value);
+    else
+      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, cptr, "%s %s",
+                               target, key);
+    return 0;
+  }
 
   /* Find target */
   if (IsChannelName(target)) {
