@@ -741,7 +741,14 @@ struct Message msgtab[] = {
   {
     MSG_CAP,
     TOK_CAP,
-    0, MAXPARA, 0, 0, NULL,
+    /* MFLG_NOSHUN: CAP is capability negotiation about the client's own
+     * connection — it reaches no other user, reveals no one else's state,
+     * and carries nothing worth silencing.  Without the exemption the shun
+     * gate below drops post-registration CAP, which wedges clients: the
+     * server itself sends CAP NEW/DEL to cap-notify clients (m_cap.c
+     * cap_notify_flush) and then discards the CAP REQ its own notification
+     * invited, leaving the client waiting on an ACK/NAK that never comes. */
+    0, MAXPARA, MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_cap, m_cap, m_ignore, m_cap, m_ignore },
     ""
