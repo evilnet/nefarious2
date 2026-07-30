@@ -410,37 +410,39 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* For registered channels (+R), query services for permission */
+  /* Registered channels (+R): authority is the channel's founder/access list,
+   * which lives in services, not here.  We must refuse locally.
+   *
+   * We used to ask services with
+   *   AC <user_numeric> R <cookie> <channel> RENAME <newname>
+   * and wait for an AC A/D reply.  That query is HARMFUL against the services
+   * package that actually ships: its AC handler treats subcommand 'R' as an
+   * account-stamp notification and reads our <cookie> as the stamp, then sets
+   * FLAGS_STAMPED on the querying user unconditionally.  Because a stamped
+   * user is skipped by later StampUser() calls, one RENAME attempt silently
+   * discards that user's *legitimate* account stamp for the rest of their
+   * session — a real side effect from a command the user only sees time out.
+   * The 'R' subcommand letter was simply already taken; this is a protocol
+   * collision on our side, not services mishandling a well-formed query.
+   *
+   * A services build that disambiguates (checking for the "RENAME" keyword
+   * before falling through to the account-stamp path) can answer this
+   * correctly, so the whole request path is deliberately RETAINED, not
+   * removed — re-enabling is a matter of restoring this emit once such a
+   * build is deployed.  Until then, refusing immediately is both honest and
+   * safe.
+   *
+   * DO NOT delete as dead code: find_services_server() and
+   * pending_rename_add() above are unreferenced only because of this
+   * refusal (they warn under -Wall; the default build does not use it), and
+   * pending_rename_find/complete/deny are still called from m_account.c's
+   * AC A/D reply path, with pending_rename_client_exit called from s_misc.c.
+   */
   if (chptr->mode.mode & MODE_REGISTERED) {
-    struct Client *services = find_services_server();
-    struct PendingRename *pr;
-
-    if (!services) {
-      send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
-                "Services unavailable");
-      return 0;
-    }
-
-    /* Create pending rename request */
-    pr = pending_rename_add(sptr, chptr, newname, reason);
-    if (!pr) {
-      send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
-                "Too many pending requests");
-      return 0;
-    }
-
-    /* Send permission query to services:
-     * AC <user_numeric> R <cookie> <channel> RENAME <newname>
-     */
-    sendcmdto_one(&me, CMD_ACCOUNT, services,
-                  "%C R %u %s RENAME %s",
-                  sptr, pr->cookie, chptr->chname, newname);
-
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "m_rename: Querying services for %s -> %s (cookie=%u)",
-              oldname, newname, pr->cookie);
-
-    return 0;  /* Wait for services response */
+    send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+              "Renaming a registered channel requires services support, "
+              "which is unavailable");
+    return 0;
   }
 
   /* Unregistered channel - proceed with rename immediately */
