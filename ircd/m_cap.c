@@ -77,6 +77,23 @@ static struct {
   struct cap_batch_entry entries[CAP_BATCH_MAX];
 } cap_batch = { 0, 0, {{0}} };
 
+/** Does this client want CAP NEW/DEL notifications?
+ *
+ * Explicit negotiation is not the only way to opt in: the cap-notify spec
+ * states that support is *implied* by CAP LS 302, so a 302 client need not
+ * (and generally does not) list cap-notify in its CAP REQ.  Gating solely on
+ * CapActive(CAP_CAPNOTIFY) silently withheld CAP NEW/DEL from exactly the
+ * modern clients most able to act on them.
+ *
+ * @param[in] cptr Local client to test.
+ * @return Non-zero if the client should receive CAP NEW/DEL.
+ */
+static int
+cap_notify_wanted(struct Client *cptr)
+{
+  return CapActive(cptr, CAP_CAPNOTIFY) || cli_capab_version(cptr) >= 302;
+}
+
 /** Begin batching CAP notify calls.
  * Called at start of rehash/config reload.
  */
@@ -179,7 +196,7 @@ void cap_notify_flush(void)
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
       continue;
-    if (!CapActive(cptr, CAP_CAPNOTIFY))
+    if (!cap_notify_wanted(cptr))
       continue;
 
     if (new_buf[0])
@@ -286,7 +303,7 @@ void send_cap_notify(const char *capname, int available, const char *value)
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
       continue;
-    if (!CapActive(cptr, CAP_CAPNOTIFY))
+    if (!cap_notify_wanted(cptr))
       continue;
 
     if (available) {
