@@ -126,9 +126,12 @@ static int rename_oplevel_ok(struct Channel *chptr, struct Membership *member)
 
 /** RENAME is only sound when every server can apply RN.  Legacy servers
  * neither relay nor apply unknown tokens (design doc section 2), so refuse
- * while any non-v3-aware, non-service server is linked.  Services are
- * exempt: they get the targeted forward in rename_forward_legacy_services()
- * below.
+ * while any non-v3-aware, non-rename-capable server is linked.  A server
+ * that advertises 'r' (FLAG_RENAME_CAPABLE, e.g. X3) is not a blocker even
+ * though it isn't IRCv3-aware: it gets the targeted forward in
+ * rename_forward_rcapable() below instead of the v3 broadcast.  Plain
+ * legacy servers with neither flag legitimately block — there is no path
+ * to tell them about the rename at all.
  * @return First blocking legacy server found, or NULL if none.
  */
 static struct Client *rename_legacy_blocker(void)
@@ -136,17 +139,18 @@ static struct Client *rename_legacy_blocker(void)
   struct Client *acptr;
 
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr))
-    if (IsServer(acptr) && !IsIRCv3Aware(acptr) && !IsService(acptr))
+    if (IsServer(acptr) && !IsIRCv3Aware(acptr) && !IsRenameCapable(acptr))
       return acptr;
 
   return NULL;
 }
 
-/** Forward a RENAME to directly-connected legacy (non-IRCv3-aware) service
- * links.  sendcmdto_serv_butone_v3() intentionally skips every
- * non-IRCv3-aware peer, but a legacy services package still needs to learn
- * about the renamed channel to keep its own channel/registration state in
- * sync, even though it can't speak the RN P10 token as an S2S relay hop.
+/** Forward a RENAME to directly-connected rename-capable-but-non-v3-aware
+ * links (peers advertising 'r' / FLAG_RENAME_CAPABLE, e.g. X3).
+ * sendcmdto_serv_butone_v3() intentionally skips every non-IRCv3-aware
+ * peer, but an r-capable peer still needs to learn about the renamed
+ * channel to keep its own channel/registration state in sync, even though
+ * it can't speak the RN P10 token as a v3 S2S relay hop.
  * @param[in] sptr Client to use as the message source.
  * @param[in] skip Downlink to skip (the direction the message came from),
  *                 or NULL if the rename originated locally.
@@ -154,9 +158,9 @@ static struct Client *rename_legacy_blocker(void)
  * @param[in] newname New channel name.
  * @param[in] reason Rename reason (may be empty string).
  */
-static void rename_forward_legacy_services(struct Client *sptr, struct Client *skip,
-                                           const char *oldname, const char *newname,
-                                           const char *reason)
+static void rename_forward_rcapable(struct Client *sptr, struct Client *skip,
+                                     const char *oldname, const char *newname,
+                                     const char *reason)
 {
   struct DLink *dlp;
 
@@ -165,13 +169,14 @@ static void rename_forward_legacy_services(struct Client *sptr, struct Client *s
 
     if (dlp->value.cptr == skip)
       continue;
-    if (!(!IsIRCv3Aware(dlp->value.cptr) && IsService(dlp->value.cptr)))
+    if (!(!IsIRCv3Aware(dlp->value.cptr) && IsRenameCapable(dlp->value.cptr)))
       continue;
 
-    /* Alias source rewrite — a legacy service was never told about the
-     * alias via BX C, so it's an unknown source to it; emit from the
-     * primary instead.  sendcmdto_serv_butone_v3() (the v3 broadcast one
-     * line up in every caller) already does this rewrite internally, but
+    /* Alias source rewrite — a rename-capable non-v3 peer (e.g. X3) was
+     * never told about the alias via BX C, so it's an unknown source to
+     * it; emit from the primary instead.  sendcmdto_serv_butone_v3() (the
+     * v3 broadcast one line up in every caller) already does this
+     * rewrite internally, but
      * sendcmdto_one() does not, so it has to happen here.  Mirrors the
      * rewrite in ircd_relay.c (~999-1004): keep the alias numeric only
      * when the primary's own wire direction IS this destination, since
@@ -402,10 +407,11 @@ void pending_rename_complete(struct PendingRename *pr)
                         "%s %s :%s", pr->oldname, chptr->chname,
                         pr->reason);
 
-  /* Legacy services links don't get RN via the v3-only broadcast above;
-   * synth it directly so they can keep their channel state in sync. */
-  rename_forward_legacy_services(pr->client, NULL, pr->oldname,
-                                 chptr->chname, pr->reason);
+  /* Rename-capable non-v3 links (X3) don't get RN via the v3-only
+   * broadcast above; synth it directly so they can keep their channel
+   * state in sync. */
+  rename_forward_rcapable(pr->client, NULL, pr->oldname,
+                          chptr->chname, pr->reason);
 
   pending_rename_remove(pr);
 }
@@ -710,10 +716,10 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     {
       /* Alias source rewrite for the %C target-user argument — sptr may
-       * be a bouncer alias, which a legacy services package (X3's
-       * cmd_account does GetUserN(argv[1]) and silently returns on an
-       * unresolvable numeric) was never told about via BX C.  Unlike
-       * rename_forward_legacy_services()'s rewrite, this is a *data*
+       * be a bouncer alias, which the rename-capable non-v3 services
+       * package (X3's cmd_account does GetUserN(argv[1]) and silently
+       * returns on an unresolvable numeric) was never told about via
+       * BX C.  Unlike rename_forward_rcapable()'s rewrite, this is a *data*
        * argument, not the message's P10 prefix (that stays &me), so
        * there's no "fake direction" case to preserve the alias numeric
        * for — always prefer the primary when there is one.  pr->client
@@ -753,9 +759,10 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s :%s",
                         oldname_buf, chptr->chname, reason);
 
-  /* Legacy services links don't get RN via the v3-only broadcast above;
-   * synth it directly so they can keep their channel state in sync. */
-  rename_forward_legacy_services(sptr, NULL, oldname_buf, chptr->chname, reason);
+  /* Rename-capable non-v3 links (X3) don't get RN via the v3-only
+   * broadcast above; synth it directly so they can keep their channel
+   * state in sync. */
+  rename_forward_rcapable(sptr, NULL, oldname_buf, chptr->chname, reason);
 
   return 0;
 }
@@ -816,10 +823,10 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s :%s",
                         oldname_buf, chptr->chname, reason);
 
-  /* Legacy services links don't get RN via the v3-only broadcast above;
-   * synth it directly so they can keep their channel state in sync.
-   * Skip the link this RENAME arrived on. */
-  rename_forward_legacy_services(sptr, cptr, oldname_buf, chptr->chname, reason);
+  /* Rename-capable non-v3 links (X3) don't get RN via the v3-only
+   * broadcast above; synth it directly so they can keep their channel
+   * state in sync. Skip the link this RENAME arrived on. */
+  rename_forward_rcapable(sptr, cptr, oldname_buf, chptr->chname, reason);
 
   return 0;
 }

@@ -192,6 +192,13 @@ enum Flag
     FLAG_OPLEVELS,                  /**< server has oplevels support */
     FLAG_MULTILINE,                 /**< server supports P10 multiline batches */
     FLAG_IRCV3AWARE,                /**< server speaks IRCv3 message-tag wire extensions */
+    FLAG_RENAME_CAPABLE,            /**< server applies and relays RENAME
+                                         (P10 RN) without being IRCv3-aware —
+                                         set on peers like X3 that advertise
+                                         'r' in their SERVER flags. Advertised
+                                         via 'r' in SERVER flags. Fork servers
+                                         are IRCv3-aware and use 'v' instead;
+                                         we never set this on &me. */
     FLAG_BXF_AWARE,                 /**< server speaks BX F (reconcile-end)
                                          marker — gates the burst N tail on
                                          peer's BX F arrival.  Strictly a
@@ -1175,6 +1182,9 @@ struct Client {
 #define IsMultiline(x)          HasFlag(x, FLAG_MULTILINE)
 /** Return non-zero if the server speaks IRCv3 message-tag wire extensions. */
 #define IsIRCv3Aware(x)         HasFlag(x, FLAG_IRCV3AWARE)
+/** Return non-zero if the server applies/relays RENAME without being
+ * IRCv3-aware (e.g. X3 advertising 'r'). */
+#define IsRenameCapable(x)      HasFlag(x, FLAG_RENAME_CAPABLE)
 /** Return non-zero if the server emits BX F (reconcile-end) markers. */
 #define IsBxfAware(x)           HasFlag(x, FLAG_BXF_AWARE)
 /** Return non-zero if the client has an account stamp. */
@@ -1323,6 +1333,8 @@ struct Client {
 #define SetMultiline(x)         SetFlag(x, FLAG_MULTILINE)
 /** Mark a server as speaking IRCv3 message-tag wire extensions. */
 #define SetIRCv3Aware(x)        SetFlag(x, FLAG_IRCV3AWARE)
+/** Mark a server as applying/relaying RENAME without being IRCv3-aware. */
+#define SetRenameCapable(x)     SetFlag(x, FLAG_RENAME_CAPABLE)
 /** Mark a server as supporting the BX F handshake. */
 #define SetBxfAware(x)          SetFlag(x, FLAG_BXF_AWARE)
 /** Mark a client as having an account stamp. */

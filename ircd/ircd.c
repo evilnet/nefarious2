@@ -1212,6 +1212,15 @@ int main(int argc, char **argv) {
    * flag will set FLAG_IRCV3AWARE on us and gate fork-only emissions
    * accordingly. Legacy peers ignore the unknown flag char. */
   SetIRCv3Aware(&me);
+  /* Deliberately do NOT SetRenameCapable(&me): 'r' (FLAG_RENAME_CAPABLE)
+   * exists so this fork can recognize and propagate rename-capable
+   * non-v3 peers (X3, which advertises 'r'), not to advertise it on our
+   * own SERVER line. Fork servers apply/relay RENAME via the 'v'
+   * (IsIRCv3Aware) path, so &me stays r-less; the emit sites in
+   * s_serv.c/m_server.c only carry 'r' for the *described* server, and
+   * IsServer(&me) is false (cli_status(&me) == STAT_ME, not
+   * STAT_SERVER) so rename_legacy_blocker()'s GlobalClientList walk
+   * never even considers &me. */
 
   write_pidfile();
   init_counters();
