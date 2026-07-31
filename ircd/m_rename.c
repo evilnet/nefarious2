@@ -530,10 +530,12 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   char oldname_buf[CHANNELLEN + 1];
   int rc;
 
-  /* Must have draft/channel-rename capability */
-  if (!CapActive(sptr, CAP_DRAFT_CHANRENAME)) {
-    return send_reply(sptr, ERR_UNKNOWNCOMMAND, "RENAME");
-  }
+  /* Per the draft/channel-rename spec the capability governs only how a
+   * client is *notified* of a rename (the RENAME message vs the PART/JOIN
+   * legacy fallback, handled per-member in send_rename_to_members) — it is
+   * NOT required to *issue* the command.  A client without the cap may
+   * rename and simply receives the fallback for itself; do not reject with
+   * ERR_UNKNOWNCOMMAND. */
 
   /* Need at least old and new channel names */
   if (parc < 3 || EmptyString(parv[1]) || EmptyString(parv[2])) {
