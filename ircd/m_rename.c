@@ -104,6 +104,24 @@ static struct Client *find_services_server(void)
   return NULL;
 }
 
+/** Channel-oplevel gate for rename authorization.  When a channel has
+ * oplevels active (MODE_APASS / +A can only be set with FEAT_OPLEVELS),
+ * ownership is founder-based: only the founder at oplevel 0 may rename it,
+ * not an arbitrary chanop opped by the founder.  Without oplevels there is
+ * no founder notion and any chanop may rename (traditional behaviour).
+ * @return non-zero if \a member is permitted to rename \a chptr.
+ */
+static int rename_oplevel_ok(struct Channel *chptr, struct Membership *member)
+{
+  /* Apass presence is the mode.apass string being non-empty, not a
+   * mode.mode bit (the codebase tests it this way everywhere, e.g.
+   * channel.c:390/1055/1327).  Founder == oplevel 0 / channel manager
+   * (m_join.c:280 assigns the manager 0 and other ops 1 on apass chans);
+   * accept either so post-burst oplevel drift can't lock the founder out. */
+  return !chptr->mode.apass[0]
+         || (member && (OpLevel(member) == 0 || IsChannelManager(member)));
+}
+
 /** RENAME is only sound when every server can apply RN.  Legacy servers
  * neither relay nor apply unknown tokens, so refuse while any
  * non-rename-capable, non-service server is linked.  Rename-capable
@@ -310,7 +328,8 @@ void pending_rename_complete(struct PendingRename *pr)
    * MODE_REGISTERED — before letting the approved rename land on it. */
   {
     struct Membership *member = find_channel_member(pr->client, chptr);
-    if (!member || !IsChanOp(member) || !(chptr->mode.mode & MODE_REGISTERED)) {
+    if (!member || !IsChanOp(member) || !rename_oplevel_ok(chptr, member)
+        || !(chptr->mode.mode & MODE_REGISTERED)) {
       log_write(LS_DEBUG, L_WARNING, 0,
                 "pending_rename_complete: channel %s changed identity while "
                 "awaiting services", pr->oldname);
@@ -540,6 +559,13 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Check if user is a channel operator */
   if (!IsChanOp(member)) {
     return send_reply(sptr, ERR_CHANOPRIVSNEEDED, oldname);
+  }
+
+  /* With channel oplevels active (+A), only the founder may rename. */
+  if (!rename_oplevel_ok(chptr, member)) {
+    send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+              "Only the channel founder may rename this channel");
+    return 0;
   }
 
   /* Validate new channel name */
