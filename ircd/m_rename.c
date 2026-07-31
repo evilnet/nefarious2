@@ -323,6 +323,25 @@ void pending_rename_complete(struct PendingRename *pr)
     return;
   }
 
+  /* A name match alone isn't enough: with FEAT_ZANNELS off, an empty
+   * registered channel destructs synchronously when its last member
+   * parts, and a DIFFERENT user can recreate that exact name before this
+   * completion runs — FindChannel() above would then resolve to that
+   * unrelated fresh channel (mode 0, no +R, pr->client not even a
+   * member).  Re-validate the same authorization m_rename required at
+   * request time — requester still a chanop member, channel still
+   * MODE_REGISTERED — before letting the approved rename land on it. */
+  {
+    struct Membership *member = find_channel_member(pr->client, chptr);
+    if (!member || !IsChanOp(member) || !(chptr->mode.mode & MODE_REGISTERED)) {
+      log_write(LS_DEBUG, L_WARNING, 0,
+                "pending_rename_complete: channel %s changed identity while "
+                "awaiting services", pr->oldname);
+      pending_rename_deny(pr, "Channel changed while awaiting services");
+      return;
+    }
+  }
+
   /* Perform the rename (updates chptr if reallocated) */
   rc = rename_channel(&chptr, pr->newname);
   if (rc != 0) {
