@@ -1208,6 +1208,11 @@ static struct FeatureDesc {
   F_B(CAP_draft_message_redaction, 0, 0, feature_notify_cap_draft_message_redaction),
   F_B(CAP_draft_account_registration, 0, 0, feature_notify_cap_draft_account_registration),
   F_S(REGISTER_SERVER, 0, "*", 0),
+  /* Off by default: only a services build that disambiguates RENAME
+   * requests from account-stamp notifications on the AC 'R' subcommand
+   * (see the protocol-history comment in m_rename.c) should have this
+   * enabled. */
+  F_B(RENAME_SERVICES, 0, 0, 0),
   F_B(CAP_draft_read_marker, 0, 0, feature_notify_cap_draft_read_marker),
   F_B(CAP_draft_channel_rename, 0, 0, feature_notify_cap_draft_channel_rename),
   F_B(CAP_draft_metadata_2, 0, 0, feature_notify_cap_draft_metadata_2),

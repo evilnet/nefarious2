@@ -39,6 +39,7 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "ircd_alloc.h"
+#include "list.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -92,6 +93,51 @@ static struct Client *find_services_server(void)
   }
 
   return NULL;
+}
+
+/** RENAME is only sound when every server can apply RN.  Legacy servers
+ * neither relay nor apply unknown tokens (design doc section 2), so refuse
+ * while any non-v3-aware, non-service server is linked.  Services are
+ * exempt: they get the targeted forward in rename_forward_legacy_services()
+ * below.
+ * @return First blocking legacy server found, or NULL if none.
+ */
+static struct Client *rename_legacy_blocker(void)
+{
+  struct Client *acptr;
+
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr))
+    if (IsServer(acptr) && !IsIRCv3Aware(acptr) && !IsService(acptr))
+      return acptr;
+
+  return NULL;
+}
+
+/** Forward a RENAME to directly-connected legacy (non-IRCv3-aware) service
+ * links.  sendcmdto_serv_butone_v3() intentionally skips every
+ * non-IRCv3-aware peer, but a legacy services package still needs to learn
+ * about the renamed channel to keep its own channel/registration state in
+ * sync, even though it can't speak the RN P10 token as an S2S relay hop.
+ * @param[in] sptr Client to use as the message source.
+ * @param[in] skip Downlink to skip (the direction the message came from),
+ *                 or NULL if the rename originated locally.
+ * @param[in] oldname Old channel name.
+ * @param[in] newname New channel name.
+ * @param[in] reason Rename reason (may be empty string).
+ */
+static void rename_forward_legacy_services(struct Client *sptr, struct Client *skip,
+                                           const char *oldname, const char *newname,
+                                           const char *reason)
+{
+  struct DLink *dlp;
+
+  for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+    if (dlp->value.cptr == skip)
+      continue;
+    if (!IsIRCv3Aware(dlp->value.cptr) && IsService(dlp->value.cptr))
+      sendcmdto_one(sptr, CMD_RENAME, dlp->value.cptr, "%s %s :%s",
+                    oldname, newname, reason);
+  }
 }
 
 /** Add a pending rename request.
@@ -224,6 +270,11 @@ void pending_rename_complete(struct PendingRename *pr)
   sendcmdto_serv_butone_v3(pr->client, CMD_RENAME, cli_from(pr->client),
                         "%s %s :%s", pr->oldname, pr->channel->chname,
                         pr->reason);
+
+  /* Legacy services links don't get RN via the v3-only broadcast above;
+   * synth it directly so they can keep their channel state in sync. */
+  rename_forward_legacy_services(pr->client, NULL, pr->oldname,
+                                 pr->channel->chname, pr->reason);
 
   pending_rename_remove(pr);
 }
@@ -410,8 +461,22 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* RENAME is only sound when every linked server can apply RN.  Refuse
+   * up front while a legacy (non-v3-aware, non-service) server is on the
+   * network, rather than only in the registered-channel branch below —
+   * an unregistered-channel rename that a legacy peer can neither relay
+   * nor apply diverges it from the rest of the network just as surely. */
+  {
+    struct Client *blocker = rename_legacy_blocker();
+    if (blocker) {
+      send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+                "A linked server does not support channel rename");
+      return 0;
+    }
+  }
+
   /* Registered channels (+R): authority is the channel's founder/access list,
-   * which lives in services, not here.  We must refuse locally.
+   * which lives in services, not here.  We must ask services.
    *
    * We used to ask services with
    *   AC <user_numeric> R <cookie> <channel> RENAME <newname>
@@ -425,23 +490,44 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * The 'R' subcommand letter was simply already taken; this is a protocol
    * collision on our side, not services mishandling a well-formed query.
    *
-   * A services build that disambiguates (checking for the "RENAME" keyword
-   * before falling through to the account-stamp path) can answer this
-   * correctly, so the whole request path is deliberately RETAINED, not
-   * removed — re-enabling is a matter of restoring this emit once such a
-   * build is deployed.  Until then, refusing immediately is both honest and
-   * safe.
+   * A disambiguating services build now exists: it requires argc >= 7 and
+   * checks for the literal "RENAME" keyword before falling through to the
+   * account-stamp path, so the two no longer collide.  FEAT_RENAME_SERVICES
+   * records which deployments are running that build and may safely be
+   * asked — it defaults OFF, so every deployment still running the old
+   * services package keeps today's honest local refusal instead of
+   * re-triggering the stamp-clobbering bug.
    *
    * DO NOT delete as dead code: find_services_server() and
-   * pending_rename_add() above are unreferenced only because of this
-   * refusal (they warn under -Wall; the default build does not use it), and
+   * pending_rename_add() above are used by the emit below, and
    * pending_rename_find/complete/deny are still called from m_account.c's
    * AC A/D reply path, with pending_rename_client_exit called from s_misc.c.
    */
   if (chptr->mode.mode & MODE_REGISTERED) {
-    send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
-              "Renaming a registered channel requires services support, "
-              "which is unavailable");
+    struct Client *services;
+    struct PendingRename *pr;
+
+    if (!feature_bool(FEAT_RENAME_SERVICES)) {
+      send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+                "Renaming a registered channel requires services support, "
+                "which is unavailable");
+      return 0;
+    }
+
+    if (!(services = find_services_server())) {
+      send_fail(sptr, "RENAME", "TEMPORARILY_UNAVAILABLE", oldname,
+                "Registration service is not available");
+      return 0;
+    }
+
+    if (!(pr = pending_rename_add(sptr, chptr, newname, reason))) {
+      send_fail(sptr, "RENAME", "TEMPORARILY_UNAVAILABLE", oldname,
+                "Too many renames in progress");
+      return 0;
+    }
+
+    sendcmdto_one(&me, CMD_ACCOUNT, services, "%C R %u %s RENAME %s",
+                 sptr, pr->cookie, chptr->chname, newname);
     return 0;
   }
 
@@ -468,6 +554,10 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Propagate to other servers */
   sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s :%s",
                         oldname_buf, chptr->chname, reason);
+
+  /* Legacy services links don't get RN via the v3-only broadcast above;
+   * synth it directly so they can keep their channel state in sync. */
+  rename_forward_legacy_services(sptr, NULL, oldname_buf, chptr->chname, reason);
 
   return 0;
 }
@@ -527,6 +617,11 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Propagate to other servers */
   sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s :%s",
                         oldname_buf, chptr->chname, reason);
+
+  /* Legacy services links don't get RN via the v3-only broadcast above;
+   * synth it directly so they can keep their channel state in sync.
+   * Skip the link this RENAME arrived on. */
+  rename_forward_legacy_services(sptr, cptr, oldname_buf, chptr->chname, reason);
 
   return 0;
 }
