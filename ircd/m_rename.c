@@ -58,10 +58,17 @@
 /** Timeout for services response (seconds) */
 #define RENAME_TIMEOUT 10
 
-/** Pending channel rename request */
+/** Pending channel rename request.
+ *
+ * Deliberately holds NO struct Channel * across the AC round-trip: the
+ * channel can be freed/reallocated (rename_channel() MyFree()s the old
+ * node when the new name is longer than the old one — channel.c ~2123)
+ * or destroyed outright (last member parts mid-flight) while this request
+ * is waiting on services, up to RENAME_TIMEOUT seconds away.  Only the
+ * name survives that wait; every consumer re-resolves via
+ * FindChannel(oldname) at the point it actually needs the channel. */
 struct PendingRename {
   struct Client *client;           /**< Client waiting for response */
-  struct Channel *channel;         /**< Channel being renamed */
   char oldname[CHANNELLEN + 1];    /**< Original channel name */
   char newname[CHANNELLEN + 1];    /**< Requested new name */
   char reason[TOPICLEN + 1];       /**< Rename reason */
@@ -163,7 +170,9 @@ static void rename_forward_legacy_services(struct Client *sptr, struct Client *s
 
 /** Add a pending rename request.
  * @param[in] client Client requesting the rename.
- * @param[in] channel Channel to be renamed.
+ * @param[in] channel Channel to be renamed; only its current name is
+ *                     snapshotted here — the pointer itself is not kept
+ *                     (see the PendingRename struct comment).
  * @param[in] newname New channel name.
  * @param[in] reason Rename reason.
  * @return Pointer to new pending request, or NULL on error.
@@ -184,7 +193,6 @@ static struct PendingRename *pending_rename_add(struct Client *client,
 
   memset(pr, 0, sizeof(*pr));
   pr->client = client;
-  pr->channel = channel;
   ircd_strncpy(pr->oldname, channel->chname, CHANNELLEN + 1);
   ircd_strncpy(pr->newname, newname, CHANNELLEN + 1);
   if (reason && *reason) {
@@ -218,6 +226,26 @@ struct PendingRename *pending_rename_find(unsigned int cookie)
 
   for (pr = pending_renames; pr; pr = pr->next) {
     if (pr->cookie == cookie)
+      return pr;
+  }
+
+  return NULL;
+}
+
+/** Find a pending rename by the channel's original name, case-insensitive.
+ * Used at request time to refuse a second concurrent RENAME on a channel
+ * that already has one in flight — without this, two pendings for the
+ * same channel can both complete, and the first completion's
+ * rename_channel() can free the node the second one is about to touch.
+ * @param[in] name Channel name to search for.
+ * @return Pointer to pending request, or NULL if not found.
+ */
+static struct PendingRename *pending_rename_find_by_name(const char *name)
+{
+  struct PendingRename *pr;
+
+  for (pr = pending_renames; pr; pr = pr->next) {
+    if (0 == ircd_strcmp(pr->oldname, name))
       return pr;
   }
 
@@ -258,9 +286,10 @@ static void pending_rename_remove(struct PendingRename *pr)
  */
 void pending_rename_complete(struct PendingRename *pr)
 {
+  struct Channel *chptr;
   int rc;
 
-  if (!pr || !pr->client || !pr->channel)
+  if (!pr || !pr->client)
     return;
 
   log_write(LS_DEBUG, L_DEBUG, 0,
@@ -278,16 +307,24 @@ void pending_rename_complete(struct PendingRename *pr)
     return;
   }
 
-  /* Re-verify the channel still exists and name matches */
-  if (0 != ircd_strcmp(pr->channel->chname, pr->oldname)) {
+  /* Re-resolve the channel by name instead of trusting a cached pointer:
+   * across the round-trip the channel may have been destroyed (last
+   * member parted mid-flight) or, absent the request-time dedup, freed
+   * and reallocated by a same-channel completion that ran first
+   * (rename_channel() MyFree()s the old node when the new name is
+   * longer).  A miss here — channel gone, or since renamed out from
+   * under this name by some other path — is treated as a deny, not a
+   * silent drop, so the requester gets a FAIL instead of nothing. */
+  if (!(chptr = FindChannel(pr->oldname))) {
     log_write(LS_DEBUG, L_WARNING, 0,
-              "pending_rename_complete: channel name changed while waiting");
-    pending_rename_remove(pr);
+              "pending_rename_complete: channel %s no longer exists",
+              pr->oldname);
+    pending_rename_deny(pr, "Channel no longer exists");
     return;
   }
 
-  /* Perform the rename (updates pr->channel if reallocated) */
-  rc = rename_channel(&pr->channel, pr->newname);
+  /* Perform the rename (updates chptr if reallocated) */
+  rc = rename_channel(&chptr, pr->newname);
   if (rc != 0) {
     send_fail(pr->client, "RENAME", "CANNOT_RENAME", pr->oldname,
               "Rename failed");
@@ -296,17 +333,17 @@ void pending_rename_complete(struct PendingRename *pr)
   }
 
   /* Send to local channel members */
-  send_rename_to_members(pr->client, pr->channel, pr->oldname, pr->reason);
+  send_rename_to_members(pr->client, chptr, pr->oldname, pr->reason);
 
   /* Propagate to other servers */
   sendcmdto_serv_butone_v3(pr->client, CMD_RENAME, cli_from(pr->client),
-                        "%s %s :%s", pr->oldname, pr->channel->chname,
+                        "%s %s :%s", pr->oldname, chptr->chname,
                         pr->reason);
 
   /* Legacy services links don't get RN via the v3-only broadcast above;
    * synth it directly so they can keep their channel state in sync. */
   rename_forward_legacy_services(pr->client, NULL, pr->oldname,
-                                 pr->channel->chname, pr->reason);
+                                 chptr->chname, pr->reason);
 
   pending_rename_remove(pr);
 }
@@ -552,14 +589,41 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
 
+    /* Cheap request-time dedup: a second concurrent RENAME on the same
+     * channel would produce two pendings racing the same completion path
+     * (see the PendingRename struct comment) — refuse it up front rather
+     * than relying solely on pending_rename_complete()'s re-resolve to
+     * paper over it. */
+    if (pending_rename_find_by_name(chptr->chname)) {
+      send_fail(sptr, "RENAME", "TEMPORARILY_UNAVAILABLE", oldname,
+                "A rename is already in progress for this channel");
+      return 0;
+    }
+
     if (!(pr = pending_rename_add(sptr, chptr, newname, reason))) {
       send_fail(sptr, "RENAME", "TEMPORARILY_UNAVAILABLE", oldname,
                 "Too many renames in progress");
       return 0;
     }
 
-    sendcmdto_one(&me, CMD_ACCOUNT, services, "%C R %u %s RENAME %s",
-                 sptr, pr->cookie, chptr->chname, newname);
+    {
+      /* Alias source rewrite for the %C target-user argument — sptr may
+       * be a bouncer alias, which a legacy services package (X3's
+       * cmd_account does GetUserN(argv[1]) and silently returns on an
+       * unresolvable numeric) was never told about via BX C.  Unlike
+       * rename_forward_legacy_services()'s rewrite, this is a *data*
+       * argument, not the message's P10 prefix (that stays &me), so
+       * there's no "fake direction" case to preserve the alias numeric
+       * for — always prefer the primary when there is one.  pr->client
+       * stays the alias: the AC A/D reply routes back by cookie, not by
+       * this numeric. */
+      struct Client *acct_user = sptr;
+      if (IsUser(sptr) && IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+        acct_user = cli_alias_primary(sptr);
+
+      sendcmdto_one(&me, CMD_ACCOUNT, services, "%C R %u %s RENAME %s",
+                   acct_user, pr->cookie, chptr->chname, newname);
+    }
     return 0;
   }
 
