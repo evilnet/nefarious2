@@ -333,31 +333,32 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
       if (parc < 3)
         return need_more_params(sptr, "ACCOUNT");
 
-      /* First check if this is a server numeric (LOC reply) */
-      acptr = FindNServer(parv[1]);
-
-      if (!acptr) {
-        /* Not a server numeric - check for rename permission response */
+      /* Rename reply carries the explicit RENAME discriminator (parv[3]);
+       * route by cookie without FindNServer so a decimal cookie can't
+       * alias a server numeric (F2). */
+      if (parc > 3 && !ircd_strcmp(parv[3], "RENAME")) {
         unsigned int cookie = atoi(parv[1]);
         struct PendingRename *pr = pending_rename_find(cookie);
 
         if (pr) {
-          /* Found a pending rename with this cookie */
           if (type == 'A') {
             Debug((DEBUG_DEBUG, "ACCOUNT rename allow cookie=%u", cookie));
             pending_rename_complete(pr);
           } else {
-            /* Deny response: parv[3] contains the reason (trailing param) */
-            const char *reason = (parc > 3) ? parv[3] : "Permission denied";
+            /* Deny response: parv[4] contains the reason (trailing param) */
+            const char *reason = (parc > 4) ? parv[4] : "Permission denied";
             Debug((DEBUG_DEBUG, "ACCOUNT rename deny cookie=%u reason=%s", cookie, reason));
             pending_rename_deny(pr, reason);
           }
-          return 0;
         }
-
-        /* Neither LOC reply nor rename reply - ignore */
         return 0;
       }
+
+      /* First check if this is a server numeric (LOC reply) */
+      acptr = FindNServer(parv[1]);
+
+      if (!acptr)
+        return 0; /* unknown numeric - ignore */
 
       /* LOC reply - need at least 4 params */
       if (parc < 4)
