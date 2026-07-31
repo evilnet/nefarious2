@@ -214,8 +214,10 @@ int server_estab(struct Client *cptr, struct ConfItem *aconf)
   jupe_burst(cptr);
   zline_burst(cptr);
 
-  /* Burst webpush subscriptions to newly linked server */
-  if (feature_bool(FEAT_CAP_draft_webpush))
+  /* Burst webpush subscriptions to newly linked server.  Gate on
+   * IsIRCv3Aware like ML below — legacy peers (X3) error on unknown
+   * tokens, and X3's snoop was echoing every WP B into its log channel. */
+  if (feature_bool(FEAT_CAP_draft_webpush) && IsIRCv3Aware(cptr))
     webpush_burst(cptr);
 
   /* Bouncer sessions are burst AFTER client introduction (below) so that
