@@ -74,6 +74,10 @@ struct PendingRename {
   char reason[TOPICLEN + 1];       /**< Rename reason */
   unsigned int cookie;             /**< Unique identifier for matching response */
   struct Timer timeout;            /**< Timeout timer */
+  int timer_active;                /**< Whether the timer still owns this
+                                         struct's lifetime -- see the
+                                         free-once note on
+                                         pending_rename_timeout_cb() */
   struct PendingRename *next;      /**< Linked list */
 };
 
@@ -208,6 +212,7 @@ static struct PendingRename *pending_rename_add(struct Client *client,
   /* Start timeout timer */
   timer_add(timer_init(&pr->timeout), pending_rename_timeout_cb, (void *)pr,
             TT_RELATIVE, RENAME_TIMEOUT);
+  pr->timer_active = 1;
 
   log_write(LS_DEBUG, L_DEBUG, 0,
             "pending_rename_add: cookie=%u channel=%s newname=%s client=%C",
@@ -252,21 +257,16 @@ static struct PendingRename *pending_rename_find_by_name(const char *name)
   return NULL;
 }
 
-/** Remove a pending rename request from the list.
- * @param[in] pr Pending request to remove.
+/** Unlink a pending rename from the global list.  Does NOT touch the
+ * timer and does NOT free pr -- see the free-once note on
+ * pending_rename_timeout_cb() for why the actual MyFree() is deferred to
+ * that function's ET_DESTROY case.
+ * @param[in] pr Pending request to unlink.
  */
-static void pending_rename_remove(struct PendingRename *pr)
+static void pending_rename_unlink(struct PendingRename *pr)
 {
   struct PendingRename **pp;
 
-  if (!pr)
-    return;
-
-  /* Cancel timeout timer */
-  if (t_active(&pr->timeout))
-    timer_del(&pr->timeout);
-
-  /* Unlink from list */
   for (pp = &pending_renames; *pp; pp = &(*pp)->next) {
     if (*pp == pr) {
       *pp = pr->next;
@@ -274,11 +274,35 @@ static void pending_rename_remove(struct PendingRename *pr)
       break;
     }
   }
+}
+
+/** Remove a pending rename request: unlink it and cancel its timer.
+ *
+ * pr's struct Timer is embedded in pr itself, so pr cannot be freed until
+ * the timer generator is actually torn down.  timer_del() on a timer
+ * that is NOT mid-dispatch synchronously fires ET_DESTROY right here
+ * (see ircd_events.c timer_del()/event_generate()), and
+ * pending_rename_timeout_cb()'s ET_DESTROY case does the MyFree() -- so
+ * by the time this call returns, pr is already gone.  This function is
+ * only ever called from contexts that are NOT inside the timer callback
+ * (pending_rename_complete(), pending_rename_deny()), so timer_active is
+ * always true here; the check is defensive.
+ * @param[in] pr Pending request to remove.
+ */
+static void pending_rename_remove(struct PendingRename *pr)
+{
+  if (!pr)
+    return;
 
   log_write(LS_DEBUG, L_DEBUG, 0,
             "pending_rename_remove: cookie=%u", pr->cookie);
 
-  MyFree(pr);
+  pending_rename_unlink(pr);
+
+  if (pr->timer_active) {
+    pr->timer_active = 0;
+    timer_del(&pr->timeout); /* -> ET_DESTROY -> MyFree(pr), synchronously */
+  }
 }
 
 /** Complete a pending rename (called when services approves).
@@ -387,6 +411,25 @@ void pending_rename_deny(struct PendingRename *pr, const char *reason)
 }
 
 /** Timeout callback for pending rename.
+ *
+ * pr's struct Timer is embedded in pr (see the PendingRename struct
+ * comment), so pr must NOT be freed from the ET_EXPIRE branch below:
+ * timer_run() (ircd_events.c) sets GEN_MARKED on the timer generator
+ * before calling this callback and keeps touching that generator after
+ * we return (clearing GEN_MARKED, then generating ET_DESTROY) -- freeing
+ * pr here would make all of that a use-after-free.  timer_del() called
+ * from within an ET_EXPIRE dispatch hits its own "timer is being used"
+ * guard and does nothing, so it can't be used to neutralize this either.
+ *
+ * Instead: ET_EXPIRE does the user-facing work and unlinks pr from the
+ * list (so it can't be found or double-completed), but leaves the
+ * actual free to the ET_DESTROY case, which fires either automatically
+ * right after ET_EXPIRE returns (the timeout path) or synchronously
+ * from pending_rename_remove()'s timer_del() call (the complete/deny/
+ * client-exit paths).  MyFree(pr) happens in exactly one place -- the
+ * ET_DESTROY case below -- so there is exactly one free per pending
+ * rename no matter which of the five teardown paths (complete-success,
+ * complete-failure, deny, timeout, client-exit) retires it.
  * @param[in] ev Timer event.
  */
 static void pending_rename_timeout_cb(struct Event *ev)
@@ -396,9 +439,10 @@ static void pending_rename_timeout_cb(struct Event *ev)
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
 
-  if (ev_type(ev) == ET_EXPIRE) {
-    pr = (struct PendingRename *)t_data(ev_timer(ev));
+  pr = (struct PendingRename *)t_data(ev_timer(ev));
 
+  switch (ev_type(ev)) {
+  case ET_EXPIRE:
     log_write(LS_DEBUG, L_DEBUG, 0,
               "pending_rename_timeout: cookie=%u channel=%s",
               pr->cookie, pr->oldname);
@@ -406,9 +450,20 @@ static void pending_rename_timeout_cb(struct Event *ev)
     send_fail(pr->client, "RENAME", "CANNOT_RENAME", pr->oldname,
               "Services response timeout");
 
-    /* Timer already fired, mark inactive before remove */
-    timer_del(&pr->timeout);
-    pending_rename_remove(pr);
+    /* Do NOT call timer_del() (a no-op while mid-dispatch, see above)
+     * and do NOT MyFree(pr) here -- just make pr unreachable until
+     * ET_DESTROY frees it below. */
+    pending_rename_unlink(pr);
+    pr->timer_active = 0;
+    break;
+
+  case ET_DESTROY:
+    /* The only place pr is freed -- see the function comment above. */
+    MyFree(pr);
+    break;
+
+  default:
+    break;
   }
 }
 
@@ -418,23 +473,25 @@ static void pending_rename_timeout_cb(struct Event *ev)
 void pending_rename_client_exit(struct Client *cptr)
 {
   struct PendingRename *pr, *next;
-  struct PendingRename **pp;
 
-  pp = &pending_renames;
-  while (*pp) {
-    pr = *pp;
+  /* Cache pr->next before unlinking/triggering the free below -- pr may
+   * already be gone (freed via the synchronous ET_DESTROY that
+   * timer_del() triggers) by the time a naive iteration would otherwise
+   * need to read pr->next. */
+  for (pr = pending_renames; pr; pr = next) {
+    next = pr->next;
+
     if (pr->client == cptr) {
-      /* Cancel timeout and remove */
-      if (t_active(&pr->timeout))
-        timer_del(&pr->timeout);
-      *pp = pr->next;
-      pending_rename_count--;
       log_write(LS_DEBUG, L_DEBUG, 0,
                 "pending_rename_client_exit: removed cookie=%u for %C",
                 pr->cookie, cptr);
-      MyFree(pr);
-    } else {
-      pp = &(*pp)->next;
+
+      pending_rename_unlink(pr);
+
+      if (pr->timer_active) {
+        pr->timer_active = 0;
+        timer_del(&pr->timeout); /* -> ET_DESTROY -> MyFree(pr) */
+      }
     }
   }
 }
