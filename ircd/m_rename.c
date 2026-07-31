@@ -132,11 +132,32 @@ static void rename_forward_legacy_services(struct Client *sptr, struct Client *s
   struct DLink *dlp;
 
   for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
+    struct Client *from = sptr;
+
     if (dlp->value.cptr == skip)
       continue;
-    if (!IsIRCv3Aware(dlp->value.cptr) && IsService(dlp->value.cptr))
-      sendcmdto_one(sptr, CMD_RENAME, dlp->value.cptr, "%s %s :%s",
-                    oldname, newname, reason);
+    if (!(!IsIRCv3Aware(dlp->value.cptr) && IsService(dlp->value.cptr)))
+      continue;
+
+    /* Alias source rewrite — a legacy service was never told about the
+     * alias via BX C, so it's an unknown source to it; emit from the
+     * primary instead.  sendcmdto_serv_butone_v3() (the v3 broadcast one
+     * line up in every caller) already does this rewrite internally, but
+     * sendcmdto_one() does not, so it has to happen here.  Mirrors the
+     * rewrite in ircd_relay.c (~999-1004): keep the alias numeric only
+     * when the primary's own wire direction IS this destination, since
+     * sending toward the primary's own uplink as the primary would be a
+     * fake direction.  sptr can be a server in principle (defensive only
+     * — RENAME's source is always a user in practice), so gate on
+     * IsUser() before the client-only alias macros. */
+    if (IsUser(sptr) && IsBouncerAlias(sptr) && cli_alias_primary(sptr)) {
+      from = cli_alias_primary(sptr);
+      if (!MyUser(from) && cli_from(from) == dlp->value.cptr)
+        from = sptr;
+    }
+
+    sendcmdto_one(from, CMD_RENAME, dlp->value.cptr, "%s %s :%s",
+                  oldname, newname, reason);
   }
 }
 
@@ -245,6 +266,17 @@ void pending_rename_complete(struct PendingRename *pr)
   log_write(LS_DEBUG, L_DEBUG, 0,
             "pending_rename_complete: cookie=%u oldname=%s newname=%s",
             pr->cookie, pr->oldname, pr->newname);
+
+  /* Re-check for a legacy blocker: a non-v3-aware, non-service server can
+   * link during the up-to-RENAME_TIMEOUT-second AC round-trip, after
+   * m_rename's request-time check already passed.  Nothing has been
+   * applied anywhere on the network yet at this point (the rename below
+   * is the first mutation), so deny rather than complete — that's the
+   * conservative move that keeps every server consistent. */
+  if (rename_legacy_blocker()) {
+    pending_rename_deny(pr, "A linked server does not support channel rename");
+    return;
+  }
 
   /* Re-verify the channel still exists and name matches */
   if (0 != ircd_strcmp(pr->channel->chname, pr->oldname)) {
