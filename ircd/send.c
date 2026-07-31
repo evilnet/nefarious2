@@ -3762,14 +3762,14 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
     tagbuf[pos] = '\0';
 
     if (context && *context)
-      mb = msgq_make(to, "%s%s %s %s %s :%s", tagbuf, type, command, code, context, description);
+      mb = msgq_make(to, "%s%:#C %s %s %s %s :%s", tagbuf, &me, type, command, code, context, description);
     else
-      mb = msgq_make(to, "%s%s %s %s :%s", tagbuf, type, command, code, description);
+      mb = msgq_make(to, "%s%:#C %s %s %s :%s", tagbuf, &me, type, command, code, description);
   } else {
     if (context && *context)
-      mb = msgq_make(to, "%s %s %s %s :%s", type, command, code, context, description);
+      mb = msgq_make(to, "%:#C %s %s %s %s :%s", &me, type, command, code, context, description);
     else
-      mb = msgq_make(to, "%s %s %s :%s", type, command, code, description);
+      mb = msgq_make(to, "%:#C %s %s %s :%s", &me, type, command, code, description);
   }
 
   send_buffer(to, mb, 0);
