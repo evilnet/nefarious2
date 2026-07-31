@@ -62,6 +62,7 @@ static struct capabilities {
   _CAP(AWAYNOTIFY, 0, "away-notify", FEAT_CAP_away_notify),
   _CAP(ACCNOTIFY, 0, "account-notify", FEAT_CAP_account_notify),
   _CAP(SASL, 0, "sasl", FEAT_CAP_sasl),
+  _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", FEAT_CAP_draft_channel_rename),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
 #endif
