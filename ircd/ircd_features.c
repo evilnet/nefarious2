@@ -1213,13 +1213,6 @@ static struct FeatureDesc {
    * (see the protocol-history comment in m_rename.c) should have this
    * enabled. */
   F_B(RENAME_SERVICES, 0, 0, 0),
-  /* While services mark registered channels via the persist exmode
-   * (wire letter 'z', X3's historical mapping) rather than 'R', mirror a
-   * services/burst-sourced ±z onto MODE_REGISTERED so registration-gated
-   * machinery (rename arbitration, chathistory store-registered, metadata
-   * persistence) engages.  Turning this OFF is the Phase-3 switch of the
-   * registered-mode z->R transition plan. */
-  F_B(REGISTERED_FROM_PERSIST, 0, 1, 0),
   F_B(CAP_draft_read_marker, 0, 0, feature_notify_cap_draft_read_marker),
   F_B(CAP_draft_channel_rename, 0, 0, feature_notify_cap_draft_channel_rename),
   F_B(CAP_draft_metadata_2, 0, 0, feature_notify_cap_draft_metadata_2),

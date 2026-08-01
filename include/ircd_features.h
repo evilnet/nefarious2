@@ -365,7 +365,6 @@ enum Feature {
   FEAT_CAP_draft_account_registration,
   FEAT_REGISTER_SERVER,
   FEAT_RENAME_SERVICES,
-  FEAT_REGISTERED_FROM_PERSIST,
   FEAT_CAP_draft_read_marker,
   FEAT_CAP_draft_channel_rename,
   FEAT_CAP_draft_metadata_2,
