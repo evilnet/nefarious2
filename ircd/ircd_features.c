@@ -802,6 +802,13 @@ static struct FeatureDesc {
    * (see the protocol-history comment in m_rename.c) should have this
    * enabled. */
   F_B(RENAME_SERVICES, 0, 0, 0),
+  /* While services mark registered channels via the persist exmode
+   * (wire letter 'z', X3's historical mapping) rather than 'R', mirror a
+   * services/burst-sourced ±z onto MODE_REGISTERED so the RENAME
+   * services-arbitration gate (m_rename.c) is reachable.  Turning this
+   * OFF is the Phase-3 switch of the registered-mode z->R transition
+   * plan. */
+  F_B(REGISTERED_FROM_PERSIST, 0, 1, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

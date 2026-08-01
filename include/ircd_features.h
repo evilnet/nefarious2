@@ -315,6 +315,7 @@ enum Feature {
   FEAT_CAP_sasl,
   FEAT_CAP_draft_channel_rename,
   FEAT_RENAME_SERVICES,
+  FEAT_REGISTERED_FROM_PERSIST,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif
