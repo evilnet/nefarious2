@@ -5248,6 +5248,26 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     t_exmode |= state.exadd;
   }
 
+  /* Registered-mode mirror ('z' -> R): while services mark registered
+   * channels with the persist exmode (wire letter 'z') rather than 'R',
+   * derive MODE_REGISTERED from the persist transition so registration-
+   * gated machinery (rename arbitration, chathistory store-registered,
+   * metadata persistence) engages.  Internal only: the modebuf emissions
+   * above were built from state.add/state.exadd before this point, so no
+   * 'R' is relayed for a mirrored flip -- the wire stays 'z'-driven (the
+   * bit still renders as 'R' in bursts and mode queries, an accepted
+   * marker on every nefarious2 lineage).  The 'z' setter gate in
+   * mode_parse restricts sources to burst/services, so the mirror
+   * inherits that authority; the ±R metadata hook below fires off the
+   * mirrored bit exactly as off an explicit ±R.  See the registered-mode
+   * z->R transition plan; disabling the feature is its Phase-3 switch. */
+  if (feature_bool(FEAT_REGISTERED_FROM_PERSIST)) {
+    if (state.exadd & EXMODE_PERSIST)
+      t_mode |= MODE_REGISTERED;
+    else if (state.exdel & EXMODE_PERSIST)
+      t_mode &= ~MODE_REGISTERED;
+  }
+
   if (state.flags & MODE_PARSE_SET) { /* set the channel modes */
     /* B3: capture the MODE_REGISTERED bit BEFORE the flush so the ±R
      * metadata hook fires only on an ACTUAL change (re-applying +R to an
