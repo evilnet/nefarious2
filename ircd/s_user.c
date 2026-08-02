@@ -2300,6 +2300,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         else
           ClearNoLink(acptr);
         break;
+      case 'F':
+        /* evilnet/channel-relocate: advance consent to be moved by any
+         * channel relocation; see docs/specs/channel-relocate.md in the
+         * testnet repo. Freely user-settable, like +L/+M. */
+        if (what == MODE_ADD)
+          SetRelocateFollow(acptr);
+        else
+          ClearRelocateFollow(acptr);
+        break;
       case 'M':
         if (what == MODE_ADD)
           SetFlag(acptr, FLAG_MULTILINE_EXPAND);
