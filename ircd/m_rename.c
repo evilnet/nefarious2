@@ -858,18 +858,73 @@ static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
   struct Membership *member;
   unsigned int nswept = 0;
 
-  /* The record can outlive its channel's identity: services DESTRUCT, an
-   * operator MODE -z, or a chanop stripping +L all break the tombstone
+  /* The record can outlive its channel's identity: services DESTRUCT, a
+   * services MODE -z, or a chanop stripping +L all break the tombstone
    * without going through relocate_tombstone_channel_gone(), and an
    * unrelated channel can then be created on the same name well inside the
    * grace period.  relocate_tombstone_channel() rejects all of those.  The
    * caller has ALREADY unlinked ts and disowned the timer, so returning
    * here cancels the record cleanly rather than leaving an unresolvable
-   * record with a fired timer behind it. */
+   * record with a fired timer behind it.
+   *
+   * But cancelling the record is not enough on its own, because the most
+   * likely way to get here is ONE unprivileged command.  `MODE #old -L` has
+   * no privilege gate beyond ordinary chanop (channel.c:5021-5023 dispatches
+   * straight into mode_parse_redir()), and it clears MODE_REDIRECT and
+   * mode.redir -- failing the identity check while leaving EXMODE_PERSIST
+   * set.  And EXMODE_PERSIST is exactly the bit no ordinary user can undo:
+   * channel.c:5094-5097 ignores 'z' unless the source is a service or comes
+   * from a service's server.  So a chanop typing -L on a tombstone would
+   * strand a channel that no member count can ever collect -- a permanent
+   * leak, reachable on purpose.
+   *
+   * So reclaim the bit.  This is not overreach: EXMODE_PERSIST was set
+   * unilaterally by relocate_execute() on the struct and deliberately never
+   * put on the wire, precisely so relocation would not depend on services
+   * agreeing to persist the channel -- and this engine is the only thing
+   * that sets it for a channel services never asked to persist.  Handing it
+   * back is symmetric with having taken it.
+   *
+   * What is NOT done here is the sweep: a channel that failed
+   * authentication may be an unrelated channel wearing the old name, and
+   * parting its members would be exactly the wrong-channel damage the
+   * identity check exists to prevent.  Members of a de-tombstoned channel
+   * simply stay where they are -- which is why the reclaim is reported to
+   * operators rather than only to the debug log. */
   if (!(chptr = relocate_tombstone_channel(ts))) {
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "relocate_tombstone_sweep: %s -> %s no longer resolves to a "
-              "tombstone; record cancelled", ts->oldname, ts->newname);
+    struct Channel *stray = FindChannel(ts->oldname);
+
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "relocate: tombstone %s -> %s no longer authenticates at grace "
+              "expiry (%s); record cancelled without sweeping",
+              ts->oldname, ts->newname,
+              !stray ? "channel is gone"
+                : !(stray->mode.exmode & EXMODE_PERSIST) ? "+z was cleared"
+                : !(stray->mode.mode & MODE_REDIRECT) ? "+L was cleared"
+                : "redirect was retargeted");
+
+    if (stray && (stray->mode.exmode & EXMODE_PERSIST)) {
+      stray->mode.exmode &= ~EXMODE_PERSIST;
+
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "Relocation tombstone %s (-> %s) lost its redirect "
+                           "before its grace period expired; the internal "
+                           "persist flag has been reclaimed so the channel can "
+                           "be collected normally.  %u member%s left in place "
+                           "-- they were NOT parted, because the channel no "
+                           "longer authenticates as this tombstone.",
+                           ts->oldname, ts->newname, stray->users,
+                           (stray->users == 1) ? "" : "s");
+
+      /* Same reason the sweep proper needs this (see the tail of this
+       * function): every removal that happened while the bit was set took
+       * sub1_from_channel()'s persist early return, so an already-empty
+       * channel has nothing scheduled for it.  Mirrors what MODE -z itself
+       * does for an empty channel (channel.c:5099-5100).  May free stray. */
+      if (!stray->members)
+        sub1_from_channel(stray);
+    }
+
     return;
   }
 
@@ -1026,16 +1081,25 @@ static void relocate_tombstone_expire_cb(struct Event *ev)
 
   switch (ev_type(ev)) {
   case ET_EXPIRE:
-    /* Unlink and disown the timer BEFORE the sweep, not after.  The sweep
-     * ends in destruct_channel(), which calls
-     * relocate_tombstone_channel_gone(), which walks this very list -- with
-     * ts still on it that hook would match our own record and call
-     * relocate_tombstone_remove() on a timer that is mid-dispatch, where
-     * timer_del() returns early (GEN_MARKED) without the ET_DESTROY that is
-     * supposed to free it.  Unlinking first makes the record unfindable;
-     * ts itself stays valid because only ET_DESTROY, below, frees it.
+    /* Unlink and disown the timer BEFORE the sweep, not after.
      *
-     * Do NOT call timer_del() here for the same reason. */
+     * Defensive, not load-bearing, and the distinction is written down here
+     * so nobody reverts it after checking timer_run(): the sweep ends in
+     * destruct_channel(), which calls relocate_tombstone_channel_gone(),
+     * which walks this very list.  With ts still linked, that hook would
+     * match our own record and reach timer_del() on a mid-dispatch timer,
+     * where it returns early on GEN_MARKED (ircd_events.c:513-521) without
+     * generating ET_DESTROY.  That does NOT leak -- timer_run() generates
+     * ET_DESTROY for a TT_ABSOLUTE timer unconditionally once the callback
+     * returns, so ts is freed either way.  What it would do is let a record
+     * that is already being retired be "retired" a second time from inside
+     * its own callback, with timer_active cleared by a path that did not
+     * actually cancel anything.  Unlinking first makes the record simply
+     * unfindable for the duration of the sweep, which is cheaper to reason
+     * about than that interleaving.
+     *
+     * Do NOT call timer_del() here: that one IS a correctness rule, and it
+     * is the PendingRename discipline this callback inherits. */
     relocate_tombstone_unlink(ts);
     ts->timer_active = 0;
 
