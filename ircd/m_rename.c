@@ -90,6 +90,38 @@ static unsigned int rename_cookie_counter = 1;
 static void pending_rename_timeout_cb(struct Event *ev);
 static void send_rename_to_members(struct Client *sptr, struct Channel *chptr,
                                    const char *oldname, const char *reason);
+static void send_rename_to_member(struct Client *sptr, struct Client *acptr,
+                                  struct Channel *chptr, const char *oldname,
+                                  const char *reason);
+
+/* Relocation mode (evilnet/channel-relocate) -- implementation lives in the
+ * "Relocation" section below; declared here because the pending-rename
+ * completion path above it dispatches into relocation mode too. */
+struct RelocateTombstone;
+static int rename_is_consent(void);
+static int relocate_execute(struct Client *sptr, struct Channel *chptr,
+                            const char *oldname, const char *newname,
+                            const char *reason);
+static struct RelocateTombstone *relocate_tombstone_find(const char *name);
+
+/** Wire marker distinguishing a relocation-mode RN from a classic one,
+ * as the parameter immediately before the trailing reason:
+ *
+ *     classic:     RN <old> <new> :<reason>
+ *     relocation:  RN <old> <new> C :<reason>
+ *
+ * NORMATIVE for every emitter (including X3): the trailing reason
+ * parameter MUST be present -- emit ":" with an empty reason rather than
+ * dropping it.  ms_rename() only honours the marker in the five-parameter
+ * shape, because a four-parameter "RN <old> <new> :C" is a classic rename
+ * whose reason happens to be the letter C and must not be mistaken for a
+ * relocation.  Honouring a marker in the shorter shape would turn that
+ * message into a partition on some servers and a force-move on others --
+ * i.e. permanent membership divergence -- which is strictly worse than
+ * losing the marker on a malformed emission. */
+#define RELOCATE_MARKER "C"
+/** RELOCATE_MARKER as a rename_forward_rcapable()/sendcmdto splice. */
+#define RELOCATE_MARKER_SP RELOCATE_MARKER " "
 
 /** Find the services server.
  * @return Pointer to services server, or NULL if not connected.
@@ -395,6 +427,36 @@ void pending_rename_complete(struct PendingRename *pr)
     }
   }
 
+  /* The channel can also have BECOME a tombstone during the round-trip
+   * (some other channel relocated onto this name).  Same refusal as the
+   * request-time check in m_rename(). */
+  if (rename_is_consent() && relocate_tombstone_find(pr->oldname)) {
+    pending_rename_deny(pr, "Channel is a relocation tombstone");
+    return;
+  }
+
+  /* Relocation mode: partition instead of force-moving, and mark the RN.
+   * chptr keeps its old name here, so the propagated new name comes from
+   * pr->newname rather than chptr->chname. */
+  if (rename_is_consent()) {
+    if (relocate_execute(pr->client, chptr, pr->oldname, pr->newname,
+                         pr->reason) != 0) {
+      send_fail(pr->client, "RENAME", "CANNOT_RENAME", pr->oldname,
+                "Rename failed");
+      pending_rename_remove(pr);
+      return;
+    }
+
+    sendcmdto_serv_butone_v3(pr->client, CMD_RENAME, cli_from(pr->client),
+                             "%s %s %s:%s", pr->oldname, pr->newname,
+                             RELOCATE_MARKER, pr->reason);
+    rename_forward_rcapable(pr->client, NULL, pr->oldname, pr->newname,
+                            RELOCATE_MARKER_SP, pr->reason);
+
+    pending_rename_remove(pr);
+    return;
+  }
+
   /* Perform the rename (updates chptr if reallocated) */
   rc = rename_channel(&chptr, pr->newname);
   if (rc != 0) {
@@ -591,6 +653,497 @@ static void send_rename_to_members(struct Client *sptr, struct Channel *chptr,
   }
 }
 
+/* ========== Relocation (evilnet/channel-relocate) ========== */
+
+/** Is this server running relocation mode?
+ *
+ * Relocation mode replaces the rename's unconditional member move with
+ * consent: only the issuer and users carrying umode +F are moved, everyone
+ * else stays behind in a tombstoned old channel and is invited to follow.
+ * See docs/specs/channel-relocate.md.
+ *
+ * This gates the ORIGIN decision only.  A server that receives an RN
+ * already carrying the C marker applies relocation semantics regardless of
+ * its own setting -- the alternative is for one server to force-move a
+ * member that its neighbours left behind, which is unrecoverable membership
+ * divergence.  (The spec forbids mixing the two modes on one network; this
+ * is the belt-and-braces for a misconfigured link.)
+ * @return non-zero when relocation mode is active.
+ */
+static int rename_is_consent(void)
+{
+  return feature_bool(FEAT_RENAME_CONSENT);
+}
+
+/** Per-member status snapshot for grace-period rejoins.  Task 4 defines it;
+ * the tombstone only carries the list head so its layout is fixed now. */
+struct RelocateSnap;
+
+/** A tombstoned old channel, alive for FEAT_RELOCATE_GRACE seconds after a
+ * relocation-mode rename.
+ *
+ * Like struct PendingRename above, this deliberately does NOT trust its
+ * struct Channel * across time: the tombstone carries EXMODE_PERSIST so the
+ * ordinary empty-channel destruct can't free it, but services DESTRUCT
+ * (m_destruct.c) still can.  @a oldname is the authority and @a oldchan is
+ * a cache -- resolve through relocate_tombstone_channel(), never by reading
+ * the field directly. */
+struct RelocateTombstone {
+  struct RelocateTombstone *next;   /**< Linked list */
+  struct Channel *oldchan;          /**< CACHE ONLY -- see struct comment */
+  char oldname[CHANNELLEN + 1];     /**< The tombstone's own (stable) name */
+  char newname[CHANNELLEN + 1];     /**< Redirect target, chain-flattened */
+  time_t expires;                   /**< When the grace period elapses */
+  struct Timer timer;               /**< Embedded -- freed only on ET_DESTROY,
+                                         mirroring the PendingRename timer
+                                         discipline documented above */
+  int timer_active;                 /**< Whether the timer still owns this
+                                         struct's lifetime */
+  struct RelocateSnap *snaps;       /**< Task 4: member status snapshots */
+};
+
+/** Global tombstone list. */
+static struct RelocateTombstone *relocate_tombstones = NULL;
+
+static void relocate_tombstone_expire_cb(struct Event *ev);
+
+/** Find a live tombstone by its (old) channel name, case-insensitively.
+ * @param[in] name Channel name to look up.
+ * @return Tombstone, or NULL if @a name is not a tombstone.
+ */
+static struct RelocateTombstone *relocate_tombstone_find(const char *name)
+{
+  struct RelocateTombstone *ts;
+
+  if (EmptyString(name))
+    return NULL;
+
+  for (ts = relocate_tombstones; ts; ts = ts->next)
+    if (0 == ircd_strcmp(ts->oldname, name))
+      return ts;
+
+  return NULL;
+}
+
+/** Resolve a tombstone's channel, refreshing the cached pointer.
+ * @param[in] ts Tombstone to resolve.
+ * @return The channel, or NULL if it no longer exists.
+ */
+static struct Channel *relocate_tombstone_channel(struct RelocateTombstone *ts)
+{
+  if (!ts)
+    return NULL;
+
+  ts->oldchan = FindChannel(ts->oldname);
+  return ts->oldchan;
+}
+
+/** Unlink a tombstone from the global list.  Does NOT touch the timer and
+ * does NOT free @a ts -- the free happens exactly once, in the ET_DESTROY
+ * case of relocate_tombstone_expire_cb().
+ * @param[in] ts Tombstone to unlink.
+ */
+static void relocate_tombstone_unlink(struct RelocateTombstone *ts)
+{
+  struct RelocateTombstone **pp;
+
+  for (pp = &relocate_tombstones; *pp; pp = &(*pp)->next) {
+    if (*pp == ts) {
+      *pp = ts->next;
+      break;
+    }
+  }
+}
+
+/** Timer callback for a tombstone's grace period.
+ *
+ * ts's struct Timer is embedded in ts, so the same free-once discipline as
+ * pending_rename_timeout_cb() applies verbatim: timer_run() keeps touching
+ * the generator after ET_EXPIRE returns, so ET_EXPIRE may only make ts
+ * unreachable (unlink + clear timer_active) and ET_DESTROY -- which fires
+ * automatically right after ET_EXPIRE, or synchronously from a future
+ * timer_del() -- is the single place ts is freed.
+ *
+ * TASK 3 fills in the expiry sweep (server-generated PARTs for the
+ * remaining members, -L, channel dissolve, do-not-register window) at the
+ * marked point in the ET_EXPIRE branch.  Nothing outside this callback body
+ * needs to change for that.
+ * @param[in] ev Timer event.
+ */
+static void relocate_tombstone_expire_cb(struct Event *ev)
+{
+  struct RelocateTombstone *ts;
+
+  assert(0 != ev_timer(ev));
+  assert(0 != t_data(ev_timer(ev)));
+
+  ts = (struct RelocateTombstone *)t_data(ev_timer(ev));
+
+  switch (ev_type(ev)) {
+  case ET_EXPIRE:
+    /* ---- TASK 3: expiry sweep goes here ---- */
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "relocate_tombstone_expire: %s -> %s (grace elapsed; sweep is "
+              "not implemented yet, tombstone left in place)",
+              ts->oldname, ts->newname);
+
+    /* Not optional even while the sweep is a stub: ET_DESTROY frees ts
+     * immediately after this returns, so leaving it linked would leave a
+     * dangling entry in relocate_tombstones. */
+    relocate_tombstone_unlink(ts);
+    ts->timer_active = 0;
+    break;
+
+  case ET_DESTROY:
+    /* The only place ts is freed -- see the function comment above. */
+    MyFree(ts);
+    break;
+
+  default:
+    break;
+  }
+}
+
+/** Register a tombstone for @a chptr and arm its grace timer.
+ * @param[in] chptr Channel being tombstoned (keeps its own name).
+ * @param[in] newname Redirect target.
+ * @return The new tombstone, or NULL on allocation failure.
+ */
+static struct RelocateTombstone *
+relocate_tombstone_add(struct Channel *chptr, const char *newname)
+{
+  struct RelocateTombstone *ts;
+
+  /* Re-tombstoning a channel that is already one: the origin server
+   * refuses it (see m_rename()), so this only happens on a diverged link
+   * whose RN C we are obliged to follow.  Repoint the existing record
+   * rather than stacking a second one -- two records for one name means
+   * two grace timers, and the second ET_EXPIRE would sweep a channel the
+   * first one already dissolved.  The original grace clock is kept: the
+   * channel has been dying since the first relocation. */
+  if ((ts = relocate_tombstone_find(chptr->chname))) {
+    ircd_strncpy(ts->newname, newname, sizeof(ts->newname));
+    ts->oldchan = chptr;
+    return ts;
+  }
+
+  ts = (struct RelocateTombstone *)MyMalloc(sizeof(struct RelocateTombstone));
+  if (!ts)
+    return NULL;
+
+  memset(ts, 0, sizeof(*ts));
+  ts->oldchan = chptr;
+  ircd_strncpy(ts->oldname, chptr->chname, sizeof(ts->oldname));
+  ircd_strncpy(ts->newname, newname, sizeof(ts->newname));
+  ts->expires = CurrentTime + feature_int(FEAT_RELOCATE_GRACE);
+
+  ts->next = relocate_tombstones;
+  relocate_tombstones = ts;
+
+  timer_add(timer_init(&ts->timer), relocate_tombstone_expire_cb, (void *)ts,
+            TT_ABSOLUTE, ts->expires);
+  ts->timer_active = 1;
+
+  log_write(LS_DEBUG, L_DEBUG, 0,
+            "relocate_tombstone_add: %s -> %s expires=%Tu",
+            ts->oldname, ts->newname, ts->expires);
+
+  return ts;
+}
+
+/** Announce a tombstone's (possibly updated) redirect to its remaining
+ * LOCAL members.
+ *
+ * Deliberately channel-only, never MODEBUF_DEST_SERVER: every server runs
+ * relocate_execute() off the same RN C marker and announces to its own
+ * local members, so a server leg here would be a duplicate MODE racing the
+ * RN itself.  Source is &me (modebuf_flush_int() maps that to &his under
+ * FEAT_HIS_MODEWHO, matching the spec's server-sourced presentation).
+ * @param[in] chptr Tombstone channel; its mode.redir is already set.
+ */
+static void relocate_announce_redirect(struct Channel *chptr)
+{
+  struct ModeBuf mbuf;
+
+  modebuf_init(&mbuf, &me, NULL, chptr, MODEBUF_DEST_CHANNEL);
+  modebuf_mode_string(&mbuf, MODE_ADD | MODE_REDIRECT, chptr->mode.redir, 0);
+  modebuf_flush(&mbuf);
+}
+
+/** Chain-flattening: a rename of a channel that is itself some tombstone's
+ * redirect target repoints that tombstone at the newest name, so a join of
+ * the oldest name never needs multi-hop resolution (spec, "Multiple
+ * renames").
+ * @param[in] oldtarget Name that just stopped being a valid target.
+ * @param[in] newtarget Name it became.
+ */
+static void relocate_tombstone_retarget(const char *oldtarget,
+                                        const char *newtarget)
+{
+  struct RelocateTombstone *ts;
+
+  for (ts = relocate_tombstones; ts; ts = ts->next) {
+    struct Channel *chptr;
+
+    if (0 != ircd_strcmp(ts->newname, oldtarget))
+      continue;
+
+    ircd_strncpy(ts->newname, newtarget, sizeof(ts->newname));
+
+    if (!(chptr = relocate_tombstone_channel(ts)))
+      continue;
+
+    ircd_strncpy(chptr->mode.redir, ts->newname, sizeof(chptr->mode.redir));
+    chptr->mode.mode |= MODE_REDIRECT;
+    relocate_announce_redirect(chptr);
+
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "relocate_tombstone_retarget: %s now redirects to %s",
+              ts->oldname, ts->newname);
+  }
+}
+
+/** Deep-copy a ban list onto the tail of @a dst.
+ *
+ * The tombstone keeps its own bans (it stays a real, joinable-by-redirect
+ * channel for the whole grace period), so the lists are COPIED rather than
+ * spliced across.  make_ban() re-derives everything set_ban_mask() can see
+ * from the mask itself (BAN_EXTENDED/BAN_IPMASK, address, addrbits,
+ * nu_len, extban); only the setter, timestamp and the exception marker have
+ * to be carried over by hand.  Transient parse-time bits (BAN_ADD/BAN_DEL/
+ * BAN_OVERLAPPED/BAN_BURSTED) are intentionally NOT copied.
+ * @param[in,out] dst Head pointer of the destination list (must be empty).
+ * @param[in] src Source list.
+ */
+static void relocate_copy_bans(struct Ban **dst, struct Ban *src)
+{
+  struct Ban *b;
+  struct Ban **tail = dst;
+
+  for (b = src; b; b = b->next) {
+    struct Ban *nb = make_ban(b->banstr);
+
+    if (!nb)
+      return;
+
+    nb->when = b->when;
+    nb->flags |= (b->flags & BAN_EXCEPTION);
+    ircd_strncpy(nb->who, b->who, sizeof(nb->who));
+    nb->next = NULL;
+
+    *tail = nb;
+    tail = &nb->next;
+  }
+}
+
+/** One member scheduled to move, snapshotted before any membership
+ * mutation happens (see relocate_execute()'s two-pass note). */
+struct RelocateMover {
+  struct Client *user;    /**< The moving client */
+  unsigned int status;    /**< Status bits to carry to the new channel */
+  int oplevel;            /**< Oplevel to carry to the new channel */
+};
+
+/** Execute a relocation-mode rename on THIS server.
+ *
+ * Creates @a newname, transfers channel state to it, moves only the
+ * consenting members (the issuer and umode +F users), notifies the local
+ * members of both classes, and turns @a chptr into a redirecting tombstone.
+ * Every server on the network runs this same function off the RN C marker
+ * with the same globally-known @a sptr, so the partition is identical
+ * everywhere; consequently nothing here emits network-wide per member.  In
+ * particular the movers are moved with add_user_to_channel() /
+ * remove_user_from_channel() rather than the joinbuf machinery precisely
+ * because joinbuf broadcasts, and the RN C marker already implies the move
+ * network-wide (same contract as a classic rename).
+ *
+ * @a chptr is NOT freed and NOT renamed -- it survives as the tombstone.
+ *
+ * @param[in] sptr Issuer of the rename.  May be a server when services
+ *                 drove the rename: no membership can match a server, so
+ *                 the issuer class is then simply empty and only +F members
+ *                 move.  That is intentional -- a services-driven rename has
+ *                 no user whose action counts as consent.
+ * @param[in] chptr Channel being relocated (keeps its name).
+ * @param[in] oldname @a chptr's name, snapshotted by the caller.
+ * @param[in] newname Name to relocate to.
+ * @param[in] reason Reason (may be empty string).
+ * @return 0 on success, -1 on bad/oversized name or allocation failure,
+ *         -2 if @a newname is already in use.
+ */
+static int relocate_execute(struct Client *sptr, struct Channel *chptr,
+                            const char *oldname, const char *newname,
+                            const char *reason)
+{
+  struct Channel *newchan;
+  struct Membership *member;
+  struct RelocateMover *movers;
+  char newname_buf[CHANNELLEN + 1];
+  int nmembers = 0;
+  int nmovers = 0;
+  int i;
+
+  if (!sptr || !chptr || EmptyString(newname))
+    return -1;
+  if (strlen(newname) > CHANNELLEN)
+    return -1;
+  if (FindChannel(newname))
+    return -2;
+
+  if (!reason)
+    reason = "";
+
+  ircd_strncpy(newname_buf, newname, sizeof(newname_buf));
+
+  /* Upper-bound the mover array by the membership list length (which can
+   * exceed chptr->users: aliases and zombies are on the list too).  Do it
+   * before any mutation so an allocation failure leaves the channel
+   * untouched. */
+  for (member = chptr->members; member; member = member->next_member)
+    nmembers++;
+
+  movers = (struct RelocateMover *)
+           MyMalloc(sizeof(struct RelocateMover) * (nmembers + 1));
+  if (!movers)
+    return -1;
+
+  newchan = get_channel(sptr, newname_buf, CGT_CREATE);
+  if (!newchan) {
+    MyFree(movers);
+    return -1;
+  }
+
+  /* ---- 1. Channel STATE transfer ----
+   * A classic rename carries state along implicitly: rename_channel()
+   * keeps (or memcpy()s) the whole struct Channel and only swaps the name.
+   * Relocation needs two live channels, so the same set of fields is
+   * copied explicitly here.  struct Mode covers mode/exmode/limit/key/
+   * upass/apass/redir in one assignment -- which is also how registration
+   * (MODE_REGISTERED) and oplevel ownership (apass/upass) follow the
+   * community to the new name.  Memberships are deliberately excluded:
+   * they are the whole point of this function's second half.
+   *
+   * NOT transferred: chptr->metadata (draft/metadata-2).  Channel metadata
+   * is persisted keyed by channel name; splitting it is a Task-4-or-later
+   * decision and moving the in-memory pointer here would leave the live
+   * tombstone with none.  Recorded rather than silently skipped. */
+  newchan->mode = chptr->mode;
+  newchan->creationtime = chptr->creationtime;
+  newchan->topic_time = chptr->topic_time;
+  ircd_strncpy(newchan->topic, chptr->topic, sizeof(newchan->topic));
+  ircd_strncpy(newchan->topic_nick, chptr->topic_nick,
+               sizeof(newchan->topic_nick));
+  relocate_copy_bans(&newchan->banlist, chptr->banlist);
+  relocate_copy_bans(&newchan->exceptlist, chptr->exceptlist);
+
+  /* ---- 2. Tombstone the old channel, BEFORE moving anyone out ----
+   * EXMODE_PERSIST is what stops sub1_from_channel() from destructing
+   * chptr when the last mover leaves (a channel where every member is the
+   * issuer or +F is the ordinary case, not a corner case) -- without it
+   * the rest of this function would be operating on freed memory.  It is
+   * set on the struct directly and never put on the wire: relocation must
+   * not depend on services agreeing to persist the channel.
+   *
+   * The redirect is set here too, but ANNOUNCED after the partition, so
+   * the members who are leaving anyway don't get a MODE for a channel they
+   * are about to part. */
+  chptr->mode.exmode |= EXMODE_PERSIST;
+  chptr->mode.mode |= MODE_REDIRECT;
+  ircd_strncpy(chptr->mode.redir, newname_buf, sizeof(chptr->mode.redir));
+
+  /* ---- 3. Classify, and notify the members who stay ----
+   * Pass one only reads the membership list and sends messages, so the
+   * list is stable across it.  It must NOT be fused with the move pass:
+   * remove_user_from_channel() calls bounce_sync_alias_part(), which
+   * unlinks the moving user's alias memberships from this same list --
+   * so even a next_member captured before the call can be freed by it.
+   * Snapshotting the movers first makes that structurally impossible. */
+  for (member = chptr->members; member; member = member->next_member) {
+    struct Client *user = member->user;
+
+    /* Alias memberships are shadows of their primary's; they follow it
+     * automatically via bounce_sync_alias_join()/_part() in pass two.
+     * Zombies are kicked-but-present artifacts and follow nothing. */
+    if (IsMemberAlias(member) || IsZombie(member))
+      continue;
+
+    /* Movers: the issuer (issuing the rename IS consent) and anyone who
+     * pre-consented with umode +F. */
+    if (user == sptr || IsRelocateFollow(user)) {
+      movers[nmovers].user = user;
+      /* CHFL_DELAYED rides along with the status bits: a classic rename
+       * keeps the whole Membership struct, so a +D-hidden member stays
+       * hidden across it.  Dropping the bit here would reveal, as a side
+       * effect of a relocation, a member who had chosen not to be seen --
+       * the exact class of involuntary exposure this extension exists to
+       * prevent.  MODE_DELJOINS/MODE_WASDELJOINS come across with
+       * newchan->mode, so the new channel is in the matching state. */
+      movers[nmovers].status = member->status & (CHFL_CHANOP | CHFL_HALFOP
+                                                 | CHFL_VOICE | CHFL_DELAYED);
+      movers[nmovers].oplevel = OpLevel(member);
+      nmovers++;
+      continue;
+    }
+
+    /* Non-movers keep their membership in the tombstone.  They must NOT
+     * get a RENAME: that message asserts "your membership now points at
+     * the new name" and would desynchronise a client that honours it.
+     * Notification is local-only -- remote members are told by their own
+     * server, which ran this same code off the propagated marker. */
+    if (!MyUser(user))
+      continue;
+
+    if (CapActive(user, CAP_EVILNET_RELOCATE))
+      sendcmdto_one(sptr, CMD_RELOCATE, user, "%s %s :%s",
+                    oldname, newname_buf, reason);
+    else
+      sendcmdto_one(&his, CMD_NOTICE, user,
+                    "%H :%s has moved to %s (%s). Join %s to follow; this "
+                    "channel closes in %d minutes.",
+                    chptr, oldname, newname_buf,
+                    *reason ? reason : "no reason given", newname_buf,
+                    feature_int(FEAT_RELOCATE_GRACE) / 60);
+  }
+
+  /* ---- 4. Move the movers ----
+   * Two passes, and the split matters: the PART/JOIN fallback in
+   * send_rename_to_member() ends in do_names() on the new channel, so
+   * every mover has to already be on it before ANY of them is notified.
+   * Interleaving move-and-notify would hand each mover a NAMES list
+   * containing only the movers processed before them. */
+  for (i = 0; i < nmovers; i++) {
+    add_user_to_channel(newchan, movers[i].user, movers[i].status,
+                        movers[i].oplevel);
+    remove_user_from_channel(movers[i].user, chptr);
+  }
+
+  for (i = 0; i < nmovers; i++) {
+    /* Local movers only: a mover on another server is notified by that
+     * server, which ran this same function off the propagated marker. */
+    if (MyUser(movers[i].user))
+      send_rename_to_member(sptr, movers[i].user, newchan, oldname, reason);
+  }
+
+  MyFree(movers);
+
+  /* ---- 5. Announce the redirect and arm the grace timer ---- */
+  relocate_announce_redirect(chptr);
+  relocate_tombstone_add(chptr, newname_buf);
+
+  /* A tombstone that pointed at oldname must now point at newname_buf --
+   * our own fresh tombstone points at newname_buf already, so it can never
+   * match here. */
+  relocate_tombstone_retarget(oldname, newname_buf);
+
+  log_write(LS_DEBUG, L_DEBUG, 0,
+            "relocate_execute: %s -> %s by %#C (%d moved, %d stayed)",
+            oldname, newname_buf, sptr, nmovers, nmembers - nmovers);
+
+  return 0;
+}
+
+/* ========== End Relocation ========== */
+
 /** m_rename - Handle RENAME command from local client.
  *
  * parv[0] = sender prefix
@@ -644,6 +1197,17 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Check if user is a channel operator */
   if (!IsChanOp(member)) {
     return send_reply(sptr, ERR_CHANOPRIVSNEEDED, oldname);
+  }
+
+  /* A live tombstone is a channel on its way out, not a community: its
+   * name is reserved for the grace period and its remaining members were
+   * explicitly NOT moved once already.  Renaming it would either strand
+   * them again or produce a redirect chain nobody asked for (spec,
+   * "Multiple renames": a tombstone channel itself cannot be renamed). */
+  if (rename_is_consent() && relocate_tombstone_find(oldname)) {
+    send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+              "Channel is a relocation tombstone");
+    return 0;
   }
 
   /* With channel oplevels active (+A), only the founder may rename. */
@@ -769,6 +1333,27 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Store old name before rename */
   ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
 
+  /* Relocation mode: partition instead of force-moving, and mark the RN so
+   * every other server does the same.  Classic mode below is untouched. */
+  if (rename_is_consent()) {
+    rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason);
+    if (rc == -1) {
+      send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+                "New channel name is too long");
+      return 0;
+    } else if (rc == -2) {
+      send_fail(sptr, "RENAME", "CHANNEL_NAME_IN_USE", oldname,
+                "Channel name already in use");
+      return 0;
+    }
+
+    sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s %s:%s",
+                             oldname_buf, newname, RELOCATE_MARKER, reason);
+    rename_forward_rcapable(sptr, NULL, oldname_buf, newname,
+                            RELOCATE_MARKER_SP, reason);
+    return 0;
+  }
+
   /* Perform the rename (updates chptr if reallocated) */
   rc = rename_channel(&chptr, newname);
   if (rc == -1) {
@@ -815,6 +1400,7 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   const char *newname;
   const char *reason;
   char oldname_buf[CHANNELLEN + 1];
+  int relocate = 0;
   int rc;
 
   /* Need at least old and new channel names */
@@ -826,6 +1412,17 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   newname = parv[2];
   reason = (parc > 3 && !EmptyString(parv[3])) ? parv[3] : "";
 
+  /* Relocation marker: RN <old> <new> C :<reason>.  Recognised only in the
+   * five-parameter shape -- see the RELOCATE_MARKER comment for why the
+   * four-parameter shape must stay a classic rename with the reason "C".
+   * When the marker is present relocation semantics apply on THIS server
+   * regardless of the local FEAT_RENAME_CONSENT setting. */
+  if (parc > 4 && !EmptyString(parv[3]) && 0 == strcmp(parv[3],
+                                                       RELOCATE_MARKER)) {
+    relocate = 1;
+    reason = !EmptyString(parv[4]) ? parv[4] : "";
+  }
+
   /* Find the channel */
   chptr = FindChannel(oldname);
   if (!chptr) {
@@ -834,6 +1431,26 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* Store old name before rename */
   ircd_strncpy(oldname_buf, chptr->chname, CHANNELLEN + 1);
+
+  if (relocate) {
+    rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason);
+    if (rc != 0) {
+      /* Same conservative handling as the classic failure below: log and
+       * do not propagate, rather than telling downstream servers about a
+       * relocation this server did not apply. */
+      log_write(LS_DEBUG, L_ERROR, 0,
+                "RELOCATE failed from %#C: %s -> %s (rc=%d)",
+                sptr, oldname, newname, rc);
+      return 0;
+    }
+
+    /* Propagate with the marker preserved. */
+    sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s %s:%s",
+                             oldname_buf, newname, RELOCATE_MARKER, reason);
+    rename_forward_rcapable(sptr, cptr, oldname_buf, newname,
+                            RELOCATE_MARKER_SP, reason);
+    return 0;
+  }
 
   /* Perform the rename (updates chptr if reallocated) */
   rc = rename_channel(&chptr, newname);
