@@ -365,8 +365,13 @@ enum Feature {
   FEAT_CAP_draft_account_registration,
   FEAT_REGISTER_SERVER,
   FEAT_RENAME_SERVICES,
+  /* relocation mode -- renames move only the issuer and +F users;
+   * see docs/specs/channel-relocate.md in the testnet repo */
+  FEAT_RENAME_CONSENT,
+  FEAT_RELOCATE_GRACE,
   FEAT_CAP_draft_read_marker,
   FEAT_CAP_draft_channel_rename,
+  FEAT_CAP_evilnet_channel_relocate,
   FEAT_CAP_draft_metadata_2,
   FEAT_CAP_draft_webpush,
   FEAT_WEBPUSH_DB,

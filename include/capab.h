@@ -100,6 +100,7 @@ enum Capab {
   _CAP(DRAFT_ACCOUNTREG, 0, "draft/account-registration", 0),
   _CAP(DRAFT_READMARKER, 0, "draft/read-marker", 0),
   _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", 0),
+  _CAP(EVILNET_RELOCATE, 0, "evilnet/channel-relocate", 0),
   _CAP(DRAFT_METADATA2, 0, "draft/metadata-2", 0),
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", 0),
   _CAP(DRAFT_BOUNCER, 0, "draft/bouncer", 0),

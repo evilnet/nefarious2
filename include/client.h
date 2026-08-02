@@ -227,6 +227,9 @@ enum Flag
     FLAG_OPER,                      /**< Operator */
     FLAG_INVISIBLE,                 /**< makes user invisible */
     FLAG_WALLOP,                    /**< send wallops to them */
+    FLAG_RELOCATE_FOLLOW,           /**< auto-follow channel relocations (+F);
+                                       see docs/specs/channel-relocate.md in
+                                       the testnet repo */
     FLAG_DEAF,                      /**< Makes user deaf */
     FLAG_CHSERV,                    /**< Disallow KICK or MODE -o on the user;
                                        don't display channels in /whois */
@@ -1170,6 +1173,8 @@ struct Client {
 #define SendServNotice(x)       HasFlag(x, FLAG_SERVNOTICE)
 /** Return non-zero if the client has set mode +w (wallops). */
 #define SendWallops(x)          HasFlag(x, FLAG_WALLOP)
+/** Return non-zero if the client has set mode +F (auto-follow relocations). */
+#define IsRelocateFollow(x)     HasFlag(x, FLAG_RELOCATE_FOLLOW)
 /** Return non-zero if the client claims to be a hub. */
 #define IsHub(x)                HasFlag(x, FLAG_HUB)
 /** Return non-zero if the client understands IPv6 addresses in P10. */
@@ -1319,6 +1324,8 @@ struct Client {
 #define SetUPing(x)             SetFlag(x, FLAG_UPING)
 /** Mark a client as having mode +w (wallops). */
 #define SetWallops(x)           SetFlag(x, FLAG_WALLOP)
+/** Mark a client as having mode +F (auto-follow relocations). */
+#define SetRelocateFollow(x)    SetFlag(x, FLAG_RELOCATE_FOLLOW)
 /** Mark a client as having mode +s (server notices). */
 #define SetServNotice(x)        SetFlag(x, FLAG_SERVNOTICE)
 /** Mark a client as being a hub server. */
@@ -1464,6 +1471,8 @@ struct Client {
 #define ClearUPing(x)           ClrFlag(x, FLAG_UPING)
 /** Remove mode +w (wallops) from the client. */
 #define ClearWallops(x)         ClrFlag(x, FLAG_WALLOP)
+/** Remove mode +F (auto-follow relocations) from the client. */
+#define ClearRelocateFollow(x)  ClrFlag(x, FLAG_RELOCATE_FOLLOW)
 /** Remove mode +s (server notices) from the client. */
 #define ClearServNotice(x)      ClrFlag(x, FLAG_SERVNOTICE)
 /** Remove mode +x (hidden host) from the client. */

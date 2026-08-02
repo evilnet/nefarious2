@@ -1059,7 +1059,8 @@ static const struct UserMode {
   { FLAG_MULTILINE_EXPAND, 'M' },
   { FLAG_NOSTORAGE,    'Y' },
   { FLAG_PM_OPTOUT,    'y' },
-  { FLAG_BNC_HOLDPREF, 'b' }
+  { FLAG_BNC_HOLDPREF, 'b' },
+  { FLAG_RELOCATE_FOLLOW, 'F' }
 };
 
 /** Length of #userModeList. */
@@ -3338,6 +3339,10 @@ void init_isupport(void)
     add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
     add_isupport_s("MSGREFTYPES", "timestamp,msgid");
   }
+
+  /* evilnet/channel-relocate: relocation mode + tombstone grace period */
+  if (feature_bool(FEAT_RENAME_CONSENT))
+    add_isupport_i("RELOCATE", feature_int(FEAT_RELOCATE_GRACE));
 
   /* IRCv3 CLIENTTAGDENY - advertise blocked client-only tag patterns */
   {

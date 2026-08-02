@@ -591,6 +591,7 @@ DEFINE_CAP_NOTIFY("draft/message-redaction", draft_message_redaction)
 DEFINE_CAP_NOTIFY("draft/account-registration", draft_account_registration)
 DEFINE_CAP_NOTIFY("draft/read-marker", draft_read_marker)
 DEFINE_CAP_NOTIFY("draft/channel-rename", draft_channel_rename)
+DEFINE_CAP_NOTIFY("evilnet/channel-relocate", evilnet_channel_relocate)
 DEFINE_CAP_NOTIFY("draft/metadata-2", draft_metadata_2)
 DEFINE_CAP_NOTIFY("draft/bouncer", draft_bouncer)
 DEFINE_CAP_NOTIFY("draft/persistence", draft_persistence)
@@ -1213,8 +1214,16 @@ static struct FeatureDesc {
    * (see the protocol-history comment in m_rename.c) should have this
    * enabled. */
   F_B(RENAME_SERVICES, 0, 0, 0),
+  /* relocation mode -- renames move only the issuer and +F users;
+   * see docs/specs/channel-relocate.md in the testnet repo */
+  F_B(RENAME_CONSENT, 0, 0, 0),
+  F_I(RELOCATE_GRACE, 0, 900, 0),
   F_B(CAP_draft_read_marker, 0, 0, feature_notify_cap_draft_read_marker),
   F_B(CAP_draft_channel_rename, 0, 0, feature_notify_cap_draft_channel_rename),
+  /* Advertised whenever the build supports it; the RENAME_CONSENT feature
+   * gates the relocation BEHAVIOR, not the cap -- negotiating this cap
+   * alone is harmless. */
+  F_B(CAP_evilnet_channel_relocate, 0, 1, feature_notify_cap_evilnet_channel_relocate),
   F_B(CAP_draft_metadata_2, 0, 0, feature_notify_cap_draft_metadata_2),
   F_B(CAP_draft_webpush, 0, 0, 0),  /* webpush has special handling via VAPID key */
   F_S(WEBPUSH_DB, 0, "webpush", 0),
