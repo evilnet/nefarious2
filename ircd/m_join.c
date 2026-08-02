@@ -320,7 +320,11 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
         && relocate_snap_lookup(chptr->chname, sptr, &rflags, &roplevel)) {
       struct ModeBuf mbuf;
 
-      rmember->status |= rflags;
+      /* Clear CHFL_DEOPPED alongside granting status, mirroring the
+       * equivalent burst-revealed-chanop transition in m_burst.c (~494,
+       * ~519, ~563): a member who just joined deopped-by-server and is now
+       * being handed op/halfop/voice back is no longer "deopped". */
+      rmember->status = (rmember->status & ~CHFL_DEOPPED) | rflags;
       SetOpLevel(rmember, roplevel);
 
       modebuf_init(&mbuf, &me, cptr, chptr,
