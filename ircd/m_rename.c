@@ -1286,9 +1286,25 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
    * would still reach movers i+1..n -- who are being told by their own
    * RENAME/PART+JOIN that they are on the new channel, and would be
    * getting old-channel PART traffic at the same time. */
-  for (i = 0; i < nmovers; i++)
+  for (i = 0; i < nmovers; i++) {
+    /* Same gate joinbuf_flush() applies before announcing a PART to a
+     * channel (channel.c ~5386): a member the channel never saw JOIN must
+     * not be announced leaving.  Without it a +D (delayed-join) mover is
+     * revealed to the stayers by their own departure -- undoing the whole
+     * point of carrying CHFL_DELAYED through the status mask above, and
+     * re-opening the involuntary-exposure class this extension exists to
+     * close.  The mover still learns they moved: that is the
+     * RENAME/PART+JOIN in the next loop, addressed to them alone (the same
+     * split joinbuf_flush() makes with its self-only else branch).
+     * CHFL_ZOMBIE is in the test to mirror joinbuf_flush()'s condition
+     * exactly; pass 1 already excludes zombies from the mover set, so it
+     * is belt-and-braces against a future classifier change. */
+    if (movers[i].status & (CHFL_ZOMBIE | CHFL_DELAYED))
+      continue;
+
     sendcmdto_channel_butserv_butone(movers[i].user, CMD_PART, chptr, NULL, 0,
                                      "%H :Moved to %s", chptr, newname_buf);
+  }
 
   for (i = 0; i < nmovers; i++) {
     /* Local movers only: a mover on another server is notified by that
