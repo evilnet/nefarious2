@@ -516,6 +516,13 @@ extern void pending_rename_client_exit(struct Client *cptr);
  * period elapses takes its record and grace timer with it. */
 extern void relocate_tombstone_channel_gone(struct Channel *chptr);
 
+/* Grace-period member status restore (spec, "Status preservation").  Called
+ * from do_join() once a join to an existing channel has completed; looks up
+ * and CONSUMES a status snapshot for `who` in whichever live tombstone (if
+ * any) currently redirects to `newname`. */
+extern int relocate_snap_lookup(const char *newname, struct Client *who,
+                                unsigned int *flags, int *oplevel);
+
 extern struct Membership* find_member_link(struct Channel * chptr,
                                            const struct Client* cptr);
 extern int sub1_from_channel(struct Channel* chptr);

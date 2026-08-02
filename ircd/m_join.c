@@ -282,6 +282,59 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
     }
   }
 
+  /* evilnet/channel-relocate, "Status preservation": a former member who
+   * follows to the new channel within the grace period gets back the
+   * op/halfop/voice (and oplevel) they held in the old channel at rename
+   * time.  Applies to BOTH branches above (an existing #new, or one this
+   * join just (re)created) -- relocate_snap_lookup() matches on chptr's
+   * name regardless of which branch got us here, and a member who just
+   * created the channel already has full CHFL_CHANOP status from that, so
+   * the "no status yet" gate below is a no-op for them.
+   *
+   * Only the joining user's OWN server performs this.  Every server that
+   * sees this JOIN reconstructs its own tombstone/snapshot list from its
+   * own local membership walk at relocate_execute() time (Task 2/3's
+   * per-server contract), so if every server tried to grant the restore
+   * independently off its own copy, each would broadcast its own MODE for
+   * what is really one event.  Gating on MyUser(sptr) makes this run
+   * exactly once, on the server the follow-join actually landed on; the
+   * MODE it broadcasts below is a perfectly ordinary network mode change,
+   * and every OTHER server applies it through the normal MODE path when it
+   * arrives, exactly as it would for a services-issued grant -- no special
+   * handling is needed anywhere else.  A remote sptr here (a bouncer alias
+   * whose primary lives elsewhere -- see the alias rewrite in m_join())
+   * simply does not get this treatment; that is a known gap, not a bug: the
+   * primary's own server never runs do_join() for this join at all (it
+   * sees ms_join() instead), so there is no second chance to apply it. */
+  if (MyUser(sptr)) {
+    struct Membership *rmember = find_member_link(chptr, sptr);
+    unsigned int rflags = 0;
+    int roplevel = 0;
+
+    /* "no status in the new channel" is CHFL_VOICED_OR_OPPED being clear --
+     * a member who already has any of op/halfop/voice from the join itself
+     * (channel creator, apass/upass match, etc.) keeps what the join gave
+     * them; this never downgrades, and consuming the snapshot here would
+     * otherwise burn it on a join that had no need for it. */
+    if (rmember && !(rmember->status & CHFL_VOICED_OR_OPPED)
+        && relocate_snap_lookup(chptr->chname, sptr, &rflags, &roplevel)) {
+      struct ModeBuf mbuf;
+
+      rmember->status |= rflags;
+      SetOpLevel(rmember, roplevel);
+
+      modebuf_init(&mbuf, &me, cptr, chptr,
+                  MODEBUF_DEST_CHANNEL | MODEBUF_DEST_SERVER);
+      if (rflags & CHFL_CHANOP)
+        modebuf_mode_client(&mbuf, MODE_ADD | MODE_CHANOP, sptr, roplevel);
+      if (rflags & CHFL_HALFOP)
+        modebuf_mode_client(&mbuf, MODE_ADD | MODE_HALFOP, sptr, roplevel);
+      if (rflags & CHFL_VOICE)
+        modebuf_mode_client(&mbuf, MODE_ADD | MODE_VOICE, sptr, roplevel);
+      modebuf_flush(&mbuf);
+    }
+  }
+
   del_invite(sptr, chptr);
 
   /* Post-JOIN replies (TOPIC, MARKREAD, NAMES).
