@@ -315,10 +315,31 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
      * a member who already has any of op/halfop/voice from the join itself
      * (channel creator, apass/upass match, etc.) keeps what the join gave
      * them; this never downgrades, and consuming the snapshot here would
-     * otherwise burn it on a join that had no need for it. */
+     * otherwise burn it on a join that had no need for it.  rflags != 0 is
+     * checked too (review round 1, M1): a plain member's own snapshot
+     * carries flags == 0 (every member is snapshotted at relocate_execute()
+     * time, not just former op/halfop/voice holders), and there is nothing
+     * to grant or broadcast for that -- the lookup above still consumes it
+     * (it was that member's one shot at a restore either way), this just
+     * skips doing work for an empty grant. */
     if (rmember && !(rmember->status & CHFL_VOICED_OR_OPPED)
-        && relocate_snap_lookup(chptr->chname, sptr, &rflags, &roplevel)) {
+        && relocate_snap_lookup(chptr->chname, sptr, &rflags, &roplevel)
+        && rflags != 0) {
       struct ModeBuf mbuf;
+
+      /* Reveal a +D (delayed-join) member BEFORE writing status, mirroring
+       * mode_process_clients() (channel.c:4678-4679) exactly.  This is the
+       * COMMON case for a channel that carries MODE_DELJOINS, not an edge
+       * case: joinbuf_join() (channel.c:5431-5433) always adds a follow-
+       * joiner to a +D channel with CHFL_DELAYED set (the entry flags here
+       * are CHFL_DEOPPED, which is not in CHFL_VOICED_OR_OPPED), so
+       * relocate_snap_lookup() runs -- and can hit -- before this member has
+       * ever been revealed.  Without this, a granted CHFL_CHANOP would sit
+       * on a membership nobody's client has been told exists: a MODE for a
+       * nick absent from every local NAMES/JOIN view, and CHFL_DELAYED
+       * sitting alongside CHFL_CHANOP on the same Membership. */
+      if (IsDelayedJoin(rmember) && !IsZombie(rmember))
+        RevealDelayedJoin(rmember);
 
       /* Clear CHFL_DEOPPED alongside granting status, mirroring the
        * equivalent burst-revealed-chanop transition in m_burst.c (~494,
@@ -326,6 +347,16 @@ void do_join(struct Client *cptr, struct Client *sptr, struct JoinBuf *join,
        * being handed op/halfop/voice back is no longer "deopped". */
       rmember->status = (rmember->status & ~CHFL_DEOPPED) | rflags;
       SetOpLevel(rmember, roplevel);
+
+      /* Every OTHER client-mode grant in this codebase (channel.c:4692,
+       * m_clearmode.c:271) syncs the primary's bouncer aliases and marks
+       * the session dirty in the same breath; this grant is otherwise
+       * indistinguishable from those to a bouncer user's secondary
+       * connections, and skipping it would leave them with no @#chan
+       * delivery and no op perms until an unrelated mode change happened
+       * to resync. */
+      bounce_sync_alias_chanmodes(chptr, sptr);
+      bounce_mark_dirty(sptr);
 
       modebuf_init(&mbuf, &me, cptr, chptr,
                   MODEBUF_DEST_CHANNEL | MODEBUF_DEST_SERVER);

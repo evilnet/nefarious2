@@ -687,16 +687,23 @@ static int rename_is_consent(void)
  *
  * Keyed by account when the member had one at snapshot time -- accounts
  * survive nick changes and reconnects, so they are the more durable key --
- * with @a nick as the fallback for a member who was never logged in.  @a
- * account is empty for that fallback case, and relocate_snap_lookup() only
- * ever matches a nick-keyed entry against a joiner who ALSO has no account:
- * an account holder must not be able to claim a stranger's bare-nick
- * snapshot just by reusing that nick after the original owner changed it or
- * disconnected. */
+ * with @a nick + @a userhost as the fallback for a member who was never
+ * logged in.  @a account is empty for that fallback case, and
+ * relocate_snap_find() enforces two things review round 1 found this
+ * struct's own comment claiming but the code not yet doing: an account
+ * holder is matched ONLY by account (never falls back to nick), and a
+ * nick-keyed entry is matched only by an EXACT nick+user@host pair -- a
+ * bare nick match alone would let anyone who acquires a departed op's nick
+ * within the grace period (a very ordinary thing to happen: nicks free up
+ * the moment their owner quits or gets ghosted) walk in and claim their
+ * status. */
 struct RelocateSnap {
   struct RelocateSnap *next;      /**< Linked list, off RelocateTombstone.snaps */
   char account[ACCOUNTLEN + 1];   /**< Primary key when non-empty */
-  char nick[NICKLEN + 1];         /**< Fallback key -- nick match, account-less only */
+  char nick[NICKLEN + 1];         /**< Fallback key part 1 -- account-less only */
+  char userhost[USERLEN + HOSTLEN + 2]; /**< Fallback key part 2 ("user@host"),
+                                              required alongside nick -- both
+                                              account-less only */
   unsigned int flags;             /**< CHFL_CHANOP|CHFL_HALFOP|CHFL_VOICE subset */
   int oplevel;                    /**< Oplevel to restore alongside flags */
 };
@@ -861,13 +868,21 @@ static void relocate_snap_free_list(struct RelocateSnap *head)
 
 /** Find @a who's snapshot entry within @a ts, if any.
  *
- * Account match takes priority over nick match, and a nick match is only
- * honoured against a snapshot entry that has NO account of its own: an
- * account holder's snapshot must always be reclaimed by account (a nick
- * change between rename and follow-join must not lose it), and a bare-nick
- * snapshot (a member who was never logged in at rename time) must not be
- * claimable by an unrelated account holder who merely shares that nick
- * right now.
+ * Two DISJOINT match strategies, per whether @a who currently has an
+ * account (review round 1, I3 -- fixed to actually match this function's
+ * own struct-level doc comment, which the original code did not):
+ *
+ * - An account holder is matched ONLY by account, and never falls back to
+ *   a nick match.  Falling back would mean an account holder could claim a
+ *   bare-nick snapshot (a member who had no account at rename time) simply
+ *   by reusing that nick, which is exactly the kind of unrelated-identity
+ *   collision the account/nick split exists to prevent.
+ * - An account-less joiner is matched by nick AND userhost together,
+ *   against snapshot entries that are themselves account-less.  Nick
+ *   alone is not enough: nicks free up the instant their previous owner
+ *   quits, changes nick, or gets ghosted -- all ordinary events well
+ *   within a multi-minute grace period -- so an exact user@host match is
+ *   required too before a bare-nick snapshot is honoured.
  * @param[in] ts Tombstone whose snapshot list to search.
  * @param[in] who Joining client to match.
  * @return Pointer to the list slot holding the match (suitable for
@@ -885,11 +900,22 @@ static struct RelocateSnap **relocate_snap_find(struct RelocateTombstone *ts,
       if ((*pp)->account[0] && 0 == ircd_strcmp((*pp)->account, account))
         return pp;
     }
+
+    return NULL; /* account holders never fall back to a nick match */
   }
 
-  for (pp = &ts->snaps; *pp; pp = &(*pp)->next) {
-    if (!(*pp)->account[0] && 0 == ircd_strcmp((*pp)->nick, cli_name(who)))
-      return pp;
+  {
+    char who_userhost[USERLEN + HOSTLEN + 2];
+
+    ircd_snprintf(0, who_userhost, sizeof(who_userhost), "%s@%s",
+                 cli_user(who)->username, cli_user(who)->host);
+
+    for (pp = &ts->snaps; *pp; pp = &(*pp)->next) {
+      if (!(*pp)->account[0]
+          && 0 == ircd_strcmp((*pp)->nick, cli_name(who))
+          && 0 == ircd_strcmp((*pp)->userhost, who_userhost))
+        return pp;
+    }
   }
 
   return NULL;
@@ -905,6 +931,25 @@ static struct RelocateSnap **relocate_snap_find(struct RelocateTombstone *ts,
  * the newest name as renames chain, so a follower who joins the FINAL name
  * of a multi-hop chain still matches the ORIGINAL tombstone's snapshot
  * without this function needing to resolve more than one hop itself.
+ *
+ * This function MUST scan every matching tombstone, not stop at the first,
+ * because a multi-hop chain is the ORDINARY way to get more than one live
+ * record targeting the same @a newname -- not a hypothetical corner case
+ * (review round 1 corrected an earlier version of this comment that called
+ * it one).  Relocate #a -> #b, then before #b's grace expires relocate
+ * #b -> #c: relocate_tombstone_retarget() repoints #a's record's ->newname
+ * from #b to #c, and #b's OWN fresh record also targets #c -- so #a's and
+ * #b's records BOTH have ->newname == "#c" for the rest of #a's grace
+ * period.  A member who was in #b (and thus snapshotted into #b's record)
+ * at the second rename, but who was ALSO an unconsumed mover snapshot from
+ * the first rename still sitting in #a's record (moved automatically, so
+ * never "followed" and never consumed it), has a valid entry in BOTH.  The
+ * loop below finds #b's record first: relocate_tombstone_add() prepends
+ * (ts->next = relocate_tombstones; relocate_tombstones = ts;), so the
+ * newest hop is always closest to the list head.  That is the desired
+ * outcome, not an arbitrary tie-break -- the newer snapshot reflects this
+ * member's status as of the MORE RECENT rename, which is the one that
+ * actually describes what they last held before declining to move.
  *
  * A tombstone's own (old) name can never be a match target here: the spec
  * forbids renaming a tombstone, and m_rename()/ms_rename() enforce it
@@ -938,9 +983,13 @@ int relocate_snap_lookup(const char *newname, struct Client *who,
       continue;
 
     if (!(pp = relocate_snap_find(ts, who)))
-      continue; /* keep scanning -- another live tombstone could also
-                 * currently target newname (independent chains that
-                 * happen to converge on the same final name). */
+      continue; /* keep scanning -- REQUIRED, not defensive: a multi-hop
+                 * rename chain ordinarily leaves more than one live record
+                 * targeting the same newname (see the function comment).
+                 * Do not simplify this to "return 0 on the first newname
+                 * match" -- that would silently drop the older hop's
+                 * snapshot whenever this member wasn't also snapshotted by
+                 * the newer one. */
 
     snap = *pp;
     if (flags)
@@ -1731,6 +1780,13 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
           ircd_strncpy(snap->account, cli_user(user)->account,
                       sizeof(snap->account));
         ircd_strncpy(snap->nick, cli_name(user), sizeof(snap->nick));
+        /* Populated regardless of IsAccount(): harmless for an account
+         * holder (relocate_snap_find() never reads nick/userhost on that
+         * path -- it returns before reaching the fallback loop), and this
+         * is the only point that ever sees this member's identity, so
+         * there is no cheaper later place to fill it in. */
+        ircd_snprintf(0, snap->userhost, sizeof(snap->userhost), "%s@%s",
+                     cli_user(user)->username, cli_user(user)->host);
         snap->flags = member->status & (CHFL_CHANOP | CHFL_HALFOP
                                         | CHFL_VOICE);
         snap->oplevel = OpLevel(member);
