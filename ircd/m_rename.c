@@ -156,11 +156,16 @@ static struct Client *rename_legacy_blocker(void)
  *                 or NULL if the rename originated locally.
  * @param[in] oldname Old channel name.
  * @param[in] newname New channel name.
+ * @param[in] marker Extra parameter to splice in before the trailing
+ *                   reason, ALREADY trailing-space terminated -- "" for a
+ *                   classic rename (the emission is then byte-identical to
+ *                   the historical "%s %s :%s" shape) or "C " for a
+ *                   relocation-mode rename.
  * @param[in] reason Rename reason (may be empty string).
  */
 static void rename_forward_rcapable(struct Client *sptr, struct Client *skip,
                                      const char *oldname, const char *newname,
-                                     const char *reason)
+                                     const char *marker, const char *reason)
 {
   struct DLink *dlp;
 
@@ -190,8 +195,8 @@ static void rename_forward_rcapable(struct Client *sptr, struct Client *skip,
         from = sptr;
     }
 
-    sendcmdto_one(from, CMD_RENAME, dlp->value.cptr, "%s %s :%s",
-                  oldname, newname, reason);
+    sendcmdto_one(from, CMD_RENAME, dlp->value.cptr, "%s %s %s:%s",
+                  oldname, newname, marker, reason);
   }
 }
 
@@ -411,7 +416,7 @@ void pending_rename_complete(struct PendingRename *pr)
    * broadcast above; synth it directly so they can keep their channel
    * state in sync. */
   rename_forward_rcapable(pr->client, NULL, pr->oldname,
-                          chptr->chname, pr->reason);
+                          chptr->chname, "", pr->reason);
 
   pending_rename_remove(pr);
 }
@@ -523,6 +528,47 @@ void pending_rename_client_exit(struct Client *cptr)
 
 /* ========== End Pending Rename Infrastructure ========== */
 
+/** Deliver the rename notification for ONE local member: a RENAME message
+ * when that connection negotiated draft/channel-rename, the legacy
+ * PART/JOIN(+TOPIC/NAMES) pair otherwise.
+ *
+ * Split out of send_rename_to_members() so relocation mode can drive it
+ * per-member: under FEAT_RENAME_CONSENT only the movers (issuer and +F
+ * users) may be told "your membership now points at the new name", and
+ * they are no longer walkable as "every member of chptr" -- see
+ * relocate_execute().  The emissions below are unchanged from the
+ * historical inline body.
+ *
+ * @param[in] sptr Client that initiated the rename (message source).
+ * @param[in] acptr Local member to notify.  Caller guarantees MyUser().
+ * @param[in] chptr Channel the member is now on (i.e. carries the NEW name).
+ * @param[in] oldname The old channel name.
+ * @param[in] reason Reason for rename (may be empty string or NULL).
+ */
+static void send_rename_to_member(struct Client *sptr, struct Client *acptr,
+                                  struct Channel *chptr, const char *oldname,
+                                  const char *reason)
+{
+  if (CapOwnHas(acptr, CAP_DRAFT_CHANRENAME)) {
+    /* Non-bouncer with cap — send RENAME */
+    sendcmdto_one(sptr, CMD_RENAME, acptr, "%s %s :%s",
+                  oldname, chptr->chname, reason ? reason : "");
+  } else {
+    /* Non-bouncer without cap — PART/JOIN fallback */
+    sendcmdto_one(acptr, CMD_PART, acptr, "%s :Channel renamed to %s%s%s",
+                  oldname, chptr->chname,
+                  (reason && *reason) ? ": " : "",
+                  (reason && *reason) ? reason : "");
+    sendcmdto_one(acptr, CMD_JOIN, acptr, "%s", chptr->chname);
+    if (chptr->topic[0]) {
+      send_reply(acptr, RPL_TOPIC, chptr->chname, chptr->topic);
+      send_reply(acptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
+                 chptr->topic_time);
+    }
+    do_names(acptr, chptr, NAMES_ALL|NAMES_EON);
+  }
+}
+
 /** Send RENAME to clients with the capability, fallback PART/JOIN to others.
  * @param[in] sptr Client that initiated the rename.
  * @param[in] chptr Channel being renamed (already has new name).
@@ -541,26 +587,7 @@ static void send_rename_to_members(struct Client *sptr, struct Channel *chptr,
     if (!MyUser(acptr))
       continue;
 
-    {
-      if (CapOwnHas(acptr, CAP_DRAFT_CHANRENAME)) {
-        /* Non-bouncer with cap — send RENAME */
-        sendcmdto_one(sptr, CMD_RENAME, acptr, "%s %s :%s",
-                      oldname, chptr->chname, reason ? reason : "");
-      } else {
-        /* Non-bouncer without cap — PART/JOIN fallback */
-        sendcmdto_one(acptr, CMD_PART, acptr, "%s :Channel renamed to %s%s%s",
-                      oldname, chptr->chname,
-                      (reason && *reason) ? ": " : "",
-                      (reason && *reason) ? reason : "");
-        sendcmdto_one(acptr, CMD_JOIN, acptr, "%s", chptr->chname);
-        if (chptr->topic[0]) {
-          send_reply(acptr, RPL_TOPIC, chptr->chname, chptr->topic);
-          send_reply(acptr, RPL_TOPICWHOTIME, chptr->chname, chptr->topic_nick,
-                     chptr->topic_time);
-        }
-        do_names(acptr, chptr, NAMES_ALL|NAMES_EON);
-      }
-    }
+    send_rename_to_member(sptr, acptr, chptr, oldname, reason);
   }
 }
 
@@ -764,7 +791,7 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Rename-capable non-v3 links (X3) don't get RN via the v3-only
    * broadcast above; synth it directly so they can keep their channel
    * state in sync. */
-  rename_forward_rcapable(sptr, NULL, oldname_buf, chptr->chname, reason);
+  rename_forward_rcapable(sptr, NULL, oldname_buf, chptr->chname, "", reason);
 
   return 0;
 }
@@ -828,7 +855,7 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   /* Rename-capable non-v3 links (X3) don't get RN via the v3-only
    * broadcast above; synth it directly so they can keep their channel
    * state in sync. Skip the link this RENAME arrived on. */
-  rename_forward_rcapable(sptr, cptr, oldname_buf, chptr->chname, reason);
+  rename_forward_rcapable(sptr, cptr, oldname_buf, chptr->chname, "", reason);
 
   return 0;
 }
