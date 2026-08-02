@@ -511,6 +511,11 @@ extern void pending_rename_complete(struct PendingRename *pr);
 extern void pending_rename_deny(struct PendingRename *pr, const char *reason);
 extern void pending_rename_client_exit(struct Client *cptr);
 
+/* Relocation tombstones (evilnet/channel-relocate).  Called from
+ * destruct_channel() so a tombstone channel that dies before its grace
+ * period elapses takes its record and grace timer with it. */
+extern void relocate_tombstone_channel_gone(struct Channel *chptr);
+
 extern struct Membership* find_member_link(struct Channel * chptr,
                                            const struct Client* cptr);
 extern int sub1_from_channel(struct Channel* chptr);

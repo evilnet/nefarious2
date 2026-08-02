@@ -441,6 +441,14 @@ int destruct_channel(struct Channel* chptr)
 
   assert(0 == chptr->members);
 
+  /* This is the one place a struct Channel is actually freed, so it is the
+   * one place a relocation tombstone can learn its channel died early
+   * (services DESTRUCT, or a MODE -z followed by the last member parting,
+   * both of which get past EXMODE_PERSIST).  Retiring the record here takes
+   * its grace timer with it, instead of leaving a fired-but-unresolvable
+   * record behind.  A no-op for every ordinary channel. */
+  relocate_tombstone_channel_gone(chptr);
+
   /*
    * Now, find all invite links from channel structure
    */

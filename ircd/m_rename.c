@@ -785,19 +785,234 @@ static void relocate_tombstone_unlink(struct RelocateTombstone *ts)
   }
 }
 
+/** Retire a tombstone from OUTSIDE the timer dispatch: unlink it and cancel
+ * its grace timer.
+ *
+ * Mirrors pending_rename_remove() exactly.  ts's struct Timer is embedded in
+ * ts, and timer_del() on a timer that is not mid-dispatch synchronously
+ * fires ET_DESTROY (ircd_events.c timer_del() -> event_generate()), whose
+ * case in relocate_tombstone_expire_cb() does the MyFree() -- so ts is
+ * already GONE by the time this returns and must not be touched afterwards.
+ *
+ * Never call this from inside relocate_tombstone_expire_cb(): timer_del()
+ * returns early on a GEN_MARKED (in-dispatch) timer, so the free would not
+ * happen here and the caller would be left believing it had cancelled.
+ * @param[in] ts Tombstone to retire.
+ */
+static void relocate_tombstone_remove(struct RelocateTombstone *ts)
+{
+  if (!ts)
+    return;
+
+  relocate_tombstone_unlink(ts);
+
+  if (ts->timer_active) {
+    ts->timer_active = 0;
+    timer_del(&ts->timer); /* -> ET_DESTROY -> MyFree(ts), synchronously */
+  }
+}
+
+/** Strip the marks relocate_execute() put on a tombstone channel.
+ *
+ * All three go together and none is optional:
+ *  - EXMODE_PERSIST is the only thing keeping sub1_from_channel() from
+ *    collecting the channel once it is empty (channel.c:370).  Left set,
+ *    the dissolved tombstone never destructs.
+ *  - MODE_REDIRECT / mode.redir keep forwarding JOINs of this name to a
+ *    channel it no longer has any relationship with (m_join.c:160).
+ * relocate_tombstone_channel()'s identity check keys on all three as well,
+ * so leaving any one of them set would also keep a dissolved channel
+ * validating as somebody's live tombstone.
+ * @param[in] chptr Channel to strip.
+ */
+static void relocate_tombstone_clear_marks(struct Channel *chptr)
+{
+  chptr->mode.mode &= ~MODE_REDIRECT;
+  chptr->mode.redir[0] = '\0';
+  chptr->mode.exmode &= ~EXMODE_PERSIST;
+}
+
+/** Grace-period expiry sweep: PART every remaining member of a tombstone and
+ * dissolve the channel (spec, "The tombstone": at grace expiry the server
+ * removes each remaining member with a server-generated PART).
+ *
+ * NOTHING here goes to servers.  Every server on the network processed the
+ * same RN C marker and registered its own tombstone with its own timer, so
+ * every server runs this same sweep over its own copy of the membership;
+ * broadcasting the removals would double them.  The removals are therefore
+ * local bookkeeping plus local-client emission only, exactly like
+ * relocate_execute()'s partition.  The cost is that the sweeps are not
+ * simultaneous: the timers were armed when each server processed the RN, so
+ * they fire within the link latency of each other (seconds).  For those few
+ * seconds a member already swept on server A is still listed in the
+ * tombstone on server B.  That is accepted -- the channel is empty and
+ * dissolving on both, and the alternative (a network-wide PART burst per
+ * member, from every server) is far worse.
+ *
+ * @param[in] ts Tombstone whose grace period has elapsed.  Already unlinked
+ *               from the global list by the caller.
+ */
+static void relocate_tombstone_sweep(struct RelocateTombstone *ts)
+{
+  struct Channel *chptr;
+  struct Membership *member;
+  unsigned int nswept = 0;
+
+  /* The record can outlive its channel's identity: services DESTRUCT, an
+   * operator MODE -z, or a chanop stripping +L all break the tombstone
+   * without going through relocate_tombstone_channel_gone(), and an
+   * unrelated channel can then be created on the same name well inside the
+   * grace period.  relocate_tombstone_channel() rejects all of those.  The
+   * caller has ALREADY unlinked ts and disowned the timer, so returning
+   * here cancels the record cleanly rather than leaving an unresolvable
+   * record with a fired timer behind it. */
+  if (!(chptr = relocate_tombstone_channel(ts))) {
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "relocate_tombstone_sweep: %s -> %s no longer resolves to a "
+              "tombstone; record cancelled", ts->oldname, ts->newname);
+    return;
+  }
+
+  /* Head-walk with chptr->members re-read every iteration, rather than a
+   * next_member cursor: remove_user_from_channel() calls
+   * bounce_sync_alias_part(), which unlinks the member's alias shadows from
+   * this same list, so even a next_member captured before the call can be
+   * freed by it (the hazard relocate_execute() solves with a snapshot
+   * array -- here the list is being emptied outright, so re-reading the
+   * head is simpler and needs no allocation).  Progress is guaranteed
+   * because find_member_link() -- unlike find_channel_member()
+   * (channel.c:496) -- returns zombie memberships too, so the selected
+   * member is always actually removed. */
+  while ((member = chptr->members)) {
+    struct Client *user;
+    unsigned int flags;
+
+    /* Alias shadows follow their primary out via bounce_sync_alias_part();
+     * parting one directly would drop a bouncer connection out of a channel
+     * its primary is still in. */
+    while (member && IsMemberAlias(member))
+      member = member->next_member;
+    if (!member)
+      break; /* only orphaned alias shadows left -- see the tail below */
+
+    user = member->user;
+    flags = member->status;
+
+    /* Same suppression gate joinbuf_flush() applies before announcing a
+     * PART to a channel (channel.c:5394) and the same one
+     * relocate_execute()'s stayer loop applies: a member the channel never
+     * saw JOIN must not be announced leaving.  Without it the sweep reveals
+     * a +D (delayed-join) member to everyone else as a parting shot --
+     * exactly the involuntary exposure this extension exists to close.
+     * They are still REMOVED, and if they are local they still get their
+     * own PART, addressed to them alone: joinbuf_flush()'s self-only else
+     * branch, mirrored.
+     *
+     * For everyone else the channel walk IS the self-echo -- it does not
+     * exclude the source (one == NULL) and does not skip alias members
+     * (send.c:2377), so a local member and each of their local bouncer
+     * connections all see the PART under the shared nick. */
+    if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
+      sendcmdto_channel_butserv_butone(user, CMD_PART, chptr, NULL, 0,
+                                       "%H :Channel has moved to %s",
+                                       chptr, ts->newname);
+    else if (MyUser(user))
+      sendcmdto_one(user, CMD_PART, user, "%H :Channel has moved to %s",
+                    chptr, ts->newname);
+
+    remove_user_from_channel(user, chptr);
+    nswept++;
+  }
+
+  /* Order is load-bearing in both directions.  The removals above had to
+   * run with EXMODE_PERSIST still set, or the last one would have
+   * destructed chptr and every line from here on would be a use-after-free.
+   * But that also means each removal's sub1_from_channel() took the persist
+   * early return (channel.c:370) and so never scheduled the ordinary
+   * empty-channel collection -- and nothing re-enters that path by itself.
+   * So the dissolve clears the marks and then runs it once, by hand. */
+  relocate_tombstone_clear_marks(chptr);
+
+  ts->oldchan = NULL; /* about to be freed or zannel'd; never read again */
+
+  if (!chptr->members) {
+    /* The normal empty-channel path, entered exactly as an ordinary last
+     * PART would enter it: apass is already cleared (relocate_execute()
+     * strips it), so sub1_from_channel() resets the modes and then either
+     * destruct_channel()s immediately (!FEAT_OPLEVELS, or !FEAT_ZANNELS) or
+     * schedules the destruct event (FEAT_ZANNELS).  Either way chptr may be
+     * freed by this call -- do not touch it afterwards. */
+    sub1_from_channel(chptr);
+  }
+  /* else: alias shadows whose primaries are already gone are still holding
+   * chptr->aliases > 0, so sub1_from_channel() would refuse anyway.  Assert
+   * nothing: the marks are cleared, so the channel is now an ordinary empty
+   * channel and the ordinary path collects it when the last shadow goes. */
+
+  log_write(LS_DEBUG, L_DEBUG, 0,
+            "relocate_tombstone_sweep: %s -> %s dissolved (%u member%s swept)",
+            ts->oldname, ts->newname, nswept, (nswept == 1) ? "" : "s");
+}
+
+/** A struct Channel is about to be freed: retire any tombstone record that
+ * refers to it.
+ *
+ * EXMODE_PERSIST defends a tombstone against the ordinary empty-channel
+ * collection, but not against services DESTRUCT (m_destruct.c:202) or an
+ * operator MODE -z followed by the last member parting -- either can free
+ * the channel with most of the grace period still on the clock.  Left
+ * alone, the record would keep a live timer and a dangling cached pointer
+ * pointing at a name any user can re-create inside the grace period.
+ * relocate_tombstone_channel()'s identity check already stops that becoming
+ * a wrong-channel sweep, but the record and its timer are still garbage,
+ * and an unresolvable record that fires is a strictly worse failure than
+ * one that was cancelled at the moment it became unresolvable.  So retire
+ * them here, at the one place a channel actually dies.
+ * @param[in] chptr Channel being destroyed.
+ */
+void relocate_tombstone_channel_gone(struct Channel *chptr)
+{
+  struct RelocateTombstone *ts, *next;
+
+  if (!chptr)
+    return;
+
+  /* Cache ->next before the removal: relocate_tombstone_remove() frees ts
+   * synchronously, the same reason pending_rename_client_exit() caches it. */
+  for (ts = relocate_tombstones; ts; ts = next) {
+    next = ts->next;
+
+    /* Match on the NAME only, never on ts->oldchan.  Channel names are
+     * unique in the hash, so while the tombstone channel is alive a name
+     * match here is exact.  The cached pointer, by contrast, can dangle --
+     * rename_channel() MyFree()s the old node without coming through here
+     * (channel.c:2131) -- and a later channel allocated at that same
+     * address would then falsely match and retire a healthy record.  A
+     * record left holding a dangling cache is harmless: nothing ever
+     * dereferences it (relocate_tombstone_channel() re-resolves by name and
+     * NULLs the cache), and the sweep cancels it as unresolvable. */
+    if (0 != ircd_strcmp(ts->oldname, chptr->chname))
+      continue;
+
+    log_write(LS_DEBUG, L_DEBUG, 0,
+              "relocate_tombstone_channel_gone: %s -> %s retired early "
+              "(channel destroyed with %Tu seconds of grace left)",
+              ts->oldname, ts->newname,
+              (ts->expires > CurrentTime) ? (ts->expires - CurrentTime) : 0);
+
+    relocate_tombstone_remove(ts); /* ts is freed by this call */
+  }
+}
+
 /** Timer callback for a tombstone's grace period.
  *
  * ts's struct Timer is embedded in ts, so the same free-once discipline as
  * pending_rename_timeout_cb() applies verbatim: timer_run() keeps touching
  * the generator after ET_EXPIRE returns, so ET_EXPIRE may only make ts
  * unreachable (unlink + clear timer_active) and ET_DESTROY -- which fires
- * automatically right after ET_EXPIRE, or synchronously from a future
- * timer_del() -- is the single place ts is freed.
- *
- * TASK 3 fills in the expiry sweep (server-generated PARTs for the
- * remaining members, -L, channel dissolve, do-not-register window) at the
- * marked point in the ET_EXPIRE branch.  Nothing outside this callback body
- * needs to change for that.
+ * automatically right after ET_EXPIRE, or synchronously from a
+ * relocate_tombstone_remove() timer_del() -- is the single place ts is
+ * freed.
  * @param[in] ev Timer event.
  */
 static void relocate_tombstone_expire_cb(struct Event *ev)
@@ -811,17 +1026,20 @@ static void relocate_tombstone_expire_cb(struct Event *ev)
 
   switch (ev_type(ev)) {
   case ET_EXPIRE:
-    /* ---- TASK 3: expiry sweep goes here ---- */
-    log_write(LS_DEBUG, L_DEBUG, 0,
-              "relocate_tombstone_expire: %s -> %s (grace elapsed; sweep is "
-              "not implemented yet, tombstone left in place)",
-              ts->oldname, ts->newname);
-
-    /* Not optional even while the sweep is a stub: ET_DESTROY frees ts
-     * immediately after this returns, so leaving it linked would leave a
-     * dangling entry in relocate_tombstones. */
+    /* Unlink and disown the timer BEFORE the sweep, not after.  The sweep
+     * ends in destruct_channel(), which calls
+     * relocate_tombstone_channel_gone(), which walks this very list -- with
+     * ts still on it that hook would match our own record and call
+     * relocate_tombstone_remove() on a timer that is mid-dispatch, where
+     * timer_del() returns early (GEN_MARKED) without the ET_DESTROY that is
+     * supposed to free it.  Unlinking first makes the record unfindable;
+     * ts itself stays valid because only ET_DESTROY, below, frees it.
+     *
+     * Do NOT call timer_del() here for the same reason. */
     relocate_tombstone_unlink(ts);
     ts->timer_active = 0;
+
+    relocate_tombstone_sweep(ts);
     break;
 
   case ET_DESTROY:
@@ -923,10 +1141,15 @@ static void relocate_tombstone_retarget(const char *oldtarget,
      * ts->newname, which is still the PRIOR target at this instant. */
     chptr = relocate_tombstone_channel(ts);
 
-    ircd_strncpy(ts->newname, newtarget, sizeof(ts->newname));
-
     if (!chptr)
       continue;
+
+    /* Repoint only AFTER the record has been validated.  A record whose
+     * channel no longer resolves is dead; rewriting its target would make
+     * its remaining lifetime claim a redirect that nothing on this server
+     * implements, and would leave relocate_tombstone_channel() comparing
+     * against a target the record never actually pointed at. */
+    ircd_strncpy(ts->newname, newtarget, sizeof(ts->newname));
 
     ircd_strncpy(chptr->mode.redir, ts->newname, sizeof(chptr->mode.redir));
     chptr->mode.mode |= MODE_REDIRECT;
@@ -1185,6 +1408,23 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
   chptr->mode.mode &= ~MODE_REGISTERED;
   chptr->mode.apass[0] = '\0';
   chptr->mode.upass[0] = '\0';
+
+  /* The limit goes too, and this one is load-bearing rather than tidy.
+   * m_join.c's forwarding branch only redirects when the channel is at its
+   * limit -- `if (chptr->users >= chptr->mode.limit)` (m_join.c:161) inside
+   * the `if (*chptr->mode.redir)` test at m_join.c:160.  With no limit set
+   * that comparison is trivially true (mode.limit is unsigned) and every
+   * join of the tombstone forwards, which is the unconditional behaviour
+   * the spec describes.  Carry the old channel's +l across, though, and it
+   * is FALSE for as long as the tombstone is under-full -- so joins of the
+   * old name would silently land IN the dying channel instead of being
+   * forwarded to the new one, for the whole grace period.  The limit
+   * belongs to the live community, which is at the new name;
+   * newchan->mode already carries it.  Cleared silently for the same
+   * reason as the registration bits above: every server runs this engine
+   * off the same marker, so it clears everywhere in lockstep. */
+  chptr->mode.mode &= ~MODE_LIMIT;
+  chptr->mode.limit = 0;
 
   /* ---- 2. Tombstone the old channel, BEFORE moving anyone out ----
    * EXMODE_PERSIST is what stops sub1_from_channel() from destructing
