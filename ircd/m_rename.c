@@ -120,7 +120,13 @@ static struct RelocateTombstone *relocate_tombstone_find(const char *name);
  * i.e. permanent membership divergence -- which is strictly worse than
  * losing the marker on a malformed emission. */
 #define RELOCATE_MARKER "C"
-/** RELOCATE_MARKER as a rename_forward_rcapable()/sendcmdto splice. */
+/** RELOCATE_MARKER as a "%s %s %s:%s" splice.  EVERY emitter -- the v3
+ * sendcmdto_serv_butone_v3() broadcasts as much as rename_forward_rcapable()
+ * -- must use THIS, not bare RELOCATE_MARKER: the trailing space is what
+ * separates the marker from the reason's leading colon.  Without it the
+ * wire renders "RN #old #new C:reason", a four-parameter classic rename
+ * whose reason is "C:reason", and every downstream server force-moves a
+ * membership this server left behind. */
 #define RELOCATE_MARKER_SP RELOCATE_MARKER " "
 
 /** Find the services server.
@@ -449,7 +455,7 @@ void pending_rename_complete(struct PendingRename *pr)
 
     sendcmdto_serv_butone_v3(pr->client, CMD_RENAME, cli_from(pr->client),
                              "%s %s %s:%s", pr->oldname, pr->newname,
-                             RELOCATE_MARKER, pr->reason);
+                             RELOCATE_MARKER_SP, pr->reason);
     rename_forward_rcapable(pr->client, NULL, pr->oldname, pr->newname,
                             RELOCATE_MARKER_SP, pr->reason);
 
@@ -726,16 +732,40 @@ static struct RelocateTombstone *relocate_tombstone_find(const char *name)
 }
 
 /** Resolve a tombstone's channel, refreshing the cached pointer.
+ *
+ * A name lookup alone is NOT an identity check.  A tombstone can die early
+ * (services DESTRUCT, a manual MODE -z followed by the last member
+ * parting) and an unrelated user can then create a brand-new channel of
+ * the same name well inside the grace period -- FindChannel() would hand
+ * that fresh channel back and a chain-flattening retarget would stamp
+ * +L onto somebody's live channel.  So the result is only accepted when it
+ * still carries the marks this engine put on it: the internal persist bit,
+ * the redirect bit, and a redirect string still pointing where this
+ * tombstone points.  Anything else is a different channel wearing the same
+ * name.
  * @param[in] ts Tombstone to resolve.
- * @return The channel, or NULL if it no longer exists.
+ * @return The tombstone channel, or NULL if it is gone or has been
+ *         replaced by an unrelated channel of the same name.
  */
 static struct Channel *relocate_tombstone_channel(struct RelocateTombstone *ts)
 {
+  struct Channel *chptr;
+
   if (!ts)
     return NULL;
 
-  ts->oldchan = FindChannel(ts->oldname);
-  return ts->oldchan;
+  ts->oldchan = NULL;
+
+  if (!(chptr = FindChannel(ts->oldname)))
+    return NULL;
+
+  if (!(chptr->mode.exmode & EXMODE_PERSIST)
+      || !(chptr->mode.mode & MODE_REDIRECT)
+      || 0 != ircd_strcmp(chptr->mode.redir, ts->newname))
+    return NULL;
+
+  ts->oldchan = chptr;
+  return chptr;
 }
 
 /** Unlink a tombstone from the global list.  Does NOT touch the timer and
@@ -888,9 +918,14 @@ static void relocate_tombstone_retarget(const char *oldtarget,
     if (0 != ircd_strcmp(ts->newname, oldtarget))
       continue;
 
+    /* Resolve BEFORE repointing the record: relocate_tombstone_channel()
+     * authenticates the channel by comparing its live redirect against
+     * ts->newname, which is still the PRIOR target at this instant. */
+    chptr = relocate_tombstone_channel(ts);
+
     ircd_strncpy(ts->newname, newtarget, sizeof(ts->newname));
 
-    if (!(chptr = relocate_tombstone_channel(ts)))
+    if (!chptr)
       continue;
 
     ircd_strncpy(chptr->mode.redir, ts->newname, sizeof(chptr->mode.redir));
@@ -933,6 +968,67 @@ static void relocate_copy_bans(struct Ban **dst, struct Ban *src)
 
     *tail = nb;
     tail = &nb->next;
+  }
+}
+
+/** Tell a mover's LOCAL bouncer-alias connections that their view of the
+ * old channel is over.
+ *
+ * A classic rename notified alias connections for free: send_rename_to_
+ * members() walks chptr->members, which includes the CHFL_ALIAS shadow
+ * memberships, and a local alias is MyUser().  Relocation cannot reuse
+ * that walk, and the alias plumbing is asymmetric -- add_user_to_channel(
+ * newchan, primary) -> bounce_sync_alias_join() DOES emit a JOIN echo
+ * (plus TOPIC/NAMES) to each local alias connection, but
+ * remove_user_from_channel(primary, chptr) -> bounce_sync_alias_part()
+ * removes the alias membership SILENTLY.  Left alone, connection 2 of a
+ * bouncer user is told it joined the new channel and never told it left
+ * the old one, so it believes it is in both forever.
+ *
+ * Of the two coherent repairs, this one -- part the alias's view of the
+ * old channel and let bounce_sync_alias_join()'s existing JOIN echo stand
+ * -- is chosen over replaying send_rename_to_member() for each alias.
+ * Replaying it would emit a SECOND JOIN #new (and a second NAMES burst)
+ * on top of the sync echo for a no-cap alias, and for a cap-holding alias
+ * it would emit a RENAME asserting a membership move the connection has
+ * already been told about as a JOIN -- both leave the connection
+ * describing itself as in the new channel twice.  The cost is that an
+ * alias connection holding draft/channel-rename gets the legacy PART/JOIN
+ * presentation rather than a RENAME; that is a presentation downgrade on
+ * a secondary connection, not a state divergence.
+ *
+ * MUST be called BEFORE add_user_to_channel(newchan, primary): that call
+ * is what emits the JOIN echo, and PART-after-JOIN would render out of
+ * order.  Read-only with respect to the membership list.
+ * @param[in] primary The moving (non-alias) client.
+ * @param[in] chptr The old channel, still holding the alias memberships.
+ * @param[in] oldname The old channel name.
+ * @param[in] newname The new channel name.
+ * @param[in] reason Rename reason (may be empty string).
+ */
+static void relocate_part_local_aliases(struct Client *primary,
+                                        struct Channel *chptr,
+                                        const char *oldname,
+                                        const char *newname,
+                                        const char *reason)
+{
+  struct Membership *member;
+
+  for (member = chptr->members; member; member = member->next_member) {
+    struct Client *alias = member->user;
+
+    if (!IsMemberAlias(member) || !MyConnect(alias))
+      continue;
+    if (cli_alias_primary(alias) != primary)
+      continue;
+
+    /* Same wording as send_rename_to_member()'s legacy fallback PART, so
+     * the pair an alias connection sees is indistinguishable from the one
+     * a cap-less primary sees. */
+    sendcmdto_one(alias, CMD_PART, alias, "%s :Channel renamed to %s%s%s",
+                  oldname, newname,
+                  (reason && *reason) ? ": " : "",
+                  (reason && *reason) ? reason : "");
   }
 }
 
@@ -979,6 +1075,7 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
   struct Membership *member;
   struct RelocateMover *movers;
   char newname_buf[CHANNELLEN + 1];
+  char reasonpart[TOPICLEN + 4];
   int nmembers = 0;
   int nmovers = 0;
   int i;
@@ -990,10 +1087,25 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
   if (FindChannel(newname))
     return -2;
 
+  /* Issuer normalisation.  A bouncer alias connection is not the channel
+   * member -- the PRIMARY holds the real Membership and the alias holds a
+   * CHFL_ALIAS shadow that pass 1 skips.  Without this rewrite an alias
+   * issuing RENAME would match no membership at all and the issuer, whose
+   * own action is the consent, would be left behind in the tombstone.
+   * Same rewrite rename_forward_rcapable() and m_rename()'s AC emit
+   * already perform for the same reason. */
+  if (IsUser(sptr) && IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+    sptr = cli_alias_primary(sptr);
+
   if (!reason)
     reason = "";
 
   ircd_strncpy(newname_buf, newname, sizeof(newname_buf));
+
+  if (*reason)
+    ircd_snprintf(0, reasonpart, sizeof(reasonpart), " (%s)", reason);
+  else
+    reasonpart[0] = '\0';
 
   /* Upper-bound the mover array by the membership list length (which can
    * exceed chptr->users: aliases and zombies are on the list too).  Do it
@@ -1035,6 +1147,44 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
                sizeof(newchan->topic_nick));
   relocate_copy_bans(&newchan->banlist, chptr->banlist);
   relocate_copy_bans(&newchan->exceptlist, chptr->exceptlist);
+
+  /* Pending invites MOVE rather than fork: an invite is a one-shot grant
+   * to enter the community, and the community is now at the new name.
+   * The per-client back-pointers have to be re-aimed exactly as
+   * rename_channel() re-aims them (channel.c ~2103) -- cli_user()->invited
+   * holds struct Channel *, so leaving them pointing at the tombstone
+   * would strand del_invite() on the wrong list. */
+  {
+    struct SLink *link;
+
+    newchan->invites = chptr->invites;
+    chptr->invites = NULL;
+
+    for (link = newchan->invites; link; link = link->next) {
+      struct Client *icptr = link->value.cptr;
+      struct SLink *inv;
+
+      for (inv = cli_user(icptr)->invited; inv; inv = inv->next) {
+        if (inv->value.chptr == chptr) {
+          inv->value.chptr = newchan;
+          break;
+        }
+      }
+    }
+  }
+
+  /* ---- 1b. Registration and channel credentials TRANSFER ----
+   * They are moved, not forked.  The struct Mode assignment above already
+   * gave newchan the MODE_REGISTERED bit and the apass/upass, so all that
+   * is left is to strip them from the tombstone: a tombstone that stays
+   * +R claims a registration that now belongs to the new name (services
+   * re-point it themselves), and a tombstone that keeps the apass would
+   * hand a dissolving channel's founder credentials to whoever is left in
+   * it.  Nothing extra goes on the wire -- every server runs this same
+   * engine off the marker, so the bit clears everywhere in lockstep. */
+  chptr->mode.mode &= ~MODE_REGISTERED;
+  chptr->mode.apass[0] = '\0';
+  chptr->mode.upass[0] = '\0';
 
   /* ---- 2. Tombstone the old channel, BEFORE moving anyone out ----
    * EXMODE_PERSIST is what stops sub1_from_channel() from destructing
@@ -1097,11 +1247,14 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
       sendcmdto_one(sptr, CMD_RELOCATE, user, "%s %s :%s",
                     oldname, newname_buf, reason);
     else
+      /* Exactly the spec's fallback shape.  reasonpart carries the
+       * " (<reason>)" parenthetical, or is empty when there is no reason
+       * -- an empty "()" would read as a rendering bug and inventing a
+       * placeholder reason would put words in the issuer's mouth. */
       sendcmdto_one(&his, CMD_NOTICE, user,
-                    "%H :%s has moved to %s (%s). Join %s to follow; this "
+                    "%H :%s has moved to %s%s. Join %s to follow; this "
                     "channel closes in %d minutes.",
-                    chptr, oldname, newname_buf,
-                    *reason ? reason : "no reason given", newname_buf,
+                    chptr, oldname, newname_buf, reasonpart, newname_buf,
                     feature_int(FEAT_RELOCATE_GRACE) / 60);
   }
 
@@ -1112,10 +1265,30 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
    * Interleaving move-and-notify would hand each mover a NAMES list
    * containing only the movers processed before them. */
   for (i = 0; i < nmovers; i++) {
+    /* Before the add: add_user_to_channel() is what emits the alias JOIN
+     * echo, so the alias's PART of the old name has to precede it. */
+    relocate_part_local_aliases(movers[i].user, chptr, oldname, newname_buf,
+                                reason);
+
     add_user_to_channel(newchan, movers[i].user, movers[i].status,
                         movers[i].oplevel);
     remove_user_from_channel(movers[i].user, chptr);
   }
+
+  /* The members staying behind have to SEE the movers go, or the
+   * tombstone's NAMES list keeps names that are not in it any more.
+   * Local-only: this is not the network PART that add/remove deliberately
+   * avoid emitting -- every server runs this same loop for its own local
+   * stayers.
+   *
+   * It runs as its OWN loop, after every mover has been unlinked, so that
+   * no mover can receive it.  Fused into the loop above, mover i's PART
+   * would still reach movers i+1..n -- who are being told by their own
+   * RENAME/PART+JOIN that they are on the new channel, and would be
+   * getting old-channel PART traffic at the same time. */
+  for (i = 0; i < nmovers; i++)
+    sendcmdto_channel_butserv_butone(movers[i].user, CMD_PART, chptr, NULL, 0,
+                                     "%H :Moved to %s", chptr, newname_buf);
 
   for (i = 0; i < nmovers; i++) {
     /* Local movers only: a mover on another server is notified by that
@@ -1348,7 +1521,7 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s %s:%s",
-                             oldname_buf, newname, RELOCATE_MARKER, reason);
+                             oldname_buf, newname, RELOCATE_MARKER_SP, reason);
     rename_forward_rcapable(sptr, NULL, oldname_buf, newname,
                             RELOCATE_MARKER_SP, reason);
     return 0;
@@ -1421,6 +1594,22 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                                                        RELOCATE_MARKER)) {
     relocate = 1;
     reason = !EmptyString(parv[4]) ? parv[4] : "";
+  } else if (parc == 4 && !EmptyString(parv[3]) && parv[3][0] == 'C'
+             && IsIRCv3Aware(cptr)) {
+    /* Tripwire for a mis-spliced marker.  A peer that emits the marker
+     * without its separating space produces "RN #old #new C:<reason>",
+     * which parses here as a four-parameter CLASSIC rename with the
+     * reason "C:<reason>" -- so this server force-moves a membership the
+     * emitting server partitioned, and the divergence is silent and
+     * permanent.  A genuine classic rename whose reason merely starts
+     * with 'C' is legitimate, so this only warns; it does not reinterpret
+     * the message. */
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "RENAME from %#C: %s -> %s has a 4-parameter reason beginning "
+              "with 'C' (\"%s\").  If that peer meant to send the relocation "
+              "marker it omitted the separating space, and this server has "
+              "just applied a CLASSIC rename to a channel it partitioned.",
+              cptr, parv[1], parv[2], parv[3]);
   }
 
   /* Find the channel */
@@ -1434,10 +1623,29 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   if (relocate) {
     rc = relocate_execute(sptr, chptr, oldname_buf, newname, reason);
-    if (rc != 0) {
-      /* Same conservative handling as the classic failure below: log and
-       * do not propagate, rather than telling downstream servers about a
-       * relocation this server did not apply. */
+
+    if (rc == -2) {
+      /* Both names already exist HERE.  That is a pre-existing local
+       * divergence, not a defect in the message, and it is exactly the
+       * case where dropping the relay does the most damage: this server
+       * would become a silent wall, leaving every server behind it on the
+       * old name forever while everything in front of it moved.  So warn
+       * loudly enough for an operator to act -- the two channels have to
+       * be reconciled by hand -- and CONTINUE propagating.  Containment of
+       * the divergence to this one server beats orphaning the whole
+       * subtree. */
+      sendto_opmask_butone(0, SNO_OLDSNO,
+                           "RELOCATE %s -> %s from %C NOT applied locally: "
+                           "%s already exists on this server.  The rename "
+                           "has been relayed onward, so this server is now "
+                           "divergent and needs manual reconciliation.",
+                           oldname_buf, newname, sptr, newname);
+      /* fall through to propagation */
+    } else if (rc != 0) {
+      /* Any other failure is deterministic from the message itself (name
+       * too long, allocation failure), so every server fails it the same
+       * way and there is nothing downstream to orphan.  Log and drop,
+       * matching the classic failure path below. */
       log_write(LS_DEBUG, L_ERROR, 0,
                 "RELOCATE failed from %#C: %s -> %s (rc=%d)",
                 sptr, oldname, newname, rc);
@@ -1446,7 +1654,7 @@ int ms_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     /* Propagate with the marker preserved. */
     sendcmdto_serv_butone_v3(sptr, CMD_RENAME, cptr, "%s %s %s:%s",
-                             oldname_buf, newname, RELOCATE_MARKER, reason);
+                             oldname_buf, newname, RELOCATE_MARKER_SP, reason);
     rename_forward_rcapable(sptr, cptr, oldname_buf, newname,
                             RELOCATE_MARKER_SP, reason);
     return 0;
