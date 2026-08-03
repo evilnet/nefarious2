@@ -949,6 +949,14 @@ struct Message msgtab[] = {
     "<oldchannel> <newchannel> [:<reason>] - Rename a channel"
   },
   {
+    MSG_RELOCATE,
+    TOK_RELOCATE,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_ignore, m_ignore, m_ignore, m_ignore, m_ignore },
+    "<oldchannel> <newchannel> [:<reason>] - Server-to-client relocation notice (no client command)"
+  },
+  {
     MSG_WATCH,
     TOK_WATCH,
     0, MAXPARA, MFLG_SLOW, 0, NULL,

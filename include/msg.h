@@ -340,6 +340,10 @@ struct Client;
 #define TOK_RENAME	"RN"
 #define CMD_RENAME	MSG_RENAME, TOK_RENAME
 
+#define MSG_RELOCATE	"RELOCATE"
+#define TOK_RELOCATE	"RLO"
+#define CMD_RELOCATE	MSG_RELOCATE, TOK_RELOCATE
+
 #define MSG_ASLL               "ASLL"          /* ASLL */
 #define TOK_ASLL               "LL"
 #define CMD_ASLL               MSG_ASLL, TOK_ASLL
