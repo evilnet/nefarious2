@@ -30,6 +30,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "gline.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_events.h"
@@ -429,6 +430,19 @@ void pending_rename_complete(struct PendingRename *pr)
                 "pending_rename_complete: channel %s changed identity while "
                 "awaiting services", pr->oldname);
       pending_rename_deny(pr, "Channel changed while awaiting services");
+      return;
+    }
+  }
+
+  /* Re-run the BADCHAN check from m_rename: a badchan on the target can
+   * land during the services round-trip, and the approval must not
+   * override it (services arbitrate ownership, not G-line policy).
+   * Runs before the consent branch — a relocation onto a banned name is
+   * just as much a bypass as a classic rename onto one. */
+  {
+    struct Gline *gline = gline_find(pr->newname, GLINE_BADCHAN | GLINE_EXACT);
+    if (gline && GlineIsActive(gline) && !IsAnOper(pr->client)) {
+      pending_rename_deny(pr, "Target channel name is banned");
       return;
     }
   }
@@ -2020,6 +2034,23 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     send_fail(sptr, "RENAME", "CHANNEL_NAME_IN_USE", oldname,
               "Channel name already in use");
     return 0;
+  }
+
+  /* BADCHAN-glined target: renaming onto a banned name would move the
+   * whole membership into a channel none of them could have JOINed —
+   * do_join() enforces this per-joiner (m_join.c, GLINE_BADCHAN branch);
+   * without this check RENAME is a wholesale bypass.  Mirror do_join's
+   * exact test, including the oper exemption.  Deliberately NOT enforced
+   * in ms_rename: local badchans never blocked remote users' presence in
+   * a channel (join-time, local policy), so a remote-origin rename is
+   * accepted the same way remote joins are. */
+  {
+    struct Gline *gline = gline_find(newname, GLINE_BADCHAN | GLINE_EXACT);
+    if (gline && GlineIsActive(gline) && !IsAnOper(sptr)) {
+      send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
+                "Target channel name is banned");
+      return 0;
+    }
   }
 
   /* RENAME is only sound when every linked server can apply RN.  Refuse
