@@ -515,6 +515,16 @@ extern int IsInvited(struct Client* cptr, const void* chptr);
 extern void send_channel_modes(struct Client *cptr, struct Channel *chptr);
 extern char *pretty_mask(char *mask);
 extern char *pretty_extmask(char *mask);
+extern int rename_channel(struct Channel **chptr_p, const char *newname);
+
+/* Pending channel-rename requests (defined in m_rename.c; consumed by the
+ * ACCOUNT A/D reply path in m_account.c and client exit in s_misc.c). */
+struct PendingRename;
+extern struct PendingRename *pending_rename_find(unsigned int cookie);
+extern void pending_rename_complete(struct PendingRename *pr);
+extern void pending_rename_deny(struct PendingRename *pr, const char *reason);
+extern void pending_rename_client_exit(struct Client *cptr);
+
 extern void del_invite(struct Client *cptr, struct Channel *chptr);
 extern void list_set_default(void); /* this belongs elsewhere! */
 
