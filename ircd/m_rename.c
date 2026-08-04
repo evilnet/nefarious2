@@ -1668,9 +1668,11 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
       }
     }
 
-    /* Movers: the issuer (issuing the rename IS consent) and anyone who
-     * pre-consented with umode +F. */
-    if (user == sptr || IsRelocateFollow(user)) {
+    /* Movers: the issuer only -- issuing the rename IS consent.  Every
+     * other member stays in the tombstone and follows by their own JOIN
+     * (see docs/specs/channel-relocate.md, design "D"); the per-member
+     * snapshot captured above is what restores their status on follow. */
+    if (user == sptr) {
       movers[nmovers].user = user;
       /* CHFL_DELAYED rides along with the status bits: a classic rename
        * keeps the whole Membership struct, so a +D-hidden member stays

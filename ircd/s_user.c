@@ -702,8 +702,7 @@ static const struct UserMode {
   { FLAG_SETHOST,      'h' },
   { FLAG_FAKEHOST,     'f' },
   { FLAG_CLOAKHOST,    'C' },
-  { FLAG_CLOAKIP,      'c' },
-  { FLAG_RELOCATE_FOLLOW, 'F' }
+  { FLAG_CLOAKIP,      'c' }
 };
 
 /** Length of #userModeList. */
@@ -1602,15 +1601,6 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           SetNoLink(acptr);
         else
           ClearNoLink(acptr);
-        break;
-      case 'F':
-        /* evilnet/channel-relocate: advance consent to be moved by any
-         * channel relocation; see docs/specs/channel-relocate.md in the
-         * testnet repo. Freely user-settable, like +L. */
-        if (what == MODE_ADD)
-          SetRelocateFollow(acptr);
-        else
-          ClearRelocateFollow(acptr);
         break;
       case 'x':
         if (what == MODE_ADD) {
