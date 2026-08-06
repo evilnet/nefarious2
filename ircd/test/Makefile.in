@@ -16,10 +16,11 @@ TESTPROGS = \
 # CMocka test programs (proper assertions)
 #
 # @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka
-# kc_jwt_cmocka under --enable-keycloak, and empty otherwise: those four
-# link ../kc/*.o, which ircd/Makefile only builds when Keycloak is
-# enabled (see configure.in's Keycloak block).  Their build rules stay
-# defined below either way; they are simply never requested.
+# kc_jwt_cmocka kc_cred_derive_cmocka under --enable-keycloak, and empty
+# otherwise: those five link ../kc/*.o, which ircd/Makefile only builds
+# when Keycloak is enabled (see configure.in's Keycloak block).  Their
+# build rules stay defined below either way; they are simply never
+# requested.
 CMOCKA_TESTPROGS = \
 	@KC_CMOCKA_TESTPROGS@ \
 	ircd_chattr_cmocka \
@@ -64,6 +65,7 @@ DEP_SRC = \
 	kc_base64_cmocka.c \
 	kc_cache_cmocka.c \
 	kc_jwt_cmocka.c \
+	kc_cred_derive_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -194,6 +196,13 @@ kc_cache_cmocka: $(KC_CACHE_CMOCKA_OBJS)
 KC_JWT_CMOCKA_OBJS = kc_jwt_cmocka.o ../kc/kc_base64.o ../kc/kc_http_sync.o
 kc_jwt_cmocka: $(KC_JWT_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_JWT_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(CURL_LIBS) $(SSL_LIBS)
+
+# kc_cred_derive tests - registration-time SCRAM-SHA-256 + Keycloak PBKDF2
+# credential derivation.  Pure derivation code (no HTTP), so only
+# kc_base64.o is needed alongside kc_cred_derive.o itself.
+KC_CRED_DERIVE_CMOCKA_OBJS = kc_cred_derive_cmocka.o ../kc/kc_cred_derive.o ../kc/kc_base64.o
+kc_cred_derive_cmocka: $(KC_CRED_DERIVE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(KC_CRED_DERIVE_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(SSL_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
