@@ -89,17 +89,48 @@
 /** Maximum accepted password length (mirrored in the CAP value above). */
 #define REGISTER_PASSWORD_MAX 300
 
+/** Current draft/account-registration CAP 302 value under the active
+ * policy. */
+static const char *accountreg_capvalue(void)
+{
+  return feature_bool(FEAT_REGISTER_VERIFY_EMAIL) ?
+    ACCOUNTREG_CAPVALUE_EMAIL : ACCOUNTREG_CAPVALUE_NOEMAIL;
+}
+
 /** Feature-notify hook for FEAT_REGISTER_VERIFY_EMAIL.
  *
- * Keeps the draft/account-registration CAP value in step with the policy,
- * so a rehash that flips the feature cannot leave "email-required" (or its
- * absence) stale in CAP LS output.
- */
+ * Keeps the draft/account-registration CAP value in step with the policy.
+ * cap_set_value() only updates the stored CAP LS value -- it does not
+ * notify -- so a policy flip must also emit CAP NEW with the new value
+ * to cap-notify clients (only when the capability itself is advertised).
+ * During a rehash the notify batch (cap_notify_begin_batch/flush)
+ * deduplicates this against feature_notify_cap_accountreg(). */
 void feature_notify_accountreg_capvalue(void)
 {
-  cap_set_value(CAP_DRAFT_ACCOUNTREG,
-                feature_bool(FEAT_REGISTER_VERIFY_EMAIL) ?
-                ACCOUNTREG_CAPVALUE_EMAIL : ACCOUNTREG_CAPVALUE_NOEMAIL);
+  cap_set_value(CAP_DRAFT_ACCOUNTREG, accountreg_capvalue());
+  if (feature_bool(FEAT_CAP_draft_account_registration))
+    send_cap_notify("draft/account-registration", 1, accountreg_capvalue());
+}
+
+/** Feature-notify hook for FEAT_CAP_draft_account_registration itself.
+ *
+ * Replaces the generic DEFINE_CAP_NOTIFY hook, which sent CAP NEW with
+ * no value: this capability's value is load-bearing (email-required,
+ * password bounds), so enabling the cap must advertise it. */
+void feature_notify_cap_accountreg(void)
+{
+  cap_set_value(CAP_DRAFT_ACCOUNTREG, accountreg_capvalue());
+  if (feature_bool(FEAT_CAP_draft_account_registration)) {
+    send_cap_notify("draft/account-registration", 1, accountreg_capvalue());
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "draft/account-registration: capability enabled, "
+              "sent CAP NEW to cap-notify clients");
+  } else {
+    send_cap_notify("draft/account-registration", 0, NULL);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "draft/account-registration: capability disabled, "
+              "sent CAP DEL to cap-notify clients");
+  }
 }
 
 #ifdef USE_LIBKC

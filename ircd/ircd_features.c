@@ -588,7 +588,6 @@ DEFINE_CAP_NOTIFY("draft/extended-isupport", draft_extended_isupport)
 DEFINE_CAP_NOTIFY("draft/pre-away", draft_pre_away)
 DEFINE_CAP_NOTIFY("draft/event-playback", draft_event_playback)
 DEFINE_CAP_NOTIFY("draft/message-redaction", draft_message_redaction)
-DEFINE_CAP_NOTIFY("draft/account-registration", draft_account_registration)
 DEFINE_CAP_NOTIFY("draft/read-marker", draft_read_marker)
 DEFINE_CAP_NOTIFY("draft/channel-rename", draft_channel_rename)
 DEFINE_CAP_NOTIFY("evilnet/channel-relocate", evilnet_channel_relocate)
@@ -1207,7 +1206,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_chathistory, 0, 1, feature_notify_cap_chathistory),
   F_B(CAP_draft_event_playback, 0, 0, feature_notify_cap_draft_event_playback),
   F_B(CAP_draft_message_redaction, 0, 0, feature_notify_cap_draft_message_redaction),
-  F_B(CAP_draft_account_registration, 0, 0, feature_notify_cap_draft_account_registration),
+  F_B(CAP_draft_account_registration, 0, 0, feature_notify_cap_accountreg),
   /* REGISTER policy: when on, accounts are created with emailVerified=false
    * plus a VERIFY_EMAIL required action and Keycloak mails a verification
    * link; an email address then becomes mandatory on REGISTER.  The notify

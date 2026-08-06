@@ -142,6 +142,7 @@ extern void cap_set_value(enum Capab cap, const char *value);
  * draft/account-registration CAP value from FEAT_REGISTER_VERIFY_EMAIL.
  * Defined in m_register.c. */
 extern void feature_notify_accountreg_capvalue(void);
+extern void feature_notify_cap_accountreg(void);
 
 /* CAP notify batching for rehash - aggregates multiple CAP NEW/DEL into single messages */
 extern void cap_notify_begin_batch(void);
