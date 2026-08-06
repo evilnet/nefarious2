@@ -1214,6 +1214,15 @@ static struct FeatureDesc {
    * hook rebuilds the draft/account-registration CAP value (email-required)
    * so a rehash cannot leave a stale advertisement behind. */
   F_B(REGISTER_VERIFY_EMAIL, 0, 0, feature_notify_accountreg_capvalue),
+  /* Cross-connection REGISTER throttle (register_throttle.c, consulted by
+   * m_register.c): LIMIT counted attempts per PERIOD seconds per client
+   * IP (/64 for IPv6), plus a server-wide GLOBAL backstop per PERIOD.
+   * 0 disables that limiter; attempts are counted, not successes; opers
+   * bypass.  Defaults are meant for an exposed network -- the testnet bed
+   * pins LIMIT/GLOBAL to 0 in its confs. */
+  F_I(REGISTER_THROTTLE_LIMIT, 0, 3, 0),
+  F_I(REGISTER_THROTTLE_PERIOD, 0, 3600, 0),
+  F_I(REGISTER_THROTTLE_GLOBAL, 0, 60, 0),
   /* Off by default: only a services build that disambiguates RENAME
    * requests from account-stamp notifications on the AC 'R' subcommand
    * (see the protocol-history comment in m_rename.c) should have this

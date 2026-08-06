@@ -1886,3 +1886,34 @@ keeps working for them, but SCRAM does not, until their emailVerified flag
 is corrected. Only enable this on a realm where emailVerified accurately
 reflects verification state for all existing accounts, or after running a
 backfill to set it correctly.
+
+REGISTER_THROTTLE_LIMIT
+ * Type: integer
+ * Default: 3
+
+Maximum counted REGISTER attempts per client IP address (per /64 for
+IPv6) within REGISTER_THROTTLE_PERIOD seconds.  Attempts are counted,
+not successes: a rejected duplicate account name or a failed backend
+call still consumes budget, so account-name enumeration is rate-limited
+too.  A throttled client receives FAIL REGISTER RATE_LIMITED.  IRC
+operators bypass the throttle.  0 disables the per-IP limiter.
+
+REGISTER_THROTTLE_PERIOD
+ * Type: integer
+ * Default: 3600
+
+The window, in seconds, for both REGISTER_THROTTLE_LIMIT and
+REGISTER_THROTTLE_GLOBAL.  A client's per-IP window resets once this
+many seconds pass after its last counted attempt.  0 disables both
+limiters.
+
+REGISTER_THROTTLE_GLOBAL
+ * Type: integer
+ * Default: 60
+
+Server-wide cap on counted REGISTER attempts per
+REGISTER_THROTTLE_PERIOD, regardless of source IP -- the backstop that
+bounds account minting from a botnet spread across many addresses.
+Trips are logged at L_WARNING.  Note this is per-server, not
+per-network: each server enforces its own budget.  0 disables the
+global limiter.

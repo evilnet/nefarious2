@@ -364,6 +364,9 @@ enum Feature {
   FEAT_CAP_draft_message_redaction,
   FEAT_CAP_draft_account_registration,
   FEAT_REGISTER_VERIFY_EMAIL,
+  FEAT_REGISTER_THROTTLE_LIMIT,
+  FEAT_REGISTER_THROTTLE_PERIOD,
+  FEAT_REGISTER_THROTTLE_GLOBAL,
   FEAT_RENAME_SERVICES,
   /* relocation mode -- renames move only the issuer and +F users;
    * see docs/specs/channel-relocate.md in the testnet repo */

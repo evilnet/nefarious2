@@ -59,6 +59,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "random.h"
+#include "register_throttle.h"
 #include "s_auth.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -425,7 +426,7 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * for each one, spending the server's Keycloak quota unthrottled.  A
    * nonzero cli_regcookie() *is* the guard; it is set when the context is
    * allocated below and cleared in reg_ctx_free() on every terminal path.
-   * (Cross-connection rate limiting is a separate, unaddressed concern.) */
+   * (Cross-connection rate limiting is the register_throttle.c check below.) */
   if (cli_regcookie(cptr)) {
     send_fail(sptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account,
               "Registration already in progress");
@@ -477,6 +478,30 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     send_fail(sptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account,
               "Registration service is not available");
     return 0;
+  }
+
+  /* Cross-connection throttle: per-IP rolling window plus a server-wide
+   * backstop (register_throttle.c).  Placed after all synchronous
+   * validation and before the in-flight cookie/context, so a throttled
+   * request neither arms the guard nor derives credentials.  Attempts
+   * are counted, not successes: a later duplicate-name or Keycloak
+   * failure still consumed budget, so account-name enumeration is not
+   * free.  Opers bypass (metadata-limiter precedent). */
+  if (!IsOper(sptr)) {
+    enum reg_throttle_result tres =
+      reg_throttle_check(&cli_ip(cptr), CurrentTime,
+                         feature_int(FEAT_REGISTER_THROTTLE_LIMIT),
+                         feature_int(FEAT_REGISTER_THROTTLE_PERIOD),
+                         feature_int(FEAT_REGISTER_THROTTLE_GLOBAL));
+    if (tres != REG_THROTTLE_OK) {
+      if (tres == REG_THROTTLE_GLOBAL)
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "REGISTER: server-wide registration cap reached "
+                  "(client %C)", cptr);
+      send_fail(sptr, "REGISTER", "RATE_LIMITED", account,
+                "Too many registration attempts; try again later");
+      return 0;
+    }
   }
 
 #ifdef USE_LIBKC
