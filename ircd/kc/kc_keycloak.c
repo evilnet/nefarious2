@@ -1136,7 +1136,16 @@ int kc_user_create_full(const struct kc_user_create_req *req,
         json_object_set_new(user_repr, "attributes", attrs);
     }
 
-    /* credentials: same nested-JSON-strings shape as kc_user_create */
+    /* credentials: Keycloak's admin REST schema wants credentialData/
+     * secretData as JSON-*encoded strings* nested inside the credential
+     * object, not as parsed JSON objects -- confirmed against a live
+     * Keycloak 26.4.7 (Task 0's probe, and reproduced directly: embedding
+     * them as objects gets a verbatim 400 "Cannot parse the JSON" from the
+     * admin API; embedding the same content as strings gets 201). Still
+     * json_loads() req->cred_data/secret_data first as a well-formedness
+     * check on the derived credential material -- reject rather than send
+     * Keycloak something we already know is broken -- but embed the
+     * *original strings*, not the parsed objects. */
     {
         json_error_t err;
         json_t *cred_obj = json_loads(req->cred_data, 0, &err);
@@ -1147,14 +1156,15 @@ int kc_user_create_full(const struct kc_user_create_req *req,
             json_decref(user_repr);
             return -1;
         }
+        json_decref(cred_obj);
+        json_decref(secret_obj);
         json_t *cred = json_object();
         json_object_set_new(cred, "type", json_string("password"));
-        json_object_set(cred, "credentialData", cred_obj);
-        json_object_set(cred, "secretData", secret_obj);
+        json_object_set_new(cred, "credentialData", json_string(req->cred_data));
+        json_object_set_new(cred, "secretData", json_string(req->secret_data));
         json_t *creds = json_array();
         json_array_append_new(creds, cred);
         json_object_set_new(user_repr, "credentials", creds);
-        json_decref(cred_obj); json_decref(secret_obj);
     }
 
     char *body = json_dumps(user_repr, JSON_COMPACT);
