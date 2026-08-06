@@ -198,6 +198,26 @@ static int parse_user(json_t *json, struct kc_user *user)
 
     user->email_verified = json_get_bool(json, "emailVerified", 0);
 
+    /* Top-level requiredActions: the only action the ircd cares about is
+     * VERIFY_EMAIL (set by kc_user_create_full under the verification
+     * policy).  Absent or empty array => false (the memset above).
+     * Confirmed live 2026-08-06 that the search-by-username
+     * representation used by kc_user_get() carries this field. */
+    {
+        json_t *actions = json_object_get(json, "requiredActions");
+        if (actions && json_is_array(actions)) {
+            size_t ai;
+            for (ai = 0; ai < json_array_size(actions); ai++) {
+                json_t *act = json_array_get(actions, ai);
+                if (act && json_is_string(act)
+                    && strcmp(json_string_value(act), "VERIFY_EMAIL") == 0) {
+                    user->verify_email_pending = true;
+                    break;
+                }
+            }
+        }
+    }
+
     /* Extract custom attributes (Keycloak stores as {"key": ["value"]}) */
     json_t *attrs = json_object_get(json, "attributes");
     if (attrs && json_is_object(attrs)) {

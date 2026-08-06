@@ -1367,9 +1367,14 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
     return;
   }
 
-  /* Spec: SCRAM verifies locally and bypasses the ROPC required-action gate,
-   * so enforce email verification here when registration policy demands it. */
-  if (register_verify_email_policy() && !user->email_verified) {
+  /* Spec: SCRAM verifies locally and bypasses the ROPC required-action
+   * gate, so enforce the verification policy here.  Parity with PLAIN:
+   * key on the pending VERIFY_EMAIL required action (what the ROPC
+   * "Account is not fully set up" error keys on), NOT the bare
+   * emailVerified flag -- legacy accounts all have emailVerified=false
+   * but no pending action, and must not be locked out when the policy
+   * is enabled. */
+  if (register_verify_email_policy() && user->verify_email_pending) {
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL SCRAM: unverified account %s (client %C)",
               session->authcid, acptr);

@@ -65,6 +65,13 @@ struct kc_user {
     char *email;
     size_t email_size;
     bool email_verified;
+    /* Top-level requiredActions[] contains "VERIFY_EMAIL": verification
+     * was requested for this account and is still pending.  Distinguishes
+     * a daemon-born unverified account (action pending -> refuse) from a
+     * legacy account that merely predates emailVerified (no action ->
+     * allow).  Parsed in parse_user(); scalar, so kc_user_free() is
+     * untouched. */
+    bool verify_email_pending;
     int opserv_level;             /* Custom attribute: x3_opserv_level */
 
     /* SCRAM-SHA-256 credentials (from user attributes, may be NULL).
