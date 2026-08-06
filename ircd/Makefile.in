@@ -87,7 +87,7 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	memdebug.c \
 	umkpasswd.c
 
-# The KC_SRC list below is the nine vendored ircd/kc/*.c sources.  configure
+# The KC_SRC list below is the vendored ircd/kc/*.c sources.  configure
 # substitutes them only under --enable-keycloak, and nothing otherwise:
 # unlike every other optional consumer (sasl_auth.c, ircd_kc_adapter.c,
 # ...) the kc/ sources are verbatim from evilnet/libkc and carry no

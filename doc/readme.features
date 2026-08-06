@@ -1860,3 +1860,29 @@ UPING_PORT
 
 The default UDP ping server port. Change requires a restart of the
 IRCd.
+
+REGISTER_VERIFY_EMAIL
+ * Type: boolean
+ * Default: FALSE
+
+Controls whether accounts created via the IRCv3 draft/account-registration
+REGISTER command require e-mail verification before they are usable. When
+enabled, REGISTER creates the Keycloak account with emailVerified set to
+false and a pending VERIFY_EMAIL required action; Keycloak mails the
+verification link and the client is sent a REGISTER VERIFICATION_REQUIRED
+reply instead of being logged in. The draft/account-registration CAP 302
+value also gains the "email-required" token so clients can detect the
+policy before registering. When disabled, REGISTER creates a fully usable,
+already-verified account and logs the client in immediately.
+
+CAUTION: on a realm that already has accounts from before this feature was
+turned on, enabling it does not just affect new registrations -- it also
+changes what existing accounts can do. SASL SCRAM-SHA-256 gates directly on
+the account's emailVerified flag, while SASL PLAIN gates on the pending
+VERIFY_EMAIL required action. Legacy accounts have emailVerified=false (the
+field was never populated) but no pending required action, so turning this
+feature on locks SCRAM-SHA-256 out for every such legacy account -- PLAIN
+keeps working for them, but SCRAM does not, until their emailVerified flag
+is corrected. Only enable this on a realm where emailVerified accurately
+reflects verification state for all existing accounts, or after running a
+backfill to set it correctly.
