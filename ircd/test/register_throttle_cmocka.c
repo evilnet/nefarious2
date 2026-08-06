@@ -141,6 +141,30 @@ static void test_ip_refusal_spares_global(void **state)
   }
 }
 
+/* a global refusal must leave per-IP state completely untouched: no
+ * counted attempt, no window slide.  Regression for the bug where the
+ * per-IP recording happened before the global cap was evaluated, so a
+ * refused-by-global attempt still consumed the caller's per-IP budget. */
+static void test_global_refusal_spares_ip(void **state)
+{
+  struct irc_in_addr ip = mk_v4(10, 6, 0, 1);
+  (void)state;
+  /* first attempt: both limiters record it (per-IP attempts -> 1) */
+  assert_int_equal(REG_THROTTLE_OK,     reg_throttle_check(&ip, T0,     3, 3600, 1));
+  /* second attempt, same IP: per-IP alone would allow it (1 < limit 3),
+   * but the global cap (limit 1) is already spent for this window --
+   * the refusal must not increment the per-IP counter or slide its
+   * window (match->last must stay at T0, not move to T0+1) */
+  assert_int_equal(REG_THROTTLE_GLOBAL, reg_throttle_check(&ip, T0 + 1, 3, 3600, 1));
+  /* with global disabled from here (standing in for its window having
+   * since reset), the per-IP counter shows only the ONE real attempt
+   * was ever recorded: two more succeed (attempts -> 2, -> 3), then the
+   * next is refused by the per-IP limiter itself */
+  assert_int_equal(REG_THROTTLE_OK, reg_throttle_check(&ip, T0 + 2, 3, 3600, 0));
+  assert_int_equal(REG_THROTTLE_OK, reg_throttle_check(&ip, T0 + 3, 3, 3600, 0));
+  assert_int_equal(REG_THROTTLE_IP, reg_throttle_check(&ip, T0 + 4, 3, 3600, 0));
+}
+
 /* with the test's 1x4 table, a 5th distinct live IP evicts the oldest */
 static void test_eviction_oldest_live(void **state)
 {
@@ -205,6 +229,7 @@ int main(void)
     cmocka_unit_test_setup(test_zero_disables, setup),
     cmocka_unit_test_setup(test_global_cap, setup),
     cmocka_unit_test_setup(test_ip_refusal_spares_global, setup),
+    cmocka_unit_test_setup(test_global_refusal_spares_ip, setup),
     cmocka_unit_test_setup(test_eviction_oldest_live, setup),
     cmocka_unit_test_setup(test_expired_reused_before_eviction, setup),
     cmocka_unit_test_setup(test_expire_and_clear, setup),

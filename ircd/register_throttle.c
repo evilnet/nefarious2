@@ -80,14 +80,21 @@ enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
                                             time_t now, int limit,
                                             int period, int global_limit)
 {
+  struct irc_in_addr canon;
+  struct reg_throttle_entry *bucket = 0, *match = 0, *reusable = 0, *oldest = 0;
+  int have_ip = 0;
+
   if (period <= 0)
     return REG_THROTTLE_OK;
 
+  /* Phase 1: find (but do not mutate) the per-IP slot this attempt would
+   * land in, and refuse now if the per-IP window is already exhausted.
+   * This refusal is unconditional -- it must not touch the global
+   * counter either, so it stays a hard early return. */
   if (limit > 0 && ip) {
-    struct irc_in_addr canon;
-    struct reg_throttle_entry *bucket, *match = 0, *reusable = 0, *oldest = 0;
     int i;
 
+    have_ip = 1;
     reg_canon(&canon, ip);
     bucket = reg_table[reg_hash(&canon)];
     for (i = 0; i < REG_THROTTLE_BUCKET_DEPTH; ++i) {
@@ -104,9 +111,28 @@ enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
       }
     }
 
+    if (match && match->attempts >= limit)
+      return REG_THROTTLE_IP;   /* refusal: no count, no window slide */
+  }
+
+  /* Phase 2: evaluate (but do not yet commit) the global cap.  Checking
+   * this before touching per-IP state is what keeps a global refusal
+   * from consuming per-IP budget -- the bug this function used to have:
+   * it recorded the per-IP attempt first, then refused globally, so a
+   * botnet-exhausted global window silently ate a legit IP's budget too. */
+  if (global_limit > 0) {
+    if (now - reg_global_start >= period) {
+      reg_global_start = now;
+      reg_global_count = 0;
+    }
+    if (reg_global_count >= global_limit)
+      return REG_THROTTLE_GLOBAL;  /* refusal: per-IP state untouched */
+  }
+
+  /* Both limiters (whichever are enabled) have cleared the attempt --
+   * commit it to both now. */
+  if (have_ip) {
     if (match) {
-      if (match->attempts >= limit)
-        return REG_THROTTLE_IP;   /* refusal: no count, no window slide */
       ++match->attempts;
       match->last = now;
     } else {
@@ -120,15 +146,8 @@ enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
     }
   }
 
-  if (global_limit > 0) {
-    if (now - reg_global_start >= period) {
-      reg_global_start = now;
-      reg_global_count = 0;
-    }
-    if (reg_global_count >= global_limit)
-      return REG_THROTTLE_GLOBAL;
+  if (global_limit > 0)
     ++reg_global_count;
-  }
 
   return REG_THROTTLE_OK;
 }

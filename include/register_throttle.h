@@ -22,8 +22,11 @@ enum reg_throttle_result {
 };
 
 /* Test-and-count in one call: on OK the attempt is recorded against both
- * limiters.  A refusal records nothing (a refused client must get back in
- * once the window since its last COUNTED attempt elapses).
+ * limiters.  A refusal by EITHER limiter records nothing in EITHER
+ * limiter -- an attempt refused by the global cap does not slide or
+ * consume the caller IP's per-IP window, and vice versa -- so a refused
+ * client must get back in once the window since its last COUNTED
+ * attempt elapses.
  * limit <= 0 disables the per-IP limiter, global_limit <= 0 the global
  * one, period <= 0 both. */
 extern enum reg_throttle_result reg_throttle_check(const struct irc_in_addr *ip,
