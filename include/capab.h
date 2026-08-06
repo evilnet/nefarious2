@@ -134,6 +134,15 @@ extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned
 /* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
 extern void send_cap_notify(const char *capname, int available, const char *value);
 
+/* Overwrite a capability's advertised CAP 302 value at runtime (the value is
+ * copied).  NULL/"" advertises the capability with no value. */
+extern void cap_set_value(enum Capab cap, const char *value);
+
+/* Feature-notify hook (ircd_features.c table): rebuilds the
+ * draft/account-registration CAP value from FEAT_REGISTER_VERIFY_EMAIL.
+ * Defined in m_register.c. */
+extern void feature_notify_accountreg_capvalue(void);
+
 /* CAP notify batching for rehash - aggregates multiple CAP NEW/DEL into single messages */
 extern void cap_notify_begin_batch(void);
 extern void cap_notify_flush(void);

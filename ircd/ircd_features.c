@@ -1208,7 +1208,12 @@ static struct FeatureDesc {
   F_B(CAP_draft_event_playback, 0, 0, feature_notify_cap_draft_event_playback),
   F_B(CAP_draft_message_redaction, 0, 0, feature_notify_cap_draft_message_redaction),
   F_B(CAP_draft_account_registration, 0, 0, feature_notify_cap_draft_account_registration),
-  F_S(REGISTER_SERVER, 0, "*", 0),
+  /* REGISTER policy: when on, accounts are created with emailVerified=false
+   * plus a VERIFY_EMAIL required action and Keycloak mails a verification
+   * link; an email address then becomes mandatory on REGISTER.  The notify
+   * hook rebuilds the draft/account-registration CAP value (email-required)
+   * so a rehash cannot leave a stale advertisement behind. */
+  F_B(REGISTER_VERIFY_EMAIL, 0, 0, feature_notify_accountreg_capvalue),
   /* Off by default: only a services build that disambiguates RENAME
    * requests from account-stamp notifications on the AC 'R' subcommand
    * (see the protocol-history comment in m_rename.c) should have this

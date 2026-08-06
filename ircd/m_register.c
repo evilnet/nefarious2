@@ -24,8 +24,22 @@
  * REGISTER <account> {<email> | "*"} <password>
  * VERIFY <account> <code>
  *
- * This implementation relays registration requests to X3 services via P10
- * using RG (REGISTER), VF (VERIFY), and RR (REGREPLY) tokens.
+ * The account is created directly in Keycloak through libkc; there is no
+ * services relay any more (the old RG/VF/RR P10 round-trip is gone).  The
+ * IRCd derives the credential material itself:
+ *
+ *   - a Keycloak PBKDF2 credential (credentialData/secretData) so the
+ *     account can log in with SASL PLAIN immediately, and
+ *   - SCRAM-SHA-256 attributes (scram_sha256_*) so SASL SCRAM works without
+ *     ever seeing the plaintext again.
+ *
+ * Both are derived synchronously in m_register(), before the first async
+ * hop, so the plaintext password never enters the async context.
+ *
+ * When FEAT_REGISTER_VERIFY_EMAIL is on, the account is created unverified
+ * (emailVerified=false + a VERIFY_EMAIL required action) and Keycloak mails
+ * a verification link.  Verification therefore completes out-of-band in the
+ * browser, not over IRC -- which is why VERIFY only declines gracefully.
  */
 #include "config.h"
 
@@ -33,7 +47,10 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
+#include "ircd_chattr.h"
 #include "ircd_features.h"
+#include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
@@ -41,100 +58,285 @@
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
+#include "random.h"
 #include "s_auth.h"
 #include "s_conf.h"
 #include "s_debug.h"
 #include "s_user.h"
+#include "sasl_auth.h"
 #include "send.h"
+
+#ifdef USE_LIBKC
+#include <kc/kc_cred_derive.h>
+#include <kc/kc_keycloak.h>
+#endif
 
 #include <stdlib.h>
 #include <string.h>
 
+/** Advertised CAP 302 value when e-mail verification is required. */
+#define ACCOUNTREG_CAPVALUE_EMAIL \
+  "before-connect,custom-account-name,email-required," \
+  "min-password-length=5,max-password-length=300"
+/** Advertised CAP 302 value when e-mail is optional. */
+#define ACCOUNTREG_CAPVALUE_NOEMAIL \
+  "before-connect,custom-account-name," \
+  "min-password-length=5,max-password-length=300"
+
+/** Minimum accepted password length (mirrored in the CAP value above). */
+#define REGISTER_PASSWORD_MIN 5
+/** Maximum accepted password length (mirrored in the CAP value above). */
+#define REGISTER_PASSWORD_MAX 300
+
+/** Feature-notify hook for FEAT_REGISTER_VERIFY_EMAIL.
+ *
+ * Keeps the draft/account-registration CAP value in step with the policy,
+ * so a rehash that flips the feature cannot leave "email-required" (or its
+ * absence) stale in CAP LS output.
+ */
+void feature_notify_accountreg_capvalue(void)
+{
+  cap_set_value(CAP_DRAFT_ACCOUNTREG,
+                feature_bool(FEAT_REGISTER_VERIFY_EMAIL) ?
+                ACCOUNTREG_CAPVALUE_EMAIL : ACCOUNTREG_CAPVALUE_NOEMAIL);
+}
+
+#ifdef USE_LIBKC
+
 extern struct Client* LocalClientArray[];
 
-/** Find the services server (X3).
- * Uses FEAT_REGISTER_SERVER to determine which server to use:
- * - "*" (default): Find any server with +s (service) flag
- * - Specific name: Use find_match_server to find a matching server
- * @return Pointer to services server, or NULL if not connected.
+/** Async registration context.
+ *
+ * Carries no plaintext: every piece of credential material is derived in
+ * m_register() before the first async hop.  The client is re-found by
+ * fd+cookie (the SASL callback pattern) because the callbacks run on later
+ * event-loop iterations, by which time the client may be gone and its fd
+ * reused by an unrelated connection.
  */
-static struct Client *find_services_server(void)
+struct reg_ctx {
+  int fd;                          /**< Connection fd at REGISTER time. */
+  unsigned int cookie;             /**< cli_saslcookie() at REGISTER time. */
+  int stage;                       /**< 0=search, 1=create, 2=verify-email. */
+  int verify_email;                /**< Policy snapshot at REGISTER time. */
+  char account[ACCOUNTLEN + 1];    /**< Account being created. */
+  char email[201];                 /**< E-mail, or "" for none. */
+  char *cred_data;                 /**< Keycloak credentialData JSON. */
+  char *secret_data;               /**< Keycloak secretData JSON. */
+  struct scram_sha256_creds scram; /**< SCRAM-SHA-256 attribute material. */
+};
+
+/** Re-find the client that issued the REGISTER, if it is still there.
+ * @param[in] ctx Registration context.
+ * @return The client, or NULL if it disconnected or the fd was reused.
+ */
+static struct Client *reg_ctx_client(struct reg_ctx *ctx)
 {
-  const char *server_name = feature_str(FEAT_REGISTER_SERVER);
   struct Client *acptr;
 
-  Debug((DEBUG_DEBUG, "find_services_server: REGISTER_SERVER=%s", server_name));
-
-  /* If a specific server is configured, try to find it */
-  if (strcmp(server_name, "*") != 0) {
-    acptr = find_match_server((char *)server_name);
-    if (acptr) {
-      Debug((DEBUG_DEBUG, "find_services_server: Found configured server %s",
-             cli_name(acptr)));
-      return acptr;
-    }
-    Debug((DEBUG_DEBUG, "find_services_server: Configured server %s not found",
-           server_name));
+  if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS)
     return NULL;
-  }
+  acptr = LocalClientArray[ctx->fd];
+  if (!acptr || cli_saslcookie(acptr) != ctx->cookie)
+    return NULL;
+  return acptr;
+}
 
-  /* Default: find any server that's a service (has +s) */
-  Debug((DEBUG_DEBUG, "find_services_server: Searching for any service server"));
+/** Release a registration context and cleanse its key material.
+ * @param[in] ctx Registration context (must not be NULL).
+ */
+static void reg_ctx_free(struct reg_ctx *ctx)
+{
+  if (ctx->cred_data)
+    free(ctx->cred_data);
+  if (ctx->secret_data)
+    free(ctx->secret_data);
+  memset(&ctx->scram, 0, sizeof(ctx->scram));
+  MyFree(ctx);
+}
 
-  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-    if (IsServer(acptr)) {
-      Debug((DEBUG_DEBUG, "find_services_server: Found server %s, IsService=%d",
-             cli_name(acptr), IsService(acptr) ? 1 : 0));
-      if (IsService(acptr))
-        return acptr;
+/** Attach the freshly created account to the client and tell it so.
+ *
+ * Two shapes, matching the two moments a REGISTER can complete:
+ *  - the client already finished registration (post-connect REGISTER), so
+ *    the account is stamped directly and announced to account-notify peers;
+ *  - the client is still pre-registration (before-connect REGISTER), so the
+ *    account is parked in cli_saslaccount() and auth_complete_sasl() applies
+ *    it when NICK/USER finish.
+ *
+ * @param[in] acptr Client to log in.
+ * @param[in] account Account name that was created.
+ */
+static void register_complete_success(struct Client *acptr, const char *account)
+{
+  if (IsRegistered(acptr)) {
+    if (!IsAccount(acptr) && cli_user(acptr)) {
+      /* ircd_strncpy() is strlcpy-shaped: the third argument is the buffer
+       * SIZE, not a max character count.  The pre-rewrite ms_regreply()
+       * passed sizeof-1 here, which silently truncated a full-length
+       * (ACCOUNTLEN) account name to ACCOUNTLEN-1 -- and would now diverge
+       * from the name actually created in Keycloak. */
+      ircd_strncpy(cli_user(acptr)->account, account,
+                   sizeof(cli_user(acptr)->account));
+      SetAccount(acptr);
+      /* P1 A3 residue: a post-registration REGISTER attaches an account to
+       * an already-registered client outside the register_user chokepoint
+       * (that ran at initial registration) -- load metadata here. */
+      metadata_load_account(acptr, cli_user(acptr)->account);
+      sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
+      sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr,
+                                             CAP_ACCNOTIFY, CAP_NONE,
+                                             "%s", account);
     }
+  } else {
+    ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN + 1);
+    SetSASLComplete(acptr);
+    if (cli_auth(acptr))
+      auth_set_account(cli_auth(acptr), account);
+    sendrawto_one(acptr, "REGISTER SUCCESS %s :Account registered", account);
+  }
+}
+
+/** Stage 2 result: the verification mail was (or was not) triggered.
+ *
+ * Always non-fatal.  The account exists and is in the correct state either
+ * way; a failure here only means the mail has to be re-triggered
+ * out-of-band, so the client is still told to go look for the link.
+ *
+ * @param[in] result KC_SUCCESS or a kc_error code.
+ * @param[in] data The struct reg_ctx.
+ */
+static void reg_email_cb(int result, void *data)
+{
+  struct reg_ctx *ctx = (struct reg_ctx *)data;
+  struct Client *acptr = reg_ctx_client(ctx);
+
+  if (result != KC_SUCCESS)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "REGISTER: send-verify-email failed for %s (result %d) - "
+              "account state is correct; verification completable out-of-band",
+              ctx->account, result);
+
+  if (acptr)
+    sendrawto_one(acptr, "REGISTER VERIFICATION_REQUIRED %s :Account created - "
+                  "check your email for a verification link, then log in "
+                  "normally (SASL)", ctx->account);
+
+  reg_ctx_free(ctx);
+}
+
+/** Stage 2 lookup: fetch the new account's Keycloak id for send-verify-email.
+ * @param[in] result KC_SUCCESS or a kc_error code.
+ * @param[in] user The user record (borrowed), or NULL.
+ * @param[in] data The struct reg_ctx.
+ */
+static void reg_verify_lookup_cb(int result, const struct kc_user *user,
+                                 void *data)
+{
+  struct reg_ctx *ctx = (struct reg_ctx *)data;
+
+  if (result != KC_SUCCESS || !user || !user->id) {
+    reg_email_cb(KC_ERROR, ctx);        /* non-fatal; frees ctx */
+    return;
   }
 
-  Debug((DEBUG_DEBUG, "find_services_server: No service server found"));
-  return NULL;
+  if (kc_user_send_verify_email(user->id, reg_email_cb, ctx) != 0)
+    reg_email_cb(KC_ERROR, ctx);        /* non-fatal; frees ctx */
 }
 
-/** Send registration request to X3 via RG token (new protocol).
- * @param[in] cptr Client connection (for fd).
- * @param[in] sptr Client requesting registration.
- * @param[in] account Account name to register.
- * @param[in] email Email address (or "*").
- * @param[in] password Password.
- * @param[in] services Services server to send to.
- * @return 0 on success.
+/** Stage 1 result: the account create either landed or did not.
+ * @param[in] result KC_SUCCESS, KC_CONFLICT, or another kc_error code.
+ * @param[in] data The struct reg_ctx.
  */
-static int send_register_rg(struct Client *cptr, struct Client *sptr,
-                             const char *account, const char *email,
-                             const char *password, struct Client *services)
+static void reg_create_cb(int result, void *data)
 {
-  /* Format: <server> RG <target> <server>!<fd>.<cookie> <account> <email> :<password>
-   * Similar to SASL, we use server!fd.cookie to identify pre-registration clients.
-   * The cookie is the SASL cookie assigned to this connection.
-   */
-  sendcmdto_one(&me, CMD_REGISTER, services, "%C %C!%u.%u %s %s :%s",
-                services, &me, cli_fd(cptr), cli_saslcookie(cptr),
-                account, email, password);
-  return 0;
+  struct reg_ctx *ctx = (struct reg_ctx *)data;
+  struct Client *acptr = reg_ctx_client(ctx);
+
+  if (result != KC_SUCCESS) {
+    if (acptr) {
+      if (result == KC_CONFLICT)
+        send_fail(acptr, "REGISTER", "ACCOUNT_EXISTS", ctx->account,
+                  "Account already exists");
+      else
+        send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", ctx->account,
+                  "Registration is temporarily unavailable");
+    }
+    reg_ctx_free(ctx);
+    return;
+  }
+
+  if (ctx->verify_email) {
+    /* send-verify-email is addressed by user id, which the create response
+     * does not give us -- look the account up by its (exact) username. */
+    ctx->stage = 2;
+    if (kc_user_get(ctx->account, reg_verify_lookup_cb, ctx) != 0)
+      reg_email_cb(KC_ERROR, ctx);      /* non-fatal; frees ctx */
+    return;
+  }
+
+  if (acptr)
+    register_complete_success(acptr, ctx->account);
+  reg_ctx_free(ctx);
 }
 
-/** Send verify request to X3 via VF token.
- * @param[in] cptr Client connection (for fd).
- * @param[in] sptr Client requesting verification.
- * @param[in] account Account name.
- * @param[in] code Verification code.
- * @param[in] services Services server to send to.
- * @return 0 on success.
+/** Stage 0 result: does the account name already exist?
+ * @param[in] result KC_SUCCESS (taken), KC_NOT_FOUND (free), or an error.
+ * @param[in] user The matching user (borrowed), or NULL.
+ * @param[in] data The struct reg_ctx.
  */
-static int send_verify_vf(struct Client *cptr, struct Client *sptr,
-                           const char *account, const char *code,
-                           struct Client *services)
+static void reg_search_cb(int result, const struct kc_user *user, void *data)
 {
-  /* Format similar to RG: server!fd.cookie to identify client */
-  sendcmdto_one(&me, CMD_VERIFY, services, "%C %C!%u.%u %s %s",
-                services, &me, cli_fd(cptr), cli_saslcookie(cptr),
-                account, code);
-  return 0;
+  struct reg_ctx *ctx = (struct reg_ctx *)data;
+  struct Client *acptr = reg_ctx_client(ctx);
+  struct kc_user_create_req req;
+  static const char *const keys[4] = {
+    "scram_sha256_salt", "scram_sha256_iterations",
+    "scram_sha256_stored_key", "scram_sha256_server_key"
+  };
+  const char *vals[4];
+  char iterbuf[16];
+
+  if (result == KC_SUCCESS && user) {           /* name taken */
+    if (acptr)
+      send_fail(acptr, "REGISTER", "ACCOUNT_EXISTS", ctx->account,
+                "Account already exists");
+    reg_ctx_free(ctx);
+    return;
+  }
+  if (result != KC_NOT_FOUND) {                 /* connectivity trouble */
+    if (acptr)
+      send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", ctx->account,
+                "Registration is temporarily unavailable");
+    reg_ctx_free(ctx);
+    return;
+  }
+
+  ircd_snprintf(0, iterbuf, sizeof(iterbuf), "%d", ctx->scram.iterations);
+  vals[0] = ctx->scram.salt_b64;
+  vals[1] = iterbuf;
+  vals[2] = ctx->scram.stored_key_b64;
+  vals[3] = ctx->scram.server_key_b64;
+
+  memset(&req, 0, sizeof(req));
+  req.username = ctx->account;
+  req.email = ctx->email[0] ? ctx->email : NULL;
+  req.cred_data = ctx->cred_data;
+  req.secret_data = ctx->secret_data;
+  req.set_email_verified = ctx->verify_email;
+  req.attr_keys = keys;
+  req.attr_values = vals;
+  req.n_attrs = 4;
+
+  ctx->stage = 1;
+  if (kc_user_create_full(&req, reg_create_cb, ctx) != 0) {
+    if (acptr)
+      send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", ctx->account,
+                "Registration is temporarily unavailable");
+    reg_ctx_free(ctx);
+  }
 }
+
+#endif /* USE_LIBKC */
 
 /** m_register - Handle REGISTER command from local client.
  *
@@ -154,18 +356,17 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   const char *account;
   const char *email;
   const char *password;
-  struct Client *services;
-
-  Debug((DEBUG_DEBUG, "m_register called: parc=%d from %s", parc, cli_name(sptr)));
+  const char *p;
+#ifdef USE_LIBKC
+  struct reg_ctx *ctx;
+#endif
 
   /* Check if feature is enabled */
   if (!feature_bool(FEAT_CAP_draft_account_registration)) {
-    Debug((DEBUG_DEBUG, "m_register: feature disabled"));
     send_fail(sptr, "REGISTER", "DISABLED", NULL,
               "Account registration is not enabled on this server");
     return 0;
   }
-  Debug((DEBUG_DEBUG, "m_register: feature enabled, checking params"));
 
   /* Need account, email, and password */
   if (parc < 4) {
@@ -177,68 +378,122 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   account = parv[1];
   email = parv[2];
   password = parv[3];
-  Debug((DEBUG_DEBUG, "m_register: account=%s email=%s", account, email));
 
   /* Check if already authenticated */
   if (IsAccount(sptr)) {
-    Debug((DEBUG_DEBUG, "m_register: already authenticated"));
     send_fail(sptr, "REGISTER", "ALREADY_AUTHENTICATED", account,
               "You are already authenticated");
     return 0;
   }
 
-  Debug((DEBUG_DEBUG, "m_register: checking IsAccount"));
-
-  /* Validate account name */
-  if (account[0] == '*' && account[1] == '\0') {
-    /* Use current nickname */
+  /* "*" means "register my current nickname" */
+  if (account[0] == '*' && account[1] == '\0')
     account = cli_name(sptr);
-  }
-  Debug((DEBUG_DEBUG, "m_register: account len=%zu ACCOUNTLEN=%d", strlen(account), ACCOUNTLEN));
 
-  /* Basic account name validation */
-  if (strlen(account) > ACCOUNTLEN) {
-    Debug((DEBUG_DEBUG, "m_register: account name too long"));
+  if (!*account || strlen(account) > ACCOUNTLEN) {
     send_fail(sptr, "REGISTER", "BAD_ACCOUNT_NAME", account,
-              "Account name too long");
+              "Account name is empty or too long");
     return 0;
   }
 
-  Debug((DEBUG_DEBUG, "m_register: password len=%zu", strlen(password)));
-  /* Basic password length check */
-  if (strlen(password) < 5) {
-    Debug((DEBUG_DEBUG, "m_register: password too short"));
+  /* The account name has to be nick-shaped: it is stamped into
+   * cli_user()->account and travels the network as an account name. */
+  for (p = account; *p; p++) {
+    if (!IsNickChar(*p)) {
+      send_fail(sptr, "REGISTER", "BAD_ACCOUNT_NAME", account,
+                "Account name contains invalid characters");
+      return 0;
+    }
+  }
+
+  /* Password length gates -- these bounds are advertised in the
+   * draft/account-registration CAP value, keep them in step. */
+  if (strlen(password) < REGISTER_PASSWORD_MIN) {
     send_fail(sptr, "REGISTER", "WEAK_PASSWORD", account,
               "Password too short (minimum 5 characters)");
     return 0;
   }
-
-  if (strlen(password) > 300) {
-    Debug((DEBUG_DEBUG, "m_register: password too long"));
+  if (strlen(password) > REGISTER_PASSWORD_MAX) {
     send_fail(sptr, "REGISTER", "WEAK_PASSWORD", account,
               "Password too long (maximum 300 characters)");
     return 0;
   }
 
-  /* Find services server */
-  Debug((DEBUG_DEBUG, "m_register: looking for services server"));
-  services = find_services_server();
-  if (!services) {
-    Debug((DEBUG_DEBUG, "m_register: no services server found"));
+  /* Email handling.  "*" (and an empty string) mean "no address"; that is
+   * only acceptable when the verification policy is off. */
+  if (!*email || (email[0] == '*' && email[1] == '\0')) {
+    if (feature_bool(FEAT_REGISTER_VERIFY_EMAIL)) {
+      send_fail(sptr, "REGISTER", "INVALID_EMAIL", account,
+                "An email address is required to register on this server");
+      return 0;
+    }
+    email = NULL;
+  } else {
+    if (!strchr(email, '@') || strchr(email, ' ') || strlen(email) > 200) {
+      send_fail(sptr, "REGISTER", "INVALID_EMAIL", account,
+                "Invalid email address");
+      return 0;
+    }
+  }
+
+  /* Keycloak is where accounts live; without it there is nothing to do. */
+  if (!sasl_local_available()) {
     send_fail(sptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account,
               "Registration service is not available");
     return 0;
   }
-  Debug((DEBUG_DEBUG, "m_register: found services %s, sending RG", cli_name(services)));
 
-  /* Send to services using RG (REGISTER) P10 token */
-  send_register_rg(cptr, sptr, account, email, password, services);
-  Debug((DEBUG_DEBUG, "m_register: sent RG to services"));
+#ifdef USE_LIBKC
+  /* A real cookie is needed so the async callbacks can tell "still the same
+   * connection" from "fd reused" (the SASL pattern). */
+  if (!cli_saslcookie(cptr)) {
+    do {
+      cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
+    } while (!cli_saslcookie(cptr));
+  }
+
+  ctx = (struct reg_ctx *)MyMalloc(sizeof(*ctx));
+  memset(ctx, 0, sizeof(*ctx));
+  ctx->fd = cli_fd(cptr);
+  ctx->cookie = cli_saslcookie(cptr);
+  ctx->verify_email = feature_bool(FEAT_REGISTER_VERIFY_EMAIL);
+  /* ircd_strncpy() takes the buffer SIZE (strlcpy semantics), so pass
+   * sizeof() -- sizeof()-1 would clip the last character of a full-length
+   * account name or address. */
+  ircd_strncpy(ctx->account, account, sizeof(ctx->account));
+  if (email)
+    ircd_strncpy(ctx->email, email, sizeof(ctx->email));
+
+  /* Derive everything from the plaintext up front; past this point the
+   * password is not needed and never enters the async context. */
+  if (scram_sha256_derive_random(password, &ctx->scram) != 0 ||
+      kc_pbkdf2_cred_build(password, &ctx->cred_data,
+                           &ctx->secret_data) != 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "REGISTER: credential derivation failed for %s", ctx->account);
+    send_fail(sptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account,
+              "Registration is temporarily unavailable");
+    reg_ctx_free(ctx);
+    return 0;
+  }
+
+  ctx->stage = 0;
+  if (kc_user_get(ctx->account, reg_search_cb, ctx) != 0) {
+    send_fail(sptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account,
+              "Registration is temporarily unavailable");
+    reg_ctx_free(ctx);
+  }
+#endif /* USE_LIBKC */
 
   return 0;
 }
 
 /** m_verify - Handle VERIFY command from local client.
+ *
+ * Verification is Keycloak's own e-mail flow: the account is created with a
+ * VERIFY_EMAIL required action and the user clicks the link in the mail.
+ * There is no code for the client to relay back over IRC, so VERIFY exists
+ * only to decline gracefully and point at the link.
  *
  * parv[0] = sender prefix
  * parv[1] = account name
@@ -253,8 +508,6 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 int m_verify(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *account;
-  const char *code;
-  struct Client *services;
 
   /* Check if feature is enabled */
   if (!feature_bool(FEAT_CAP_draft_account_registration)) {
@@ -271,7 +524,6 @@ int m_verify(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 
   account = parv[1];
-  code = parv[2];
 
   /* Check if already authenticated */
   if (IsAccount(sptr)) {
@@ -280,196 +532,8 @@ int m_verify(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Find services server */
-  services = find_services_server();
-  if (!services) {
-    send_fail(sptr, "VERIFY", "TEMPORARILY_UNAVAILABLE", account,
-              "Verification service is not available");
-    return 0;
-  }
-
-  /* Send to services using VF (VERIFY) P10 token */
-  send_verify_vf(cptr, sptr, account, code, services);
-
-  return 0;
-}
-
-/** Find a pre-registration client by server!fd.cookie token.
- * @param[in] token The token in format "server!fd.cookie"
- * @return Client pointer or NULL if not found.
- */
-static struct Client *find_prereg_client(const char *token)
-{
-  char buf[64];
-  char *fdstr, *cookiestr;
-  int fd;
-  unsigned int cookie;
-  struct Client *acptr;
-
-  /* Copy token so we can modify it */
-  ircd_strncpy(buf, token, sizeof(buf) - 1);
-  buf[sizeof(buf) - 1] = '\0';
-
-  /* Find the ! separator (server!fd.cookie) */
-  fdstr = strchr(buf, '!');
-  if (!fdstr)
-    return NULL;
-  fdstr++; /* Skip past the ! */
-
-  /* Find the . separator (fd.cookie) */
-  cookiestr = strchr(fdstr, '.');
-  if (!cookiestr)
-    return NULL;
-  *cookiestr++ = '\0';
-
-  fd = atoi(fdstr);
-  cookie = (unsigned int)atoi(cookiestr);
-
-  Debug((DEBUG_DEBUG, "find_prereg_client: token=%s fd=%d cookie=%u", token, fd, cookie));
-
-  /* Bounds-check the wire-supplied fd before indexing LocalClientArray
-   * [MAXCONNECTIONS].  fd is signed here, so guard both ends -- a negative
-   * atoi() result would otherwise be a negative (out-of-bounds) array index
-   * that is then dereferenced via cli_saslcookie() below. */
-  if (fd < 0 || fd >= MAXCONNECTIONS)
-    return NULL;
-
-  /* Find client by fd and verify cookie */
-  acptr = LocalClientArray[fd];
-  if (!acptr) {
-    Debug((DEBUG_DEBUG, "find_prereg_client: no client at fd %d", fd));
-    return NULL;
-  }
-
-  if (cli_saslcookie(acptr) != cookie) {
-    Debug((DEBUG_DEBUG, "find_prereg_client: cookie mismatch (%u != %u)",
-           cli_saslcookie(acptr), cookie));
-    return NULL;
-  }
-
-  Debug((DEBUG_DEBUG, "find_prereg_client: found client %s", cli_name(acptr)));
-  return acptr;
-}
-
-/** ms_regreply - Handle REGREPLY from services (S2S).
- *
- * parv[0] = sender prefix (services server)
- * parv[1] = target client ID (either "server!fd.cookie" for pre-reg or user numeric)
- * parv[2] = status: S=success, F=fail, V=verification needed
- * parv[3] = account name
- * parv[4] = message
- *
- * @param[in] cptr Client that sent us the message.
- * @param[in] sptr Original source of message.
- * @param[in] parc Number of arguments.
- * @param[in] parv Argument vector.
- * @return 0 on success.
- */
-int ms_regreply(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
-{
-  struct Client *acptr;
-  const char *status;
-  const char *account;
-  const char *message;
-
-  if (parc < 5)
-    return 0;
-
-  Debug((DEBUG_DEBUG, "ms_regreply: target=%s status=%s account=%s msg=%s",
-         parv[1], parv[2], parv[3], parv[4]));
-
-  /* Try to find the target client - could be either:
-   * 1. Pre-registration client: "server!fd.cookie" format
-   * 2. Registered user: user numeric
-   */
-  if (strchr(parv[1], '!')) {
-    /* Pre-registration client format: server!fd.cookie */
-    acptr = find_prereg_client(parv[1]);
-  } else {
-    /* Registered user numeric */
-    acptr = findNUser(parv[1]);
-  }
-
-  if (!acptr) {
-    Debug((DEBUG_DEBUG, "ms_regreply: target not found: %s", parv[1]));
-    return 0;
-  }
-
-  /* If not our user, forward (only for registered users) */
-  if (!MyConnect(acptr)) {
-    sendcmdto_one(sptr, CMD_REGREPLY, acptr, "%C %s %s :%s",
-                  acptr, parv[2], parv[3], parv[4]);
-    return 0;
-  }
-
-  status = parv[2];
-  account = parv[3];
-  message = parv[4];
-
-  switch (status[0]) {
-  case 'S': /* Success */
-    /* Log the user in */
-    Debug((DEBUG_DEBUG, "ms_regreply: SUCCESS for %s, IsRegistered=%d",
-           cli_name(acptr), IsRegistered(acptr) ? 1 : 0));
-
-    if (IsRegistered(acptr)) {
-      /* Fully registered user - set account directly */
-      if (!IsAccount(acptr) && cli_user(acptr)) {
-        ircd_strncpy(cli_user(acptr)->account, account,
-                     sizeof(cli_user(acptr)->account) - 1);
-        SetAccount(acptr);
-        /* P1 A3 residue: post-reg REGISTER success attaches an account to
-         * an already-registered client outside the register_user
-         * chokepoint (that already ran at initial registration) — load
-         * the account's metadata here. */
-        metadata_load_account(acptr, cli_user(acptr)->account);
-        /* Notify the user and other clients */
-        sendrawto_one(acptr, "REGISTER SUCCESS %s :%s", account, message);
-        /* Send ACCOUNT to clients with account-notify */
-        sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr,
-                                                CAP_ACCNOTIFY, CAP_NONE,
-                                                "%s", account);
-      }
-    } else {
-      /* Pre-registration client - store in saslaccount for later.
-       * When registration completes (NICK/USER done), auth_complete_sasl()
-       * will copy saslaccount to cli_user(acptr)->account and SetAccount().
-       */
-      ircd_strncpy(cli_saslaccount(acptr), account, ACCOUNTLEN + 1);
-      SetSASLComplete(acptr);  /* Mark SASL as complete so auth_complete_sasl applies account */
-      if (cli_auth(acptr))
-        auth_set_account(cli_auth(acptr), account);
-      /* Send success message to client */
-      sendrawto_one(acptr, "REGISTER SUCCESS %s :%s", account, message);
-      Debug((DEBUG_DEBUG, "ms_regreply: pre-reg client, set saslaccount=%s, SetSASLComplete", account));
-    }
-    break;
-
-  case 'V': /* Verification required */
-    sendrawto_one(acptr, "REGISTER VERIFICATION_REQUIRED %s :%s",
-                  account, message);
-    break;
-
-  case 'F': /* Failure */
-    /* Parse the error code from message if present, otherwise generic */
-    if (strstr(message, "exists") || strstr(message, "ACCOUNT_EXISTS")) {
-      send_fail(acptr, "REGISTER", "ACCOUNT_EXISTS", account, message);
-    } else if (strstr(message, "email") || strstr(message, "INVALID_EMAIL")) {
-      send_fail(acptr, "REGISTER", "INVALID_EMAIL", account, message);
-    } else if (strstr(message, "weak") || strstr(message, "WEAK_PASSWORD")) {
-      send_fail(acptr, "REGISTER", "WEAK_PASSWORD", account, message);
-    } else if (strstr(message, "invalid") || strstr(message, "BAD_ACCOUNT_NAME")) {
-      send_fail(acptr, "REGISTER", "BAD_ACCOUNT_NAME", account, message);
-    } else {
-      send_fail(acptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account, message);
-    }
-    break;
-
-  default:
-    Debug((DEBUG_DEBUG, "Unknown REGREPLY status '%s' from %s for %s",
-           status, cli_name(sptr), cli_name(acptr)));
-    break;
-  }
-
+  send_fail(sptr, "VERIFY", "INVALID_CODE", account,
+            "Verification is completed via the link in your email - "
+            "after clicking it, log in normally (SASL)");
   return 0;
 }

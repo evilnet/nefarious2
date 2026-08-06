@@ -363,7 +363,7 @@ enum Feature {
   FEAT_CAP_draft_event_playback,
   FEAT_CAP_draft_message_redaction,
   FEAT_CAP_draft_account_registration,
-  FEAT_REGISTER_SERVER,
+  FEAT_REGISTER_VERIFY_EMAIL,
   FEAT_RENAME_SERVICES,
   /* relocation mode -- renames move only the issuer and +F users;
    * see docs/specs/channel-relocate.md in the testnet repo */

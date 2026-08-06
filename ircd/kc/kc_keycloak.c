@@ -489,9 +489,15 @@ int kc_token_ensure(kc_token_cb cb, void *data)
     /* Start refresh if not already in progress */
     if (!g_token_refreshing) {
         if (start_token_refresh() != 0) {
-            /* Failed to start — notify all waiters */
+            /* Failed to start — notify all waiters, ourselves included.
+             *
+             * Return SUCCESS, not -1: the contract every caller relies on is
+             * "non-zero return => the callback was NOT and will NOT be
+             * invoked, so the caller still owns its context".  We just ran
+             * the callback (which frees that context), so reporting failure
+             * here invites a double free in the caller's error path. */
             notify_token_waiters(KC_TOKEN_ERROR, NULL);
-            return -1;
+            return 0;
         }
     }
 

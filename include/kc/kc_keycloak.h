@@ -146,6 +146,15 @@ const struct kc_access_token *kc_token_cached(void);
 
 /*
  * User operations (all async)
+ *
+ * CALLBACK CONTRACT, relied on by every caller that heap-allocates its
+ * `data` context:
+ *   - return 0  => the callback WILL be invoked exactly once and takes
+ *                  ownership of `data`.  It may fire synchronously, before
+ *                  the start function returns, so the caller must not touch
+ *                  `data` after a successful start.
+ *   - return -1 => the callback was NOT and will NOT be invoked; `data` is
+ *                  still the caller's to free.
  */
 
 /* Get user by exact username match */

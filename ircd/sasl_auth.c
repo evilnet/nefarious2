@@ -684,8 +684,14 @@ void sasl_complete_login(struct Client *sptr, const char *account,
 
 #ifdef USE_LIBKC
 
-/* sasl_auth.c — replaced by feature_bool(FEAT_REGISTER_VERIFY_EMAIL) in Task 4 */
-static int register_verify_email_policy(void) { return 0; }
+/* Is this deployment's REGISTER policy "account is unusable until the
+ * e-mailed verification link is clicked"?  When it is, a Keycloak
+ * pending-required-action grant failure is a genuine "not verified yet"
+ * rather than an unrelated setup problem. */
+static int register_verify_email_policy(void)
+{
+  return feature_bool(FEAT_REGISTER_VERIFY_EMAIL);
+}
 
 /** Callback from kc_user_verify_password(). */
 static void sasl_plain_cb(int result, const struct kc_access_token *token, void *data)
