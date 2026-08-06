@@ -35,7 +35,8 @@ CMOCKA_TESTPROGS = \
 	crule_cmocka \
 	history_cmocka \
 	chathistory_presence_cmocka \
-	recv_classify_cmocka
+	recv_classify_cmocka \
+	register_throttle_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -61,6 +62,7 @@ DEP_SRC = \
 	history_cmocka.c \
 	chathistory_presence_cmocka.c \
 	recv_classify_cmocka.c \
+	register_throttle_cmocka.c \
 	kc_url_cmocka.c \
 	kc_base64_cmocka.c \
 	kc_cache_cmocka.c \
@@ -171,6 +173,16 @@ chathistory_presence_cmocka: $(CHATHISTORY_PRESENCE_CMOCKA_OBJS)
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o
 recv_classify_cmocka: $(RECV_CLASSIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(RECV_CLASSIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# register_throttle tests - the module is recompiled with a 1-bucket,
+# 4-slot table so eviction is reachable without hash-collision gymnastics.
+# No test_stub.o: the module is pure by design (no log_write, no ircd deps).
+register_throttle_test.o: ../register_throttle.c ../../include/register_throttle.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -DREG_THROTTLE_TABLE_BITS=0 -DREG_THROTTLE_BUCKET_DEPTH=4 -c -o $@ ../register_throttle.c
+
+REGISTER_THROTTLE_CMOCKA_OBJS = register_throttle_cmocka.o register_throttle_test.o
+register_throttle_cmocka: $(REGISTER_THROTTLE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(REGISTER_THROTTLE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # kc_url tests - vendored libkc URL builders.  kc_url.c calls
 # curl_easy_escape in kc_url_group_by_path, hence -lcurl.  The test

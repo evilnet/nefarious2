@@ -277,6 +277,7 @@ IRCD_SRC = \
 	querycmds.c \
 	random.c \
 	recv_classify.c \
+	register_throttle.c \
 	replay.c \
 	s_auth.c \
 	s_bsd.c \
