@@ -6,6 +6,7 @@
 #include <kc/kc_cred_derive.h>
 #include <kc/kc_base64.h>
 #include <jansson.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -25,24 +26,35 @@ int scram_sha256_derive(const char *password, const unsigned char *salt,
     unsigned char client_key[SCRAM_SHA256_KEY_LEN], stored_key[SCRAM_SHA256_KEY_LEN];
     unsigned char server_key[SCRAM_SHA256_KEY_LEN];
     unsigned int len;
+    int rc = -1;
 
     if (!password || !salt || !salt_len || iterations < 1 || !out)
         return -1;
     if (!PKCS5_PBKDF2_HMAC(password, strlen(password), salt, salt_len,
                            iterations, EVP_sha256(), sizeof(sp), sp))
-        return -1;
+        goto done;
+    len = 0;
     if (!HMAC(EVP_sha256(), sp, sizeof(sp), (const unsigned char *)"Client Key", 10,
-              client_key, &len))
-        return -1;
+              client_key, &len) || len != sizeof(client_key))
+        goto done;
     SHA256(client_key, sizeof(client_key), stored_key);
+    len = 0;
     if (!HMAC(EVP_sha256(), sp, sizeof(sp), (const unsigned char *)"Server Key", 10,
-              server_key, &len))
-        return -1;
+              server_key, &len) || len != sizeof(server_key))
+        goto done;
     b64_fixed(salt, salt_len, out->salt_b64, sizeof(out->salt_b64));
     b64_fixed(stored_key, sizeof(stored_key), out->stored_key_b64, sizeof(out->stored_key_b64));
     b64_fixed(server_key, sizeof(server_key), out->server_key_b64, sizeof(out->server_key_b64));
     out->iterations = iterations;
-    return 0;
+    rc = 0;
+
+done:
+    /* Zero key material before returning on every path, success or not. */
+    OPENSSL_cleanse(sp, sizeof(sp));
+    OPENSSL_cleanse(client_key, sizeof(client_key));
+    OPENSSL_cleanse(stored_key, sizeof(stored_key));
+    OPENSSL_cleanse(server_key, sizeof(server_key));
+    return rc;
 }
 
 int scram_sha256_derive_random(const char *password, struct scram_sha256_creds *out)
@@ -59,6 +71,7 @@ int kc_pbkdf2_cred_build(const char *password, char **cred_data, char **secret_d
     unsigned char salt[16], dk[KC_PBKDF2_KEY_LEN];
     char salt_b64[32], dk_b64[64];
     json_t *cj, *sj;
+    int rc = -1;
 
     if (!password || !cred_data || !secret_data)
         return -1;
@@ -66,21 +79,29 @@ int kc_pbkdf2_cred_build(const char *password, char **cred_data, char **secret_d
         return -1;
     if (!PKCS5_PBKDF2_HMAC(password, strlen(password), salt, sizeof(salt),
                            KC_PBKDF2_ITERATIONS, EVP_sha256(), sizeof(dk), dk))
-        return -1;
+        goto done;
     b64_fixed(salt, sizeof(salt), salt_b64, sizeof(salt_b64));
     b64_fixed(dk, sizeof(dk), dk_b64, sizeof(dk_b64));
 
     cj = json_pack("{sisss{}}", "hashIterations", KC_PBKDF2_ITERATIONS,
                    "algorithm", "pbkdf2-sha256", "additionalParameters");
     sj = json_pack("{ssss}", "value", dk_b64, "salt", salt_b64);
-    if (!cj || !sj) { if (cj) json_decref(cj); if (sj) json_decref(sj); return -1; }
+    if (!cj || !sj) { if (cj) json_decref(cj); if (sj) json_decref(sj); goto done; }
     *cred_data = json_dumps(cj, JSON_COMPACT);
     *secret_data = json_dumps(sj, JSON_COMPACT);
     json_decref(cj); json_decref(sj);
     if (!*cred_data || !*secret_data) {
         free(*cred_data); free(*secret_data);
         *cred_data = *secret_data = NULL;
-        return -1;
+        goto done;
     }
-    return 0;
+    rc = 0;
+
+done:
+    /* Zero the derived key material (and its base64 rendering, since it
+     * lands in the "value" field of *secret_data, not dk_b64 itself, but
+     * dk_b64 briefly holds the same secret in text form). */
+    OPENSSL_cleanse(dk, sizeof(dk));
+    OPENSSL_cleanse(dk_b64, sizeof(dk_b64));
+    return rc;
 }

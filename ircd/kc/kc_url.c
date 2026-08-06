@@ -142,6 +142,18 @@ kc_url_user_reset_password(struct kc_realm r, const char *user_id)
     return uri;
 }
 
+char *
+kc_url_user_send_verify_email(struct kc_realm r, const char *user_id)
+{
+    static const char tmpl[] = "%s/admin/realms/%s/users/%s/send-verify-email";
+    if (!r.base_url || !r.realm || !user_id) return NULL;
+
+    int len = snprintf(NULL, 0, tmpl, r.base_url, r.realm, user_id) + 1;
+    char *uri = malloc(len);
+    if (uri) snprintf(uri, len, tmpl, r.base_url, r.realm, user_id);
+    return uri;
+}
+
 /*
  * =============================================================================
  * Admin REST API: Groups

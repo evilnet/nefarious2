@@ -75,6 +75,15 @@ static void test_null_realm_rejected(void **state) {
     assert_null(kc_url_users(bad));
 }
 
+static void test_user_send_verify_email(void **state) {
+    (void)state;
+    char *u = kc_url_user_send_verify_email(R, "abc-123");
+    assert_non_null(u);
+    assert_string_equal(u,
+        "http://keycloak:8080/admin/realms/afternet/users/abc-123/send-verify-email");
+    free(u);
+}
+
 /* group_by_path percent-encodes via curl but must keep literal slashes. */
 static void test_group_by_path_keeps_slashes(void **state) {
     (void)state;
@@ -92,6 +101,7 @@ int main(void) {
         cmocka_unit_test(test_user_by_id),
         cmocka_unit_test(test_user_by_username_exact),
         cmocka_unit_test(test_user_by_username_inexact),
+        cmocka_unit_test(test_user_send_verify_email),
         cmocka_unit_test(test_null_realm_rejected),
         cmocka_unit_test(test_group_by_path_keeps_slashes),
     };

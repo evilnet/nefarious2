@@ -16,11 +16,11 @@ TESTPROGS = \
 # CMocka test programs (proper assertions)
 #
 # @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka
-# kc_jwt_cmocka kc_cred_derive_cmocka under --enable-keycloak, and empty
-# otherwise: those five link ../kc/*.o, which ircd/Makefile only builds
-# when Keycloak is enabled (see configure.in's Keycloak block).  Their
-# build rules stay defined below either way; they are simply never
-# requested.
+# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka under
+# --enable-keycloak, and empty otherwise: those six link ../kc/*.o, which
+# ircd/Makefile only builds when Keycloak is enabled (see configure.in's
+# Keycloak block).  Their build rules stay defined below either way; they
+# are simply never requested.
 CMOCKA_TESTPROGS = \
 	@KC_CMOCKA_TESTPROGS@ \
 	ircd_chattr_cmocka \
@@ -66,6 +66,7 @@ DEP_SRC = \
 	kc_cache_cmocka.c \
 	kc_jwt_cmocka.c \
 	kc_cred_derive_cmocka.c \
+	kc_error_classify_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -203,6 +204,12 @@ kc_jwt_cmocka: $(KC_JWT_CMOCKA_OBJS)
 KC_CRED_DERIVE_CMOCKA_OBJS = kc_cred_derive_cmocka.o ../kc/kc_cred_derive.o ../kc/kc_base64.o
 kc_cred_derive_cmocka: $(KC_CRED_DERIVE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_CRED_DERIVE_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(SSL_LIBS)
+
+# kc_error_classify tests - ROPC 400/401 grant-error body classifier
+# (KC_UNVERIFIED vs KC_FORBIDDEN). Pure jansson logic, no HTTP.
+KC_ERROR_CLASSIFY_CMOCKA_OBJS = kc_error_classify_cmocka.o ../kc/kc_error_classify.o
+kc_error_classify_cmocka: $(KC_ERROR_CLASSIFY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(KC_ERROR_CLASSIFY_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@

@@ -15,6 +15,7 @@
 
 #include <kc/kc_keycloak.h>
 #include <kc/kc.h>
+#include <kc/kc_error_classify.h>
 #include <kc/kc_http.h>
 #include <kc/kc_jwt.h>
 #include <kc/kc_url.h>
@@ -207,20 +208,36 @@ static int parse_user(json_t *json, struct kc_user *user)
                 user->opserv_level = atoi(json_string_value(first));
         }
 
-        /* SCRAM-SHA-256 credentials — try SPI names first, fall back to legacy */
-        user->scram_salt       = json_get_attr_string(attrs, "x3_scram_salt");
+        /* SCRAM-SHA-256 credentials — three tiers, checked in order:
+         *   1. scram_sha256_* — written at account-REGISTER time by this
+         *      client's own kc_cred_derive.c (scram_sha256_derive()) and,
+         *      in lockstep, by keycloak-webhook-spi's ScramCredentialProvider.
+         *      Both write byte-identical SHA-256/4096-iteration/16-byte-salt
+         *      material under these names; change one, change both.
+         *   2. x3_scram_* — legacy X3-set names.
+         *   3. x3_scram_sha256_* — older legacy fallback.
+         */
+        user->scram_salt       = json_get_attr_string(attrs, "scram_sha256_salt");
+        if (!user->scram_salt)
+            user->scram_salt   = json_get_attr_string(attrs, "x3_scram_salt");
         if (!user->scram_salt)
             user->scram_salt   = json_get_attr_string(attrs, "x3_scram_sha256_salt");
 
-        user->scram_stored_key = json_get_attr_string(attrs, "x3_scram_stored_key");
+        user->scram_stored_key = json_get_attr_string(attrs, "scram_sha256_stored_key");
+        if (!user->scram_stored_key)
+            user->scram_stored_key = json_get_attr_string(attrs, "x3_scram_stored_key");
         if (!user->scram_stored_key)
             user->scram_stored_key = json_get_attr_string(attrs, "x3_scram_sha256_stored_key");
 
-        user->scram_server_key = json_get_attr_string(attrs, "x3_scram_server_key");
+        user->scram_server_key = json_get_attr_string(attrs, "scram_sha256_server_key");
+        if (!user->scram_server_key)
+            user->scram_server_key = json_get_attr_string(attrs, "x3_scram_server_key");
         if (!user->scram_server_key)
             user->scram_server_key = json_get_attr_string(attrs, "x3_scram_sha256_server_key");
 
-        json_t *iter = json_object_get(attrs, "x3_scram_iterations");
+        json_t *iter = json_object_get(attrs, "scram_sha256_iterations");
+        if (!iter)
+            iter = json_object_get(attrs, "x3_scram_iterations");
         if (!iter)
             iter = json_object_get(attrs, "x3_scram_sha256_iterations");
         if (iter && json_is_array(iter) && json_array_size(iter) > 0) {
@@ -521,6 +538,7 @@ struct kc_op_ctx {
         OP_UPDATE_USER,
         OP_SET_PASSWORD,
         OP_VERIFY_PASSWORD,
+        OP_SEND_VERIFY_EMAIL,
         OP_GET_GROUPS,
         OP_ADD_GROUP,
         OP_REMOVE_GROUP,
@@ -662,7 +680,9 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
             /* TODO: capture Location header from response */
             ctx->cb.result(KC_SUCCESS, ctx->cb_data);
         } else if (resp->status_code == 409) {
-            ctx->cb.result(KC_USER_EXISTS, ctx->cb_data);
+            /* username/email already exists — kc_user_create_full and its
+             * thin-wrapper kc_user_create share this dispatch arm. */
+            ctx->cb.result(KC_CONFLICT, ctx->cb_data);
         } else {
             ctx->cb.result(KC_ERROR, ctx->cb_data);
         }
@@ -715,6 +735,19 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
         break;
     }
 
+    case OP_SEND_VERIFY_EMAIL: {
+        if (!resp || resp->status_code == 0) {
+            ctx->cb.result(KC_ERROR, ctx->cb_data);
+            break;
+        }
+        if (resp->status_code == 204 || resp->status_code == 200) {
+            ctx->cb.result(KC_SUCCESS, ctx->cb_data);
+        } else {
+            ctx->cb.result(KC_ERROR, ctx->cb_data);
+        }
+        break;
+    }
+
     case OP_VERIFY_PASSWORD: {
         if (!resp || resp->status_code == 0) {
             ctx->cb.token(KC_ERROR, NULL, ctx->cb_data);
@@ -729,7 +762,12 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
                 ctx->cb.token(KC_INVALID_RESPONSE, NULL, ctx->cb_data);
             }
         } else if (resp->status_code == 401 || resp->status_code == 400) {
-            ctx->cb.token(KC_FORBIDDEN, NULL, ctx->cb_data);
+            /* resp->json is populated for any status code whenever the body
+             * parses as JSON (see kc_http.c's completion handler — parsing
+             * isn't gated on 2xx), so no local re-parse is needed here.
+             * Distinguish "bad credentials" from "account not fully set up"
+             * (pending a required action) via the error_description body. */
+            ctx->cb.token(kc_classify_grant_error(resp->json), NULL, ctx->cb_data);
         } else {
             ctx->cb.token(KC_ERROR, NULL, ctx->cb_data);
         }
@@ -1060,40 +1098,57 @@ int kc_user_search(const char *query, bool exact, kc_users_cb cb, void *data)
     return start_op(ctx);
 }
 
-int kc_user_create(const char *username, const char *email,
-                   const char *cred_data, const char *secret_data,
-                   kc_result_cb cb, void *data)
+int kc_user_create_full(const struct kc_user_create_req *req,
+                        kc_result_cb cb, void *data)
 {
-    if (!username || !cb)
+    json_t *user_repr;
+    size_t i;
+
+    if (!req || !req->username || !req->cred_data || !req->secret_data || !cb)
         return -1;
 
-    /* Build user representation JSON */
-    json_t *user_repr = json_object();
-    json_object_set_new(user_repr, "username", json_string(username));
+    user_repr = json_object();
+    json_object_set_new(user_repr, "username", json_string(req->username));
     json_object_set_new(user_repr, "enabled", json_true());
+    if (req->email && req->email[0])
+        json_object_set_new(user_repr, "email", json_string(req->email));
 
-    if (email && email[0])
-        json_object_set_new(user_repr, "email", json_string(email));
+    if (req->set_email_verified) {
+        json_object_set_new(user_repr, "emailVerified", json_false());
+        json_t *ra = json_array();
+        json_array_append_new(ra, json_string("VERIFY_EMAIL"));
+        json_object_set_new(user_repr, "requiredActions", ra);
+    }
 
-    /* Add pre-hashed credentials if provided */
-    if (cred_data && secret_data) {
-        json_error_t err;
-        json_t *cred_obj = json_loads(cred_data, 0, &err);
-        json_t *secret_obj = json_loads(secret_data, 0, &err);
-
-        if (cred_obj && secret_obj) {
-            json_t *cred = json_object();
-            json_object_set_new(cred, "type", json_string("password"));
-            json_object_set(cred, "credentialData", cred_obj);
-            json_object_set(cred, "secretData", secret_obj);
-
-            json_t *creds = json_array();
-            json_array_append_new(creds, cred);
-            json_object_set_new(user_repr, "credentials", creds);
+    if (req->n_attrs) {
+        json_t *attrs = json_object();
+        for (i = 0; i < req->n_attrs; i++) {
+            json_t *arr = json_array();
+            json_array_append_new(arr, json_string(req->attr_values[i]));
+            json_object_set_new(attrs, req->attr_keys[i], arr);
         }
+        json_object_set_new(user_repr, "attributes", attrs);
+    }
 
-        json_decref(cred_obj);
-        json_decref(secret_obj);
+    /* credentials: same nested-JSON-strings shape as kc_user_create */
+    {
+        json_error_t err;
+        json_t *cred_obj = json_loads(req->cred_data, 0, &err);
+        json_t *secret_obj = json_loads(req->secret_data, 0, &err);
+        if (!cred_obj || !secret_obj) {
+            if (cred_obj) json_decref(cred_obj);
+            if (secret_obj) json_decref(secret_obj);
+            json_decref(user_repr);
+            return -1;
+        }
+        json_t *cred = json_object();
+        json_object_set_new(cred, "type", json_string("password"));
+        json_object_set(cred, "credentialData", cred_obj);
+        json_object_set(cred, "secretData", secret_obj);
+        json_t *creds = json_array();
+        json_array_append_new(creds, cred);
+        json_object_set_new(user_repr, "credentials", creds);
+        json_decref(cred_obj); json_decref(secret_obj);
     }
 
     char *body = json_dumps(user_repr, JSON_COMPACT);
@@ -1115,9 +1170,24 @@ int kc_user_create(const char *username, const char *email,
     ctx->method = "POST";
     ctx->body = body;
     ctx->headers = curl_slist_append(NULL, "Content-Type: application/json");
-    ctx->username = strdup(username);
+    ctx->username = strdup(req->username);
 
     return start_op(ctx);
+}
+
+int kc_user_create(const char *username, const char *email,
+                   const char *cred_data, const char *secret_data,
+                   kc_result_cb cb, void *data)
+{
+    struct kc_user_create_req req;
+
+    memset(&req, 0, sizeof(req));
+    req.username = username;
+    req.email = email;
+    req.cred_data = cred_data;
+    req.secret_data = secret_data;
+
+    return kc_user_create_full(&req, cb, data);
 }
 
 int kc_user_delete(const char *id, kc_result_cb cb, void *data)
@@ -1198,6 +1268,25 @@ int kc_user_set_password(const char *id, const char *password,
     ctx->method = "PUT";
     ctx->body = body;
     ctx->headers = curl_slist_append(NULL, "Content-Type: application/json");
+
+    return start_op(ctx);
+}
+
+int kc_user_send_verify_email(const char *id, kc_result_cb cb, void *data)
+{
+    if (!id || !cb)
+        return -1;
+
+    struct kc_op_ctx *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx)
+        return -1;
+
+    ctx->op = OP_SEND_VERIFY_EMAIL;
+    ctx->cb.result = cb;
+    ctx->cb_data = data;
+    ctx->url = kc_url_user_send_verify_email(get_realm(), id);
+    ctx->method = "PUT";
+    ctx->body = NULL;
 
     return start_op(ctx);
 }

@@ -24,6 +24,7 @@ char *kc_url_user_by_username(struct kc_realm r, const char *escaped_username, i
 char *kc_url_user_groups(struct kc_realm r, const char *user_id);
 char *kc_url_user_group(struct kc_realm r, const char *user_id, const char *group_id);
 char *kc_url_user_reset_password(struct kc_realm r, const char *user_id);
+char *kc_url_user_send_verify_email(struct kc_realm r, const char *user_id);
 
 /* Admin REST API: Groups */
 char *kc_url_groups(struct kc_realm r);
