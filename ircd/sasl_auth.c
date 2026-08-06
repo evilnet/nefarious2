@@ -684,6 +684,9 @@ void sasl_complete_login(struct Client *sptr, const char *account,
 
 #ifdef USE_LIBKC
 
+/* sasl_auth.c — replaced by feature_bool(FEAT_REGISTER_VERIFY_EMAIL) in Task 4 */
+static int register_verify_email_policy(void) { return 0; }
+
 /** Callback from kc_user_verify_password(). */
 static void sasl_plain_cb(int result, const struct kc_access_token *token, void *data)
 {
@@ -727,25 +730,38 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
     sasl_complete_login(acptr, login_as,
                         token && token->created_at ? token->created_at : 0);
   } else {
-    /* Distinguish auth failures from connectivity errors.
-     * KC_FORBIDDEN = wrong password (HTTP 401/400) — Keycloak is working fine.
-     * KC_NOT_FOUND = user doesn't exist — Keycloak is working fine.
-     * Everything else (KC_ERROR, KC_UNAVAILABLE, KC_TIMEOUT, KC_TOKEN_ERROR,
-     * KC_INVALID_RESPONSE) indicates a connectivity or service problem.
-     */
-    if (result != KC_FORBIDDEN && result != KC_NOT_FOUND) {
-      sasl_mark_unhealthy(result);
-    }
+    if (result == KC_UNVERIFIED) {
+      /* Account exists and Keycloak is healthy — the account has a pending
+       * required action (email verification). Do NOT negcache (the password
+       * may be correct) and do NOT mark unhealthy. */
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "SASL PLAIN: unverified account %s (client %C)",
+                session->authcid, acptr);
+      send_fail(acptr, "AUTHENTICATE", "VERIFICATION_REQUIRED", NULL,
+                "Your account email is not verified - check your email for "
+                "the verification link, then try again");
+      /* fall into the shared cleanup below (state/cookie/timers/session) */
+    } else {
+      /* Distinguish auth failures from connectivity errors.
+       * KC_FORBIDDEN = wrong password (HTTP 401/400) — Keycloak is working fine.
+       * KC_NOT_FOUND = user doesn't exist — Keycloak is working fine.
+       * Everything else (KC_ERROR, KC_UNAVAILABLE, KC_TIMEOUT, KC_TOKEN_ERROR,
+       * KC_INVALID_RESPONSE) indicates a connectivity or service problem.
+       */
+      if (result != KC_FORBIDDEN && result != KC_NOT_FOUND) {
+        sasl_mark_unhealthy(result);
+      }
 
-    /* Update auth caches — only for actual auth failures, not connectivity errors */
-    if ((result == KC_FORBIDDEN || result == KC_NOT_FOUND) && session->cred_hash_valid) {
-      negcache_insert(session->authcid, session->cred_hash);
-      poscache_remove(session->cred_hash);
-    }
+      /* Update auth caches — only for actual auth failures, not connectivity errors */
+      if ((result == KC_FORBIDDEN || result == KC_NOT_FOUND) && session->cred_hash_valid) {
+        negcache_insert(session->authcid, session->cred_hash);
+        poscache_remove(session->cred_hash);
+      }
 
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "SASL PLAIN: Failed authentication for %s (client %C, result %d)",
-              session->authcid, acptr, result);
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "SASL PLAIN: Failed authentication for %s (client %C, result %d)",
+                session->authcid, acptr, result);
+    }
     /* Send failure and clean up */
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
@@ -1333,6 +1349,27 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL SCRAM: No SCRAM credentials for %s (client %C)",
               session->authcid, acptr);
+    send_reply(acptr, ERR_SASLFAIL, "");
+    session->state = SASL_STATE_FAILED;
+    cli_saslcookie(acptr) = 0;
+    cli_saslstart(acptr) = 0;
+    if (t_active(&cli_sasltimeout(acptr)))
+      timer_del(&cli_sasltimeout(acptr));
+    sasl_session_free(acptr);
+    if (cli_auth(acptr))
+      auth_sasl_done(cli_auth(acptr));
+    return;
+  }
+
+  /* Spec: SCRAM verifies locally and bypasses the ROPC required-action gate,
+   * so enforce email verification here when registration policy demands it. */
+  if (register_verify_email_policy() && !user->email_verified) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL SCRAM: unverified account %s (client %C)",
+              session->authcid, acptr);
+    send_fail(acptr, "AUTHENTICATE", "VERIFICATION_REQUIRED", NULL,
+              "Your account email is not verified - check your email for "
+              "the verification link, then try again");
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
     cli_saslcookie(acptr) = 0;
