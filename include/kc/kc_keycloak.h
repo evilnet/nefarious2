@@ -158,7 +158,14 @@ int kc_user_get_by_id(const char *id, kc_user_cb cb, void *data);
 int kc_user_search(const char *query, bool exact, kc_users_cb cb, void *data);
 
 /* Create user with pre-hashed password (PBKDF2 credential import).
- * Thin wrapper over kc_user_create_full(). */
+ * Thin wrapper over kc_user_create_full(): username, cred_data, and
+ * secret_data are all REQUIRED — NULL in any of them (or a NULL cb)
+ * returns -1 without making a request; there is no credential-less create
+ * path (via this function or kc_user_create_full()). This differs from
+ * the pre-Task-2 behavior, which silently created a credential-less user
+ * when cred_data/secret_data were NULL; that shorthand no longer exists.
+ * To set emailVerified/requiredActions or custom attributes on create,
+ * call kc_user_create_full() directly (it still requires credentials). */
 int kc_user_create(const char *username, const char *email,
                    const char *cred_data, const char *secret_data,
                    kc_result_cb cb, void *data);
@@ -178,8 +185,11 @@ struct kc_user_create_req {
     size_t n_attrs;
 };
 
-/* Create user with the full request shape above. Result callback receives
- * KC_CONFLICT (not KC_USER_EXISTS) on HTTP 409. */
+/* Create user with the full request shape above. req->username,
+ * req->cred_data, and req->secret_data are all REQUIRED (see the struct's
+ * field comments) — NULL in any of them (or a NULL req/cb) returns -1
+ * without making a request; there is no credential-less create path.
+ * Result callback receives KC_CONFLICT (not KC_USER_EXISTS) on HTTP 409. */
 int kc_user_create_full(const struct kc_user_create_req *req,
                         kc_result_cb cb, void *data);
 
