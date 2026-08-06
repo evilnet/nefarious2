@@ -549,6 +549,9 @@ struct Client {
   struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
   struct SASLSession* cli_saslsession; /**< Local SASL session state (NULL if not using local path) */
 
+  /* IRCv3 draft/account-registration */
+  unsigned int cli_regcookie;       /**< Nonzero exactly while a REGISTER async chain is outstanding on this connection; doubles as that chain's client-refind key and as the one-in-flight guard. Deliberately NOT cli_saslcookie, which SASL zeroes on its own failure paths. See m_register.c */
+
   /* IRCv3 Metadata */
   struct MetadataEntry* cli_metadata;    /**< Client metadata key-value pairs */
   struct MetadataSub*   cli_metadatasub; /**< Client metadata subscriptions */
@@ -751,6 +754,8 @@ struct Client {
 #define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
 /** Get local SASL session (may be NULL). */
 #define cli_saslsession(cli)     ((cli)->cli_saslsession)
+/** Get the REGISTER in-flight cookie (nonzero => a chain is outstanding). */
+#define cli_regcookie(cli)       ((cli)->cli_regcookie)
 /** Get client metadata list. */
 #define cli_metadata(cli)        ((cli)->cli_metadata)
 /** Get client metadata subscriptions. */

@@ -115,7 +115,7 @@ extern struct Client* LocalClientArray[];
  */
 struct reg_ctx {
   int fd;                          /**< Connection fd at REGISTER time. */
-  unsigned int cookie;             /**< cli_saslcookie() at REGISTER time. */
+  unsigned int cookie;             /**< cli_regcookie() at REGISTER time. */
   int stage;                       /**< 0=search, 1=create, 2=verify-email. */
   int verify_email;                /**< Policy snapshot at REGISTER time. */
   char account[ACCOUNTLEN + 1];    /**< Account being created. */
@@ -126,6 +126,14 @@ struct reg_ctx {
 };
 
 /** Re-find the client that issued the REGISTER, if it is still there.
+ *
+ * Keyed on cli_regcookie() rather than cli_saslcookie(): SASL zeroes its own
+ * cookie on its failure paths (e.g. sasl_plain_cb at sasl_auth.c:774), so a
+ * client that failed a SASL attempt while a REGISTER was in flight would
+ * become unfindable -- losing its REGISTER reply and stranding the in-flight
+ * guard set, which locks REGISTER out on that connection until it reconnects.
+ * A dedicated cookie is owned solely by this file and cannot be clobbered.
+ *
  * @param[in] ctx Registration context.
  * @return The client, or NULL if it disconnected or the fd was reused.
  */
@@ -136,16 +144,32 @@ static struct Client *reg_ctx_client(struct reg_ctx *ctx)
   if (ctx->fd < 0 || ctx->fd >= MAXCONNECTIONS)
     return NULL;
   acptr = LocalClientArray[ctx->fd];
-  if (!acptr || cli_saslcookie(acptr) != ctx->cookie)
+  if (!acptr || cli_regcookie(acptr) != ctx->cookie)
     return NULL;
   return acptr;
 }
 
-/** Release a registration context and cleanse its key material.
+/** Release a registration context, clear its in-flight guard, and cleanse
+ * its key material.
+ *
+ * This is the single terminal point of a context's life, so retiring
+ * cli_regcookie() here makes the in-flight guard's lifetime identical to the
+ * context's: set once at birth in m_register(), cleared once here, on every
+ * path.  reg_ctx_client() validates fd AND cookie, so a connection that
+ * merely reused the fd is never touched -- and a client that disconnected
+ * mid-chain needs no clearing at all, because alloc_client() memsets the
+ * whole struct Client on allocation and on reuse from the free list
+ * (list.c:122), so the guard cannot outlive the connection.
+ *
  * @param[in] ctx Registration context (must not be NULL).
  */
 static void reg_ctx_free(struct reg_ctx *ctx)
 {
+  struct Client *acptr = reg_ctx_client(ctx);
+
+  if (acptr)
+    cli_regcookie(acptr) = 0;      /* releases the one-in-flight guard */
+
   if (ctx->cred_data)
     free(ctx->cred_data);
   if (ctx->secret_data)
@@ -396,6 +420,18 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* One REGISTER in flight per connection.  Without this an unauthenticated
+   * connection could pipeline REGISTERs and mint a distinct Keycloak account
+   * for each one, spending the server's Keycloak quota unthrottled.  A
+   * nonzero cli_regcookie() *is* the guard; it is set when the context is
+   * allocated below and cleared in reg_ctx_free() on every terminal path.
+   * (Cross-connection rate limiting is a separate, unaddressed concern.) */
+  if (cli_regcookie(cptr)) {
+    send_fail(sptr, "REGISTER", "TEMPORARILY_UNAVAILABLE", account,
+              "Registration already in progress");
+    return 0;
+  }
+
   /* The account name has to be nick-shaped: it is stamped into
    * cli_user()->account and travels the network as an account name. */
   for (p = account; *p; p++) {
@@ -445,17 +481,18 @@ int m_register(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
 #ifdef USE_LIBKC
   /* A real cookie is needed so the async callbacks can tell "still the same
-   * connection" from "fd reused" (the SASL pattern). */
-  if (!cli_saslcookie(cptr)) {
-    do {
-      cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
-    } while (!cli_saslcookie(cptr));
-  }
+   * connection" from "fd reused" (the SASL pattern, with REGISTER's own
+   * cookie -- see reg_ctx_client()).  Setting it also arms the one-in-flight
+   * guard, and it stays armed for exactly as long as the context below
+   * lives: every exit path goes through reg_ctx_free(), which clears it. */
+  do {
+    cli_regcookie(cptr) = ircrandom() & 0x7fffffff;
+  } while (!cli_regcookie(cptr));
 
   ctx = (struct reg_ctx *)MyMalloc(sizeof(*ctx));
   memset(ctx, 0, sizeof(*ctx));
   ctx->fd = cli_fd(cptr);
-  ctx->cookie = cli_saslcookie(cptr);
+  ctx->cookie = cli_regcookie(cptr);
   ctx->verify_email = feature_bool(FEAT_REGISTER_VERIFY_EMAIL);
   /* ircd_strncpy() takes the buffer SIZE (strlcpy semantics), so pass
    * sizeof() -- sizeof()-1 would clip the last character of a full-length
