@@ -32,6 +32,20 @@ struct Client;
 #define WS_OPCODE_PING         0x9
 #define WS_OPCODE_PONG         0xA
 
+/** Largest data-frame payload accepted from a client, in bytes.  Frames
+ * over this are answered with Close 1009 (Message Too Big).  Callers of
+ * websocket_decode_frame() must hand it a buffer larger than this. */
+#define WS_MAX_PAYLOAD 16384
+
+/** Largest complete client frame: 2-byte header + 8-byte extended length
+ * + 4-byte mask + WS_MAX_PAYLOAD.  Sizes the per-connection buffer that
+ * holds a partial frame between reads. */
+#define WS_MAX_FRAME   (WS_MAX_PAYLOAD + 14)
+
+/** websocket_decode_frame() return value for a frame over WS_MAX_PAYLOAD
+ * (a negative value distinct from the generic -1 protocol error). */
+#define WS_DECODE_TOOBIG (-2)
+
 /** Handle WebSocket handshake for a new connection.
  * @param[in] cptr Client attempting to connect.
  * @param[in] buffer Raw data received.
@@ -48,7 +62,8 @@ extern int websocket_handshake(struct Client *cptr, const char *buffer, int leng
  * @param[out] payload_len Length of decoded payload.
  * @param[out] opcode The frame opcode.
  * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
- * @return Number of bytes consumed from frame, 0 if incomplete, -1 on error.
+ * @return Number of bytes consumed from frame, 0 if incomplete, -1 on
+ *   error, WS_DECODE_TOOBIG if the payload exceeds WS_MAX_PAYLOAD.
  */
 extern int websocket_decode_frame(const unsigned char *frame, int frame_len,
                                   char *payload, int payload_size,
@@ -73,5 +88,13 @@ extern int websocket_encode_frame(const char *data, int data_len,
  */
 extern int websocket_handle_control(struct Client *cptr, int opcode,
                                     const char *payload, int payload_len);
+
+/** Send a WebSocket Close frame with a status code (best effort).
+ * @param[in] cptr Client connection.
+ * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big).
+ * @param[in] reason Optional short reason text (truncated to 123 bytes).
+ */
+extern void websocket_send_close(struct Client *cptr, int code,
+                                 const char *reason);
 
 #endif /* INCLUDED_websocket_h */

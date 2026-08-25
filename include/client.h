@@ -50,6 +50,9 @@
 #include "ssl.h"
 #endif
 #endif /* USE_SSL */
+#ifndef INCLUDED_websocket_h
+#include "websocket.h"          /* WS_MAX_FRAME */
+#endif
 
 struct ConfItem;
 struct Listener;
@@ -460,7 +463,7 @@ struct Connection
   unsigned char       con_labeled_batch; /**< 1 if labeled_batch_start opened a batch */
   struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
   /* WebSocket state for RFC 6455 compliance */
-  unsigned char       con_ws_frame_buf[FULL_MSG_SIZE]; /**< Partial WebSocket frame buffer */
+  unsigned char       con_ws_frame_buf[WS_MAX_FRAME]; /**< Partial WebSocket frame buffer (holds one max-size frame) */
   int                 con_ws_frame_len;   /**< Length of data in frame buffer */
   char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
   int                 con_ws_frag_len;    /**< Length of data in fragment buffer */

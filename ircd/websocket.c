@@ -63,9 +63,6 @@
 #define WS_FIN  0x80
 #define WS_MASK 0x80
 
-/* Maximum WebSocket frame payload we'll accept */
-#define WS_MAX_PAYLOAD 16384
-
 /* Subprotocol types */
 #define WS_SUBPROTO_NONE   0  /**< No subprotocol requested by client */
 #define WS_SUBPROTO_BINARY 1
@@ -449,7 +446,8 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
  * @param[out] payload_len Length of decoded payload.
  * @param[out] opcode The frame opcode.
  * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
- * @return Number of bytes consumed from frame, 0 if incomplete, -1 on error.
+ * @return Number of bytes consumed from frame, 0 if incomplete, -1 on
+ *   error, WS_DECODE_TOOBIG if the payload exceeds WS_MAX_PAYLOAD.
  *
  * RFC 6455 Compliance:
  * - §5.2: RSV1-3 bits MUST be 0 unless extension negotiated (we negotiate none)
@@ -531,10 +529,11 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
     return -1;
   }
 
-  /* Sanity check payload length */
+  /* Sanity check payload length.  Distinct return so the caller can
+   * answer with Close 1009 instead of a bare TCP drop. */
   if (plen > WS_MAX_PAYLOAD) {
     Debug((DEBUG_DEBUG, "WebSocket: Frame too large: %llu bytes", plen));
-    return -1;
+    return WS_DECODE_TOOBIG;
   }
 
   /* Get mask (required for client-to-server frames - we already verified masked=1 above) */
@@ -632,6 +631,31 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
     unsigned int bytes_sent;
     return (os_send_nonb(cli_fd(cptr), (char *)data, len, &bytes_sent) == IO_SUCCESS) ? 1 : 0;
   }
+}
+
+/** Send a WebSocket Close frame (RFC 6455 §5.5.1) with a status code.
+ * Best effort, no error reporting: this is used immediately before the
+ * connection is dropped so the client can tell a policy close (e.g.
+ * 1009 Message Too Big) apart from a network failure (1006).
+ * @param[in] cptr Client connection.
+ * @param[in] code Status code.
+ * @param[in] reason Optional reason text (truncated to fit a control frame).
+ */
+void websocket_send_close(struct Client *cptr, int code, const char *reason)
+{
+  unsigned char frame[2 + 125];
+  int rlen = reason ? (int)strlen(reason) : 0;
+
+  if (rlen > 123)
+    rlen = 123;  /* control frame payload <= 125 incl. 2-byte code */
+  frame[0] = WS_FIN | WS_OPCODE_CLOSE;
+  frame[1] = (unsigned char)(2 + rlen);
+  frame[2] = (code >> 8) & 0xFF;
+  frame[3] = code & 0xFF;
+  if (rlen > 0)
+    memcpy(frame + 4, reason, rlen);
+  Debug((DEBUG_DEBUG, "WebSocket: sending Close %d (%s)", code, reason ? reason : ""));
+  ws_send_raw(cptr, frame, 4 + rlen);
 }
 
 int websocket_handle_control(struct Client *cptr, int opcode,

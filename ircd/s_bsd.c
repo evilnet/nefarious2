@@ -1123,41 +1123,71 @@ ssl_read_again:
      * Supports RFC 6455 fragmentation and partial frame buffering.
      */
     if (length > 0 && IsWebSocket(cptr)) {
-      char ws_payload[BUFSIZE + 16];  /* Stack-local, not static */
-      int ws_len, opcode, consumed, is_fin;
+      /* Decode buffer.  The decoder rejects any payload >= the buffer
+       * size, so this must be larger than WS_MAX_PAYLOAD (the largest
+       * frame it accepts) plus the '\n' appended below.  Static rather
+       * than stack: 16 KB is too much stack, and read_packet() is not
+       * reentrant anyway (readbuf is static too). */
+      static char ws_payload[WS_MAX_PAYLOAD + 2];
+      int ws_len = 0, opcode = 0, consumed, is_fin = 0;
       unsigned char *ws_data;
       int ws_remaining;
       int copy_len;
+      const char *src = readbuf;
+      int src_len = length;
 
       Debug((DEBUG_DEBUG, "WebSocket receive: length=%d, IsWebSocket=%d", length, IsWebSocket(cptr)));
 
-      /* Prepend any partial frame from previous read */
-      if (cli_ws_frame_len(cptr) > 0) {
-        copy_len = length;
-        if (copy_len > BUFSIZE - cli_ws_frame_len(cptr))
-          copy_len = BUFSIZE - cli_ws_frame_len(cptr);
-        memcpy(cli_ws_frame_buf(cptr) + cli_ws_frame_len(cptr), readbuf, copy_len);
-        ws_data = cli_ws_frame_buf(cptr);
-        ws_remaining = cli_ws_frame_len(cptr) + copy_len;
-      } else {
-        ws_data = (unsigned char *)readbuf;
-        ws_remaining = length;
-      }
+      /*
+       * All input goes through the per-connection frame buffer, which
+       * holds exactly one maximum-size frame (WS_MAX_FRAME).  readbuf
+       * (SERVER_TCP_WINDOW) can be much larger than that, so the loop
+       * below tops the frame buffer up from readbuf whenever it holds
+       * no complete frame, decodes what it can, and repeats until the
+       * read is drained.  A frame split across reads is thus reassembled
+       * whatever its size, and bytes after a completed frame are never
+       * dropped.
+       */
+      ws_data = cli_ws_frame_buf(cptr);
+      ws_remaining = cli_ws_frame_len(cptr);
 
-      while (ws_remaining > 0) {
-        consumed = websocket_decode_frame(ws_data, ws_remaining,
-                                          ws_payload, sizeof(ws_payload),
-                                          &ws_len, &opcode, &is_fin);
-        Debug((DEBUG_DEBUG, "WebSocket decode: consumed=%d, ws_len=%d, opcode=%d, is_fin=%d, remaining=%d",
-               consumed, ws_len, opcode, is_fin, ws_remaining));
+      while (ws_remaining > 0 || src_len > 0) {
+        consumed = 0;
+        if (ws_remaining > 0) {
+          consumed = websocket_decode_frame(ws_data, ws_remaining,
+                                            ws_payload, sizeof(ws_payload),
+                                            &ws_len, &opcode, &is_fin);
+          Debug((DEBUG_DEBUG, "WebSocket decode: consumed=%d, ws_len=%d, opcode=%d, is_fin=%d, remaining=%d",
+                 consumed, ws_len, opcode, is_fin, ws_remaining));
+        }
         if (consumed == 0) {
-          /* Incomplete frame - save for next read */
-          Debug((DEBUG_DEBUG, "WebSocket: Incomplete frame, saving %d bytes", ws_remaining));
-          if (ws_remaining > 0 && ws_remaining < BUFSIZE) {
-            memmove(cli_ws_frame_buf(cptr), ws_data, ws_remaining);
-            cli_ws_frame_len(cptr) = ws_remaining;
+          /* Incomplete frame (or empty buffer): pull in more of the read */
+          if (src_len <= 0) {
+            Debug((DEBUG_DEBUG, "WebSocket: Incomplete frame, saving %d bytes", ws_remaining));
+            break;  /* tail is saved after the loop */
           }
-          break;
+          if (ws_remaining > 0 && ws_data != cli_ws_frame_buf(cptr))
+            memmove(cli_ws_frame_buf(cptr), ws_data, ws_remaining);
+          ws_data = cli_ws_frame_buf(cptr);
+          copy_len = (int)sizeof(cli_ws_frame_buf(cptr)) - ws_remaining;
+          if (copy_len <= 0) {
+            /* Buffer full and still no complete frame.  Cannot happen for
+             * a frame the decoder accepts (WS_MAX_FRAME covers the largest
+             * header plus WS_MAX_PAYLOAD), so treat it as a protocol error
+             * rather than spin. */
+            return exit_client(cptr, cptr, &me, "WebSocket frame error");
+          }
+          if (copy_len > src_len)
+            copy_len = src_len;
+          memcpy(cli_ws_frame_buf(cptr) + ws_remaining, src, copy_len);
+          ws_remaining += copy_len;
+          src += copy_len;
+          src_len -= copy_len;
+          continue;
+        } else if (consumed == WS_DECODE_TOOBIG) {
+          /* Over WS_MAX_PAYLOAD: tell the client why before dropping it */
+          websocket_send_close(cptr, 1009, "Message too big");
+          return exit_client(cptr, cptr, &me, "WebSocket message too big");
         } else if (consumed < 0) {
           /* Frame error */
           Debug((DEBUG_DEBUG, "WebSocket: Frame error (consumed=%d)", consumed));
@@ -1165,7 +1195,6 @@ ssl_read_again:
         }
 
         Debug((DEBUG_DEBUG, "WebSocket frame payload: '%.50s'", ws_payload));
-        cli_ws_frame_len(cptr) = 0;  /* Frame consumed successfully */
 
         /* Handle control frames (always complete, can be interleaved) */
         if (opcode >= WS_OPCODE_CLOSE) {
@@ -1260,6 +1289,11 @@ ssl_read_again:
         ws_data += consumed;
         ws_remaining -= consumed;
       }
+
+      /* Keep any partial frame at the front of the buffer for the next read */
+      if (ws_remaining > 0 && ws_data != cli_ws_frame_buf(cptr))
+        memmove(cli_ws_frame_buf(cptr), ws_data, ws_remaining);
+      cli_ws_frame_len(cptr) = ws_remaining;
       length = 0; /* Data processed via WebSocket path */
     }
 
