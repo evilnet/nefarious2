@@ -46,6 +46,14 @@ struct Client;
  * (a negative value distinct from the generic -1 protocol error). */
 #define WS_DECODE_TOOBIG (-2)
 
+/** Largest HTTP upgrade request we will accumulate before giving up.
+ * Browsers send 500-700 bytes routinely and a few KB with cookies. */
+#define WS_HANDSHAKE_MAX 8192
+
+/** websocket_handshake_feed() return value when the request exceeded
+ * WS_HANDSHAKE_MAX without a terminating blank line. */
+#define WS_HANDSHAKE_TOOBIG (-2)
+
 /** Handle WebSocket handshake for a new connection.
  * @param[in] cptr Client attempting to connect.
  * @param[in] buffer Raw data received.
@@ -53,6 +61,19 @@ struct Client;
  * @return 1 if handshake completed successfully, 0 if more data needed, -1 on error.
  */
 extern int websocket_handshake(struct Client *cptr, const char *buffer, int length);
+
+/** Accumulate an HTTP upgrade request across reads and run the handshake
+ * once the terminating blank line has arrived.
+ * @param[in] cptr Client attempting to connect.
+ * @param[in] data Bytes just read.
+ * @param[in] len Number of bytes in \a data.
+ * @param[out] consumed Number of bytes of \a data that belonged to the
+ *   request; anything after them is already WebSocket frame data.
+ * @return 1 if the handshake completed, 0 if more data is needed, -1 if
+ *   the handshake failed, WS_HANDSHAKE_TOOBIG if the request is too big.
+ */
+extern int websocket_handshake_feed(struct Client *cptr, const char *data,
+                                    int len, int *consumed);
 
 /** Decode a WebSocket frame and extract the payload.
  * @param[in] frame Raw WebSocket frame data.

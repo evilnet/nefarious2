@@ -1078,43 +1078,48 @@ ssl_read_again:
      */
     if (IsWSNeedHandshake(cptr)) {
       int result;
-      char *client_buffer;
-      char *endp;
-      const char *src;
+      int consumed;
 
       Debug((DEBUG_DEBUG, "Client WebSocket handshake: length=%d", length));
 
-      /* Accumulate data in client buffer for HTTP request */
-      client_buffer = cli_buffer(cptr);
-      endp = client_buffer + cli_count(cptr);
-      src = readbuf;
+      /*
+       * The request is accumulated in a per-connection buffer of up to
+       * WS_HANDSHAKE_MAX bytes (browsers send 500-700 byte requests,
+       * more than cli_buffer holds) and the handshake runs once the
+       * blank line arrives, however many reads that takes.
+       */
 
-      /* Copy incoming data to buffer */
-      while (length > 0 && (endp - client_buffer) < BUFSIZE - 1) {
-        *endp++ = *src++;
-        length--;
+      /* The sniff step above may have parked up to 3 bytes in
+       * cli_buffer; they are the start of the request.  Too short to
+       * complete anything, so the result is not interesting. */
+      if (cli_count(cptr) > 0) {
+        (void)websocket_handshake_feed(cptr, cli_buffer(cptr), cli_count(cptr),
+                                       &consumed);
+        cli_count(cptr) = 0;
       }
-      *endp = '\0';
-      cli_count(cptr) = endp - client_buffer;
 
-      /* Try to complete handshake */
-      result = websocket_handshake(cptr, client_buffer, cli_count(cptr));
+      result = websocket_handshake_feed(cptr, readbuf, length, &consumed);
       if (result == 0) {
         /* Need more data */
         return 1;
+      } else if (result == WS_HANDSHAKE_TOOBIG) {
+        return exit_client(cptr, cptr, &me, "WebSocket handshake too large");
       } else if (result < 0) {
         /* Handshake failed */
         return exit_client(cptr, cptr, &me, "WebSocket handshake failed");
       }
-      /* Handshake succeeded - clear buffer and unblock sends */
+      /* Handshake succeeded - unblock sends */
       Debug((DEBUG_DEBUG, "WebSocket handshake completed successfully"));
-      cli_count(cptr) = 0;
       ClrFlag(cptr, FLAG_BLOCKED);  /* Allow queued messages to be sent */
       /* Trigger send of queued data */
       send_queued(cptr);
-      /* If no remaining data, we're done for now */
+      /* Anything after the request in this read is already WebSocket
+       * frame data: move it to the front of readbuf for the decoder
+       * below instead of dropping it. */
+      length -= consumed;
       if (length <= 0)
         return 1;
+      memmove(readbuf, readbuf + consumed, length);
     }
 
     /*
