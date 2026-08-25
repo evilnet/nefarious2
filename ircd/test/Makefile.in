@@ -26,9 +26,11 @@ CMOCKA_TESTPROGS = \
 	ircd_crypt_cmocka \
 	crule_cmocka \
 	history_cmocka \
-	recv_classify_cmocka
+	recv_classify_cmocka \
+	websocket_cmocka
 
 CMOCKA_LIBS = -lcmocka
+SSL_LIBS = -lssl -lcrypto
 ZSTD_LIBS = -lzstd
 
 DEP_SRC = \
@@ -48,6 +50,7 @@ DEP_SRC = \
 	crule_cmocka.c \
 	history_cmocka.c \
 	recv_classify_cmocka.c \
+	websocket_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -142,6 +145,12 @@ history_cmocka: $(HISTORY_CMOCKA_OBJS)
 RECV_CLASSIFY_CMOCKA_OBJS = recv_classify_cmocka.o test_stub.o ../recv_classify.o
 recv_classify_cmocka: $(RECV_CLASSIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(RECV_CLASSIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# websocket tests - frame decoding and handshake accumulation (#98, #99).
+# Includes websocket.c directly with stubs; needs OpenSSL for the accept key.
+WEBSOCKET_CMOCKA_OBJS = websocket_cmocka.o test_stub.o ../ircd_alloc.o ../ircd_string.o
+websocket_cmocka: $(WEBSOCKET_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBSOCKET_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
