@@ -34,7 +34,8 @@ CMOCKA_TESTPROGS = \
 	crule_cmocka \
 	history_cmocka \
 	chathistory_presence_cmocka \
-	recv_classify_cmocka
+	recv_classify_cmocka \
+	websocket_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -64,6 +65,7 @@ DEP_SRC = \
 	kc_base64_cmocka.c \
 	kc_cache_cmocka.c \
 	kc_jwt_cmocka.c \
+	websocket_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -194,6 +196,12 @@ kc_cache_cmocka: $(KC_CACHE_CMOCKA_OBJS)
 KC_JWT_CMOCKA_OBJS = kc_jwt_cmocka.o ../kc/kc_base64.o ../kc/kc_http_sync.o
 kc_jwt_cmocka: $(KC_JWT_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_JWT_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(CURL_LIBS) $(SSL_LIBS)
+
+# websocket tests - frame decoding and handshake accumulation (#98, #99).
+# Includes websocket.c directly with stubs; needs OpenSSL for the accept key.
+WEBSOCKET_CMOCKA_OBJS = websocket_cmocka.o test_stub.o ../ircd_alloc.o ../ircd_string.o
+websocket_cmocka: $(WEBSOCKET_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBSOCKET_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@

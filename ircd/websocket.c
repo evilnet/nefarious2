@@ -63,9 +63,6 @@
 #define WS_FIN  0x80
 #define WS_MASK 0x80
 
-/* Maximum WebSocket frame payload we'll accept */
-#define WS_MAX_PAYLOAD 16384
-
 /* Subprotocol types */
 #define WS_SUBPROTO_NONE   0  /**< No subprotocol requested by client */
 #define WS_SUBPROTO_BINARY 1
@@ -441,6 +438,84 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
 #endif
 }
 
+/** Accumulate an HTTP upgrade request across reads and run the handshake
+ * once it is complete.
+ *
+ * The request is collected in a per-connection heap buffer of
+ * WS_HANDSHAKE_MAX + 1 bytes, allocated on the first byte and released
+ * as soon as the handshake succeeds or fails (dealloc_connection() also
+ * frees it if the client goes away first).  Real browsers send 500-700
+ * byte upgrade requests, well over the 512-byte cli_buffer that used to
+ * hold it, so the request must be allowed to span several reads.
+ *
+ * @param[in] cptr Client attempting to connect.
+ * @param[in] data Bytes just read.
+ * @param[in] len Number of bytes in \a data.
+ * @param[out] consumed Number of bytes of \a data that belonged to the
+ *   request.  Any bytes after them arrived in the same read as the end
+ *   of the request and are the client's first WebSocket frames; the
+ *   caller must hand them to the frame decoder rather than drop them.
+ * @return 1 if the handshake completed, 0 if more data is needed, -1 if
+ *   the handshake failed, WS_HANDSHAKE_TOOBIG if WS_HANDSHAKE_MAX bytes
+ *   arrived without a terminating blank line.
+ */
+int websocket_handshake_feed(struct Client *cptr, const char *data,
+                             int len, int *consumed)
+{
+  char *buf = cli_ws_hs_buf(cptr);
+  int have = cli_ws_hs_len(cptr);
+  const char *term;
+  int take, req_len, result;
+
+  *consumed = 0;
+
+  if (!buf) {
+    buf = (char *)MyMalloc(WS_HANDSHAKE_MAX + 1);
+    cli_ws_hs_buf(cptr) = buf;
+    have = 0;
+  }
+
+  /* Append what fits; keep the buffer NUL-terminated for strstr() */
+  take = len;
+  if (take > WS_HANDSHAKE_MAX - have)
+    take = WS_HANDSHAKE_MAX - have;
+  if (take > 0)
+    memcpy(buf + have, data, take);
+  have += take;
+  buf[have] = '\0';
+  cli_ws_hs_len(cptr) = have;
+
+  Debug((DEBUG_DEBUG, "WebSocket handshake: +%d bytes, %d buffered", take, have));
+
+  /* Search from the start so a terminator split across reads is found */
+  term = strstr(buf, "\r\n\r\n");
+  if (!term) {
+    if (have >= WS_HANDSHAKE_MAX) {
+      Debug((DEBUG_DEBUG, "WebSocket: upgrade request from %s exceeds %d bytes",
+             cli_sockhost(cptr), WS_HANDSHAKE_MAX));
+      MyFree(buf);
+      cli_ws_hs_buf(cptr) = NULL;
+      cli_ws_hs_len(cptr) = 0;
+      return WS_HANDSHAKE_TOOBIG;
+    }
+    *consumed = take;
+    return 0;  /* need more data */
+  }
+
+  /* Everything past the blank line came from this read: hand it back */
+  req_len = (term + 4) - buf;
+  *consumed = take - (have - req_len);
+  buf[req_len] = '\0';
+
+  result = websocket_handshake(cptr, buf, req_len);
+
+  MyFree(buf);
+  cli_ws_hs_buf(cptr) = NULL;
+  cli_ws_hs_len(cptr) = 0;
+
+  return result;
+}
+
 /** Decode a WebSocket frame and extract the payload.
  * @param[in] frame Raw WebSocket frame data.
  * @param[in] frame_len Length of frame data.
@@ -449,7 +524,8 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
  * @param[out] payload_len Length of decoded payload.
  * @param[out] opcode The frame opcode.
  * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
- * @return Number of bytes consumed from frame, 0 if incomplete, -1 on error.
+ * @return Number of bytes consumed from frame, 0 if incomplete, -1 on
+ *   error, WS_DECODE_TOOBIG if the payload exceeds WS_MAX_PAYLOAD.
  *
  * RFC 6455 Compliance:
  * - §5.2: RSV1-3 bits MUST be 0 unless extension negotiated (we negotiate none)
@@ -531,10 +607,11 @@ int websocket_decode_frame(const unsigned char *frame, int frame_len,
     return -1;
   }
 
-  /* Sanity check payload length */
+  /* Sanity check payload length.  Distinct return so the caller can
+   * answer with Close 1009 instead of a bare TCP drop. */
   if (plen > WS_MAX_PAYLOAD) {
     Debug((DEBUG_DEBUG, "WebSocket: Frame too large: %llu bytes", plen));
-    return -1;
+    return WS_DECODE_TOOBIG;
   }
 
   /* Get mask (required for client-to-server frames - we already verified masked=1 above) */
@@ -632,6 +709,31 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
     unsigned int bytes_sent;
     return (os_send_nonb(cli_fd(cptr), (char *)data, len, &bytes_sent) == IO_SUCCESS) ? 1 : 0;
   }
+}
+
+/** Send a WebSocket Close frame (RFC 6455 §5.5.1) with a status code.
+ * Best effort, no error reporting: this is used immediately before the
+ * connection is dropped so the client can tell a policy close (e.g.
+ * 1009 Message Too Big) apart from a network failure (1006).
+ * @param[in] cptr Client connection.
+ * @param[in] code Status code.
+ * @param[in] reason Optional reason text (truncated to fit a control frame).
+ */
+void websocket_send_close(struct Client *cptr, int code, const char *reason)
+{
+  unsigned char frame[2 + 125];
+  int rlen = reason ? (int)strlen(reason) : 0;
+
+  if (rlen > 123)
+    rlen = 123;  /* control frame payload <= 125 incl. 2-byte code */
+  frame[0] = WS_FIN | WS_OPCODE_CLOSE;
+  frame[1] = (unsigned char)(2 + rlen);
+  frame[2] = (code >> 8) & 0xFF;
+  frame[3] = code & 0xFF;
+  if (rlen > 0)
+    memcpy(frame + 4, reason, rlen);
+  Debug((DEBUG_DEBUG, "WebSocket: sending Close %d (%s)", code, reason ? reason : ""));
+  ws_send_raw(cptr, frame, 4 + rlen);
 }
 
 int websocket_handle_control(struct Client *cptr, int opcode,

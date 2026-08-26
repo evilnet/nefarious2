@@ -50,6 +50,9 @@
 #include "ssl.h"
 #endif
 #endif /* USE_SSL */
+#ifndef INCLUDED_websocket_h
+#include "websocket.h"          /* WS_MAX_FRAME */
+#endif
 
 struct ConfItem;
 struct Listener;
@@ -464,11 +467,13 @@ struct Connection
   unsigned char       con_labeled_batch; /**< 1 if labeled_batch_start opened a batch */
   struct ForwardedLabel con_fwd_labels[MAX_FORWARDED_LABELS]; /**< Forwarded label FIFO */
   /* WebSocket state for RFC 6455 compliance */
-  unsigned char       con_ws_frame_buf[FULL_MSG_SIZE]; /**< Partial WebSocket frame buffer */
+  unsigned char       con_ws_frame_buf[WS_MAX_FRAME]; /**< Partial WebSocket frame buffer (holds one max-size frame) */
   int                 con_ws_frame_len;   /**< Length of data in frame buffer */
   char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
   int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
   int                 con_ws_frag_opcode; /**< Opcode of first fragment */
+  char*               con_ws_hs_buf;      /**< HTTP upgrade request being accumulated (heap, WS_HANDSHAKE_MAX + 1; freed once the handshake is decided) */
+  int                 con_ws_hs_len;      /**< Bytes in con_ws_hs_buf */
   time_t              con_burst_gate_deadline; /**< Deadline at which to force-release a
                                                   burst gate held on a non-BXF-aware (legacy)
                                                   peer.  Only meaningful while IsBurstGated().
@@ -688,6 +693,10 @@ struct Client {
 #define cli_ws_frag_len(cli)	con_ws_frag_len(cli_connect(cli))
 /** Get WebSocket first fragment opcode. */
 #define cli_ws_frag_opcode(cli)	con_ws_frag_opcode(cli_connect(cli))
+/** Get WebSocket handshake accumulation buffer. */
+#define cli_ws_hs_buf(cli)	con_ws_hs_buf(cli_connect(cli))
+/** Get WebSocket handshake accumulation buffer length. */
+#define cli_ws_hs_len(cli)	con_ws_hs_len(cli_connect(cli))
 /** Get per-class recv classifier state. */
 #define cli_recv_state(cli)     con_recv_state(cli_connect(cli))
 /** Get tag-region byte count for the in-flight wire line. */
@@ -999,6 +1008,10 @@ struct Client {
 #define con_ws_frag_len(con)	((con)->con_ws_frag_len)
 /** Get WebSocket first fragment opcode. */
 #define con_ws_frag_opcode(con)	((con)->con_ws_frag_opcode)
+/** Get WebSocket handshake accumulation buffer. */
+#define con_ws_hs_buf(con)	((con)->con_ws_hs_buf)
+/** Get WebSocket handshake accumulation buffer length. */
+#define con_ws_hs_len(con)	((con)->con_ws_hs_len)
 /** Get per-class recv classifier state. */
 #define con_recv_state(con)     ((con)->con_recv_state)
 /** Get tag-region byte count for the in-flight wire line. */
