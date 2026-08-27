@@ -125,25 +125,20 @@ struct AuthRequest {
   char deferred_nick[NICKLEN + 1]; /**< nick deferred due to bouncer ghost collision */
 };
 
-/** Array of message text (with length) pairs for AUTH status
- * messages.  Indexed using #ReportType.
+/** Array of AUTH status message texts (CRLF is added by msgq).
+ * Indexed using #ReportType.
  */
-static struct {
-  const char*  message;
-  unsigned int length;
-} HeaderMessages [] = {
-#define MSG(STR) { STR, sizeof(STR) - 1 }
-  MSG("NOTICE * :*** Looking up your hostname\r\n"),
-  MSG("NOTICE * :*** Found your hostname\r\n"),
-  MSG("NOTICE * :*** Couldn't look up your hostname\r\n"),
-  MSG("NOTICE * :*** Checking Ident\r\n"),
-  MSG("NOTICE * :*** Got ident response\r\n"),
-  MSG("NOTICE * :*** No ident response\r\n"),
-  MSG("NOTICE * :*** \r\n"),
-  MSG("NOTICE * :*** Your forward and reverse DNS do not match, "
-    "ignoring hostname.\r\n"),
-  MSG("NOTICE * :*** Invalid hostname\r\n")
-#undef MSG
+static const char* HeaderMessages [] = {
+  "NOTICE * :*** Looking up your hostname",
+  "NOTICE * :*** Found your hostname",
+  "NOTICE * :*** Couldn't look up your hostname",
+  "NOTICE * :*** Checking Ident",
+  "NOTICE * :*** Got ident response",
+  "NOTICE * :*** No ident response",
+  "NOTICE * :*** ",
+  "NOTICE * :*** Your forward and reverse DNS do not match, "
+    "ignoring hostname.",
+  "NOTICE * :*** Invalid hostname"
 };
 
 /** Enum used to index messages in the HeaderMessages[] array. */
@@ -159,14 +154,20 @@ typedef enum {
   REPORT_INVAL_DNS
 } ReportType;
 
-/** Sends response \a r (from #ReportType) to client \a c. */
-#ifdef USE_SSL
+/** Sends response \a r (from #ReportType) to client \a c.
+ *
+ * Always goes through the client's sendQ (msgq appends the CRLF).
+ * This used to be a raw write() on plain sockets, which bypassed the
+ * IsWSNeedHandshake()/IsWSSniff() hold in deliver_it() and put bare
+ * IRC lines on the wire ahead of the HTTP 101 on plain-text WebSocket
+ * ports.  Queuing it means the hold applies, and once the handshake
+ * completes the notices are delivered as proper WebSocket frames.  For
+ * ordinary plain IRC ports the sendQ is flushed immediately, so the
+ * behaviour there is unchanged.
+ */
 #define sendheader(c, r) \
-   ssl_send(c, HeaderMessages[(r)].message, HeaderMessages[(r)].length)
-#else
-#define sendheader(c, r) \
-   send(cli_fd(c), HeaderMessages[(r)].message, HeaderMessages[(r)].length, 0)
-#endif /* USE_SSL */
+   do { sendrawto_one((c), "%s", HeaderMessages[(r)]); \
+        send_queued(c); } while (0)
 
 /** Enumeration of IAuth connection flags. */
 enum IAuthFlag

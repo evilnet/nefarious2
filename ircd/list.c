@@ -184,6 +184,12 @@ static void dealloc_connection(struct Connection* con)
   DBufClear(&(con_recvQ(con)));
   if (con_listener(con))
     release_listener(con_listener(con));
+  /* Client went away in the middle of a WebSocket upgrade request */
+  if (con_ws_hs_buf(con)) {
+    MyFree(con_ws_hs_buf(con));
+    con_ws_hs_buf(con) = NULL;
+    con_ws_hs_len(con) = 0;
+  }
 
   --connections.inuse;
 

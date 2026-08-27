@@ -32,6 +32,28 @@ struct Client;
 #define WS_OPCODE_PING         0x9
 #define WS_OPCODE_PONG         0xA
 
+/** Largest data-frame payload accepted from a client, in bytes.  Frames
+ * over this are answered with Close 1009 (Message Too Big).  Callers of
+ * websocket_decode_frame() must hand it a buffer larger than this. */
+#define WS_MAX_PAYLOAD 16384
+
+/** Largest complete client frame: 2-byte header + 8-byte extended length
+ * + 4-byte mask + WS_MAX_PAYLOAD.  Sizes the per-connection buffer that
+ * holds a partial frame between reads. */
+#define WS_MAX_FRAME   (WS_MAX_PAYLOAD + 14)
+
+/** websocket_decode_frame() return value for a frame over WS_MAX_PAYLOAD
+ * (a negative value distinct from the generic -1 protocol error). */
+#define WS_DECODE_TOOBIG (-2)
+
+/** Largest HTTP upgrade request we will accumulate before giving up.
+ * Browsers send 500-700 bytes routinely and a few KB with cookies. */
+#define WS_HANDSHAKE_MAX 8192
+
+/** websocket_handshake_feed() return value when the request exceeded
+ * WS_HANDSHAKE_MAX without a terminating blank line. */
+#define WS_HANDSHAKE_TOOBIG (-2)
+
 /** Handle WebSocket handshake for a new connection.
  * @param[in] cptr Client attempting to connect.
  * @param[in] buffer Raw data received.
@@ -39,6 +61,19 @@ struct Client;
  * @return 1 if handshake completed successfully, 0 if more data needed, -1 on error.
  */
 extern int websocket_handshake(struct Client *cptr, const char *buffer, int length);
+
+/** Accumulate an HTTP upgrade request across reads and run the handshake
+ * once the terminating blank line has arrived.
+ * @param[in] cptr Client attempting to connect.
+ * @param[in] data Bytes just read.
+ * @param[in] len Number of bytes in \a data.
+ * @param[out] consumed Number of bytes of \a data that belonged to the
+ *   request; anything after them is already WebSocket frame data.
+ * @return 1 if the handshake completed, 0 if more data is needed, -1 if
+ *   the handshake failed, WS_HANDSHAKE_TOOBIG if the request is too big.
+ */
+extern int websocket_handshake_feed(struct Client *cptr, const char *data,
+                                    int len, int *consumed);
 
 /** Decode a WebSocket frame and extract the payload.
  * @param[in] frame Raw WebSocket frame data.
@@ -48,7 +83,8 @@ extern int websocket_handshake(struct Client *cptr, const char *buffer, int leng
  * @param[out] payload_len Length of decoded payload.
  * @param[out] opcode The frame opcode.
  * @param[out] is_fin Set to 1 if FIN bit is set (final fragment), 0 otherwise.
- * @return Number of bytes consumed from frame, 0 if incomplete, -1 on error.
+ * @return Number of bytes consumed from frame, 0 if incomplete, -1 on
+ *   error, WS_DECODE_TOOBIG if the payload exceeds WS_MAX_PAYLOAD.
  */
 extern int websocket_decode_frame(const unsigned char *frame, int frame_len,
                                   char *payload, int payload_size,
@@ -73,5 +109,13 @@ extern int websocket_encode_frame(const char *data, int data_len,
  */
 extern int websocket_handle_control(struct Client *cptr, int opcode,
                                     const char *payload, int payload_len);
+
+/** Send a WebSocket Close frame with a status code (best effort).
+ * @param[in] cptr Client connection.
+ * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big).
+ * @param[in] reason Optional short reason text (truncated to 123 bytes).
+ */
+extern void websocket_send_close(struct Client *cptr, int code,
+                                 const char *reason);
 
 #endif /* INCLUDED_websocket_h */
