@@ -412,6 +412,15 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
   SetWebSocket(cptr);
   ClearWSNeedHandshake(cptr);
 
+  /* Retain the validated Origin for the oper-visible WEBSOCKET mark.
+   * Set pre-registration (no cli_name yet); register_user re-emits it
+   * to peers as MARK_WEBSOCKET, exactly like the SSLCLIFP mark, so any
+   * oper on any server sees it in WHOIS and can match on the origin.
+   * "-" records a WS client that sent no Origin (native ws libs), so
+   * the mark still flags WS-ness with a distinguishable empty origin. */
+  ircd_strncpy(cli_wsorigin(cptr), origin[0] ? origin : "-",
+               sizeof(cli_wsorigin(cptr)));
+
   /* Store subprotocol preference for frame encoding:
    * - text.ircv3.net: Set FLAG_WSTEXT, use text frames
    * - binary.ircv3.net: Don't set FLAG_WSTEXT, use binary frames

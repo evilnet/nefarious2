@@ -295,6 +295,14 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
         send_reply(sptr, RPL_WHOISSSLFP, name, cli_sslclifp(acptr));
     }
 
+    /* Oper-only: flag WebSocket-connected users and expose the Origin.
+     * Gated on cli_wsorigin (non-empty iff the client is WS, set locally
+     * at handshake or via MARK on remote servers) — NOT IsWebSocket,
+     * which is a local-only behavioral flag not set on remote users.
+     * IsAnOper gate matches the surrounding oper-visible whois lines. */
+    if (IsAnOper(sptr) && !EmptyString(cli_wsorigin(acptr)))
+      send_reply(sptr, RPL_WHOISWEBSOCKET, name, cli_wsorigin(acptr));
+
     if (!EmptyString(user->swhois))
       send_reply(sptr, RPL_WHOISSPECIAL, name, user->swhois);
 

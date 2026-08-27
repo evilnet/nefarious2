@@ -1375,6 +1375,7 @@ static Numeric replyTable[] = {
   { RPL_STARTTLS, ":STARTTLS successful, go ahead with TLS handshake", "670" },
 /* 671 */
   { RPL_WHOISSSL, "%s :is connected via SSL", "671" },
+  { RPL_WHOISWEBSOCKET, "%s :is connected via WebSocket (origin: %s)", "672" },
 /* 672 */
   { 0 },
 /* 673 */

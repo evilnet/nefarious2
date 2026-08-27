@@ -543,6 +543,7 @@ struct Client {
   char cli_sslclifp[BUFSIZE + 1];   /**< SSL client certificate fingerprint if available */
   time_t cli_sslcliexp;             /**< SSL client certificate expiration timestamp */
   char cli_killmark[BUFSIZE + 1];   /**< Kill block mark */
+  char cli_wsorigin[256];           /**< WebSocket Origin header (oper WHOIS mark); empty = not WS */
 
   /* SASL */
   int            cli_saslagentref; /**< Number of clients that reference this client as an SASL agent */
@@ -733,6 +734,7 @@ struct Client {
 #define cli_version(cli)        ((cli)->cli_version)
 /** Get a clients SSL fingerprint string. */
 #define cli_sslclifp(cli)       ((cli)->cli_sslclifp)
+#define cli_wsorigin(cli)       ((cli)->cli_wsorigin)
 /** Get a clients SSL certificate expiration timestamp. */
 #define cli_sslcliexp(cli)      ((cli)->cli_sslcliexp)
 /** Get a clients Kill block exemption mark. */

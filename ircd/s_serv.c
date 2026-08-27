@@ -441,6 +441,10 @@ int server_finish_burst(struct Client *cptr)
                         cli_name(acptr), MARK_SSLCLIEXP, (unsigned long)cli_sslcliexp(acptr));
       }
 
+      if (!EmptyString(cli_wsorigin(acptr)))
+        sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
+                      cli_name(acptr), MARK_WEBSOCKET, cli_wsorigin(acptr));
+
       if (cli_killmark(acptr) && !EmptyString(cli_killmark(acptr)))
         sendcmdto_one(cli_user(acptr)->server, CMD_MARK, cptr, "%s %s :%s",
                       cli_name(acptr), MARK_KILL, cli_killmark(acptr));

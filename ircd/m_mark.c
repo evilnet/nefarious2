@@ -159,6 +159,19 @@ int ms_mark(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       ircd_strncpy(cli_killmark(acptr), parv[3], BUFSIZE + 1);
       sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_KILL, parv[3]);
     }
+  } else if (!strcmp(parv[2], MARK_WEBSOCKET)) {
+    if(parc < 4)
+      return protocol_violation(sptr, "MARK websocket received too few parameters (%u)", parc);
+
+    if ((acptr = FindUser(parv[1]))) {
+      /* Store the origin only — do NOT SetWebSocket on a remote user:
+       * FLAG_WEBSOCKET is a behavioral flag (drives frame encoding in
+       * deliver_it for LOCAL sockets), meaningless and wrong on a remote
+       * client.  A non-empty cli_wsorigin is itself the "is WS" signal
+       * the WHOIS render gates on. */
+      ircd_strncpy(cli_wsorigin(acptr), parv[3], sizeof(cli_wsorigin(acptr)));
+      sendcmdto_serv_butone(sptr, CMD_MARK, cptr, "%s %s :%s", cli_name(acptr), MARK_WEBSOCKET, parv[3]);
+    }
   } else if (!strcmp(parv[2], MARK_MARK) || !strcmp(parv[2], MARK_DNSBL_DATA)) {
     if(parc < 4)
       return protocol_violation(sptr, "MARK MARK (tag) received too few parameters (%u)", parc);

@@ -33,6 +33,7 @@
 #define MARK_DNSBL_DATA         "DNSBL_DATA"            /**< Alias to MARK */
 #define MARK_MARK               "MARK"                  /**< List of single word tags */
 #define MARK_KILL               "KILL"                  /**< KILL block exemption mark */
+#define MARK_WEBSOCKET          "WEBSOCKET"             /**< Connected via WebSocket; value = Origin header */
 
 #endif /* INCLUDED_mark_h */
 
