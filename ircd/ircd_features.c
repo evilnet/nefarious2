@@ -1380,6 +1380,7 @@ static struct FeatureDesc {
   F_S(GITSYNC_CERT_FILE, 0, "", 0),  /* Empty = use SSL_CERTFILE */
   F_S(GITSYNC_HOST_FINGERPRINT, 0, "", 0),  /* SSH host key fingerprint (TOFU) */
 #endif
+  F_I(BOUNCER_MAX_ALIASES, 0, 4, 0),
 
 #undef F_S
 #undef F_B

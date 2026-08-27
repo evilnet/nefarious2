@@ -813,6 +813,18 @@ This is the maximum number of seconds to wait for the ident lookup and
 the DNS query to succeed.  On older (pre 2.10.11.06) servers this was
 hard coded to 60 seconds.
 
+BOUNCER_MAX_ALIASES
+ * Type: integer
+ * Default: 4
+
+Maximum number of simultaneous alias connections (additional clients on
+the same account attaching to one bouncer session) this server will
+ADMIT locally.  Settable at runtime with /SET, clamped to the compiled
+array size (16).  Lowering it never disturbs existing aliases; it only
+gates new attach attempts.  A connection refused here (and unable to
+attach any other way) is rejected with "Account already has an active
+session on this network".
+
 IPCHECK_CLONE_LIMIT
  * Type: integer
  * Default: 4

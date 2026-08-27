@@ -1058,6 +1058,20 @@ static void bounce_resolve_hs_client_from_ghost(struct BouncerSession *session,
   bounce_hs_client_assign_checked(session, candidate, site_label);
 }
 
+/** Effective alias-admission limit: FEAT_BOUNCER_MAX_ALIASES clamped to
+ * the compiled array size.  Applies ONLY to local admission decisions in
+ * bounce_auto_resume — array-write guards that RECORD aliases admitted
+ * elsewhere (setup_local_alias, alias_create, demote) stay on the macro,
+ * because refusing to track a peer-created alias would diverge session
+ * state, and the cap (<= array size) can never overflow them anyway. */
+static int bounce_max_aliases(void)
+{
+  int v = feature_int(FEAT_BOUNCER_MAX_ALIASES);
+  if (v < 0)
+    v = 0;
+  return (v > BOUNCER_MAX_ALIASES) ? BOUNCER_MAX_ALIASES : v;
+}
+
 /** SASL-triggered automatic resume.
  * Called from register_user() after SASL auth sets the account
  * but before the client is introduced to the network.
@@ -1140,7 +1154,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * audit note. */
       bounce_resolve_hs_client_from_ghost(session, "HELD resume");
       if (managing_server && session->hs_client
-          && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+          && session->hs_alias_count < bounce_max_aliases()) {
         *out_session = session;
         log_write(LS_USER, L_INFO, 0,
                   "Bouncer: HELD alias_remote path for %s session %s (primary on %s)",
@@ -1243,7 +1257,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
        * the pre-e9b3b34 attach bug, reached by a different route. */
       bounce_resolve_hs_client_from_ghost(session, "ACTIVE resume");
       if (managing_server && session->hs_client
-          && session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+          && session->hs_alias_count < bounce_max_aliases()) {
         *out_session = session;
         log_write(LS_USER, L_INFO, 0,
                   "Bouncer: ACTIVE alias_remote path for %s session %s (primary on %s)",
@@ -1271,7 +1285,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                 account, session->hs_sessid);
     } else {
       /* ACTIVE session with primary — attach as alias connection */
-      if (session->hs_alias_count < BOUNCER_MAX_ALIASES) {
+      if (session->hs_alias_count < bounce_max_aliases()) {
 #ifdef USE_SSL
         /* Respect BOUNCER_REQUIRE_TLS for aliases too */
         if (feature_bool(FEAT_BOUNCER_REQUIRE_TLS) && !cli_socket(cptr).ssl) {
@@ -3112,10 +3126,67 @@ int bounce_db_restore(void)
     memcpy(&version, vbuf, sizeof(version));
 
     if (version == BOUNCER_DB_VERSION) {
-      /* v9: current schema, parse directly from on-disk bytes. */
+      /* v10: current schema, parse directly from on-disk bytes. */
       if (vlen != sizeof(struct BounceSessionRecord))
         continue;
       rec = (struct BounceSessionRecord *)vbuf;
+    } else if (version == 9) {
+      /* v9: identical to v10 except bsr_aliases[] was sized 4.  Read
+       * with the frozen v9 struct and copy field-by-field; the alias
+       * roster copies up to the old array size, the rest of the
+       * (larger) v10 array stays zero. */
+      const struct BounceSessionRecord_v9 *v9;
+      unsigned int ai;
+      if (vlen != sizeof(struct BounceSessionRecord_v9))
+        continue;
+      v9 = (const struct BounceSessionRecord_v9 *)vbuf;
+      memset(&rec_buf, 0, sizeof(rec_buf));
+      rec_buf.bsr_version = BOUNCER_DB_VERSION;
+      ircd_strncpy(rec_buf.bsr_account, v9->bsr_account, ACCOUNTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_sessid, v9->bsr_sessid, BOUNCER_SESSID_LEN);
+      ircd_strncpy(rec_buf.bsr_token, v9->bsr_token, BOUNCER_TOKEN_LEN + 1);
+      ircd_strncpy(rec_buf.bsr_name, v9->bsr_name, BOUNCER_NAME_LEN);
+      ircd_strncpy(rec_buf.bsr_origin, v9->bsr_origin, NICKLEN + 1);
+      rec_buf.bsr_hold_override = v9->bsr_hold_override;
+      rec_buf.bsr_created = v9->bsr_created;
+      rec_buf.bsr_disconnect_time = v9->bsr_disconnect_time;
+      rec_buf.bsr_last_active = v9->bsr_last_active;
+      rec_buf.bsr_last_msg_time = v9->bsr_last_msg_time;
+      rec_buf.bsr_total_active = v9->bsr_total_active;
+      rec_buf.bsr_attach_count = v9->bsr_attach_count;
+      rec_buf.bsr_connect_count = v9->bsr_connect_count;
+      ircd_strncpy(rec_buf.bsr_nick, v9->bsr_nick, NICKLEN + 1);
+      ircd_strncpy(rec_buf.bsr_username, v9->bsr_username, USERLEN + 1);
+      ircd_strncpy(rec_buf.bsr_realhost, v9->bsr_realhost, HOSTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_host, v9->bsr_host, HOSTLEN + 1);
+      ircd_strncpy(rec_buf.bsr_realname, v9->bsr_realname, REALLEN + 1);
+      ircd_strncpy(rec_buf.bsr_account_name, v9->bsr_account_name,
+                   ACCOUNTLEN + 1);
+      rec_buf.bsr_acc_create = v9->bsr_acc_create;
+      memcpy(&rec_buf.bsr_ip, &v9->bsr_ip, sizeof(rec_buf.bsr_ip));
+      ircd_strncpy(rec_buf.bsr_sock_ip, v9->bsr_sock_ip, SOCKIPLEN + 1);
+      ircd_strncpy(rec_buf.bsr_sockhost, v9->bsr_sockhost, HOSTLEN + 1);
+      rec_buf.bsr_listener_port = v9->bsr_listener_port;
+      rec_buf.bsr_agg_sendB = v9->bsr_agg_sendB;
+      rec_buf.bsr_agg_receiveB = v9->bsr_agg_receiveB;
+      rec_buf.bsr_agg_sendM = v9->bsr_agg_sendM;
+      rec_buf.bsr_agg_receiveM = v9->bsr_agg_receiveM;
+      rec_buf.bsr_histcount = v9->bsr_histcount;
+      memcpy(rec_buf.bsr_history, v9->bsr_history, sizeof(rec_buf.bsr_history));
+      rec_buf.bsr_chancount = v9->bsr_chancount;
+      memcpy(rec_buf.bsr_channels, v9->bsr_channels,
+             sizeof(rec_buf.bsr_channels));
+      rec_buf.bsr_aliascount = v9->bsr_aliascount;
+      if (rec_buf.bsr_aliascount > 4)
+        rec_buf.bsr_aliascount = 4;
+      for (ai = 0; ai < rec_buf.bsr_aliascount; ai++)
+        rec_buf.bsr_aliases[ai] = v9->bsr_aliases[ai];
+      ircd_strncpy(rec_buf.bsr_oper_name, v9->bsr_oper_name, NICKLEN + 1);
+      rec_buf.bsr_oper_granted_at = v9->bsr_oper_granted_at;
+      rec = &rec_buf;
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "bouncer_persist: migrated v9 record (account=%s) → v10",
+                rec->bsr_account);
     } else if (version == 8) {
       /* v8: legacy schema.  Read with the frozen v8 struct, then build
        * a v9 record in-place; v9 only adds oper-grant fields (left
@@ -3171,7 +3242,7 @@ int bounce_db_restore(void)
        * had no session-level oper grant. */
       rec = &rec_buf;
       log_write(LS_SYSTEM, L_INFO, 0,
-                "bouncer_persist: migrated v8 record (account=%s) → v9",
+                "bouncer_persist: migrated v8 record (account=%s) → current",
                 rec->bsr_account);
     } else if (version == 7) {
       /* v7: legacy schema.  Read with the frozen v7 struct, then

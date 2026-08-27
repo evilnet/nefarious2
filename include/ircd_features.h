@@ -502,6 +502,8 @@ enum Feature {
   FEAT_GITSYNC_HOST_FINGERPRINT,
 #endif
 
+  FEAT_BOUNCER_MAX_ALIASES,
+
   FEAT_LAST_F
 };
 

@@ -74,7 +74,7 @@ struct Listener;
 /** Maximum channels tracked per session. */
 #define BOUNCER_MAX_CHANNELS    50
 /** Maximum alias numerics per bouncer session (multi-server presence). */
-#define BOUNCER_MAX_ALIASES     4
+#define BOUNCER_MAX_ALIASES     16
 /** Maximum connection history entries per session (unique hosts). */
 #define BOUNCER_MAX_CONN_HISTORY 10
 /** Maximum legacy-peer-face entries per session (one face per legacy
@@ -102,7 +102,7 @@ struct BounceConnHistory {
 };
 
 /** Current version of the on-disk bouncer session record. */
-#define BOUNCER_DB_VERSION 9
+#define BOUNCER_DB_VERSION 10
 
 /** Persisted alias roster entry (v8+).  Records "this session has an
  * alias on server YY with numeric NNN, last active at T, with caps C."
@@ -180,6 +180,69 @@ struct BounceSessionRecord {
   /* Alias roster (per-alias activity + caps, v8+) */
   uint16_t bsr_aliascount;
   struct BounceSessionAliasRecord bsr_aliases[BOUNCER_MAX_ALIASES];
+  /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
+   * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
+   * keyed on bsr_oper_name (looked up in the local O:line config). */
+  char     bsr_oper_name[NICKLEN + 1];
+  int64_t  bsr_oper_granted_at;
+};
+
+/** Frozen v9 layout for migration reads.  Do not modify — must mirror
+ * the on-disk layout produced by code with BOUNCER_DB_VERSION=9 (when
+ * BOUNCER_MAX_ALIASES was 4).  Used exclusively by the v9→v10 migration
+ * path in bounce_db_restore; v10 only grows the alias array to the
+ * current BOUNCER_MAX_ALIASES. */
+struct BounceSessionRecord_v9 {
+  uint32_t bsr_version;
+  /* Session identity */
+  char     bsr_account[ACCOUNTLEN + 1];
+  char     bsr_sessid[BOUNCER_SESSID_LEN];
+  char     bsr_token[BOUNCER_TOKEN_LEN + 1];
+  char     bsr_name[BOUNCER_NAME_LEN];
+  char     bsr_origin[NICKLEN + 1];        /**< Historical: server numeric that created this.
+                                            *   NOT used for authorization or behavior. */
+  int32_t  bsr_hold_override;
+  /* Timestamps */
+  int64_t  bsr_created;
+  int64_t  bsr_disconnect_time;
+  int64_t  bsr_last_active;                /**< Primary's last-active (per-connection split) */
+  int64_t  bsr_last_msg_time;              /**< Last PRIVMSG time (user idle) */
+  int64_t  bsr_total_active;
+  uint32_t bsr_attach_count;
+  uint32_t bsr_connect_count;
+  /* Ghost client identity */
+  char     bsr_nick[NICKLEN + 1];
+  char     bsr_username[USERLEN + 1];
+  char     bsr_realhost[HOSTLEN + 1];
+  char     bsr_host[HOSTLEN + 1];          /**< Displayed/hidden host */
+  char     bsr_realname[REALLEN + 1];
+  char     bsr_account_name[ACCOUNTLEN + 1];
+  int64_t  bsr_acc_create;
+  /* Last connection metadata (historical, reconciled on revive) */
+  struct irc_in_addr bsr_ip;                /**< Last connection IP (binary) */
+  char     bsr_sock_ip[SOCKIPLEN + 1];      /**< Last connection IP (string) */
+  char     bsr_sockhost[HOSTLEN + 1];       /**< Last resolved hostname */
+  uint16_t bsr_listener_port;               /**< Server listener port */
+  /* Session-level aggregate counters (lifetime totals from dead connections) */
+  uint64_t bsr_agg_sendB;
+  uint64_t bsr_agg_receiveB;
+  uint32_t bsr_agg_sendM;
+  uint32_t bsr_agg_receiveM;
+  /* Connection history (unique hosts, most recent first) */
+  uint16_t bsr_histcount;
+  struct BounceConnHistory bsr_history[BOUNCER_MAX_CONN_HISTORY];
+  /* Channel memberships */
+  uint16_t bsr_chancount;
+  struct {
+    char     name[CHANNELLEN + 1];
+    uint32_t modes;
+    int64_t  join_tv_sec;       /**< Original JOIN time (seconds) */
+    int32_t  join_tv_usec;      /**< Original JOIN time (microseconds) */
+    char     join_msgid[16];    /**< Original JOIN msgid */
+  } bsr_channels[BOUNCER_MAX_CHANNELS];
+  /* Alias roster (per-alias activity + caps, v8+) */
+  uint16_t bsr_aliascount;
+  struct BounceSessionAliasRecord bsr_aliases[4]; /* frozen: v9 array size */
   /* Session-anchored oper grant (v9+).  Empty bsr_oper_name = not opered.
    * On revival, the new primary inherits IsOper via bounce_apply_oper_grant
    * keyed on bsr_oper_name (looked up in the local O:line config). */
