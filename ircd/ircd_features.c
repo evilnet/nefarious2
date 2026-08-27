@@ -1236,7 +1236,7 @@ static struct FeatureDesc {
   /* Advertised whenever the build supports it; the RENAME_CONSENT feature
    * gates the relocation BEHAVIOR, not the cap -- negotiating this cap
    * alone is harmless. */
-  F_B(CAP_evilnet_channel_relocate, 0, 1, feature_notify_cap_evilnet_channel_relocate),
+  F_B(CAP_evilnet_channel_relocate, 0, 0, feature_notify_cap_evilnet_channel_relocate),
   F_B(CAP_draft_metadata_2, 0, 0, feature_notify_cap_draft_metadata_2),
   F_B(CAP_draft_webpush, 0, 0, 0),  /* webpush has special handling via VAPID key */
   F_S(WEBPUSH_DB, 0, "webpush", 0),
