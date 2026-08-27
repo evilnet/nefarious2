@@ -800,7 +800,7 @@ static struct FeatureDesc {
   /* Advertised whenever the build supports it; the RENAME_CONSENT feature
    * gates the relocation BEHAVIOR, not the cap -- negotiating this cap
    * alone is harmless. */
-  F_B(CAP_evilnet_channel_relocate, 0, 1, 0),
+  F_B(CAP_evilnet_channel_relocate, 0, 0, 0),
   /* Off by default: only a services build that disambiguates RENAME
    * requests from account-stamp notifications on the AC 'R' subcommand
    * (see the protocol-history comment in m_rename.c) should have this
