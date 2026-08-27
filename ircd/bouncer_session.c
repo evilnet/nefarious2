@@ -8990,7 +8990,7 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
                                                   : cli_user(from)->realhost;
       if (b->client_tags[0]) {
         sendrawto_one(alias,
-                      "@%s:%s!%s@%s BATCH +%s draft/multiline %s",
+                      "@%s :%s!%s@%s BATCH +%s draft/multiline %s",
                       b->client_tags,
                       cli_name(from), cli_user(from)->username, from_host,
                       alias_batchid, b->target_nick);

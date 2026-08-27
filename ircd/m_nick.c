@@ -754,7 +754,12 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
          * values, just whether 'r' is set anywhere in the flag list. */
       }
     }
-    if (!incoming_has_account) {
+    /* Policy (2026-08-27): the account is same-person evidence, not a
+     * license to kill a DIFFERENT older claimant.  Gate on !differ so the
+     * protection only covers same-user@host (our own ghost/stale claim);
+     * a different-person collision falls through to classic rules --
+     * older wins, period, authenticated or not. */
+    if (!incoming_has_account && !differ) {
       sendto_opmask_butone(0, SNO_OLDSNO,
                            "Account-asymmetry override: refusing to kill "
                            "account-bearing %C for unauth incoming %s on "
@@ -768,6 +773,10 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * sendcmdto_one targets cptr (the introducing link) directly,
        * matching the pattern used at m_nick.c:813 for the standard
        * server-introduced-new-client kill case. */
+      log_write(LS_SERVKILL, L_INFO, 0,
+                "collision KILL (asymmetry): killed incoming unauth %s "
+                "(ts %Tu) toward %C; kept local authed %C (ts %Tu, differ=0)",
+                parv[parc - 2], lastnick, cptr, acptr, cli_lastnick(acptr));
       sendcmdto_one(&me, CMD_KILL, cptr,
                     "%s :%s (Unauthenticated nick collides with "
                     "authenticated user)",
@@ -835,6 +844,11 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        */
       assert(!MyConnect(sptr));
       /* Inform the rest of the net... */
+      log_write(LS_SERVKILL, L_INFO, 0,
+                "collision KILL: killed remote %s (nick change to %s, ts %Tu) "
+                "from %C; kept %C (ts %Tu, %s)",
+                cli_name(sptr), nick, lastnick, cptr, acptr,
+                cli_lastnick(acptr), type);
       sendcmdto_serv_butone(&me, CMD_KILL, 0, "%C :%s (%s)",
                             sptr, cli_name(&me), type);
       /* Don't go sending off a QUIT message... */
@@ -850,6 +864,11 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * send the KILL in the direction it came from.  We have no
        * client record that we would have to clean up.
        */
+      log_write(LS_SERVKILL, L_INFO, 0,
+                "collision KILL: killed incoming %s (ts %Tu) toward %C; "
+                "kept %C (ts %Tu, %s)",
+                parv[parc - 2], lastnick, cptr, acptr,
+                cli_lastnick(acptr), type);
       sendcmdto_one(&me, CMD_KILL, cptr, "%s :%s (%s)",
                     parv[parc - 2], cli_name(&me), type);
     }
@@ -859,6 +878,10 @@ int ms_nick(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (lastnick != cli_lastnick(acptr))
       return 0;
   }
+  log_write(LS_SERVKILL, L_INFO, 0,
+            "collision KILL: killed local %C (ts %Tu) for incoming %s "
+            "(ts %Tu) from %C (%s)",
+            acptr, cli_lastnick(acptr), nick, lastnick, cptr, type);
   /* Tell acptr why we are killing it. */
   send_reply(acptr, ERR_NICKCOLLISION, nick);
 

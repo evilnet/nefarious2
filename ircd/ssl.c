@@ -697,7 +697,8 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
 
   ERR_clear_error();
   res = SSL_read(socketh->ssl, buf, length);
-  switch (SSL_get_error(socketh->ssl, res)) {
+  err = SSL_get_error(socketh->ssl, res);
+  switch (err) {
   case SSL_ERROR_NONE:
     *count_out = (unsigned) res;
     return IO_SUCCESS;
@@ -715,8 +716,9 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
     break;
   }
 
-  /* Use the socket's own SSL context for error lookup, not the client's. */
-  err = SSL_get_error(socketh->ssl, res);
+  /* err was captured BEFORE the ZERO_RETURN branch's SSL_shutdown above:
+   * re-calling SSL_get_error here would reflect the shutdown's close_notify
+   * write (e.g. WANT_WRITE) and mislabel a clean peer EOF as an SSL error. */
   cli_sslerror(cptr) = ssl_error_str(err, errno);
   cli_error(cptr) = errno;
 
