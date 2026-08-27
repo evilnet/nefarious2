@@ -424,13 +424,23 @@ int websocket_handshake(struct Client *cptr, const char *buffer, int length)
   /* Store subprotocol preference for frame encoding:
    * - text.ircv3.net: Set FLAG_WSTEXT, use text frames
    * - binary.ircv3.net: Don't set FLAG_WSTEXT, use binary frames
-   * - No subprotocol: Set FLAG_WSAUTODETECT, detect from first incoming frame
+   * - No subprotocol: DEFAULT TO TEXT, but keep FLAG_WSAUTODETECT so the
+   *   first incoming frame can still switch us to binary.  Text is the
+   *   right default: browser IRC clients are overwhelmingly text, the
+   *   IRCv3 WebSocket draft treats text (UTF-8) as the normal mode, and
+   *   the pre-registration auth NOTICEs flush at the 101 -- before any
+   *   client frame exists to autodetect from -- so a binary default sent
+   *   those greeting frames as binary to text clients (they arrived as
+   *   opcode-2 while later CAP replies were opcode-1).  A client that then
+   *   sends a binary first frame is switched to binary below; only its two
+   *   greeting notices were text (harmless -- binary-mode clients parse
+   *   bytes and ignore the opcode).
    */
   if (subproto == WS_SUBPROTO_TEXT) {
     SetWSText(cptr);
   } else if (subproto == WS_SUBPROTO_NONE) {
-    /* Legacy client - autodetect mode from first incoming frame */
-    SetWSAutodetect(cptr);
+    SetWSText(cptr);        /* default text ... */
+    SetWSAutodetect(cptr);  /* ... but let a binary first frame override */
   }
   /* For WS_SUBPROTO_BINARY, we leave both flags unset (binary mode) */
 

@@ -123,6 +123,22 @@ static int build_request(char *req, int total_len)
   return total_len;
 }
 
+/* Build a minimal upgrade request with NO Sec-WebSocket-Protocol header,
+ * to exercise the no-subprotocol default (text). */
+static int build_request_nosub(char *req)
+{
+  static const char r[] =
+    "GET / HTTP/1.1\r\n"
+    "Host: localhost\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    "Sec-WebSocket-Version: 13\r\n"
+    "\r\n";
+  memcpy(req, r, sizeof(r) - 1);
+  return (int)(sizeof(r) - 1);
+}
+
 /* Feed 'req' to websocket_handshake_feed() in chunks of 'chunk' bytes,
  * asserting it wants more until the last chunk.  Returns the final result
  * and the consumed count of the last call. */
@@ -285,6 +301,26 @@ static void test_handshake_single_read(void **state)
   assert_true(IsWebSocket(&cli));
 }
 
+/* No Sec-WebSocket-Protocol: default is TEXT (with autodetect armed so a
+ * binary first frame can still override).  Guards the pre-registration
+ * NOTICE flush going out as text frames for browser-style clients. */
+static void test_handshake_no_subproto_defaults_text(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  static char req[1024];
+  int len, result, consumed;
+  (void)state;
+
+  setup_client(&cli, &con);
+  len = build_request_nosub(req);
+  result = websocket_handshake_feed(&cli, req, len, &consumed);
+  assert_int_equal(result, 1);
+  assert_true(IsWebSocket(&cli));
+  assert_true(IsWSText(&cli));        /* default text */
+  assert_true(IsWSAutodetect(&cli));  /* but still overridable by first frame */
+}
+
 /* Terminator split across reads: "\r\n\r" then "\n". */
 static void test_handshake_terminator_split(void **state)
 {
@@ -372,6 +408,7 @@ int main(void)
     cmocka_unit_test(test_handshake_600_bytes_split_reads),
     cmocka_unit_test(test_handshake_2000_bytes_split_reads),
     cmocka_unit_test(test_handshake_single_read),
+    cmocka_unit_test(test_handshake_no_subproto_defaults_text),
     cmocka_unit_test(test_handshake_terminator_split),
     cmocka_unit_test(test_handshake_trailing_frame_not_consumed),
     cmocka_unit_test(test_handshake_too_large),

@@ -1242,11 +1242,13 @@ ssl_read_again:
         }
         /* Handle data frames (TEXT or BINARY) */
         else if (opcode == WS_OPCODE_TEXT || opcode == WS_OPCODE_BINARY) {
-          /* Autodetect mode for legacy clients based on first incoming frame */
+          /* Autodetect mode from the first incoming frame.  Text is the
+           * default (set at handshake), so only a BINARY first frame
+           * changes anything -- switch this client to binary. */
           if (IsWSAutodetect(cptr)) {
-            if (opcode == WS_OPCODE_TEXT)
-              SetWSText(cptr);
-            /* Binary mode is default (no flag set) */
+            if (opcode == WS_OPCODE_BINARY)
+              ClearWSText(cptr);
+            /* TEXT: leave the default text flag set */
             ClearWSAutodetect(cptr);
             Debug((DEBUG_DEBUG, "WebSocket: Autodetected mode from opcode %d, text=%d",
                    opcode, IsWSText(cptr)));
