@@ -563,6 +563,17 @@ void ssl_add_connection(struct Listener *listener, int fd)
     return;
   }
   SSL_set_fd(ssl, fd);
+
+  /* Dedicated WebSocket listeners serve browsers, and Chromium cancels a
+   * JS-initiated WebSocket handshake outright when the server requests a
+   * client certificate (there is no certificate picker for WebSockets;
+   * Firefox just continues without one).  So don't ask on these ports —
+   * same workaround the paste listener uses.  `websocket = auto` ports
+   * keep the request: it is sent before any bytes reveal whether the
+   * peer is a browser, and shared IRC ports still need certfp. */
+  if (listener_websocket(listener))
+    SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
+
   ssl_set_nonblocking(ssl);
 
   add_connection(listener, fd, ssl);
