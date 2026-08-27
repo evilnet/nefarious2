@@ -171,6 +171,7 @@ enum Flag
     FLAG_IPV6,                      /**< server understands P10 IPv6 addrs */
     FLAG_SERVICE,                   /**< server is a service */
     FLAG_OPLEVELS,                  /**< server has oplevels support */
+    FLAG_RENAME_CAPABLE,            /**< server applies and relays RENAME */
     FLAG_GOTID,                     /**< successful ident lookup achieved */
     FLAG_DOID,                      /**< I-lines say must use ident return */
     FLAG_NONL,                      /**< No \n in buffer */
@@ -727,6 +728,7 @@ struct Client {
 #define SendServNotice(x)       HasFlag(x, FLAG_SERVNOTICE)
 /** Return non-zero if the client has set mode +w (wallops). */
 #define SendWallops(x)          HasFlag(x, FLAG_WALLOP)
+/** Return non-zero if the client has set mode +F (auto-follow relocations). */
 /** Return non-zero if the client claims to be a hub. */
 #define IsHub(x)                HasFlag(x, FLAG_HUB)
 /** Return non-zero if the client understands IPv6 addresses in P10. */
@@ -735,6 +737,8 @@ struct Client {
 #define IsService(x)            HasFlag(x, FLAG_SERVICE)
 /** Return non-zero if the client has oplevels support. */
 #define IsOpLevels(x)           HasFlag(x, FLAG_OPLEVELS)
+/** Return non-zero if the client applies and relays RENAME. */
+#define IsRenameCapable(x)      HasFlag(x, FLAG_RENAME_CAPABLE)
 /** Return non-zero if the client has an account stamp. */
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
@@ -845,6 +849,7 @@ struct Client {
 #define SetUPing(x)             SetFlag(x, FLAG_UPING)
 /** Mark a client as having mode +w (wallops). */
 #define SetWallops(x)           SetFlag(x, FLAG_WALLOP)
+/** Mark a client as having mode +F (auto-follow relocations). */
 /** Mark a client as having mode +s (server notices). */
 #define SetServNotice(x)        SetFlag(x, FLAG_SERVNOTICE)
 /** Mark a client as being a hub server. */
@@ -855,6 +860,8 @@ struct Client {
 #define SetService(x)           SetFlag(x, FLAG_SERVICE)
 /** Mark a client as having oplevels support. */
 #define SetOpLevels(x)          SetFlag(x, FLAG_OPLEVELS)
+/** Mark a client as applying and relaying RENAME. */
+#define SetRenameCapable(x)     SetFlag(x, FLAG_RENAME_CAPABLE)
 /** Mark a client as having an account stamp. */
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */
@@ -960,6 +967,7 @@ struct Client {
 #define ClearUPing(x)           ClrFlag(x, FLAG_UPING)
 /** Remove mode +w (wallops) from the client. */
 #define ClearWallops(x)         ClrFlag(x, FLAG_WALLOP)
+/** Remove mode +F (auto-follow relocations) from the client. */
 /** Remove mode +s (server notices) from the client. */
 #define ClearServNotice(x)      ClrFlag(x, FLAG_SERVNOTICE)
 /** Remove mode +x (hidden host) from the client. */

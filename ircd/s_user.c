@@ -2532,6 +2532,10 @@ void init_isupport(void)
   add_isupport_s("NETWORK", feature_str(FEAT_NETWORK));
   add_isupport_s("MAXLIST", imaxlist);
   add_isupport_s("ELIST", "CT");
+
+  /* evilnet/channel-relocate: relocation mode + tombstone grace period */
+  if (feature_bool(FEAT_RENAME_CONSENT))
+    add_isupport_i("RELOCATE", feature_int(FEAT_RELOCATE_GRACE));
 }
 
 /** Send RPL_ISUPPORT lines to \a cptr.
