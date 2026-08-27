@@ -72,6 +72,13 @@ struct sni_cert {
 /** Linked list of SNI certificates (from SSL config block) */
 static struct sni_cert *sni_cert_list = NULL;
 
+/** SSL ex_data slot tracking the browser / client-cert decision for a
+ * connection (see ssl_client_hello_cb).  Values stored in the slot: */
+#define SSL_WS_EXDATA_NONE     ((void *)0) /**< not a websocket-capable port */
+#define SSL_WS_EXDATA_CAPABLE  ((void *)1) /**< websocket port, undecided */
+#define SSL_WS_EXDATA_BROWSER  ((void *)2) /**< ALPN seen: skip cert request */
+static int ssl_ws_ex_idx = -1;
+
 SSL_CTX *ssl_init_server_ctx(void);
 SSL_CTX *ssl_init_client_ctx(void);
 SSL_CTX *ssl_create_ctx_for_cert(const char *certfile, const char *keyfile);
@@ -83,6 +90,9 @@ void binary_to_hex(unsigned char *bin, char *hex, int length);
 static int sni_callback(SSL *ssl, int *al, void *arg);
 static void sni_init_certs(void);
 static void sni_free_certs(void);
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+static int ssl_client_hello_cb(SSL *ssl, int *al, void *arg);
+#endif
 
 int ssl_init(void)
 {
@@ -91,6 +101,8 @@ int ssl_init(void)
   ERR_load_crypto_strings();
 
   Debug((DEBUG_NOTICE, "SSL: read %d bytes of randomness", RAND_load_file("/dev/urandom", 4096)));
+
+  ssl_ws_ex_idx = SSL_get_ex_new_index(0, "websocket listener", NULL, NULL, NULL);
 
   ssl_server_ctx = ssl_init_server_ctx();
   if (!ssl_server_ctx)
@@ -217,6 +229,12 @@ SSL_CTX *ssl_init_server_ctx(void)
   /* Register SNI callback for multi-certificate support */
   SSL_CTX_set_tlsext_servername_callback(server_ctx, sni_callback);
 
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+  /* Spot browsers on websocket-capable listeners before the
+   * CertificateRequest is written (see ssl_client_hello_cb). */
+  SSL_CTX_set_client_hello_cb(server_ctx, ssl_client_hello_cb, NULL);
+#endif
+
   return server_ctx;
 }
 
@@ -292,6 +310,44 @@ int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
  * @param arg User data (unused)
  * @return SSL_TLSEXT_ERR_OK if context switched, SSL_TLSEXT_ERR_NOACK otherwise
  */
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+/** ClientHello callback: runs after the ClientHello is parsed but before
+ * the server constructs its CertificateRequest — the last moment the
+ * client-cert decision can still be made per connection.
+ *
+ * Chromium (Chrome, Edge) cancels JS-initiated WebSocket handshakes
+ * outright when the TLS server requests a client certificate: there is
+ * no certificate picker for WebSockets ("WebSocket opening handshake
+ * was canceled").  Browsers always advertise ALPN (http/1.1) in their
+ * ClientHello, while native IRC clients essentially never send ALPN —
+ * so on websocket-capable listeners an ALPN-bearing ClientHello marks a
+ * browser and turns the certificate request off for just that
+ * connection.  Handshakes without ALPN keep SSL_VERIFY_PEER, so certfp
+ * on a `websocket = auto` port still works for IRC clients sharing it. */
+static int ssl_client_hello_cb(SSL *ssl, int *al, void *arg)
+{
+  const unsigned char *ext;
+  size_t extlen;
+
+  (void)al;   /* Unused */
+  (void)arg;  /* Unused */
+
+  if (ssl_ws_ex_idx < 0
+      || SSL_get_ex_data(ssl, ssl_ws_ex_idx) == SSL_WS_EXDATA_NONE)
+    return SSL_CLIENT_HELLO_SUCCESS;
+
+  if (SSL_client_hello_get0_ext(ssl, TLSEXT_TYPE_application_layer_protocol_negotiation,
+                                &ext, &extlen) && extlen > 0) {
+    Debug((DEBUG_DEBUG, "SSL: ALPN in ClientHello on websocket listener, "
+           "skipping client certificate request"));
+    SSL_set_ex_data(ssl, ssl_ws_ex_idx, SSL_WS_EXDATA_BROWSER);
+    SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
+  }
+
+  return SSL_CLIENT_HELLO_SUCCESS;
+}
+#endif /* OPENSSL_VERSION_NUMBER >= 0x10101000L */
+
 static int sni_callback(SSL *ssl, int *al, void *arg)
 {
   const char *hostname;
@@ -312,6 +368,12 @@ static int sni_callback(SSL *ssl, int *al, void *arg)
       if (!strcasecmp(cert->hostname, hostname)) {
         Debug((DEBUG_DEBUG, "SNI: switching to certificate for '%s'", hostname));
         SSL_set_SSL_CTX(ssl, cert->ctx);
+        /* SSL_set_SSL_CTX can adopt the new context's verify mode;
+         * re-apply the per-connection browser decision made in
+         * ssl_client_hello_cb (which runs before this callback). */
+        if (ssl_ws_ex_idx >= 0
+            && SSL_get_ex_data(ssl, ssl_ws_ex_idx) == SSL_WS_EXDATA_BROWSER)
+          SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
         return SSL_TLSEXT_ERR_OK;
       }
     }
@@ -568,11 +630,19 @@ void ssl_add_connection(struct Listener *listener, int fd)
    * JS-initiated WebSocket handshake outright when the server requests a
    * client certificate (there is no certificate picker for WebSockets;
    * Firefox just continues without one).  So don't ask on these ports —
-   * same workaround the paste listener uses.  `websocket = auto` ports
-   * keep the request: it is sent before any bytes reveal whether the
-   * peer is a browser, and shared IRC ports still need certfp. */
+   * same workaround the paste listener uses. */
   if (listener_websocket(listener))
     SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
+
+  /* On `websocket = auto` ports the peer may be a browser or an IRC
+   * client wanting certfp, and nothing distinguishes them until the
+   * ClientHello arrives.  Mark the connection so ssl_client_hello_cb can
+   * decide per handshake (ALPN present == browser).  Dedicated websocket
+   * ports are marked too so the same path covers a browser whose cert
+   * request was already disabled above. */
+  if (ssl_ws_ex_idx >= 0
+      && (listener_websocket(listener) || listener_websocket_auto(listener)))
+    SSL_set_ex_data(ssl, ssl_ws_ex_idx, SSL_WS_EXDATA_CAPABLE);
 
   ssl_set_nonblocking(ssl);
 
