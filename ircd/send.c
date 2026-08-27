@@ -1046,7 +1046,12 @@ void send_queued(struct Client *to)
     if ((len = deliver_it(to, &(cli_sendQ(to))))) {
       msgq_delete(&(cli_sendQ(to)), len);
       cli_lastsq(to) = MsgQLength(&(cli_sendQ(to))) / 1024;
-      if (IsBlocked(to)) {
+      /* Only stay listed for the blocked retry while data remains: a
+       * write that drains the queue exactly as the socket blocks must
+       * fall through to the drop below, or the connection is left on
+       * send_queues with an empty sendQ (the state free_client's linger
+       * path can then orphan permanently — send.c:1019 assert class). */
+      if (IsBlocked(to) && 0 < MsgQLength(&(cli_sendQ(to)))) {
 	update_write(to);
         return;
       }
@@ -1064,6 +1069,25 @@ void send_queued(struct Client *to)
 
   /* Ok, sendq is now empty... */
   client_drop_sendq(cli_connect(to));
+  update_write(to);
+}
+
+/** Reconcile a connection's send_queues membership with its sendQ
+ * contents after the queue was moved or cleared OUTSIDE the normal send
+ * path (the bouncer socket transplant).  Lists the connection and arms
+ * a write event when data is present; delists it otherwise.  Needed
+ * because send_queues is static to this file.
+ * @param[in] to Client whose connection should be reconciled.
+ */
+void client_reconcile_sendq(struct Client *to)
+{
+  assert(0 != to);
+  assert(0 != cli_connect(to));
+
+  if (0 < MsgQLength(&(cli_sendQ(to))))
+    client_add_sendq(cli_connect(to), &send_queues);
+  else
+    client_drop_sendq(cli_connect(to));
   update_write(to);
 }
 

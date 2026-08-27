@@ -459,6 +459,18 @@ void free_client(struct Client* cptr)
        * revival cycles). */
       con_client(cli_connect(cptr)) = 0;
 
+      /* If the connection is still on send_queues, remove it NOW.  The
+       * send_queued blocked-return can leave a fully-drained connection
+       * listed; normally the next write event re-enters send_queued and
+       * drops it, but on this path the client is gone and — when the fd
+       * is already closed — no socket_del is queued below, so ET_DESTROY
+       * never fires and dealloc_connection's drop never runs.  The freed
+       * connection then dangles on send_queues until flush_connections
+       * walks into it: assert(0 < MsgQLength) at send.c:1019.  Confirmed
+       * from a production core carrying 35 such orphans accumulated over
+       * 57 days of uptime, aborting on the first clean shutdown. */
+      client_drop_sendq(cli_connect(cptr));
+
       if (-1 < cli_fd(cptr) && cli_freeflag(cptr) & FREEFLAG_SOCKET)
 	socket_del(&(cli_socket(cptr))); /* queue a socket delete */
       if (cli_freeflag(cptr) & FREEFLAG_TIMER)

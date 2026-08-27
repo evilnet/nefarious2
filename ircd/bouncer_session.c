@@ -5398,10 +5398,20 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   bounce_history_connect(session, con_sock_ip(ghost_con),
                          cli_sockhost(ghost));
 
-  /* Step 7: Transfer sendQ/recvQ from temp to ghost */
+  /* Step 7: Transfer sendQ/recvQ from temp to ghost.
+   * send_queues membership must follow the queues (send.c:1019 assert
+   * class): temp may be listed with the replies queued to it this same
+   * tick — after the move its queue is empty, so drop it (its
+   * Connection is about to be discarded, and nothing later would).
+   * The ghost may be listed from a pre-hold life (active-path revive)
+   * or may now hold temp's undelivered bytes — reconcile it against
+   * the transplanted queue and arm a write event so those bytes
+   * actually flush on the new socket. */
   MsgQClear(&con_sendQ(ghost_con));
   con_sendQ(ghost_con) = con_sendQ(temp_con);
   msgq_init(&con_sendQ(temp_con));
+  client_drop_sendq(temp_con);
+  client_reconcile_sendq(ghost);
 
   DBufClear(&con_recvQ(ghost_con));
   con_recvQ(ghost_con) = con_recvQ(temp_con);

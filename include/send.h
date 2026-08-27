@@ -52,6 +52,7 @@ extern void send_buffer(struct Client* to, struct MsgBuf* buf, int prio);
 extern void kill_highest_sendq(int servers_too);
 extern void flush_connections(struct Client* cptr);
 extern void send_queued(struct Client *to);
+extern void client_reconcile_sendq(struct Client *to);
 
 /* Send a raw message to one client; USE ONLY IF YOU MUST SEND SOMETHING
  * WITHOUT A PREFIX!
