@@ -371,6 +371,87 @@ static void test_parse_key_roundtrip(void **state)
     }
 }
 
+/* ========== #103 sentinel-escape helpers (copied verbatim from
+ * ircd/history.c -- pure logic, no deps, gated here) ========== */
+#define HIST_ESC 0x04
+static int history_field_needs_escape(unsigned char c)
+{
+  return c == HIST_ESC || c == 0x05 || c == 0x06;
+}
+static char *history_escape_field(char *dst, size_t dstsize, const char *src)
+{
+  size_t o = 0;
+  const unsigned char *p;
+  if (dstsize == 0)
+    return dst;
+  for (p = (const unsigned char *)(src ? src : ""); *p; ++p) {
+    if (history_field_needs_escape(*p)) {
+      if (o + 2 >= dstsize) break;
+      dst[o++] = HIST_ESC;
+      dst[o++] = (char)(*p ^ 0x40);
+    } else {
+      if (o + 1 >= dstsize) break;
+      dst[o++] = (char)*p;
+    }
+  }
+  dst[o] = '\0';
+  return dst;
+}
+static void history_unescape_field(char *str)
+{
+  char *r = str, *w = str;
+  while (*r) {
+    if (*r == HIST_ESC && r[1]) { *w++ = (char)((unsigned char)r[1] ^ 0x40); r += 2; }
+    else { *w++ = *r++; }
+  }
+  *w = '\0';
+}
+
+static void test_sentinel_escape_roundtrip(void **state)
+{
+  char esc[128], buf[128];
+  (void)state;
+  /* Plain text is untouched. */
+  history_escape_field(esc, sizeof(esc), "hello world");
+  assert_string_equal(esc, "hello world");
+  history_unescape_field(esc);
+  assert_string_equal(esc, "hello world");
+  /* Formatting/CTCP bytes (0x02, 0x03, 0x01) are NOT escaped -- only
+   * the record sentinels are -- so mIRC codes survive verbatim. */
+  history_escape_field(esc, sizeof(esc), "\002bold\003 \001ACTION\001");
+  assert_string_equal(esc, "\002bold\003 \001ACTION\001");
+}
+
+static void test_sentinel_escape_neutralizes_injection(void **state)
+{
+  char esc[128];
+  (void)state;
+  /* The reproduced attack: body starting with a forged \x06 tag span. */
+  history_escape_field(esc, sizeof(esc), "\x06+evil/injected=owned\x06text");
+  /* No raw sentinel remains, so the deserializer's leading-\x06 check
+   * can never lift it into client_tags. */
+  assert_null(strchr(esc, '\x06'));
+  assert_null(strchr(esc, '\x05'));
+  assert_true(esc[0] == HIST_ESC);
+  /* Round-trip restores the exact body as literal content. */
+  history_unescape_field(esc);
+  assert_string_equal(esc, "\x06+evil/injected=owned\x06text");
+}
+
+static void test_sentinel_escape_of_escape_byte(void **state)
+{
+  char esc[64];
+  (void)state;
+  /* A literal 0x04 in the body must itself be escaped, else unescape
+   * would misread the following byte.  "a\x04b" -> "a" ESC (0x04^0x40='D')
+   * "b" = "a\x04Db"; the escaped form differs from the input, and the
+   * round-trip restores it exactly. */
+  history_escape_field(esc, sizeof(esc), "a\004b");
+  assert_string_equal(esc, "a\004Db");
+  history_unescape_field(esc);
+  assert_string_equal(esc, "a\004b");
+}
+
 /* ========== serialize_message Tests ========== */
 
 static void test_serialize_privmsg(void **state)
@@ -666,6 +747,9 @@ int main(void)
         cmocka_unit_test(test_deserialize_invalid_type),
         cmocka_unit_test(test_deserialize_missing_field),
         cmocka_unit_test(test_serialize_deserialize_roundtrip),
+        cmocka_unit_test(test_sentinel_escape_roundtrip),
+        cmocka_unit_test(test_sentinel_escape_neutralizes_injection),
+        cmocka_unit_test(test_sentinel_escape_of_escape_byte),
         cmocka_unit_test(test_deserialize_all_message_types),
 
         /* parse_reference tests */

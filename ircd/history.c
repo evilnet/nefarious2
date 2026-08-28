@@ -149,6 +149,71 @@ static int build_key(char *key, int keysize, const char *target,
  * @param[in] content Message content (may be NULL).
  * @return Length of serialized data.
  */
+/* In-band record sentinels (\x05 original_target, \x06 client_tags) are
+ * structural in the serialized value.  A client can put those bytes in
+ * its own message body, and the deserializer would lift the span into
+ * client_tags/original_target -- tag/target injection into chathistory
+ * replay (evilnet/nefarious2#103, reproduced on a stock build).  Nothing
+ * upstream guarantees the bytes are absent (check_utf8_text is a no-op
+ * unless FEAT_UTF8ONLY).  So escape them in every VALUE field on write
+ * and reverse on read; the structural brackets serialize_message adds
+ * stay raw.  Escape introducer \x04 (EOT); escaped byte = \x04,(b^0x40)
+ * -- 0x04->0x44 'D', 0x05->0x45 'E', 0x06->0x46 'F', none of which are
+ * themselves sentinels.  Legacy records (no \x04 escapes) unescape to
+ * themselves, so the format stays backward compatible; already-poisoned
+ * legacy records can't be retroactively cleaned, but no NEW injection
+ * lands.  NB: only \x05/\x06 are handled here -- the multiline markers
+ * \x1E/\x1F are structural in a different (downstream) consumer and
+ * need their own analysis; see the residue note in the #103 fix commit. */
+#define HIST_ESC 0x04
+static int history_field_needs_escape(unsigned char c)
+{
+  return c == HIST_ESC || c == 0x05 || c == 0x06;
+}
+
+/** Escape VALUE-field bytes that would otherwise read as structural
+ * sentinels.  Writes at most \a dstsize-1 bytes + NUL; returns dst.
+ * A field that would overflow the escaped buffer is truncated at a
+ * whole escape-sequence boundary (never a dangling \x04). */
+static char *history_escape_field(char *dst, size_t dstsize, const char *src)
+{
+  size_t o = 0;
+  const unsigned char *p;
+
+  if (dstsize == 0)
+    return dst;
+  for (p = (const unsigned char *)(src ? src : ""); *p; ++p) {
+    if (history_field_needs_escape(*p)) {
+      if (o + 2 >= dstsize)
+        break;
+      dst[o++] = HIST_ESC;
+      dst[o++] = (char)(*p ^ 0x40);
+    } else {
+      if (o + 1 >= dstsize)
+        break;
+      dst[o++] = (char)*p;
+    }
+  }
+  dst[o] = '\0';
+  return dst;
+}
+
+/** Reverse history_escape_field in place. */
+static void history_unescape_field(char *s)
+{
+  char *r = s, *w = s;
+
+  while (*r) {
+    if (*r == HIST_ESC && r[1]) {
+      *w++ = (char)((unsigned char)r[1] ^ 0x40);
+      r += 2;
+    } else {
+      *w++ = *r++;
+    }
+  }
+  *w = '\0';
+}
+
 static int serialize_message(char *buf, int bufsize,
                              enum HistoryMessageType type,
                              const char *sender, const char *account,
@@ -170,30 +235,38 @@ static int serialize_message(char *buf, int bufsize,
    * recipient.  Channel messages omit it.
    */
   const char *ot_open = "";
-  const char *ot_value = "";
   const char *ot_close = "";
   const char *ct_open = "";
-  const char *ct_value = "";
   const char *ct_close = "";
+  /* Escaped copies (worst case 2x + NUL): sentinel bytes inside the
+   * value fields are neutralized so they can't forge structure. */
+  char ot_esc[(CHANNELLEN + 1) * 2 + 1];
+  char ct_esc[512 * 2 + 1];
+  char content_esc[HISTORY_CONTENT_LEN * 2 + 1];
 
+  history_escape_field(content_esc, sizeof(content_esc), content ? content : "");
   if (original_target && original_target[0]) {
     ot_open = "\x05";
-    ot_value = original_target;
     ot_close = "\x05";
+    history_escape_field(ot_esc, sizeof(ot_esc), original_target);
+  } else {
+    ot_esc[0] = '\0';
   }
   if (client_tags && client_tags[0]) {
     ct_open = "\x06";
-    ct_value = client_tags;
     ct_close = "\x06";
+    history_escape_field(ct_esc, sizeof(ct_esc), client_tags);
+  } else {
+    ct_esc[0] = '\0';
   }
 
   return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s%s%s%s%s%s%s",
                        (int)type,
                        sender ? sender : "",
                        account ? account : "",
-                       ot_open, ot_value, ot_close,
-                       ct_open, ct_value, ct_close,
-                       content ? content : "");
+                       ot_open, ot_esc, ot_close,
+                       ct_open, ct_esc, ct_close,
+                       content_esc);
 }
 
 /** Deserialize a message from a buffer.
@@ -292,6 +365,7 @@ static int deserialize_message(const char *data, int datalen,
           ot_len = sizeof(msg->original_target) - 1;
         memcpy(msg->original_target, p + 1, ot_len);
         msg->original_target[ot_len] = '\0';
+        history_unescape_field(msg->original_target);
         p = ot_end + 1;
         content_len = end - p;
       }
@@ -306,6 +380,7 @@ static int deserialize_message(const char *data, int datalen,
           tags_len = sizeof(msg->client_tags) - 1;
         memcpy(msg->client_tags, p + 1, tags_len);
         msg->client_tags[tags_len] = '\0';
+        history_unescape_field(msg->client_tags);
         p = tag_end + 1;
         content_len = end - p;
       }
@@ -315,6 +390,7 @@ static int deserialize_message(const char *data, int datalen,
       content_len = sizeof(msg->content) - 1;
     memcpy(msg->content, p, content_len);
     msg->content[content_len] = '\0';
+    history_unescape_field(msg->content);
   }
 
   ret = 0;
@@ -817,7 +893,8 @@ int history_store_message(const char *msgid, const char *timestamp,
 
   size_t content_len = content ? strlen(content) : 0;
   size_t tags_len = client_tags ? strlen(client_tags) : 0;
-  size_t bufsize = content_len + tags_len + HISTORY_SENDER_LEN + ACCOUNTLEN + 32;
+  /* 2x the escapable fields (content, tags): worst-case every byte escapes. */
+  size_t bufsize = 2 * content_len + 2 * tags_len + HISTORY_SENDER_LEN + ACCOUNTLEN + 32;
   if (bufsize < HISTORY_VALUE_BUFSIZE)
     bufsize = HISTORY_VALUE_BUFSIZE;
 
@@ -2183,10 +2260,25 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
     return 0;
 
   for (m = messages; m; m = m->next) {
-    if (m->client_tags[0] && strstr(m->client_tags, needle)) {
-      found = 1;
-      break;
+    const char *hit;
+    /* Anchor the match to a tag-list boundary (start of string, or
+     * immediately after a ';' separator): the server prepends its sid
+     * tag at position 0, so an unanchored strstr would also accept the
+     * needle as a substring of a longer client-supplied tag value.
+     * (Residue: a client can still legitimately *name* a client-only
+     * tag "+afternet.org/sid=..."; reserving that vendor namespace at
+     * store time is a separate fix -- see the #103 commit note.) */
+    if (!m->client_tags[0])
+      continue;
+    for (hit = strstr(m->client_tags, needle); hit;
+         hit = strstr(hit + 1, needle)) {
+      if (hit == m->client_tags || hit[-1] == ';') {
+        found = 1;
+        break;
+      }
     }
+    if (found)
+      break;
   }
 
   history_free_messages(messages);
