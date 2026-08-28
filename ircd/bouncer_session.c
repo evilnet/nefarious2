@@ -7553,6 +7553,18 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
 
   motd_signon(sptr);
 
+  /* Post-registration fakelag credit: modern clients burst init
+   * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
+   * the default ~10s cli_since headroom covers only ~5 of them.
+   * Start the client in surplus -- every command is still CHARGED
+   * (credit, not exemption), the one-shot grace just raises the
+   * initial burst budget; recvq byte caps still bound the wire. */
+  {
+    int grace = feature_int(FEAT_POSTREG_GRACE);
+    if (grace > 0)
+      cli_since(sptr) = CurrentTime - grace;
+  }
+
   /* IRCv3 draft/metadata-2: mirror normal-path self-burst.  Aliases
    * inherit the primary's account-scoped metadata at attach time, so
    * the new local socket should learn its keys without an explicit

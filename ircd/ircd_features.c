@@ -1219,6 +1219,7 @@ static struct FeatureDesc {
    * 0 disables that limiter; attempts are counted, not successes; opers
    * bypass.  Defaults are meant for an exposed network -- the testnet bed
    * pins LIMIT/GLOBAL to 0 in its confs. */
+  F_I(POSTREG_GRACE, 0, 20, 0),
   F_I(REGISTER_THROTTLE_LIMIT, 0, 3, 0),
   F_I(REGISTER_THROTTLE_PERIOD, 0, 3600, 0),
   F_I(REGISTER_THROTTLE_GLOBAL, 0, 60, 0),

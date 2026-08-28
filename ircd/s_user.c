@@ -558,6 +558,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
           persistence_send_status(ghost);
 
         motd_signon(ghost);
+        /* Post-registration fakelag credit: modern clients burst init
+         * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
+         * the default ~10s cli_since headroom covers only ~5 of them.
+         * Start the client in surplus -- every command is still CHARGED
+         * (credit, not exemption), the one-shot grace just raises the
+         * initial burst budget; recvq byte caps still bound the wire. */
+        {
+          int grace = feature_int(FEAT_POSTREG_GRACE);
+          if (grace > 0)
+            cli_since(ghost) = CurrentTime - grace;
+        }
 
         /* IRCv3 draft/metadata-2: mirror the normal-path self-metadata
          * BATCH so a reviving client sees its persisted keys at attach
@@ -733,6 +744,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
       persistence_send_status(sptr);
 
     motd_signon(sptr);
+    /* Post-registration fakelag credit: modern clients burst init
+     * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
+     * the default ~10s cli_since headroom covers only ~5 of them.
+     * Start the client in surplus -- every command is still CHARGED
+     * (credit, not exemption), the one-shot grace just raises the
+     * initial burst budget; recvq byte caps still bound the wire. */
+    {
+      int grace = feature_int(FEAT_POSTREG_GRACE);
+      if (grace > 0)
+        cli_since(sptr) = CurrentTime - grace;
+    }
 
     /* IRCv3 draft/metadata-2: burst client's own metadata after registration.
      * Spec requires METADATA commands in a metadata batch with target param.
