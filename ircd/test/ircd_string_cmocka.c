@@ -11,6 +11,7 @@
 #include <string.h>
 #include <cmocka.h>
 
+#include "ircd_defs.h"
 #include "ircd_string.h"
 #include "ircd_chattr.h"
 
@@ -558,6 +559,109 @@ static void test_utf8_clamp_null_safe(void **state)
   assert_int_equal(0, ircd_utf8_clamp(NULL, 5));
 }
 
+/* --- string_is_valid_utf8 / string_sanitize_utf8 --- */
+
+/* A line as an IRC client actually sends it: CTCP delimiters and the mIRC
+ * formatting codes are bare C0 control bytes, and every one of them is a
+ * well-formed single-byte UTF-8 sequence. */
+#define CTCP_ACTION_LINE "\001ACTION waves\001"
+#define FORMATTED_LINE   "\002bold\002 \037under\037 \003" "04red\003 \035it\035 \017"
+
+static void test_utf8_valid_plain_ascii(void **state)
+{
+  (void)state;
+  assert_int_equal(1, string_is_valid_utf8(""));
+  assert_int_equal(1, string_is_valid_utf8("hello world"));
+  assert_int_equal(1, string_is_valid_utf8("tab\there\r\n"));
+}
+
+static void test_utf8_valid_control_characters(void **state)
+{
+  (void)state;
+  /* CTCP delimiter and the mIRC formatting codes. */
+  assert_int_equal(1, string_is_valid_utf8(CTCP_ACTION_LINE));
+  assert_int_equal(1, string_is_valid_utf8(FORMATTED_LINE));
+  /* Every byte 0x01-0x7F on its own. */
+  {
+    char one[2] = {0, 0};
+    int c;
+    for (c = 0x01; c <= 0x7F; c++) {
+      one[0] = (char)c;
+      assert_int_equal(1, string_is_valid_utf8(one));
+    }
+  }
+}
+
+static void test_utf8_valid_multibyte(void **state)
+{
+  (void)state;
+  assert_int_equal(1, string_is_valid_utf8("caf\303\251"));          /* U+00E9 */
+  assert_int_equal(1, string_is_valid_utf8("\342\202\254"));         /* U+20AC */
+  assert_int_equal(1, string_is_valid_utf8("\360\237\222\251"));     /* U+1F4A9 */
+  assert_int_equal(1, string_is_valid_utf8("\355\237\277"));         /* U+D7FF */
+}
+
+static void test_utf8_invalid_sequences(void **state)
+{
+  (void)state;
+  assert_int_equal(0, string_is_valid_utf8("\200"));                 /* lone continuation */
+  assert_int_equal(0, string_is_valid_utf8("\300\200"));             /* overlong NUL */
+  assert_int_equal(0, string_is_valid_utf8("\301\277"));             /* overlong */
+  assert_int_equal(0, string_is_valid_utf8("\340\200\200"));         /* overlong 3-byte */
+  assert_int_equal(0, string_is_valid_utf8("\355\240\200"));         /* U+D800 surrogate */
+  assert_int_equal(0, string_is_valid_utf8("\342\202"));             /* truncated 3-byte */
+  assert_int_equal(0, string_is_valid_utf8("\364\220\200\200"));     /* > U+10FFFF */
+  assert_int_equal(0, string_is_valid_utf8("\365\200\200\200"));     /* 0xF5 lead */
+  assert_int_equal(0, string_is_valid_utf8("\376\377"));             /* never valid */
+  assert_int_equal(0, string_is_valid_utf8("ok then \377 no"));      /* mid-string */
+}
+
+static void test_utf8_sanitize_leaves_control_codes_alone(void **state)
+{
+  char buf[BUFSIZE];
+  (void)state;
+
+  strcpy(buf, FORMATTED_LINE);
+  assert_int_equal(-1, string_sanitize_utf8(buf));   /* -1 == nothing modified */
+  assert_string_equal(buf, FORMATTED_LINE);
+
+  strcpy(buf, CTCP_ACTION_LINE);
+  assert_int_equal(-1, string_sanitize_utf8(buf));
+  assert_string_equal(buf, CTCP_ACTION_LINE);
+}
+
+static void test_utf8_sanitize_replaces_invalid_bytes(void **state)
+{
+  char buf[BUFSIZE];
+  (void)state;
+
+  /* One bad byte becomes the 3-byte U+FFFD, so the string grows by two. */
+  strcpy(buf, "bad\377end");
+  assert_int_equal((int)strlen("bad") + 3 + (int)strlen("end"),
+                   string_sanitize_utf8(buf));
+  assert_string_equal(buf, "bad\357\277\275end");
+
+  /* Valid multibyte text survives untouched alongside a bad byte:
+   * "caf" (3) + U+00E9 (2) + U+FFFD for the 0x80 (3) + "!" (1) = 9. */
+  strcpy(buf, "caf\303\251\200!");
+  assert_int_equal(9, string_sanitize_utf8(buf));
+  assert_string_equal(buf, "caf\303\251\357\277\275!");
+}
+
+static void test_utf8_sanitize_keeps_formatted_line_intact(void **state)
+{
+  /* The WebSocket text-frame path (s_bsd.c) validates and then sanitizes:
+   * a formatted line must come out of both steps byte-for-byte unchanged. */
+  char buf[BUFSIZE];
+  (void)state;
+
+  strcpy(buf, "\002Rubin\002: Pong!");
+  assert_int_equal(1, string_is_valid_utf8(buf));
+  assert_int_equal(-1, string_sanitize_utf8(buf));
+  assert_string_equal(buf, "\002Rubin\002: Pong!");
+}
+
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -630,6 +734,15 @@ int main(void)
         cmocka_unit_test(test_json_escape_passthrough),
         cmocka_unit_test(test_json_escape_specials),
         cmocka_unit_test(test_json_escape_truncates_cleanly),
+
+        /* string_is_valid_utf8 / string_sanitize_utf8 */
+        cmocka_unit_test(test_utf8_valid_plain_ascii),
+        cmocka_unit_test(test_utf8_valid_control_characters),
+        cmocka_unit_test(test_utf8_valid_multibyte),
+        cmocka_unit_test(test_utf8_invalid_sequences),
+        cmocka_unit_test(test_utf8_sanitize_leaves_control_codes_alone),
+        cmocka_unit_test(test_utf8_sanitize_replaces_invalid_bytes),
+        cmocka_unit_test(test_utf8_sanitize_keeps_formatted_line_intact),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
