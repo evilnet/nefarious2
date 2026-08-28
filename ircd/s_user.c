@@ -86,15 +86,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-/** Sends response \a m of length \a l to client \a c. */
-#ifdef USE_SSL
-#define sendheader(c, m, l) \
-   ssl_send(c, m, l)
-#else
-#define sendheader(c, m, l) \
-   send(cli_fd(c), m, l, 0)
-#endif /* USE_SSL */
-
 /** Count of allocated User structures. */
 static int userCount = 0;
 
@@ -685,10 +676,14 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
     if (feature_bool(FEAT_CTCP_VERSIONING)) {
       if (feature_str(FEAT_CTCP_VERSIONING_NOTICE)) {
-        char strver[BUFSIZE] = "";
-        ircd_snprintf(0, strver, strlen(feature_str(FEAT_CTCP_VERSIONING_NOTICE)) + 16,
-                      "NOTICE * :%s\r\n", feature_str(FEAT_CTCP_VERSIONING_NOTICE));
-        sendheader(sptr, strver, strlen(strver));
+        /* Through the normal send path (NOT a raw socket write): the
+         * old sendheader macro bypassed deliver_it's WebSocket framing,
+         * so every WS client received these bytes unframed and died
+         * with "invalid opcode".  Same fix s_auth.c's sendheader got;
+         * this was the last raw-write straggler.  (Upstream master
+         * s_user.c:83/416 has the identical defect.) */
+        sendrawto_one(sptr, "NOTICE * :%s",
+                      feature_str(FEAT_CTCP_VERSIONING_NOTICE));
       }
 
       if (!EmptyString(feature_str(FEAT_CTCP_VERSIONING_NICK)))
