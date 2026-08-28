@@ -46,7 +46,8 @@ int paste_listener_port(void);
  * failure the fd is closed.
  * @param[in] fd Accepted socket file descriptor.
  */
-void paste_accept_connection(int fd);
+struct Listener;
+void paste_accept_connection(struct Listener *listener, int fd);
 
 /**
  * Generate a paste URL from a paste_id.

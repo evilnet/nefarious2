@@ -1008,9 +1008,9 @@ portblock: PORT '{' portitems '}' ';' {
       parse_error("Port block has paste enabled but ssl is not set; paste requires ssl = yes.");
       paste_invalid = 1;
     }
-    if (FlagHas(&listen_flags, LISTEN_WEBSOCKET) ||
-        FlagHas(&listen_flags, LISTEN_WEBSOCKET_AUTO)) {
-      parse_error("Port block cannot combine paste with websocket.");
+    if (FlagHas(&listen_flags, LISTEN_WEBSOCKET_AUTO)) {
+      parse_error("Port block cannot combine paste with websocket = autodetect; "
+                  "use websocket = yes (upgrade detection is HTTP-header based).");
       paste_invalid = 1;
     }
     if (FlagHas(&listen_flags, LISTEN_SERVER)) {

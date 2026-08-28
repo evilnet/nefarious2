@@ -577,7 +577,7 @@ static void accept_connection(struct Event* ev)
       /* nextping = CurrentTime; */
 #ifdef USE_SSL
       if (listener_paste(listener))
-        paste_accept_connection(fd);
+        paste_accept_connection(listener, fd);
       else if (listener_ssl(listener))
         ssl_add_connection(listener, fd);
       else

@@ -10,6 +10,9 @@
 #ifdef USE_SSL
 
 #include "paste_listener.h"
+#include "s_misc.h"
+#include "send.h"
+#include "websocket.h"
 #include "ml_content.h"
 #include "client.h"       /* cli_name, me */
 #include "ircd.h"
@@ -126,6 +129,7 @@ struct paste_conn {
   char *response;
   size_t response_len;
   size_t response_sent;
+  struct Listener *listener;  /**< accepting listener (for WS promote) */
   struct paste_conn *next;
   struct paste_conn *prev;
 };
@@ -671,6 +675,82 @@ static int paste_validate_paste_id(const char *paste_id)
   return has_dash;
 }
 
+/** Case-insensitive scan for an `Upgrade:` header naming `websocket`
+ * in a raw HTTP request (same token RFC 6455 requires).  Header-based,
+ * so it works regardless of request-line shape.
+ */
+static int paste_request_wants_ws_upgrade(const char *req)
+{
+  const char *p;
+
+  for (p = req; (p = strchr(p, '\n')) != NULL; ) {
+    ++p;
+    if (0 == ircd_strncmp(p, "Upgrade:", 8)) {
+      const char *v = p + 8;
+      while (*v == ' ' || *v == '\t')
+        ++v;
+      if (0 == ircd_strncmp(v, "websocket", 9))
+        return 1;
+    }
+  }
+  return 0;
+}
+
+/** Promote a paste connection that sent a WebSocket upgrade into a real
+ * IRC client on the same fd+SSL: steal fd/SSL from the paste_conn (its
+ * free path then skips close/SSL_free but still unregisters the fd from
+ * the engine via socket_del), run the stolen pair through
+ * add_connection() — IPcheck, class attach, and WS-handshake arming
+ * (via the listener's websocket flag) exactly as on a dedicated WS
+ * port — then replay the already-buffered upgrade request through
+ * websocket_handshake_feed so the 101 goes out without waiting for a
+ * fresh read event.  The husk paste_conn is MyFree'd at ET_DESTROY.
+ */
+static void paste_promote_to_client(struct paste_conn *conn)
+{
+  struct Listener *listener = conn->listener;
+  SSL *ssl = conn->ssl;
+  int fd = conn->fd;
+  struct Client *cptr;
+  int result, consumed;
+  /* conn->request stays valid until ET_DESTROY MyFrees the struct,
+   * which cannot happen before this callback frame returns. */
+  const char *req = conn->request;
+  int req_len = conn->request_len;
+
+  /* Steal fd+SSL: paste_conn_free skips SSL_shutdown/SSL_free and
+   * close() for NULL/-1, but still socket_del()s — the engine drops
+   * the fd (eng_closing runs immediately) so add_connection can
+   * re-register it. */
+  conn->ssl = NULL;
+  conn->fd = -1;
+  paste_conn_free(conn);
+
+  add_connection(listener, fd, ssl);
+  cptr = LocalClientArray[fd];
+  if (!cptr)
+    return;  /* throttled/z-lined: add_connection already murdered it */
+
+  /* add_connection armed IsWSNeedHandshake off the listener flag; feed
+   * the buffered request.  Mirrors the s_bsd.c handshake-feed result
+   * handling. */
+  result = websocket_handshake_feed(cptr, req, req_len, &consumed);
+  if (result == WS_HANDSHAKE_TOOBIG) {
+    exit_client(cptr, cptr, &me, "WebSocket handshake too large");
+    return;
+  } else if (result < 0) {
+    exit_client(cptr, cptr, &me, "WebSocket handshake failed");
+    return;
+  }
+  /* result == 0 (need more data — client split the request): the
+   * normal read path continues the accumulation.  result > 0: done —
+   * unblock queued sends. */
+  if (result > 0) {
+    ClrFlag(cptr, FLAG_BLOCKED);
+    send_queued(cptr);
+  }
+}
+
 static void paste_handle_request(struct paste_conn *conn)
 {
   char method[16];
@@ -683,6 +763,16 @@ static void paste_handle_request(struct paste_conn *conn)
   size_t content_len;
   char *buf;
   size_t i;
+
+  /* WebSocket upgrade on a `paste = yes; websocket = yes;` port: an
+   * HTTP request carrying `Upgrade: websocket` is an IRC client, not a
+   * paste fetch.  Promote it BEFORE the GET-path dispatch. */
+  if (feature_bool(FEAT_WEBSOCKET) && conn->listener
+      && listener_websocket(conn->listener)
+      && paste_request_wants_ws_upgrade(conn->request)) {
+    paste_promote_to_client(conn);
+    return;
+  }
 
   /* Parse request */
   if (paste_parse_request(conn, method, sizeof(method),
@@ -941,6 +1031,8 @@ static void paste_drain_read(struct paste_conn *conn)
 
     if (strstr(conn->request, "\r\n\r\n")) {
       paste_handle_request(conn);
+      if (conn->dying)
+        return;  /* promoted to IRC client (or freed) — conn is a husk */
       if (conn->state == PASTE_CONN_WRITING)
         socket_events(&conn->socket, SOCK_EVENT_WRITABLE);
       return;
@@ -1055,7 +1147,7 @@ static void paste_conn_callback(struct Event *ev)
 /* Per-fd connection setup, called from accept_connection() in listener.c
  * for fds accepted on a Listener with the LISTEN_PASTE flag.
  */
-void paste_accept_connection(int fd)
+void paste_accept_connection(struct Listener *listener, int fd)
 {
   struct paste_conn *conn;
 
@@ -1073,6 +1165,7 @@ void paste_accept_connection(int fd)
     close(fd);
     return;
   }
+  conn->listener = listener;
 
   /* Register socket for events */
   if (!socket_add(&conn->socket, paste_conn_callback, conn,
@@ -1131,9 +1224,10 @@ int paste_listener_port(void)
   return 0;
 }
 
-void paste_accept_connection(int fd)
+void paste_accept_connection(struct Listener *listener, int fd)
 {
   /* Paste requires SSL; close any accidentally-dispatched connection. */
+  (void)listener;
   close(fd);
 }
 
