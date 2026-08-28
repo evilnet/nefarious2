@@ -188,18 +188,16 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   /* Check if chathistory storage is enabled */
   if (!feature_bool(FEAT_CHATHISTORY_STORE)) {
     /* If write forwarding is enabled, forward to a storage server.
-     * Encode client tags into the content using \x06 sentinel so they
-     * survive the CH W wire format transparently. */
+     * history_forward_encode sentinel-escapes the payload and brackets
+     * the client tags in \x06 so the storage server can split them back
+     * out (process_write_forward) without raw client bytes ever reading
+     * as structure. */
     if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
-      if (client_tags && client_tags[0]) {
-        char tagged_content[HISTORY_CONTENT_LEN + 512];
-        ircd_snprintf(0, tagged_content, sizeof(tagged_content),
-                      "\x06%s\x06%s", client_tags, text ? text : "");
-        forward_history_write(chptr, sptr, msgid, timestamp, type,
-                              tagged_content);
-      } else {
-        forward_history_write(chptr, sptr, msgid, timestamp, type, text);
-      }
+      char tagged_content[(512 + 512) * 2 + 3];
+      history_forward_encode(tagged_content, sizeof(tagged_content),
+                             client_tags, text);
+      forward_history_write(chptr, sptr, msgid, timestamp, type,
+                            tagged_content);
     }
     return;
   }

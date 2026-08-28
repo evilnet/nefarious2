@@ -406,10 +406,45 @@ static void history_unescape_field(char *str)
   }
   *w = '\0';
 }
+static char *history_forward_encode(char *dst, size_t dstsize,
+                                    const char *client_tags, const char *text)
+{
+  size_t used = 0;
+  if (dstsize == 0)
+    return dst;
+  dst[0] = '\0';
+  if (client_tags && client_tags[0]) {
+    if (dstsize < 3)
+      return dst;
+    dst[used++] = '\x06';
+    history_escape_field(dst + used, dstsize - used - 1, client_tags);
+    used += strlen(dst + used);
+    dst[used++] = '\x06';
+    dst[used] = '\0';
+  }
+  history_escape_field(dst + used, dstsize - used, text ? text : "");
+  return dst;
+}
+static char *history_forward_split(char *content, char **tags_out)
+{
+  char *text = content;
+  *tags_out = NULL;
+  if (content[0] == '\x06') {
+    char *close = strchr(content + 1, '\x06');
+    if (close) {
+      *close = '\0';
+      *tags_out = content + 1;
+      history_unescape_field(*tags_out);
+      text = close + 1;
+    }
+  }
+  history_unescape_field(text);
+  return text;
+}
 
 static void test_sentinel_escape_roundtrip(void **state)
 {
-  char esc[128], buf[128];
+  char esc[128];
   (void)state;
   /* Plain text is untouched. */
   history_escape_field(esc, sizeof(esc), "hello world");
@@ -450,6 +485,59 @@ static void test_sentinel_escape_of_escape_byte(void **state)
   assert_string_equal(esc, "a\004Db");
   history_unescape_field(esc);
   assert_string_equal(esc, "a\004b");
+}
+
+static void test_forward_encode_split_roundtrip(void **state)
+{
+  char wire[512];
+  char *tags = (char *)1;
+  char *text;
+  (void)state;
+  /* Benign tags+text: escape is identity, wire format unchanged from
+   * the pre-escape encoding, split recovers both halves exactly. */
+  history_forward_encode(wire, sizeof(wire), "+draft/react=x;+reply=abc", "hello");
+  assert_string_equal(wire, "\006+draft/react=x;+reply=abc\006hello");
+  text = history_forward_split(wire, &tags);
+  assert_non_null(tags);
+  assert_string_equal(tags, "+draft/react=x;+reply=abc");
+  assert_string_equal(text, "hello");
+  /* Tags-only (TAGMSG) form. */
+  history_forward_encode(wire, sizeof(wire), "+typing=active", "");
+  text = history_forward_split(wire, &tags);
+  assert_non_null(tags);
+  assert_string_equal(tags, "+typing=active");
+  assert_string_equal(text, "");
+  /* No tags: no bracket. */
+  history_forward_encode(wire, sizeof(wire), NULL, "plain");
+  assert_string_equal(wire, "plain");
+  text = history_forward_split(wire, &tags);
+  assert_null(tags);
+  assert_string_equal(text, "plain");
+}
+
+static void test_forward_encode_blocks_injection(void **state)
+{
+  char wire[512];
+  char *tags = (char *)1;
+  char *text;
+  (void)state;
+  /* The federation-side #103 variant: no real tags, client text opens
+   * with a forged \x06 span.  Pre-escape this went raw onto the wire
+   * and the storage server lifted it as tags; now the composer escapes
+   * it, so split finds no bracket and the text survives as literals. */
+  history_forward_encode(wire, sizeof(wire), NULL,
+                         "\006+evil/injected=owned\006hi");
+  assert_true(wire[0] != '\006');
+  text = history_forward_split(wire, &tags);
+  assert_null(tags);
+  assert_string_equal(text, "\006+evil/injected=owned\006hi");
+  /* Sentinel bytes inside genuinely-tagged text round-trip too. */
+  history_forward_encode(wire, sizeof(wire), "+reply=abc",
+                         "body\005with\006bytes\004too");
+  text = history_forward_split(wire, &tags);
+  assert_non_null(tags);
+  assert_string_equal(tags, "+reply=abc");
+  assert_string_equal(text, "body\005with\006bytes\004too");
 }
 
 /* ========== serialize_message Tests ========== */
@@ -750,6 +838,8 @@ int main(void)
         cmocka_unit_test(test_sentinel_escape_roundtrip),
         cmocka_unit_test(test_sentinel_escape_neutralizes_injection),
         cmocka_unit_test(test_sentinel_escape_of_escape_byte),
+        cmocka_unit_test(test_forward_encode_split_roundtrip),
+        cmocka_unit_test(test_forward_encode_blocks_injection),
         cmocka_unit_test(test_deserialize_all_message_types),
 
         /* parse_reference tests */

@@ -341,6 +341,9 @@ extern int history_msgid_to_timestamp(const char *msgid, char *timestamp);
  * @param sessid  Caller's cli_session_id to match against record tags.
  */
 extern int history_pm_target_has_sessid(const char *target, const char *sessid);
+extern char *history_forward_encode(char *dst, size_t dstsize,
+                                    const char *client_tags, const char *text);
+extern char *history_forward_split(char *content, char **tags_out);
 
 /** Redact a message: strip content/tags but keep the entry in the database.
  * Used instead of history_delete_message() to support REDACT-as-context.

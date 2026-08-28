@@ -302,10 +302,15 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                             cli_user(sptr)->account[0] ? cli_user(sptr)->account : "",
                             HISTORY_REDACT, redact_content, NULL);
 
-      /* Write-forward to STORE servers if we're non-STORE */
-      if (chptr)
+      /* Write-forward to STORE servers if we're non-STORE.  The reason
+       * is client-supplied: sentinel-escape it for the CH W payload. */
+      if (chptr) {
+        char fwd_content[sizeof(redact_content) * 2 + 1];
+        history_forward_encode(fwd_content, sizeof(fwd_content), NULL,
+                               redact_content);
         forward_history_write(chptr, sptr, redact_msgid, timestamp,
-                              HISTORY_REDACT, redact_content);
+                              HISTORY_REDACT, fwd_content);
+      }
     }
 
     /* Set msgid for live channel broadcast */

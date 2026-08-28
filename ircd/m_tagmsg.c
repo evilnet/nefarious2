@@ -192,10 +192,11 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
     history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
                           account, HISTORY_TAGMSG, "", client_tags);
   } else if (feature_bool(FEAT_CHATHISTORY_WRITE_FORWARD)) {
-    /* Encode client tags with \x06 sentinel for transparent forwarding */
-    char tagged_content[512 + 4];
-    ircd_snprintf(0, tagged_content, sizeof(tagged_content),
-                  "\x06%s\x06", client_tags);
+    /* Bracket + sentinel-escape the tags for transparent forwarding
+     * (split back out in process_write_forward). */
+    char tagged_content[512 * 2 + 3];
+    history_forward_encode(tagged_content, sizeof(tagged_content),
+                           client_tags, "");
     forward_history_write(chptr, sptr, msgid, timestamp, HISTORY_TAGMSG,
                           tagged_content);
   }

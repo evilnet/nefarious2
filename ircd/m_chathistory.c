@@ -2382,11 +2382,12 @@ static void append_write_chunk_data(struct WriteChunkEntry *chunk, const char *b
 static void process_write_forward(const char *target, const char *msgid,
                                   const char *timestamp, const char *sender,
                                   const char *account, char type_char,
-                                  const char *content)
+                                  char *content)
 {
   struct Channel *chptr;
   enum HistoryMessageType type;
   int has_local_users;
+  char *client_tags = NULL;
 
   /* Only process channels */
   if (!IsChannelName(target))
@@ -2419,6 +2420,11 @@ static void process_write_forward(const char *target, const char *msgid,
       Debug((DEBUG_DEBUG, "CH W: Unknown type '%c' for %s", type_char, target));
       return;
   }
+
+  /* Split + unescape the federation payload (history_forward_encode on
+   * the sender): a raw leading \x06 is the composer's tag bracket,
+   * never client bytes.  Everything below sees clean content. */
+  content = history_forward_split(content, &client_tags);
 
   /* Find channel */
   chptr = FindChannel(target);
@@ -2492,7 +2498,7 @@ static void process_write_forward(const char *target, const char *msgid,
    * stored via this path. */
   if (history_store_message(msgid, timestamp, target, NULL, sender,
                             (account[0] == '*') ? NULL : account,
-                            type, content, NULL) == 0) {
+                            type, content, client_tags) == 0) {
     /* Layer 1: Broadcast CH A + if this is the first message in the channel */
     if (is_new_channel) {
       broadcast_channel_advertisement(target);

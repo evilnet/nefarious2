@@ -214,6 +214,69 @@ static void history_unescape_field(char *s)
   *w = '\0';
 }
 
+/** Compose the CH W federation-forward payload: client tags ride in-band
+ * as [\x06<tags>\x06]<text>, with BOTH halves sentinel-escaped first so
+ * a raw \x06 in the wire payload can only ever be the composer's own
+ * bracket.  (#103 follow-up: the pre-escape encoding relied on
+ * deserialize_message lifting raw sentinels back out of stored content,
+ * which the #103 escape closed -- and it was itself an injection vector:
+ * client text with a leading \x06, forwarded raw in the no-tags branch,
+ * was lifted as tags on the storage server.)  Benign payloads contain no
+ * 0x04-0x06 bytes, so the escape is an identity map for them and the
+ * wire format is unchanged across mixed-version links.
+ * @param[out] dst Output buffer.
+ * @param[in] dstsize Size of dst.
+ * @param[in] client_tags Client-only tag list (NULL/empty = no bracket).
+ * @param[in] text Message text (may be NULL).
+ * @return dst. */
+char *history_forward_encode(char *dst, size_t dstsize,
+                             const char *client_tags, const char *text)
+{
+  size_t used = 0;
+
+  if (dstsize == 0)
+    return dst;
+  dst[0] = '\0';
+  if (client_tags && client_tags[0]) {
+    if (dstsize < 3)
+      return dst;
+    dst[used++] = '\x06';
+    history_escape_field(dst + used, dstsize - used - 1, client_tags);
+    used += strlen(dst + used);
+    dst[used++] = '\x06';
+    dst[used] = '\0';
+  }
+  history_escape_field(dst + used, dstsize - used, text ? text : "");
+  return dst;
+}
+
+/** Reverse history_forward_encode in place on a received CH W payload.
+ * If a leading raw \x06 bracket is present, terminates the tag span,
+ * unescapes it, and points *tags_out at it; unescapes the remaining
+ * text either way.  On a current sender a raw bracket can only be
+ * composer-written (client bytes are escaped); on a pre-escape sender
+ * this matches the old deserializer lift, no worse.
+ * @param[in,out] content Received payload (modified in place).
+ * @param[out] tags_out Set to the tag span within \a content, or NULL.
+ * @return Pointer to the text portion within \a content. */
+char *history_forward_split(char *content, char **tags_out)
+{
+  char *text = content;
+
+  *tags_out = NULL;
+  if (content[0] == '\x06') {
+    char *close = strchr(content + 1, '\x06');
+    if (close) {
+      *close = '\0';
+      *tags_out = content + 1;
+      history_unescape_field(*tags_out);
+      text = close + 1;
+    }
+  }
+  history_unescape_field(text);
+  return text;
+}
+
 static int serialize_message(char *buf, int bufsize,
                              enum HistoryMessageType type,
                              const char *sender, const char *account,
