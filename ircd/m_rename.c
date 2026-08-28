@@ -2047,7 +2047,7 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * a channel (join-time, local policy), so a remote-origin rename is
    * accepted the same way remote joins are. */
   {
-    struct Gline *gline = gline_find(newname, GLINE_BADCHAN | GLINE_EXACT);
+    struct Gline *gline = gline_find((char *)newname, GLINE_BADCHAN | GLINE_EXACT);
     if (gline && GlineIsActive(gline) && !IsAnOper(sptr)) {
       send_fail(sptr, "RENAME", "CANNOT_RENAME", oldname,
                 "Target channel name is banned");
