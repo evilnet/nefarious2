@@ -1204,7 +1204,20 @@ ssl_read_again:
         /* Handle control frames (always complete, can be interleaved) */
         if (opcode >= WS_OPCODE_CLOSE) {
           if (!websocket_handle_control(cptr, opcode, ws_payload, ws_len)) {
-            /* Close frame received */
+            /* Close frame received.  A WS CLOSE is transport teardown --
+             * the WebSocket-layer FIN -- so route it through the bouncer
+             * hold gate exactly like the dead-link path below (~1746)
+             * does for a TCP drop.  Every other disconnect entry point
+             * (dead-link, QUIT, ping timeout) consults the gate; without
+             * this, a clean WS close destroyed a persistent session an
+             * unclean drop would have kept.  Mirrors the dead-link
+             * shape deliberately: no immediate-promote shortcut here
+             * (see that site's comment for the promote/BX X race). */
+            if (IsUser(cptr) && bounce_should_hold(cptr)) {
+              if (bounce_hold_client(cptr, "WebSocket closed") == 0)
+                return CPTR_KILLED; /* held: ghost owns the socket now */
+              /* hold failed -> fall through to normal exit */
+            }
             return exit_client(cptr, cptr, &me, "WebSocket closed");
           }
         }

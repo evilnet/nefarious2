@@ -241,6 +241,39 @@ static void test_decode_incomplete_frame(void **state)
   assert_int_equal(consumed, 0);
 }
 
+/* CLOSE control frame => websocket_handle_control returns 0, the signal
+ * s_bsd.c's read loop keys the bouncer-hold-or-exit branch on.  The
+ * hold wiring itself lives mid-socket-loop (not unit-reachable); it
+ * mirrors the dead-link hold pattern the Vitest bouncer suite already
+ * exercises via TCP drop.  End-to-end WS-close-while-held stays
+ * unverified until something can speak WS to the bed. */
+static void test_control_close_signals_teardown(void **state)
+{
+  struct Client cli;
+  struct Connection con;
+  char status[2] = { 0x03, (char)0xE8 };  /* 1000 normal closure */
+  (void)state;
+
+  setup_client(&cli, &con);
+  /* PING and PONG keep the connection alive... */
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_PING, "hi", 2), 1);
+  assert_true((unsigned char)sent_buf[0] == (WS_FIN | WS_OPCODE_PONG));
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_PONG, NULL, 0), 1);
+
+  /* ...CLOSE signals teardown (return 0) and echoes a close response
+   * with the client's status code. */
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, status, 2), 0);
+  assert_true((unsigned char)sent_buf[0] == (WS_FIN | WS_OPCODE_CLOSE));
+  assert_int_equal(sent_buf[1], 2);
+  assert_true((unsigned char)sent_buf[2] == 0x03 && (unsigned char)sent_buf[3] == 0xE8);
+
+  /* Payload-less CLOSE also signals teardown. */
+  setup_client(&cli, &con);
+  assert_int_equal(websocket_handle_control(&cli, WS_OPCODE_CLOSE, NULL, 0), 0);
+  assert_true((unsigned char)sent_buf[0] == (WS_FIN | WS_OPCODE_CLOSE));
+}
+
 /* ========== websocket_handshake_feed() (#99) ========== */
 
 static void test_handshake_600_bytes_split_reads(void **state)
@@ -413,6 +446,7 @@ int main(void)
     cmocka_unit_test(test_handshake_trailing_frame_not_consumed),
     cmocka_unit_test(test_handshake_too_large),
     cmocka_unit_test(test_handshake_invalid_request),
+    cmocka_unit_test(test_control_close_signals_teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
