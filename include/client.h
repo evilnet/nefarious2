@@ -454,6 +454,9 @@ struct Connection
    * "default" at registration if not specified.  Per-connection
    * (aliases each have their own value). */
   char                con_active_profile[33]; /* PERSISTENCE_PROFILE_NAME_MAX + 1 */
+  char                con_attach_cursor[64];  /* HISTORY_MSGID_LEN: client's last-seen
+                                                 msgid from PERSISTENCE ATTACH (catch-up
+                                                 anchor); empty = none supplied */
   /* Multiline batch state (draft/multiline) */
   char                con_ml_batch_id[65]; /**< Active multiline batch ID (IRCv3 allows up to 64 chars) */
   char                con_ml_target[CHANNELLEN + 1]; /**< Multiline batch target (channel or nick) */
@@ -980,6 +983,8 @@ struct Client {
 /** Get the active draft/persistence profile name (per-connection). */
 #define con_active_profile(con)	((con)->con_active_profile)
 #define cli_active_profile(cli)	con_active_profile(cli_connect(cli))
+#define con_attach_cursor(con)	((con)->con_attach_cursor)
+#define cli_attach_cursor(cli)	con_attach_cursor(cli_connect(cli))
 /** Get the multiline batch ID. */
 #define con_ml_batch_id(con)	((con)->con_ml_batch_id)
 /** Get the multiline batch target. */

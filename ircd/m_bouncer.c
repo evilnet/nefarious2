@@ -172,9 +172,10 @@ static int bouncer_resume(struct Client *sptr, const char *token)
 
   /* Async auto-replay for clients without draft/chathistory, gated
    * by PERSISTENCE REPLAY (account-global or active-profile). */
-  if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+  if ((!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+       || cli_attach_cursor(sptr)[0])
       && persistence_replay_enabled_for(sptr)) {
-    replay_start_bouncer(sptr, since_time, 0);
+    replay_start_catchup(sptr, since_time, 0);
   }
 
   return 0;

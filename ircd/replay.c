@@ -696,12 +696,32 @@ void replay_start_batch(struct Client *sptr, const char *target,
  */
 void replay_start_bouncer(struct Client *sptr, time_t since_time, int limit)
 {
+  char ts[32];
+
+  if (since_time == 0)
+    return;
+  ircd_snprintf(0, ts, sizeof(ts), "%lu.000", (unsigned long)since_time);
+  replay_start_bouncer_at(sptr, ts, limit);
+}
+
+/** Start a bouncer auto-replay from an explicit "sec.msec" timestamp
+ * cursor (millisecond-precise — used by the ATTACH catch-up cursor,
+ * where the anchor comes from the msgid index rather than a time_t).
+ * Same semantics as replay_start_bouncer otherwise.
+ */
+void replay_start_bouncer_at(struct Client *sptr, const char *since_timestamp,
+                             int limit)
+{
   struct ReplayState *rs;
   struct Membership *member;
+  time_t since_time;
   int count = 0;
 
   if (!feature_bool(FEAT_BOUNCER_AUTO_REPLAY))
     return;
+  if (!since_timestamp || !since_timestamp[0])
+    return;
+  since_time = (time_t)strtoul(since_timestamp, NULL, 10);
   if (since_time == 0)
     return;
 
@@ -732,8 +752,8 @@ void replay_start_bouncer(struct Client *sptr, time_t since_time, int limit)
   if (rs->replay_limit <= 0)
     rs->replay_limit = 100;
   rs->since_time = since_time;
-  ircd_snprintf(0, rs->since_timestamp, sizeof(rs->since_timestamp),
-                "%lu.000", (unsigned long)since_time);
+  ircd_strncpy(rs->since_timestamp, since_timestamp,
+               sizeof(rs->since_timestamp));
 
   /* Copy channel names — safe across event loop iterations */
   if (count > 0) {
@@ -749,6 +769,31 @@ void replay_start_bouncer(struct Client *sptr, time_t since_time, int limit)
   cli_replay(sptr) = rs;
   update_write(sptr);
   replay_continue(sptr);
+}
+
+/** Start the post-revive/attach catch-up replay: resolve the client's
+ * PERSISTENCE ATTACH cursor (last-seen msgid) to a millisecond
+ * timestamp via the global msgid index and replay from there;
+ * without a cursor — or when the msgid is unknown/evicted — fall back
+ * to the server-derived since_time.  On an unknown cursor the client
+ * gets FAIL PERSISTENCE CURSOR_UNKNOWN (it converged, but should
+ * consider a full resync) rather than a silent divergence.
+ */
+void replay_start_catchup(struct Client *sptr, time_t since_time, int limit)
+{
+  const char *cursor = cli_attach_cursor(sptr);
+
+  if (cursor[0]) {
+    char ts[HISTORY_TIMESTAMP_LEN];
+
+    if (history_msgid_to_timestamp(cursor, ts) == 0) {
+      replay_start_bouncer_at(sptr, ts, limit);
+      return;
+    }
+    send_fail(sptr, "PERSISTENCE", "CURSOR_UNKNOWN", cursor,
+              "Cursor msgid not found; replaying from last activity");
+  }
+  replay_start_bouncer(sptr, since_time, limit);
 }
 
 /** Cancel and clean up any in-progress replay.

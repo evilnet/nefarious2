@@ -576,9 +576,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* Async auto-replay missed messages for legacy clients,
          * unless the user has disabled it via PERSISTENCE REPLAY SET
          * OFF on their active profile or account-global. */
-        if (!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)
+        if ((!CapOwnHas(ghost, CAP_DRAFT_CHATHISTORY)
+             || cli_attach_cursor(ghost)[0])
             && persistence_replay_enabled_for(ghost)) {
-          replay_start_bouncer(ghost, saved_since_time, 0);
+          replay_start_catchup(ghost, saved_since_time, 0);
         }
 
         /* Return special code — caller must not dereference sptr */
@@ -786,9 +787,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
 
       /* Async auto-replay for legacy clients (no chathistory CAP),
        * unless the user has disabled it via PERSISTENCE REPLAY. */
-      if (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+      if ((!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+           || cli_attach_cursor(sptr)[0])
           && persistence_replay_enabled_for(sptr))
-        replay_start_bouncer(sptr, saved_since_time, 0);
+        replay_start_catchup(sptr, saved_since_time, 0);
     }
   }
   else {

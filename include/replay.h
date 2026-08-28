@@ -115,6 +115,10 @@ extern void replay_start_batch(struct Client *sptr, const char *target,
  * @param[in] since_time Baseline timestamp for replay.
  * @param[in] limit Per-channel/PM message limit.
  */
+extern void replay_start_bouncer_at(struct Client *sptr,
+                                    const char *since_timestamp, int limit);
+extern void replay_start_catchup(struct Client *sptr, time_t since_time,
+                                 int limit);
 extern void replay_start_bouncer(struct Client *sptr, time_t since_time,
                                   int limit);
 

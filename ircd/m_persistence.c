@@ -742,6 +742,19 @@ static int persistence_cmd_attach(struct Client *sptr, int parc, char *parv[])
                   "No such profile", "ATTACH %s", name);
     return 0;
   }
+  /* Optional trailing arg: the client's last-seen msgid (any buffer —
+   * the newest it holds), the catch-up anchor for server-driven replay
+   * at revive/alias-attach.  Stored on the Connection beside the
+   * profile; resolved (msgid -> timestamp) at the replay trigger. */
+  if (parc > 3 && parv[3] && parv[3][0]) {
+    if (strlen(parv[3]) >= sizeof(con_attach_cursor(cli_connect(sptr)))) {
+      send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
+                    "Cursor msgid too long", "ATTACH %s", name);
+      return 0;
+    }
+    ircd_strncpy(cli_attach_cursor(sptr), parv[3],
+                 sizeof(con_attach_cursor(cli_connect(sptr))));
+  }
   ircd_strncpy(cli_active_profile(sptr), name,
                sizeof(con_active_profile(cli_connect(sptr))));
   send_persistence_reply(sptr, "ATTACH", name);

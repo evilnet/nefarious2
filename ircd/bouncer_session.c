@@ -5502,6 +5502,11 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * over the connection. */
   ircd_strncpy(con_active_profile(ghost_con), con_active_profile(temp_con),
                sizeof(con_active_profile(ghost_con)));
+  /* Same for the ATTACH catch-up cursor (client's last-seen msgid): it
+   * was stored on temp_con pre-CAP-END and is consumed at the replay
+   * trigger after the transplant. */
+  ircd_strncpy(con_attach_cursor(ghost_con), con_attach_cursor(temp_con),
+               sizeof(con_attach_cursor(ghost_con)));
 
   /* Step 9: Update timing */
   con_lasttime(ghost_con) = con_lasttime(temp_con);
@@ -7574,16 +7579,20 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * per-user PERSISTENCE REPLAY SET (account-global or active-profile)
    * gates on top of it via persistence_replay_enabled_for. */
   if (feature_bool(FEAT_BOUNCER_AUTO_REPLAY)
-      && !CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+      && (!CapOwnHas(sptr, CAP_DRAFT_CHATHISTORY)
+          || cli_attach_cursor(sptr)[0])
       && persistence_replay_enabled_for(sptr)) {
     time_t since = session->hs_last_active;
     if (since == 0)
       since = session->hs_created;
 
     if (history_is_available()) {
-      /* Local store: async replay from MDBX */
+      /* Local store: async replay from MDBX.  An explicit ATTACH
+       * cursor requests server-driven catch-up even for chathistory-
+       * capable clients (they msgid-dedup); replay_start_catchup
+       * resolves the cursor, else falls back to `since`. */
       if (since > 0 && since < CurrentTime)
-        replay_start_bouncer(sptr, since, 0);
+        replay_start_catchup(sptr, since, 0);
     } else {
       /* No local store: federate to storage servers */
       int limit = feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
