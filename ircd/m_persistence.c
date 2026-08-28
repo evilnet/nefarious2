@@ -158,15 +158,49 @@ int persistence_replay_enabled_for(struct Client *cptr)
   return persistence_effective_replay(cptr);
 }
 
-/** Send `:server PERSISTENCE STATUS ON|OFF` to a client.
- * Public — also called from registration (s_user.c) to emit the
- * unsolicited STATUS once the client has negotiated draft/persistence.
+/** Resolve the user's explicitly-set client-setting for hold (the
+ * value before FEAT_* fallthrough).  Returns "ON" / "OFF" / "DEFAULT"
+ * into `out`.  Mirrors persistence_replay_client_setting.
+ */
+static void persistence_client_setting(struct Client *cptr,
+                                       char *out, size_t out_len)
+{
+  char val[METADATA_VALUE_LEN];
+
+  if (IsAccount(cptr)
+      && persistence_profile_get_effective(cli_account(cptr),
+                                           active_profile_for(cptr),
+                                           "hold",
+                                           val, sizeof(val)) == 0
+      && val[0]) {
+    ircd_strncpy(out, val[0] != '0' ? "ON" : "OFF", out_len);
+    return;
+  }
+  if (IsAccount(cptr)
+      && metadata_account_get(cli_account(cptr), "draft/persistence/hold", val) == 0
+      && val[0]) {
+    ircd_strncpy(out, val[0] != '0' ? "ON" : "OFF", out_len);
+    return;
+  }
+  ircd_strncpy(out, "DEFAULT", out_len);
+}
+
+/** Send `:server PERSISTENCE STATUS <client-setting> <effective>` to a
+ * client (client-setting ON|OFF|DEFAULT, effective ON|OFF) per PR #503
+ * and the vendored draft-persistence spec.  Public — also called from
+ * registration (s_user.c) to emit the unsolicited STATUS once the
+ * client has negotiated draft/persistence.
  */
 void persistence_send_status(struct Client *to)
 {
+  char client_setting[16];
+
   if (!to || !MyConnect(to))
     return;
-  send_persistence_reply(to, "STATUS", persistence_state_keyword(to));
+  persistence_client_setting(to, client_setting, sizeof(client_setting));
+  sendrawto_one(to, ":%s PERSISTENCE STATUS %s %s",
+                cli_name(&me), client_setting,
+                persistence_state_keyword(to));
 }
 
 /** Handle STATUS / GET subcommand.  Both report the effective state. */
