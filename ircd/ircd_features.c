@@ -1245,6 +1245,7 @@ static struct FeatureDesc {
   F_S(WEBPUSH_VAPID_PRIVKEY, 0, "", feature_notify_webpush_vapid_privkey),
   F_B(WEBPUSH_NOTIFY, 0, 1, 0),
   F_I(WEBPUSH_COOLDOWN, 0, 60, 0),
+  F_B(WEBPUSH_HIGHLIGHTS, 0, 1, 0),
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
   F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* Limited by 512-byte IRC message size */
   F_I(METADATA_MAX_SUBS, 0, 50, 0),

@@ -186,6 +186,18 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
                        const char *text, int is_notice,
                        const char *msgid, const char *timestamp);
 
+struct Channel;
+
+/*
+ * Channel-highlight push trigger (v2, design: webpush-trigger-payload.md).
+ * Called from the channel PRIVMSG store path; pushes to held members
+ * whose nick the message mentions (word-boundary, casemapped), same
+ * gate stack as the PM trigger plus FEAT_WEBPUSH_HIGHLIGHTS.
+ */
+void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
+                            const char *text, const char *msgid,
+                            const char *timestamp);
+
 void webpush_notify_account(const char *account, const char *message,
                             size_t message_len);
 

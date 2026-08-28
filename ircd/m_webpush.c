@@ -55,9 +55,14 @@
 #include "webpush.h"
 #include "webpush_store.h"
 #include "bouncer_session.h"
+#include "channel.h"
 #include "metadata.h"
 
 #include <jansson.h>
+
+static void webpush_subs_cache_invalidate(const char *account);
+static int webpush_store_count_cached(const char *account);
+static int webpush_pm_cooldown_ok(const char *account, const char *origin);
 
 #include <string.h>
 #include <stdlib.h>
@@ -231,6 +236,7 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
   snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth);
 
   /* Store locally in LMDB */
+  webpush_subs_cache_invalidate(cli_user(sptr)->account);
   if (webpush_store_add(cli_user(sptr)->account, stored) != 0) {
     send_webpush_fail(sptr, "INTERNAL_ERROR", "REGISTER",
                       "Failed to store push subscription");
@@ -281,6 +287,7 @@ static int webpush_cmd_unregister(struct Client *sptr, int parc, char *parv[])
 
   /* Remove locally from LMDB */
   if (webpush_store_available()) {
+    webpush_subs_cache_invalidate(cli_user(sptr)->account);
     webpush_store_remove(cli_user(sptr)->account, endpoint);
   }
 
@@ -364,6 +371,7 @@ static void notify_send_cb(int result, long http_code, void *data)
               ctx->account, ctx->endpoint, http_code);
 
     if (webpush_store_available()) {
+      webpush_subs_cache_invalidate(ctx->account);
       webpush_store_remove(ctx->account, ctx->endpoint);
     }
 
@@ -441,6 +449,56 @@ void webpush_notify_account(const char *account, const char *message,
  * PM push trigger (v1 -- design: webpush-trigger-payload.md)
  * ---------------------------------------------------------------------------*/
 
+/** Per-account subscription-count cache (TTL'd) so the channel-highlight
+ * walk never hits the store per message.  Invalidated beside every store
+ * mutation (local WEBPUSH R/U, S2S sync, 410-reap), so R/U changes take
+ * effect immediately; the TTL only bounds staleness across restarts of
+ * the pattern. */
+#define WP_SUBS_CACHE_SLOTS 64
+#define WP_SUBS_CACHE_TTL   30
+
+static struct {
+  char account[ACCOUNTLEN + 1];
+  int count;
+  time_t at;
+} wp_subs_cache[WP_SUBS_CACHE_SLOTS];
+
+static unsigned int wp_subs_slot(const char *account)
+{
+  unsigned int h = 2166136261u;
+  const char *p;
+  for (p = account; *p; ++p) {
+    h ^= (unsigned char)*p;
+    h *= 16777619u;
+  }
+  return h & (WP_SUBS_CACHE_SLOTS - 1);
+}
+
+static void webpush_subs_cache_invalidate(const char *account)
+{
+  unsigned int i;
+  if (!account || !account[0])
+    return;
+  i = wp_subs_slot(account);
+  if (0 == ircd_strcmp(wp_subs_cache[i].account, account))
+    wp_subs_cache[i].at = 0;
+}
+
+static int webpush_store_count_cached(const char *account)
+{
+  unsigned int i = wp_subs_slot(account);
+  int c;
+
+  if (0 == ircd_strcmp(wp_subs_cache[i].account, account)
+      && wp_subs_cache[i].at + WP_SUBS_CACHE_TTL > CurrentTime)
+    return wp_subs_cache[i].count;
+  c = webpush_store_count(account);
+  ircd_strncpy(wp_subs_cache[i].account, account, sizeof(wp_subs_cache[i].account));
+  wp_subs_cache[i].count = c;
+  wp_subs_cache[i].at = CurrentTime;
+  return c;
+}
+
 #define WEBPUSH_CD_SLOTS 256
 
 /** Per-(account, origin) push cooldown -- open-addressed, overwrite on
@@ -477,16 +535,17 @@ static int webpush_pm_cooldown_ok(const char *account, const char *origin)
   return 1;
 }
 
+static void webpush_emit_push(const char *account, const char *kind,
+                              const char *from, const char *target,
+                              const char *msgid, const char *timestamp,
+                              const char *text);
+
 void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
                        const char *text, int is_notice,
                        const char *msgid, const char *timestamp)
 {
   struct BouncerSession *sess;
   const char *account;
-  char tier[METADATA_VALUE_LEN];
-  json_t *obj;
-  char *out;
-  size_t outlen;
 
   if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
     return;
@@ -503,26 +562,41 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
   if (!webpush_pm_cooldown_ok(account, cli_name(sptr)))
     return;
 
+  webpush_emit_push(account, is_notice ? "notice" : "msg",
+                    cli_name(sptr), cli_name(acptr), msgid, timestamp, text);
+}
+
+/** Build the tiered JSON payload and hand it to webpush_notify_account.
+ * Tier from the account's draft/webpush/payload metadata key:
+ * ping (bare), route (DEFAULT: from/target/msgid/time, no content),
+ * full (route + text, UTF-8-clamped -- never reject-and-drop; invalid
+ * UTF-8 text degrades the push to route because json_string() rejects
+ * it and the field is simply omitted). */
+static void webpush_emit_push(const char *account, const char *kind,
+                              const char *from, const char *target,
+                              const char *msgid, const char *timestamp,
+                              const char *text)
+{
+  char tier[METADATA_VALUE_LEN];
+  json_t *obj;
+  char *out;
+  size_t outlen;
+
   tier[0] = '\0';
   (void)metadata_account_get(account, "draft/webpush/payload", tier);
 
   obj = json_object();
   if (!obj)
     return;
-  json_object_set_new(obj, "t", json_string(is_notice ? "notice" : "msg"));
+  json_object_set_new(obj, "t", json_string(kind));
   if (0 != ircd_strcmp(tier, "ping")) {
-    /* route tier (default): enough to deep-link + dedup, no content. */
-    json_object_set_new(obj, "from", json_string(cli_name(sptr)));
-    json_object_set_new(obj, "target", json_string(cli_name(acptr)));
+    json_object_set_new(obj, "from", json_string(from));
+    json_object_set_new(obj, "target", json_string(target));
     if (msgid && msgid[0])
       json_object_set_new(obj, "msgid", json_string(msgid));
     if (timestamp && timestamp[0])
       json_object_set_new(obj, "time", json_string(timestamp));
     if (0 == ircd_strcmp(tier, "full") && text && text[0]) {
-      /* Clamp (never reject-and-drop) with headroom for the JSON
-       * envelope under WEBPUSH_MAX_PAYLOAD.  json_string() rejects
-       * invalid UTF-8 -- non-UTF-8 message text then simply omits the
-       * text field and the push degrades to route tier. */
       char body[WEBPUSH_MAX_PAYLOAD];
       ircd_strncpy(body, text, sizeof(body));
       if (ircd_utf8_clamp(body, 3072))
@@ -538,6 +612,61 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
   if (outlen > 0 && outlen <= WEBPUSH_MAX_PAYLOAD)
     webpush_notify_account(account, out, outlen);
   free(out);
+}
+
+/** Channel-highlight push trigger (v2 -- design:
+ * webpush-trigger-payload.md).  Called from the channel PRIVMSG store
+ * choke point; scans members for held sessions whose nick the message
+ * mentions.  Cost when no held members: one bit test per member. */
+void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
+                            const char *text, const char *msgid,
+                            const char *timestamp)
+{
+  struct Membership *member;
+  const char *scan = text;
+  const char *sender_acct;
+
+  if (!feature_bool(FEAT_WEBPUSH_NOTIFY)
+      || !feature_bool(FEAT_WEBPUSH_HIGHLIGHTS))
+    return;
+  if (!sptr || !chptr || !text || !cli_user(sptr))
+    return;
+  if (text[0] == '\001') {
+    /* ACTION text participates; any other CTCP never highlights. */
+    if (0 != ircd_strncmp(text, "\001ACTION ", 8))
+      return;
+    scan = text + 8;
+  }
+  sender_acct = cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL;
+
+  for (member = chptr->members; member; member = member->next_member) {
+    struct Client *u = member->user;
+    struct BouncerSession *sess;
+    const char *account;
+
+    if (IsZombie(member))
+      continue;
+    if (!IsBouncerHold(u) || !MyConnect(u))
+      continue;
+    if (!cli_user(u) || !cli_user(u)->account[0])
+      continue;
+    account = cli_user(u)->account;
+    if (sender_acct && 0 == ircd_strcmp(sender_acct, account))
+      continue;  /* no self-highlights via own aliases */
+    sess = bounce_get_session(u);
+    if (!sess || sess->hs_state != BOUNCE_HOLDING)
+      continue;
+    if (webpush_store_count_cached(account) <= 0)
+      continue;
+    if (is_silenced(sptr, u, 1))
+      continue;
+    if (!ircd_text_mentions(scan, cli_name(u)))
+      continue;
+    if (!webpush_pm_cooldown_ok(account, chptr->chname))
+      continue;
+    webpush_emit_push(account, "hl", cli_name(sptr), chptr->chname,
+                      msgid, timestamp, scan);
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -823,6 +952,7 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth_secret);
 
     if (webpush_store_available()) {
+      webpush_subs_cache_invalidate(account);
       webpush_store_add(account, stored);
     }
 
@@ -839,6 +969,7 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     const char *endpoint = parv[3];
 
     if (webpush_store_available()) {
+      webpush_subs_cache_invalidate(account);
       webpush_store_remove(account, endpoint);
     }
 
@@ -860,6 +991,7 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth_secret);
 
     if (webpush_store_available()) {
+      webpush_subs_cache_invalidate(account);
       webpush_store_add(account, stored);
     }
 

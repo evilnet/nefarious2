@@ -450,6 +450,40 @@ static void test_csv_contains_token_match_and_case(void **state)
 }
 
 
+/* --- ircd_text_mentions --- */
+
+static void test_mentions_basic_and_case(void **state)
+{
+  (void)state;
+  assert_int_equal(1, ircd_text_mentions("hey rubin look", "rubin"));
+  assert_int_equal(1, ircd_text_mentions("hey RUBIN look", "rubin"));
+  assert_int_equal(1, ircd_text_mentions("rubin: ping", "Rubin"));
+}
+
+static void test_mentions_boundaries(void **state)
+{
+  (void)state;
+  assert_int_equal(1, ircd_text_mentions("rubin", "rubin"));      /* whole text */
+  assert_int_equal(1, ircd_text_mentions("(rubin)", "rubin"));    /* punct sides */
+  assert_int_equal(1, ircd_text_mentions("cc rubin", "rubin"));   /* end of text */
+}
+
+static void test_mentions_substring_rejected(void **state)
+{
+  (void)state;
+  assert_int_equal(0, ircd_text_mentions("rubinstein plays", "rubin"));
+  assert_int_equal(0, ircd_text_mentions("subrubin here", "rubin"));
+  assert_int_equal(0, ircd_text_mentions("rubin2 spoke", "rubin"));
+}
+
+static void test_mentions_null_safe(void **state)
+{
+  (void)state;
+  assert_int_equal(0, ircd_text_mentions(NULL, "x"));
+  assert_int_equal(0, ircd_text_mentions("text", NULL));
+  assert_int_equal(0, ircd_text_mentions("text", ""));
+}
+
 /* --- ircd_utf8_clamp --- */
 
 static void test_utf8_clamp_fits_untouched(void **state)
@@ -556,6 +590,12 @@ int main(void)
         cmocka_unit_test(test_utf8_clamp_multibyte_boundary),
         cmocka_unit_test(test_utf8_clamp_keeps_complete_sequence),
         cmocka_unit_test(test_utf8_clamp_null_safe),
+
+        /* ircd_text_mentions */
+        cmocka_unit_test(test_mentions_basic_and_case),
+        cmocka_unit_test(test_mentions_boundaries),
+        cmocka_unit_test(test_mentions_substring_rejected),
+        cmocka_unit_test(test_mentions_null_safe),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

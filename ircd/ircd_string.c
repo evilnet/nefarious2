@@ -518,6 +518,32 @@ int ircd_utf8_clamp(char* s, size_t maxbytes)
   return 1;
 }
 
+/** Case-insensitive word-boundary search for \a nick in \a text, using
+ * the IRC nickname character class as the boundary definition: a match
+ * counts only when the characters on both sides of it are not nickname
+ * characters (start/end of string included).  Comparison uses the
+ * server casemapping (ircd_strncmp).
+ * @param[in] text Message text to scan (may be NULL).
+ * @param[in] nick Nickname to look for (may be NULL/empty).
+ * @return 1 when mentioned, 0 otherwise.
+ */
+int ircd_text_mentions(const char* text, const char* nick)
+{
+  size_t nlen;
+  const char* p;
+
+  if (!text || !nick || !*nick)
+    return 0;
+  nlen = strlen(nick);
+  for (p = text; *p; ++p) {
+    if ((p == text || !IsNickChar(p[-1]))
+        && 0 == ircd_strncmp(p, nick, nlen)
+        && !IsNickChar(p[nlen]))
+      return 1;
+  }
+  return 0;
+}
+
 int csv_contains_token(const char* csv, const char* token)
 {
   const char *p;

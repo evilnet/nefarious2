@@ -176,6 +176,12 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
   const char *account;
   int has_local_interest;
 
+  /* WebPush v2: channel-highlight pushes for held members.  PRIVMSG
+   * only (channel NOTICEs are bot noise by design); before the history
+   * gates so pushes don't depend on chathistory storage. */
+  if (type == HISTORY_PRIVMSG)
+    webpush_notify_channel(sptr, chptr, text, msgid, timestamp);
+
   if (!history_is_available())
     return;
 
