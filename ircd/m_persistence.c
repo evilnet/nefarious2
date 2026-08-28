@@ -50,6 +50,8 @@
 #include "s_user.h"
 #include "send.h"
 #include "bouncer_session.h"
+#include "s_conf.h"
+#include "class.h"
 #include "persistence_profile.h"
 
 #include <string.h>
@@ -85,6 +87,17 @@ static int persistence_effective_state(struct Client *cptr)
   if (!cptr || !IsAccount(cptr))
     return 0;
 
+  /* For a live client with an attached session, the truth is whatever
+   * the disconnect path will actually do: bounce_should_hold() -- the
+   * session hold-override > +b/metadata > (bouncer-class || FEAT)
+   * chain.  Consulting it directly keeps STATUS drift-proof against
+   * that logic (spec: <effective-setting> MUST reflect the actual
+   * state).  Previously a class-enforced bouncer connection with no
+   * explicit preference reported DEFAULT OFF while holding on every
+   * disconnect. */
+  if (MyUser(cptr) && bounce_get_session(cptr))
+    return bounce_should_hold(cptr) != NULL;
+
   if (persistence_profile_get_effective(cli_account(cptr),
                                          active_profile_for(cptr),
                                          "hold",
@@ -94,6 +107,13 @@ static int persistence_effective_state(struct Client *cptr)
   if (metadata_account_get(cli_account(cptr), "draft/persistence/hold", hold_val) == 0)
     return (hold_val[0] != '0');
 
+  /* Mirror bounce_should_hold's fallback: a bouncer-enforced class
+   * defaults to hold even when the feature-level default is off. */
+  if (MyConnect(cptr)) {
+    struct ConnectionClass *cls = get_client_class_conf(cptr);
+    if (cls && FlagHas(&cls->restrictflags, CRFLAG_BOUNCER))
+      return 1;
+  }
   return feature_bool(FEAT_BOUNCER_DEFAULT_HOLD) ? 1 : 0;
 }
 
