@@ -133,19 +133,26 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
 {
   const char *account = msg->account[0] ? msg->account : "*";
   const char *content = msg->dyn_content ? msg->dyn_content : msg->content;
+  /* A resolved-multiline record ships its dyn_content INLINE, so the
+   * receiving requester has no local ml blob and no dyn_content -- the
+   * wire TYPE is the only way its \x1F-split gate can open.  Rewrite
+   * legacy (pre-type-12) records to HISTORY_MULTILINE on the wire; for
+   * everything else wire_type == msg->type. */
+  int wire_type = msg->dyn_content ? HISTORY_MULTILINE : msg->type;
 
   /* If we have raw compressed data, send with Z flag for bandwidth savings.
    * Only use Z if the base64-encoded result fits in a single P10 message.
    * Otherwise fall through to normal B chunking with decompressed content.
-   */
-  if (msg->raw_content && msg->raw_content_len > 0) {
+   * Never for a resolved-multiline record: raw_content is the stored
+   * PLACEHOLDER record, not the body the requester needs. */
+  if (!msg->dyn_content && msg->raw_content && msg->raw_content_len > 0) {
     size_t b64_len = ((msg->raw_content_len + 2) / 3) * 4 + 1;
     if (b64_len <= CH_CHUNK_B64_SIZE) {
       char *b64 = MyMalloc(b64_len);
       if (b64) {
         ch_base64_encode((const char *)msg->raw_content, msg->raw_content_len, b64);
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "Z %s %s %s %d %s %s :%s",
-                      reqid, msg->msgid, msg->timestamp, msg->type,
+                      reqid, msg->msgid, msg->timestamp, wire_type,
                       msg->sender, account, b64);
         MyFree(b64);
         return;
@@ -158,7 +165,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
   if (!ch_needs_encoding(content)) {
     /* Simple case: send as-is */
     sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
-                  reqid, msg->msgid, msg->timestamp, msg->type,
+                  reqid, msg->msgid, msg->timestamp, wire_type,
                   msg->sender, account, content);
     return;
   }
@@ -170,7 +177,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
   if (!b64) {
     /* Fallback: send truncated without encoding */
     sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "R %s %s %s %d %s %s :%s",
-                  reqid, msg->msgid, msg->timestamp, msg->type,
+                  reqid, msg->msgid, msg->timestamp, wire_type,
                   msg->sender, account, "[content too large]");
     return;
   }
@@ -181,7 +188,7 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
   /* If it fits in one message, send complete B message (no + marker) */
   if (b64_total <= CH_CHUNK_B64_SIZE) {
     sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s %s %d %s %s :%s",
-                  reqid, msg->msgid, msg->timestamp, msg->type,
+                  reqid, msg->msgid, msg->timestamp, wire_type,
                   msg->sender, account, b64);
     MyFree(b64);
     return;
@@ -204,12 +211,12 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
       /* First chunk: include all metadata, + marker if more coming */
       if (more) {
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s %s %d %s %s + :%s",
-                      reqid, msg->msgid, msg->timestamp, msg->type,
+                      reqid, msg->msgid, msg->timestamp, wire_type,
                       msg->sender, account, chunk);
       } else {
         /* Single chunk that just barely needed encoding */
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "B %s %s %s %d %s %s :%s",
-                      reqid, msg->msgid, msg->timestamp, msg->type,
+                      reqid, msg->msgid, msg->timestamp, wire_type,
                       msg->sender, account, chunk);
       }
       first = 0;
@@ -3998,8 +4005,16 @@ static void complete_redact_fed(struct FedRequest *req)
         ircd_snprintf(0, redact_content, sizeof(redact_content),
                       "%s", ctx->msgid);
 
-      forward_history_write(chptr, sptr, redact_msgid, timestamp,
-                            HISTORY_REDACT, redact_content);
+      {
+        /* Reason is client-supplied: sentinel-escape for the CH W
+         * payload, same as m_redact.c's forward site (missed by the
+         * 0c9d97a composer conversion). */
+        char fwd_content[sizeof(redact_content) * 2 + 1];
+        history_forward_encode(fwd_content, sizeof(fwd_content), NULL,
+                               redact_content);
+        forward_history_write(chptr, sptr, redact_msgid, timestamp,
+                              HISTORY_REDACT, fwd_content);
+      }
     }
 
     /* Set msgid for live channel broadcast */
