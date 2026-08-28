@@ -662,6 +662,50 @@ static void test_utf8_sanitize_keeps_formatted_line_intact(void **state)
 }
 
 
+static void test_utf8_sanitize_returns_minus_one_past_its_window(void **state)
+{
+  /* string_sanitize_utf8() only scans until its output buffer is nearly
+   * full (BUFSIZE), while string_is_valid_utf8() scans the whole string.
+   * A long line whose only bad byte sits past that window is therefore
+   * "invalid" but sanitizes to -1 == "nothing modified".  s_bsd.c used to
+   * assign that straight into the WebSocket frame length, i.e. memcpy() of
+   * SIZE_MAX bytes; pin the contract here so it stays visible. */
+  char buf[BUFSIZE * 4];
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < BUFSIZE + 100; i++)
+    buf[i] = 'x';
+  buf[i++] = (char)0xFF;      /* the one malformed byte, past the window */
+  buf[i] = '\0';
+
+  assert_int_equal(0, string_is_valid_utf8(buf));
+  assert_int_equal(-1, string_sanitize_utf8(buf));
+  assert_int_equal(BUFSIZE + 101, (int)strlen(buf));  /* left untouched */
+}
+
+static void test_utf8_sanitize_truncates_at_a_sequence_boundary(void **state)
+{
+  /* A bad byte inside the window is replaced, and the result is clamped to
+   * the working buffer without splitting a multibyte sequence. */
+  char buf[BUFSIZE * 4];
+  size_t i;
+  int n;
+  (void)state;
+
+  buf[0] = (char)0x80;        /* lone continuation, inside the window */
+  for (i = 1; i < BUFSIZE * 2; i++)
+    buf[i] = 'z';
+  buf[i] = '\0';
+
+  n = string_sanitize_utf8(buf);
+  assert_true(n > 0);
+  assert_true(n < BUFSIZE);
+  assert_int_equal(n, (int)strlen(buf));
+  assert_int_equal(1, string_is_valid_utf8(buf));
+}
+
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -743,6 +787,8 @@ int main(void)
         cmocka_unit_test(test_utf8_sanitize_leaves_control_codes_alone),
         cmocka_unit_test(test_utf8_sanitize_replaces_invalid_bytes),
         cmocka_unit_test(test_utf8_sanitize_keeps_formatted_line_intact),
+        cmocka_unit_test(test_utf8_sanitize_returns_minus_one_past_its_window),
+        cmocka_unit_test(test_utf8_sanitize_truncates_at_a_sequence_boundary),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

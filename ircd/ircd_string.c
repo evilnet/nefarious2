@@ -164,6 +164,13 @@ int string_is_valid_utf8(const char * str)
  * The string is modified in place. Caller should ensure str has at least
  * BUFSIZE bytes available.
  *
+ * Note that "no modification was needed" is also what callers get when the
+ * invalid bytes lie beyond the working buffer: the scan stops at BUFSIZE
+ * while string_is_valid_utf8() scans the whole string, so a long line whose
+ * only bad byte is near the end validates as invalid yet sanitizes to -1.
+ * Callers must therefore treat -1 as "leave the string and its length
+ * alone", never as a length.
+ *
  * @param str The string to sanitize (will be modified).
  * @return Length of sanitized string, or -1 if no modification was needed.
  */

@@ -673,6 +673,11 @@ int websocket_encode_frame(const char *data, int data_len,
   int pos = 0;
   int opcode = text_mode ? WS_OPCODE_TEXT : WS_OPCODE_BINARY;
 
+  /* data_len feeds an unchecked memcpy() below; a negative value would be
+   * a SIZE_MAX copy.  Refuse rather than trust the caller. */
+  if (data_len < 0)
+    return -1;
+
   /* First byte: FIN + opcode */
   frame[pos++] = WS_FIN | opcode;
 
