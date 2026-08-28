@@ -311,7 +311,7 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
     } else {
       const char *per_msg_target = rs->target;
 
-      cmd = (msg->type <= HISTORY_REDACT) ? msg_type_cmd[msg->type] : "PRIVMSG";
+      cmd = (msg->type <= HISTORY_MULTILINE) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
       /* For PM batches, the BATCH-level target (rs->target = other party's
        * nick) is correct for the BATCH start line and for the replaying

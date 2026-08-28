@@ -237,7 +237,8 @@ static void send_ch_response(struct Client *sptr, const char *reqid,
 const char *msg_type_cmd[] = {
   "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
   "KICK", "MODE", "TOPIC", "TAGMSG", "PRIVMSG", /* GAP rendered as PRIVMSG */
-  "NICK", "REDACT"
+  "NICK", "REDACT",
+  "PRIVMSG" /* MULTILINE rendered as PRIVMSG */
 };
 
 /** Validate a timestamp value.
@@ -503,7 +504,8 @@ int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
    * discussion — reactions are message-like content, not events.
    * Only stored TAGMSGs pass this check (typing-only are filtered earlier). */
   if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE ||
-      type == HISTORY_GAP || type == HISTORY_TAGMSG)
+      type == HISTORY_GAP || type == HISTORY_TAGMSG ||
+      type == HISTORY_MULTILINE)
     return 1;
 
   /* REDACT requires message-redaction cap but NOT event-playback.
@@ -649,13 +651,17 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
     char ctags_str[516] = "";
 
     if (msg->client_tags[0] &&
-        (msg->type == HISTORY_PRIVMSG || msg->type == HISTORY_NOTICE) &&
+        (msg->type == HISTORY_PRIVMSG || msg->type == HISTORY_NOTICE ||
+         msg->type == HISTORY_MULTILINE) &&
         CapRecipientHas(sptr, CAP_MSGTAGS)) {
       ircd_snprintf(0, ctags_str, sizeof(ctags_str), ";%s", msg->client_tags);
     }
 
-  /* Check if content contains Unit Separator (multiline) */
-  separator = strchr(content, '\x1F');
+  /* Unit Separators are honored only on genuine multiline records
+   * (type-marked, or legacy-sentinel-resolved => dyn_content set).
+   * A \x1F a client embedded in a plain message renders literally. */
+  separator = (msg->type == HISTORY_MULTILINE || msg->dyn_content)
+                ? strchr(content, '\x1F') : NULL;
 
   if (separator && CapRecipientHas(sptr, CAP_DRAFT_MULTILINE) && CapRecipientHas(sptr, CAP_BATCH)) {
     /* Re-batch as draft/multiline nested inside chathistory batch */
@@ -941,7 +947,7 @@ static void send_history_batch(struct Client *sptr, const char *target,
       continue;
     }
 
-    cmd = (msg->type <= HISTORY_REDACT) ? msg_type_cmd[msg->type] : "PRIVMSG";
+    cmd = (msg->type <= HISTORY_MULTILINE) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
     /* Send message, handling multiline content if present */
     send_history_message(sptr, msg, target,
@@ -1301,7 +1307,8 @@ static int redact_filter_messages(struct HistoryMessage **head, int count)
     int drop = 0;
     if (cur->type == HISTORY_PRIVMSG
         || cur->type == HISTORY_NOTICE
-        || cur->type == HISTORY_TAGMSG) {
+        || cur->type == HISTORY_TAGMSG
+        || cur->type == HISTORY_MULTILINE) {
       int i;
       for (i = 0; i < n_redacted; i++) {
         if (0 == strcmp(cur->msgid, redacted[i])) {

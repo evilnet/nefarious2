@@ -41,7 +41,11 @@ enum HistoryMessageType {
     HISTORY_KICK    = 5,
     HISTORY_MODE    = 6,
     HISTORY_TOPIC   = 7,
-    HISTORY_TAGMSG  = 8
+    HISTORY_TAGMSG  = 8,
+    HISTORY_GAP     = 9,
+    HISTORY_NICK    = 10,
+    HISTORY_REDACT  = 11,
+    HISTORY_MULTILINE = 12
 };
 
 /* Reference types from history.h */
@@ -176,7 +180,7 @@ static int deserialize_message(const char *data, int datalen,
     field = strchr(p, '|');
     if (!field || field >= end) return -1;
     type = atoi(p);
-    if (type < 0 || type > HISTORY_TAGMSG) return -1;
+    if (type < 0 || type > HISTORY_MULTILINE) return -1;
     msg->type = (enum HistoryMessageType)type;
     p = field + 1;
 
@@ -487,6 +491,37 @@ static void test_sentinel_escape_of_escape_byte(void **state)
   assert_string_equal(esc, "a\004b");
 }
 
+/* Mirror of ml_content_resolve's multiline-identification predicate
+ * (ircd/ml_content.c): TYPE-keyed, with an EXACT-3-byte legacy fallback.
+ * Copied here as pure logic to lock the #103-residue semantics: client
+ * message bytes must never forge a multiline resolve. */
+static int ml_is_multiline_ref(int type, const char *content)
+{
+  if (type == HISTORY_MULTILINE)
+    return 1;
+  if (type == HISTORY_PRIVMSG &&
+      content[0] == '\x1E' && content[1] == 'm' &&
+      content[2] == 'l' && content[3] == '\0')
+    return 1;  /* legacy pre-type-12 placeholder */
+  return 0;
+}
+
+static void test_multiline_ref_is_type_keyed(void **state)
+{
+  (void)state;
+  /* Genuine placeholder: type-12, resolves regardless of content. */
+  assert_true(ml_is_multiline_ref(HISTORY_MULTILINE, "\x1Eml"));
+  assert_true(ml_is_multiline_ref(HISTORY_MULTILINE, "anything"));
+  /* Legacy placeholder: PRIVMSG whose entire body is the 3-byte sentinel. */
+  assert_true(ml_is_multiline_ref(HISTORY_PRIVMSG, "\x1Eml"));
+  /* #103 residue closed: a client PRIVMSG that merely STARTS with the
+   * sentinel (or embeds \x1F) is NOT multiline -- renders as literal. */
+  assert_false(ml_is_multiline_ref(HISTORY_PRIVMSG, "\x1Emlctrl-injected"));
+  assert_false(ml_is_multiline_ref(HISTORY_PRIVMSG, "line1\x1Fline2"));
+  assert_false(ml_is_multiline_ref(HISTORY_PRIVMSG, "\x1E"));
+  assert_false(ml_is_multiline_ref(HISTORY_NOTICE, "\x1Eml"));
+}
+
 static void test_forward_encode_split_roundtrip(void **state)
 {
   char wire[512];
@@ -702,10 +737,11 @@ static void test_deserialize_all_message_types(void **state)
 
     const char *type_names[] = {
         "PRIVMSG", "NOTICE", "JOIN", "PART", "QUIT",
-        "KICK", "MODE", "TOPIC", "TAGMSG"
+        "KICK", "MODE", "TOPIC", "TAGMSG", "GAP",
+        "NICK", "REDACT", "MULTILINE"
     };
 
-    for (int i = 0; i <= HISTORY_TAGMSG; i++) {
+    for (int i = 0; i <= HISTORY_MULTILINE; i++) {
         len = serialize_message(buf, sizeof(buf), (enum HistoryMessageType)i,
                                 "nick!user@host", "acc", type_names[i]);
         assert_true(len > 0);
@@ -840,6 +876,7 @@ int main(void)
         cmocka_unit_test(test_sentinel_escape_of_escape_byte),
         cmocka_unit_test(test_forward_encode_split_roundtrip),
         cmocka_unit_test(test_forward_encode_blocks_injection),
+        cmocka_unit_test(test_multiline_ref_is_type_keyed),
         cmocka_unit_test(test_deserialize_all_message_types),
 
         /* parse_reference tests */

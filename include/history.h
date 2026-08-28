@@ -69,7 +69,12 @@ enum HistoryMessageType {
   HISTORY_TAGMSG  = 8,
   HISTORY_GAP     = 9,  /**< Message not stored (sender opted out via +Y/+y) */
   HISTORY_NICK    = 10, /**< Nick change event */
-  HISTORY_REDACT  = 11  /**< Message redaction event */
+  HISTORY_REDACT  = 11, /**< Message redaction event */
+  HISTORY_MULTILINE = 12 /**< Multiline placeholder: real content lives in
+                          *   the ml_content store keyed by msgid.  The
+                          *   record type (not in-band content bytes) is
+                          *   what marks a record as multiline, so client
+                          *   message bytes can never forge one. */
 };
 
 /** Stored message for chathistory retrieval.

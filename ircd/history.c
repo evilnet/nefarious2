@@ -162,9 +162,14 @@ static int build_key(char *key, int keysize, const char *target,
  * themselves sentinels.  Legacy records (no \x04 escapes) unescape to
  * themselves, so the format stays backward compatible; already-poisoned
  * legacy records can't be retroactively cleaned, but no NEW injection
- * lands.  NB: only \x05/\x06 are handled here -- the multiline markers
- * \x1E/\x1F are structural in a different (downstream) consumer and
- * need their own analysis; see the residue note in the #103 fix commit. */
+ * lands.  NB: the multiline markers \x1E/\x1F are deliberately NOT in
+ * this escape set: record-layer escaping is a transparent round-trip, so
+ * it cannot distinguish server-written markers from client bytes -- both
+ * would unescape identically.  Their fix is semantic instead: multiline
+ * placeholders carry HISTORY_MULTILINE (out-of-band record type, also on
+ * the CH R/Z/B fed wire), ml_content_resolve keys on that type, and the
+ * \x1F replay split is gated on it -- client-injected \x1E/\x1F bytes
+ * render as literals. */
 #define HIST_ESC 0x04
 static int history_field_needs_escape(unsigned char c)
 {
@@ -388,7 +393,7 @@ static int deserialize_message(const char *data, int datalen,
   field = memchr(p, '|', end - p);
   if (!field || field >= end) goto deser_cleanup;
   type = atoi(p);
-  if (type < 0 || type > HISTORY_REDACT) goto deser_cleanup;
+  if (type < 0 || type > HISTORY_MULTILINE) goto deser_cleanup;
   msg->type = (enum HistoryMessageType)type;
   p = field + 1;
 
@@ -1165,7 +1170,7 @@ int history_store_multiline(const char *msgid, const char *timestamp,
   idx_keylen = build_key(idxkeybuf, sizeof(idxkeybuf), target, timestamp, NULL);
   if (idx_keylen < 0) return -1;
 
-  vallen = serialize_message(valbuf, sizeof(valbuf), HISTORY_PRIVMSG,
+  vallen = serialize_message(valbuf, sizeof(valbuf), HISTORY_MULTILINE,
                              sender, account, ML_CONTENT_SENTINEL, NULL,
                              original_target);
   if (vallen < 0) return -1;

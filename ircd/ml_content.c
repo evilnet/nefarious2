@@ -297,8 +297,16 @@ int ml_content_resolve(struct db_snapshot *snap, struct HistoryMessage *msg)
   if (!ml_available)
     return -1;
 
-  /* Check for multiline sentinel */
-  if (msg->content[0] != '\x1E' || msg->content[1] != 'm' || msg->content[2] != 'l')
+  /* Multiline refs are identified by record TYPE — out-of-band, so
+   * client message bytes can never forge one.  Legacy records
+   * (pre-HISTORY_MULTILINE) stored the \x1Eml sentinel as their entire
+   * content under HISTORY_PRIVMSG; accept those only on an EXACT 3-byte
+   * match (a client PRIVMSG whose body merely starts with \x1Eml no
+   * longer triggers a resolve — it renders as the literal it is). */
+  if (msg->type != HISTORY_MULTILINE &&
+      !(msg->type == HISTORY_PRIVMSG &&
+        msg->content[0] == '\x1E' && msg->content[1] == 'm' &&
+        msg->content[2] == 'l' && msg->content[3] == '\0'))
     return 0;  /* Not a multiline ref — nothing to do */
 
   rc = db_get(ml_db_env, ml_content_cf,
