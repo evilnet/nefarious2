@@ -177,6 +177,17 @@ SSL_CTX *ssl_init_server_ctx(void)
     SSL_CTX_set_options(server_ctx, SSL_OP_NO_TLSv1);
   SSL_CTX_set_verify(server_ctx, vrfyopts, ssl_verify_callback);
   SSL_CTX_set_session_cache_mode(server_ctx, SSL_SESS_CACHE_OFF);
+  /* Required for TLS session resumption under SSL_VERIFY_PEER: without a
+   * session id context OpenSSL refuses to resume ("session id context
+   * uninitialized" -- older versions fail the handshake, newer ones
+   * silently fall back to a full one), so every reconnect paid a full
+   * handshake.  TLS 1.3 tickets are stateless, so SSL_SESS_CACHE_OFF
+   * above does not conflict.  The SNI per-cert contexts must use the
+   * SAME value (see ssl_create_ctx_for_cert) or resumption breaks
+   * across a servername-driven context switch.  certfp survives
+   * resumption: the peer cert is restored from the original session. */
+  SSL_CTX_set_session_id_context(server_ctx,
+                                 (const unsigned char *)"nefarious", 9);
 
   if (SSL_CTX_use_certificate_chain_file(server_ctx, feature_str(FEAT_SSL_CERTFILE)) <= 0)
   {
@@ -411,6 +422,9 @@ SSL_CTX *ssl_create_ctx_for_cert(const char *certfile, const char *keyfile)
     SSL_CTX_set_options(ctx, SSL_OP_NO_TLSv1);
 
   SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
+  /* Same session id context as the main server ctx -- required for
+   * resumption to survive the SNI context switch (see ssl_init_server_ctx). */
+  SSL_CTX_set_session_id_context(ctx, (const unsigned char *)"nefarious", 9);
 
   if (SSL_CTX_use_certificate_chain_file(ctx, certfile) <= 0) {
     Debug((DEBUG_ERROR, "SNI: Error loading certificate '%s'", certfile));
