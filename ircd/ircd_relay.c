@@ -71,6 +71,7 @@
 #include "handlers.h"
 #include "bouncer_session.h"
 #include "forwarded_label.h"
+#include "webpush.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -336,6 +337,13 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
   char target[PM_PAIRKEY_BUFSIZE];  /* identity pair-key */
   const char *account;
   const char *nick1, *nick2;
+
+  /* WebPush v1 trigger: PM/NOTICE toward a held bouncer session.
+   * Deliberately BEFORE the history feature gates -- push delivery
+   * must not depend on chathistory storage being enabled.  All gating
+   * (hold state, subscriptions, cooldown, FEAT) lives inside. */
+  webpush_notify_pm(sptr, acptr, text, type == HISTORY_NOTICE,
+                    msgid, timestamp);
 
   if (!history_is_available())
     return;

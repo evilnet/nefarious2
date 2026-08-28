@@ -172,6 +172,20 @@ void webpush_burst(struct Client *cptr);
  * Send push notifications to all subscriptions for an account.
  * Called from message relay path for locally-originated messages.
  */
+struct Client;
+
+/*
+ * PM/NOTICE push trigger (v1, design: webpush-trigger-payload.md).
+ * Called from the PM delivery path; sends a push to the target's
+ * subscriptions iff the target is a held bouncer session with
+ * subscriptions, FEAT_WEBPUSH_NOTIFY is on, and the per-(account,
+ * sender) cooldown passes.  Payload tier (ping/route/full) comes from
+ * the account's draft/webpush/payload metadata key (default: route).
+ */
+void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
+                       const char *text, int is_notice,
+                       const char *msgid, const char *timestamp);
+
 void webpush_notify_account(const char *account, const char *message,
                             size_t message_len);
 

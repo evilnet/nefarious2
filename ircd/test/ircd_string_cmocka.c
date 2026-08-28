@@ -450,6 +450,51 @@ static void test_csv_contains_token_match_and_case(void **state)
 }
 
 
+/* --- ircd_utf8_clamp --- */
+
+static void test_utf8_clamp_fits_untouched(void **state)
+{
+  char buf[32] = "hello";
+  (void)state;
+  assert_int_equal(0, ircd_utf8_clamp(buf, 10));
+  assert_string_equal(buf, "hello");
+  assert_int_equal(0, ircd_utf8_clamp(buf, 5)); /* exact fit */
+  assert_string_equal(buf, "hello");
+}
+
+static void test_utf8_clamp_ascii_cut(void **state)
+{
+  char buf[32] = "hello world";
+  (void)state;
+  assert_int_equal(1, ircd_utf8_clamp(buf, 5));
+  assert_string_equal(buf, "hello");
+}
+
+static void test_utf8_clamp_multibyte_boundary(void **state)
+{
+  /* "aX" where X = 2-byte U+00E9 (0xC3 0xA9).  Cutting at 2 lands on
+   * the continuation byte -> whole sequence dropped. */
+  char buf[8] = "a\303\251";
+  (void)state;
+  assert_int_equal(1, ircd_utf8_clamp(buf, 2));
+  assert_string_equal(buf, "a");
+}
+
+static void test_utf8_clamp_keeps_complete_sequence(void **state)
+{
+  /* Cutting exactly after the full 2-byte sequence keeps it. */
+  char buf[8] = "a\303\251b";
+  (void)state;
+  assert_int_equal(1, ircd_utf8_clamp(buf, 3));
+  assert_string_equal(buf, "a\303\251");
+}
+
+static void test_utf8_clamp_null_safe(void **state)
+{
+  (void)state;
+  assert_int_equal(0, ircd_utf8_clamp(NULL, 5));
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -504,6 +549,13 @@ int main(void)
         /* csv_contains_token */
         cmocka_unit_test(test_csv_contains_token_empty_denies),
         cmocka_unit_test(test_csv_contains_token_match_and_case),
+
+        /* ircd_utf8_clamp */
+        cmocka_unit_test(test_utf8_clamp_fits_untouched),
+        cmocka_unit_test(test_utf8_clamp_ascii_cut),
+        cmocka_unit_test(test_utf8_clamp_multibyte_boundary),
+        cmocka_unit_test(test_utf8_clamp_keeps_complete_sequence),
+        cmocka_unit_test(test_utf8_clamp_null_safe),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

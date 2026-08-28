@@ -34,6 +34,7 @@ extern int str_appendf(char* buf, size_t buflen, size_t* pos,
 extern int         ircd_strcmp(const char *a, const char *b);
 extern int         ircd_strncmp(const char *a, const char *b, size_t n);
 extern int csv_contains_token(const char* csv, const char* token);
+extern int ircd_utf8_clamp(char* s, size_t maxbytes);
 extern int         unique_name_vector(char* names, char token,
                                       char** vector, int size);
 extern int         token_vector(char* names, char token,

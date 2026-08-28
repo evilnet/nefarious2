@@ -54,6 +54,10 @@
 #include "send.h"
 #include "webpush.h"
 #include "webpush_store.h"
+#include "bouncer_session.h"
+#include "metadata.h"
+
+#include <jansson.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -431,6 +435,109 @@ void webpush_notify_account(const char *account, const char *message,
   nid.message_len = message_len;
 
   webpush_store_foreach(account, notify_iter_cb, &nid);
+}
+
+/* ---------------------------------------------------------------------------
+ * PM push trigger (v1 -- design: webpush-trigger-payload.md)
+ * ---------------------------------------------------------------------------*/
+
+#define WEBPUSH_CD_SLOTS 256
+
+/** Per-(account, origin) push cooldown -- open-addressed, overwrite on
+ * collision (best-effort: a collision can only cause an extra push,
+ * never a lost one beyond the window).  Entries expire by time; no
+ * revive-reset needed: pushes are gated on HOLDING state, so a stale
+ * entry can only suppress within FEAT_WEBPUSH_COOLDOWN seconds of the
+ * previous push, which is the intended behavior anyway. */
+static struct {
+  char key[ACCOUNTLEN + NICKLEN + 2];
+  time_t last;
+} wp_cooldown[WEBPUSH_CD_SLOTS];
+
+static int webpush_pm_cooldown_ok(const char *account, const char *origin)
+{
+  char key[ACCOUNTLEN + NICKLEN + 2];
+  unsigned int h = 2166136261u;
+  const char *p;
+  int cd = feature_int(FEAT_WEBPUSH_COOLDOWN);
+
+  if (cd <= 0)
+    return 1;
+  ircd_snprintf(0, key, sizeof(key), "%s/%s", account, origin);
+  for (p = key; *p; ++p) {
+    h ^= (unsigned char)*p;
+    h *= 16777619u;
+  }
+  h &= (WEBPUSH_CD_SLOTS - 1);
+  if (0 == strcmp(wp_cooldown[h].key, key)
+      && wp_cooldown[h].last + cd > CurrentTime)
+    return 0;
+  ircd_strncpy(wp_cooldown[h].key, key, sizeof(wp_cooldown[h].key));
+  wp_cooldown[h].last = CurrentTime;
+  return 1;
+}
+
+void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
+                       const char *text, int is_notice,
+                       const char *msgid, const char *timestamp)
+{
+  struct BouncerSession *sess;
+  const char *account;
+  char tier[METADATA_VALUE_LEN];
+  json_t *obj;
+  char *out;
+  size_t outlen;
+
+  if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
+    return;
+  if (!sptr || !acptr || !MyConnect(acptr) || !IsBouncerHold(acptr))
+    return;
+  sess = bounce_get_session(acptr);
+  if (!sess || sess->hs_state != BOUNCE_HOLDING)
+    return;
+  if (!cli_user(acptr) || !cli_user(acptr)->account[0])
+    return;
+  account = cli_user(acptr)->account;
+  if (webpush_store_count(account) <= 0)
+    return;
+  if (!webpush_pm_cooldown_ok(account, cli_name(sptr)))
+    return;
+
+  tier[0] = '\0';
+  (void)metadata_account_get(account, "draft/webpush/payload", tier);
+
+  obj = json_object();
+  if (!obj)
+    return;
+  json_object_set_new(obj, "t", json_string(is_notice ? "notice" : "msg"));
+  if (0 != ircd_strcmp(tier, "ping")) {
+    /* route tier (default): enough to deep-link + dedup, no content. */
+    json_object_set_new(obj, "from", json_string(cli_name(sptr)));
+    json_object_set_new(obj, "target", json_string(cli_name(acptr)));
+    if (msgid && msgid[0])
+      json_object_set_new(obj, "msgid", json_string(msgid));
+    if (timestamp && timestamp[0])
+      json_object_set_new(obj, "time", json_string(timestamp));
+    if (0 == ircd_strcmp(tier, "full") && text && text[0]) {
+      /* Clamp (never reject-and-drop) with headroom for the JSON
+       * envelope under WEBPUSH_MAX_PAYLOAD.  json_string() rejects
+       * invalid UTF-8 -- non-UTF-8 message text then simply omits the
+       * text field and the push degrades to route tier. */
+      char body[WEBPUSH_MAX_PAYLOAD];
+      ircd_strncpy(body, text, sizeof(body));
+      if (ircd_utf8_clamp(body, 3072))
+        json_object_set_new(obj, "trunc", json_true());
+      json_object_set_new(obj, "text", json_string(body));
+    }
+  }
+  out = json_dumps(obj, JSON_COMPACT);
+  json_decref(obj);
+  if (!out)
+    return;
+  outlen = strlen(out);
+  if (outlen > 0 && outlen <= WEBPUSH_MAX_PAYLOAD)
+    webpush_notify_account(account, out, outlen);
+  free(out);
 }
 
 /* ---------------------------------------------------------------------------

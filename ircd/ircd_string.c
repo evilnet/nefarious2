@@ -493,6 +493,31 @@ int ircd_strncmp(const char *a, const char *b, size_t n)
 /** Is @a token a member of the comma/space/tab-separated @a csv list
  * (case-insensitive, exact token match, no prefix match)?  Empty/NULL csv
  * or token denies.  Pure helper; the SASL layer passes feature_str(...) in. */
+/** Truncate \a s in place to at most \a maxbytes bytes (excluding the
+ * NUL), never splitting a UTF-8 sequence: if the cut lands mid-sequence
+ * the whole partial sequence is dropped.
+ * @param[in,out] s        String to clamp (may be NULL).
+ * @param[in]     maxbytes Maximum byte length to keep.
+ * @return 1 if truncation occurred, 0 if the string already fit.
+ */
+int ircd_utf8_clamp(char* s, size_t maxbytes)
+{
+  size_t len;
+
+  if (!s)
+    return 0;
+  len = strlen(s);
+  if (len <= maxbytes)
+    return 0;
+  /* Back off over UTF-8 continuation bytes so the byte at the cut
+   * index is a lead byte (or ASCII); cutting there drops any partial
+   * sequence while keeping every complete one. */
+  while (maxbytes > 0 && ((unsigned char)s[maxbytes] & 0xC0) == 0x80)
+    --maxbytes;
+  s[maxbytes] = '\0';
+  return 1;
+}
+
 int csv_contains_token(const char* csv, const char* token)
 {
   const char *p;
