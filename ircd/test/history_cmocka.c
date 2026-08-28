@@ -506,6 +506,39 @@ static int ml_is_multiline_ref(int type, const char *content)
   return 0;
 }
 
+/* Mirror of ircd.c is_reserved_vendor_tag -- pure prefix test; the real
+ * one uses ircd_strncmp (case-insensitive IRC casemap), available here
+ * because the suite links ../ircd_string.o. */
+extern int ircd_strncmp(const char *a, const char *b, size_t n);
+static int is_reserved_vendor_tag(const char *tag, size_t tag_len)
+{
+  static const char prefix[] = "+afternet.org/";
+  const size_t plen = sizeof(prefix) - 1;
+  if (!tag || tag_len < plen)
+    return 0;
+  return 0 == ircd_strncmp(tag, prefix, plen);
+}
+
+static void test_reserved_vendor_tag(void **state)
+{
+  (void)state;
+  /* The server's own namespace is reserved (case-insensitive vendor). */
+  assert_true(is_reserved_vendor_tag("+afternet.org/sid=abc",
+                                     strlen("+afternet.org/sid=abc")));
+  assert_true(is_reserved_vendor_tag("+AfterNet.ORG/sid=abc",
+                                     strlen("+AfterNet.ORG/sid=abc")));
+  assert_true(is_reserved_vendor_tag("+afternet.org/anything",
+                                     strlen("+afternet.org/anything")));
+  /* Other client tags pass through untouched. */
+  assert_false(is_reserved_vendor_tag("+reply=abc", strlen("+reply=abc")));
+  assert_false(is_reserved_vendor_tag("+draft/react=x", strlen("+draft/react=x")));
+  assert_false(is_reserved_vendor_tag("+example.com/afternet.org",
+                                      strlen("+example.com/afternet.org")));
+  /* A lookalike shorter than the prefix cannot match. */
+  assert_false(is_reserved_vendor_tag("+afternet.org", strlen("+afternet.org")));
+  assert_false(is_reserved_vendor_tag(NULL, 0));
+}
+
 static void test_multiline_ref_is_type_keyed(void **state)
 {
   (void)state;
@@ -877,6 +910,7 @@ int main(void)
         cmocka_unit_test(test_forward_encode_split_roundtrip),
         cmocka_unit_test(test_forward_encode_blocks_injection),
         cmocka_unit_test(test_multiline_ref_is_type_keyed),
+        cmocka_unit_test(test_reserved_vendor_tag),
         cmocka_unit_test(test_deserialize_all_message_types),
 
         /* parse_reference tests */

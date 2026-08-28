@@ -1532,6 +1532,12 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
           /* IRCv3 CLIENTTAGDENY: check if this tag is blocked by operator config */
           if (is_client_tag_denied(tag_name, tag_len))
             ; /* Tag is denied, silently drop it */
+          /* Reserved vendor namespace: a client must not squat
+           * `+afternet.org/*`, which the server authors and trusts
+           * (e.g. the `+afternet.org/sid=` PM-history auth marker).
+           * Drop silently, same as a denied tag. */
+          else if (is_reserved_vendor_tag(tag_name, tag_len))
+            ; /* Reserved for the server, silently drop it */
           /* Copy client-only tag to buffer for TAGMSG relay.
            * IRCv3 message-tags spec: 4094 bytes max for client-only tags.
            * Silently drop excess tags rather than rejecting the message.

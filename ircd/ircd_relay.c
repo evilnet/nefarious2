@@ -435,8 +435,11 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
    * tag to prove "I'm the same session as the one that participated."
    *
    * Stored as `+afternet.org/sid=<sessid>` in client_tags.  Tag is
-   * server-injected and trusted (not echoed from the client's own
-   * tags), so the auth check can rely on it. */
+   * server-injected and trusted: the whole `+afternet.org/` vendor
+   * namespace is reserved at tag capture (parse.c drops any
+   * client-supplied tag in it via is_reserved_vendor_tag), so the
+   * client_tags appended below cannot carry a forged sid marker and
+   * the auth check can rely on this one. */
   {
     char tagbuf[768];
     const char *eph_sessid = NULL;

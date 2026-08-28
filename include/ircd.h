@@ -80,6 +80,7 @@ extern const char* get_vapid_pubkey(void);
 
 /** Check if a client-only tag is denied by CLIENTTAGDENY config */
 extern int is_client_tag_denied(const char *tag, size_t tag_len);
+extern int is_reserved_vendor_tag(const char *tag, size_t tag_len);
 
 #endif /* INCLUDED_ircd_h */
 
