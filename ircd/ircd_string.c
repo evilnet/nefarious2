@@ -544,6 +544,50 @@ int ircd_text_mentions(const char* text, const char* nick)
   return 0;
 }
 
+/** Escape \a src as a JSON string body (no surrounding quotes) into
+ * \a dst: backslash, double-quote, and control characters below 0x20
+ * are escaped; everything else (UTF-8 bytes included) passes through
+ * verbatim.  Output is always NUL-terminated; content that would
+ * overflow is truncated at an escape-sequence boundary.
+ * @param[out] dst    Destination buffer.
+ * @param[in]  dstlen Destination size in bytes (>= 1).
+ * @param[in]  src    Source string (may be NULL == empty).
+ * @return dst.
+ */
+char* ircd_json_escape(char* dst, size_t dstlen, const char* src)
+{
+  size_t o = 0;
+  const unsigned char* p;
+
+  if (!dst || dstlen == 0)
+    return dst;
+  for (p = (const unsigned char*)(src ? src : ""); *p; ++p) {
+    if (*p == '"' || *p == '\\') {
+      if (o + 2 >= dstlen)
+        break;
+      dst[o++] = '\\';
+      dst[o++] = (char)*p;
+    }
+    else if (*p < 0x20) {
+      if (o + 6 >= dstlen)
+        break;
+      dst[o++] = '\\';
+      dst[o++] = 'u';
+      dst[o++] = '0';
+      dst[o++] = '0';
+      dst[o++] = "0123456789abcdef"[*p >> 4];
+      dst[o++] = "0123456789abcdef"[*p & 0xf];
+    }
+    else {
+      if (o + 1 >= dstlen)
+        break;
+      dst[o++] = (char)*p;
+    }
+  }
+  dst[o] = '\0';
+  return dst;
+}
+
 int csv_contains_token(const char* csv, const char* token)
 {
   const char *p;

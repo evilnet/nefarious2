@@ -58,8 +58,6 @@
 #include "channel.h"
 #include "metadata.h"
 
-#include <jansson.h>
-
 static void webpush_subs_cache_invalidate(const char *account);
 static int webpush_store_count_cached(const char *account);
 static int webpush_pm_cooldown_ok(const char *account, const char *origin);
@@ -578,40 +576,42 @@ static void webpush_emit_push(const char *account, const char *kind,
                               const char *text)
 {
   char tier[METADATA_VALUE_LEN];
-  json_t *obj;
-  char *out;
-  size_t outlen;
+  char esc[WEBPUSH_MAX_PAYLOAD];
+  char out[WEBPUSH_MAX_PAYLOAD];
+  size_t pos = 0;
 
   tier[0] = '\0';
   (void)metadata_account_get(account, "draft/webpush/payload", tier);
 
-  obj = json_object();
-  if (!obj)
-    return;
-  json_object_set_new(obj, "t", json_string(kind));
+  /* Hand-rolled JSON (no jansson: it is only linked in keycloak-enabled
+   * builds, and this path must link everywhere).  All string content
+   * goes through ircd_json_escape; UTF-8 bytes pass through verbatim. */
+  str_appendf(out, sizeof(out), &pos, "{\"t\":\"%s\"", kind);
   if (0 != ircd_strcmp(tier, "ping")) {
-    json_object_set_new(obj, "from", json_string(from));
-    json_object_set_new(obj, "target", json_string(target));
+    str_appendf(out, sizeof(out), &pos, ",\"from\":\"%s\"",
+                ircd_json_escape(esc, sizeof(esc), from));
+    str_appendf(out, sizeof(out), &pos, ",\"target\":\"%s\"",
+                ircd_json_escape(esc, sizeof(esc), target));
     if (msgid && msgid[0])
-      json_object_set_new(obj, "msgid", json_string(msgid));
+      str_appendf(out, sizeof(out), &pos, ",\"msgid\":\"%s\"",
+                  ircd_json_escape(esc, sizeof(esc), msgid));
     if (timestamp && timestamp[0])
-      json_object_set_new(obj, "time", json_string(timestamp));
+      str_appendf(out, sizeof(out), &pos, ",\"time\":\"%s\"",
+                  ircd_json_escape(esc, sizeof(esc), timestamp));
     if (0 == ircd_strcmp(tier, "full") && text && text[0]) {
       char body[WEBPUSH_MAX_PAYLOAD];
       ircd_strncpy(body, text, sizeof(body));
-      if (ircd_utf8_clamp(body, 3072))
-        json_object_set_new(obj, "trunc", json_true());
-      json_object_set_new(obj, "text", json_string(body));
+      if (ircd_utf8_clamp(body, 3000))
+        str_appendf(out, sizeof(out), &pos, ",\"trunc\":true");
+      str_appendf(out, sizeof(out), &pos, ",\"text\":\"%s\"",
+                  ircd_json_escape(esc, sizeof(esc), body));
     }
   }
-  out = json_dumps(obj, JSON_COMPACT);
-  json_decref(obj);
-  if (!out)
-    return;
-  outlen = strlen(out);
-  if (outlen > 0 && outlen <= WEBPUSH_MAX_PAYLOAD)
-    webpush_notify_account(account, out, outlen);
-  free(out);
+  str_appendf(out, sizeof(out), &pos, "}");
+  /* A payload that hit the buffer ceiling may be un-terminated JSON;
+   * guard on the closing brace before sending. */
+  if (pos > 1 && pos < sizeof(out) && out[pos - 1] == '}')
+    webpush_notify_account(account, out, pos);
 }
 
 /** Channel-highlight push trigger (v2 -- design:

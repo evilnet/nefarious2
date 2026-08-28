@@ -450,6 +450,35 @@ static void test_csv_contains_token_match_and_case(void **state)
 }
 
 
+/* --- ircd_json_escape --- */
+
+static void test_json_escape_passthrough(void **state)
+{
+  char buf[64];
+  (void)state;
+  assert_string_equal(ircd_json_escape(buf, sizeof(buf), "plain text"),
+                      "plain text");
+  assert_string_equal(ircd_json_escape(buf, sizeof(buf), NULL), "");
+}
+
+static void test_json_escape_specials(void **state)
+{
+  char buf[64];
+  (void)state;
+  assert_string_equal(ircd_json_escape(buf, sizeof(buf), "a\"b\\c"),
+                      "a\\\"b\\\\c");
+  assert_string_equal(ircd_json_escape(buf, sizeof(buf), "x\ny"),
+                      "x\\u000ay");
+}
+
+static void test_json_escape_truncates_cleanly(void **state)
+{
+  char buf[4];
+  (void)state;
+  /* 2-byte escape does not fit in the 1 remaining slot: clean stop. */
+  assert_string_equal(ircd_json_escape(buf, sizeof(buf), "ab\"cd"), "ab");
+}
+
 /* --- ircd_text_mentions --- */
 
 static void test_mentions_basic_and_case(void **state)
@@ -596,6 +625,11 @@ int main(void)
         cmocka_unit_test(test_mentions_boundaries),
         cmocka_unit_test(test_mentions_substring_rejected),
         cmocka_unit_test(test_mentions_null_safe),
+
+        /* ircd_json_escape */
+        cmocka_unit_test(test_json_escape_passthrough),
+        cmocka_unit_test(test_json_escape_specials),
+        cmocka_unit_test(test_json_escape_truncates_cleanly),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
