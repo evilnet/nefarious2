@@ -1334,7 +1334,11 @@ int main(int argc, char **argv) {
   /* draft/persistence CAP 302 value: static feature-token inventory
    * (spec: clients MUST tolerate unknown tokens).  attach-cursor =
    * ATTACH accepts the optional last-seen-msgid catch-up anchor. */
-  cap_set_value(CAP_DRAFT_PERSISTENCE, "attach,detach,list,attach-cursor");
+  /* NB: no "list" token -- PERSISTENCE LIST is specced (session
+   * enumeration) but not implemented; advertising it made feature
+   * detection lie (#104).  Re-add the token when the subcommand
+   * lands. */
+  cap_set_value(CAP_DRAFT_PERSISTENCE, "attach,detach,attach-cursor");
 
   /* Restore persisted bouncer sessions (ghosts + channels) from MDBX.
    * Must run after bounce_init() and metadata_lmdb_init(), before event_loop().
