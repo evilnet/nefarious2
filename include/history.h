@@ -349,6 +349,8 @@ extern int history_pm_target_has_sessid(const char *target, const char *sessid);
 extern char *history_forward_encode(char *dst, size_t dstsize,
                                     const char *client_tags, const char *text);
 extern char *history_forward_split(char *content, char **tags_out);
+extern int history_deserialize_record(const void *data, size_t datalen,
+                                      struct HistoryMessage *msg);
 
 /** Redact a message: strip content/tags but keep the entry in the database.
  * Used instead of history_delete_message() to support REDACT-as-context.

@@ -4726,47 +4726,31 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
 
 #ifdef USE_ZSTD
-    /* Decode base64 then decompress */
+    /* Decode base64, then parse the payload as the serialized RECORD it
+     * has always been: the sender ships raw_content, i.e. the stored DB
+     * value 'type|sender|account|[ot][ct]content' (possibly compressed).
+     * history_deserialize_record handles zstd internally and yields the
+     * record's true content (sentinel-unescaped) and type.  The old
+     * code passed the decompressed record blob VERBATIM as message
+     * content -- header bytes rendered as message text for any
+     * compressed (>threshold) record served over federation.  Wire
+     * msgid/ts/sender/account stay authoritative for parity with R/B;
+     * record client_tags are dropped like R/B drop them (tags-over-
+     * federation is a separate, pre-existing wire gap). */
     {
       char *decoded;
       size_t decoded_len;
 
+      (void)type; /* wire copy; the record's own type is authoritative */
       if (ch_base64_decode(b64_content, strlen(b64_content), &decoded, &decoded_len)) {
-        char decomp_stack[HISTORY_VALUE_BUFSIZE];
-        char *decompressed = NULL;
-        int decomp_dynamic = 0;
-        size_t decompressed_len;
-        size_t out_size;
-
-        /* Determine decompressed size for buffer allocation */
-        if (is_compressed((const unsigned char *)decoded, decoded_len)) {
-          unsigned long long frame_size = ZSTD_getFrameContentSize(
-              (const unsigned char *)decoded + 1, decoded_len - 1);
-          if (frame_size != ZSTD_CONTENTSIZE_ERROR
-              && frame_size != ZSTD_CONTENTSIZE_UNKNOWN
-              && frame_size > sizeof(decomp_stack)) {
-            if (frame_size <= COMPRESS_MAX_UNCOMPRESSED) {
-              decompressed = (char *)MyMalloc(frame_size + 1);
-              decomp_dynamic = 1;
-              out_size = frame_size + 1;
-            }
-          } else {
-            decompressed = decomp_stack;
-            out_size = sizeof(decomp_stack);
-          }
+        struct HistoryMessage rec;
+        memset(&rec, 0, sizeof(rec));
+        if (history_deserialize_record(decoded, decoded_len, &rec) == 0) {
+          add_fed_message(req, msgid, timestamp, rec.type, sender, account,
+                          rec.content);
         } else {
-          decompressed = decomp_stack;
-          out_size = sizeof(decomp_stack);
+          Debug((DEBUG_DEBUG, "CH Z: undecodable record for %s, dropping", msgid));
         }
-
-        if (decompressed && decompress_data((unsigned char *)decoded, decoded_len,
-                            (unsigned char *)decompressed, out_size - 1,
-                            &decompressed_len) >= 0) {
-          decompressed[decompressed_len] = '\0';
-          add_fed_message(req, msgid, timestamp, type, sender, account, decompressed);
-        }
-        if (decomp_dynamic && decompressed)
-          MyFree(decompressed);
         MyFree(decoded);
       }
     }

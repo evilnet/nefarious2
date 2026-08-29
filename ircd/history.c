@@ -471,6 +471,21 @@ deser_cleanup:
   return ret;
 }
 
+/** Parse a stored history record value (as read from the DB, possibly
+ * zstd-compressed) into \a msg.  Public wrapper for consumers that
+ * receive raw record values off the wire -- notably the CH Z federation
+ * passthrough, whose payload is the sender's stored record.  Caller
+ * zeroes \a msg first.
+ * @param[in] data Record value bytes.
+ * @param[in] datalen Length of data.
+ * @param[out] msg Parsed message.
+ * @return 0 on success, -1 on error. */
+int history_deserialize_record(const void *data, size_t datalen,
+                               struct HistoryMessage *msg)
+{
+  return deserialize_message((const char *)data, (int)datalen, msg);
+}
+
 /** Parse target and timestamp from a key.
  * @param[in] key Key data.
  * @param[in] keylen Key length.
