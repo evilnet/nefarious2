@@ -58,6 +58,10 @@
 #include "channel.h"
 #include "metadata.h"
 
+#ifdef HAVE_JANSSON
+#include <jansson.h>
+#endif
+
 static void webpush_subs_cache_invalidate(const char *account);
 static int webpush_store_count_cached(const char *account);
 static int webpush_pm_cooldown_ok(const char *account, const char *origin);
@@ -576,16 +580,58 @@ static void webpush_emit_push(const char *account, const char *kind,
                               const char *text)
 {
   char tier[METADATA_VALUE_LEN];
+#ifndef HAVE_JANSSON
   char esc[WEBPUSH_MAX_PAYLOAD];
   char out[WEBPUSH_MAX_PAYLOAD];
   size_t pos = 0;
+#endif
 
   tier[0] = '\0';
   (void)metadata_account_get(account, "draft/webpush/payload", tier);
 
-  /* Hand-rolled JSON (no jansson: it is only linked in keycloak-enabled
-   * builds, and this path must link everywhere).  All string content
-   * goes through ircd_json_escape; UTF-8 bytes pass through verbatim. */
+#ifdef HAVE_JANSSON
+  /* jansson path (preferred when the library is available -- abc9cc6
+   * dropped it wholesale to fix the non-keycloak link; configure now
+   * probes jansson independently of keycloak, so use it when found).
+   * Same shape as the fallback: same fields, same 3000-byte UTF-8-safe
+   * clamp for the full tier. */
+  {
+    json_t *obj;
+    char *dump;
+    size_t dumplen;
+
+    obj = json_object();
+    if (!obj)
+      return;
+    json_object_set_new(obj, "t", json_string(kind));
+    if (0 != ircd_strcmp(tier, "ping")) {
+      json_object_set_new(obj, "from", json_string(from));
+      json_object_set_new(obj, "target", json_string(target));
+      if (msgid && msgid[0])
+        json_object_set_new(obj, "msgid", json_string(msgid));
+      if (timestamp && timestamp[0])
+        json_object_set_new(obj, "time", json_string(timestamp));
+      if (0 == ircd_strcmp(tier, "full") && text && text[0]) {
+        char body[WEBPUSH_MAX_PAYLOAD];
+        ircd_strncpy(body, text, sizeof(body));
+        if (ircd_utf8_clamp(body, 3000))
+          json_object_set_new(obj, "trunc", json_true());
+        json_object_set_new(obj, "text", json_string(body));
+      }
+    }
+    dump = json_dumps(obj, JSON_COMPACT);
+    json_decref(obj);
+    if (!dump)
+      return;
+    dumplen = strlen(dump);
+    if (dumplen > 0 && dumplen <= WEBPUSH_MAX_PAYLOAD)
+      webpush_notify_account(account, dump, dumplen);
+    free(dump);
+  }
+#else
+  /* Hand-rolled fallback (jansson not found at configure time).  All
+   * string content goes through ircd_json_escape; UTF-8 bytes pass
+   * through verbatim. */
   str_appendf(out, sizeof(out), &pos, "{\"t\":\"%s\"", kind);
   if (0 != ircd_strcmp(tier, "ping")) {
     str_appendf(out, sizeof(out), &pos, ",\"from\":\"%s\"",
@@ -612,6 +658,7 @@ static void webpush_emit_push(const char *account, const char *kind,
    * guard on the closing brace before sending. */
   if (pos > 1 && pos < sizeof(out) && out[pos - 1] == '}')
     webpush_notify_account(account, out, pos);
+#endif
 }
 
 /** Channel-highlight push trigger (v2 -- design:

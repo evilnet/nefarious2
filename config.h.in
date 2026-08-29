@@ -42,6 +42,12 @@
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
 
+/* Define if libjansson is usable (lib + header) */
+#undef HAVE_JANSSON
+
+/* Define to 1 if you have the <jansson.h> header file. */
+#undef HAVE_JANSSON_H
+
 /* Define to 1 if you have the 'kqueue' function. */
 #undef HAVE_KQUEUE
 

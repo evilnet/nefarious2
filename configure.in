@@ -1047,6 +1047,19 @@ if test x"$unet_cv_enable_zstd" = xyes; then
 fi
 
 dnl **
+dnl **  jansson (optional) — webpush's payload emitter uses it when
+dnl **  available and falls back to the built-in hand-rolled JSON
+dnl **  emitter otherwise.  --enable-keycloak below hard-requires it
+dnl **  (the kc sources are unconditional jansson users).
+dnl **
+AC_CHECK_LIB([jansson], [json_object],
+  [AC_CHECK_HEADERS([jansson.h],
+    [AC_DEFINE([HAVE_JANSSON], , [Define if libjansson is usable (lib + header)])
+     LIBS="-ljansson $LIBS"],
+    [AC_MSG_WARN([libjansson found but jansson.h missing; using built-in JSON emitter])])],
+  [AC_MSG_NOTICE([libjansson not found; using built-in JSON emitter])])
+
+dnl **
 dnl **  Keycloak (libkc) checks
 dnl **
 AC_MSG_CHECKING([whether to enable Keycloak support])

@@ -4729,7 +4729,6 @@ ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
 ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
 ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
-
 am_cv_prog_cc_stdc=$ac_cv_prog_cc_stdc
 
 
@@ -9314,6 +9313,75 @@ printf "%s\n" "$as_me: WARNING: Unable to find zstd, compression features will n
   fi
 fi
 
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for json_object in -ljansson" >&5
+printf %s "checking for json_object in -ljansson... " >&6; }
+if test ${ac_cv_lib_jansson_json_object+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-ljansson  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char json_object (void);
+int
+main (void)
+{
+return json_object ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_jansson_json_object=yes
+else case e in #(
+  e) ac_cv_lib_jansson_json_object=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_jansson_json_object" >&5
+printf "%s\n" "$ac_cv_lib_jansson_json_object" >&6; }
+if test "x$ac_cv_lib_jansson_json_object" = xyes
+then :
+         for ac_header in jansson.h
+do :
+  ac_fn_c_check_header_compile "$LINENO" "jansson.h" "ac_cv_header_jansson_h" "$ac_includes_default"
+if test "x$ac_cv_header_jansson_h" = xyes
+then :
+  printf "%s\n" "#define HAVE_JANSSON_H 1" >>confdefs.h
+
+printf "%s\n" "#define HAVE_JANSSON /**/" >>confdefs.h
+
+     LIBS="-ljansson $LIBS"
+else case e in #(
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: libjansson found but jansson.h missing; using built-in JSON emitter" >&5
+printf "%s\n" "$as_me: WARNING: libjansson found but jansson.h missing; using built-in JSON emitter" >&2;} ;;
+esac
+fi
+
+done
+else case e in #(
+  e) { printf "%s\n" "$as_me:${as_lineno-$LINENO}: libjansson not found; using built-in JSON emitter" >&5
+printf "%s\n" "$as_me: libjansson not found; using built-in JSON emitter" >&6;} ;;
+esac
+fi
+
+
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable Keycloak support" >&5
 printf %s "checking whether to enable Keycloak support... " >&6; }
 # Check whether --enable-keycloak was given.
@@ -9448,8 +9516,8 @@ esac
 fi
 
 
-  KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c"
-  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka"
+  KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_cred_derive.c kc/kc_error_classify.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c"
+  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka"
 
 
 printf "%s\n" "#define USE_LIBKC /**/" >>confdefs.h
@@ -9723,7 +9791,6 @@ DEFS=-DHAVE_CONFIG_H
 
 ac_libobjs=
 ac_ltlibobjs=
-U=
 for ac_i in : $LIBOBJS; do test "x$ac_i" = x: && continue
   # 1. Remove the extension, and $U if already installed.
   ac_script='s/\$U\././;s/\.o$//;s/\.obj$//'
