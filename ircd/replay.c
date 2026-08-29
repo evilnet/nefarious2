@@ -385,13 +385,28 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
       chan_since = marker_ts;
     }
 
-    /* Query history */
-    count = history_query_latest_after(channame, rs->replay_limit,
+    /* Query one past the limit: an over-limit result means this leg is
+     * TRUNCATED at the server cap.  A complete leg carries the
+     * @draft/chathistory-end tag on its batch opener ("no more
+     * pages"); a truncated leg withholds it so the client knows to
+     * backfill via CHATHISTORY (#104 note; spec: Auto-replay
+     * completeness).  The list is chronological (oldest first) of the
+     * LATEST results, so the overflow extra is the head -- drop it to
+     * keep exactly the limit-sized set the old query returned. */
+    count = history_query_latest_after(channame, rs->replay_limit + 1,
                                         chan_since, &messages);
     if (count <= 0 || !messages) {
       if (messages)
         history_free_messages(messages);
       continue;
+    }
+    rs->is_last_page = 1;
+    if (count > rs->replay_limit) {
+      struct HistoryMessage *extra = messages;
+      messages = messages->next;
+      extra->next = NULL;
+      history_free_messages(extra);
+      rs->is_last_page = 0;
     }
 
     /* Set up new batch */
@@ -425,13 +440,24 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
     if (!strchr(tgt->target, ':') || !is_pm_target_for_client(tgt->target, sptr))
       continue;
 
-    /* Query history */
-    count = history_query_latest_after(tgt->target, rs->replay_limit,
+    /* Query history -- limit+1 truncation probe, same as the channel
+     * leg: complete => @draft/chathistory-end on the opener, truncated
+     * => tag withheld (drop the overflow head to keep the latest
+     * limit-sized set). */
+    count = history_query_latest_after(tgt->target, rs->replay_limit + 1,
                                         rs->since_timestamp, &messages);
     if (count <= 0 || !messages) {
       if (messages)
         history_free_messages(messages);
       continue;
+    }
+    rs->is_last_page = 1;
+    if (count > rs->replay_limit) {
+      struct HistoryMessage *extra = messages;
+      messages = messages->next;
+      extra->next = NULL;
+      history_free_messages(extra);
+      rs->is_last_page = 0;
     }
 
     /* Set up new batch.  Storage key is "lowerNick:higherNick" — the
