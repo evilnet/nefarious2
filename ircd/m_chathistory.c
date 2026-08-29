@@ -874,7 +874,8 @@ void send_gap_marker(struct Client *sptr, const char *target,
  */
 static void send_history_batch(struct Client *sptr, const char *target,
                                 struct HistoryMessage *messages, int count,
-                                int ops_override, const char *label)
+                                int ops_override, const char *label,
+                                int complete)
 {
   struct HistoryMessage *msg;
   char batchid[BATCH_ID_LEN];
@@ -887,13 +888,21 @@ static void send_history_batch(struct Client *sptr, const char *target,
   /* Generate batch ID */
   generate_batch_id(batchid, sizeof(batchid), sptr);
 
-  /* Start batch — include @label on BATCH +start if labeled-response applies */
+  /* Start batch — include @label on BATCH +start if labeled-response
+   * applies, and @draft/chathistory-end when the result is COMPLETE
+   * (same completeness signal as the local auto-replay legs: absence
+   * means the leg may have been truncated at the server cap). */
   if (CapRecipientHas(sptr, CAP_BATCH)) {
+    const char *end_tag = complete ? "draft/chathistory-end;" : "";
+
     if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
         CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
-                    label, cli_name(&me), batchid, target);
+      sendrawto_one(sptr, "@%slabel=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                    end_tag, label, cli_name(&me), batchid, target);
       cli_label_responded(sptr) = 1;
+    } else if (complete) {
+      sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                    cli_name(&me), batchid, target);
     } else {
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s chathistory %s",
                     batchid, target);
@@ -1731,6 +1740,7 @@ struct FedRequest {
   struct Timer timer;                 /**< Timeout timer (embedded) */
   int timer_active;                   /**< Whether timer is active */
   int response_sent;                  /**< Whether response was already sent */
+  int fed_truncated;                  /**< Any storage server flagged its result truncated (CH E ... T) */
   void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
   void *cb_data;                      /**< Custom data for completion callback */
   void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
@@ -3585,7 +3595,7 @@ static void send_fed_response(struct FedRequest *req)
   history_attach_context(req->target, merged);
   /* Async replay — ownership of merged list transfers to ReplayState */
   total = presence_filter_and_replay(client, req->target, &merged, total, req->ops_override, req->label);
-  if (cli_replay(client) && total < req->limit)
+  if (cli_replay(client) && total < req->limit && !req->fed_truncated)
     cli_replay(client)->is_last_page = 1;
 }
 
@@ -4209,13 +4219,24 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
     /* Save cursor for next iteration (after this channel completes) */
     ctx->cursor = member->next_channel;
 
-    /* Try local first if available */
+    /* Try local first if available.  limit+1 completeness probe, same
+     * as the local replay legs: overflow head trimmed (LATEST =>
+     * chronological list of the latest, oldest first). */
     if (history_is_available()) {
       struct HistoryMessage *messages = NULL;
+      int complete = 1;
       int count = history_query_latest(channame, HISTORY_REF_NONE, "*",
-                                        ctx->limit, &messages);
+                                        ctx->limit + 1, &messages);
+      if (count > ctx->limit && messages) {
+        struct HistoryMessage *extra = messages;
+        messages = messages->next;
+        extra->next = NULL;
+        history_free_messages(extra);
+        count = ctx->limit;
+        complete = 0;
+      }
       if (count > 0 && messages) {
-        send_history_batch(sptr, channame, messages, count, 0, NULL);
+        send_history_batch(sptr, channame, messages, count, 0, NULL, complete);
         ctx->total_replayed += count;
         ctx->chan_count++;
         history_free_messages(messages);
@@ -4344,7 +4365,8 @@ static void complete_autoreplay_channel(struct FedRequest *req)
       total++;
 
     if (total > 0) {
-      send_history_batch(sptr, req->target, merged, total, 0, NULL);
+      send_history_batch(sptr, req->target, merged, total, 0, NULL,
+                         !req->fed_truncated);
       ctx->total_replayed += total;
       ctx->chan_count++;
     }
@@ -4618,13 +4640,22 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     query_subcmd_char = query_subcmd_str[0];
     query_subcmd_full = s2s_to_subcmd(query_subcmd_char);
 
-    /* Query local LMDB based on subcommand */
+    /* Query local LMDB based on subcommand.  For the linear shapes
+     * (L/B/A) probe limit+1: an over-limit result marks this response
+     * TRUNCATED, signaled to the requester on the CH E terminator so
+     * the completeness reaches the end client as the presence/absence
+     * of @draft/chathistory-end.  The overflow row is trimmed so the
+     * emitted set matches the plain-limit query exactly: L and B
+     * collect reverse (latest-first) into a chronological list, so
+     * their overflow is the HEAD (oldest); A walks forward, so its
+     * overflow is the TAIL (newest).  R (around) is bidirectional --
+     * no probe, never flagged. */
     if (query_subcmd_char == 'L') {
-      count = history_query_latest(target, ref_type, ref_value, limit, &messages);
+      count = history_query_latest(target, ref_type, ref_value, limit + 1, &messages);
     } else if (query_subcmd_char == 'B') {
-      count = history_query_before(target, ref_type, ref_value, limit, &messages);
+      count = history_query_before(target, ref_type, ref_value, limit + 1, &messages);
     } else if (query_subcmd_char == 'A') {
-      count = history_query_after(target, ref_type, ref_value, limit, &messages);
+      count = history_query_after(target, ref_type, ref_value, limit + 1, &messages);
     } else if (query_subcmd_char == 'R') {
       count = history_query_around(target, ref_type, ref_value, limit, &messages);
     } else if (query_subcmd_char == 'X') {
@@ -4658,17 +4689,47 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    /* Send response messages.
-     * Uses base64 chunked encoding for long content (>400 bytes).
-     * - CH R: normal response (content as-is)
-     * - CH B: base64 encoded response (with chunking if needed)
-     */
-    for (msg = messages; msg; msg = msg->next) {
-      send_ch_response(sptr, reqid, msg);
-    }
+    /* Over-limit probe result => truncated; trim the overflow row
+     * (direction-dependent end, see the query comment above). */
+    {
+      int truncated = 0;
+      if ((query_subcmd_char == 'L' || query_subcmd_char == 'B'
+           || query_subcmd_char == 'A') && count > limit) {
+        truncated = 1;
+        if (query_subcmd_char == 'A') {
+          struct HistoryMessage *m = messages;
+          int n;
+          for (n = 1; n < limit && m; n++)
+            m = m->next;
+          if (m && m->next) {
+            history_free_messages(m->next);
+            m->next = NULL;
+          }
+        } else {
+          struct HistoryMessage *extra = messages;
+          messages = messages->next;
+          extra->next = NULL;
+          history_free_messages(extra);
+        }
+        count = limit;
+      }
 
-    /* Send end marker */
-    sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, count);
+      /* Send response messages.
+       * Uses base64 chunked encoding for long content (>400 bytes).
+       * - CH R: normal response (content as-is)
+       * - CH B: base64 encoded response (with chunking if needed)
+       */
+      for (msg = messages; msg; msg = msg->next) {
+        send_ch_response(sptr, reqid, msg);
+      }
+
+      /* Send end marker; trailing T = this result was truncated at the
+       * requested limit (optional param, ignored by older parsers). */
+      if (truncated)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, count);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, count);
+    }
 
     history_free_messages(messages);
   }
@@ -4879,6 +4940,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       forward_fed_reply(sptr, cptr, parc, parv);
       return 0;
     }
+
+    /* Optional trailing T: that server's result hit its limit.  OR
+     * across servers -- any truncated contributor means the aggregate
+     * cannot claim completeness. */
+    if (parc > 4 && parv[4] && parv[4][0] == 'T')
+      req->fed_truncated = 1;
 
     /* Decrement pending count */
     req->servers_pending--;
