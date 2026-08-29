@@ -278,26 +278,33 @@ const char* get_vapid_pubkey(void)
  * @param[in] tag_len Length of the tag name (up to = or end).
  * @return 1 if tag is denied, 0 if allowed.
  */
-/** Check whether a client-only tag squats the server's reserved vendor
- * namespace `+afternet.org/`.  The server authors tags there and trusts
- * them: the `+afternet.org/sid=<sessid>` marker injected into PM history
+/** Check whether a client-only tag squats a server-reserved vendor
+ * namespace.  The server authors tags there and trusts them: the
+ * `+evilnet.github.io/sid=<sessid>` marker injected into PM history
  * (ircd_relay.c) is what chathistory's ephemeral-participant auth check
- * (history_pm_target_has_sessid) matches against.  A client-supplied tag
- * in that namespace is dropped at capture (parse.c), so it can never be
- * stored beside, or relayed as, a server-authored tag.  The vendor part
- * is a DNS name -> case-insensitive match (ircd_strncmp folds ASCII
- * letters; the '.' '/' '+' are compared exactly).
+ * (history_pm_target_has_sessid) matches against.  `+afternet.org/` is
+ * ALSO reserved: records stored before 2026-08-29 carry the sid marker
+ * under that legacy namespace and the auth check still honors it, so a
+ * client must not be able to plant tags there either.  A client-supplied
+ * tag in either namespace is dropped at capture (parse.c).  The vendor
+ * part is a DNS name -> case-insensitive match (ircd_strncmp folds
+ * ASCII letters; the '.' '/' '+' are compared exactly).
  * @param[in] tag The tag name to check (including + prefix).
  * @param[in] tag_len Length of the tag (name, optionally =value).
- * @return 1 if the tag is in the reserved namespace, 0 otherwise. */
+ * @return 1 if the tag is in a reserved namespace, 0 otherwise. */
 int is_reserved_vendor_tag(const char *tag, size_t tag_len)
 {
-  static const char prefix[] = "+afternet.org/";
-  const size_t plen = sizeof(prefix) - 1;
+  static const char *prefixes[] = { "+evilnet.github.io/", "+afternet.org/" };
+  size_t i;
 
-  if (!tag || tag_len < plen)
+  if (!tag)
     return 0;
-  return 0 == ircd_strncmp(tag, prefix, plen);
+  for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+    size_t plen = strlen(prefixes[i]);
+    if (tag_len >= plen && 0 == ircd_strncmp(tag, prefixes[i], plen))
+      return 1;
+  }
+  return 0;
 }
 
 int is_client_tag_denied(const char *tag, size_t tag_len)

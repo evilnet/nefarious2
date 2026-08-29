@@ -434,7 +434,11 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
    * the ephemeral can match their cli_session_id against the stored
    * tag to prove "I'm the same session as the one that participated."
    *
-   * Stored as `+afternet.org/sid=<sessid>` in client_tags.  Tag is
+   * Stored as `+evilnet.github.io/sid=<sessid>` in client_tags
+   * (evilnet = the upstream-org vendor namespace, same host as the
+   * evilnet.github.io/bouncer-replay batch; records written before
+   * 2026-08-29 carry the legacy `+afternet.org/sid=` form, which the
+   * auth check still accepts).  Tag is
    * server-injected and trusted: the whole `+afternet.org/` vendor
    * namespace is reserved at tag capture (parse.c drops any
    * client-supplied tag in it via is_reserved_vendor_tag), so the
@@ -450,7 +454,7 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
 
     if (eph_sessid) {
       ircd_snprintf(0, tagbuf, sizeof(tagbuf),
-                    "+afternet.org/sid=%s%s%s",
+                    "+evilnet.github.io/sid=%s%s%s",
                     eph_sessid,
                     (client_tags && *client_tags) ? ";" : "",
                     client_tags ? client_tags : "");

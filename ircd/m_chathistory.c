@@ -1143,7 +1143,7 @@ static int check_history_access(struct Client *sptr, const char *target,
      *
      *   - Ephemeral sptr (no account): session_id-based.  The stored
      *     PM record's client_tags carry a server-injected
-     *     `+afternet.org/sid=<sessid>` tag for the ephemeral
+     *     `+evilnet.github.io/sid=<sessid>` tag for the ephemeral
      *     participant (see ircd_relay.c store_private_history).  Auth
      *     requires that the caller's cli_session_id matches that tag
      *     in at least one record under the canonical pair-key.

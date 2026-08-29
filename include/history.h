@@ -328,7 +328,8 @@ extern int history_purge_old(unsigned long max_age_seconds);
 extern int history_msgid_to_timestamp(const char *msgid, char *timestamp);
 
 /** Check whether any PM record under @a target carries
- * `+afternet.org/sid=<sessid>` in its client_tags.  Used by the
+ * `+evilnet.github.io/sid=<sessid>` in its client_tags (legacy
+ * records: `+afternet.org/sid=`).  Used by the
  * chathistory PM access-check path to authorize an ephemeral
  * (unauthed) requester whose only durable identity is the session_id —
  * if the sessid appears in a stored record's tags, the requester was a

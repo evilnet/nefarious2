@@ -512,23 +512,34 @@ static int ml_is_multiline_ref(int type, const char *content)
 extern int ircd_strncmp(const char *a, const char *b, size_t n);
 static int is_reserved_vendor_tag(const char *tag, size_t tag_len)
 {
-  static const char prefix[] = "+afternet.org/";
-  const size_t plen = sizeof(prefix) - 1;
-  if (!tag || tag_len < plen)
+  static const char *prefixes[] = { "+evilnet.github.io/", "+afternet.org/" };
+  size_t i;
+  if (!tag)
     return 0;
-  return 0 == ircd_strncmp(tag, prefix, plen);
+  for (i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+    size_t plen = strlen(prefixes[i]);
+    if (tag_len >= plen && 0 == ircd_strncmp(tag, prefixes[i], plen))
+      return 1;
+  }
+  return 0;
 }
 
 static void test_reserved_vendor_tag(void **state)
 {
   (void)state;
-  /* The server's own namespace is reserved (case-insensitive vendor). */
+  /* The org vendor namespace is reserved (case-insensitive vendor). */
+  assert_true(is_reserved_vendor_tag("+evilnet.github.io/sid=abc",
+                                     strlen("+evilnet.github.io/sid=abc")));
+  assert_true(is_reserved_vendor_tag("+EvilNet.GitHub.IO/sid=abc",
+                                     strlen("+EvilNet.GitHub.IO/sid=abc")));
+  assert_true(is_reserved_vendor_tag("+evilnet.github.io/anything",
+                                     strlen("+evilnet.github.io/anything")));
+  /* The legacy namespace stays reserved (pre-2026-08-29 records carry
+   * the sid marker there and the auth check still honors it). */
   assert_true(is_reserved_vendor_tag("+afternet.org/sid=abc",
                                      strlen("+afternet.org/sid=abc")));
   assert_true(is_reserved_vendor_tag("+AfterNet.ORG/sid=abc",
                                      strlen("+AfterNet.ORG/sid=abc")));
-  assert_true(is_reserved_vendor_tag("+afternet.org/anything",
-                                     strlen("+afternet.org/anything")));
   /* Other client tags pass through untouched. */
   assert_false(is_reserved_vendor_tag("+reply=abc", strlen("+reply=abc")));
   assert_false(is_reserved_vendor_tag("+draft/react=x", strlen("+draft/react=x")));
@@ -536,6 +547,8 @@ static void test_reserved_vendor_tag(void **state)
                                       strlen("+example.com/afternet.org")));
   /* A lookalike shorter than the prefix cannot match. */
   assert_false(is_reserved_vendor_tag("+afternet.org", strlen("+afternet.org")));
+  assert_false(is_reserved_vendor_tag("+evilnet.github.io",
+                                      strlen("+evilnet.github.io")));
   assert_false(is_reserved_vendor_tag(NULL, 0));
 }
 

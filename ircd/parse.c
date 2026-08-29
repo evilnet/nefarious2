@@ -1534,7 +1534,8 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
             ; /* Tag is denied, silently drop it */
           /* Reserved vendor namespace: a client must not squat
            * `+afternet.org/*`, which the server authors and trusts
-           * (e.g. the `+afternet.org/sid=` PM-history auth marker).
+           * (e.g. the `+evilnet.github.io/sid=` PM-history auth marker;
+           * the legacy `+afternet.org/` namespace stays reserved too).
            * Drop silently, same as a denied tag. */
           else if (is_reserved_vendor_tag(tag_name, tag_len))
             ; /* Reserved for the server, silently drop it */

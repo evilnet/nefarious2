@@ -2319,16 +2319,25 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
   struct HistoryMessage *m;
   int count;
   int found = 0;
-  char needle[64];
+  char needles[2][64];
+  int n_needles = 2;
 
   if (!target || !*target || !sessid || !*sessid)
     return 0;
   if (!history_available)
     return 0;
 
-  /* The vendor-tag form prepended at store time: see
-   * ircd_relay.c store_private_history's Phase 5a block. */
-  ircd_snprintf(0, needle, sizeof(needle), "+afternet.org/sid=%s", sessid);
+  /* The vendor-tag forms prepended at store time: see ircd_relay.c
+   * store_private_history's Phase 5a block.  Current records carry the
+   * evilnet-org form; records stored before 2026-08-29 carry the
+   * legacy afternet form (both namespaces are reserved from client
+   * tags at capture -- is_reserved_vendor_tag -- so neither is
+   * forgeable in NEW records; pre-reservation legacy poison is the
+   * same accepted residue as 3ab3038's). */
+  ircd_snprintf(0, needles[0], sizeof(needles[0]),
+                "+evilnet.github.io/sid=%s", sessid);
+  ircd_snprintf(0, needles[1], sizeof(needles[1]),
+                "+afternet.org/sid=%s", sessid);
 
   /* Scan up to 100 most recent records under target.  PM records
    * involving an ephemeral participant always carry that participant's
@@ -2344,20 +2353,23 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
 
   for (m = messages; m; m = m->next) {
     const char *hit;
+    int ni;
     /* Anchor the match to a tag-list boundary (start of string, or
      * immediately after a ';' separator): the server prepends its sid
      * tag at position 0, so an unanchored strstr would also accept the
      * needle as a substring of a longer client-supplied tag value.
-     * (Residue: a client can still legitimately *name* a client-only
-     * tag "+afternet.org/sid=..."; reserving that vendor namespace at
-     * store time is a separate fix -- see the #103 commit note.) */
+     * (Both vendor namespaces are reserved from client tags at
+     * capture, so a client cannot plant either needle in new
+     * records.) */
     if (!m->client_tags[0])
       continue;
-    for (hit = strstr(m->client_tags, needle); hit;
-         hit = strstr(hit + 1, needle)) {
-      if (hit == m->client_tags || hit[-1] == ';') {
-        found = 1;
-        break;
+    for (ni = 0; ni < n_needles && !found; ni++) {
+      for (hit = strstr(m->client_tags, needles[ni]); hit;
+           hit = strstr(hit + 1, needles[ni])) {
+        if (hit == m->client_tags || hit[-1] == ';') {
+          found = 1;
+          break;
+        }
       }
     }
     if (found)
