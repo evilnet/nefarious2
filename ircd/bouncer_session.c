@@ -5488,6 +5488,23 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   con_recvQ(ghost_con) = con_recvQ(temp_con);
   memset(&con_recvQ(temp_con), 0, sizeof(con_recvQ(temp_con)));
 
+  /* WebSocket frame/fragment reassembly state rides with the recvQ:
+   * a frame split across the transplant would otherwise be dropped
+   * (#104, latent -- CAP END is complete when revive runs -- but the
+   * queues and their decoder state must move together).  The handshake
+   * buffer (con_ws_hs_buf) is NOT carried: the handshake is decided
+   * before SASL completes, and temp's teardown frees it. */
+  memcpy(con_ws_frame_buf(ghost_con), con_ws_frame_buf(temp_con),
+         sizeof(con_ws_frame_buf(ghost_con)));
+  con_ws_frame_len(ghost_con) = con_ws_frame_len(temp_con);
+  con_ws_frame_len(temp_con) = 0;
+  memcpy(con_ws_frag_buf(ghost_con), con_ws_frag_buf(temp_con),
+         sizeof(con_ws_frag_buf(ghost_con)));
+  con_ws_frag_len(ghost_con) = con_ws_frag_len(temp_con);
+  con_ws_frag_opcode(ghost_con) = con_ws_frag_opcode(temp_con);
+  con_ws_frag_len(temp_con) = 0;
+  con_ws_frag_opcode(temp_con) = 0;
+
   /* Step 8: Copy CAP state from temp to ghost */
   memcpy(con_capab(ghost_con), con_capab(temp_con), sizeof(struct CapSet));
   memcpy(con_active_own(ghost_con), con_active_own(temp_con), sizeof(struct CapSet));
@@ -5533,6 +5550,21 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
     }
   }
 #endif
+
+  /* Step 10b: WebSocket-ness follows the SOCKET, exactly like FLAG_SSL
+   * above (#104).  The handshake set these on temp only; without the
+   * mirror, a WS login reviving a TCP-born ghost writes raw IRC bytes
+   * into the WebSocket stream from 001 on (undici/browsers die with
+   * 'Expected RSV1 to be clear', close 1006, and reconnect-loop into
+   * the same poisoned ghost), and the mirror case frames bytes onto a
+   * raw socket.  Set/clear symmetric so a stale value never survives
+   * in either direction; deliver_it()/read_packet() key framing on
+   * these flags. */
+  if (IsWebSocket(temp)) SetWebSocket(ghost); else ClearWebSocket(ghost);
+  if (IsWSText(temp)) SetWSText(ghost); else ClearWSText(ghost);
+  if (IsWSAutodetect(temp)) SetWSAutodetect(ghost); else ClearWSAutodetect(ghost);
+  ircd_strncpy(cli_wsorigin(ghost), cli_wsorigin(temp),
+               sizeof(cli_wsorigin(ghost)) - 1);
 
   /* Step 11: Clear holding flags on ghost */
   if (was_holding) {
