@@ -1204,6 +1204,7 @@ int main(int argc, char **argv) {
   IPcheck_init();
   timer_add(timer_init(&connect_timer), try_connections, 0, TT_RELATIVE, 1);
   timer_add(timer_init(&ping_timer), check_pings, 0, TT_RELATIVE, 1);
+  websocket_ping_timer_init();
   timer_add(timer_init(&destruct_event_timer), exec_expired_destruct_events, 0, TT_PERIODIC, 60);
   timer_add(timer_init(&history_purge_timer), history_purge_callback, 0,
             TT_PERIODIC, history_purge_interval());

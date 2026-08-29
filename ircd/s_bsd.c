@@ -337,6 +337,51 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
     IOResult result = IO_SUCCESS;
     int text_mode = IsWSText(cptr) ? 1 : 0;
     unsigned int total_ws_written = 0;
+    unsigned int consumed = 0;  /* input bytes whose frames were FULLY written */
+    struct Connection *wcon = cli_connect(cptr);
+
+    /* A previous flush left a partially-written frame on the wire
+     * (plaintext short write).  Its line was already consumed from the
+     * queue, so the REST of that exact frame must go out before any new
+     * frame -- resending from the frame start would corrupt the stream. */
+    if (con_ws_txrem(wcon)) {
+      unsigned int remlen = (unsigned)(con_ws_txrem_len(wcon) - con_ws_txrem_pos(wcon));
+      unsigned int wrote = 0;
+      IOResult r = IO_BLOCKED;
+#ifdef USE_SSL
+      if (cli_socket(cptr).ssl) {
+        int sr = SSL_write(cli_socket(cptr).ssl,
+                           con_ws_txrem(wcon) + con_ws_txrem_pos(wcon), remlen);
+        if (sr > 0) { wrote = (unsigned)sr; r = IO_SUCCESS; }
+        else {
+          int se = SSL_get_error(cli_socket(cptr).ssl, sr);
+          r = (se == SSL_ERROR_WANT_WRITE || se == SSL_ERROR_WANT_READ)
+                ? IO_BLOCKED : IO_FAILURE;
+        }
+      } else
+#endif
+        r = os_send_nonb(cli_fd(cptr), con_ws_txrem(wcon) + con_ws_txrem_pos(wcon),
+                         remlen, &wrote);
+      if (wrote) {
+        total_ws_written += wrote;
+        con_ws_txrem_pos(wcon) += (int)wrote;
+      }
+      if (con_ws_txrem_pos(wcon) >= con_ws_txrem_len(wcon)) {
+        MyFree(con_ws_txrem(wcon));
+        con_ws_txrem(wcon) = NULL;
+        con_ws_txrem_len(wcon) = con_ws_txrem_pos(wcon) = 0;
+      } else {
+        cli_sendB(cptr) += total_ws_written;
+        cli_sendB(&me)  += total_ws_written;
+        if (r == IO_FAILURE) {
+          cli_error(cptr) = errno;
+          SetFlag(cptr, FLAG_DEADSOCKET);
+          return 0;
+        }
+        SetFlag(cptr, FLAG_BLOCKED);
+        return 0;  /* remainder still pending; nothing new consumed */
+      }
+    }
 
     /* Get data from message queue as iovecs */
     iovcnt = msgq_mapiov(buf, iov, IOV_MAX, &bytes_count);
@@ -362,15 +407,19 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
       while (pos < end) {
         char *crlf = strstr(pos, "\r\n");
         int line_len;
+        int in_len;
         int frame_len;
 
         if (!crlf) {
-          /* Incomplete line (no \r\n) — shouldn't happen in normal IRC,
-           * but handle gracefully: send what we have */
-          line_len = end - pos;
-        } else {
-          line_len = crlf - pos;  /* exclude \r\n */
+          /* Incomplete tail: an artifact of the concat_buf cap when the
+           * mapped batch exceeded it.  Do NOT frame a truncated line --
+           * leave it queued (consumed stops before it) and the next
+           * flush re-frames it whole.  Every sender terminates lines
+           * with \r\n, so a permanent crlf-less tail cannot occur. */
+          break;
         }
+        line_len = crlf - pos;  /* exclude \r\n */
+        in_len = line_len + 2;  /* this line's share of queue bytes */
 
         if (line_len > 0) {
           char irc_line[FULL_MSG_SIZE + 4];
@@ -400,6 +449,7 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
             if (send_result > 0) {
               result = IO_SUCCESS;
               total_ws_written += send_result;
+              consumed += (unsigned)in_len;
             } else {
               int ssl_err = SSL_get_error(cli_socket(cptr).ssl, send_result);
               if (ssl_err == SSL_ERROR_WANT_WRITE || ssl_err == SSL_ERROR_WANT_READ)
@@ -416,20 +466,30 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
             if (result == IO_SUCCESS) {
               total_ws_written += frame_written;
               if (frame_written < (unsigned)frame_len) {
+                /* Short write: part of this frame is on the wire.  Stash
+                 * the remainder to be completed FIRST next flush, and
+                 * count the line consumed (its bytes precede everything
+                 * still queued). */
+                int rem = frame_len - (int)frame_written;
+                con_ws_txrem(wcon) = (char *)MyMalloc(rem);
+                memcpy(con_ws_txrem(wcon), ws_frame + frame_written, rem);
+                con_ws_txrem_len(wcon) = rem;
+                con_ws_txrem_pos(wcon) = 0;
+                consumed += (unsigned)in_len;
                 result = IO_BLOCKED;
-                break;  /* Partial write — stop */
+                break;
               }
+              consumed += (unsigned)in_len;
             } else {
               break;  /* Error — stop sending */
             }
           }
+        } else {
+          consumed += (unsigned)in_len;  /* bare CRLF: swallow */
         }
 
         /* Advance past this message (including \r\n) */
-        if (crlf)
-          pos = crlf + 2;
-        else
-          break;
+        pos = crlf + 2;
       }
     }
 
@@ -438,18 +498,24 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
       ClrFlag(cptr, FLAG_BLOCKED);
       cli_sendB(cptr) += total_ws_written;
       cli_sendB(&me)  += total_ws_written;
-      /* Return original byte count so msgq knows how much to delete */
-      bytes_written = bytes_count;
+      /* Consumed = bytes of lines whose frames were fully written.  Not
+       * bytes_count: a concat_buf-capped tail was never framed and must
+       * stay queued (the old return silently DROPPED it). */
+      bytes_written = consumed;
       break;
     case IO_BLOCKED:
       SetFlag(cptr, FLAG_BLOCKED);
       cli_sendB(cptr) += total_ws_written;
       cli_sendB(&me)  += total_ws_written;
-      /* Partial delivery — tell msgq we consumed everything we could.
-       * Since we can't partially consume msgq entries, report 0 to
-       * retry the whole batch next time, or bytes_count if we sent
-       * all frames despite a partial write on the last one. */
-      bytes_written = 0;
+      /* Consume exactly the fully-sent lines so the BLOCKED line sits at
+       * the queue head for the retry.  The retry then re-frames the SAME
+       * bytes into the same static buffer, satisfying OpenSSL's
+       * retry-same-buffer rule.  (The old return of 0 re-framed from the
+       * batch start: after a mid-batch WANT_WRITE the next SSL_write
+       * presented a DIFFERENT frame -> SSL_ERROR_SSL "bad write retry"
+       * -> the mid-session "Internal OpenSSL error" kill -- and every
+       * already-sent frame went out again as a duplicate.) */
+      bytes_written = consumed;
       break;
     case IO_FAILURE:
       cli_error(cptr) = errno;

@@ -190,6 +190,12 @@ static void dealloc_connection(struct Connection* con)
     con_ws_hs_buf(con) = NULL;
     con_ws_hs_len(con) = 0;
   }
+  /* Pending partial outbound WS frame (socket is gone with it) */
+  if (con_ws_txrem(con)) {
+    MyFree(con_ws_txrem(con));
+    con_ws_txrem(con) = NULL;
+    con_ws_txrem_len(con) = con_ws_txrem_pos(con) = 0;
+  }
 
   --connections.inuse;
 

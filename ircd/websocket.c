@@ -38,6 +38,7 @@
 #include "s_debug.h"
 #include "send.h"
 #include "ssl.h"
+#include "ircd_events.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -718,6 +719,14 @@ int websocket_encode_frame(const char *data, int data_len,
  */
 static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
 {
+  /* Never interleave with a pending blocked TLS write or a stashed
+   * partial frame: OpenSSL requires the retry SSL_write to present the
+   * SAME buffer (else SSL_ERROR_SSL "bad write retry" kills the
+   * connection), and a plaintext partial frame must be completed before
+   * any new bytes.  All callers are best-effort: WS PING responses are
+   * re-askable and close/keepalive frames are optional. */
+  if (IsBlocked(cptr) || con_ws_txrem(cli_connect(cptr)))
+    return 0;
 #ifdef USE_SSL
   if (cli_socket(cptr).ssl) {
     int result = SSL_write(cli_socket(cptr).ssl, data, len);
@@ -753,6 +762,50 @@ void websocket_send_close(struct Client *cptr, int code, const char *reason)
     memcpy(frame + 4, reason, rlen);
   Debug((DEBUG_DEBUG, "WebSocket: sending Close %d (%s)", code, reason ? reason : ""));
   ws_send_raw(cptr, frame, 4 + rlen);
+}
+
+/** Send an empty WS protocol-level PING (RFC 6455 5.5.2).  Browsers
+ * auto-PONG these with no JS involvement -- a ~30s cadence keeps mobile
+ * NAT/middlebox mappings alive (their idle timeouts are commonly shorter
+ * than the 90s IRC ping cycle; observed killing mobile WS clients with
+ * "unexpected eof while reading" every few minutes) and surfaces dead
+ * sockets in seconds.  Best-effort via ws_send_raw, which skips while a
+ * TLS write retry is pending. */
+void websocket_send_ping(struct Client *cptr)
+{
+  static const unsigned char ping_frame[2] = { 0x89, 0x00 };
+  ws_send_raw(cptr, ping_frame, sizeof(ping_frame));
+}
+
+static struct Timer ws_ping_timer;
+
+static void ws_ping_callback(struct Event *ev)
+{
+  int i;
+
+  if (ev_type(ev) != ET_EXPIRE)
+    return;
+  for (i = 0; i <= HighestFd; i++) {
+    struct Client *cptr = LocalClientArray[i];
+    if (!cptr || !IsWebSocket(cptr) || IsDead(cptr) || cli_fd(cptr) < 0)
+      continue;
+    if (IsWSNeedHandshake(cptr) || IsWSSniff(cptr))
+      continue;
+    websocket_send_ping(cptr);
+  }
+}
+
+/** Arm the periodic WS keepalive ping timer (boot; interval from
+ * FEAT_WEBSOCKET_PING_INTERVAL, 0 disables, floor 10s). */
+void websocket_ping_timer_init(void)
+{
+  int iv = feature_int(FEAT_WEBSOCKET_PING_INTERVAL);
+
+  if (iv <= 0)
+    return;
+  if (iv < 10)
+    iv = 10;
+  timer_add(timer_init(&ws_ping_timer), ws_ping_callback, 0, TT_PERIODIC, iv);
 }
 
 int websocket_handle_control(struct Client *cptr, int opcode,

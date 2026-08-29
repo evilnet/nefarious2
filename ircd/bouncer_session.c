@@ -5528,6 +5528,15 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   con_ws_frag_opcode(ghost_con) = con_ws_frag_opcode(temp_con);
   con_ws_frag_len(temp_con) = 0;
   con_ws_frag_opcode(temp_con) = 0;
+  /* Outbound partial-frame remainder follows the socket: the ghost's
+   * old one (if any) died with its old socket; temp's rides along. */
+  if (con_ws_txrem(ghost_con))
+    MyFree(con_ws_txrem(ghost_con));
+  con_ws_txrem(ghost_con) = con_ws_txrem(temp_con);
+  con_ws_txrem_len(ghost_con) = con_ws_txrem_len(temp_con);
+  con_ws_txrem_pos(ghost_con) = con_ws_txrem_pos(temp_con);
+  con_ws_txrem(temp_con) = NULL;
+  con_ws_txrem_len(temp_con) = con_ws_txrem_pos(temp_con) = 0;
 
   /* Step 8: Copy CAP state from temp to ghost */
   memcpy(con_capab(ghost_con), con_capab(temp_con), sizeof(struct CapSet));

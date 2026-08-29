@@ -484,6 +484,9 @@ struct Connection
   int                 con_ws_frag_opcode; /**< Opcode of first fragment */
   char*               con_ws_hs_buf;      /**< HTTP upgrade request being accumulated (heap, WS_HANDSHAKE_MAX + 1; freed once the handshake is decided) */
   int                 con_ws_hs_len;      /**< Bytes in con_ws_hs_buf */
+  char*               con_ws_txrem;       /**< Unsent tail of a partially-written outbound WS frame (heap, on demand; plaintext sockets) */
+  int                 con_ws_txrem_len;   /**< Total bytes in con_ws_txrem */
+  int                 con_ws_txrem_pos;   /**< Bytes of con_ws_txrem already written */
   time_t              con_burst_gate_deadline; /**< Deadline at which to force-release a
                                                   burst gate held on a non-BXF-aware (legacy)
                                                   peer.  Only meaningful while IsBurstGated().
@@ -1031,6 +1034,9 @@ struct Client {
 #define con_ws_hs_buf(con)	((con)->con_ws_hs_buf)
 /** Get WebSocket handshake accumulation buffer length. */
 #define con_ws_hs_len(con)	((con)->con_ws_hs_len)
+#define con_ws_txrem(con)	((con)->con_ws_txrem)
+#define con_ws_txrem_len(con)	((con)->con_ws_txrem_len)
+#define con_ws_txrem_pos(con)	((con)->con_ws_txrem_pos)
 /** Get per-class recv classifier state. */
 #define con_recv_state(con)     ((con)->con_recv_state)
 /** Get tag-region byte count for the in-flight wire line. */

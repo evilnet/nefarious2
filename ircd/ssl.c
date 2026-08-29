@@ -55,6 +55,8 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 
+void ssl_doerror_anon(void);
+
 #ifndef IOV_MAX
 #define IOV_MAX 1024
 #endif /* IOV_MAX */
@@ -573,6 +575,7 @@ int ssl_accept(struct Client *cptr)
             return 1;
         default:
           cli_sslerror(cptr) = ssl_error_str(err, errno);
+          ssl_doerror_anon();
 
           Debug((DEBUG_ERROR, "SSL_accept: %s", cli_sslerror(cptr)));
 
@@ -670,7 +673,11 @@ void ssl_doerror(struct Client *cptr)
 
   memset(&ebuf, 0, 120);
   err = ERR_get_error();
-  ERR_error_string(err, (char *)&ebuf);
+  if (err)
+    ERR_error_string(err, (char *)&ebuf);
+  else
+    snprintf(ebuf, sizeof(ebuf), "no OpenSSL error queued (errno: %s)",
+             strerror(errno));
 
   sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for client %s: %s", cli_name(cptr), ebuf);
 }
@@ -1081,7 +1088,11 @@ char *ssl_error_str(int err, int my_errno)
       break;
     case SSL_ERROR_SSL:
       ssl_errstr = "Internal OpenSSL error or protocol error";
-      ssl_doerror_anon();
+      /* Do NOT drain the OpenSSL error queue here: callers that follow
+       * up with ssl_doerror(cptr) need the queued reason.  (This used
+       * to call ssl_doerror_anon(), which popped the queue -- every
+       * real error printed as "unknown client" and the subsequent named
+       * notice printed an empty 00000000 reason.) */
       break;
     case SSL_ERROR_WANT_READ:
       ssl_errstr = "OpenSSL functions requested a read()";

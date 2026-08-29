@@ -115,6 +115,8 @@ extern int websocket_handle_control(struct Client *cptr, int opcode,
  * @param[in] code RFC 6455 status code (e.g. 1009 Message Too Big).
  * @param[in] reason Optional short reason text (truncated to 123 bytes).
  */
+extern void websocket_send_ping(struct Client *cptr);
+extern void websocket_ping_timer_init(void);
 extern void websocket_send_close(struct Client *cptr, int code,
                                  const char *reason);
 
