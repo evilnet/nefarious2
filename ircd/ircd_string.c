@@ -62,6 +62,13 @@ int string_has_wildcards(const char* str)
 /**
  * Check if a given string is a valid UTF-8 encoded string.
  *
+ * This answers the encoding question only.  C0 control characters are valid
+ * UTF-8 and are accepted: IRC carries CTCP delimiters (0x01) and the mIRC
+ * formatting codes (bold 0x02, colour 0x03, reset 0x0F, reverse 0x16,
+ * monospace 0x11, italic 0x1D, strikethrough 0x1E, underline 0x1F) as bare
+ * control bytes, and rejecting them here would strip them from every message.
+ * A caller that wants printable-only text must check for that separately.
+ *
  * @param str The string to check.
  * @return 1 if the string is valid UTF-8, 0 otherwise.
  */
@@ -73,12 +80,10 @@ int string_is_valid_utf8(const char * str)
     const unsigned char * bytes = (const unsigned char *)str;
     while(*bytes)
     {
-        if( (// ASCII
-             // use bytes[0] <= 0x7F to allow ASCII control characters
-                bytes[0] == 0x09 ||
-                bytes[0] == 0x0A ||
-                bytes[0] == 0x0D ||
-                (0x20 <= bytes[0] && bytes[0] <= 0x7E)
+        if( (// ASCII: every byte 0x01-0x7F is a well-formed single-byte
+             // sequence, C0 control characters included.  0x00 cannot occur
+             // here -- it terminates the string and ends the loop above.
+                bytes[0] <= 0x7F
             )
         ) {
             bytes += 1;
@@ -159,6 +164,13 @@ int string_is_valid_utf8(const char * str)
  * The string is modified in place. Caller should ensure str has at least
  * BUFSIZE bytes available.
  *
+ * Note that "no modification was needed" is also what callers get when the
+ * invalid bytes lie beyond the working buffer: the scan stops at BUFSIZE
+ * while string_is_valid_utf8() scans the whole string, so a long line whose
+ * only bad byte is near the end validates as invalid yet sanitizes to -1.
+ * Callers must therefore treat -1 as "leave the string and its length
+ * alone", never as a length.
+ *
  * @param str The string to sanitize (will be modified).
  * @return Length of sanitized string, or -1 if no modification was needed.
  */
@@ -182,9 +194,8 @@ int string_sanitize_utf8(char *str)
     {
         seq_len = 0;
 
-        /* ASCII printable and common control characters */
-        if (in[0] == 0x09 || in[0] == 0x0A || in[0] == 0x0D ||
-            (0x20 <= in[0] && in[0] <= 0x7E))
+        /* ASCII: any byte 0x01-0x7F, C0 control characters included */
+        if (in[0] <= 0x7F)
         {
             seq_len = 1;
         }

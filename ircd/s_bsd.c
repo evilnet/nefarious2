@@ -433,7 +433,16 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
            * using text messages. We replace invalid bytes with U+FFFD.
            */
           if (text_mode && !string_is_valid_utf8(irc_line)) {
-            line_len = string_sanitize_utf8(irc_line);
+            /* string_sanitize_utf8() returns -1 for "nothing modified",
+             * which happens whenever the offending bytes sit past its
+             * BUFSIZE working window: the line is then unchanged and its
+             * original length still stands.  Assigning that -1 into
+             * line_len would hand websocket_encode_frame() a data_len of
+             * -1, i.e. memcpy(..., SIZE_MAX).  The inbound path at the
+             * bottom of this file already guards it; do the same here. */
+            int sanitized_len = string_sanitize_utf8(irc_line);
+            if (sanitized_len >= 0)
+              line_len = sanitized_len;
           }
 
           /* Encode as WebSocket frame using client's negotiated/detected mode */
@@ -442,6 +451,17 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
 
           Debug((DEBUG_DEBUG, "WebSocket deliver: line_len=%d, frame_len=%d, msg='%.50s'",
                  line_len, frame_len, irc_line));
+
+          if (frame_len <= 0) {
+            /* Un-encodable line: consume and SKIP it.  (PR #102 wrote a
+             * bare break against the old return-bytes_count accounting,
+             * where the batch was deleted wholesale; under per-line
+             * consumed accounting a break would leave this line at the
+             * queue head and stall the connection's output forever.) */
+            consumed += (unsigned)in_len;
+            pos = crlf + 2;
+            continue;
+          }
 
 #ifdef USE_SSL
           if (cli_socket(cptr).ssl) {
