@@ -52,6 +52,7 @@
 #include "bouncer_session.h"
 #include "s_conf.h"
 #include "class.h"
+#include "ircd_snprintf.h"
 #include "persistence_profile.h"
 
 #include <string.h>
@@ -877,6 +878,79 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
  * @param[in] parc Argument count (parv[0] is command name).
  * @param[in] parv Argument vector.
  */
+/* ---- LIST subcommand (session enumeration, spec 'LIST extension') ----
+ *
+ * PERSISTENCE LIST
+ *   -> PERSISTENCE SESSION <session-id> <state> <nick> <channels> :<info>
+ *      (zero or more)
+ *   -> PERSISTENCE ENDOFLIST
+ *
+ * Valid post-SASL pre-CAP-END (persistence_account_for resolves the
+ * SASL-complete account before registration) and after registration
+ * (spec: MUST also accept LIST post-registration).  Channels field is
+ * comma-separated or '*'; capped to line budget with the true count in
+ * <info> so a truncated list is detectable. */
+static int persistence_cmd_list(struct Client *sptr)
+{
+  const char *account = persistence_account_for(sptr);
+  struct AccountSessions *as;
+  struct BouncerSession *sess;
+
+  if (!account) {
+    send_fail(sptr, "PERSISTENCE", "ACCOUNT_REQUIRED", "LIST",
+              "You must be authenticated to use PERSISTENCE LIST");
+    return 0;
+  }
+
+  as = bounce_find_by_account(account);
+  for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext) {
+    char chanbuf[400];
+    char info[160];
+    const char *state;
+    const char *nick;
+    size_t used = 0;
+    int i;
+
+    if (sess->hs_state == BOUNCE_DESTROYING)
+      continue;
+    state = (sess->hs_state == BOUNCE_HOLDING) ? "HELD" : "ACTIVE";
+    nick = (sess->hs_client && cli_name(sess->hs_client)[0])
+             ? cli_name(sess->hs_client) : "*";
+
+    chanbuf[0] = '\0';
+    for (i = 0; i < sess->hs_chancount; i++) {
+      size_t nlen = strlen(sess->hs_channels[i].name);
+      if (used + nlen + 2 >= sizeof(chanbuf))
+        break;  /* line budget; the count in <info> stays truthful */
+      if (used)
+        chanbuf[used++] = ',';
+      memcpy(chanbuf + used, sess->hs_channels[i].name, nlen);
+      used += nlen;
+      chanbuf[used] = '\0';
+    }
+
+    if (sess->hs_state == BOUNCE_HOLDING)
+      ircd_snprintf(0, info, sizeof(info), "held; %d channel%s%s",
+                    sess->hs_chancount,
+                    sess->hs_chancount == 1 ? "" : "s",
+                    (i < sess->hs_chancount) ? " (list truncated)" : "");
+    else
+      ircd_snprintf(0, info, sizeof(info), "active on %s; %d channel%s%s",
+                    (sess->hs_client && cli_user(sess->hs_client)
+                     && cli_user(sess->hs_client)->server)
+                      ? cli_name(cli_user(sess->hs_client)->server) : "*",
+                    sess->hs_chancount,
+                    sess->hs_chancount == 1 ? "" : "s",
+                    (i < sess->hs_chancount) ? " (list truncated)" : "");
+
+    sendrawto_one(sptr, ":%s PERSISTENCE SESSION %s %s %s %s :%s",
+                  cli_name(&me), sess->hs_sessid, state, nick,
+                  used ? chanbuf : "*", info);
+  }
+  sendrawto_one(sptr, ":%s PERSISTENCE ENDOFLIST", cli_name(&me));
+  return 0;
+}
+
 int m_persistence(struct Client *cptr, struct Client *sptr,
                   int parc, char *parv[])
 {
@@ -907,6 +981,9 @@ int m_persistence(struct Client *cptr, struct Client *sptr,
 
   if (0 == ircd_strcmp(sub, "DETACH"))
     return persistence_cmd_detach(sptr, parc, parv);
+
+  if (0 == ircd_strcmp(sub, "LIST"))
+    return persistence_cmd_list(sptr);
 
   send_fail_ctx(sptr, "PERSISTENCE", "INVALID_PARAMETERS",
                 "Unknown PERSISTENCE subcommand",
