@@ -283,9 +283,12 @@ const char* get_vapid_pubkey(void)
  * `+evilnet.github.io/sid=<sessid>` marker injected into PM history
  * (ircd_relay.c) is what chathistory's ephemeral-participant auth check
  * (history_pm_target_has_sessid) matches against.  `+afternet.org/` is
- * ALSO reserved: records stored before 2026-08-29 carry the sid marker
- * under that legacy namespace and the auth check still honors it, so a
- * client must not be able to plant tags there either.  A client-supplied
+ * ALSO reserved, permanently and independent of any single use: it is
+ * the network's own domain (cf. the afternet.org/account WEBIRC
+ * option), so client tags have no claim to it -- and concretely,
+ * records stored before 2026-08-29 carry the sid marker under it and
+ * the auth check still honors those.  Do NOT drop this entry when the
+ * legacy records age out.  A client-supplied
  * tag in either namespace is dropped at capture (parse.c).  The vendor
  * part is a DNS name -> case-insensitive match (ircd_strncmp folds
  * ASCII letters; the '.' '/' '+' are compared exactly).
