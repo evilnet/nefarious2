@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "websocket.h"
 #include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
 #include "session_markread.h"
@@ -5074,6 +5075,14 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
  * This is called from s_bsd.c when a disconnect is detected and
  * bounce_should_hold() returned a session.
  */
+const char *bounce_last_hold_reason(struct Client *cptr)
+{
+  struct BouncerSession *session = bounce_get_session(cptr);
+  if (!session || !session->hs_hold_reason[0])
+    return NULL;
+  return session->hs_hold_reason;
+}
+
 int bounce_hold_client(struct Client *cptr, const char *comment)
 {
   struct BouncerSession *session;
@@ -5107,6 +5116,14 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   session->hs_state = BOUNCE_HOLDING;
   session->hs_enforced = 0; /* Phase 3: cleared on transition to HOLDING */
   session->hs_disconnect_time = CurrentTime;
+  /* Record WHY -- holds suppress QUIT and never reach the connexit
+   * notice, so without this the cause of death is destroyed.  Echoed
+   * to the user at resume (replay_send_summary) and shown in /CHECK. */
+  ircd_strncpy(session->hs_hold_reason, comment ? comment : "unknown",
+               sizeof(session->hs_hold_reason) - 1);
+  log_write(LS_USER, L_INFO, 0, "Bouncer hold for %s (%s): %s",
+            session->hs_account, cli_name(cptr),
+            comment ? comment : "unknown");
   ircd_strncpy(session->hs_ghost_numeric, cli_yxx(cptr), sizeof(session->hs_ghost_numeric));
   session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
   /* hs_client still points to cptr (now a ghost) */
@@ -5119,6 +5136,13 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
 
   /* Broadcast detach to all servers (sends channel list for cross-server) */
   bounce_broadcast(session, 'D', NULL);
+
+  /* WebSocket farewell (best effort): tell the client WHY before the
+   * socket drops, so browsers see a labeled close instead of a bare
+   * 1006 indistinguishable from a network cut.  Dead sockets (write
+   * errors, EOF) can't be written to -- skip. */
+  if (IsWebSocket(cptr) && !IsDead(cptr) && cli_fd(cptr) >= 0)
+    websocket_send_close(cptr, 1000, comment ? comment : "held");
 
   /* Close the socket but keep the client structure alive.
    * Note: We do NOT call exit_client() here - that would destroy the client.

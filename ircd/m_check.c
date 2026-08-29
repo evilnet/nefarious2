@@ -767,6 +767,12 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
          ircd_snprintf(0, outbuf, sizeof(outbuf), "  Hold override:: %s", hold_str);
          send_reply(sptr, RPL_DATASTR, outbuf);
 
+         if (session->hs_hold_reason[0]) {
+            ircd_snprintf(0, outbuf, sizeof(outbuf), "Last disconnect:: %s",
+                          session->hs_hold_reason);
+            send_reply(sptr, RPL_DATASTR, outbuf);
+         }
+
          ircd_snprintf(0, outbuf, sizeof(outbuf), "  Session since:: %s", myctime(session->hs_created));
          send_reply(sptr, RPL_DATASTR, outbuf);
 

@@ -422,6 +422,13 @@ struct BouncerSession {
   char hs_ghost_numeric[6];           /**< Ghost client numeric during HOLDING */
 
   int hs_hold_override;               /**< -1=use default, 0=no hold, 1=hold */
+  char hs_hold_reason[128];           /**< Why the last hold happened (the
+                                       *   disconnect comment: "Ping timeout",
+                                       *   "Read error: ...", a QUIT message,
+                                       *   "WebSocket closed", ...).  In-memory
+                                       *   diagnostic only -- NOT persisted to
+                                       *   MDBX (a restart clears it); echoed
+                                       *   at resume + shown in /CHECK. */
 
   struct BounceChannel hs_channels[BOUNCER_MAX_CHANNELS];
   int hs_chancount;
@@ -898,6 +905,12 @@ extern void bounce_snapshot_channels(struct BouncerSession *session,
  * @return Session pointer, or NULL if client has no bouncer session.
  */
 extern struct BouncerSession *bounce_get_session(struct Client *cptr);
+
+/** Reason recorded at this client's session's last hold, or NULL.
+ * Diagnostic: lets the resume path tell the user why the previous
+ * connection ended (the information is otherwise destroyed -- holds
+ * never emit QUIT or connexit notices). */
+extern const char *bounce_last_hold_reason(struct Client *cptr);
 
 /** Find any session for an account (ACTIVE or HOLDING).
  * Unlike bounce_find_best_held(), this returns any session.

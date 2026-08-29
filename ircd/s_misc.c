@@ -61,6 +61,7 @@
 #include "send.h"
 #include "struct.h"
 #include "sys.h"
+#include "websocket.h"
 #include "uping.h"
 #include "userload.h"
 #include "watch.h"
@@ -820,6 +821,13 @@ int exit_client(struct Client *cptr,
   if (MyConnect(victim))
   {
     SetFlag(victim, FLAG_CLOSING);
+
+    /* WebSocket farewell (best effort): label the close with the exit
+     * reason so browser clients can distinguish a server-side close
+     * from a network cut (otherwise every death is a bare 1006).
+     * Dead sockets can't be written to -- skip. */
+    if (IsWebSocket(victim) && !IsDead(victim) && cli_fd(victim) >= 0)
+      websocket_send_close(victim, 1000, comment);
 
     if (feature_bool(FEAT_CONNEXIT_NOTICES) && IsUser(victim))
       sendto_opmask_butone_global(&me, SNO_CONNEXIT,

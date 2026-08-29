@@ -508,6 +508,15 @@ static void replay_send_summary(struct Client *sptr, struct ReplayState *rs)
                     sptr, total_chans);
     }
   }
+
+  /* Diagnostic: why did the previous connection end?  Holds destroy
+   * the QUIT/notice trail, so this is the user's only view of it. */
+  {
+    const char *why = bounce_last_hold_reason(sptr);
+    if (why)
+      sendcmdto_one(&me, CMD_NOTICE, sptr,
+                    "%C :Previous disconnect: %s", sptr, why);
+  }
 }
 
 /*
