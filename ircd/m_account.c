@@ -184,19 +184,20 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
          * string is still set so the LMDB lookup key is valid. */
         metadata_clear_client(acptr);
 
-        /* Decrement authusers for all channels this user is in */
-        {
-          struct Membership *chan;
-          for (chan = cli_user(acptr)->channel; chan; chan = chan->next_channel) {
-            if (chan->channel->authusers > 0)
-              --chan->channel->authusers;
-          }
-        }
+        /* Decrement authusers for all channels this user is in.
+         * channel_account_adjust skips CHFL_ALIAS memberships, so an
+         * AC U addressed at an alias numeric cannot steal counts the
+         * alias never added. */
+        channel_account_adjust(acptr, -1);
+
+        /* Emit the alias account-clear BEFORE ClearAccount:
+         * bounce_emit_alias_update bails on !IsAccount(primary), so
+         * the old order (clear first) silently stranded every alias
+         * with a stale FLAG_ACCOUNT after deauth. */
+        bounce_emit_alias_update(acptr, "account", "");
 
         ClearAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
-
-        bounce_emit_alias_update(acptr, "account", "");
 
         {
           char ac_msgid[64] = "";
@@ -248,17 +249,21 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         /* Load account-linked metadata BEFORE setting account flag */
         metadata_load_account(acptr, parv[3]);
 
-        ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
-        SetAccount(acptr);
-
-        bounce_emit_alias_update(acptr, "account", cli_user(acptr)->account);
-
-        /* Increment authusers for all channels this user is in */
         {
-          struct Membership *chan;
-          for (chan = cli_user(acptr)->channel; chan; chan = chan->next_channel) {
-            ++chan->channel->authusers;
-          }
+          int was_account = IsAccount(acptr);
+
+          ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
+          SetAccount(acptr);
+
+          bounce_emit_alias_update(acptr, "account", cli_user(acptr)->account);
+
+          /* Count this member's channels only on a false->true account
+           * transition.  An account CHANGE ('M') arrives with the user
+           * already counted -- the old unconditional loop double-counted
+           * every re-login on every receiving server, leaking authusers
+           * upward and desyncing the storage gate across the network. */
+          if (!was_account)
+            channel_account_adjust(acptr, +1);
         }
 
         if (parc > 4) {
@@ -444,6 +449,10 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);
+    /* Chathistory-gate parity with the EXTENDED_ACCOUNTS branch: count
+     * the member's channels (the !IsAccount bail above guarantees this
+     * is a false->true transition). */
+    channel_account_adjust(acptr, +1);
 
     {
       char ac_msgid[64] = "";

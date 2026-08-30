@@ -55,33 +55,40 @@ static int webhook_initialized = 0;
  */
 static void deauth_client(struct Client *cptr, const char *reason)
 {
-  struct Membership *chan;
-
   if (!IsAccount(cptr) || !cli_user(cptr))
     return;
 
   /* Send notice to the user explaining what happened */
   sendcmdto_one(&me, CMD_NOTICE, cptr, "%C :%s", cptr, reason);
 
-  /* Decrement authusers on all channels */
-  for (chan = cli_user(cptr)->channel; chan; chan = chan->next_channel) {
-    if (chan->channel->authusers > 0)
-      --chan->channel->authusers;
-  }
+  /* Decrement authusers on all channels.  channel_account_adjust
+   * skips CHFL_ALIAS memberships -- alias memberships were never
+   * counted, and the old open-coded loop stole counts whenever the
+   * session walk matched a bouncer alias. */
+  channel_account_adjust(cptr, -1);
+
+  /* Notify bouncer aliases BEFORE clearing: bounce_emit_alias_update
+   * bails on !IsAccount(primary), so clearing first stranded every
+   * alias with a stale FLAG_ACCOUNT. */
+  bounce_emit_alias_update(cptr, "account", "");
 
   /* Clear account locally */
   ClearAccount(cptr);
   ircd_strncpy(cli_user(cptr)->account, "", ACCOUNTLEN + 1);
 
-  /* Notify bouncer aliases */
-  bounce_emit_alias_update(cptr, "account", "");
-
   /* Notify channel members with account-notify capability */
   sendcmdto_common_channels_capab_butone(cptr, CMD_ACCOUNT, cptr,
                                           CAP_ACCNOTIFY, CAP_NONE, "*");
 
-  /* Propagate AC U to network */
-  sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C U", cptr);
+  /* Propagate the account clear.  "AC <numeric> U" is
+   * EXTENDED_ACCOUNTS syntax; the legacy AC grammar has no unregister
+   * form at all (a legacy parser reads "U" as an account name and
+   * raises a protocol violation on the already-registered user), so
+   * under legacy accounts peers cannot be told -- mirror
+   * sasl_auth.c's EXTENDED_ACCOUNTS branching instead of emitting a
+   * token every legacy peer rejects. */
+  if (feature_bool(FEAT_EXTENDED_ACCOUNTS))
+    sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C U", cptr);
 
   wh_stats.sessions_killed++;  /* reuse counter for deauth+kill */
 }
@@ -101,6 +108,14 @@ static void handle_sessions_for_account(const char *account, const char *reason,
     if (!IsUser(cptr) || !IsAccount(cptr))
       continue;
     if (!cli_user(cptr) || ircd_strcmp(cli_user(cptr)->account, account) != 0)
+      continue;
+
+    /* Deauth targets the session primary; aliases mirror the primary's
+     * account via the BX U emit inside deauth_client, and a direct
+     * alias deauth would leak the alias numeric to legacy peers via
+     * AC U (aliases are BX C-introduced).  Kills still walk aliases --
+     * every socket of a disabled account must go. */
+    if (!do_kill && IsBouncerAlias(cptr))
       continue;
 
     if (do_kill) {

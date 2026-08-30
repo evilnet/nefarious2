@@ -14,6 +14,7 @@
 
 #include "sasl_auth.h"
 #include "capab.h"
+#include "channel.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -623,6 +624,13 @@ void sasl_complete_login(struct Client *sptr, const char *account,
 
       ircd_strncpy(cli_user(sptr)->account, cli_saslaccount(sptr), ACCOUNTLEN + 1);
       SetAccount(sptr);
+
+      /* Chathistory gate: this is the post-registration attach the
+       * authusers counter never saw (drift class: FLAG_ACCOUNT flip
+       * mid-membership).  Count only the false->true transition ('R');
+       * an account change ('M') is already counted. */
+      if (type == 'R')
+        channel_account_adjust(sptr, +1);
 
       bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
 

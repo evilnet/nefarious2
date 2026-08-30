@@ -874,6 +874,42 @@ static int remove_member_from_channel(struct Membership* member)
   return sub1_from_channel(chptr);
 }
 
+/** Adjust the authusers counter on every channel @a cptr is a member
+ * of, skipping CHFL_ALIAS memberships (alias memberships are never
+ * counted at add/remove time and must never be counted here either).
+ *
+ * This is THE chokepoint for account-state transitions on a client
+ * that already holds memberships: the add/remove sites above evaluate
+ * IsAccount() at membership add/remove time, so any FLAG_ACCOUNT flip
+ * in between silently desyncs the counter unless the flip site calls
+ * this helper.  Under FEAT_CHATHISTORY_REQUIRE_AUTH a low counter
+ * silently disables history storage for the channel, so drift here is
+ * an invisible data hole (decrements are guarded, never a crash).
+ *
+ * Call with delta=+1 immediately AFTER SetAccount on a false->true
+ * transition, and delta=-1 BEFORE ClearAccount on a true->false one.
+ * An account CHANGE (name swap, flag stays set) must NOT call this.
+ *
+ * @param cptr  Client whose memberships to walk.
+ * @param delta +1 or -1.
+ */
+void channel_account_adjust(struct Client *cptr, int delta)
+{
+  struct Membership *member;
+
+  if (!cptr || !cli_user(cptr))
+    return;
+
+  for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
+    if (IsMemberAlias(member))
+      continue;
+    if (delta > 0)
+      ++member->channel->authusers;
+    else if (member->channel->authusers > 0)
+      --member->channel->authusers;
+  }
+}
+
 /** Check if all the remaining members on the channel are zombies
  *
  * @returns False if the channel has any non zombie members, True otherwise.

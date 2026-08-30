@@ -543,6 +543,7 @@ extern int client_can_send_to_channel(struct Client *cptr, struct Channel *chptr
 
 extern void remove_user_from_channel(struct Client *sptr, struct Channel *chptr);
 extern void remove_user_from_all_channels(struct Client* cptr);
+extern void channel_account_adjust(struct Client *cptr, int delta);
 
 extern int is_chan_op(struct Client *cptr, struct Channel *chptr);
 extern int is_zombie(struct Client *cptr, struct Channel *chptr);

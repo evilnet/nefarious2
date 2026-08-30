@@ -44,6 +44,7 @@
 #include "config.h"
 
 #include "capab.h"
+#include "channel.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -234,6 +235,10 @@ static void register_complete_success(struct Client *acptr, const char *account)
       ircd_strncpy(cli_user(acptr)->account, account,
                    sizeof(cli_user(acptr)->account));
       SetAccount(acptr);
+      /* Chathistory gate: post-registration REGISTER is a FLAG_ACCOUNT
+       * flip mid-membership -- count it, or this client's eventual PART
+       * decrements a count it never added (authusers drift class). */
+      channel_account_adjust(acptr, +1);
       /* P1 A3 residue: a post-registration REGISTER attaches an account to
        * an already-registered client outside the register_user chokepoint
        * (that ran at initial registration) -- load metadata here. */

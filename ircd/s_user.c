@@ -2547,6 +2547,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
        * still carries "name:ts". */
       if (IsRegistered(acptr))
         metadata_load_account(acptr, cli_user(acptr)->account);
+      /* Fork chathistory gate: the authusers counter (born c07b9d9) never
+       * learned about this upstream-era account attach.  A live client
+       * gaining an account here must be counted, or its eventual PART
+       * decrements a count it never added and the REQUIRE_AUTH storage
+       * gate drifts low.  Pre-registration clients (mid burst-intro)
+       * hold no memberships, so the walk no-ops for them. */
+      channel_account_adjust(acptr, +1);
   }
 
   if (!FlagHas(&setflags, FLAG_CLOAKIP) && IsCloakIP(acptr))
