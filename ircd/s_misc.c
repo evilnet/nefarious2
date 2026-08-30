@@ -185,37 +185,10 @@ const char* get_client_name(const struct Client* sptr, int showip)
 }
 
 #ifdef USE_ROCKSDB
-/** Derive a per-channel msgid from a base msgid and channel name.
- * Deterministic: same (base, channel) -> same result on every server.
- * Used for QUIT events where one S2S msgid maps to N channel entries.
- * @param[out] buf Output buffer for derived msgid.
- * @param[in] buflen Size of output buffer.
- * @param[in] base_msgid Base msgid from S2S tag.
- * @param[in] channel Channel name.
- * @return Pointer to buf.
- */
-static char *derive_channel_msgid(char *buf, size_t buflen,
-                                  const char *base_msgid, const char *channel)
-{
-  /* FNV-1a hash of channel name (case-insensitive) */
-  uint32_t h = 2166136261u;
-  const char *p;
-  char disc[7];
-
-  for (p = channel; *p; p++) {
-    unsigned char c = (unsigned char)*p;
-    if (c >= 'A' && c <= 'Z')
-      c += 'a' - 'A';
-    h ^= (uint32_t)c;
-    h *= 16777619u;
-  }
-
-  /* 6 base64 chars encodes 32 bits (top 4 bits zero).
-   * Birthday collision at 1000 channels: ~10^-4. Acceptable. */
-  inttobase64(disc, h, 6);
-  snprintf(buf, buflen, "%s%s", base_msgid, disc);
-  return buf;
-}
+/* derive_channel_msgid removed: the multi-target msgid index in
+ * history.c makes one shared msgid per multi-channel event correct in
+ * storage; per-channel derived msgids (which would have broken the
+ * one-msgid-per-event invariant) were the rejected alternative. */
 
 /** Store QUIT events in history for all channels the user is on.
  * Uses the same msgid that was broadcast to clients so they can deduplicate.

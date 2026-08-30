@@ -957,6 +957,168 @@ struct db_env *history_get_env(void)
   return history_db_env;
 }
 
+/* ---------------------------------------------------------------- */
+/* msgid index — multi-target scheme                                  */
+/*                                                                    */
+/* One msgid can legitimately exist under multiple targets: a QUIT or */
+/* NICK event stores one row per common channel, all sharing the      */
+/* broadcast msgid (one msgid per event across all delivery paths).   */
+/* The old index keyed rows on the bare msgid, so the last-written    */
+/* channel silently overwrote the rest, and evicting ONE channel's    */
+/* copy deleted the shared index row out from under every other       */
+/* channel's still-live rows (anchors died network-visibly).          */
+/*                                                                    */
+/* New scheme: key = "msgid\0target", value = "timestamp" — naturally */
+/* multi-row, exact per-target deletes, no read-modify-write.  Rows   */
+/* written before this change (key = bare msgid, value =              */
+/* "target\0timestamp\0") remain readable via a legacy fallback and  */
+/* age out through retention.                                          */
+/* ---------------------------------------------------------------- */
+
+/** Build the new-scheme index key "msgid\0target".
+ * @return Key length, or -1 if it doesn't fit. */
+static int build_msgid_index_key(char *buf, size_t bufsize,
+                                 const char *msgid, const char *target)
+{
+  size_t ml = strlen(msgid);
+  size_t tl = strlen(target);
+  if (ml + 1 + tl > bufsize)
+    return -1;
+  memcpy(buf, msgid, ml);
+  buf[ml] = '\0';
+  memcpy(buf + ml + 1, target, tl);
+  return (int)(ml + 1 + tl);
+}
+
+/** Parse a LEGACY index value ("target\0timestamp[\0]") into
+ * @a timestamp (and optionally @a target_out).
+ * @return 0 on success, -1 on malformed. */
+static int parse_legacy_msgid_val(const struct db_val *val, char *timestamp,
+                                  char *target_out, size_t target_sz)
+{
+  const char *sep = memchr(val->base, KEY_SEP, val->len);
+  size_t copy_len;
+  if (!sep)
+    return -1;
+  if (target_out) {
+    size_t tl = (size_t)(sep - (const char *)val->base);
+    if (tl >= target_sz)
+      return -1;
+    memcpy(target_out, val->base, tl);
+    target_out[tl] = '\0';
+  }
+  sep++;
+  copy_len = (const char *)val->base + val->len - sep;
+  if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
+    copy_len--;
+  if (copy_len == 0 || copy_len >= HISTORY_TIMESTAMP_LEN)
+    return -1;
+  memcpy(timestamp, sep, copy_len);
+  timestamp[copy_len] = '\0';
+  return 0;
+}
+
+/** Resolve @a msgid to a timestamp (and optionally the target) via the
+ * index: exact new-scheme row when @a target is given; otherwise the
+ * first new-scheme row by prefix scan; legacy bare-key row as the
+ * fallback either way.
+ * @return 0 found, 1 not found, -1 error. */
+static int msgid_index_resolve(const char *msgid, const char *target,
+                               struct db_snapshot *snap, char *timestamp,
+                               char *target_out, size_t target_sz)
+{
+  struct db_val val = { NULL, 0 };
+  char keybuf[HISTORY_MSGID_LEN + 1 + CHANNELLEN + 2];
+  int klen;
+  int rc;
+  size_t mlen = strlen(msgid);
+
+  if (target && target[0]) {
+    klen = build_msgid_index_key(keybuf, sizeof(keybuf), msgid, target);
+    if (klen > 0) {
+      rc = db_get(history_db_env, history_cf_msgid, keybuf, (size_t)klen,
+                  snap, &val);
+      if (rc == DB_OK) {
+        if (val.len == 0 || val.len >= HISTORY_TIMESTAMP_LEN) {
+          db_val_free(&val);
+          return -1;
+        }
+        memcpy(timestamp, val.base, val.len);
+        timestamp[val.len] = '\0';
+        if (target_out)
+          ircd_strncpy(target_out, target, target_sz);
+        db_val_free(&val);
+        return 0;
+      }
+      if (rc != DB_NOTFOUND)
+        return -1;
+    }
+  } else {
+    /* No target: first new-scheme row wins (any channel resolves the
+     * shared timestamp -- multi-channel events stamp all rows from one
+     * gettimeofday). */
+    struct db_iter *it = db_iter_open(history_db_env, history_cf_msgid, snap);
+    if (it) {
+      if (mlen + 1 < sizeof(keybuf)) {
+        memcpy(keybuf, msgid, mlen);
+        keybuf[mlen] = '\0';
+        if (db_iter_seek(it, keybuf, mlen + 1) == DB_OK
+            && db_iter_valid(it)) {
+          size_t klen2, vlen2;
+          const void *kb = db_iter_key(it, &klen2);
+          const void *vb = db_iter_value(it, &vlen2);
+          if (kb && klen2 > mlen + 1
+              && memcmp(kb, msgid, mlen) == 0
+              && ((const char *)kb)[mlen] == '\0'
+              && vb && vlen2 > 0 && vlen2 < HISTORY_TIMESTAMP_LEN) {
+            memcpy(timestamp, vb, vlen2);
+            timestamp[vlen2] = '\0';
+            if (target_out) {
+              size_t tl = klen2 - mlen - 1;
+              if (tl < target_sz) {
+                memcpy(target_out, (const char *)kb + mlen + 1, tl);
+                target_out[tl] = '\0';
+              } else {
+                target_out[0] = '\0';
+              }
+            }
+            db_iter_close(it);
+            return 0;
+          }
+        }
+      }
+      db_iter_close(it);
+    }
+  }
+
+  /* Legacy fallback: bare-msgid key, "target\0timestamp" value. */
+  memset(&val, 0, sizeof(val));
+  rc = db_get(history_db_env, history_cf_msgid, msgid, mlen, snap, &val);
+  if (rc == DB_NOTFOUND)
+    return 1;
+  if (rc != DB_OK)
+    return -1;
+  rc = parse_legacy_msgid_val(&val, timestamp, target_out, target_sz);
+  db_val_free(&val);
+  return (rc == 0) ? 0 : -1;
+}
+
+/** Stage deletion of @a msgid's index rows for @a target: the exact
+ * new-scheme row plus the legacy bare-key row (shared across targets
+ * -- legacy rows can't be split; they only shrink toward extinction). */
+static void msgid_index_del(struct db_writebatch *wb, const char *msgid,
+                            const char *target)
+{
+  char keybuf[HISTORY_MSGID_LEN + 1 + CHANNELLEN + 2];
+  int klen;
+  if (target && target[0]) {
+    klen = build_msgid_index_key(keybuf, sizeof(keybuf), msgid, target);
+    if (klen > 0)
+      db_writebatch_del(wb, history_cf_msgid, keybuf, (size_t)klen);
+  }
+  db_writebatch_del(wb, history_cf_msgid, msgid, strlen(msgid));
+}
+
 int history_store_message(const char *msgid, const char *timestamp,
                           const char *target, const char *original_target,
                           const char *sender, const char *account,
@@ -1069,11 +1231,17 @@ store_retry:
     goto store_cleanup;
   }
 
-  /* msgid → target\0timestamp index */
-  rc = db_writebatch_put(wb, history_cf_msgid,
-                         msgid, strlen(msgid),
-                         idxkeybuf, (size_t)idx_keylen);
-  if (rc != DB_OK) goto store_wb_fail;
+  /* msgid index: "msgid\0target" -> timestamp (multi-target scheme) */
+  {
+    char midxkey[HISTORY_MSGID_LEN + 1 + CHANNELLEN + 2];
+    int midxlen = build_msgid_index_key(midxkey, sizeof(midxkey),
+                                        msgid, target);
+    if (midxlen < 0) { rc = -1; goto store_wb_fail; }
+    rc = db_writebatch_put(wb, history_cf_msgid,
+                           midxkey, (size_t)midxlen,
+                           timestamp, strlen(timestamp));
+    if (rc != DB_OK) goto store_wb_fail;
+  }
 
   /* target → last-timestamp */
   rc = db_writebatch_put(wb, history_cf_targets,
@@ -1221,10 +1389,16 @@ store_ml_retry:
                                 keybuf, (size_t)keylen, vbuf, vlen);
   if (rc != DB_OK) goto store_ml_fail;
 
-  rc = db_writebatch_put(wb, history_cf_msgid,
-                         msgid, strlen(msgid),
-                         idxkeybuf, (size_t)idx_keylen);
-  if (rc != DB_OK) goto store_ml_fail;
+  {
+    char midxkey[HISTORY_MSGID_LEN + 1 + CHANNELLEN + 2];
+    int midxlen = build_msgid_index_key(midxkey, sizeof(midxkey),
+                                        msgid, target);
+    if (midxlen < 0) { rc = -1; goto store_ml_fail; }
+    rc = db_writebatch_put(wb, history_cf_msgid,
+                           midxkey, (size_t)midxlen,
+                           timestamp, strlen(timestamp));
+    if (rc != DB_OK) goto store_ml_fail;
+  }
 
   rc = db_writebatch_put(wb, history_cf_targets,
                          target, strlen(target),
@@ -1269,10 +1443,12 @@ int history_has_msgid(const char *msgid)
   if (!msgid || !msgid[0])
     return 0;
 
-  rc = db_exists(history_db_env, history_cf_msgid,
-                 msgid, strlen(msgid), /*snap=*/NULL);
-  if (rc == DB_OK)        return 1;
-  if (rc == DB_NOTFOUND)  return 0;
+  {
+    char ts[HISTORY_TIMESTAMP_LEN];
+    rc = msgid_index_resolve(msgid, NULL, NULL, ts, NULL, 0);
+  }
+  if (rc == 0)  return 1;
+  if (rc == 1)  return 0;
   return -1;
 }
 
@@ -2188,8 +2364,7 @@ int history_purge_old(unsigned long max_age_seconds)
 
     /* Stage delete from msgid index and ml_content if we have a msgid */
     if (msg_msgid[0] != '\0') {
-      db_writebatch_del(wb, history_cf_msgid,
-                        msg_msgid, strlen(msg_msgid));
+      msgid_index_del(wb, msg_msgid, msg_target);
 
       ml_content_delete(wb, msg_msgid);
 
@@ -2389,42 +2564,20 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
     return -1;
   }
 
-  rc = db_get(history_db_env, history_cf_msgid,
-              msgid, strlen(msgid), /*snap=*/NULL, &val);
-  if (rc != DB_OK) {
-    if (rc == DB_NOTFOUND)
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "history_msgid_to_timestamp: msgid=%s NOT FOUND in cf_msgid index "
-                "(message never stored locally or evicted)", msgid);
-    else
-      log_write(LS_SYSTEM, L_INFO, 0, "history_msgid_to_timestamp: db_get failed for msgid=%s: %s",
-                msgid, db_strerror(rc));
+  (void)val; (void)sep;
+  rc = msgid_index_resolve(msgid, NULL, NULL, timestamp, NULL, 0);
+  if (rc == 1) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history_msgid_to_timestamp: msgid=%s NOT FOUND in cf_msgid index "
+              "(message never stored locally or evicted)", msgid);
     return -1;
   }
-
-  /* Value is target\0timestamp\0 - extract timestamp (exclude trailing separator) */
-  sep = memchr(val.base, KEY_SEP, val.len);
-  if (!sep) {
-    db_val_free(&val);
+  if (rc != 0) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "history_msgid_to_timestamp: index resolve failed for msgid=%s",
+              msgid);
     return -1;
   }
-  sep++; /* Skip separator after target */
-
-  /* Calculate copy length - exclude trailing KEY_SEP if present */
-  {
-    size_t copy_len = (char *)val.base + val.len - sep;
-    /* build_key adds trailing KEY_SEP, exclude it */
-    if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
-      copy_len--;
-    if (copy_len >= HISTORY_TIMESTAMP_LEN) {
-      db_val_free(&val);
-      return -1;
-    }
-    memcpy(timestamp, sep, copy_len);
-    timestamp[copy_len] = '\0';
-  }
-
-  db_val_free(&val);
   return 0;
 }
 
@@ -2450,42 +2603,17 @@ int history_lookup_message(const char *target, const char *msgid,
   if (!snap)
     return -1;
 
-  /* First, look up the msgid to get target and timestamp */
-  rc = db_get(history_db_env, history_cf_msgid,
-              msgid, strlen(msgid), snap, &val);
-  if (rc == DB_NOTFOUND) {
+  /* Resolve the msgid to a timestamp under the pinned snapshot,
+   * preferring this target's own index row (multi-target scheme). */
+  rc = msgid_index_resolve(msgid, target, snap, timestamp, NULL, 0);
+  if (rc == 1) {
     db_snapshot_destroy(snap);
     return 1; /* Not found */
   }
-  if (rc != DB_OK) {
+  if (rc != 0) {
     db_snapshot_destroy(snap);
     return -1;
   }
-
-  /* Value is target\0timestamp\0 - extract timestamp (exclude trailing KEY_SEP) */
-  {
-    const char *sep;
-    size_t copy_len;
-    sep = memchr(val.base, KEY_SEP, val.len);
-    if (!sep) {
-      db_val_free(&val);
-      db_snapshot_destroy(snap);
-      return -1;
-    }
-    sep++; /* Skip separator after target */
-    copy_len = (char *)val.base + val.len - sep;
-    /* build_key adds trailing KEY_SEP, exclude it */
-    if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
-      copy_len--;
-    if (copy_len >= HISTORY_TIMESTAMP_LEN) {
-      db_val_free(&val);
-      db_snapshot_destroy(snap);
-      return -1;
-    }
-    memcpy(timestamp, sep, copy_len);
-    timestamp[copy_len] = '\0';
-  }
-  db_val_free(&val);
 
   /* Build key for main database lookup: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
@@ -2549,36 +2677,13 @@ int history_delete_message(const char *target, const char *msgid)
   if (!history_available)
     return -1;
 
-  /* First, look up the msgid to get the timestamp */
-  rc = db_get(history_db_env, history_cf_msgid,
-              msgid, strlen(msgid), /*snap=*/NULL, &val);
-  if (rc == DB_NOTFOUND)
+  (void)val;
+  /* Resolve via this target's own index row (multi-target scheme). */
+  rc = msgid_index_resolve(msgid, target, NULL, timestamp, NULL, 0);
+  if (rc == 1)
     return 1; /* Not found */
-  if (rc != DB_OK)
+  if (rc != 0)
     return -1;
-
-  /* Extract timestamp from value (target\0timestamp[\0]) */
-  {
-    const char *sep;
-    size_t copy_len;
-    sep = memchr(val.base, KEY_SEP, val.len);
-    if (!sep) {
-      db_val_free(&val);
-      return -1;
-    }
-    sep++; /* Skip separator */
-    copy_len = (char *)val.base + val.len - sep;
-    /* build_key adds trailing KEY_SEP, exclude it if present. */
-    if (copy_len > 0 && sep[copy_len - 1] == KEY_SEP)
-      copy_len--;
-    if (copy_len >= HISTORY_TIMESTAMP_LEN) {
-      db_val_free(&val);
-      return -1;
-    }
-    memcpy(timestamp, sep, copy_len);
-    timestamp[copy_len] = '\0';
-  }
-  db_val_free(&val);
 
   /* Build key for main database: target\0timestamp\0msgid */
   keylen = build_key(keybuf, sizeof(keybuf), target, timestamp, msgid);
@@ -2589,8 +2694,10 @@ int history_delete_message(const char *target, const char *msgid)
   if (!wb)
     return -1;
 
-  /* Stage all deletes atomically. */
-  db_writebatch_del(wb, history_cf_msgid, msgid, strlen(msgid));
+  /* Stage all deletes atomically.  Only THIS target's index row (plus
+   * the shared legacy row) -- other channels' rows for a multi-channel
+   * event keep their anchors. */
+  msgid_index_del(wb, msgid, target);
   db_writebatch_del(wb, history_cf_messages, keybuf, keylen);
 
   ml_content_delete(wb, msgid);
@@ -2862,8 +2969,7 @@ static int history_emergency_evict(void)
     if (parse_key((void *)kbase, klen,
                   msg_target, msg_timestamp, msg_msgid) == 0) {
       if (msg_msgid[0] != '\0') {
-        db_writebatch_del(wb, history_cf_msgid,
-                          msg_msgid, strlen(msg_msgid));
+        msgid_index_del(wb, msg_msgid, msg_target);
 
         ml_content_delete(wb, msg_msgid);
 
@@ -3020,8 +3126,7 @@ int history_evict_to_target(int target_percent)
       if (parse_key((void *)kbase, klen,
                     msg_target, msg_timestamp, msg_msgid) == 0) {
         if (msg_msgid[0] != '\0') {
-          db_writebatch_del(wb, history_cf_msgid,
-                            msg_msgid, strlen(msg_msgid));
+          msgid_index_del(wb, msg_msgid, msg_target);
 
           ml_content_delete(wb, msg_msgid);
 
