@@ -959,9 +959,15 @@ void remove_user_from_channel(struct Client* cptr, struct Channel* chptr)
         /*
          * XXX - this looks dangerous but isn't if we got the referential
          * integrity right for channels
+         *
+         * Strict-presence: this sweep bypassed remove_user_from_channel,
+         * so every member torn down here kept a permanently-open
+         * presence interval (unbounded forward visibility).  Hook each
+         * removal like the normal path does.
          */
-        while (remove_member_from_channel(chptr->members))
-          ;
+        do {
+          presence_on_channel_remove(chptr->members->user, chptr);
+        } while (remove_member_from_channel(chptr->members));
       }
     }
   }

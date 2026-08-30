@@ -33,6 +33,7 @@
 #include "class.h"
 #include "client.h"
 #include "hash.h"
+#include "chathistory_presence.h"
 #include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -406,7 +407,20 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
       messages = messages->next;
       extra->next = NULL;
       history_free_messages(extra);
+      count = rs->replay_limit;
       rs->is_last_page = 0;
+    }
+
+    /* Strict-presence: the bouncer auto-replay bypassed the presence
+     * filter entirely -- a session that joined a channel yesterday
+     * replayed it from its detach point days back.  Filter exactly
+     * like the CHATHISTORY query paths do (no-op unless the feature
+     * is on). */
+    count = presence_filter_messages(sptr, channame, &messages, count, 0);
+    if (count <= 0 || !messages) {
+      if (messages)
+        history_free_messages(messages);
+      continue;
     }
 
     /* Set up new batch */

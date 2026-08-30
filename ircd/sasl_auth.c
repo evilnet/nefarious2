@@ -15,6 +15,7 @@
 #include "sasl_auth.h"
 #include "capab.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -619,6 +620,10 @@ void sasl_complete_login(struct Client *sptr, const char *account,
     char type = IsAccount(sptr) ? 'M' : 'R';
 
     if (ircd_strcmp(cli_user(sptr)->account, cli_saslaccount(sptr)) != 0) {
+      char presence_old_acct[ACCOUNTLEN + 1];
+      ircd_strncpy(presence_old_acct, cli_user(sptr)->account,
+                   sizeof(presence_old_acct));
+
       /* Load account-linked metadata BEFORE setting account flag */
       metadata_load_account(sptr, cli_saslaccount(sptr));
 
@@ -631,6 +636,16 @@ void sasl_complete_login(struct Client *sptr, const char *account,
        * an account change ('M') is already counted. */
       if (type == 'R')
         channel_account_adjust(sptr, +1);
+
+      /* Strict-presence anchor transfer (self-gated on the feature):
+       * 'R' moves session->account carrying the open-interval start;
+       * 'M' renames account->account. */
+      if (type == 'R')
+        presence_anchor_transfer(sptr, cli_session_id(sptr), 1,
+                                 cli_user(sptr)->account, 0);
+      else
+        presence_anchor_transfer(sptr, presence_old_acct, 0,
+                                 cli_user(sptr)->account, 0);
 
       bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
 

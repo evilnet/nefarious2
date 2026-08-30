@@ -1384,6 +1384,7 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
     ircd_strncpy(session->hs_sessid, cli_session_id(cptr), BOUNCER_SESSID_LEN);
   else {
     generate_sessid(session->hs_sessid);
+    presence_purge_session(cli_session_id(cptr));
     ircd_strncpy(cli_session_id(cptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
   }
   generate_token(session->hs_token);
@@ -1741,6 +1742,7 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   /* Session-identity continuity follows the bouncer session, not the
    * underlying socket: the freshly-minted cli_session_id from
    * make_client is superseded by the bouncer's durable sessid. */
+  presence_purge_session(cli_session_id(cptr));
   ircd_strncpy(cli_session_id(cptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
   session->hs_attach_count++;
   session->hs_connect_count++;
@@ -4101,17 +4103,21 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
            * Aliases are tracked in hs_aliases[] which records numerics
            * rather than Client pointers; this resolves each alias's
            * Client and updates its cli_session_id in lockstep. */
-          if (local->hs_client && IsUser(local->hs_client))
+          if (local->hs_client && IsUser(local->hs_client)) {
+            presence_purge_session(cli_session_id(local->hs_client));
             ircd_strncpy(cli_session_id(local->hs_client), sessid,
                          S2S_SESSID_BUFSIZE);
+          }
           {
             int ai;
             for (ai = 0; ai < local->hs_alias_count; ai++) {
               struct Client *al =
                 findNUser(local->hs_aliases[ai].ba_numeric);
-              if (al && IsUser(al))
+              if (al && IsUser(al)) {
+                presence_purge_session(cli_session_id(al));
                 ircd_strncpy(cli_session_id(al), sessid,
                              S2S_SESSID_BUFSIZE);
+              }
             }
           }
           /* Re-persist under new sessid if we still hold it locally. */
@@ -7409,6 +7415,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   /* Inherit the session's sessid so this alias's cli_session_id agrees
    * with the primary's and with the bouncer session record.  Supersedes
    * the freshly-minted value from make_client. */
+  presence_purge_session(cli_session_id(sptr));
   ircd_strncpy(cli_session_id(sptr), session->hs_sessid, S2S_SESSID_BUFSIZE);
 
   /* --- Step 3: Set alias flags --- */
@@ -7896,6 +7903,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       ircd_strncpy(user->fakehost, cli_user(primary)->fakehost, HOSTLEN + 1);
       /* Inherit the session's sessid so this alias's cli_session_id
        * agrees with the primary's and with the bouncer session record. */
+      presence_purge_session(cli_session_id(alias));
       ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
       SetBouncerAlias(alias);
       if (IsHiddenHost(primary))
@@ -7960,6 +7968,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
    * aliases share the alias_server's Connection (from != NULL path in
    * make_client), so cli_session_id was not minted at allocation — we
    * populate it explicitly from the BX C-announced sessid here. */
+  presence_purge_session(cli_session_id(alias));
   ircd_strncpy(cli_session_id(alias), sessid, S2S_SESSID_BUFSIZE);
 
   /* Register in P10 numeric space — NOT in nick hash */

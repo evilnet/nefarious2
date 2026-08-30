@@ -45,6 +45,7 @@
 
 #include "capab.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -239,6 +240,9 @@ static void register_complete_success(struct Client *acptr, const char *account)
        * flip mid-membership -- count it, or this client's eventual PART
        * decrements a count it never added (authusers drift class). */
       channel_account_adjust(acptr, +1);
+      /* Strict-presence anchor transfer: session -> new account. */
+      presence_anchor_transfer(acptr, cli_session_id(acptr), 1,
+                               cli_user(acptr)->account, 0);
       /* P1 A3 residue: a post-registration REGISTER attaches an account to
        * an already-registered client outside the register_user chokepoint
        * (that ran at initial registration) -- load metadata here. */

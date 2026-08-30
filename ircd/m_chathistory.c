@@ -4235,6 +4235,9 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
         count = ctx->limit;
         complete = 0;
       }
+      /* Strict-presence: this replay leg bypassed the filter (audit
+       * finding #3) -- apply it exactly like the query paths. */
+      count = presence_filter_messages(sptr, channame, &messages, count, 0);
       if (count > 0 && messages) {
         send_history_batch(sptr, channame, messages, count, 0, NULL, complete);
         ctx->total_replayed += count;
@@ -4363,6 +4366,10 @@ static void complete_autoreplay_channel(struct FedRequest *req)
     total = 0;
     for (struct HistoryMessage *m = merged; m; m = m->next)
       total++;
+
+    /* Strict-presence: filter the merged federated results before
+     * batching (audit finding #3). */
+    total = presence_filter_messages(sptr, req->target, &merged, total, 0);
 
     if (total > 0) {
       send_history_batch(sptr, req->target, merged, total, 0, NULL,

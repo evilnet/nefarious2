@@ -32,6 +32,7 @@
 #ifdef USE_LIBKC
 
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_string.h"
@@ -66,6 +67,11 @@ static void deauth_client(struct Client *cptr, const char *reason)
    * counted, and the old open-coded loop stole counts whenever the
    * session walk matched a bouncer alias. */
   channel_account_adjust(cptr, -1);
+
+  /* Strict-presence anchor transfer: account -> session (close the
+   * account-anchored open interval at deauth). */
+  presence_anchor_transfer(cptr, cli_user(cptr)->account, 0,
+                           cli_session_id(cptr), 1);
 
   /* Notify bouncer aliases BEFORE clearing: bounce_emit_alias_update
    * bails on !IsAccount(primary), so clearing first stranded every

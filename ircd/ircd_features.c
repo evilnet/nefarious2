@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include "ircd_features.h"
+#include "chathistory_presence.h"
 #include "capab.h"	/* send_cap_notify */
 #include "channel.h"	/* list_set_default */
 #include "class.h"
@@ -631,6 +632,22 @@ feature_notify_cap_sts(void)
  * Called when CHATHISTORY_RETENTION is modified via SET or REHASH.
  * Only sends if we're a storage server (CHATHISTORY_STORE enabled).
  */
+/** Notify handler for FEAT_CHATHISTORY_STRICT_PRESENCE.  A runtime
+ * flip to ON leaves every pre-existing membership without an open
+ * presence interval (the join hook early-returns while the feature is
+ * off), hiding all history from current members until they part and
+ * rejoin.  Backfill open intervals for everyone present now.  Guarded
+ * for the conf-parse-time firing (no channels exist yet). */
+static void
+feature_notify_strict_presence(void)
+{
+  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
+    return;
+  if (!cli_serv(&me))
+    return;
+  presence_backfill_now();
+}
+
 static void
 feature_notify_chathistory_retention(void)
 {
@@ -1275,7 +1292,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
   F_B(CHATHISTORY_REQUIRE_AUTH, 0, 0, 0),   /* Require auth for channel history (non-+H) — default off so unauthed/ephemeral clients can use CHATHISTORY out of the box; Afternet sets this to 1 in ircd.conf */
-  F_B(CHATHISTORY_STRICT_PRESENCE, 0, 0, 0), /* Filter chathistory to caller's presence windows (strict mode) */
+  F_B(CHATHISTORY_STRICT_PRESENCE, 0, 0, feature_notify_strict_presence), /* Filter chathistory to caller's presence windows (strict mode) */
   F_I(CHATHISTORY_PRESENCE_MAX_INTERVALS, 0, 64, 0), /* Per-(anchor,channel) cap on retained presence intervals; oldest evicted FIFO when exceeded */
   F_I(EPHEMERAL_HISTORY_BYTES, 0, 65536, 0), /* Per-Client byte cap on the ephemeral↔ephemeral PM ring (64KB default) */
   F_I(MULTILINE_MAX_BYTES, 0, 16384, feature_notify_multiline),

@@ -32,6 +32,7 @@
 #include "capab.h"
 #include "IPcheck.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "class.h"
 #include "client.h"
 #include "hash.h"
@@ -2561,6 +2562,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
        * gate drifts low.  Pre-registration clients (mid burst-intro)
        * hold no memberships, so the walk no-ops for them. */
       channel_account_adjust(acptr, +1);
+      /* Strict-presence anchor transfer: session -> stamped account.
+       * Pre-registration clients hold no memberships; the walk no-ops. */
+      presence_anchor_transfer(acptr, cli_session_id(acptr), 1,
+                               cli_user(acptr)->account, 0);
   }
 
   if (!FlagHas(&setflags, FLAG_CLOAKIP) && IsCloakIP(acptr))

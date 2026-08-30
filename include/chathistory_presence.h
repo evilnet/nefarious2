@@ -137,4 +137,14 @@ extern int presence_filter_messages(struct Client *requestor,
                                      int count_in,
                                      int ops_override);
 
+
+/* Strict-presence hardening (2026-08-30 audit wave) */
+extern void presence_touch_last_alive(void);
+extern void presence_backfill_now(void);
+extern void presence_anchor_transfer(struct Client *cptr,
+                                     const char *old_anchor,
+                                     int old_is_session,
+                                     const char *new_anchor,
+                                     int new_is_session);
+
 #endif /* INCLUDED_chathistory_presence_h */

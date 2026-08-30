@@ -97,6 +97,7 @@
 #include "send.h"
 #include "metadata.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdlib.h>
@@ -190,6 +191,12 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
          * alias never added. */
         channel_account_adjust(acptr, -1);
 
+        /* Strict-presence anchor transfer: account -> session, closing
+         * the account-anchored open interval (deauth previously left
+         * it open forever -- unbounded forward visibility). */
+        presence_anchor_transfer(acptr, cli_user(acptr)->account, 0,
+                                 cli_session_id(acptr), 1);
+
         /* Emit the alias account-clear BEFORE ClearAccount:
          * bounce_emit_alias_update bails on !IsAccount(primary), so
          * the old order (clear first) silently stranded every alias
@@ -251,6 +258,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         {
           int was_account = IsAccount(acptr);
+          char presence_old_acct[ACCOUNTLEN + 1];
+          ircd_strncpy(presence_old_acct, cli_user(acptr)->account,
+                       sizeof(presence_old_acct));
 
           ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
           SetAccount(acptr);
@@ -264,6 +274,15 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
            * upward and desyncing the storage gate across the network. */
           if (!was_account)
             channel_account_adjust(acptr, +1);
+
+          /* Strict-presence anchor transfer: R = session->account,
+           * M = account rename. */
+          if (!was_account)
+            presence_anchor_transfer(acptr, cli_session_id(acptr), 1,
+                                     cli_user(acptr)->account, 0);
+          else
+            presence_anchor_transfer(acptr, presence_old_acct, 0,
+                                     cli_user(acptr)->account, 0);
         }
 
         if (parc > 4) {
@@ -453,6 +472,9 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
      * the member's channels (the !IsAccount bail above guarantees this
      * is a false->true transition). */
     channel_account_adjust(acptr, +1);
+    /* Strict-presence anchor transfer: session -> account. */
+    presence_anchor_transfer(acptr, cli_session_id(acptr), 1,
+                             cli_user(acptr)->account, 0);
 
     {
       char ac_msgid[64] = "";

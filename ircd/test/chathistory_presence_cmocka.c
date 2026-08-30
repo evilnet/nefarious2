@@ -250,10 +250,12 @@ time_t CurrentTime;
 /* Base epoch far enough from 0 to make failures easy to eyeball. */
 #define BASE_TS ((time_t)1700000000)
 
-/* Interval i occupies [BASE_TS + i*10, BASE_TS + i*10 + 1]; consecutive
- * intervals are strictly increasing and never overlap (gap of 10 vs a
- * 1-second span). */
-static time_t join_ts(int i) { return BASE_TS + (time_t)i * 10; }
+/* Interval i occupies [BASE_TS + i*100, BASE_TS + i*100 + 1]; consecutive
+ * intervals are strictly increasing and never overlap.  The 99-second
+ * gap deliberately exceeds the 30s reconnect-coalescing window in
+ * record_apply_part, so each join/part pair stays a distinct interval
+ * and the FIFO-eviction assertions below keep their meaning. */
+static time_t join_ts(int i) { return BASE_TS + (time_t)i * 100; }
 static time_t part_ts(int i) { return join_ts(i) + 1; }
 
 static void test_presence_basic_join_part_present(void **state)
@@ -334,11 +336,69 @@ static void test_presence_no_wraparound_at_misconfigured_cap(void **state)
   presence_purge_session(anchor);
 }
 
+/* Reconnect-churn coalescing: a part/rejoin gap of <=30s must merge
+ * into the previous interval (one FIFO slot, and the blip itself is
+ * covered), while a larger gap must stay a distinct interval with the
+ * gap NOT covered. */
+static void test_presence_reconnect_coalescing(void **state)
+{
+  const char *anchor = "test-session-anchor-coal";
+  time_t t = BASE_TS;
+
+  (void)state;
+  presence_purge_session(anchor);
+
+  presence_record_join(anchor, 1, TEST_CHANNEL, t);
+  presence_record_part(anchor, 1, TEST_CHANNEL, t + 5);
+  /* Reconnect 10s later: inside the 30s window -> coalesce. */
+  presence_record_join(anchor, 1, TEST_CHANNEL, t + 15);
+  presence_record_part(anchor, 1, TEST_CHANNEL, t + 20);
+  /* The blip gap is covered by the merged interval. */
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 10));
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 20));
+
+  /* Reconnect 100s later: outside the window -> distinct interval,
+   * gap NOT covered. */
+  presence_record_join(anchor, 1, TEST_CHANNEL, t + 120);
+  presence_record_part(anchor, 1, TEST_CHANNEL, t + 125);
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + 70));
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 122));
+
+  presence_purge_session(anchor);
+}
+
+/* Backward clock step: a part BEFORE the open's start must clamp to a
+ * zero-length visit at the join instant, not discard the window
+ * entirely (the old behavior erased the member's whole real window). */
+static void test_presence_clock_skew_clamp(void **state)
+{
+  const char *anchor = "test-session-anchor-skew";
+  time_t t = BASE_TS + 1000000;
+
+  (void)state;
+  presence_purge_session(anchor);
+
+  presence_record_join(anchor, 1, TEST_CHANNEL, t);
+  presence_record_part(anchor, 1, TEST_CHANNEL, t - 50);  /* skewed */
+  /* The join instant survives as a zero-length interval. */
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t - 50));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + 1));
+
+  /* Record remains usable afterwards. */
+  presence_record_join(anchor, 1, TEST_CHANNEL, t + 100);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 150));
+
+  presence_purge_session(anchor);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test(test_presence_basic_join_part_present),
     cmocka_unit_test(test_presence_no_wraparound_at_misconfigured_cap),
+    cmocka_unit_test(test_presence_reconnect_coalescing),
+    cmocka_unit_test(test_presence_clock_skew_clamp),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
