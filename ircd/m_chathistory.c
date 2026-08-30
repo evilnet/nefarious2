@@ -1191,7 +1191,8 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            const char *subcmd, const char *ref,
                                            int limit,
                                            struct HistoryMessage *local_msgs,
-                                           int local_count, int ops_override);
+                                           int local_count, int ops_override,
+                                           const char *ref2);
 static int count_storage_servers(const char *target, time_t query_time);
 static int is_ulined_server(struct Client *server);
 static void fed_timeout_callback(struct Event *ev);
@@ -1226,9 +1227,12 @@ static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
  */
 static int should_federate(const char *target, int local_count, int limit)
 {
-  /* Only federate for channels, not PMs */
-  if (!IsChannelName(target))
-    return 0;
+  /* PM (identity pair-key) targets federate too.  Historically refused
+   * "until history was more reliable" and then forgotten: the ORIGIN
+   * server has already participant-checked the requester
+   * (check_history_access normalizes the target and verifies the
+   * caller is one of the pair), and responders operate under the P10
+   * server-trust model exactly as for channels. */
 
   /* Check if federation is enabled */
   if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
@@ -1433,7 +1437,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "LATEST",
                                               ref_str, limit, messages, count,
-                                              ops_override);
+                                              ops_override, NULL);
     if (req) {
       /* Federation started - response will be sent when complete */
       /* Note: messages ownership transferred to req */
@@ -1503,7 +1507,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "BEFORE",
                                               ref_str, limit, messages, count,
-                                              ops_override);
+                                              ops_override, NULL);
     if (req)
       return 0;
   }
@@ -1568,7 +1572,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "AFTER",
                                               ref_str, limit, messages, count,
-                                              ops_override);
+                                              ops_override, NULL);
     if (req)
       return 0;
   }
@@ -1633,7 +1637,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   if (should_federate(lookup_target, count, limit)) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, "AROUND",
                                               ref_str, limit, messages, count,
-                                              ops_override);
+                                              ops_override, NULL);
     if (req)
       return 0;
   }
@@ -1701,6 +1705,17 @@ static int chathistory_between(struct Client *sptr, const char *target,
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
     return 0;
+  }
+
+  /* Federation (oversight fix): BETWEEN was the one subcommand that
+   * never federated -- the CH Q wire had a single ref slot; W now
+   * carries an optional trailing second ref. */
+  if (should_federate(lookup_target, count, limit)) {
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, "BETWEEN",
+                                              ref1_str, limit, messages, count,
+                                              ops_override, ref2_str);
+    if (req)
+      return 0;  /* messages ownership transferred to req */
   }
 
   /* Attach context messages (reactions, redacts) to their parents */
@@ -1901,6 +1916,25 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
     /* Access filter — skip targets the client can't read */
     if (check_history_access(sptr, tgt->target, NULL, 0) != 0)
       continue;
+
+    /* Strict-presence filter (oversight fix): TARGETS leaked the
+     * last-activity timestamp of channels the requester was a member
+     * of but NOT present for.  Same policy as the message filter:
+     * channel targets require presence at the activity time; +H
+     * bypasses; PM targets are already participant-checked above. */
+    if (feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)
+        && IsChannelName(tgt->target)) {
+      struct Channel *pchan = FindChannel(tgt->target);
+      if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
+        int p_is_session = 0;
+        const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
+        time_t act = (time_t)strtoul(tgt->last_timestamp, NULL, 10);
+        if (!p_anchor || act == 0
+            || !presence_was_present(p_anchor, p_is_session,
+                                     tgt->target, act))
+          continue;
+      }
+    }
 
     if (history_unix_to_iso(tgt->last_timestamp, iso_time, sizeof(iso_time)) == 0)
       time_str = iso_time;
@@ -3759,11 +3793,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            const char *subcmd, const char *ref,
                                            int limit,
                                            struct HistoryMessage *local_msgs,
-                                           int local_count, int ops_override)
+                                           int local_count, int ops_override,
+                                           const char *ref2)
 {
   struct FedRequest *req;
   char reqid[32];
   char s2s_ref[64];
+  char s2s_ref2[64];
   char s2s_subcmd;
   int i, server_count;
   time_t query_time = 0;
@@ -3782,13 +3818,29 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   if (!ref_to_s2s(ref, s2s_ref, sizeof(s2s_ref)))
     return NULL;  /* Invalid reference */
 
+  /* Optional second reference (BETWEEN/W): empty when absent. */
+  s2s_ref2[0] = '\0';
+  if (ref2 && ref2[0]) {
+    if (!ref_to_s2s(ref2, s2s_ref2, sizeof(s2s_ref2)))
+      return NULL;  /* Invalid second reference */
+  }
+
   /* Extract timestamp from reference for retention filtering.
    * For timestamp references, we can skip servers whose retention doesn't
    * cover the query time. For msgid or * references, we query all storage servers.
    */
   if (parse_reference(ref, &ref_type, &ref_value) == 0) {
     if (ref_type == HISTORY_REF_TIMESTAMP && ref_value) {
-      query_time = (time_t)strtoul(ref_value, NULL, 10);
+      /* Clients send ISO 8601; strtoul on "2026-..." yielded 2026
+       * (epoch 1970!), so server_retention_covers() rejected every
+       * storage server and federation SILENTLY never fired for any
+       * ISO-timestamp reference (LATEST's "*" masked this for years).
+       * Convert first; fall back to raw for unix.ms refs. */
+      char unix_buf[HISTORY_TIMESTAMP_LEN];
+      if (history_iso_to_unix(ref_value, unix_buf, sizeof(unix_buf)) == 0)
+        query_time = (time_t)strtoul(unix_buf, NULL, 10);
+      else
+        query_time = (time_t)strtoul(ref_value, NULL, 10);
     }
     /* For HISTORY_REF_MSGID or HISTORY_REF_NONE, query_time stays 0 (no filter) */
   }
@@ -3879,8 +3931,13 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
        * counter; the bloom-filter design at
        * .claude/plans/federation-dedup-s2s-msgid.md will revive a
        * principled per-target filter when it lands. */
-      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s",
-                    target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx);
+      if (s2s_ref2[0])
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s %s",
+                      target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
+                      s2s_ref2);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s",
+                      target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx);
     }
   }
 
@@ -4502,6 +4559,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     /* Query: Q <target> <subcmd:1char> <ref:T/M/*> <limit> <reqid> [<dest_numeric>] */
     char *target, *query_subcmd_str, *ref, *reqid;
     char *dest_numeric = NULL;
+    char *ref2 = NULL;
     char query_subcmd_char;
     const char *query_subcmd_full;
     int limit, count;
@@ -4523,14 +4581,23 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (parc >= 8 && parv[7][0] != '\0')
       dest_numeric = parv[7];
 
+    /* Optional second reference (BETWEEN/W) */
+    if (parc >= 9 && parv[8][0] != '\0')
+      ref2 = parv[8];
+
     /* Destination-addressed query: if not for us, forward and skip */
     if (dest_numeric) {
       struct Client *dest = FindNServer(dest_numeric);
       if (dest && dest != &me) {
         /* Forward to destination via P10 routing — don't process locally */
-        sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s",
-                      target, query_subcmd_str, ref, limit, reqid,
-                      dest_numeric);
+        if (ref2)
+          sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s %s",
+                        target, query_subcmd_str, ref, limit, reqid,
+                        dest_numeric, ref2);
+        else
+          sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s",
+                        target, query_subcmd_str, ref, limit, reqid,
+                        dest_numeric);
         return 0;
       }
       /* dest_numeric is us — fall through to local processing.
@@ -4624,12 +4691,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     }
 
-    /* Only process for channels (not PMs) */
-    if (!IsChannelName(target)) {
-      /* Send empty response for PMs */
-      sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
-      return 0;
-    }
+    /* PM (pair-key) targets are served like channels: the origin
+     * server vouches for its requester (the participant check ran
+     * there); this responder trusts linked servers per the P10 model. */
 
     /* Check if we have history backend */
     if (!history_is_available()) {
@@ -4665,6 +4729,17 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       count = history_query_after(target, ref_type, ref_value, limit + 1, &messages);
     } else if (query_subcmd_char == 'R') {
       count = history_query_around(target, ref_type, ref_value, limit, &messages);
+    } else if (query_subcmd_char == 'W') {
+      /* BETWEEN: second reference arrives as the optional trailing
+       * param (after dest_numeric). */
+      enum HistoryRefType ref_type2;
+      const char *ref_value2;
+      if (!ref2 || parse_s2s_reference(ref2, &ref_type2, &ref_value2) != 0) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+      count = history_query_between(target, ref_type, ref_value,
+                                    ref_type2, ref_value2, limit, &messages);
     } else if (query_subcmd_char == 'X') {
       /* Exact message lookup by msgid — used for federated REDACT.
        * ref is M<msgid> format from S2S. ref_value is the msgid.

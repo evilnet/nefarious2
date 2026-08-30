@@ -1288,7 +1288,7 @@ static struct FeatureDesc {
   F_I(CHATHISTORY_MAINTENANCE_INTERVAL, 0, 300, feature_notify_chathistory_maintenance_interval),
   F_I(CHATHISTORY_EVICT_BATCH_SIZE, 0, 1000, 0),
 
-  F_B(CHATHISTORY_OPS_OVERRIDE, 0, 1, 0),
+  F_B(CHATHISTORY_OPS_OVERRIDE, 0, 0, 0), /* :full bypass for channel ops -- default OFF (was on by oversight; grant deliberately per network) */
   F_B(CHATHISTORY_USER_QUOTA, 0, 1, 0),      /* Enable per-user quotas */
   F_I(CHATHISTORY_USER_QUOTA_PCT, 0, 10, 0), /* Max % of channel history per user */
   F_B(CHATHISTORY_REQUIRE_AUTH, 0, 0, 0),   /* Require auth for channel history (non-+H) — default off so unauthed/ephemeral clients can use CHATHISTORY out of the box; Afternet sets this to 1 in ircd.conf */
