@@ -26,6 +26,30 @@
 
 /* ---- stubs for websocket.c's external dependencies ---- */
 
+/* Keepalive-ping additions (ws_ping_timer): websocket.c walks the
+ * local client array from a periodic timer.  The harness never arms
+ * the timer (feature_int returns 0 = disabled), so these exist only
+ * to satisfy the linker of this standalone TU. */
+int HighestFd = -1;
+struct Client* LocalClientArray[MAXCONNECTIONS];
+
+int feature_int(enum Feature feat)
+{
+  (void)feat;
+  return 0; /* WEBSOCKET_PING_INTERVAL disabled in the harness */
+}
+
+struct Timer* timer_init(struct Timer* timer)
+{
+  return timer;
+}
+
+void timer_add(struct Timer* timer, EventCallBack call, void* data,
+               enum TimerType type, time_t value)
+{
+  (void)timer; (void)call; (void)data; (void)type; (void)value;
+}
+
 const char *feature_str(enum Feature feat)
 {
   (void)feat;
