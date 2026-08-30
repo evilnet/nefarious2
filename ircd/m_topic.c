@@ -69,6 +69,9 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
+  if (!feature_bool(FEAT_CAP_draft_event_playback))
+    return;  /* events replay only under event-playback (see channel.c) */
+
   /* Receiver-side storage (see store_kick_event): every server with
    * the channel stores its own copy; the msgid is unified via the S2S
    * tag, so federated merges dedup cleanly. */

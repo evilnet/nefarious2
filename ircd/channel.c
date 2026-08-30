@@ -114,6 +114,13 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
+  /* Events are replayable only under draft/event-playback; storing
+   * them with the feature off is dead weight (and lets a member's own
+   * JOIN event mask the TARGETS presence filter).  Same gate TAGMSG
+   * storage always had. */
+  if (!feature_bool(FEAT_CAP_draft_event_playback))
+    return;
+
   /* Storage gate: when CHATHISTORY_REQUIRE_AUTH is on, unauthed
    * clients can never query, so storing into a channel with no
    * authed member would be dead bytes nobody can read.  Skip in that

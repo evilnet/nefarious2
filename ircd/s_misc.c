@@ -214,6 +214,9 @@ static void store_quit_events(struct Client *sptr, const char *comment,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
+  if (!feature_bool(FEAT_CAP_draft_event_playback))
+    return;  /* events replay only under event-playback (see channel.c) */
+
   /* Receiver-side storage (see store_kick_event): every server with
    * channels in common stores its own copy under the unified msgid. */
 

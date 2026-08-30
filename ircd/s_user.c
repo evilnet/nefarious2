@@ -1262,7 +1262,8 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
          * cli_name(sptr) still has the OLD nick at this point. */
         /* Receiver-side storage (see store_kick_event): remote nick
          * changes store too, under the unified msgid. */
-        if (history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)) {
+        if (history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)
+            && feature_bool(FEAT_CAP_draft_event_playback)) {
           struct Membership *chan;
           struct timeval tv;
           char timestamp[32];
