@@ -241,9 +241,8 @@ static void store_quit_events(struct Client *sptr, const char *comment,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
-  /* Only store for local users to avoid duplicates */
-  if (!MyUser(sptr))
-    return;
+  /* Receiver-side storage (see store_kick_event): every server with
+   * channels in common stores its own copy under the unified msgid. */
 
   /* Note: +Y user mode only blocks message storage (PRIVMSG/NOTICE),
    * not channel events (JOIN/PART/QUIT) which are metadata */

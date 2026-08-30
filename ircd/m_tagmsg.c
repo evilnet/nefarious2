@@ -96,6 +96,7 @@
 #include "send.h"
 #include "handlers.h"
 #include "s_user.h"
+#include "ircd_relay.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -341,6 +342,22 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         }
       }
 
+      /* Store DM TAGMSG for event-playback (reactions/replies).  Same
+       * feature + ephemeral-only gates as the channel side; then the
+       * standard PM consent path -- store_private_history keys by
+       * identity pair and honors PRIVATE/opt-out/ephemeral, and skips
+       * webpush for HISTORY_TAGMSG.  Without this, every reaction
+       * delivered a msgid the msgid index never learned (unresolvable
+       * ATTACH cursors, unknowable anchors). */
+#ifdef USE_ROCKSDB
+      if (feature_bool(FEAT_CAP_draft_event_playback)
+          && !has_only_ephemeral_tags(client_tags)) {
+        char ts_buf[HISTORY_TIMESTAMP_LEN];
+        history_format_timestamp(ts_buf, sizeof(ts_buf));
+        store_private_history(sptr, acptr, "", HISTORY_TAGMSG, dm_msgid,
+                              ts_buf, client_tags);
+      }
+#endif
       sendcmdto_set_client_msgid(NULL);
     }
   }
@@ -414,7 +431,13 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!chptr)
       return 0;
 
-    /* Set msgid from S2S tags for local client delivery */
+    /* Unified msgid: reuse the S2S msgid, else mint into the link
+     * buffer (parse_server clears it per message) so delivery, storage
+     * and onward relay share ONE id.  Legacy peers send no S2S tags;
+     * the old code delivered no msgid while the store minted one
+     * nobody ever saw. */
+    if (feature_bool(FEAT_MSGID) && !cli_s2s_msgid(cptr)[0])
+      generate_msgid(cli_s2s_msgid(cptr), S2S_MSGID_BUFSIZE);
     if (cli_s2s_msgid(cptr)[0])
       sendcmdto_set_client_msgid(cli_s2s_msgid(cptr));
 
@@ -442,7 +465,10 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (!acptr)
       return 0;
 
-    /* Set msgid from S2S tags for local client delivery */
+    /* Unified msgid (see the channel arm above): reuse or mint into
+     * the link buffer so delivery and storage share one id. */
+    if (feature_bool(FEAT_MSGID) && !cli_s2s_msgid(cptr)[0])
+      generate_msgid(cli_s2s_msgid(cptr), S2S_MSGID_BUFSIZE);
     if (cli_s2s_msgid(cptr)[0])
       sendcmdto_set_client_msgid(cli_s2s_msgid(cptr));
 
@@ -460,6 +486,18 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                     client_tags, acptr);
     }
 
+    /* Store DM TAGMSG for event-playback -- mirrors the local-client
+     * path (m_tagmsg); pair-keyed + consent-gated inside. */
+#ifdef USE_ROCKSDB
+    if (feature_bool(FEAT_CAP_draft_event_playback)
+        && cli_s2s_msgid(cptr)[0]
+        && !has_only_ephemeral_tags(client_tags)) {
+      char ts_buf[HISTORY_TIMESTAMP_LEN];
+      history_format_timestamp(ts_buf, sizeof(ts_buf));
+      store_private_history(sptr, acptr, "", HISTORY_TAGMSG,
+                            cli_s2s_msgid(cptr), ts_buf, client_tags);
+    }
+#endif
     sendcmdto_set_client_msgid(NULL);
   }
 

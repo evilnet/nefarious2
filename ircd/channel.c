@@ -101,6 +101,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   char sender[HISTORY_SENDER_LEN];
   const char *account;
   const char *use_msgid;
+  int gap_only = 0;
 
   if (!history_is_available())
     return;
@@ -126,7 +127,7 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
       && chptr->authusers == 0
       && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
-    return;
+    gap_only = 1;  /* keep the delivered msgid resolvable (GAP row) */
 
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
@@ -155,9 +156,11 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
-  /* Store in database */
+  /* Store in database.  gap_only: the auth gate refused content, but
+   * the event's broadcast msgid still gets an index anchor. */
   history_store_message(use_msgid, timestamp, chptr->chname, NULL, sender,
-                        account, type, text ? text : "", NULL);
+                        account, gap_only ? HISTORY_GAP : type,
+                        gap_only ? "" : (text ? text : ""), NULL);
 }
 #endif /* USE_ROCKSDB */
 
@@ -2779,8 +2782,9 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       sendcmdto_set_client_msgid(NULL);
 
 #ifdef USE_ROCKSDB
-      /* Store MODE event in history — same msgid as broadcast */
-      if (MyUser(mbuf->mb_source)) {
+      /* Store MODE event in history — same msgid as broadcast;
+       * receiver-side like the other event stores. */
+      {
         char mode_text[512];
         ircd_snprintf(0, mode_text, sizeof(mode_text), "%s%s%s%s%s%s%s%s",
                       rembuf_i || rembuf_local_i ? "-" : "",
@@ -5437,8 +5441,9 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
                            ":%H" : "%H :%s", chan, jbuf->jb_comment);
 
 #ifdef USE_ROCKSDB
-      /* Store PART event in history (only from local users to avoid duplicates) */
-      if (MyUser(jbuf->jb_source) && !(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
+      /* Store PART event in history -- receiver-side like the message
+       * store; msgid unified via jb_msgids (S2S re-relay). */
+      if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
         store_channel_event(jbuf->jb_source, chan,
                             (flags & CHFL_BANNED || !jbuf->jb_comment) ? "" : jbuf->jb_comment,
                             HISTORY_PART, part_msgid);
@@ -5476,9 +5481,12 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       char join_msgid[64];
       struct Membership *memb;
 
-      /* Use pre-populated msgid from incoming S2S (re-relay), or generate new */
-      if (jbuf->jb_type == JOINBUF_TYPE_CREATE
-          && jbuf->jb_msgids[jbuf->jb_count][0])
+      /* Use pre-populated msgid from incoming S2S (re-relay), or
+       * generate new.  Accept the pre-populated id for ALL joinbuf
+       * types, not just CREATE -- a plain re-relayed JOIN otherwise
+       * re-mints per hop and every server stores a different msgid
+       * for the same event. */
+      if (jbuf->jb_msgids[jbuf->jb_count][0])
         ircd_strncpy(join_msgid, jbuf->jb_msgids[jbuf->jb_count],
                       sizeof(join_msgid));
       else
@@ -5548,9 +5556,10 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       }
 
 #ifdef USE_ROCKSDB
-      /* Store JOIN event in history with the same msgid */
-      if (MyUser(jbuf->jb_source))
-        store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
+      /* Store JOIN event in history with the same msgid --
+       * receiver-side; net-burst joins bypass the joinbuf entirely so
+       * they remain unstored. */
+      store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
 #endif
 
       if (cli_user(jbuf->jb_source)->away)
@@ -5573,9 +5582,8 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
         sendcmdto_one_tags(jbuf->jb_source, CMD_JOIN, jbuf->jb_source, ":%H", chan);
 
 #ifdef USE_ROCKSDB
-      /* Store DELJOINS JOIN event in history */
-      if (MyUser(jbuf->jb_source))
-        store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
+      /* Store DELJOINS JOIN event in history (receiver-side) */
+      store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
 #endif
     }
 
@@ -5741,9 +5749,8 @@ void RevealDelayedJoin(struct Membership *member)
   sendcmdto_set_client_msgid(NULL);
 
 #ifdef USE_ROCKSDB
-  if (MyUser(member->user))
-    store_channel_event(member->user, member->channel, "", HISTORY_JOIN,
-                        reveal_msgid[0] ? reveal_msgid : NULL);
+  store_channel_event(member->user, member->channel, "", HISTORY_JOIN,
+                      reveal_msgid[0] ? reveal_msgid : NULL);
 #endif
 
   CheckDelayedJoins(member->channel);

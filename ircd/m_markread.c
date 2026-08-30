@@ -212,6 +212,19 @@ static int parse_timestamp_param(const char *arg, char *unix_ts, size_t tslen)
   if (history_iso_to_unix(iso_ts, unix_ts, tslen) != 0)
     return 0;
 
+  /* Clamp to the server clock.  Markers are only-update-if-newer
+   * (metadata_readmarker_set), so a client with a skewed-ahead clock
+   * would otherwise plant a FUTURE marker that can never be lowered --
+   * and both replay paths skip messages at or before the marker, so
+   * that channel's replay is silently suppressed until wall-time
+   * catches up.  A clamped marker is still "everything read as of
+   * now", which is the most the client can truthfully claim. */
+  {
+    unsigned long secs = strtoul(unix_ts, NULL, 10);
+    if (secs > (unsigned long)CurrentTime)
+      ircd_snprintf(0, unix_ts, tslen, "%Tu.000", CurrentTime);
+  }
+
   return 1;
 }
 

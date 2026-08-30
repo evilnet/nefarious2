@@ -128,9 +128,12 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
-  /* Only store for local users to avoid duplicates */
-  if (!MyUser(sptr))
-    return;
+  /* Receiver-side storage: every server with the channel stores its
+   * own copy (same policy as store_channel_history -- the old
+   * MyUser-only gate left remote kicks unstored here, so their
+   * delivered msgids never entered the local index).  Cross-server
+   * duplicates don't arise: each server stores into its own DB, and
+   * federated query merges dedup by the now-shared msgid. */
 
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
@@ -261,11 +264,16 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
               "Kick reason contained invalid UTF-8 and was sanitized");
   }
 
-  /* Generate msgid before S2S relay so both use the same one */
+  /* Unified msgid: reuse the incoming S2S msgid (remote kicks), else
+   * mint -- so every server's delivery, storage and onward relay share
+   * one id instead of a per-hop re-mint. */
   {
     char kick_msgid[64] = "";
     if (feature_bool(FEAT_MSGID)) {
-      generate_msgid(kick_msgid, sizeof(kick_msgid));
+      if (cptr && !MyUser(sptr) && cli_s2s_msgid(cptr)[0])
+        ircd_strncpy(kick_msgid, cli_s2s_msgid(cptr), sizeof(kick_msgid));
+      else
+        generate_msgid(kick_msgid, sizeof(kick_msgid));
       sendcmdto_set_client_msgid(kick_msgid);
     }
 

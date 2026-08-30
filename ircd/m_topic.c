@@ -69,9 +69,9 @@ static void store_topic_event(struct Client *sptr, struct Channel *chptr,
   if (!feature_bool(FEAT_CHATHISTORY_STORE))
     return;
 
-  /* Only store for local users to avoid duplicates */
-  if (!MyUser(sptr))
-    return;
+  /* Receiver-side storage (see store_kick_event): every server with
+   * the channel stores its own copy; the msgid is unified via the S2S
+   * tag, so federated merges dedup cleanly. */
 
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)

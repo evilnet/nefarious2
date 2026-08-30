@@ -52,6 +52,13 @@ extern void server_relay_private_notice(struct Client* sptr, const char* name, c
 /* DM chathistory identity keying (F-CH1): account when authenticated,
  * else the per-connection session id.  NEVER the nick. */
 extern void history_pm_identity(struct Client *cli, char *buf, size_t buflen);
+#include "history.h"  /* enum HistoryMessageType for the prototype below */
+
+extern int  has_pm_optout(struct Client *cptr);
+extern void store_private_history(struct Client *sptr, struct Client *acptr,
+                                  const char *text, enum HistoryMessageType type,
+                                  const char *msgid, const char *timestamp,
+                                  const char *client_tags);
 extern int  history_pm_identity_matches(struct Client *cli,
                                         const char *half, size_t half_len);
 

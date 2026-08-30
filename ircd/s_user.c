@@ -1234,7 +1234,12 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
       {
         char nick_msgid[64] = "";
         if (feature_bool(FEAT_MSGID)) {
-          generate_msgid(nick_msgid, sizeof(nick_msgid));
+          /* Unified msgid: reuse the incoming S2S msgid for remote
+           * nick changes so all servers share one id. */
+          if (!MyUser(sptr) && cli_s2s_msgid(cptr)[0])
+            ircd_strncpy(nick_msgid, cli_s2s_msgid(cptr), sizeof(nick_msgid));
+          else
+            generate_msgid(nick_msgid, sizeof(nick_msgid));
           sendcmdto_set_client_msgid(nick_msgid);
         }
 
@@ -1254,7 +1259,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
 #ifdef USE_ROCKSDB
         /* Store NICK event in chathistory for each common channel.
          * cli_name(sptr) still has the OLD nick at this point. */
-        if (MyUser(sptr) && history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)) {
+        /* Receiver-side storage (see store_kick_event): remote nick
+         * changes store too, under the unified msgid. */
+        if (history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)) {
           struct Membership *chan;
           struct timeval tv;
           char timestamp[32];

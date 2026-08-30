@@ -256,8 +256,16 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
    * STRICT_PRESENCE only filters at replay, never gates storage. */
   if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
       && chptr->authusers == 0
-      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY)) {
+    /* No authed member: content must not be stored, but the delivered
+     * msgid still needs an anchor -- clients hold it (ATTACH cursors,
+     * BEFORE/AFTER/AROUND refs) and a bare skip made it unknowable
+     * forever.  Store a content-free GAP row (msgid-indexed), the same
+     * pattern the +Y/opt-out paths use below. */
+    history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
+                          account, HISTORY_GAP, "", NULL);
     return;
+  }
 
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {
@@ -283,7 +291,7 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
  * @param[in] cptr Client to check.
  * @return 1 if opted out, 0 otherwise.
  */
-static int has_pm_optout(struct Client *cptr)
+int has_pm_optout(struct Client *cptr)
 {
   struct MetadataEntry *entry;
 
@@ -332,7 +340,7 @@ static int should_store_pm(struct Client *sender, struct Client *recipient)
  * @param[in] msgid Message ID (same one sent to clients via echo-message).
  * @param[in] timestamp ISO 8601 timestamp.
  */
-static void store_private_history(struct Client *sptr, struct Client *acptr,
+void store_private_history(struct Client *sptr, struct Client *acptr,
                                    const char *text, enum HistoryMessageType type,
                                    const char *msgid, const char *timestamp,
                                    const char *client_tags)
@@ -346,8 +354,9 @@ static void store_private_history(struct Client *sptr, struct Client *acptr,
    * Deliberately BEFORE the history feature gates -- push delivery
    * must not depend on chathistory storage being enabled.  All gating
    * (hold state, subscriptions, cooldown, FEAT) lives inside. */
-  webpush_notify_pm(sptr, acptr, text, type == HISTORY_NOTICE,
-                    msgid, timestamp);
+  if (type != HISTORY_TAGMSG)
+    webpush_notify_pm(sptr, acptr, text, type == HISTORY_NOTICE,
+                      msgid, timestamp);
 
   if (!history_is_available())
     return;

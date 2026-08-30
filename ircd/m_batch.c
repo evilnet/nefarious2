@@ -57,6 +57,7 @@
 #include "send.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "ircd_relay.h"
 #include "msgq.h"
 #include "class.h"
 #include "bouncer_session.h"
@@ -1664,20 +1665,62 @@ process_multiline_batch(struct Client *sptr)
     /* Get timestamp for storage */
     history_format_timestamp(timestamp, sizeof(timestamp));
 
-    /* Check if channel has +P (no storage) mode or sender has +Y */
-    if ((is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) || IsNoStorage(sptr)) {
-      /* Skip storage but still clear batch */
-    } else {
-      /* Store content in unified ml_content + history sentinel atomically */
-      int store_result = history_store_multiline(batch_base_msgid, timestamp,
-                          is_channel ? chptr->chname : cli_name(acptr),
-                          is_channel ? NULL : cli_name(acptr),
-                          sender_mask,
-                          cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
-                          history_content, content_len,
-                          batch_paste_secret[0] ? batch_paste_secret : NULL);
-      log_write(LS_SYSTEM, L_INFO, 0, "multiline: history_store_multiline returned %d for msgid=%s target=%s",
-                store_result, batch_base_msgid, is_channel ? chptr->chname : cli_name(acptr));
+    /* Storage keying + consent.  Channels: store under the channel
+     * name gated on +P / +Y.  DMs: store under the IDENTITY PAIR-KEY --
+     * the only key the PM query/replay paths ever look up
+     * (normalize_pm_target / is_pm_target_for_client).  The old code
+     * stored DMs under the recipient NICK (unreachable by any query)
+     * and bypassed the PM consent gates entirely. */
+    {
+      char pm_pairkey[PM_PAIRKEY_BUFSIZE];
+      const char *store_target = NULL;
+      int dm_gap = 0;
+
+      if (is_channel) {
+        if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr))
+          store_target = chptr->chname;
+      } else {
+        char id_s[S2S_SESSID_BUFSIZE], id_a[S2S_SESSID_BUFSIZE];
+        history_pm_identity(sptr, id_s, sizeof(id_s));
+        history_pm_identity(acptr, id_a, sizeof(id_a));
+        if (ircd_strcmp(id_s, id_a) < 0)
+          ircd_snprintf(0, pm_pairkey, sizeof(pm_pairkey), "%s:%s", id_s, id_a);
+        else
+          ircd_snprintf(0, pm_pairkey, sizeof(pm_pairkey), "%s:%s", id_a, id_s);
+
+        if (!feature_bool(FEAT_CHATHISTORY_PRIVATE))
+          ; /* PM history disabled -- no store */
+        else if (!IsAccount(sptr) && !IsAccount(acptr))
+          ; /* fully-ephemeral pair: no multiline ring exists -- no store
+             * (singleline goes to the ephemeral ring; multiline skipping
+             * is the conservative parity choice, noted in the plan) */
+        else if (
+#ifdef USE_ROCKSDB
+                 has_pm_optout(sptr) || has_pm_optout(acptr) ||
+#endif
+                 IsNoStorage(sptr))
+          dm_gap = 1; /* consent refused -- keep the msgid resolvable */
+        else
+          store_target = pm_pairkey;
+      }
+
+      if (dm_gap) {
+        history_store_message(batch_base_msgid, timestamp, pm_pairkey,
+                              cli_name(acptr), sender_mask,
+                              cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
+                              HISTORY_GAP, "", NULL);
+      } else if (store_target) {
+        int store_result = history_store_multiline(batch_base_msgid, timestamp,
+                            store_target,
+                            is_channel ? NULL : cli_name(acptr),
+                            sender_mask,
+                            cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
+                            history_content, content_len,
+                            batch_paste_secret[0] ? batch_paste_secret : NULL);
+        (void)store_result;
+        log_write(LS_SYSTEM, L_INFO, 0, "multiline: history_store_multiline returned %d for msgid=%s target=%s",
+                  store_result, batch_base_msgid, store_target);
+      }
     }
     MyFree(history_content);
   }
@@ -2464,16 +2507,60 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
     /* Get timestamp for storage */
     history_format_timestamp(timestamp, sizeof(timestamp));
 
-    /* Check if channel has +P (no storage) mode or sender has +Y */
-    if (!((is_channel && (chptr->mode.exmode & EXMODE_NOSTORAGE)) || IsNoStorage(sptr))) {
-      /* Store content in unified ml_content + history sentinel atomically */
-      history_store_multiline(batch_base_msgid, timestamp,
-                              is_channel ? chptr->chname : cli_name(acptr),
-                              is_channel ? NULL : cli_name(acptr),
-                              sender_mask,
+    /* Storage keying + consent.  Channels: store under the channel
+     * name gated on +P / +Y.  DMs: store under the IDENTITY PAIR-KEY --
+     * the only key the PM query/replay paths ever look up
+     * (normalize_pm_target / is_pm_target_for_client).  The old code
+     * stored DMs under the recipient NICK (unreachable by any query)
+     * and bypassed the PM consent gates entirely. */
+    {
+      char pm_pairkey[PM_PAIRKEY_BUFSIZE];
+      const char *store_target = NULL;
+      int dm_gap = 0;
+
+      if (is_channel) {
+        if (!(chptr->mode.exmode & EXMODE_NOSTORAGE) && !IsNoStorage(sptr))
+          store_target = chptr->chname;
+      } else {
+        char id_s[S2S_SESSID_BUFSIZE], id_a[S2S_SESSID_BUFSIZE];
+        history_pm_identity(sptr, id_s, sizeof(id_s));
+        history_pm_identity(acptr, id_a, sizeof(id_a));
+        if (ircd_strcmp(id_s, id_a) < 0)
+          ircd_snprintf(0, pm_pairkey, sizeof(pm_pairkey), "%s:%s", id_s, id_a);
+        else
+          ircd_snprintf(0, pm_pairkey, sizeof(pm_pairkey), "%s:%s", id_a, id_s);
+
+        if (!feature_bool(FEAT_CHATHISTORY_PRIVATE))
+          ; /* PM history disabled -- no store */
+        else if (!IsAccount(sptr) && !IsAccount(acptr))
+          ; /* fully-ephemeral pair: no multiline ring exists -- no store
+             * (singleline goes to the ephemeral ring; multiline skipping
+             * is the conservative parity choice, noted in the plan) */
+        else if (
+#ifdef USE_ROCKSDB
+                 has_pm_optout(sptr) || has_pm_optout(acptr) ||
+#endif
+                 IsNoStorage(sptr))
+          dm_gap = 1; /* consent refused -- keep the msgid resolvable */
+        else
+          store_target = pm_pairkey;
+      }
+
+      if (dm_gap) {
+        history_store_message(batch_base_msgid, timestamp, pm_pairkey,
+                              cli_name(acptr), sender_mask,
                               cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
-                              history_content, content_len,
-                              s2s_paste_secret[0] ? s2s_paste_secret : NULL);
+                              HISTORY_GAP, "", NULL);
+      } else if (store_target) {
+        int store_result = history_store_multiline(batch_base_msgid, timestamp,
+                            store_target,
+                            is_channel ? NULL : cli_name(acptr),
+                            sender_mask,
+                            cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL,
+                            history_content, content_len,
+                            s2s_paste_secret[0] ? s2s_paste_secret : NULL);
+        (void)store_result;
+      }
     }
     MyFree(history_content);
   }
