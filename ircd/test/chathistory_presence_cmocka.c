@@ -240,6 +240,11 @@ struct Channel *hSeekChannel(const char *name)
  * called here), but the symbol must exist to link. */
 time_t CurrentTime;
 
+/** presence_backfill_now walks the real channel list; this suite never
+ * calls it (feature-gated, no channels exist here) but the standalone
+ * link of ../chathistory_presence.o needs the symbol. */
+struct Channel *GlobalChannelList;
+
 /* ------------------------------------------------------------------ */
 /* Tests                                                               */
 /* ------------------------------------------------------------------ */
