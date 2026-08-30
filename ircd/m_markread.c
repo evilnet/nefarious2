@@ -37,6 +37,7 @@
 
 #include "capab.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"
@@ -422,6 +423,39 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
   }
 
+  return 0;
+}
+
+/** ms_presencesync - Handle the S2S-only PN token: a peer replicated a
+ * closed strict-presence interval for an account (#6 metadata-layer
+ * replication).  Union-merge it into the local record and relay
+ * butone (readmarker MR pattern).  Applied regardless of the local
+ * FEAT_CHATHISTORY_STRICT_PRESENCE setting -- like readmarkers, the
+ * data stays warm for a later enable; storage no-ops if the metadata
+ * LMDB is unavailable.
+ *
+ * Format: PN <account> <channel> <start> <end>   (epoch seconds)
+ */
+int ms_presencesync(struct Client *cptr, struct Client *sptr, int parc,
+                    char *parv[])
+{
+  time_t start, end;
+
+  if (parc < 5)
+    return 0;
+  if (!IsServer(sptr))
+    return protocol_violation(cptr, "PRESENCE from non-server %s",
+                              cli_name(sptr));
+
+  start = (time_t)strtoul(parv[3], NULL, 10);
+  end = (time_t)strtoul(parv[4], NULL, 10);
+  if (start == 0 || end == 0)
+    return 0;
+
+  presence_apply_close(parv[1], /*is_session=*/0, parv[2], start, end);
+
+  sendcmdto_serv_butone_v3(sptr, CMD_PRESENCE, cptr, "%s %s %s %s",
+                           parv[1], parv[2], parv[3], parv[4]);
   return 0;
 }
 

@@ -245,6 +245,23 @@ time_t CurrentTime;
  * link of ../chathistory_presence.o needs the symbol. */
 struct Channel *GlobalChannelList;
 
+/* PN replication emit path (presence_broadcast_close): never fires in
+ * this suite (feature stubbed off / no server init) but the standalone
+ * link needs the symbols. */
+/* 'me' comes from test_stub.o. */
+void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
+                              const char *tok, struct Client *one,
+                              const char *pattern, ...)
+{
+  (void)from; (void)cmd; (void)tok; (void)one; (void)pattern;
+}
+struct db_env *metadata_get_env(void) { return NULL; }
+void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
+                   struct Client *to, const char *pattern, ...)
+{
+  (void)from; (void)cmd; (void)tok; (void)to; (void)pattern;
+}
+
 /* ------------------------------------------------------------------ */
 /* Tests                                                               */
 /* ------------------------------------------------------------------ */
@@ -397,6 +414,57 @@ static void test_presence_clock_skew_clamp(void **state)
   presence_purge_session(anchor);
 }
 
+/* Remote-close union merge (#6 metadata replication): closed intervals
+ * arriving from peers -- out of order, overlapping, or duplicated --
+ * must union into the record without disturbing correctness of the
+ * membership test.  Exercised via the session flavor (the account
+ * flavor shares the merge code; its load/store is stubbed here). */
+static void test_presence_remote_close_union(void **state)
+{
+  const char *anchor = "test-session-anchor-union";
+  time_t t = BASE_TS + 2000000;
+
+  (void)state;
+  presence_purge_session(anchor);
+
+  /* Base closed interval. */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 100, t + 200);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 150));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + 250));
+
+  /* Overlapping close extends the same window (union, not append). */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 150, t + 300);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 250));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + 350));
+
+  /* Disjoint later window. */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 500, t + 600);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 550));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + 400));
+
+  /* Out-of-order EARLIER window still lands. */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 10, t + 40);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 20));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + 60));
+
+  /* Duplicate apply is idempotent (no visibility change). */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 10, t + 40);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 20));
+
+  /* Degenerate input (end < start) is clamped, not corrupting. */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 900, t + 800);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 900));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + 850));
+
+  /* An open interval must survive a union merge underneath it. */
+  presence_record_join(anchor, 1, TEST_CHANNEL, t + 1000);
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 700, t + 750);
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 1100));
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + 720));
+
+  presence_purge_session(anchor);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -404,6 +472,7 @@ int main(void)
     cmocka_unit_test(test_presence_no_wraparound_at_misconfigured_cap),
     cmocka_unit_test(test_presence_reconnect_coalescing),
     cmocka_unit_test(test_presence_clock_skew_clamp),
+    cmocka_unit_test(test_presence_remote_close_union),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

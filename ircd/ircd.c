@@ -1329,6 +1329,13 @@ int main(int argc, char **argv) {
     if (feature_bool(FEAT_CAP_draft_webpush) && web_arg.rc != 0)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize webpush database");
+
+    /* Strict-presence: account records live on the METADATA env (#6
+     * metadata-layer replication) -- init after metadata_lmdb_init
+     * completes.  Also runs the boot-close sweep for stale open
+     * intervals.  Non-fatal: without the env, session-anchored
+     * presence remains usable in-memory. */
+    (void)presence_init();
   }
 #endif
 

@@ -23,3 +23,5 @@ ircd_match_cmocka
 
 *.log
 *.o
+*_cmocka
+*_t

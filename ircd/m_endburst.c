@@ -84,6 +84,7 @@
 #include "bouncer_session.h"
 #include "capab.h"
 #include "channel.h"
+#include "chathistory_presence.h"
 #include "client.h"
 #include "handlers.h"
 #include "hash.h"
@@ -174,6 +175,14 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * EOB is too late: by then peer's N for hold ghosts has already
      * been processed and any colliding ghosts have already been
      * killed by m_nick.) */
+
+    /* Strict-presence #6 step 2: catch the newly-linked peer up on
+     * closed account intervals it could not have observed (netsplit
+     * windows, downtime, brand-new servers) -- their PN broadcasts
+     * were lost while the link was down.  Self-gated on the feature
+     * and storage availability; union application on the receiver
+     * makes repeat syncs across relinks harmless. */
+    presence_burst_sync(sptr);
 
     /* Advertise chathistory storage capability (CH A S) to newly linked server.
      * Only advertise if we have CHATHISTORY_STORE enabled - this indicates we

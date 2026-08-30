@@ -1018,6 +1018,14 @@ struct Message msgtab[] = {
     "<target> [timestamp=<ts>] - Get or set read marker for target"
   },
   {
+    MSG_PRESENCE,
+    TOK_PRESENCE,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_ignore, ms_presencesync, m_ignore, m_ignore },
+    "S2S-only: strict-presence interval replication"
+  },
+  {
     MSG_RENAME,
     TOK_RENAME,
     0, MAXPARA, MFLG_SLOW, 0, NULL,

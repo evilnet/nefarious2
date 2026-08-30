@@ -909,11 +909,9 @@ int history_init(const char *dbpath)
     /* Non-fatal — history still works, just without separate multiline storage */
   }
 
-  /* Open the presence CF (strict-mode chathistory).  Reads history's
-   * env via history_get_env(); silent if FEAT_CHATHISTORY_STRICT_PRESENCE
-   * is never enabled.  Non-fatal on failure — session-anchored presence
-   * remains usable in-memory. */
-  (void)presence_init();
+  /* Strict-presence init moved to ircd.c: the account records now live
+   * on the METADATA env (#6 replication), which initializes after this
+   * function. */
 
   history_available = 1;
   log_write(LS_SYSTEM, L_INFO, 0, "history: storage initialized at %s", dbpath);

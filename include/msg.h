@@ -548,6 +548,10 @@ struct Client;
 #define TOK_MARKREAD	"MR"
 #define CMD_MARKREAD	MSG_MARKREAD, TOK_MARKREAD
 
+#define MSG_PRESENCE	"PRESENCE"	/* S2S-only: strict-presence closed-interval replication */
+#define TOK_PRESENCE	"PN"
+#define CMD_PRESENCE	MSG_PRESENCE, TOK_PRESENCE
+
 #define MSG_RENAME	"RENAME"
 #define TOK_RENAME	"RN"
 #define CMD_RENAME	MSG_RENAME, TOK_RENAME

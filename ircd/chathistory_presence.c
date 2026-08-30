@@ -33,6 +33,10 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
+#include "metadata.h"
+#include "msg.h"
+#include "send.h"
+#include "s_debug.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_string.h"
@@ -233,7 +237,7 @@ static int acct_load(const char *account, const char *channel,
   memset(out, 0, sizeof(*out));
   if (!presence_persistence_ready || !presence_cf)
     return -1;
-  env = history_get_env();
+  env = metadata_get_env();
   if (!env)
     return -1;
   klen = build_acct_key(keybuf, sizeof(keybuf), account, channel);
@@ -266,7 +270,7 @@ static int acct_store(const char *account, const char *channel,
 
   if (!presence_persistence_ready || !presence_cf)
     return -1;
-  env = history_get_env();
+  env = metadata_get_env();
   if (!env)
     return -1;
   klen = build_acct_key(keybuf, sizeof(keybuf), account, channel);
@@ -381,7 +385,7 @@ void presence_touch_last_alive(void)
 
   if (!presence_persistence_ready || !presence_cf)
     return;
-  env = history_get_env();
+  env = metadata_get_env();
   if (!env)
     return;
   wb = db_writebatch_new(env);
@@ -403,7 +407,7 @@ int presence_init(void)
   /* In-memory tables are already zero-initialized at static scope;
    * nothing to do for the session-anchored side. */
 
-  env = history_get_env();
+  env = metadata_get_env();
   if (!env) {
     /* History storage isn't up yet (or is disabled).  Session-anchored
      * presence still works; account-anchored is silently unavailable. */
@@ -508,6 +512,103 @@ void presence_shutdown(void)
   presence_persistence_ready = 0;
 }
 
+/** Union-merge one closed interval [start,end] into @a r, preserving
+ * sort order, coalescing overlaps (and near-adjacency, same 30s policy
+ * as record_apply_part), leaving any open interval untouched, and
+ * FIFO-dropping the oldest closed interval at the cap.  The merge is
+ * idempotent and order-independent -- the properties the PN
+ * replication flood needs. */
+static void record_union_close(struct presence_record *r,
+                               int64_t start, int64_t end)
+{
+  unsigned int cap = effective_max_intervals();
+  uint8_t i, pos;
+
+  if (end < start)
+    end = start;   /* degenerate input: clamp to zero-length */
+
+  /* Find insertion position (intervals are sorted by start). */
+  for (pos = 0; pos < r->count && r->intervals[pos].start <= start; pos++)
+    ;
+
+  /* Merge with predecessor when overlapping/adjacent. */
+  if (pos > 0 && r->intervals[pos - 1].end + 30 >= start) {
+    if (end > r->intervals[pos - 1].end)
+      r->intervals[pos - 1].end = end;
+    pos--;
+  } else {
+    /* Insert at pos. */
+    while (r->count > cap) {   /* runtime cap lowered under us */
+      memmove(&r->intervals[0], &r->intervals[1],
+              sizeof(r->intervals[0]) * (r->count - 1u));
+      r->count--;
+      if (pos > 0) pos--;
+    }
+    if (r->count >= cap) {
+      if (pos == 0)
+        return;   /* older than everything retained -- drop it */
+      memmove(&r->intervals[0], &r->intervals[1],
+              sizeof(r->intervals[0]) * (pos - 1u));
+      pos--;
+      r->count--;
+    }
+    memmove(&r->intervals[pos + 1], &r->intervals[pos],
+            sizeof(r->intervals[0]) * (r->count - pos));
+    r->intervals[pos].start = start;
+    r->intervals[pos].end = end;
+    r->count++;
+  }
+
+  /* Swallow successors the (possibly grown) interval now covers. */
+  i = pos;
+  while (i + 1 < r->count
+         && r->intervals[i].end + 30 >= r->intervals[i + 1].start) {
+    if (r->intervals[i + 1].end > r->intervals[i].end)
+      r->intervals[i].end = r->intervals[i + 1].end;
+    memmove(&r->intervals[i + 1], &r->intervals[i + 2],
+            sizeof(r->intervals[0]) * (r->count - i - 2u));
+    r->count--;
+  }
+}
+
+void presence_apply_close(const char *anchor, int anchor_is_session,
+                          const char *channel, time_t start, time_t end)
+{
+  if (!anchor || !*anchor || !channel || !*channel)
+    return;
+
+  if (anchor_is_session) {
+    struct presence_session_entry *e =
+        session_get_or_create(anchor, channel);
+    record_union_close(&e->record, (int64_t)start, (int64_t)end);
+    return;
+  }
+
+  {
+    struct presence_record r;
+    if (acct_load(anchor, channel, &r) != 0)
+      memset(&r, 0, sizeof(r));
+    record_union_close(&r, (int64_t)start, (int64_t)end);
+    (void)acct_store(anchor, channel, &r);
+  }
+}
+
+/** Broadcast a closed account interval to all servers (PN token).
+ * Readmarker-style flood; receivers apply via presence_apply_close and
+ * relay butone.  Gated on the feature (no traffic while strict
+ * presence is dark) and on server init (conf-parse safety). */
+static void presence_broadcast_close(const char *account,
+                                     const char *channel,
+                                     time_t start, time_t end)
+{
+  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
+    return;
+  if (!cli_serv(&me))
+    return;
+  sendcmdto_serv_butone_v3(&me, CMD_PRESENCE, NULL, "%s %s %Tu %Tu",
+                           account, channel, start, end);
+}
+
 void presence_record_join(const char *anchor, int anchor_is_session,
                            const char *channel, time_t when)
 {
@@ -551,10 +652,24 @@ void presence_record_part(const char *anchor, int anchor_is_session,
 
   {
     struct presence_record r;
+    int64_t was_open;
     if (acct_load(anchor, channel, &r) != 0)
       return;  /* nothing to close */
+    was_open = r.open_since;
     record_apply_part(&r, when);
     (void)acct_store(anchor, channel, &r);
+    /* Replicate the just-closed window (#6, metadata-layer
+     * replication): peers union it into their own view, healing
+     * netsplit windows and roaming.  Only account anchors replicate;
+     * session anchors are connection-local by nature. */
+    if (was_open != 0) {
+      int64_t bstart = was_open;
+      int64_t bend = (int64_t)when;
+      if (bend < bstart)
+        bend = bstart;
+      presence_broadcast_close(anchor, channel,
+                               (time_t)bstart, (time_t)bend);
+    }
   }
 }
 
@@ -779,6 +894,76 @@ void presence_anchor_transfer(struct Client *cptr,
   }
 }
 
+/** Link-time catch-up (#6 step 2): send this server's account-anchored
+ * closed intervals to a newly-linked peer as PN lines.  Windows that
+ * closed while the peer was unreachable (netsplit, downtime, a brand
+ * new server) were never observed there and their PN broadcasts were
+ * lost -- without this sync the steady-state flood only re-covers what
+ * per-server observation already records.  Union application on the
+ * receiver makes re-sends across repeated relinks harmless.
+ * Bounded by the per-record FIFO cap and the retention sweep; a hard
+ * line ceiling guards pathological stores. */
+void presence_burst_sync(struct Client *cptr)
+{
+  struct db_env *env;
+  struct db_iter *it;
+  unsigned int sent = 0;
+  const unsigned int line_ceiling = 20000;
+
+  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
+    return;
+  if (!presence_persistence_ready || !presence_cf)
+    return;
+  env = metadata_get_env();
+  if (!env)
+    return;
+
+  it = db_iter_open(env, presence_cf, NULL);
+  if (!it)
+    return;
+  if (db_iter_seek_first(it) == DB_OK) {
+    while (db_iter_valid(it) && sent < line_ceiling) {
+      size_t klen, vlen;
+      const void *kptr = db_iter_key(it, &klen);
+      const void *vptr = db_iter_value(it, &vlen);
+      struct presence_record r;
+
+      /* Key: "<account>\0<channel>"; the meta row starts with NUL and
+       * its value size differs from the record -- both checks skip it. */
+      if (kptr && klen > 2 && ((const char *)kptr)[0] != '\0'
+          && vptr && vlen == sizeof(r)) {
+        const char *account = (const char *)kptr;
+        size_t alen = strnlen(account, klen);
+        if (alen < klen) {
+          const char *channel = account + alen + 1;
+          size_t clen = klen - alen - 1;
+          char chanbuf[CHANNELLEN + 1];
+          uint8_t k;
+          if (clen > 0 && clen <= CHANNELLEN) {
+            memcpy(chanbuf, channel, clen);
+            chanbuf[clen] = '\0';
+            memcpy(&r, vptr, sizeof(r));
+            for (k = 0; k < r.count && sent < line_ceiling; k++) {
+              sendcmdto_one(&me, CMD_PRESENCE, cptr, "%s %s %Tu %Tu",
+                            account, chanbuf,
+                            (time_t)r.intervals[k].start,
+                            (time_t)r.intervals[k].end);
+              sent++;
+            }
+          }
+        }
+      }
+      if (db_iter_next(it) != DB_OK)
+        break;
+    }
+  }
+  db_iter_close(it);
+  if (sent)
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence: burst-synced %u interval(s) to %s",
+              sent, cli_name(cptr));
+}
+
 void presence_purge_session(const char *session_id)
 {
   unsigned int i;
@@ -957,7 +1142,7 @@ void presence_retention_sweep(void)
    * every FEAT_CHATHISTORY_MAINTENANCE_INTERVAL seconds (default 300),
    * not on the hot path. */
   if (presence_persistence_ready && presence_cf) {
-    struct db_env *env = history_get_env();
+    struct db_env *env = metadata_get_env();
     struct db_iter *it;
     struct db_writebatch *wb;
     unsigned int rewritten = 0, deleted = 0;
