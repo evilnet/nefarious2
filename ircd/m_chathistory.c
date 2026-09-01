@@ -4263,15 +4263,9 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
 
     channame = chptr->chname;
 
-    /* Check read marker: if user already read past since_time, skip */
-    if (ctx->since_time > 0 && IsAccount(sptr) &&
-        metadata_readmarker_get(cli_account(sptr), channame, marker_ts) == 0) {
-      char since_str[HISTORY_TIMESTAMP_LEN];
-      ircd_snprintf(0, since_str, sizeof(since_str), "%lu.000",
-                    (unsigned long)ctx->since_time);
-      if (strcmp(marker_ts, since_str) > 0)
-        continue;  /* Already read past our baseline */
-    }
+    /* NOTE: this leg used to SKIP the whole channel when the account's
+     * read marker was past since_time -- same multi-device day-gap bug
+     * as replay.c's marker fast-forward (see the note there). */
 
     /* Save cursor for next iteration (after this channel completes) */
     ctx->cursor = member->next_channel;

@@ -367,7 +367,6 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
   while (rs->chan_index < rs->num_channels) {
     const char *channame = rs->chan_names[rs->chan_index];
     const char *chan_since = rs->since_timestamp;
-    char marker_ts[32];
     struct HistoryMessage *messages = NULL;
     struct Channel *chptr;
     int count;
@@ -379,12 +378,14 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
     if (!chptr || !find_member_link(chptr, sptr))
       continue;
 
-    /* Use read marker if it's ahead of the since time */
-    if (IsAccount(sptr) &&
-        metadata_readmarker_get(cli_account(sptr), channame, marker_ts) == 0 &&
-        strcmp(marker_ts, rs->since_timestamp) > 0) {
-      chan_since = marker_ts;
-    }
+    /* NOTE: replay used to fast-forward past the account's READ MARKER
+     * here ("don't re-send what was read").  Markers are account-global
+     * and every device advances them, so a phone reattaching after a
+     * day of desktop use replayed NOTHING for the whole day -- "history
+     * skipped all day long activity" (Rubin, 2026-08-30).  Read-on-one-
+     * device is not delivered-to-another: markers are unread-pointer
+     * UX, not delivery accounting.  Replay everything since the
+     * cursor/detach point; msgid-deduping clients drop true dupes. */
 
     /* Query one past the limit: an over-limit result means this leg is
      * TRUNCATED at the server cap.  A complete leg carries the
