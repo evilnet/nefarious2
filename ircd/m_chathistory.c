@@ -1917,24 +1917,61 @@ static struct HistoryTarget *merge_targets(struct HistoryTarget *local,
  * @param[in] label Label string for labeled-response (NULL for auto-replay).
  */
 static void send_targets_batch(struct Client *sptr, struct HistoryTarget *targets,
-                               int limit, const char *label)
+                               int limit, const char *label, int query_complete)
 {
   char batchid[BATCH_ID_LEN];
   char iso_time[32];
   const char *time_str;
   int sent = 0;
+  int final;
 
   generate_batch_id(batchid, sizeof(batchid), sptr);
 
-  /* Start batch — TARGETS always returns all results so always last page */
+  /* Completeness (spec: valueless draft/chathistory-end on the FIRST
+   * BATCH line of a draft/chathistory-targets batch when no more are
+   * available).  This used to be stamped unconditionally ("TARGETS
+   * always returns all results") -- false: the query over-fetch, the
+   * access/presence filters, and the send limit all clip.  The tag
+   * rides the opener, so pre-count the eligible rows: final only when
+   * the QUERY was exhausted and everything eligible fits the limit. */
+  final = query_complete;
+  if (final) {
+    int eligible = 0;
+    struct HistoryTarget *tgt;
+    for (tgt = targets; tgt && eligible <= limit; tgt = tgt->next) {
+      if (check_history_access(sptr, tgt->target, NULL, 0) != 0)
+        continue;
+      if (feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)
+          && IsChannelName(tgt->target)) {
+        struct Channel *pchan = FindChannel(tgt->target);
+        if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
+          int p_is_session = 0;
+          const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
+          time_t act = (time_t)strtoul(tgt->last_timestamp, NULL, 10);
+          if (!p_anchor || act == 0
+              || !presence_was_present(p_anchor, p_is_session,
+                                       tgt->target, act))
+            continue;
+        }
+      }
+      eligible++;
+    }
+    if (eligible > limit)
+      final = 0;
+  }
+
   if (CapRecipientHas(sptr, CAP_BATCH)) {
     if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
         CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-      sendrawto_one(sptr, "@draft/chathistory-end;label=%s :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+      sendrawto_one(sptr, "@%slabel=%s :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+                    final ? "draft/chathistory-end;" : "",
                     label, cli_name(&me), batchid);
       cli_label_responded(sptr) = 1;
-    } else {
+    } else if (final) {
       sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
+                    cli_name(&me), batchid);
+    } else {
+      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s draft/chathistory-targets",
                     cli_name(&me), batchid);
     }
   }
@@ -2099,7 +2136,8 @@ static void complete_targets_fed(struct FedRequest *req)
   merged = merge_targets(ctx->local_targets, ctx->fed_targets);
 
   /* Send to client with access filtering and limit enforcement */
-  send_targets_batch(client, merged, req->limit, req->label);
+  send_targets_batch(client, merged, req->limit, req->label,
+                     ctx->local_count + ctx->fed_count < req->limit);
 
   history_free_targets(merged);
 }
@@ -2172,10 +2210,15 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
      * targets ownership stays with us (not transferred to FedRequest). */
   }
 
-  /* Local-only path: sort by recency and send */
+  /* Local-only path: sort by recency and send.  Query exhaustion:
+   * the over-fetch returned fewer rows than it asked for. */
   {
     struct HistoryTarget *sorted = merge_targets(targets, NULL);
-    send_targets_batch(sptr, sorted, limit, cli_label(sptr));
+    int fetch_limit = limit * 3;
+    if (fetch_limit > 500)
+      fetch_limit = 500;
+    send_targets_batch(sptr, sorted, limit, cli_label(sptr),
+                       count < fetch_limit);
     history_free_targets(sorted);
   }
   history_free_targets(targets);
