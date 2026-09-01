@@ -106,7 +106,8 @@ struct ReplayState {
  */
 extern void replay_start_batch(struct Client *sptr, const char *target,
                                 struct HistoryMessage *messages, int count,
-                                int ops_override, const char *label);
+                                int ops_override, const char *label,
+                                int complete);
 
 /** Start async bouncer auto-replay across all channels + PMs.
  * Builds channel name list from current memberships, starts replaying

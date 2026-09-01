@@ -987,7 +987,7 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        const char *target,
                                        struct HistoryMessage **head,
                                        int count, int ops_override,
-                                       const char *label);
+                                       const char *label, int complete);
 
 /** Replay chathistory to a client since a given timestamp.
  * Used by bouncer auto-replay for legacy clients without draft/chathistory.
@@ -1019,7 +1019,8 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
     /* Attach context messages (reactions, redacts) to their parents */
     history_attach_context(target, messages);
     /* Ownership of messages transfers to replay_start_batch */
-    count = presence_filter_and_replay(sptr, target, &messages, count, 0, NULL);
+    count = presence_filter_and_replay(sptr, target, &messages, count, 0, NULL,
+                                       count < limit);
   }
 
   return count;
@@ -1353,7 +1354,7 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        const char *target,
                                        struct HistoryMessage **head,
                                        int count, int ops_override,
-                                       const char *label)
+                                       const char *label, int complete)
 {
   int real_override = 0;
   if (ops_override) {
@@ -1366,7 +1367,8 @@ static int presence_filter_and_replay(struct Client *sptr,
    * (a later capability) would skip this filter. */
   count = redact_filter_messages(head, count);
   count = presence_filter_messages(sptr, target, head, count, real_override);
-  replay_start_batch(sptr, target, *head, count, real_override, label);
+  replay_start_batch(sptr, target, *head, count, real_override, label,
+                     complete);
   return count;
 }
 
@@ -1450,9 +1452,14 @@ skip_federation:
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
-  if (cli_replay(sptr) && count < limit)
-    cli_replay(sptr)->is_last_page = 1;
+  /* Completeness = QUERY EXHAUSTION: judged on the raw row count
+   * BEFORE reply-side filters (redact originals, cap-gated REDACT
+   * events, strict presence all legitimately shrink the emitted
+   * page), and threaded down to the batch opener -- the replay layer
+   * used to stamp every single-shot page final regardless. */
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
+                                     ops_override, cli_label(sptr),
+                                     count < limit);
 
   return 0;
 }
@@ -1515,9 +1522,14 @@ static int chathistory_before(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
-  if (cli_replay(sptr) && count < limit)
-    cli_replay(sptr)->is_last_page = 1;
+  /* Completeness = QUERY EXHAUSTION: judged on the raw row count
+   * BEFORE reply-side filters (redact originals, cap-gated REDACT
+   * events, strict presence all legitimately shrink the emitted
+   * page), and threaded down to the batch opener -- the replay layer
+   * used to stamp every single-shot page final regardless. */
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
+                                     ops_override, cli_label(sptr),
+                                     count < limit);
 
   return 0;
 }
@@ -1580,9 +1592,14 @@ static int chathistory_after(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
-  if (cli_replay(sptr) && count < limit)
-    cli_replay(sptr)->is_last_page = 1;
+  /* Completeness = QUERY EXHAUSTION: judged on the raw row count
+   * BEFORE reply-side filters (redact originals, cap-gated REDACT
+   * events, strict presence all legitimately shrink the emitted
+   * page), and threaded down to the batch opener -- the replay layer
+   * used to stamp every single-shot page final regardless. */
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
+                                     ops_override, cli_label(sptr),
+                                     count < limit);
 
   return 0;
 }
@@ -1645,9 +1662,14 @@ static int chathistory_around(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
-  if (cli_replay(sptr) && count < limit)
-    cli_replay(sptr)->is_last_page = 1;
+  /* Completeness = QUERY EXHAUSTION: judged on the raw row count
+   * BEFORE reply-side filters (redact originals, cap-gated REDACT
+   * events, strict presence all legitimately shrink the emitted
+   * page), and threaded down to the batch opener -- the replay layer
+   * used to stamp every single-shot page final regardless. */
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
+                                     ops_override, cli_label(sptr),
+                                     count < limit);
 
   return 0;
 }
@@ -1721,9 +1743,14 @@ static int chathistory_between(struct Client *sptr, const char *target,
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(lookup_target, messages);
   /* Async replay — ownership of messages transfers to ReplayState */
-  count = presence_filter_and_replay(sptr, lookup_target, &messages, count, ops_override, cli_label(sptr));
-  if (cli_replay(sptr) && count < limit)
-    cli_replay(sptr)->is_last_page = 1;
+  /* Completeness = QUERY EXHAUSTION: judged on the raw row count
+   * BEFORE reply-side filters (redact originals, cap-gated REDACT
+   * events, strict presence all legitimately shrink the emitted
+   * page), and threaded down to the batch opener -- the replay layer
+   * used to stamp every single-shot page final regardless. */
+  count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
+                                     ops_override, cli_label(sptr),
+                                     count < limit);
 
   return 0;
 }
@@ -3627,10 +3654,12 @@ static void send_fed_response(struct FedRequest *req)
 
   /* Attach context messages (reactions, redacts) to their parents */
   history_attach_context(req->target, merged);
-  /* Async replay — ownership of merged list transfers to ReplayState */
-  total = presence_filter_and_replay(client, req->target, &merged, total, req->ops_override, req->label);
-  if (cli_replay(client) && total < req->limit && !req->fed_truncated)
-    cli_replay(client)->is_last_page = 1;
+  /* Async replay — ownership of merged list transfers to ReplayState.
+   * Completeness judged on the PRE-filter merged total (see the
+   * query_count note in the subcommand handlers). */
+  total = presence_filter_and_replay(client, req->target, &merged, total,
+                                     req->ops_override, req->label,
+                                     total < req->limit && !req->fed_truncated);
 }
 
 /** Complete a federation request - sends response and triggers cleanup.

@@ -665,7 +665,7 @@ void replay_continue(struct Client *sptr)
  */
 void replay_start_batch(struct Client *sptr, const char *target,
                          struct HistoryMessage *messages, int count,
-                         int ops_override, const char *label)
+                         int ops_override, const char *label, int complete)
 {
   struct ReplayState *rs;
   /* Translate `target` (may be a PM storage key "nick1:nick2") to the
@@ -685,19 +685,27 @@ void replay_start_batch(struct Client *sptr, const char *target,
   replay_set_target_from_storage(sptr, &tmp_rs, target);
 
   if (!messages || count == 0) {
-    /* Send empty batch synchronously — always last page */
+    /* Empty batch.  NOT inherently the last page: reply-side filters
+     * (redact originals, cap-gated REDACT events, strict presence) can
+     * empty a page whose QUERY was not exhausted -- claiming finality
+     * there stopped paginators with history remaining.  Honor the
+     * caller's query-exhaustion verdict. */
     char batchid[REPLAY_BATCH_ID_LEN];
+    const char *end_pfx = complete ? "@draft/chathistory-end" : "";
     generate_batch_id(batchid, sizeof(batchid), sptr);
 
     if (CapRecipientHas(sptr, CAP_BATCH)) {
-      /* Empty batch is always the last page — tag on BATCH start */
       if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
           CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-        sendrawto_one(sptr, "@draft/chathistory-end;label=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+        sendrawto_one(sptr, "%s%slabel=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                      complete ? end_pfx : "@", complete ? ";" : "",
                       label, cli_name(&me), batchid, tmp_rs.target);
         cli_label_responded(sptr) = 1;
+      } else if (complete) {
+        sendrawto_one(sptr, "%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                      end_pfx, cli_name(&me), batchid, tmp_rs.target);
       } else {
-        sendrawto_one(sptr, "@draft/chathistory-end :%s " MSG_BATCH_CMD " +%s chathistory %s",
+        sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s chathistory %s",
                       cli_name(&me), batchid, tmp_rs.target);
       }
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
@@ -716,13 +724,12 @@ void replay_start_batch(struct Client *sptr, const char *target,
   if (label && label[0])
     ircd_strncpy(rs->label, label, sizeof(rs->label));
   rs->phase = REPLAY_PHASE_SINGLE;
-  /* Single-shot on-demand chathistory query — no pagination continuation,
-   * so the BATCH we're about to open IS the last page.  Setting this
-   * before replay_open_batch ensures the @draft/chathistory-end tag
-   * lands on the BATCH start line.  Without it, callers like
-   * chathistory_latest set is_last_page only AFTER replay_open_batch
-   * has already emitted the BATCH start, and the end-tag is lost. */
-  rs->is_last_page = 1;
+  /* Single-shot on-demand query.  "No continuation" is NOT "history
+   * exhausted": the old unconditional is_last_page=1 stamped EVERY
+   * page final, so end-tag-honoring paginators stopped at filter-
+   * shrunk pages with history remaining.  The caller judged
+   * completeness on the raw pre-filter row count. */
+  rs->is_last_page = complete ? 1 : 0;
 
   cli_replay(sptr) = rs;
 
