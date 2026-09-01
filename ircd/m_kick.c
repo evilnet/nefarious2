@@ -135,9 +135,6 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
    * duplicates don't arise: each server stores into its own DB, and
    * federated query merges dedup by the now-shared msgid. */
 
-  if (!feature_bool(FEAT_CAP_draft_event_playback))
-    return;  /* events replay only under event-playback (see channel.c) */
-
   /* Check if channel has +P (no storage) mode */
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;

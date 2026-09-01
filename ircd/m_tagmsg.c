@@ -145,9 +145,8 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   if (!history_is_available())
     return;
 
-  /* Only store if event-playback is enabled */
-  if (!feature_bool(FEAT_CAP_draft_event_playback))
-    return;
+  /* No event-playback gate: TAGMSG is always SENT in history replies
+   * (should_send_message_type) and its msgid must always be anchorable. */
 
   /* Filter ephemeral tags — typing indicators are not meaningful in history.
    * Only skip if ALL tags are ephemeral; a TAGMSG with both +typing and
@@ -350,8 +349,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * delivered a msgid the msgid index never learned (unresolvable
        * ATTACH cursors, unknowable anchors). */
 #ifdef USE_ROCKSDB
-      if (feature_bool(FEAT_CAP_draft_event_playback)
-          && !has_only_ephemeral_tags(client_tags)) {
+      if (!has_only_ephemeral_tags(client_tags)) {
         char ts_buf[HISTORY_TIMESTAMP_LEN];
         history_format_timestamp(ts_buf, sizeof(ts_buf));
         store_private_history(sptr, acptr, "", HISTORY_TAGMSG, dm_msgid,
@@ -489,8 +487,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Store DM TAGMSG for event-playback -- mirrors the local-client
      * path (m_tagmsg); pair-keyed + consent-gated inside. */
 #ifdef USE_ROCKSDB
-    if (feature_bool(FEAT_CAP_draft_event_playback)
-        && cli_s2s_msgid(cptr)[0]
+    if (cli_s2s_msgid(cptr)[0]
         && !has_only_ephemeral_tags(client_tags)) {
       char ts_buf[HISTORY_TIMESTAMP_LEN];
       history_format_timestamp(ts_buf, sizeof(ts_buf));

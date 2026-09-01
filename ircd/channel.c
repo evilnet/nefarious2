@@ -114,12 +114,10 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (chptr->mode.exmode & EXMODE_NOSTORAGE)
     return;
 
-  /* Events are replayable only under draft/event-playback; storing
-   * them with the feature off is dead weight (and lets a member's own
-   * JOIN event mask the TARGETS presence filter).  Same gate TAGMSG
-   * storage always had. */
-  if (!feature_bool(FEAT_CAP_draft_event_playback))
-    return;
+  /* Events store UNCONDITIONALLY (send-time filtering per client cap
+   * happens in should_send_message_type): every delivered msgid must
+   * be indexable, or event msgids become unusable anchors -- briefly
+   * shipped feature-gated and it broke ATTACH cursors on prod. */
 
   /* Storage gate: when CHATHISTORY_REQUIRE_AUTH is on, unauthed
    * clients can never query, so storing into a channel with no
