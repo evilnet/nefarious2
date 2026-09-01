@@ -9,6 +9,7 @@
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <cmocka.h>
 
 #include "ircd_defs.h"
@@ -706,9 +707,65 @@ static void test_utf8_sanitize_truncates_at_a_sequence_boundary(void **state)
 }
 
 
+
+/* ---- msgid intrinsic time decode (2026-09 repack) ---- */
+
+static const char *msgid_test_alphabet =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]";
+
+static void msgid_encode7(char *out, unsigned long long ms)
+{
+  int i;
+  for (i = 6; i >= 0; i--) {
+    out[i] = msgid_test_alphabet[ms & 63];
+    ms >>= 6;
+  }
+  out[7] = '\0';
+}
+
+static void test_msgid_decode_roundtrip(void **state)
+{
+  char id[16];
+  char t7[8];
+  unsigned long long samples[] = {
+    1577836800000ULL,          /* 2020-01-01 floor */
+    1788112345678ULL,          /* ~now */
+    4102444799999ULL,          /* just under the 2100 ceiling */
+  };
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(samples)/sizeof(samples[0]); i++) {
+    msgid_encode7(t7, samples[i]);
+    snprintf(id, sizeof(id), "Bj" "AAB" "%s" "Ac", t7);
+    assert_int_equal((unsigned long long)msgid_decode_time_ms(id), samples[i]);
+  }
+}
+
+static void test_msgid_decode_rejects(void **state)
+{
+  (void)state;
+  /* Legacy layout: counter high padding decodes to ~0 -> rejected. */
+  assert_int_equal(msgid_decode_time_ms("BjAABAAAAAAAAB"), 0);
+  /* Garbage char in the time field. */
+  assert_int_equal(msgid_decode_time_ms("BjAAB!!!!!!!Ac"), 0);
+  /* Too short. */
+  assert_int_equal(msgid_decode_time_ms("BjAAB"), 0);
+  assert_int_equal(msgid_decode_time_ms(NULL), 0);
+  /* Below the 2020 floor (counter-era values). */
+  {
+    char id[16], t7[8];
+    msgid_encode7(t7, 123456ULL);
+    snprintf(id, sizeof(id), "BjAAB%sAc", t7);
+    assert_int_equal(msgid_decode_time_ms(id), 0);
+  }
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_msgid_decode_roundtrip),
+    cmocka_unit_test(test_msgid_decode_rejects),
         /* ircd_strncpy */
         cmocka_unit_test(test_ircd_strncpy_normal),
         cmocka_unit_test(test_ircd_strncpy_truncation),

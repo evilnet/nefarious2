@@ -1232,3 +1232,55 @@ int valid_hostname(const char* name) {
 
   return 1;
 }
+
+/* ------------------------------------------------------------------
+ * msgid intrinsic time decode
+ *
+ * generate_msgid() (send.c) lays a msgid out as
+ *   <node_2><logical_3><time_ms_7><counter_2>   (14 chars)
+ * with time_ms_7 = milliseconds since epoch in the ircd base64
+ * alphabet.  Decoding it lets every msgid resolve to WHEN it was
+ * minted even after the message aged out of history storage (or was
+ * never stored).  Pre-repack msgids carried a monotonic counter in
+ * those positions whose value decodes to ~zero -- far outside the
+ * accepted epoch range -- so legacy ids are rejected cleanly and the
+ * caller falls back to index/failure paths.
+ *
+ * The alphabet below MUST match numnicks.c convert2y; it is duplicated
+ * here because this file stays dependency-light (umkpasswd/table_gen
+ * link it standalone).  A build-time drift would break the round-trip
+ * cmocka test in ircd_string_cmocka.c.
+ * ------------------------------------------------------------------ */
+static const char msgid_b64_alphabet[65] =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]";
+
+/** Decode the intrinsic mint-time from a msgid.
+ * @param[in] msgid The message id (>= 12 chars examined).
+ * @return Milliseconds since epoch, or 0 if the id is not a
+ *         time-carrying msgid (legacy format, malformed, or the
+ *         decoded value falls outside 2020..2100). */
+uint64_t msgid_decode_time_ms(const char *msgid)
+{
+  uint64_t ms = 0;
+  int i;
+
+  if (!msgid)
+    return 0;
+  for (i = 0; i < 12; i++)
+    if (!msgid[i])
+      return 0;   /* shorter than <node2><logical3><time7> */
+
+  for (i = 5; i < 12; i++) {
+    const char *pos = strchr(msgid_b64_alphabet, msgid[i]);
+    if (!pos)
+      return 0;
+    ms = (ms << 6) | (uint64_t)(pos - msgid_b64_alphabet);
+  }
+
+  /* Sanity: accept 2020-01-01 .. 2100-01-01 only.  Legacy msgids
+   * decode to near-zero here (counter high padding). */
+  if (ms < 1577836800000ULL || ms > 4102444800000ULL)
+    return 0;
+  return ms;
+}
+

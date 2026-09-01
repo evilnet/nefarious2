@@ -101,7 +101,6 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   char sender[HISTORY_SENDER_LEN];
   const char *account;
   const char *use_msgid;
-  int gap_only = 0;
 
   if (!history_is_available())
     return;
@@ -132,7 +131,8 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
       && chptr->authusers == 0
       && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
-    gap_only = 1;  /* keep the delivered msgid resolvable (GAP row) */
+    return;  /* msgid resolves intrinsically (2026-09 repack); no
+              * anchor row needed */
 
   /* Generate Unix timestamp for storage */
   gettimeofday(&tv, NULL);
@@ -161,11 +161,9 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
   account = (cli_user(sptr) && cli_user(sptr)->account[0])
             ? cli_user(sptr)->account : NULL;
 
-  /* Store in database.  gap_only: the auth gate refused content, but
-   * the event's broadcast msgid still gets an index anchor. */
+  /* Store in database */
   history_store_message(use_msgid, timestamp, chptr->chname, NULL, sender,
-                        account, gap_only ? HISTORY_GAP : type,
-                        gap_only ? "" : (text ? text : ""), NULL);
+                        account, type, text ? text : "", NULL);
 }
 #endif /* USE_ROCKSDB */
 

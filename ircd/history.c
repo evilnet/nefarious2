@@ -2567,9 +2567,21 @@ int history_msgid_to_timestamp(const char *msgid, char *timestamp)
   (void)val; (void)sep;
   rc = msgid_index_resolve(msgid, NULL, NULL, timestamp, NULL, 0);
   if (rc == 1) {
+    /* Not in the index (never stored, evicted, aged out).  The msgid
+     * itself carries its mint time since the 2026-09 repack -- decode
+     * it so cursors and refs degrade to a time anchor instead of
+     * failing.  Legacy/garbage ids decode to 0 and keep the old
+     * failure path. */
+    uint64_t ms = msgid_decode_time_ms(msgid);
+    if (ms != 0) {
+      ircd_snprintf(0, timestamp, HISTORY_TIMESTAMP_LEN, "%llu.%03llu",
+                    (unsigned long long)(ms / 1000),
+                    (unsigned long long)(ms % 1000));
+      return 0;
+    }
     log_write(LS_SYSTEM, L_INFO, 0,
               "history_msgid_to_timestamp: msgid=%s NOT FOUND in cf_msgid index "
-              "(message never stored locally or evicted)", msgid);
+              "and not time-decodable (legacy format)", msgid);
     return -1;
   }
   if (rc != 0) {
@@ -2604,11 +2616,20 @@ int history_lookup_message(const char *target, const char *msgid,
     return -1;
 
   /* Resolve the msgid to a timestamp under the pinned snapshot,
-   * preferring this target's own index row (multi-target scheme). */
+   * preferring this target's own index row (multi-target scheme).
+   * On an index miss, fall back to the msgid's intrinsic time -- the
+   * main-CF row may still exist even when its index row was lost. */
   rc = msgid_index_resolve(msgid, target, snap, timestamp, NULL, 0);
   if (rc == 1) {
-    db_snapshot_destroy(snap);
-    return 1; /* Not found */
+    uint64_t ms = msgid_decode_time_ms(msgid);
+    if (ms == 0) {
+      db_snapshot_destroy(snap);
+      return 1; /* Not found */
+    }
+    ircd_snprintf(0, timestamp, sizeof(timestamp), "%llu.%03llu",
+                  (unsigned long long)(ms / 1000),
+                  (unsigned long long)(ms % 1000));
+    rc = 0;
   }
   if (rc != 0) {
     db_snapshot_destroy(snap);

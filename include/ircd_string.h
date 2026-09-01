@@ -5,6 +5,7 @@
 #ifndef INCLUDED_ircd_string_h
 #define INCLUDED_ircd_string_h
 
+#include <stdint.h>
 #include <string.h> /* for DupString()'s strcpy, strlen */
 
 #ifndef INCLUDED_ircd_chattr_h
@@ -145,6 +146,9 @@ static __inline__ NTL_HDR_strChattr { NTL_SRC_strChattr }
 static __inline__ NTL_HDR_strCasediff { NTL_SRC_strCasediff }
 #endif
 #endif /* FORCEINLINE */
+
+
+extern uint64_t msgid_decode_time_ms(const char *msgid);
 
 #endif /* INCLUDED_ircd_string_h */
 

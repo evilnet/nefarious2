@@ -256,16 +256,12 @@ static void store_channel_history(struct Client *sptr, struct Channel *chptr,
    * STRICT_PRESENCE only filters at replay, never gates storage. */
   if (feature_bool(FEAT_CHATHISTORY_REQUIRE_AUTH)
       && chptr->authusers == 0
-      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY)) {
-    /* No authed member: content must not be stored, but the delivered
-     * msgid still needs an anchor -- clients hold it (ATTACH cursors,
-     * BEFORE/AFTER/AROUND refs) and a bare skip made it unknowable
-     * forever.  Store a content-free GAP row (msgid-indexed), the same
-     * pattern the +Y/opt-out paths use below. */
-    history_store_message(msgid, timestamp, chptr->chname, NULL, sender,
-                          account, HISTORY_GAP, "", NULL);
-    return;
-  }
+      && !(chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+    return;   /* no content stored; the delivered msgid still resolves
+               * to its mint time intrinsically (2026-09 repack), so no
+               * anchor row is needed.  +Y/opt-out GAPs below are kept
+               * for their visible unavailable-marker role, not
+               * anchoring. */
 
   /* Check if sender has +Y (no storage) user mode — store gap marker */
   if (IsNoStorage(sptr)) {

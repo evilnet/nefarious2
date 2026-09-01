@@ -419,12 +419,19 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
  */
 char *generate_msgid(char *buf, size_t buflen)
 {
-  /* HLC format: YY(node_id 2) + LLL(logical 3) + QQQQQQQQQ(counter 9) = 14 chars */
+  /* Repacked 2026-09-01: <node_2><logical_3><time_ms_7><counter_2>.
+   * The old layout wasted the counter's top chars on zero padding;
+   * they now carry the HLC physical time, so ANY msgid resolves to
+   * its mint time intrinsically (msgid_decode_time_ms) -- cursors and
+   * refs keep working after the message ages out of storage.  12-bit
+   * counter + per-event logical increments keep uniqueness. */
   struct HLC hlc = hlc_global_event();
-  char logical_b64[4], counter_b64[10];
+  char logical_b64[4], time_b64[8], counter_b64[3];
   inttobase64_64(logical_b64, (uint64_t)hlc.logical, 3);
-  inttobase64_64(counter_b64, (uint64_t)(++MsgIdCounter), 9);
-  snprintf(buf, buflen, "%s%s%s", cli_yxx(&me), logical_b64, counter_b64);
+  inttobase64_64(time_b64, hlc.physical_ms, 7);
+  inttobase64_64(counter_b64, (uint64_t)(++MsgIdCounter & 0xFFF), 2);
+  snprintf(buf, buflen, "%s%s%s%s", cli_yxx(&me), logical_b64, time_b64,
+           counter_b64);
   return buf;
 }
 
