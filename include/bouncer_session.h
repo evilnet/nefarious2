@@ -461,6 +461,8 @@ struct BouncerSession {
   time_t hs_oper_granted_at;
 
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
+  time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost
+                                           nothing claims must stop gating bursts. */
   int hs_restore_pending;             /**< Set in bounce_db_restore; cleared on first
                                            successful BX R reconciliation, on any client
                                            attach (revive/alias-create), or when a

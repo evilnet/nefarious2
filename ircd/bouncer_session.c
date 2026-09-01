@@ -1571,6 +1571,24 @@ void bounce_post_burst_reconcile(void)
   struct Client *local_primary;
   int multiple_candidates;
 
+  /* Burst-settle for restored holds: this is where BX R's clear used
+   * to live before its Phase 5 retirement.  Once no burst is in
+   * flight, a restored session no live peer claimed during the burst
+   * is firm -- it must stop counting as convergence-pending, or the
+   * NEXT link's burst gets gated the full 30s fallback too. */
+  if (!bounce_burst_in_progress()) {
+    int cleared = 0;
+    for (h = 0; h < BOUNCE_ACCOUNT_HASHSIZE; h++)
+      for (as = accountHash[h]; as; as = as->as_hnext)
+        for (s = as->as_sessions; s; s = s->hs_anext)
+          if (s->hs_restore_pending) {
+            s->hs_restore_pending = 0;
+            cleared++;
+          }
+    if (cleared)
+      bounce_release_idle_gates();
+  }
+
   for (h = 0; h < BOUNCE_ACCOUNT_HASHSIZE; h++) {
     for (as = accountHash[h]; as; as = as->as_hnext) {
       for (s = as->as_sessions; s; s = next_s) {
@@ -2237,8 +2255,16 @@ int bounce_convergence_pending(struct Client *exclude_peer)
   for (h = 0; h < BOUNCE_ACCOUNT_HASHSIZE; h++)
     for (as = accountHash[h]; as; as = as->as_hnext)
       for (s = as->as_sessions; s; s = s->hs_anext)
-        if (s->hs_restore_pending)
+        if (s->hs_restore_pending) {
+          /* Defensive ceiling: an unclaimed restored hold must not
+           * gate bursts forever.  Lazily expire it here -- this is
+           * the one place every gate decision flows through. */
+          if (s->hs_restore_deadline && CurrentTime >= s->hs_restore_deadline) {
+            s->hs_restore_pending = 0;
+            continue;
+          }
           return 1;
+        }
 
   if (cli_serv(&me)) {
     for (dlp = cli_serv(&me)->down; dlp; dlp = dlp->next) {
@@ -3332,7 +3358,14 @@ int bounce_db_restore(void)
     ircd_strncpy(session->hs_origin, rec->bsr_origin, NICKLEN + 1);
     session->hs_hold_override = rec->bsr_hold_override;
     session->hs_state = BOUNCE_HOLDING;
-    session->hs_restore_pending = 1;  /* cleared by burst-time BX R or by attach */
+    /* Cleared by attach/revive, by the post-burst settle in
+     * bounce_post_burst_reconcile, or by the deadline below.  (The
+     * original burst-time BX R clear went away with BX R's Phase 5
+     * retirement -- leaving a session nothing ever claimed gating
+     * EVERY subsequent server link's burst the full 30s fallback,
+     * which broke anything cross-server within 30s of a link.) */
+    session->hs_restore_pending = 1;
+    session->hs_restore_deadline = CurrentTime + BOUNCE_LEGACY_GATE_SECS;
     session->hs_client = ghost;
     /* Sync ghost's cli_session_id to the bouncer's durable hs_sessid
      * NOW — at make_client time bounce_create_ghost minted a fresh
