@@ -304,12 +304,41 @@ static int wants_message_tags(struct Client *to)
           MyConnect(to) && cli_label(to)[0]);
 }
 
+/* draft/oper-tag (#494): a server-attached tag on every command sent
+ * by an operator.  Attached only for DISPLAYED opers (PRIV_DISPLAY and
+ * not +H) -- hidden opers are never disclosed by tag to anyone, which
+ * is the visibility restriction the spec explicitly permits.  The tag
+ * value discloses the opername only under FEAT_OPERTAG_VALUE. */
+static int oper_tag_eligible(struct Client *from)
+{
+  return from && cli_user(from) && IsAnOper(from)
+      && HasPriv(from, PRIV_DISPLAY) && !IsHideOper(from);
+}
+
+static int append_oper_tag(char *buf, size_t buflen, int pos, struct Client *from)
+{
+  const char *name = feature_bool(FEAT_OPERTAG_VALUE)
+      ? cli_user(from)->opername : NULL;
+  if (pos > 1 && pos < (int)buflen - 1)
+    buf[pos++] = ';';
+  if (name && *name && !strpbrk(name, "; "))
+    pos += snprintf(buf + pos, buflen - pos, "draft/oper=%s", name);
+  else
+    pos += snprintf(buf + pos, buflen - pos, "draft/oper");
+  return pos;
+}
+
 /** Flags for format_message_tags_ex() tag selection */
 #define TAGS_TIME     0x01  /**< Include @time tag */
 #define TAGS_ACCOUNT  0x02  /**< Include @account tag */
 #define TAGS_BATCH    0x04  /**< Include @batch tag (network batch) */
 #define TAGS_BOT      0x08  /**< Include @bot tag */
 #define TAGS_MSGID    0x10  /**< Include @msgid tag from client_msgid_override */
+#define TAGS_OPER     0x20  /**< Include @draft/oper tag (eligibility pre-checked) */
+/** Size of per-flag-combination MsgBuf caches: one slot per possible
+ * TAGS_* bitmask.  MUST cover every flag above -- an out-of-range
+ * index reads an uninitialized stack slot as a MsgBuf* (SIGSEGV). */
+#define TAGS_CACHE_SIZE (TAGS_OPER << 1)
 
 /** Format message tags with explicit control over which tags to include.
  * @param[out] buf Buffer to write tags to.
@@ -326,8 +355,9 @@ static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *fro
   int use_batch = (flags & TAGS_BATCH) && active_network_batch_id[0];
   int use_bot = (flags & TAGS_BOT) && from && IsBot(from);
   int use_msgid = (flags & TAGS_MSGID) && client_msgid_override[0];
+  int use_oper = (flags & TAGS_OPER) != 0;
 
-  if (!use_time && !use_account && !use_batch && !use_bot && !use_msgid)
+  if (!use_time && !use_account && !use_batch && !use_bot && !use_msgid && !use_oper)
     return NULL;
 
   buf[0] = '@';
@@ -364,6 +394,9 @@ static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *fro
     pos += snprintf(buf + pos, buflen - pos, "account=%s", cli_user(from)->account);
   }
 
+  if (use_oper)
+    pos = append_oper_tag(buf, buflen, pos, from);
+
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
   if (use_bot) {
     if (pos > 1 && pos < (int)buflen - 1)
@@ -397,6 +430,9 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
     flags |= TAGS_TIME;
   if (feature_bool(FEAT_CAP_account_tag) && CapOwnHas(to, CAP_ACCOUNTTAG))
     flags |= TAGS_ACCOUNT;
+  if (feature_bool(FEAT_CAP_oper_tag) && CapOwnHas(to, CAP_DRAFT_OPERTAG)
+      && oper_tag_eligible(from))
+    flags |= TAGS_OPER;
   if (include_batch && CapOwnHas(to, CAP_BATCH) && active_network_batch_id[0])
     flags |= TAGS_BATCH;
   /* Bot tag requires message-tags capability (server-generated tag per IRCv3) */
@@ -557,6 +593,8 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
 {
   int use_time = feature_bool(FEAT_CAP_server_time) && CapOwnHas(to, CAP_SERVERTIME);
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapOwnHas(to, CAP_ACCOUNTTAG);
+  int use_oper = feature_bool(FEAT_CAP_oper_tag)
+      && CapOwnHas(to, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapOwnHas(to, CAP_LABELEDRESP) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
@@ -568,7 +606,8 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
   int use_msgid = msgid && *msgid && CapOwnHas(to, CAP_MSGTAGS);
   int pos = 0;
 
-  if (!use_time && !use_account && !use_label && !use_batch && !use_fwd_batch && !use_msgid)
+  if (!use_time && !use_account && !use_label && !use_batch && !use_fwd_batch && !use_msgid
+      && !use_oper)
     return NULL;
 
   buf[0] = '@';
@@ -619,6 +658,9 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
     pos += snprintf(buf + pos, buflen - pos, "account=%s",
                     cli_user(from)->account);
   }
+
+  if (use_oper)
+    pos = append_oper_tag(buf, buflen, pos, from);
 
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec).
    * Per IRCv3, server-generated tags require message-tags capability. */
@@ -675,6 +717,8 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
 {
   int use_time = feature_bool(FEAT_CAP_server_time) && CapHas(caps, CAP_SERVERTIME);
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapHas(caps, CAP_ACCOUNTTAG);
+  int use_oper = feature_bool(FEAT_CAP_oper_tag)
+      && CapHas(caps, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapHas(caps, CAP_LABELEDRESP) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
@@ -684,7 +728,7 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
   int use_msgid = msgid && *msgid && CapHas(caps, CAP_MSGTAGS);
   int pos = 0;
 
-  if (!use_time && !use_account && !use_label && !use_batch && !use_msgid)
+  if (!use_time && !use_account && !use_label && !use_batch && !use_msgid && !use_oper)
     return NULL;
 
   buf[0] = '@';
@@ -725,6 +769,9 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
                     cli_user(from)->account);
   }
 
+  if (use_oper)
+    pos = append_oper_tag(buf, buflen, pos, from);
+
   if (from && IsBot(from) && CapHas(caps, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
@@ -752,6 +799,8 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
 {
   int use_time = feature_bool(FEAT_CAP_server_time) && CapOwnHas(to, CAP_SERVERTIME);
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapOwnHas(to, CAP_ACCOUNTTAG);
+  int use_oper = feature_bool(FEAT_CAP_oper_tag)
+      && CapOwnHas(to, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapOwnHas(to, CAP_LABELEDRESP) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
@@ -762,7 +811,8 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
   int pos = 0;
 
   /* TAGMSG is only useful if there are client-only tags to relay */
-  if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch)
+  if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch
+      && !use_oper)
     return NULL;
 
   buf[0] = '@';
@@ -814,6 +864,9 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
                     cli_user(from)->account);
   }
 
+  if (use_oper)
+    pos = append_oper_tag(buf, buflen, pos, from);
+
   /* Add @bot tag if sender has +B mode (IRCv3 bot-mode spec) */
   if (from && IsBot(from) && CapOwnHas(to, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
@@ -849,6 +902,8 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
 {
   int use_time = feature_bool(FEAT_CAP_server_time) && CapHas(caps, CAP_SERVERTIME);
   int use_account = feature_bool(FEAT_CAP_account_tag) && CapHas(caps, CAP_ACCOUNTTAG);
+  int use_oper = feature_bool(FEAT_CAP_oper_tag)
+      && CapHas(caps, CAP_DRAFT_OPERTAG) && oper_tag_eligible(from);
   int use_label = feature_bool(FEAT_CAP_labeled_response) &&
                   CapHas(caps, CAP_LABELEDRESP) &&
                   to && MyConnect(to) && cli_label(to)[0] &&
@@ -858,7 +913,8 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
   int use_client_tags = client_tags && *client_tags && CapHas(caps, CAP_MSGTAGS);
   int pos = 0;
 
-  if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch)
+  if (!use_client_tags && !use_time && !use_account && !use_label && !use_batch
+      && !use_oper)
     return NULL;
 
   buf[0] = '@';
@@ -906,6 +962,9 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
     pos += snprintf(buf + pos, buflen - pos, "account=%s",
                     cli_user(from)->account);
   }
+
+  if (use_oper)
+    pos = append_oper_tag(buf, buflen, pos, from);
 
   if (from && IsBot(from) && CapHas(caps, CAP_MSGTAGS)) {
     if (pos > 1 && pos < (int)buflen - 1)
@@ -2194,7 +2253,7 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[TAGS_CACHE_SIZE] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
   char tagbuf[128];
@@ -2264,7 +2323,7 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
   cap_route_ctx.stc_active = 0;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 32; flags++) {
+  for (flags = 0; flags < TAGS_CACHE_SIZE; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
@@ -2285,7 +2344,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[TAGS_CACHE_SIZE] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *chan;
   struct Membership *member;
   char tagbuf[128];
@@ -2364,7 +2423,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
   cap_route_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 32; flags++) {
+  for (flags = 0; flags < TAGS_CACHE_SIZE; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
@@ -2387,7 +2446,7 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[TAGS_CACHE_SIZE] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
   char tagbuf[128];
   int flags;
@@ -2439,7 +2498,7 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
   cap_route_ctx.stc_active = 0;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 32; flags++) {
+  for (flags = 0; flags < TAGS_CACHE_SIZE; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
@@ -2466,7 +2525,7 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   struct VarData vd;
   struct MsgBuf *mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *mb_cache[TAGS_CACHE_SIZE] = {0};  /* Indexed by TAGS_* flag combinations */
   struct Membership *member;
   char tagbuf[128];
   int flags;
@@ -2524,7 +2583,7 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
   cap_route_ctx.stc_skipcap = CAP_NONE;
 
   msgq_clean(mb);
-  for (flags = 0; flags < 32; flags++) {
+  for (flags = 0; flags < TAGS_CACHE_SIZE; flags++) {
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
@@ -2679,7 +2738,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
   struct VarData vd;
   struct MsgBuf *user_mb;
   /* Per-capability message buffers - only send tags client actually requested */
-  struct MsgBuf *user_mb_cache[32] = {0};  /* Indexed by TAGS_* flag combinations */
+  struct MsgBuf *user_mb_cache[TAGS_CACHE_SIZE] = {0};  /* Indexed by TAGS_* flag combinations */
   struct MsgBuf *serv_mb;
   struct MsgBuf *serv_mb_tags = NULL;  /* S2S tagged version */
   struct MsgBuf *serv_mb_alias = NULL; /* Alias numeric for primary's server direction */
@@ -2819,7 +2878,7 @@ void sendcmdto_channel_butone(struct Client *from, const char *cmd,
    * MsgBuf whose tflags included TAGS_MSGID — fired on every
    * channel PRIVMSG to a recipient with CAP_MSGTAGS when the relay
    * had a msgid override staged. */
-  for (tflags = 0; tflags < 32; tflags++) {
+  for (tflags = 0; tflags < TAGS_CACHE_SIZE; tflags++) {
     if (user_mb_cache[tflags])
       msgq_clean(user_mb_cache[tflags]);
   }

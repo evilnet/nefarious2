@@ -2103,7 +2103,8 @@ int history_query_between(const char *target,
 }
 
 int history_query_targets(const char *timestamp1, const char *timestamp2,
-                          int limit, struct HistoryTarget **result)
+                          int include_newer, int limit,
+                          struct HistoryTarget **result)
 {
   struct db_iter *it;
   struct HistoryTarget *head = NULL, *tail = NULL, *tgt;
@@ -2156,7 +2157,14 @@ int history_query_targets(const char *timestamp1, const char *timestamp2,
     memcpy(last_ts, vbase, vlen);
     last_ts[vlen] = '\0';
 
-    if (strcmp(last_ts, ts1) >= 0 && strcmp(last_ts, ts2) <= 0) {
+    /* include_newer: also return targets whose latest is ABOVE the
+     * window.  A federated requester needs those as VETO rows -- a
+     * remote server holding a newer latest pushes the network-wide
+     * latest out of the window, so the target must NOT be listed
+     * (#565 latest-message matching is a network-wide property).
+     * The requester re-filters to the window after the merge. */
+    if (strcmp(last_ts, ts1) >= 0
+        && (include_newer || strcmp(last_ts, ts2) <= 0)) {
       tgt = (struct HistoryTarget *)MyMalloc(sizeof(struct HistoryTarget));
       if (!tgt)
         break;

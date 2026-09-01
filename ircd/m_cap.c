@@ -369,6 +369,7 @@ static struct capabilities {
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
   _CAP(DRAFT_BOUNCER, 0, "draft/bouncer", FEAT_CAP_draft_bouncer),
   _CAP(DRAFT_PERSISTENCE, 0, "draft/persistence", FEAT_CAP_draft_persistence),
+  _CAP(DRAFT_OPERTAG, 0, "draft/oper-tag", FEAT_CAP_oper_tag),
 #ifdef USE_SSL
   _CAP(TLS, 0, "tls", FEAT_CAP_tls),
   _CAP(STS, CAPFL_PROHIBIT, "sts", FEAT_CAP_sts),

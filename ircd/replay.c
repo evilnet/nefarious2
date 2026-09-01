@@ -619,8 +619,10 @@ void replay_continue(struct Client *sptr)
         char now_timestamp[HISTORY_TIMESTAMP_LEN];
         ircd_snprintf(0, now_timestamp, sizeof(now_timestamp), "%lu.000",
                       (unsigned long)CurrentTime);
-        history_query_targets(rs->since_timestamp, now_timestamp, 50,
-                              &rs->pm_targets);
+        /* Auto-replay wants the plain in-window view: no veto rows
+         * (this is a local availability sweep, not #565 matching). */
+        history_query_targets(rs->since_timestamp, now_timestamp,
+                              /*include_newer=*/0, 50, &rs->pm_targets);
         rs->pm_cursor = rs->pm_targets;
         rs->phase = REPLAY_PHASE_PMS;
       } else {

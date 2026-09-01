@@ -438,10 +438,9 @@ int register_user(struct Client *cptr, struct Client *sptr)
       /* #585: FAIL * ACCOUNT_REQUIRED is the signal that makes our
        * advertised before-connect registration actionable -- a
        * conformant client reacts by offering REGISTER/SASL instead of
-       * showing a bare disconnect.  (The draft/ACCOUNTREQUIRED ISUPPORT
-       * token is deliberately NOT emitted: gating here is
-       * class-conditional, exactly the case the spec routes through
-       * this FAIL instead.) */
+       * showing a bare disconnect.  (Clients that DO complete
+       * registration on a gated class also see the per-connection
+       * draft/ACCOUNTREQUIRED ISUPPORT token -- send_supported.) */
       send_fail(sptr, "*", "ACCOUNT_REQUIRED", NULL,
                 "Authentication required; register an account (REGISTER) "
                 "or log in with SASL");
@@ -3414,12 +3413,23 @@ int
 send_supported(struct Client *cptr)
 {
   struct SLink *line;
+  struct ConnectionClass *cclass;
 
   if (isupport && !isupport_lines)
     build_isupport_lines();
 
   for (line = isupport_lines; line; line = line->next)
     send_reply(cptr, RPL_ISUPPORT, line->value.cp);
+
+  /* #585 draft/ACCOUNTREQUIRED: per-CONNECTION, not static -- our
+   * account gating is class-conditional (require_sasl on the resolved
+   * connection class, which ports select via Client blocks), so the
+   * token is true exactly for clients whose class carries the gate.
+   * A client seeing it either authenticated already or is inside a
+   * grace the class allows. */
+  cclass = get_client_class_conf(cptr);
+  if (cclass && FlagHas(&cclass->restrictflags, CRFLAG_REQUIRE_SASL))
+    send_reply(cptr, RPL_ISUPPORT, "draft/ACCOUNTREQUIRED");
 
   return 0; /* convenience return, if it's ever needed */
 }
@@ -3472,6 +3482,16 @@ send_supported_batched(struct Client *cptr)
                   batchid, cli_name(&me),
                   IsRegistered(cptr) ? cli_name(cptr) : "*",
                   line->value.cp);
+  }
+
+  /* Per-connection draft/ACCOUNTREQUIRED (see send_supported) */
+  {
+    struct ConnectionClass *cclass = get_client_class_conf(cptr);
+    if (cclass && FlagHas(&cclass->restrictflags, CRFLAG_REQUIRE_SASL))
+      sendrawto_one(cptr, "@batch=%s :%s 005 %s draft/ACCOUNTREQUIRED "
+                    ":are supported by this server",
+                    batchid, cli_name(&me),
+                    IsRegistered(cptr) ? cli_name(cptr) : "*");
   }
 
   /* End batch: BATCH -id */

@@ -630,6 +630,7 @@ DEFINE_CAP_NOTIFY("cap-notify", cap_notify)
 DEFINE_CAP_NOTIFY("server-time", server_time)
 DEFINE_CAP_NOTIFY("echo-message", echo_message)
 DEFINE_CAP_NOTIFY("account-tag", account_tag)
+DEFINE_CAP_NOTIFY("draft/oper-tag", oper_tag)
 DEFINE_CAP_NOTIFY("chghost", chghost)
 DEFINE_CAP_NOTIFY("invite-notify", invite_notify)
 DEFINE_CAP_NOTIFY("labeled-response", labeled_response)
@@ -1259,6 +1260,10 @@ static struct FeatureDesc {
   F_B(CAP_server_time, 0, 1, feature_notify_cap_server_time),
   F_B(CAP_echo_message, 0, 1, feature_notify_cap_echo_message),
   F_B(CAP_account_tag, 0, 1, feature_notify_cap_account_tag),
+  F_B(CAP_oper_tag, 0, 1, feature_notify_cap_oper_tag),
+  /* Disclose the opername as the draft/oper tag value.  OFF: the bare
+   * tag signals oper status without identifying which oper. */
+  F_B(OPERTAG_VALUE, 0, 0, 0),
   F_B(CAP_chghost, 0, 1, feature_notify_cap_chghost),
   F_B(CAP_invite_notify, 0, 1, feature_notify_cap_invite_notify),
   F_B(CAP_labeled_response, 0, 1, feature_notify_cap_labeled_response),

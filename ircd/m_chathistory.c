@@ -1767,6 +1767,14 @@ static int chathistory_between(struct Client *sptr, const char *target,
 #define MAX_FED_MESSAGES 500
 
 /** Structure for a pending federation request */
+/** Parent linkage for a federated context child (CH C declaration). */
+struct FedCtxPair {
+  char child[HISTORY_MSGID_LEN];
+  char parent[HISTORY_MSGID_LEN];
+  char tags[512];   /**< Child's client-only tags (CH R never carries them) */
+};
+#define MAX_FED_CTX 64
+
 struct FedRequest {
   char reqid[32];                     /**< Request ID */
   char target[CHANNELLEN + 1];        /**< Target channel */
@@ -1783,6 +1791,8 @@ struct FedRequest {
   int timer_active;                   /**< Whether timer is active */
   int response_sent;                  /**< Whether response was already sent */
   int fed_truncated;                  /**< Any storage server flagged its result truncated (CH E ... T) */
+  struct FedCtxPair ctx_pairs[MAX_FED_CTX]; /**< Declared context children (CH C) */
+  int ctx_pair_count;
   void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
   void *cb_data;                      /**< Custom data for completion callback */
   void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
@@ -1803,6 +1813,8 @@ static unsigned long fed_reqid_counter = 0;
 struct TargetsFedContext {
   struct HistoryTarget *local_targets;   /**< Local MDBX results */
   struct HistoryTarget *fed_targets;     /**< Accumulated federated results */
+  char ts1[64];                          /**< Requested window start (client ref) */
+  char ts2[64];                          /**< Requested window end (client ref) */
   int local_count;
   int fed_count;
 };
@@ -1908,6 +1920,39 @@ static struct HistoryTarget *merge_targets(struct HistoryTarget *local,
   }
 
   return result;
+}
+
+/** Drop merged TARGETS rows whose final (network-wide max) latest
+ * falls outside the requested window.  Local and remote queries run
+ * with include_newer so out-of-window-high latests arrive as veto
+ * rows; after the merge keeps the max per target, anything outside
+ * [ts1,ts2] is a target the network-wide latest disqualifies. */
+static void filter_targets_window(struct HistoryTarget **list,
+                                  const char *ref_ts1, const char *ref_ts2)
+{
+  char u1[HISTORY_TIMESTAMP_LEN], u2[HISTORY_TIMESTAMP_LEN];
+  const char *ts1, *ts2;
+  struct HistoryTarget **pp;
+
+  ts1 = (history_iso_to_unix(ref_ts1, u1, sizeof(u1)) == 0) ? u1 : ref_ts1;
+  ts2 = (history_iso_to_unix(ref_ts2, u2, sizeof(u2)) == 0) ? u2 : ref_ts2;
+  if (strcmp(ts1, ts2) > 0) {
+    const char *tmp = ts1;
+    ts1 = ts2;
+    ts2 = tmp;
+  }
+
+  pp = list;
+  while (*pp) {
+    struct HistoryTarget *t = *pp;
+    if (strcmp(t->last_timestamp, ts1) < 0
+        || strcmp(t->last_timestamp, ts2) > 0) {
+      *pp = t->next;
+      t->next = NULL;
+      history_free_targets(t);
+    } else
+      pp = &t->next;
+  }
 }
 
 /** Send TARGETS results to a client with access filtering and limit.
@@ -2083,6 +2128,8 @@ static struct FedRequest *start_fed_targets_query(
   ctx = (struct TargetsFedContext *)MyCalloc(1, sizeof(struct TargetsFedContext));
   ctx->local_targets = local_targets;
   ctx->local_count = local_count;
+  ircd_strncpy(ctx->ts1, ts1, sizeof(ctx->ts1) - 1);
+  ircd_strncpy(ctx->ts2, ts2, sizeof(ctx->ts2) - 1);
 
   /* Create request */
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
@@ -2158,8 +2205,12 @@ static void complete_targets_fed(struct FedRequest *req)
 
   ctx = (struct TargetsFedContext *)req->cb_data;
 
-  /* Merge local + federated targets (dedup + sort by recency) */
+  /* Merge local + federated targets (dedup + sort by recency), then
+   * re-filter to the requested window: the merge keeps the network-wide
+   * max latest per target, and veto rows (include_newer) can push a
+   * target's final latest out of the window. */
   merged = merge_targets(ctx->local_targets, ctx->fed_targets);
+  filter_targets_window(&merged, ctx->ts1, ctx->ts2);
 
   /* Send to client with access filtering and limit enforcement */
   send_targets_batch(client, merged, req->limit, req->label,
@@ -2218,7 +2269,8 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
     if (fetch_limit > 500)
       fetch_limit = 500;
 
-    count = history_query_targets(ts1, ts2, fetch_limit, &targets);
+    count = history_query_targets(ts1, ts2, /*include_newer=*/1,
+                                  fetch_limit, &targets);
     if (count < 0) {
       send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", "*",
                 "Failed to retrieve targets");
@@ -2243,6 +2295,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
     int fetch_limit = limit * 3;
     if (fetch_limit > 500)
       fetch_limit = 500;
+    filter_targets_window(&sorted, ts1, ts2);
     send_targets_batch(sptr, sorted, limit, cli_label(sptr),
                        count < fetch_limit);
     history_free_targets(sorted);
@@ -3599,6 +3652,23 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
     ircd_strncpy(msg->content, content, sizeof(msg->content) - 1);
   msg->next = NULL;
 
+  /* CH C declaration already seen for this msgid?  Mark the row as a
+   * context child so the merge treats it as spliced-uncounted. */
+  {
+    int ci;
+    for (ci = 0; ci < req->ctx_pair_count; ci++) {
+      if (strcmp(req->ctx_pairs[ci].child, msgid) == 0) {
+        msg->is_context = 1;
+        ircd_strncpy(msg->ctx_parent, req->ctx_pairs[ci].parent,
+                     sizeof(msg->ctx_parent) - 1);
+        if (req->ctx_pairs[ci].tags[0] && !msg->client_tags[0])
+          ircd_strncpy(msg->client_tags, req->ctx_pairs[ci].tags,
+                       sizeof(msg->client_tags) - 1);
+        break;
+      }
+    }
+  }
+
   /* Append to list */
   if (!req->fed_msgs) {
     req->fed_msgs = msg;
@@ -3608,6 +3678,73 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
     tail->next = msg;
   }
   req->fed_count++;
+}
+
+/** Unlink federated context children (marked via CH C) from a
+ * request's fed_msgs list.  They must not participate in the ordinary
+ * merge -- context children are spliced after their parent, uncounted
+ * (#526), not sorted/limited as rows. */
+static struct HistoryMessage *extract_fed_context(struct FedRequest *req)
+{
+  struct HistoryMessage **pp = &req->fed_msgs;
+  struct HistoryMessage *ctx_head = NULL, *ctx_tail = NULL;
+
+  while (*pp) {
+    struct HistoryMessage *m = *pp;
+    if (m->is_context && m->ctx_parent[0]) {
+      *pp = m->next;
+      m->next = NULL;
+      if (ctx_tail)
+        ctx_tail->next = m;
+      else
+        ctx_head = m;
+      ctx_tail = m;
+      req->fed_count--;
+    } else
+      pp = &m->next;
+  }
+  return ctx_head;
+}
+
+static int message_exists(struct HistoryMessage *list, struct HistoryMessage *check);
+
+/** Splice federated context children into a merged result list after
+ * their parents (after any locally-attached context run).  Ownership
+ * of ctx_list transfers here: spliced nodes join \a merged, children
+ * whose parent is absent or already present (local copy attached by
+ * history_attach_context) are freed. */
+static void splice_fed_context(struct HistoryMessage *merged,
+                               struct HistoryMessage *ctx_list)
+{
+  struct HistoryMessage *ctx = ctx_list;
+
+  while (ctx) {
+    struct HistoryMessage *next_ctx = ctx->next;
+    struct HistoryMessage *parent = NULL, *m;
+
+    ctx->next = NULL;
+
+    if (!message_exists(merged, ctx)) {
+      for (m = merged; m; m = m->next) {
+        if (!m->is_context && strcmp(m->msgid, ctx->ctx_parent) == 0) {
+          parent = m;
+          break;
+        }
+      }
+    }
+
+    if (parent) {
+      /* Insert after the parent's existing context run */
+      struct HistoryMessage *ins = parent;
+      while (ins->next && ins->next->is_context)
+        ins = ins->next;
+      ctx->next = ins->next;
+      ins->next = ctx;
+    } else {
+      history_free_messages(ctx);
+    }
+    ctx = next_ctx;
+  }
 }
 
 /** Check if message already exists in a list (by msgid) */
@@ -3713,16 +3850,25 @@ static void send_fed_response(struct FedRequest *req)
     return;
   }
 
-  /* Merge local and federated results */
-  merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit);
+  /* Merge local and federated results.  Context children declared by
+   * remote responders (CH C) are pulled aside first -- they splice
+   * after their parents below instead of competing as rows. */
+  {
+    struct HistoryMessage *fed_ctx = extract_fed_context(req);
 
-  /* Count total */
-  total = 0;
-  for (struct HistoryMessage *m = merged; m; m = m->next)
-    total++;
+    merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit);
 
-  /* Attach context messages (reactions, redacts) to their parents */
-  history_attach_context(req->target, merged);
+    /* Count total */
+    total = 0;
+    for (struct HistoryMessage *m = merged; m; m = m->next)
+      total++;
+
+    /* Attach context messages (reactions, redacts) to their parents;
+     * then splice the remote-only children (dedup against the local
+     * attach by msgid). */
+    history_attach_context(req->target, merged);
+    splice_fed_context(merged, fed_ctx);
+  }
   /* Async replay — ownership of merged list transfers to ReplayState.
    * Completeness judged on the PRE-filter merged total (see the
    * query_count note in the subcommand handlers). */
@@ -4509,12 +4655,15 @@ static void complete_autoreplay_channel(struct FedRequest *req)
   /* Deliver federated results to client */
   if (req->fed_count > 0 && req->fed_msgs) {
     struct HistoryMessage *merged;
+    struct HistoryMessage *fed_ctx;
     int total;
 
+    fed_ctx = extract_fed_context(req);
     merged = merge_messages(req->local_msgs, req->fed_msgs, req->limit);
     total = 0;
     for (struct HistoryMessage *m = merged; m; m = m->next)
       total++;
+    splice_fed_context(merged, fed_ctx);
 
     /* Strict-presence: filter the merged federated results before
      * batching (audit finding #3). */
@@ -4765,7 +4914,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       if (fetch_limit > 500)
         fetch_limit = 500;
 
-      tgt_count = history_query_targets(ts1_buf, ts2_buf, fetch_limit, &targets);
+      tgt_count = history_query_targets(ts1_buf, ts2_buf, /*include_newer=*/1,
+                                        fetch_limit, &targets);
       if (tgt_count <= 0) {
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
         return 0;
@@ -4888,13 +5038,37 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         count = limit;
       }
 
+      /* Attach context children (reactions, redacts) so remote-only
+       * children of in-window parents reach the requester even when
+       * their own timestamps fall outside the page (#526).  Each child
+       * is preceded by a CH C declaration naming its parent; requesters
+       * splice on it, older requesters ignore the unknown subcommand
+       * and see the child as an ordinary row (harmless). */
+      history_attach_context(target, messages);
+
       /* Send response messages.
        * Uses base64 chunked encoding for long content (>400 bytes).
        * - CH R: normal response (content as-is)
        * - CH B: base64 encoded response (with chunking if needed)
        */
-      for (msg = messages; msg; msg = msg->next) {
-        send_ch_response(sptr, reqid, msg);
+      {
+        const char *last_parent = NULL;
+        for (msg = messages; msg; msg = msg->next) {
+          if (msg->is_context && last_parent) {
+            /* The child's client-only tags (reactions live entirely in
+             * them) ride the declaration -- the R row's trailing param
+             * is the content, which is empty for a TAGMSG. */
+            if (msg->client_tags[0])
+              sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "C %s %s %s :%s",
+                            reqid, last_parent, msg->msgid, msg->client_tags);
+            else
+              sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "C %s %s %s",
+                            reqid, last_parent, msg->msgid);
+          }
+          else if (!msg->is_context)
+            last_parent = msg->msgid;
+          send_ch_response(sptr, reqid, msg);
+        }
       }
 
       /* Send end marker; trailing T = this result was truncated at the
@@ -4906,6 +5080,41 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
 
     history_free_messages(messages);
+  }
+  else if (strcmp(subcmd, "C") == 0) {
+    /* Context declaration: C <reqid> <parent_msgid> <child_msgid>.
+     * Marks the (following or already-received) child row as a
+     * context child of parent for splice-after-parent handling. */
+    struct FedRequest *req;
+    struct HistoryMessage *m;
+
+    if (parc < 5)
+      return 0;
+
+    req = find_fed_request(parv[2]);
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
+      return 0;
+    }
+
+    if (req->ctx_pair_count < MAX_FED_CTX) {
+      struct FedCtxPair *pair = &req->ctx_pairs[req->ctx_pair_count++];
+      ircd_strncpy(pair->child, parv[4], sizeof(pair->child) - 1);
+      ircd_strncpy(pair->parent, parv[3], sizeof(pair->parent) - 1);
+      if (parc > 5 && parv[5])
+        ircd_strncpy(pair->tags, parv[5], sizeof(pair->tags) - 1);
+    }
+
+    /* Row may have arrived ahead of the declaration */
+    for (m = req->fed_msgs; m; m = m->next) {
+      if (strcmp(m->msgid, parv[4]) == 0) {
+        m->is_context = 1;
+        ircd_strncpy(m->ctx_parent, parv[3], sizeof(m->ctx_parent) - 1);
+        if (parc > 5 && parv[5] && !m->client_tags[0])
+          ircd_strncpy(m->client_tags, parv[5], sizeof(m->client_tags) - 1);
+        break;
+      }
+    }
   }
   else if (strcmp(subcmd, "R") == 0) {
     /* Response: R <reqid> <msgid> <ts> <type> <sender> <account> :<content> */

@@ -345,6 +345,8 @@ enum Feature {
   FEAT_CAP_server_time,
   FEAT_CAP_echo_message,
   FEAT_CAP_account_tag,
+  FEAT_CAP_oper_tag,
+  FEAT_OPERTAG_VALUE,
   FEAT_CAP_chghost,
   FEAT_CAP_invite_notify,
   FEAT_CAP_labeled_response,

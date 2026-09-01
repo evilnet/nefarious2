@@ -102,6 +102,7 @@ struct HistoryMessage {
   size_t raw_content_len;              /**< Length of raw_content */
   struct HistoryMessage *next;         /**< Next in linked list (for results) */
   int is_context;                      /**< Non-zero if draft/chathistory-context message */
+  char ctx_parent[HISTORY_MSGID_LEN];  /**< Federated context child: parent msgid (else empty) */
 };
 
 /** Target info for CHATHISTORY TARGETS query. */
@@ -284,6 +285,7 @@ extern int history_query_between(const char *target,
  * @return Number of targets returned, or -1 on error.
  */
 extern int history_query_targets(const char *timestamp1, const char *timestamp2,
+                                 int include_newer,
                                   int limit, struct HistoryTarget **result);
 
 /** Find the most recent JOIN event for a nick in a channel.
