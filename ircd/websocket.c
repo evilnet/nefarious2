@@ -180,15 +180,27 @@ static int parse_ws_handshake(const char *buffer, int length,
      * We select the first one we support.
      */
     else if (strncasecmp(line, "Sec-WebSocket-Protocol:", 23) == 0) {
-      const char *text_pos = strstr(line, "text.ircv3.net");
-      const char *binary_pos = strstr(line, "binary.ircv3.net");
-      if (text_pos && binary_pos) {
-        /* Both present — pick whichever appears first (client preference) */
-        *subproto = (binary_pos < text_pos) ? WS_SUBPROTO_BINARY : WS_SUBPROTO_TEXT;
-      } else if (text_pos) {
-        *subproto = WS_SUBPROTO_TEXT;
-      } else if (binary_pos) {
-        *subproto = WS_SUBPROTO_BINARY;
+      /* Token-boundary scan (a hypothetical "notext.ircv3.net" must
+       * not match); first supported token wins, and a preference
+       * already chosen from an earlier header line is never
+       * overridden, so multi-header requests keep client order. */
+      const char *p = line + 23;
+      while (*p && *subproto == WS_SUBPROTO_NONE) {
+        const char *e;
+        size_t n;
+        while (*p == ' ' || *p == '\t' || *p == ',')
+          p++;
+        if (!*p)
+          break;
+        e = p;
+        while (*e && *e != ',' && *e != ' ' && *e != '\t' && *e != '\r')
+          e++;
+        n = (size_t)(e - p);
+        if (n == 14 && 0 == strncasecmp(p, "text.ircv3.net", 14))
+          *subproto = WS_SUBPROTO_TEXT;
+        else if (n == 16 && 0 == strncasecmp(p, "binary.ircv3.net", 16))
+          *subproto = WS_SUBPROTO_BINARY;
+        p = e;
       }
     }
     /* Get Origin header for validation */

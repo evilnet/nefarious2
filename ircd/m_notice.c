@@ -185,6 +185,14 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * Must be checked BEFORE the empty-text check so that blank lines
    * in a multiline batch can reach multiline_add_message() for validation.
    */
+  /* Lines tagged with a FAILed batch's ref are ignored per spec --
+   * without this they leaked into the target as ordinary messages. */
+  if (cli_msg_batch_tag(sptr)[0] != '\0'
+      && cli_ml_dead_batch_id(sptr)[0] != '\0'
+      && strcmp(cli_msg_batch_tag(sptr), cli_ml_dead_batch_id(sptr)) == 0
+      && strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) != 0)
+    return 0;
+
   if (cli_msg_batch_tag(sptr)[0] != '\0' && cli_ml_batch_id(sptr)[0] != '\0') {
     if (strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
       return multiline_add_message(sptr, parv[1],
@@ -340,6 +348,14 @@ int mo_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     return send_reply(sptr, ERR_NORECIPIENT, MSG_NOTICE);
 
   /* Multiline batch interception for NOTICE */
+  /* Lines tagged with a FAILed batch's ref are ignored per spec --
+   * without this they leaked into the target as ordinary messages. */
+  if (cli_msg_batch_tag(sptr)[0] != '\0'
+      && cli_ml_dead_batch_id(sptr)[0] != '\0'
+      && strcmp(cli_msg_batch_tag(sptr), cli_ml_dead_batch_id(sptr)) == 0
+      && strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) != 0)
+    return 0;
+
   if (cli_msg_batch_tag(sptr)[0] != '\0' && cli_ml_batch_id(sptr)[0] != '\0') {
     if (strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
       return multiline_add_message(sptr, parv[1],

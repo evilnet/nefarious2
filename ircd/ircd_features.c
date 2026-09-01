@@ -489,9 +489,62 @@ set_isupport_utf8only(void)
 static void
 set_isupport_clienttagdeny(void)
 {
+    /* #600: "Servers MUST NOT advertise the same tag twice in the
+     * list, negated or otherwise."  Sanitize the operator string:
+     * exact duplicates dropped; when a tag appears both negated and
+     * plain, only the negated form survives (matching the evaluator,
+     * where negation wins). */
     const char *deny_list = feature_str(FEAT_CLIENTTAGDENY);
-    if (deny_list && *deny_list)
-        add_isupport_s("CLIENTTAGDENY", deny_list);
+    static char clean[BUFSIZE];
+    char work[BUFSIZE];
+    char haystack[BUFSIZE + 2];
+    char *saveptr = NULL;
+    char *tok;
+
+    if (!deny_list || !*deny_list) {
+        del_isupport("CLIENTTAGDENY");
+        return;
+    }
+
+    ircd_strncpy(work, deny_list, sizeof(work));
+    clean[0] = '\0';
+    for (tok = strtok_r(work, ",", &saveptr); tok;
+         tok = strtok_r(NULL, ",", &saveptr)) {
+        const char *name = (*tok == '-') ? tok + 1 : tok;
+        char probe_neg[520], probe_plain[520];
+        size_t cur;
+        if (!*name)
+            continue;
+        ircd_snprintf(0, probe_neg, sizeof(probe_neg), ",-%s,", name);
+        ircd_snprintf(0, probe_plain, sizeof(probe_plain), ",%s,", name);
+        ircd_snprintf(0, haystack, sizeof(haystack), ",%s,", clean);
+        if (strstr(haystack, probe_neg))
+            continue;   /* negated form already advertised */
+        if (strstr(haystack, probe_plain)) {
+            if (*tok == '-') {
+                /* plain form emitted earlier; negation must win */
+                char *hit = strstr(clean, probe_plain + 1);
+                while (hit && hit != clean && hit[-1] != ',')
+                    hit = strstr(hit + 1, probe_plain + 1);
+                if (hit && strlen(clean) + 2 < sizeof(clean)) {
+                    memmove(hit + 1, hit, strlen(hit) + 1);
+                    *hit = '-';
+                }
+            }
+            continue;
+        }
+        cur = strlen(clean);
+        if (cur + strlen(tok) + 2 >= sizeof(clean))
+            break;
+        if (cur) {
+            clean[cur++] = ',';
+            clean[cur] = '\0';
+        }
+        memcpy(clean + cur, tok, strlen(tok) + 1);
+    }
+
+    if (clean[0])
+        add_isupport_s("CLIENTTAGDENY", clean);
     else
         del_isupport("CLIENTTAGDENY");
 }

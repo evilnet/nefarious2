@@ -2005,14 +2005,40 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
     else
       time_str = tgt->last_timestamp;
 
-    if (CapRecipientHas(sptr, CAP_BATCH))
-      sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
-                    batchid, cli_name(&me), "chathistory", cli_name(&me),
-                    tgt->target, time_str);
-    else
-      sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s timestamp=%s",
-                    cli_name(&me), "chathistory", cli_name(&me),
-                    tgt->target, time_str);
+    /* Spec conformance (#565 clarified format): response rows carry a
+     * BARE ISO timestamp -- the "timestamp=" prefix belongs to request
+     * syntax only; conformant clients failed to parse prefixed rows.
+     * PM rows: the store key is the identity pair "a:b"; the spec's
+     * <nickname> is the OTHER participant, so emit the half that is
+     * not the requester (identity = account for authed users). */
+    {
+      const char *row_target = tgt->target;
+      char other_buf[CHANNELLEN + 1];
+      if (!IsChannelName(tgt->target)) {
+        char *colon = strchr(tgt->target, ':');
+        if (colon) {
+          size_t l1 = (size_t)(colon - tgt->target);
+          if (history_pm_identity_matches(sptr, tgt->target, l1)) {
+            ircd_strncpy(other_buf, colon + 1, sizeof(other_buf));
+            row_target = other_buf;
+          } else {
+            if (l1 >= sizeof(other_buf))
+              l1 = sizeof(other_buf) - 1;
+            memcpy(other_buf, tgt->target, l1);
+            other_buf[l1] = '\0';
+            row_target = other_buf;
+          }
+        }
+      }
+      if (CapRecipientHas(sptr, CAP_BATCH))
+        sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s %s",
+                      batchid, cli_name(&me), "chathistory", cli_name(&me),
+                      row_target, time_str);
+      else
+        sendrawto_one(sptr, ":%s!%s@%s CHATHISTORY TARGETS %s %s",
+                      cli_name(&me), "chathistory", cli_name(&me),
+                      row_target, time_str);
+    }
     sent++;
   }
 

@@ -1050,6 +1050,23 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
                                wire_target, entry->key);
   }
 
+  /* #605: the requester gets a `metadata` batch with one RPL_KEYNOTSET
+   * per cleared key (this used to send NOTHING -- the dangling
+   * "send empty keyvalue?" question below).  Enumerate BEFORE the wipe,
+   * same source as the S2S loop above. */
+  {
+    const char *display_target = (target[0] == '*' && !target[1]
+                                  && !is_channel && target_client)
+                                  ? cli_name(target_client) : target;
+    struct MetadataEntry *entry = is_channel
+                                    ? metadata_list_channel(target_channel)
+                                    : metadata_list_client(target_client);
+    send_batch_start(sptr, "metadata");
+    for (; entry; entry = entry->next)
+      send_reply(sptr, RPL_KEYNOTSET, display_target, entry->key);
+    send_batch_end(sptr);
+  }
+
   if (is_channel) {
     metadata_clear_channel(target_channel);
 
@@ -1087,7 +1104,6 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
     metadata_clear_client(target_client);
   }
 
-  /* Confirmation - send empty keyvalue? */
   return 0;
 }
 

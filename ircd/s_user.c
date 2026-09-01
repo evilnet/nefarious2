@@ -435,6 +435,16 @@ int register_user(struct Client *cptr, struct Client *sptr)
     connclass = get_client_class_conf(sptr);
     if (connclass && FlagHas(&connclass->restrictflags, CRFLAG_REQUIRE_SASL) &&
         !IsAccount(sptr)) {
+      /* #585: FAIL * ACCOUNT_REQUIRED is the signal that makes our
+       * advertised before-connect registration actionable -- a
+       * conformant client reacts by offering REGISTER/SASL instead of
+       * showing a bare disconnect.  (The draft/ACCOUNTREQUIRED ISUPPORT
+       * token is deliberately NOT emitted: gating here is
+       * class-conditional, exactly the case the spec routes through
+       * this FAIL instead.) */
+      send_fail(sptr, "*", "ACCOUNT_REQUIRED", NULL,
+                "Authentication required; register an account (REGISTER) "
+                "or log in with SASL");
       ++ServerStats->is_ref;
       return exit_client(cptr, sptr, &me,
                          "SASL authentication required for this connection class");

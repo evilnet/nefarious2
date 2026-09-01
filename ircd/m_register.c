@@ -626,6 +626,9 @@ int m_verify(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 
   account = parv[1];
+  /* #595: "*" means the current nick, same as REGISTER */
+  if (account[0] == '*' && !account[1])
+    account = cli_name(sptr);
 
   /* Check if already authenticated */
   if (IsAccount(sptr)) {

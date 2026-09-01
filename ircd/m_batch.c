@@ -684,6 +684,12 @@ multiline_apply_cooldown(struct Connection *con)
 static void
 clear_multiline_batch(struct Connection *con)
 {
+  /* Remember the ref: any further @batch=<ref> lines are ignored per
+   * spec ("all past and future messages in this batch will be
+   * ignored") instead of leaking into channels as plain messages. */
+  if (con_ml_batch_id(con)[0])
+    ircd_strncpy(con_ml_dead_batch_id(con), con_ml_batch_id(con),
+                 sizeof(con->con_ml_dead_batch_id));
   struct SLink *lp, *next;
 
   /* Free all stored messages */
@@ -809,8 +815,11 @@ multiline_add_message(struct Client *sptr, const char *target,
   }
 
   {
+    /* Spec: "Each line feed used to join line messages contributes one
+     * byte towards the max-bytes limit." */
+    int join_extra = (con_ml_msg_count(con) > 0 && !concat) ? 1 : 0;
     int max_bytes = feature_int(FEAT_MULTILINE_MAX_BYTES);
-    if (con_ml_total_bytes(con) + len > max_bytes) {
+    if (con_ml_total_bytes(con) + len + join_extra > max_bytes) {
       send_fail_ctx(sptr, "BATCH", "MULTILINE_MAX_BYTES",
                     "Multiline batch max-bytes exceeded", "%d", max_bytes);
       clear_multiline_batch(con);
@@ -838,7 +847,8 @@ multiline_add_message(struct Client *sptr, const char *target,
   }
 
   con_ml_msg_count(con)++;
-  con_ml_total_bytes(con) += len;
+  con_ml_total_bytes(con) += len
+      + ((con_ml_msg_count(con) > 1 && !concat) ? 1 : 0);
 
   return 0;
 }
@@ -1825,6 +1835,8 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (!is_valid_batch_reftag(batch_ref)) {
     send_fail(sptr, "BATCH", "INVALID_REFTAG", batch_ref,
               "Invalid batch reference tag");
+      ircd_strncpy(cli_ml_dead_batch_id(sptr), batch_ref,
+                   sizeof(cli_connect(sptr)->con_ml_dead_batch_id));
     return 0;
   }
 
@@ -1833,6 +1845,8 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (ircd_strcmp(batch_type, "draft/multiline") != 0) {
       send_fail(sptr, "BATCH", "UNKNOWN_TYPE", batch_type,
                 "Unknown batch type");
+      ircd_strncpy(cli_ml_dead_batch_id(sptr), batch_ref,
+                   sizeof(cli_connect(sptr)->con_ml_dead_batch_id));
       return 0;
     }
 
@@ -1876,7 +1890,9 @@ int m_batch(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       clear_multiline_batch(con);
     }
 
-    /* Start new multiline batch */
+    /* Start new multiline batch (a fresh open also clears any
+     * dead-batch swallow state from a previous failure) */
+    con_ml_dead_batch_id(con)[0] = '\0';
     ircd_strncpy(con_ml_batch_id(con), batch_ref,
                  sizeof(con->con_ml_batch_id) - 1);
     con_ml_batch_id(con)[sizeof(con->con_ml_batch_id) - 1] = '\0';

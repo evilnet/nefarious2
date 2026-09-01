@@ -459,6 +459,10 @@ struct Connection
                                                  anchor); empty = none supplied */
   /* Multiline batch state (draft/multiline) */
   char                con_ml_batch_id[65]; /**< Active multiline batch ID (IRCv3 allows up to 64 chars) */
+  char                con_ml_dead_batch_id[65]; /**< Last FAILed/cleared batch ref: spec says all past and
+                                                 *   future messages in that batch are ignored, so tagged
+                                                 *   lines arriving after the FAIL are swallowed, not
+                                                 *   delivered (reset when a new batch opens) */
   char                con_ml_target[CHANNELLEN + 1]; /**< Multiline batch target (channel or nick) */
   struct SLink*       con_ml_messages; /**< List of multiline messages */
   int                 con_ml_msg_count; /**< Number of messages in batch */
@@ -670,6 +674,7 @@ struct Client {
 #define cli_s2s_batch_type(cli)	con_s2s_batch_type(cli_connect(cli))
 /** Get active multiline batch ID. */
 #define cli_ml_batch_id(cli)	con_ml_batch_id(cli_connect(cli))
+#define cli_ml_dead_batch_id(cli)	con_ml_dead_batch_id(cli_connect(cli))
 /** Get multiline batch target. */
 #define cli_ml_target(cli)	con_ml_target(cli_connect(cli))
 /** Get multiline message list. */
@@ -990,6 +995,7 @@ struct Client {
 #define cli_attach_cursor(cli)	con_attach_cursor(cli_connect(cli))
 /** Get the multiline batch ID. */
 #define con_ml_batch_id(con)	((con)->con_ml_batch_id)
+#define con_ml_dead_batch_id(con)	((con)->con_ml_dead_batch_id)
 /** Get the multiline batch target. */
 #define con_ml_target(con)	((con)->con_ml_target)
 /** Get the multiline message list. */

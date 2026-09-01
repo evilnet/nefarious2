@@ -134,6 +134,14 @@ int m_privmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * This must be checked BEFORE the empty-text check so that blank lines
    * in a multiline batch can reach multiline_add_message() for validation.
    */
+  /* Lines tagged with a FAILed batch's ref are ignored per spec --
+   * without this they leaked into the target as ordinary messages. */
+  if (cli_msg_batch_tag(sptr)[0] != '\0'
+      && cli_ml_dead_batch_id(sptr)[0] != '\0'
+      && strcmp(cli_msg_batch_tag(sptr), cli_ml_dead_batch_id(sptr)) == 0
+      && strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) != 0)
+    return 0;
+
   if (cli_msg_batch_tag(sptr)[0] != '\0' && cli_ml_batch_id(sptr)[0] != '\0') {
     if (strcmp(cli_msg_batch_tag(sptr), cli_ml_batch_id(sptr)) == 0) {
       /* This PRIVMSG is part of an active multiline batch - add to batch.
