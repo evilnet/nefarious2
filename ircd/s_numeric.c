@@ -113,8 +113,25 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
         sendcmdto_set_fwd_batch(fl->fl_batch_id);
         sendcmdto_one_tags(from, num, num, acptr, "%C %s", acptr, parv[2]);
 
-        if (fwd_label_is_terminal(fl, numeric))
-          fl->fl_state = FWD_LABEL_DRAINING;
+        if (fwd_label_is_terminal(fl, numeric)) {
+          if ((numeric == 401 || numeric == 402)
+              && numeric != fl->fl_terminal && numeric != fl->fl_terminal2) {
+            /* Generic error mid-sequence (e.g. multi-target WHOIS a,b
+             * emits 401 between lists): hold the batch open briefly for
+             * the rest, swept by the expiry timer. */
+            fl->fl_state = FWD_LABEL_DRAINING;
+            fl->fl_created = CurrentTime;
+          } else {
+            /* The command's own terminal numeric IS the end of the
+             * response -- close NOW, mirroring the synchronous
+             * labeled_batch_end on the local path.  Leaving the batch
+             * in DRAINING made closure contingent on the client's next
+             * command: a client silently awaiting its reply buffered
+             * the whole batched response until its next PONG (~90s)
+             * and saw only ACK in the meantime. */
+            fwd_label_close_batch(acptr, fl);
+          }
+        }
         return 0;
       }
 

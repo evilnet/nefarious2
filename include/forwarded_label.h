@@ -85,6 +85,9 @@ struct ForwardedLabel *fwd_label_find_draining(struct Client *acptr,
  */
 void fwd_label_close_draining(struct Client *acptr);
 
+/** Timer-driven expiry sweep across all local clients. */
+void fwd_label_expire_all(void);
+
 /** Zero all forwarded label entries on client disconnect.
  * Does not send BATCH close (dead socket). Called from exit_client.
  *

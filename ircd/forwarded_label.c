@@ -16,6 +16,7 @@
 #include "msg.h"
 #include "numnicks.h"
 #include "send.h"
+#include "s_bsd.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -42,6 +43,8 @@ static const struct {
   { "LUSERS",   266, 0   },  /* RPL_CURRENT_GLOBAL (last numeric) */
   { "RULES",    309, 0   },  /* RPL_ENDOFRULES */
   { "OPERMOTD", 537, 0   },  /* RPL_ENDOFOMOTD */
+  { "WHOWAS",   369, 0   },  /* RPL_ENDOFWHOWAS (406 precedes it on miss) */
+  { "NAMES",    366, 0   },  /* RPL_ENDOFNAMES */
   { NULL, 0, 0 }
 };
 
@@ -147,10 +150,7 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
     /* Timeout check */
     if (fl->fl_state == FWD_LABEL_DRAINING) {
       if (CurrentTime - fl->fl_created > FWD_TIMEOUT_DRAIN) {
-        if (fl->fl_state == FWD_LABEL_ACTIVE || fl->fl_state == FWD_LABEL_DRAINING)
-          fwd_label_close_batch(acptr, fl);
-        else
-          memset(fl, 0, sizeof(*fl));
+        fwd_label_close_batch(acptr, fl);
         continue;
       }
     } else if (CurrentTime - fl->fl_created > FWD_TIMEOUT_NORMAL) {
@@ -269,6 +269,37 @@ struct ForwardedLabel *fwd_label_find_draining(struct Client *acptr,
   }
 
   return NULL;
+}
+
+/** Periodic expiry sweep (timer-driven).  The lazy checks inside
+ * fwd_label_find*() only run when a numeric or client command arrives
+ * -- an idle client's stale entries otherwise live forever: a
+ * DRAINING batch stayed open (client buffers the response), and four
+ * stranded PENDING entries exhausted the FIFO so later labels
+ * degraded to plain ACK. */
+void fwd_label_expire_all(void)
+{
+  int fd, i;
+
+  for (fd = HighestFd; fd >= 0; fd--) {
+    struct Client *acptr = LocalClientArray[fd];
+    if (!acptr || !cli_connect(acptr))
+      continue;
+    for (i = 0; i < MAX_FORWARDED_LABELS; i++) {
+      struct ForwardedLabel *fl = &cli_fwd_labels(acptr)[i];
+      if (fl->fl_state == FWD_LABEL_EMPTY)
+        continue;
+      if (fl->fl_state == FWD_LABEL_DRAINING) {
+        if (CurrentTime - fl->fl_created > FWD_TIMEOUT_DRAIN)
+          fwd_label_close_batch(acptr, fl);
+      } else if (CurrentTime - fl->fl_created > FWD_TIMEOUT_NORMAL) {
+        if (fl->fl_state == FWD_LABEL_ACTIVE)
+          fwd_label_close_batch(acptr, fl);
+        else
+          memset(fl, 0, sizeof(*fl));
+      }
+    }
+  }
 }
 
 void fwd_label_close_draining(struct Client *acptr)

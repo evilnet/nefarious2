@@ -38,6 +38,7 @@
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
 #include "ircd_events.h"
+#include "forwarded_label.h"
 #include "ircd_features.h"
 #include "ircd_geoip.h"
 #include "ircd_log.h"
@@ -169,7 +170,15 @@ static struct Timer ping_timer; /**< timer structure for check_pings() */
 static struct Timer destruct_event_timer; /**< timer structure for exec_expired_destruct_events() */
 static struct Timer history_purge_timer; /**< timer structure for history_purge_callback() */
 static struct Timer metadata_purge_timer; /**< timer structure for metadata_purge_callback() */
-static struct Timer bouncer_gate_timer; /**< timer structure for bounce_legacy_burst_gate_tick() */
+static struct Timer bouncer_gate_timer;
+static struct Timer fwd_label_timer;
+
+/** Periodic forwarded-label expiry (see forwarded_label.c). */
+static void fwd_label_timer_callback(struct Event *ev)
+{
+  (void)ev;
+  fwd_label_expire_all();
+} /**< timer structure for bounce_legacy_burst_gate_tick() */
 
 /* Forward declarations so the *_restart_timer helpers below can refer to
  * the callbacks before their definitions. */
@@ -1214,6 +1223,11 @@ int main(int argc, char **argv) {
    * design intent #135 + #254 (one face per session toward legacy). */
   timer_add(timer_init(&bouncer_gate_timer),
             bounce_legacy_burst_gate_callback, 0, TT_PERIODIC, 1);
+  /* Forwarded-label expiry: closes DRAINING batches and reaps stranded
+   * PENDING/ACTIVE entries for idle clients (the lazy checks only run
+   * on client activity). */
+  timer_add(timer_init(&fwd_label_timer), fwd_label_timer_callback, 0,
+            TT_PERIODIC, 2);
   CurrentTime = time(NULL);
 
   SetMe(&me);
