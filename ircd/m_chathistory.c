@@ -2171,7 +2171,13 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
     {
       const char *row_target = tgt->target;
       char other_buf[CHANNELLEN + 1];
-      if (!IsChannelName(tgt->target)) {
+      if (IsChannelName(tgt->target)) {
+        /* The index keys folded names (db_casefold.h); show a live
+         * channel under its current spelling. */
+        struct Channel *live = FindChannel(tgt->target);
+        if (live)
+          row_target = live->chname;
+      } else {
         char *colon = strchr(tgt->target, ':');
         if (colon) {
           size_t l1 = (size_t)(colon - tgt->target);

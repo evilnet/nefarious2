@@ -40,6 +40,7 @@
 #include "ml_content.h"
 #include "client.h"
 #include "crdt_hlc.h"
+#include "db_casefold.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
 #include "ircd_features.h"
@@ -114,10 +115,11 @@ static int build_key(char *key, int keysize, const char *target,
   int pos = 0;
   int len;
 
-  /* Copy target */
+  /* Copy the target, folded: names are case-insensitive under the
+   * casemapping and the store compares bytes (db_casefold.h). */
   len = strlen(target);
   if (pos + len + 1 >= keysize) return -1;
-  memcpy(key + pos, target, len);
+  db_casefold_bytes(key + pos, target, len);
   pos += len;
   key[pos++] = KEY_SEP;
 
@@ -139,6 +141,33 @@ static int build_key(char *key, int keysize, const char *target,
   }
 
   return pos;
+}
+
+/** Build the targets-index key: the bare target name, folded like the
+ * message keys.
+ * @return Length of key, or -1 if it doesn't fit.
+ */
+static int build_target_key(char *key, int keysize, const char *target)
+{
+  int len = strlen(target);
+  if (len >= keysize) return -1;
+  db_casefold_bytes(key, target, len);
+  return len;
+}
+
+/** Build a quota key "channel\0account"; both halves are names.
+ * @return Length of key, or -1 if it doesn't fit.
+ */
+static int build_quota_key(char *key, int keysize,
+                           const char *channel, const char *account)
+{
+  int clen = strlen(channel);
+  int alen = strlen(account);
+  if (clen + 1 + alen >= keysize) return -1;
+  db_casefold_bytes(key, channel, clen);
+  key[clen] = KEY_SEP;
+  db_casefold_bytes(key + clen + 1, account, alen);
+  return clen + 1 + alen;
 }
 
 /** Serialize a message to a buffer.
@@ -617,7 +646,7 @@ static int build_reply_index_key(char *buf, size_t bufsize,
   size_t cl  = strlen(child_msgid);
 
   if (kpos + tl  + 1 > bufsize) return -1;
-  memcpy(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
+  db_casefold_bytes(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
   if (kpos + pl  + 1 > bufsize) return -1;
   memcpy(buf + kpos, parent_msgid, pl); kpos += pl; buf[kpos++] = KEY_SEP;
   if (kpos + tsl + 1 > bufsize) return -1;
@@ -639,7 +668,7 @@ static int build_reply_index_prefix(char *buf, size_t bufsize,
   size_t pl = strlen(parent_msgid);
 
   if (kpos + tl + 1 > bufsize) return -1;
-  memcpy(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
+  db_casefold_bytes(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
   if (kpos + pl + 1 > bufsize) return -1;
   memcpy(buf + kpos, parent_msgid, pl); kpos += pl; buf[kpos++] = KEY_SEP;
   return (int)kpos;
@@ -955,6 +984,27 @@ int history_init(const char *dbpath)
     return -1;
   }
 
+  /* Stores written before the key builders folded names are rewritten
+   * to folded keys once, before anything reads them (db_casefold.h).
+   * A failure leaves the store as it was; the next open retries. */
+  {
+    struct db_casefold_cf cfs[] = {
+      { history_cf_messages, "messages",    1u },   /* target\0ts\0msgid */
+      { history_cf_msgid,    "msgid_index", 2u },   /* msgid\0target */
+      { history_cf_targets,  "targets",     DB_CASEFOLD_ALL },
+      { history_cf_quotas,   "quotas",      3u },   /* channel\0account */
+      { history_cf_reply,    "reply_index", 1u },   /* target\0parent\0ts\0child */
+    };
+    if (db_casefold_migrate(history_db_env, "history", cfs,
+                            sizeof(cfs) / sizeof(cfs[0])) != 0)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: case-fold key migration did not complete; "
+                "rows keyed under an unfolded spelling stay invisible "
+                "until the next start (%s)",
+                db_env_last_error(history_db_env)
+                  ? db_env_last_error(history_db_env) : "no backend detail");
+  }
+
   /* Open multiline content databases (shares this env) */
   if (ml_content_init(history_db_env) != 0) {
     log_write(LS_SYSTEM, L_WARNING, 0,
@@ -1039,7 +1089,7 @@ static int build_msgid_index_key(char *buf, size_t bufsize,
     return -1;
   memcpy(buf, msgid, ml);
   buf[ml] = '\0';
-  memcpy(buf + ml + 1, target, tl);
+  db_casefold_bytes(buf + ml + 1, target, tl);
   return (int)(ml + 1 + tl);
 }
 
@@ -1296,10 +1346,14 @@ store_retry:
     if (rc != DB_OK) goto store_wb_fail;
   }
 
-  /* target → last-timestamp */
-  rc = db_writebatch_put(wb, history_cf_targets,
-                         target, strlen(target),
-                         timestamp, strlen(timestamp));
+  /* target → last-timestamp (folded key, like the message rows) */
+  {
+    char tkey[CHANNELLEN + 2];
+    int tlen = build_target_key(tkey, sizeof(tkey), target);
+    if (tlen < 0) { rc = -1; goto store_wb_fail; }
+    rc = db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
+                           timestamp, strlen(timestamp));
+  }
   if (rc != DB_OK) goto store_wb_fail;
 
   /* Index reply references for draft/chathistory-context lookups.
@@ -1453,9 +1507,13 @@ store_ml_retry:
     if (rc != DB_OK) goto store_ml_fail;
   }
 
-  rc = db_writebatch_put(wb, history_cf_targets,
-                         target, strlen(target),
-                         timestamp, strlen(timestamp));
+  {
+    char tkey[CHANNELLEN + 2];
+    int tlen = build_target_key(tkey, sizeof(tkey), target);
+    if (tlen < 0) { rc = -1; goto store_ml_fail; }
+    rc = db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
+                           timestamp, strlen(timestamp));
+  }
   if (rc != DB_OK) goto store_ml_fail;
 
   rc = db_writebatch_commit(wb, /*sync_durably=*/0);
@@ -1607,8 +1665,10 @@ static int history_query_internal(const char *target,
     return -1;
 
   /* Build target prefix for boundary checking */
-  target_prefix_len = ircd_snprintf(0, target_prefix, sizeof(target_prefix),
-                                    "%s%c", target, KEY_SEP);
+  target_prefix_len = build_key(target_prefix, sizeof(target_prefix),
+                                target, NULL, NULL);
+  if (target_prefix_len < 0)
+    return -1;
 
   /* Open a read snapshot.  history_query_internal returns a coherent
    * point-in-time view, so we pin a snapshot for the iter and (under
@@ -1951,8 +2011,10 @@ int history_find_last_join(const char *channel, const char *nick,
   nick_len = strlen(nick);
 
   /* Build target prefix for boundary checking */
-  target_prefix_len = ircd_snprintf(0, target_prefix, sizeof(target_prefix),
-                                    "%s%c", channel, KEY_SEP);
+  target_prefix_len = build_key(target_prefix, sizeof(target_prefix),
+                                channel, NULL, NULL);
+  if (target_prefix_len < 0)
+    return 0;
 
   /* Start from end of channel's key range */
   keylen = build_key(keybuf, sizeof(keybuf), channel, "32503680000.000", NULL);
@@ -2432,8 +2494,14 @@ int history_has_channel(const char *target)
   if (!history_available || !target)
     return -1;
 
-  rc = db_exists(history_db_env, history_cf_targets,
-                 target, strlen(target), /*snap=*/NULL);
+  {
+    char tkey[CHANNELLEN + 2];
+    int tlen = build_target_key(tkey, sizeof(tkey), target);
+    if (tlen < 0)
+      return -1;
+    rc = db_exists(history_db_env, history_cf_targets,
+                   tkey, (size_t)tlen, /*snap=*/NULL);
+  }
   if (rc == DB_OK)        return 1;
   if (rc == DB_NOTFOUND)  return 0;
   return -1;
@@ -2450,13 +2518,10 @@ int history_channel_has_messages(const char *target)
   if (!history_available || !target)
     return -1;
 
-  /* Build prefix key: "target\0" */
-  prefix_len = strlen(target);
-  if (prefix_len > CHANNELLEN)
+  /* Build prefix key: "target\0" (folded, like the rows) */
+  prefix_len = build_key(prefix, sizeof(prefix), target, NULL, NULL);
+  if (prefix_len < 0)
     return -1;
-  memcpy(prefix, target, prefix_len);
-  prefix[prefix_len] = KEY_SEP;
-  prefix_len++;
 
   it = db_iter_open(history_db_env, history_cf_messages, NULL);
   if (!it)
@@ -3703,8 +3768,9 @@ static int quota_increment(const char *channel, const char *account)
     return 0;
 
   /* Build key: channel\0account */
-  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
-                          channel, KEY_SEP, account);
+  keylen = build_quota_key(keybuf, sizeof(keybuf), channel, account);
+  if (keylen < 0)
+    return -1;
 
   /* Get current count */
   rc = db_get(history_db_env, history_cf_quotas,
@@ -3753,8 +3819,9 @@ static int quota_decrement(const char *channel, const char *account)
   if (!account || !account[0])
     return 0;
 
-  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
-                          channel, KEY_SEP, account);
+  keylen = build_quota_key(keybuf, sizeof(keybuf), channel, account);
+  if (keylen < 0)
+    return -1;
 
   rc = db_get(history_db_env, history_cf_quotas,
               keybuf, keylen, /*snap=*/NULL, &val);
@@ -3800,8 +3867,9 @@ int history_quota_get_count(const char *channel, const char *account)
   if (!history_available || !channel || !account || !account[0])
     return 0;
 
-  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
-                          channel, KEY_SEP, account);
+  keylen = build_quota_key(keybuf, sizeof(keybuf), channel, account);
+  if (keylen < 0)
+    return -1;
 
   rc = db_get(history_db_env, history_cf_quotas,
               keybuf, keylen, /*snap=*/NULL, &val);

@@ -136,7 +136,9 @@ static int           presence_persistence_ready = 0;
  * retention sweep. */
 static inline unsigned char to_lower_ascii(unsigned char c)
 {
-  return (unsigned char)ToLower(c);
+  /* ToLower indexes its table from CHAR_MIN, i.e. by a plain char; an
+   * unsigned byte above 127 would index past it. */
+  return (unsigned char)ToLower((char)c);
 }
 
 /** FNV-1a over a session_id + channel pair, case-folding the channel. */

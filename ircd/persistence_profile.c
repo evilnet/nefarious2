@@ -527,7 +527,7 @@ static int channel_list_contains(const char *list, const char *channel)
       size_t i;
       int eq = 1;
       for (i = 0; i < seg_len; ++i) {
-        if (ToLower((unsigned char)p[i]) != ToLower((unsigned char)channel[i])) {
+        if (ToLower(p[i]) != ToLower(channel[i])) {
           eq = 0;
           break;
         }
@@ -559,7 +559,7 @@ static size_t channel_list_remove(char *buf, const char *channel)
       size_t i;
       int eq = 1;
       for (i = 0; i < seg_len; ++i) {
-        if (ToLower((unsigned char)p[i]) != ToLower((unsigned char)channel[i])) {
+        if (ToLower(p[i]) != ToLower(channel[i])) {
           eq = 0;
           break;
         }
@@ -644,7 +644,7 @@ static int channel_eq_ci(const char *a, size_t a_len, const char *b)
   if (a_len != b_len)
     return 0;
   for (i = 0; i < a_len; ++i) {
-    if (ToLower((unsigned char)a[i]) != ToLower((unsigned char)b[i]))
+    if (ToLower(a[i]) != ToLower(b[i]))
       return 0;
   }
   return 1;
