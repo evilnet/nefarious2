@@ -1119,7 +1119,7 @@ static int check_history_access(struct Client *sptr, const char *target,
     /* Check if channel has +H (public history) - bypass all access checks */
     if (chptr->mode.exmode & EXMODE_PUBLICHISTORY) {
       if (normalized_target && normalized_len > 0)
-        ircd_strncpy(normalized_target, target, normalized_len);
+        ircd_strncpy(normalized_target, chptr->chname, normalized_len);
       return 0;  /* Public history - allow access */
     }
 
@@ -1132,9 +1132,14 @@ static int check_history_access(struct Client *sptr, const char *target,
     if (!find_member_link(chptr, sptr))
       return -1;
 
-    /* For channels, normalized target is same as input */
+    /* Channels: the store keys rows under the CANONICAL spelling
+     * (chptr->chname -- every store site passes it) and build_key never
+     * folds case, so the lookup key must be the canonical name too, not
+     * the client's spelling.  "#linux" against a channel created as
+     * "#Linux" used to scan an empty prefix and return an empty batch
+     * (field report 2026-09-02).  Presence keys fold case themselves. */
     if (normalized_target && normalized_len > 0)
-      ircd_strncpy(normalized_target, target, normalized_len);
+      ircd_strncpy(normalized_target, chptr->chname, normalized_len);
     return 0;
   } else {
     /* Private message history.  Two participant-check paths:

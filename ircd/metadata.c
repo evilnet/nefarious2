@@ -39,6 +39,7 @@
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_chattr.h"
 #include "ircd_defs.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -609,9 +610,17 @@ static int build_readmarker_key(char *key, int keysize,
   pos += len;
   key[pos++] = KEY_SEP;
 
+  /* Targets (channels, nicks) are case-insensitive under the ircd's
+   * casemapping; fold the key so "#Linux" and "#linux" address the same
+   * marker.  Rows written under the unfolded spelling before this fix
+   * simply read as "*" once and are re-set by the client. */
   len = strlen(target);
   if (pos + len >= keysize) return -1;
-  memcpy(key + pos, target, len);
+  {
+    int i;
+    for (i = 0; i < len; i++)
+      key[pos + i] = (char)ToLower((unsigned char)target[i]);
+  }
   pos += len;
 
   return pos;

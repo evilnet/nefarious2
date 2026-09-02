@@ -157,6 +157,11 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
               "No such channel");
     return 0;
   }
+  /* The history store is keyed by the channel's canonical spelling
+   * (build_key never folds case); a redaction typed as "#linux" for a
+   * channel created as "#Linux" must delete and record under the
+   * canonical name or it silently never takes effect in history. */
+  target = chptr->chname;
 
   if (!cli_user(sptr)) {
     send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", NULL,
@@ -368,6 +373,8 @@ int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (IsChannelName(target)) {
     chptr = FindChannel(target);
     if (chptr) {
+      /* Store keys are the canonical spelling (see m_redact). */
+      target = chptr->chname;
       /* Redact message: strip content but keep entry for context */
       if (history_is_available()) {
         history_redact_message(target, msgid);
