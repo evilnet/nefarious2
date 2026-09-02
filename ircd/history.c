@@ -3125,6 +3125,85 @@ int history_redact_message(const char *target, const char *msgid)
   return 0;
 }
 
+int history_message_is_redacted(const char *target, const char *msgid)
+{
+  struct db_snapshot *snap;
+  struct db_iter *ri_it;
+  char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+  int plen;
+  int rc;
+  int redacted = 0;
+
+  if (!history_available || !target || !msgid || !*msgid)
+    return -1;
+
+  /* A redaction is a REDACT context row whose reply-index parent is the
+   * message (history_store_message links it; history_redact_message
+   * itself keeps the row as a placeholder).  Walk the children and look
+   * for one of that type. */
+  plen = build_reply_index_prefix(prefix, sizeof(prefix), target, msgid);
+  if (plen < 0)
+    return -1;
+
+  snap = db_snapshot_new(history_db_env);
+  if (!snap)
+    return -1;
+  ri_it = db_iter_open(history_db_env, history_cf_reply, snap);
+  if (!ri_it) {
+    db_snapshot_destroy(snap);
+    return -1;
+  }
+
+  for (rc = db_iter_seek(ri_it, prefix, plen);
+       rc == DB_OK && db_iter_valid(ri_it) && !redacted;
+       rc = db_iter_next(ri_it)) {
+    size_t klen;
+    const void *kbase = db_iter_key(ri_it, &klen);
+    const char *child_part;
+    const char *sep;
+    size_t ts_len, mid_len;
+    char child_ts[HISTORY_TIMESTAMP_LEN];
+    char child_mid[HISTORY_MSGID_LEN];
+    char main_keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+    int main_keylen;
+    struct db_val main_val = { NULL, 0 };
+    struct HistoryMessage child;
+
+    if (klen <= (size_t)plen || memcmp(kbase, prefix, plen) != 0)
+      break;
+
+    /* After the prefix: timestamp\0child_msgid */
+    child_part = (const char *)kbase + plen;
+    sep = memchr(child_part, KEY_SEP, klen - plen);
+    if (!sep)
+      continue;
+    ts_len = sep - child_part;
+    mid_len = (const char *)kbase + klen - (sep + 1);
+    if (ts_len >= sizeof(child_ts) || mid_len == 0 || mid_len >= sizeof(child_mid))
+      continue;
+    memcpy(child_ts, child_part, ts_len);
+    child_ts[ts_len] = '\0';
+    memcpy(child_mid, sep + 1, mid_len);
+    child_mid[mid_len] = '\0';
+
+    main_keylen = build_key(main_keybuf, sizeof(main_keybuf), target, child_ts, child_mid);
+    if (main_keylen < 0)
+      continue;
+    if (db_get(history_db_env, history_cf_messages, main_keybuf, main_keylen,
+               snap, &main_val) != DB_OK)
+      continue;
+    memset(&child, 0, sizeof(child));
+    if (deserialize_message(main_val.base, main_val.len, &child) == 0
+        && child.type == HISTORY_REDACT)
+      redacted = 1;
+    db_val_free(&main_val);
+  }
+
+  db_iter_close(ri_it);
+  db_snapshot_destroy(snap);
+  return redacted;
+}
+
 /** Build a readmarker key from account and target.
  * @param[out] key Output buffer.
  * @param[in] keysize Size of output buffer.

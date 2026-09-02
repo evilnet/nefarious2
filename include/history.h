@@ -400,6 +400,11 @@ extern int history_deserialize_record(const void *data, size_t datalen,
  */
 extern int history_redact_message(const char *target, const char *msgid);
 
+/** Has @a msgid under @a target already been redacted, i.e. does a
+ * REDACT context row reference it?
+ * @return 1 if redacted, 0 if not, -1 on error. */
+extern int history_message_is_redacted(const char *target, const char *msgid);
+
 /** Query context messages (reactions, redacts) for a set of parent msgids.
  * Looks up the reply index to find TAGMSG(+draft/react) and REDACT events
  * that reference any of the given parent msgids, then splices them into
