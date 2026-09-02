@@ -247,10 +247,17 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
 
   /* Save label and generate compact tag for forwarded labeled commands.
-   * Must happen before sendcmdto_one which picks up the s2s overrides. */
+   * Must happen before sendcmdto_one which picks up the s2s overrides.
+   *
+   * Only toward an IRCv3-aware destination: the label is correlated to
+   * the reply by the compact msgid, which a legacy server neither
+   * receives (send.c gates the @A prefix on IsIRCv3Aware) nor echoes.
+   * With no possible correlation the honest outcome is the plain
+   * labeled ACK now and untagged numerics when they arrive. */
   if (MyConnect(from) && cli_label(from)[0] &&
       feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH)) {
+      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
+      IsIRCv3Aware(acptr)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
     if (fwd_label_save(from, cmd, msgid, &time_ms)) {
@@ -327,10 +334,12 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
 
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
 
-  /* Save label and generate compact tag for forwarded labeled commands. */
+  /* Save label and generate compact tag for forwarded labeled commands.
+   * IRCv3-aware destinations only -- see hunt_server_cmd. */
   if (MyConnect(from) && cli_label(from)[0] &&
       feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH)) {
+      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
+      IsIRCv3Aware(acptr)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
     if (fwd_label_save(from, cmd, msgid, &time_ms)) {
