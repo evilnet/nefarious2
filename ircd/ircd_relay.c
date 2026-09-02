@@ -620,8 +620,14 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
         sendcmdto_set_client_msgid(NULL);
       } else {
 #ifdef USE_ROCKSDB
+        /* Arm the event so the echo's @time is the row's time, not the
+         * clock at send (the composer only honours it while a client
+         * msgid is armed). */
+        if (msgid[0])
+          sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
         sendcmdto_one_tags_ext(sptr, CMD_PRIVATE, sptr, msgid,
                                "%H :%s", chptr, mytext);
+        sendcmdto_set_client_msgid(NULL);
 #else
         sendcmdto_one_tags(sptr, CMD_PRIVATE, sptr, "%H :%s", chptr, mytext);
 #endif
@@ -769,8 +775,13 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
         sendcmdto_set_client_msgid(NULL);
       } else {
 #ifdef USE_ROCKSDB
+        /* Arm the event so the echo's @time is the row's time (see the
+         * PRIVMSG echo above). */
+        if (msgid[0])
+          sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
         sendcmdto_one_tags_ext(sptr, CMD_NOTICE, sptr, msgid,
                                "%H :%s", chptr, mytext);
+        sendcmdto_set_client_msgid(NULL);
 #else
         sendcmdto_one_tags(sptr, CMD_NOTICE, sptr, "%H :%s", chptr, mytext);
 #endif
@@ -1349,12 +1360,14 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         if (pm_msgid[0])
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";msgid=%s", pm_msgid);
         if (feature_bool(FEAT_CAP_server_time) && CapActive(sptr, CAP_SERVERTIME)) {
-          struct timeval tv; struct tm tm;
-          gettimeofday(&tv, NULL); gmtime_r(&tv.tv_sec, &tm);
+          /* The echo carries the message's one time (the stored row's),
+           * not the wall clock at send. */
+          char iso[40];
+          history_format_iso_ms(iso, sizeof(iso),
+                                pm_timestamp[0] ? history_parse_ms(pm_timestamp)
+                                                : history_event_time_ms(NULL));
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos,
-                           ";time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                           tm.tm_hour, tm.tm_min, tm.tm_sec, tv.tv_usec / 1000);
+                           ";time=%s", iso);
         }
         echo_tagbuf[tpos] = '\0';
         sendrawto_one(sptr, "%s :%s!%s@%s PRIVMSG %C :%s",
@@ -1389,12 +1402,14 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
         if (pm_msgid[0])
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos, ";msgid=%s", pm_msgid);
         if (feature_bool(FEAT_CAP_server_time) && CapActive(sptr, CAP_SERVERTIME)) {
-          struct timeval tv; struct tm tm;
-          gettimeofday(&tv, NULL); gmtime_r(&tv.tv_sec, &tm);
+          /* The echo carries the message's one time (the stored row's),
+           * not the wall clock at send. */
+          char iso[40];
+          history_format_iso_ms(iso, sizeof(iso),
+                                pm_timestamp[0] ? history_parse_ms(pm_timestamp)
+                                                : history_event_time_ms(NULL));
           tpos += snprintf(echo_tagbuf + tpos, sizeof(echo_tagbuf) - tpos,
-                           ";time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
-                           tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                           tm.tm_hour, tm.tm_min, tm.tm_sec, tv.tv_usec / 1000);
+                           ";time=%s", iso);
         }
         echo_tagbuf[tpos] = '\0';
         sendrawto_one(sptr, "%s :%s!%s@%s PRIVMSG %C :%s",

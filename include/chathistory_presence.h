@@ -53,7 +53,49 @@ extern int presence_init(void);
  * history_shutdown().  Safe to call without a prior init. */
 extern void presence_shutdown(void);
 
-/** Record that @a anchor entered @a channel at @a when.  Idempotent
+/* Presence time (2026-09-02) is the event's HLC stamp packed into an
+ * int64: (epoch milliseconds << 16) | logical counter.  Rows carry
+ * millisecond stamps, but two events processed inside the same
+ * millisecond are still totally ordered by the HLC's logical counter,
+ * which every msgid embeds -- so "a message sent right before the JOIN"
+ * is hidden even when both land in one millisecond, and a member's own
+ * JOIN/PART rows (same stamp as the interval edge) stay visible.
+ * Whole-second intervals with inclusive edges used to count a message
+ * sent in the same second as the JOIN -- but before it -- as seen.
+ * Older stamps migrate on read by magnitude (presence_norm_time). */
+
+#define PRESENCE_TIME_PACK(ms, logical) \
+  ((((int64_t)(ms)) << 16) | ((int64_t)((logical) & 0xFFFF)))
+#define PRESENCE_TIME_FROM_MS(ms) PRESENCE_TIME_PACK((ms), 0)
+/** An ms-only stamp read as the END of its millisecond.  For a listing
+ * (TARGETS' last-activity stamp has no msgid to order it inside its
+ * millisecond) "activity at or after the join" should include activity
+ * in the join's own millisecond; rows keep the start-of-millisecond
+ * reading (hidden when unorderable -- the fail-safe direction). */
+#define PRESENCE_TIME_FROM_MS_LATE(ms) PRESENCE_TIME_PACK((ms), 0xFFFF)
+#define PRESENCE_TIME_MS(t) ((int64_t)(t) >> 16)
+
+/** Reconnect-churn coalescing window: a part/rejoin gap at or below
+ * this merges into the previous interval (30 s). */
+#define PRESENCE_COALESCE_TIME PRESENCE_TIME_FROM_MS(30000)
+
+/** Normalize a stored/wire stamp to presence time by magnitude: an
+ * epoch in seconds (~1.7e9) is below 1e11, one in milliseconds
+ * (~1.7e12) below 1e15, a packed stamp (~1.1e17) above. */
+extern int64_t presence_norm_time(int64_t v);
+
+/** The presence time of an event: its msgid's HLC stamp when the msgid
+ * decodes and its millisecond agrees with @a event_ms (the row's stamp),
+ * else (@a event_ms, logical 0). */
+extern int64_t presence_event_time(const char *msgid, uint64_t event_ms);
+
+/** Arm the event time the next membership hooks should stamp with --
+ * the same event the row is stored for.  Callers set it around the
+ * add/remove that fires the hooks and clear it with 0; an unarmed hook
+ * stamps the HLC's current time. */
+extern void presence_set_event_time(int64_t t);
+
+/** Record that @a anchor entered @a channel at @a when_ms.  Idempotent
  * if an interval is already open for this anchor in this channel.
  * Hooked from add_user_to_channel(); not normally called directly.
  *
@@ -62,20 +104,21 @@ extern void presence_shutdown(void);
  *                           (in-memory storage); zero for account
  *                           (persistent storage).
  * @param channel            Channel name (case-insensitive).
- * @param when               Event timestamp (epoch seconds).
+ * @param when               Event time (presence time, see PRESENCE_TIME_PACK).
  */
 extern void presence_record_join(const char *anchor, int anchor_is_session,
-                                  const char *channel, time_t when);
+                                  const char *channel, int64_t when);
 
 /** Close the open presence interval for @a anchor in @a channel.
  * No-op if no interval is open.  Hooked from remove_user_from_channel(). */
 extern void presence_record_part(const char *anchor, int anchor_is_session,
-                                  const char *channel, time_t when);
+                                  const char *channel, int64_t when);
 
-/** Was @a anchor present in @a channel at @a msg_time?  Returns nonzero
- * iff any open or closed interval contains @a msg_time. */
+/** Was @a anchor present in @a channel at presence time @a t?  Returns
+ * nonzero iff any open or closed interval contains @a t (inclusive
+ * edges, HLC resolution). */
 extern int presence_was_present(const char *anchor, int anchor_is_session,
-                                 const char *channel, time_t msg_time);
+                                 const char *channel, int64_t t);
 
 /** Resolve the canonical presence anchor for @a cli: account name if
  * the client is authed, else cli_session_id.  Returns the anchor
@@ -148,8 +191,8 @@ extern void presence_touch_last_alive(void);
 extern void presence_backfill_now(void);
 extern void presence_burst_sync(struct Client *cptr);
 extern void presence_apply_close(const char *anchor, int anchor_is_session,
-                                 const char *channel, time_t start,
-                                 time_t end);
+                                 const char *channel, int64_t start,
+                                 int64_t end);
 extern void presence_anchor_transfer(struct Client *cptr,
                                      const char *old_anchor,
                                      int old_is_session,
@@ -164,12 +207,13 @@ extern void presence_anchor_transfer(struct Client *cptr,
  * page that filtered to nothing used to leave the client with an empty,
  * incomplete batch and no cursor. */
 
-/** Nearest second at/after (reverse=0) or at/before (reverse=1) @a t at
- * which @a anchor is present in @a channel.  Returns @a t itself when
- * @a t is already inside a presence window, -1 when nothing is visible
- * in that direction. */
+/** Nearest presence time at/after (reverse=0) or at/before (reverse=1)
+ * @a t at which @a anchor is present in @a channel.  Returns @a t itself
+ * when it is already inside a presence window, -1 when nothing is
+ * visible in that direction. */
 extern int64_t presence_next_visible(const char *anchor, int anchor_is_session,
-                                     const char *channel, time_t t, int reverse);
+                                     const char *channel, int64_t t,
+                                     int reverse);
 
 /** Opaque per-query presence filter: one snapshot of the requester's
  * presence record plus the history row hook that consults it. */

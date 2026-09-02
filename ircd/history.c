@@ -786,6 +786,18 @@ void history_format_ms(char *buf, size_t buflen, uint64_t ms)
                 (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
 }
 
+void history_format_iso_ms(char *buf, size_t buflen, uint64_t ms)
+{
+  time_t sec = (time_t)(ms / 1000);
+  struct tm tm;
+
+  gmtime_r(&sec, &tm);
+  ircd_snprintf(0, buf, buflen, "%04d-%02d-%02dT%02d:%02d:%02d.%03luZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                (unsigned long)(ms % 1000));
+}
+
 uint64_t history_parse_ms(const char *ts)
 {
   char *end = NULL;
@@ -1532,7 +1544,7 @@ static int history_filter_row(struct HistoryRowFilter *filter,
   if (verdict == 1)
     return 1;
 
-  row_t = (int64_t)strtoll(msg->timestamp, NULL, 10);
+  row_t = (int64_t)history_parse_ms(msg->timestamp);
   msg->next = NULL;
   history_free_messages(msg);
 
@@ -1550,12 +1562,12 @@ static int history_filter_row(struct HistoryRowFilter *filter,
     char tsbuf[HISTORY_TIMESTAMP_LEN];
     int seeklen;
 
-    /* Keys carry millisecond stamps ("%lu.%03u").  Forward: land on the
-     * first row at or after the boundary second.  Reverse: position at
-     * the first row past the boundary second, then step back onto the
-     * last row within it. */
-    ircd_snprintf(0, tsbuf, sizeof(tsbuf), "%ld.000",
-                  (long)(reverse ? skip_to + 1 : skip_to));
+    /* Keys carry millisecond stamps ("%lu.%03u") and so do boundaries.
+     * Forward: land on the first row at or after the boundary
+     * millisecond.  Reverse: position at the first row past it, then
+     * step back onto the last row within it. */
+    history_format_ms(tsbuf, sizeof(tsbuf),
+                      (uint64_t)(reverse ? skip_to + 1 : skip_to));
     seeklen = build_key(seekbuf, sizeof(seekbuf), target, tsbuf, NULL);
     if (seeklen > 0) {
       *rc = db_iter_seek(it, seekbuf, seeklen);

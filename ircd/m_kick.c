@@ -96,6 +96,7 @@
 #include "send.h"
 #include "ircd_features.h"
 #include "history.h"
+#include "chathistory_presence.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <sys/time.h>
@@ -360,7 +361,11 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      */
     if (sptr == cli_user(who)->server)
     {
+      /* Presence closes at the KICK's own HLC stamp (the origin's). */
+      presence_set_event_time(presence_event_time(cli_s2s_msgid(cptr),
+                                                  history_event_time_ms(cptr)));
       remove_user_from_channel(who, chptr);
+      presence_set_event_time(0);
     }
     /* Otherwise, we treat zombies like they are not channel members. */
     member = 0;

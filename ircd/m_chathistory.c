@@ -2098,7 +2098,11 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
         if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
           int p_is_session = 0;
           const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
-          time_t act = (time_t)strtoul(tgt->last_timestamp, NULL, 10);
+          /* The index holds only the last activity's millisecond; read it
+           * as the end of that millisecond so activity in the join's own
+           * millisecond counts as witnessed (rows are ordered exactly by
+           * their msgid's HLC when they are queried). */
+          int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(tgt->last_timestamp));
           if (!p_anchor || act == 0
               || !presence_was_present(p_anchor, p_is_session,
                                        tgt->target, act))
@@ -2143,7 +2147,9 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
       if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
         int p_is_session = 0;
         const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
-        time_t act = (time_t)strtoul(tgt->last_timestamp, NULL, 10);
+        /* Same reading as the local TARGETS check: the index holds only
+         * the last activity's millisecond, read as the end of it. */
+        int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(tgt->last_timestamp));
         if (!p_anchor || act == 0
             || !presence_was_present(p_anchor, p_is_session,
                                      tgt->target, act))

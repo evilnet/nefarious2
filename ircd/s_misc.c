@@ -66,6 +66,7 @@
 #include "userload.h"
 #include "watch.h"
 #include "history.h"
+#include "chathistory_presence.h"
 #include "sasl_auth.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
@@ -477,16 +478,20 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * loop also skips when this flag is set; without the same skip on
      * the common-channel broadcast at this point, the QUIT routed via
      * channel members reaches legacy peers anyway. */
+    int64_t quit_time = 0;   /* presence stamp for the removals below */
     if (!IsBouncerInternalDestroy(bcptr)) {
       char quit_msgid[64] = "";
       if (feature_bool(FEAT_MSGID)) {
+        uint64_t quit_ms;
         if (cli_s2s_msgid(bcptr)[0])
           ircd_strncpy(quit_msgid, cli_s2s_msgid(bcptr), sizeof(quit_msgid));
         else
           generate_msgid(quit_msgid, sizeof(quit_msgid));
-        /* Same time the QUIT rows are stored with (store_quit_events) */
-        sendcmdto_set_client_event(quit_msgid,
-                                   history_event_time_ms(MyConnect(bcptr) ? bcptr : NULL));
+        /* Same time the QUIT rows are stored with (store_quit_events);
+         * the presence hooks close at the same HLC stamp (below). */
+        quit_ms = history_event_time_ms(MyConnect(bcptr) ? bcptr : NULL);
+        sendcmdto_set_client_event(quit_msgid, quit_ms);
+        quit_time = presence_event_time(quit_msgid, quit_ms);
       }
       sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
       sendcmdto_set_client_msgid(NULL);
@@ -497,7 +502,10 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
 #endif
     }
 
+    /* Presence closes at the QUIT's own HLC stamp (the rows' time). */
+    presence_set_event_time(quit_time);
     remove_user_from_all_channels(bcptr);
+    presence_set_event_time(0);
 
     /* Clean up invitefield */
     while ((lp = cli_user(bcptr)->invited))

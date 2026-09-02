@@ -5453,14 +5453,14 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
   if (jbuf->jb_type == JOINBUF_TYPE_PART ||
       jbuf->jb_type == JOINBUF_TYPE_PARTALL) {
     struct Membership *member = find_member_link(chan, jbuf->jb_source);
+    uint64_t part_ms = 0;
+    char part_msgid[64] = "";
     if (IsUserParting(member))
       return;
     SetUserParting(member);
 
     /* Generate or use pre-populated msgid for PART */
     {
-      char part_msgid[64];
-      uint64_t part_ms;
 
       /* Use pre-populated msgid from incoming S2S (re-relay), or generate new */
       if (jbuf->jb_msgids[jbuf->jb_count][0])
@@ -5518,23 +5518,28 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
      * the original m_part.c */
 
     if (jbuf->jb_type == JOINBUF_TYPE_PARTALL ||
-	is_local) /* got to remove user here */
+	is_local) { /* got to remove user here */
+      /* The presence hook closes at the PART's own HLC stamp (the row's). */
+      presence_set_event_time(presence_event_time(part_msgid, part_ms));
       remove_user_from_channel(jbuf->jb_source, chan);
+      presence_set_event_time(0);
+    }
   } else {
     int oplevel = !chan->mode.apass[0] ? MAXOPLEVEL
         : (flags & CHFL_CHANNEL_MANAGER) ? 0
         : 1;
-    /* Add user to channel */
-    if ((chan->mode.mode & MODE_DELJOINS) && !(flags & CHFL_VOICED_OR_OPPED))
-      add_user_to_channel(chan, jbuf->jb_source, flags | CHFL_DELAYED, oplevel);
-    else
-      add_user_to_channel(chan, jbuf->jb_source, flags, oplevel);
-
-    /* Generate or use pre-populated msgid for this JOIN — used in membership stamp,
-     * channel broadcast, joiner echo, and history storage. */
+    /* Generate or use pre-populated msgid for this JOIN BEFORE the
+     * membership is added: the presence hook inside add_user_to_channel
+     * opens the interval at this event's HLC stamp -- the origin's for a
+     * re-relayed JOIN, the msgid's mint stamp for a local one -- so a
+     * message minted just before the JOIN (even in the same millisecond)
+     * sorts before it, while the JOIN row itself is on the edge and
+     * stays visible.  The msgid is used in the membership stamp, the
+     * channel broadcast, the joiner echo and the history row. */
     {
       char join_msgid[64];
       struct Membership *memb;
+      uint64_t join_ms;
 
       /* Use pre-populated msgid from incoming S2S (re-relay), or
        * generate new.  Accept the pre-populated id for ALL joinbuf
@@ -5547,15 +5552,24 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       else
         generate_msgid(join_msgid, sizeof(join_msgid));
 
-      /* Stamp membership for bouncer replay.  The stamp is the event's
-       * ONE time: the origin's S2S tag time for a re-relayed JOIN
-       * (jb_msgid_time_ms), else the mint time of the msgid generated
-       * just above -- never this server's clock at observation.  It
+      /* The event's ONE time: the origin's S2S tag time for a
+       * re-relayed JOIN (jb_msgid_time_ms), else the mint time of the
+       * msgid generated just above -- never this server's clock. */
+      join_ms = jbuf->jb_msgid_time_ms
+          ? jbuf->jb_msgid_time_ms : history_event_time_ms(NULL);
+
+    /* Add user to channel (presence opens at the JOIN's own stamp) */
+    presence_set_event_time(presence_event_time(join_msgid, join_ms));
+    if ((chan->mode.mode & MODE_DELJOINS) && !(flags & CHFL_VOICED_OR_OPPED))
+      add_user_to_channel(chan, jbuf->jb_source, flags | CHFL_DELAYED, oplevel);
+    else
+      add_user_to_channel(chan, jbuf->jb_source, flags, oplevel);
+    presence_set_event_time(0);
+
+      /* Stamp membership for bouncer replay with the same time; it
        * feeds the re-relay tag and the history row below. */
       memb = find_member_link(chan, jbuf->jb_source);
       if (memb) {
-        uint64_t join_ms = jbuf->jb_msgid_time_ms
-            ? jbuf->jb_msgid_time_ms : history_event_time_ms(NULL);
         memb->join_tv.tv_sec = (time_t)(join_ms / 1000);
         memb->join_tv.tv_usec = (suseconds_t)((join_ms % 1000) * 1000);
         ircd_strncpy(memb->join_msgid, join_msgid, sizeof(memb->join_msgid));

@@ -450,6 +450,10 @@ extern void history_format_ms(char *buf, size_t buflen, uint64_t ms);
  * unparseable. */
 extern uint64_t history_parse_ms(const char *ts);
 
+/** Format an epoch-millisecond time as the client @time value
+ * ("YYYY-MM-DDThh:mm:ss.mmmZ"). */
+extern void history_format_iso_ms(char *buf, size_t buflen, uint64_t ms);
+
 /** Convert Unix timestamp to ISO 8601 for client display.
  * @param[in] unix_ts Unix timestamp string (seconds.milliseconds).
  * @param[out] iso_buf Buffer for ISO 8601 output (at least 32 bytes).
