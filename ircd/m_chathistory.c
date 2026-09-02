@@ -4281,13 +4281,15 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
        * counter; the bloom-filter design at
        * .claude/plans/federation-dedup-s2s-msgid.md will revive a
        * principled per-target filter when it lands. */
-      if (s2s_ref2[0])
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s %s",
-                      target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
-                      s2s_ref2);
-      else
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s",
-                      target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx);
+      /* Trailing requester token (presence-aware paging on the
+       * responder): P<yxx> = filter to the requester's presence,
+       * F<yxx> = the requester asked for ":full" (the responder applies
+       * has_ops_override itself).  ref2 is "*" when absent so the token
+       * keeps its slot; older responders ignore both. */
+      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s %s %c%s",
+                    target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
+                    s2s_ref2[0] ? s2s_ref2 : "*",
+                    ops_override ? 'F' : 'P', req->client_yxx);
     }
   }
 
@@ -4915,6 +4917,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     char *target, *query_subcmd_str, *ref, *reqid;
     char *dest_numeric = NULL;
     char *ref2 = NULL;
+    const char *requester = NULL;   /* P<yxx> / F<yxx>, see start_fed_query */
+    struct PresenceQueryFilter *fed_pf = NULL;
     char query_subcmd_char;
     const char *query_subcmd_full;
     int limit, count;
@@ -4936,16 +4940,25 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (parc >= 8 && parv[7][0] != '\0')
       dest_numeric = parv[7];
 
-    /* Optional second reference (BETWEEN/W) */
-    if (parc >= 9 && parv[8][0] != '\0')
+    /* Optional second reference (BETWEEN/W); "*" is the placeholder a
+     * requester sends to keep the requester token's slot. */
+    if (parc >= 9 && parv[8][0] != '\0' && strcmp(parv[8], "*") != 0)
       ref2 = parv[8];
+
+    /* Optional requester token (presence-aware paging on the responder) */
+    if (parc >= 10 && parv[9][0] != '\0')
+      requester = parv[9];
 
     /* Destination-addressed query: if not for us, forward and skip */
     if (dest_numeric) {
       struct Client *dest = FindNServer(dest_numeric);
       if (dest && dest != &me) {
         /* Forward to destination via P10 routing — don't process locally */
-        if (ref2)
+        if (requester)
+          sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s %s %s",
+                        target, query_subcmd_str, ref, limit, reqid,
+                        dest_numeric, ref2 ? ref2 : "*", requester);
+        else if (ref2)
           sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s %s",
                         target, query_subcmd_str, ref, limit, reqid,
                         dest_numeric, ref2);
@@ -5067,6 +5080,29 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     query_subcmd_char = query_subcmd_str[0];
     query_subcmd_full = s2s_to_subcmd(query_subcmd_char);
 
+    /* Presence-aware paging on the responder.  The requester names its
+     * client (P<yxx> / F<yxx>, F = ":full" requested) so a storage
+     * server walks with the requester's presence and its limit+1
+     * truncation probe counts VISIBLE rows -- otherwise a remote page
+     * full of rows the requester never saw is reported truncated, and
+     * the origin's post-filter can only shrink it.  Only ACCOUNT
+     * anchors qualify: account presence replicates by observation, a
+     * session anchor lives in memory on the origin alone.  Unresolvable
+     * or session-anchored requesters get the unfiltered walk (the
+     * origin post-filters, as before). */
+    if (requester && (requester[0] == 'P' || requester[0] == 'F')
+        && requester[1] && IsChannelName(target)) {
+      struct Client *rq = findNUser(requester + 1);
+      if (rq && IsUser(rq) && IsAccount(rq) && cli_user(rq)
+          && cli_user(rq)->account[0]) {
+        if (open_query_presence(rq, target, requester[0] == 'F', &fed_pf) < 0) {
+          /* Fail closed exactly as the origin would. */
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+          return 0;
+        }
+      }
+    }
+
     /* Query local LMDB based on subcommand.  For the linear shapes
      * (L/B/A) probe limit+1: an over-limit result marks this response
      * TRUNCATED, signaled to the requester on the CH E terminator so
@@ -5078,30 +5114,33 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * overflow is the TAIL (newest).  R (around) is bidirectional --
      * no probe, never flagged. */
     if (query_subcmd_char == 'L') {
-      /* No query-time presence filter on the responder: the CH Q wire
-       * carries no requester identity (sourced from &me), so the
-       * requesting server post-filters the merged rows.  Follow-up in
-       * chathistory-presence-paging.md. */
-      count = history_query_latest(target, ref_type, ref_value, limit + 1, &messages, NULL);
+      count = history_query_latest(target, ref_type, ref_value, limit + 1,
+                                   &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'B') {
-      count = history_query_before(target, ref_type, ref_value, limit + 1, &messages, NULL);
+      count = history_query_before(target, ref_type, ref_value, limit + 1,
+                                   &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'A') {
-      count = history_query_after(target, ref_type, ref_value, limit + 1, &messages, NULL);
+      count = history_query_after(target, ref_type, ref_value, limit + 1,
+                                  &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'R') {
-      count = history_query_around(target, ref_type, ref_value, limit, &messages, NULL);
+      count = history_query_around(target, ref_type, ref_value, limit,
+                                   &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'W') {
       /* BETWEEN: second reference arrives as the optional trailing
        * param (after dest_numeric). */
       enum HistoryRefType ref_type2;
       const char *ref_value2;
       if (!ref2 || parse_s2s_reference(ref2, &ref_type2, &ref_value2) != 0) {
+        presence_query_filter_close(fed_pf);
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
         return 0;
       }
       count = history_query_between(target, ref_type, ref_value,
                                     ref_type2, ref_value2, limit, &messages,
-                                    NULL);
+                                    presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'X') {
+      presence_query_filter_close(fed_pf);
+      fed_pf = NULL;
       /* Exact message lookup by msgid — used for federated REDACT.
        * ref is M<msgid> format from S2S. ref_value is the msgid.
        */
@@ -5123,9 +5162,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     } else {
       /* Unsupported subcommand for federation */
+      presence_query_filter_close(fed_pf);
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
       return 0;
     }
+    presence_query_filter_close(fed_pf);
+    fed_pf = NULL;
 
     if (count <= 0) {
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
