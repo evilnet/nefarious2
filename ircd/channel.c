@@ -5359,6 +5359,48 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
 /*
  * Initialize a join buffer
  */
+/** Load the per-channel msgids carried by an incoming S2S JOIN / PART /
+ * CREATE into @a out (positional: one slot per channel in the command's
+ * channel list).  The origin tags a single-channel command with the
+ * plain @A<time><msgid> form and a multi-channel one with
+ * msgid1+msgid2+...; the parser fills cli_s2s_multi_msgid only for the
+ * latter, so readers that consulted the multi buffer alone re-minted a
+ * fresh msgid for every single-channel JOIN/PART -- the common case --
+ * and each server stored the same event under a different msgid
+ * (federated chathistory merges then counted it once per server, and
+ * an event msgid was only resolvable as an anchor on the origin).
+ * Returns the number of slots filled. */
+int joinbuf_load_s2s_msgids(struct Client *cptr, char out[][16], int max)
+{
+  const char *multi;
+  int idx = 0;
+
+  if (!cptr || !out || max <= 0)
+    return 0;
+  memset(out, 0, (size_t)max * 16);
+
+  multi = cli_s2s_multi_msgid(cptr);
+  if (multi[0]) {
+    const char *mp = multi;
+    while (mp && *mp && idx < max) {
+      const char *plus = strchr(mp, '+');
+      int len = plus ? (int)(plus - mp) : (int)strlen(mp);
+      if (len > 0 && len < 16) {
+        memcpy(out[idx], mp, len);
+        out[idx][len] = '\0';
+      }
+      idx++;
+      mp = plus ? plus + 1 : NULL;
+    }
+    return idx;
+  }
+  if (cli_s2s_msgid(cptr)[0]) {
+    ircd_strncpy(out[0], cli_s2s_msgid(cptr), 16);
+    return 1;
+  }
+  return 0;
+}
+
 void
 joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
 	     struct Client *connect, unsigned int type, char *comment,

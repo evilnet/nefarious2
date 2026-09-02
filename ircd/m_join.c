@@ -585,10 +585,21 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (alias_source && !MyConnect(sptr))
     join.jb_alias_source = alias_source;
 
+  /* Per-channel msgids from the incoming S2S tag (positional match to
+   * the channel list, as ms_part / ms_create do).  Without this every
+   * server minted its own msgid for a remote JOIN, so the same event
+   * lived under a different msgid on each storage server. */
+  {
+  char incoming_msgids[MAXJOINARGS][16];
+  int chan_idx = 0;
+  (void)joinbuf_load_s2s_msgids(cptr, incoming_msgids, MAXJOINARGS);
+  if (cli_s2s_time_ms(cptr))
+    join.jb_msgid_time_ms = cli_s2s_time_ms(cptr);
+
   chanlist = last0(cptr, sptr, parv[1]); /* find last "JOIN 0" */
 
   for (name = ircd_strtok(&p, chanlist, ","); name;
-       name = ircd_strtok(&p, 0, ",")) {
+       name = ircd_strtok(&p, 0, ","), chan_idx++) {
 
     flags = CHFL_DEOPPED;
 
@@ -696,8 +707,14 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       }
     }
 
+    /* Pre-populate this channel's msgid from the incoming S2S tag */
+    if (chan_idx < MAXJOINARGS && incoming_msgids[chan_idx][0])
+      ircd_strncpy(join.jb_msgids[join.jb_count], incoming_msgids[chan_idx],
+                    sizeof(join.jb_msgids[0]));
+
     joinbuf_join(&join, chptr, flags);
   }
+  } /* end incoming_msgids/chan_idx scope */
 
   joinbuf_flush(&join); /* flush joins... */
 
