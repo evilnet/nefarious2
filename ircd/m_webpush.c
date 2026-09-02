@@ -53,9 +53,12 @@
 #include "s_user.h"
 #include "send.h"
 #include "webpush.h"
+#include "webpush_mute.h"
+#include "webpush_expiry.h"
 #include "webpush_store.h"
 #include "bouncer_session.h"
 #include "channel.h"
+#include "ircd_events.h"
 #include "metadata.h"
 
 #ifdef HAVE_JANSSON
@@ -168,10 +171,16 @@ static int parse_keys(const char *keys, char *p256dh, size_t p256dh_size,
     return 0;
 
   /* Copy values */
-  ircd_strncpy(p256dh, p256dh_start, p256dh_end - p256dh_start);
+  /* Copy values.  ircd_strncpy copies at most len-1 chars (strlcpy
+   * semantics), so pass the value length + 1 — the destination buffers
+   * have room for the full value plus the NUL.  With the bare length a
+   * full-size browser key (87-char p256dh, 22-char auth) lost its last
+   * char(s), the point then decoded to 64 bytes and failed the 65-byte
+   * check, and every push silently skipped in notify_iter_cb. */
+  ircd_strncpy(p256dh, p256dh_start, p256dh_end - p256dh_start + 1);
   p256dh[p256dh_end - p256dh_start] = '\0';
 
-  ircd_strncpy(auth, auth_start, auth_end - auth_start);
+  ircd_strncpy(auth, auth_start, auth_end - auth_start + 1);
   auth[auth_end - auth_start] = '\0';
 
   /* Basic validation - should be non-empty base64 */
@@ -234,8 +243,12 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Build stored format: "endpoint|p256dh|auth" */
-  snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth);
+  /* Build stored format: "endpoint|p256dh|auth|armed" -- the arming
+   * timestamp is this REGISTER (clients re-arm on every login; the
+   * expiry sweep removes records not re-armed within
+   * FEAT_WEBPUSH_EXPIRE). */
+  snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh, auth,
+           (long long)CurrentTime);
 
   /* Store locally in LMDB */
   webpush_subs_cache_invalidate(cli_user(sptr)->account);
@@ -400,7 +413,12 @@ static int notify_iter_cb(const char *stored, void *data)
 
   /* Parse subscription from stored format */
   if (webpush_parse_subscription(stored, &sub) != 0)
+  {
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "WebPush: notify_iter: parse FAILED: len=%d head=%.60s",
+              (int)strlen(stored), stored);
     return 0; /* skip invalid, continue iteration */
+  }
 
   /* Allocate callback context */
   ctx = malloc(sizeof(*ctx));
@@ -444,6 +462,8 @@ void webpush_notify_account(const char *account, const char *message,
   nid.message = message;
   nid.message_len = message_len;
 
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "WebPush: notify_account: iterating subscriptions for %s", account);
   webpush_store_foreach(account, notify_iter_cb, &nid);
 }
 
@@ -542,6 +562,39 @@ static void webpush_emit_push(const char *account, const char *kind,
                               const char *msgid, const char *timestamp,
                               const char *text);
 
+/** 1 when the account's `draft/webpush/mute` metadata mutes `target`
+ * (a DM peer nick or a channel) right now. */
+static int webpush_mute_blocked(const char *account, const char *target)
+{
+  char value[METADATA_VALUE_LEN];
+
+  if (metadata_account_get(account, "draft/webpush/mute", value) != 0)
+    return 0;
+
+  return webpush_mute_check(value, target, CurrentTime);
+}
+
+/** Relay a read marker to the account's webpush subscriptions so other
+ * devices can close their notifications (`{"t":"read",...}`).  Deliberately
+ * ungated by hold/cooldown/mute: it is how they clear. */
+void webpush_notify_read(const char *account, const char *target,
+                         const char *timestamp)
+{
+  char payload[512];
+
+  if (!account || !account[0] || !target || !target[0])
+    return;
+  if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
+    return;
+  if (webpush_store_count_cached(account) <= 0)
+    return;
+
+  snprintf(payload, sizeof(payload),
+           "{\"t\":\"read\",\"target\":\"%s\",\"ts\":\"%s\"}",
+           target, timestamp ? timestamp : "*");
+  webpush_notify_account(account, payload, strlen(payload));
+}
+
 void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
                        const char *text, int is_notice,
                        const char *msgid, const char *timestamp)
@@ -559,9 +612,14 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
   if (!cli_user(acptr) || !cli_user(acptr)->account[0])
     return;
   account = cli_user(acptr)->account;
-  if (webpush_store_count(account) <= 0)
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "WebPush: notify_pm entry: from=%s target=%s store=%d",
+            cli_name(sptr), cli_name(acptr), webpush_store_count_cached(account));
+  if (webpush_store_count_cached(account) <= 0)
     return;
   if (!webpush_pm_cooldown_ok(account, cli_name(sptr)))
+    return;
+  if (webpush_mute_blocked(account, cli_name(sptr)))
     return;
 
   webpush_emit_push(account, is_notice ? "notice" : "msg",
@@ -569,11 +627,14 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
 }
 
 /** Build the tiered JSON payload and hand it to webpush_notify_account.
- * Tier from the account's draft/webpush/payload metadata key:
- * ping (bare), route (DEFAULT: from/target/msgid/time, no content),
- * full (route + text, UTF-8-clamped -- never reject-and-drop; invalid
- * UTF-8 text degrades the push to route because json_string() rejects
- * it and the field is simply omitted). */
+ * Tier from the account's draft/webpush/payload metadata key, defaulting
+ * to full: full (route + text, UTF-8-clamped -- never reject-and-drop;
+ * invalid UTF-8 text degrades the push to route because json_string()
+ * rejects it and the field is simply omitted), route (from/target/msgid/
+ * time, no content) or ping (bare).  The payload is encrypted
+ * server-to-device, so the push service never sees the text; an empty
+ * default that renders notifications without content is just a worse
+ * product, so accounts must explicitly opt down. */
 static void webpush_emit_push(const char *account, const char *kind,
                               const char *from, const char *target,
                               const char *msgid, const char *timestamp,
@@ -588,6 +649,8 @@ static void webpush_emit_push(const char *account, const char *kind,
 
   tier[0] = '\0';
   (void)metadata_account_get(account, "draft/webpush/payload", tier);
+  if (tier[0] == '\0')
+    ircd_strncpy(tier, "full", sizeof(tier));
 
 #ifdef HAVE_JANSSON
   /* jansson path (preferred when the library is available -- abc9cc6
@@ -711,6 +774,8 @@ void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
       continue;
     if (!webpush_pm_cooldown_ok(account, chptr->chname))
       continue;
+    if (webpush_mute_blocked(account, chptr->chname))
+      continue;
     webpush_emit_push(account, "hl", cli_name(sptr), chptr->chname,
                       msgid, timestamp, scan);
   }
@@ -762,9 +827,11 @@ static int burst_iter_cb(const char *account, const char *stored, void *data)
   p256dh_buf[len] = '\0';
   p256dh = p256dh_buf;
 
-  /* Extract auth */
+  /* Extract auth.  Stored records may carry a trailing "|armed"
+   * timestamp (webpush_expiry.h); the WP wire format stays 3-field, so
+   * stop the auth field at the next '|'. */
   auth_secret = sep2 + 1;
-  len = strlen(auth_secret);
+  len = strcspn(auth_secret, "|");
   if (len == 0 || len >= sizeof(auth_buf))
     return 0;
   memcpy(auth_buf, auth_secret, len);
@@ -775,6 +842,86 @@ static int burst_iter_cb(const char *account, const char *stored, void *data)
                 account, endpoint, p256dh, auth_buf);
 
   return 0; /* continue iteration */
+}
+
+/* ---------------------------------------------------------------------------
+ * Stale-subscription sweep
+ * ------------------------------------------------------------------------- */
+
+/* Sweep period: cheap (one RocksDB scan over the subs keyspace), so an
+ * hour keeps stale records' residency bounded to an hour past their
+ * expiry, and an initial sweep runs at boot. */
+#define WEBPUSH_SWEEP_INTERVAL 3600
+
+static struct Timer webpush_sweep_timer;
+static int webpush_sweep_started = 0;
+
+struct sweep_ctx
+{
+  time_t now;
+  long long max_age;
+  int checked;
+  int reaped;
+};
+
+static int sweep_iter_cb(const char *account, const char *stored, void *data)
+{
+  struct sweep_ctx *ctx = data;
+  long long armed = webpush_armed_at(stored);
+  char endpoint[WEBPUSH_MAX_ENDPOINT];
+  size_t len;
+
+  ctx->checked++;
+
+  if (!webpush_expired(armed, ctx->now, ctx->max_age))
+    return 0;
+
+  /* Endpoint = the record's first field. */
+  len = strcspn(stored, "|");
+  if (len == 0 || len >= sizeof(endpoint))
+    return 0;
+  memcpy(endpoint, stored, len);
+  endpoint[len] = '\0';
+
+  if (webpush_store_remove(account, endpoint) != 0)
+    return 0;
+
+  ctx->reaped++;
+  webpush_subs_cache_invalidate(account);
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "WebPush: swept stale subscription for %s (armed %lld)",
+            account, armed);
+  return 0;
+}
+
+/** Periodic maintenance: remove subscriptions not re-armed (via
+ * WEBPUSH REGISTER) within FEAT_WEBPUSH_EXPIRE seconds.  Clients re-arm
+ * on every login, so a stale record is a device that has not run the
+ * client since before the window began; its push endpoint is presumed
+ * gone.  Records without an arming timestamp are left alone. */
+static void webpush_sweep(struct Event *ev)
+{
+  struct sweep_ctx ctx;
+
+  (void)ev;
+  if (!webpush_store_available())
+    return;
+
+  ctx.now = CurrentTime;
+  ctx.max_age = (long long)feature_int(FEAT_WEBPUSH_EXPIRE);
+  ctx.checked = 0;
+  ctx.reaped = 0;
+  if (ctx.max_age <= 0)
+    return;  /* 0 disables the sweep */
+
+  webpush_store_foreach_all(sweep_iter_cb, &ctx);
+
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "WebPush: sweep checked=%d reaped=%d", ctx.checked, ctx.reaped);
+  if (ctx.reaped > 0)
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBPUSH: expired %d subscription(s) not re-armed within %d seconds",
+              ctx.reaped, feature_int(FEAT_WEBPUSH_EXPIRE));
 }
 
 /** Burst all webpush subscriptions to a newly linked server.
@@ -827,6 +974,16 @@ int webpush_setup(void)
     log_write(LS_SYSTEM, L_WARNING, 0,
               "WEBPUSH: store not available, cannot initialize VAPID key");
     return -1;
+  }
+
+  /* Start the stale-subscription sweep: once at boot, then hourly
+   * (webpush_sweep itself re-checks FEAT_WEBPUSH_EXPIRE every run, so
+   * REHASH picks up window changes without touching the timer). */
+  if (!webpush_sweep_started) {
+    webpush_sweep_started = 1;
+    webpush_sweep(NULL);
+    timer_add(timer_init(&webpush_sweep_timer), webpush_sweep, 0,
+              TT_PERIODIC, WEBPUSH_SWEEP_INTERVAL);
   }
 
   /* Remember old pubkey for change detection (static buffer gets overwritten) */
@@ -996,7 +1153,10 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     const char *auth_secret = parv[5];
     char stored[4096];
 
-    snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth_secret);
+    /* The peer vouches for the subscription being live (arming
+     * timestamps do not cross the wire); stamp our receipt time. */
+    snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh,
+             auth_secret, (long long)CurrentTime);
 
     if (webpush_store_available()) {
       webpush_subs_cache_invalidate(account);
@@ -1035,7 +1195,10 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     const char *auth_secret = parv[5];
     char stored[4096];
 
-    snprintf(stored, sizeof(stored), "%s|%s|%s", endpoint, p256dh, auth_secret);
+    /* The peer vouches for the subscription being live (arming
+     * timestamps do not cross the wire); stamp our receipt time. */
+    snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh,
+             auth_secret, (long long)CurrentTime);
 
     if (webpush_store_available()) {
       webpush_subs_cache_invalidate(account);

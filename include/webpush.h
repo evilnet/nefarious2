@@ -175,12 +175,41 @@ void webpush_burst(struct Client *cptr);
 struct Client;
 
 /*
+ * Push payload wire contract (consumed by the seance service worker).
+ *
+ * The encrypted aes128gcm body is one compact JSON object, `{"t":KIND,...}`:
+ *
+ *   "msg"     DM to the account: from=<sender nick>
+ *   "notice"  as "msg", for NOTICE
+ *   "hl"      channel message in target mentioning the account
+ *   "read"    read-marker relay: {"t":"read","target":T,"ts":TIME};
+ *             ungated by hold/mute/cooldown so devices can close
+ *             notifications
+ *
+ * Non-"read" payloads carry the route fields `from`, `target` (a nick for
+ * msg/notice, a channel for hl), optional `msgid` and `time` (ISO 8601),
+ * and — full tier only — `text` plus `trunc:true` when the text was
+ * clamped.  WEBPUSH_MAX_PAYLOAD bounds the whole body.
+ *
+ * The tier comes from the account's `draft/webpush/payload` metadata:
+ *   "ping"   bare notification, no route fields
+ *   "route"  from/target/msgid/time, no text
+ *   "full"   route + text — the default; the body is encrypted
+ *            server-to-device, so accounts must opt down explicitly
+ *
+ * Mutes come from `draft/webpush/mute`: ';'-separated `target:until`
+ * entries (unix seconds; `*` is a global snooze; 0 or negative =
+ * indefinite), checked per push against the sender/channel and pruned by
+ * writers.
+ */
+
+/*
  * PM/NOTICE push trigger (v1, design: webpush-trigger-payload.md).
  * Called from the PM delivery path; sends a push to the target's
  * subscriptions iff the target is a held bouncer session with
  * subscriptions, FEAT_WEBPUSH_NOTIFY is on, and the per-(account,
  * sender) cooldown passes.  Payload tier (ping/route/full) comes from
- * the account's draft/webpush/payload metadata key (default: route).
+ * the account's draft/webpush/payload metadata key (default: full).
  */
 void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
                        const char *text, int is_notice,
@@ -197,6 +226,12 @@ struct Channel;
 void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
                             const char *text, const char *msgid,
                             const char *timestamp);
+
+/** Relay an account read marker (MARKREAD set) as a `{"t":"read",...}`
+ * payload so other devices can close their notifications.  Ungated by
+ * hold/mute/cooldown on purpose. */
+void webpush_notify_read(const char *account, const char *target,
+                         const char *timestamp);
 
 void webpush_notify_account(const char *account, const char *message,
                             size_t message_len);

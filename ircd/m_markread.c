@@ -34,6 +34,7 @@
  * converted to ISO 8601 only for client-facing protocol.
  */
 #include "config.h"
+#include "webpush.h"
 
 #include "capab.h"
 #include "channel.h"
@@ -377,6 +378,10 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       if (rc == 0) {
         /* Successfully updated - notify local clients and broadcast */
         notify_local_clients(account, target, timestamp);
+
+        /* Relay to the account's webpush subscriptions so other devices
+         * can close their notifications (draft/webpush). */
+        webpush_notify_read(account, target, timestamp);
 
         /* Broadcast to other servers: MR <account> <target> <timestamp> */
         sendcmdto_serv_butone_v3(&me, CMD_MARKREAD, cptr, "%s %s %s",
