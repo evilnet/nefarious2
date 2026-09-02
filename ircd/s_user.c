@@ -246,6 +246,20 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
 
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
 
+  /* Bouncer invariant #10: an alias numeric is introduced only via
+   * BX C, which legacy peers never see -- sourced from the alias, a
+   * routed command is an unknown source at the first legacy hop and
+   * is dropped silently (no reply, no error).  Rewrite to the primary
+   * unless the route heads toward the primary's own server, which
+   * knows the alias (and where a primary-sourced line would be a fake
+   * direction).  Replies then arrive addressed to the primary; the
+   * numeric relay mirrors them to the session's local aliases. */
+  if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
+    struct Client *prim = cli_user(from)->alias_primary;
+    if (MyUser(prim) || cli_from(prim) != cli_from(acptr))
+      from = prim;
+  }
+
   /* Save label and generate compact tag for forwarded labeled commands.
    * Must happen before sendcmdto_one which picks up the s2s overrides.
    *
@@ -333,6 +347,20 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
   /* assert(!IsServer(from)); SETTIME to particular destinations permitted */
 
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
+
+  /* Bouncer invariant #10: an alias numeric is introduced only via
+   * BX C, which legacy peers never see -- sourced from the alias, a
+   * routed command is an unknown source at the first legacy hop and
+   * is dropped silently (no reply, no error).  Rewrite to the primary
+   * unless the route heads toward the primary's own server, which
+   * knows the alias (and where a primary-sourced line would be a fake
+   * direction).  Replies then arrive addressed to the primary; the
+   * numeric relay mirrors them to the session's local aliases. */
+  if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
+    struct Client *prim = cli_user(from)->alias_primary;
+    if (MyUser(prim) || cli_from(prim) != cli_from(acptr))
+      from = prim;
+  }
 
   /* Save label and generate compact tag for forwarded labeled commands.
    * IRCv3-aware destinations only -- see hunt_server_cmd. */

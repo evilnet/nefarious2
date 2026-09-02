@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "s_numeric.h"
+#include "bouncer_session.h"
 #include "channel.h"
 #include "client.h"
 #include "forwarded_label.h"
@@ -144,6 +145,28 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
     }
 
     sendcmdto_one(from, num, num, acptr, "%C %s", acptr, parv[2]);
+
+    /* Bouncer: a numeric that arrived over S2S addressed to a local
+     * primary is a reply to something the SESSION did -- and after the
+     * alias->primary egress rewrite (hunt_server_cmd, ircd_relay) the
+     * device that actually asked may be one of the aliases.  Mirror it
+     * to every local alias so replies never land only on another
+     * device.  Plain path only: label-batched numerics belong to the
+     * primary connection's batch and would be discarded by an alias
+     * that never opened it. */
+    if (MyConnect(acptr) && !IsBouncerAlias(acptr)) {
+      struct BouncerSession *bs = bounce_get_session(acptr);
+      if (bs && bs->hs_alias_count > 0) {
+        int ai;
+        for (ai = 0; ai < bs->hs_alias_count; ai++) {
+          struct Client *alias = findNUser(bs->hs_aliases[ai].ba_numeric);
+          if (alias && alias != acptr && MyConnect(alias)
+              && IsBouncerAlias(alias) && cli_user(alias)
+              && cli_user(alias)->alias_primary == acptr)
+            sendcmdto_one(from, num, num, alias, "%C %s", acptr, parv[2]);
+        }
+      }
+    }
   } else
     sendcmdto_channel_butone(feature_bool(FEAT_HIS_REWRITE) ? &me : sptr,
                              num, num, achptr, cptr, SKIP_DEAF | SKIP_BURST,
