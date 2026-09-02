@@ -44,6 +44,7 @@
 #include "metadata.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_chattr.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -99,10 +100,11 @@ static unsigned int sm_hash(const char *session_id, const char *target)
   }
   h ^= 0;
   h *= 16777619u;
+  /* Fold with the ircd casemapping: sm_find compares with ircd_strcmp,
+   * under which rfc1459's []\~ equal {}|^ -- an ASCII-only fold hashed
+   * such spellings to different buckets (case-fold audit 2026-09-02). */
   for (p = target; *p; p++) {
-    unsigned char c = (unsigned char)*p;
-    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-    h ^= c;
+    h ^= (unsigned char)ToLower((unsigned char)*p);
     h *= 16777619u;
   }
   return h & SESSION_MR_HASH_MASK;
