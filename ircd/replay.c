@@ -80,21 +80,85 @@ static int is_pm_target_for_client(const char *target, struct Client *cptr)
  * `me` tiebreak uses current nick — display-only (access already
  * authorized), so a mutable nick is acceptable here.  Returns 1+fills
  * buf, else 0. */
+/** Copy the nick part of a stored sender mask ("nick!user@host"). */
+static void pm_sender_nick(const struct HistoryMessage *m, char *buf, size_t buflen)
+{
+  const char *bang = strchr(m->sender, '!');
+  size_t n = bang ? (size_t)(bang - m->sender) : strlen(m->sender);
+  if (n >= buflen) n = buflen - 1;
+  memcpy(buf, m->sender, n);
+  buf[n] = '\0';
+}
+
+/** The live client logged into @a account, if any.  First match on the
+ * global list: a bouncer primary and its aliases share the account and
+ * the nick, so any of them will do. */
+static struct Client *pm_live_client_for_account(const char *account)
+{
+  struct Client *acptr;
+  if (!account || !*account)
+    return NULL;
+  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
+    if (!IsUser(acptr) || !IsAccount(acptr) || !cli_user(acptr))
+      continue;
+    if (cli_user(acptr)->account[0]
+        && ircd_strcmp(cli_user(acptr)->account, account) == 0)
+      return acptr;
+  }
+  return NULL;
+}
+
+/** Is @a m a row the replaying client sent?  By sender account when the
+ * client is logged in (the client may have changed nick since the row
+ * was stored, and an older nick of their own must not read as the
+ * other party); by sender nick otherwise. */
+static int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m)
+{
+  char snick[NICKLEN + 1];
+  if (IsAccount(sptr) && cli_user(sptr) && cli_user(sptr)->account[0]
+      && m->account[0]
+      && ircd_strcmp(m->account, cli_user(sptr)->account) == 0)
+    return 1;
+  pm_sender_nick(m, snick, sizeof(snick));
+  return ircd_strcmp(snick, cli_name(sptr)) == 0;
+}
+
+/** Derive the other party's nick for a PM page.  The page can span
+ * months of one pair key, so rows carry whatever nicks both sides had
+ * at the time: identify the caller's own rows by identity, take the
+ * NEWEST row the other party sent, and show that party under their
+ * current nick when they are online -- a client that opens the
+ * conversation under a stale nick fragments it. */
 static int pm_other_nick_from_messages(struct Client *sptr,
                                        const struct HistoryMessage *msgs,
                                        char *buf, size_t buflen)
 {
-  const char *me = cli_name(sptr);
   const struct HistoryMessage *m;
+  const struct HistoryMessage *other = NULL;   /* newest row the other party sent */
+  const struct HistoryMessage *own = NULL;     /* newest own row naming its target */
+
   for (m = msgs; m; m = m->next) {
-    char snick[NICKLEN + 1];
-    const char *bang = strchr(m->sender, '!');
-    size_t n = bang ? (size_t)(bang - m->sender) : strlen(m->sender);
-    if (n >= sizeof(snick)) n = sizeof(snick) - 1;
-    memcpy(snick, m->sender, n);
-    snick[n] = '\0';
-    if (0 != ircd_strcmp(snick, me)) { ircd_strncpy(buf, snick, buflen); return 1; }
-    if (m->original_target[0])       { ircd_strncpy(buf, m->original_target, buflen); return 1; }
+    if (!pm_row_is_own(sptr, m)) {
+      if (!other || strcmp(m->timestamp, other->timestamp) > 0)
+        other = m;
+    } else if (m->original_target[0]) {
+      if (!own || strcmp(m->timestamp, own->timestamp) > 0)
+        own = m;
+    }
+  }
+
+  if (other) {
+    struct Client *live = other->account[0]
+                          ? pm_live_client_for_account(other->account) : NULL;
+    if (live)
+      ircd_strncpy(buf, cli_name(live), buflen);
+    else
+      pm_sender_nick(other, buf, buflen);
+    return 1;
+  }
+  if (own) {
+    ircd_strncpy(buf, own->original_target, buflen);
+    return 1;
   }
   return 0;
 }
@@ -116,10 +180,6 @@ static void replay_set_target_from_storage(struct Client *sptr,
                                             const char *storage_target)
 {
   const char *colon;
-  const char *mynick;
-  size_t mynick_len, nick1_len;
-  const char *other_nick;
-  char other_nick_buf[CHANNELLEN + 1];
 
   if (!storage_target || !*storage_target) {
     rs->target[0] = '\0';
@@ -314,35 +374,17 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
 
       cmd = (msg->type <= HISTORY_MULTILINE) ? msg_type_cmd[msg->type] : "PRIVMSG";
 
-      /* For PM batches, the BATCH-level target (rs->target = other party's
-       * nick) is correct for the BATCH start line and for the replaying
-       * client's outgoing messages, but incoming messages need the
-       * client's own nick as the per-message PRIVMSG target.  Prefer the
-       * stored original_target (set on new entries); fall back to
-       * direction reconstruction from msg->sender for legacy entries
-       * predating the original_target field.
-       */
-      if (rs->is_pm) {
-        if (msg->original_target[0]) {
-          per_msg_target = msg->original_target;
-        } else {
-          const char *bang = strchr(msg->sender, '!');
-          size_t sender_nick_len = bang ? (size_t)(bang - msg->sender)
-                                         : strlen(msg->sender);
-          const char *mynick = cli_name(sptr);
-          size_t mynick_len = strlen(mynick);
-
-          if (sender_nick_len == mynick_len &&
-              ircd_strncmp(msg->sender, mynick, sender_nick_len) == 0) {
-            /* Outgoing — sender is the replaying client; recipient is
-             * the other party. */
-            per_msg_target = rs->other_nick;
-          } else {
-            /* Incoming — sender is the other party; recipient was self. */
-            per_msg_target = mynick;
-          }
-        }
-      }
+      /* For PM batches the wire target follows the row's DIRECTION, in
+       * today's nicks: the replaying client's own rows go to the other
+       * party's current nick (rs->other_nick), incoming rows to the
+       * client's own current nick.  The stored original_target is the
+       * nick typed when the row was written; replaying it would scatter
+       * a conversation that spans nick changes across several buffers
+       * (the storage-key leak this path was fixed for, in another
+       * guise). */
+      if (rs->is_pm)
+        per_msg_target = pm_row_is_own(sptr, msg) ? rs->other_nick
+                                                  : cli_name(sptr);
 
       send_history_message(sptr, msg, per_msg_target, batchid, time_str, cmd);
       rs->current = msg->next;
