@@ -173,6 +173,30 @@ static char client_msgid_override[64] = "";
  * consistent timestamps across all recipients. */
 static char client_time_override[40] = "";
 
+/** The event's ONE time, in epoch milliseconds, for client-facing @time
+ * tags (2026-09-02).  Armed together with the client msgid (either by
+ * sendcmdto_set_client_event or, for the sites that already stamp the
+ * S2S tag, by sendcmdto_set_s2s_tags) and cleared with it.  Every
+ * client composer used to stamp the wall clock at send time, so a
+ * message's live @time drifted from the row the origin stored (the
+ * HLC's lead over the wall clock, 1 ms in the echo case; tens of ms on
+ * a receiving server whose PART broadcast never carried the tag).
+ * Consumed only while a client msgid is armed, so a stray S2S-only
+ * override can never stamp an unrelated later send. */
+static uint64_t client_event_ms = 0;
+
+/** Wall-clock replacement for client @time composition: the armed
+ * event time when there is one, else the clock. */
+static void client_tag_tv(struct timeval *tv)
+{
+  if (client_msgid_override[0] && client_event_ms) {
+    tv->tv_sec = (time_t)(client_event_ms / 1000);
+    tv->tv_usec = (suseconds_t)((client_event_ms % 1000) * 1000);
+    return;
+  }
+  gettimeofday(tv, NULL);
+}
+
 void sendcmdto_set_client_time(const char *timestr)
 {
   if (timestr)
@@ -185,8 +209,16 @@ void sendcmdto_set_client_msgid(const char *msgid)
 {
   if (msgid)
     ircd_strncpy(client_msgid_override, msgid, sizeof(client_msgid_override));
-  else
+  else {
     client_msgid_override[0] = '\0';
+    client_event_ms = 0;
+  }
+}
+
+void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms)
+{
+  sendcmdto_set_client_msgid(msgid);
+  client_event_ms = msgid ? event_ms : 0;
 }
 
 void sendcmdto_set_fwd_batch(const char *batch_id)
@@ -200,6 +232,10 @@ void sendcmdto_set_fwd_batch(const char *batch_id)
 void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid)
 {
   s2s_time_override = time_ms;
+  /* The same event time serves the client-facing @time (see
+   * client_event_ms); only meaningful while a client msgid is armed. */
+  if (time_ms)
+    client_event_ms = time_ms;
   if (msgid)
     ircd_strncpy(s2s_msgid_override, msgid, sizeof(s2s_msgid_override));
   else
@@ -255,7 +291,7 @@ static char *format_server_time(char *buf, size_t buflen)
   struct timeval tv;
   struct tm tm;
 
-  gettimeofday(&tv, NULL);
+  client_tag_tv(&tv);
   gmtime_r(&tv.tv_sec, &tm);
   snprintf(buf, buflen, "@time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ ",
            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
@@ -373,7 +409,7 @@ static char *format_message_tags_ex(char *buf, size_t buflen, struct Client *fro
     struct tm tm;
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    gettimeofday(&tv, NULL);
+    client_tag_tv(&tv);
     gmtime_r(&tv.tv_sec, &tm);
     pos += snprintf(buf + pos, buflen - pos,
                     "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
@@ -642,7 +678,7 @@ static char *format_message_tags_for_ex(char *buf, size_t buflen, struct Client 
     } else {
       struct timeval tv;
       struct tm tm;
-      gettimeofday(&tv, NULL);
+      client_tag_tv(&tv);
       gmtime_r(&tv.tv_sec, &tm);
       pos += snprintf(buf + pos, buflen - pos,
                       "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
@@ -753,7 +789,7 @@ static char *format_message_tags_for_caps(char *buf, size_t buflen,
     struct tm tm;
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    gettimeofday(&tv, NULL);
+    client_tag_tv(&tv);
     gmtime_r(&tv.tv_sec, &tm);
     pos += snprintf(buf + pos, buflen - pos,
                     "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
@@ -848,7 +884,7 @@ static char *format_message_tags_with_client(char *buf, size_t buflen, struct Cl
     struct tm tm;
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    gettimeofday(&tv, NULL);
+    client_tag_tv(&tv);
     gmtime_r(&tv.tv_sec, &tm);
     pos += snprintf(buf + pos, buflen - pos,
                     "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
@@ -947,7 +983,7 @@ static char *format_message_tags_with_client_caps(char *buf, size_t buflen,
     struct tm tm;
     if (pos > 1 && pos < (int)buflen - 1)
       buf[pos++] = ';';
-    gettimeofday(&tv, NULL);
+    client_tag_tv(&tv);
     gmtime_r(&tv.tv_sec, &tm);
     pos += snprintf(buf + pos, buflen - pos,
                     "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
@@ -1547,7 +1583,7 @@ void sendcmdto_one_tags_msgid(struct Client *from, const char *cmd, const char *
   }
 
   /* Generate timestamp - ISO for client @time= tag, Unix for storage */
-  gettimeofday(&tv, NULL);
+  client_tag_tv(&tv);
   gmtime_r(&tv.tv_sec, &tm);
   snprintf(timebuf, sizeof(timebuf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
            tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
@@ -3838,7 +3874,7 @@ static void send_standard_reply_ex(struct Client *to, const char *type,
       } else {
         struct timeval tv;
         struct tm tm;
-        gettimeofday(&tv, NULL);
+        client_tag_tv(&tv);
         gmtime_r(&tv.tv_sec, &tm);
         pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
                         "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
@@ -4037,7 +4073,7 @@ void send_labeled_ack(struct Client *to)
     struct tm tm;
     if (pos < (int)sizeof(tagbuf) - 1)
       tagbuf[pos++] = ';';
-    gettimeofday(&tv, NULL);
+    client_tag_tv(&tv);
     gmtime_r(&tv.tv_sec, &tm);
     pos += snprintf(tagbuf + pos, sizeof(tagbuf) - pos,
                     "time=%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",

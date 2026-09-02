@@ -78,6 +78,9 @@ extern void sendcmdto_set_fwd_batch(const char *batch_id);
 extern void sendcmdto_set_client_msgid(const char *msgid);
 /* Override server-time for client-side tag formatting (caller must clear after use) */
 extern void sendcmdto_set_client_time(const char *timestr);
+/** Arm the client msgid AND the event's time (epoch ms) for the
+ * client-facing @time tag; cleared by sendcmdto_set_client_msgid(NULL). */
+extern void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms);
 /* Override S2S compact tag time/msgid for forwarded commands (auto-cleared) */
 extern void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid);
 /* Override S2S compact tag bouncer session-id hint (,S segment) for the next

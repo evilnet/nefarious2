@@ -1149,7 +1149,7 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
       char ssl_kick_msgid[64] = "";
       if (feature_bool(FEAT_MSGID)) {
         generate_msgid(ssl_kick_msgid, sizeof(ssl_kick_msgid));
-        sendcmdto_set_client_msgid(ssl_kick_msgid);
+        sendcmdto_set_client_event(ssl_kick_msgid, history_event_time_ms(NULL));
       }
       sendcmdto_serv_butone(&me, CMD_KICK, NULL,
                             "%H %C :SSL-only channel (insecure session)",
@@ -5478,7 +5478,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
           ? jbuf->jb_msgid_time_ms : history_event_time_ms(NULL);
 
       if (feature_bool(FEAT_MSGID))
-        sendcmdto_set_client_msgid(part_msgid);
+        sendcmdto_set_client_event(part_msgid, part_ms);
 
       /* Save per-channel msgid for S2S relay in joinbuf_flush() */
       ircd_strncpy(jbuf->jb_msgids[jbuf->jb_count], part_msgid,
@@ -5563,7 +5563,9 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 
       /* Set msgid override so channel sends and echo include it */
       if (feature_bool(FEAT_MSGID))
-        sendcmdto_set_client_msgid(join_msgid);
+        sendcmdto_set_client_event(join_msgid,
+                                   memb ? (uint64_t)memb->join_tv.tv_sec * 1000
+                                          + memb->join_tv.tv_usec / 1000 : 0);
 
       /* Save per-channel msgid for S2S relay in joinbuf_flush() (CREATE batches channels) */
       if (jbuf->jb_type == JOINBUF_TYPE_CREATE && memb) {
@@ -5796,7 +5798,7 @@ void RevealDelayedJoin(struct Membership *member)
 
   if (feature_bool(FEAT_MSGID)) {
     generate_msgid(reveal_msgid, sizeof(reveal_msgid));
-    sendcmdto_set_client_msgid(reveal_msgid);
+    sendcmdto_set_client_event(reveal_msgid, history_event_time_ms(NULL));
   }
 
   sendcmdto_channel_capab_butserv_butone(member->user, CMD_JOIN, member->channel,

@@ -484,7 +484,9 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
           ircd_strncpy(quit_msgid, cli_s2s_msgid(bcptr), sizeof(quit_msgid));
         else
           generate_msgid(quit_msgid, sizeof(quit_msgid));
-        sendcmdto_set_client_msgid(quit_msgid);
+        /* Same time the QUIT rows are stored with (store_quit_events) */
+        sendcmdto_set_client_event(quit_msgid,
+                                   history_event_time_ms(MyConnect(bcptr) ? bcptr : NULL));
       }
       sendcmdto_common_channels_butone(bcptr, CMD_QUIT, NULL, ":%s", comment);
       sendcmdto_set_client_msgid(NULL);

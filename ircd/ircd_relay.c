@@ -579,7 +579,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
     /* Set msgid override so channel broadcast includes it in client tags */
     if (msgid[0])
-      sendcmdto_set_client_msgid(msgid);
+      sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
 
     /* Alias source rewriting: use primary's numeric for S2S delivery.
      * When primary is remote, use split S2S delivery: primary numeric for
@@ -614,7 +614,7 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
       if (echo_ctags && *echo_ctags && CapOwnHas(sptr, CAP_MSGTAGS)) {
         /* Include client tags in echo */
         if (msgid[0])
-          sendcmdto_set_client_msgid(msgid);
+          sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
         sendcmdto_one_client_tags(sptr, MSG_PRIVATE, sptr, echo_ctags,
                                   "%H :%s", chptr, mytext);
         sendcmdto_set_client_msgid(NULL);
@@ -732,7 +732,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
     /* Set msgid override so channel broadcast includes it in client tags */
     if (msgid[0])
-      sendcmdto_set_client_msgid(msgid);
+      sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
 
     /* Alias source rewriting (see relay_channel_message) */
     {
@@ -763,7 +763,7 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
       const char *echo_ctags = cli_client_tags(sptr);
       if (echo_ctags && *echo_ctags && CapOwnHas(sptr, CAP_MSGTAGS)) {
         if (msgid[0])
-          sendcmdto_set_client_msgid(msgid);
+          sendcmdto_set_client_event(msgid, history_parse_ms(timestamp));
         sendcmdto_one_client_tags(sptr, MSG_NOTICE, sptr, echo_ctags,
                                   "%H :%s", chptr, mytext);
         sendcmdto_set_client_msgid(NULL);
@@ -855,7 +855,7 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
         ircd_strncpy(relay_msgid, s2s_mid, sizeof(relay_msgid));
       else
         generate_msgid(relay_msgid, sizeof(relay_msgid));
-      sendcmdto_set_client_msgid(relay_msgid);
+      sendcmdto_set_client_event(relay_msgid, history_event_time_ms(one));
     }
 
     if (client_tags && *client_tags) {
@@ -949,7 +949,7 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
         ircd_strncpy(relay_msgid, s2s_mid, sizeof(relay_msgid));
       else
         generate_msgid(relay_msgid, sizeof(relay_msgid));
-      sendcmdto_set_client_msgid(relay_msgid);
+      sendcmdto_set_client_event(relay_msgid, history_event_time_ms(one));
     }
 
     if (client_tags && *client_tags) {
@@ -1302,7 +1302,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       /* Set msgid override so format_message_tags_with_client includes it */
       if (pm_msgid[0])
-        sendcmdto_set_client_msgid(pm_msgid);
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
       sendcmdto_one_client_tags(from, MSG_PRIVATE, acptr, client_tags,
                                 "%C :%s", acptr, mytext);
       sendcmdto_set_client_msgid(NULL);
@@ -1508,7 +1508,7 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
 
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       if (pm_msgid[0])
-        sendcmdto_set_client_msgid(pm_msgid);
+        sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
       sendcmdto_one_client_tags(from, MSG_NOTICE, acptr, client_tags,
                                 "%C :%s", acptr, mytext);
       sendcmdto_set_client_msgid(NULL);
@@ -1642,7 +1642,7 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
 
     /* Set client msgid so local client gets @msgid= tag */
     if (pm_msgid[0])
-      sendcmdto_set_client_msgid(pm_msgid);
+      sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
     if (client_tags && *client_tags && MyConnect(acptr) && CapActive(acptr, CAP_MSGTAGS)) {
       sendcmdto_one_client_tags(send_from, MSG_PRIVATE, acptr, client_tags,
@@ -1750,7 +1750,7 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
 
     /* Set client msgid so local client gets @msgid= tag */
     if (pm_msgid[0])
-      sendcmdto_set_client_msgid(pm_msgid);
+      sendcmdto_set_client_event(pm_msgid, history_parse_ms(pm_timestamp));
 
     /* Check for forwarded label batch in DRAINING state */
     if (MyConnect(acptr) && feature_bool(FEAT_CAP_labeled_response)) {

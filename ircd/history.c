@@ -786,6 +786,34 @@ void history_format_ms(char *buf, size_t buflen, uint64_t ms)
                 (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
 }
 
+uint64_t history_parse_ms(const char *ts)
+{
+  char *end = NULL;
+  unsigned long long sec;
+  unsigned long ms = 0;
+
+  if (!ts || !*ts)
+    return 0;
+  sec = strtoull(ts, &end, 10);
+  if (end == ts)
+    return 0;
+  if (end && *end == '.') {
+    /* Up to three fractional digits; anything beyond is ignored. */
+    int digits = 0;
+    const char *p = end + 1;
+    while (*p >= '0' && *p <= '9' && digits < 3) {
+      ms = ms * 10 + (unsigned long)(*p - '0');
+      p++;
+      digits++;
+    }
+    while (digits < 3) {
+      ms *= 10;
+      digits++;
+    }
+  }
+  return sec * 1000ULL + ms;
+}
+
 int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_buflen)
 {
   unsigned long secs;

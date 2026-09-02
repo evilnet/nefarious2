@@ -257,10 +257,12 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Generate msgid for this TAGMSG (used in relay and history) */
     {
       char tagmsg_msgid[64];
+      uint64_t tagmsg_ms;
       generate_msgid(tagmsg_msgid, sizeof(tagmsg_msgid));
+      tagmsg_ms = history_event_time_ms(NULL);   /* the msgid's mint time */
 
-      /* Set msgid override so channel/client tag sends include it */
-      sendcmdto_set_client_msgid(tagmsg_msgid);
+      /* Set msgid + event time so channel/client tag sends carry them */
+      sendcmdto_set_client_event(tagmsg_msgid, tagmsg_ms);
 
       /* Relay TAGMSG with client-only tags to local channel members */
       sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, sptr,
@@ -279,12 +281,12 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_set_client_msgid(NULL);
 
       /* Store for chathistory event-playback — same msgid as broadcast */
-      store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid, 0);
+      store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid, tagmsg_ms);
 
       /* Propagate to other servers (S2S with tags in P10 message).
-       * Use the same msgid we generated for local delivery. */
+       * Use the same msgid and time we generated for local delivery. */
       if (!IsLocalChannel(chptr->chname)) {
-        sendcmdto_set_s2s_tags(0, tagmsg_msgid);
+        sendcmdto_set_s2s_tags(tagmsg_ms, tagmsg_msgid);
         sendcmdto_want_s2s_tags(1);
         sendcmdto_serv_butone_v3(sptr, CMD_TAGMSG, cptr, "@%s %s",
                               client_tags, chptr->chname);
@@ -302,8 +304,10 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     {
       char dm_msgid[64];
+      uint64_t dm_ms;
       generate_msgid(dm_msgid, sizeof(dm_msgid));
-      sendcmdto_set_client_msgid(dm_msgid);
+      dm_ms = history_event_time_ms(NULL);   /* the msgid's mint time */
+      sendcmdto_set_client_event(dm_msgid, dm_ms);
 
       if (MyConnect(acptr)) {
         /* Local user - deliver with client-only tags if they support message-tags */
@@ -325,7 +329,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       }
       else {
         /* Remote user - forward to their server with tags */
-        sendcmdto_set_s2s_tags(0, dm_msgid);
+        sendcmdto_set_s2s_tags(dm_ms, dm_msgid);
         sendcmdto_one(sptr, CMD_TAGMSG, acptr, "@%s %C",
                       client_tags, acptr);
 
@@ -349,7 +353,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 #ifdef USE_ROCKSDB
       if (!has_only_ephemeral_tags(client_tags)) {
         char ts_buf[HISTORY_TIMESTAMP_LEN];
-        history_format_timestamp(ts_buf, sizeof(ts_buf));
+        history_format_ms(ts_buf, sizeof(ts_buf), dm_ms);
         store_private_history(sptr, acptr, "", HISTORY_TAGMSG, dm_msgid,
                               ts_buf, client_tags);
       }
@@ -435,7 +439,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (feature_bool(FEAT_MSGID) && !cli_s2s_msgid(cptr)[0])
       generate_msgid(cli_s2s_msgid(cptr), S2S_MSGID_BUFSIZE);
     if (cli_s2s_msgid(cptr)[0])
-      sendcmdto_set_client_msgid(cli_s2s_msgid(cptr));
+      sendcmdto_set_client_event(cli_s2s_msgid(cptr), history_event_time_ms(cptr));
 
     /* Relay to local channel members with message-tags capability */
     sendcmdto_channel_client_tags(sptr, MSG_TAGMSG, chptr, cptr,
@@ -452,7 +456,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * Use S2S msgid if available so clients can deduplicate. */
     store_tagmsg_history(sptr, chptr, client_tags,
                          cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL,
-                         cli_s2s_time_ms(cptr));
+                         history_event_time_ms(cptr));
   }
   else {
     /* Target is a user */
@@ -467,7 +471,7 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (feature_bool(FEAT_MSGID) && !cli_s2s_msgid(cptr)[0])
       generate_msgid(cli_s2s_msgid(cptr), S2S_MSGID_BUFSIZE);
     if (cli_s2s_msgid(cptr)[0])
-      sendcmdto_set_client_msgid(cli_s2s_msgid(cptr));
+      sendcmdto_set_client_event(cli_s2s_msgid(cptr), history_event_time_ms(cptr));
 
     if (MyConnect(acptr)) {
       /* Local user - deliver with client-only tags if they support message-tags */

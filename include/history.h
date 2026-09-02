@@ -446,6 +446,10 @@ extern uint64_t history_event_time_ms(struct Client *link);
 /** Format an epoch-millisecond time as the storage stamp "sec.mmm". */
 extern void history_format_ms(char *buf, size_t buflen, uint64_t ms);
 
+/** Parse a storage stamp "sec[.mmm]" back to epoch milliseconds; 0 when
+ * unparseable. */
+extern uint64_t history_parse_ms(const char *ts);
+
 /** Convert Unix timestamp to ISO 8601 for client display.
  * @param[in] unix_ts Unix timestamp string (seconds.milliseconds).
  * @param[out] iso_buf Buffer for ISO 8601 output (at least 32 bytes).

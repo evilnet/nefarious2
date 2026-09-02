@@ -1287,7 +1287,10 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
             ircd_strncpy(nick_msgid, cli_s2s_msgid(cptr), sizeof(nick_msgid));
           else
             generate_msgid(nick_msgid, sizeof(nick_msgid));
-          sendcmdto_set_client_msgid(nick_msgid);
+          /* One time per event: the origin's tag time for a remote nick
+           * change, the msgid's mint time for a local one. */
+          sendcmdto_set_client_event(nick_msgid,
+                                     history_event_time_ms(MyUser(sptr) ? NULL : cptr));
         }
 
         /* If sender has a labeled-response label, send them a labeled NICK
@@ -1310,7 +1313,6 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
          * changes store too, under the unified msgid. */
         if (history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)) {
           struct Membership *chan;
-          struct timeval tv;
           char timestamp[32];
           char old_sender[HISTORY_SENDER_LEN];
           const char *account = (cli_user(sptr) && cli_user(sptr)->account[0])
@@ -1319,9 +1321,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
           ircd_snprintf(0, old_sender, sizeof(old_sender), "%s!%s@%s",
                         cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->host);
 
-          gettimeofday(&tv, NULL);
-          ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                        (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
+          /* Same event time the live NICK was tagged with (above) */
+          history_format_ms(timestamp, sizeof(timestamp),
+                            history_event_time_ms(MyUser(sptr) ? NULL : cptr));
 
           for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
             if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)
