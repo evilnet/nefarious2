@@ -93,9 +93,8 @@ int parse_extban(char *ban, struct ExtBan *extban, int level, char *prefix);
  */
 static void store_channel_event(struct Client *sptr, struct Channel *chptr,
                                 const char *text, enum HistoryMessageType type,
-                                const char *ext_msgid)
+                                const char *ext_msgid, uint64_t event_ms)
 {
-  struct timeval tv;
   char timestamp[32];
   char msgid[64];
   char sender[HISTORY_SENDER_LEN];
@@ -134,19 +133,21 @@ static void store_channel_event(struct Client *sptr, struct Channel *chptr,
     return;  /* msgid resolves intrinsically (2026-09 repack); no
               * anchor row needed */
 
-  /* Generate Unix timestamp for storage */
-  gettimeofday(&tv, NULL);
-  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                (unsigned long)tv.tv_sec,
-                (unsigned long)(tv.tv_usec / 1000));
-
-  /* Use provided msgid or generate a new one */
+  /* Use provided msgid or generate a new one -- BEFORE reading the time:
+   * minting advances the HLC and the row time must be the mint time. */
   if (ext_msgid && *ext_msgid)
     use_msgid = ext_msgid;
   else {
     generate_msgid(msgid, sizeof(msgid));
     use_msgid = msgid;
   }
+
+  /* Row time: the caller's event time (S2S tag time for a remote event,
+   * the membership/mode stamp it already emitted on the wire), else the
+   * local HLC mint time.  Never the wall clock at observation. */
+  if (!event_ms)
+    event_ms = history_event_time_ms(NULL);
+  history_format_ms(timestamp, sizeof(timestamp), event_ms);
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -1163,7 +1164,8 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
         ircd_snprintf(0, kick_text, sizeof(kick_text), "%s :SSL-only channel (insecure session)",
                       cli_name(member->user));
         store_channel_event(&me, member->channel, kick_text,
-                            HISTORY_KICK, ssl_kick_msgid[0] ? ssl_kick_msgid : NULL);
+                            HISTORY_KICK, ssl_kick_msgid[0] ? ssl_kick_msgid : NULL,
+                            0);
       }
 #endif
       make_zombie(member, member->user, &me, &me, member->channel);
@@ -2771,12 +2773,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
         } else {
           generate_msgid(mode_msgid, sizeof(mode_msgid));
         }
-        if (!mode_time_ms) {
-          struct timeval mode_tv;
-          gettimeofday(&mode_tv, NULL);
-          mode_time_ms = (uint64_t)mode_tv.tv_sec * 1000
-                       + mode_tv.tv_usec / 1000;
-        }
+        if (!mode_time_ms)
+          mode_time_ms = history_event_time_ms(NULL);  /* mint time */
         sendcmdto_set_client_msgid(mode_msgid);
       }
 
@@ -2802,7 +2800,7 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
                       addbuf, addbuf_local,
                       remstr, addstr);
         store_channel_event(mbuf->mb_source, mbuf->mb_channel, mode_text, HISTORY_MODE,
-                            mode_msgid[0] ? mode_msgid : NULL);
+                            mode_msgid[0] ? mode_msgid : NULL, mode_time_ms);
       }
 #endif
     }
@@ -5462,8 +5460,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
     /* Generate or use pre-populated msgid for PART */
     {
       char part_msgid[64];
-      struct timeval part_tv;
-      gettimeofday(&part_tv, NULL);
+      uint64_t part_ms;
 
       /* Use pre-populated msgid from incoming S2S (re-relay), or generate new */
       if (jbuf->jb_msgids[jbuf->jb_count][0])
@@ -5472,14 +5469,21 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       else
         generate_msgid(part_msgid, sizeof(part_msgid));
 
+      /* The event's ONE time: the origin's tag time for a re-relayed
+       * PART (ms_part loaded it into jb_msgid_time_ms), else the mint
+       * time of the msgid just generated.  This used to be overwritten
+       * with the local wall clock, so every hop re-stamped the tag and
+       * the row. */
+      part_ms = jbuf->jb_msgid_time_ms
+          ? jbuf->jb_msgid_time_ms : history_event_time_ms(NULL);
+
       if (feature_bool(FEAT_MSGID))
         sendcmdto_set_client_msgid(part_msgid);
 
       /* Save per-channel msgid for S2S relay in joinbuf_flush() */
       ircd_strncpy(jbuf->jb_msgids[jbuf->jb_count], part_msgid,
                     sizeof(jbuf->jb_msgids[0]));
-      jbuf->jb_msgid_time_ms = (uint64_t)part_tv.tv_sec * 1000
-                              + part_tv.tv_usec / 1000;
+      jbuf->jb_msgid_time_ms = part_ms;
 
       /* Send notification to channel */
       if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
@@ -5497,7 +5501,7 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       if (!(flags & (CHFL_ZOMBIE | CHFL_DELAYED)))
         store_channel_event(jbuf->jb_source, chan,
                             (flags & CHFL_BANNED || !jbuf->jb_comment) ? "" : jbuf->jb_comment,
-                            HISTORY_PART, part_msgid);
+                            HISTORY_PART, part_msgid, part_ms);
 #endif
 
       sendcmdto_set_client_msgid(NULL);
@@ -5543,10 +5547,17 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       else
         generate_msgid(join_msgid, sizeof(join_msgid));
 
-      /* Stamp membership for bouncer replay */
+      /* Stamp membership for bouncer replay.  The stamp is the event's
+       * ONE time: the origin's S2S tag time for a re-relayed JOIN
+       * (jb_msgid_time_ms), else the mint time of the msgid generated
+       * just above -- never this server's clock at observation.  It
+       * feeds the re-relay tag and the history row below. */
       memb = find_member_link(chan, jbuf->jb_source);
       if (memb) {
-        gettimeofday(&memb->join_tv, NULL);
+        uint64_t join_ms = jbuf->jb_msgid_time_ms
+            ? jbuf->jb_msgid_time_ms : history_event_time_ms(NULL);
+        memb->join_tv.tv_sec = (time_t)(join_ms / 1000);
+        memb->join_tv.tv_usec = (suseconds_t)((join_ms % 1000) * 1000);
         ircd_strncpy(memb->join_msgid, join_msgid, sizeof(memb->join_msgid));
       }
 
@@ -5610,7 +5621,9 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
       /* Store JOIN event in history with the same msgid --
        * receiver-side; net-burst joins bypass the joinbuf entirely so
        * they remain unstored. */
-      store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
+      store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid,
+                          memb ? (uint64_t)memb->join_tv.tv_sec * 1000
+                                 + memb->join_tv.tv_usec / 1000 : 0);
 #endif
 
       if (cli_user(jbuf->jb_source)->away)
@@ -5634,7 +5647,9 @@ joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan, unsigned int flags)
 
 #ifdef USE_ROCKSDB
       /* Store DELJOINS JOIN event in history (receiver-side) */
-      store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid);
+      store_channel_event(jbuf->jb_source, chan, "", HISTORY_JOIN, join_msgid,
+                          memb ? (uint64_t)memb->join_tv.tv_sec * 1000
+                                 + memb->join_tv.tv_usec / 1000 : 0);
 #endif
     }
 
@@ -5801,7 +5816,7 @@ void RevealDelayedJoin(struct Membership *member)
 
 #ifdef USE_ROCKSDB
   store_channel_event(member->user, member->channel, "", HISTORY_JOIN,
-                      reveal_msgid[0] ? reveal_msgid : NULL);
+                      reveal_msgid[0] ? reveal_msgid : NULL, 0);
 #endif
 
   CheckDelayedJoins(member->channel);

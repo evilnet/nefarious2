@@ -38,6 +38,8 @@
 #include "db_types.h"
 #include "history.h"
 #include "ml_content.h"
+#include "client.h"
+#include "crdt_hlc.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
 #include "ircd_features.h"
@@ -764,13 +766,24 @@ static void reply_index_del_children(struct db_writebatch *wb,
 
 char *history_format_timestamp(char *buf, size_t buflen)
 {
-  struct timeval tv;
-
-  gettimeofday(&tv, NULL);
-  ircd_snprintf(0, buf, buflen, "%lu.%03lu",
-                (unsigned long)tv.tv_sec,
-                (unsigned long)(tv.tv_usec / 1000));
+  /* "Now" for a store stamp is the HLC's physical time, not the wall
+   * clock: it is monotone across received S2S tags, and right after a
+   * generate_msgid() it is that msgid's mint time. */
+  history_format_ms(buf, buflen, hlc_global()->physical_ms);
   return buf;
+}
+
+uint64_t history_event_time_ms(struct Client *link)
+{
+  if (link && cli_s2s_time_ms(link))
+    return cli_s2s_time_ms(link);
+  return hlc_global()->physical_ms;
+}
+
+void history_format_ms(char *buf, size_t buflen, uint64_t ms)
+{
+  ircd_snprintf(0, buf, buflen, "%lu.%03lu",
+                (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
 }
 
 int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_buflen)

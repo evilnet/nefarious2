@@ -563,17 +563,17 @@ void relay_channel_message(struct Client* sptr, const char* name, const char* te
 
 #ifdef USE_ROCKSDB
     if (feature_bool(FEAT_MSGID)) {
-      struct timeval tv;
-      gettimeofday(&tv, NULL);
-      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                    (unsigned long)tv.tv_sec,
-                    (unsigned long)(tv.tv_usec / 1000));
+      uint64_t event_ms;
+      /* msgid FIRST: minting advances the HLC, and the row time read
+       * after it is the msgid's own mint time -- the same number the
+       * live @time and the S2S tag carry (one time per message). */
       generate_msgid(msgid, sizeof(msgid));
+      event_ms = history_event_time_ms(NULL);
+      history_format_ms(timestamp, sizeof(timestamp), event_ms);
 
       /* Set S2S msgid override so the S2S relay carries the same msgid
        * that we store locally — prevents federation dedup failures. */
-      sendcmdto_set_s2s_tags(
-        (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, msgid);
+      sendcmdto_set_s2s_tags(event_ms, msgid);
     }
 #endif
 
@@ -720,15 +720,13 @@ void relay_channel_notice(struct Client* sptr, const char* name, const char* tex
 
 #ifdef USE_ROCKSDB
     if (feature_bool(FEAT_MSGID)) {
-      struct timeval tv;
-      gettimeofday(&tv, NULL);
-      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                    (unsigned long)tv.tv_sec,
-                    (unsigned long)(tv.tv_usec / 1000));
+      uint64_t event_ms;
+      /* msgid first, then its mint time (see relay_channel_message) */
       generate_msgid(msgid, sizeof(msgid));
+      event_ms = history_event_time_ms(NULL);
+      history_format_ms(timestamp, sizeof(timestamp), event_ms);
 
-      sendcmdto_set_s2s_tags(
-        (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000, msgid);
+      sendcmdto_set_s2s_tags(event_ms, msgid);
     }
 #endif
 
@@ -873,15 +871,14 @@ void server_relay_channel_message(struct Client* sptr, const char* name, const c
 
 #ifdef USE_ROCKSDB
     /* Store server-relayed message in history database.
-     * Uses the same msgid that was broadcast to clients above. */
+     * Uses the same msgid that was broadcast to clients above, and the
+     * origin's time from the same S2S tag -- the @time this server just
+     * delivered live.  It used to stamp the local wall clock here, so
+     * the row replayed with a different time than it was delivered with. */
     if (relay_msgid[0]) {
       char timestamp[32];
-      struct timeval tv;
 
-      gettimeofday(&tv, NULL);
-      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                    (unsigned long)tv.tv_sec,
-                    (unsigned long)(tv.tv_usec / 1000));
+      history_format_ms(timestamp, sizeof(timestamp), history_event_time_ms(one));
       store_channel_history(sptr, chptr, text, HISTORY_PRIVMSG, relay_msgid, timestamp, NULL);
     }
 #endif
@@ -968,15 +965,12 @@ void server_relay_channel_notice(struct Client* sptr, const char* name, const ch
 
 #ifdef USE_ROCKSDB
     /* Store server-relayed notice in history database.
-     * Uses the same msgid that was broadcast to clients above. */
+     * Same msgid and same origin time as the live delivery (see
+     * server_relay_channel_message). */
     if (relay_msgid[0]) {
       char timestamp[32];
-      struct timeval tv;
 
-      gettimeofday(&tv, NULL);
-      ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                    (unsigned long)tv.tv_sec,
-                    (unsigned long)(tv.tv_usec / 1000));
+      history_format_ms(timestamp, sizeof(timestamp), history_event_time_ms(one));
       store_channel_history(sptr, chptr, text, HISTORY_NOTICE, relay_msgid, timestamp, NULL);
     }
 #endif
@@ -1284,12 +1278,10 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
   pm_msgid[0] = '\0';
   pm_timestamp[0] = '\0';
   if (feature_bool(FEAT_MSGID)) {
-    struct timeval tv;
+    /* msgid first, then its mint time (one time per message) */
     generate_msgid(pm_msgid, sizeof(pm_msgid));
-    gettimeofday(&tv, NULL);
-    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
-                  (unsigned long)tv.tv_sec,
-                  (unsigned long)(tv.tv_usec / 1000));
+    history_format_ms(pm_timestamp, sizeof(pm_timestamp),
+                      history_event_time_ms(NULL));
   }
 
   /* Alias source rewriting for S2S legacy compat.
@@ -1496,12 +1488,10 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
   pm_msgid[0] = '\0';
   pm_timestamp[0] = '\0';
   if (feature_bool(FEAT_MSGID)) {
-    struct timeval tv;
+    /* msgid first, then its mint time (one time per message) */
     generate_msgid(pm_msgid, sizeof(pm_msgid));
-    gettimeofday(&tv, NULL);
-    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
-                  (unsigned long)tv.tv_sec,
-                  (unsigned long)(tv.tv_usec / 1000));
+    history_format_ms(pm_timestamp, sizeof(pm_timestamp),
+                      history_event_time_ms(NULL));
   }
 
   /* Alias source rewriting (see relay_private_message) */
@@ -1625,7 +1615,6 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
   pm_timestamp[0] = '\0';
   if (feature_bool(FEAT_MSGID)) {
     const char *s2s_mid = NULL;
-    struct timeval tv;
 
     if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
         && cli_s2s_msgid(cli_from(sptr))[0])
@@ -1636,10 +1625,10 @@ void server_relay_private_message(struct Client* sptr, const char* name, const c
     else
       generate_msgid(pm_msgid, sizeof(pm_msgid));
 
-    gettimeofday(&tv, NULL);
-    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
-                  (unsigned long)tv.tv_sec,
-                  (unsigned long)(tv.tv_usec / 1000));
+    /* One time per message: the origin's tag time when the msgid came
+     * over the link, else the mint time of the msgid just generated. */
+    history_format_ms(pm_timestamp, sizeof(pm_timestamp),
+                      history_event_time_ms(s2s_mid ? cli_from(sptr) : NULL));
   }
 
   /* Per-target direction guard for split S2S delivery:
@@ -1734,7 +1723,6 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
   pm_timestamp[0] = '\0';
   if (feature_bool(FEAT_MSGID)) {
     const char *s2s_mid = NULL;
-    struct timeval tv;
 
     if (feature_bool(FEAT_P10_MESSAGE_TAGS) && cli_from(sptr)
         && cli_s2s_msgid(cli_from(sptr))[0])
@@ -1745,10 +1733,10 @@ void server_relay_private_notice(struct Client* sptr, const char* name, const ch
     else
       generate_msgid(pm_msgid, sizeof(pm_msgid));
 
-    gettimeofday(&tv, NULL);
-    ircd_snprintf(0, pm_timestamp, sizeof(pm_timestamp), "%lu.%03lu",
-                  (unsigned long)tv.tv_sec,
-                  (unsigned long)(tv.tv_usec / 1000));
+    /* One time per message: the origin's tag time when the msgid came
+     * over the link, else the mint time of the msgid just generated. */
+    history_format_ms(pm_timestamp, sizeof(pm_timestamp),
+                      history_event_time_ms(s2s_mid ? cli_from(sptr) : NULL));
   }
 
   /* Per-target direction guard (see server_relay_private_message) */

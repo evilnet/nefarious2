@@ -111,9 +111,8 @@
  */
 static void store_kick_event(struct Client *sptr, struct Channel *chptr,
                              struct Client *who, const char *comment,
-                             const char *broadcast_msgid)
+                             const char *broadcast_msgid, uint64_t event_ms)
 {
-  struct timeval tv;
   char timestamp[32];
   char fallback_msgid[64];
   const char *msgid;
@@ -145,11 +144,10 @@ static void store_kick_event(struct Client *sptr, struct Channel *chptr,
   else
     msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
 
-  /* Generate Unix timestamp for storage */
-  gettimeofday(&tv, NULL);
-  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                (unsigned long)tv.tv_sec,
-                (unsigned long)(tv.tv_usec / 1000));
+  /* Row time: the event's one time (the S2S tag time the caller already
+   * put on the wire), else the mint time of the msgid chosen above. */
+  history_format_ms(timestamp, sizeof(timestamp),
+                    event_ms ? event_ms : history_event_time_ms(NULL));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -309,7 +307,7 @@ int m_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 #ifdef USE_ROCKSDB
     /* Store KICK event in history — same msgid as broadcast */
     store_kick_event(sptr, chptr, who, comment,
-                     kick_msgid[0] ? kick_msgid : NULL);
+                     kick_msgid[0] ? kick_msgid : NULL, 0);
 #endif
   }
 
@@ -420,11 +418,8 @@ int ms_kick(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     /* Propagate kick with consistent S2S msgid... */
     if (kick_msgid[0]) {
-      if (!kick_time_ms) {
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        kick_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-      }
+      if (!kick_time_ms)
+        kick_time_ms = history_event_time_ms(NULL);  /* mint time */
       sendcmdto_set_s2s_tags(kick_time_ms, kick_msgid);
     }
     sendcmdto_want_s2s_tags(1);

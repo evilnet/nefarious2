@@ -200,7 +200,6 @@ static void store_quit_events(struct Client *sptr, const char *comment,
                               const char *broadcast_msgid)
 {
   struct Membership *member;
-  struct timeval tv;
   char timestamp[32];
   char fallback_msgid[64];
   const char *msgid;
@@ -239,11 +238,14 @@ static void store_quit_events(struct Client *sptr, const char *comment,
   else
     msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
 
-  /* Generate Unix timestamp (same for all channels) */
-  gettimeofday(&tv, NULL);
-  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                (unsigned long)tv.tv_sec,
-                (unsigned long)(tv.tv_usec / 1000));
+  /* Row time (same for all channels): a local quitter's stamp is the
+   * mint time of the msgid chosen above (a KILL victim carries it in
+   * cli_s2s_time_ms); a remote quitter's QUIT reaches exit_client from
+   * several contexts (SQUIT, ping-out, KILL) where the link's tag stash
+   * may belong to an unrelated earlier message, so it is NOT consulted:
+   * remote QUIT rows keep a local mint time (documented residue). */
+  history_format_ms(timestamp, sizeof(timestamp),
+                    history_event_time_ms(MyConnect(sptr) ? sptr : NULL));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))

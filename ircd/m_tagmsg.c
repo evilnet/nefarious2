@@ -133,9 +133,8 @@ static int has_only_ephemeral_tags(const char *tags)
  */
 static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
                                   const char *client_tags,
-                                  const char *broadcast_msgid)
+                                  const char *broadcast_msgid, uint64_t event_ms)
 {
-  struct timeval tv;
   char timestamp[32];
   char fallback_msgid[64];
   const char *msgid;
@@ -168,11 +167,10 @@ static void store_tagmsg_history(struct Client *sptr, struct Channel *chptr,
   else
     msgid = generate_msgid(fallback_msgid, sizeof(fallback_msgid));
 
-  /* Generate Unix timestamp for storage */
-  gettimeofday(&tv, NULL);
-  ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                (unsigned long)tv.tv_sec,
-                (unsigned long)(tv.tv_usec / 1000));
+  /* Row time: the origin's S2S tag time for a relayed TAGMSG, else the
+   * mint time of the msgid chosen above. */
+  history_format_ms(timestamp, sizeof(timestamp),
+                    event_ms ? event_ms : history_event_time_ms(NULL));
 
   /* Build sender string: nick!user@host */
   if (cli_user(sptr))
@@ -281,7 +279,7 @@ int m_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       sendcmdto_set_client_msgid(NULL);
 
       /* Store for chathistory event-playback — same msgid as broadcast */
-      store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid);
+      store_tagmsg_history(sptr, chptr, client_tags, tagmsg_msgid, 0);
 
       /* Propagate to other servers (S2S with tags in P10 message).
        * Use the same msgid we generated for local delivery. */
@@ -453,7 +451,8 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Store in history (or write-forward to STORE server).
      * Use S2S msgid if available so clients can deduplicate. */
     store_tagmsg_history(sptr, chptr, client_tags,
-                         cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL);
+                         cli_s2s_msgid(cptr)[0] ? cli_s2s_msgid(cptr) : NULL,
+                         cli_s2s_time_ms(cptr));
   }
   else {
     /* Target is a user */
@@ -490,7 +489,8 @@ int ms_tagmsg(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (cli_s2s_msgid(cptr)[0]
         && !has_only_ephemeral_tags(client_tags)) {
       char ts_buf[HISTORY_TIMESTAMP_LEN];
-      history_format_timestamp(ts_buf, sizeof(ts_buf));
+      /* Origin's time from the same tag as the msgid */
+      history_format_ms(ts_buf, sizeof(ts_buf), history_event_time_ms(cptr));
       store_private_history(sptr, acptr, "", HISTORY_TAGMSG,
                             cli_s2s_msgid(cptr), ts_buf, client_tags);
     }

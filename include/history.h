@@ -431,6 +431,21 @@ extern int history_is_available(void);
  */
 extern char *history_format_timestamp(char *buf, size_t buflen);
 
+/** A stored row's time.  One rule for every store site (2026-09-02): the
+ * S2S tag time when the event arrived over @a link (the origin's stamp,
+ * which is also the live @time this server delivered), else the local
+ * HLC's current physical time -- which, read right after
+ * generate_msgid(), is exactly the mint time embedded in that msgid and
+ * the time send.c stamps on the live tag.  Before this every server
+ * stamped rows with its own clock at observation time, so the same
+ * msgid replayed with a different @time than it was delivered with on
+ * every non-origin server.  @a link may be NULL (local event). */
+struct Client;
+extern uint64_t history_event_time_ms(struct Client *link);
+
+/** Format an epoch-millisecond time as the storage stamp "sec.mmm". */
+extern void history_format_ms(char *buf, size_t buflen, uint64_t ms);
+
 /** Convert Unix timestamp to ISO 8601 for client display.
  * @param[in] unix_ts Unix timestamp string (seconds.milliseconds).
  * @param[out] iso_buf Buffer for ISO 8601 output (at least 32 bytes).
