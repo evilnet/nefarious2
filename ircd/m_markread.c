@@ -266,12 +266,22 @@ static void notify_local_clients(const char *account, const char *target, const 
   if (!account || !*account)
     return;
 
-  /* Find all local clients with the same account */
+  /* Find all local clients with the same anchor: the account, or -- for
+   * an ephemeral (session-anchored) marker -- the session_id itself.
+   * The session branch used to be unreachable (an unauthed client has an
+   * empty account and was skipped), so an ephemeral MARKREAD SET was
+   * stored but never echoed; the spec requires every connection of the
+   * setter, the setter included, to receive the new marker. */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!IsUser(acptr) || !MyUser(acptr))
       continue;
     if (!CapActive(acptr, CAP_DRAFT_READMARKER))
       continue;
+    if (cli_session_id(acptr)[0]
+        && 0 == strcmp(cli_session_id(acptr), account)) {
+      send_markread(acptr, target, timestamp);
+      continue;
+    }
     if (!cli_user(acptr) || !cli_user(acptr)->account[0])
       continue;
     if (ircd_strcmp(cli_user(acptr)->account, account) != 0)
