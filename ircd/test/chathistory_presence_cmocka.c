@@ -465,6 +465,67 @@ static void test_presence_remote_close_union(void **state)
   presence_purge_session(anchor);
 }
 
+/* Presence-aware paging (2026-09-02): the store walk asks, for a row
+ * OUTSIDE the anchor's presence, where the next presence boundary lies
+ * in the walk direction so it can seek there instead of stepping (or
+ * stop when nothing further is visible).  Pure interval logic over the
+ * same record the membership test uses.
+ *
+ *   forward  (reverse=0): smallest interval start > t, or open_since
+ *                         if that is > t; -1 when none
+ *   backward (reverse=1): largest interval end < t; -1 when none
+ *   t inside an interval (or >= open_since): the query never asks, but
+ *   the answer is t itself (identity) so a caller can't be misled. */
+static void test_presence_next_visible_boundaries(void **state)
+{
+  const char *anchor = "test-session-anchor-page";
+  time_t t = BASE_TS + 3000000;
+
+  (void)state;
+  presence_purge_session(anchor);
+
+  /* No record at all: nothing visible in either direction. */
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t, 0), -1);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t, 1), -1);
+
+  /* Two closed windows [100,200] and [500,600], gaps around them. */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 100, t + 200);
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + 500, t + 600);
+
+  /* Before everything, walking forward: first window's start. */
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t, 0), t + 100);
+  /* Before everything, walking backward: nothing. */
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t, 1), -1);
+
+  /* In the gap between the windows. */
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 300, 0), t + 500);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 300, 1), t + 200);
+
+  /* After everything (no open interval): forward nothing, backward last end. */
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 900, 0), -1);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 900, 1), t + 600);
+
+  /* Inside a window: identity in both directions. */
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 150, 0), t + 150);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 150, 1), t + 150);
+
+  /* Boundary seconds are inclusive: end+1 is outside, end is inside. */
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 201, 1), t + 200);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 200, 1), t + 200);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 499, 0), t + 500);
+
+  /* Open interval from t+1000: forward from the trailing gap lands on
+   * open_since; backward from inside the open run is identity; forward
+   * from inside is identity. */
+  presence_record_join(anchor, 1, TEST_CHANNEL, t + 1000);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 900, 0), t + 1000);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 900, 1), t + 600);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 5000, 0), t + 5000);
+  assert_int_equal(presence_next_visible(anchor, 1, TEST_CHANNEL, t + 5000, 1), t + 5000);
+
+  presence_purge_session(anchor);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -473,6 +534,7 @@ int main(void)
     cmocka_unit_test(test_presence_reconnect_coalescing),
     cmocka_unit_test(test_presence_clock_skew_clamp),
     cmocka_unit_test(test_presence_remote_close_union),
+    cmocka_unit_test(test_presence_next_visible_boundaries),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

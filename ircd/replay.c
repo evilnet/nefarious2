@@ -395,8 +395,19 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
      * completeness).  The list is chronological (oldest first) of the
      * LATEST results, so the overflow extra is the head -- drop it to
      * keep exactly the limit-sized set the old query returned. */
-    count = history_query_latest_after(channame, rs->replay_limit + 1,
-                                        chan_since, &messages);
+    {
+      /* Presence-aware paging: skip rows outside the session's presence
+       * inside the walk (and seek past invisible runs) instead of
+       * filtering a page that was already full of them. */
+      int pf_rc = 0;
+      struct PresenceQueryFilter *pf =
+          presence_query_filter_open(sptr, channame, 0, &pf_rc);
+      count = (pf_rc < 0) ? 0
+          : history_query_latest_after(channame, rs->replay_limit + 1,
+                                       chan_since, &messages,
+                                       presence_query_filter_hook(pf));
+      presence_query_filter_close(pf);
+    }
     if (count <= 0 || !messages) {
       if (messages)
         history_free_messages(messages);
@@ -460,7 +471,7 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
      * => tag withheld (drop the overflow head to keep the latest
      * limit-sized set). */
     count = history_query_latest_after(tgt->target, rs->replay_limit + 1,
-                                        rs->since_timestamp, &messages);
+                                        rs->since_timestamp, &messages, NULL);
     if (count <= 0 || !messages) {
       if (messages)
         history_free_messages(messages);

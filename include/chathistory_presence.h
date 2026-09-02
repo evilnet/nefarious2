@@ -29,10 +29,15 @@
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
 #endif
+#ifndef INCLUDED_stdint_h
+#include <stdint.h>
+#define INCLUDED_stdint_h
+#endif
 
 struct Client;
 struct Channel;
 struct HistoryMessage;
+struct HistoryRowFilter;
 
 /** Open the "presence" column family on the chathistory storage env
  * for the account-anchored side, and zero the in-memory session
@@ -150,5 +155,41 @@ extern void presence_anchor_transfer(struct Client *cptr,
                                      int old_is_session,
                                      const char *new_anchor,
                                      int new_is_session);
+
+/* Presence-aware paging (2026-09-02).  The store walk consults the
+ * caller's presence PER ROW instead of the page being filtered after
+ * it was filled: rows outside presence are skipped without counting
+ * against the limit, and the walk seeks straight to the next presence
+ * boundary instead of stepping through an invisible run.  A full raw
+ * page that filtered to nothing used to leave the client with an empty,
+ * incomplete batch and no cursor. */
+
+/** Nearest second at/after (reverse=0) or at/before (reverse=1) @a t at
+ * which @a anchor is present in @a channel.  Returns @a t itself when
+ * @a t is already inside a presence window, -1 when nothing is visible
+ * in that direction. */
+extern int64_t presence_next_visible(const char *anchor, int anchor_is_session,
+                                     const char *channel, time_t t, int reverse);
+
+/** Opaque per-query presence filter: one snapshot of the requester's
+ * presence record plus the history row hook that consults it. */
+struct PresenceQueryFilter;
+
+/** Build the query-time presence filter for @a requestor on @a target.
+ * *@a rc_out (may be NULL) receives 0 when no filtering applies (feature
+ * off, PM target, +H channel, or @a effective_override set) and NULL is
+ * returned; 1 when a filter was armed (returned); -1 when the request
+ * must fail CLOSED (no resolvable anchor) and NULL is returned -- the
+ * caller answers an empty, complete page. */
+extern struct PresenceQueryFilter *presence_query_filter_open(
+    struct Client *requestor, const char *target, int effective_override,
+    int *rc_out);
+
+/** The row hook to hand to history_query_*(); NULL for a NULL filter. */
+extern struct HistoryRowFilter *presence_query_filter_hook(
+    struct PresenceQueryFilter *pf);
+
+/** Release a filter from presence_query_filter_open (NULL-safe). */
+extern void presence_query_filter_close(struct PresenceQueryFilter *pf);
 
 #endif /* INCLUDED_chathistory_presence_h */

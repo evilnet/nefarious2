@@ -1461,11 +1461,83 @@ int history_has_msgid(const char *msgid)
  * @param[out] result Pointer to result list head.
  * @return Number of messages returned, or -1 on error.
  */
+/** Apply a query-time row filter to a freshly built row.
+ *
+ * Returns 1 when the row is kept.  Otherwise the row is freed and the
+ * iterator advanced for the caller: 0 = keep walking (the iterator was
+ * either stepped or SOUGHT to the boundary the hook named), -1 = stop
+ * the walk (hook said nothing further is visible, or scan_max hit --
+ * the latter sets filter->truncated).  @a rc receives the iterator
+ * status after the advance.
+ *
+ * A boundary seek is only honoured when it moves in the walk direction
+ * (forward: strictly later than the row; reverse: strictly earlier), so
+ * a confused hook can never pin the walk in place. */
+static int history_filter_row(struct HistoryRowFilter *filter,
+                              struct HistoryMessage *msg, int reverse,
+                              const char *target, struct db_iter *it,
+                              int *rc)
+{
+  int64_t skip_to = 0;
+  int64_t row_t;
+  int verdict;
+  int scan_max;
+
+  if (!filter || !filter->fn)
+    return 1;
+
+  filter->scanned++;
+  verdict = filter->fn(msg, reverse, filter->ctx, &skip_to);
+  if (verdict == 1)
+    return 1;
+
+  row_t = (int64_t)strtoll(msg->timestamp, NULL, 10);
+  msg->next = NULL;
+  history_free_messages(msg);
+
+  if (verdict < 0)
+    return -1;
+
+  scan_max = filter->scan_max > 0 ? filter->scan_max : HISTORY_FILTER_SCAN_MAX;
+  if (filter->scanned >= scan_max) {
+    filter->truncated = 1;
+    return -1;
+  }
+
+  if (skip_to > 0 && (reverse ? skip_to < row_t : skip_to > row_t)) {
+    char seekbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+    char tsbuf[HISTORY_TIMESTAMP_LEN];
+    int seeklen;
+
+    /* Keys carry millisecond stamps ("%lu.%03u").  Forward: land on the
+     * first row at or after the boundary second.  Reverse: position at
+     * the first row past the boundary second, then step back onto the
+     * last row within it. */
+    ircd_snprintf(0, tsbuf, sizeof(tsbuf), "%ld.000",
+                  (long)(reverse ? skip_to + 1 : skip_to));
+    seeklen = build_key(seekbuf, sizeof(seekbuf), target, tsbuf, NULL);
+    if (seeklen > 0) {
+      *rc = db_iter_seek(it, seekbuf, seeklen);
+      if (reverse) {
+        if (*rc == DB_NOTFOUND)
+          *rc = db_iter_seek_last(it);
+        else if (*rc == DB_OK)
+          *rc = db_iter_prev(it);
+      }
+      return 0;
+    }
+  }
+
+  *rc = reverse ? db_iter_prev(it) : db_iter_next(it);
+  return 0;
+}
+
 static int history_query_internal(const char *target,
                                   const char *start_key, int start_keylen,
                                   enum HistoryDirection direction,
                                   int limit, struct HistoryMessage **result,
-                                  const char *floor_key, int floor_keylen)
+                                  const char *floor_key, int floor_keylen,
+                                  struct HistoryRowFilter *filter)
 {
   struct db_snapshot *snap = NULL;
   struct db_iter *it = NULL;
@@ -1619,6 +1691,16 @@ static int history_query_internal(const char *target,
      * point-in-time view. */
     ml_content_resolve(snap, msg);
 
+    /* Query-time filter (presence-aware paging): skipped rows do not
+     * count toward the limit; the helper advances/seeks the iterator. */
+    {
+      int keep = history_filter_row(filter, msg, reverse, target, it, &rc);
+      if (keep < 0)
+        break;
+      if (keep == 0)
+        continue;
+    }
+
     /* Add to list */
     msg->next = NULL;
     if (reverse) {
@@ -1652,7 +1734,8 @@ static int history_query_internal(const char *target,
 
 int history_query_before(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
-                         struct HistoryMessage **result)
+                         struct HistoryMessage **result,
+                         struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
@@ -1682,12 +1765,13 @@ int history_query_before(const char *target, enum HistoryRefType ref_type,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_BEFORE, limit, result,
-                                NULL, 0);
+                                NULL, 0, filter);
 }
 
 int history_query_after(const char *target, enum HistoryRefType ref_type,
                         const char *reference, int limit,
-                        struct HistoryMessage **result)
+                        struct HistoryMessage **result,
+                        struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
@@ -1713,12 +1797,13 @@ int history_query_after(const char *target, enum HistoryRefType ref_type,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_AFTER, limit, result,
-                                NULL, 0);
+                                NULL, 0, filter);
 }
 
 int history_query_latest(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
-                         struct HistoryMessage **result)
+                         struct HistoryMessage **result,
+                         struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
@@ -1734,7 +1819,7 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
       return -1;
     return history_query_internal(target, keybuf, keylen,
                                   HISTORY_DIR_LATEST, limit, result,
-                                  NULL, 0);
+                                  NULL, 0, filter);
   }
 
   /* Convert reference to Unix timestamp format */
@@ -1759,12 +1844,13 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_LATEST, limit, result,
-                                floorbuf, floorlen);
+                                floorbuf, floorlen, filter);
 }
 
 int history_query_latest_after(const char *target, int limit,
                                const char *after_timestamp,
-                               struct HistoryMessage **result)
+                               struct HistoryMessage **result,
+                               struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
@@ -1792,7 +1878,7 @@ int history_query_latest_after(const char *target, int limit,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_LATEST, limit, result,
-                                floorbuf, floorlen);
+                                floorbuf, floorlen, filter);
 }
 
 int history_find_last_join(const char *channel, const char *nick,
@@ -1917,7 +2003,8 @@ int history_find_last_join(const char *channel, const char *nick,
 
 int history_query_around(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
-                         struct HistoryMessage **result)
+                         struct HistoryMessage **result,
+                         struct HistoryRowFilter *filter)
 {
   struct HistoryMessage *before = NULL, *after = NULL, *ref_msg = NULL;
   int half = limit / 2;
@@ -1931,14 +2018,27 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
   if (ref_type == HISTORY_REF_MSGID) {
     int rc = history_lookup_message(target, reference, &ref_msg);
     if (rc == 0 && ref_msg) {
-      count_ref = 1;
-      log_write(LS_SYSTEM, L_INFO, 0, "history_query_around: found reference msg at ts=%s",
-                ref_msg->timestamp);
+      /* The reference row is subject to the same visibility rule as
+       * the rows around it. */
+      if (filter && filter->fn) {
+        int64_t skip_to = 0;
+        filter->scanned++;
+        if (filter->fn(ref_msg, 0, filter->ctx, &skip_to) != 1) {
+          history_free_messages(ref_msg);
+          ref_msg = NULL;
+        }
+      }
+      if (ref_msg) {
+        count_ref = 1;
+        log_write(LS_SYSTEM, L_INFO, 0, "history_query_around: found reference msg at ts=%s",
+                  ref_msg->timestamp);
+      }
     }
   }
 
   /* Get messages before reference */
-  count_before = history_query_before(target, ref_type, reference, half, &before);
+  count_before = history_query_before(target, ref_type, reference, half, &before,
+                                      filter);
   if (count_before < 0) {
     history_free_messages(before);
     history_free_messages(ref_msg);
@@ -1947,7 +2047,8 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
 
   /* Get messages after reference (reduce limit by ref_msg if found) */
   count_after = history_query_after(target, ref_type, reference,
-                                    limit - count_before - count_ref, &after);
+                                    limit - count_before - count_ref, &after,
+                                    filter);
   if (count_after < 0) {
     history_free_messages(before);
     history_free_messages(ref_msg);
@@ -1980,7 +2081,8 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
 int history_query_between(const char *target,
                           enum HistoryRefType ref_type1, const char *reference1,
                           enum HistoryRefType ref_type2, const char *reference2,
-                          int limit, struct HistoryMessage **result)
+                          int limit, struct HistoryMessage **result,
+                          struct HistoryRowFilter *filter)
 {
   char timestamp1[HISTORY_TIMESTAMP_LEN];
   char timestamp2[HISTORY_TIMESTAMP_LEN];
@@ -2083,6 +2185,16 @@ int history_query_between(const char *target,
 
     /* Resolve multiline content via the snapshot for coherent reads. */
     ml_content_resolve(snap, msg);
+
+    /* Query-time filter (presence-aware paging); forward walk.  The
+     * end-prefix check above re-runs on whatever row a seek lands on. */
+    {
+      int keep = history_filter_row(filter, msg, 0, target, it, &rc);
+      if (keep < 0)
+        break;
+      if (keep == 0)
+        continue;
+    }
 
     msg->next = NULL;
     if (tail)
@@ -2528,7 +2640,7 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
    * shouldn't happen because the pair-key only matches the two
    * specific nicks involved. */
   count = history_query_latest(target, HISTORY_REF_NONE, NULL,
-                                100, &messages);
+                                100, &messages, NULL);
   if (count <= 0 || !messages)
     return 0;
 

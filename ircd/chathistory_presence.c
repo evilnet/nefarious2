@@ -694,6 +694,59 @@ int presence_was_present(const char *anchor, int anchor_is_session,
   }
 }
 
+/** Nearest presence boundary in the walk direction (see the header).
+ * Pure interval logic over one record: forward = smallest closed start
+ * (or open_since) strictly after @a t; backward = largest closed end
+ * strictly before @a t.  Inside a window the answer is @a t. */
+static int64_t record_next_visible(const struct presence_record *r,
+                                   int64_t t, int reverse)
+{
+  int64_t best = -1;
+  uint8_t i;
+
+  if (record_was_present(r, (time_t)t))
+    return t;
+
+  if (!reverse) {
+    if (r->open_since != 0 && r->open_since > t)
+      best = r->open_since;
+    for (i = 0; i < r->count; i++) {
+      if (r->intervals[i].start > t
+          && (best < 0 || r->intervals[i].start < best))
+        best = r->intervals[i].start;
+    }
+  } else {
+    /* An open interval starts after every closed one and (t not being
+     * inside it) lies entirely after t, so only closed ends qualify. */
+    for (i = 0; i < r->count; i++) {
+      if (r->intervals[i].end < t && r->intervals[i].end > best)
+        best = r->intervals[i].end;
+    }
+  }
+  return best;
+}
+
+int64_t presence_next_visible(const char *anchor, int anchor_is_session,
+                              const char *channel, time_t t, int reverse)
+{
+  if (!anchor || !*anchor || !channel || !*channel)
+    return -1;
+
+  if (anchor_is_session) {
+    struct presence_session_entry *e = session_find(anchor, channel);
+    if (!e)
+      return -1;
+    return record_next_visible(&e->record, (int64_t)t, reverse);
+  }
+
+  {
+    struct presence_record r;
+    if (acct_load(anchor, channel, &r) != 0)
+      return -1;
+    return record_next_visible(&r, (int64_t)t, reverse);
+  }
+}
+
 const char *presence_anchor_for(const struct Client *cli,
                                  int *is_session_out)
 {
@@ -1095,6 +1148,103 @@ int presence_filter_messages(struct Client *requestor,
               target, anchor, is_session ? " (session)" : " (account)",
               kept, dropped);
   return kept;
+}
+
+/* ---------------------------------------------------------------- */
+/* Query-time presence filter (presence-aware paging)                */
+/* ---------------------------------------------------------------- */
+
+struct PresenceQueryFilter {
+  struct HistoryRowFilter hook;     /**< handed to history_query_*() */
+  char channel[CHANNELLEN + 1];
+  struct presence_record rec;       /**< ONE snapshot of the anchor's record
+                                     *   (the post-filter re-loads per row) */
+};
+
+/** history.c row hook.  Presence is second-granular; a row exactly on a
+ * boundary second is inside it (intervals are inclusive), which is what
+ * lets the walk seek to a boundary and trust the landing row. */
+static int presence_row_hook(const struct HistoryMessage *msg, int reverse,
+                             void *ctx, int64_t *skip_to)
+{
+  struct PresenceQueryFilter *pf = (struct PresenceQueryFilter *)ctx;
+  time_t t = parse_history_seconds(msg->timestamp);
+  int64_t next;
+
+  /* Unparseable stamp: fail closed, step on (same rule as the
+   * post-filter). */
+  if (t == 0)
+    return 0;
+  if (record_was_present(&pf->rec, t))
+    return 1;
+  next = record_next_visible(&pf->rec, (int64_t)t, reverse);
+  if (next < 0)
+    return -1;              /* nothing further visible this way: stop */
+  *skip_to = next;
+  return 0;
+}
+
+struct PresenceQueryFilter *presence_query_filter_open(
+    struct Client *requestor, const char *target, int effective_override,
+    int *rc_out)
+{
+  struct Channel *chptr;
+  const char *anchor;
+  int is_session = 0;
+  struct PresenceQueryFilter *pf;
+
+  if (rc_out)
+    *rc_out = 0;
+  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
+    return NULL;
+  if (effective_override)
+    return NULL;
+  if (!target || !IsChannelName(target))
+    return NULL;
+  chptr = FindChannel(target);
+  if (chptr && (chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+    return NULL;
+
+  anchor = presence_anchor_for(requestor, &is_session);
+  if (!anchor) {
+    /* Mirrors presence_filter_messages: broken identity state fails
+     * CLOSED.  The caller answers an empty, complete page. */
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence_query_filter_open: target=%s requestor without "
+              "anchor -- failing closed", target);
+    if (rc_out)
+      *rc_out = -1;
+    return NULL;
+  }
+
+  pf = (struct PresenceQueryFilter *)MyCalloc(1, sizeof(*pf));
+  ircd_strncpy(pf->channel, target, sizeof(pf->channel));
+  if (is_session) {
+    struct presence_session_entry *e = session_find(anchor, target);
+    if (e)
+      pf->rec = e->record;
+    /* else: zero record -- no presence at all, nothing visible */
+  } else if (acct_load(anchor, target, &pf->rec) != 0) {
+    /* Store unavailable or no record: a zero record hides everything,
+     * exactly as presence_was_present() answers 0 here. */
+    memset(&pf->rec, 0, sizeof(pf->rec));
+  }
+  pf->hook.fn = presence_row_hook;
+  pf->hook.ctx = pf;
+  if (rc_out)
+    *rc_out = 1;
+  return pf;
+}
+
+struct HistoryRowFilter *presence_query_filter_hook(struct PresenceQueryFilter *pf)
+{
+  return pf ? &pf->hook : NULL;
+}
+
+void presence_query_filter_close(struct PresenceQueryFilter *pf)
+{
+  if (pf)
+    MyFree(pf);
 }
 
 void presence_retention_sweep(void)
