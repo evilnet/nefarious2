@@ -13,6 +13,7 @@
 #if defined(USE_SSL) && defined(USE_LIBKC)
 
 #include "webpush.h"
+#include "webpush_keyring.h"
 #include "ircd_log.h"
 #include "ircd_kc_adapter.h"
 
@@ -39,14 +40,24 @@
 #include <time.h>
 
 /* ---------------------------------------------------------------------------
- * Static globals — VAPID key state
+ * VAPID key table
+ *
+ * Every key of the ring (webpush_keyring.h) this server can sign with is
+ * loaded here as an EVP_PKEY, keyed by its id (the base64url public key).
+ * `wp_current` is the key advertised to clients and used for subscriptions
+ * that carry no key id; delivery signs with the key a subscription is
+ * bound to (webpush_send_async), which is how retired keys keep serving
+ * the subscriptions registered under them.
  * ---------------------------------------------------------------------------*/
 
-static EVP_PKEY *vapid_key = NULL;
-static unsigned char vapid_pubkey_raw[65];  /* uncompressed P-256 */
-static size_t vapid_pubkey_raw_len = 0;
-static char vapid_pubkey_b64[WEBPUSH_VAPID_B64_LEN + 1];
-static int vapid_initialized = 0;
+struct wp_key {
+  char      id[WEBPUSH_KEY_ID_LEN + 1];
+  EVP_PKEY *pkey;
+};
+
+static struct wp_key  wp_keys[WEBPUSH_KEYRING_MAX];
+static int            wp_key_count = 0;
+static struct wp_key *wp_current = NULL;
 
 /* ---------------------------------------------------------------------------
  * Base64url encode / decode  (RFC 4648 Section 5)
@@ -210,205 +221,95 @@ cleanup:
  * VAPID key management
  * ---------------------------------------------------------------------------*/
 
-/** Generate a fresh P-256 keypair for VAPID signing. */
-static int generate_vapid_key(void)
+static struct wp_key *wp_key_find(const char *id)
 {
-  int enc_len;
-
-  vapid_key = EVP_EC_gen("P-256");
-  if (!vapid_key) {
-    log_write(LS_SYSTEM, L_ERROR, 0, "WebPush: failed to generate P-256 key");
-    return -1;
-  }
-
-  /* Extract uncompressed public key */
-  vapid_pubkey_raw_len = sizeof(vapid_pubkey_raw);
-  if (!EVP_PKEY_get_octet_string_param(vapid_key, OSSL_PKEY_PARAM_PUB_KEY,
-                                        vapid_pubkey_raw,
-                                        sizeof(vapid_pubkey_raw),
-                                        &vapid_pubkey_raw_len)) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush: failed to extract VAPID public key");
-    EVP_PKEY_free(vapid_key);
-    vapid_key = NULL;
-    return -1;
-  }
-
-  /* Base64url-encode the public key */
-  enc_len = base64url_encode(vapid_pubkey_raw, vapid_pubkey_raw_len,
-                             vapid_pubkey_b64, sizeof(vapid_pubkey_b64));
-  if (enc_len < 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush: failed to base64url-encode VAPID public key");
-    EVP_PKEY_free(vapid_key);
-    vapid_key = NULL;
-    return -1;
-  }
-
-  return 0;
-}
-
-int webpush_init(void)
-{
-  if (vapid_initialized)
-    return 0;
-
-  if (generate_vapid_key() != 0)
-    return -1;
-
-  vapid_initialized = 1;
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "WebPush: VAPID key initialized, pubkey=%s", vapid_pubkey_b64);
-  return 0;
-}
-
-void webpush_cleanup(void)
-{
-  if (vapid_key) {
-    EVP_PKEY_free(vapid_key);
-    vapid_key = NULL;
-  }
-  OPENSSL_cleanse(vapid_pubkey_raw, sizeof(vapid_pubkey_raw));
-  OPENSSL_cleanse(vapid_pubkey_b64, sizeof(vapid_pubkey_b64));
-  vapid_pubkey_raw_len = 0;
-  vapid_initialized = 0;
-}
-
-const char *webpush_get_vapid_pubkey(void)
-{
-  if (!vapid_initialized)
+  int i;
+  if (!id || !id[0])
     return NULL;
-  return vapid_pubkey_b64;
+  for (i = 0; i < wp_key_count; i++)
+    if (0 == strcmp(wp_keys[i].id, id))
+      return &wp_keys[i];
+  return NULL;
 }
 
-const unsigned char *webpush_get_vapid_pubkey_raw(size_t *out_len)
-{
-  if (!vapid_initialized) {
-    if (out_len)
-      *out_len = 0;
-    return NULL;
-  }
-  if (out_len)
-    *out_len = vapid_pubkey_raw_len;
-  return vapid_pubkey_raw;
-}
-
-int webpush_import_vapid_key(const unsigned char *privkey, size_t privkey_len,
-                              const unsigned char *pubkey, size_t pubkey_len)
+/** Build a P-256 keypair from a 32-byte private scalar (the public point
+ * is derived: EVP_PKEY_fromdata() does not compute it in OpenSSL 3.x) and
+ * write the base64url public key -- the key's id -- into @a id_out.
+ * Returns the key or NULL. */
+static EVP_PKEY *wp_pkey_from_priv(const unsigned char *privkey, size_t privkey_len,
+                                   char *id_out, size_t id_sz)
 {
   OSSL_PARAM_BLD *bld = NULL;
   OSSL_PARAM *params = NULL;
   EVP_PKEY_CTX *pctx = NULL;
   EVP_PKEY *pkey = NULL;
+  EVP_PKEY *ret = NULL;
   BIGNUM *priv_bn = NULL;
-  unsigned char derived_pub[65];
-  size_t derived_pub_len = 0;
-  int enc_len;
-  int ret = -1;
+  unsigned char pub[65];
+  size_t pub_len = 0;
 
-  if (!privkey || privkey_len != 32) {
+  if (!privkey || privkey_len != 32 || !id_out || id_sz < WEBPUSH_KEY_ID_LEN + 1) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush: import requires 32-byte private key");
-    return -1;
+              "WebPush: key load requires a 32-byte private key");
+    return NULL;
   }
 
   priv_bn = BN_bin2bn(privkey, (int)privkey_len, NULL);
   if (!priv_bn)
     goto cleanup;
 
-  /* If no public key provided, derive it from the private key.
-   * EVP_PKEY_fromdata() does not automatically compute the public point
-   * from just the private scalar in OpenSSL 3.x. */
-  if (!pubkey || pubkey_len != 65) {
+  {
     EC_GROUP *group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
     EC_POINT *pub_point = NULL;
     if (group) {
       pub_point = EC_POINT_new(group);
       if (pub_point &&
           EC_POINT_mul(group, pub_point, priv_bn, NULL, NULL, NULL)) {
-        derived_pub_len = EC_POINT_point2oct(group, pub_point,
-                                              POINT_CONVERSION_UNCOMPRESSED,
-                                              derived_pub, sizeof(derived_pub),
-                                              NULL);
+        pub_len = EC_POINT_point2oct(group, pub_point,
+                                     POINT_CONVERSION_UNCOMPRESSED,
+                                     pub, sizeof(pub), NULL);
       }
       EC_POINT_free(pub_point);
       EC_GROUP_free(group);
     }
-    if (derived_pub_len != 65) {
+    if (pub_len != 65) {
       log_write(LS_SYSTEM, L_ERROR, 0,
                 "WebPush: failed to derive public key from private key");
       goto cleanup;
     }
-    pubkey = derived_pub;
-    pubkey_len = derived_pub_len;
   }
 
   bld = OSSL_PARAM_BLD_new();
   if (!bld)
     goto cleanup;
-
-  if (!OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME,
-                                        "P-256", 0))
+  if (!OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, "P-256", 0))
     goto cleanup;
-
   if (!OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, priv_bn))
     goto cleanup;
-
-  if (!OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY,
-                                         pubkey, pubkey_len))
+  if (!OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pub, pub_len))
     goto cleanup;
-
   params = OSSL_PARAM_BLD_to_param(bld);
   if (!params)
     goto cleanup;
-
   pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
   if (!pctx)
     goto cleanup;
-
   if (EVP_PKEY_fromdata_init(pctx) <= 0)
     goto cleanup;
-
   if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
     goto cleanup;
 
-  /* Replace current key */
-  if (vapid_key)
-    EVP_PKEY_free(vapid_key);
-  vapid_key = pkey;
-  pkey = NULL;  /* ownership transferred */
-
-  /* Extract public key */
-  vapid_pubkey_raw_len = sizeof(vapid_pubkey_raw);
-  if (!EVP_PKEY_get_octet_string_param(vapid_key, OSSL_PKEY_PARAM_PUB_KEY,
-                                        vapid_pubkey_raw,
-                                        sizeof(vapid_pubkey_raw),
-                                        &vapid_pubkey_raw_len)) {
+  if (base64url_encode(pub, pub_len, id_out, id_sz) < 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush: failed to extract public key after import");
-    EVP_PKEY_free(vapid_key);
-    vapid_key = NULL;
+              "WebPush: failed to base64url-encode public key");
     goto cleanup;
   }
 
-  /* Base64url-encode */
-  enc_len = base64url_encode(vapid_pubkey_raw, vapid_pubkey_raw_len,
-                             vapid_pubkey_b64, sizeof(vapid_pubkey_b64));
-  if (enc_len < 0) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush: failed to base64url-encode imported key");
-    EVP_PKEY_free(vapid_key);
-    vapid_key = NULL;
-    goto cleanup;
-  }
-
-  vapid_initialized = 1;
-  log_write(LS_SYSTEM, L_INFO, 0,
-            "WebPush: VAPID key imported, pubkey=%s", vapid_pubkey_b64);
-  ret = 0;
+  ret = pkey;
+  pkey = NULL;
 
 cleanup:
-  BN_free(priv_bn);
+  BN_clear_free(priv_bn);
   OSSL_PARAM_BLD_free(bld);
   OSSL_PARAM_free(params);
   EVP_PKEY_CTX_free(pctx);
@@ -416,51 +317,138 @@ cleanup:
   return ret;
 }
 
-int webpush_export_vapid_privkey(unsigned char *out, size_t *out_len)
+int webpush_key_load(const unsigned char *privkey, size_t privkey_len,
+                     const char *expect_id, char *id_out, size_t id_sz)
 {
-  BIGNUM *priv_bn = NULL;
-  int bn_len;
+  char id[WEBPUSH_KEY_ID_LEN + 1];
+  EVP_PKEY *pkey;
+  struct wp_key *k;
 
-  if (!vapid_key || !out || !out_len)
+  pkey = wp_pkey_from_priv(privkey, privkey_len, id, sizeof(id));
+  if (!pkey)
     return -1;
 
-  if (*out_len < 32)
-    return -1;
+  /* A stored or wire record names the key it claims to carry; a private
+   * scalar that derives a different public key is corrupt, and signing
+   * with it would only earn 403s from the push service. */
+  if (expect_id && expect_id[0] && 0 != strcmp(expect_id, id)) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "WebPush: private key does not match its id %.16s... (derives %.16s...)",
+              expect_id, id);
+    EVP_PKEY_free(pkey);
+    return -2;
+  }
 
-  if (!EVP_PKEY_get_bn_param(vapid_key, OSSL_PKEY_PARAM_PRIV_KEY, &priv_bn))
-    return -1;
+  k = wp_key_find(id);
+  if (k) {
+    EVP_PKEY_free(k->pkey);
+    k->pkey = pkey;
+  } else {
+    if (wp_key_count >= WEBPUSH_KEYRING_MAX) {
+      log_write(LS_SYSTEM, L_ERROR, 0, "WebPush: key table full");
+      EVP_PKEY_free(pkey);
+      return -1;
+    }
+    k = &wp_keys[wp_key_count++];
+    memcpy(k->id, id, sizeof(k->id));
+    k->pkey = pkey;
+  }
 
-  bn_len = BN_bn2binpad(priv_bn, out, 32);
-  BN_clear_free(priv_bn);
-
-  if (bn_len != 32)
-    return -1;
-
-  *out_len = 32;
+  if (id_out && id_sz > 0) {
+    strncpy(id_out, id, id_sz - 1);
+    id_out[id_sz - 1] = '\0';
+  }
   return 0;
 }
 
-int webpush_import_vapid_key_b64(const char *b64, size_t b64_len)
+void webpush_key_unload(const char *id)
 {
-  unsigned char privkey[32];
-  size_t privkey_len = 0;
-  int ret;
+  struct wp_key *k = wp_key_find(id);
+  int idx;
 
-  if (!b64 || b64_len == 0)
+  if (!k)
+    return;
+  EVP_PKEY_free(k->pkey);
+  if (wp_current == k)
+    wp_current = NULL;
+  idx = (int)(k - wp_keys);
+  if (idx != wp_key_count - 1) {
+    wp_keys[idx] = wp_keys[wp_key_count - 1];
+    if (wp_current == &wp_keys[wp_key_count - 1])
+      wp_current = &wp_keys[idx];
+  }
+  memset(&wp_keys[wp_key_count - 1], 0, sizeof(wp_keys[0]));
+  wp_key_count--;
+}
+
+int webpush_key_loaded(const char *id)
+{
+  return wp_key_find(id) != NULL;
+}
+
+int webpush_key_generate(unsigned char *priv_out, size_t *priv_len,
+                         char *id_out, size_t id_sz)
+{
+  EVP_PKEY *gen;
+  BIGNUM *priv_bn = NULL;
+  int bn_len;
+  int rc;
+
+  if (!priv_out || !priv_len || *priv_len < 32)
     return -1;
 
-  if (base64url_decode(b64, b64_len, privkey, sizeof(privkey),
-                       &privkey_len) != 0 || privkey_len != 32) {
-    log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush: invalid base64url VAPID private key (decoded %u bytes, expected 32)",
-              (unsigned)privkey_len);
-    memset(privkey, 0, sizeof(privkey));
+  gen = EVP_EC_gen("P-256");
+  if (!gen) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "WebPush: failed to generate P-256 key");
     return -1;
   }
+  if (!EVP_PKEY_get_bn_param(gen, OSSL_PKEY_PARAM_PRIV_KEY, &priv_bn)) {
+    EVP_PKEY_free(gen);
+    return -1;
+  }
+  bn_len = BN_bn2binpad(priv_bn, priv_out, 32);
+  BN_clear_free(priv_bn);
+  EVP_PKEY_free(gen);
+  if (bn_len != 32)
+    return -1;
+  *priv_len = 32;
 
-  ret = webpush_import_vapid_key(privkey, privkey_len, NULL, 0);
-  memset(privkey, 0, sizeof(privkey));
-  return ret;
+  /* Load through the same path a stored key takes, so the id is derived
+   * exactly as it will be on every reload. */
+  rc = webpush_key_load(priv_out, 32, NULL, id_out, id_sz);
+  if (rc != 0)
+    OPENSSL_cleanse(priv_out, 32);
+  return rc == 0 ? 0 : -1;
+}
+
+int webpush_set_current_key(const char *id)
+{
+  struct wp_key *k;
+
+  if (!id || !id[0]) {
+    wp_current = NULL;
+    return 0;
+  }
+  k = wp_key_find(id);
+  if (!k)
+    return -1;
+  wp_current = k;
+  return 0;
+}
+
+const char *webpush_get_vapid_pubkey(void)
+{
+  return wp_current ? wp_current->id : NULL;
+}
+
+void webpush_cleanup(void)
+{
+  int i;
+  for (i = 0; i < wp_key_count; i++)
+    EVP_PKEY_free(wp_keys[i].pkey);
+  OPENSSL_cleanse(wp_keys, sizeof(wp_keys));
+  wp_key_count = 0;
+  wp_current = NULL;
 }
 
 /* ---------------------------------------------------------------------------
@@ -762,7 +750,8 @@ cleanup:
 /** Build VAPID Authorization header value.
  *  Format: vapid t=<JWT>, k=<pubkey_b64>
  *  Returns 0 on success, -1 on error. */
-static int create_vapid_header(const char *endpoint, char *out, size_t out_size)
+static int create_vapid_header(const char *endpoint, const struct wp_key *key,
+                               char *out, size_t out_size)
 {
   /* JWT parts */
   char header_b64[64];
@@ -792,7 +781,7 @@ static int create_vapid_header(const char *endpoint, char *out, size_t out_size)
 
   int ret = -1;
 
-  if (!endpoint || !out || !vapid_key)
+  if (!endpoint || !out || !key || !key->pkey)
     return -1;
 
   /* ---- Extract audience (origin) from endpoint URL ---- */
@@ -844,7 +833,7 @@ static int create_vapid_header(const char *endpoint, char *out, size_t out_size)
   if (!mdctx)
     goto cleanup;
 
-  if (EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, vapid_key) != 1)
+  if (EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, key->pkey) != 1)
     goto cleanup;
 
   if (EVP_DigestSign(mdctx, NULL, &der_sig_len,
@@ -884,7 +873,7 @@ static int create_vapid_header(const char *endpoint, char *out, size_t out_size)
 
   /* ---- Build output: vapid t=<header>.<payload>.<signature>, k=<pubkey> ---- */
   snprintf(out, out_size, "vapid t=%s.%s.%s, k=%s",
-           header_b64, payload_b64, signature_b64, vapid_pubkey_b64);
+           header_b64, payload_b64, signature_b64, key->id);
 
   ret = 0;
 
@@ -922,6 +911,13 @@ static void webpush_http_callback(struct kc_http_response *resp, void *data)
       result = WEBPUSH_ERR_EXPIRED;
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "WebPush: subscription expired (HTTP 410)");
+    } else if (status == 403) {
+      /* The push service refused our VAPID signature: the subscription
+       * was created under a key we no longer hold (or never had). */
+      result = WEBPUSH_ERR_FORBIDDEN;
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WebPush: delivery refused (HTTP 403, VAPID key mismatch?)%s%s",
+                resp->error ? ": " : "", resp->error ? resp->error : "");
     } else {
       result = WEBPUSH_ERR_HTTP;
       log_write(LS_SYSTEM, L_WARNING, 0,
@@ -949,6 +945,7 @@ int webpush_send_async(const struct webpush_subscription *sub,
   struct curl_slist *headers = NULL;
   char auth_header[1024];
   char ttl_header[64];
+  const struct wp_key *key;
   int rc;
 
   if (!sub || !encrypted || encrypted_len == 0) {
@@ -962,8 +959,26 @@ int webpush_send_async(const struct webpush_subscription *sub,
     return -1;
   }
 
+  /* Sign with the key the subscription was registered under; a retired
+   * key keeps signing for its subscriptions until they age out.  A
+   * record without a key id (pre-ring) or bound to a key this server no
+   * longer holds falls back to the current key -- the latter earns a 403
+   * that the delivery callback counts toward reaping. */
+  key = sub->key_id[0] ? wp_key_find(sub->key_id) : NULL;
+  if (!key) {
+    if (sub->key_id[0])
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WebPush: subscription bound to unknown VAPID key %.16s..., signing with current",
+                sub->key_id);
+    key = wp_current;
+  }
+  if (!key) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "WebPush: send_async: no VAPID key");
+    return -1;
+  }
+
   /* Create VAPID Authorization header */
-  if (create_vapid_header(sub->endpoint, auth_header,
+  if (create_vapid_header(sub->endpoint, key, auth_header,
                            sizeof(auth_header)) != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "WebPush: send_async: failed to create VAPID header");
@@ -1129,6 +1144,12 @@ int webpush_parse_subscription(const char *stored,
   if (sub->auth_len != 16)
     return -1;
 
+  /* Key binding (5th field, webpush_keyring.h); absent on pre-ring
+   * records, and an over-long field is treated as absent rather than
+   * failing the whole record. */
+  if (webpush_record_key_id(stored, sub->key_id, sizeof(sub->key_id)) != 0)
+    sub->key_id[0] = '\0';
+
   return 0;
 }
 
@@ -1142,26 +1163,20 @@ int webpush_parse_subscription(const char *stored,
 
 #include "webpush.h"
 
-int webpush_init(void) { return -1; }
 void webpush_cleanup(void) {}
 const char *webpush_get_vapid_pubkey(void) { return NULL; }
-const unsigned char *webpush_get_vapid_pubkey_raw(size_t *out_len) {
-  if (out_len) *out_len = 0;
-  return NULL;
-}
-int webpush_import_vapid_key(const unsigned char *p, size_t pl,
-                              const unsigned char *k, size_t kl) {
-  (void)p; (void)pl; (void)k; (void)kl;
+int webpush_key_load(const unsigned char *p, size_t pl, const char *e,
+                     char *o, size_t os) {
+  (void)p; (void)pl; (void)e; (void)o; (void)os;
   return -1;
 }
-int webpush_export_vapid_privkey(unsigned char *o, size_t *l) {
-  (void)o; (void)l;
+void webpush_key_unload(const char *id) { (void)id; }
+int webpush_key_loaded(const char *id) { (void)id; return 0; }
+int webpush_key_generate(unsigned char *p, size_t *pl, char *o, size_t os) {
+  (void)p; (void)pl; (void)o; (void)os;
   return -1;
 }
-int webpush_import_vapid_key_b64(const char *b, size_t l) {
-  (void)b; (void)l;
-  return -1;
-}
+int webpush_set_current_key(const char *id) { (void)id; return -1; }
 int webpush_parse_subscription(const char *s,
                                 struct webpush_subscription *sub) {
   (void)s; (void)sub;

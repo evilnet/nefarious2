@@ -31,10 +31,16 @@
  * via P10 WP token.
  *
  * P10 server-to-server subcommands:
- *   WP V :<vapid_pubkey>                               - VAPID key broadcast
- *   WP R <account> <endpoint> <p256dh> <auth>          - Register subscription
- *   WP U <account> <endpoint>                          - Unregister subscription
- *   WP B <account> <endpoint> <p256dh> <auth>          - Burst subscription on link
+ *   WP K <id> <gen> <created> <origin> <manual> :<priv>  - Key ring entry (burst + rotation)
+ *   WP V :<vapid_pubkey>                                  - Advertised key (legacy, advisory)
+ *   WP R <account> <endpoint> <p256dh> <auth> <armed> <keyid|->  - Register subscription
+ *   WP U <account> <endpoint>                             - Unregister subscription
+ *   WP B <account> <endpoint> <p256dh> <auth> <armed> <keyid|->  - Burst subscription on link
+ *
+ * VAPID keys form a ring (webpush_keyring.h): every server holds every key,
+ * the current key is computed locally by one rule, subscriptions bind to
+ * the key their client saw in ISUPPORT, and delivery signs with that key.
+ * Design: .claude/para/projects/webpush-vapid-key-plan.md (testnet repo).
  */
 #include "config.h"
 
@@ -53,6 +59,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "webpush.h"
+#include "webpush_keyring.h"
 #include "webpush_mute.h"
 #include "webpush_expiry.h"
 #include "webpush_store.h"
@@ -60,6 +67,7 @@
 #include "channel.h"
 #include "ircd_events.h"
 #include "metadata.h"
+#include "s_stats.h"
 
 #ifdef HAVE_JANSSON
 #include <jansson.h>
@@ -69,14 +77,18 @@ static void webpush_subs_cache_invalidate(const char *account);
 static int webpush_store_count_cached(const char *account);
 static int webpush_pm_cooldown_ok(const char *account, const char *origin);
 static long long webpush_wire_armed(int parc, char *parv[]);
+static const char *webpush_wire_keyid(int parc, char *parv[]);
 static void webpush_store_receive(const char *account, const char *endpoint,
                                   const char *p256dh, const char *auth_secret,
-                                  long long armed);
+                                  long long armed, const char *keyid);
+static void webpush_forbidden(const char *account, const char *endpoint);
+static void webpush_delivered(const char *account, const char *endpoint);
 static int webpush_cooldown_ok(const char *account, const char *origin,
                                int cd, const char *ns);
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 /** Maximum endpoint URL length */
 #define WEBPUSH_MAX_ENDPOINT_LEN 512
@@ -210,6 +222,7 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
   char p256dh[WEBPUSH_MAX_P256DH];
   char auth[WEBPUSH_MAX_AUTH];
   char stored[4096];
+  const char *keyid;
 
   /* WEBPUSH REGISTER <endpoint> <keys> */
   if (parc < 4) {
@@ -267,12 +280,21 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
     }
   }
 
-  /* Build stored format: "endpoint|p256dh|auth|armed" -- the arming
+  /* The key this client registered under is the one in the last VAPID
+   * ISUPPORT token it was sent (webpush_note_key_seen), not whatever is
+   * current now: a rotation between the client's 005 and its REGISTER
+   * must not mis-bind the subscription.  A connection that never saw a
+   * token (none existed) binds to the current key if one exists since. */
+  keyid = cli_vapid_seen(sptr)[0] ? cli_vapid_seen(sptr) : webpush_get_vapid_pubkey();
+  if (!keyid)
+    keyid = "";
+
+  /* Build stored format: "endpoint|p256dh|auth|armed|keyid" -- the arming
    * timestamp is this REGISTER (clients re-arm on every login; the
    * expiry sweep removes records not re-armed within
    * FEAT_WEBPUSH_EXPIRE). */
-  snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh, auth,
-           (long long)CurrentTime);
+  snprintf(stored, sizeof(stored), "%s|%s|%s|%lld|%s", endpoint, p256dh, auth,
+           (long long)CurrentTime, keyid);
 
   /* Store locally in LMDB */
   webpush_subs_cache_invalidate(cli_user(sptr)->account);
@@ -286,9 +308,9 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
   /* The arming time rides the wire (trailing param; older peers read
    * parv[2..5] and ignore it) so every server ages the record from the
    * same instant. */
-  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "R %s %s %s %s %lld",
+  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "R %s %s %s %s %lld %s",
                         cli_user(sptr)->account, endpoint, p256dh, auth,
-                        (long long)CurrentTime);
+                        (long long)CurrentTime, keyid[0] ? keyid : "-");
 
   /* Echo success to client per spec */
   sendrawto_one(sptr, "WEBPUSH REGISTER %s", endpoint);
@@ -410,8 +432,8 @@ static void notify_send_cb(int result, long http_code, void *data)
   if (result == WEBPUSH_ERR_EXPIRED) {
     /* Subscription expired (HTTP 410) — remove from store */
     log_write(LS_SYSTEM, L_INFO, 0,
-              "WEBPUSH: subscription expired for %s endpoint %s (HTTP %ld)",
-              ctx->account, ctx->endpoint, http_code);
+              "WEBPUSH: subscription expired for %s (HTTP %ld)",
+              ctx->account, http_code);
 
     if (webpush_store_available()) {
       webpush_subs_cache_invalidate(ctx->account);
@@ -421,9 +443,68 @@ static void notify_send_cb(int result, long http_code, void *data)
     /* Broadcast removal to linked servers */
     sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "U %s %s",
                           ctx->account, ctx->endpoint);
+  } else if (result == WEBPUSH_ERR_FORBIDDEN) {
+    /* The push service refused our VAPID signature: the subscription was
+     * created under a key this server no longer holds.  Transient
+     * service trouble looks the same, so reap only after repeats. */
+    webpush_forbidden(ctx->account, ctx->endpoint);
+  } else if (result == WEBPUSH_OK) {
+    webpush_delivered(ctx->account, ctx->endpoint);
   }
 
   free(ctx);
+}
+
+/* Per-subscription HTTP 403 counter: reap after this many in a row. */
+#define WEBPUSH_FORBIDDEN_REAP  3
+#define WEBPUSH_FORBIDDEN_SLOTS 64
+
+static struct {
+  char account[ACCOUNTLEN + 1];
+  char endpoint[WEBPUSH_MAX_ENDPOINT];
+  int count;
+} wp_forbidden[WEBPUSH_FORBIDDEN_SLOTS];
+
+static unsigned int wp_forbidden_slot(const char *account, const char *endpoint)
+{
+  unsigned int h = 2166136261u;
+  const char *p;
+  for (p = account; *p; ++p) { h ^= (unsigned char)*p; h *= 16777619u; }
+  for (p = endpoint; *p; ++p) { h ^= (unsigned char)*p; h *= 16777619u; }
+  return h & (WEBPUSH_FORBIDDEN_SLOTS - 1);
+}
+
+static void webpush_delivered(const char *account, const char *endpoint)
+{
+  unsigned int i = wp_forbidden_slot(account, endpoint);
+  if (wp_forbidden[i].count
+      && 0 == strcmp(wp_forbidden[i].account, account)
+      && 0 == strcmp(wp_forbidden[i].endpoint, endpoint))
+    wp_forbidden[i].count = 0;
+}
+
+static void webpush_forbidden(const char *account, const char *endpoint)
+{
+  unsigned int i = wp_forbidden_slot(account, endpoint);
+
+  if (0 != strcmp(wp_forbidden[i].account, account)
+      || 0 != strcmp(wp_forbidden[i].endpoint, endpoint)) {
+    ircd_strncpy(wp_forbidden[i].account, account, sizeof(wp_forbidden[i].account));
+    ircd_strncpy(wp_forbidden[i].endpoint, endpoint, sizeof(wp_forbidden[i].endpoint));
+    wp_forbidden[i].count = 0;
+  }
+  if (++wp_forbidden[i].count < WEBPUSH_FORBIDDEN_REAP)
+    return;
+
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "WEBPUSH: reaping subscription of %s after %d HTTP 403s (VAPID key mismatch)",
+            account, wp_forbidden[i].count);
+  wp_forbidden[i].count = 0;
+  if (webpush_store_available()) {
+    webpush_subs_cache_invalidate(account);
+    webpush_store_remove(account, endpoint);
+  }
+  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "U %s %s", account, endpoint);
 }
 
 /** Iterator callback for webpush_notify_account — sends push to each subscription. */
@@ -831,12 +912,22 @@ static long long webpush_wire_armed(int parc, char *parv[])
   return armed;
 }
 
+/** The key id carried on a WP R/B line (7th param), "" when the peer
+ * sent none or the "-" placeholder. */
+static const char *webpush_wire_keyid(int parc, char *parv[])
+{
+  if (parc >= 8 && parv[7] && parv[7][0] && 0 != strcmp(parv[7], "-")
+      && strlen(parv[7]) <= WEBPUSH_KEY_ID_LEN)
+    return parv[7];
+  return "";
+}
+
 /** Store a subscription received from a peer.  The record keeps the
  * newer of the arming times we hold and the one the peer sent (a peer
  * without one is stamped now), so a burst never re-arms a record. */
 static void webpush_store_receive(const char *account, const char *endpoint,
                                   const char *p256dh, const char *auth_secret,
-                                  long long armed)
+                                  long long armed, const char *keyid)
 {
   char stored[4096];
   char existing[4096];
@@ -848,8 +939,8 @@ static void webpush_store_receive(const char *account, const char *endpoint,
   if (webpush_store_get(account, endpoint, existing, sizeof(existing)) == 0
       && webpush_armed_at(existing) >= armed)
     return;   /* ours is at least as fresh */
-  snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh,
-           auth_secret, armed);
+  snprintf(stored, sizeof(stored), "%s|%s|%s|%lld|%s", endpoint, p256dh,
+           auth_secret, armed, keyid ? keyid : "");
   webpush_subs_cache_invalidate(account);
   webpush_store_add(account, stored);
 }
@@ -959,9 +1050,10 @@ static int burst_iter_cb(const char *account, const char *stored, void *data)
   char ep_buf[WEBPUSH_MAX_ENDPOINT];
   char p256dh_buf[WEBPUSH_MAX_P256DH];
   char auth_buf[WEBPUSH_MAX_AUTH];
+  char keyid[WEBPUSH_KEY_ID_LEN + 1];
   size_t len;
 
-  /* Parse stored format: "endpoint|p256dh|auth" */
+  /* Parse stored format: "endpoint|p256dh|auth[|armed[|keyid]]" */
   sep1 = strchr(stored, '|');
   if (!sep1)
     return 0;
@@ -996,17 +1088,360 @@ static int burst_iter_cb(const char *account, const char *stored, void *data)
   auth_buf[len] = '\0';
 
   /* Send burst entry to target server:
-   *   WP B <account> <endpoint> <p256dh> <auth> [<armed>]
+   *   WP B <account> <endpoint> <p256dh> <auth> <armed> <keyid|->
    * The arming time rides along so the peer ages the record from the
-   * same instant we do (0 = timestamp-less record; the peer stamps it). */
-  sendcmdto_one(&me, CMD_WEBPUSH, bctx->cptr, "B %s %s %s %s %lld",
-                account, endpoint, p256dh, auth_buf, webpush_armed_at(stored));
+   * same instant we do (0 = timestamp-less record; the peer stamps it);
+   * the key id so the peer signs with the key the client subscribed
+   * under. */
+  if (webpush_record_key_id(stored, keyid, sizeof(keyid)) != 0)
+    keyid[0] = '\0';
+  sendcmdto_one(&me, CMD_WEBPUSH, bctx->cptr, "B %s %s %s %s %lld %s",
+                account, endpoint, p256dh, auth_buf, webpush_armed_at(stored),
+                keyid[0] ? keyid : "-");
 
   return 0; /* continue iteration */
 }
 
 /* ---------------------------------------------------------------------------
- * Stale-subscription sweep
+ * The key ring
+ * ------------------------------------------------------------------------- */
+
+static struct webpush_keyring wp_ring;
+static int wp_ring_loaded = 0;          /* ring read from the store once */
+static char wp_last_error[200];         /* last setup problem, for STATS */
+static time_t wp_last_error_at = 0;
+
+static void wp_error(const char *fmt, ...)
+{
+  va_list ap;
+  va_start(ap, fmt);
+  ircd_vsnprintf(0, wp_last_error, sizeof(wp_last_error), fmt, ap);
+  va_end(ap);
+  wp_last_error_at = CurrentTime;
+  log_write(LS_SYSTEM, L_ERROR, 0, "WEBPUSH: %s", wp_last_error);
+  /* Prod drops LS_SYSTEM; a snomask notice is the surface opers see. */
+  sendto_opmask_butone(0, SNO_OLDSNO, "WEBPUSH: %s", wp_last_error);
+}
+
+/** Persist a ring key ("key/<id>" -> record text). */
+static int wp_persist_key(const struct webpush_key *key)
+{
+  char text[WEBPUSH_KEY_TEXT_LEN];
+  if (webpush_key_format(key, text, sizeof(text)) != 0)
+    return -1;
+  return webpush_store_key_put(key->id, text);
+}
+
+/** Send one ring key to a server (or, with @a to NULL, to every IRCv3-
+ * aware peer except @a except):
+ *   WP K <id> <gen> <created> <origin> <manual> :<priv_b64> */
+static void wp_send_key(struct Client *to, struct Client *except,
+                        const struct webpush_key *key)
+{
+  char priv_b64[64];
+
+  if (webpush_b64url_encode(key->priv, sizeof(key->priv), priv_b64,
+                            sizeof(priv_b64)) < 0)
+    return;
+  if (to)
+    sendcmdto_one(&me, CMD_WEBPUSH, to, "K %s %u %lld %s %d :%s",
+                  key->id, key->generation, key->created, key->origin,
+                  key->manual ? 1 : 0, priv_b64);
+  else
+    sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, except, "K %s %u %lld %s %d :%s",
+                             key->id, key->generation, key->created,
+                             key->origin, key->manual ? 1 : 0, priv_b64);
+  memset(priv_b64, 0, sizeof(priv_b64));
+}
+
+/** Load a key into the crypto table (its private scalar must derive its
+ * id) and union it into the ring, persisting it when new.
+ * Returns 1 added, 0 already held, -1 rejected. */
+static int wp_ring_adopt(const struct webpush_key *key, const char *how)
+{
+  int rc;
+
+  rc = webpush_key_load(key->priv, sizeof(key->priv), key->id, NULL, 0);
+  if (rc != 0) {
+    wp_error("rejected VAPID key %.16s... from %s (%s)", key->id, how,
+             rc == -2 ? "private key does not derive its id" : "unloadable");
+    return -1;
+  }
+  rc = webpush_keyring_add(&wp_ring, key);
+  if (rc < 0) {
+    webpush_key_unload(key->id);
+    wp_error("key ring full, dropping VAPID key %.16s... from %s", key->id, how);
+    return -1;
+  }
+  if (rc == 1) {
+    if (wp_persist_key(key) != 0)
+      wp_error("failed to persist VAPID key %.16s...", key->id);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBPUSH: ring += key %.16s... gen %u created %lld origin %s%s (%s)",
+              key->id, key->generation, key->created, key->origin,
+              key->manual ? " manual" : "", how);
+  }
+  return rc;
+}
+
+/** Recompute the current key and, when it changed, re-advertise:
+ * ISUPPORT VAPID (re-sent to draft/extended-isupport clients), the cap
+ * value, and a legacy WP V for peers that predate the ring. */
+static void wp_announce(const char *why)
+{
+  const struct webpush_key *cur = webpush_keyring_current(&wp_ring);
+  const char *old = webpush_get_vapid_pubkey();
+  char oldbuf[WEBPUSH_KEY_ID_LEN + 1];
+  int changed;
+
+  ircd_strncpy(oldbuf, old ? old : "", sizeof(oldbuf));
+  changed = cur ? (0 != strcmp(oldbuf, cur->id)) : (oldbuf[0] != '\0');
+
+  if (cur) {
+    webpush_set_current_key(cur->id);
+    set_vapid_pubkey(cur->id);
+    add_isupport_s("VAPID", cur->id);
+  } else {
+    webpush_set_current_key(NULL);
+    set_vapid_pubkey(NULL);
+    del_isupport("VAPID");
+  }
+
+  if (!changed)
+    return;
+
+  /* touch_isupport happens inside add/del; push the new 005 to clients
+   * that asked for updates.  Everyone else learns it on their next
+   * connection, which is when they register anyway. */
+  send_isupport_update();
+  if (cur)
+    sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "V :%s", cur->id);
+
+  log_write(LS_SYSTEM, L_INFO, 0, "WEBPUSH: current VAPID key %s %.16s... (%s)",
+            cur ? "now" : "cleared", cur ? cur->id : "", why);
+  sendto_opmask_butone(0, SNO_OLDSNO, "WEBPUSH: current VAPID key %s%.16s%s (%s)",
+                       cur ? "now " : "cleared", cur ? cur->id : "",
+                       cur ? "..." : "", why);
+}
+
+/** Mint a key here: generate one (@a priv NULL) or wrap a given scalar,
+ * at @a generation, persist, broadcast to peers, re-announce. */
+static const struct webpush_key *wp_mint(unsigned int generation, int manual,
+                                         const unsigned char *priv,
+                                         const char *why)
+{
+  struct webpush_key key;
+  size_t plen = sizeof(key.priv);
+  int rc;
+
+  memset(&key, 0, sizeof(key));
+  if (priv) {
+    memcpy(key.priv, priv, sizeof(key.priv));
+    rc = webpush_key_load(key.priv, sizeof(key.priv), NULL, key.id, sizeof(key.id));
+  } else {
+    rc = webpush_key_generate(key.priv, &plen, key.id, sizeof(key.id));
+  }
+  if (rc != 0) {
+    wp_error("failed to %s a VAPID key (%s)", priv ? "import" : "generate", why);
+    memset(&key, 0, sizeof(key));
+    return NULL;
+  }
+  key.generation = generation;
+  key.created = (long long)CurrentTime;
+  ircd_strncpy(key.origin, cli_name(&me), sizeof(key.origin));
+  key.manual = manual ? 1 : 0;
+
+  rc = wp_ring_adopt(&key, why);
+  if (rc < 0) {
+    memset(&key, 0, sizeof(key));
+    return NULL;
+  }
+  if (rc == 1)
+    wp_send_key(NULL, NULL, &key);
+  memset(&key, 0, sizeof(key));
+  wp_announce(why);
+  return webpush_keyring_current(&wp_ring);
+}
+
+/** Move a config record that will not load aside for post-mortem
+ * ("bad/<name>.<time>") and drop the original. */
+static void wp_quarantine(const char *name, const void *val, size_t len)
+{
+  char aside[WEBPUSH_KEY_ID_LEN + 40];
+  ircd_snprintf(0, aside, sizeof(aside), "bad/%s.%lld", name, (long long)CurrentTime);
+  if (webpush_store_cfg_put(aside, val, len) == 0)
+    webpush_store_cfg_del(name);
+}
+
+struct ring_load_ctx { int loaded; int bad; };
+
+static int ring_load_cb(const char *id, const char *text, void *data)
+{
+  struct ring_load_ctx *ctx = data;
+  struct webpush_key key;
+  char name[WEBPUSH_KEY_ID_LEN + 8];
+
+  if (webpush_key_parse(id, text, &key) != 0
+      || webpush_key_load(key.priv, sizeof(key.priv), key.id, NULL, 0) != 0
+      || webpush_keyring_add(&wp_ring, &key) != 1) {
+    /* Never leave a bad blob where the next boot trips over it again,
+     * never destroy it either. */
+    webpush_key_unload(id);
+    ircd_snprintf(0, name, sizeof(name), "key/%s", id);
+    wp_quarantine(name, text, strlen(text));
+    wp_error("quarantined unloadable VAPID ring key %.16s...", id);
+    ctx->bad++;
+  } else {
+    ctx->loaded++;
+  }
+  memset(&key, 0, sizeof(key));
+  return 0;
+}
+
+/* Pre-ring records carry no key id; stamp them with the key that was in
+ * the single slot when the ring arrived (the only one they can have been
+ * registered under).  Collect first, rewrite after: no writes under an
+ * open iterator. */
+struct migrate_rec { char account[ACCOUNTLEN + 1]; char stored[4096]; };
+struct migrate_ctx { struct migrate_rec *recs; int n, cap; };
+
+static int migrate_collect_cb(const char *account, const char *stored, void *data)
+{
+  struct migrate_ctx *ctx = data;
+  char keyid[WEBPUSH_KEY_ID_LEN + 1];
+
+  if (webpush_record_key_id(stored, keyid, sizeof(keyid)) != 1)
+    return 0;   /* already bound (or malformed: leave it) */
+  if (ctx->n == ctx->cap) {
+    int ncap = ctx->cap ? ctx->cap * 2 : 64;
+    struct migrate_rec *nr = realloc(ctx->recs, (size_t)ncap * sizeof(*nr));
+    if (!nr)
+      return 1;
+    ctx->recs = nr;
+    ctx->cap = ncap;
+  }
+  ircd_strncpy(ctx->recs[ctx->n].account, account, sizeof(ctx->recs[ctx->n].account));
+  ircd_strncpy(ctx->recs[ctx->n].stored, stored, sizeof(ctx->recs[ctx->n].stored));
+  ctx->n++;
+  return 0;
+}
+
+static void wp_migrate_records(const char *keyid)
+{
+  struct migrate_ctx ctx = { NULL, 0, 0 };
+  int i, done = 0;
+
+  webpush_store_foreach_all(migrate_collect_cb, &ctx);
+  for (i = 0; i < ctx.n; i++) {
+    char out[4096 + WEBPUSH_KEY_ID_LEN + 4];
+    const char *stored = ctx.recs[i].stored;
+    int fields = 1;
+    const char *q;
+    for (q = stored; (q = strchr(q, '|')) != NULL; q++)
+      fields++;
+    /* 3 fields: no arming stamp either -> "|0|keyid" keeps armed_at's
+     * "never sweep a timestamp-less record" contract. */
+    ircd_snprintf(0, out, sizeof(out), "%s%s|%s", stored,
+                  fields < 4 ? "|0" : "", keyid);
+    if (webpush_store_add(ctx.recs[i].account, out) == 0)
+      done++;
+  }
+  free(ctx.recs);
+  if (ctx.n)
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBPUSH: bound %d/%d pre-ring subscription(s) to key %.16s...",
+              done, ctx.n, keyid);
+}
+
+/** First-boot ring load: the persisted ring, then the pre-ring single
+ * key (migrated in as a generation-0 key, its records stamped). */
+static void wp_ring_load(void)
+{
+  struct ring_load_ctx lctx = { 0, 0 };
+  unsigned char priv[WEBPUSH_KEY_PRIV_LEN];
+  size_t plen = sizeof(priv);
+
+  webpush_store_key_foreach(ring_load_cb, &lctx);
+  if (lctx.loaded || lctx.bad)
+    log_write(LS_SYSTEM, L_INFO, 0, "WEBPUSH: ring loaded: %d key(s), %d quarantined",
+              lctx.loaded, lctx.bad);
+
+  if (webpush_store_get_vapid_key(priv, &plen) == 0) {
+    struct webpush_key key;
+    memset(&key, 0, sizeof(key));
+    if (webpush_key_load(priv, plen, NULL, key.id, sizeof(key.id)) != 0) {
+      wp_quarantine("vapid_privkey", priv, plen);
+      wp_error("quarantined the pre-ring VAPID key: it does not load");
+    } else {
+      memcpy(key.priv, priv, sizeof(key.priv));
+      key.generation = 0;
+      key.created = (long long)CurrentTime;   /* mint time unknown */
+      ircd_strncpy(key.origin, cli_name(&me), sizeof(key.origin));
+      if (wp_ring_adopt(&key, "pre-ring store key") >= 0) {
+        webpush_store_cfg_del("vapid_privkey");
+        wp_migrate_records(key.id);
+      }
+    }
+    memset(&key, 0, sizeof(key));
+  }
+  memset(priv, 0, sizeof(priv));
+}
+
+/** Apply WEBPUSH_VAPID_PRIVKEY: a set key joins the ring as manual at
+ * generation max+1 (so it wins everywhere once replicated) or, if
+ * already held, is flagged manual; a cleared config demotes the keys
+ * this server flagged, which lets scheduled rotation displace them.  The
+ * flag is local bookkeeping (replicated at mint, mutable here) -- the
+ * current-key rule never reads it. */
+static void wp_apply_config_key(void)
+{
+  const char *config_key = feature_str(FEAT_WEBPUSH_VAPID_PRIVKEY);
+  unsigned char priv[WEBPUSH_KEY_PRIV_LEN];
+  char id[WEBPUSH_KEY_ID_LEN + 1];
+  size_t plen = 0;
+  struct webpush_key *k;
+  int i;
+
+  if (!config_key || !config_key[0]) {
+    for (i = 0; i < wp_ring.count; i++) {
+      k = &wp_ring.keys[i];
+      if (k->manual && 0 == ircd_strcmp(k->origin, cli_name(&me))) {
+        k->manual = 0;
+        wp_persist_key(k);
+        log_write(LS_SYSTEM, L_INFO, 0,
+                  "WEBPUSH: config key cleared; key %.16s... demoted to automatic", k->id);
+      }
+    }
+    return;
+  }
+
+  if (webpush_b64url_decode(config_key, strlen(config_key), priv, sizeof(priv), &plen) != 0
+      || plen != sizeof(priv)) {
+    wp_error("WEBPUSH_VAPID_PRIVKEY is not a base64url 32-byte P-256 scalar; ignored");
+    memset(priv, 0, sizeof(priv));
+    return;
+  }
+  if (webpush_key_load(priv, plen, NULL, id, sizeof(id)) != 0) {
+    wp_error("WEBPUSH_VAPID_PRIVKEY does not load as a P-256 key; ignored");
+    memset(priv, 0, sizeof(priv));
+    return;
+  }
+  k = webpush_keyring_find(&wp_ring, id);
+  if (k) {
+    if (!k->manual) {
+      k->manual = 1;
+      wp_persist_key(k);
+    }
+  } else {
+    wp_mint(webpush_keyring_next_generation(&wp_ring), 1, priv,
+            "config key WEBPUSH_VAPID_PRIVKEY");
+  }
+  memset(priv, 0, sizeof(priv));
+}
+
+/* ---------------------------------------------------------------------------
+ * Maintenance: stale-subscription sweep, key reference counts, rotation,
+ * ring pruning
  * ------------------------------------------------------------------------- */
 
 /* Sweep period: cheap (one RocksDB scan over the subs keyspace), so an
@@ -1023,6 +1458,7 @@ struct sweep_ctx
   long long max_age;
   int checked;
   int reaped;
+  int unbound;
 };
 
 static int sweep_iter_cb(const char *account, const char *stored, void *data)
@@ -1030,12 +1466,22 @@ static int sweep_iter_cb(const char *account, const char *stored, void *data)
   struct sweep_ctx *ctx = data;
   long long armed = webpush_armed_at(stored);
   char endpoint[WEBPUSH_MAX_ENDPOINT];
+  char keyid[WEBPUSH_KEY_ID_LEN + 1];
   size_t len;
 
   ctx->checked++;
 
-  if (!webpush_expired(armed, ctx->now, ctx->max_age))
+  if (!webpush_expired(armed, ctx->now, ctx->max_age)) {
+    /* Live record: it references its key. */
+    struct webpush_key *k = NULL;
+    if (webpush_record_key_id(stored, keyid, sizeof(keyid)) == 0)
+      k = webpush_keyring_find(&wp_ring, keyid);
+    if (k)
+      k->refs++;
+    else
+      ctx->unbound++;
     return 0;
+  }
 
   /* Endpoint = the record's first field. */
   len = strcspn(stored, "|");
@@ -1058,193 +1504,254 @@ static int sweep_iter_cb(const char *account, const char *stored, void *data)
   return 0;
 }
 
+/** Scheduled rotation: mint generation max+1 once the current key is
+ * older than WEBPUSH_KEY_ROTATE.  Exactly one server does it in steady
+ * state -- the key's origin -- so a linked network rotates once, not
+ * once per server; any server may once the origin is gone.  A manual
+ * key (config) is the operator's to rotate: never displaced here. */
+static void wp_rotate_if_due(time_t now)
+{
+  const struct webpush_key *cur = webpush_keyring_current(&wp_ring);
+  long long rotate = (long long)feature_int(FEAT_WEBPUSH_KEY_ROTATE);
+
+  if (!cur || rotate <= 0 || cur->manual || cur->created <= 0)
+    return;
+  if (cur->created + rotate > (long long)now)
+    return;
+  if (0 != ircd_strcmp(cur->origin, cli_name(&me)) && FindServer(cur->origin))
+    return;
+  wp_mint(webpush_keyring_next_generation(&wp_ring), 0, NULL, "scheduled rotation");
+}
+
+/* Reference count only (no sweeping): which keys do live records bind to. */
+static int refs_iter_cb(const char *account, const char *stored, void *data)
+{
+  char keyid[WEBPUSH_KEY_ID_LEN + 1];
+  struct webpush_key *k;
+  (void)account; (void)data;
+  if (webpush_record_key_id(stored, keyid, sizeof(keyid)) == 0
+      && (k = webpush_keyring_find(&wp_ring, keyid)) != NULL)
+    k->refs++;
+  return 0;
+}
+
+static void wp_count_refs(void)
+{
+  int i;
+  for (i = 0; i < wp_ring.count; i++)
+    wp_ring.keys[i].refs = 0;
+  if (webpush_store_available())
+    webpush_store_foreach_all(refs_iter_cb, NULL);
+}
+
+/* A retired key nothing references is kept this long past its creation:
+ * a client that saw it in ISUPPORT on another server can still register
+ * under it, and that registration reaches us as a WP R bound to the key.
+ * A day covers any burst or relink; a connection older than that which
+ * registers for the first time binds to a key we may have dropped, and
+ * delivery's 403 reaping plus the client's next login recover it. */
+#define WEBPUSH_KEY_GRACE 86400
+
+/** Drop retired keys nothing here references (past the grace) or past
+ * the expiry window.  A peer still holding one re-sends it at the next
+ * link and it is re-adopted -- harmless and bounded by the same rule
+ * there. */
+static void wp_prune(time_t now, long long expire)
+{
+  int i;
+  for (i = 0; i < wp_ring.count; ) {
+    struct webpush_key *k = &wp_ring.keys[i];
+    if (webpush_key_prunable(&wp_ring, k, (long long)now, expire, WEBPUSH_KEY_GRACE)) {
+      char id[WEBPUSH_KEY_ID_LEN + 1];
+      ircd_strncpy(id, k->id, sizeof(id));
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "WEBPUSH: pruning retired VAPID key %.16s... (gen %u, %d refs)",
+                id, k->generation, k->refs);
+      webpush_store_key_del(id);
+      webpush_key_unload(id);
+      webpush_keyring_remove(&wp_ring, id);   /* moves the last key into slot i */
+      continue;
+    }
+    i++;
+  }
+}
+
 /** Periodic maintenance: remove subscriptions not re-armed (via
- * WEBPUSH REGISTER) within FEAT_WEBPUSH_EXPIRE seconds.  Clients re-arm
- * on every login, so a stale record is a device that has not run the
- * client since before the window began; its push endpoint is presumed
- * gone.  Records without an arming timestamp are left alone. */
-static void webpush_sweep(struct Event *ev)
+ * WEBPUSH REGISTER) within FEAT_WEBPUSH_EXPIRE seconds, count which
+ * keys the survivors reference, rotate when due, prune the ring.  Also
+ * the retry path for a setup that found the store unavailable. */
+static void webpush_maintenance(struct Event *ev)
 {
   struct sweep_ctx ctx;
+  int i;
 
   (void)ev;
   if (!webpush_store_available())
     return;
+  if (!wp_ring_loaded || !webpush_keyring_current(&wp_ring)) {
+    webpush_setup();
+    if (!wp_ring_loaded)
+      return;
+  }
 
   ctx.now = CurrentTime;
   ctx.max_age = (long long)feature_int(FEAT_WEBPUSH_EXPIRE);
   ctx.checked = 0;
   ctx.reaped = 0;
-  if (ctx.max_age <= 0)
-    return;  /* 0 disables the sweep */
+  ctx.unbound = 0;
+  for (i = 0; i < wp_ring.count; i++)
+    wp_ring.keys[i].refs = 0;
 
+  /* max_age <= 0 disables the expiry; the walk still counts references. */
   webpush_store_foreach_all(sweep_iter_cb, &ctx);
 
   log_write(LS_SYSTEM, L_DEBUG, 0,
-            "WebPush: sweep checked=%d reaped=%d", ctx.checked, ctx.reaped);
+            "WebPush: sweep checked=%d reaped=%d unbound=%d",
+            ctx.checked, ctx.reaped, ctx.unbound);
   if (ctx.reaped > 0)
     log_write(LS_SYSTEM, L_INFO, 0,
               "WEBPUSH: expired %d subscription(s) not re-armed within %d seconds",
               ctx.reaped, feature_int(FEAT_WEBPUSH_EXPIRE));
+
+  wp_rotate_if_due(ctx.now);
+  wp_prune(ctx.now, ctx.max_age);
 }
 
-/** Burst all webpush subscriptions to a newly linked server.
- * Called during server link (e.g., from burst handling code).
- * Iterates all subscriptions in LMDB and sends them via WP B.
+/** Burst the key ring, then every subscription, to a newly linked server.
+ * Keys go first so the peer can sign for the subscriptions that follow.
  * @param[in] cptr Target server to send burst data to.
  */
 void webpush_burst(struct Client *cptr)
 {
   struct burst_ctx bctx;
+  int i;
 
   if (!cptr || !webpush_store_available())
     return;
+
+  for (i = 0; i < wp_ring.count; i++)
+    wp_send_key(cptr, NULL, &wp_ring.keys[i]);
 
   bctx.cptr = cptr;
   webpush_store_foreach_all(burst_iter_cb, &bctx);
 
   log_write(LS_SYSTEM, L_INFO, 0,
-            "WEBPUSH: burst subscriptions sent to %s",
-            cli_name(cptr));
+            "WEBPUSH: burst %d key(s) and subscriptions sent to %s",
+            wp_ring.count, cli_name(cptr));
 }
 
 /* ---------------------------------------------------------------------------
  * VAPID key initialization and persistence
  * ---------------------------------------------------------------------------*/
 
-/** Initialize the webpush subsystem with VAPID key persistence.
- * Key loading priority:
- *   1. FEAT_WEBPUSH_VAPID_PRIVKEY (config/gitsync) — shared across network
- *   2. Existing key in LMDB store — standalone/legacy
- *   3. Generate new keypair — first start
+/** Initialize the webpush subsystem: load the key ring, apply the config
+ * key, generate a first key if the ring is empty, compute and advertise
+ * the current key.  Never leaves the server keyless while the store is
+ * open: a key that fails to load is quarantined and the next source
+ * takes over.  With the store unavailable (transient) nothing is
+ * advertised and the maintenance timer retries.
  *
- * Safe to call on REHASH: compares config key against current key and
- * only re-imports if actually changed.
+ * Safe to call again (REHASH, config key change, maintenance retry).
  *
- * @return 0 on success, -1 on error.
+ * @return 0 on success (a current key exists), -1 otherwise.
  */
 int webpush_setup(void)
 {
-  unsigned char privkey[32];
-  size_t privkey_len = sizeof(privkey);
-  const char *vapid_pubkey;
-  const char *config_key;
-  char old_pubkey[WEBPUSH_VAPID_B64_LEN + 1];
-  int had_key = 0;
-  int key_loaded = 0;
-  int changed;
-
-  if (!webpush_store_available()) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "WEBPUSH: store not available, cannot initialize VAPID key");
-    return -1;
-  }
-
-  /* Start the stale-subscription sweep: once at boot, then hourly
-   * (webpush_sweep itself re-checks FEAT_WEBPUSH_EXPIRE every run, so
-   * REHASH picks up window changes without touching the timer). */
+  /* Maintenance runs whether or not the store is open yet: it is also
+   * the retry path. */
   if (!webpush_sweep_started) {
     webpush_sweep_started = 1;
-    webpush_sweep(NULL);
-    timer_add(timer_init(&webpush_sweep_timer), webpush_sweep, 0,
+    timer_add(timer_init(&webpush_sweep_timer), webpush_maintenance, 0,
               TT_PERIODIC, WEBPUSH_SWEEP_INTERVAL);
   }
 
-  /* Remember old pubkey for change detection (static buffer gets overwritten) */
-  vapid_pubkey = webpush_get_vapid_pubkey();
-  if (vapid_pubkey) {
-    ircd_strncpy(old_pubkey, vapid_pubkey, sizeof(old_pubkey));
-    had_key = 1;
+  if (!webpush_store_available()) {
+    wp_error("store not available, VAPID key ring not loaded (will retry)");
+    return -1;
+  }
+
+  if (!wp_ring_loaded) {
+    wp_ring_loaded = 1;
+    wp_ring_load();
+  }
+
+  wp_apply_config_key();
+
+  if (wp_ring.count == 0) {
+    if (!wp_mint(0, 0, NULL, "first key")) {
+      wp_announce("setup");
+      return -1;
+    }
+    /* wp_mint announced. */
   } else {
-    old_pubkey[0] = '\0';
+    wp_announce("setup");
   }
 
-  /* Priority 1: Config-based key (FEAT_WEBPUSH_VAPID_PRIVKEY) */
-  config_key = feature_str(FEAT_WEBPUSH_VAPID_PRIVKEY);
-  if (config_key && config_key[0] != '\0') {
-    /* Import config key (base64url-encoded 32-byte P-256 private scalar).
-     * On REHASH this may re-import the same key — we detect that below
-     * by comparing old_pubkey vs new pubkey and skip broadcast if unchanged. */
-    if (webpush_import_vapid_key_b64(config_key, strlen(config_key)) != 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "WEBPUSH: failed to import config VAPID key (WEBPUSH_VAPID_PRIVKEY)");
-      /* Fall through to LMDB/generation */
-    } else {
-      /* Persist config key to LMDB so it survives config removal */
-      privkey_len = sizeof(privkey);
-      if (webpush_export_vapid_privkey(privkey, &privkey_len) == 0) {
-        webpush_store_set_vapid_key(privkey, privkey_len);
-        memset(privkey, 0, sizeof(privkey));
-      }
+  if (!webpush_get_vapid_pubkey())
+    return -1;
 
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "WEBPUSH: loaded VAPID key from config (WEBPUSH_VAPID_PRIVKEY)");
-      key_loaded = 1;
-    }
-  }
-
-  /* Priority 2: Load from LMDB persistent store */
-  if (!key_loaded) {
-    privkey_len = sizeof(privkey);
-    if (webpush_store_get_vapid_key(privkey, &privkey_len) == 0) {
-      if (webpush_import_vapid_key(privkey, privkey_len, NULL, 0) != 0) {
-        log_write(LS_SYSTEM, L_ERROR, 0,
-                  "WEBPUSH: failed to import persisted VAPID key");
-        memset(privkey, 0, sizeof(privkey));
-        return -1;
-      }
-      memset(privkey, 0, sizeof(privkey));
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "WEBPUSH: loaded VAPID key from persistent store");
-      key_loaded = 1;
-    }
-  }
-
-  /* Priority 3: Generate new keypair */
-  if (!key_loaded) {
-    if (webpush_init() != 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "WEBPUSH: failed to generate VAPID keypair");
-      return -1;
-    }
-
-    privkey_len = sizeof(privkey);
-    if (webpush_export_vapid_privkey(privkey, &privkey_len) != 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "WEBPUSH: failed to export VAPID private key");
-      return -1;
-    }
-
-    if (webpush_store_set_vapid_key(privkey, privkey_len) != 0) {
-      log_write(LS_SYSTEM, L_ERROR, 0,
-                "WEBPUSH: failed to persist VAPID key");
-    }
-    memset(privkey, 0, sizeof(privkey));
-
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "WEBPUSH: generated and persisted new VAPID keypair");
-  }
-
-  /* Set the VAPID public key for capability advertisement */
-  vapid_pubkey = webpush_get_vapid_pubkey();
-  if (vapid_pubkey) {
-    /* Only broadcast if the key actually changed */
-    changed = (!had_key || strcmp(old_pubkey, vapid_pubkey) != 0);
-
-    set_vapid_pubkey(vapid_pubkey);
-    add_isupport_s("VAPID", vapid_pubkey);
-
-    if (changed) {
-      sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "V :%s", vapid_pubkey);
-      send_isupport_update();
-    }
-
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "WEBPUSH: VAPID public key: %s%s", vapid_pubkey,
-              changed ? " (changed)" : "");
-  }
-
+  /* Boot-time sweep + reference count + prune. */
+  webpush_maintenance(NULL);
   return 0;
+}
+
+/** Remember, per connection, the VAPID key id in the ISUPPORT block just
+ * sent to it: the key the client will register under.  Called from
+ * every 005 emitter. */
+void webpush_note_key_seen(struct Client *cptr)
+{
+  const char *cur;
+
+  if (!cptr || !MyConnect(cptr) || !cli_connect(cptr))
+    return;
+  cur = webpush_get_vapid_pubkey();
+  if (cur)
+    ircd_strncpy(cli_vapid_seen(cptr), cur, WEBPUSH_KEY_ID_LEN + 1);
+}
+
+/* ---------------------------------------------------------------------------
+ * STATS webpush
+ * ------------------------------------------------------------------------- */
+
+void webpush_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  struct webpush_store_stats st;
+  const struct webpush_key *cur = webpush_keyring_current(&wp_ring);
+  int i;
+
+  (void)sd; (void)param;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :WEBPUSH VAPID key ring");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :  Store: %s, ring %s",
+             webpush_store_available() ? "available" : "UNAVAILABLE",
+             wp_ring_loaded ? "loaded" : "not loaded");
+  if (webpush_store_available() && webpush_store_get_stats(&st) == 0)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :  Subscriptions: ~%lu, store %lu bytes",
+               st.total_subscriptions, st.db_size_bytes);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Current key: %s", cur ? cur->id : "(none)");
+  /* Fresh counts: the hourly maintenance figures would lag a REGISTER
+   * made since. */
+  wp_count_refs();
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Rotation: every %d s (0 = never); config key %s",
+             feature_int(FEAT_WEBPUSH_KEY_ROTATE),
+             (feature_str(FEAT_WEBPUSH_VAPID_PRIVKEY)
+              && feature_str(FEAT_WEBPUSH_VAPID_PRIVKEY)[0]) ? "set" : "unset");
+  for (i = 0; i < wp_ring.count; i++) {
+    const struct webpush_key *k = &wp_ring.keys[i];
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :  Key %.16s... gen %u created %lld origin %s%s%s refs %d%s",
+               k->id, k->generation, k->created, k->origin,
+               k->manual ? " manual" : "",
+               webpush_key_loaded(k->id) ? "" : " NOT LOADED",
+               k->refs, (cur && cur == k) ? " (current)" : "");
+  }
+  if (wp_last_error[0])
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :  Last error (%lld s ago): %s",
+               (long long)(CurrentTime - wp_last_error_at), wp_last_error);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1254,10 +1761,11 @@ int webpush_setup(void)
 /** Handle WEBPUSH (WP) command from a server (P10).
  *
  * Incoming formats:
- *   WP V :<vapid_pubkey>                               - VAPID key from peer
- *   WP R <account> <endpoint> <p256dh> <auth>          - Register subscription
- *   WP U <account> <endpoint>                          - Unregister subscription
- *   WP B <account> <endpoint> <p256dh> <auth>          - Burst subscription on link
+ *   WP K <id> <gen> <created> <origin> <manual> :<priv>   - Ring key
+ *   WP V :<vapid_pubkey>                                   - Legacy advisory
+ *   WP R <account> <endpoint> <p256dh> <auth> <armed> <keyid|->
+ *   WP U <account> <endpoint>
+ *   WP B <account> <endpoint> <p256dh> <auth> <armed> <keyid|->
  *
  * @param[in] cptr Client that sent us the message.
  * @param[in] sptr Original source of message.
@@ -1274,59 +1782,73 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   subcmd = parv[1];
 
-  /* Handle VAPID key broadcast from peer: WP V :<vapid_pubkey> */
-  if (subcmd[0] == 'V') {
-    const char *vapid_key;
+  /* Ring key from a peer: WP K <id> <gen> <created> <origin> <manual> :<priv>.
+   * Union into the ring; only a key we did not hold propagates onward
+   * (that is what terminates the flood), and a key whose private half
+   * does not derive its id is dropped without propagation. */
+  if (subcmd[0] == 'K') {
+    struct webpush_key key;
+    char text[WEBPUSH_KEY_TEXT_LEN];
+    int rc;
 
+    if (parc < 8)
+      return 0;
+    if (!webpush_store_available() || !wp_ring_loaded)
+      return 0;   /* no ring to union into yet; peers re-send at the next link */
+
+    ircd_snprintf(0, text, sizeof(text), "%s|%s|%s|%s|%s",
+                  parv[3], parv[4], parv[5], parv[6], parv[7]);
+    if (webpush_key_parse(parv[2], text, &key) != 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WEBPUSH: malformed WP K from %s ignored", cli_name(sptr));
+      return 0;
+    }
+    rc = wp_ring_adopt(&key, cli_name(sptr));
+    if (rc == 1) {
+      wp_send_key(NULL, cptr, &key);
+      wp_announce("key from peer");
+      /* A local key this one displaces is retired, not dropped: the
+       * maintenance prune takes it once nothing references it and the
+       * grace has passed. */
+    }
+    memset(&key, 0, sizeof(key));
+    return 0;
+  }
+
+  /* Legacy advisory from a pre-ring peer: WP V :<vapid_pubkey>.  Never
+   * adopt it -- a key we cannot sign with must never be advertised, or
+   * clients register subscriptions nobody can push to.  Fan out for
+   * other legacy peers. */
+  if (subcmd[0] == 'V') {
     if (parc < 3)
       return 0;
-
-    vapid_key = parv[2];
-
-    /* Only accept VAPID key if we don't have one yet.
-     * Each server generates its own VAPID key; we don't overwrite ours
-     * with a peer's key. However if we haven't initialized yet (e.g.,
-     * store unavailable), we can use the peer's key as a fallback. */
-    if (!webpush_get_vapid_pubkey()) {
-      set_vapid_pubkey(vapid_key);
-      add_isupport_s("VAPID", vapid_key);
-
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "WEBPUSH: accepted VAPID key from peer %s: %s",
-                cli_name(sptr), vapid_key);
-    } else {
-      log_write(LS_SYSTEM, L_DEBUG, 0,
-                "WEBPUSH: ignoring VAPID key from peer %s (already have our own)",
-                cli_name(sptr));
-    }
-
-    /* Propagate to other servers regardless */
-    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "V :%s", vapid_key);
-
+    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "V :%s", parv[2]);
     return 0;
   }
 
   if (parc < 3)
     return 0;
 
-  /* Handle subscription registration from peer: WP R <account> <endpoint> <p256dh> <auth> */
+  /* Registration from a peer */
   if (subcmd[0] == 'R' && parc >= 6) {
     const char *account = parv[2];
     const char *endpoint = parv[3];
     const char *p256dh = parv[4];
     const char *auth_secret = parv[5];
     long long armed = webpush_wire_armed(parc, parv);
+    const char *keyid = webpush_wire_keyid(parc, parv);
 
-    webpush_store_receive(account, endpoint, p256dh, auth_secret, armed);
+    webpush_store_receive(account, endpoint, p256dh, auth_secret, armed, keyid);
 
-    /* Propagate to other servers, arming time included */
-    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s %lld",
-                          account, endpoint, p256dh, auth_secret, armed);
+    /* Propagate to other servers, arming time and key id included */
+    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s %lld %s",
+                          account, endpoint, p256dh, auth_secret, armed,
+                          keyid[0] ? keyid : "-");
 
     return 0;
   }
 
-  /* Handle subscription removal from peer: WP U <account> <endpoint> */
+  /* Removal from a peer: WP U <account> <endpoint> */
   if (subcmd[0] == 'U' && parc >= 4) {
     const char *account = parv[2];
     const char *endpoint = parv[3];
@@ -1343,20 +1865,27 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Handle burst subscription from linking server: WP B <account> <endpoint> <p256dh> <auth> */
+  /* Burst from a linking server */
   if (subcmd[0] == 'B' && parc >= 6) {
     const char *account = parv[2];
     const char *endpoint = parv[3];
     const char *p256dh = parv[4];
     const char *auth_secret = parv[5];
     long long armed = webpush_wire_armed(parc, parv);
+    const char *keyid = webpush_wire_keyid(parc, parv);
 
     /* A burst is a peer's copy: it must never re-arm a record we hold
      * with a newer stamp, or every relink would resurrect what the
      * sweep removed. */
-    webpush_store_receive(account, endpoint, p256dh, auth_secret, armed);
+    webpush_store_receive(account, endpoint, p256dh, auth_secret, armed, keyid);
 
-    /* Don't propagate burst entries — they come from a single source during link */
+    /* Relay onward: the servers behind us never see the linking
+     * server's burst otherwise, so a registration made on a split-off
+     * leaf only ever reached its direct peer.  Idempotent at every hop
+     * (newer arming time wins), tree topology terminates it. */
+    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "B %s %s %s %s %lld %s",
+                          account, endpoint, p256dh, auth_secret, armed,
+                          keyid[0] ? keyid : "-");
     return 0;
   }
 

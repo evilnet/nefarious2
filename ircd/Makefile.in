@@ -213,6 +213,7 @@ IRCD_SRC = \
 	m_webpush.c \
 	webpush_mute.c \
 	webpush_expiry.c \
+	webpush_keyring.c \
 	metadata.c \
 	m_rehash.c \
 	m_remove.c \

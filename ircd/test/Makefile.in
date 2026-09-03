@@ -39,6 +39,7 @@ CMOCKA_TESTPROGS = \
 	register_throttle_cmocka \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
+	webpush_keyring_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka
 
@@ -69,6 +70,7 @@ DEP_SRC = \
 	register_throttle_cmocka.c \
 	webpush_mute_cmocka.c \
 	webpush_expiry_cmocka.c \
+	webpush_keyring_cmocka.c \
 	kc_url_cmocka.c \
 	kc_base64_cmocka.c \
 	kc_cache_cmocka.c \
@@ -330,3 +332,11 @@ webpush_expiry_test.o: ../webpush_expiry.c ../../include/webpush_expiry.h
 WEBPUSH_EXPIRY_CMOCKA_OBJS = webpush_expiry_cmocka.o webpush_expiry_test.o
 webpush_expiry_cmocka: $(WEBPUSH_EXPIRY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_EXPIRY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webpush_keyring tests - the module is pure (no log_write, no ircd deps)
+webpush_keyring_test.o: ../webpush_keyring.c ../../include/webpush_keyring.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../webpush_keyring.c
+
+WEBPUSH_KEYRING_CMOCKA_OBJS = webpush_keyring_cmocka.o webpush_keyring_test.o
+webpush_keyring_cmocka: $(WEBPUSH_KEYRING_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_KEYRING_CMOCKA_OBJS) $(CMOCKA_LIBS)
