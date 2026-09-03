@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../include/webpush_expiry.h"
+#include "webpush_expiry.h"
 
 long long webpush_armed_at(const char *stored)
 {

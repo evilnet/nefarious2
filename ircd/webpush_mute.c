@@ -12,7 +12,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "../include/webpush_mute.h"
+#include "webpush_mute.h"
 
 /** One mute-list entry parsed out of the value string. */
 struct mute_entry
@@ -75,7 +75,13 @@ static void next_mute_entry(const char **pp, struct mute_entry *e)
   e->target_len = (size_t)(colon - p);
 }
 
-int webpush_mute_check(const char *value, const char *target, time_t now)
+static int mute_eq_bytes(const char *a, size_t alen, const char *b, size_t blen)
+{
+  return alen == blen && memcmp(a, b, alen) == 0;
+}
+
+int webpush_mute_check_cmp(const char *value, const char *target, time_t now,
+                           webpush_mute_eq eq)
 {
   struct mute_entry e;
   const char *p;
@@ -83,6 +89,8 @@ int webpush_mute_check(const char *value, const char *target, time_t now)
 
   if (!value || !*value || !target)
     return 0;
+  if (!eq)
+    eq = mute_eq_bytes;
 
   target_len = strlen(target);
 
@@ -94,11 +102,10 @@ int webpush_mute_check(const char *value, const char *target, time_t now)
       continue;
 
     if ((e.target_len == 1 && e.target[0] == '*') ||
-        (e.target_len == target_len &&
-         memcmp(e.target, target, target_len) == 0))
+        eq(e.target, e.target_len, target, target_len))
     {
-      /* 0 = indefinite (a negative until simply never matches) */
-      if (e.until == 0 || e.until > (long long)now)
+      /* 0 or negative = indefinite (same reading as the prune) */
+      if (e.neg || e.until == 0 || e.until > (long long)now)
         return 1;
     }
   }
@@ -106,11 +113,16 @@ int webpush_mute_check(const char *value, const char *target, time_t now)
   return 0;
 }
 
+int webpush_mute_check(const char *value, const char *target, time_t now)
+{
+  return webpush_mute_check_cmp(value, target, now, mute_eq_bytes);
+}
+
 /** Remove expired (and, when `drop_target` is given, that target's) entries.
  * Writes the pruned list into `out` (NUL-terminated) and returns 1 when the
  * value changed. */
-int webpush_mute_prune(const char *value, const char *drop_target, time_t now,
-                       char *out, size_t outlen)
+int webpush_mute_prune_cmp(const char *value, const char *drop_target, time_t now,
+                           char *out, size_t outlen, webpush_mute_eq eq)
 {
   struct mute_entry e;
   const char *p;
@@ -118,7 +130,9 @@ int webpush_mute_prune(const char *value, const char *drop_target, time_t now,
   int changed = 0;
 
   if (!out || outlen == 0)
-    return 0;
+    return -1;
+  if (!eq)
+    eq = mute_eq_bytes;
 
   out[0] = '\0';
 
@@ -137,9 +151,7 @@ int webpush_mute_prune(const char *value, const char *drop_target, time_t now,
     /* An explicit '-' or 0 until = indefinite: keep. */
     keep = (e.neg || e.until == 0 || e.until > (long long)now);
 
-    if (drop_target &&
-        e.target_len == strlen(drop_target) &&
-        memcmp(e.target, drop_target, e.target_len) == 0)
+    if (drop_target && eq(e.target, e.target_len, drop_target, strlen(drop_target)))
       keep = 0;
 
     if (!keep)
@@ -148,14 +160,24 @@ int webpush_mute_prune(const char *value, const char *drop_target, time_t now,
       continue;
     }
 
+    /* The result must fit whole: a truncated list silently drops mutes. */
+    if (pos + (pos > 0) + e.entry_len + 1 > outlen)
+    {
+      out[0] = '\0';
+      return -1;
+    }
     if (pos > 0)
       out[pos++] = ';';
-    if (pos + e.entry_len >= outlen)
-      break;
     memcpy(out + pos, e.entry, e.entry_len);
     pos += e.entry_len;
     out[pos] = '\0';
   }
 
   return changed;
+}
+
+int webpush_mute_prune(const char *value, const char *drop_target, time_t now,
+                       char *out, size_t outlen)
+{
+  return webpush_mute_prune_cmp(value, drop_target, now, out, outlen, mute_eq_bytes);
 }

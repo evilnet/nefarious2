@@ -101,6 +101,58 @@ static void test_prune_drop_target(void **state)
     webpush_mute_prune(value, "#nope", T0, out, sizeof(out)), 0);
 }
 
+static int eq_ascii_ci(const char *a, size_t alen, const char *b, size_t blen)
+{
+  size_t i;
+  if (alen != blen)
+    return 0;
+  for (i = 0; i < alen; i++) {
+    char x = a[i], y = b[i];
+    if (x >= 'A' && x <= 'Z') x += 32;
+    if (y >= 'A' && y <= 'Z') y += 32;
+    if (x != y)
+      return 0;
+  }
+  return 1;
+}
+
+static void test_negative_until_is_indefinite(void **state)
+{
+  (void)state;
+  /* The header promises 0 or negative = indefinite; check and prune agree. */
+  assert_int_equal(webpush_mute_check("#ps:-1", "#ps", T0 + 86400 * 365), 1);
+  {
+    char out[64];
+    assert_int_equal(webpush_mute_prune("#ps:-1", NULL, T0, out, sizeof(out)), 0);
+    assert_string_equal(out, "#ps:-1");
+  }
+}
+
+static void test_comparator_makes_names_case_insensitive(void **state)
+{
+  (void)state;
+  char value[64];
+  char out[64];
+  snprintf(value, sizeof(value), "#Linux:%lld", (long long)T0 + 3600);
+  /* Byte compare: no match across case. */
+  assert_int_equal(webpush_mute_check(value, "#linux", T0), 0);
+  /* With the ircd's compare: a mute typed in another case still holds. */
+  assert_int_equal(webpush_mute_check_cmp(value, "#linux", T0, eq_ascii_ci), 1);
+  assert_int_equal(webpush_mute_check_cmp(value, "#linu", T0, eq_ascii_ci), 0);
+  assert_int_equal(webpush_mute_prune_cmp(value, "#LINUX", T0, out, sizeof(out), eq_ascii_ci), 1);
+  assert_string_equal(out, "");
+}
+
+static void test_prune_refuses_to_truncate(void **state)
+{
+  (void)state;
+  char out[12];
+  /* Two live entries that do not fit: -1 and an empty out, never a
+   * silently shortened list. */
+  assert_int_equal(webpush_mute_prune("#ps:0;#other:0", NULL, T0, out, sizeof(out)), -1);
+  assert_string_equal(out, "");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -110,6 +162,9 @@ int main(void)
     cmocka_unit_test(test_expired_and_garbage_entries_are_skipped),
     cmocka_unit_test(test_prune_expired),
     cmocka_unit_test(test_prune_drop_target),
+    cmocka_unit_test(test_negative_until_is_indefinite),
+    cmocka_unit_test(test_comparator_makes_names_case_insensitive),
+    cmocka_unit_test(test_prune_refuses_to_truncate),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
