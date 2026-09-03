@@ -1062,13 +1062,35 @@ AC_CHECK_LIB([jansson], [json_object],
 dnl **
 dnl **  Keycloak (libkc) checks
 dnl **
-AC_MSG_CHECKING([whether to enable Keycloak support])
+dnl libkc is vendored in-tree (ircd/kc) and is what webpush delivery,
+dnl local SASL via Keycloak and the webhook listener run on.  It builds
+dnl AUTOMATICALLY whenever its two dependencies (libcurl, libjansson) are
+dnl present; --enable-keycloak makes a missing dependency a hard error,
+dnl --disable-keycloak leaves it out.  (The old default was OFF, which let
+dnl a plain ./configure ship an ircd that advertised draft/webpush with no
+dnl transport and no log line -- prod, 2026-09-03.)
+AC_MSG_CHECKING([whether to enable Keycloak (libkc) support])
 AC_ARG_ENABLE([keycloak],
-[  --disable-keycloak      Disable Keycloak (libkc) support],
+[  --enable-keycloak       Require Keycloak (libkc) support (default: auto when libcurl+libjansson found)
+  --disable-keycloak      Build without libkc (no webpush delivery, no local Keycloak SASL)],
 [unet_cv_enable_keycloak=$enable_keycloak],
-[AC_CACHE_VAL(unet_cv_enable_keycloak,
-[unet_cv_enable_keycloak=no])])
+[unet_cv_enable_keycloak=auto])
 AC_MSG_RESULT([$unet_cv_enable_keycloak])
+
+if test x"$unet_cv_enable_keycloak" = xauto; then
+  unet_kc_have_curl=no
+  unet_kc_have_jansson=no
+  AC_CHECK_LIB([curl], [curl_multi_init], [unet_kc_have_curl=yes], [])
+  AC_CHECK_LIB([jansson], [json_object], [unet_kc_have_jansson=yes], [])
+  if test x"$unet_kc_have_curl" = xyes && test x"$unet_kc_have_jansson" = xyes; then
+    unet_cv_enable_keycloak=yes
+  else
+    unet_cv_enable_keycloak=no
+    AC_MSG_WARN([libkc NOT built: needs libcurl (found: $unet_kc_have_curl) and libjansson (found: $unet_kc_have_jansson).])
+    AC_MSG_WARN([Without it draft/webpush cannot deliver and is disabled at boot; local Keycloak SASL and webhooks are unavailable.])
+    AC_MSG_WARN([Install the dev packages and re-run configure, or pass --disable-keycloak to silence this.])
+  fi
+fi
 
 dnl KC_SRC carries the vendored ircd/kc sources into ircd/Makefile.in's
 dnl IRCD_SRC, and KC_CMOCKA_TESTPROGS carries the kc cmocka suites

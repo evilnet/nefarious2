@@ -1414,7 +1414,8 @@ Optional Features:
   --disable-geoip         Disable GeoIP support
   --disable-mmdb         Disable MaxMindDB support
   --disable-zstd          Disable zstd compression support
-  --disable-keycloak      Disable Keycloak (libkc) support
+  --enable-keycloak       Require Keycloak (libkc) support (default: auto when libcurl+libjansson found)
+  --disable-keycloak      Build without libkc (no webpush delivery, no local Keycloak SASL)
 
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
@@ -4728,6 +4729,7 @@ ac_cpp='$CPP $CPPFLAGS'
 ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
 ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
 ac_compiler_gnu=$ac_cv_c_compiler_gnu
+
 
 am_cv_prog_cc_stdc=$ac_cv_prog_cc_stdc
 
@@ -9382,26 +9384,131 @@ esac
 fi
 
 
-{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable Keycloak support" >&5
-printf %s "checking whether to enable Keycloak support... " >&6; }
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking whether to enable Keycloak (libkc) support" >&5
+printf %s "checking whether to enable Keycloak (libkc) support... " >&6; }
 # Check whether --enable-keycloak was given.
 if test ${enable_keycloak+y}
 then :
   enableval=$enable_keycloak; unet_cv_enable_keycloak=$enable_keycloak
 else case e in #(
-  e) if test ${unet_cv_enable_keycloak+y}
-then :
-  printf %s "(cached) " >&6
-else case e in #(
-  e) unet_cv_enable_keycloak=no ;;
-esac
-fi
- ;;
+  e) unet_cv_enable_keycloak=auto ;;
 esac
 fi
 
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $unet_cv_enable_keycloak" >&5
 printf "%s\n" "$unet_cv_enable_keycloak" >&6; }
+
+if test x"$unet_cv_enable_keycloak" = xauto; then
+  unet_kc_have_curl=no
+  unet_kc_have_jansson=no
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for curl_multi_init in -lcurl" >&5
+printf %s "checking for curl_multi_init in -lcurl... " >&6; }
+if test ${ac_cv_lib_curl_curl_multi_init+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-lcurl  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char curl_multi_init (void);
+int
+main (void)
+{
+return curl_multi_init ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_curl_curl_multi_init=yes
+else case e in #(
+  e) ac_cv_lib_curl_curl_multi_init=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_curl_curl_multi_init" >&5
+printf "%s\n" "$ac_cv_lib_curl_curl_multi_init" >&6; }
+if test "x$ac_cv_lib_curl_curl_multi_init" = xyes
+then :
+  unet_kc_have_curl=yes
+fi
+
+  { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for json_object in -ljansson" >&5
+printf %s "checking for json_object in -ljansson... " >&6; }
+if test ${ac_cv_lib_jansson_json_object+y}
+then :
+  printf %s "(cached) " >&6
+else case e in #(
+  e) ac_check_lib_save_LIBS=$LIBS
+LIBS="-ljansson  $LIBS"
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+/* Override any GCC internal prototype to avoid an error.
+   Use char because int might match the return type of a GCC
+   builtin and then its argument prototype would still apply.
+   The 'extern "C"' is for builds by C++ compilers;
+   although this is not generally supported in C code supporting it here
+   has little cost and some practical benefit (sr 110532).  */
+#ifdef __cplusplus
+extern "C"
+#endif
+char json_object (void);
+int
+main (void)
+{
+return json_object ();
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  ac_cv_lib_jansson_json_object=yes
+else case e in #(
+  e) ac_cv_lib_jansson_json_object=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+LIBS=$ac_check_lib_save_LIBS ;;
+esac
+fi
+{ printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: $ac_cv_lib_jansson_json_object" >&5
+printf "%s\n" "$ac_cv_lib_jansson_json_object" >&6; }
+if test "x$ac_cv_lib_jansson_json_object" = xyes
+then :
+  unet_kc_have_jansson=yes
+fi
+
+  if test x"$unet_kc_have_curl" = xyes && test x"$unet_kc_have_jansson" = xyes; then
+    unet_cv_enable_keycloak=yes
+  else
+    unet_cv_enable_keycloak=no
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: libkc NOT built: needs libcurl (found: $unet_kc_have_curl) and libjansson (found: $unet_kc_have_jansson)." >&5
+printf "%s\n" "$as_me: WARNING: libkc NOT built: needs libcurl (found: $unet_kc_have_curl) and libjansson (found: $unet_kc_have_jansson)." >&2;}
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Without it draft/webpush cannot deliver and is disabled at boot; local Keycloak SASL and webhooks are unavailable." >&5
+printf "%s\n" "$as_me: WARNING: Without it draft/webpush cannot deliver and is disabled at boot; local Keycloak SASL and webhooks are unavailable." >&2;}
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: Install the dev packages and re-run configure, or pass --disable-keycloak to silence this." >&5
+printf "%s\n" "$as_me: WARNING: Install the dev packages and re-run configure, or pass --disable-keycloak to silence this." >&2;}
+  fi
+fi
 
 KC_SRC=""
 KC_CMOCKA_TESTPROGS=""
@@ -9791,6 +9898,7 @@ DEFS=-DHAVE_CONFIG_H
 
 ac_libobjs=
 ac_ltlibobjs=
+U=
 for ac_i in : $LIBOBJS; do test "x$ac_i" = x: && continue
   # 1. Remove the extension, and $U if already installed.
   ac_script='s/\$U\././;s/\.o$//;s/\.obj$//'
