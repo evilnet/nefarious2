@@ -122,6 +122,7 @@ IRC commands are implemented in `ircd/m_*.c` files (e.g., `m_join.c`, `m_privmsg
 - **Bouncer**: `bouncer_session.c`, `m_bouncer.c` - persistent sessions, aliases, BS/BX P10 tokens
 - **Chathistory / storage**: `history.c`, `chathistory_presence.c`, `ml_content.c`, `db_*.c`, `m_chathistory.c` - RocksDB-backed history + strict-presence replay
 - **Metadata / read-marker**: `metadata.c`, `m_metadata.c`, `m_markread.c`
+- **Web push** (`draft/webpush`): `m_webpush.c` (command + triggers + sweep), `webpush.c` (RFC 8291/8292 crypto + delivery), `webpush_store.c` (per-account subscriptions), `webpush_mute.c` / `webpush_expiry.c` (pure decision logic, cmocka-tested)
 - **SASL / Keycloak**: `sasl_auth.c`, `sasl_webhook.c`, `ircd_kc_adapter.c`
 - **Multiline / redaction / batch**: `m_batch.c`, `m_redact.c`
 

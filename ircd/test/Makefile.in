@@ -37,6 +37,8 @@ CMOCKA_TESTPROGS = \
 	chathistory_presence_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
+	webpush_mute_cmocka \
+	webpush_expiry_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka
 
@@ -65,6 +67,8 @@ DEP_SRC = \
 	chathistory_presence_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
+	webpush_mute_cmocka.c \
+	webpush_expiry_cmocka.c \
 	kc_url_cmocka.c \
 	kc_base64_cmocka.c \
 	kc_cache_cmocka.c \
@@ -310,3 +314,19 @@ test_stub.o: test_stub.c ../../include/client.h ../../include/ircd_defs.h \
   ../../include/dbuf.h ../../include/msgq.h ../../include/ircd_events.h \
   ../../config.h ../../include/ircd_handler.h ../../include/res.h \
   ../../include/capab.h ../../include/ircd_log.h ../../include/s_debug.h
+
+# webpush_mute tests - the module is pure (no log_write, no ircd deps)
+webpush_mute_test.o: ../webpush_mute.c ../../include/webpush_mute.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../webpush_mute.c
+
+WEBPUSH_MUTE_CMOCKA_OBJS = webpush_mute_cmocka.o webpush_mute_test.o
+webpush_mute_cmocka: $(WEBPUSH_MUTE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_MUTE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webpush_expiry tests - the module is pure (no log_write, no ircd deps)
+webpush_expiry_test.o: ../webpush_expiry.c ../../include/webpush_expiry.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../webpush_expiry.c
+
+WEBPUSH_EXPIRY_CMOCKA_OBJS = webpush_expiry_cmocka.o webpush_expiry_test.o
+webpush_expiry_cmocka: $(WEBPUSH_EXPIRY_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_EXPIRY_CMOCKA_OBJS) $(CMOCKA_LIBS)

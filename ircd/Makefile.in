@@ -211,6 +211,8 @@ IRCD_SRC = \
 	persistence_profile.c \
 	m_rename.c \
 	m_webpush.c \
+	webpush_mute.c \
+	webpush_expiry.c \
 	metadata.c \
 	m_rehash.c \
 	m_remove.c \

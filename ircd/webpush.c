@@ -93,7 +93,8 @@ static int base64url_decode(const char *in, size_t in_len,
                             size_t *out_len)
 {
   char *std_buf = NULL;
-  size_t padded_len, i;
+  unsigned char *scratch = NULL;
+  size_t padded_len, exact_len, i;
   int decoded_len;
 
   /* Calculate padded length (base64 must be multiple of 4) */
@@ -104,6 +105,16 @@ static int base64url_decode(const char *in, size_t in_len,
     case 0: break;
     default: return -1;  /* invalid base64url length */
   }
+
+  /* Exact decoded length (padding excluded): 87 b64url chars -> 65 bytes,
+   * 22 -> 16.  EVP_DecodeBlock always returns whole 4-char blocks (66 and
+   * 18 here), so the caller's exact-sized buffer (65/16) is smaller than
+   * the padded block size even though the real output fits.  Reject short
+   * buffers up front; the decode below always goes through a block-sized
+   * scratch buffer. */
+  exact_len = (padded_len / 4) * 3 - (padded_len - in_len);
+  if (out_size < exact_len)
+    return -1;
 
   std_buf = (char *)malloc(padded_len + 1);
   if (!std_buf)
@@ -125,18 +136,23 @@ static int base64url_decode(const char *in, size_t in_len,
   std_buf[padded_len] = '\0';
 
   /* Decode — EVP_DecodeBlock returns decoded length, ignoring padding.
-   * It may include up to 2 extra zero bytes for padding chars. */
-  if (out_size < (padded_len / 4) * 3) {
+   * It may include up to 2 extra zero bytes for padding chars, so decode
+   * into a scratch buffer sized for the whole block and copy the exact
+   * length out. */
+  scratch = (unsigned char *)malloc((padded_len / 4) * 3);
+  if (!scratch) {
     free(std_buf);
     return -1;
   }
-
-  decoded_len = EVP_DecodeBlock(out, (const unsigned char *)std_buf,
+  decoded_len = EVP_DecodeBlock(scratch, (const unsigned char *)std_buf,
                                 (int)padded_len);
   free(std_buf);
-
-  if (decoded_len < 0)
+  if (decoded_len < 0) {
+    free(scratch);
     return -1;
+  }
+  memcpy(out, scratch, exact_len);
+  free(scratch);
 
   /* Subtract padding bytes from decoded length */
   if (padded_len > in_len)
@@ -475,9 +491,14 @@ int webpush_encrypt(const struct webpush_subscription *sub,
   unsigned char cek[16];
   unsigned char nonce[12];
 
-  /* aes128gcm content encoding info strings */
-  static const unsigned char cek_info[] = "Content-Encoding: aes128gcm\0";
-  static const unsigned char nonce_info[] = "Content-Encoding: nonce\0";
+  /* aes128gcm content encoding info strings.  The implicit NUL of the C
+   * string literal IS the 0x00 byte RFC 8291 appends to the info, so
+   * sizeof() gives exactly the right length (28 / 24).  An extra explicit
+   * "\0" would make the literal one byte longer and silently derive a
+   * CEK/nonce the browser cannot reproduce (cryptography is exact here:
+   * pushes would decrypt nowhere while FCM still accepts them). */
+  static const unsigned char cek_info[] = "Content-Encoding: aes128gcm";
+  static const unsigned char nonce_info[] = "Content-Encoding: nonce";
 
   /* Padded plaintext: content || 0x02 */
   unsigned char *padded = NULL;
@@ -1032,6 +1053,9 @@ int webpush_notify(const struct webpush_subscription *sub,
     return -1;
   }
 
+  log_write(LS_SYSTEM, L_DEBUG, 0, "WebPush: posting %zu bytes to %s",
+            encrypted_len, sub->endpoint);
+
   return webpush_send_async(sub, encrypted, encrypted_len, 0, cb, cb_data);
 }
 
@@ -1079,8 +1103,10 @@ int webpush_parse_subscription(const char *stored,
   if (sub->p256dh_len != 65 || sub->p256dh[0] != 0x04)
     return -1;
 
-  /* Decode auth */
-  auth_b64_len = strlen(p2 + 1);
+  /* Decode auth.  The record may carry a trailing "|armed" timestamp
+   * (webpush_expiry.h); stop the auth field at the next '|' so both
+   * record formats parse. */
+  auth_b64_len = strcspn(p2 + 1, "|");
   if (auth_b64_len == 0)
     return -1;
   if (base64url_decode(p2 + 1, auth_b64_len,
