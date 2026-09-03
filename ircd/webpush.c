@@ -10,15 +10,20 @@
 
 #include "config.h"
 
-#if defined(USE_SSL) && defined(USE_LIBKC)
+/* Keys, encryption and VAPID signing need only OpenSSL; the HTTP delivery
+ * needs libkc.  A build (or a boot) without libkc must still hold keys
+ * and advertise the VAPID token -- that is what clients register
+ * against -- so only the delivery path is gated on USE_LIBKC. */
+#ifdef USE_SSL
 
 #include "webpush.h"
 #include "webpush_keyring.h"
 #include "ircd_log.h"
+#ifdef USE_LIBKC
 #include "ircd_kc_adapter.h"
-
 #include <kc/kc.h>
 #include <kc/kc_http.h>
+#endif
 
 #include <openssl/evp.h>
 #include <openssl/ec.h>
@@ -31,7 +36,9 @@
 #include <openssl/param_build.h>
 #include <openssl/core_names.h>
 
+#ifdef USE_LIBKC
 #include <curl/curl.h>   /* curl_slist */
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -890,6 +897,8 @@ cleanup:
  * Async HTTP delivery
  * ---------------------------------------------------------------------------*/
 
+#ifdef USE_LIBKC
+
 struct webpush_send_ctx {
   webpush_send_cb cb;
   void *cb_data;
@@ -1046,6 +1055,21 @@ error:
   return -1;
 }
 
+#else /* !USE_LIBKC: keys and the token exist, nothing can be delivered */
+
+int webpush_send_async(const struct webpush_subscription *sub,
+                       const unsigned char *encrypted, size_t encrypted_len,
+                       unsigned long ttl,
+                       webpush_send_cb cb, void *cb_data)
+{
+  (void)sub; (void)encrypted; (void)encrypted_len; (void)ttl; (void)cb; (void)cb_data;
+  log_write(LS_SYSTEM, L_ERROR, 0,
+            "WebPush: built without libkc (--enable-keycloak): cannot deliver");
+  return -1;
+}
+
+#endif /* USE_LIBKC */
+
 /* ---------------------------------------------------------------------------
  * High-level convenience
  * ---------------------------------------------------------------------------*/
@@ -1153,13 +1177,13 @@ int webpush_parse_subscription(const char *stored,
   return 0;
 }
 
-#endif /* USE_SSL && USE_LIBKC */
+#endif /* USE_SSL */
 
 /* ---------------------------------------------------------------------------
  * Stub implementations when crypto or HTTP transport unavailable
  * ---------------------------------------------------------------------------*/
 
-#if !defined(USE_SSL) || !defined(USE_LIBKC)
+#ifndef USE_SSL
 
 #include "webpush.h"
 
@@ -1201,4 +1225,4 @@ int webpush_notify(const struct webpush_subscription *s,
   return -1;
 }
 
-#endif /* !USE_SSL || !USE_LIBKC */
+#endif /* !USE_SSL */

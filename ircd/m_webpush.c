@@ -520,6 +520,12 @@ static int notify_iter_cb(const char *stored, void *data)
   struct webpush_subscription sub;
   struct notify_ctx *ctx;
 
+  if (!kc_transport_ready) {
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "WebPush: notify_iter: HTTP transport not initialised, push dropped");
+    return 1;   /* stop: every subscription would fail the same way */
+  }
+
   /* Parse subscription from stored format */
   if (webpush_parse_subscription(stored, &sub) != 0)
   {
@@ -1673,6 +1679,9 @@ int webpush_setup(void)
   if (!wp_ring_loaded) {
     wp_ring_loaded = 1;
     wp_ring_load();
+    if (!kc_transport_ready)
+      wp_error("HTTP transport (libkc) not initialised: keys are advertised "
+               "but no push can be delivered");
   }
 
   wp_apply_config_key();
@@ -1725,6 +1734,14 @@ void webpush_report_stats(struct Client *to, const struct StatDesc *sd, char *pa
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :  Store: %s, ring %s",
              webpush_store_available() ? "available" : "UNAVAILABLE",
              wp_ring_loaded ? "loaded" : "not loaded");
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :  Delivery: %s",
+#ifdef USE_LIBKC
+             kc_transport_ready ? "libkc HTTP transport ready"
+                                : "libkc HTTP transport FAILED at boot -- pushes cannot be sent"
+#else
+             "built without libkc (--enable-keycloak) -- pushes cannot be sent"
+#endif
+             );
   if (webpush_store_available() && webpush_store_get_stats(&st) == 0)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "W :  Subscriptions: ~%lu, store %lu bytes",

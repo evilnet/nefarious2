@@ -72,6 +72,7 @@ extern const char* get_sasl_mechanisms(void);
 /** VAPID public key received from services (for webpush ISUPPORT) */
 #define VAPID_KEY_LEN 128
 extern char           VapidPublicKey[VAPID_KEY_LEN];
+extern int            kc_transport_ready;
 
 /** Set the VAPID public key (called when services announces it) */
 extern void set_vapid_pubkey(const char *key);
