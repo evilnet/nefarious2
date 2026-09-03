@@ -988,6 +988,11 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        struct HistoryMessage **head,
                                        int count, int ops_override,
                                        const char *label, int complete);
+static int open_query_presence(struct Client *sptr, const char *lookup_target,
+                               int ops_override,
+                               struct PresenceQueryFilter **pf_out);
+static int query_page_complete(struct PresenceQueryFilter *pf, int count,
+                               int limit);
 
 /** Replay chathistory to a client since a given timestamp.
  * Used by bouncer auto-replay for legacy clients without draft/chathistory.
@@ -1004,6 +1009,7 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
 {
   struct HistoryMessage *messages = NULL;
   int count;
+  int complete = 1;
 
   if (!history_is_available())
     return -1;
@@ -1011,7 +1017,15 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
   /* Query the most recent messages, but no older than the since-timestamp.
    * Uses LATEST with a floor rather than AFTER so that when there are more
    * messages than the limit, we get the newest ones (not the oldest). */
-  count = history_query_latest_after(target, limit, since_timestamp, &messages);
+  {
+    struct PresenceQueryFilter *pf = NULL;
+    if (open_query_presence(sptr, target, 0, &pf) < 0)
+      return 0;   /* fail closed: nothing visible to replay */
+    count = history_query_latest_after(target, limit, since_timestamp, &messages,
+                                       presence_query_filter_hook(pf));
+    complete = query_page_complete(pf, count, limit);
+    presence_query_filter_close(pf);
+  }
   if (count < 0)
     return -1;
 
@@ -1020,7 +1034,7 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
     history_attach_context(target, messages);
     /* Ownership of messages transfers to replay_start_batch */
     count = presence_filter_and_replay(sptr, target, &messages, count, 0, NULL,
-                                       count < limit);
+                                       complete);
   }
 
   return count;
@@ -1119,7 +1133,7 @@ static int check_history_access(struct Client *sptr, const char *target,
     /* Check if channel has +H (public history) - bypass all access checks */
     if (chptr->mode.exmode & EXMODE_PUBLICHISTORY) {
       if (normalized_target && normalized_len > 0)
-        ircd_strncpy(normalized_target, target, normalized_len);
+        ircd_strncpy(normalized_target, chptr->chname, normalized_len);
       return 0;  /* Public history - allow access */
     }
 
@@ -1132,9 +1146,14 @@ static int check_history_access(struct Client *sptr, const char *target,
     if (!find_member_link(chptr, sptr))
       return -1;
 
-    /* For channels, normalized target is same as input */
+    /* Channels: the store keys rows under the CANONICAL spelling
+     * (chptr->chname -- every store site passes it) and build_key never
+     * folds case, so the lookup key must be the canonical name too, not
+     * the client's spelling.  "#linux" against a channel created as
+     * "#Linux" used to scan an empty prefix and return an empty batch
+     * (field report 2026-09-02).  Presence keys fold case themselves. */
     if (normalized_target && normalized_len > 0)
-      ircd_strncpy(normalized_target, target, normalized_len);
+      ircd_strncpy(normalized_target, chptr->chname, normalized_len);
     return 0;
   } else {
     /* Private message history.  Two participant-check paths:
@@ -1372,6 +1391,40 @@ static int presence_filter_and_replay(struct Client *sptr,
   return count;
 }
 
+/** Presence-aware paging: arm the query-time presence filter for @a sptr
+ * on @a lookup_target (see chathistory-presence-paging.md).  The user's
+ * ":full" request only counts when has_ops_override() confirms it.
+ * Returns 0 to proceed (*pf_out may be NULL = unfiltered walk) or -1
+ * when the request must fail CLOSED -- the caller answers an empty,
+ * complete page. */
+static int open_query_presence(struct Client *sptr, const char *lookup_target,
+                               int ops_override,
+                               struct PresenceQueryFilter **pf_out)
+{
+  int rc = 0;
+  int real_override = 0;
+
+  if (ops_override) {
+    struct Channel *chptr = (lookup_target && IsChannelName(lookup_target))
+        ? FindChannel(lookup_target) : NULL;
+    real_override = has_ops_override(sptr, chptr);
+  }
+  *pf_out = presence_query_filter_open(sptr, lookup_target, real_override, &rc);
+  return (rc < 0) ? -1 : 0;
+}
+
+/** Completeness of a page produced by a (possibly filtered) walk: fewer
+ * visible rows than the limit means the walk was exhausted -- unless
+ * the raw-scan cap cut it short. */
+static int query_page_complete(struct PresenceQueryFilter *pf, int count,
+                               int limit)
+{
+  struct HistoryRowFilter *hook = presence_query_filter_hook(pf);
+  if (hook && hook->truncated)
+    return 0;
+  return count < limit;
+}
+
 /** Handle CHATHISTORY LATEST subcommand.
  * @param[in] sptr Client sending the command.
  * @param[in] target Target channel or nick.
@@ -1388,6 +1441,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int complete = 1;
+  struct PresenceQueryFilter *pf = NULL;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
                                        * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
@@ -1413,8 +1468,18 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     return 0;
   }
 
-  /* Query local history using normalized target */
-  count = history_query_latest(lookup_target, ref_type, ref_value, limit, &messages);
+  /* Query local history using normalized target.  Presence-aware
+   * paging: the walk skips rows outside the caller's presence without
+   * counting them, so `count < limit` means the walk was exhausted. */
+  if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
+    presence_filter_and_replay(sptr, lookup_target, &messages, 0,
+                               ops_override, cli_label(sptr), 1);
+    return 0;
+  }
+  count = history_query_latest(lookup_target, ref_type, ref_value, limit,
+                               &messages, presence_query_filter_hook(pf));
+  complete = query_page_complete(pf, count, limit);
+  presence_query_filter_close(pf);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -1429,6 +1494,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
       && !IsChannelName(target)) {
     count = chathistory_ephemeral_query(sptr, lookup_target, limit, &messages);
     if (count > 0) {
+      complete = (count < limit);
       /* Skip federation when we satisfied the query from a local
        * ephemeral ring — no peer has these records. */
       goto skip_federation;
@@ -1459,7 +1525,7 @@ skip_federation:
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     count < limit);
+                                     complete);
 
   return 0;
 }
@@ -1480,6 +1546,8 @@ static int chathistory_before(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int complete = 1;
+  struct PresenceQueryFilter *pf = NULL;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
                                        * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
@@ -1503,7 +1571,15 @@ static int chathistory_before(struct Client *sptr, const char *target,
     return 0;
   }
 
-  count = history_query_before(lookup_target, ref_type, ref_value, limit, &messages);
+  if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
+    presence_filter_and_replay(sptr, lookup_target, &messages, 0,
+                               ops_override, cli_label(sptr), 1);
+    return 0;
+  }
+  count = history_query_before(lookup_target, ref_type, ref_value, limit,
+                               &messages, presence_query_filter_hook(pf));
+  complete = query_page_complete(pf, count, limit);
+  presence_query_filter_close(pf);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -1529,7 +1605,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     count < limit);
+                                     complete);
 
   return 0;
 }
@@ -1550,6 +1626,8 @@ static int chathistory_after(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int complete = 1;
+  struct PresenceQueryFilter *pf = NULL;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
                                        * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
@@ -1573,7 +1651,15 @@ static int chathistory_after(struct Client *sptr, const char *target,
     return 0;
   }
 
-  count = history_query_after(lookup_target, ref_type, ref_value, limit, &messages);
+  if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
+    presence_filter_and_replay(sptr, lookup_target, &messages, 0,
+                               ops_override, cli_label(sptr), 1);
+    return 0;
+  }
+  count = history_query_after(lookup_target, ref_type, ref_value, limit,
+                              &messages, presence_query_filter_hook(pf));
+  complete = query_page_complete(pf, count, limit);
+  presence_query_filter_close(pf);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -1599,7 +1685,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     count < limit);
+                                     complete);
 
   return 0;
 }
@@ -1620,6 +1706,8 @@ static int chathistory_around(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int complete = 1;
+  struct PresenceQueryFilter *pf = NULL;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
                                        * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
@@ -1643,7 +1731,15 @@ static int chathistory_around(struct Client *sptr, const char *target,
     return 0;
   }
 
-  count = history_query_around(lookup_target, ref_type, ref_value, limit, &messages);
+  if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
+    presence_filter_and_replay(sptr, lookup_target, &messages, 0,
+                               ops_override, cli_label(sptr), 1);
+    return 0;
+  }
+  count = history_query_around(lookup_target, ref_type, ref_value, limit,
+                               &messages, presence_query_filter_hook(pf));
+  complete = query_page_complete(pf, count, limit);
+  presence_query_filter_close(pf);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -1669,7 +1765,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     count < limit);
+                                     complete);
 
   return 0;
 }
@@ -1691,6 +1787,8 @@ static int chathistory_between(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type1, ref_type2;
   const char *ref_value1, *ref_value2;
   int limit, count, max_limit;
+  int complete = 1;
+  struct PresenceQueryFilter *pf = NULL;
   char lookup_target[CHANNELLEN + 1];  /* must fit a channel name (CHANNELLEN) or a
                                        * PM identity pair-key (PM_PAIRKEY_BUFSIZE); CHANNELLEN+1 dominates */
 
@@ -1721,8 +1819,16 @@ static int chathistory_between(struct Client *sptr, const char *target,
     return 0;
   }
 
+  if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
+    presence_filter_and_replay(sptr, lookup_target, &messages, 0,
+                               ops_override, cli_label(sptr), 1);
+    return 0;
+  }
   count = history_query_between(lookup_target, ref_type1, ref_value1,
-                                 ref_type2, ref_value2, limit, &messages);
+                                 ref_type2, ref_value2, limit, &messages,
+                                 presence_query_filter_hook(pf));
+  complete = query_page_complete(pf, count, limit);
+  presence_query_filter_close(pf);
   if (count < 0) {
     send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
               "Failed to retrieve history");
@@ -1750,7 +1856,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     count < limit);
+                                     complete);
 
   return 0;
 }
@@ -1992,7 +2098,11 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
         if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
           int p_is_session = 0;
           const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
-          time_t act = (time_t)strtoul(tgt->last_timestamp, NULL, 10);
+          /* The index holds only the last activity's millisecond; read it
+           * as the end of that millisecond so activity in the join's own
+           * millisecond counts as witnessed (rows are ordered exactly by
+           * their msgid's HLC when they are queried). */
+          int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(tgt->last_timestamp));
           if (!p_anchor || act == 0
               || !presence_was_present(p_anchor, p_is_session,
                                        tgt->target, act))
@@ -2037,7 +2147,9 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
       if (!(pchan && (pchan->mode.exmode & EXMODE_PUBLICHISTORY))) {
         int p_is_session = 0;
         const char *p_anchor = presence_anchor_for(sptr, &p_is_session);
-        time_t act = (time_t)strtoul(tgt->last_timestamp, NULL, 10);
+        /* Same reading as the local TARGETS check: the index holds only
+         * the last activity's millisecond, read as the end of it. */
+        int64_t act = PRESENCE_TIME_FROM_MS_LATE((int64_t)history_parse_ms(tgt->last_timestamp));
         if (!p_anchor || act == 0
             || !presence_was_present(p_anchor, p_is_session,
                                      tgt->target, act))
@@ -2059,7 +2171,13 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
     {
       const char *row_target = tgt->target;
       char other_buf[CHANNELLEN + 1];
-      if (!IsChannelName(tgt->target)) {
+      if (IsChannelName(tgt->target)) {
+        /* The index keys folded names (db_casefold.h); show a live
+         * channel under its current spelling. */
+        struct Channel *live = FindChannel(tgt->target);
+        if (live)
+          row_target = live->chname;
+      } else {
         char *colon = strchr(tgt->target, ':');
         if (colon) {
           size_t l1 = (size_t)(colon - tgt->target);
@@ -4175,13 +4293,15 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
        * counter; the bloom-filter design at
        * .claude/plans/federation-dedup-s2s-msgid.md will revive a
        * principled per-target filter when it lands. */
-      if (s2s_ref2[0])
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s %s",
-                      target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
-                      s2s_ref2);
-      else
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s",
-                      target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx);
+      /* Trailing requester token (presence-aware paging on the
+       * responder): P<yxx> = filter to the requester's presence,
+       * F<yxx> = the requester asked for ":full" (the responder applies
+       * has_ops_override itself).  ref2 is "*" when absent so the token
+       * keeps its slot; older responders ignore both. */
+      sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s %c %s %d %s %s %s %c%s",
+                    target, s2s_subcmd, s2s_ref, limit, reqid, dest_yxx,
+                    s2s_ref2[0] ? s2s_ref2 : "*",
+                    ops_override ? 'F' : 'P', req->client_yxx);
     }
   }
 
@@ -4520,8 +4640,16 @@ static void autoreplay_next_channel(struct AutoReplayContext *ctx)
     if (history_is_available()) {
       struct HistoryMessage *messages = NULL;
       int complete = 1;
-      int count = history_query_latest(channame, HISTORY_REF_NONE, "*",
-                                        ctx->limit + 1, &messages);
+      struct PresenceQueryFilter *pf = NULL;
+      int count = 0;
+      /* Presence-aware paging: the walk itself skips rows outside the
+       * session's presence, so a long absence no longer empties the
+       * replay page while older visible rows sit behind it. */
+      if (open_query_presence(sptr, channame, 0, &pf) == 0)
+        count = history_query_latest(channame, HISTORY_REF_NONE, "*",
+                                     ctx->limit + 1, &messages,
+                                     presence_query_filter_hook(pf));
+      presence_query_filter_close(pf);
       if (count > ctx->limit && messages) {
         struct HistoryMessage *extra = messages;
         messages = messages->next;
@@ -4801,6 +4929,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     char *target, *query_subcmd_str, *ref, *reqid;
     char *dest_numeric = NULL;
     char *ref2 = NULL;
+    const char *requester = NULL;   /* P<yxx> / F<yxx>, see start_fed_query */
+    struct PresenceQueryFilter *fed_pf = NULL;
     char query_subcmd_char;
     const char *query_subcmd_full;
     int limit, count;
@@ -4822,16 +4952,25 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (parc >= 8 && parv[7][0] != '\0')
       dest_numeric = parv[7];
 
-    /* Optional second reference (BETWEEN/W) */
-    if (parc >= 9 && parv[8][0] != '\0')
+    /* Optional second reference (BETWEEN/W); "*" is the placeholder a
+     * requester sends to keep the requester token's slot. */
+    if (parc >= 9 && parv[8][0] != '\0' && strcmp(parv[8], "*") != 0)
       ref2 = parv[8];
+
+    /* Optional requester token (presence-aware paging on the responder) */
+    if (parc >= 10 && parv[9][0] != '\0')
+      requester = parv[9];
 
     /* Destination-addressed query: if not for us, forward and skip */
     if (dest_numeric) {
       struct Client *dest = FindNServer(dest_numeric);
       if (dest && dest != &me) {
         /* Forward to destination via P10 routing — don't process locally */
-        if (ref2)
+        if (requester)
+          sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s %s %s",
+                        target, query_subcmd_str, ref, limit, reqid,
+                        dest_numeric, ref2 ? ref2 : "*", requester);
+        else if (ref2)
           sendcmdto_one(sptr, CMD_CHATHISTORY, dest, "Q %s %s %s %d %s %s %s",
                         target, query_subcmd_str, ref, limit, reqid,
                         dest_numeric, ref2);
@@ -4953,6 +5092,29 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     query_subcmd_char = query_subcmd_str[0];
     query_subcmd_full = s2s_to_subcmd(query_subcmd_char);
 
+    /* Presence-aware paging on the responder.  The requester names its
+     * client (P<yxx> / F<yxx>, F = ":full" requested) so a storage
+     * server walks with the requester's presence and its limit+1
+     * truncation probe counts VISIBLE rows -- otherwise a remote page
+     * full of rows the requester never saw is reported truncated, and
+     * the origin's post-filter can only shrink it.  Only ACCOUNT
+     * anchors qualify: account presence replicates by observation, a
+     * session anchor lives in memory on the origin alone.  Unresolvable
+     * or session-anchored requesters get the unfiltered walk (the
+     * origin post-filters, as before). */
+    if (requester && (requester[0] == 'P' || requester[0] == 'F')
+        && requester[1] && IsChannelName(target)) {
+      struct Client *rq = findNUser(requester + 1);
+      if (rq && IsUser(rq) && IsAccount(rq) && cli_user(rq)
+          && cli_user(rq)->account[0]) {
+        if (open_query_presence(rq, target, requester[0] == 'F', &fed_pf) < 0) {
+          /* Fail closed exactly as the origin would. */
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+          return 0;
+        }
+      }
+    }
+
     /* Query local LMDB based on subcommand.  For the linear shapes
      * (L/B/A) probe limit+1: an over-limit result marks this response
      * TRUNCATED, signaled to the requester on the CH E terminator so
@@ -4964,25 +5126,33 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
      * overflow is the TAIL (newest).  R (around) is bidirectional --
      * no probe, never flagged. */
     if (query_subcmd_char == 'L') {
-      count = history_query_latest(target, ref_type, ref_value, limit + 1, &messages);
+      count = history_query_latest(target, ref_type, ref_value, limit + 1,
+                                   &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'B') {
-      count = history_query_before(target, ref_type, ref_value, limit + 1, &messages);
+      count = history_query_before(target, ref_type, ref_value, limit + 1,
+                                   &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'A') {
-      count = history_query_after(target, ref_type, ref_value, limit + 1, &messages);
+      count = history_query_after(target, ref_type, ref_value, limit + 1,
+                                  &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'R') {
-      count = history_query_around(target, ref_type, ref_value, limit, &messages);
+      count = history_query_around(target, ref_type, ref_value, limit,
+                                   &messages, presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'W') {
       /* BETWEEN: second reference arrives as the optional trailing
        * param (after dest_numeric). */
       enum HistoryRefType ref_type2;
       const char *ref_value2;
       if (!ref2 || parse_s2s_reference(ref2, &ref_type2, &ref_value2) != 0) {
+        presence_query_filter_close(fed_pf);
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
         return 0;
       }
       count = history_query_between(target, ref_type, ref_value,
-                                    ref_type2, ref_value2, limit, &messages);
+                                    ref_type2, ref_value2, limit, &messages,
+                                    presence_query_filter_hook(fed_pf));
     } else if (query_subcmd_char == 'X') {
+      presence_query_filter_close(fed_pf);
+      fed_pf = NULL;
       /* Exact message lookup by msgid — used for federated REDACT.
        * ref is M<msgid> format from S2S. ref_value is the msgid.
        */
@@ -5004,9 +5174,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       return 0;
     } else {
       /* Unsupported subcommand for federation */
+      presence_query_filter_close(fed_pf);
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
       return 0;
     }
+    presence_query_filter_close(fed_pf);
+    fed_pf = NULL;
 
     if (count <= 0) {
       sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);

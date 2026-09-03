@@ -543,9 +543,14 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
       /* First check LMDB cache (works for both existing and non-existent channels) */
       if (metadata_lmdb_is_available()) {
         int vis = METADATA_VIS_PUBLIC;
+        /* Rows are keyed by the channel's canonical spelling (every
+         * writer passes chptr->chname) and the key builder never folds
+         * case, so look up by the resolved channel, not the client's
+         * spelling (case-fold audit 2026-09-02). */
+        const char *chan_key = target_channel ? target_channel->chname : target;
         /* Decoded visibility comes from the out-param — see the matching
          * comment in the user GET fallback above. */
-        if (metadata_account_get_vis(target, key, value_buf, sizeof(value_buf), &vis) == 0) {
+        if (metadata_account_get_vis(chan_key, key, value_buf, sizeof(value_buf), &vis) == 0) {
           /* Found in LMDB cache - load into channel memory */
           const char *vis_str = (vis == METADATA_VIS_PRIVATE) ? "private" : "*";
           const char *val = value_buf;

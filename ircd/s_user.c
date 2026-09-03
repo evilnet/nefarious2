@@ -246,11 +246,32 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
 
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
 
+  /* Bouncer invariant #10: an alias numeric is introduced only via
+   * BX C, which legacy peers never see -- sourced from the alias, a
+   * routed command is an unknown source at the first legacy hop and
+   * is dropped silently (no reply, no error).  Rewrite to the primary
+   * unless the route heads toward the primary's own server, which
+   * knows the alias (and where a primary-sourced line would be a fake
+   * direction).  Replies then arrive addressed to the primary; the
+   * numeric relay mirrors them to the session's local aliases. */
+  if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
+    struct Client *prim = cli_user(from)->alias_primary;
+    if (MyUser(prim) || cli_from(prim) != cli_from(acptr))
+      from = prim;
+  }
+
   /* Save label and generate compact tag for forwarded labeled commands.
-   * Must happen before sendcmdto_one which picks up the s2s overrides. */
+   * Must happen before sendcmdto_one which picks up the s2s overrides.
+   *
+   * Only toward an IRCv3-aware destination: the label is correlated to
+   * the reply by the compact msgid, which a legacy server neither
+   * receives (send.c gates the @A prefix on IsIRCv3Aware) nor echoes.
+   * With no possible correlation the honest outcome is the plain
+   * labeled ACK now and untagged numerics when they arrive. */
   if (MyConnect(from) && cli_label(from)[0] &&
       feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH)) {
+      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
+      IsIRCv3Aware(acptr)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
     if (fwd_label_save(from, cmd, msgid, &time_ms)) {
@@ -327,10 +348,26 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
 
   parv[server] = (char *) acptr; /* HACK! HACK! HACK! ARGH! */
 
-  /* Save label and generate compact tag for forwarded labeled commands. */
+  /* Bouncer invariant #10: an alias numeric is introduced only via
+   * BX C, which legacy peers never see -- sourced from the alias, a
+   * routed command is an unknown source at the first legacy hop and
+   * is dropped silently (no reply, no error).  Rewrite to the primary
+   * unless the route heads toward the primary's own server, which
+   * knows the alias (and where a primary-sourced line would be a fake
+   * direction).  Replies then arrive addressed to the primary; the
+   * numeric relay mirrors them to the session's local aliases. */
+  if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
+    struct Client *prim = cli_user(from)->alias_primary;
+    if (MyUser(prim) || cli_from(prim) != cli_from(acptr))
+      from = prim;
+  }
+
+  /* Save label and generate compact tag for forwarded labeled commands.
+   * IRCv3-aware destinations only -- see hunt_server_cmd. */
   if (MyConnect(from) && cli_label(from)[0] &&
       feature_bool(FEAT_CAP_labeled_response) &&
-      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH)) {
+      CapActive(from, CAP_LABELEDRESP) && CapActive(from, CAP_BATCH) &&
+      IsIRCv3Aware(acptr)) {
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
     if (fwd_label_save(from, cmd, msgid, &time_ms)) {
@@ -1250,7 +1287,10 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
             ircd_strncpy(nick_msgid, cli_s2s_msgid(cptr), sizeof(nick_msgid));
           else
             generate_msgid(nick_msgid, sizeof(nick_msgid));
-          sendcmdto_set_client_msgid(nick_msgid);
+          /* One time per event: the origin's tag time for a remote nick
+           * change, the msgid's mint time for a local one. */
+          sendcmdto_set_client_event(nick_msgid,
+                                     history_event_time_ms(MyUser(sptr) ? NULL : cptr));
         }
 
         /* If sender has a labeled-response label, send them a labeled NICK
@@ -1273,7 +1313,6 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
          * changes store too, under the unified msgid. */
         if (history_is_available() && feature_bool(FEAT_CHATHISTORY_STORE)) {
           struct Membership *chan;
-          struct timeval tv;
           char timestamp[32];
           char old_sender[HISTORY_SENDER_LEN];
           const char *account = (cli_user(sptr) && cli_user(sptr)->account[0])
@@ -1282,9 +1321,9 @@ int set_nick_name(struct Client* cptr, struct Client* sptr,
           ircd_snprintf(0, old_sender, sizeof(old_sender), "%s!%s@%s",
                         cli_name(sptr), cli_user(sptr)->username, cli_user(sptr)->host);
 
-          gettimeofday(&tv, NULL);
-          ircd_snprintf(0, timestamp, sizeof(timestamp), "%lu.%03lu",
-                        (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
+          /* Same event time the live NICK was tagged with (above) */
+          history_format_ms(timestamp, sizeof(timestamp),
+                            history_event_time_ms(MyUser(sptr) ? NULL : cptr));
 
           for (chan = cli_user(sptr)->channel; chan; chan = chan->next_channel) {
             if (chan->channel->mode.exmode & EXMODE_NOSTORAGE)

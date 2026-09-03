@@ -1259,6 +1259,29 @@ static const char msgid_b64_alphabet[65] =
  * @return Milliseconds since epoch, or 0 if the id is not a
  *         time-carrying msgid (legacy format, malformed, or the
  *         decoded value falls outside 2020..2100). */
+int msgid_decode_hlc(const char *msgid, uint64_t *ms_out, uint16_t *logical_out)
+{
+  uint64_t ms, logical = 0;
+  int i;
+
+  ms = msgid_decode_time_ms(msgid);
+  if (!ms)
+    return 0;
+  /* <node_2><logical_3><time_7><counter_2>: the logical counter sits in
+   * chars 2..4 (see generate_msgid). */
+  for (i = 2; i < 5; i++) {
+    const char *pos = strchr(msgid_b64_alphabet, msgid[i]);
+    if (!pos)
+      return 0;
+    logical = (logical << 6) | (uint64_t)(pos - msgid_b64_alphabet);
+  }
+  if (ms_out)
+    *ms_out = ms;
+  if (logical_out)
+    *logical_out = (uint16_t)(logical & 0xFFFF);
+  return 1;
+}
+
 uint64_t msgid_decode_time_ms(const char *msgid)
 {
   uint64_t ms = 0;

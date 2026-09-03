@@ -104,6 +104,7 @@ IRCD_SRC = \
 	crule.c \
 	dbuf.c \
 	db_rocksdb.c \
+	db_casefold.c \
 	destruct_event.c \
 	dnsbl.c \
 	fileio.c \
@@ -569,6 +570,9 @@ db_rocksdb.o: db_rocksdb.c ../config.h ../include/client.h \
   ../include/db_cursor.h ../include/db_env.h ../include/db_txn.h \
   ../include/db_types.h ../include/ircd_alloc.h ../include/ircd_log.h \
   ../include/ircd_snprintf.h
+db_casefold.o: db_casefold.c ../config.h ../include/db_casefold.h \
+  ../include/db_cursor.h ../include/db_env.h ../include/db_txn.h \
+  ../include/db_types.h ../include/ircd_chattr.h ../include/ircd_log.h
 destruct_event.o: destruct_event.c ../config.h ../include/channel.h \
   ../include/destruct_event.h ../include/s_debug.h ../include/ircd_alloc.h \
   ../include/ircd.h ../include/ircd_events.h ../include/ircd_log.h \

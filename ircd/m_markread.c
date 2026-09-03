@@ -45,6 +45,7 @@
 #include "metadata.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_chattr.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -100,10 +101,11 @@ static unsigned int sm_hash(const char *session_id, const char *target)
   }
   h ^= 0;
   h *= 16777619u;
+  /* Fold with the ircd casemapping: sm_find compares with ircd_strcmp,
+   * under which rfc1459's []\~ equal {}|^ -- an ASCII-only fold hashed
+   * such spellings to different buckets (case-fold audit 2026-09-02). */
   for (p = target; *p; p++) {
-    unsigned char c = (unsigned char)*p;
-    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-    h ^= c;
+    h ^= (unsigned char)ToLower((unsigned char)*p);
     h *= 16777619u;
   }
   return h & SESSION_MR_HASH_MASK;
@@ -265,12 +267,22 @@ static void notify_local_clients(const char *account, const char *target, const 
   if (!account || !*account)
     return;
 
-  /* Find all local clients with the same account */
+  /* Find all local clients with the same anchor: the account, or -- for
+   * an ephemeral (session-anchored) marker -- the session_id itself.
+   * The session branch used to be unreachable (an unauthed client has an
+   * empty account and was skipped), so an ephemeral MARKREAD SET was
+   * stored but never echoed; the spec requires every connection of the
+   * setter, the setter included, to receive the new marker. */
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
     if (!IsUser(acptr) || !MyUser(acptr))
       continue;
     if (!CapActive(acptr, CAP_DRAFT_READMARKER))
       continue;
+    if (cli_session_id(acptr)[0]
+        && 0 == strcmp(cli_session_id(acptr), account)) {
+      send_markread(acptr, target, timestamp);
+      continue;
+    }
     if (!cli_user(acptr) || !cli_user(acptr)->account[0])
       continue;
     if (ircd_strcmp(cli_user(acptr)->account, account) != 0)
@@ -439,12 +451,14 @@ int m_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  * data stays warm for a later enable; storage no-ops if the metadata
  * LMDB is unavailable.
  *
- * Format: PN <account> <channel> <start> <end>   (epoch seconds)
+ * Format: PN <account> <channel> <start> <end>   (presence time since
+ * 2026-09-02: HLC packed as ms<<16|logical; seconds-era values from
+ * older peers are recognized by magnitude and scaled)
  */
 int ms_presencesync(struct Client *cptr, struct Client *sptr, int parc,
                     char *parv[])
 {
-  time_t start, end;
+  int64_t start, end;
 
   if (parc < 5)
     return 0;
@@ -452,8 +466,8 @@ int ms_presencesync(struct Client *cptr, struct Client *sptr, int parc,
     return protocol_violation(cptr, "PRESENCE from non-server %s",
                               cli_name(sptr));
 
-  start = (time_t)strtoul(parv[3], NULL, 10);
-  end = (time_t)strtoul(parv[4], NULL, 10);
+  start = presence_norm_time((int64_t)strtoull(parv[3], NULL, 10));
+  end = presence_norm_time((int64_t)strtoull(parv[4], NULL, 10));
   if (start == 0 || end == 0)
     return 0;
 

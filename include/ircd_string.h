@@ -149,6 +149,9 @@ static __inline__ NTL_HDR_strCasediff { NTL_SRC_strCasediff }
 
 
 extern uint64_t msgid_decode_time_ms(const char *msgid);
+/** Decode a msgid's full HLC stamp (physical ms + logical counter).
+ * Returns 1 on success; 0 for a legacy/foreign msgid. */
+extern int msgid_decode_hlc(const char *msgid, uint64_t *ms_out, uint16_t *logical_out);
 
 #endif /* INCLUDED_ircd_string_h */
 

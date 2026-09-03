@@ -168,24 +168,9 @@ int ms_create(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   {
     char incoming_msgids[MAXJOINARGS][16];
     int chan_idx = 0;
-    memset(incoming_msgids, 0, sizeof(incoming_msgids));
-    {
-      const char *multi = cli_s2s_multi_msgid(cptr);
-      if (multi[0]) {
-        const char *mp = multi;
-        int idx = 0;
-        while (mp && *mp && idx < MAXJOINARGS) {
-          const char *plus = strchr(mp, '+');
-          int len = plus ? (int)(plus - mp) : (int)strlen(mp);
-          if (len > 0 && len < (int)sizeof(incoming_msgids[0])) {
-            memcpy(incoming_msgids[idx], mp, len);
-            incoming_msgids[idx][len] = '\0';
-          }
-          idx++;
-          mp = plus ? plus + 1 : NULL;
-        }
-      }
-    }
+    /* Single- and multi-channel forms alike (the multi buffer is only
+     * filled for 2+ channels; see joinbuf_load_s2s_msgids). */
+    (void)joinbuf_load_s2s_msgids(cptr, incoming_msgids, MAXJOINARGS);
     if (cli_s2s_time_ms(cptr))
       create.jb_msgid_time_ms = cli_s2s_time_ms(cptr);
 

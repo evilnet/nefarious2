@@ -23,6 +23,7 @@
 
 #include "channel.h"
 #include "client.h"
+#include "crdt_hlc.h"
 #include "hash.h"
 #include "history.h"
 #include "db_cursor.h"
@@ -135,7 +136,9 @@ static int           presence_persistence_ready = 0;
  * retention sweep. */
 static inline unsigned char to_lower_ascii(unsigned char c)
 {
-  return (unsigned char)ToLower(c);
+  /* ToLower indexes its table from CHAR_MIN, i.e. by a plain char; an
+   * unsigned byte above 127 would index past it. */
+  return (unsigned char)ToLower((char)c);
 }
 
 /** FNV-1a over a session_id + channel pair, case-folding the channel. */
@@ -225,6 +228,8 @@ static size_t build_acct_key(char *buf, size_t bufsz,
 /** Load the account-anchored record from storage into @a out.  Returns
  * 0 on success, -1 if missing or unavailable.  Zero-fills @a out if
  * the stored record has an unexpected size (treats as missing). */
+static int record_norm_ms(struct presence_record *r);  /* defined with the time helpers */
+
 static int acct_load(const char *account, const char *channel,
                      struct presence_record *out)
 {
@@ -248,8 +253,10 @@ static int acct_load(const char *account, const char *channel,
   rc = db_get(env, presence_cf, keybuf, klen, NULL, &v);
   if (rc != DB_OK)
     return -1;
-  if (v.len == sizeof(*out))
+  if (v.len == sizeof(*out)) {
     memcpy(out, v.base, sizeof(*out));
+    record_norm_ms(out);   /* seconds-era record: read as milliseconds */
+  }
   /* Else: leave @a out zeroed.  Caller will write a fresh record next
    * time anything mutates state, which is the right behavior. */
   db_val_free(&v);
@@ -295,8 +302,82 @@ static int acct_store(const char *account, const char *channel,
 /* Core interval algorithms (shared between in-memory and persistent) */
 /* ---------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------- */
+/* Presence time: packed HLC (ms << 16 | logical), since 2026-09-02   */
+/* ---------------------------------------------------------------- */
+
+int64_t presence_norm_time(int64_t v)
+{
+  /* Three eras by magnitude: seconds (~1.7e9, below 1e11), milliseconds
+   * (~1.7e12, below 1e15 -- only ever on the bed), packed HLC (~1.1e17).
+   * 1e11 is the year 5138 in seconds and March 1973 in milliseconds;
+   * 1e15 is the year 33658 in milliseconds and 1970-01-01 plus 19
+   * minutes packed. */
+  if (v <= 0)
+    return v;
+  if (v < 100000000000LL)
+    return PRESENCE_TIME_FROM_MS(v * 1000);
+  if (v < 1000000000000000LL)
+    return PRESENCE_TIME_FROM_MS(v);
+  return v;
+}
+
+int64_t presence_event_time(const char *msgid, uint64_t event_ms)
+{
+  uint64_t ms = 0;
+  uint16_t logical = 0;
+
+  if (msgid && msgid[0] && msgid_decode_hlc(msgid, &ms, &logical)
+      && (!event_ms || ms == event_ms))
+    return PRESENCE_TIME_PACK(ms, logical);
+  return PRESENCE_TIME_FROM_MS(event_ms);
+}
+
+/** Normalize a record read from disk (or replicated) in place.  Returns
+ * nonzero when anything changed, so a sweep can rewrite it. */
+static int record_norm_ms(struct presence_record *r)
+{
+  int changed = 0;
+  uint8_t i;
+  int64_t v;
+
+  v = presence_norm_time(r->open_since);
+  if (v != r->open_since) { r->open_since = v; changed = 1; }
+  for (i = 0; i < r->count; i++) {
+    v = presence_norm_time(r->intervals[i].start);
+    if (v != r->intervals[i].start) { r->intervals[i].start = v; changed = 1; }
+    v = presence_norm_time(r->intervals[i].end);
+    if (v != r->intervals[i].end) { r->intervals[i].end = v; changed = 1; }
+  }
+  return changed;
+}
+
+/** The event time the membership hooks stamp with (see
+ * presence_set_event_time); 0 = none armed. */
+static int64_t presence_event_ctx = 0;
+
+void presence_set_event_time(int64_t t)
+{
+  presence_event_ctx = t;
+}
+
+/** The HLC's current stamp as presence time (no event armed). */
+static int64_t presence_clock_time(void)
+{
+  const struct HLC *h = hlc_global();
+  return PRESENCE_TIME_PACK(h->physical_ms, h->logical);
+}
+
+/** Time for a hook: the armed event time, else the clock. */
+static int64_t presence_now_time(void)
+{
+  if (presence_event_ctx > 0)
+    return presence_event_ctx;
+  return presence_clock_time();
+}
+
 /** Open a new interval if none is open.  Idempotent. */
-static void record_apply_join(struct presence_record *r, time_t when)
+static void record_apply_join(struct presence_record *r, int64_t when)
 {
   if (r->open_since == 0)
     r->open_since = (int64_t)when;
@@ -305,9 +386,9 @@ static void record_apply_join(struct presence_record *r, time_t when)
 /** Close the open interval, appending it to the closed list.  Drops
  * the oldest closed interval if the cap would be exceeded (hard FIFO
  * — fail-safe).  No-op if no interval is open. */
-static void record_apply_part(struct presence_record *r, time_t when)
+static void record_apply_part(struct presence_record *r, int64_t when)
 {
-  int64_t end = (int64_t)when;
+  int64_t end = when;
   if (r->open_since == 0)
     return;
   if (end < r->open_since) {
@@ -322,7 +403,7 @@ static void record_apply_part(struct presence_record *r, time_t when)
    * windows.  30s covers reconnect blips without granting any
    * meaningful absence. */
   if (r->count > 0
-      && r->intervals[r->count - 1].end + 30 >= r->open_since) {
+      && r->intervals[r->count - 1].end + PRESENCE_COALESCE_TIME >= r->open_since) {
     if (end > r->intervals[r->count - 1].end)
       r->intervals[r->count - 1].end = end;
     r->open_since = 0;
@@ -353,9 +434,9 @@ static void record_apply_part(struct presence_record *r, time_t when)
 /** Test whether @a msg_time falls inside any closed interval or the
  * currently-open one.  Closed intervals are checked inclusively on
  * both ends; the open interval is inclusive on its start. */
-static int record_was_present(const struct presence_record *r, time_t msg_time)
+static int record_was_present(const struct presence_record *r, int64_t msg_ms)
 {
-  int64_t t = (int64_t)msg_time;
+  int64_t t = msg_ms;
   uint8_t i;
   if (r->open_since != 0 && t >= r->open_since)
     return 1;
@@ -381,7 +462,7 @@ void presence_touch_last_alive(void)
 {
   struct db_env *env;
   struct db_writebatch *wb;
-  int64_t now = (int64_t)CurrentTime;
+  int64_t now = presence_clock_time();
 
   if (!presence_persistence_ready || !presence_cf)
     return;
@@ -452,6 +533,7 @@ int presence_init(void)
                sizeof(PRESENCE_META_LAST_ALIVE) - 1, NULL, &v) == DB_OK) {
       if (v.len == sizeof(last_alive))
         memcpy(&last_alive, v.base, sizeof(last_alive));
+      last_alive = presence_norm_time(last_alive);
       db_val_free(&v);
     }
 
@@ -464,11 +546,12 @@ int presence_init(void)
 
         if (vptr && vlen == sizeof(r) && kptr && klen > 0) {
           memcpy(&r, vptr, sizeof(r));
+          record_norm_ms(&r);
           if (r.open_since != 0) {
             int64_t end = last_alive;
             if (end < r.open_since)
               end = r.open_since;   /* zero-length: keep the join instant */
-            record_apply_part(&r, (time_t)end);
+            record_apply_part(&r, end);
             db_writebatch_put(wb, presence_cf, kptr, klen, &r, sizeof(r));
             closed++;
           }
@@ -532,7 +615,7 @@ static void record_union_close(struct presence_record *r,
     ;
 
   /* Merge with predecessor when overlapping/adjacent. */
-  if (pos > 0 && r->intervals[pos - 1].end + 30 >= start) {
+  if (pos > 0 && r->intervals[pos - 1].end + PRESENCE_COALESCE_TIME >= start) {
     if (end > r->intervals[pos - 1].end)
       r->intervals[pos - 1].end = end;
     pos--;
@@ -562,7 +645,7 @@ static void record_union_close(struct presence_record *r,
   /* Swallow successors the (possibly grown) interval now covers. */
   i = pos;
   while (i + 1 < r->count
-         && r->intervals[i].end + 30 >= r->intervals[i + 1].start) {
+         && r->intervals[i].end + PRESENCE_COALESCE_TIME >= r->intervals[i + 1].start) {
     if (r->intervals[i + 1].end > r->intervals[i].end)
       r->intervals[i].end = r->intervals[i + 1].end;
     memmove(&r->intervals[i + 1], &r->intervals[i + 2],
@@ -572,7 +655,7 @@ static void record_union_close(struct presence_record *r,
 }
 
 void presence_apply_close(const char *anchor, int anchor_is_session,
-                          const char *channel, time_t start, time_t end)
+                          const char *channel, int64_t start, int64_t end)
 {
   if (!anchor || !*anchor || !channel || !*channel)
     return;
@@ -599,14 +682,20 @@ void presence_apply_close(const char *anchor, int anchor_is_session,
  * presence is dark) and on server init (conf-parse safety). */
 static void presence_broadcast_close(const char *account,
                                      const char *channel,
-                                     time_t start, time_t end)
+                                     int64_t start, int64_t end)
 {
+  char sb[24], eb[24];
+
   if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
     return;
   if (!cli_serv(&me))
     return;
-  sendcmdto_serv_butone_v3(&me, CMD_PRESENCE, NULL, "%s %s %Tu %Tu",
-                           account, channel, start, end);
+  /* Epoch milliseconds on the wire (2026-09-02); receivers normalize
+   * seconds-era values from older peers by magnitude. */
+  snprintf(sb, sizeof(sb), "%lld", (long long)start);
+  snprintf(eb, sizeof(eb), "%lld", (long long)end);
+  sendcmdto_serv_butone_v3(&me, CMD_PRESENCE, NULL, "%s %s %s %s",
+                           account, channel, sb, eb);
 }
 
 void presence_record_join(const char *anchor, int anchor_is_session,
@@ -674,7 +763,7 @@ void presence_record_part(const char *anchor, int anchor_is_session,
 }
 
 int presence_was_present(const char *anchor, int anchor_is_session,
-                          const char *channel, time_t msg_time)
+                          const char *channel, int64_t t)
 {
   if (!anchor || !*anchor || !channel || !*channel)
     return 0;
@@ -683,14 +772,67 @@ int presence_was_present(const char *anchor, int anchor_is_session,
     struct presence_session_entry *e = session_find(anchor, channel);
     if (!e)
       return 0;
-    return record_was_present(&e->record, msg_time);
+    return record_was_present(&e->record, t);
   }
 
   {
     struct presence_record r;
     if (acct_load(anchor, channel, &r) != 0)
       return 0;
-    return record_was_present(&r, msg_time);
+    return record_was_present(&r, t);
+  }
+}
+
+/** Nearest presence boundary in the walk direction (see the header).
+ * Pure interval logic over one record: forward = smallest closed start
+ * (or open_since) strictly after @a t; backward = largest closed end
+ * strictly before @a t.  Inside a window the answer is @a t. */
+static int64_t record_next_visible(const struct presence_record *r,
+                                   int64_t t, int reverse)
+{
+  int64_t best = -1;
+  uint8_t i;
+
+  if (record_was_present(r, t))
+    return t;
+
+  if (!reverse) {
+    if (r->open_since != 0 && r->open_since > t)
+      best = r->open_since;
+    for (i = 0; i < r->count; i++) {
+      if (r->intervals[i].start > t
+          && (best < 0 || r->intervals[i].start < best))
+        best = r->intervals[i].start;
+    }
+  } else {
+    /* An open interval starts after every closed one and (t not being
+     * inside it) lies entirely after t, so only closed ends qualify. */
+    for (i = 0; i < r->count; i++) {
+      if (r->intervals[i].end < t && r->intervals[i].end > best)
+        best = r->intervals[i].end;
+    }
+  }
+  return best;
+}
+
+int64_t presence_next_visible(const char *anchor, int anchor_is_session,
+                              const char *channel, int64_t t, int reverse)
+{
+  if (!anchor || !*anchor || !channel || !*channel)
+    return -1;
+
+  if (anchor_is_session) {
+    struct presence_session_entry *e = session_find(anchor, channel);
+    if (!e)
+      return -1;
+    return record_next_visible(&e->record, t, reverse);
+  }
+
+  {
+    struct presence_record r;
+    if (acct_load(anchor, channel, &r) != 0)
+      return -1;
+    return record_next_visible(&r, t, reverse);
   }
 }
 
@@ -776,7 +918,7 @@ void presence_on_channel_add(struct Client *who, struct Channel *chptr)
   if (anchor_sibling_in_channel(who, chptr, anchor, is_session))
     return;
 
-  presence_record_join(anchor, is_session, chptr->chname, CurrentTime);
+  presence_record_join(anchor, is_session, chptr->chname, presence_now_time());
 }
 
 void presence_on_channel_remove(struct Client *who, struct Channel *chptr)
@@ -799,7 +941,7 @@ void presence_on_channel_remove(struct Client *who, struct Channel *chptr)
   if (anchor_sibling_in_channel(who, chptr, anchor, is_session))
     return;
 
-  presence_record_part(anchor, is_session, chptr->chname, CurrentTime);
+  presence_record_part(anchor, is_session, chptr->chname, presence_now_time());
 }
 
 /** Open an interval NOW for every current non-alias member of every
@@ -823,7 +965,7 @@ void presence_backfill_now(void)
         continue;
       /* record_apply_join is idempotent, so same-anchor siblings are
        * naturally collapsed. */
-      presence_record_join(anchor, is_session, chptr->chname, CurrentTime);
+      presence_record_join(anchor, is_session, chptr->chname, presence_now_time());
     }
   }
   log_write(LS_SYSTEM, L_INFO, 0,
@@ -862,7 +1004,8 @@ void presence_anchor_transfer(struct Client *cptr,
 
   for (m = cli_user(cptr)->channel; m; m = m->next_channel) {
     struct Channel *chptr = m->channel;
-    time_t start = CurrentTime;
+    int64_t now = presence_now_time();
+    int64_t start = now;
 
     if (IsMemberAlias(m) || !chptr)
       continue;
@@ -874,20 +1017,19 @@ void presence_anchor_transfer(struct Client *cptr,
         struct presence_session_entry *e =
             session_find(old_anchor, chptr->chname);
         if (e && e->record.open_since != 0
-            && (time_t)e->record.open_since < start)
-          start = (time_t)e->record.open_since;
+            && e->record.open_since < start)
+          start = e->record.open_since;
       } else {
         struct presence_record r;
         if (acct_load(old_anchor, chptr->chname, &r) == 0
-            && r.open_since != 0 && (time_t)r.open_since < start)
-          start = (time_t)r.open_since;
+            && r.open_since != 0 && r.open_since < start)
+          start = r.open_since;
       }
       /* Close the old anchor's interval unless a same-old-anchor
        * sibling remains (another connection of the same account). */
       if (!anchor_sibling_in_channel(cptr, chptr, old_anchor,
                                      old_is_session))
-        presence_record_part(old_anchor, old_is_session, chptr->chname,
-                             CurrentTime);
+        presence_record_part(old_anchor, old_is_session, chptr->chname, now);
     }
 
     presence_record_join(new_anchor, new_is_session, chptr->chname, start);
@@ -943,11 +1085,13 @@ void presence_burst_sync(struct Client *cptr)
             memcpy(chanbuf, channel, clen);
             chanbuf[clen] = '\0';
             memcpy(&r, vptr, sizeof(r));
+            record_norm_ms(&r);
             for (k = 0; k < r.count && sent < line_ceiling; k++) {
-              sendcmdto_one(&me, CMD_PRESENCE, cptr, "%s %s %Tu %Tu",
-                            account, chanbuf,
-                            (time_t)r.intervals[k].start,
-                            (time_t)r.intervals[k].end);
+              char sb[24], eb[24];
+              snprintf(sb, sizeof(sb), "%lld", (long long)r.intervals[k].start);
+              snprintf(eb, sizeof(eb), "%lld", (long long)r.intervals[k].end);
+              sendcmdto_one(&me, CMD_PRESENCE, cptr, "%s %s %s %s",
+                            account, chanbuf, sb, eb);
               sent++;
             }
           }
@@ -989,13 +1133,15 @@ void presence_purge_session(const char *session_id)
   }
 }
 
-/** Parse a HistoryMessage.timestamp string ("seconds.milliseconds")
- * into integer seconds since the epoch.  Returns 0 on parse failure. */
-static time_t parse_history_seconds(const char *ts)
+/** A history row's presence time: its msgid's HLC stamp (validated
+ * against the row's millisecond stamp), else (row ms, 0).  0 when the
+ * stamp is unparseable. */
+static int64_t row_presence_time(const struct HistoryMessage *m)
 {
-  if (!ts || !*ts)
+  uint64_t ms = history_parse_ms(m->timestamp);
+  if (!ms)
     return 0;
-  return (time_t)strtoul(ts, NULL, 10);
+  return presence_event_time(m->msgid, ms);
 }
 
 int presence_filter_messages(struct Client *requestor,
@@ -1038,7 +1184,7 @@ int presence_filter_messages(struct Client *requestor,
   pp = head;
   while (*pp) {
     struct HistoryMessage *m = *pp;
-    time_t mtime = parse_history_seconds(m->timestamp);
+    int64_t mtime = row_presence_time(m);
     /* Unparseable timestamp: fail CLOSED.  Locally-stored stamps are
      * server-generated, but federated rows arrive over the wire --
      * visible-if-unparseable was the wrong default for a security
@@ -1068,7 +1214,7 @@ int presence_filter_messages(struct Client *requestor,
       target_msgid[i] = '\0';
       if (target_msgid[0]
           && history_msgid_to_timestamp(target_msgid, ts_buf) == 0) {
-        time_t parent_time = parse_history_seconds(ts_buf);
+        int64_t parent_time = presence_event_time(target_msgid, history_parse_ms(ts_buf));
         if (parent_time != 0
             && presence_was_present(anchor, is_session, target, parent_time))
           visible = 1;
@@ -1097,6 +1243,103 @@ int presence_filter_messages(struct Client *requestor,
   return kept;
 }
 
+/* ---------------------------------------------------------------- */
+/* Query-time presence filter (presence-aware paging)                */
+/* ---------------------------------------------------------------- */
+
+struct PresenceQueryFilter {
+  struct HistoryRowFilter hook;     /**< handed to history_query_*() */
+  char channel[CHANNELLEN + 1];
+  struct presence_record rec;       /**< ONE snapshot of the anchor's record
+                                     *   (the post-filter re-loads per row) */
+};
+
+/** history.c row hook.  Presence is second-granular; a row exactly on a
+ * boundary second is inside it (intervals are inclusive), which is what
+ * lets the walk seek to a boundary and trust the landing row. */
+static int presence_row_hook(const struct HistoryMessage *msg, int reverse,
+                             void *ctx, int64_t *skip_to)
+{
+  struct PresenceQueryFilter *pf = (struct PresenceQueryFilter *)ctx;
+  int64_t t = row_presence_time(msg);
+  int64_t next;
+
+  /* Unparseable stamp: fail closed, step on (same rule as the
+   * post-filter). */
+  if (t == 0)
+    return 0;
+  if (record_was_present(&pf->rec, t))
+    return 1;
+  next = record_next_visible(&pf->rec, t, reverse);
+  if (next < 0)
+    return -1;              /* nothing further visible this way: stop */
+  *skip_to = PRESENCE_TIME_MS(next);   /* the walk seeks by millisecond */
+  return 0;
+}
+
+struct PresenceQueryFilter *presence_query_filter_open(
+    struct Client *requestor, const char *target, int effective_override,
+    int *rc_out)
+{
+  struct Channel *chptr;
+  const char *anchor;
+  int is_session = 0;
+  struct PresenceQueryFilter *pf;
+
+  if (rc_out)
+    *rc_out = 0;
+  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
+    return NULL;
+  if (effective_override)
+    return NULL;
+  if (!target || !IsChannelName(target))
+    return NULL;
+  chptr = FindChannel(target);
+  if (chptr && (chptr->mode.exmode & EXMODE_PUBLICHISTORY))
+    return NULL;
+
+  anchor = presence_anchor_for(requestor, &is_session);
+  if (!anchor) {
+    /* Mirrors presence_filter_messages: broken identity state fails
+     * CLOSED.  The caller answers an empty, complete page. */
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "presence_query_filter_open: target=%s requestor without "
+              "anchor -- failing closed", target);
+    if (rc_out)
+      *rc_out = -1;
+    return NULL;
+  }
+
+  pf = (struct PresenceQueryFilter *)MyCalloc(1, sizeof(*pf));
+  ircd_strncpy(pf->channel, target, sizeof(pf->channel));
+  if (is_session) {
+    struct presence_session_entry *e = session_find(anchor, target);
+    if (e)
+      pf->rec = e->record;
+    /* else: zero record -- no presence at all, nothing visible */
+  } else if (acct_load(anchor, target, &pf->rec) != 0) {
+    /* Store unavailable or no record: a zero record hides everything,
+     * exactly as presence_was_present() answers 0 here. */
+    memset(&pf->rec, 0, sizeof(pf->rec));
+  }
+  pf->hook.fn = presence_row_hook;
+  pf->hook.ctx = pf;
+  if (rc_out)
+    *rc_out = 1;
+  return pf;
+}
+
+struct HistoryRowFilter *presence_query_filter_hook(struct PresenceQueryFilter *pf)
+{
+  return pf ? &pf->hook : NULL;
+}
+
+void presence_query_filter_close(struct PresenceQueryFilter *pf)
+{
+  if (pf)
+    MyFree(pf);
+}
+
 void presence_retention_sweep(void)
 {
   int retention_days = feature_int(FEAT_CHATHISTORY_RETENTION);
@@ -1109,7 +1352,8 @@ void presence_retention_sweep(void)
 
   if (retention_days <= 0)
     return;
-  cutoff = (int64_t)CurrentTime - (int64_t)retention_days * 86400;
+  cutoff = PRESENCE_TIME_FROM_MS((int64_t)hlc_global()->physical_ms
+                                 - (int64_t)retention_days * 86400000LL);
 
   /* In-memory side first: drop fully-old intervals; truncate straddlers;
    * delete empty records. */
@@ -1169,6 +1413,8 @@ void presence_retention_sweep(void)
 
         if (vlen == sizeof(r) && kptr && klen > 0) {
           memcpy(&r, vptr, sizeof(r));
+          if (record_norm_ms(&r))
+            changed = 1;   /* seconds-era row: rewrite in milliseconds */
           for (k = 0; k < r.count; k++) {
             if (r.intervals[k].end < cutoff) {
               changed = 1;

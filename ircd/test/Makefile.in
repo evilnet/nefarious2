@@ -39,7 +39,8 @@ CMOCKA_TESTPROGS = \
 	register_throttle_cmocka \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
-	websocket_cmocka
+	websocket_cmocka \
+	db_casefold_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -75,6 +76,7 @@ DEP_SRC = \
 	kc_cred_derive_cmocka.c \
 	kc_error_classify_cmocka.c \
 	websocket_cmocka.c \
+	db_casefold_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -233,6 +235,14 @@ kc_error_classify_cmocka: $(KC_ERROR_CLASSIFY_CMOCKA_OBJS)
 WEBSOCKET_CMOCKA_OBJS = websocket_cmocka.o test_stub.o ../ircd_alloc.o ../ircd_string.o
 websocket_cmocka: $(WEBSOCKET_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(WEBSOCKET_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
+
+# db_casefold tests - key folding and the one-time key rewrite.  The
+# store is an in-memory fake defined in the test (sorted rows, snapshot
+# iterators, ordered batches), so only db_casefold.o and the casemapping
+# table are linked; no RocksDB.
+DB_CASEFOLD_CMOCKA_OBJS = db_casefold_cmocka.o test_stub.o ../db_casefold.o ../ircd_string.o
+db_casefold_cmocka: $(DB_CASEFOLD_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(DB_CASEFOLD_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@

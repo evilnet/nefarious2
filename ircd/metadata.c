@@ -36,9 +36,11 @@
 #include "capab.h"
 #include "channel.h"
 #include "client.h"
+#include "db_casefold.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
+#include "ircd_chattr.h"
 #include "ircd_defs.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
@@ -118,15 +120,20 @@ static int build_lmdb_key(char *key, int keysize, const char *target, const char
   int pos = 0;
   int len;
 
+  /* Both halves fold (db_casefold.h): the target is a name, and key
+   * names compare case-insensitively everywhere else (ircd_strcmp on
+   * the in-memory lists), so the store must not tell "Foo" from "foo"
+   * either -- that is also what makes a persistence profile named
+   * "Work" and one named "work" the same profile on disk. */
   len = strlen(target);
   if (pos + len + 1 >= keysize) return -1;
-  memcpy(key + pos, target, len);
+  db_casefold_bytes(key + pos, target, len);
   pos += len;
   key[pos++] = KEY_SEP;
 
   len = strlen(metakey);
   if (pos + len >= keysize) return -1;
-  memcpy(key + pos, metakey, len);
+  db_casefold_bytes(key + pos, metakey, len);
   pos += len;
 
   return pos;
@@ -288,6 +295,26 @@ int metadata_lmdb_init(const char *dbpath)
     metadata_cf = NULL;
     metadata_db_env = NULL;
     return -1;
+  }
+
+  /* Rows written before the key builders folded names are moved to
+   * folded keys once, before anything reads them (db_casefold.h).
+   * bouncer_sessions is keyed by opaque session ids and the presence CF
+   * (opened later by presence_init) already folds its channel half and
+   * only ever sees canonical account names, so neither is rewritten. */
+  {
+    struct db_casefold_cf cfs[] = {
+      { metadata_cf,    "metadata",    DB_CASEFOLD_ALL },   /* target\0key */
+      { readmarkers_cf, "readmarkers", DB_CASEFOLD_ALL },   /* account\0target */
+    };
+    if (db_casefold_migrate(metadata_db_env, "metadata", cfs,
+                            sizeof(cfs) / sizeof(cfs[0])) != 0)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "metadata: case-fold key migration did not complete; "
+                "rows keyed under an unfolded spelling stay invisible "
+                "until the next start (%s)",
+                db_env_last_error(metadata_db_env)
+                  ? db_env_last_error(metadata_db_env) : "no backend detail");
   }
 
   metadata_lmdb_available = 1;
@@ -603,15 +630,17 @@ static int build_readmarker_key(char *key, int keysize,
   int pos = 0;
   int len;
 
+  /* Both halves are names: fold them (db_casefold.h) so "#Linux" and
+   * "#linux" address the same marker whoever typed which. */
   len = strlen(account);
   if (pos + len + 1 >= keysize) return -1;
-  memcpy(key + pos, account, len);
+  db_casefold_bytes(key + pos, account, len);
   pos += len;
   key[pos++] = KEY_SEP;
 
   len = strlen(target);
   if (pos + len >= keysize) return -1;
-  memcpy(key + pos, target, len);
+  db_casefold_bytes(key + pos, target, len);
   pos += len;
 
   return pos;
@@ -740,7 +769,7 @@ struct MetadataEntry *metadata_account_list(const char *account)
    * metadata_channel_load, so it must accept a full channel name. */
   if (prefixlen > CHANNELLEN)
     return NULL;
-  memcpy(prefix, account, prefixlen);
+  db_casefold_bytes(prefix, account, prefixlen);   /* folded, like the keys */
   prefix[prefixlen++] = KEY_SEP;
 
   it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
@@ -843,7 +872,7 @@ int metadata_account_clear(const char *account)
    * channel name must clear its store rows, not silently no-op. */
   if (prefixlen > CHANNELLEN)
     return -1;
-  memcpy(prefix, account, prefixlen);
+  db_casefold_bytes(prefix, account, prefixlen);   /* folded, like the keys */
   prefix[prefixlen++] = KEY_SEP;
 
   /* Two-pass: iterate to collect matching keys, then delete via a
@@ -908,7 +937,7 @@ int metadata_account_count_keys(const char *account)
    * length checks in metadata_account_list / metadata_account_clear. */
   if (prefixlen > CHANNELLEN)
     return 0;
-  memcpy(prefix, account, prefixlen);
+  db_casefold_bytes(prefix, account, prefixlen);   /* folded, like the keys */
   prefix[prefixlen++] = KEY_SEP;
 
   it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);

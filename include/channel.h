@@ -597,6 +597,8 @@ extern int mode_parse(struct ModeBuf *mbuf, struct Client *cptr,
 #define MODE_PARSE_BURST	0x80	/**< be even more strict w/extra args */
 #define MODE_PARSE_ISHALFOP	0x100	/**< op and halfop differentiation */
 
+extern int joinbuf_load_s2s_msgids(struct Client *cptr, char out[][16],
+                                   int max);
 extern void joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
 			 struct Client *connect, unsigned int type,
 			 char *comment, time_t create);

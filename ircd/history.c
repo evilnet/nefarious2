@@ -38,6 +38,9 @@
 #include "db_types.h"
 #include "history.h"
 #include "ml_content.h"
+#include "client.h"
+#include "crdt_hlc.h"
+#include "db_casefold.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
 #include "ircd_features.h"
@@ -112,10 +115,11 @@ static int build_key(char *key, int keysize, const char *target,
   int pos = 0;
   int len;
 
-  /* Copy target */
+  /* Copy the target, folded: names are case-insensitive under the
+   * casemapping and the store compares bytes (db_casefold.h). */
   len = strlen(target);
   if (pos + len + 1 >= keysize) return -1;
-  memcpy(key + pos, target, len);
+  db_casefold_bytes(key + pos, target, len);
   pos += len;
   key[pos++] = KEY_SEP;
 
@@ -137,6 +141,33 @@ static int build_key(char *key, int keysize, const char *target,
   }
 
   return pos;
+}
+
+/** Build the targets-index key: the bare target name, folded like the
+ * message keys.
+ * @return Length of key, or -1 if it doesn't fit.
+ */
+static int build_target_key(char *key, int keysize, const char *target)
+{
+  int len = strlen(target);
+  if (len >= keysize) return -1;
+  db_casefold_bytes(key, target, len);
+  return len;
+}
+
+/** Build a quota key "channel\0account"; both halves are names.
+ * @return Length of key, or -1 if it doesn't fit.
+ */
+static int build_quota_key(char *key, int keysize,
+                           const char *channel, const char *account)
+{
+  int clen = strlen(channel);
+  int alen = strlen(account);
+  if (clen + 1 + alen >= keysize) return -1;
+  db_casefold_bytes(key, channel, clen);
+  key[clen] = KEY_SEP;
+  db_casefold_bytes(key + clen + 1, account, alen);
+  return clen + 1 + alen;
 }
 
 /** Serialize a message to a buffer.
@@ -615,7 +646,7 @@ static int build_reply_index_key(char *buf, size_t bufsize,
   size_t cl  = strlen(child_msgid);
 
   if (kpos + tl  + 1 > bufsize) return -1;
-  memcpy(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
+  db_casefold_bytes(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
   if (kpos + pl  + 1 > bufsize) return -1;
   memcpy(buf + kpos, parent_msgid, pl); kpos += pl; buf[kpos++] = KEY_SEP;
   if (kpos + tsl + 1 > bufsize) return -1;
@@ -637,7 +668,7 @@ static int build_reply_index_prefix(char *buf, size_t bufsize,
   size_t pl = strlen(parent_msgid);
 
   if (kpos + tl + 1 > bufsize) return -1;
-  memcpy(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
+  db_casefold_bytes(buf + kpos, target, tl); kpos += tl; buf[kpos++] = KEY_SEP;
   if (kpos + pl + 1 > bufsize) return -1;
   memcpy(buf + kpos, parent_msgid, pl); kpos += pl; buf[kpos++] = KEY_SEP;
   return (int)kpos;
@@ -764,13 +795,64 @@ static void reply_index_del_children(struct db_writebatch *wb,
 
 char *history_format_timestamp(char *buf, size_t buflen)
 {
-  struct timeval tv;
-
-  gettimeofday(&tv, NULL);
-  ircd_snprintf(0, buf, buflen, "%lu.%03lu",
-                (unsigned long)tv.tv_sec,
-                (unsigned long)(tv.tv_usec / 1000));
+  /* "Now" for a store stamp is the HLC's physical time, not the wall
+   * clock: it is monotone across received S2S tags, and right after a
+   * generate_msgid() it is that msgid's mint time. */
+  history_format_ms(buf, buflen, hlc_global()->physical_ms);
   return buf;
+}
+
+uint64_t history_event_time_ms(struct Client *link)
+{
+  if (link && cli_s2s_time_ms(link))
+    return cli_s2s_time_ms(link);
+  return hlc_global()->physical_ms;
+}
+
+void history_format_ms(char *buf, size_t buflen, uint64_t ms)
+{
+  ircd_snprintf(0, buf, buflen, "%lu.%03lu",
+                (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
+}
+
+void history_format_iso_ms(char *buf, size_t buflen, uint64_t ms)
+{
+  time_t sec = (time_t)(ms / 1000);
+  struct tm tm;
+
+  gmtime_r(&sec, &tm);
+  ircd_snprintf(0, buf, buflen, "%04d-%02d-%02dT%02d:%02d:%02d.%03luZ",
+                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                tm.tm_hour, tm.tm_min, tm.tm_sec,
+                (unsigned long)(ms % 1000));
+}
+
+uint64_t history_parse_ms(const char *ts)
+{
+  char *end = NULL;
+  unsigned long long sec;
+  unsigned long ms = 0;
+
+  if (!ts || !*ts)
+    return 0;
+  sec = strtoull(ts, &end, 10);
+  if (end == ts)
+    return 0;
+  if (end && *end == '.') {
+    /* Up to three fractional digits; anything beyond is ignored. */
+    int digits = 0;
+    const char *p = end + 1;
+    while (*p >= '0' && *p <= '9' && digits < 3) {
+      ms = ms * 10 + (unsigned long)(*p - '0');
+      p++;
+      digits++;
+    }
+    while (digits < 3) {
+      ms *= 10;
+      digits++;
+    }
+  }
+  return sec * 1000ULL + ms;
 }
 
 int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_buflen)
@@ -902,6 +984,27 @@ int history_init(const char *dbpath)
     return -1;
   }
 
+  /* Stores written before the key builders folded names are rewritten
+   * to folded keys once, before anything reads them (db_casefold.h).
+   * A failure leaves the store as it was; the next open retries. */
+  {
+    struct db_casefold_cf cfs[] = {
+      { history_cf_messages, "messages",    1u },   /* target\0ts\0msgid */
+      { history_cf_msgid,    "msgid_index", 2u },   /* msgid\0target */
+      { history_cf_targets,  "targets",     DB_CASEFOLD_ALL },
+      { history_cf_quotas,   "quotas",      3u },   /* channel\0account */
+      { history_cf_reply,    "reply_index", 1u },   /* target\0parent\0ts\0child */
+    };
+    if (db_casefold_migrate(history_db_env, "history", cfs,
+                            sizeof(cfs) / sizeof(cfs[0])) != 0)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "history: case-fold key migration did not complete; "
+                "rows keyed under an unfolded spelling stay invisible "
+                "until the next start (%s)",
+                db_env_last_error(history_db_env)
+                  ? db_env_last_error(history_db_env) : "no backend detail");
+  }
+
   /* Open multiline content databases (shares this env) */
   if (ml_content_init(history_db_env) != 0) {
     log_write(LS_SYSTEM, L_WARNING, 0,
@@ -986,7 +1089,7 @@ static int build_msgid_index_key(char *buf, size_t bufsize,
     return -1;
   memcpy(buf, msgid, ml);
   buf[ml] = '\0';
-  memcpy(buf + ml + 1, target, tl);
+  db_casefold_bytes(buf + ml + 1, target, tl);
   return (int)(ml + 1 + tl);
 }
 
@@ -1243,10 +1346,14 @@ store_retry:
     if (rc != DB_OK) goto store_wb_fail;
   }
 
-  /* target → last-timestamp */
-  rc = db_writebatch_put(wb, history_cf_targets,
-                         target, strlen(target),
-                         timestamp, strlen(timestamp));
+  /* target → last-timestamp (folded key, like the message rows) */
+  {
+    char tkey[CHANNELLEN + 2];
+    int tlen = build_target_key(tkey, sizeof(tkey), target);
+    if (tlen < 0) { rc = -1; goto store_wb_fail; }
+    rc = db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
+                           timestamp, strlen(timestamp));
+  }
   if (rc != DB_OK) goto store_wb_fail;
 
   /* Index reply references for draft/chathistory-context lookups.
@@ -1400,9 +1507,13 @@ store_ml_retry:
     if (rc != DB_OK) goto store_ml_fail;
   }
 
-  rc = db_writebatch_put(wb, history_cf_targets,
-                         target, strlen(target),
-                         timestamp, strlen(timestamp));
+  {
+    char tkey[CHANNELLEN + 2];
+    int tlen = build_target_key(tkey, sizeof(tkey), target);
+    if (tlen < 0) { rc = -1; goto store_ml_fail; }
+    rc = db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
+                           timestamp, strlen(timestamp));
+  }
   if (rc != DB_OK) goto store_ml_fail;
 
   rc = db_writebatch_commit(wb, /*sync_durably=*/0);
@@ -1461,11 +1572,83 @@ int history_has_msgid(const char *msgid)
  * @param[out] result Pointer to result list head.
  * @return Number of messages returned, or -1 on error.
  */
+/** Apply a query-time row filter to a freshly built row.
+ *
+ * Returns 1 when the row is kept.  Otherwise the row is freed and the
+ * iterator advanced for the caller: 0 = keep walking (the iterator was
+ * either stepped or SOUGHT to the boundary the hook named), -1 = stop
+ * the walk (hook said nothing further is visible, or scan_max hit --
+ * the latter sets filter->truncated).  @a rc receives the iterator
+ * status after the advance.
+ *
+ * A boundary seek is only honoured when it moves in the walk direction
+ * (forward: strictly later than the row; reverse: strictly earlier), so
+ * a confused hook can never pin the walk in place. */
+static int history_filter_row(struct HistoryRowFilter *filter,
+                              struct HistoryMessage *msg, int reverse,
+                              const char *target, struct db_iter *it,
+                              int *rc)
+{
+  int64_t skip_to = 0;
+  int64_t row_t;
+  int verdict;
+  int scan_max;
+
+  if (!filter || !filter->fn)
+    return 1;
+
+  filter->scanned++;
+  verdict = filter->fn(msg, reverse, filter->ctx, &skip_to);
+  if (verdict == 1)
+    return 1;
+
+  row_t = (int64_t)history_parse_ms(msg->timestamp);
+  msg->next = NULL;
+  history_free_messages(msg);
+
+  if (verdict < 0)
+    return -1;
+
+  scan_max = filter->scan_max > 0 ? filter->scan_max : HISTORY_FILTER_SCAN_MAX;
+  if (filter->scanned >= scan_max) {
+    filter->truncated = 1;
+    return -1;
+  }
+
+  if (skip_to > 0 && (reverse ? skip_to < row_t : skip_to > row_t)) {
+    char seekbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+    char tsbuf[HISTORY_TIMESTAMP_LEN];
+    int seeklen;
+
+    /* Keys carry millisecond stamps ("%lu.%03u") and so do boundaries.
+     * Forward: land on the first row at or after the boundary
+     * millisecond.  Reverse: position at the first row past it, then
+     * step back onto the last row within it. */
+    history_format_ms(tsbuf, sizeof(tsbuf),
+                      (uint64_t)(reverse ? skip_to + 1 : skip_to));
+    seeklen = build_key(seekbuf, sizeof(seekbuf), target, tsbuf, NULL);
+    if (seeklen > 0) {
+      *rc = db_iter_seek(it, seekbuf, seeklen);
+      if (reverse) {
+        if (*rc == DB_NOTFOUND)
+          *rc = db_iter_seek_last(it);
+        else if (*rc == DB_OK)
+          *rc = db_iter_prev(it);
+      }
+      return 0;
+    }
+  }
+
+  *rc = reverse ? db_iter_prev(it) : db_iter_next(it);
+  return 0;
+}
+
 static int history_query_internal(const char *target,
                                   const char *start_key, int start_keylen,
                                   enum HistoryDirection direction,
                                   int limit, struct HistoryMessage **result,
-                                  const char *floor_key, int floor_keylen)
+                                  const char *floor_key, int floor_keylen,
+                                  struct HistoryRowFilter *filter)
 {
   struct db_snapshot *snap = NULL;
   struct db_iter *it = NULL;
@@ -1482,8 +1665,10 @@ static int history_query_internal(const char *target,
     return -1;
 
   /* Build target prefix for boundary checking */
-  target_prefix_len = ircd_snprintf(0, target_prefix, sizeof(target_prefix),
-                                    "%s%c", target, KEY_SEP);
+  target_prefix_len = build_key(target_prefix, sizeof(target_prefix),
+                                target, NULL, NULL);
+  if (target_prefix_len < 0)
+    return -1;
 
   /* Open a read snapshot.  history_query_internal returns a coherent
    * point-in-time view, so we pin a snapshot for the iter and (under
@@ -1619,6 +1804,16 @@ static int history_query_internal(const char *target,
      * point-in-time view. */
     ml_content_resolve(snap, msg);
 
+    /* Query-time filter (presence-aware paging): skipped rows do not
+     * count toward the limit; the helper advances/seeks the iterator. */
+    {
+      int keep = history_filter_row(filter, msg, reverse, target, it, &rc);
+      if (keep < 0)
+        break;
+      if (keep == 0)
+        continue;
+    }
+
     /* Add to list */
     msg->next = NULL;
     if (reverse) {
@@ -1652,7 +1847,8 @@ static int history_query_internal(const char *target,
 
 int history_query_before(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
-                         struct HistoryMessage **result)
+                         struct HistoryMessage **result,
+                         struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
@@ -1682,12 +1878,13 @@ int history_query_before(const char *target, enum HistoryRefType ref_type,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_BEFORE, limit, result,
-                                NULL, 0);
+                                NULL, 0, filter);
 }
 
 int history_query_after(const char *target, enum HistoryRefType ref_type,
                         const char *reference, int limit,
-                        struct HistoryMessage **result)
+                        struct HistoryMessage **result,
+                        struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
@@ -1713,12 +1910,13 @@ int history_query_after(const char *target, enum HistoryRefType ref_type,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_AFTER, limit, result,
-                                NULL, 0);
+                                NULL, 0, filter);
 }
 
 int history_query_latest(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
-                         struct HistoryMessage **result)
+                         struct HistoryMessage **result,
+                         struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
@@ -1734,7 +1932,7 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
       return -1;
     return history_query_internal(target, keybuf, keylen,
                                   HISTORY_DIR_LATEST, limit, result,
-                                  NULL, 0);
+                                  NULL, 0, filter);
   }
 
   /* Convert reference to Unix timestamp format */
@@ -1759,12 +1957,13 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_LATEST, limit, result,
-                                floorbuf, floorlen);
+                                floorbuf, floorlen, filter);
 }
 
 int history_query_latest_after(const char *target, int limit,
                                const char *after_timestamp,
-                               struct HistoryMessage **result)
+                               struct HistoryMessage **result,
+                               struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
   char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
@@ -1792,7 +1991,7 @@ int history_query_latest_after(const char *target, int limit,
 
   return history_query_internal(target, keybuf, keylen,
                                 HISTORY_DIR_LATEST, limit, result,
-                                floorbuf, floorlen);
+                                floorbuf, floorlen, filter);
 }
 
 int history_find_last_join(const char *channel, const char *nick,
@@ -1812,8 +2011,10 @@ int history_find_last_join(const char *channel, const char *nick,
   nick_len = strlen(nick);
 
   /* Build target prefix for boundary checking */
-  target_prefix_len = ircd_snprintf(0, target_prefix, sizeof(target_prefix),
-                                    "%s%c", channel, KEY_SEP);
+  target_prefix_len = build_key(target_prefix, sizeof(target_prefix),
+                                channel, NULL, NULL);
+  if (target_prefix_len < 0)
+    return 0;
 
   /* Start from end of channel's key range */
   keylen = build_key(keybuf, sizeof(keybuf), channel, "32503680000.000", NULL);
@@ -1917,7 +2118,8 @@ int history_find_last_join(const char *channel, const char *nick,
 
 int history_query_around(const char *target, enum HistoryRefType ref_type,
                          const char *reference, int limit,
-                         struct HistoryMessage **result)
+                         struct HistoryMessage **result,
+                         struct HistoryRowFilter *filter)
 {
   struct HistoryMessage *before = NULL, *after = NULL, *ref_msg = NULL;
   int half = limit / 2;
@@ -1931,14 +2133,27 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
   if (ref_type == HISTORY_REF_MSGID) {
     int rc = history_lookup_message(target, reference, &ref_msg);
     if (rc == 0 && ref_msg) {
-      count_ref = 1;
-      log_write(LS_SYSTEM, L_INFO, 0, "history_query_around: found reference msg at ts=%s",
-                ref_msg->timestamp);
+      /* The reference row is subject to the same visibility rule as
+       * the rows around it. */
+      if (filter && filter->fn) {
+        int64_t skip_to = 0;
+        filter->scanned++;
+        if (filter->fn(ref_msg, 0, filter->ctx, &skip_to) != 1) {
+          history_free_messages(ref_msg);
+          ref_msg = NULL;
+        }
+      }
+      if (ref_msg) {
+        count_ref = 1;
+        log_write(LS_SYSTEM, L_INFO, 0, "history_query_around: found reference msg at ts=%s",
+                  ref_msg->timestamp);
+      }
     }
   }
 
   /* Get messages before reference */
-  count_before = history_query_before(target, ref_type, reference, half, &before);
+  count_before = history_query_before(target, ref_type, reference, half, &before,
+                                      filter);
   if (count_before < 0) {
     history_free_messages(before);
     history_free_messages(ref_msg);
@@ -1947,7 +2162,8 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
 
   /* Get messages after reference (reduce limit by ref_msg if found) */
   count_after = history_query_after(target, ref_type, reference,
-                                    limit - count_before - count_ref, &after);
+                                    limit - count_before - count_ref, &after,
+                                    filter);
   if (count_after < 0) {
     history_free_messages(before);
     history_free_messages(ref_msg);
@@ -1980,7 +2196,8 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
 int history_query_between(const char *target,
                           enum HistoryRefType ref_type1, const char *reference1,
                           enum HistoryRefType ref_type2, const char *reference2,
-                          int limit, struct HistoryMessage **result)
+                          int limit, struct HistoryMessage **result,
+                          struct HistoryRowFilter *filter)
 {
   char timestamp1[HISTORY_TIMESTAMP_LEN];
   char timestamp2[HISTORY_TIMESTAMP_LEN];
@@ -2083,6 +2300,16 @@ int history_query_between(const char *target,
 
     /* Resolve multiline content via the snapshot for coherent reads. */
     ml_content_resolve(snap, msg);
+
+    /* Query-time filter (presence-aware paging); forward walk.  The
+     * end-prefix check above re-runs on whatever row a seek lands on. */
+    {
+      int keep = history_filter_row(filter, msg, 0, target, it, &rc);
+      if (keep < 0)
+        break;
+      if (keep == 0)
+        continue;
+    }
 
     msg->next = NULL;
     if (tail)
@@ -2267,8 +2494,14 @@ int history_has_channel(const char *target)
   if (!history_available || !target)
     return -1;
 
-  rc = db_exists(history_db_env, history_cf_targets,
-                 target, strlen(target), /*snap=*/NULL);
+  {
+    char tkey[CHANNELLEN + 2];
+    int tlen = build_target_key(tkey, sizeof(tkey), target);
+    if (tlen < 0)
+      return -1;
+    rc = db_exists(history_db_env, history_cf_targets,
+                   tkey, (size_t)tlen, /*snap=*/NULL);
+  }
   if (rc == DB_OK)        return 1;
   if (rc == DB_NOTFOUND)  return 0;
   return -1;
@@ -2285,13 +2518,10 @@ int history_channel_has_messages(const char *target)
   if (!history_available || !target)
     return -1;
 
-  /* Build prefix key: "target\0" */
-  prefix_len = strlen(target);
-  if (prefix_len > CHANNELLEN)
+  /* Build prefix key: "target\0" (folded, like the rows) */
+  prefix_len = build_key(prefix, sizeof(prefix), target, NULL, NULL);
+  if (prefix_len < 0)
     return -1;
-  memcpy(prefix, target, prefix_len);
-  prefix[prefix_len] = KEY_SEP;
-  prefix_len++;
 
   it = db_iter_open(history_db_env, history_cf_messages, NULL);
   if (!it)
@@ -2528,7 +2758,7 @@ int history_pm_target_has_sessid(const char *target, const char *sessid)
    * shouldn't happen because the pair-key only matches the two
    * specific nicks involved. */
   count = history_query_latest(target, HISTORY_REF_NONE, NULL,
-                                100, &messages);
+                                100, &messages, NULL);
   if (count <= 0 || !messages)
     return 0;
 
@@ -2893,6 +3123,85 @@ int history_redact_message(const char *target, const char *msgid)
   (void)target;
   (void)msgid;
   return 0;
+}
+
+int history_message_is_redacted(const char *target, const char *msgid)
+{
+  struct db_snapshot *snap;
+  struct db_iter *ri_it;
+  char prefix[CHANNELLEN + HISTORY_MSGID_LEN + 4];
+  int plen;
+  int rc;
+  int redacted = 0;
+
+  if (!history_available || !target || !msgid || !*msgid)
+    return -1;
+
+  /* A redaction is a REDACT context row whose reply-index parent is the
+   * message (history_store_message links it; history_redact_message
+   * itself keeps the row as a placeholder).  Walk the children and look
+   * for one of that type. */
+  plen = build_reply_index_prefix(prefix, sizeof(prefix), target, msgid);
+  if (plen < 0)
+    return -1;
+
+  snap = db_snapshot_new(history_db_env);
+  if (!snap)
+    return -1;
+  ri_it = db_iter_open(history_db_env, history_cf_reply, snap);
+  if (!ri_it) {
+    db_snapshot_destroy(snap);
+    return -1;
+  }
+
+  for (rc = db_iter_seek(ri_it, prefix, plen);
+       rc == DB_OK && db_iter_valid(ri_it) && !redacted;
+       rc = db_iter_next(ri_it)) {
+    size_t klen;
+    const void *kbase = db_iter_key(ri_it, &klen);
+    const char *child_part;
+    const char *sep;
+    size_t ts_len, mid_len;
+    char child_ts[HISTORY_TIMESTAMP_LEN];
+    char child_mid[HISTORY_MSGID_LEN];
+    char main_keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+    int main_keylen;
+    struct db_val main_val = { NULL, 0 };
+    struct HistoryMessage child;
+
+    if (klen <= (size_t)plen || memcmp(kbase, prefix, plen) != 0)
+      break;
+
+    /* After the prefix: timestamp\0child_msgid */
+    child_part = (const char *)kbase + plen;
+    sep = memchr(child_part, KEY_SEP, klen - plen);
+    if (!sep)
+      continue;
+    ts_len = sep - child_part;
+    mid_len = (const char *)kbase + klen - (sep + 1);
+    if (ts_len >= sizeof(child_ts) || mid_len == 0 || mid_len >= sizeof(child_mid))
+      continue;
+    memcpy(child_ts, child_part, ts_len);
+    child_ts[ts_len] = '\0';
+    memcpy(child_mid, sep + 1, mid_len);
+    child_mid[mid_len] = '\0';
+
+    main_keylen = build_key(main_keybuf, sizeof(main_keybuf), target, child_ts, child_mid);
+    if (main_keylen < 0)
+      continue;
+    if (db_get(history_db_env, history_cf_messages, main_keybuf, main_keylen,
+               snap, &main_val) != DB_OK)
+      continue;
+    memset(&child, 0, sizeof(child));
+    if (deserialize_message(main_val.base, main_val.len, &child) == 0
+        && child.type == HISTORY_REDACT)
+      redacted = 1;
+    db_val_free(&main_val);
+  }
+
+  db_iter_close(ri_it);
+  db_snapshot_destroy(snap);
+  return redacted;
 }
 
 /** Build a readmarker key from account and target.
@@ -3538,8 +3847,9 @@ static int quota_increment(const char *channel, const char *account)
     return 0;
 
   /* Build key: channel\0account */
-  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
-                          channel, KEY_SEP, account);
+  keylen = build_quota_key(keybuf, sizeof(keybuf), channel, account);
+  if (keylen < 0)
+    return -1;
 
   /* Get current count */
   rc = db_get(history_db_env, history_cf_quotas,
@@ -3588,8 +3898,9 @@ static int quota_decrement(const char *channel, const char *account)
   if (!account || !account[0])
     return 0;
 
-  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
-                          channel, KEY_SEP, account);
+  keylen = build_quota_key(keybuf, sizeof(keybuf), channel, account);
+  if (keylen < 0)
+    return -1;
 
   rc = db_get(history_db_env, history_cf_quotas,
               keybuf, keylen, /*snap=*/NULL, &val);
@@ -3635,8 +3946,9 @@ int history_quota_get_count(const char *channel, const char *account)
   if (!history_available || !channel || !account || !account[0])
     return 0;
 
-  keylen = ircd_snprintf(0, keybuf, sizeof(keybuf), "%s%c%s",
-                          channel, KEY_SEP, account);
+  keylen = build_quota_key(keybuf, sizeof(keybuf), channel, account);
+  if (keylen < 0)
+    return -1;
 
   rc = db_get(history_db_env, history_cf_quotas,
               keybuf, keylen, /*snap=*/NULL, &val);

@@ -30,7 +30,36 @@
 
 #include "ircd_defs.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <time.h>
+
+struct HistoryMessage;
+
+/** Query-time row filter (presence-aware paging, 2026-09-02).
+ *
+ * Handed to history_query_*(); NULL means an unfiltered walk.  The walk
+ * calls @a fn for every row it builds; rows the hook rejects are freed
+ * and do NOT count toward the limit, so a page is @a limit VISIBLE rows
+ * and "fewer than limit" means the walk was exhausted (unless
+ * @a truncated is set).  The hook may name the nearest time in the walk
+ * direction at which rows can become visible again; the walk then seeks
+ * there instead of stepping through an invisible run. */
+struct HistoryRowFilter {
+  /** Return 1 to keep @a msg; 0 to skip it (optionally setting
+   * *@a skip_to, epoch seconds, to seek to); -1 to skip it and stop the
+   * walk because nothing further is visible in this direction. */
+  int (*fn)(const struct HistoryMessage *msg, int reverse, void *ctx,
+            int64_t *skip_to);
+  void *ctx;
+  int scan_max;    /**< raw rows examined before giving up; 0 = default */
+  int scanned;     /**< out: raw rows examined (kept + skipped) */
+  int truncated;   /**< out: scan_max hit -- page may be incomplete */
+};
+
+/** Default raw-row scan cap for a filtered walk.  Boundary seeks keep
+ * real walks far below this; it is the safety net against a hook that
+ * never names a boundary. */
+#define HISTORY_FILTER_SCAN_MAX 20000
 
 struct Channel;
 struct Client;
@@ -207,7 +236,8 @@ extern int history_has_msgid(const char *msgid);
  */
 extern int history_query_before(const char *target, enum HistoryRefType ref_type,
                                  const char *reference, int limit,
-                                 struct HistoryMessage **result);
+                                 struct HistoryMessage **result,
+                                 struct HistoryRowFilter *filter);
 
 /** Query messages after a reference point.
  * @param[in] target Channel or nick to query.
@@ -219,7 +249,8 @@ extern int history_query_before(const char *target, enum HistoryRefType ref_type
  */
 extern int history_query_after(const char *target, enum HistoryRefType ref_type,
                                 const char *reference, int limit,
-                                struct HistoryMessage **result);
+                                struct HistoryMessage **result,
+                                struct HistoryRowFilter *filter);
 
 /** Query the most recent messages.
  * @param[in] target Channel or nick to query.
@@ -231,7 +262,8 @@ extern int history_query_after(const char *target, enum HistoryRefType ref_type,
  */
 extern int history_query_latest(const char *target, enum HistoryRefType ref_type,
                                  const char *reference, int limit,
-                                 struct HistoryMessage **result);
+                                 struct HistoryMessage **result,
+                                 struct HistoryRowFilter *filter);
 
 /** Query the most recent messages, but no older than a floor timestamp.
  * Walks backward from the end of the target's history, collecting up to
@@ -246,7 +278,8 @@ extern int history_query_latest(const char *target, enum HistoryRefType ref_type
  */
 extern int history_query_latest_after(const char *target, int limit,
                                        const char *after_timestamp,
-                                       struct HistoryMessage **result);
+                                       struct HistoryMessage **result,
+                                       struct HistoryRowFilter *filter);
 
 /** Query messages around a reference point.
  * Returns limit/2 messages before and limit/2 messages after.
@@ -259,7 +292,8 @@ extern int history_query_latest_after(const char *target, int limit,
  */
 extern int history_query_around(const char *target, enum HistoryRefType ref_type,
                                  const char *reference, int limit,
-                                 struct HistoryMessage **result);
+                                 struct HistoryMessage **result,
+                                 struct HistoryRowFilter *filter);
 
 /** Query messages between two reference points.
  * @param[in] target Channel or nick to query.
@@ -274,7 +308,8 @@ extern int history_query_around(const char *target, enum HistoryRefType ref_type
 extern int history_query_between(const char *target,
                                   enum HistoryRefType ref_type1, const char *reference1,
                                   enum HistoryRefType ref_type2, const char *reference2,
-                                  int limit, struct HistoryMessage **result);
+                                  int limit, struct HistoryMessage **result,
+                                  struct HistoryRowFilter *filter);
 
 /** Query targets with recent message activity.
  * Used for CHATHISTORY TARGETS command.
@@ -365,6 +400,11 @@ extern int history_deserialize_record(const void *data, size_t datalen,
  */
 extern int history_redact_message(const char *target, const char *msgid);
 
+/** Has @a msgid under @a target already been redacted, i.e. does a
+ * REDACT context row reference it?
+ * @return 1 if redacted, 0 if not, -1 on error. */
+extern int history_message_is_redacted(const char *target, const char *msgid);
+
 /** Query context messages (reactions, redacts) for a set of parent msgids.
  * Looks up the reply index to find TAGMSG(+draft/react) and REDACT events
  * that reference any of the given parent msgids, then splices them into
@@ -395,6 +435,29 @@ extern int history_is_available(void);
  * @return Pointer to buf.
  */
 extern char *history_format_timestamp(char *buf, size_t buflen);
+
+/** A stored row's time.  One rule for every store site (2026-09-02): the
+ * S2S tag time when the event arrived over @a link (the origin's stamp,
+ * which is also the live @time this server delivered), else the local
+ * HLC's current physical time -- which, read right after
+ * generate_msgid(), is exactly the mint time embedded in that msgid and
+ * the time send.c stamps on the live tag.  Before this every server
+ * stamped rows with its own clock at observation time, so the same
+ * msgid replayed with a different @time than it was delivered with on
+ * every non-origin server.  @a link may be NULL (local event). */
+struct Client;
+extern uint64_t history_event_time_ms(struct Client *link);
+
+/** Format an epoch-millisecond time as the storage stamp "sec.mmm". */
+extern void history_format_ms(char *buf, size_t buflen, uint64_t ms);
+
+/** Parse a storage stamp "sec[.mmm]" back to epoch milliseconds; 0 when
+ * unparseable. */
+extern uint64_t history_parse_ms(const char *ts);
+
+/** Format an epoch-millisecond time as the client @time value
+ * ("YYYY-MM-DDThh:mm:ss.mmmZ"). */
+extern void history_format_iso_ms(char *buf, size_t buflen, uint64_t ms);
 
 /** Convert Unix timestamp to ISO 8601 for client display.
  * @param[in] unix_ts Unix timestamp string (seconds.milliseconds).

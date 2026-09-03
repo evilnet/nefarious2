@@ -161,14 +161,17 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
       continue;
     }
 
-    /* Match by msgid if provided */
-    if (msgid && msgid[0]) {
-      if (fl->fl_msgid[0] && ircd_strcmp(fl->fl_msgid, msgid) == 0)
-        return fl;
-    } else {
-      /* FIFO fallback — return first non-empty entry */
+    /* Exact msgid correlation only.  There is deliberately NO
+     * positional fallback: a numeric without a compact msgid is one
+     * a legacy server produced, and it can belong to ANY command --
+     * the old "first non-empty entry" fallback captured unrelated,
+     * unlabeled remote WHOIS replies into a stale batch the client had
+     * already closed, so they were silently discarded.  Labels are
+     * only ever created toward IRCv3-aware destinations (s_user.c), so
+     * every correlatable reply carries its msgid. */
+    if (msgid && msgid[0] && fl->fl_msgid[0]
+        && ircd_strcmp(fl->fl_msgid, msgid) == 0)
       return fl;
-    }
   }
 
   return NULL;
@@ -258,14 +261,10 @@ struct ForwardedLabel *fwd_label_find_draining(struct Client *acptr,
       continue;
     }
 
-    /* Match by msgid if provided */
-    if (msgid && msgid[0]) {
-      if (fl->fl_msgid[0] && ircd_strcmp(fl->fl_msgid, msgid) == 0)
-        return fl;
-    } else {
-      /* FIFO fallback */
+    /* Exact msgid correlation only (see fwd_label_find). */
+    if (msgid && msgid[0] && fl->fl_msgid[0]
+        && ircd_strcmp(fl->fl_msgid, msgid) == 0)
       return fl;
-    }
   }
 
   return NULL;
