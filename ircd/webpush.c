@@ -1053,8 +1053,19 @@ int webpush_notify(const struct webpush_subscription *sub,
     return -1;
   }
 
-  log_write(LS_SYSTEM, L_DEBUG, 0, "WebPush: posting %zu bytes to %s",
-            encrypted_len, sub->endpoint);
+  {
+    /* The endpoint is a capability URL: log its host only. */
+    char host[128];
+    const char *p = strstr(sub->endpoint, "://");
+    size_t n = 0;
+    p = p ? p + 3 : sub->endpoint;
+    while (p[n] && p[n] != '/' && n < sizeof(host) - 1)
+      n++;
+    memcpy(host, p, n);
+    host[n] = '\0';
+    log_write(LS_SYSTEM, L_DEBUG, 0, "WebPush: posting %zu bytes to %s",
+              encrypted_len, host);
+  }
 
   return webpush_send_async(sub, encrypted, encrypted_len, 0, cb, cb_data);
 }

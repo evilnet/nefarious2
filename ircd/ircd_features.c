@@ -1321,6 +1321,7 @@ static struct FeatureDesc {
   F_B(WEBPUSH_NOTIFY, 0, 1, 0),
   F_I(WEBPUSH_COOLDOWN, 0, 60, 0),
   F_I(WEBPUSH_EXPIRE, 0, 15552000, 0),  /* 180 days; 0 disables the sweep */
+  F_I(WEBPUSH_MAX_REGISTRATIONS, 0, 10, 0), /* endpoints per account; 0 = unlimited */
   F_B(WEBPUSH_HIGHLIGHTS, 0, 1, 0),
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
   F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* Limited by 512-byte IRC message size */

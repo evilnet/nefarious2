@@ -50,6 +50,13 @@ int webpush_store_add(const char *account, const char *stored);
 int webpush_store_remove(const char *account, const char *endpoint);
 
 /*
+ * Fetch the stored record for an account's endpoint into out (NUL-
+ * terminated).  Returns 0 when found, 1 when absent, -1 on error.
+ */
+int webpush_store_get(const char *account, const char *endpoint,
+                      char *out, size_t outsz);
+
+/*
  * Remove all subscriptions for an account.
  * Returns number of subscriptions removed, or -1 on error.
  */

@@ -509,6 +509,10 @@ int ms_markread(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
   /* Notify local clients with this account */
   notify_local_clients(account, target, timestamp);
 
+  /* And this server's push subscriptions for the account: a read on
+   * another server must close notifications here too. */
+  webpush_notify_read(account, target, timestamp);
+
   /* Propagate to other servers */
   sendcmdto_serv_butone_v3(sptr, CMD_MARKREAD, cptr, "%s %s %s",
                         account, target, timestamp);

@@ -269,6 +269,34 @@ int webpush_store_remove(const char *account, const char *endpoint)
   return (rc == DB_OK) ? 0 : -1;
 }
 
+int webpush_store_get(const char *account, const char *endpoint,
+                      char *out, size_t outsz)
+{
+  struct db_val val = { NULL, 0 };
+  char keybuf[WEBPUSH_KEY_MAX];
+  int keylen;
+  int rc;
+
+  if (!webpush_db_available || !account || !endpoint || !out || outsz == 0)
+    return -1;
+  keylen = build_sub_key(keybuf, sizeof(keybuf), account, endpoint);
+  if (keylen < 0)
+    return -1;
+  rc = db_get(webpush_env, webpush_sub_cf, keybuf, (size_t)keylen, NULL, &val);
+  if (rc == DB_NOTFOUND)
+    return 1;
+  if (rc != DB_OK)
+    return -1;
+  if (val.len >= outsz) {
+    db_val_free(&val);
+    return -1;
+  }
+  memcpy(out, val.base, val.len);
+  out[val.len] = '\0';
+  db_val_free(&val);
+  return 0;
+}
+
 int webpush_store_clear(const char *account)
 {
   /* Iterate to collect matching keys, then delete them via a single
@@ -564,6 +592,9 @@ int webpush_store_remove(const char *account, const char *endpoint)
 { (void)account; (void)endpoint; return -1; }
 
 int webpush_store_clear(const char *account) { (void)account; return -1; }
+int webpush_store_get(const char *account, const char *endpoint,
+                      char *out, size_t outsz)
+{ (void)account; (void)endpoint; (void)out; (void)outsz; return -1; }
 int webpush_store_count(const char *account) { (void)account; return -1; }
 
 int webpush_store_foreach(const char *account, webpush_store_iter_cb cb,

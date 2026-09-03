@@ -45,7 +45,7 @@
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "metadata.h"
-#include "webpush_store.h"
+#include "webpush.h"
 #include "msg.h"
 #include "numeric.h"
 #include "s_user.h"
@@ -858,7 +858,7 @@ static int persistence_cmd_detach(struct Client *sptr, int parc, char *parv[])
    * browser keeps its own subscription object, but the server forgets
    * every endpoint, so no push can fire for this account until a device
    * re-registers (which happens automatically on the next login). */
-  webpush_store_clear(cli_user(sptr)->account);
+  webpush_forget_account(cli_user(sptr)->account);
 
   /* Mirror PERSISTENCE SET OFF's tear-down: clear account-global hold
    * preference, broadcast to peers, then destroy the session. */

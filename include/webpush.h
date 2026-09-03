@@ -233,6 +233,10 @@ void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
 void webpush_notify_read(const char *account, const char *target,
                          const char *timestamp);
 
+/** Drop every subscription of @a account here and on every peer (a
+ * `WP U` per endpoint).  PERSISTENCE DETACH uses it. */
+void webpush_forget_account(const char *account);
+
 void webpush_notify_account(const char *account, const char *message,
                             size_t message_len);
 
