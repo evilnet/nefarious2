@@ -51,11 +51,15 @@ Everything else fails — every quoted include, and every angle include naming
 an ircd header. It covers **both** directories (sources and headers). A new
 C-library header goes into `KC_ALLOWED_STD_HDRS`; an ircd header never does.
 
-Because the files carry no `#ifdef`, `--enable-keycloak` gates them at the
-*source-list* level: `configure.in` substitutes `@KC_SRC@` into `IRCD_SRC` and
-`@KC_CMOCKA_TESTPROGS@` into the test `CMOCKA_TESTPROGS`, both empty when
-Keycloak is disabled. Adding a `kc/*.c` file or a kc cmocka suite means adding
-it to `KC_SRC` / `KC_CMOCKA_TESTPROGS` in `configure.in`, not to the Makefiles.
+Because the files carry no `#ifdef`, configure gates them at the *source-list* level:
+`configure.in` substitutes `@KC_SRC@` into `IRCD_SRC` and `@KC_CMOCKA_TESTPROGS@` into the
+test `CMOCKA_TESTPROGS`, both empty when libkc is not built.  Since 2026-09-03 the default is
+**auto**: libkc builds whenever libcurl and libjansson are found (`--enable-keycloak` =
+required, `--disable-keycloak` = out).  The old OFF default let a plain `./configure` ship an
+ircd that advertised `draft/webpush` with no transport and no log line; the ircd now turns the
+cap off at boot with a CONFIG error when the transport is missing, and `STATS webpush` shows a
+Delivery line.  Adding a `kc/*.c` file or a kc cmocka suite means editing `configure.in`, not
+the Makefiles.
 
 If kc code needs something from the ircd, add it to the adapter interface in
 `include/kc/kc_event.h` — do not reach across.
