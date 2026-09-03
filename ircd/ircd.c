@@ -1410,11 +1410,31 @@ int main(int argc, char **argv) {
   }
 #endif
 
-  /* Webpush key setup is independent of the HTTP transport: the VAPID key
-   * and its ISUPPORT token are what clients register against, and they
-   * must exist even when nothing can be delivered yet.  (Prod 2026-09-03:
-   * nesting this inside the libkc block hid a transport failure as "no
-   * key" for months.)  STATS webpush reports the transport state. */
+  /* draft/webpush promises delivery.  Without the libkc HTTP transport --
+   * a build without --enable-keycloak (the configure default is OFF), or
+   * kc_init() failing -- no push can ever be sent, so advertising the cap
+   * only collects registrations nobody can serve.  Refuse loudly, at a
+   * log level every deployment keeps.  (Prod 2026-09-03: the whole block
+   * above was compiled out, nothing logged, and the cap stayed on with no
+   * VAPID key for months.) */
+  if (feature_bool(FEAT_CAP_draft_webpush) && !kc_transport_ready) {
+    static const char *const off[] = { "CAP_draft_webpush", "FALSE" };
+#ifdef USE_LIBKC
+    log_write(LS_CONFIG, L_ERROR, 0,
+              "CAP_draft_webpush is on but the libkc HTTP transport failed to "
+              "initialise: draft/webpush disabled (pushes could never be sent)");
+#else
+    log_write(LS_CONFIG, L_ERROR, 0,
+              "CAP_draft_webpush is on but this build has no libkc: rebuild with "
+              "./configure --enable-keycloak (needs libcurl and libjansson); "
+              "draft/webpush disabled");
+#endif
+    feature_set(NULL, off, 2);
+  }
+
+  /* Webpush key setup is independent of the transport's health once it
+   * exists: the VAPID key and its ISUPPORT token are what clients register
+   * against.  STATS webpush reports both. */
   if (feature_bool(FEAT_CAP_draft_webpush))
     webpush_setup();
 
