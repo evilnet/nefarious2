@@ -412,6 +412,20 @@ int m_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  * Notification delivery
  * ---------------------------------------------------------------------------*/
 
+/* Delivery counters for STATS webpush: the only surface a deployment
+ * that drops LS_SYSTEM has for "is push working". */
+static struct {
+  unsigned long attempts;    /* pushes handed to the HTTP transport */
+  unsigned long submit_fail; /* refused before leaving (encrypt/sign/no transport) */
+  unsigned long ok;          /* 2xx */
+  unsigned long expired;     /* 410 */
+  unsigned long forbidden;   /* 403 */
+  unsigned long failed;      /* anything else */
+  long last_http;            /* last HTTP status seen */
+  time_t last_at;            /* time of the last completed attempt */
+  time_t last_ok_at;
+} wp_delivery;
+
 /** Context for async push notification delivery callback. */
 struct notify_ctx {
   char account[256];
@@ -428,6 +442,18 @@ static void notify_send_cb(int result, long http_code, void *data)
 
   if (!ctx)
     return;
+
+  wp_delivery.last_http = http_code;
+  wp_delivery.last_at = CurrentTime;
+  if (result == WEBPUSH_OK) {
+    wp_delivery.ok++;
+    wp_delivery.last_ok_at = CurrentTime;
+  } else if (result == WEBPUSH_ERR_EXPIRED)
+    wp_delivery.expired++;
+  else if (result == WEBPUSH_ERR_FORBIDDEN)
+    wp_delivery.forbidden++;
+  else
+    wp_delivery.failed++;
 
   if (result == WEBPUSH_ERR_EXPIRED) {
     /* Subscription expired (HTTP 410) — remove from store */
@@ -549,7 +575,10 @@ static int notify_iter_cb(const char *stored, void *data)
   if (webpush_notify(&sub, nid->message, nid->message_len,
                      notify_send_cb, ctx) != 0) {
     /* Delivery submission failed */
+    wp_delivery.submit_fail++;
     free(ctx);
+  } else {
+    wp_delivery.attempts++;
   }
 
   return 0; /* continue iteration */
@@ -1746,6 +1775,20 @@ void webpush_report_stats(struct Client *to, const struct StatDesc *sd, char *pa
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "W :  Subscriptions: ~%lu, store %lu bytes",
                st.total_subscriptions, st.db_size_bytes);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Pushes since boot: %lu sent, %lu ok, %lu expired(410), %lu forbidden(403), "
+             "%lu failed, %lu not submitted",
+             wp_delivery.attempts, wp_delivery.ok, wp_delivery.expired,
+             wp_delivery.forbidden, wp_delivery.failed, wp_delivery.submit_fail);
+  if (wp_delivery.last_at)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :  Last push: HTTP %ld, %lld s ago; last success %s",
+               wp_delivery.last_http, (long long)(CurrentTime - wp_delivery.last_at),
+               wp_delivery.last_ok_at ? "" : "never");
+  if (wp_delivery.last_ok_at)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :  Last successful push: %lld s ago",
+               (long long)(CurrentTime - wp_delivery.last_ok_at));
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "W :  Current key: %s", cur ? cur->id : "(none)");
   /* Fresh counts: the hourly maintenance figures would lag a REGISTER
