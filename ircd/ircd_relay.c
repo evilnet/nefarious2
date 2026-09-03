@@ -354,6 +354,15 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
     webpush_notify_pm(sptr, acptr, text, type == HISTORY_NOTICE,
                       msgid, timestamp);
 
+  /* Service traffic is not a conversation: AuthServ's "I recognize you"
+   * and "X authed to your account" notices, and the user's own commands
+   * to a bot (which can carry a password).  Storing them keyed the rows
+   * on the bot's session id -- it has no account -- and put that id in
+   * every user's CHATHISTORY TARGETS.  Servers likewise. */
+  if (IsServer(sptr) || IsServer(acptr)
+      || IsServiceClient(sptr) || IsServiceClient(acptr))
+    return;
+
   if (!history_is_available())
     return;
 
