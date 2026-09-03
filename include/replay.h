@@ -138,6 +138,22 @@ extern void replay_continue(struct Client *sptr);
  */
 extern void replay_cancel(struct Client *sptr);
 
+/** Name the other party of the PM pair key @a pair_key for @a sptr: the
+ * live client on the other half's account, else the newest row's sender
+ * as they last used it (own rows contribute their original target).
+ * @return 1 and the nick in @a buf; 0 when there is nobody to name
+ *         (the other half is a session id with no usable row) or the
+ *         other party is a service bot. */
+extern int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
+                                  char *buf, size_t buflen);
+
+/** The reverse: the PM pair key of @a sptr's conversation whose other
+ * party replay_pm_display_nick names @a nick -- how a departed
+ * unauthenticated correspondent, listed by nick, is found again.
+ * @return 1 and the pair key in @a out, else 0. */
+extern int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
+                                   char *out, size_t outsz);
+
 /** Check if sendQ has room for more replay messages.
  * Uses FEAT_REPLAY_SENDQ_THRESHOLD (default 50% of limit).
  * Also used by federation replay paths and multiline echo.

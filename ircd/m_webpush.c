@@ -68,6 +68,12 @@
 static void webpush_subs_cache_invalidate(const char *account);
 static int webpush_store_count_cached(const char *account);
 static int webpush_pm_cooldown_ok(const char *account, const char *origin);
+static long long webpush_wire_armed(int parc, char *parv[]);
+static void webpush_store_receive(const char *account, const char *endpoint,
+                                  const char *p256dh, const char *auth_secret,
+                                  long long armed);
+static int webpush_cooldown_ok(const char *account, const char *origin,
+                               int cd, const char *ns);
 
 #include <string.h>
 #include <stdlib.h>
@@ -243,6 +249,24 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
+  /* Cap per account (spec: FAIL WEBPUSH MAX_REGISTRATIONS).  A re-REGISTER
+   * of an endpoint already held re-arms it and never counts against the
+   * cap; without a cap one account could register thousands of endpoints
+   * and fan every message out to all of them. */
+  {
+    int max = feature_int(FEAT_WEBPUSH_MAX_REGISTRATIONS);
+    char existing[4096];
+    if (max > 0
+        && webpush_store_get(cli_user(sptr)->account, endpoint,
+                             existing, sizeof(existing)) != 0
+        && webpush_store_count(cli_user(sptr)->account) >= max) {
+      sendrawto_one(sptr, "FAIL WEBPUSH MAX_REGISTRATIONS REGISTER %s "
+                    ":This account already has %d push registrations",
+                    endpoint, max);
+      return 0;
+    }
+  }
+
   /* Build stored format: "endpoint|p256dh|auth|armed" -- the arming
    * timestamp is this REGISTER (clients re-arm on every login; the
    * expiry sweep removes records not re-armed within
@@ -259,8 +283,12 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
   }
 
   /* Broadcast to all linked servers */
-  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "R %s %s %s %s",
-                        cli_user(sptr)->account, endpoint, p256dh, auth);
+  /* The arming time rides the wire (trailing param; older peers read
+   * parv[2..5] and ignore it) so every server ages the record from the
+   * same instant. */
+  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "R %s %s %s %s %lld",
+                        cli_user(sptr)->account, endpoint, p256dh, auth,
+                        (long long)CurrentTime);
 
   /* Echo success to client per spec */
   sendrawto_one(sptr, "WEBPUSH REGISTER %s", endpoint);
@@ -415,8 +443,8 @@ static int notify_iter_cb(const char *stored, void *data)
   if (webpush_parse_subscription(stored, &sub) != 0)
   {
     log_write(LS_SYSTEM, L_DEBUG, 0,
-              "WebPush: notify_iter: parse FAILED: len=%d head=%.60s",
-              (int)strlen(stored), stored);
+              "WebPush: notify_iter: parse FAILED: len=%d",
+              (int)strlen(stored));
     return 0; /* skip invalid, continue iteration */
   }
 
@@ -534,16 +562,22 @@ static struct {
   time_t last;
 } wp_cooldown[WEBPUSH_CD_SLOTS];
 
-static int webpush_pm_cooldown_ok(const char *account, const char *origin)
+/** Seconds within which repeated read-marker pushes for one target
+ * are coalesced. */
+#define WEBPUSH_READ_COALESCE 3
+
+/** One push per (account, origin) per @a cd seconds; @a ns keeps the
+ * read-marker keys apart from the PM/highlight keys in the same table. */
+static int webpush_cooldown_ok(const char *account, const char *origin,
+                               int cd, const char *ns)
 {
-  char key[ACCOUNTLEN + NICKLEN + 2];
+  char key[ACCOUNTLEN + CHANNELLEN + 8];
   unsigned int h = 2166136261u;
   const char *p;
-  int cd = feature_int(FEAT_WEBPUSH_COOLDOWN);
 
   if (cd <= 0)
     return 1;
-  ircd_snprintf(0, key, sizeof(key), "%s/%s", account, origin);
+  ircd_snprintf(0, key, sizeof(key), "%s%s/%s", ns ? ns : "", account, origin);
   for (p = key; *p; ++p) {
     h ^= (unsigned char)*p;
     h *= 16777619u;
@@ -557,10 +591,22 @@ static int webpush_pm_cooldown_ok(const char *account, const char *origin)
   return 1;
 }
 
+static int webpush_pm_cooldown_ok(const char *account, const char *origin)
+{
+  return webpush_cooldown_ok(account, origin, feature_int(FEAT_WEBPUSH_COOLDOWN), NULL);
+}
+
 static void webpush_emit_push(const char *account, const char *kind,
                               const char *from, const char *target,
                               const char *msgid, const char *timestamp,
                               const char *text);
+
+/** Mute-list name compare: the ircd casemapping, exact length. */
+static int webpush_mute_name_eq(const char *a, size_t alen,
+                                const char *b, size_t blen)
+{
+  return alen == blen && ircd_strncmp(a, b, alen) == 0;
+}
 
 /** 1 when the account's `draft/webpush/mute` metadata mutes `target`
  * (a DM peer nick or a channel) right now. */
@@ -571,28 +617,32 @@ static int webpush_mute_blocked(const char *account, const char *target)
   if (metadata_account_get(account, "draft/webpush/mute", value) != 0)
     return 0;
 
-  return webpush_mute_check(value, target, CurrentTime);
+  /* Channel names and nicks are case-insensitive under the casemapping;
+   * the highlight path passes the channel's canonical spelling. */
+  return webpush_mute_check_cmp(value, target, CurrentTime, webpush_mute_name_eq);
 }
 
 /** Relay a read marker to the account's webpush subscriptions so other
  * devices can close their notifications (`{"t":"read",...}`).  Deliberately
  * ungated by hold/cooldown/mute: it is how they clear. */
+static void webpush_emit_read(const char *account, const char *target,
+                              const char *timestamp);
+
 void webpush_notify_read(const char *account, const char *target,
                          const char *timestamp)
 {
-  char payload[512];
-
   if (!account || !account[0] || !target || !target[0])
     return;
   if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
     return;
   if (webpush_store_count_cached(account) <= 0)
     return;
-
-  snprintf(payload, sizeof(payload),
-           "{\"t\":\"read\",\"target\":\"%s\",\"ts\":\"%s\"}",
-           target, timestamp ? timestamp : "*");
-  webpush_notify_account(account, payload, strlen(payload));
+  /* Reading a busy conversation sets a marker every few seconds; one
+   * push per target per short window is enough for devices to close
+   * their notifications (deliberately not the minute-long PM cooldown). */
+  if (!webpush_cooldown_ok(account, target, WEBPUSH_READ_COALESCE, "read/"))
+    return;
+  webpush_emit_read(account, target, timestamp ? timestamp : "*");
 }
 
 void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
@@ -619,7 +669,12 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
     return;
   if (!webpush_pm_cooldown_ok(account, cli_name(sptr)))
     return;
+  /* Mutes name a nick or, for a logged-in sender, an account: a nick
+   * change must not bypass a mute. */
   if (webpush_mute_blocked(account, cli_name(sptr)))
+    return;
+  if (cli_user(sptr)->account[0]
+      && webpush_mute_blocked(account, cli_user(sptr)->account))
     return;
 
   webpush_emit_push(account, is_notice ? "notice" : "msg",
@@ -722,6 +777,109 @@ static void webpush_emit_push(const char *account, const char *kind,
   if (pos > 1 && pos < sizeof(out) && out[pos - 1] == '}')
     webpush_notify_account(account, out, pos);
 #endif
+}
+
+/** `{"t":"read","target":T,"ts":TIME}` with the same escaping as every
+ * other payload: a channel name or nick may contain a quote or a
+ * backslash. */
+static void webpush_emit_read(const char *account, const char *target,
+                              const char *timestamp)
+{
+#ifdef HAVE_JANSSON
+  json_t *obj = json_object();
+  char *dump;
+  size_t dumplen;
+
+  if (!obj)
+    return;
+  json_object_set_new(obj, "t", json_string("read"));
+  json_object_set_new(obj, "target", json_string(target));
+  json_object_set_new(obj, "ts", json_string(timestamp));
+  dump = json_dumps(obj, JSON_COMPACT);
+  json_decref(obj);
+  if (!dump)
+    return;
+  dumplen = strlen(dump);
+  if (dumplen > 0 && dumplen <= WEBPUSH_MAX_PAYLOAD)
+    webpush_notify_account(account, dump, dumplen);
+  free(dump);
+#else
+  char esc[WEBPUSH_MAX_PAYLOAD];
+  char out[WEBPUSH_MAX_PAYLOAD];
+  size_t pos = 0;
+
+  str_appendf(out, sizeof(out), &pos, "{\"t\":\"read\",\"target\":\"%s\"",
+              ircd_json_escape(esc, sizeof(esc), target));
+  str_appendf(out, sizeof(out), &pos, ",\"ts\":\"%s\"}",
+              ircd_json_escape(esc, sizeof(esc), timestamp));
+  if (pos > 1 && pos < sizeof(out) && out[pos - 1] == '}')
+    webpush_notify_account(account, out, pos);
+#endif
+}
+
+/** The arming time carried on a WP R/B line (trailing param), or 0 when
+ * the peer did not send one. */
+static long long webpush_wire_armed(int parc, char *parv[])
+{
+  long long armed = 0;
+  if (parc >= 7 && parv[6] && parv[6][0] && parv[6][0] != '-') {
+    char *endp;
+    armed = (long long)strtoull(parv[6], &endp, 10);
+    if (endp == parv[6])
+      armed = 0;
+  }
+  return armed;
+}
+
+/** Store a subscription received from a peer.  The record keeps the
+ * newer of the arming times we hold and the one the peer sent (a peer
+ * without one is stamped now), so a burst never re-arms a record. */
+static void webpush_store_receive(const char *account, const char *endpoint,
+                                  const char *p256dh, const char *auth_secret,
+                                  long long armed)
+{
+  char stored[4096];
+  char existing[4096];
+
+  if (!webpush_store_available())
+    return;
+  if (armed <= 0)
+    armed = (long long)CurrentTime;
+  if (webpush_store_get(account, endpoint, existing, sizeof(existing)) == 0
+      && webpush_armed_at(existing) >= armed)
+    return;   /* ours is at least as fresh */
+  snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh,
+           auth_secret, armed);
+  webpush_subs_cache_invalidate(account);
+  webpush_store_add(account, stored);
+}
+
+struct forget_ctx { const char *account; };
+
+static int forget_iter_cb(const char *stored, void *data)
+{
+  struct forget_ctx *ctx = data;
+  char endpoint[WEBPUSH_MAX_ENDPOINT];
+  size_t len = strcspn(stored, "|");
+  if (len == 0 || len >= sizeof(endpoint))
+    return 0;
+  memcpy(endpoint, stored, len);
+  endpoint[len] = '\0';
+  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "U %s %s",
+                           ctx->account, endpoint);
+  return 0;
+}
+
+void webpush_forget_account(const char *account)
+{
+  struct forget_ctx ctx;
+  if (!account || !account[0] || !webpush_store_available())
+    return;
+  /* Tell the peers first, endpoint by endpoint, then drop ours. */
+  ctx.account = account;
+  webpush_store_foreach(account, forget_iter_cb, &ctx);
+  webpush_subs_cache_invalidate(account);
+  webpush_store_clear(account);
 }
 
 /** Channel-highlight push trigger (v2 -- design:
@@ -837,9 +995,12 @@ static int burst_iter_cb(const char *account, const char *stored, void *data)
   memcpy(auth_buf, auth_secret, len);
   auth_buf[len] = '\0';
 
-  /* Send burst entry to target server: WP B <account> <endpoint> <p256dh> <auth> */
-  sendcmdto_one(&me, CMD_WEBPUSH, bctx->cptr, "B %s %s %s %s",
-                account, endpoint, p256dh, auth_buf);
+  /* Send burst entry to target server:
+   *   WP B <account> <endpoint> <p256dh> <auth> [<armed>]
+   * The arming time rides along so the peer ages the record from the
+   * same instant we do (0 = timestamp-less record; the peer stamps it). */
+  sendcmdto_one(&me, CMD_WEBPUSH, bctx->cptr, "B %s %s %s %s %lld",
+                account, endpoint, p256dh, auth_buf, webpush_armed_at(stored));
 
   return 0; /* continue iteration */
 }
@@ -888,6 +1049,9 @@ static int sweep_iter_cb(const char *account, const char *stored, void *data)
 
   ctx->reaped++;
   webpush_subs_cache_invalidate(account);
+  /* Peers hold their own copy; without this they keep it and burst it
+   * back at the next link. */
+  sendcmdto_serv_butone_v3(&me, CMD_WEBPUSH, NULL, "U %s %s", account, endpoint);
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "WebPush: swept stale subscription for %s (armed %lld)",
             account, armed);
@@ -1151,21 +1315,13 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     const char *endpoint = parv[3];
     const char *p256dh = parv[4];
     const char *auth_secret = parv[5];
-    char stored[4096];
+    long long armed = webpush_wire_armed(parc, parv);
 
-    /* The peer vouches for the subscription being live (arming
-     * timestamps do not cross the wire); stamp our receipt time. */
-    snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh,
-             auth_secret, (long long)CurrentTime);
+    webpush_store_receive(account, endpoint, p256dh, auth_secret, armed);
 
-    if (webpush_store_available()) {
-      webpush_subs_cache_invalidate(account);
-      webpush_store_add(account, stored);
-    }
-
-    /* Propagate to other servers */
-    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s",
-                          account, endpoint, p256dh, auth_secret);
+    /* Propagate to other servers, arming time included */
+    sendcmdto_serv_butone_v3(sptr, CMD_WEBPUSH, cptr, "R %s %s %s %s %lld",
+                          account, endpoint, p256dh, auth_secret, armed);
 
     return 0;
   }
@@ -1193,17 +1349,12 @@ int ms_webpush(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     const char *endpoint = parv[3];
     const char *p256dh = parv[4];
     const char *auth_secret = parv[5];
-    char stored[4096];
+    long long armed = webpush_wire_armed(parc, parv);
 
-    /* The peer vouches for the subscription being live (arming
-     * timestamps do not cross the wire); stamp our receipt time. */
-    snprintf(stored, sizeof(stored), "%s|%s|%s|%lld", endpoint, p256dh,
-             auth_secret, (long long)CurrentTime);
-
-    if (webpush_store_available()) {
-      webpush_subs_cache_invalidate(account);
-      webpush_store_add(account, stored);
-    }
+    /* A burst is a peer's copy: it must never re-arm a record we hold
+     * with a newer stamp, or every relink would resurrect what the
+     * sweep removed. */
+    webpush_store_receive(account, endpoint, p256dh, auth_secret, armed);
 
     /* Don't propagate burst entries — they come from a single source during link */
     return 0;

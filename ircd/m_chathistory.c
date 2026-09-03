@@ -525,6 +525,35 @@ int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
   return CapActive(sptr, CAP_DRAFT_EVENTPLAYBACK);
 }
 
+/** Copy @a in to @a out without the server's own PM-history markers
+ * (`+evilnet.github.io/sid=` and the legacy `+afternet.org/sid=`).  They
+ * exist for the ephemeral participant check in check_history_access and
+ * carry a session id that is nobody else's business.
+ * @return @a out (empty when nothing else was there). */
+static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
+{
+  size_t pos = 0;
+
+  out[0] = '\0';
+  if (!in)
+    return out;
+  while (*in) {
+    const char *end = strchr(in, ';');
+    size_t len = end ? (size_t)(end - in) : strlen(in);
+    int internal = (len >= 22 && memcmp(in, "+evilnet.github.io/sid", 22) == 0)
+                   || (len >= 17 && memcmp(in, "+afternet.org/sid", 17) == 0);
+    if (!internal && len > 0 && pos + len + 2 <= outsz) {
+      if (pos)
+        out[pos++] = ';';
+      memcpy(out + pos, in, len);
+      pos += len;
+      out[pos] = '\0';
+    }
+    in = end ? end + 1 : in + len;
+  }
+  return out;
+}
+
 /** Send a single history message, handling multiline content.
  * If content contains \x1F separators and client supports multiline,
  * send as nested batch. Otherwise truncate to first line.
@@ -642,11 +671,17 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
    * Legacy format: content has the tags, client_tags is empty.
    * Format: @batch=X;time=T;msgid=M;+draft/react=val :sender TAGMSG #channel */
   if (msg->type == HISTORY_TAGMSG) {
-    const char *ctags = msg->client_tags[0] ? msg->client_tags : content;
-    if (tpos)
+    char ctags_buf[516];
+    const char *ctags = strip_internal_tags(msg->client_tags[0] ? msg->client_tags : content,
+                                            ctags_buf, sizeof(ctags_buf));
+    if (tpos && *ctags)
       sendrawto_one(sptr, "@%s;%s :%s %s %s", tags, ctags, msg->sender, cmd, target);
-    else
+    else if (tpos)
+      sendrawto_one(sptr, "@%s :%s %s %s", tags, msg->sender, cmd, target);
+    else if (*ctags)
       sendrawto_one(sptr, "@%s :%s %s %s", ctags, msg->sender, cmd, target);
+    else
+      sendrawto_one(sptr, ":%s %s %s", msg->sender, cmd, target);
     return;
   }
 
@@ -661,7 +696,10 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
         (msg->type == HISTORY_PRIVMSG || msg->type == HISTORY_NOTICE ||
          msg->type == HISTORY_MULTILINE) &&
         CapRecipientHas(sptr, CAP_MSGTAGS)) {
-      ircd_snprintf(0, ctags_str, sizeof(ctags_str), ";%s", msg->client_tags);
+      char kept[516];
+      strip_internal_tags(msg->client_tags, kept, sizeof(kept));
+      if (kept[0])
+        ircd_snprintf(0, ctags_str, sizeof(ctags_str), ";%s", kept);
     }
 
   /* Unit Separators are honored only on genuine multiline records
@@ -1098,6 +1136,17 @@ static int normalize_pm_target(struct Client *sptr, const char *target,
       if (ircd_strcmp(self_id, other_id) < 0) { a = self_id; b = other_id; }
       else                                    { a = other_id; b = self_id; }
       ircd_snprintf(0, normalized, buflen, "%s:%s", a, b);
+
+      /* Not a live user: the name may be the nick a departed
+       * unauthenticated correspondent last used -- what TARGETS lists
+       * them as -- whose half of the key is their session id.  When
+       * nothing is stored under the direct pair, find the pair by that
+       * nick with the derivation TARGETS used to name it. */
+      if (!target_client && history_has_channel(normalized) == 0) {
+        char pair[PM_PAIRKEY_BUFSIZE];
+        if (replay_pm_pair_for_nick(sptr, target, pair, sizeof(pair)))
+          ircd_strncpy(normalized, pair, buflen);
+      }
     }
   }
 
@@ -2092,6 +2141,11 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
     for (tgt = targets; tgt && eligible <= limit; tgt = tgt->next) {
       if (check_history_access(sptr, tgt->target, NULL, 0) != 0)
         continue;
+      if (!IsChannelName(tgt->target) && strchr(tgt->target, ':')) {
+        char name[NICKLEN + 1];
+        if (!replay_pm_display_nick(sptr, tgt->target, name, sizeof(name)))
+          continue;   /* nobody to name it after (see the emit loop) */
+      }
       if (feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE)
           && IsChannelName(tgt->target)) {
         struct Channel *pchan = FindChannel(tgt->target);
@@ -2177,21 +2231,17 @@ static void send_targets_batch(struct Client *sptr, struct HistoryTarget *target
         struct Channel *live = FindChannel(tgt->target);
         if (live)
           row_target = live->chname;
-      } else {
-        char *colon = strchr(tgt->target, ':');
-        if (colon) {
-          size_t l1 = (size_t)(colon - tgt->target);
-          if (history_pm_identity_matches(sptr, tgt->target, l1)) {
-            ircd_strncpy(other_buf, colon + 1, sizeof(other_buf));
-            row_target = other_buf;
-          } else {
-            if (l1 >= sizeof(other_buf))
-              l1 = sizeof(other_buf) - 1;
-            memcpy(other_buf, tgt->target, l1);
-            other_buf[l1] = '\0';
-            row_target = other_buf;
-          }
-        }
+      } else if (strchr(tgt->target, ':')) {
+        /* PM pair key: name the row after the other party (their live
+         * nick, else the nick their newest row carries).  The raw half
+         * of the key is an identity -- for an account-less party a
+         * session id -- and must never reach a client as a "target":
+         * PoxChat opened "Dialog with AaBj..." on prod (2026-09-02).
+         * Pairs nobody can be named for, and pairs with a service bot,
+         * are not listed. */
+        if (!replay_pm_display_nick(sptr, tgt->target, other_buf, sizeof(other_buf)))
+          continue;
+        row_target = other_buf;
       }
       if (CapRecipientHas(sptr, CAP_BATCH))
         sendrawto_one(sptr, "@batch=%s :%s!%s@%s CHATHISTORY TARGETS %s %s",

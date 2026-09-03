@@ -47,6 +47,7 @@
 #include "s_bsd.h"
 #include "send.h"
 
+#include <ctype.h>
 #include <string.h>
 
 /* These are defined in m_chathistory.c and made extern for replay use */
@@ -88,6 +89,23 @@ static void pm_sender_nick(const struct HistoryMessage *m, char *buf, size_t buf
   if (n >= buflen) n = buflen - 1;
   memcpy(buf, m->sender, n);
   buf[n] = '\0';
+}
+
+/** A per-connection session id: 22 chars of base64 (UUID v7).  The one
+ * identity half that is not a name anyone could have typed; an account
+ * name, by contrast, is a reasonable label even when nobody is logged
+ * into it. */
+static int pm_half_is_session_id(const char *s, size_t len)
+{
+  size_t i;
+  if (len != 22)
+    return 0;
+  for (i = 0; i < len; i++) {
+    char c = s[i];
+    if (!(isalnum((unsigned char)c) || c == '+' || c == '/' || c == '_' || c == '-'))
+      return 0;
+  }
+  return 1;
 }
 
 /** The live client logged into @a account, if any.  First match on the
@@ -175,17 +193,23 @@ static int pm_other_nick_from_messages(struct Client *sptr,
  * Shared between the bouncer auto-replay path (replay_next_pm) and
  * the on-demand CHATHISTORY query path (replay_start_batch).
  */
-static void replay_set_target_from_storage(struct Client *sptr,
-                                            struct ReplayState *rs,
-                                            const char *storage_target)
+/** @return 1 when the wire target names a person (channel, a nick from
+ * the rows, or the live client on the other half's account); 0 when it
+ * fell back to the raw other half of the key, which for an account-less
+ * party is a session id nobody would recognise.  On-demand queries echo
+ * what the client asked for; the bouncer's auto-replay skips such pages. */
+static int replay_set_target_from_storage(struct Client *sptr,
+                                           struct ReplayState *rs,
+                                           const char *storage_target)
 {
   const char *colon;
+  int named = 0;
 
   if (!storage_target || !*storage_target) {
     rs->target[0] = '\0';
     rs->other_nick[0] = '\0';
     rs->is_pm = 0;
-    return;
+    return 0;
   }
 
   colon = strchr(storage_target, ':');
@@ -194,28 +218,145 @@ static void replay_set_target_from_storage(struct Client *sptr,
     ircd_strncpy(rs->target, storage_target, sizeof(rs->target));
     rs->other_nick[0] = '\0';
     rs->is_pm = 0;
-    return;
+    return 1;
   }
 
   rs->is_pm = 1;
   if (pm_other_nick_from_messages(sptr, rs->messages,
                                   rs->other_nick, sizeof(rs->other_nick))) {
-    /* real nick from the stream */
+    named = 1;   /* real nick from the stream */
   } else {
-    /* Empty batch: fall back to the non-caller identity half of the key.
-     * May surface an account/session id on an EMPTY PM batch — cosmetic,
-     * no content, never leaks the colon. */
+    /* No usable row: the other half of the key is an identity, an
+     * account or a session id.  A live client on that account gives a
+     * nick; otherwise the raw half stands and the caller decides. */
     size_t left_len = (size_t)(colon - storage_target);
-    if (history_pm_identity_matches(sptr, storage_target, left_len))
-      ircd_strncpy(rs->other_nick, colon + 1, sizeof(rs->other_nick));
-    else {
-      size_t cl = left_len < sizeof(rs->other_nick) ? left_len
-                                                    : sizeof(rs->other_nick) - 1;
-      memcpy(rs->other_nick, storage_target, cl);
-      rs->other_nick[cl] = '\0';
+    const char *other;
+    size_t olen;
+    struct Client *live;
+
+    if (history_pm_identity_matches(sptr, storage_target, left_len)) {
+      other = colon + 1;
+      olen = strlen(other);
+    } else {
+      other = storage_target;
+      olen = left_len;
+    }
+    if (olen >= sizeof(rs->other_nick))
+      olen = sizeof(rs->other_nick) - 1;
+    memcpy(rs->other_nick, other, olen);
+    rs->other_nick[olen] = '\0';
+
+    live = pm_live_client_for_account(rs->other_nick);
+    if (live) {
+      ircd_strncpy(rs->other_nick, cli_name(live), sizeof(rs->other_nick));
+      named = 1;
+    } else if (!pm_half_is_session_id(rs->other_nick, strlen(rs->other_nick))) {
+      named = 1;   /* an account name: a label a person would recognise */
     }
   }
   ircd_strncpy(rs->target, rs->other_nick, sizeof(rs->target));
+  return named;
+}
+
+int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
+                           char *buf, size_t buflen)
+{
+  const char *colon = pair_key ? strchr(pair_key, ':') : NULL;
+  struct Client *live;
+  char half[CHANNELLEN + 1];
+  int named = 0;
+
+  if (!colon || !buf || buflen == 0)
+    return 0;
+  buf[0] = '\0';
+
+  /* The other half of the key, and the live client on that account. */
+  {
+    size_t left_len = (size_t)(colon - pair_key);
+    const char *other;
+    size_t olen;
+
+    if (history_pm_identity_matches(sptr, pair_key, left_len)) {
+      other = colon + 1;
+      olen = strlen(other);
+    } else {
+      other = pair_key;
+      olen = left_len;
+    }
+    if (olen >= sizeof(half))
+      return 0;
+    memcpy(half, other, olen);
+    half[olen] = '\0';
+    live = pm_live_client_for_account(half);
+    if (live) {
+      ircd_strncpy(buf, cli_name(live), buflen);
+      named = 1;
+    }
+  }
+
+  /* Else the newest rows: the other party's nick as they last used it. */
+  if (!named) {
+    struct HistoryMessage *msgs = NULL;
+    if (history_query_latest(pair_key, HISTORY_REF_NONE, NULL, 20, &msgs, NULL) > 0
+        && msgs) {
+      named = pm_other_nick_from_messages(sptr, msgs, buf, buflen);
+      history_free_messages(msgs);
+    }
+  }
+
+  /* Else an account name is still a label; a session id is not. */
+  if (!named && !pm_half_is_session_id(half, strlen(half))) {
+    ircd_strncpy(buf, half, buflen);
+    named = 1;
+  }
+  if (!named)
+    return 0;
+
+  /* A service bot is not a correspondent (rows from before service
+   * traffic stopped being stored). */
+  live = FindUser(buf);
+  if (live && IsServiceClient(live))
+    return 0;
+  return 1;
+}
+
+int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
+                            char *out, size_t outsz)
+{
+  struct HistoryTarget *list = NULL, *t;
+  const char *best_ts = NULL;
+  int found = 0;
+
+  if (!nick || !*nick || !out || outsz == 0)
+    return 0;
+  out[0] = '\0';
+
+  /* Every target on this server -- the walk TARGETS makes, unbounded,
+   * because the index is in key order and a limit would cut off the
+   * newest pairs -- kept to the PM pairs that involve the caller.  Of
+   * those whose other party the TARGETS derivation names @a nick, the
+   * most recently active wins: a guest nick is reused by different
+   * people over time. */
+  if (history_query_targets("0", "99999999999.999", 1, 1000000, &list) <= 0
+      || !list)
+    return 0;
+  for (t = list; t; t = t->next) {
+    char name[NICKLEN + 1];
+    if (IsChannelName(t->target) || !strchr(t->target, ':'))
+      continue;
+    if (!is_pm_target_for_client(t->target, sptr))
+      continue;
+    if (best_ts && strcmp(t->last_timestamp, best_ts) <= 0)
+      continue;   /* older than the best match so far */
+    if (replay_pm_display_nick(sptr, t->target, name, sizeof(name))
+        && ircd_strcmp(name, nick) == 0) {
+      ircd_strncpy(out, t->target, outsz);
+      best_ts = t->last_timestamp;
+      found = 1;
+    }
+  }
+  history_free_targets(list);
+  return found;
 }
 
 /** Lazily emit the outer evilnet.github.io/bouncer-replay batch on first
@@ -536,7 +677,15 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
      * derives the display nick from the message stream. */
     rs->messages = messages;
     rs->current = messages;
-    replay_set_target_from_storage(sptr, rs, tgt->target);
+    if (!replay_set_target_from_storage(sptr, rs, tgt->target)) {
+      /* Nobody to name the page after (the other half is a session id
+       * with no usable row): an auto-replay must not open a
+       * conversation on it. */
+      history_free_messages(messages);
+      rs->messages = NULL;
+      rs->current = NULL;
+      continue;
+    }
 
     rs->pm_count++;
 

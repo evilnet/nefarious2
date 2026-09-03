@@ -1214,6 +1214,12 @@ struct Client {
 #define IsIPv6(x)               HasFlag(x, FLAG_IPV6)
 /** Return non-zero if the client claims to be a services server. */
 #define IsService(x)            HasFlag(x, FLAG_SERVICE)
+/** A service bot: carries the channel-service user mode (+k) or sits on a
+ * server that announced itself as a service (SERVER ... +s).  Neither
+ * needs a U-line. */
+#define IsServiceClient(x)      (IsChannelService(x) \
+                                 || (cli_user(x) && cli_user(x)->server \
+                                     && IsService(cli_user(x)->server)))
 /** Return non-zero if the client has oplevels support. */
 #define IsOpLevels(x)           HasFlag(x, FLAG_OPLEVELS)
 /** Return non-zero if the server supports P10 multiline batches. */
