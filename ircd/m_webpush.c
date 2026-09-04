@@ -60,6 +60,7 @@
 #include "send.h"
 #include "webpush.h"
 #include "webpush_keyring.h"
+#include "webpush_attention.h"
 #include "webpush_mute.h"
 #include "webpush_expiry.h"
 #include "webpush_store.h"
@@ -717,6 +718,84 @@ static void webpush_emit_push(const char *account, const char *kind,
                               const char *msgid, const char *timestamp,
                               const char *text);
 
+/* ---------------------------------------------------------------------------
+ * Attention: push only when nobody is looking
+ * ------------------------------------------------------------------------- */
+
+/* Why the last pushes were NOT sent, for STATS webpush. */
+static struct {
+  unsigned long attended, cooldown, muted;
+  char last_reason[48];
+  time_t last_at;
+} wp_suppress;
+
+static void wp_suppressed(unsigned long *counter, const char *reason,
+                          const char *account)
+{
+  (*counter)++;
+  ircd_snprintf(0, wp_suppress.last_reason, sizeof(wp_suppress.last_reason),
+                "%s (%s)", reason, account);
+  wp_suppress.last_at = CurrentTime;
+}
+
+/** Idle window for an account: its `draft/webpush/idle` metadata (seconds)
+ * when set, else WEBPUSH_IDLE. */
+static long long webpush_idle_window(const char *account)
+{
+  char v[METADATA_VALUE_LEN];
+  if (metadata_account_get(account, "draft/webpush/idle", v) == 0 && v[0]) {
+    char *endp;
+    long long n = strtoll(v, &endp, 10);
+    if (endp != v && n >= 0)
+      return n;
+  }
+  return (long long)feature_int(FEAT_WEBPUSH_IDLE);
+}
+
+static void wp_conn_state(struct Client *c, int held, long long replicated,
+                          struct webpush_conn_state *out)
+{
+  out->held = held;
+  out->away = 0;
+  out->last_msg = replicated;
+  if (!c) {
+    out->held = 1;
+    return;
+  }
+  if (MyConnect(c) && cli_connect(c))
+    out->away = con_pre_away(cli_connect(c)) != 0;
+  else
+    out->away = (cli_user(c) && cli_user(c)->away) ? 1 : 0;
+  if (cli_user(c) && (long long)cli_user(c)->last > out->last_msg)
+    out->last_msg = cli_user(c)->last;
+}
+
+/** 1 when no connection of @a acptr's account attends: every one is held,
+ * away, or idle past the window.  @a acptr is the session primary (or a
+ * plain client); aliases are read from the session, local ones through
+ * their own idle clock and away state, remote ones through the activity
+ * the bouncer replicates (BX U la=) and their AWAY.  See
+ * webpush-attention-trigger.md. */
+static int webpush_account_unattended(struct Client *acptr, const char *account)
+{
+  struct webpush_conn_state st[BOUNCER_MAX_ALIASES + 1];
+  struct BouncerSession *sess = bounce_get_session(acptr);
+  long long idle = webpush_idle_window(account);
+  int n = 0, i;
+
+  if (!sess) {
+    wp_conn_state(acptr, 0, 0, &st[n++]);
+    return webpush_unattended(st, n, (long long)CurrentTime, idle);
+  }
+  wp_conn_state(sess->hs_client, sess->hs_state == BOUNCE_HOLDING,
+                (long long)sess->hs_last_active, &st[n++]);
+  for (i = 0; i < sess->hs_alias_count && n < (int)(sizeof(st) / sizeof(st[0])); i++) {
+    struct Client *al = findNUser(sess->hs_aliases[i].ba_numeric);
+    wp_conn_state(al, al ? 0 : 1, (long long)sess->hs_aliases[i].ba_last_active, &st[n++]);
+  }
+  return webpush_unattended(st, n, (long long)CurrentTime, idle);
+}
+
 /** Mute-list name compare: the ircd casemapping, exact length. */
 static int webpush_mute_name_eq(const char *a, size_t alen,
                                 const char *b, size_t blen)
@@ -765,15 +844,13 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
                        const char *text, int is_notice,
                        const char *msgid, const char *timestamp)
 {
-  struct BouncerSession *sess;
   const char *account;
 
   if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
     return;
-  if (!sptr || !acptr || !MyConnect(acptr) || !IsBouncerHold(acptr))
-    return;
-  sess = bounce_get_session(acptr);
-  if (!sess || sess->hs_state != BOUNCE_HOLDING)
+  /* acptr is the account's primary (a held ghost, or a live client); the
+   * decision runs once per message there, never per alias delivery. */
+  if (!sptr || !acptr || !MyConnect(acptr) || IsBouncerAlias(acptr))
     return;
   if (!cli_user(acptr) || !cli_user(acptr)->account[0])
     return;
@@ -783,15 +860,24 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
             cli_name(sptr), cli_name(acptr), webpush_store_count_cached(account));
   if (webpush_store_count_cached(account) <= 0)
     return;
-  if (!webpush_pm_cooldown_ok(account, cli_name(sptr)))
+  /* Push only when nobody is attending the account (held, away, or idle
+   * on every connection) -- not only when the session is held. */
+  if (!webpush_account_unattended(acptr, account)) {
+    wp_suppressed(&wp_suppress.attended, "attended", account);
     return;
+  }
+  if (!webpush_pm_cooldown_ok(account, cli_name(sptr))) {
+    wp_suppressed(&wp_suppress.cooldown, "cooldown", account);
+    return;
+  }
   /* Mutes name a nick or, for a logged-in sender, an account: a nick
    * change must not bypass a mute. */
-  if (webpush_mute_blocked(account, cli_name(sptr)))
+  if (webpush_mute_blocked(account, cli_name(sptr))
+      || (cli_user(sptr)->account[0]
+          && webpush_mute_blocked(account, cli_user(sptr)->account))) {
+    wp_suppressed(&wp_suppress.muted, "muted", account);
     return;
-  if (cli_user(sptr)->account[0]
-      && webpush_mute_blocked(account, cli_user(sptr)->account))
-    return;
+  }
 
   webpush_emit_push(account, is_notice ? "notice" : "msg",
                     cli_name(sptr), cli_name(acptr), msgid, timestamp, text);
@@ -1035,31 +1121,37 @@ void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
 
   for (member = chptr->members; member; member = member->next_member) {
     struct Client *u = member->user;
-    struct BouncerSession *sess;
     const char *account;
 
     if (IsZombie(member))
       continue;
-    if (!IsBouncerHold(u) || !MyConnect(u))
+    /* One decision per session: its primary (held ghost or live client),
+     * never its aliases. */
+    if (!MyConnect(u) || IsBouncerAlias(u))
       continue;
     if (!cli_user(u) || !cli_user(u)->account[0])
       continue;
     account = cli_user(u)->account;
     if (sender_acct && 0 == ircd_strcmp(sender_acct, account))
       continue;  /* no self-highlights via own aliases */
-    sess = bounce_get_session(u);
-    if (!sess || sess->hs_state != BOUNCE_HOLDING)
-      continue;
     if (webpush_store_count_cached(account) <= 0)
       continue;
     if (is_silenced(sptr, u, 1))
       continue;
     if (!ircd_text_mentions(scan, cli_name(u)))
       continue;
-    if (!webpush_pm_cooldown_ok(account, chptr->chname))
+    if (!webpush_account_unattended(u, account)) {
+      wp_suppressed(&wp_suppress.attended, "attended", account);
       continue;
-    if (webpush_mute_blocked(account, chptr->chname))
+    }
+    if (!webpush_pm_cooldown_ok(account, chptr->chname)) {
+      wp_suppressed(&wp_suppress.cooldown, "cooldown", account);
       continue;
+    }
+    if (webpush_mute_blocked(account, chptr->chname)) {
+      wp_suppressed(&wp_suppress.muted, "muted", account);
+      continue;
+    }
     webpush_emit_push(account, "hl", cli_name(sptr), chptr->chname,
                       msgid, timestamp, scan);
   }
@@ -1789,6 +1881,14 @@ void webpush_report_stats(struct Client *to, const struct StatDesc *sd, char *pa
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
                "W :  Last successful push: %lld s ago",
                (long long)(CurrentTime - wp_delivery.last_ok_at));
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Suppressed since boot: %lu attended, %lu cooldown, %lu muted; idle window %d s",
+             wp_suppress.attended, wp_suppress.cooldown, wp_suppress.muted,
+             feature_int(FEAT_WEBPUSH_IDLE));
+  if (wp_suppress.last_at)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :  Last suppressed: %s, %lld s ago",
+               wp_suppress.last_reason, (long long)(CurrentTime - wp_suppress.last_at));
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "W :  Current key: %s", cur ? cur->id : "(none)");
   /* Fresh counts: the hourly maintenance figures would lag a REGISTER

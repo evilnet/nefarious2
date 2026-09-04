@@ -1324,6 +1324,7 @@ static struct FeatureDesc {
   F_I(WEBPUSH_MAX_REGISTRATIONS, 0, 10, 0), /* endpoints per account; 0 = unlimited */
   F_B(WEBPUSH_HIGHLIGHTS, 0, 1, 0),
   F_I(WEBPUSH_KEY_ROTATE, 0, 7776000, 0), /* 90 days between VAPID key rotations; 0 = never */
+  F_I(WEBPUSH_IDLE, 0, 900, 0), /* a connection attends while it spoke within this many seconds; 0 = held/away only */
   F_I(METADATA_MAX_KEYS, 0, 20, 0),
   F_I(METADATA_MAX_VALUE_BYTES, 0, 300, 0),  /* Limited by 512-byte IRC message size */
   F_I(METADATA_MAX_SUBS, 0, 50, 0),

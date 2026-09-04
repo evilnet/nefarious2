@@ -40,6 +40,7 @@ CMOCKA_TESTPROGS = \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
 	webpush_keyring_cmocka \
+	webpush_attention_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka
 
@@ -71,6 +72,7 @@ DEP_SRC = \
 	webpush_mute_cmocka.c \
 	webpush_expiry_cmocka.c \
 	webpush_keyring_cmocka.c \
+	webpush_attention_cmocka.c \
 	kc_url_cmocka.c \
 	kc_base64_cmocka.c \
 	kc_cache_cmocka.c \
@@ -340,3 +342,11 @@ webpush_keyring_test.o: ../webpush_keyring.c ../../include/webpush_keyring.h
 WEBPUSH_KEYRING_CMOCKA_OBJS = webpush_keyring_cmocka.o webpush_keyring_test.o
 webpush_keyring_cmocka: $(WEBPUSH_KEYRING_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_KEYRING_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webpush_attention tests - the module is pure (no log_write, no ircd deps)
+webpush_attention_test.o: ../webpush_attention.c ../../include/webpush_attention.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../webpush_attention.c
+
+WEBPUSH_ATTENTION_CMOCKA_OBJS = webpush_attention_cmocka.o webpush_attention_test.o
+webpush_attention_cmocka: $(WEBPUSH_ATTENTION_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_ATTENTION_CMOCKA_OBJS) $(CMOCKA_LIBS)
