@@ -27,6 +27,7 @@
 #include "config.h"
 
 #include "s_user.h"
+#include "webpush.h"
 #include "bouncer_session.h"
 #include "history.h"
 #include "capab.h"
@@ -3470,6 +3471,10 @@ send_supported(struct Client *cptr)
   if (cclass && FlagHas(&cclass->restrictflags, CRFLAG_REQUIRE_SASL))
     send_reply(cptr, RPL_ISUPPORT, "draft/ACCOUNTREQUIRED");
 
+  /* The VAPID token the client just saw is the key it will register
+   * under (draft/webpush key binding). */
+  webpush_note_key_seen(cptr);
+
   return 0; /* convenience return, if it's ever needed */
 }
 
@@ -3505,6 +3510,7 @@ send_supported_batched(struct Client *cptr)
     /* No batch support, fall back to regular ISUPPORT */
     for (line = isupport_lines; line; line = line->next)
       send_reply(cptr, RPL_ISUPPORT, line->value.cp);
+    webpush_note_key_seen(cptr);
     return 0;
   }
 
@@ -3535,6 +3541,8 @@ send_supported_batched(struct Client *cptr)
 
   /* End batch: BATCH -id */
   sendcmdto_one(&me, CMD_BATCH_CMD, cptr, "-%s", batchid);
+
+  webpush_note_key_seen(cptr);
 
   return 0;
 }

@@ -4610,6 +4610,7 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
   struct Membership *member;
   int winner_idx = -1;
   time_t oldest_time = 0;
+  time_t winner_activity = 0;
   const char *me_yxx;
 
   if (session->hs_alias_count <= 0)
@@ -4622,21 +4623,33 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
     ircd_snprintf(0, old_numeric, sizeof(old_numeric), "%s%s",
                   cli_yxx(cli_user(old_primary)->server), cli_yxx(old_primary));
 
-  /* A0: Tiebreaker — oldest connection (lowest cli_firsttime).  When
-   * `local_only` is set, candidates on remote servers are skipped — the
-   * caller has decided that a cross-server promote is unsafe in its
-   * call context (typical: m_quit's immediate-promote path, which
-   * can't safely emit BX P against an alias whose home server may be
-   * concurrently emitting BX X for it). */
+  /* A0: the connection the user was actually using wins -- most recent
+   * activity (local: the idle clock; remote: the replicated ba_last_active,
+   * kept live by BX U la=), ties broken by the oldest connection (lowest
+   * cli_firsttime), which was the whole rule while activity only
+   * replicated at link time.  When `local_only` is set, candidates on
+   * remote servers are skipped — the caller has decided that a
+   * cross-server promote is unsafe in its call context (typical:
+   * m_quit's immediate-promote path, which can't safely emit BX P
+   * against an alias whose home server may be concurrently emitting
+   * BX X for it). */
   me_yxx = cli_yxx(&me);
   for (j = 0; j < session->hs_alias_count; j++) {
     struct Client *candidate = findNUser(session->hs_aliases[j].ba_numeric);
+    time_t activity;
     if (!candidate || !IsBouncerAlias(candidate))
       continue;
     if (local_only
         && 0 != ircd_strcmp(session->hs_aliases[j].ba_server, me_yxx))
       continue;
-    if (!winner_numeric || cli_firsttime(candidate) < oldest_time) {
+    activity = session->hs_aliases[j].ba_last_active;
+    if (MyConnect(candidate) && cli_user(candidate)
+        && cli_user(candidate)->last > activity)
+      activity = cli_user(candidate)->last;
+    if (!winner_numeric
+        || activity > winner_activity
+        || (activity == winner_activity && cli_firsttime(candidate) < oldest_time)) {
+      winner_activity = activity;
       oldest_time = cli_firsttime(candidate);
       winner_server = session->hs_aliases[j].ba_server;
       winner_numeric = session->hs_aliases[j].ba_numeric;
@@ -8467,6 +8480,32 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
   alias_numeric = parv[2];
   field_value = parv[3];
 
+  /* la=<unix time>: a connection's activity (quiet -> active transition
+   * on its own server).  Applies to aliases AND primaries -- the numeric
+   * may name a primary, which the alias guard below would otherwise
+   * defer forever waiting for a BX C that never comes. */
+  if (0 == strncmp(field_value, "la=", 3)) {
+    struct Client *who = bx_find_user_strict(alias_numeric);
+    time_t la = (time_t)strtoul(field_value + 3, NULL, 10);
+    if (who && IsUser(who) && IsAccount(who) && la > 0) {
+      struct AccountSessions *as = bounce_find_by_account(cli_user(who)->account);
+      struct BouncerSession *sess;
+      int i;
+      for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext) {
+        if (!IsBouncerAlias(who)) {
+          if (sess->hs_client == who && la > sess->hs_last_active)
+            sess->hs_last_active = la;
+          continue;
+        }
+        for (i = 0; i < sess->hs_alias_count; i++)
+          if (0 == strcmp(sess->hs_aliases[i].ba_numeric, alias_numeric)
+              && la > sess->hs_aliases[i].ba_last_active)
+            sess->hs_aliases[i].ba_last_active = la;
+      }
+    }
+    goto forward;
+  }
+
   alias = bx_find_user_strict(alias_numeric);
   if (!alias || !IsBouncerAlias(alias)) {
     /* Burst race: defer the local identity update for replay when
@@ -9808,6 +9847,18 @@ void bounce_record_activity(struct Client *from)
       for (i = 0; i < sess->hs_alias_count; i++) {
         if (0 == strcmp(sess->hs_aliases[i].ba_numeric, full_numeric)) {
           sess->hs_aliases[i].ba_last_active = CurrentTime;
+          /* Quiet -> active transition: tell the replicas.  Every
+           * consumer of a remote connection's activity (promotion,
+           * session idle, webpush attention) reads the replicated
+           * value; before this it was frozen at link-burst time. */
+          if (MyConnect(from)
+              && CurrentTime - sess->hs_aliases[i].ba_last_active_emitted
+                 >= BOUNCE_ACTIVITY_QUIET) {
+            sess->hs_aliases[i].ba_last_active_emitted = CurrentTime;
+            sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                                  "U %s la=%lu", full_numeric,
+                                  (unsigned long)CurrentTime);
+          }
           return;
         }
       }
@@ -9818,10 +9869,44 @@ void bounce_record_activity(struct Client *from)
     for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
       if (sess->hs_client == from) {
         sess->hs_last_active = CurrentTime;
+        /* Same transition rule as aliases; only worth a line when the
+         * session has other connections whose servers may read it. */
+        if (MyConnect(from) && sess->hs_alias_count > 0
+            && cli_user(from) && cli_user(from)->server
+            && CurrentTime - sess->hs_last_active_emitted >= BOUNCE_ACTIVITY_QUIET) {
+          sess->hs_last_active_emitted = CurrentTime;
+          sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                                "U %s%s la=%lu",
+                                cli_yxx(cli_user(from)->server), cli_yxx(from),
+                                (unsigned long)CurrentTime);
+        }
         return;
       }
     }
   }
+}
+
+time_t bounce_session_last_active(struct BouncerSession *session)
+{
+  time_t best = 0;
+  int i;
+
+  if (!session)
+    return 0;
+  if (session->hs_client && MyConnect(session->hs_client)
+      && cli_user(session->hs_client) && cli_user(session->hs_client)->last > best)
+    best = cli_user(session->hs_client)->last;
+  if (session->hs_last_active > best)
+    best = session->hs_last_active;
+  for (i = 0; i < session->hs_alias_count; i++) {
+    struct Client *alias = findNUser(session->hs_aliases[i].ba_numeric);
+    time_t la = session->hs_aliases[i].ba_last_active;
+    if (alias && MyConnect(alias) && cli_user(alias) && cli_user(alias)->last > la)
+      la = cli_user(alias)->last;
+    if (la > best)
+      best = la;
+  }
+  return best;
 }
 
 /** Compute effective away state across all session connections.

@@ -5,9 +5,11 @@
  *   - "subscriptions": per-account push subscriptions
  *     Key:   account\0<sha256_hex(endpoint)[0:16]>
  *     Value: endpoint|p256dh_b64|auth_b64
- *   - "config": server-level config (VAPID key)
- *     Key:   "vapid_privkey"
- *     Value: 32-byte raw private key
+ *   - "config": server-level config
+ *     Key:   "key/<id>"       Value: webpush_key_format() text (the ring)
+ *     Key:   "vapid_privkey"  Value: 32-byte raw private key (pre-ring,
+ *                             migrated into the ring at setup)
+ *     Key:   anything else    Value: opaque (bad-key quarantine, markers)
  *
  * Routes through the storage abstraction (db_env.h / db_txn.h /
  * db_cursor.h).  Backend (libmdbx today, RocksDB after migration) is
@@ -483,39 +485,148 @@ int webpush_store_foreach_all(webpush_store_iter_all_cb cb, void *data)
 }
 
 /* ---------------------------------------------------------------------------
- * VAPID key persistence
+ * Config records: the key ring and the pre-ring VAPID key
  * ---------------------------------------------------------------------------*/
 
 static const char vapid_key_name[] = "vapid_privkey";
+static const char ring_prefix[] = "key/";
 
-int webpush_store_set_vapid_key(const unsigned char *privkey, size_t privkey_len)
+int webpush_store_cfg_put(const char *name, const void *val, size_t len)
 {
   struct db_writebatch *wb;
   int rc;
 
-  if (!webpush_db_available || !privkey || privkey_len != 32)
+  if (!webpush_db_available || !name || !name[0] || !val)
     return -1;
 
   wb = db_writebatch_new(webpush_env);
   if (!wb)
     return -1;
 
-  rc = db_writebatch_put(wb, webpush_cfg_cf,
-                         vapid_key_name, sizeof(vapid_key_name) - 1,
-                         privkey, privkey_len);
+  rc = db_writebatch_put(wb, webpush_cfg_cf, name, strlen(name), val, len);
   if (rc != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WebPush store: set VAPID key failed: %s", db_strerror(rc));
+              "WebPush store: put config %s failed: %s", name, db_strerror(rc));
+    db_writebatch_destroy(wb);
+    return -1;
+  }
+  /* Config records hold private keys: durable commit. */
+  rc = db_writebatch_commit(wb, /*sync_durably=*/1);
+  db_writebatch_destroy(wb);
+  return (rc == DB_OK) ? 0 : -1;
+}
+
+int webpush_store_cfg_get(const char *name, char *out, size_t outsz, size_t *outlen)
+{
+  struct db_val val = { NULL, 0 };
+  int rc;
+
+  if (!webpush_db_available || !name || !name[0] || !out || outsz == 0)
+    return -1;
+
+  rc = db_get(webpush_env, webpush_cfg_cf, name, strlen(name), NULL, &val);
+  if (rc == DB_NOTFOUND)
+    return 1;
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0,
+              "WebPush store: get config %s failed: %s", name, db_strerror(rc));
+    return -1;
+  }
+  if (val.len >= outsz) {
+    db_val_free(&val);
+    return -1;
+  }
+  memcpy(out, val.base, val.len);
+  out[val.len] = '\0';
+  if (outlen)
+    *outlen = val.len;
+  db_val_free(&val);
+  return 0;
+}
+
+int webpush_store_cfg_del(const char *name)
+{
+  struct db_writebatch *wb;
+  int rc;
+
+  if (!webpush_db_available || !name || !name[0])
+    return -1;
+
+  wb = db_writebatch_new(webpush_env);
+  if (!wb)
+    return -1;
+  rc = db_writebatch_del(wb, webpush_cfg_cf, name, strlen(name));
+  if (rc != DB_OK && rc != DB_NOTFOUND) {
     db_writebatch_destroy(wb);
     return -1;
   }
   rc = db_writebatch_commit(wb, /*sync_durably=*/1);
   db_writebatch_destroy(wb);
-  if (rc != DB_OK)
+  return (rc == DB_OK) ? 0 : -1;
+}
+
+static int ring_key_name(char *buf, size_t bufsz, const char *id)
+{
+  int n;
+  if (!id || !id[0])
+    return -1;
+  n = snprintf(buf, bufsz, "%s%s", ring_prefix, id);
+  return (n > 0 && (size_t)n < bufsz) ? 0 : -1;
+}
+
+int webpush_store_key_put(const char *id, const char *text)
+{
+  char name[WEBPUSH_KEY_MAX];
+  if (ring_key_name(name, sizeof(name), id) != 0 || !text)
+    return -1;
+  return webpush_store_cfg_put(name, text, strlen(text));
+}
+
+int webpush_store_key_del(const char *id)
+{
+  char name[WEBPUSH_KEY_MAX];
+  if (ring_key_name(name, sizeof(name), id) != 0)
+    return -1;
+  return webpush_store_cfg_del(name);
+}
+
+int webpush_store_key_foreach(webpush_store_key_cb cb, void *data)
+{
+  struct db_iter *it;
+  size_t plen = sizeof(ring_prefix) - 1;
+  int count = 0;
+  int rc;
+
+  if (!webpush_db_available || !cb)
     return -1;
 
-  log_write(LS_SYSTEM, L_INFO, 0, "WebPush store: VAPID key persisted");
-  return 0;
+  it = db_iter_open(webpush_env, webpush_cfg_cf, NULL);
+  if (!it)
+    return -1;
+
+  rc = db_iter_seek(it, ring_prefix, plen);
+  while (rc == DB_OK && db_iter_valid(it)) {
+    size_t klen, vlen;
+    const void *k = db_iter_key(it, &klen);
+    const void *v = db_iter_value(it, &vlen);
+    char id[WEBPUSH_KEY_MAX];
+    char text[WEBPUSH_KEY_MAX];
+
+    if (klen < plen || memcmp(k, ring_prefix, plen) != 0)
+      break;
+    if (klen - plen < sizeof(id) && vlen < sizeof(text)) {
+      memcpy(id, (const char *)k + plen, klen - plen);
+      id[klen - plen] = '\0';
+      memcpy(text, v, vlen);
+      text[vlen] = '\0';
+      count++;
+      if (cb(id, text, data) != 0)
+        break;
+    }
+    rc = db_iter_next(it);
+  }
+  db_iter_close(it);
+  return count;
 }
 
 int webpush_store_get_vapid_key(unsigned char *privkey, size_t *privkey_len)
@@ -604,8 +715,16 @@ int webpush_store_foreach(const char *account, webpush_store_iter_cb cb,
 int webpush_store_foreach_all(webpush_store_iter_all_cb cb, void *data)
 { (void)cb; (void)data; return -1; }
 
-int webpush_store_set_vapid_key(const unsigned char *privkey, size_t privkey_len)
-{ (void)privkey; (void)privkey_len; return -1; }
+int webpush_store_cfg_put(const char *name, const void *val, size_t len)
+{ (void)name; (void)val; (void)len; return -1; }
+int webpush_store_cfg_get(const char *name, char *out, size_t outsz, size_t *outlen)
+{ (void)name; (void)out; (void)outsz; (void)outlen; return -1; }
+int webpush_store_cfg_del(const char *name) { (void)name; return -1; }
+int webpush_store_key_put(const char *id, const char *text)
+{ (void)id; (void)text; return -1; }
+int webpush_store_key_del(const char *id) { (void)id; return -1; }
+int webpush_store_key_foreach(webpush_store_key_cb cb, void *data)
+{ (void)cb; (void)data; return -1; }
 
 int webpush_store_get_vapid_key(unsigned char *privkey, size_t *privkey_len)
 { (void)privkey; (void)privkey_len; return -1; }

@@ -103,15 +103,32 @@ typedef int (*webpush_store_iter_all_cb)(const char *account,
 int webpush_store_foreach_all(webpush_store_iter_all_cb cb, void *data);
 
 /*
- * Store VAPID private key for persistence across restarts.
- * privkey: 32-byte P-256 private key scalar
- * Returns 0 on success, -1 on error.
+ * Server-level config records (the "config" column family).
+ *
+ * Key ring entries live under "key/<id>" with the text record produced by
+ * webpush_key_format().  The pre-ring single key lives under
+ * "vapid_privkey" (32 raw bytes) and is migrated into the ring at setup.
+ * Arbitrary records (bad-key quarantine, markers) use the generic calls.
  */
-int webpush_store_set_vapid_key(const unsigned char *privkey, size_t privkey_len);
+
+/* Put/get/delete a config record.  get returns 0 when found (NUL-
+ * terminated copy in out, *outlen bytes), 1 when absent, -1 on error;
+ * binary values are fine (outlen tells the real length). */
+int webpush_store_cfg_put(const char *name, const void *val, size_t len);
+int webpush_store_cfg_get(const char *name, char *out, size_t outsz, size_t *outlen);
+int webpush_store_cfg_del(const char *name);
+
+/* Persist / drop a ring key ("key/<id>" -> text). */
+int webpush_store_key_put(const char *id, const char *text);
+int webpush_store_key_del(const char *id);
+
+/* Iterate the persisted ring: cb(id, text, data); return nonzero to
+ * stop.  Returns the number of keys visited or -1. */
+typedef int (*webpush_store_key_cb)(const char *id, const char *text, void *data);
+int webpush_store_key_foreach(webpush_store_key_cb cb, void *data);
 
 /*
- * Load VAPID private key from storage.
- * privkey: buffer to receive 32-byte key
+ * Load the pre-ring VAPID private key ("vapid_privkey", 32 raw bytes).
  * privkey_len: in/out buffer size (must be >= 32)
  * Returns 0 on success, -1 if not found or error.
  */

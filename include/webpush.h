@@ -18,6 +18,8 @@
 
 #include <stddef.h>
 
+#include "webpush_keyring.h"
+
 /* Maximum sizes */
 #define WEBPUSH_MAX_ENDPOINT   512   /* Endpoint URL */
 #define WEBPUSH_MAX_PAYLOAD    4096  /* Plaintext message */
@@ -33,7 +35,8 @@ enum webpush_result {
   WEBPUSH_ERR_HTTP    = -2,  /* HTTP delivery failure */
   WEBPUSH_ERR_EXPIRED = -3,  /* Subscription expired (HTTP 410) */
   WEBPUSH_ERR_INVALID = -4,  /* Invalid input */
-  WEBPUSH_ERR_MEMORY  = -5   /* Allocation failure */
+  WEBPUSH_ERR_MEMORY  = -5,  /* Allocation failure */
+  WEBPUSH_ERR_FORBIDDEN = -6 /* Push service refused the VAPID signature (HTTP 403) */
 };
 
 /* Subscription parsed from stored format */
@@ -43,63 +46,64 @@ struct webpush_subscription {
   size_t p256dh_len;
   unsigned char auth[WEBPUSH_AUTH_LEN];
   size_t auth_len;
+  char key_id[WEBPUSH_KEY_ID_LEN + 1];  /* VAPID key it was registered under; "" = unbound */
 };
 
 /* Async delivery callback */
 typedef void (*webpush_send_cb)(int result, long http_code, void *data);
 
 /*
- * Initialize the webpush subsystem.
- * Generates VAPID keypair if not already loaded.
- * Must be called after OpenSSL is initialized.
- * Returns 0 on success, -1 on error.
+ * VAPID key table (crypto layer).  The ring of keys this server holds is
+ * modelled in webpush_keyring.h; every key it can sign with is loaded here
+ * by id (base64url public key).  The CURRENT key is the one advertised in
+ * the VAPID ISUPPORT token and used for subscriptions without a key id;
+ * delivery signs with the key each subscription is bound to.
  */
-int webpush_init(void);
+
+/*
+ * Load a P-256 private scalar (32 bytes) into the table, deriving its
+ * public key = id.  When expect_id is non-empty the derived id must match
+ * it (a stored/wire record naming a different key is corrupt): returns -2
+ * on mismatch.  Re-loading an id already present replaces its key.
+ * Returns 0 on success (id copied into id_out when given), -1 on error.
+ */
+int webpush_key_load(const unsigned char *privkey, size_t privkey_len,
+                     const char *expect_id, char *id_out, size_t id_sz);
+
+/* Drop a key from the table (no-op when absent). */
+void webpush_key_unload(const char *id);
+
+/* 1 when the table holds a key with this id. */
+int webpush_key_loaded(const char *id);
+
+/*
+ * Generate a fresh P-256 keypair, load it, and export the private scalar
+ * (priv_out, *priv_len >= 32 in; 32 out) and its id.  Returns 0 or -1.
+ */
+int webpush_key_generate(unsigned char *priv_out, size_t *priv_len,
+                         char *id_out, size_t id_sz);
+
+/*
+ * Make a loaded key the current one (NULL/"" clears).  Returns -1 when
+ * the id is not loaded.
+ */
+int webpush_set_current_key(const char *id);
 
 /*
  * Shutdown the webpush subsystem.
- * Frees VAPID keypair.
+ * Frees every loaded key.
  */
 void webpush_cleanup(void);
 
 /*
- * Get the VAPID public key in base64url encoding.
- * Returns pointer to static buffer, or NULL if not initialized.
+ * Get the current VAPID public key in base64url encoding.
+ * Returns pointer to the table entry's id, or NULL if no current key.
  */
 const char *webpush_get_vapid_pubkey(void);
 
 /*
- * Get the raw VAPID public key bytes.
- * Returns pointer to 65-byte uncompressed P-256 point, or NULL.
- */
-const unsigned char *webpush_get_vapid_pubkey_raw(size_t *out_len);
-
-/*
- * Import VAPID keypair from raw bytes (for persistence/restore).
- * privkey: 32-byte private key scalar
- * pubkey: 65-byte uncompressed public key (optional, derived if NULL)
- * Returns 0 on success, -1 on error.
- */
-int webpush_import_vapid_key(const unsigned char *privkey, size_t privkey_len,
-                             const unsigned char *pubkey, size_t pubkey_len);
-
-/*
- * Export VAPID private key bytes for persistence.
- * out: buffer to receive 32-byte private key
- * out_len: in/out buffer size
- * Returns 0 on success, -1 on error.
- */
-int webpush_export_vapid_privkey(unsigned char *out, size_t *out_len);
-
-/*
- * Import VAPID private key from base64url-encoded string.
- * Decodes and delegates to webpush_import_vapid_key().
- * Returns 0 on success, -1 on error.
- */
-int webpush_import_vapid_key_b64(const char *b64, size_t b64_len);
-
-/*
- * Parse subscription from stored format: "endpoint|p256dh_base64|auth_base64"
+ * Parse subscription from stored format:
+ *   "endpoint|p256dh_base64|auth_base64[|armed[|keyid]]"
  * Returns 0 on success, -1 on parse error.
  */
 int webpush_parse_subscription(const char *stored,
@@ -156,11 +160,24 @@ struct Client;
 
 /*
  * Initialize webpush subsystem with VAPID key persistence.
- * Loads or generates VAPID key, broadcasts to linked servers.
- * Must be called after webpush_store_init().
+ * Loads the key ring (or generates its first key), computes the current
+ * key, advertises it, and starts the maintenance timer.
+ * Must be called after webpush_store_init().  Safe to call again (REHASH,
+ * config key change, maintenance retry).
  * Returns 0 on success, -1 on error.
  */
 int webpush_setup(void);
+
+/*
+ * Record on a connection which VAPID key it was just told about (every
+ * ISUPPORT emission calls this); WEBPUSH REGISTER binds the subscription
+ * to that key, the only one the client can have used.
+ */
+void webpush_note_key_seen(struct Client *cptr);
+
+/* STATS webpush */
+struct StatDesc;
+void webpush_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
 
 /*
  * Burst all webpush subscriptions to a newly linked server.

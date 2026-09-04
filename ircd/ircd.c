@@ -242,6 +242,11 @@ const char* get_sasl_mechanisms(void)
 /** VAPID public key received from services. Empty means webpush unavailable. */
 char VapidPublicKey[VAPID_KEY_LEN] = "";
 
+/** 1 once libkc's HTTP transport initialised (webpush delivery, local
+ * SASL, webhooks).  Stays 0 on a build without libkc or when kc_init()
+ * failed at boot; STATS webpush reports it. */
+int kc_transport_ready = 0;
+
 /** Set the VAPID public key (called when services announces it).
  * Sends CAP NEW when webpush becomes available, CAP DEL when removed.
  * @param[in] key Base64url-encoded VAPID public key.
@@ -1391,21 +1396,47 @@ int main(int argc, char **argv) {
     if (kc_needed) {
       ircd_kc_adapter_init();
       if (kc_init(ircd_kc_get_event_ops(), ircd_kc_get_log_ops()) != 0) {
-        log_write(LS_SYSTEM, L_WARNING, 0,
-                  "Failed to initialize libkc HTTP transport");
+        log_write(LS_SYSTEM, L_ERROR, 0,
+                  "Failed to initialize libkc HTTP transport "
+                  "(webpush delivery, local SASL and webhooks are down)");
       } else {
+        kc_transport_ready = 1;
         /* Apply parsed Keycloak{} + Webhook{} blocks (or fall back to features).
          * Re-initialises libkc's Keycloak REST API + arms local SASL on first
          * arrival, and starts the webhook listener if configured. */
         sasl_conf_boot_apply();
-
-        /* Initialize webpush if enabled */
-        if (feature_bool(FEAT_CAP_draft_webpush))
-          webpush_setup();
       }
     }
   }
 #endif
+
+  /* draft/webpush promises delivery.  Without the libkc HTTP transport --
+   * a build without --enable-keycloak (the configure default is OFF), or
+   * kc_init() failing -- no push can ever be sent, so advertising the cap
+   * only collects registrations nobody can serve.  Refuse loudly, at a
+   * log level every deployment keeps.  (Prod 2026-09-03: the whole block
+   * above was compiled out, nothing logged, and the cap stayed on with no
+   * VAPID key for months.) */
+  if (feature_bool(FEAT_CAP_draft_webpush) && !kc_transport_ready) {
+    static const char *const off[] = { "CAP_draft_webpush", "FALSE" };
+#ifdef USE_LIBKC
+    log_write(LS_CONFIG, L_ERROR, 0,
+              "CAP_draft_webpush is on but the libkc HTTP transport failed to "
+              "initialise: draft/webpush disabled (pushes could never be sent)");
+#else
+    log_write(LS_CONFIG, L_ERROR, 0,
+              "CAP_draft_webpush is on but this build has no libkc: rebuild with "
+              "./configure --enable-keycloak (needs libcurl and libjansson); "
+              "draft/webpush disabled");
+#endif
+    feature_set(NULL, off, 2);
+  }
+
+  /* Webpush key setup is independent of the transport's health once it
+   * exists: the VAPID key and its ISUPPORT token are what clients register
+   * against.  STATS webpush reports both. */
+  if (feature_bool(FEAT_CAP_draft_webpush))
+    webpush_setup();
 
 #ifdef USE_LIBGIT2
   /* Start gitsync timer after config is loaded */

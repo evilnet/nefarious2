@@ -50,6 +50,7 @@
 #include "s_misc.h"
 #include "s_serv.h"
 #include "s_stats.h"
+#include "webpush.h"
 #include "s_user.h"
 #include "send.h"
 #include "shun.h"
@@ -740,6 +741,9 @@ struct StatDesc statsinfo[] = {
   { ' ', "metadata", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     metadata_report_stats, 0,
     "METADATA storage and queue statistics." },
+  { ' ', "webpush", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
+    webpush_report_stats, 0,
+    "WEBPUSH VAPID key ring and subscription statistics." },
   { ' ', "dnsbl", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     dnsbl_report_stats, 0,
     "DNSBL statistics and configuration." },

@@ -334,6 +334,7 @@ DECLARE_FLAGSET(Privs, PRIV_LAST_PRIV);
 DECLARE_FLAGSET(Flags, FLAG_LAST_FLAG);
 
 #include "capab.h" /* client capabilities */
+#include "webpush_keyring.h" /* WEBPUSH_KEY_ID_LEN */
 
 /** Maximum number of concurrent forwarded label entries per connection. */
 #define MAX_FORWARDED_LABELS 4
@@ -392,6 +393,9 @@ struct Connection
                                         for parsing. */
   struct ListingArgs* con_listing;   /**< Current LIST status. */
   struct ReplayState* con_replay;    /**< Current chathistory replay status. */
+  char con_vapid_seen[WEBPUSH_KEY_ID_LEN + 1]; /**< VAPID key id in the last
+                                        ISUPPORT this connection was sent
+                                        (draft/webpush REGISTER binds to it) */
   unsigned int        con_max_sendq; /**< cached max send queue for client */
   unsigned int        con_max_recvq; /**< cached max recv queue for client */
   unsigned int        con_ping_freq; /**< cached ping freq */
@@ -849,6 +853,8 @@ struct Client {
 #define cli_sock_ip(cli)	con_sock_ip(cli_connect(cli))
 /** Get the resolved hostname for the client. */
 #define cli_sockhost(cli)	con_sockhost(cli_connect(cli))
+/** Get the VAPID key id the client last saw in ISUPPORT. */
+#define cli_vapid_seen(cli)	con_vapid_seen(cli_connect(cli))
 /** Get the client's password. */
 #define cli_passwd(cli)		con_passwd(cli_connect(cli))
 /** Get the unprocessed input buffer for a client's connection.  */
@@ -942,6 +948,8 @@ struct Client {
 #define con_sock_ip(con)	((con)->con_sock_ip)
 /** Get the resolved hostname for the connection. */
 #define con_sockhost(con)	((con)->con_sockhost)
+/** Get the VAPID key id the connection last saw in ISUPPORT. */
+#define con_vapid_seen(con)	((con)->con_vapid_seen)
 /** Get the password sent by the remote end of the connection.  */
 #define con_passwd(con)		((con)->con_passwd)
 /** Get the buffer of unprocessed incoming data from the connection. */
