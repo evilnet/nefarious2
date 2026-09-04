@@ -621,7 +621,7 @@ void webpush_notify_account(const char *account, const char *message,
  * mutation (local WEBPUSH R/U, S2S sync, 410-reap), so R/U changes take
  * effect immediately; the TTL only bounds staleness across restarts of
  * the pattern. */
-#define WP_SUBS_CACHE_SLOTS 64
+#define WP_SUBS_CACHE_SLOTS 1024
 #define WP_SUBS_CACHE_TTL   30
 
 static struct {
@@ -1134,11 +1134,15 @@ void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
     account = cli_user(u)->account;
     if (sender_acct && 0 == ircd_strcmp(sender_acct, account))
       continue;  /* no self-highlights via own aliases */
-    if (webpush_store_count_cached(account) <= 0)
+    /* Cheap tests first.  Everything below the mention test touches
+     * the store or the session; with the trigger no longer limited to
+     * held members it would otherwise run for every local member of
+     * every channel on every line. */
+    if (!ircd_text_mentions(scan, cli_name(u)))
       continue;
     if (is_silenced(sptr, u, 1))
       continue;
-    if (!ircd_text_mentions(scan, cli_name(u)))
+    if (webpush_store_count_cached(account) <= 0)
       continue;
     if (!webpush_account_unattended(u, account)) {
       wp_suppressed(&wp_suppress.attended, "attended", account);
