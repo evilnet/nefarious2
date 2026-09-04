@@ -756,6 +756,41 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
                ircd_snprintf(0, outbuf, sizeof(outbuf), "    Connections:: %d (%s)", total, detail);
             }
             send_reply(sptr, RPL_DATASTR, outbuf);
+
+            /* Per-connection activity: which connection is the primary and
+             * how recently each one was used.  Local connections read the
+             * idle clock; remote aliases the replicated activity (BX U la=). */
+            if (session->hs_state == BOUNCE_ACTIVE) {
+               int i;
+               if (session->hs_client) {
+                  struct Client *pc = session->hs_client;
+                  time_t la = session->hs_last_active;
+                  if (MyConnect(pc) && cli_user(pc) && cli_user(pc)->last > la)
+                     la = cli_user(pc)->last;
+                  ircd_snprintf(0, outbuf, sizeof(outbuf),
+                                "        Primary:: %s%s on %s, idle %lus",
+                                cli_user(pc) && cli_user(pc)->server
+                                  ? cli_yxx(cli_user(pc)->server) : "??",
+                                cli_yxx(pc),
+                                cli_user(pc) && cli_user(pc)->server
+                                  ? cli_name(cli_user(pc)->server) : "?",
+                                la > 0 ? (unsigned long)(CurrentTime - la) : 0UL);
+                  send_reply(sptr, RPL_DATASTR, outbuf);
+               }
+               for (i = 0; i < session->hs_alias_count; i++) {
+                  struct Client *ac = findNUser(session->hs_aliases[i].ba_numeric);
+                  struct Client *srv = FindNServer(session->hs_aliases[i].ba_server);
+                  time_t la = session->hs_aliases[i].ba_last_active;
+                  if (ac && MyConnect(ac) && cli_user(ac) && cli_user(ac)->last > la)
+                     la = cli_user(ac)->last;
+                  ircd_snprintf(0, outbuf, sizeof(outbuf),
+                                "          Alias:: %s on %s, idle %lus",
+                                session->hs_aliases[i].ba_numeric,
+                                srv ? cli_name(srv) : session->hs_aliases[i].ba_server,
+                                la > 0 ? (unsigned long)(CurrentTime - la) : 0UL);
+                  send_reply(sptr, RPL_DATASTR, outbuf);
+               }
+            }
          }
 
          if (session->hs_hold_override == -1)

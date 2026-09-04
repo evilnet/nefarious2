@@ -333,9 +333,21 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
 
     if (MyConnect(acptr) && (IsAnOper(sptr) || (!IsNoIdle(acptr) &&
           (!feature_bool(FEAT_HIS_WHOIS_IDLETIME) || sptr == acptr ||
-             parc >= 3))))
-       send_reply(sptr, RPL_WHOISIDLE, name, CurrentTime - user->last,
-                  cli_firsttime(acptr));
+             parc >= 3)))) {
+      /* A bouncer session is one user on several connections: idle is
+       * measured from the most recent activity on any of them (aliases
+       * on other servers via the replicated activity), not just the
+       * primary's own clock. */
+      time_t last = user->last;
+      struct BouncerSession *isess = bounce_get_session(acptr);
+      if (isess) {
+        time_t sl = bounce_session_last_active(isess);
+        if (sl > last)
+          last = sl;
+      }
+      send_reply(sptr, RPL_WHOISIDLE, name, CurrentTime - last,
+                 cli_firsttime(acptr));
+    }
 
     if (IsOper(acptr) && IsWhoisNotice(acptr) && (sptr != acptr))
       sendcmdto_one(&me, CMD_NOTICE, acptr,

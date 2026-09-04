@@ -372,6 +372,9 @@ struct BounceAlias {
                                  carry their own last_active here.  Used
                                  as the "most-active" disambiguator in
                                  D.2 tiebreaker rules. */
+  time_t ba_last_active_emitted; /**< Local bookkeeping on the alias's own
+                                 server: when its activity was last put on
+                                 the wire (BX U la=).  Not replicated. */
   char ba_active_profile[33]; /**< Phase 4 M4b: alias's active draft/persistence
                                    profile name (PERSISTENCE_PROFILE_NAME_MAX + NUL).
                                    Empty string resolves to "default" by the
@@ -474,6 +477,8 @@ struct BouncerSession {
 
   time_t hs_created;                  /**< When session was created */
   time_t hs_last_active;              /**< Last activity timestamp */
+  time_t hs_last_active_emitted;      /**< Primary's activity last put on the
+                                           wire (BX U la=); local bookkeeping */
   time_t hs_last_msg_time;            /**< Last PRIVMSG time (user idle baseline) */
   time_t hs_disconnect_time;          /**< When client disconnected (0=active) */
   unsigned int hs_attach_count;       /**< Number of times resumed from HOLDING */
@@ -947,6 +952,17 @@ extern int bounce_compute_effective_away(struct BouncerSession *session,
  * @param[in] session Session to re-aggregate.
  */
 extern void bounce_recompute_session_away(struct BouncerSession *session);
+
+/** Activity replication: a connection's first message after this many
+ * seconds of quiet puts its activity on the wire (BX U <numeric> la=<ts>),
+ * so every replica's hs_last_active / ba_last_active tracks live use at a
+ * bounded cost (one line per connection per quiet period). */
+#define BOUNCE_ACTIVITY_QUIET 300
+
+/** Most recent activity across every connection of @a session: the
+ * primary's and each alias's, local from the idle clock, remote from the
+ * replicated value.  0 when nothing is known. */
+extern time_t bounce_session_last_active(struct BouncerSession *session);
 
 /** Replay channel state (JOIN/TOPIC/NAMES) to a client after held session resume.
  * @param[in] cptr Client that just resumed a held session.
