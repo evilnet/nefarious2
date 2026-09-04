@@ -852,6 +852,12 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
    * decision runs once per message there, never per alias delivery. */
   if (!sptr || !acptr || !MyConnect(acptr) || IsBouncerAlias(acptr))
     return;
+  /* Only people push.  Server and service NOTICEs -- the connect-time
+   * "you are connected with TLS", AuthServ's recognition, X3 bots --
+   * are not conversation, and a client reviving a session received a
+   * notification per line of its own welcome. */
+  if (IsServer(sptr) || IsServiceClient(sptr) || !cli_user(sptr))
+    return;
   if (!cli_user(acptr) || !cli_user(acptr)->account[0])
     return;
   account = cli_user(acptr)->account;
