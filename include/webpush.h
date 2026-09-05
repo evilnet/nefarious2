@@ -193,26 +193,30 @@ struct Client;
 
 /*
  * Push payload wire contract (consumed by the seance service worker).
+ * Design: docs/projects/push-payload-multiline.md in the Seance repo.
  *
- * The encrypted aes128gcm body is one compact JSON object, `{"t":KIND,...}`:
+ * full tier (the DEFAULT): one raw IRC line, no CRLF, as draft/webpush
+ * requires -- the message as a client with server-time, message-tags and
+ * account-tag would receive it:
  *
- *   "msg"     DM to the account: from=<sender nick>
- *   "notice"  as "msg", for NOTICE
- *   "hl"      channel message in target mentioning the account
- *   "read"    read-marker relay: {"t":"read","target":T,"ts":TIME};
- *             ungated by hold/mute/cooldown so devices can close
- *             notifications
+ *   @msgid=..;time=..;account=.. :nick!user@host PRIVMSG|NOTICE target :text
  *
- * Non-"read" payloads carry the route fields `from`, `target` (a nick for
- * msg/notice, a channel for hl), optional `msgid` and `time` (ISO 8601),
- * and — full tier only — `text` plus `trunc:true` when the text was
- * clamped.  WEBPUSH_MAX_PAYLOAD bounds the whole body.
+ * A draft/multiline batch is one push PER LINE (WEBPUSH_MULTILINE_LINES at
+ * most, itself clamped to at most 64), ordered by a vendor tag because a
+ * batch shares one msgid and time:
  *
- * The tier comes from the account's `draft/webpush/payload` metadata:
- *   "ping"   bare notification, no route fields
- *   "route"  from/target/msgid/time, no text
- *   "full"   route + text — the default; the body is encrypted
- *            server-to-device, so accounts must opt down explicitly
+ *   @batch=<base msgid>;msgid=<base>;time=..;account=..;evilnet.github.io/line=<i>/<sent>/<total>[;draft/multiline-concat] :nick!user@host PRIVMSG|NOTICE target :line
+ *
+ * A read-marker relay is the MARKREAD line: ":server MARKREAD target timestamp=<ts>".
+ *
+ * route / ping tiers (account metadata draft/webpush/payload): JSON
+ * opt-downs carrying no message -- {"t":KIND,"from":..,"target":..,
+ * "msgid":..,"time":..} and {"t":KIND}; KIND is msg, notice or hl.
+ * WEBPUSH_MAX_PAYLOAD bounds every body; an oversize payload is logged.
+ *
+ * The full tier carries the text exactly as sent, CTCP ACTION bytes
+ * included (the JSON tiers carry no text); the client is responsible
+ * for splitting the ACTION itself.
  *
  * Mutes come from `draft/webpush/mute`: ';'-separated `target:until`
  * entries (unix seconds; `*` is a global snooze; 0 or negative =
@@ -244,9 +248,31 @@ void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
                             const char *text, const char *msgid,
                             const char *timestamp);
 
-/** Relay an account read marker (MARKREAD set) as a `{"t":"read",...}`
- * payload so other devices can close their notifications.  Ungated by
- * hold/mute/cooldown on purpose. */
+/** One line of a draft/multiline batch, for webpush_notify_multiline. */
+struct webpush_batch_line {
+  const char *text;
+  int concat;   /**< non-zero when the line carried draft/multiline-concat */
+};
+
+/*
+ * Multiline push trigger.  Called once per delivered batch from
+ * process_multiline_batch (local) and deliver_s2s_multiline_batch (S2S),
+ * after the message was delivered; exactly one of chptr / acptr is set.
+ * The batch is one message: the highlight test runs over every line, the
+ * cooldown is checked once per recipient, and then each of the first
+ * WEBPUSH_MULTILINE_LINES lines goes out as its own push (one IRC message
+ * per push, ordered by the evilnet.github.io/line tag).  The batch
+ * reference is base_msgid.
+ */
+void webpush_notify_multiline(struct Client *sptr, struct Channel *chptr,
+                              struct Client *acptr,
+                              const struct webpush_batch_line *lines, int nlines,
+                              const char *base_msgid, const char *timestamp,
+                              int is_notice);
+
+/** Relay an account read marker (MARKREAD set) as the line
+ * ":<server> MARKREAD <target> timestamp=<iso>" so other devices can
+ * close their notifications.  Ungated by hold/mute/cooldown on purpose. */
 void webpush_notify_read(const char *account, const char *target,
                          const char *timestamp);
 

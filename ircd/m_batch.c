@@ -64,6 +64,8 @@
 #include "history.h"
 #include "ml_content.h"
 #include "paste_listener.h"
+#include "webpush.h"
+#include "webpush_store.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <string.h>
@@ -1735,6 +1737,30 @@ process_multiline_batch(struct Client *sptr)
     MyFree(history_content);
   }
 
+  /* Web push: the batch is one message -- push its lines (one IRC message
+   * per push) to unattended recipients.  Not gated on history, like the
+   * single-message triggers in ircd_relay.c.  Skip the list walk and the
+   * MyMalloc entirely when the feature is off. */
+  if (feature_bool(FEAT_WEBPUSH_NOTIFY) && webpush_store_available()) {
+    int n = 0, i = 0;
+    struct webpush_batch_line *wl;
+    char ml_ts[32];
+
+    history_format_ms(ml_ts, sizeof(ml_ts), batch_time_ms);
+
+    for (lp = con_ml_messages(con); lp; lp = lp->next)
+      n++;
+    wl = (struct webpush_batch_line *)MyMalloc(sizeof(*wl) * n);
+    for (lp = con_ml_messages(con); lp; lp = lp->next, i++) {
+      wl[i].concat = lp->value.cp[0];
+      wl[i].text = lp->value.cp + 1;
+    }
+    webpush_notify_multiline(sptr, is_channel ? chptr : NULL,
+                             is_channel ? NULL : acptr,
+                             wl, n, batch_base_msgid, ml_ts, is_notice);
+    MyFree(wl);
+  }
+
   /* Clear the time override set at the start of this function */
   sendcmdto_set_client_time(NULL);
 
@@ -2579,6 +2605,35 @@ deliver_s2s_multiline_batch(struct S2SMultilineBatch *batch, struct Client *cptr
       }
     }
     MyFree(history_content);
+  }
+
+  /* Web push for the batch, as on the local path.  The push time is the
+   * originating server's batch time when it sent one.  Skip the list walk
+   * and the MyMalloc entirely when the feature is off. */
+  if (feature_bool(FEAT_WEBPUSH_NOTIFY) && webpush_store_available()) {
+    char ml_ts[32];
+    uint64_t ms = batch->time_ms;
+    int n = 0, i = 0;
+    struct webpush_batch_line *wl;
+
+    if (!ms) {
+      struct timeval tv;
+      gettimeofday(&tv, NULL);
+      ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
+    history_format_ms(ml_ts, sizeof(ml_ts), ms);
+
+    for (lp = batch->messages; lp; lp = lp->next)
+      n++;
+    wl = (struct webpush_batch_line *)MyMalloc(sizeof(*wl) * n);
+    for (lp = batch->messages; lp; lp = lp->next, i++) {
+      wl[i].concat = lp->value.cp[0];
+      wl[i].text = lp->value.cp + 1;
+    }
+    webpush_notify_multiline(sptr, is_channel ? chptr : NULL,
+                             is_channel ? NULL : acptr,
+                             wl, n, batch_base_msgid, ml_ts, is_notice);
+    MyFree(wl);
   }
 }
 
