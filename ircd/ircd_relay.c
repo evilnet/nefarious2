@@ -1334,6 +1334,10 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
        * also adds the @A...,C<client_tags> compact-tag prefix so the
        * remote server can forward client-only tags to its local recipient
        * (per p10-compact-client-tags plan). */
+      /* Locally minted: this message's own id and time ride the wire,
+       * not whatever was last parsed off the destination link. */
+      if (from == sptr && pm_msgid[0])
+        sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
       sendcmdto_one_tags_with_client(from, CMD_PRIVATE, acptr,
                                      pm_msgid, client_tags,
                                      "%C :%s", acptr, mytext);
@@ -1540,7 +1544,11 @@ void relay_private_notice(struct Client* sptr, const char* name, const char* tex
       if (from != sptr)
         sendcmdto_set_s2s_cptr(cli_from(sptr));
       /* Tag-aware send; for S2S to IRCV3AWARE peers also includes
-       * @A...,C<client_tags> compact-tag prefix. */
+       * @A...,C<client_tags> compact-tag prefix.  Locally minted: this
+       * message's own id and time ride the wire, not whatever was last
+       * parsed off the destination link. */
+      if (from == sptr && pm_msgid[0])
+        sendcmdto_set_s2s_tags(history_parse_ms(pm_timestamp), pm_msgid);
       sendcmdto_one_tags_with_client(from, CMD_NOTICE, acptr,
                                      pm_msgid, client_tags,
                                      "%C :%s", acptr, mytext);

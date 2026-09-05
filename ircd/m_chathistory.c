@@ -1025,7 +1025,8 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        const char *target,
                                        struct HistoryMessage **head,
                                        int count, int ops_override,
-                                       const char *label, int complete);
+                                       const char *label, int complete,
+                                       const char *requested);
 static int open_query_presence(struct Client *sptr, const char *lookup_target,
                                int ops_override,
                                struct PresenceQueryFilter **pf_out);
@@ -1072,7 +1073,7 @@ int chathistory_auto_replay(struct Client *sptr, const char *target,
     history_attach_context(target, messages);
     /* Ownership of messages transfers to replay_start_batch */
     count = presence_filter_and_replay(sptr, target, &messages, count, 0, NULL,
-                                       complete);
+                                       complete, NULL);
   }
 
   return count;
@@ -1257,6 +1258,7 @@ static int check_history_access(struct Client *sptr, const char *target,
 
 /* Forward declarations for federation */
 static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
+                                           const char *requested,
                                            const char *subcmd, const char *ref,
                                            int limit,
                                            struct HistoryMessage *local_msgs,
@@ -1422,7 +1424,8 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        const char *target,
                                        struct HistoryMessage **head,
                                        int count, int ops_override,
-                                       const char *label, int complete)
+                                       const char *label, int complete,
+                                       const char *requested)
 {
   int real_override = 0;
   if (ops_override) {
@@ -1436,7 +1439,7 @@ static int presence_filter_and_replay(struct Client *sptr,
   count = redact_filter_messages(head, count);
   count = presence_filter_messages(sptr, target, head, count, real_override);
   replay_start_batch(sptr, target, *head, count, real_override, label,
-                     complete);
+                     complete, requested);
   return count;
 }
 
@@ -1522,7 +1525,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
    * counting them, so `count < limit` means the walk was exhausted. */
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
-                               ops_override, cli_label(sptr), 1);
+                               ops_override, cli_label(sptr), 1, target);
     return 0;
   }
   count = history_query_latest(lookup_target, ref_type, ref_value, limit,
@@ -1552,7 +1555,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
 
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, lookup_target, "LATEST",
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "LATEST",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL);
     if (req) {
@@ -1574,7 +1577,7 @@ skip_federation:
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete);
+                                     complete, target);
 
   return 0;
 }
@@ -1622,7 +1625,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
-                               ops_override, cli_label(sptr), 1);
+                               ops_override, cli_label(sptr), 1, target);
     return 0;
   }
   count = history_query_before(lookup_target, ref_type, ref_value, limit,
@@ -1637,7 +1640,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
 
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, lookup_target, "BEFORE",
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BEFORE",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL);
     if (req)
@@ -1654,7 +1657,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete);
+                                     complete, target);
 
   return 0;
 }
@@ -1702,7 +1705,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
-                               ops_override, cli_label(sptr), 1);
+                               ops_override, cli_label(sptr), 1, target);
     return 0;
   }
   count = history_query_after(lookup_target, ref_type, ref_value, limit,
@@ -1717,7 +1720,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
 
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, lookup_target, "AFTER",
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AFTER",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL);
     if (req)
@@ -1734,7 +1737,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete);
+                                     complete, target);
 
   return 0;
 }
@@ -1782,7 +1785,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
-                               ops_override, cli_label(sptr), 1);
+                               ops_override, cli_label(sptr), 1, target);
     return 0;
   }
   count = history_query_around(lookup_target, ref_type, ref_value, limit,
@@ -1797,7 +1800,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
 
   /* Check if we should try federation */
   if (should_federate(lookup_target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, lookup_target, "AROUND",
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AROUND",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL);
     if (req)
@@ -1814,7 +1817,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete);
+                                     complete, target);
 
   return 0;
 }
@@ -1870,7 +1873,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
 
   if (open_query_presence(sptr, lookup_target, ops_override, &pf) < 0) {
     presence_filter_and_replay(sptr, lookup_target, &messages, 0,
-                               ops_override, cli_label(sptr), 1);
+                               ops_override, cli_label(sptr), 1, target);
     return 0;
   }
   count = history_query_between(lookup_target, ref_type1, ref_value1,
@@ -1888,7 +1891,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
    * never federated -- the CH Q wire had a single ref slot; W now
    * carries an optional trailing second ref. */
   if (should_federate(lookup_target, count, limit)) {
-    struct FedRequest *req = start_fed_query(sptr, lookup_target, "BETWEEN",
+    struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BETWEEN",
                                               ref1_str, limit, messages, count,
                                               ops_override, ref2_str);
     if (req)
@@ -1905,7 +1908,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete);
+                                     complete, target);
 
   return 0;
 }
@@ -1933,6 +1936,7 @@ struct FedCtxPair {
 struct FedRequest {
   char reqid[32];                     /**< Request ID */
   char target[CHANNELLEN + 1];        /**< Target channel */
+  char requested[CHANNELLEN + 1];     /**< Target as the client typed it (batch name) */
   char client_yxx[6];                 /**< Client numeric (YXX) for safe lookup */
   struct HistoryMessage *local_msgs;  /**< Local LMDB results */
   struct HistoryMessage *fed_msgs;    /**< Federated results */
@@ -4042,7 +4046,8 @@ static void send_fed_response(struct FedRequest *req)
    * query_count note in the subcommand handlers). */
   total = presence_filter_and_replay(client, req->target, &merged, total,
                                      req->ops_override, req->label,
-                                     total < req->limit && !req->fed_truncated);
+                                     total < req->limit && !req->fed_truncated,
+                                     req->requested);
 }
 
 /** Complete a federation request - sends response and triggers cleanup.
@@ -4202,6 +4207,7 @@ static int count_storage_servers(const char *target, time_t query_time)
  * and whose retention window covers the query timeframe.
  */
 static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
+                                           const char *requested,
                                            const char *subcmd, const char *ref,
                                            int limit,
                                            struct HistoryMessage *local_msgs,
@@ -4281,6 +4287,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
   req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
   ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
   ircd_strncpy(req->target, target, sizeof(req->target) - 1);
+  ircd_strncpy(req->requested, requested ? requested : "", sizeof(req->requested) - 1);
   /* Store full client numeric (server + client) for safe lookup later
    * findNUser expects the full numeric like "BjAAU" not just the client part "AAU" */
   ircd_snprintf(0, req->client_yxx, sizeof(req->client_yxx), "%s%s",

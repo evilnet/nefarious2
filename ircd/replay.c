@@ -864,12 +864,29 @@ void replay_continue(struct Client *sptr)
   }
 }
 
+/** An on-demand query answers about the target the client named.  For a
+ * plain nick that is the batch target and the wire target of the caller's
+ * own rows, whatever the storage key's other half resolves to: a session
+ * id for an account-less partner with no rows yet, or -- for two
+ * connections of one account -- an arbitrary live client on that account,
+ * often the requester (2026-09-04).  Channels keep the canonical name and
+ * an explicit "a:b" request keeps the derived other party. */
+static void replay_name_after_request(struct ReplayState *rs, const char *requested)
+{
+  if (!requested || !*requested || !rs->is_pm
+      || IsChannelName(requested) || strchr(requested, ':'))
+    return;
+  ircd_strncpy(rs->target, requested, sizeof(rs->target));
+  ircd_strncpy(rs->other_nick, requested, sizeof(rs->other_nick));
+}
+
 /** Start async replay of a single chathistory batch.
  * Transfers ownership of messages to the ReplayState.
  */
 void replay_start_batch(struct Client *sptr, const char *target,
                          struct HistoryMessage *messages, int count,
-                         int ops_override, const char *label, int complete)
+                         int ops_override, const char *label, int complete,
+                         const char *requested)
 {
   struct ReplayState *rs;
   /* Translate `target` (may be a PM storage key "nick1:nick2") to the
@@ -887,6 +904,7 @@ void replay_start_batch(struct Client *sptr, const char *target,
    * doesn't allocate a full ReplayState. */
   memset(&tmp_rs, 0, sizeof(tmp_rs));
   replay_set_target_from_storage(sptr, &tmp_rs, target);
+  replay_name_after_request(&tmp_rs, requested);
 
   if (!messages || count == 0) {
     /* Empty batch.  NOT inherently the last page: reply-side filters
@@ -924,6 +942,7 @@ void replay_start_batch(struct Client *sptr, const char *target,
   rs->messages = messages;
   rs->current = messages;
   replay_set_target_from_storage(sptr, rs, target);
+  replay_name_after_request(rs, requested);
   rs->ops_override = ops_override;
   if (label && label[0])
     ircd_strncpy(rs->label, label, sizeof(rs->label));

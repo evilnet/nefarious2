@@ -228,6 +228,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
               ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
             }
             sendcmdto_set_s2s_tags(ac_time, ac_msgid);
+            sendcmdto_want_s2s_tags(1);
           }
         }
 
@@ -312,6 +313,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
               ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
             }
             sendcmdto_set_s2s_tags(ac_time, ac_msgid);
+            sendcmdto_want_s2s_tags(1);
           }
         }
 
@@ -497,6 +499,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           ac_time = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
         }
         sendcmdto_set_s2s_tags(ac_time, ac_msgid);
+        sendcmdto_want_s2s_tags(1);
       }
     }
 

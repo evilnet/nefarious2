@@ -304,6 +304,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           /* Became present — broadcast unaway */
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+            sendcmdto_want_s2s_tags(1);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE, "");
@@ -311,6 +312,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           /* Away (state-flip or message-update) — broadcast eff_msg */
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+            sendcmdto_want_s2s_tags(1);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s",
                                 eff_msg ? eff_msg : "");
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
@@ -326,6 +328,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           if (!star_msg) star_msg = "*";
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+            sendcmdto_want_s2s_tags(1);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", star_msg);
           sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
                                                  CAP_AWAYNOTIFY, CAP_NONE,
@@ -367,6 +370,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       if (!was_away) {
         if (away_msgid[0])
           sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+          sendcmdto_want_s2s_tags(1);
         sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
       }
       send_reply(sptr, RPL_NOWAWAY);
@@ -376,6 +380,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     else {
       if (away_msgid[0])
         sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+        sendcmdto_want_s2s_tags(1);
       sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
       send_reply(sptr, RPL_UNAWAY);
       sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE, "");
@@ -468,6 +473,7 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Set S2S tags for downstream server relay */
     if (away_msgid[0])
       sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+      sendcmdto_want_s2s_tags(1);
 
     if (is_away)
       sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);

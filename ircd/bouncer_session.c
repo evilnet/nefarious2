@@ -10098,6 +10098,7 @@ void bounce_recompute_session_away(struct BouncerSession *session)
         gettimeofday(&tv, NULL);
         away_time_ms = (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
         sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
+        sendcmdto_want_s2s_tags(1);
       }
 
       if (new_effective == 0) {

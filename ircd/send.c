@@ -1500,9 +1500,20 @@ void sendcmdto_one_tags_with_client(struct Client *from,
     /* Server-link destination — use compact S2S tag prefix.
      * IRCV3AWARE peers get @A...,C<client_tags>; legacy peers get the
      * bare command (preserves pre-extension behaviour where direct
-     * PMs to remote users had no @A prefix). */
+     * PMs to remote users had no @A prefix).
+     *
+     * The tag source is the ORIGIN, never `to`: passing the destination
+     * link made format_s2s_tags_with_client read cli_s2s_msgid(to) -- the
+     * last msgid PARSED off that link -- so a local PM sent right after a
+     * services round-trip reused that message's id (2026-09-04).  For a
+     * relayed message the origin link rides in s2s_cptr_override; for a
+     * locally-minted one the caller armed s2s_msgid_override/time with
+     * this message's own id (ext_msgid), which format consumes when the
+     * cptr carries none. */
+    struct Client *tag_cptr = s2s_cptr_override;
+    s2s_cptr_override = NULL;
     if (IsIRCv3Aware(to) &&
-        format_s2s_tags_with_client(s2s_tagbuf, sizeof(s2s_tagbuf), to,
+        format_s2s_tags_with_client(s2s_tagbuf, sizeof(s2s_tagbuf), tag_cptr,
                                     has_ctags ? client_tags : NULL,
                                     NULL, 0)) {
       mb = msgq_make(to, "%s%:#C %s %v", s2s_tagbuf, from, tok, &vd);
@@ -1535,6 +1546,13 @@ void sendcmdto_one_tags_with_client(struct Client *from,
   prio = (feature_bool(FEAT_FLUSH_ULINE_IMMEDIATE) && is_from_uline(from)) ? 1 : 0;
   send_buffer(to, mb, prio);
   msgq_clean(mb);
+
+  /* Consume any tag overrides the caller armed for this one send, so a
+   * local-recipient path or a legacy (untagged) peer cannot leave them
+   * to stamp the next server-bound emit. */
+  s2s_cptr_override = NULL;
+  s2s_msgid_override[0] = '\0';
+  s2s_time_override = 0;
 }
 
 /** Send a (prefixed) command to a single local client with message tags,
@@ -1954,6 +1972,17 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
       }
+    } else {
+      /* No tagged variant was built, so nothing consumed the overrides.
+       * Clear them here or they ride the next server-bound emit: an
+       * ACCOUNT/AWAY relay armed by sendcmdto_set_s2s_tags() without
+       * sendcmdto_want_s2s_tags() stamped the next cross-server PRIVMSG
+       * with the auth-time msgid and timestamp (2026-09-04). */
+      s2s_cptr_override = NULL;
+      s2s_raw_tags[0] = '\0';
+      s2s_msgid_override[0] = '\0';
+      s2s_sessid_override[0] = '\0';
+      s2s_time_override = 0;
     }
 
     /* Untagged variants for legacy peers — also serve as the only
@@ -2100,6 +2129,17 @@ void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
       }
+    } else {
+      /* No tagged variant was built, so nothing consumed the overrides.
+       * Clear them here or they ride the next server-bound emit: an
+       * ACCOUNT/AWAY relay armed by sendcmdto_set_s2s_tags() without
+       * sendcmdto_want_s2s_tags() stamped the next cross-server PRIVMSG
+       * with the auth-time msgid and timestamp (2026-09-04). */
+      s2s_cptr_override = NULL;
+      s2s_raw_tags[0] = '\0';
+      s2s_msgid_override[0] = '\0';
+      s2s_sessid_override[0] = '\0';
+      s2s_time_override = 0;
     }
   }
 
@@ -2217,6 +2257,17 @@ void sendcmdto_legacy_serv_butone(struct Client *from, const char *cmd,
         s2s_msgid_override[0] = '\0';
         s2s_time_override = 0;
       }
+    } else {
+      /* No tagged variant was built, so nothing consumed the overrides.
+       * Clear them here or they ride the next server-bound emit: an
+       * ACCOUNT/AWAY relay armed by sendcmdto_set_s2s_tags() without
+       * sendcmdto_want_s2s_tags() stamped the next cross-server PRIVMSG
+       * with the auth-time msgid and timestamp (2026-09-04). */
+      s2s_cptr_override = NULL;
+      s2s_raw_tags[0] = '\0';
+      s2s_msgid_override[0] = '\0';
+      s2s_sessid_override[0] = '\0';
+      s2s_time_override = 0;
     }
   }
 
