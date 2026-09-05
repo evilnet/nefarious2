@@ -48,6 +48,7 @@
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
+#include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
@@ -59,6 +60,7 @@
 #include "s_user.h"
 #include "send.h"
 #include "webpush.h"
+#include "webpush_line.h"
 #include "webpush_keyring.h"
 #include "webpush_attention.h"
 #include "webpush_mute.h"
@@ -66,6 +68,7 @@
 #include "webpush_store.h"
 #include "bouncer_session.h"
 #include "channel.h"
+#include "history.h"
 #include "ircd_events.h"
 #include "metadata.h"
 #include "s_stats.h"
@@ -713,10 +716,24 @@ static int webpush_pm_cooldown_ok(const char *account, const char *origin)
   return webpush_cooldown_ok(account, origin, feature_int(FEAT_WEBPUSH_COOLDOWN), NULL);
 }
 
+static void webpush_line_src_of(struct Client *sptr, struct webpush_line_src *src);
 static void webpush_emit_push(const char *account, const char *kind,
-                              const char *from, const char *target,
+                              const struct webpush_line_src *src,
+                              const char *command, const char *target,
                               const char *msgid, const char *timestamp,
-                              const char *text);
+                              const char *text,
+                              const struct webpush_line_ml *ml);
+static const char *webpush_emit_resolve(const char *account, const char *kind,
+                                        const char *timestamp,
+                                        char *tier, size_t tier_sz,
+                                        char *iso, size_t iso_sz);
+static void webpush_emit_resolved(const char *account, const char *kind,
+                                  const struct webpush_line_src *src,
+                                  const char *command, const char *target,
+                                  const char *msgid, const char *wire_ts,
+                                  const char *text,
+                                  const struct webpush_line_ml *ml,
+                                  const char *tier);
 
 /* ---------------------------------------------------------------------------
  * Attention: push only when nobody is looking
@@ -818,8 +835,9 @@ static int webpush_mute_blocked(const char *account, const char *target)
 }
 
 /** Relay a read marker to the account's webpush subscriptions so other
- * devices can close their notifications (`{"t":"read",...}`).  Deliberately
- * ungated by hold/cooldown/mute: it is how they clear. */
+ * devices can close their notifications, as the MARKREAD line the
+ * account's clients would see.  Deliberately ungated by hold/cooldown/mute:
+ * it is how they clear. */
 static void webpush_emit_read(const char *account, const char *target,
                               const char *timestamp);
 
@@ -840,41 +858,36 @@ void webpush_notify_read(const char *account, const char *target,
   webpush_emit_read(account, target, timestamp ? timestamp : "*");
 }
 
-void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
-                       const char *text, int is_notice,
-                       const char *msgid, const char *timestamp)
+/** The PM gate: the account to push to for a PM from sptr to acptr, or
+ * NULL (with the suppression counted).  acptr is the account's primary
+ * (a held ghost, or a live client); the decision runs once per message
+ * there, never per alias delivery. */
+static const char *webpush_pm_account(struct Client *sptr, struct Client *acptr)
 {
   const char *account;
 
-  if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
-    return;
-  /* acptr is the account's primary (a held ghost, or a live client); the
-   * decision runs once per message there, never per alias delivery. */
   if (!sptr || !acptr || !MyConnect(acptr) || IsBouncerAlias(acptr))
-    return;
+    return NULL;
   /* Only people push.  Server and service NOTICEs -- the connect-time
    * "you are connected with TLS", AuthServ's recognition, X3 bots --
    * are not conversation, and a client reviving a session received a
    * notification per line of its own welcome. */
   if (IsServer(sptr) || IsServiceClient(sptr) || !cli_user(sptr))
-    return;
+    return NULL;
   if (!cli_user(acptr) || !cli_user(acptr)->account[0])
-    return;
+    return NULL;
   account = cli_user(acptr)->account;
-  log_write(LS_SYSTEM, L_DEBUG, 0,
-            "WebPush: notify_pm entry: from=%s target=%s store=%d",
-            cli_name(sptr), cli_name(acptr), webpush_store_count_cached(account));
   if (webpush_store_count_cached(account) <= 0)
-    return;
+    return NULL;
   /* Push only when nobody is attending the account (held, away, or idle
    * on every connection) -- not only when the session is held. */
   if (!webpush_account_unattended(acptr, account)) {
     wp_suppressed(&wp_suppress.attended, "attended", account);
-    return;
+    return NULL;
   }
   if (!webpush_pm_cooldown_ok(account, cli_name(sptr))) {
     wp_suppressed(&wp_suppress.cooldown, "cooldown", account);
-    return;
+    return NULL;
   }
   /* Mutes name a nick or, for a logged-in sender, an account: a nick
    * change must not bypass a mute. */
@@ -882,45 +895,149 @@ void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
       || (cli_user(sptr)->account[0]
           && webpush_mute_blocked(account, cli_user(sptr)->account))) {
     wp_suppressed(&wp_suppress.muted, "muted", account);
-    return;
+    return NULL;
   }
-
-  webpush_emit_push(account, is_notice ? "notice" : "msg",
-                    cli_name(sptr), cli_name(acptr), msgid, timestamp, text);
+  return account;
 }
 
-/** Build the tiered JSON payload and hand it to webpush_notify_account.
- * Tier from the account's draft/webpush/payload metadata key, defaulting
- * to full: full (route + text, UTF-8-clamped -- never reject-and-drop;
- * invalid UTF-8 text degrades the push to route because json_string()
- * rejects it and the field is simply omitted), route (from/target/msgid/
- * time, no content) or ping (bare).  The payload is encrypted
- * server-to-device, so the push service never sees the text; an empty
- * default that renders notifications without content is just a worse
- * product, so accounts must explicitly opt down. */
+void webpush_notify_pm(struct Client *sptr, struct Client *acptr,
+                       const char *text, int is_notice,
+                       const char *msgid, const char *timestamp)
+{
+  const char *account;
+  struct webpush_line_src src;
+
+  if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
+    return;
+  if (!sptr || !acptr || !cli_user(sptr) || !cli_user(acptr))
+    return;
+  account = webpush_pm_account(sptr, acptr);
+  if (!account)
+    return;
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "WebPush: notify_pm entry: from=%s target=%s account=%s store=%d",
+            cli_name(sptr), cli_name(acptr), account,
+            webpush_store_count_cached(account));
+  webpush_line_src_of(sptr, &src);
+  webpush_emit_push(account, is_notice ? "notice" : "msg", &src,
+                    is_notice ? "NOTICE" : "PRIVMSG", cli_name(acptr),
+                    msgid, timestamp, text, NULL);
+}
+
+/** The sender as the push line names it: nick!user@host (displayed host,
+ * as the batch relay shows it) and, when logged in, the account.  Same
+ * rule as get_displayed_host() in m_batch.c; keep them together. */
+static void webpush_line_src_of(struct Client *sptr, struct webpush_line_src *src)
+{
+  src->nick = cli_name(sptr);
+  src->user = cli_user(sptr)->username;
+  src->host = IsHiddenHost(sptr) ? cli_user(sptr)->host : cli_user(sptr)->realhost;
+  src->account = cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL;
+}
+
+/** Single-message entry point: resolve the tier and wire timestamp for
+ * this one push, then build and send it.  webpush_emit_multiline
+ * resolves once per batch instead and calls webpush_emit_resolved
+ * directly for every line. */
 static void webpush_emit_push(const char *account, const char *kind,
-                              const char *from, const char *target,
+                              const struct webpush_line_src *src,
+                              const char *command, const char *target,
                               const char *msgid, const char *timestamp,
-                              const char *text)
+                              const char *text,
+                              const struct webpush_line_ml *ml)
 {
   char tier[METADATA_VALUE_LEN];
+  char iso[32];
+  const char *wire_ts;
+
+  wire_ts = webpush_emit_resolve(account, kind, timestamp, tier, sizeof(tier),
+                                 iso, sizeof(iso));
+  webpush_emit_resolved(account, kind, src, command, target, msgid, wire_ts,
+                        text, ml, tier);
+}
+
+/** Resolve the payload tier (the account's draft/webpush/payload metadata,
+ * defaulting to full) and the wire-form timestamp (internal unix.ms ->
+ * ISO 8601, as a server-time tag would carry it -- history_unix_to_iso,
+ * same as send_markread/replay.c) once per message or batch, not per
+ * line.  @a iso must outlive the caller's use of the returned pointer. */
+static const char *webpush_emit_resolve(const char *account, const char *kind,
+                                        const char *timestamp,
+                                        char *tier, size_t tier_sz,
+                                        char *iso, size_t iso_sz)
+{
+  const char *wire_ts = timestamp;
+
+  tier[0] = '\0';
+  (void)metadata_account_get(account, "draft/webpush/payload", tier);
+  if (tier[0] == '\0')
+    ircd_strncpy(tier, "full", tier_sz);
+
+  if (timestamp && timestamp[0]) {
+    /* unix.ms is a bare number; an ISO 8601 stamp has '-' date
+     * separators (and, unlike a unix.ms value, can start with a digit
+     * too -- isdigit() alone cannot tell them apart). */
+    if (!strchr(timestamp, '-')) {
+      if (0 == history_unix_to_iso(timestamp, iso, iso_sz))
+        wire_ts = iso;
+    } else {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WebPush: unexpected timestamp form %s for %s payload to %s; passing through",
+                timestamp, kind, account);
+    }
+  }
+  return wire_ts;
+}
+
+/** Build one push payload from an already-resolved tier and wire-form
+ * timestamp and hand it to webpush_notify_account.
+ *
+ * full: the message itself as ONE IRC LINE -- what draft/webpush asks for
+ * ("exactly one IRC message as the payload, without the final CRLF").  A
+ * single line always fits WEBPUSH_MAX_PAYLOAD; if it ever does not, say so
+ * in the log instead of dropping silently.  For a multiline batch (ml set)
+ * every line is its own push; see webpush_emit_multiline.
+ *
+ * route / ping: JSON opt-downs that carry no message (route: from/target/
+ * msgid/time; ping: bare), so the one-message rule does not apply and the
+ * worker parses both shapes.  A batch produces one route/ping push, on its
+ * first line. */
+static void webpush_emit_resolved(const char *account, const char *kind,
+                                  const struct webpush_line_src *src,
+                                  const char *command, const char *target,
+                                  const char *msgid, const char *wire_ts,
+                                  const char *text,
+                                  const struct webpush_line_ml *ml,
+                                  const char *tier)
+{
 #ifndef HAVE_JANSSON
   char esc[WEBPUSH_MAX_PAYLOAD];
   char out[WEBPUSH_MAX_PAYLOAD];
   size_t pos = 0;
 #endif
+  const char *timestamp = wire_ts;
 
-  tier[0] = '\0';
-  (void)metadata_account_get(account, "draft/webpush/payload", tier);
-  if (tier[0] == '\0')
-    ircd_strncpy(tier, "full", sizeof(tier));
+  if (0 == ircd_strcmp(tier, "full")) {
+    char line[WEBPUSH_MAX_PAYLOAD];
+    int len;
+
+    len = webpush_line_message(line, sizeof(line), src, command, target,
+                               text, msgid, wire_ts, ml);
+    if (len < 0) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WebPush: %s payload for %s does not fit %d bytes; dropped (msgid %s)",
+                kind, account, WEBPUSH_MAX_PAYLOAD,
+                (msgid && msgid[0]) ? msgid : "-");
+      return;
+    }
+    webpush_notify_account(account, line, (size_t)len);
+    return;
+  }
+
+  if (ml && ml->index > 1)
+    return;
 
 #ifdef HAVE_JANSSON
-  /* jansson path (preferred when the library is available -- abc9cc6
-   * dropped it wholesale to fix the non-keycloak link; configure now
-   * probes jansson independently of keycloak, so use it when found).
-   * Same shape as the fallback: same fields, same 3000-byte UTF-8-safe
-   * clamp for the full tier. */
   {
     json_t *obj;
     char *dump;
@@ -931,19 +1048,12 @@ static void webpush_emit_push(const char *account, const char *kind,
       return;
     json_object_set_new(obj, "t", json_string(kind));
     if (0 != ircd_strcmp(tier, "ping")) {
-      json_object_set_new(obj, "from", json_string(from));
+      json_object_set_new(obj, "from", json_string(src->nick));
       json_object_set_new(obj, "target", json_string(target));
       if (msgid && msgid[0])
         json_object_set_new(obj, "msgid", json_string(msgid));
       if (timestamp && timestamp[0])
         json_object_set_new(obj, "time", json_string(timestamp));
-      if (0 == ircd_strcmp(tier, "full") && text && text[0]) {
-        char body[WEBPUSH_MAX_PAYLOAD];
-        ircd_strncpy(body, text, sizeof(body));
-        if (ircd_utf8_clamp(body, 3000))
-          json_object_set_new(obj, "trunc", json_true());
-        json_object_set_new(obj, "text", json_string(body));
-      }
     }
     dump = json_dumps(obj, JSON_COMPACT);
     json_decref(obj);
@@ -952,16 +1062,16 @@ static void webpush_emit_push(const char *account, const char *kind,
     dumplen = strlen(dump);
     if (dumplen > 0 && dumplen <= WEBPUSH_MAX_PAYLOAD)
       webpush_notify_account(account, dump, dumplen);
+    else
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WebPush: %s JSON payload for %s does not fit; dropped", kind, account);
     free(dump);
   }
 #else
-  /* Hand-rolled fallback (jansson not found at configure time).  All
-   * string content goes through ircd_json_escape; UTF-8 bytes pass
-   * through verbatim. */
   str_appendf(out, sizeof(out), &pos, "{\"t\":\"%s\"", kind);
   if (0 != ircd_strcmp(tier, "ping")) {
     str_appendf(out, sizeof(out), &pos, ",\"from\":\"%s\"",
-                ircd_json_escape(esc, sizeof(esc), from));
+                ircd_json_escape(esc, sizeof(esc), src->nick));
     str_appendf(out, sizeof(out), &pos, ",\"target\":\"%s\"",
                 ircd_json_escape(esc, sizeof(esc), target));
     if (msgid && msgid[0])
@@ -970,59 +1080,46 @@ static void webpush_emit_push(const char *account, const char *kind,
     if (timestamp && timestamp[0])
       str_appendf(out, sizeof(out), &pos, ",\"time\":\"%s\"",
                   ircd_json_escape(esc, sizeof(esc), timestamp));
-    if (0 == ircd_strcmp(tier, "full") && text && text[0]) {
-      char body[WEBPUSH_MAX_PAYLOAD];
-      ircd_strncpy(body, text, sizeof(body));
-      if (ircd_utf8_clamp(body, 3000))
-        str_appendf(out, sizeof(out), &pos, ",\"trunc\":true");
-      str_appendf(out, sizeof(out), &pos, ",\"text\":\"%s\"",
-                  ircd_json_escape(esc, sizeof(esc), body));
-    }
   }
   str_appendf(out, sizeof(out), &pos, "}");
-  /* A payload that hit the buffer ceiling may be un-terminated JSON;
-   * guard on the closing brace before sending. */
   if (pos > 1 && pos < sizeof(out) && out[pos - 1] == '}')
     webpush_notify_account(account, out, pos);
+  else
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "WebPush: %s JSON payload for %s does not fit; dropped", kind, account);
 #endif
 }
 
-/** `{"t":"read","target":T,"ts":TIME}` with the same escaping as every
- * other payload: a channel name or nick may contain a quote or a
- * backslash. */
+/** ":<server> MARKREAD <target> timestamp=<ts>" -- one IRC message, like
+ * every other payload. */
 static void webpush_emit_read(const char *account, const char *target,
                               const char *timestamp)
 {
-#ifdef HAVE_JANSSON
-  json_t *obj = json_object();
-  char *dump;
-  size_t dumplen;
+  char line[WEBPUSH_MAX_PAYLOAD];
+  /* timestamp arrives in the internal unix.ms form (same store as
+   * metadata_readmarker_set); MARKREAD shows clients ISO 8601
+   * (send_markread does the same conversion). */
+  char iso[32];
+  const char *wire_ts = timestamp;
+  int len;
+  if (timestamp && timestamp[0] && 0 != strcmp(timestamp, "*")) {
+    if (!strchr(timestamp, '-')) {
+      if (0 == history_unix_to_iso(timestamp, iso, sizeof(iso)))
+        wire_ts = iso;
+    } else {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WebPush: unexpected timestamp form %s for MARKREAD payload to %s/%s; passing through",
+                timestamp, account, target);
+    }
+  }
+  len = webpush_line_markread(line, sizeof(line), cli_name(&me), target, wire_ts);
 
-  if (!obj)
+  if (len < 0) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "WebPush: MARKREAD payload for %s/%s does not fit; dropped", account, target);
     return;
-  json_object_set_new(obj, "t", json_string("read"));
-  json_object_set_new(obj, "target", json_string(target));
-  json_object_set_new(obj, "ts", json_string(timestamp));
-  dump = json_dumps(obj, JSON_COMPACT);
-  json_decref(obj);
-  if (!dump)
-    return;
-  dumplen = strlen(dump);
-  if (dumplen > 0 && dumplen <= WEBPUSH_MAX_PAYLOAD)
-    webpush_notify_account(account, dump, dumplen);
-  free(dump);
-#else
-  char esc[WEBPUSH_MAX_PAYLOAD];
-  char out[WEBPUSH_MAX_PAYLOAD];
-  size_t pos = 0;
-
-  str_appendf(out, sizeof(out), &pos, "{\"t\":\"read\",\"target\":\"%s\"",
-              ircd_json_escape(esc, sizeof(esc), target));
-  str_appendf(out, sizeof(out), &pos, ",\"ts\":\"%s\"}",
-              ircd_json_escape(esc, sizeof(esc), timestamp));
-  if (pos > 1 && pos < sizeof(out) && out[pos - 1] == '}')
-    webpush_notify_account(account, out, pos);
-#endif
+  }
+  webpush_notify_account(account, line, (size_t)len);
 }
 
 /** The arming time carried on a WP R/B line (trailing param), or 0 when
@@ -1100,10 +1197,59 @@ void webpush_forget_account(const char *account)
   webpush_store_clear(account);
 }
 
-/** Channel-highlight push trigger (v2 -- design:
- * webpush-trigger-payload.md).  Called from the channel PRIVMSG store
- * choke point; scans members for held sessions whose nick the message
- * mentions.  Cost when no held members: one bit test per member. */
+/** The highlight gate for one member: the account to push to, or NULL
+ * (suppressions counted).  texts are what to scan for the member's nick --
+ * one text for a single message, every line of a batch. */
+static const char *webpush_hl_account(struct Client *sptr, struct Channel *chptr,
+                                      struct Membership *member,
+                                      const char *sender_acct,
+                                      const char *const *texts, int ntexts)
+{
+  struct Client *u = member->user;
+  const char *account;
+  int i, mentioned = 0;
+
+  if (IsZombie(member))
+    return NULL;
+  /* One decision per session: its primary (held ghost or live client),
+   * never its aliases. */
+  if (!MyConnect(u) || IsBouncerAlias(u))
+    return NULL;
+  if (!cli_user(u) || !cli_user(u)->account[0])
+    return NULL;
+  account = cli_user(u)->account;
+  if (sender_acct && 0 == ircd_strcmp(sender_acct, account))
+    return NULL;  /* no self-highlights via own aliases */
+  /* Cheap tests first.  Everything below the mention test touches
+   * the store or the session; with the trigger no longer limited to
+   * held members it would otherwise run for every local member of
+   * every channel on every line. */
+  for (i = 0; i < ntexts && !mentioned; i++)
+    mentioned = ircd_text_mentions(texts[i], cli_name(u));
+  if (!mentioned)
+    return NULL;
+  if (is_silenced(sptr, u, 1))
+    return NULL;
+  if (webpush_store_count_cached(account) <= 0)
+    return NULL;
+  if (!webpush_account_unattended(u, account)) {
+    wp_suppressed(&wp_suppress.attended, "attended", account);
+    return NULL;
+  }
+  if (!webpush_pm_cooldown_ok(account, chptr->chname)) {
+    wp_suppressed(&wp_suppress.cooldown, "cooldown", account);
+    return NULL;
+  }
+  if (webpush_mute_blocked(account, chptr->chname)) {
+    wp_suppressed(&wp_suppress.muted, "muted", account);
+    return NULL;
+  }
+  return account;
+}
+
+/** Channel-highlight push trigger.  Called from the channel PRIVMSG store
+ * choke point; scans members for unattended accounts whose nick the
+ * message mentions.  Cost when no such members: one bit test per member. */
 void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
                             const char *text, const char *msgid,
                             const char *timestamp)
@@ -1111,9 +1257,11 @@ void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
   struct Membership *member;
   const char *scan = text;
   const char *sender_acct;
+  struct webpush_line_src src;
 
   if (!feature_bool(FEAT_WEBPUSH_NOTIFY)
-      || !feature_bool(FEAT_WEBPUSH_HIGHLIGHTS))
+      || !feature_bool(FEAT_WEBPUSH_HIGHLIGHTS)
+      || !webpush_store_available())
     return;
   if (!sptr || !chptr || !text || !cli_user(sptr))
     return;
@@ -1124,46 +1272,114 @@ void webpush_notify_channel(struct Client *sptr, struct Channel *chptr,
     scan = text + 8;
   }
   sender_acct = cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL;
+  webpush_line_src_of(sptr, &src);
 
   for (member = chptr->members; member; member = member->next_member) {
-    struct Client *u = member->user;
-    const char *account;
+    const char *account = webpush_hl_account(sptr, chptr, member, sender_acct, &scan, 1);
+    if (!account)
+      continue;
+    /* the line carries the text as sent (CTCP ACTION included) */
+    webpush_emit_push(account, "hl", &src, "PRIVMSG", chptr->chname,
+                      msgid, timestamp, text, NULL);
+  }
+}
 
-    if (IsZombie(member))
-      continue;
-    /* One decision per session: its primary (held ghost or live client),
-     * never its aliases. */
-    if (!MyConnect(u) || IsBouncerAlias(u))
-      continue;
-    if (!cli_user(u) || !cli_user(u)->account[0])
-      continue;
-    account = cli_user(u)->account;
-    if (sender_acct && 0 == ircd_strcmp(sender_acct, account))
-      continue;  /* no self-highlights via own aliases */
-    /* Cheap tests first.  Everything below the mention test touches
-     * the store or the session; with the trigger no longer limited to
-     * held members it would otherwise run for every local member of
-     * every channel on every line. */
-    if (!ircd_text_mentions(scan, cli_name(u)))
-      continue;
-    if (is_silenced(sptr, u, 1))
-      continue;
-    if (webpush_store_count_cached(account) <= 0)
-      continue;
-    if (!webpush_account_unattended(u, account)) {
-      wp_suppressed(&wp_suppress.attended, "attended", account);
-      continue;
+/** Every pushed line of a batch to one account.  The tier and the wire
+ * timestamp are resolved once for the whole batch, not per line -- a
+ * route/ping tier's "push once" decision (index 1 only) is then made
+ * before any per-line metadata lookup. */
+static void webpush_emit_multiline(const char *account, const char *kind,
+                                   const struct webpush_line_src *src,
+                                   const char *command, const char *target,
+                                   const struct webpush_batch_line *lines,
+                                   int nlines, int sent,
+                                   const char *base_msgid, const char *timestamp)
+{
+  char tier[METADATA_VALUE_LEN];
+  char iso[32];
+  const char *wire_ts;
+  int i;
+
+  wire_ts = webpush_emit_resolve(account, kind, timestamp, tier, sizeof(tier),
+                                 iso, sizeof(iso));
+
+  for (i = 0; i < sent; i++) {
+    struct webpush_line_ml ml;
+    ml.batch = base_msgid;
+    ml.index = i + 1;
+    ml.sent = sent;
+    ml.total = nlines;
+    ml.concat = lines[i].concat;
+    webpush_emit_resolved(account, kind, src, command, target, base_msgid,
+                          wire_ts, lines[i].text, &ml, tier);
+  }
+}
+
+void webpush_notify_multiline(struct Client *sptr, struct Channel *chptr,
+                              struct Client *acptr,
+                              const struct webpush_batch_line *lines, int nlines,
+                              const char *base_msgid, const char *timestamp,
+                              int is_notice)
+{
+  const char *command = is_notice ? "NOTICE" : "PRIVMSG";
+  struct webpush_line_src src;
+  int cap, sent;
+
+  if (!feature_bool(FEAT_WEBPUSH_NOTIFY) || !webpush_store_available())
+    return;
+  if (!sptr || !cli_user(sptr) || !lines || nlines < 1)
+    return;
+  if (!base_msgid || !base_msgid[0])
+    return;  /* the batch reference; a delivered batch always has one */
+  cap = feature_int(FEAT_WEBPUSH_MULTILINE_LINES);
+  if (cap < 1)
+    cap = 1;
+  /* Each line is one POST per unattended member; without a ceiling a
+   * pathological multiline message could fan out an unbounded number of
+   * pushes per recipient. */
+  if (cap > 64)
+    cap = 64;
+  sent = nlines < cap ? nlines : cap;
+  webpush_line_src_of(sptr, &src);
+
+  if (chptr) {
+    struct Membership *member;
+    const char *sender_acct;
+    const char **texts;
+    int i;
+
+    if (is_notice)
+      return;   /* channel NOTICEs never push, as in ircd_relay.c */
+    if (!feature_bool(FEAT_WEBPUSH_HIGHLIGHTS))
+      return;
+    texts = (const char **)MyMalloc(sizeof(*texts) * nlines);
+    for (i = 0; i < nlines; i++)
+      texts[i] = lines[i].text;
+    if (texts[0][0] == '\001') {
+      /* a first-line ACTION participates; any other CTCP never highlights */
+      if (0 != ircd_strncmp(texts[0], "\001ACTION ", 8)) {
+        MyFree(texts);
+        return;
+      }
+      texts[0] += 8;
     }
-    if (!webpush_pm_cooldown_ok(account, chptr->chname)) {
-      wp_suppressed(&wp_suppress.cooldown, "cooldown", account);
-      continue;
+    sender_acct = cli_user(sptr)->account[0] ? cli_user(sptr)->account : NULL;
+    for (member = chptr->members; member; member = member->next_member) {
+      const char *account = webpush_hl_account(sptr, chptr, member, sender_acct,
+                                               texts, nlines);
+      if (!account)
+        continue;
+      webpush_emit_multiline(account, "hl", &src, command, chptr->chname,
+                             lines, nlines, sent, base_msgid, timestamp);
     }
-    if (webpush_mute_blocked(account, chptr->chname)) {
-      wp_suppressed(&wp_suppress.muted, "muted", account);
-      continue;
-    }
-    webpush_emit_push(account, "hl", cli_name(sptr), chptr->chname,
-                      msgid, timestamp, scan);
+    MyFree(texts);
+  } else if (acptr) {
+    const char *account = webpush_pm_account(sptr, acptr);
+    if (!account)
+      return;
+    webpush_emit_multiline(account, is_notice ? "notice" : "msg", &src, command,
+                           cli_name(acptr), lines, nlines, sent, base_msgid,
+                           timestamp);
   }
 }
 
