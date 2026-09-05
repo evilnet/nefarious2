@@ -4,7 +4,7 @@
  * Subscription records persist as "endpoint|p256dh|auth|armed", where
  * `armed` is the unix second of the last WEBPUSH REGISTER.  Clients re-arm
  * on every login, so a record not re-armed within the expiry window
- * (FEAT_WEBPUSH_EXPIRE, default 180 days) belongs to a device that has
+ * (FEAT_WEBPUSH_EXPIRE, default 90 days) belongs to a device that has
  * not run the client since before the window began and is presumed gone.
  *
  * Both functions are pure (no ircd dependencies) and unit-tested in
