@@ -5613,6 +5613,15 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   /* Step 9: Update timing */
   con_lasttime(ghost_con) = con_lasttime(temp_con);
   con_since(ghost_con) = con_since(temp_con);
+  /* A revive is activity: the person just opened a client.  Without this
+   * the ghost keeps its pre-hold idle clock, so the account still looks
+   * unattended to webpush during its own connect (every welcome NOTICE
+   * pushed) and WHOIS idle spans the hold.  The auto-replay "since" was
+   * taken from the old clock before we got here (register_user Try 1). */
+  if (cli_user(ghost)) {
+    cli_user(ghost)->last = CurrentTime;
+    bounce_record_activity(ghost);
+  }
 
 #ifdef USE_SSL
   /* Step 10: Update FLAG_SSL and channel nonsslusers counters */
