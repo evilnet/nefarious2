@@ -1712,6 +1712,8 @@ spoofhostblock : SPOOFHOST QSTRING
     parse_error("Missing host(s) in spoofhost block");
   else if (spoofhost == NULL)
     parse_error("Missing spoofhost in spoofhost block");
+  else if (!valid_spoofhost(spoofhost, (flags & SHFLAG_ISMASK)))
+    parse_error("Invalid spoofhost '%s' in spoofhost block", spoofhost);
   else for (link = hosts; link != NULL; link = link->next) {
     sconf = (struct SHostConf*) MyCalloc(1, sizeof(*sconf));
     if (!(flags & SHFLAG_NOPASS))
