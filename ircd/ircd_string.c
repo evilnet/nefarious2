@@ -1307,3 +1307,48 @@ uint64_t msgid_decode_time_ms(const char *msgid)
   return ms;
 }
 
+
+/* Check if a spoof host is valid.  A spoof host is a host name, optionally
+ * prefixed with a user name and '@'.  Wildcards are only allowed if mask is
+ * non-zero (Spoofhost blocks using ismask).  Anything else is rejected so
+ * that the spoof host cannot be mistaken for something other than a single
+ * parameter when it is sent to other servers, most notably a spoof host
+ * beginning with a ':'.
+ */
+int valid_spoofhost(const char* host, int mask) {
+  const char *c = NULL;
+  const char *at = NULL;
+
+  /* Empty strings are not valid spoof hosts */
+  if (EmptyString(host))
+    return 0;
+
+  if ((at = strchr(host, '@')) != NULL) {
+    /* Don't allow an empty user name */
+    if (at == host)
+      return 0;
+    for (c = host; c < at; c++) {
+      if (!IsUserChar(*c) && !(mask && ((*c == '*') || (*c == '?'))))
+        return 0;
+    }
+    c = at + 1;
+  } else
+    c = host;
+
+  /* Empty strings are not valid hosts */
+  if (EmptyString(c))
+    return 0;
+  /* Don't allow leading period */
+  if (*c == '.')
+    return 0;
+  /* Don't allow trailing period */
+  if (c[strlen(c)-1] == '.')
+    return 0;
+
+  for ( ; *c; c++) {
+    if (!IsHostChar(*c) && !(mask && ((*c == '*') || (*c == '?'))))
+      return 0;
+  }
+
+  return 1;
+}
