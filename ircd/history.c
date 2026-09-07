@@ -2720,6 +2720,11 @@ int history_purge_old(unsigned long max_age_seconds)
   if (max_age_seconds == 0)
     return 0; /* Retention disabled */
 
+  int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
+#define PURGE_QUOTA_BATCH 512
+  struct { char target[CHANNELLEN + 1]; char account[ACCOUNTLEN + 1]; } purge_quota[PURGE_QUOTA_BATCH];
+  int purge_quota_count = 0;
+
   /* Calculate cutoff timestamp (Unix format) */
   cutoff_time = time(NULL) - max_age_seconds;
   ircd_snprintf(0, cutoff_ts, sizeof(cutoff_ts), "%lu.000",
@@ -2769,6 +2774,25 @@ int history_purge_old(unsigned long max_age_seconds)
       reply_index_del_children(wb, msg_target, msg_msgid);
     }
 
+    /* Per-account quota: the retention purge never gave these rows'
+     * counts back, so with CHATHISTORY_USER_QUOTA on the counters only
+     * ever ratcheted up (audit 2026-09-06 L2).  Same collect-then-apply
+     * shape as history_emergency_evict (no nested txns). */
+    if (quota_enabled && purge_quota_count < PURGE_QUOTA_BATCH) {
+      size_t vlen;
+      const void *vbase = db_iter_value(it, &vlen);
+      struct HistoryMessage pm;
+      memset(&pm, 0, sizeof(pm));
+      if (vbase && deserialize_message((void *)vbase, vlen, &pm) == 0
+          && pm.account[0] != '\0') {
+        ircd_strncpy(purge_quota[purge_quota_count].target, msg_target,
+                     sizeof(purge_quota[0].target));
+        ircd_strncpy(purge_quota[purge_quota_count].account, pm.account,
+                     sizeof(purge_quota[0].account));
+        purge_quota_count++;
+      }
+    }
+
     /* Stage delete of the message itself.  Borrow the key — writebatch
      * copies, so it's safe to use the iterator's transient pointer. */
     db_writebatch_del(wb, history_cf_messages, kbase, klen);
@@ -2784,6 +2808,11 @@ int history_purge_old(unsigned long max_age_seconds)
     log_write(LS_SYSTEM, L_ERROR, 0, "history: purge commit failed: %s",
               db_strerror(rc));
     return -1;
+  }
+  {
+    int qi;
+    for (qi = 0; qi < purge_quota_count; qi++)
+      quota_decrement(purge_quota[qi].target, purge_quota[qi].account);
   }
 
   if (deleted > 0) {

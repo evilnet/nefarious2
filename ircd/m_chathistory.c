@@ -494,6 +494,17 @@ void generate_batch_id(char *buf, size_t buflen, struct Client *sptr)
   ircd_snprintf(0, buf, buflen, "hist%lu", ++batch_counter);
 }
 
+/** "<subcommand> <target>" -- the spec's context for FAIL CHATHISTORY
+ * INVALID_TARGET / MESSAGE_ERROR (the subcommand was missing; a parser
+ * indexing the params positionally read the target as the subcommand;
+ * audit 2026-09-06 #25). */
+static const char *ch_fail_ctx(const char *subcmd, const char *target)
+{
+  static char buf[CHANNELLEN + 32];
+  ircd_snprintf(0, buf, sizeof(buf), "%s %s", subcmd, (target && *target) ? target : "*");
+  return buf;
+}
+
 /** Check if message type should be sent to client.
  * Without draft/event-playback, only PRIVMSG and NOTICE are sent.
  * @param[in] sptr Client to check.
@@ -507,9 +518,14 @@ int should_send_message_type(struct Client *sptr, enum HistoryMessageType type)
    * discussion — reactions are message-like content, not events.
    * Only stored TAGMSGs pass this check (typing-only are filtered earlier). */
   if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE ||
-      type == HISTORY_GAP || type == HISTORY_TAGMSG ||
-      type == HISTORY_MULTILINE)
+      type == HISTORY_GAP || type == HISTORY_MULTILINE)
     return 1;
+
+  /* TAGMSG is message-like content and does not need event-playback --
+   * but message-tags says a server MUST NOT deliver TAGMSG to a client
+   * that has not negotiated it (audit 2026-09-06 #17). */
+  if (type == HISTORY_TAGMSG)
+    return CapRecipientHas(sptr, CAP_MSGTAGS);
 
   /* REDACT requires message-redaction cap but NOT event-playback.
    * Per spec: "draft/event-playback is not required in order to include
@@ -850,6 +866,9 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
         line_start = NULL;
       }
 
+      if (!first_line[0])
+        continue;   /* multiline: MUST NOT send blank lines to a non-multiline client */
+
       if (first) {
         /* First line gets all tags + client tags */
         if (tpos)
@@ -942,7 +961,7 @@ static int has_ops_override(struct Client *sptr, struct Channel *chptr)
   return 0;
 }
 
-/** Send a gap marker as a PRIVMSG with +draft/chathistory-gap tag.
+/** Send a gap marker as a PRIVMSG with the +evilnet.github.io/chathistory-gap tag.
  * For channels, the source is the server (sender identity hidden).
  * For PMs, the source is the original sender.
  * @param[in] sptr Client to send to.
@@ -984,11 +1003,20 @@ void send_gap_marker(struct Client *sptr, const char *target,
       if (gpos) gtags[gpos++] = ';';
       gpos += ircd_snprintf(0, gtags + gpos, sizeof(gtags) - gpos, "msgid=%s", msgid);
     }
-    if (gpos) gtags[gpos++] = ';';
-    gpos += ircd_snprintf(0, gtags + gpos, sizeof(gtags) - gpos, "+draft/chathistory-gap");
+    /* Our extension, so our namespace (formerly +draft/chathistory-gap),
+     * and a client-only tag only to a client that negotiated message-tags
+     * (audit 2026-09-06 #29 / #17). */
+    if (CapRecipientHas(sptr, CAP_MSGTAGS)) {
+      if (gpos) gtags[gpos++] = ';';
+      gpos += ircd_snprintf(0, gtags + gpos, sizeof(gtags) - gpos,
+                            "+evilnet.github.io/chathistory-gap");
+    }
     gtags[gpos] = '\0';
 
-    sendrawto_one(sptr, "@%s :%s PRIVMSG %s :%s", gtags, source, target, content);
+    if (gpos)
+      sendrawto_one(sptr, "@%s :%s PRIVMSG %s :%s", gtags, source, target, content);
+    else
+      sendrawto_one(sptr, ":%s PRIVMSG %s :%s", source, target, content);
   }
 }
 
@@ -1234,7 +1262,11 @@ static int normalize_pm_target(struct Client *sptr, const char *target,
        * them as -- whose half of the key is their session id.  When
        * nothing is stored under the direct pair, find the pair by that
        * nick with the derivation TARGETS used to name it. */
-      if (!target_client && history_has_channel(normalized) == 0) {
+      /* Also when the nick IS held right now but by an identity with no
+       * rows under this pair: TARGETS named the conversation after the
+       * stored rows' nick, so a reused nick must still reach them
+       * (audit 2026-09-06 #19). */
+      if (history_has_channel(normalized) == 0) {
         char pair[PM_PAIRKEY_BUFSIZE];
         if (replay_pm_pair_for_nick(sptr, target, pair, sizeof(pair)))
           ircd_strncpy(normalized, pair, buflen);
@@ -1348,6 +1380,9 @@ static int check_history_access(struct Client *sptr, const char *target,
 }
 
 /* Forward declarations for federation */
+/** Set by start_fed_query when federation was wanted but no request slot
+ * was free: the local page must then NOT claim completeness (audit #22). */
+static int fed_start_capacity_miss = 0;
 static struct FedRequest *start_fed_query(struct Client *sptr, const char *target,
                                            const char *requested,
                                            const char *subcmd, const char *ref,
@@ -1606,7 +1641,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
 
   /* Check access and normalize target (for PMs, converts nick to nick:nick format) */
   if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
-    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
+    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", ch_fail_ctx("LATEST", target),
               "No access to target");
     return 0;
   }
@@ -1625,7 +1660,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   complete = query_page_complete(hook, count, limit);
   presence_query_filter_close(pf);
   if (count < 0) {
-    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
+    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("LATEST", target),
               "Failed to retrieve history");
     return 0;
   }
@@ -1650,6 +1685,8 @@ static int chathistory_latest(struct Client *sptr, const char *target,
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "LATEST",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    if (!req && fed_start_capacity_miss)
+      complete = 0;   /* federation wanted, no slot: withhold the end tag */
     if (req) {
       /* Federation started - response will be sent when complete */
       /* Note: messages ownership transferred to req */
@@ -1711,7 +1748,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
     limit = max_limit;
 
   if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
-    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
+    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", ch_fail_ctx("BEFORE", target),
               "No access to target");
     return 0;
   }
@@ -1727,7 +1764,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
   complete = query_page_complete(hook, count, limit);
   presence_query_filter_close(pf);
   if (count < 0) {
-    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
+    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("BEFORE", target),
               "Failed to retrieve history");
     return 0;
   }
@@ -1737,6 +1774,8 @@ static int chathistory_before(struct Client *sptr, const char *target,
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BEFORE",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    if (!req && fed_start_capacity_miss)
+      complete = 0;   /* federation wanted, no slot: withhold the end tag */
     if (req)
       return 0;
   }
@@ -1793,7 +1832,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
     limit = max_limit;
 
   if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
-    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
+    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", ch_fail_ctx("AFTER", target),
               "No access to target");
     return 0;
   }
@@ -1809,7 +1848,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
   complete = query_page_complete(hook, count, limit);
   presence_query_filter_close(pf);
   if (count < 0) {
-    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
+    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("AFTER", target),
               "Failed to retrieve history");
     return 0;
   }
@@ -1819,6 +1858,8 @@ static int chathistory_after(struct Client *sptr, const char *target,
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AFTER",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    if (!req && fed_start_capacity_miss)
+      complete = 0;   /* federation wanted, no slot: withhold the end tag */
     if (req)
       return 0;
   }
@@ -1875,7 +1916,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
     limit = max_limit;
 
   if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
-    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
+    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", ch_fail_ctx("AROUND", target),
               "No access to target");
     return 0;
   }
@@ -1891,7 +1932,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   complete = query_page_complete(hook, count, limit);
   presence_query_filter_close(pf);
   if (count < 0) {
-    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
+    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("AROUND", target),
               "Failed to retrieve history");
     return 0;
   }
@@ -1901,6 +1942,8 @@ static int chathistory_around(struct Client *sptr, const char *target,
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AROUND",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
+    if (!req && fed_start_capacity_miss)
+      complete = 0;   /* federation wanted, no slot: withhold the end tag */
     if (req)
       return 0;
   }
@@ -1965,7 +2008,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
     limit = max_limit;
 
   if (check_history_access(sptr, target, lookup_target, sizeof(lookup_target)) != 0) {
-    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", target,
+    send_fail(sptr, "CHATHISTORY", "INVALID_TARGET", ch_fail_ctx("BETWEEN", target),
               "No access to target");
     return 0;
   }
@@ -1982,7 +2025,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
   complete = query_page_complete(hook, count, limit);
   presence_query_filter_close(pf);
   if (count < 0) {
-    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", target,
+    send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("BETWEEN", target),
               "Failed to retrieve history");
     return 0;
   }
@@ -1994,6 +2037,8 @@ static int chathistory_between(struct Client *sptr, const char *target,
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BETWEEN",
                                               ref1_str, limit, messages, count,
                                               ops_override, ref2_str, complete);
+    if (!req && fed_start_capacity_miss)
+      complete = 0;   /* federation wanted, no slot: withhold the end tag */
     if (req)
       return 0;  /* messages ownership transferred to req */
   }
@@ -2054,6 +2099,7 @@ struct FedRequest {
   int keep_oldest;                    /**< Merge trim direction: 1 keep oldest (AFTER/asc BETWEEN), 0 keep newest */
   struct FedCtxPair ctx_pairs[MAX_FED_CTX]; /**< Declared context children (CH C) */
   int ctx_pair_count;
+  unsigned char e_seen[MAX_AD_SERVERS / 8]; /**< responders whose CH E arrived (dup guard) */
   void (*completion_cb)(struct FedRequest *); /**< Custom completion (NULL = send_fed_response) */
   void *cb_data;                      /**< Custom data for completion callback */
   void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
@@ -2575,7 +2621,7 @@ static int chathistory_targets(struct Client *sptr, const char *ref1_str,
                                   fetch_limit, &targets,
                                   targets_visible_cb, sptr);
     if (count < 0) {
-      send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", "*",
+      send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ch_fail_ctx("TARGETS", "*"),
                 "Failed to retrieve targets");
       return 0;
     }
@@ -3976,8 +4022,12 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
 {
   struct HistoryMessage *msg, *tail;
 
-  if (!req || req->fed_count >= MAX_FED_MESSAGES)
+  if (!req)
     return;
+  if (req->fed_count >= MAX_FED_MESSAGES) {
+    req->fed_truncated = 1;   /* rows beyond the cap are dropped: say so */
+    return;
+  }
 
   msg = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
   ircd_strncpy(msg->msgid, msgid, sizeof(msg->msgid) - 1);
@@ -4434,6 +4484,8 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            const char *ref2, int local_complete)
 {
   struct FedRequest *req;
+
+  fed_start_capacity_miss = 0;
   char reqid[32];
   char s2s_ref[64];
   char s2s_ref2[64];
@@ -4495,8 +4547,10 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
     if (!fed_requests[i])
       break;
   }
-  if (i >= MAX_FED_REQUESTS)
+  if (i >= MAX_FED_REQUESTS) {
+    fed_start_capacity_miss = 1;   /* callers: the page is not complete */
     return NULL;  /* No room */
+  }
 
   /* Generate request ID */
   ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu",
@@ -4659,8 +4713,11 @@ static void complete_redact_fed(struct FedRequest *req)
   msg = req->fed_msgs;
   if (!msg) {
     /* No storage server had this message */
-    send_fail(sptr, "REDACT", "UNKNOWN_MSGID", ctx->msgid,
-              "Message not found");
+    {
+      char fctx[BUFSIZE];   /* spec: <target> <msgid> */
+      ircd_snprintf(0, fctx, sizeof(fctx), "%s %s", req->target, ctx->msgid);
+      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fctx, "Message not found");
+    }
     return;
   }
 
@@ -5826,7 +5883,17 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     if (parc > 4 && parv[4] && parv[4][0] == 'T')
       req->fed_truncated = 1;
 
-    /* Decrement pending count */
+    /* Decrement pending count -- once per responder: a duplicate CH E
+     * from one server completed the request without the others' rows
+     * (audit 2026-09-06 #14). */
+    {
+      int si = server_ad_index(sptr);
+      if (si >= 0 && si < MAX_AD_SERVERS) {
+        if (req->e_seen[si >> 3] & (1u << (si & 7)))
+          return 0;
+        req->e_seen[si >> 3] |= (unsigned char)(1u << (si & 7));
+      }
+    }
     req->servers_pending--;
 
     /* If all servers have responded, complete the request */

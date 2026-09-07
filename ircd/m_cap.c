@@ -611,8 +611,15 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
         if (vapid)
           val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=vapid=%s", vapid);
       } else if (capab_list[i].cap == CAP_DRAFT_CHATHISTORY) {
-        /* Bare integer for compatibility (goguma does int.parse on the value).
-         * Extended info (retention, pm) is available via ISUPPORT CHATHISTORY. */
+        /* NON-SPEC VALUE, kept deliberately (audit 2026-09-06 #29, checked
+         * against goguma's source): goguma reads this as its page size --
+         * `max = caps.chatHistory; if (max == 0) max = 1000` -- and stops
+         * paging a target's backlog when a page comes back SHORTER than
+         * max.  A bare cap therefore means max = 1000 against our clamp of
+         * CHATHISTORY_MAX rows: every full page looks short and goguma
+         * fetches ONE page per target.  Bare integer; the limit is also
+         * ISUPPORT CHATHISTORY=<n>.  Document any change in
+         * FEATURE_FLAGS_CONFIG.md. */
         val_len = ircd_snprintf(0, valbuf, sizeof(valbuf), "=%d",
                                 feature_int(FEAT_CHATHISTORY_MAX));
 #ifdef USE_SSL

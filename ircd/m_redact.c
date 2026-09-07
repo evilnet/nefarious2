@@ -163,8 +163,12 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   target = chptr->chname;
 
   if (!cli_user(sptr)) {
-    send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", NULL,
-              "You must be fully registered to use REDACT");
+    {
+      char fctx[BUFSIZE];   /* spec: <target> <msgid> */
+      ircd_snprintf(0, fctx, sizeof(fctx), "%s %s", target, msgid);
+      send_fail(sptr, "REDACT", "REDACT_FORBIDDEN", fctx,
+                "You must be fully registered to use REDACT");
+    }
     return 0;
   }
 
@@ -195,6 +199,13 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     } else if (rc < 0) {
       /* Database error - allow redaction anyway (trust client) */
       can_redact = 1;
+    } else if (msg->type != HISTORY_PRIVMSG && msg->type != HISTORY_NOTICE
+               && msg->type != HISTORY_TAGMSG && msg->type != HISTORY_MULTILINE) {
+      /* spec: the msgid MUST name a PRIVMSG, NOTICE or TAGMSG; a JOIN or
+       * MODE row is not redactable (audit 2026-09-06 #59). */
+      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fail_ctx, "Not a message");
+      history_free_messages(msg);
+      return 0;
     } else {
       /* Found the message - get actual timestamp for window check */
       msg_time = (time_t)strtoul(msg->timestamp, NULL, 10);
@@ -204,8 +215,12 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         window = (time_t)feature_int(FEAT_REDACT_OPER_WINDOW);
         if (window > 0 && (CurrentTime - msg_time) > window) {
           history_free_messages(msg);
-          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", fail_ctx,
-                    "Redaction window has expired");
+          {
+            char wctx[BUFSIZE];   /* spec: <target> <msgid> <window> */
+            ircd_snprintf(0, wctx, sizeof(wctx), "%s %ld", fail_ctx, (long)window);
+            send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", wctx,
+                      "Redaction window has expired");
+          }
           return 0;
         }
         can_redact = 1;
@@ -230,8 +245,12 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         window = (time_t)feature_int(FEAT_REDACT_WINDOW);
         if (window > 0 && (CurrentTime - msg_time) > window) {
           history_free_messages(msg);
-          send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", fail_ctx,
-                    "Redaction window has expired");
+          {
+            char wctx[BUFSIZE];   /* spec: <target> <msgid> <window> */
+            ircd_snprintf(0, wctx, sizeof(wctx), "%s %ld", fail_ctx, (long)window);
+            send_fail(sptr, "REDACT", "REDACT_WINDOW_EXPIRED", wctx,
+                      "Redaction window has expired");
+          }
           return 0;
         }
 

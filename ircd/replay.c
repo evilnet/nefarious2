@@ -349,7 +349,7 @@ int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
    * those whose other party the TARGETS derivation names @a nick, the
    * most recently active wins: a guest nick is reused by different
    * people over time. */
-  if (history_query_targets("0", "99999999999.999", 1, 1000000, &list, NULL, NULL) <= 0
+  if (history_query_targets("0", "99999999999.999", 1, 200, &list, replay_pm_target_cb, sptr) <= 0
       || !list)
     return 0;
   for (t = list; t; t = t->next) {
@@ -527,8 +527,12 @@ static int replay_send_messages(struct Client *sptr, struct ReplayState *rs)
         gap_count++;
       }
 
-      send_gap_marker(sptr, rs->target, batchid, time_str,
-                       gap_start->msgid, gap_start->sender, gap_count);
+      send_gap_marker(sptr,
+                      rs->is_pm ? (pm_row_is_own(sptr, gap_start) ? rs->other_nick
+                                                                   : cli_name(sptr))
+                                : rs->target,
+                      batchid, time_str,
+                      gap_start->msgid, gap_start->sender, gap_count);
       rs->current = msg->next;
       rs->total_replayed += gap_count;
     } else {
