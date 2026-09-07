@@ -388,6 +388,16 @@ int sub1_from_channel(struct Channel* chptr)
   chptr->mode.mode &= ~MODE_INVITEONLY;
   chptr->mode.limit = 0;
   /*
+   * +L goes with +l: the redirect fires on users >= limit (m_join.c),
+   * so with the limit cleared to 0 on an empty channel a surviving +L
+   * turned from an overflow redirect into an UNCONDITIONAL one and sent
+   * every joiner -- the founder included -- away from their own empty
+   * channel, the exact lockout this reset exists to prevent.  A
+   * redirect meant to outlive an empty channel belongs on a +z channel,
+   * which returned above (PR #108 follow-up, 2026-09-07).
+   */
+  *chptr->mode.redir = '\0';
+  /*
    * We do NOT reset a possible key or bans because when
    * the 'channel owners' can't get in because of a key
    * or ban then apparently there was a fight/takeover

@@ -372,6 +372,55 @@ static void test_valid_hostname(void **state)
 }
 
 
+
+/* PR #109 + follow-up: Spoofhost block validation.  The user part takes
+ * IsUserChar (alphanumerics, Latin-1 letters and .-_^'`~ -- so the
+ * no-ident '~' prefix is fine); it is bounded by USERLEN and the host part
+ * by HOSTLEN because both are strlcpy'd into sethost[HOSTLEN + USERLEN + 2]
+ * downstream; an IPv6 literal is not a host. */
+static void test_valid_spoofhost(void **state)
+{
+    char longuser[USERLEN + 2 + 16];
+    char longhost[HOSTLEN + 2 + 16];
+    (void)state;
+
+    assert_true(valid_spoofhost("example.com", 0));
+    assert_true(valid_spoofhost("user@example.com", 0));
+    assert_true(valid_spoofhost("~user@example.com", 0));
+    assert_true(valid_spoofhost("*", 1));
+    assert_true(valid_spoofhost("us?r@*.example.com", 1));
+
+    assert_false(valid_spoofhost("", 0));
+    assert_false(valid_spoofhost("@example.com", 0));
+    assert_false(valid_spoofhost("user@", 0));
+    assert_false(valid_spoofhost(":evil@example.com", 0));
+    assert_false(valid_spoofhost("us er@example.com", 0));
+    assert_true(valid_spoofhost("u.s-e_r@example.com", 0));
+    assert_false(valid_spoofhost(".example.com", 0));
+    assert_false(valid_spoofhost("example.com.", 0));
+    assert_false(valid_spoofhost("2001:db8::1", 0));          /* IPv6 literal */
+    assert_false(valid_spoofhost("*", 0));                    /* wildcard needs ismask */
+
+    memset(longuser, 'a', sizeof(longuser) - 1);
+    longuser[sizeof(longuser) - 1] = '\0';
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%.*s@example.com", USERLEN + 1, longuser);
+        assert_false(valid_spoofhost(buf, 0));
+        snprintf(buf, sizeof(buf), "%.*s@example.com", USERLEN, longuser);
+        assert_true(valid_spoofhost(buf, 0));
+    }
+    memset(longhost, 'h', sizeof(longhost) - 1);
+    longhost[sizeof(longhost) - 1] = '\0';
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "%.*s", HOSTLEN + 1, longhost);
+        assert_false(valid_spoofhost(buf, 0));
+        snprintf(buf, sizeof(buf), "%.*s", HOSTLEN, longhost);
+        assert_true(valid_spoofhost(buf, 0));
+    }
+}
+
 /* ========== Character classification string functions ========== */
 /* NOTE: strIsDigit/strIsAlpha/strIsAlnum tests removed because strChattr()
  * is conditionally compiled with FORCEINLINE and difficult to link in tests.
@@ -807,6 +856,7 @@ int main(void)
         /* Username/hostname validation */
         cmocka_unit_test(test_valid_username),
         cmocka_unit_test(test_valid_hostname),
+        cmocka_unit_test(test_valid_spoofhost),
 
         /* str_appendf */
         cmocka_unit_test(test_str_appendf_basic),

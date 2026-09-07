@@ -1327,6 +1327,11 @@ int valid_spoofhost(const char* host, int mask) {
     /* Don't allow an empty user name */
     if (at == host)
       return 0;
+    /* The user part is copied into cli_user()->sethost[HOSTLEN+USERLEN+2]
+     * downstream with strlcpy semantics; bound it here rather than let
+     * it truncate silently (PR #109 follow-up). */
+    if ((size_t)(at - host) > USERLEN)
+      return 0;
     for (c = host; c < at; c++) {
       if (!IsUserChar(*c) && !(mask && ((*c == '*') || (*c == '?'))))
         return 0;
@@ -1337,6 +1342,8 @@ int valid_spoofhost(const char* host, int mask) {
 
   /* Empty strings are not valid hosts */
   if (EmptyString(c))
+    return 0;
+  if (strlen(c) > HOSTLEN)
     return 0;
   /* Don't allow leading period */
   if (*c == '.')
