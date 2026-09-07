@@ -76,12 +76,10 @@ void broadcast_channel_advertisement(const char *channel);
 /** Maximum batch ID length */
 #define BATCH_ID_LEN 16
 
-/** Max bytes per base64 chunk (after encoding).
- * P10 line limit is 512 bytes. After headers (~100 bytes), we have ~400 safe.
- * Raw data: 300 bytes -> 400 base64 chars.
- */
-#define CH_CHUNK_RAW_SIZE 300
-#define CH_CHUNK_B64_SIZE 400
+/* Chunk budgets are MEASURED per row against the 510-byte P10 line in
+ * send_ch_response (read path) and send_ch_write (write-forward); the
+ * old fixed 300/400 constants assumed a ~100-byte header and overflowed
+ * on a long target/msgid/hostmask (audit 2026-09-06 #11, re-review R2). */
 
 /** Check if content needs base64 encoding.
  * Note: New multiline content uses \x1F separators, but we must still check for
@@ -1156,7 +1154,7 @@ static int redact_filter_messages(struct HistoryMessage **head, int count);
  * @a target the way the on-demand handlers do.  See history.h.  This is
  * the ONLY page builder the bouncer reattach replay may use (wave 1). */
 int chathistory_page_since(struct Client *sptr, const char *target, int limit,
-                           const char *since_timestamp,
+                           const char *since_timestamp, const char *since_msgid,
                            struct HistoryMessage **out, int *complete)
 {
   struct HistoryMessage *messages = NULL;
@@ -1176,8 +1174,8 @@ int chathistory_page_since(struct Client *sptr, const char *target, int limit,
   if (open_query_presence(sptr, target, 0, &pf) < 0)
     return 0;   /* fail closed: nothing visible to replay */
   hook = query_row_filter(sptr, pf, &bare);
-  count = history_query_latest_after(target, limit, since_timestamp, &messages,
-                                     hook);
+  count = history_query_latest_after(target, limit, since_timestamp,
+                                     since_msgid, &messages, hook);
   *complete = query_page_complete(hook, count, limit);
   presence_query_filter_close(pf);
   if (count < 0)
@@ -3062,20 +3060,15 @@ static void process_write_forward(const char *target, const char *msgid,
   }
 }
 
-/** Check if content needs encoding (same logic as ch_needs_encoding) */
-static int write_needs_encoding(const char *content)
-{
-  if (!content)
-    return 0;
-  if (strchr(content, '\n') != NULL)
-    return 1;
-  if (strlen(content) > 400)
-    return 1;
-  return 0;
-}
-
 /** Send CH W or CH WB to a target server.
  * Handles chunking for large/multiline content.
+ *
+ * Content budget per P10 line = 510 (BUFSIZE-2) minus THIS row's header,
+ * measured, never a fixed 400: the W/WB header alone (target, msgid,
+ * timestamp, sender mask, account, type) can reach ~430 bytes, and
+ * msgq silently truncates anything over 510, so a fixed budget cut W
+ * content and corrupted WB base64 exactly the way the read path's R/Z/B
+ * did before send_ch_response was measured (re-review 2026-09-07 R2).
  * @param[in] server Target storage server.
  * @param[in] target Channel name.
  * @param[in] msgid Message ID.
@@ -3090,71 +3083,87 @@ static void send_ch_write(struct Client *server, const char *target,
                           const char *sender, const char *account,
                           char type_char, const char *content)
 {
-  /* Check if content needs base64 encoding */
-  if (!write_needs_encoding(content)) {
-    /* Simple case: send as CH W */
+  size_t full, cont;
+  size_t content_len, b64_len, b64_total, offset;
+  char *b64;
+  int first;
+
+  if (!content)
+    content = "";
+
+  {
+    /* ":XX CH W <target> <msgid> <ts> <sender> <account> <c> :<content>" */
+    size_t base = strlen(target) + strlen(msgid) + strlen(timestamp)
+                + strlen(sender) + strlen(account) + 1 /* type */;
+    size_t over = 3 /*:XX*/ + 4 /* CH W */ + 8 /* single spaces */ + 2 /* " :" */ + base;
+    /* ":XX CH WB <target> <msgid> + :<chunk>" */
+    size_t cover = 3 + 5 /* CH WB */ + 1 + strlen(target) + 1 + strlen(msgid)
+                 + 2 /* " +" */ + 2 /* " :" */;
+    full = (over + 4 < 510) ? (size_t)(510 - over - 4) : 8;    /* -4 safety */
+    full &= ~((size_t)3);                                      /* mult of 4 for b64 */
+    cont = (cover + 4 < 510) ? (size_t)(510 - cover - 4) : 8;
+    cont &= ~((size_t)3);
+  }
+
+  /* Plain W only when the content has no newline AND fits one line. */
+  if (strchr(content, '\n') == NULL && strlen(content) <= full) {
     sendcmdto_one(&me, CMD_CHATHISTORY, server, "W %s %s %s %s %s %c :%s",
                   target, msgid, timestamp, sender, account, type_char, content);
     return;
   }
 
   /* Base64 encode the content */
-  size_t content_len = strlen(content);
-  size_t b64_len = ((content_len + 2) / 3) * 4 + 1;
-  char *b64 = MyMalloc(b64_len);
+  content_len = strlen(content);
+  b64_len = ((content_len + 2) / 3) * 4 + 1;
+  b64 = MyMalloc(b64_len);
   if (!b64) {
-    /* Fallback: truncate and send as plain */
     sendcmdto_one(&me, CMD_CHATHISTORY, server, "W %s %s %s %s %s %c :[content too large]",
                   target, msgid, timestamp, sender, account, type_char);
     return;
   }
 
   ch_base64_encode(content, content_len, b64);
-  size_t b64_total = strlen(b64);
+  b64_total = strlen(b64);
 
   /* If it fits in one message, send complete WB message (no + marker) */
-  if (b64_total <= CH_CHUNK_B64_SIZE) {
+  if (b64_total <= full) {
     sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c :%s",
                   target, msgid, timestamp, sender, account, type_char, b64);
     MyFree(b64);
     return;
   }
 
-  /* Multi-chunk: send with chunking */
-  size_t offset = 0;
-  int first = 1;
-
+  /* Multi-chunk: the first line carries the full header (budget `full`),
+   * continuations only target+msgid (budget `cont`). */
+  offset = 0;
+  first = 1;
   while (offset < b64_total) {
     size_t remaining = b64_total - offset;
-    size_t chunk_size = (remaining > CH_CHUNK_B64_SIZE) ? CH_CHUNK_B64_SIZE : remaining;
+    size_t budget = first ? full : cont;
+    size_t chunk_size = (remaining > budget) ? budget : remaining;
     int more = (offset + chunk_size < b64_total);
-    char chunk[CH_CHUNK_B64_SIZE + 1];
+    char chunk[520];
 
+    if (chunk_size > sizeof(chunk) - 1)
+      chunk_size = sizeof(chunk) - 1;
     memcpy(chunk, b64 + offset, chunk_size);
     chunk[chunk_size] = '\0';
 
     if (first) {
-      /* First chunk: include all metadata, + marker if more coming */
-      if (more) {
+      if (more)
         sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c + :%s",
                       target, msgid, timestamp, sender, account, type_char, chunk);
-      } else {
+      else
         sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s %s %s %s %c :%s",
                       target, msgid, timestamp, sender, account, type_char, chunk);
-      }
       first = 0;
+    } else if (more) {
+      sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s + :%s",
+                    target, msgid, chunk);
     } else {
-      /* Continuation chunk: just target, msgid, and marker */
-      if (more) {
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s + :%s",
-                      target, msgid, chunk);
-      } else {
-        /* Final chunk: no + marker */
-        sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s :%s",
-                      target, msgid, chunk);
-      }
+      sendcmdto_one(&me, CMD_CHATHISTORY, server, "WB %s %s :%s",
+                    target, msgid, chunk);
     }
-
     offset += chunk_size;
   }
 
@@ -5799,6 +5808,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
     } else {
       is_continuation = 0;
+      /* The full form is B <reqid> <msgid> <ts> <type> <sender> <account>
+       * [+] <b64>: parv[7] must exist (a 7-param line is a truncated
+       * full form, and parv[7] is the NULL terminator -- re-review
+       * 2026-09-07 R1). */
+      if (parc < 8)
+        return 0;
       if (parc == 10 && strcmp(parv[8], "+") == 0) {
         has_more = 1;
         b64_data = parv[9];
@@ -6113,6 +6128,12 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       }
     } else {
       is_continuation = 0;
+      /* The full form is B <reqid> <msgid> <ts> <type> <sender> <account>
+       * [+] <b64>: parv[7] must exist (a 7-param line is a truncated
+       * full form, and parv[7] is the NULL terminator -- re-review
+       * 2026-09-07 R1). */
+      if (parc < 8)
+        return 0;
       if (parc == 10 && strcmp(parv[8], "+") == 0) {
         has_more = 1;
         b64_data = parv[9];

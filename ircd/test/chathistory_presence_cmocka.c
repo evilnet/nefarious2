@@ -467,6 +467,49 @@ static void test_presence_clock_skew_clamp(void **state)
  * vanished whenever an older PN arrived (burst sync sends a peer's
  * records oldest-first, so any at-cap account lost its newest window on
  * every relink). */
+/* Re-review 2026-09-07 R5: a remote window (PN from another connection of
+ * the same anchor) that STARTS AFTER the local open must not erase the
+ * local connection's earlier presence when the local part coalesces with
+ * it.  record_apply_part merged into the last closed window without
+ * lowering its start: union [900,1000]; join@400; part@1100 gave
+ * [900,1100] and t=500 flipped from visible to hidden. */
+static void test_presence_part_coalesce_keeps_earlier_open(void **state)
+{
+  const char *anchor = "test-session-anchor-partcoal";
+  int64_t t = BASE_MS + SEC(4000000);
+
+  (void)state;
+  presence_purge_session(anchor);
+
+  /* Local connection joins at 400s (interval opens). */
+  presence_record_join(anchor, 1, TEST_CHANNEL, t + SEC(400));
+  /* The other connection's closed window [900s,1000s] arrives by PN. */
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + SEC(900), t + SEC(1000));
+  /* Still visible while open. */
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(500)));
+  /* Local part at 1100s: within the coalesce window of [900,1000]. */
+  presence_record_part(anchor, 1, TEST_CHANNEL, t + SEC(1100));
+  /* The whole span [400,1100] stays visible ... */
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(500)));
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(950)));
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(1050)));
+  /* ... and nothing outside it. */
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(399)));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(1101)));
+
+  /* Mirror: a remote window that ends INSIDE the open interval and a part
+   * far outside the coalesce window: the open window must still be the
+   * one that lands, not be dropped as "already covered". */
+  presence_record_join(anchor, 1, TEST_CHANNEL, t + SEC(2000));
+  presence_apply_close(anchor, 1, TEST_CHANNEL, t + SEC(2100), t + SEC(2200));
+  presence_record_part(anchor, 1, TEST_CHANNEL, t + SEC(2500));
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(2050)));
+  assert_true(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(2400)));
+  assert_false(presence_was_present(anchor, 1, TEST_CHANNEL, t + SEC(1500)));
+
+  presence_purge_session(anchor);
+}
+
 static void test_presence_union_close_at_cap(void **state)
 {
   const char *anchor = "test-session-anchor-cap";
@@ -710,6 +753,7 @@ int main(void)
     cmocka_unit_test(test_presence_clock_skew_clamp),
     cmocka_unit_test(test_presence_remote_close_union),
     cmocka_unit_test(test_presence_union_close_at_cap),
+    cmocka_unit_test(test_presence_part_coalesce_keeps_earlier_open),
     cmocka_unit_test(test_presence_next_visible_boundaries),
     cmocka_unit_test(test_presence_millisecond_edges),
     cmocka_unit_test(test_presence_event_time_from_msgid),

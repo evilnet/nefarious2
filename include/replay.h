@@ -78,6 +78,8 @@ struct ReplayState {
   int replay_limit;                   /**< Per-channel/PM message limit */
   time_t since_time;                  /**< Baseline for read marker comparison */
   char since_timestamp[32];          /**< Formatted "unix.000" string */
+  char since_msgid[64];               /**< Cursor row at since_timestamp
+                                           (ATTACH cursor), else empty */
   int total_replayed;                 /**< Running total for summary */
   int chan_count;                      /**< Channels with messages */
   int pm_count;                       /**< PMs replayed */
@@ -118,7 +120,8 @@ extern void replay_start_batch(struct Client *sptr, const char *target,
  * @param[in] limit Per-channel/PM message limit.
  */
 extern void replay_start_bouncer_at(struct Client *sptr,
-                                    const char *since_timestamp, int limit);
+                                    const char *since_timestamp,
+                                    const char *since_msgid, int limit);
 extern void replay_start_catchup(struct Client *sptr, time_t since_time,
                                  int limit);
 extern void replay_start_bouncer(struct Client *sptr, time_t since_time,

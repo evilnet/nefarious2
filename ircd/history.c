@@ -1799,8 +1799,14 @@ static int history_query_internal(const char *target,
      * the floor timestamp (used by auto-replay to get the most recent
      * N messages but no older than the since-timestamp). */
     if (reverse && floor_key && floor_keylen > 0) {
-      if (klen >= (size_t)floor_keylen &&
-          memcmp(kbase, floor_key, floor_keylen) <= 0)
+      /* Compare on the shorter length so a key can never dodge the
+       * floor by being short: floors are full row keys since the
+       * msgid-as-key change, and a row whose msgid is shorter than
+       * the floor's used to fail the length test and walk on past the
+       * floor (re-review 2026-09-07 R4; the ascending BETWEEN bound
+       * below already does this). */
+      size_t n = klen < (size_t)floor_keylen ? klen : (size_t)floor_keylen;
+      if (memcmp(kbase, floor_key, n) <= 0)
         break;
     }
 
@@ -2013,11 +2019,12 @@ int history_query_latest(const char *target, enum HistoryRefType ref_type,
 
 int history_query_latest_after(const char *target, int limit,
                                const char *after_timestamp,
+                               const char *after_msgid,
                                struct HistoryMessage **result,
                                struct HistoryRowFilter *filter)
 {
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
-  char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+  char floorbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char timestamp[HISTORY_TIMESTAMP_LEN];
   const char *floor_ts;
   int keylen, floorlen;
@@ -2035,8 +2042,12 @@ int history_query_latest_after(const char *target, int limit,
   if (keylen < 0)
     return -1;
 
-  /* Floor key: stop backward walk at (or before) the since-timestamp */
-  floorlen = build_key(floorbuf, sizeof(floorbuf), target, floor_ts, NULL);
+  /* Floor key: stop backward walk at (or before) the since-timestamp.
+   * With a msgid the floor is that exact row, so same-millisecond rows
+   * minted after it are still replayed (re-review 2026-09-07 R3: the
+   * bouncer ATTACH cursor used to lose them). */
+  floorlen = build_key(floorbuf, sizeof(floorbuf), target, floor_ts,
+                       (after_msgid && after_msgid[0]) ? after_msgid : NULL);
   if (floorlen < 0)
     return -1;
 

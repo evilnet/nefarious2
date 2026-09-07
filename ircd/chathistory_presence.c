@@ -398,52 +398,34 @@ static void record_apply_join(struct presence_record *r, int64_t when)
     r->open_since = (int64_t)when;
 }
 
-/** Close the open interval, appending it to the closed list.  Drops
- * the oldest closed interval if the cap would be exceeded (hard FIFO
- * — fail-safe).  No-op if no interval is open. */
+static void record_union_close(struct presence_record *r,
+                               int64_t start, int64_t end);
+
+/** Close the open interval, folding it into the closed list.
+ *
+ * The closed list may already hold windows that START AFTER the open
+ * one (a PN from another connection of the same anchor, or an anchor
+ * transfer carrying an old start), so the fold is a real union, not an
+ * append: record_union_close handles both merge directions, the
+ * reconnect-churn coalesce, the cap (drop-oldest FIFO, fail-safe) and
+ * the swallow of successors.  The old bespoke coalesce only checked
+ * "does the last closed window end near my start" and kept THAT
+ * window's start, erasing the earlier part of the open one
+ * (re-review 2026-09-07 R5).  No-op if no interval is open. */
 static void record_apply_part(struct presence_record *r, int64_t when)
 {
-  int64_t end = when;
+  int64_t start, end = when;
   if (r->open_since == 0)
     return;
-  if (end < r->open_since) {
+  start = r->open_since;
+  if (end < start) {
     /* Clock skew or out-of-order event: clamp to a zero-length visit
      * instead of discarding -- a discarded open erased the member's
      * entire real window under a backward clock step. */
-    end = r->open_since;
+    end = start;
   }
-  /* Coalesce with the previous closed interval when the gap is tiny
-   * (reconnect churn): a flaky mobile client otherwise burns one
-   * FIFO slot per reconnect and silently ages out its oldest real
-   * windows.  30s covers reconnect blips without granting any
-   * meaningful absence. */
-  if (r->count > 0
-      && r->intervals[r->count - 1].end + PRESENCE_COALESCE_TIME >= r->open_since) {
-    if (end > r->intervals[r->count - 1].end)
-      r->intervals[r->count - 1].end = end;
-    r->open_since = 0;
-    return;
-  }
-  {
-    unsigned int cap = effective_max_intervals();
-    /* Trim down if the runtime cap was lowered below the current
-     * count — drop oldest intervals first, then make room for the
-     * new one if we're still at the cap. */
-    while (r->count > cap) {
-      memmove(&r->intervals[0], &r->intervals[1],
-              sizeof(r->intervals[0]) * (r->count - 1u));
-      r->count--;
-    }
-    if (r->count >= cap) {
-      memmove(&r->intervals[0], &r->intervals[1],
-              sizeof(r->intervals[0]) * (cap - 1u));
-      r->count = (uint8_t)(cap - 1u);
-    }
-  }
-  r->intervals[r->count].start = r->open_since;
-  r->intervals[r->count].end = end;
-  r->count++;
   r->open_since = 0;
+  record_union_close(r, start, end);
 }
 
 /** Test whether @a msg_time falls inside any closed interval or the

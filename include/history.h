@@ -286,11 +286,17 @@ extern int history_query_latest(const char *target, enum HistoryRefType ref_type
  * @param[in] limit Maximum messages to return.
  * @param[in] after_timestamp Floor timestamp (Unix or ISO 8601); messages
  *            at or before this time are excluded.
+ * @param[in] after_msgid Optional msgid of the row AT the floor
+ *            timestamp: the floor becomes that full row key, so rows in
+ *            the same millisecond that sort after it are included and
+ *            the row itself (and its earlier same-ms siblings) is not.
+ *            NULL/empty = exclude the whole floor millisecond.
  * @param[out] result Pointer to result list head (caller must free).
  * @return Number of messages returned, or -1 on error.
  */
 extern int history_query_latest_after(const char *target, int limit,
                                        const char *after_timestamp,
+                                       const char *after_msgid,
                                        struct HistoryMessage **result,
                                        struct HistoryRowFilter *filter);
 
@@ -686,6 +692,7 @@ extern int history_quota_check(const char *channel, const char *account, int cha
  */
 extern int chathistory_page_since(struct Client *sptr, const char *target,
                                   int limit, const char *since_timestamp,
+                                  const char *since_msgid,
                                   struct HistoryMessage **out, int *complete);
 
 /** Free partial federation chunk reassembly buffers (CH B read responses and

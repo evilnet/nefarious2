@@ -610,7 +610,8 @@ static int replay_next_channel(struct Client *sptr, struct ReplayState *rs)
     {
       int complete = 1;
       count = chathistory_page_since(sptr, channame, rs->replay_limit,
-                                     chan_since, &messages, &complete);
+                                     chan_since, rs->since_msgid,
+                                     &messages, &complete);
       if (count <= 0 || !messages)
         continue;
       rs->is_last_page = complete;
@@ -652,7 +653,8 @@ static int replay_next_pm(struct Client *sptr, struct ReplayState *rs)
     {
       int complete = 1;
       count = chathistory_page_since(sptr, tgt->target, rs->replay_limit,
-                                     rs->since_timestamp, &messages, &complete);
+                                     rs->since_timestamp, rs->since_msgid,
+                                     &messages, &complete);
       if (count <= 0 || !messages)
         continue;
       rs->is_last_page = complete;
@@ -975,7 +977,7 @@ void replay_start_bouncer(struct Client *sptr, time_t since_time, int limit)
   if (since_time == 0)
     return;
   ircd_snprintf(0, ts, sizeof(ts), "%lu.000", (unsigned long)since_time);
-  replay_start_bouncer_at(sptr, ts, limit);
+  replay_start_bouncer_at(sptr, ts, NULL, limit);
 }
 
 /** Start a bouncer auto-replay from an explicit "sec.msec" timestamp
@@ -984,7 +986,7 @@ void replay_start_bouncer(struct Client *sptr, time_t since_time, int limit)
  * Same semantics as replay_start_bouncer otherwise.
  */
 void replay_start_bouncer_at(struct Client *sptr, const char *since_timestamp,
-                             int limit)
+                             const char *since_msgid, int limit)
 {
   struct ReplayState *rs;
   struct Membership *member;
@@ -1028,6 +1030,13 @@ void replay_start_bouncer_at(struct Client *sptr, const char *since_timestamp,
   rs->since_time = since_time;
   ircd_strncpy(rs->since_timestamp, since_timestamp,
                sizeof(rs->since_timestamp));
+  /* The ATTACH cursor names the exact last-seen row: the page floor is
+   * that row's full key, so same-millisecond rows minted after it are
+   * replayed (re-review 2026-09-07 R3).  Applied to every target: for
+   * the cursor's own target it is exact, elsewhere it orders same-ms
+   * rows by msgid, the same order the store keys use. */
+  if (since_msgid && since_msgid[0])
+    ircd_strncpy(rs->since_msgid, since_msgid, sizeof(rs->since_msgid));
 
   /* Copy channel names — safe across event loop iterations */
   if (count > 0) {
@@ -1061,7 +1070,7 @@ void replay_start_catchup(struct Client *sptr, time_t since_time, int limit)
     char ts[HISTORY_TIMESTAMP_LEN];
 
     if (history_msgid_to_timestamp(cursor, ts) == 0) {
-      replay_start_bouncer_at(sptr, ts, limit);
+      replay_start_bouncer_at(sptr, ts, cursor, limit);
       return;
     }
     send_fail(sptr, "PERSISTENCE", "CURSOR_UNKNOWN", cursor,
