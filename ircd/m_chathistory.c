@@ -503,6 +503,29 @@ static const char *ch_fail_ctx(const char *subcmd, const char *target)
   return buf;
 }
 
+/** #73: an anchor msgid the store cannot place (not indexed, not
+ * time-decodable -- a legacy id or garbage) used to produce an EMPTY
+ * page stamped chathistory-end, which reads as "no more history".
+ * BEFORE/AFTER/AROUND/BETWEEN answer FAIL MESSAGE_ERROR naming the
+ * msgid so the client falls back to a timestamp; LATEST stays tolerant
+ * (the anchor only bounds, see the handler).  Returns 1 when it sent
+ * the FAIL. */
+static int fail_unknown_msgid(struct Client *sptr, const char *subcmd,
+                              const char *target, enum HistoryRefType ref_type,
+                              const char *ref_value)
+{
+  char ts[HISTORY_TIMESTAMP_LEN];
+  static char ctx[CHANNELLEN + HISTORY_MSGID_LEN + 40];
+  if (ref_type != HISTORY_REF_MSGID || !ref_value)
+    return 0;
+  if (history_msgid_to_timestamp(ref_value, ts) == 0)
+    return 0;
+  ircd_snprintf(0, ctx, sizeof(ctx), "%s %s %s", subcmd,
+                (target && *target) ? target : "*", ref_value);
+  send_fail(sptr, "CHATHISTORY", "MESSAGE_ERROR", ctx, "Unknown message id");
+  return 1;
+}
+
 /** Check if message type should be sent to client.
  * Without draft/event-playback, only PRIVMSG and NOTICE are sent.
  * @param[in] sptr Client to check.
@@ -633,6 +656,54 @@ static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
   return out;
 }
 
+/** Client line budget for the message body: 512 bytes for everything
+ * after the tags (":<sender> <cmd> <target> :" + body + CRLF), the
+ * tag section being separately bounded by message-tags. */
+static size_t history_line_budget(const char *sender, const char *cmd,
+                                  const char *target)
+{
+  size_t head = 1 + strlen(sender) + 1 + strlen(cmd) + 1 + strlen(target) + 2;
+  return head + 2 < 510 ? 510 - head - 2 : 1;
+}
+
+/** Longest prefix of @a line (@a len bytes) that fits @a budget,
+ * preferring the last space (kept in the part) and never splitting a
+ * UTF-8 sequence. */
+static size_t history_split_point(const char *line, size_t len, size_t budget)
+{
+  size_t i;
+  if (len <= budget)
+    return len;
+  for (i = budget; i > 0; i--)
+    if (line[i - 1] == ' ')
+      return i;
+  i = budget;
+  while (i > 0 && (line[i] & 0xC0) == 0x80)
+    i--;
+  return i > 0 ? i : budget;
+}
+
+/** Emit one logical line as as many wire lines as the budget needs:
+ * the first with @a pfx_first, the rest with @a pfx_cont.  The budget is
+ * measured on the part after the tags. */
+static void send_split_line(struct Client *sptr, const char *pfx_first,
+                            const char *pfx_cont, const char *line, size_t len)
+{
+  const char *pfx = pfx_first;
+  while (1) {
+    const char *body = (pfx[0] == '@') ? strchr(pfx, ' ') : pfx;
+    size_t head = body ? strlen(body + (pfx[0] == '@' ? 1 : 0)) : strlen(pfx);
+    size_t budget = head + 2 < 510 ? 510 - head - 2 : 1;
+    size_t n = history_split_point(line, len, budget);
+    sendrawto_one(sptr, "%s%.*s", pfx, (int)n, line);
+    if (n >= len)
+      return;
+    line += n;
+    len -= n;
+    pfx = pfx_cont;
+  }
+}
+
 /** Send a single history message, handling multiline content.
  * If content contains \x1F separators and client supports multiline,
  * send as nested batch. Otherwise truncate to first line.
@@ -649,7 +720,6 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
                                   const char *time_str, const char *cmd)
 {
   char *separator;
-  char first_line[512];
   char *content = msg->dyn_content ? msg->dyn_content : msg->content;
   const char *ctx_tag = msg->is_context ? ";draft/chathistory-context" : "";
 
@@ -787,7 +857,22 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
   separator = (msg->type == HISTORY_MULTILINE || msg->dyn_content)
                 ? strchr(content, '\x1F') : NULL;
 
-  if (separator && CapRecipientHas(sptr, CAP_DRAFT_MULTILINE) && CapRecipientHas(sptr, CAP_BATCH)) {
+  /* Wire prefixes.  Every logical line goes through send_split_line,
+   * which re-splits a line longer than the client line budget at word
+   * boundaries (audit #26: concat parts are joined at store time and
+   * the split points are lost; a joined line over the limit was sent
+   * whole, over the limit).  Continuation parts carry
+   * draft/multiline-concat for a multiline client, and are plain
+   * consecutive messages for the fallback tiers. */
+  {
+    char pfx_first[1100], pfx_cont[1100];
+    int ml_client = CapRecipientHas(sptr, CAP_DRAFT_MULTILINE)
+                    && CapRecipientHas(sptr, CAP_BATCH);
+    size_t body_budget = history_line_budget(msg->sender, cmd, target);
+    int first_over = strlen(content) > body_budget
+                     && (!separator || (size_t)(separator - content) > body_budget);
+
+  if ((separator || first_over) && ml_client) {
     /* Re-batch as draft/multiline nested inside chathistory batch */
     static unsigned long ml_counter = 0;
     char ml_batchid[BATCH_ID_LEN];
@@ -812,27 +897,19 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
                     ml_batchid, target);
     }
 
-    /* Send each line with the same msgid (per multiline spec) */
+    /* Per multiline spec, inner lines only get @batch= tag.
+     * Server tags (time, msgid, account) go on the BATCH opener. */
+    ircd_snprintf(0, pfx_first, sizeof(pfx_first), "@batch=%s :%s %s %s :",
+                  ml_batchid, msg->sender, cmd, target);
+    ircd_snprintf(0, pfx_cont, sizeof(pfx_cont),
+                  "@batch=%s;draft/multiline-concat :%s %s %s :",
+                  ml_batchid, msg->sender, cmd, target);
     while (line_start && *line_start) {
+      size_t len;
       line_end = strchr(line_start, '\x1F');
-      if (line_end) {
-        /* Copy line without separator */
-        size_t len = line_end - line_start;
-        if (len >= sizeof(first_line))
-          len = sizeof(first_line) - 1;
-        memcpy(first_line, line_start, len);
-        first_line[len] = '\0';
-        line_start = line_end + 1;
-      } else {
-        /* Last line (no trailing separator) */
-        ircd_strncpy(first_line, line_start, sizeof(first_line) - 1);
-        line_start = NULL;
-      }
-
-      /* Per multiline spec, inner lines only get @batch= tag.
-       * Server tags (time, msgid, account) go on the BATCH opener. */
-      sendrawto_one(sptr, "@batch=%s :%s %s %s :%s",
-                    ml_batchid, msg->sender, cmd, target, first_line);
+      len = line_end ? (size_t)(line_end - line_start) : strlen(line_start);
+      send_split_line(sptr, pfx_first, pfx_cont, line_start, len);
+      line_start = line_end ? line_end + 1 : NULL;
     }
 
     /* End nested multiline batch */
@@ -849,86 +926,73 @@ void send_history_message(struct Client *sptr, struct HistoryMessage *msg,
     char *line_start = content;
     char *line_end;
     int first = 1;
+    char rest[sizeof(tags)];
+
+    /* Subsequent lines: the batch/time tags but NOT the msgid.  The
+     * live fallback (send_multiline_fallback) puts the msgid on the
+     * first line only; repeating it here made msgid-deduping clients
+     * keep one line of every multiline in history and broke the
+     * one-msgid-per-event rule (audit 2026-09-06 #14). */
+    rest[0] = '\0';
+    if (tpos) {
+      const char *m = strstr(tags, "msgid=");
+      if (m) {
+        const char *e = strchr(m, ';');
+        size_t pre = (size_t)(m - tags);
+        /* drop "msgid=...;" or a trailing ";msgid=..." */
+        if (e) {
+          memcpy(rest, tags, pre);
+          ircd_strncpy(rest + pre, e + 1, sizeof(rest) - pre - 1);
+        } else {
+          if (pre > 0 && tags[pre - 1] == ';')
+            pre--;
+          memcpy(rest, tags, pre);
+          rest[pre] = '\0';
+        }
+      } else
+        ircd_strncpy(rest, tags, sizeof(rest) - 1);
+    }
+    if (rest[0])
+      ircd_snprintf(0, pfx_cont, sizeof(pfx_cont), "@%s :%s %s %s :",
+                    rest, msg->sender, cmd, target);
+    else
+      ircd_snprintf(0, pfx_cont, sizeof(pfx_cont), ":%s %s %s :",
+                    msg->sender, cmd, target);
+    if (tpos)
+      ircd_snprintf(0, pfx_first, sizeof(pfx_first), "@%s%s :%s %s %s :",
+                    tags, ctags_str, msg->sender, cmd, target);
+    else
+      ircd_snprintf(0, pfx_first, sizeof(pfx_first), ":%s %s %s :",
+                    msg->sender, cmd, target);
 
     while (line_start && *line_start) {
+      size_t len;
       line_end = strchr(line_start, '\x1F');
-      if (line_end) {
-        size_t len = line_end - line_start;
-        if (len >= sizeof(first_line))
-          len = sizeof(first_line) - 1;
-        memcpy(first_line, line_start, len);
-        first_line[len] = '\0';
-        line_start = line_end + 1;
-      } else {
-        ircd_strncpy(first_line, line_start, sizeof(first_line) - 1);
-        line_start = NULL;
-      }
-
-      if (!first_line[0])
-        continue;   /* multiline: MUST NOT send blank lines to a non-multiline client */
-
-      if (first) {
-        /* First line gets all tags + client tags */
-        if (tpos)
-          sendrawto_one(sptr, "@%s%s :%s %s %s :%s",
-                        tags, ctags_str, msg->sender, cmd, target, first_line);
-        else
-          sendrawto_one(sptr, ":%s %s %s :%s",
-                        msg->sender, cmd, target, first_line);
+      len = line_end ? (size_t)(line_end - line_start) : strlen(line_start);
+      if (len > 0) {   /* multiline: MUST NOT send blank lines to a non-multiline client */
+        /* First line gets all tags + client tags; its continuation parts
+         * and every later line get the msgid-less tags. */
+        send_split_line(sptr, first ? pfx_first : pfx_cont, pfx_cont, line_start, len);
         first = 0;
-      } else {
-        /* Subsequent lines: the batch/time tags but NOT the msgid.  The
-         * live fallback (send_multiline_fallback) puts the msgid on the
-         * first line only; repeating it here made msgid-deduping clients
-         * keep one line of every multiline in history and broke the
-         * one-msgid-per-event rule (audit 2026-09-06 #14). */
-        if (tpos) {
-          char rest[sizeof(tags)];
-          const char *m = strstr(tags, "msgid=");
-          if (m) {
-            const char *e = strchr(m, ';');
-            size_t pre = (size_t)(m - tags);
-            /* drop "msgid=...;" or a trailing ";msgid=..." */
-            if (e) {
-              memcpy(rest, tags, pre);
-              ircd_strncpy(rest + pre, e + 1, sizeof(rest) - pre - 1);
-            } else {
-              if (pre > 0 && tags[pre - 1] == ';')
-                pre--;
-              memcpy(rest, tags, pre);
-              rest[pre] = '\0';
-            }
-          } else
-            ircd_strncpy(rest, tags, sizeof(rest) - 1);
-          if (rest[0])
-            sendrawto_one(sptr, "@%s :%s %s %s :%s",
-                          rest, msg->sender, cmd, target, first_line);
-          else
-            sendrawto_one(sptr, ":%s %s %s :%s",
-                          msg->sender, cmd, target, first_line);
-        } else
-          sendrawto_one(sptr, ":%s %s %s :%s",
-                        msg->sender, cmd, target, first_line);
       }
+      line_start = line_end ? line_end + 1 : NULL;
     }
   } else {
-    /* Tier 3: No chathistory batch or no separators - send single message */
-    if (separator) {
-      size_t len = separator - content;
-      if (len >= sizeof(first_line))
-        len = sizeof(first_line) - 1;
-      memcpy(first_line, content, len);
-      first_line[len] = '\0';
-      content = first_line;
-    }
+    /* Tier 3: No chathistory batch or no separators - the first logical
+     * line only, re-split if it is over the wire. */
+    size_t len = separator ? (size_t)(separator - content) : strlen(content);
 
     if (tpos)
-      sendrawto_one(sptr, "@%s%s :%s %s %s :%s",
-                    tags, ctags_str, msg->sender, cmd, target, content);
+      ircd_snprintf(0, pfx_first, sizeof(pfx_first), "@%s%s :%s %s %s :",
+                    tags, ctags_str, msg->sender, cmd, target);
     else
-      sendrawto_one(sptr, ":%s %s %s :%s",
-                    msg->sender, cmd, target, content);
+      ircd_snprintf(0, pfx_first, sizeof(pfx_first), ":%s %s %s :",
+                    msg->sender, cmd, target);
+    ircd_snprintf(0, pfx_cont, sizeof(pfx_cont), ":%s %s %s :",
+                  msg->sender, cmd, target);
+    send_split_line(sptr, pfx_first, pfx_cont, content, len);
   }
+  } /* end prefix scope */
   } /* end ctags_str scope */
 }
 
@@ -1628,6 +1692,17 @@ static int chathistory_latest(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
+  /* #73: LATEST's anchor only bounds the page ("messages after it");
+   * an anchor the store cannot place bounds nothing, so answer the
+   * plain latest page rather than an empty one stamped complete. */
+  if (ref_type == HISTORY_REF_MSGID && ref_value) {
+    char ts[HISTORY_TIMESTAMP_LEN];
+    if (history_msgid_to_timestamp(ref_value, ts) != 0) {
+      ref_type = HISTORY_REF_NONE;
+      ref_value = NULL;
+      ref_str = "*";   /* the federation query must not carry it either */
+    }
+  }
 
   /* Parse and validate limit */
   limit = atoi(limit_str);
@@ -1737,6 +1812,8 @@ static int chathistory_before(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "BEFORE", target, ref_type, ref_value))
+    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -1821,6 +1898,8 @@ static int chathistory_after(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "AFTER", target, ref_type, ref_value))
+    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -1905,6 +1984,8 @@ static int chathistory_around(struct Client *sptr, const char *target,
               "Invalid message reference");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "AROUND", target, ref_type, ref_value))
+    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
@@ -1997,6 +2078,9 @@ static int chathistory_between(struct Client *sptr, const char *target,
               "Invalid second message reference");
     return 0;
   }
+  if (fail_unknown_msgid(sptr, "BETWEEN", target, ref_type1, ref_value1)
+      || fail_unknown_msgid(sptr, "BETWEEN", target, ref_type2, ref_value2))
+    return 0;
 
   limit = atoi(limit_str);
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);

@@ -473,8 +473,8 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
     /*
      * Stop a running chathistory replay clean
      */
-    if (MyUser(bcptr) && cli_replay(bcptr))
-      replay_cancel(bcptr);
+    while (MyUser(bcptr) && cli_replay(bcptr))
+      replay_cancel(bcptr);   /* a cancel may reinstall a suspended catch-up */
     /*
      * Clean up any pending forwarded label batches (no BATCH close sent)
      */

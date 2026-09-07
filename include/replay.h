@@ -70,6 +70,12 @@ struct ReplayState {
   int label_used;                     /**< Whether label was applied */
   int is_last_page;                   /**< True if query returned fewer results than limit */
 
+  /** A bouncer catch-up suspended while this on-demand page is served;
+   * reinstalled and continued when this state is freed (audit #26/#20:
+   * the single slot used to CANCEL the catch-up on the client's first
+   * own CHATHISTORY, silently dropping every later channel and PM). */
+  struct ReplayState *resume;
+
   /* === Multi-channel iteration (bouncer replay) === */
   enum ReplayPhase phase;
   char **chan_names;                  /**< Owned array of DupString'd channel names */

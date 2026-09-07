@@ -767,8 +767,11 @@ void replay_continue(struct Client *sptr)
     return;
   }
 
-  /* If we have messages queued, keep sending */
+  /* If we have messages queued, keep sending.  A page resumed after a
+   * suspension has rows but its batch was closed: reopen it. */
   if (rs->current) {
+    if (!rs->batch_open)
+      replay_open_batch(sptr, rs);
     if (!replay_send_messages(sptr, rs))
       return;  /* Paused for sendQ */
 
@@ -891,10 +894,28 @@ void replay_start_batch(struct Client *sptr, const char *target,
    * BATCH tag and every per-message PRIVMSG target — see project
    * memory project_pm_replay_storage_key_leak. */
   struct ReplayState tmp_rs;
+  struct ReplayState *suspended = NULL;
 
-  /* Cancel any existing replay */
-  if (cli_replay(sptr))
-    replay_cancel(sptr);
+  /* An in-flight bouncer catch-up is SUSPENDED, not cancelled: its
+   * inner and outer batches close cleanly here, its cursor (phase,
+   * channel index, PM list, the rest of the current page) stays in the
+   * state, and replay_cancel reinstalls it when this on-demand page is
+   * done.  The user's own query is served first; nothing is dropped.
+   * Anything else in the slot (another on-demand page) is cancelled as
+   * before. */
+  if (cli_replay(sptr)) {
+    struct ReplayState *old = cli_replay(sptr);
+    if (old->phase == REPLAY_PHASE_CHANNELS || old->phase == REPLAY_PHASE_PMS) {
+      if (old->batch_open && !IsDead(sptr))
+        replay_close_batch(sptr, old);
+      if (old->outer_batch_open && !IsDead(sptr))
+        replay_close_outer_batch(sptr, old);
+      cli_replay(sptr) = NULL;
+      suspended = old;
+    } else {
+      replay_cancel(sptr);
+    }
+  }
 
   /* Pre-translate the wire target for the empty-batch path which
    * doesn't allocate a full ReplayState. */
@@ -931,10 +952,15 @@ void replay_start_batch(struct Client *sptr, const char *target,
 
     if (messages)
       history_free_messages(messages);
+    if (suspended) {
+      cli_replay(sptr) = suspended;
+      update_write(sptr);   /* ET_WRITE -> replay_continue picks it up */
+    }
     return;
   }
 
   rs = MyCalloc(1, sizeof(struct ReplayState));
+  rs->resume = suspended;
   rs->messages = messages;
   rs->current = messages;
   replay_set_target_from_storage(sptr, rs, target);
@@ -1085,10 +1111,13 @@ void replay_start_catchup(struct Client *sptr, time_t since_time, int limit)
 void replay_cancel(struct Client *sptr)
 {
   struct ReplayState *rs = cli_replay(sptr);
+  struct ReplayState *resume;
   int i;
 
   if (!rs)
     return;
+  resume = rs->resume;
+  rs->resume = NULL;
 
   /* Close open batch */
   if (rs->batch_open && !IsDead(sptr))
@@ -1115,5 +1144,16 @@ void replay_cancel(struct Client *sptr)
 
   MyFree(rs);
   cli_replay(sptr) = NULL;
+
+  /* Reinstall a suspended bouncer catch-up.  Its current page (if any)
+   * continues in a fresh inner batch, the outer wrapper reopens lazily
+   * (replay_open_batch); a dead client just tears it down too. */
+  if (resume) {
+    cli_replay(sptr) = resume;
+    if (IsDead(sptr)) {
+      replay_cancel(sptr);
+      return;
+    }
+  }
   update_write(sptr);
 }
