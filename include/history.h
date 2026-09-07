@@ -46,7 +46,7 @@ struct HistoryMessage;
  * there instead of stepping through an invisible run. */
 struct HistoryRowFilter {
   /** Return 1 to keep @a msg; 0 to skip it (optionally setting
-   * *@a skip_to, epoch seconds, to seek to); -1 to skip it and stop the
+   * *@a skip_to, epoch milliseconds, to seek to); -1 to skip it and stop the
    * walk because nothing further is visible in this direction. */
   int (*fn)(const struct HistoryMessage *msg, int reverse, void *ctx,
             int64_t *skip_to);
@@ -313,6 +313,14 @@ extern int history_query_around(const char *target, enum HistoryRefType ref_type
                                  const char *reference, int limit,
                                  struct HistoryMessage **result,
                                  struct HistoryRowFilter *filter);
+
+/** Direction BETWEEN would walk for these selectors: 1 = descending
+ * (first selector newer), 0 = ascending, -1 = a msgid selector could not
+ * be resolved.  Shared by the walk, the federation origin's merge trim
+ * and the responder's overflow trim so all three agree. */
+extern int history_between_descending(const char *target,
+                                      enum HistoryRefType ref_type1, const char *reference1,
+                                      enum HistoryRefType ref_type2, const char *reference2);
 
 /** Query messages between two reference points.
  * @param[in] target Channel or nick to query.

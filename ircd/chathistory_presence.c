@@ -83,8 +83,8 @@ static unsigned int effective_max_intervals(void)
 
 /** A closed presence interval.  Stored compactly in the record. */
 struct presence_interval {
-  int64_t start;   /**< epoch seconds, inclusive */
-  int64_t end;     /**< epoch seconds, inclusive (always >= start) */
+  int64_t start;   /**< packed HLC time (ms<<16 | logical), inclusive */
+  int64_t end;     /**< packed HLC time, inclusive (always >= start) */
 };
 
 /** Per-(anchor, channel) presence record.  Same layout for in-memory
@@ -714,8 +714,9 @@ static void presence_broadcast_close(const char *account,
     return;
   if (!cli_serv(&me))
     return;
-  /* Epoch milliseconds on the wire (2026-09-02); receivers normalize
-   * seconds-era values from older peers by magnitude. */
+  /* Packed HLC time on the wire (ms<<16 | logical); receivers normalize
+   * seconds- and milliseconds-era values from older peers by magnitude
+   * (m_markread.c PN handler). */
   snprintf(sb, sizeof(sb), "%lld", (long long)start);
   snprintf(eb, sizeof(eb), "%lld", (long long)end);
   sendcmdto_serv_butone_v3(&me, CMD_PRESENCE, NULL, "%s %s %s %s",
@@ -723,7 +724,7 @@ static void presence_broadcast_close(const char *account,
 }
 
 void presence_record_join(const char *anchor, int anchor_is_session,
-                           const char *channel, time_t when)
+                           const char *channel, int64_t when)
 {
   if (!anchor || !*anchor || !channel || !*channel)
     return;
@@ -746,7 +747,7 @@ void presence_record_join(const char *anchor, int anchor_is_session,
 }
 
 void presence_record_part(const char *anchor, int anchor_is_session,
-                           const char *channel, time_t when)
+                           const char *channel, int64_t when)
 {
   if (!anchor || !*anchor || !channel || !*channel)
     return;
@@ -780,8 +781,7 @@ void presence_record_part(const char *anchor, int anchor_is_session,
       int64_t bend = (int64_t)when;
       if (bend < bstart)
         bend = bstart;
-      presence_broadcast_close(anchor, channel,
-                               (time_t)bstart, (time_t)bend);
+      presence_broadcast_close(anchor, channel, bstart, bend);
     }
   }
 }
@@ -907,6 +907,12 @@ static int anchor_sibling_in_channel(const struct Client *exclude,
      * then each saw the other as an existing sibling and NO interval
      * ever opened for bouncer accounts (the feature's main audience). */
     if (IsMemberAlias(m))
+      continue;
+    /* A zombie membership (kicked, PART not yet propagated) is not a
+     * live sibling either: it must not keep the interval open when the
+     * live connection parts.  presence_backfill_now already skips it
+     * (re-review 2026-09-07 R18). */
+    if (IsZombie(m))
       continue;
     other_anchor = presence_anchor_for(c, &other_is_session);
     if (!other_anchor)
@@ -1118,6 +1124,22 @@ void presence_burst_sync(struct Client *cptr)
                             account, chanbuf, sb, eb);
               sent++;
             }
+            /* An interval still OPEN spans the split the peer lost: send
+             * it as [open, now] so the peer unions it; the real close
+             * later extends the same window.  Closed-only sync left the
+             * peer with a permanent hole across the split (re-review
+             * 2026-09-07 R17). */
+            if (r.open_since != 0 && sent < line_ceiling) {
+              char sb[24], eb[24];
+              int64_t now = presence_clock_time();
+              if (now < r.open_since)
+                now = r.open_since;
+              snprintf(sb, sizeof(sb), "%lld", (long long)r.open_since);
+              snprintf(eb, sizeof(eb), "%lld", (long long)now);
+              sendcmdto_one(&me, CMD_PRESENCE, cptr, "%s %s %s %s",
+                            account, chanbuf, sb, eb);
+              sent++;
+            }
           }
         }
       }
@@ -1211,6 +1233,24 @@ int presence_filter_messages(struct Client *requestor,
     return 0;
   }
 
+  /* One record snapshot for the whole page: presence_was_present loads
+   * the ~4 KB account record from the store on EVERY call, and a
+   * 100-row page (200 with redaction inheritance) was 100-200 reads
+   * (re-review 2026-09-07 R22).  The query-time filter already
+   * snapshots once.  No record at all => nothing is visible. */
+  {
+    const struct presence_record *rp = NULL;
+    struct presence_record snap;
+    if (is_session) {
+      struct presence_session_entry *e = session_find(anchor, target);
+      if (e)
+        rp = &e->record;
+    } else if (acct_load(anchor, target, &snap) == 0) {
+      rp = &snap;
+    }
+    if (!rp)
+      memset(&snap, 0, sizeof(snap)), rp = &snap;
+
   pp = head;
   while (*pp) {
     struct HistoryMessage *m = *pp;
@@ -1219,8 +1259,7 @@ int presence_filter_messages(struct Client *requestor,
      * server-generated, but federated rows arrive over the wire --
      * visible-if-unparseable was the wrong default for a security
      * gate. */
-    int visible = (mtime != 0) &&
-                  presence_was_present(anchor, is_session, target, mtime);
+    int visible = (mtime != 0) && record_was_present(rp, mtime);
 
     /* Redaction inheritance: a HISTORY_REDACT entry's visibility is
      * the visibility of its target message, not its own timestamp.
@@ -1245,8 +1284,7 @@ int presence_filter_messages(struct Client *requestor,
       if (target_msgid[0]
           && history_msgid_to_timestamp(target_msgid, ts_buf) == 0) {
         int64_t parent_time = presence_event_time(target_msgid, history_parse_ms(ts_buf));
-        if (parent_time != 0
-            && presence_was_present(anchor, is_session, target, parent_time))
+        if (parent_time != 0 && record_was_present(rp, parent_time))
           visible = 1;
       }
     }
@@ -1260,6 +1298,7 @@ int presence_filter_messages(struct Client *requestor,
       history_free_messages(m);
       dropped++;
     }
+  }
   }
   /* Diagnostic: when a full sweep drops everything, the user sees an
    * empty batch and has no way to tell strict-presence apart from
@@ -1284,9 +1323,10 @@ struct PresenceQueryFilter {
                                      *   (the post-filter re-loads per row) */
 };
 
-/** history.c row hook.  Presence is second-granular; a row exactly on a
- * boundary second is inside it (intervals are inclusive), which is what
- * lets the walk seek to a boundary and trust the landing row. */
+/** history.c row hook.  Presence is HLC-granular (packed ms<<16 |
+ * logical); a row exactly on a boundary is inside it (intervals are
+ * inclusive), which is what lets the walk seek to a boundary
+ * (handed to the walk as a millisecond) and trust the landing row. */
 static int presence_row_hook(const struct HistoryMessage *msg, int reverse,
                              void *ctx, int64_t *skip_to)
 {

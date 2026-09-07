@@ -12,8 +12,11 @@
  *   - Session anchors: in-memory hash, purged on ephemeral client exit.
  *
  * Hooks live in channel.c at add_user_to_channel / remove_user_from_channel,
- * which between them cover JOIN, PART, KICK, QUIT, SQUIT, and burst-rejoin
- * uniformly without per-message-type plumbing.
+ * which between them cover JOIN, PART, QUIT, SQUIT, and burst-rejoin
+ * uniformly without per-message-type plumbing.  KICK leaves a zombie
+ * membership: the close is armed at the kick's event time (m_kick.c,
+ * channel.c +Z sweep) and fires from the removal the propagated PART
+ * runs later.
  *
  * Storage shape (see chathistory_presence.c): per (anchor, channel),
  * a hard-capped list of closed (start,end) intervals plus an
@@ -41,7 +44,7 @@ struct HistoryRowFilter;
 
 /** Open the "presence" column family on the chathistory storage env
  * for the account-anchored side, and zero the in-memory session
- * tables.  Called from history_init() after the env is up; safe to
+ * tables.  Called from ircd.c main() after the env is up; safe to
  * call again (idempotent).  Returns 0 on success, -1 if the env is
  * not available or the CF open fails — session-anchored presence
  * keeps working in-memory either way; only account persistence is

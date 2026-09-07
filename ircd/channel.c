@@ -1147,9 +1147,10 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
       /* Invariant violation: TLS primary in +Z but session has plaintext.
        * Kick from channel — this shouldn't happen with gates A/B working. */
       char ssl_kick_msgid[64] = "";
+      int64_t ssl_kick_ms = history_event_time_ms(NULL);
       if (feature_bool(FEAT_MSGID)) {
         generate_msgid(ssl_kick_msgid, sizeof(ssl_kick_msgid));
-        sendcmdto_set_client_event(ssl_kick_msgid, history_event_time_ms(NULL));
+        sendcmdto_set_client_event(ssl_kick_msgid, ssl_kick_ms);
       }
       sendcmdto_serv_butone(&me, CMD_KICK, NULL,
                             "%H %C :SSL-only channel (insecure session)",
@@ -1168,7 +1169,14 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
                             0);
       }
 #endif
+      /* The victim's presence interval closes at the kick's time, the
+       * same stamp every peer closes at from the KICK's msgid, not at
+       * whatever make_zombie's removal runs at (P2; every m_kick.c site
+       * already arms this -- re-review 2026-09-07 R16). */
+      presence_set_event_time(ssl_kick_msgid[0]
+                              ? presence_event_time(ssl_kick_msgid, ssl_kick_ms) : 0);
       make_zombie(member, member->user, &me, &me, member->channel);
+      presence_set_event_time(0);
     }
     return 0;
   }

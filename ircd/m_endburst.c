@@ -200,12 +200,13 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
 
       /* Layer 1: Also send channel advertisements (CH A F) */
       send_channel_advertisements(sptr);
-
-      /* Re-advertise storage servers already known to us so the new
-       * peer can federate to the whole network, not just its own
-       * subtree (audit 2026-09-06 #21). */
-      chathistory_reflood_ads(sptr);
     }
+    /* Re-advertise storage servers already known to us so the new peer
+     * can federate to the whole network, not just its own subtree
+     * (audit 2026-09-06 #21).  Independent of OUR storage: the relay-only
+     * hub is exactly the topology that needs it (re-review R11). */
+    if (IsIRCv3Aware(sptr))
+      chathistory_reflood_ads(sptr);
 
     /* Forward cached SASL mechanism list to newly linked server.
      * The SASL M broadcast from services only fires once when services

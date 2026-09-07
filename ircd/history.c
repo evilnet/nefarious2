@@ -2277,16 +2277,92 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
   return count_before + count_ref + count_after;
 }
 
+/** Resolve BETWEEN's two selectors to store keys and decide the walk
+ * direction.  Bounds are ROWS when given as msgids (full key),
+ * milliseconds when given as timestamps (prefix).  Both selectors are
+ * EXCLUSIVE, and the page is counted from the FIRST selector: a
+ * newer-first request pages backwards from it (spec: "counted starting
+ * from and excluding the first message selector ... may be forwards or
+ * backwards in time").  The old walk swapped the selectors and always
+ * returned the OLDEST rows of the window, with the start row included
+ * (2026-09-06).
+ * @return 0 on success, 1 when a msgid selector cannot be resolved
+ *         (caller answers "no rows"), -1 on a key-build error. */
+static int between_build_keys(const char *target,
+                              enum HistoryRefType ref_type1, const char *reference1,
+                              enum HistoryRefType ref_type2, const char *reference2,
+                              char *keybuf, size_t keybuf_size, int *keylen,
+                              char *endbuf, size_t endbuf_size, int *endlen,
+                              int *descending)
+{
+  char timestamp1[HISTORY_TIMESTAMP_LEN], timestamp2[HISTORY_TIMESTAMP_LEN];
+  const char *ref1, *ref2, *msgid1 = NULL, *msgid2 = NULL;
+
+  if (ref_type1 == HISTORY_REF_MSGID) {
+    msgid1 = reference1;
+    if (history_msgid_to_timestamp(reference1, timestamp1) != 0)
+      return 1;
+    ref1 = timestamp1;
+  } else if (ref_type1 == HISTORY_REF_TIMESTAMP) {
+    if (history_iso_to_unix(reference1, timestamp1, sizeof(timestamp1)) == 0)
+      ref1 = timestamp1;
+    else
+      ref1 = reference1;  /* Assume already Unix format */
+  } else {
+    ref1 = reference1;
+  }
+
+  if (ref_type2 == HISTORY_REF_MSGID) {
+    msgid2 = reference2;
+    if (history_msgid_to_timestamp(reference2, timestamp2) != 0)
+      return 1;
+    ref2 = timestamp2;
+  } else if (ref_type2 == HISTORY_REF_TIMESTAMP) {
+    if (history_iso_to_unix(reference2, timestamp2, sizeof(timestamp2)) == 0)
+      ref2 = timestamp2;
+    else
+      ref2 = reference2;
+  } else {
+    ref2 = reference2;
+  }
+
+  *keylen = build_key(keybuf, keybuf_size, target, ref1, msgid1);
+  if (*keylen < 0)
+    return -1;
+  *endlen = build_key(endbuf, endbuf_size, target, ref2, msgid2);
+  if (*endlen < 0)
+    return -1;
+  {
+    int minlen = *keylen < *endlen ? *keylen : *endlen;
+    int cmp = memcmp(keybuf, endbuf, minlen);
+    if (cmp == 0)
+      cmp = *keylen - *endlen;
+    *descending = cmp > 0;
+  }
+  return 0;
+}
+
+int history_between_descending(const char *target,
+                               enum HistoryRefType ref_type1, const char *reference1,
+                               enum HistoryRefType ref_type2, const char *reference2)
+{
+  char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  char endbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
+  int keylen, endlen, descending;
+
+  if (between_build_keys(target, ref_type1, reference1, ref_type2, reference2,
+                         keybuf, sizeof(keybuf), &keylen,
+                         endbuf, sizeof(endbuf), &endlen, &descending) != 0)
+    return -1;
+  return descending;
+}
+
 int history_query_between(const char *target,
                           enum HistoryRefType ref_type1, const char *reference1,
                           enum HistoryRefType ref_type2, const char *reference2,
                           int limit, struct HistoryMessage **result,
                           struct HistoryRowFilter *filter)
 {
-  char timestamp1[HISTORY_TIMESTAMP_LEN];
-  char timestamp2[HISTORY_TIMESTAMP_LEN];
-  const char *ref1, *ref2;
-  const char *msgid1 = NULL, *msgid2 = NULL;
   char keybuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char end_prefix[CHANNELLEN + HISTORY_TIMESTAMP_LEN + HISTORY_MSGID_LEN + 8];
   char target_prefix[CHANNELLEN + 2];
@@ -2303,60 +2379,18 @@ int history_query_between(const char *target,
   if (!history_available)
     return -1;
 
-  /* Convert references to Unix timestamps */
-  if (ref_type1 == HISTORY_REF_MSGID) {
-    msgid1 = reference1;
-    if (history_msgid_to_timestamp(reference1, timestamp1) != 0)
-      return 0;
-    ref1 = timestamp1;
-  } else if (ref_type1 == HISTORY_REF_TIMESTAMP) {
-    /* Client sends ISO 8601, convert to Unix for lookup */
-    if (history_iso_to_unix(reference1, timestamp1, sizeof(timestamp1)) == 0)
-      ref1 = timestamp1;
-    else
-      ref1 = reference1;  /* Assume already Unix format */
-  } else {
-    ref1 = reference1;
-  }
-
-  if (ref_type2 == HISTORY_REF_MSGID) {
-    msgid2 = reference2;
-    if (history_msgid_to_timestamp(reference2, timestamp2) != 0)
-      return 0;
-    ref2 = timestamp2;
-  } else if (ref_type2 == HISTORY_REF_TIMESTAMP) {
-    /* Client sends ISO 8601, convert to Unix for lookup */
-    if (history_iso_to_unix(reference2, timestamp2, sizeof(timestamp2)) == 0)
-      ref2 = timestamp2;
-    else
-      ref2 = reference2;  /* Assume already Unix format */
-  } else {
-    ref2 = reference2;
-  }
-
-  /* Bounds are ROWS when given as msgids (full key), milliseconds when
-   * given as timestamps (prefix).  Both selectors are EXCLUSIVE, and the
-   * page is counted from the FIRST selector: a newer-first request pages
-   * backwards from it (spec: "counted starting from and excluding the
-   * first message selector ... may be forwards or backwards in time").
-   * The old walk swapped the selectors and always returned the OLDEST
-   * rows of the window, with the start row included (2026-09-06). */
-  keylen = build_key(keybuf, sizeof(keybuf), target, ref1, msgid1);
-  if (keylen < 0)
-    return -1;
-  end_prefix_len = build_key(end_prefix, sizeof(end_prefix), target, ref2, msgid2);
-  if (end_prefix_len < 0)
-    return -1;
+  /* Resolve both selectors to keys and pick the direction (shared with
+   * history_between_descending so the federation origin and responder
+   * agree with the walk -- re-review 2026-09-07 R8/R9). */
+  rc = between_build_keys(target, ref_type1, reference1, ref_type2, reference2,
+                          keybuf, sizeof(keybuf), &keylen,
+                          end_prefix, sizeof(end_prefix), &end_prefix_len,
+                          &descending);
+  if (rc != 0)
+    return rc < 0 ? -1 : 0;
   target_prefix_len = build_key(target_prefix, sizeof(target_prefix), target, NULL, NULL);
   if (target_prefix_len < 0)
     return -1;
-  {
-    int minlen = keylen < end_prefix_len ? keylen : end_prefix_len;
-    int cmp = memcmp(keybuf, end_prefix, minlen);
-    if (cmp == 0)
-      cmp = keylen - end_prefix_len;
-    descending = cmp > 0;
-  }
   if (descending) {
     /* Walk backwards from just before the first selector down to (and
      * excluding) the second: the reverse walk's floor is the exclusive
