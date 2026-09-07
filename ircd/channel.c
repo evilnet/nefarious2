@@ -780,7 +780,10 @@ void add_user_to_channel(struct Channel* chptr, struct Client* who,
     member->channel      = chptr;
     member->status       = flags;
     member->banflags     = 0;
-    member->join_msgid[0] = '\0';
+    /* Whole array, not just the first byte: bounce_hold_client copies
+     * all 16 bytes into the persisted session record, and valgrind
+     * flagged the malloc tail reaching RocksDB (2026-09-06). */
+    memset(member->join_msgid, 0, sizeof(member->join_msgid));
     memset(&member->join_tv, 0, sizeof(member->join_tv));
     SetOpLevel(member, oplevel);
 
