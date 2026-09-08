@@ -3430,6 +3430,19 @@ void init_isupport(void)
   if (feature_bool(FEAT_CAP_draft_chathistory)) {
     add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
     add_isupport_s("MSGREFTYPES", "timestamp,msgid");
+    /* Fork extension: how far back this server keeps history, in
+     * seconds, so a client does not page past the horizon (a goguma
+     * kept asking for May with a pre-repack msgid, 2026-09-08).  A hint,
+     * not a permission: older requests are still answered honestly.
+     * Storage servers only; federated peers may keep more or less.
+     * Vendor-prefixed like draft/ICON (network-icon spec): fork-only
+     * tokens belong under evilnet/ (bare RELOCATE predates that rule;
+     * VAPID is draft/webpush's own).  See docs/features/chathistory.md. */
+    if (feature_bool(FEAT_CHATHISTORY_STORE))
+      add_isupport_i("evilnet/CHATHISTORYRETENTION",
+                     feature_int(FEAT_CHATHISTORY_RETENTION) * 86400);
+    else
+      del_isupport("evilnet/CHATHISTORYRETENTION");
   }
 
   /* evilnet/channel-relocate: relocation mode + tombstone grace period */

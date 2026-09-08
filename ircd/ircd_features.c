@@ -792,9 +792,15 @@ feature_notify_chathistory_caps(void)
 
   send_cap_notify("draft/chathistory", 1, valbuf);
 
-  /* Keep ISUPPORT CHATHISTORY token in sync with the CAP value and
-   * push to clients with draft/extended-isupport. */
+  /* Keep ISUPPORT CHATHISTORY (and the fork's CHATHISTORYRETENTION,
+   * seconds, storage servers only) in sync and push to clients with
+   * draft/extended-isupport. */
   add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
+  if (feature_bool(FEAT_CHATHISTORY_STORE))
+    add_isupport_i("evilnet/CHATHISTORYRETENTION",
+                   feature_int(FEAT_CHATHISTORY_RETENTION) * 86400);
+  else
+    del_isupport("evilnet/CHATHISTORYRETENTION");
   send_isupport_update();
 
   log_write(LS_SYSTEM, L_INFO, 0,
@@ -1356,7 +1362,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_FEDERATION, 0, 1, 0),
   F_I(CHATHISTORY_TIMEOUT, 0, 5, 0),
   F_B(CHATHISTORY_STRICT_TIMESTAMPS, 0, 0, 0),
-  F_B(CHATHISTORY_STORE, 0, 1, 0),
+  F_B(CHATHISTORY_STORE, 0, 1, feature_notify_chathistory_caps),   /* CHATHISTORYRETENTION token follows the store */
   F_B(CHATHISTORY_WRITE_FORWARD, 0, 1, 0),
   F_B(CHATHISTORY_STORE_REGISTERED, 0, 1, 0),
   F_I(CHATHISTORY_HIGH_WATERMARK, 0, 85, 0),
