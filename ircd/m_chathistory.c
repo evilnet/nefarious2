@@ -1452,6 +1452,7 @@ static struct FedRequest *start_fed_query(struct Client *sptr, const char *targe
                                            struct HistoryMessage *local_msgs,
                                            int local_count, int ops_override,
                                            const char *ref2, int local_complete);
+static void fed_request_set_partial(struct FedRequest *req, int partial);
 static int count_storage_servers(const char *target, time_t query_time);
 static int is_ulined_server(struct Client *server);
 static void fed_timeout_callback(struct Event *ev);
@@ -1480,6 +1481,156 @@ struct ChathistoryAd {
 
 /** Global array of server advertisements, indexed by server numeric */
 static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
+
+/* Storage-server ABSENCE intervals (2026-09-08, chathistory-partial).
+ * Stores only diverge across a netsplit: while a storage server is away it
+ * is not consulted and, before this table, forgotten.  Each server that
+ * ever advertised storage keeps its last few absence intervals
+ * [SQUIT, relink) (end 0 = still away), pruned past retention.  A query
+ * whose span overlaps an interval fans out even when the local page is
+ * full (the other side's rows are otherwise hidden), and one that
+ * overlaps an OPEN interval is answered partial. */
+#define MAX_ABSENCES 4
+struct StorageAbsence {
+  time_t start;
+  time_t end;      /**< 0 while the server is away */
+};
+static struct StorageAbsence *absences[MAX_AD_SERVERS];
+
+static void absence_open(int idx)
+{
+  struct StorageAbsence *a;
+  int i;
+  if (idx < 0 || idx >= MAX_AD_SERVERS)
+    return;
+  if (!absences[idx])
+    absences[idx] = (struct StorageAbsence *)MyCalloc(MAX_ABSENCES, sizeof(struct StorageAbsence));
+  a = absences[idx];
+  for (i = 0; i < MAX_ABSENCES; i++)
+    if (a[i].start && a[i].end == 0)
+      return;   /* already open */
+  /* Shift the oldest out, newest at [0]. */
+  memmove(&a[1], &a[0], sizeof(a[0]) * (MAX_ABSENCES - 1));
+  a[0].start = CurrentTime;
+  a[0].end = 0;
+}
+
+static void absence_close(int idx)
+{
+  struct StorageAbsence *a;
+  int i;
+  if (idx < 0 || idx >= MAX_AD_SERVERS || !absences[idx])
+    return;
+  a = absences[idx];
+  for (i = 0; i < MAX_ABSENCES; i++)
+    if (a[i].start && a[i].end == 0)
+      a[i].end = CurrentTime;
+}
+
+/** Does [lo, hi] (unix seconds; 0 = unbounded on that side) overlap any
+ * known storage-server absence?  Sets *open_hit when an overlapping
+ * absence is still open (that server is away right now).  Intervals
+ * older than retention are dropped as they are met. */
+static int absence_overlap(time_t lo, time_t hi, int *open_hit)
+{
+  int idx, i, any = 0;
+  time_t horizon;
+  {
+    int days = feature_int(FEAT_CHATHISTORY_RETENTION);
+    if (days <= 0 || days > 30)
+      days = 30;
+    horizon = CurrentTime - (time_t)days * 86400;
+  }
+  if (lo == 0)
+    lo = horizon;
+  if (hi == 0)
+    hi = CurrentTime;
+  *open_hit = 0;
+  for (idx = 0; idx < MAX_AD_SERVERS; idx++) {
+    struct StorageAbsence *a = absences[idx];
+    if (!a)
+      continue;
+    for (i = 0; i < MAX_ABSENCES; i++) {
+      if (!a[i].start)
+        continue;
+      if (a[i].end && a[i].end < horizon) {
+        a[i].start = a[i].end = 0;   /* aged out */
+        continue;
+      }
+      if (a[i].start <= hi && (a[i].end == 0 || a[i].end >= lo)) {
+        any = 1;
+        if (a[i].end == 0)
+          *open_hit = 1;
+      }
+    }
+  }
+  return any;
+}
+
+/** Unix seconds of a client reference (0 = unresolvable). */
+static time_t ref_unix_secs(enum HistoryRefType t, const char *v)
+{
+  char buf[HISTORY_TIMESTAMP_LEN];
+  if (!v || !*v)
+    return 0;
+  if (t == HISTORY_REF_MSGID) {
+    if (history_msgid_to_timestamp(v, buf) != 0)
+      return 0;
+    return (time_t)strtoul(buf, NULL, 10);
+  }
+  if (t == HISTORY_REF_TIMESTAMP) {
+    if (history_iso_to_unix(v, buf, sizeof(buf)) == 0)
+      return (time_t)strtoul(buf, NULL, 10);
+    return (time_t)strtoul(v, NULL, 10);
+  }
+  return 0;
+}
+
+/** The span a page answers for: the rows when the page was full (that is
+ * what it covers), else the requested window with open ends (0). */
+static void query_span(struct HistoryMessage *rows, int count, int limit,
+                       time_t ref1, time_t ref2, time_t *lo, time_t *hi)
+{
+  if (count >= limit && rows) {
+    struct HistoryMessage *m;
+    time_t first = (time_t)strtoul(rows->timestamp, NULL, 10), last = first;
+    for (m = rows; m; m = m->next)
+      last = (time_t)strtoul(m->timestamp, NULL, 10);
+    *lo = first < last ? first : last;
+    *hi = first < last ? last : first;
+    return;
+  }
+  if (ref1 && ref2) {
+    *lo = ref1 < ref2 ? ref1 : ref2;
+    *hi = ref1 < ref2 ? ref2 : ref1;
+  } else {
+    *lo = ref1 ? ref1 : ref2;   /* one bound known: the other is open */
+    *hi = 0;
+    if (*lo && rows) {
+      /* BEFORE: bound is the upper end; AFTER/LATEST-anchor: the lower.
+       * Use the rows to tell: rows older than the bound => it was hi. */
+      time_t first = (time_t)strtoul(rows->timestamp, NULL, 10);
+      if (first < *lo) { *hi = *lo; *lo = 0; }
+    }
+  }
+}
+
+/** Origin-side split check for one page.  Returns non-zero when the
+ * fan-out must happen regardless of the local page (span overlaps an
+ * absence); sets *partial when an overlapping absence is still open. */
+static int split_check(struct HistoryMessage *rows, int count, int limit,
+                       enum HistoryRefType t1, const char *v1,
+                       enum HistoryRefType t2, const char *v2, int *partial)
+{
+  time_t lo, hi;
+  int open_hit = 0;
+  query_span(rows, count, limit, ref_unix_secs(t1, v1), ref_unix_secs(t2, v2), &lo, &hi);
+  if (!absence_overlap(lo, hi, &open_hit))
+    return 0;
+  if (open_hit)
+    *partial = 1;
+  return 1;
+}
 
 /** Check if we should trigger federation query.
  * Returns 1 if we should federate, 0 otherwise.
@@ -1615,6 +1766,8 @@ static int presence_filter_and_replay(struct Client *sptr,
                                        const char *label, int complete,
                                        const char *requested)
 {
+  /* `complete` is REPLAY_COMPLETE | REPLAY_PARTIAL flags (plain 0/1
+   * from older callers still means complete/not). */
   int real_override = 0;
   if (ops_override) {
     struct Channel *chptr =
@@ -1680,6 +1833,7 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int force_fed = 0, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -1754,12 +1908,20 @@ static int chathistory_latest(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(lookup_target, count, limit)) {
+  /* Split windows: a page whose span overlaps a known store's absence
+   * fans out even when the local page is full, and is partial while that
+   * store is still away (chathistory-partial, 2026-09-08). */
+  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (should_federate(lookup_target, count, limit) || force_fed) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "LATEST",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
-    if (!req && fed_start_capacity_miss)
+    if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
+      partial = 1;
+    }
+    if (req)
+      fed_request_set_partial(req, partial);
     if (req) {
       /* Federation started - response will be sent when complete */
       /* Note: messages ownership transferred to req */
@@ -1779,7 +1941,8 @@ skip_federation:
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete, target);
+                                     (complete ? REPLAY_COMPLETE : 0)
+                                     | (partial ? REPLAY_PARTIAL : 0), target);
 
   return 0;
 }
@@ -1800,6 +1963,7 @@ static int chathistory_before(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int force_fed = 0, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -1845,12 +2009,20 @@ static int chathistory_before(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(lookup_target, count, limit)) {
+  /* Split windows: a page whose span overlaps a known store's absence
+   * fans out even when the local page is full, and is partial while that
+   * store is still away (chathistory-partial, 2026-09-08). */
+  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (should_federate(lookup_target, count, limit) || force_fed) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BEFORE",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
-    if (!req && fed_start_capacity_miss)
+    if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
+      partial = 1;
+    }
+    if (req)
+      fed_request_set_partial(req, partial);
     if (req)
       return 0;
   }
@@ -1865,7 +2037,8 @@ static int chathistory_before(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete, target);
+                                     (complete ? REPLAY_COMPLETE : 0)
+                                     | (partial ? REPLAY_PARTIAL : 0), target);
 
   return 0;
 }
@@ -1886,6 +2059,7 @@ static int chathistory_after(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int force_fed = 0, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -1931,12 +2105,20 @@ static int chathistory_after(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(lookup_target, count, limit)) {
+  /* Split windows: a page whose span overlaps a known store's absence
+   * fans out even when the local page is full, and is partial while that
+   * store is still away (chathistory-partial, 2026-09-08). */
+  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (should_federate(lookup_target, count, limit) || force_fed) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AFTER",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
-    if (!req && fed_start_capacity_miss)
+    if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
+      partial = 1;
+    }
+    if (req)
+      fed_request_set_partial(req, partial);
     if (req)
       return 0;
   }
@@ -1951,7 +2133,8 @@ static int chathistory_after(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete, target);
+                                     (complete ? REPLAY_COMPLETE : 0)
+                                     | (partial ? REPLAY_PARTIAL : 0), target);
 
   return 0;
 }
@@ -1972,6 +2155,7 @@ static int chathistory_around(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type;
   const char *ref_value;
   int limit, count, max_limit;
+  int force_fed = 0, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -2017,12 +2201,20 @@ static int chathistory_around(struct Client *sptr, const char *target,
   }
 
   /* Check if we should try federation */
-  if (should_federate(lookup_target, count, limit)) {
+  /* Split windows: a page whose span overlaps a known store's absence
+   * fans out even when the local page is full, and is partial while that
+   * store is still away (chathistory-partial, 2026-09-08). */
+  force_fed = split_check(messages, count, limit, ref_type, ref_value, HISTORY_REF_NONE, NULL, &partial);
+  if (should_federate(lookup_target, count, limit) || force_fed) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "AROUND",
                                               ref_str, limit, messages, count,
                                               ops_override, NULL, complete);
-    if (!req && fed_start_capacity_miss)
+    if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
+      partial = 1;
+    }
+    if (req)
+      fed_request_set_partial(req, partial);
     if (req)
       return 0;
   }
@@ -2037,7 +2229,8 @@ static int chathistory_around(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete, target);
+                                     (complete ? REPLAY_COMPLETE : 0)
+                                     | (partial ? REPLAY_PARTIAL : 0), target);
 
   return 0;
 }
@@ -2059,6 +2252,7 @@ static int chathistory_between(struct Client *sptr, const char *target,
   enum HistoryRefType ref_type1, ref_type2;
   const char *ref_value1, *ref_value2;
   int limit, count, max_limit;
+  int force_fed = 0, partial = 0;
   int complete = 1;
   struct PresenceQueryFilter *pf = NULL;
   struct HistoryRowFilter bare, *hook;
@@ -2115,12 +2309,20 @@ static int chathistory_between(struct Client *sptr, const char *target,
   /* Federation (oversight fix): BETWEEN was the one subcommand that
    * never federated -- the CH Q wire had a single ref slot; W now
    * carries an optional trailing second ref. */
-  if (should_federate(lookup_target, count, limit)) {
+  /* Split windows: a page whose span overlaps a known store's absence
+   * fans out even when the local page is full, and is partial while that
+   * store is still away (chathistory-partial, 2026-09-08). */
+  force_fed = split_check(messages, count, limit, ref_type1, ref_value1, ref_type2, ref_value2, &partial);
+  if (should_federate(lookup_target, count, limit) || force_fed) {
     struct FedRequest *req = start_fed_query(sptr, lookup_target, target, "BETWEEN",
                                               ref1_str, limit, messages, count,
                                               ops_override, ref2_str, complete);
-    if (!req && fed_start_capacity_miss)
+    if (!req && fed_start_capacity_miss) {
       complete = 0;   /* federation wanted, no slot: withhold the end tag */
+      partial = 1;
+    }
+    if (req)
+      fed_request_set_partial(req, partial);
     if (req)
       return 0;  /* messages ownership transferred to req */
   }
@@ -2135,7 +2337,8 @@ static int chathistory_between(struct Client *sptr, const char *target,
    * used to stamp every single-shot page final regardless. */
   count = presence_filter_and_replay(sptr, lookup_target, &messages, count,
                                      ops_override, cli_label(sptr),
-                                     complete, target);
+                                     (complete ? REPLAY_COMPLETE : 0)
+                                     | (partial ? REPLAY_PARTIAL : 0), target);
 
   return 0;
 }
@@ -2167,6 +2370,11 @@ struct FedRequest {
   char client_yxx[6];                 /**< Client numeric (YXX) for safe lookup */
   struct HistoryMessage *local_msgs;  /**< Local LMDB results */
   struct HistoryMessage *fed_msgs;    /**< Federated results */
+  int partial;                        /**< a known store is away over the span */
+  int cut;                            /**< a responder was lost: timeout/SQUIT or
+                                       *   the aggregate cap dropped rows (partial);
+                                       *   NOT a responder's own full page (that is
+                                       *   fed_truncated = "more exists") */
   int local_count;                    /**< Number of local messages */
   int fed_count;                      /**< Number of federated messages */
   int servers_pending;                /**< Servers we're waiting for */
@@ -2187,6 +2395,11 @@ struct FedRequest {
   void (*cleanup_cb)(void *cb_data);  /**< Custom cleanup for cb_data (NULL = MyFree) */
   char label[64];                     /**< Saved label for labeled-response on async completion */
 };
+
+static void fed_request_set_partial(struct FedRequest *req, int partial)
+{
+  req->partial = partial;
+}
 
 /** Global array of pending federation requests */
 static struct FedRequest *fed_requests[MAX_FED_REQUESTS];
@@ -3438,6 +3651,9 @@ void clear_server_ad(struct Client *server)
   int i;
   if (idx < 0)
     return;
+  if (server_ads[idx] && server_ads[idx]->has_advertisement
+      && server_ads[idx]->is_storage_server)
+    absence_open(idx);   /* a known store is going away: remember it */
   if (server_ads[idx]) {
     /* Free channel array if present */
     if (server_ads[idx]->channels) {
@@ -4129,6 +4345,7 @@ static void add_fed_message(struct FedRequest *req, const char *msgid,
     return;
   if (req->fed_count >= MAX_FED_MESSAGES) {
     req->fed_truncated = 1;   /* rows beyond the cap are dropped: say so */
+    req->cut = 1;             /* ... and dropped rows can be anywhere: partial */
     return;
   }
 
@@ -4399,10 +4616,13 @@ static void send_fed_response(struct FedRequest *req)
   /* Async replay — ownership of merged list transfers to ReplayState.
    * Completeness judged on the PRE-filter merged total (see the
    * query_count note in the subcommand handlers). */
+  /* Partial = a responder was cut (timeout/SQUIT/aggregate cap) or a
+   * known store was away over the span (chathistory-partial). */
   total = presence_filter_and_replay(client, req->target, &merged, total,
                                      req->ops_override, req->label,
-                                     total < req->limit && !req->fed_truncated
-                                       && !req->local_incomplete,
+                                     ((total < req->limit && !req->fed_truncated
+                                       && !req->local_incomplete) ? REPLAY_COMPLETE : 0)
+                                     | ((req->cut || req->partial) ? REPLAY_PARTIAL : 0),
                                      req->requested);
 }
 
@@ -4454,8 +4674,10 @@ static void fed_timeout_callback(struct Event *ev)
      * 2026-09-06 #10; also covers a peer that SQUIT mid-query).
      * Don't free here - timer_run will send ET_DESTROY after we return. */
     req->timer_active = 0;
-    if (req->servers_pending > 0)
+    if (req->servers_pending > 0) {
       req->fed_truncated = 1;
+      req->cut = 1;   /* a responder never answered: partial */
+    }
     complete_fed_request(req);
     break;
 
@@ -6124,6 +6346,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->is_storage_server = 1;
       ad->retention_days = retention;
       ad->last_update = CurrentTime;
+      absence_close(server_ad_index(sptr));   /* back: close its absence */
 
       Debug((DEBUG_DEBUG, "CH A S: Server %s advertises storage with %d day retention",
              cli_name(sptr), retention));

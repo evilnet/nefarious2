@@ -145,6 +145,11 @@ struct HistoryMessage {
   struct HistoryMessage *next;         /**< Next in linked list (for results) */
   int is_context;                      /**< Non-zero if draft/chathistory-context message */
   char ctx_parent[HISTORY_MSGID_LEN];  /**< Federated context child: parent msgid (else empty) */
+  /** Channel incarnation the row belongs to: the channel's creationtime
+   * at store time (0 = stamped before 2026-09-08, counts as current).
+   * A channel recreated on the losing side of a split is a different
+   * incarnation and its rows are not the surviving channel's history. */
+  time_t incarnation;
 };
 
 /** Target info for CHATHISTORY TARGETS query. */
@@ -318,6 +323,8 @@ extern int history_query_around(const char *target, enum HistoryRefType ref_type
  * (first selector newer), 0 = ascending, -1 = a msgid selector could not
  * be resolved.  Shared by the walk, the federation origin's merge trim
  * and the responder's overflow trim so all three agree. */
+extern time_t history_live_incarnation(const char *target);
+extern int history_purge_incarnation(const char *channel, time_t incarnation);
 extern int history_between_descending(const char *target,
                                       enum HistoryRefType ref_type1, const char *reference1,
                                       enum HistoryRefType ref_type2, const char *reference2);

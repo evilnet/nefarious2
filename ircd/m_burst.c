@@ -84,6 +84,7 @@
 #include "channel.h"
 #include "client.h"
 #include "hash.h"
+#include "history.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_features.h"
@@ -358,6 +359,14 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* new channel or an older one */
   if (!chptr->creationtime || chptr->creationtime > timestamp) {
+#ifdef USE_ROCKSDB
+    /* Our incarnation lost: the rows we stored for it are not the
+     * surviving channel's history (a channel recreated behind a split;
+     * 2026-09-08).  Prune them now, while we still know which
+     * creationtime they carry. */
+    if (chptr->creationtime)
+      history_purge_incarnation(chptr->chname, chptr->creationtime);
+#endif
     chptr->creationtime = timestamp;
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,

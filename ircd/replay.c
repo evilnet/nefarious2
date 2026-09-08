@@ -422,8 +422,11 @@ static void replay_open_batch(struct Client *sptr, struct ReplayState *rs)
     tagbuf[0] = '\0';
     if (outer_tag[0])
       tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%s%s", tl ? ";" : "", outer_tag);
-    if (rs->is_last_page)
+    if (rs->is_last_page && !rs->is_partial)
       tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%sdraft/chathistory-end", tl ? ";" : "");
+    if (rs->is_partial)
+      tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl,
+                          "%sevilnet.github.io/chathistory-partial", tl ? ";" : "");
     if (want_label)
       tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%slabel=%s", tl ? ";" : "", rs->label);
 
@@ -895,6 +898,11 @@ void replay_start_batch(struct Client *sptr, const char *target,
    * memory project_pm_replay_storage_key_leak. */
   struct ReplayState tmp_rs;
   struct ReplayState *suspended = NULL;
+  int partial = (complete & REPLAY_PARTIAL) != 0;
+
+  /* A partial page is never "the end": a known store was away over the
+   * span or a responder was cut (docs/features/chathistory.md). */
+  complete = (complete & REPLAY_COMPLETE) && !partial;
 
   /* An in-flight bouncer catch-up is SUSPENDED, not cancelled: its
    * inner and outer batches close cleanly here, its cursor (phase,
@@ -930,23 +938,28 @@ void replay_start_batch(struct Client *sptr, const char *target,
      * there stopped paginators with history remaining.  Honor the
      * caller's query-exhaustion verdict. */
     char batchid[REPLAY_BATCH_ID_LEN];
-    const char *end_pfx = complete ? "@draft/chathistory-end" : "";
+    char tagbuf[128];
+    int tl = 0;
     generate_batch_id(batchid, sizeof(batchid), sptr);
 
     if (CapRecipientHas(sptr, CAP_BATCH)) {
-      if (label && label[0] && feature_bool(FEAT_CAP_labeled_response) &&
-          CapRecipientHas(sptr, CAP_LABELEDRESP)) {
-        sendrawto_one(sptr, "%s%slabel=%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
-                      complete ? end_pfx : "@", complete ? ";" : "",
-                      label, cli_name(&me), batchid, tmp_rs.target);
+      int want_label = label && label[0] && feature_bool(FEAT_CAP_labeled_response)
+                       && CapRecipientHas(sptr, CAP_LABELEDRESP);
+      tagbuf[0] = '\0';
+      if (complete)
+        tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%sdraft/chathistory-end", tl ? ";" : "");
+      if (partial)
+        tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%sevilnet.github.io/chathistory-partial", tl ? ";" : "");
+      if (want_label) {
+        tl += ircd_snprintf(0, tagbuf + tl, sizeof(tagbuf) - tl, "%slabel=%s", tl ? ";" : "", label);
         cli_label_responded(sptr) = 1;
-      } else if (complete) {
-        sendrawto_one(sptr, "%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
-                      end_pfx, cli_name(&me), batchid, tmp_rs.target);
-      } else {
+      }
+      if (tl)
+        sendrawto_one(sptr, "@%s :%s " MSG_BATCH_CMD " +%s chathistory %s",
+                      tagbuf, cli_name(&me), batchid, tmp_rs.target);
+      else
         sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s chathistory %s",
                       cli_name(&me), batchid, tmp_rs.target);
-      }
       sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "-%s", batchid);
     }
 
@@ -975,6 +988,7 @@ void replay_start_batch(struct Client *sptr, const char *target,
    * shrunk pages with history remaining.  The caller judged
    * completeness on the raw pre-filter row count. */
   rs->is_last_page = complete ? 1 : 0;
+  rs->is_partial = partial;
 
   cli_replay(sptr) = rs;
 

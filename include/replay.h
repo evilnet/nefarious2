@@ -50,6 +50,13 @@ enum ReplayPhase {
 /** Async replay state, stored on Connection (like ListingArgs for LIST).
  * Handles both single-batch CHATHISTORY and multi-channel bouncer replay.
  */
+/** Flags for the `complete` argument of replay_start_batch and its
+ * callers.  REPLAY_PARTIAL: a known storage server was away over the span
+ * or a responder was cut; the opener carries
+ * evilnet.github.io/chathistory-partial and never chathistory-end. */
+#define REPLAY_COMPLETE 1
+#define REPLAY_PARTIAL  2
+
 struct ReplayState {
   /* === Message-level iteration (current batch) === */
   struct HistoryMessage *messages;    /**< Owned linked list */
@@ -69,6 +76,7 @@ struct ReplayState {
   char label[64];                     /**< Labeled-response label (first batch only) */
   int label_used;                     /**< Whether label was applied */
   int is_last_page;                   /**< True if query returned fewer results than limit */
+  int is_partial;                     /**< evilnet.github.io/chathistory-partial on the opener */
 
   /** A bouncer catch-up suspended while this on-demand page is served;
    * reinstalled and continued when this state is freed (audit #26/#20:

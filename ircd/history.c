@@ -39,6 +39,9 @@
 #include "history.h"
 #include "ml_content.h"
 #include "client.h"
+#include "channel.h"
+#include "ircd.h"
+#include "hash.h"
 #include "crdt_hlc.h"
 #include "db_casefold.h"
 #include "ircd_alloc.h"
@@ -204,7 +207,7 @@ static int build_quota_key(char *key, int keysize,
 #define HIST_ESC 0x04
 static int history_field_needs_escape(unsigned char c)
 {
-  return c == HIST_ESC || c == 0x05 || c == 0x06;
+  return c == HIST_ESC || c == 0x05 || c == 0x06 || c == 0x07;
 }
 
 /** Escape VALUE-field bytes that would otherwise read as structural
@@ -286,6 +289,29 @@ char *history_forward_encode(char *dst, size_t dstsize,
   return dst;
 }
 
+/** The live channel incarnation for a storage target: the channel's
+ * creationtime, or 0 for PM pair keys and for a channel that does not
+ * currently exist.  Stamped into every stored row and compared on read
+ * (2026-09-08: a channel recreated on the losing side of a split is a
+ * different incarnation; the burst wipes it, and its rows must not become
+ * the surviving channel's history). */
+time_t history_live_incarnation(const char *target)
+{
+  struct Channel *chptr;
+  if (!target || !IsChannelName(target))
+    return 0;
+  chptr = FindChannel(target);
+  return chptr ? chptr->creationtime : 0;
+}
+
+/** Does a stored row belong to the live incarnation?  Unstamped rows
+ * (before 2026-09-08) and targets with no live channel always do. */
+static int row_incarnation_ok(const struct HistoryMessage *msg, time_t live)
+{
+  return live == 0 || msg->incarnation == 0 || msg->incarnation == live;
+}
+
+
 /** Reverse history_forward_encode in place on a received CH W payload.
  * If a leading raw \x06 bracket is present, terminates the tag span,
  * unescapes it, and points *tags_out at it; unescapes the remaining
@@ -317,7 +343,7 @@ static int serialize_message(char *buf, int bufsize,
                              enum HistoryMessageType type,
                              const char *sender, const char *account,
                              const char *content, const char *client_tags,
-                             const char *original_target)
+                             const char *original_target, time_t incarnation)
 {
   /* The content field can carry up to two stacked sentinel sections,
    * always in this order at the very start of the field:
@@ -337,6 +363,9 @@ static int serialize_message(char *buf, int bufsize,
   const char *ot_close = "";
   const char *ct_open = "";
   const char *ct_close = "";
+  /* Third sentinel section: [\x07<creationtime>\x07], the channel
+   * incarnation (2026-09-08).  Digits only, never escaped. */
+  char inc_sec[32];
   /* Escaped copies (worst case 2x + NUL): sentinel bytes inside the
    * value fields are neutralized so they can't forge structure. */
   char ot_esc[(CHANNELLEN + 1) * 2 + 1];
@@ -359,12 +388,18 @@ static int serialize_message(char *buf, int bufsize,
     ct_esc[0] = '\0';
   }
 
-  return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s%s%s%s%s%s%s",
+  if (incarnation > 0)
+    ircd_snprintf(0, inc_sec, sizeof(inc_sec), "\x07%lu\x07", (unsigned long)incarnation);
+  else
+    inc_sec[0] = '\0';
+
+  return ircd_snprintf(0, buf, bufsize, "%d|%s|%s|%s%s%s%s%s%s%s%s",
                        (int)type,
                        sender ? sender : "",
                        account ? account : "",
                        ot_open, ot_esc, ot_close,
                        ct_open, ct_esc, ct_close,
+                       inc_sec,
                        content_esc);
 }
 
@@ -481,6 +516,17 @@ static int deserialize_message(const char *data, int datalen,
         msg->client_tags[tags_len] = '\0';
         history_unescape_field(msg->client_tags);
         p = tag_end + 1;
+        content_len = end - p;
+      }
+    }
+
+    /* Optional incarnation sentinel (\x07<creationtime>\x07) */
+    msg->incarnation = 0;
+    if (content_len > 2 && p[0] == '\x07') {
+      const char *inc_end = memchr(p + 1, '\x07', content_len - 1);
+      if (inc_end) {
+        msg->incarnation = (time_t)strtoul(p + 1, NULL, 10);
+        p = inc_end + 1;
         content_len = end - p;
       }
     }
@@ -1296,7 +1342,8 @@ int history_store_message(const char *msgid, const char *timestamp,
   }
 
   vallen = serialize_message(valbuf, bufsize, type, sender, account, content,
-                             client_tags, original_target);
+                             client_tags, original_target,
+                             history_live_incarnation(target));
   if (vallen < 0) {
     rc = -1;
     goto store_cleanup;
@@ -1492,7 +1539,7 @@ int history_store_multiline(const char *msgid, const char *timestamp,
 
   vallen = serialize_message(valbuf, sizeof(valbuf), HISTORY_MULTILINE,
                              sender, account, ML_CONTENT_SENTINEL, NULL,
-                             original_target);
+                             original_target, history_live_incarnation(target));
   if (vallen < 0) return -1;
   if ((size_t)vallen >= sizeof(valbuf)) vallen = sizeof(valbuf) - 1;
 
@@ -1695,6 +1742,7 @@ static int history_query_internal(const char *target,
   char target_prefix[CHANNELLEN + 2];
   int target_prefix_len;
   int count = 0;
+  time_t live_inc = history_live_incarnation(target);
   int rc;
   int reverse;
 
@@ -1840,6 +1888,14 @@ static int history_query_internal(const char *target,
       if (msg->raw_content)
         MyFree(msg->raw_content);
       MyFree(msg);
+      rc = reverse ? db_iter_prev(it) : db_iter_next(it);
+      continue;
+    }
+
+    /* A row from a wiped channel incarnation is not this channel's
+     * history: skip it without counting. */
+    if (!row_incarnation_ok(msg, live_inc)) {
+      history_free_messages(msg);
       rc = reverse ? db_iter_prev(it) : db_iter_next(it);
       continue;
     }
@@ -2277,6 +2333,101 @@ int history_query_around(const char *target, enum HistoryRefType ref_type,
   return count_before + count_ref + count_after;
 }
 
+#define PURGE_QUOTA_BATCH 512
+
+/** Prune a channel incarnation that lost a burst: every row of
+ * @a channel stamped with @a incarnation (the losing creationtime).
+ * Called from the burst wipeout on the losing side, which is the only
+ * side that ever stored them (stores do not sync; federation is
+ * on-demand), so every store holding them prunes.  Rows stamped 0
+ * (pre-2026-09-08) are left alone.  The read-time incarnation filter
+ * remains as belt and braces.  See docs/features/chathistory.md.
+ * @return rows deleted, or -1. */
+int history_purge_incarnation(const char *channel, time_t incarnation)
+{
+  struct db_iter *it;
+  struct db_writebatch *wb;
+  char startbuf[CHANNELLEN + HISTORY_TIMESTAMP_LEN + 8];
+  char prefix[CHANNELLEN + 2];
+  char ts[HISTORY_TIMESTAMP_LEN];
+  char msg_target[CHANNELLEN + 1], msg_timestamp[HISTORY_TIMESTAMP_LEN], msg_msgid[HISTORY_MSGID_LEN];
+  int startlen, prefixlen, deleted = 0, rc;
+  int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
+  struct { char target[CHANNELLEN + 1]; char account[ACCOUNTLEN + 1]; } purge_quota[PURGE_QUOTA_BATCH];
+  int purge_quota_count = 0, qi;
+
+  if (!history_available || !channel || !IsChannelName(channel) || incarnation <= 0)
+    return 0;
+
+  ircd_snprintf(0, ts, sizeof(ts), "%lu.000", (unsigned long)incarnation);
+  startlen = build_key(startbuf, sizeof(startbuf), channel, ts, NULL);
+  prefixlen = build_key(prefix, sizeof(prefix), channel, NULL, NULL);
+  if (startlen < 0 || prefixlen < 0)
+    return -1;
+
+  wb = db_writebatch_new(history_db_env);
+  if (!wb)
+    return -1;
+  it = db_iter_open(history_db_env, history_cf_messages, NULL);
+  if (!it) {
+    db_writebatch_destroy(wb);
+    return -1;
+  }
+
+  /* Rows of this incarnation cannot predate its creation: start there
+   * and stop at the end of the channel's range. */
+  for (rc = db_iter_seek(it, startbuf, startlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbase = db_iter_key(it, &klen);
+    const void *vbase;
+    struct HistoryMessage pm;
+
+    if (klen < (size_t)prefixlen || memcmp(kbase, prefix, prefixlen) != 0)
+      break;   /* past this channel */
+    if (parse_key((void *)kbase, klen, msg_target, msg_timestamp, msg_msgid) != 0)
+      continue;
+    vbase = db_iter_value(it, &vlen);
+    memset(&pm, 0, sizeof(pm));
+    if (!vbase || deserialize_message((void *)vbase, vlen, &pm) != 0)
+      continue;
+    if (pm.incarnation != incarnation)
+      continue;
+
+    if (msg_msgid[0]) {
+      msgid_index_del(wb, msg_msgid, msg_target);
+      ml_content_delete(wb, msg_msgid);
+      reply_index_del_children(wb, msg_target, msg_msgid);
+    }
+    if (quota_enabled && purge_quota_count < PURGE_QUOTA_BATCH && pm.account[0]) {
+      ircd_strncpy(purge_quota[purge_quota_count].target, msg_target, sizeof(purge_quota[0].target));
+      ircd_strncpy(purge_quota[purge_quota_count].account, pm.account, sizeof(purge_quota[0].account));
+      purge_quota_count++;
+    }
+    db_writebatch_del(wb, history_cf_messages, kbase, klen);
+    deleted++;
+  }
+  db_iter_close(it);
+
+  rc = db_writebatch_commit(wb, /*sync=*/0);
+  db_writebatch_destroy(wb);
+  if (rc != DB_OK) {
+    log_write(LS_SYSTEM, L_ERROR, 0, "history_purge_incarnation: commit failed: %s", db_strerror(rc));
+    return -1;
+  }
+  if (quota_enabled)
+    for (qi = 0; qi < purge_quota_count; qi++)
+      quota_decrement(purge_quota[qi].target, purge_quota[qi].account);
+  if (deleted > 0) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "chathistory: pruned %d row(s) of %s incarnation %lu (lost the burst)",
+              deleted, channel, (unsigned long)incarnation);
+    history_cleanup_empty_targets();
+  }
+  return deleted;
+}
+
 /** Resolve BETWEEN's two selectors to store keys and decide the walk
  * direction.  Bounds are ROWS when given as msgids (full key),
  * milliseconds when given as timestamps (prefix).  Both selectors are
@@ -2372,6 +2523,7 @@ int history_query_between(const char *target,
   struct db_iter *it = NULL;
   struct HistoryMessage *head = NULL, *tail = NULL, *msg;
   int count = 0;
+  time_t live_inc = history_live_incarnation(target);
   int rc;
 
   *result = NULL;
@@ -2455,6 +2607,12 @@ int history_query_between(const char *target,
                   msg->target, msg->timestamp, msg->msgid) != 0 ||
         deserialize_message((void *)vbase, vlen, msg) != 0) {
       MyFree(msg);
+      rc = db_iter_next(it);
+      continue;
+    }
+
+    if (!row_incarnation_ok(msg, live_inc)) {
+      history_free_messages(msg);
       rc = db_iter_next(it);
       continue;
     }
@@ -2766,7 +2924,6 @@ int history_purge_old(unsigned long max_age_seconds)
     return 0; /* Retention disabled */
 
   int quota_enabled = feature_bool(FEAT_CHATHISTORY_USER_QUOTA);
-#define PURGE_QUOTA_BATCH 512
   struct { char target[CHANNELLEN + 1]; char account[ACCOUNTLEN + 1]; } purge_quota[PURGE_QUOTA_BATCH];
   int purge_quota_count = 0;
 
