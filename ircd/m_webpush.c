@@ -682,6 +682,63 @@ static struct {
   time_t last;
 } wp_cooldown[WEBPUSH_CD_SLOTS];
 
+/* Outstanding message pushes per (account, conversation), so a read
+ * marker pushes only when there is a notification to clear
+ * (evilnet/nefarious2 #110: an unconditional read push made Chrome show
+ * its generic "updated in the background" notification on a client that
+ * displays nothing for it -- on every MARKREAD of a quiet conversation).
+ * The conversation key is the read marker's target: the channel for a
+ * highlight, the SENDER's nick for a PM.  Hashed like wp_cooldown; a
+ * collision only costs a missed clear.  Independent of the cooldown
+ * table, which is not written at all when WEBPUSH_COOLDOWN is 0. */
+static struct {
+  char key[ACCOUNTLEN + CHANNELLEN + 8];
+  time_t pushed;   /**< last message push for this conversation */
+  time_t read;     /**< last read push for it */
+} wp_outstanding[WEBPUSH_CD_SLOTS];
+
+static unsigned int wp_outstanding_slot(char *key, size_t keysz,
+                                        const char *account, const char *conv)
+{
+  unsigned int h = 2166136261u;
+  const char *p;
+  ircd_snprintf(0, key, keysz, "%s/%s", account, conv);
+  for (p = key; *p; ++p) {
+    h ^= (unsigned char)*p;
+    h *= 16777619u;
+  }
+  return h & (WEBPUSH_CD_SLOTS - 1);
+}
+
+/** A message push went out for @a conv on @a account. */
+static void webpush_note_pushed(const char *account, const char *conv)
+{
+  char key[ACCOUNTLEN + CHANNELLEN + 8];
+  unsigned int h;
+  if (!account || !conv)
+    return;
+  h = wp_outstanding_slot(key, sizeof(key), account, conv);
+  if (strcmp(wp_outstanding[h].key, key) != 0) {
+    ircd_strncpy(wp_outstanding[h].key, key, sizeof(wp_outstanding[h].key));
+    wp_outstanding[h].read = 0;
+  }
+  wp_outstanding[h].pushed = CurrentTime;
+}
+
+/** Is there a message push for @a conv that no read push has cleared?
+ * Claims it (records the read push) when there is. */
+static int webpush_claim_outstanding(const char *account, const char *conv)
+{
+  char key[ACCOUNTLEN + CHANNELLEN + 8];
+  unsigned int h = wp_outstanding_slot(key, sizeof(key), account, conv);
+  if (strcmp(wp_outstanding[h].key, key) != 0 || wp_outstanding[h].pushed == 0)
+    return 0;
+  if (wp_outstanding[h].read >= wp_outstanding[h].pushed)
+    return 0;
+  wp_outstanding[h].read = CurrentTime;
+  return 1;
+}
+
 /** Seconds within which repeated read-marker pushes for one target
  * are coalesced. */
 #define WEBPUSH_READ_COALESCE 3
@@ -836,8 +893,9 @@ static int webpush_mute_blocked(const char *account, const char *target)
 
 /** Relay a read marker to the account's webpush subscriptions so other
  * devices can close their notifications, as the MARKREAD line the
- * account's clients would see.  Deliberately ungated by hold/cooldown/mute:
- * it is how they clear. */
+ * account's clients would see.  Ungated by hold/cooldown/mute (it is how
+ * they clear) but gated on an OUTSTANDING push for the conversation
+ * (webpush_claim_outstanding, #110). */
 static void webpush_emit_read(const char *account, const char *target,
                               const char *timestamp);
 
@@ -849,6 +907,10 @@ void webpush_notify_read(const char *account, const char *target,
   if (!feature_bool(FEAT_WEBPUSH_NOTIFY))
     return;
   if (webpush_store_count_cached(account) <= 0)
+    return;
+  /* Only when there is a pushed notification to clear (#110): a read
+   * push a device shows nothing for is a spurious notification there. */
+  if (!webpush_claim_outstanding(account, target))
     return;
   /* Reading a busy conversation sets a marker every few seconds; one
    * push per target per short window is enough for devices to close
@@ -954,6 +1016,9 @@ static void webpush_emit_push(const char *account, const char *kind,
                                  iso, sizeof(iso));
   webpush_emit_resolved(account, kind, src, command, target, msgid, wire_ts,
                         text, ml, tier);
+  /* The conversation a read marker for this push would name. */
+  webpush_note_pushed(account, (target && IsChannelName(target)) ? target
+                               : (src ? src->nick : NULL));
 }
 
 /** Resolve the payload tier (the account's draft/webpush/payload metadata,
