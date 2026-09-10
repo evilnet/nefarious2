@@ -28,6 +28,7 @@
 
 #include "bouncer_session.h"
 #include "capab.h"
+#include "authtoken.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_chattr.h"
@@ -367,6 +368,7 @@ static struct capabilities {
   _CAP(EVILNET_RELOCATE, 0, "evilnet/channel-relocate", FEAT_CAP_evilnet_channel_relocate),
   _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "before-connect,max-subs=50,max-keys=20,max-value-bytes=300"),
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
+  _CAP(DRAFT_AUTHTOKEN, 0, "draft/authtoken", FEAT_CAP_draft_authtoken),
   _CAP(DRAFT_BOUNCER, 0, "draft/bouncer", FEAT_CAP_draft_bouncer),
   _CAP(DRAFT_PERSISTENCE, 0, "draft/persistence", FEAT_CAP_draft_persistence),
   _CAP(DRAFT_OPERTAG, 0, "draft/oper-tag", FEAT_CAP_oper_tag),
@@ -569,6 +571,12 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
 
     /* Don't advertise SASL if the SASL server is not available */
     if (capab_list[i].cap == CAP_SASL && is_ls && !sasl_server_available())
+      continue;
+
+    /* draft/authtoken is only worth negotiating (registration-burst
+     * SERVICELIST, TOKEN NEW/DEL) when a service exists; the TOKEN
+     * command itself never needs the cap. */
+    if (capab_list[i].cap == CAP_DRAFT_AUTHTOKEN && is_ls && !authtoken_service_count())
       continue;
 
 #ifdef USE_SSL

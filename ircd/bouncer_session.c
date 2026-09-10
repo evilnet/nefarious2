@@ -33,6 +33,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
+#include "authtoken.h"
 #include "client.h"
 #include "history.h"
 #include "ircd.h"
@@ -7661,6 +7662,10 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   send_reply(sptr, RPL_MYINFO, cli_name(&me), version, infousermodes,
              infochanmodes, infochanmodeswithparams);
   send_supported(sptr);
+
+  /* draft/authtoken service list: mirror of the register_user emit */
+  if (CapActive(sptr, CAP_BATCH) && CapActive(sptr, CAP_DRAFT_AUTHTOKEN))
+    authtoken_send_servicelist(sptr);
 
 #ifdef USE_SSL
   if (cli_socket(sptr).ssl)

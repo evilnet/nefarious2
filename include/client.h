@@ -436,6 +436,7 @@ struct Connection
   unsigned char       con_label_responded; /**< Whether a response was sent for current label */
   char                con_batch_id[16]; /**< Current batch reference ID */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
+  unsigned int        con_token_auth; /**< draft/authtoken: service slots this connection's PASS may validate */
   char                con_client_tags[4096]; /**< Client-only tags (+tag=value) for TAGMSG relay (IRCv3: 4094 max) */
   uint64_t            con_s2s_time_ms;   /**< S2S @time as epoch milliseconds (0 = not set) */
 #define S2S_MSGID_BUFSIZE 64  /**< Msgid buffer: fits both verbose (~34 chars) and compact (14 chars) */
@@ -658,6 +659,7 @@ struct Client {
 #define cli_batch_id(cli)	con_batch_id(cli_connect(cli))
 /** Get batch sequence number */
 #define cli_batch_seq(cli)	con_batch_seq(cli_connect(cli))
+#define cli_token_auth(cli)	con_token_auth(cli_connect(cli))
 /** Get client-only tags buffer for TAGMSG relay */
 #define cli_client_tags(cli)	con_client_tags(cli_connect(cli))
 /** Get S2S @time as epoch milliseconds from incoming message */
@@ -976,6 +978,7 @@ struct Client {
 #define con_batch_id(con)	((con)->con_batch_id)
 /** Get the batch sequence number. */
 #define con_batch_seq(con)	((con)->con_batch_seq)
+#define con_token_auth(con)	((con)->con_token_auth)
 /** Get the client-only tags buffer for TAGMSG relay. */
 #define con_client_tags(con)	((con)->con_client_tags)
 /** Get the S2S @time as epoch milliseconds from incoming message. */

@@ -210,6 +210,7 @@ IRCD_SRC = \
 	m_persistence.c \
 	persistence_profile.c \
 	m_rename.c \
+	m_token.c \
 	m_webpush.c \
 	webpush_mute.c \
 	webpush_expiry.c \
@@ -296,6 +297,7 @@ IRCD_SRC = \
 	s_stats.c \
 	s_user.c \
 	sasl_auth.c \
+	authtoken.c \
 	sasl_conf.c \
 	sasl_webhook.c \
 	send.c \

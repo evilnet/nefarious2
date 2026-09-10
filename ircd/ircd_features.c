@@ -27,6 +27,7 @@
 #include "capab.h"	/* send_cap_notify */
 #include "channel.h"	/* list_set_default */
 #include "class.h"
+#include "authtoken.h"
 #include "client.h"
 #include "hash.h"
 #include "history.h"
@@ -621,6 +622,16 @@ static void feature_notify_cap_##featname(void) { \
 }
 
 /* Generate notify functions for simple caps (no parameters) */
+/** draft/authtoken: CAP NEW only makes sense with a configured service. */
+static void feature_notify_cap_draft_authtoken(void)
+{
+  if (feature_bool(FEAT_CAP_draft_authtoken)) {
+    if (authtoken_service_count())
+      send_cap_notify("draft/authtoken", 1, NULL);
+  } else
+    send_cap_notify("draft/authtoken", 0, NULL);
+}
+
 DEFINE_CAP_NOTIFY("multi-prefix", multi_prefix)
 DEFINE_CAP_NOTIFY("userhost-in-names", userhost_in_names)
 DEFINE_CAP_NOTIFY("extended-join", extended_join)
@@ -1334,6 +1345,10 @@ static struct FeatureDesc {
   F_B(CAP_evilnet_channel_relocate, 0, 0, feature_notify_cap_evilnet_channel_relocate),
   F_B(CAP_draft_metadata_2, 0, 0, feature_notify_cap_draft_metadata_2),
   F_B(CAP_draft_webpush, 0, 0, 0),  /* webpush has special handling via VAPID key */
+  /* draft/authtoken: advertised only while an Authtoken{} service exists */
+  F_B(CAP_draft_authtoken, 0, 1, feature_notify_cap_draft_authtoken),
+  F_I(AUTHTOKEN_EXPIRE, 0, 600, 0),   /* seconds a generated token stays valid */
+  F_I(AUTHTOKEN_MAX, 0, 4096, 0),     /* outstanding tokens per server */
   F_S(WEBPUSH_DB, 0, "webpush", 0),
   F_B(WEBPUSH_DB_AUTOGROW, 0, 1, 0),
   F_S(WEBPUSH_VAPID_PRIVKEY, 0, "", feature_notify_webpush_vapid_privkey),
