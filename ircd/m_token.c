@@ -58,6 +58,35 @@ static int fail_unknown(struct Client *sptr, const char *sub)
   return 0;
 }
 
+/** Deliver a token: one line when it fits, else a draft/authtoken batch
+ * of `TOKEN GENERATE * :<chunk>` lines the client concatenates (spec).
+ * A JWT with a long scope is the case that needs it. */
+static void send_generate_reply(struct Client *sptr, const char *service, const char *token)
+{
+  /* ":server TOKEN GENERATE <service> :" plus CRLF must stay under 512. */
+  size_t overhead = strlen(cli_name(&me)) + strlen(service) + 24;
+  size_t len = strlen(token);
+  char type[AUTHTOKEN_KEYLEN + 32];
+
+  if (overhead + len <= 510) {
+    sendcmdto_one(&me, CMD_TOKEN, sptr, "GENERATE %s :%s", service, token);
+    return;
+  }
+  ircd_snprintf(0, type, sizeof(type), "draft/authtoken %s", service);
+  send_batch_start(sptr, type);
+  while (len) {
+    size_t n = len > 300 ? 300 : len;
+    if (cli_batch_id(sptr)[0])
+      sendrawto_one(sptr, "@batch=%s :%s TOKEN GENERATE * :%.*s",
+                    cli_batch_id(sptr), cli_name(&me), (int)n, token);
+    else
+      sendrawto_one(sptr, ":%s TOKEN GENERATE * :%.*s", cli_name(&me), (int)n, token);
+    token += n;
+    len -= n;
+  }
+  send_batch_end(sptr);
+}
+
 static int do_generate(struct Client *sptr, int parc, char *parv[])
 {
   const char *service = parc > 2 ? parv[2] : NULL;
@@ -114,7 +143,7 @@ static int do_generate(struct Client *sptr, int parc, char *parv[])
               "The requested action could not be completed due to an internal error");
     return 0;
   }
-  sendcmdto_one(&me, CMD_TOKEN, sptr, "GENERATE %s :%s", service, token);
+  send_generate_reply(sptr, service, token);
   return 0;
 }
 

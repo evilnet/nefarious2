@@ -58,8 +58,12 @@ extern void authtoken_conf_url(const char *url);
 extern void authtoken_conf_description(const char *desc);
 extern void authtoken_conf_pass(const char *pass);
 extern void authtoken_conf_host(const char *mask);
+extern void authtoken_conf_key(const char *b64url_scalar);  /* makes the service a JWT issuer */
 extern int  authtoken_conf_end(void);            /* end of one block; 0 = rejected */
 extern void authtoken_conf_apply(void);          /* after yyparse */
+
+struct StatDesc;
+extern void authtoken_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
 
 /* ---- Queries ---- */
 extern int authtoken_service_count(void);
@@ -90,6 +94,8 @@ extern void authtoken_learn(const char *token, const char *service,
 extern void authtoken_forget(const char *token);
 /** Look a service up by key (case-insensitive).  @return slot or -1. */
 extern int authtoken_find_service(const char *key);
+/** Whether slot @a svc issues signed JWTs instead of opaque tokens. */
+extern int authtoken_service_is_jwt(int svc);
 /** Whether @a cptr may validate tokens of slot @a svc. */
 extern int authtoken_may_validate(struct Client *cptr, int svc);
 /** Consume @a token for slot @a svc and emit its claims to @a to.

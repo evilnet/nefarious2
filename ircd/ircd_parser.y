@@ -2186,7 +2186,7 @@ authtokenblock: AUTHTOKEN QSTRING
     parse_error("Invalid Authtoken block (see the config log)");
 };
 authtokenitems: authtokenitem authtokenitems | authtokenitem;
-authtokenitem: authtokenurl | authtokendesc | authtokenpass | authtokenhost;
+authtokenitem: authtokenurl | authtokendesc | authtokenpass | authtokenhost | authtokenkey;
 authtokenurl: URL '=' QSTRING ';'
 {
   authtoken_conf_url($3);
@@ -2205,6 +2205,11 @@ authtokenpass: PASS '=' QSTRING ';'
 authtokenhost: HOST '=' QSTRING ';'
 {
   authtoken_conf_host($3);
+  MyFree($3);
+};
+authtokenkey: KEY '=' QSTRING ';'
+{
+  authtoken_conf_key($3);
   MyFree($3);
 };
 

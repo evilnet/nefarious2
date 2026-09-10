@@ -40,18 +40,30 @@
 #include "ircd_alloc.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "match.h"
 #include "msg.h"
 #include "numnicks.h"
+#include "numeric.h"
 #include "s_debug.h"
 #include "s_user.h"
 #include "send.h"
 #include "struct.h"
 
+#include "webpush_keyring.h"   /* base64url helpers */
+#include "s_stats.h"
+
 #ifdef USE_SSL
 #include <openssl/rand.h>
+#include <openssl/evp.h>
+#include <openssl/ec.h>
+#include <openssl/bn.h>
+#include <openssl/bio.h>
+#include <openssl/pem.h>
+#include <openssl/param_build.h>
+#include <openssl/core_names.h>
 #endif
 
 #include <stdio.h>
@@ -77,6 +89,15 @@ struct AuthtokenService {
   char pass[PASSWDLEN + 1];
   struct AuthtokenHost hosts[AUTHTOKEN_MAX_HOSTS];
   int nhosts;
+  /* JWT services: the signing key.  `scalar` comes from the config
+   * (base64url 32-byte P-256 private scalar); pkey/pub_pem are derived
+   * when the table is applied and owned by the live slot only. */
+  int jwt;
+  unsigned char scalar[32];
+#ifdef USE_SSL
+  EVP_PKEY *pkey;
+#endif
+  char pub_pem[256];
 };
 
 struct Authtoken {
@@ -143,6 +164,22 @@ void authtoken_conf_pass(const char *pass)
   ircd_strncpy(cur.pass, pass, sizeof(cur.pass));
 }
 
+void authtoken_conf_key(const char *b64)
+{
+  size_t got = 0;
+  if (!b64)
+    return;
+  if (webpush_b64url_decode(b64, strlen(b64), cur.scalar, sizeof(cur.scalar), &got) < 0
+      || got != 32) {
+    log_write(LS_CONFIG, L_ERROR, 0,
+              "Authtoken \"%s\": key must be the base64url of a 32-byte P-256 scalar",
+              cur.key);
+    memset(cur.scalar, 0, sizeof(cur.scalar));
+    return;
+  }
+  cur.jwt = 1;
+}
+
 void authtoken_conf_host(const char *mask)
 {
   struct AuthtokenHost h;
@@ -181,11 +218,18 @@ int authtoken_conf_end(void)
     log_write(LS_CONFIG, L_ERROR, 0, "Authtoken \"%s\": url required", cur.key);
     return 0;
   }
-  if (EmptyString(cur.pass) && cur.nhosts == 0) {
+  if (EmptyString(cur.pass) && cur.nhosts == 0 && !cur.jwt) {
     log_write(LS_CONFIG, L_ERROR, 0,
-              "Authtoken \"%s\": a validator credential (pass and/or host) is required", cur.key);
+              "Authtoken \"%s\": a validator credential (pass and/or host) or a key is required",
+              cur.key);
     return 0;
   }
+#ifndef USE_SSL
+  if (cur.jwt) {
+    log_write(LS_CONFIG, L_ERROR, 0, "Authtoken \"%s\": JWT services need an SSL build", cur.key);
+    return 0;
+  }
+#endif
   if (EmptyString(cur.desc))
     ircd_strncpy(cur.desc, cur.key, sizeof(cur.desc));
   for (i = 0; i < npending; ++i)
@@ -242,6 +286,97 @@ static void drop_tokens_of(const char *key)
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* JWT signing key                                                      */
+/* ------------------------------------------------------------------ */
+
+static void slot_key_free(struct AuthtokenService *s)
+{
+#ifdef USE_SSL
+  if (s->pkey)
+    EVP_PKEY_free(s->pkey);
+  s->pkey = NULL;
+#endif
+  s->pub_pem[0] = '\0';
+}
+
+/** Derive the EVP key and the SPKI PEM from @a s->scalar.  @return 1 ok. */
+static int slot_key_load(struct AuthtokenService *s)
+{
+#ifdef USE_SSL
+  OSSL_PARAM_BLD *bld = NULL;
+  OSSL_PARAM *params = NULL;
+  EVP_PKEY_CTX *pctx = NULL;
+  EVP_PKEY *pkey = NULL;
+  BIGNUM *priv = NULL, *order = NULL;
+  EC_GROUP *group = NULL;
+  EC_POINT *pub_point = NULL;
+  unsigned char pub[65];
+  size_t pub_len = 0;
+  int ok = 0;
+
+  slot_key_free(s);
+  priv = BN_bin2bn(s->scalar, 32, NULL);
+  group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+  order = BN_new();
+  if (!priv || !group || !order || !EC_GROUP_get_order(group, order, NULL))
+    goto out;
+  if (BN_is_zero(priv) || BN_cmp(priv, order) >= 0) {
+    log_write(LS_CONFIG, L_ERROR, 0, "Authtoken \"%s\": key is not a valid P-256 scalar", s->key);
+    goto out;
+  }
+  pub_point = EC_POINT_new(group);
+  if (!pub_point || !EC_POINT_mul(group, pub_point, priv, NULL, NULL, NULL))
+    goto out;
+  pub_len = EC_POINT_point2oct(group, pub_point, POINT_CONVERSION_UNCOMPRESSED, pub, sizeof(pub), NULL);
+  if (pub_len != 65)
+    goto out;
+  bld = OSSL_PARAM_BLD_new();
+  if (!bld
+      || !OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, "P-256", 0)
+      || !OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, priv)
+      || !OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pub, pub_len)
+      || !(params = OSSL_PARAM_BLD_to_param(bld))
+      || !(pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL))
+      || EVP_PKEY_fromdata_init(pctx) <= 0
+      || EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
+    goto out;
+  {
+    BIO *bio = BIO_new(BIO_s_mem());
+    char *data = NULL;
+    long n;
+    if (!bio)
+      goto out;
+    if (PEM_write_bio_PUBKEY(bio, pkey) == 1 && (n = BIO_get_mem_data(bio, &data)) > 0
+        && n < (long)sizeof(s->pub_pem)) {
+      memcpy(s->pub_pem, data, (size_t)n);
+      s->pub_pem[n] = '\0';
+    }
+    BIO_free(bio);
+    if (!s->pub_pem[0])
+      goto out;
+  }
+  s->pkey = pkey;
+  pkey = NULL;
+  ok = 1;
+out:
+  if (!ok)
+    log_write(LS_CONFIG, L_ERROR, 0, "Authtoken \"%s\": could not load the signing key", s->key);
+  BN_clear_free(priv);
+  BN_free(order);
+  EC_POINT_free(pub_point);
+  EC_GROUP_free(group);
+  OSSL_PARAM_BLD_free(bld);
+  OSSL_PARAM_free(params);
+  EVP_PKEY_CTX_free(pctx);
+  EVP_PKEY_free(pkey);
+  return ok;
+#else
+  (void)s;
+  return 0;
+#endif
+}
+
 void authtoken_conf_apply(void)
 {
   int i, j, before = authtoken_service_count(), after;
@@ -259,6 +394,8 @@ void authtoken_conf_apply(void)
         break;                                  /* cannot happen: npending capped */
       services[slot] = pending[i];
       seen[slot] = 1;
+      if (services[slot].jwt && !slot_key_load(&services[slot]))
+        services[slot].jwt = 0;                 /* opaque tokens until fixed */
       notify_users("NEW %s %s", services[slot].key, services[slot].url);
       continue;
     }
@@ -267,7 +404,10 @@ void authtoken_conf_apply(void)
       notify_users("NEW %s %s", pending[i].key, pending[i].url);
     if (strcmp(services[slot].pass, pending[i].pass))
       revoke_slot_auth(slot);                   /* old PASS no longer vouches */
+    slot_key_free(&services[slot]);
     services[slot] = pending[i];
+    if (services[slot].jwt && !slot_key_load(&services[slot]))
+      services[slot].jwt = 0;
   }
 
   /* Retire slots no longer configured. */
@@ -277,6 +417,7 @@ void authtoken_conf_apply(void)
     notify_users("DEL %s", services[i].key, NULL);
     revoke_slot_auth(i);
     drop_tokens_of(services[i].key);
+    slot_key_free(&services[i]);
     memset(&services[i], 0, sizeof(services[i]));
   }
 
@@ -513,9 +654,174 @@ static struct Authtoken *insert_token(const char *token, const char *key,
   return t;
 }
 
+/* ------------------------------------------------------------------ */
+/* JWT (self-validating tokens)                                         */
+/* ------------------------------------------------------------------ */
+
+/** Append @a s to a JSON string, escaping what JSON requires. */
+static int json_str(char *out, size_t outsz, size_t *pos, const char *s)
+{
+  for (; *s; ++s) {
+    const char *esc = NULL;
+    char tmp[8];
+    switch (*s) {
+    case '"':  esc = "\\\""; break;
+    case '\\': esc = "\\\\"; break;
+    case '\n': esc = "\\n"; break;
+    case '\r': esc = "\\r"; break;
+    case '\t': esc = "\\t"; break;
+    default:
+      if ((unsigned char)*s < 0x20) {
+        ircd_snprintf(0, tmp, sizeof(tmp), "\\u%04x", (unsigned char)*s);
+        esc = tmp;
+      }
+    }
+    if (esc) {
+      size_t l = strlen(esc);
+      if (*pos + l >= outsz) return 0;
+      memcpy(out + *pos, esc, l); *pos += l;
+    } else {
+      if (*pos + 1 >= outsz) return 0;
+      out[(*pos)++] = *s;
+    }
+  }
+  out[*pos] = '\0';
+  return 1;
+}
+
+/** Build the compact ES256 JWT for token @a t of a JWT service.
+ * Payload: iss (network), aud (service url), sub (account), name (nick),
+ * scope (when any), iat, exp, jti (the table key, always last).
+ * @return 1 on success. */
+static int jwt_mint(const struct AuthtokenService *s, const struct Authtoken *t,
+                    struct Client *user, char *out, size_t outsz)
+{
+#ifdef USE_SSL
+  static const char header[] = "{\"alg\":\"ES256\",\"typ\":\"JWT\"}";
+  char payload[1024], hb[64], pb[1400], sb[128];
+  size_t pos = 0;
+  EVP_MD_CTX *md = NULL;
+  unsigned char *der = NULL;
+  size_t der_len = 0;
+  ECDSA_SIG *sig = NULL;
+  const BIGNUM *r, *sg;
+  unsigned char raw[64];
+  int ok = 0, n;
+
+  if (!s->pkey)
+    return 0;
+#define PUT(lit) do { if (pos + sizeof(lit) >= sizeof(payload)) return 0; \
+                      memcpy(payload + pos, lit, sizeof(lit) - 1); pos += sizeof(lit) - 1; } while (0)
+  PUT("{\"iss\":\""); if (!json_str(payload, sizeof(payload), &pos, feature_str(FEAT_NETWORK))) return 0;
+  PUT("\",\"aud\":\""); if (!json_str(payload, sizeof(payload), &pos, s->url)) return 0;
+  PUT("\",\"sub\":\""); if (!json_str(payload, sizeof(payload), &pos, IsAccount(user) ? cli_user(user)->account : "")) return 0;
+  PUT("\",\"name\":\""); if (!json_str(payload, sizeof(payload), &pos, cli_name(user))) return 0;
+  if (t->scope[0]) {
+    PUT("\",\"scope\":\""); if (!json_str(payload, sizeof(payload), &pos, t->scope)) return 0;
+  }
+  PUT("\"");
+  n = ircd_snprintf(0, payload + pos, sizeof(payload) - pos, ",\"iat\":%Tu,\"exp\":%Tu,\"jti\":\"%s\"}",
+                    (time_t)(t->expires - feature_int(FEAT_AUTHTOKEN_EXPIRE)), t->expires, t->token);
+  if (n < 0 || pos + (size_t)n >= sizeof(payload)) return 0;
+  pos += (size_t)n;
+#undef PUT
+
+  if (webpush_b64url_encode((const unsigned char *)header, sizeof(header) - 1, hb, sizeof(hb)) < 0
+      || webpush_b64url_encode((const unsigned char *)payload, pos, pb, sizeof(pb)) < 0)
+    return 0;
+  n = ircd_snprintf(0, out, outsz, "%s.%s", hb, pb);
+  if (n < 0 || (size_t)n >= outsz) return 0;
+
+  md = EVP_MD_CTX_new();
+  if (!md || EVP_DigestSignInit(md, NULL, EVP_sha256(), NULL, s->pkey) != 1
+      || EVP_DigestSign(md, NULL, &der_len, (const unsigned char *)out, (size_t)n) != 1
+      || !(der = (unsigned char *)MyMalloc(der_len))
+      || EVP_DigestSign(md, der, &der_len, (const unsigned char *)out, (size_t)n) != 1)
+    goto out;
+  {
+    const unsigned char *p = der;
+    sig = d2i_ECDSA_SIG(NULL, &p, (long)der_len);
+  }
+  if (!sig) goto out;
+  ECDSA_SIG_get0(sig, &r, &sg);
+  if (BN_bn2binpad(r, raw, 32) != 32 || BN_bn2binpad(sg, raw + 32, 32) != 32) goto out;
+  if (webpush_b64url_encode(raw, sizeof(raw), sb, sizeof(sb)) < 0) goto out;
+  if ((size_t)n + 1 + strlen(sb) >= outsz) goto out;
+  out[n] = '.';
+  strcpy(out + n + 1, sb);
+  ok = 1;
+out:
+  EVP_MD_CTX_free(md);
+  if (der) MyFree(der);
+  ECDSA_SIG_free(sig);
+  return ok;
+#else
+  (void)s; (void)t; (void)user; (void)out; (void)outsz;
+  return 0;
+#endif
+}
+
+/** Verify a compact JWT against service @a s and extract its jti.
+ * @return 1 when the signature checks and jti fits. */
+static int jwt_open(const struct AuthtokenService *s, const char *jwt, char *jti, size_t jtisz)
+{
+#ifdef USE_SSL
+  const char *d1 = strchr(jwt, '.'), *d2 = d1 ? strchr(d1 + 1, '.') : NULL;
+  unsigned char raw[64], *der = NULL;
+  size_t raw_len = 0, der_len = 0, plen = 0;
+  unsigned char payload[1400];
+  EVP_MD_CTX *md = NULL;
+  ECDSA_SIG *sig = NULL;
+  BIGNUM *r = NULL, *sg = NULL;
+  int ok = 0, n;
+  const char *p, *q;
+
+  if (!s->pkey || !d1 || !d2 || strchr(d2 + 1, '.'))
+    return 0;
+  if (webpush_b64url_decode(d2 + 1, strlen(d2 + 1), raw, sizeof(raw), &raw_len) < 0 || raw_len != 64)
+    return 0;
+  sig = ECDSA_SIG_new();
+  r = BN_bin2bn(raw, 32, NULL);
+  sg = BN_bin2bn(raw + 32, 32, NULL);
+  if (!sig || !r || !sg || !ECDSA_SIG_set0(sig, r, sg)) {
+    BN_free(r); BN_free(sg);
+    goto out;
+  }
+  r = sg = NULL;                                /* owned by sig now */
+  n = i2d_ECDSA_SIG(sig, &der);
+  if (n <= 0) goto out;
+  der_len = (size_t)n;
+  md = EVP_MD_CTX_new();
+  if (!md || EVP_DigestVerifyInit(md, NULL, EVP_sha256(), NULL, s->pkey) != 1
+      || EVP_DigestVerify(md, der, der_len, (const unsigned char *)jwt, (size_t)(d2 - jwt)) != 1)
+    goto out;
+  /* Signature good: our own payload layout puts jti last. */
+  if (webpush_b64url_decode(d1 + 1, (size_t)(d2 - d1 - 1), payload, sizeof(payload) - 1, &plen) < 0)
+    goto out;
+  payload[plen] = '\0';
+  p = strstr((const char *)payload, "\"jti\":\"");
+  if (!p) goto out;
+  p += 7;
+  q = strchr(p, '"');
+  if (!q || (size_t)(q - p) >= jtisz) goto out;
+  memcpy(jti, p, (size_t)(q - p));
+  jti[q - p] = '\0';
+  ok = 1;
+out:
+  EVP_MD_CTX_free(md);
+  if (der) OPENSSL_free(der);
+  ECDSA_SIG_free(sig);
+  return ok;
+#else
+  (void)s; (void)jwt; (void)jti; (void)jtisz;
+  return 0;
+#endif
+}
+
 const char *authtoken_generate(struct Client *user, int svc, const char *scope)
 {
   static char token[AUTHTOKEN_LEN + 1];
+  static char jwt[2048];
   static const char hex[] = "0123456789abcdef";
   unsigned char raw[AUTHTOKEN_BYTES];
   struct Authtoken *t;
@@ -542,7 +848,20 @@ const char *authtoken_generate(struct Client *user, int svc, const char *scope)
   sendcmdto_serv_butone_v3(&me, CMD_TOKEN, NULL, "G %s %s %s %Tu %s",
                            t->token, t->key, t->yxx, t->expires,
                            t->scope[0] ? t->scope : "*");
+  if (services[svc].jwt) {
+    if (!jwt_mint(&services[svc], t, user, jwt, sizeof(jwt))) {
+      sendcmdto_serv_butone_v3(&me, CMD_TOKEN, NULL, "U %s", t->token);
+      unlink_token(t);
+      return NULL;
+    }
+    return jwt;
+  }
   return token;
+}
+
+int authtoken_service_is_jwt(int svc)
+{
+  return svc >= 0 && svc < AUTHTOKEN_MAX_SERVICES && services[svc].used && services[svc].jwt;
 }
 
 void authtoken_learn(const char *token, const char *service, const char *yxx,
@@ -662,9 +981,18 @@ int authtoken_consume(struct Client *to, int svc, const char *token)
   struct Authtoken *t;
   struct Client *user;
 
+  char jti[AUTHTOKEN_LEN + 1];
+
   expire_tokens();
   if (svc < 0 || svc >= AUTHTOKEN_MAX_SERVICES || !services[svc].used)
     return -1;
+  if (strchr(token, '.')) {
+    /* A JWT: only this service's key may have signed it; the jti it
+     * carries is the table key. */
+    if (!services[svc].jwt || !jwt_open(&services[svc], token, jti, sizeof(jti)))
+      return -1;
+    token = jti;
+  }
   t = find_token(token);
   if (!t)
     return -1;
@@ -680,4 +1008,38 @@ int authtoken_consume(struct Client *to, int svc, const char *token)
   sendcmdto_serv_butone_v3(&me, CMD_TOKEN, NULL, "U %s", t->token);
   unlink_token(t);
   return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* STATS authtoken                                                      */
+/* ------------------------------------------------------------------ */
+
+void authtoken_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  int i;
+  (void)sd; (void)param;
+
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "A :AUTHTOKEN services: %d, outstanding tokens: %d, expire %d s",
+             authtoken_service_count(), ntokens, feature_int(FEAT_AUTHTOKEN_EXPIRE));
+  for (i = 0; i < AUTHTOKEN_MAX_SERVICES; ++i) {
+    const struct AuthtokenService *s = &services[i];
+    if (!s->used)
+      continue;
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "A :%s %s %s%s%s :%s",
+               s->key, s->url, s->jwt ? "jwt" : "opaque",
+               s->pass[0] ? " pass" : "", s->nhosts ? " host" : "", s->desc);
+    if (s->jwt && s->pub_pem[0]) {
+      /* One PEM line per reply so the operator can paste it straight
+       * into the service's configuration. */
+      const char *p = s->pub_pem;
+      while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "A :  %.*s", (int)len, p);
+        if (!nl)
+          break;
+        p = nl + 1;
+      }
+    }
+  }
 }
