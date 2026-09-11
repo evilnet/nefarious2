@@ -827,7 +827,7 @@ static long long webpush_idle_window(const char *account)
 }
 
 static void wp_conn_state(struct Client *c, int held, long long replicated,
-                          struct webpush_conn_state *out)
+                          int replicated_away, struct webpush_conn_state *out)
 {
   out->held = held;
   out->away = 0;
@@ -838,6 +838,8 @@ static void wp_conn_state(struct Client *c, int held, long long replicated,
   }
   if (MyConnect(c) && cli_connect(c))
     out->away = con_pre_away(cli_connect(c)) != 0;
+  else if (replicated_away >= 0)
+    out->away = replicated_away != 0;     /* its own state (BX U aw=) */
   else
     out->away = (cli_user(c) && cli_user(c)->away) ? 1 : 0;
   if (cli_user(c) && (long long)cli_user(c)->last > out->last_msg)
@@ -858,14 +860,17 @@ static int webpush_account_unattended(struct Client *acptr, const char *account)
   int n = 0, i;
 
   if (!sess) {
-    wp_conn_state(acptr, 0, 0, &st[n++]);
+    wp_conn_state(acptr, 0, 0, -1, &st[n++]);
     return webpush_unattended(st, n, (long long)CurrentTime, idle);
   }
   wp_conn_state(sess->hs_client, sess->hs_state == BOUNCE_HOLDING,
-                (long long)sess->hs_last_active, &st[n++]);
+                (long long)sess->hs_last_active,
+                sess->hs_primary_away_known ? sess->hs_primary_away : -1, &st[n++]);
   for (i = 0; i < sess->hs_alias_count && n < (int)(sizeof(st) / sizeof(st[0])); i++) {
     struct Client *al = findNUser(sess->hs_aliases[i].ba_numeric);
-    wp_conn_state(al, al ? 0 : 1, (long long)sess->hs_aliases[i].ba_last_active, &st[n++]);
+    wp_conn_state(al, al ? 0 : 1, (long long)sess->hs_aliases[i].ba_last_active,
+                  sess->hs_aliases[i].ba_away_known ? sess->hs_aliases[i].ba_away : -1,
+                  &st[n++]);
   }
   return webpush_unattended(st, n, (long long)CurrentTime, idle);
 }

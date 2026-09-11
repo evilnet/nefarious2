@@ -375,6 +375,13 @@ struct BounceAlias {
   time_t ba_last_active_emitted; /**< Local bookkeeping on the alias's own
                                  server: when its activity was last put on
                                  the wire (BX U la=).  Not replicated. */
+  int ba_away;              /**< The alias's OWN away state as its server
+                                 reports it (BX U aw=): 0 present, 1 away,
+                                 2 AWAY * (draft/pre-away, not looking).
+                                 The webpush attention rule and the away
+                                 aggregation read this for remote aliases
+                                 instead of the session's mirrored aggregate. */
+  int ba_away_known;        /**< 1 once a BX U aw= arrived for this alias. */
   char ba_active_profile[33]; /**< Phase 4 M4b: alias's active draft/persistence
                                    profile name (PERSISTENCE_PROFILE_NAME_MAX + NUL).
                                    Empty string resolves to "default" by the
@@ -450,6 +457,9 @@ struct BouncerSession {
                                             so a subsequent non-enforced attach can detach
                                             a stale-enforced session. */
 
+  int hs_primary_away;                 /**< The primary's OWN away state as replicated
+                                            (BX U aw=), for servers that do not host it. */
+  int hs_primary_away_known;           /**< 1 once a BX U aw= arrived for the primary. */
   int hs_effective_away;               /**< Last computed effective away: 0=present, 1=away, 2=all-star */
   char hs_effective_away_msg[AWAYLEN + 1]; /**< Last effective away message */
 
@@ -892,6 +902,11 @@ extern void ephemeral_purge_session(struct Client *cli);
  * @param[in] from Source client whose activity to record.
  */
 extern void bounce_record_activity(struct Client *from);
+/** A local session connection's own away state changed (0 present, 1 away,
+ * 2 AWAY *): put it on the wire (BX U aw=) so other servers judge attention
+ * and aggregate away from the connection's own state, not the mirror. */
+extern void bounce_note_away_state(struct Client *who, int state);
+
 
 /** Set a session's user-assigned name.
  * @param[in] session Session to rename.
