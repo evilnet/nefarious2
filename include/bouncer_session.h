@@ -968,11 +968,16 @@ extern int bounce_compute_effective_away(struct BouncerSession *session,
  */
 extern void bounce_recompute_session_away(struct BouncerSession *session);
 
-/** Activity replication: a connection's first message after this many
- * seconds of quiet puts its activity on the wire (BX U <numeric> la=<ts>),
- * so every replica's hs_last_active / ba_last_active tracks live use at a
- * bounded cost (one line per connection per quiet period). */
+/** Activity replication: a connection's first message after a quiet
+ * period puts its activity on the wire (BX U <numeric> la=<ts>), so every
+ * replica's hs_last_active / ba_last_active tracks live use at a bounded
+ * cost (one line per connection per quiet period).  The period is this
+ * ceiling or half the account's webpush idle window, whichever is
+ * shorter (bounce_activity_quiet): a replica's reading is then always
+ * fresher than the window it is judged against, whatever WEBPUSH_IDLE or
+ * the per-account override is set to. */
 #define BOUNCE_ACTIVITY_QUIET 300
+extern int bounce_activity_quiet(const char *account);
 
 /** Most recent activity across every connection of @a session: the
  * primary's and each alias's, local from the idle clock, remote from the

@@ -168,6 +168,10 @@ struct Client;
  */
 int webpush_setup(void);
 
+/** The attention idle window for an account (seconds; 0 = idle rule
+ * off): `draft/webpush/idle` metadata, else WEBPUSH_IDLE. */
+long long webpush_idle_window(const char *account);
+
 /*
  * Record on a connection which VAPID key it was just told about (every
  * ISUPPORT emission calls this); WEBPUSH REGISTER binds the subscription

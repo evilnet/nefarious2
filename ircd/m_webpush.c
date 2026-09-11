@@ -813,8 +813,9 @@ static void wp_suppressed(unsigned long *counter, const char *reason,
 }
 
 /** Idle window for an account: its `draft/webpush/idle` metadata (seconds)
- * when set, else WEBPUSH_IDLE. */
-static long long webpush_idle_window(const char *account)
+ * when set, else WEBPUSH_IDLE.  Also read by the bouncer's activity
+ * replication, whose emit interval must stay inside this window. */
+long long webpush_idle_window(const char *account)
 {
   char v[METADATA_VALUE_LEN];
   if (metadata_account_get(account, "draft/webpush/idle", v) == 0 && v[0]) {

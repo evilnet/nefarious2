@@ -29,6 +29,7 @@
 #include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
 #include "session_markread.h"
+#include "webpush.h"
 #include "IPcheck.h"
 #include "capab.h"
 #include "channel.h"
@@ -9891,6 +9892,15 @@ void bounce_note_away_state(struct Client *who, int state)
                         "U %s aw=%d", full_numeric, state);
 }
 
+int bounce_activity_quiet(const char *account)
+{
+  long long idle = account ? webpush_idle_window(account) : 0;
+  long long quiet = BOUNCE_ACTIVITY_QUIET;
+  if (idle > 0 && idle / 2 < quiet)
+    quiet = idle / 2;
+  return quiet < 1 ? 1 : (int)quiet;
+}
+
 void bounce_record_activity(struct Client *from)
 {
   struct AccountSessions *as;
@@ -9922,7 +9932,7 @@ void bounce_record_activity(struct Client *from)
            * value; before this it was frozen at link-burst time. */
           if (MyConnect(from)
               && CurrentTime - sess->hs_aliases[i].ba_last_active_emitted
-                 >= BOUNCE_ACTIVITY_QUIET) {
+                 >= bounce_activity_quiet(cli_user(from)->account)) {
             sess->hs_aliases[i].ba_last_active_emitted = CurrentTime;
             sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                                   "U %s la=%lu", full_numeric,
@@ -9942,7 +9952,8 @@ void bounce_record_activity(struct Client *from)
          * session has other connections whose servers may read it. */
         if (MyConnect(from) && sess->hs_alias_count > 0
             && cli_user(from) && cli_user(from)->server
-            && CurrentTime - sess->hs_last_active_emitted >= BOUNCE_ACTIVITY_QUIET) {
+            && CurrentTime - sess->hs_last_active_emitted
+               >= bounce_activity_quiet(cli_user(from)->account)) {
           sess->hs_last_active_emitted = CurrentTime;
           sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                                 "U %s%s la=%lu",
