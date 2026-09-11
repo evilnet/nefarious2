@@ -26,6 +26,8 @@ Reference for Nefarious's bouncer subsystem: persistent account-anchored session
 - **Session move** (cross-server): `bounce_alias_create()` calls `bounce_promote_alias()` then exits the ghost with `FLAG_BOUNCER_INTERNAL_DESTROY` (`SetBouncerInternalDestroy`), gated on promote success — NOT `FLAG_KILLED`, which would trigger whole-session teardown (the opposite of a seamless move). The BX P handler on remote replicas must ALSO set `hs_state = BOUNCE_ACTIVE`.
 - `CapRecipientHas(cli, cap)` is simplified to just `CapOwnHas(cli, cap)` — each alias owns its caps. `CapRouteContext` (renamed from `ShadowTagContext`) handles per-connection cap routing in channel send functions.
 
+- **Per-connection away replicates as `BX U <numeric> aw=<0|1|2>`** (2026-09-11): a connection's OWN state (2 = `AWAY *`, draft/pre-away), emitted by its server on change and in the link burst; receivers keep `ba_away`/`hs_primary_away` (+`_known`). The webpush attention rule and the away aggregation read it for remote members instead of the session's mirrored aggregate, which a present sibling hides. Activity (`la=`) is still coarse (once per 300 s quiet), so never assert a remote member "attends again" by clock.
+
 ## Connection Classes
 
 - `CRFLAG_BOUNCER` forces bouncer auto-create/resume per-class.
