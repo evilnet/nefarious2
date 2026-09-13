@@ -1049,6 +1049,14 @@ static void client_sock_callback(struct Event* ev)
     if (IsSSLNeedAccept(cptr)) {
       int r = ssl_accept(cptr);
       if (r == 1) {
+        /* Handshake still in progress.  The auth notices queued at
+         * accept armed writable interest; unless OpenSSL is actually
+         * waiting to write, drop it, or an idle socket (a peer that
+         * never sends its ClientHello) has epoll returning instantly
+         * until the connect timeout.  ET_READ re-arms it once the
+         * handshake completes. */
+        if (!ssl_want_write(cptr))
+          socket_events(&(con_socket(con)), SOCK_ACTION_DEL | SOCK_EVENT_WRITABLE);
         break;
       } else if (r == 0) {
         SetFlag(cptr, FLAG_DEADSOCKET);
@@ -1083,6 +1091,9 @@ static void client_sock_callback(struct Event* ev)
           ssl_abort(cptr);
           break;
         }
+        /* Handshake done: anything queued meanwhile needs the writable
+         * interest that ET_WRITE dropped while waiting for the peer. */
+        update_write(cptr);
       }
       if (s_state(&(con_socket(con))) == SS_CONNECTING)
         completed_connection(cptr);
