@@ -677,8 +677,13 @@ static int webpush_store_count_cached(const char *account)
  * revive-reset needed: pushes are gated on HOLDING state, so a stale
  * entry can only suppress within FEAT_WEBPUSH_COOLDOWN seconds of the
  * previous push, which is the intended behavior anyway. */
+/* Sized for the longest key webpush_cooldown_ok builds (namespace +
+ * account + channel).  It used to be ACCOUNTLEN + NICKLEN + 2: a longer
+ * key was truncated on store, never compared equal, and the cooldown
+ * silently never fired for long channel names. */
+#define WEBPUSH_CD_KEYLEN (ACCOUNTLEN + CHANNELLEN + 8)
 static struct {
-  char key[ACCOUNTLEN + NICKLEN + 2];
+  char key[WEBPUSH_CD_KEYLEN];
   time_t last;
 } wp_cooldown[WEBPUSH_CD_SLOTS];
 
@@ -748,7 +753,7 @@ static int webpush_claim_outstanding(const char *account, const char *conv)
 static int webpush_cooldown_ok(const char *account, const char *origin,
                                int cd, const char *ns)
 {
-  char key[ACCOUNTLEN + CHANNELLEN + 8];
+  char key[WEBPUSH_CD_KEYLEN];
   unsigned int h = 2166136261u;
   const char *p;
 
@@ -953,7 +958,10 @@ static const char *webpush_pm_account(struct Client *sptr, struct Client *acptr)
     wp_suppressed(&wp_suppress.attended, "attended", account);
     return NULL;
   }
-  if (!webpush_pm_cooldown_ok(account, cli_name(sptr))) {
+  /* The PM cooldown follows the sender's session, not its nick: every
+   * connection has one (aliases share their session's), and a nick
+   * change was otherwise a fresh minute of pushes per victim. */
+  if (!webpush_pm_cooldown_ok(account, cli_session_id(sptr))) {
     wp_suppressed(&wp_suppress.cooldown, "cooldown", account);
     return NULL;
   }

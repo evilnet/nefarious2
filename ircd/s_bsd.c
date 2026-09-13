@@ -321,6 +321,15 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
    */
   if (IsWSNeedHandshake(cptr) || IsWSSniff(cptr)) {
     SetFlag(cptr, FLAG_BLOCKED);
+    /* Nothing can go out until the sniff/handshake decides, so drop
+     * write interest: the auth notices queued at accept had armed it,
+     * and an idle socket is always writable, so leaving it armed made
+     * epoll return instantly for the life of the connection -- one
+     * silent TCP connection pinned a core for CONNECTTIMEOUT seconds.
+     * The paths that resolve the state (sniff -> plain IRC, handshake
+     * complete) call send_queued, which re-arms via update_write if the
+     * socket then really blocks. */
+    socket_events(&(cli_socket(cptr)), SOCK_ACTION_DEL | SOCK_EVENT_WRITABLE);
     return 0;
   }
 
@@ -1289,6 +1298,25 @@ ssl_read_again:
 
         /* Handle control frames (always complete, can be interleaved) */
         if (opcode >= WS_OPCODE_CLOSE) {
+          /* Control frames never reach the recvQ, so they never met the
+           * fakelag that throttles commands: a 6-byte PING cost a TLS
+           * record and a syscall, unbounded.  Charge each one like a
+           * command against cli_since and drop a client that keeps going
+           * past WS_CONTROL_FLOOD_CEIL (above the 10 s parse ceiling, so
+           * a PONG to our keepalive from a client already at the command
+           * limit survives).  CLOSE is exempt: it ends the connection. */
+          if (opcode != WS_OPCODE_CLOSE && !IsTrusted(cptr)) {
+            int lagmin = get_lag_min(cptr);
+            if (lagmin < 0)
+              lagmin = 2;
+            if (cli_since(cptr) < CurrentTime)
+              cli_since(cptr) = CurrentTime;
+            cli_since(cptr) += lagmin;
+            if (cli_since(cptr) - CurrentTime > WS_CONTROL_FLOOD_CEIL) {
+              websocket_send_close(cptr, 1008, "Excess Flood");
+              return exit_client(cptr, cptr, &me, "Excess Flood");
+            }
+          }
           if (!websocket_handle_control(cptr, opcode, ws_payload, ws_len)) {
             /* Close frame received.  A WS CLOSE is transport teardown --
              * the WebSocket-layer FIN -- so route it through the bouncer
@@ -1760,6 +1788,13 @@ void client_sock_callback(struct Event* ev)
     if (IsSSLNeedAccept(cptr)) {
       int r = ssl_accept(cptr);
       if (r == 1) {
+        /* Handshake still in progress.  Unless OpenSSL is actually
+         * waiting to write, keep the writable interest off: with it
+         * armed, an idle socket (a peer that never sends its
+         * ClientHello) has epoll returning instantly until the connect
+         * timeout.  ET_READ re-arms it once the handshake completes. */
+        if (!ssl_want_write(cptr))
+          socket_events(&(con_socket(con)), SOCK_ACTION_DEL | SOCK_EVENT_WRITABLE);
         break;
       } else if (r == 0) {
         SetFlag(cptr, FLAG_DEADSOCKET);
@@ -1796,6 +1831,10 @@ void client_sock_callback(struct Event* ev)
           ssl_abort(cptr);
           break;
         }
+        /* Handshake done: anything queued meanwhile (the auth notices)
+         * needs the write interest that ET_WRITE dropped while the
+         * handshake waited for the peer. */
+        update_write(cptr);
       }
       if (s_state(&(con_socket(con))) == SS_CONNECTING)
         completed_connection(cptr);

@@ -1451,7 +1451,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL
-  F_B(CAP_tls, 0, 1, feature_notify_cap_tls),
+  F_B(CAP_tls, 0, 0, feature_notify_cap_tls), /* deprecated by IRCv3 (STS replaces it); STARTTLS is refused while off */
   F_B(CAP_sts, 0, 0, feature_notify_cap_sts),
   F_I(STS_PORT, 0, 6697, feature_notify_cap_sts),
   F_I(STS_DURATION, 0, 2592000, feature_notify_cap_sts),  /* 30 days in seconds */
