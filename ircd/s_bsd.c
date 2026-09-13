@@ -1306,7 +1306,10 @@ ssl_read_again:
            * a PONG to our keepalive from a client already at the command
            * limit survives).  CLOSE is exempt: it ends the connection. */
           if (opcode != WS_OPCODE_CLOSE && !IsTrusted(cptr)) {
-            int lagmin = get_lag_min(cptr);
+            /* Before registration there is no connection class yet, so
+             * get_lag_min() would read an unset 0 (commands are not
+             * charged at that stage at all; control frames must be). */
+            int lagmin = IsRegistered(cptr) ? get_lag_min(cptr) : -1;
             if (lagmin < 0)
               lagmin = 2;
             if (cli_since(cptr) < CurrentTime)
