@@ -1296,30 +1296,26 @@ ssl_read_again:
 
         Debug((DEBUG_DEBUG, "WebSocket frame payload: '%.50s'", ws_payload));
 
+        /* Frames that put nothing on the recvQ never meet fakelag, so a
+         * 6-byte PING (or an empty TEXT frame) cost a decode iteration,
+         * and for PING a TLS record and a syscall, unbounded.  They are
+         * metered on their own clock (see WS_CONTROL_FLOOD_CEIL).  CLOSE
+         * ends the connection; an empty FIN continuation completes a
+         * fragmented message, so both stay free. */
+        if ((opcode >= WS_OPCODE_CLOSE && opcode != WS_OPCODE_CLOSE)
+            || (opcode < WS_OPCODE_CLOSE && ws_len == 0
+                && !(opcode == WS_OPCODE_CONTINUATION && is_fin))) {
+          if (cli_ws_ctl_since(cptr) < CurrentTime)
+            cli_ws_ctl_since(cptr) = CurrentTime;
+          cli_ws_ctl_since(cptr) += WS_CONTROL_FLOOD_CHARGE;
+          if (cli_ws_ctl_since(cptr) - CurrentTime > WS_CONTROL_FLOOD_CEIL) {
+            websocket_send_close(cptr, 1008, "Excess Flood");
+            return exit_client(cptr, cptr, &me, "Excess Flood");
+          }
+        }
+
         /* Handle control frames (always complete, can be interleaved) */
         if (opcode >= WS_OPCODE_CLOSE) {
-          /* Control frames never reach the recvQ, so they never met the
-           * fakelag that throttles commands: a 6-byte PING cost a TLS
-           * record and a syscall, unbounded.  Charge each one like a
-           * command against cli_since and drop a client that keeps going
-           * past WS_CONTROL_FLOOD_CEIL (above the 10 s parse ceiling, so
-           * a PONG to our keepalive from a client already at the command
-           * limit survives).  CLOSE is exempt: it ends the connection. */
-          if (opcode != WS_OPCODE_CLOSE && !IsTrusted(cptr)) {
-            /* Before registration there is no connection class yet, so
-             * get_lag_min() would read an unset 0 (commands are not
-             * charged at that stage at all; control frames must be). */
-            int lagmin = IsRegistered(cptr) ? get_lag_min(cptr) : -1;
-            if (lagmin < 0)
-              lagmin = 2;
-            if (cli_since(cptr) < CurrentTime)
-              cli_since(cptr) = CurrentTime;
-            cli_since(cptr) += lagmin;
-            if (cli_since(cptr) - CurrentTime > WS_CONTROL_FLOOD_CEIL) {
-              websocket_send_close(cptr, 1008, "Excess Flood");
-              return exit_client(cptr, cptr, &me, "Excess Flood");
-            }
-          }
           if (!websocket_handle_control(cptr, opcode, ws_payload, ws_len)) {
             /* Close frame received.  A WS CLOSE is transport teardown --
              * the WebSocket-layer FIN -- so route it through the bouncer

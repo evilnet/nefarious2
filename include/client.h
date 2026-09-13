@@ -491,6 +491,7 @@ struct Connection
   char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
   int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
   int                 con_ws_frag_opcode; /**< Opcode of first fragment */
+  time_t              con_ws_ctl_since;   /**< Control-frame meter: debt clock (same shape as con_since, own budget) */
   char*               con_ws_hs_buf;      /**< HTTP upgrade request being accumulated (heap, WS_HANDSHAKE_MAX + 1; freed once the handshake is decided) */
   int                 con_ws_hs_len;      /**< Bytes in con_ws_hs_buf */
   char*               con_ws_txrem;       /**< Unsent tail of a partially-written outbound WS frame (heap, on demand; plaintext sockets) */
@@ -721,6 +722,7 @@ struct Client {
 #define cli_ws_frag_len(cli)	con_ws_frag_len(cli_connect(cli))
 /** Get WebSocket first fragment opcode. */
 #define cli_ws_frag_opcode(cli)	con_ws_frag_opcode(cli_connect(cli))
+#define cli_ws_ctl_since(cli)	con_ws_ctl_since(cli_connect(cli))
 /** Get WebSocket handshake accumulation buffer. */
 #define cli_ws_hs_buf(cli)	con_ws_hs_buf(cli_connect(cli))
 /** Get WebSocket handshake accumulation buffer length. */
@@ -1047,6 +1049,7 @@ struct Client {
 #define con_ws_frag_len(con)	((con)->con_ws_frag_len)
 /** Get WebSocket first fragment opcode. */
 #define con_ws_frag_opcode(con)	((con)->con_ws_frag_opcode)
+#define con_ws_ctl_since(con)	((con)->con_ws_ctl_since)
 /** Get WebSocket handshake accumulation buffer. */
 #define con_ws_hs_buf(con)	((con)->con_ws_hs_buf)
 /** Get WebSocket handshake accumulation buffer length. */
