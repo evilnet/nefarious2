@@ -436,6 +436,7 @@ struct Connection
   unsigned char       con_label_responded; /**< Whether a response was sent for current label */
   char                con_batch_id[16]; /**< Current batch reference ID */
   unsigned int        con_batch_seq;  /**< Batch sequence number for generating IDs */
+  unsigned int        con_token_auth; /**< draft/authtoken: service slots this connection's PASS may validate */
   char                con_client_tags[4096]; /**< Client-only tags (+tag=value) for TAGMSG relay (IRCv3: 4094 max) */
   uint64_t            con_s2s_time_ms;   /**< S2S @time as epoch milliseconds (0 = not set) */
 #define S2S_MSGID_BUFSIZE 64  /**< Msgid buffer: fits both verbose (~34 chars) and compact (14 chars) */
@@ -490,6 +491,7 @@ struct Connection
   char                con_ws_frag_buf[16384]; /**< Fragment reassembly buffer */
   int                 con_ws_frag_len;    /**< Length of data in fragment buffer */
   int                 con_ws_frag_opcode; /**< Opcode of first fragment */
+  time_t              con_ws_ctl_since;   /**< Control-frame meter: debt clock (same shape as con_since, own budget) */
   char*               con_ws_hs_buf;      /**< HTTP upgrade request being accumulated (heap, WS_HANDSHAKE_MAX + 1; freed once the handshake is decided) */
   int                 con_ws_hs_len;      /**< Bytes in con_ws_hs_buf */
   char*               con_ws_txrem;       /**< Unsent tail of a partially-written outbound WS frame (heap, on demand; plaintext sockets) */
@@ -658,6 +660,7 @@ struct Client {
 #define cli_batch_id(cli)	con_batch_id(cli_connect(cli))
 /** Get batch sequence number */
 #define cli_batch_seq(cli)	con_batch_seq(cli_connect(cli))
+#define cli_token_auth(cli)	con_token_auth(cli_connect(cli))
 /** Get client-only tags buffer for TAGMSG relay */
 #define cli_client_tags(cli)	con_client_tags(cli_connect(cli))
 /** Get S2S @time as epoch milliseconds from incoming message */
@@ -719,6 +722,7 @@ struct Client {
 #define cli_ws_frag_len(cli)	con_ws_frag_len(cli_connect(cli))
 /** Get WebSocket first fragment opcode. */
 #define cli_ws_frag_opcode(cli)	con_ws_frag_opcode(cli_connect(cli))
+#define cli_ws_ctl_since(cli)	con_ws_ctl_since(cli_connect(cli))
 /** Get WebSocket handshake accumulation buffer. */
 #define cli_ws_hs_buf(cli)	con_ws_hs_buf(cli_connect(cli))
 /** Get WebSocket handshake accumulation buffer length. */
@@ -976,6 +980,7 @@ struct Client {
 #define con_batch_id(con)	((con)->con_batch_id)
 /** Get the batch sequence number. */
 #define con_batch_seq(con)	((con)->con_batch_seq)
+#define con_token_auth(con)	((con)->con_token_auth)
 /** Get the client-only tags buffer for TAGMSG relay. */
 #define con_client_tags(con)	((con)->con_client_tags)
 /** Get the S2S @time as epoch milliseconds from incoming message. */
@@ -1044,6 +1049,7 @@ struct Client {
 #define con_ws_frag_len(con)	((con)->con_ws_frag_len)
 /** Get WebSocket first fragment opcode. */
 #define con_ws_frag_opcode(con)	((con)->con_ws_frag_opcode)
+#define con_ws_ctl_since(con)	((con)->con_ws_ctl_since)
 /** Get WebSocket handshake accumulation buffer. */
 #define con_ws_hs_buf(con)	((con)->con_ws_hs_buf)
 /** Get WebSocket handshake accumulation buffer length. */

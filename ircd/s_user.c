@@ -35,6 +35,7 @@
 #include "channel.h"
 #include "chathistory_presence.h"
 #include "class.h"
+#include "authtoken.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -578,6 +579,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
                    infochanmodes, infochanmodeswithparams);
         send_supported(ghost);
 
+        /* draft/authtoken service list: mirror of the register_user emit */
+        if (CapActive(ghost, CAP_BATCH) && CapActive(ghost, CAP_DRAFT_AUTHTOKEN))
+          authtoken_send_servicelist(ghost);
+
 #ifdef USE_SSL
         if (cli_socket(ghost).ssl) {
           sendcmdto_one(&me, CMD_NOTICE, ghost,
@@ -766,6 +771,12 @@ int register_user(struct Client *cptr, struct Client *sptr)
     send_reply(sptr, RPL_MYINFO, cli_name(&me), version, infousermodes,
                infochanmodes, infochanmodeswithparams);
     send_supported(sptr);
+
+    /* IRCv3 draft/authtoken: service list rides the registration burst
+     * when batch + draft/authtoken were negotiated (after ISUPPORT,
+     * before LUSERS).  Mirrored on both bouncer fast paths. */
+    if (CapActive(sptr, CAP_BATCH) && CapActive(sptr, CAP_DRAFT_AUTHTOKEN))
+      authtoken_send_servicelist(sptr);
 
 #ifdef USE_SSL
     if (cli_socket(sptr).ssl)
@@ -3443,6 +3454,20 @@ void init_isupport(void)
                      feature_int(FEAT_CHATHISTORY_RETENTION) * 86400);
     else
       del_isupport("evilnet/CHATHISTORYRETENTION");
+  }
+
+  /* IRCv3 draft/FILEHOST (PR #562): the upload URL, when an Authtoken
+   * service named FILEHOST is configured.  goguma keys on the soju
+   * spelling, so both are published (documented compatibility alias). */
+  {
+    const char *fh = authtoken_filehost_url();
+    if (fh) {
+      add_isupport_s("draft/FILEHOST", fh);
+      add_isupport_s("soju.im/FILEHOST", fh);
+    } else {
+      del_isupport("draft/FILEHOST");
+      del_isupport("soju.im/FILEHOST");
+    }
   }
 
   /* evilnet/channel-relocate: relocation mode + tombstone grace period */

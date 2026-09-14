@@ -238,6 +238,10 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     } else {
       send_reply(sptr, RPL_UNAWAY);
     }
+    /* Other servers judge attention (webpush) and aggregate away from
+     * each connection's OWN state; the effective state broadcast below
+     * is the mirror and hides an AWAY * behind a present sibling. */
+    bounce_note_away_state(sptr, con_pre_away(cli_connect(sptr)));
 
     /* Compute effective state across all connections */
     {

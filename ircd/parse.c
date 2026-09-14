@@ -28,6 +28,7 @@
 #include "capab.h"
 #include "class.h"
 #include "crdt_hlc.h"
+#include "authtoken.h"
 #include "client.h"
 #include "forwarded_label.h"
 #include "channel.h"
@@ -1048,6 +1049,14 @@ struct Message msgtab[] = {
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
     { m_metadata, m_metadata, ms_metadata, m_metadata, m_ignore },
     "<subcommand> [args] - Manage user/channel metadata"
+  },
+  {
+    MSG_TOKEN,
+    TOK_TOKEN,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { mr_token, m_token, ms_token, m_token, m_ignore },
+    "SERVICELIST|GENERATE <service> [scope]|VALIDATE <service> :<token> - draft/authtoken"
   },
   {
     MSG_WEBPUSH,

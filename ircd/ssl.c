@@ -618,6 +618,13 @@ int ssl_accept(struct Client *cptr)
   return -1;
 }
 
+/** Is the pending handshake waiting to WRITE (as opposed to read)?
+ *  Used to decide whether to keep writable interest during SSL_accept. */
+int ssl_want_write(struct Client *cptr)
+{
+  return cli_socket(cptr).ssl && SSL_want_write(cli_socket(cptr).ssl);
+}
+
 int ssl_starttls(struct Client *cptr)
 {
   if (!cli_socket(cptr).ssl) {

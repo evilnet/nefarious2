@@ -29,10 +29,12 @@
 #include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
 #include "session_markread.h"
+#include "webpush.h"
 #include "IPcheck.h"
 #include "capab.h"
 #include "channel.h"
 #include "class.h"
+#include "authtoken.h"
 #include "client.h"
 #include "history.h"
 #include "ircd.h"
@@ -3829,6 +3831,15 @@ void bounce_burst(struct Client *cptr)
                           "U %s caps=%s",
                           s->hs_aliases[a].ba_numeric, hex);
           }
+          /* And its own away state (AWAY * in particular), which the
+           * peer's attention rule must not read off the mirror. */
+          if (0 == strcmp(s->hs_aliases[a].ba_server, cli_yxx(&me))
+              && alias && MyConnect(alias) && cli_connect(alias)
+              && con_pre_away(cli_connect(alias)) != 0)
+            sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr,
+                          "U %s aw=%d",
+                          s->hs_aliases[a].ba_numeric,
+                          con_pre_away(cli_connect(alias)));
 
           /* Per redesign C.3 + B.1 + B.6: emit BS A per alias to carry
            * per-alias last_active + caps so the receiver can populate
@@ -6107,6 +6118,8 @@ int bounce_demote_live_primary_to_alias(struct Client *acptr,
     ircd_strncpy(ba->ba_server, cli_yxx(&me), sizeof(ba->ba_server));
     ba->ba_caps = 0;
     ba->ba_caps_known = 0;
+    ba->ba_away = 0;
+    ba->ba_away_known = 0;
   }
 
   bounce_db_del(session->hs_sessid);
@@ -7662,6 +7675,10 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
              infochanmodes, infochanmodeswithparams);
   send_supported(sptr);
 
+  /* draft/authtoken service list: mirror of the register_user emit */
+  if (CapActive(sptr, CAP_BATCH) && CapActive(sptr, CAP_DRAFT_AUTHTOKEN))
+    authtoken_send_servicelist(sptr);
+
 #ifdef USE_SSL
   if (cli_socket(sptr).ssl)
     sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :You are connected to %s with %s",
@@ -8083,6 +8100,8 @@ track_alias:
     ba->ba_last_active = CurrentTime;
     ba->ba_caps = 0;
     ba->ba_caps_known = 0;
+    ba->ba_away = 0;
+    ba->ba_away_known = 0;
     /* M4b: record the alias's active draft/persistence profile,
      * received as the positional field after modes.  Old peers
      * don't send this; default to empty (= "default" at the
@@ -8493,6 +8512,34 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
    * on its own server).  Applies to aliases AND primaries -- the numeric
    * may name a primary, which the alias guard below would otherwise
    * defer forever waiting for a BX C that never comes. */
+  /* aw=<0|1|2>: a connection's OWN away state (0 present, 1 away,
+   * 2 AWAY *), replicated so the attention rule and the away aggregation
+   * on other servers see the connection, not the session's mirror.
+   * Applies to aliases AND primaries, like la=. */
+  if (0 == strncmp(field_value, "aw=", 3)) {
+    struct Client *who = bx_find_user_strict(alias_numeric);
+    int aw = atoi(field_value + 3);
+    if (who && IsUser(who) && IsAccount(who) && aw >= 0 && aw <= 2) {
+      struct AccountSessions *as = bounce_find_by_account(cli_user(who)->account);
+      struct BouncerSession *sess;
+      int i;
+      for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext) {
+        if (!IsBouncerAlias(who)) {
+          if (sess->hs_client == who) {
+            sess->hs_primary_away = aw;
+            sess->hs_primary_away_known = 1;
+          }
+          continue;
+        }
+        for (i = 0; i < sess->hs_alias_count; i++)
+          if (0 == strcmp(sess->hs_aliases[i].ba_numeric, alias_numeric)) {
+            sess->hs_aliases[i].ba_away = aw;
+            sess->hs_aliases[i].ba_away_known = 1;
+          }
+      }
+    }
+    goto forward;
+  }
   if (0 == strncmp(field_value, "la=", 3)) {
     struct Client *who = bx_find_user_strict(alias_numeric);
     time_t la = (time_t)strtoul(field_value + 3, NULL, 10);
@@ -9831,6 +9878,29 @@ void ephemeral_purge_session(struct Client *cli)
  * Called from the general idle-update chokepoints so every non-trivial
  * activity from a bouncer connection bumps the right slot.
  */
+void bounce_note_away_state(struct Client *who, int state)
+{
+  char full_numeric[16];
+  if (!who || !MyConnect(who) || !IsUser(who) || !IsAccount(who)
+      || !cli_user(who) || !cli_user(who)->server)
+    return;
+  if (!bounce_has_sessions(cli_user(who)->account))
+    return;
+  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                cli_yxx(cli_user(who)->server), cli_yxx(who));
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "U %s aw=%d", full_numeric, state);
+}
+
+int bounce_activity_quiet(const char *account)
+{
+  long long idle = account ? webpush_idle_window(account) : 0;
+  long long quiet = BOUNCE_ACTIVITY_QUIET;
+  if (idle > 0 && idle / 2 < quiet)
+    quiet = idle / 2;
+  return quiet < 1 ? 1 : (int)quiet;
+}
+
 void bounce_record_activity(struct Client *from)
 {
   struct AccountSessions *as;
@@ -9862,7 +9932,7 @@ void bounce_record_activity(struct Client *from)
            * value; before this it was frozen at link-burst time. */
           if (MyConnect(from)
               && CurrentTime - sess->hs_aliases[i].ba_last_active_emitted
-                 >= BOUNCE_ACTIVITY_QUIET) {
+                 >= bounce_activity_quiet(cli_user(from)->account)) {
             sess->hs_aliases[i].ba_last_active_emitted = CurrentTime;
             sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                                   "U %s la=%lu", full_numeric,
@@ -9882,7 +9952,8 @@ void bounce_record_activity(struct Client *from)
          * session has other connections whose servers may read it. */
         if (MyConnect(from) && sess->hs_alias_count > 0
             && cli_user(from) && cli_user(from)->server
-            && CurrentTime - sess->hs_last_active_emitted >= BOUNCE_ACTIVITY_QUIET) {
+            && CurrentTime - sess->hs_last_active_emitted
+               >= bounce_activity_quiet(cli_user(from)->account)) {
           sess->hs_last_active_emitted = CurrentTime;
           sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                                 "U %s%s la=%lu",
@@ -9981,6 +10052,15 @@ int bounce_compute_effective_away(struct BouncerSession *session,
         has_away = 1;
         if (con_pre_away_msg(cli_connect(alias))[0])
           latest_away_msg = con_pre_away_msg(cli_connect(alias));
+      } else {
+        has_present = 1;
+      }
+    } else if (session->hs_aliases[i].ba_away_known) {
+      /* Remote alias with its own state replicated (BX U aw=). */
+      if (session->hs_aliases[i].ba_away == 2) {
+        /* AWAY * — invisible to aggregation */
+      } else if (session->hs_aliases[i].ba_away == 1) {
+        has_away = 1;
       } else {
         has_present = 1;
       }

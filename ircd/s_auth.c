@@ -39,6 +39,7 @@
 #include "bouncer_session.h"
 #include "class.h"
 #include "dnsbl.h"
+#include "authtoken.h"
 #include "client.h"
 #include "hash.h"
 #include "IPcheck.h"
@@ -745,6 +746,7 @@ static int check_auth_finished(struct AuthRequest *auth)
   {
     Debug((DEBUG_INFO, "check_auth_finished: completing auth for %p (fd %d), cli_name='%s'",
            (void*)auth->client, cli_fd(auth->client), cli_name(auth->client)));
+    authtoken_note_pass(auth->client);   /* validator PASS survives registration */
     memset(cli_passwd(auth->client), 0, sizeof(cli_passwd(auth->client)));
     res = auth_set_username(auth);
     if (res == 0) {

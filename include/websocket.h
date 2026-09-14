@@ -37,6 +37,19 @@ struct Client;
  * websocket_decode_frame() must hand it a buffer larger than this. */
 #define WS_MAX_PAYLOAD 16384
 
+/** Control-frame meter.  Frames that yield no recvQ bytes (PING, PONG,
+ *  empty data or continuation frames) never meet fakelag, so they get
+ *  their own debt clock (con_ws_ctl_since, same inverted-token-bucket
+ *  shape as cli_since, drains 1 s/s): each such frame adds
+ *  WS_CONTROL_FLOOD_CHARGE, and a client more than WS_CONTROL_FLOOD_CEIL
+ *  ahead of now is dropped as Excess Flood.  Ten frames in a burst, one
+ *  every two seconds sustained; legitimate traffic is one PONG per
+ *  keepalive (every FEAT_WEBSOCKET_PING_INTERVAL s).  Deliberately not on
+ *  cli_since: pre-registration is fakelag-free (OAUTHBEARER pipelining)
+ *  and a keepalive PONG should not cost a command slot. */
+#define WS_CONTROL_FLOOD_CHARGE 2
+#define WS_CONTROL_FLOOD_CEIL 20
+
 /** Largest complete client frame: 2-byte header + 8-byte extended length
  * + 4-byte mask + WS_MAX_PAYLOAD.  Sizes the per-connection buffer that
  * holds a partial frame between reads. */
