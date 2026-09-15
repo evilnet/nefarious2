@@ -218,6 +218,34 @@ do_shun(struct Client *cptr, struct Client *sptr, struct Shun *shun)
             continue;
         Debug((DEBUG_DEBUG,"Matched!"));
       } else { /* Host/IP shun */
+        /* Defer when the client's username isn't known yet (pre-USER
+         * mid-registration — cli_user is allocated by make_user on
+         * first input, but cli_user->username[] isn't populated until
+         * the USER command is parsed in register_user).  We can't
+         * evaluate the ident half of a user@host mask without it; any
+         * guard on the *shape* of sh_user (`starts with *', `looks
+         * specific', etc.) leaves edge cases broken (`?*', `?bob',
+         * `*foo' which is "ends with foo" not "matches anything",
+         * etc.) — so the rule is just "defer unless we know the mask
+         * matches any ident."
+         *
+         * The only safe known-match-any shortcut is the literal
+         * single bare `*' — explicitly check sh_user[0]=='*' &&
+         * sh_user[1]=='\0' so patterns that start with star but have
+         * trailing chars (e.g. `*foo') don't short-circuit.  This
+         * preserves Jobe's original intent (a `*@host' shun applies
+         * pre-USER, useful when no identd is running) while closing
+         * the false-positive class where a `bob@*' shun previously
+         * fired for any mid-registration client.
+         *
+         * Post-registration shun_lookup invoked from m_privmsg/etc.
+         * re-evaluates the shun once the client's USER lands, so the
+         * deferral has no enforcement consequence — the only
+         * artefact it suppresses is the spurious SNO_GLINE "Shun
+         * active for ..." oper notice for the wrong user. */
+        if (!*(cli_user(acptr)->username)
+            && !(shun->sh_user[0] == '*' && shun->sh_user[1] == '\0'))
+          continue;
         if (*(cli_user(acptr)->username) &&
             match(shun->sh_user, (cli_user(acptr))->username) != 0)
           continue;
