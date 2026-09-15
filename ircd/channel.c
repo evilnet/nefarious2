@@ -1129,6 +1129,10 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
     *mbuf++ = 'c';
   if (chptr->mode.exmode & EXMODE_STRIPCOLOR)
     *mbuf++ = 'S';
+  if (chptr->mode.exmode & EXMODE_PUBLICHISTORY)
+    *mbuf++ = 'H';
+  if (chptr->mode.exmode & EXMODE_NOSTORAGE)
+    *mbuf++ = 'P';
   if (chptr->mode.limit) {
     *mbuf++ = 'l';
     pbuf_pos = ircd_snprintf(0, pbuf, buflen, "%u", chptr->mode.limit);
@@ -1738,6 +1742,8 @@ int SetAutoChanModes(struct Channel *chptr)
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY, 'H',
+    EXMODE_NOSTORAGE,   'P',
     0, 0
   };
   unsigned int *flag_p;
@@ -2132,6 +2138,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY, 'H',
+    EXMODE_NOSTORAGE,   'P',
     0x0, 0x0
   };
   static int local_flags[] = {
@@ -2658,7 +2666,8 @@ modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
   mode &= (MODE_ADD | MODE_DEL | EXMODE_ADMINONLY | EXMODE_OPERONLY |
            EXMODE_REGMODERATED | EXMODE_NONOTICES | EXMODE_PERSIST |
            EXMODE_SSLONLY | EXMODE_NOQUITPARTS | EXMODE_NOCTCPS |
-           EXMODE_NOMULTITARG | EXMODE_NOCOLOR | EXMODE_STRIPCOLOR);
+           EXMODE_NOMULTITARG | EXMODE_NOCOLOR | EXMODE_STRIPCOLOR |
+           EXMODE_PUBLICHISTORY | EXMODE_NOSTORAGE);
 
   if (!(mode & ~(MODE_ADD | MODE_DEL))) /* don't add empty modes... */
     return;
@@ -2813,6 +2822,8 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY, 'H',
+    EXMODE_NOSTORAGE,   'P',
     0x0, 0x0
   };
   unsigned int add;
@@ -4453,6 +4464,8 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
     EXMODE_NOMULTITARG,	'T',
     EXMODE_NOCOLOR,	'c',
     EXMODE_STRIPCOLOR,	'S',
+    EXMODE_PUBLICHISTORY, 'H',
+    EXMODE_NOSTORAGE,   'P',
     0x0, 0x0
   };
 
