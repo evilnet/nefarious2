@@ -702,7 +702,14 @@ static const struct UserMode {
   { FLAG_SETHOST,      'h' },
   { FLAG_FAKEHOST,     'f' },
   { FLAG_CLOAKHOST,    'C' },
-  { FLAG_CLOAKIP,      'c' }
+  { FLAG_CLOAKIP,      'c' },
+  /* Tracked and propagated here; their behaviour lives in the IRCv3
+   * branch (chathistory / multiline / bouncer).  Listed so a user on this
+   * server can set them and so they survive a hop through it. */
+  { FLAG_MULTILINE_EXPAND, 'M' },
+  { FLAG_NOSTORAGE,    'Y' },
+  { FLAG_PM_OPTOUT,    'y' },
+  { FLAG_BNC_HOLDPREF, 'b' }
 };
 
 /** Length of #userModeList. */
@@ -2470,7 +2477,7 @@ void init_isupport(void)
     strcat(imaxlist, itoa(feature_int(FEAT_MAXEXCEPTS)));
   }
 
-  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,Ll,aCcDdiMmNnOpQRrSsTtZz",
+  ircd_snprintf(0, cmodebuf, BUFSIZE, "b%s,%sk%s,Ll,aCcDdHiMmNnOPpQRrSsTtZz",
                 feature_bool(FEAT_EXCEPTS) ? "e" : "",
                 feature_bool(FEAT_OPLEVELS) ? "A" : "",
                 feature_bool(FEAT_OPLEVELS) ? "U" : "");

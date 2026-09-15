@@ -237,6 +237,10 @@ enum Flag
     FLAG_OPERED_REMOTE,             /**< Client /OPER'ed using a remote O:Line */
     FLAG_SERVER_NOOP,               /**< Server has been NOOP'ed */
     FLAG_SENT_CVERSION,             /**< Client's CTCP VERSION reply has been sent out */
+    FLAG_MULTILINE_EXPAND,          /**< +M User opts into full multiline expansion (IRCv3 branch) */
+    FLAG_NOSTORAGE,                 /**< +Y User's messages are not stored in chathistory (IRCv3 branch) */
+    FLAG_PM_OPTOUT,                 /**< +y User opted out of PM history storage (IRCv3 branch) */
+    FLAG_BNC_HOLDPREF,              /**< +b User prefers bouncer hold mode (IRCv3 branch) */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
