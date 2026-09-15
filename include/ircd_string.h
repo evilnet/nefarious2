@@ -54,6 +54,7 @@ extern int check_if_ipmask(const char *mask);
 
 extern int valid_username(const char* name);
 extern int valid_hostname(const char* name);
+extern int valid_spoofhost(const char* host, int mask);
 
 #define COLOR_BOLD            2   /**< Bold text */
 #define COLOR_COLOR           3   /**< Color text */
