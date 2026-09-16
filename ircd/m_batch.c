@@ -1314,12 +1314,19 @@ process_multiline_batch(struct Client *sptr)
         struct BouncerSession *sender_sess = bounce_get_session(sender_primary);
         /* Echo to primary if sender is an alias and primary != acptr
          * (avoid double-delivery on self-session DM). */
+        /* Session echoes go only to connections that negotiated
+         * echo-message (see bounce_echo_pm_to_session): a client without
+         * it files a self-sourced PRIVMSG under its source, i.e. a query
+         * with the user's own nick.  Remote members are pre-filtered by
+         * the replicated BX_CAP_ECHO_MESSAGE where known and gated again
+         * on the receiving server. */
         if (sender_primary != sptr && sender_primary != acptr) {
           if (MyConnect(sender_primary)) {
-            deliver_multiline_dm_to_one(sptr, sender_primary, acptr,
-                                        batch_base_msgid, batch_timebuf,
-                                        batch_paste_url, is_notice, cmd_str,
-                                        0);
+            if (CapActive(sender_primary, CAP_ECHOMSG))
+              deliver_multiline_dm_to_one(sptr, sender_primary, acptr,
+                                          batch_base_msgid, batch_timebuf,
+                                          batch_paste_url, is_notice, cmd_str,
+                                          0);
           } else if (IsMultiline(cli_from(sender_primary))) {
             char primary_nn[6];
             ircd_snprintf(0, primary_nn, sizeof(primary_nn), "%s%s",
@@ -1356,6 +1363,10 @@ process_multiline_batch(struct Client *sptr)
             int member_use_bxm;
             if (!member || member == sptr || member == acptr
                 || !IsBouncerAlias(member))
+              continue;
+            if (MyConnect(member) ? !CapActive(member, CAP_ECHOMSG)
+                : (sender_sess->hs_aliases[i].ba_caps_known
+                   && !(sender_sess->hs_aliases[i].ba_caps & BX_CAP_ECHO_MESSAGE)))
               continue;
             /* Pick BX M when the alias's actual cap state is known
              * and includes both DRAFT_MULTILINE and BATCH.  Fall back

@@ -400,6 +400,7 @@ struct BounceAlias {
  * has nothing to wrap. */
 #define BX_CAP_DRAFT_MULTILINE 0x01
 #define BX_CAP_BATCH           0x02
+#define BX_CAP_ECHO_MESSAGE    0x04  /**< echo-message: the connection can display self-sourced messages (session echo) */
 /* Future: 0x04 MSGTAGS, 0x08 LABELEDRESP, 0x10 ECHOMSG */
 
 /** A single bouncer session.

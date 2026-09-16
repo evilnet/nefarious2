@@ -6624,11 +6624,20 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
   if (msgid && !*msgid)
     msgid = NULL;
 
+  /* The echo is a message sourced from the user's own nick.  Only a
+   * connection that negotiated echo-message can place it (ZNC's
+   * znc.in/self-message solves the same problem by opt-in); a client
+   * without it files a PRIVMSG to a non-channel target under its
+   * SOURCE, i.e. a query window with the user's own nick.  Local
+   * members are gated here, remote ones on the receiving server
+   * (bounce_alias_echo / deliver_s2s_bxm_batch) and pre-filtered by
+   * the replicated BX_CAP_ECHO_MESSAGE where known. */
   /* Echo to primary (if sender is not the primary) */
   if (sender != primary) {
     if (MyConnect(primary)) {
-      sendcmdto_one_tags_ext(primary, cmd, tok, primary, msgid,
-                             "%s :%s", cli_name(target), text);
+      if (CapActive(primary, CAP_ECHOMSG))
+        sendcmdto_one_tags_ext(primary, cmd, tok, primary, msgid,
+                               "%s :%s", cli_name(target), text);
     } else {
       char nn[6];
       ircd_snprintf(0, nn, sizeof(nn), "%s%s", NumNick(primary));
@@ -6646,9 +6655,13 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
       continue;
 
     if (MyConnect(alias)) {
-      sendcmdto_one_tags_ext(primary, cmd, tok, alias, msgid,
-                             "%s :%s", cli_name(target), text);
+      if (CapActive(alias, CAP_ECHOMSG))
+        sendcmdto_one_tags_ext(primary, cmd, tok, alias, msgid,
+                               "%s :%s", cli_name(target), text);
     } else {
+      if (sess->hs_aliases[i].ba_caps_known
+          && !(sess->hs_aliases[i].ba_caps & BX_CAP_ECHO_MESSAGE))
+        continue;
       sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, alias,
           "E %s %s%s %s %s %s :%s",
           sess->hs_aliases[i].ba_numeric,
@@ -6721,6 +6734,8 @@ bounce_compute_bx_caps(struct Client *cptr)
     caps |= BX_CAP_DRAFT_MULTILINE;
   if (CapActive(cptr, CAP_BATCH))
     caps |= BX_CAP_BATCH;
+  if (CapActive(cptr, CAP_ECHOMSG))
+    caps |= BX_CAP_ECHO_MESSAGE;
   return caps;
 }
 
@@ -8691,6 +8706,11 @@ static int bounce_alias_echo(struct Client *cptr, struct Client *sptr,
     return 0;
   }
 
+  /* A session echo only makes sense to a connection that negotiated
+   * echo-message (see bounce_echo_pm_to_session). */
+  if (!CapActive(target, CAP_ECHOMSG))
+    return 0;
+
   from = bx_find_user_strict(parv[3]);
   if (!from)
     return 0;
@@ -9173,6 +9193,14 @@ deliver_s2s_bxm_batch(struct S2SBxmBatch *b)
   if (!IsUser(alias)) {
     Debug((DEBUG_INFO,
            "BX M: deliver dropped — alias %s is not a user",
+           b->alias_numeric));
+    return;
+  }
+  if (!CapActive(alias, CAP_ECHOMSG)) {
+    /* A session echo only makes sense to a connection that negotiated
+     * echo-message (see bounce_echo_pm_to_session). */
+    Debug((DEBUG_INFO,
+           "BX M: deliver dropped — alias %s has no echo-message",
            b->alias_numeric));
     return;
   }
