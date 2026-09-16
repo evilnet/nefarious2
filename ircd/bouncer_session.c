@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include "bouncer_session.h"
+#include "bouncer_converge.h"
 #include "websocket.h"
 #include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
@@ -1140,6 +1141,7 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
   }
 
   /* Try to find a held session to resume */
+ retry_resume:
   session = bounce_find_best_held(account);
   if (session) {
     /* Per redesign C.2: hs_origin is historical-only.  The runtime
@@ -1169,6 +1171,22 @@ int bounce_auto_resume(struct Client *cptr, struct BouncerSession **out_session,
                 "(managing_server=%p hs_client=%p alias_count=%u)",
                 account, session->hs_sessid, (void*)managing_server,
                 (void*)session->hs_client, session->hs_alias_count);
+      /* Nothing anywhere we can reach holds this record: no local
+       * holder, no client, no ghost numeric to resolve.  It is garbage
+       * (a replica that outlived its holder), and leaving it would
+       * block this login twice over -- no alias path, and the create
+       * gate below counts it as the account's session.  Drop it and
+       * look again; a peer that really holds the session re-announces
+       * it and convergence sorts the two out by state. */
+      if (!session_has_local_holder(session) && !session->hs_client
+          && !session->hs_ghost_numeric[0]
+          && session->hs_alias_count == 0) {
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: discarding unattachable replica %s for %s",
+                  session->hs_sessid, account);
+        bounce_destroy(session);
+        goto retry_resume;
+      }
       /* Alias not possible — fall through to try other sessions */
     } else {
     /* Local session — proceed with normal resume */
@@ -4130,7 +4148,42 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
         if (0 == strcmp(local->hs_sessid, sessid))
           goto bsc_forward;
 
-        if (strcmp(sessid, local->hs_sessid) < 0) {
+        /* State outranks age: the record with a live primary is the
+         * account's one identity.  When ours is HOLDING (a held ghost or
+         * a clientless replica) and the peer's is active, ours is
+         * retired here -- a held ghost leaves with a normal Q and a BS X
+         * (invariant 7), a bare replica is just dropped -- and the peer's
+         * session is built below.  When the peer's is the holding one
+         * and ours is active, ours simply wins; the peer applies the
+         * same rule to our BS C and retires its own.  Only equal states
+         * fall through to the sessid-age rename/skip below. */
+        if (local->hs_state == BOUNCE_HOLDING && !is_holding) {
+          struct Client *ghost = local->hs_client;
+          if (session_has_local_holder(local)) {
+            log_write(LS_USER, L_INFO, 0,
+                      "Bouncer reconcile: retiring held session %s for %s "
+                      "-- %s announces live session %s",
+                      local->hs_sessid, account, cli_name(sptr), sessid);
+            bounce_kill_session(local, "Bouncer session moved");
+            if (ghost)
+              exit_client(cptr, ghost, &me, "Bouncer session moved");
+          } else {
+            Debug((DEBUG_INFO, "BS C: dropping clientless holding replica "
+                   "%s for %s -- %s announces live session %s",
+                   local->hs_sessid, account, cli_name(sptr), sessid));
+            bounce_destroy(local);
+          }
+          goto bsc_create;
+        }
+        if (local->hs_state == BOUNCE_ACTIVE && is_holding) {
+          Debug((DEBUG_INFO, "BS C: local live session %s for %s wins over "
+                 "peer's holding %s; skipping replica",
+                 local->hs_sessid, account, sessid));
+          goto bsc_forward;
+        }
+
+        if (bounce_converge_peer_wins(local->hs_state == BOUNCE_HOLDING,
+                                      local->hs_sessid, is_holding, sessid)) {
           /* Peer's sessid is lex-lower (older UUID v7) — peer wins.
            * Rename our local session to peer's sessid so future BX C
            * / BS A by-sessid lookups resolve to our state. */
@@ -4180,6 +4233,7 @@ int bounce_handle_bs(struct Client *cptr, struct Client *sptr,
     }
 
     /* Create session from remote data */
+  bsc_create:
     session = (struct BouncerSession *)MyCalloc(1, sizeof(*session));
     ircd_strncpy(session->hs_account, account, ACCOUNTLEN + 1);
     ircd_strncpy(session->hs_sessid, sessid, BOUNCER_SESSID_LEN);
@@ -4978,11 +5032,12 @@ void bounce_schedule_cross_server_promote(struct BouncerSession *session)
 void bounce_prepare_squit_promotions(struct Client *server)
 {
   int i, j;
-  struct BouncerSession *session;
+  struct BouncerSession *session, *next;
   const char *departed_yxx = cli_yxx(server);
 
   for (i = 0; i < BOUNCE_TOKEN_HASHSIZE; i++) {
-    for (session = tokenHash[i]; session; session = session->hs_tnext) {
+    for (session = tokenHash[i]; session; session = next) {
+      next = session->hs_tnext;   /* the no-alias branch may destroy `session` */
       /* Only sessions managed by the departing server */
       if (0 != ircd_strcmp(session->hs_origin, departed_yxx))
         continue;
@@ -5030,6 +5085,21 @@ void bounce_prepare_squit_promotions(struct Client *server)
         session->hs_client = NULL;
         Debug((DEBUG_INFO, "bounce_prepare_squit: session %s/%s has no "
                "surviving aliases", session->hs_account, session->hs_sessid));
+        /* A replica with nothing local behind it is now unreachable
+         * state: no holder here, and its origin just left.  Keeping it
+         * made it immortal -- the next link burst re-exported it as
+         * "holding", the peer seeded a fresh replica from ours, and the
+         * pair kept each other alive across restarts while blocking
+         * every login for the account (the pool00 zombie, 2026-09-16).
+         * Every server applies this rule to its own replicas, so no BS X
+         * is needed; if the departed server still holds the session it
+         * announces it again on relink and we build a fresh replica. */
+        if (!session_has_local_holder(session)) {
+          Debug((DEBUG_INFO, "bounce_prepare_squit: dropping clientless "
+                 "replica %s/%s of departed %s", session->hs_account,
+                 session->hs_sessid, departed_yxx));
+          bounce_destroy(session);
+        }
       }
     }
   }
