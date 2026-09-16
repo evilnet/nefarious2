@@ -93,6 +93,14 @@ extern int set_user_mode(struct Client *cptr, struct Client *sptr,
 extern void do_oper(struct Client* cptr, struct Client* sptr,
                     struct ConfItem* aconf, int flags);
 extern int user_set_away(struct User *user, char *message);
+/* draft/pre-away: a user whose every connection said AWAY * is stored and
+ * relayed as away "*"; only a client that did not negotiate draft/pre-away
+ * is shown FEAT_AWAY_STAR_MSG instead, at the moment we write to it. */
+extern const char *away_text_for(struct Client *viewer, const char *away);
+extern void away_notify_common(struct Client *sptr, struct Client *one,
+                               const char *text);
+extern void away_notify_channel(struct Client *sptr, struct Channel *chptr,
+                                const char *text);
 extern int is_silenced(struct Client *sptr, struct Client *acptr, int ischanmsg);
 extern int hunt_server_cmd(struct Client *from, const char *cmd,
 			   const char *tok, struct Client *one,

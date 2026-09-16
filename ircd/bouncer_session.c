@@ -10151,8 +10151,7 @@ void bounce_recompute_session_away(struct BouncerSession *session)
   else if (new_effective == 1)
     eff_msg = new_msg[0] ? new_msg : "";
   else
-    eff_msg = feature_str(FEAT_AWAY_STAR_MSG)
-                ? feature_str(FEAT_AWAY_STAR_MSG) : "*";
+    eff_msg = "*"; /* the star itself; substituted per viewer at emission */
 
   msg_changed = (new_effective == 1 && prev_effective == 1)
                 && 0 != ircd_strcmp(eff_msg, session->hs_effective_away_msg);
@@ -10219,9 +10218,7 @@ void bounce_recompute_session_away(struct BouncerSession *session)
         sendcmdto_serv_butone(broadcaster, CMD_AWAY, NULL, ":%s", eff_msg);
         if (away_msgid[0])
           sendcmdto_set_client_msgid(away_msgid);
-        sendcmdto_common_channels_capab_butone(primary, CMD_AWAY, NULL,
-                                               CAP_AWAYNOTIFY, CAP_NONE,
-                                               ":%s", eff_msg);
+        away_notify_common(primary, NULL, eff_msg);
       }
       sendcmdto_set_client_msgid(NULL);
     }

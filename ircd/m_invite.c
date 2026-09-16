@@ -204,7 +204,7 @@ int m_invite(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   send_reply(sptr, RPL_INVITING, cli_name(acptr), chptr->chname);
 
   if (cli_user(acptr)->away)
-    send_reply(sptr, RPL_AWAY, cli_name(acptr), cli_user(acptr)->away);
+    send_reply(sptr, RPL_AWAY, cli_name(acptr), away_text_for(sptr, cli_user(acptr)->away));
 
   if (MyConnect(acptr)) {
     add_invite(acptr, chptr);

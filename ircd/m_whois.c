@@ -239,7 +239,7 @@ static void do_whois(struct Client* sptr, struct Client *acptr, int parc)
   if (user)
   {
     if (user->away)
-       send_reply(sptr, RPL_AWAY, name, user->away);
+       send_reply(sptr, RPL_AWAY, name, away_text_for(sptr, user->away));
 
     if (SeeOper(sptr,acptr)) {
        if (IsAdmin(acptr))

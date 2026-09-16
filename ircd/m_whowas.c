@@ -150,7 +150,7 @@ int m_whowas(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                      temp->servername,
 		   myctime(temp->logoff));
         if (temp->away)
-	  send_reply(sptr, RPL_AWAY, temp->name, temp->away);
+	  send_reply(sptr, RPL_AWAY, temp->name, away_text_for(sptr, temp->away));
         cur++;
         found++;
       }

@@ -2423,6 +2423,17 @@ void sendcmdto_common_channels_butone(struct Client *from, const char *cmd,
  * @param[in] one Client direction to skip (or NULL).
  * @param[in] pattern Format string for command arguments.
  */
+/* An optional SECOND required capability for the next channel-capab send
+ * (sendcmdto_common_channels_capab_butone / sendcmdto_channel_capab_butserv_butone),
+ * consumed by that call.  Lets a caller split one event by two caps, e.g.
+ * away-notify AND draft/pre-away versus away-notify WITHOUT it. */
+static int sendcmdto_extra_withcap = CAP_NONE;
+
+void sendcmdto_set_extra_withcap(int cap)
+{
+  sendcmdto_extra_withcap = cap;
+}
+
 void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd,
                                       const char *tok, struct Client *one,
                                       int withcap, int skipcap,
@@ -2473,6 +2484,9 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
         continue;
       if ((skipcap != CAP_NONE) && CapActive(member->user, skipcap))
         continue;
+      if ((sendcmdto_extra_withcap != CAP_NONE)
+          && !CapActive(member->user, sendcmdto_extra_withcap))
+        continue;
       {
         cli_sentalong(member->user) = sentalong_marker;
         flags = get_client_tag_flags(member->user, from, 0);
@@ -2514,6 +2528,7 @@ void sendcmdto_common_channels_capab_butone(struct Client *from, const char *cmd
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
+  sendcmdto_extra_withcap = CAP_NONE;
 }
 
 /** Send a (prefixed) command to all local users on a channel.
@@ -2645,6 +2660,9 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
         continue;
     if ((skipcap != CAP_NONE) && CapActive(member->user, skipcap))
         continue;
+    if ((sendcmdto_extra_withcap != CAP_NONE)
+        && !CapActive(member->user, sendcmdto_extra_withcap))
+        continue;
     flags = get_client_tag_flags(member->user, from, 0);
     if (flags) {
       /* Build cached message buffer for this flag combination if needed */
@@ -2674,6 +2692,7 @@ void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd
     if (mb_cache[flags])
       msgq_clean(mb_cache[flags]);
   }
+  sendcmdto_extra_withcap = CAP_NONE;
 }
 
 /** Send TAGMSG with client-only tags to channel members with message-tags capability.

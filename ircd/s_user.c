@@ -837,10 +837,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
       int pre_away_type = con_pre_away(cli_connect(sptr));
       if (pre_away_type) {
         if (pre_away_type == 2) {
-          /* AWAY * - set away but with empty message (hidden connection) */
+          /* AWAY * - away with an unspecified reason, stored as the star
+           * (shown to non-pre-away clients as FEAT_AWAY_STAR_MSG at
+           * emission, see away_text_for). */
           if (!user->away) {
-            user->away = (char*) MyMalloc(1);
-            user->away[0] = '\0';
+            user->away = (char*) MyMalloc(2);
+            user->away[0] = '*';
+            user->away[1] = '\0';
           }
           /* Don't broadcast AWAY * to servers - it's a hidden connection */
         } else {
@@ -1632,7 +1635,7 @@ int whisper(struct Client* source, const char* nick, const char* channel,
   else
   {
     if (cli_user(dest)->away)
-      send_reply(source, RPL_AWAY, cli_name(dest), cli_user(dest)->away);
+      send_reply(source, RPL_AWAY, cli_name(dest), away_text_for(source, cli_user(dest)->away));
     sendcmdto_one(source, CMD_PRIVATE, dest, "%C :%s", dest, text);
   }
   return 0;
@@ -1829,9 +1832,7 @@ hide_hostmask(struct Client *cptr)
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
       if (cli_user(cptr)->away)
-        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, SKIP_CHGHOST,
-                                               CAP_AWAYNOTIFY, CAP_NONE, ":%s",
-                                               cli_user(cptr)->away);
+        away_notify_channel(cptr, chan->channel, cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
@@ -1932,9 +1933,7 @@ unhide_hostmask(struct Client *cptr)
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
       if (cli_user(cptr)->away)
-        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, SKIP_CHGHOST,
-                                               CAP_AWAYNOTIFY, CAP_NONE, ":%s",
-                                               cli_user(cptr)->away);
+        away_notify_channel(cptr, chan->channel, cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,

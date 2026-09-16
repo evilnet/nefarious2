@@ -1287,7 +1287,7 @@ void relay_private_message(struct Client* sptr, const char* name, const char* te
    * send away message if user away
    */
   if (cli_user(acptr) && cli_user(acptr)->away)
-    send_reply(sptr, RPL_AWAY, cli_name(acptr), cli_user(acptr)->away);
+    send_reply(sptr, RPL_AWAY, cli_name(acptr), away_text_for(sptr, cli_user(acptr)->away));
   /*
    * deliver the message
    */
