@@ -4784,12 +4784,25 @@ mode_parse(struct ModeBuf *mbuf, struct Client *cptr, struct Client *sptr,
   }
 
   if (state.flags & MODE_PARSE_WIPEOUT) {
-    if (state.chptr->mode.limit && !(state.done & DONE_LIMIT))
+    /*
+     * The limit and the redirect are special-cased by modebuf_mode_uint()
+     * and modebuf_mode_string(): -l and -L take no parameter, so neither
+     * routine keeps a reference to what we pass it.  That makes it safe to
+     * clear them here, which we must do -- nothing else on the wipeout path
+     * ever will, and both are enforced straight off the stored value.
+     */
+    if (state.chptr->mode.limit && !(state.done & DONE_LIMIT)) {
       modebuf_mode_uint(state.mbuf, MODE_DEL | MODE_LIMIT,
 			state.chptr->mode.limit);
-    if (*state.chptr->mode.redir && !(state.done & DONE_REDIR))
+      if (state.flags & MODE_PARSE_SET)
+        state.chptr->mode.limit = 0;
+    }
+    if (*state.chptr->mode.redir && !(state.done & DONE_REDIR)) {
       modebuf_mode_string(state.mbuf, MODE_DEL | MODE_REDIRECT,
               state.chptr->mode.redir, 0);
+      if (state.flags & MODE_PARSE_SET)
+        *state.chptr->mode.redir = '\0';
+    }
     if (*state.chptr->mode.key && !(state.done & DONE_KEY_DEL))
       modebuf_mode_string(state.mbuf, MODE_DEL | MODE_KEY,
 			  state.chptr->mode.key, 0);
