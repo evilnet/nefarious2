@@ -225,16 +225,41 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int is_away;
   int is_away_star = 0;
   int throttle;
+  struct BouncerSession *bsess = NULL;
 
   assert(0 != cptr);
   assert(cptr == sptr);
 
+  /* A connection that belongs to a bouncer session sets its OWN away
+   * state, and the session's effective state -- what the network sees
+   * -- is aggregated over every connection of the session below.  Not
+   * optional: the pre-away star, its per-viewer substitution, the
+   * per-connection replication (BX U aw=) and webpush attention all
+   * assume it.  Until 2026-09-18 this hung on a FEAT_PRESENCE_AGGREGATION
+   * flag that defaulted off, and a session member falling through to
+   * the plain path below broadcast a per-connection away from its own
+   * numeric: its siblings saw their own nick go away while WHOIS, which
+   * resolves to the primary, said present.
+   *
+   * A user can be IsAccount() with sessions persisted on their account
+   * from other connections; if this connection is not part of one there
+   * is nothing to aggregate across, so it takes the plain path. */
+  if (IsAccount(sptr) && bounce_enabled_for(sptr)
+      && bounce_has_sessions(cli_account(sptr))) {
+    /* Alias /away -- look up the session via the alias's primary so
+     * aggregation considers this alias's con_pre_away.
+     * bounce_get_session keys on hs_client which is the primary. */
+    struct Client *anchor =
+        (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+            ? cli_alias_primary(sptr) : sptr;
+    bsess = bounce_get_session(anchor);
+  }
+
   /* Check AWAY throttle - silently drop if too soon after last change.
-   * Skip throttle in the presence aggregation path: the aggregation path's
-   * effective-state change detection already suppresses redundant broadcasts. */
+   * Not in the session path: its effective-state change detection
+   * already suppresses redundant broadcasts. */
   throttle = feature_int(FEAT_AWAY_THROTTLE);
-  if (throttle > 0 &&
-      !(feature_bool(FEAT_PRESENCE_AGGREGATION) && bounce_enabled_for(cptr))) {
+  if (throttle > 0 && !bsess) {
     if (CurrentTime < cli_nextaway(cptr)) {
       /* Too soon - silently ignore (no error to avoid spam) */
       return 0;
@@ -250,30 +275,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * emission (away_text_for / away_notify_common). */
   }
 
-  /* Presence aggregation path — only when bouncer is active for this account
-   * AND this specific connection has an attached session. A user can be
-   * IsAccount() with sessions persisted on their account from other
-   * connections, but if this connection isn't part of a session there's
-   * nothing coherent to aggregate across — fall through to the normal
-   * broadcast path instead. Previously this branch was taken on the
-   * outer account-level predicate and then the broadcast was gated on
-   * `if (bsess)`, which silently dropped the S2S AWAY and the local
-   * away-notify while still sending RPL_NOWAWAY to the client.
-   */
-  {
-    struct BouncerSession *bsess = NULL;
-    if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
-        && bounce_enabled_for(sptr) && bounce_has_sessions(cli_account(sptr))) {
-      /* Alias /away — look up the session via the alias's primary so
-       * presence aggregation considers this alias's con_pre_away.
-       * bounce_get_session keys on hs_client which is the primary. */
-      struct Client *anchor =
-          (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
-              ? cli_alias_primary(sptr) : sptr;
-      bsess = bounce_get_session(anchor);
-    }
-
-    if (bsess) {
+  if (bsess) {
     int new_effective = 0;
     char new_msg[AWAYLEN + 1];
     int is_away = !EmptyString(away_message);
@@ -405,7 +407,6 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* If effective state and message both unchanged: suppress broadcast */
     }
     return 0;
-    }
   }
 
   /* Non-aggregated path — used when there is no bouncer session for
