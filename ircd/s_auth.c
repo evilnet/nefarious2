@@ -1171,13 +1171,15 @@ void start_auth(struct Client* client)
   assert(0 != client);
   Debug((DEBUG_INFO, "Beginning auth request on client %p", client));
 
-  /* Register with event handlers. */
+  /* Register with event handlers.  The socket's event interest is
+   * add_connection's: readable from registration, and while a TLS
+   * handshake is pending whatever OpenSSL asks for (writable interest
+   * armed there must survive this call). */
   cli_lasttime(client) = CurrentTime;
   cli_since(client) = CurrentTime;
   if (cli_fd(client) > HighestFd)
     HighestFd = cli_fd(client);
   LocalClientArray[cli_fd(client)] = client;
-  socket_events(&(cli_socket(client)), SOCK_ACTION_SET | SOCK_EVENT_READABLE);
 
   /* Allocate the AuthRequest. */
   auth = auth_freelist;
