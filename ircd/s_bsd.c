@@ -298,6 +298,32 @@ static IOResult client_sendv(struct Client *cptr, struct MsgQ *buf, unsigned int
   else
     return os_sendv_nonb(cli_fd(cptr), buf, count_in, count_out);
 }
+
+/** Set the event interest of a socket whose TLS handshake is still in
+ * progress to what OpenSSL needs next: readable always (the peer's next
+ * flight, an alert, or a close can arrive at any point), writable only
+ * while SSL_accept holds handshake bytes the kernel would not take.
+ *
+ * The write side is the one that matters.  Client listeners give their
+ * accepted sockets a CLIENT_TCP_WINDOW send buffer (2 KB, which the
+ * kernel doubles), and a server flight with a real certificate chain is
+ * larger than that, so SSL_accept regularly writes the first 4 KB, gets
+ * EAGAIN, and returns SSL_ERROR_WANT_WRITE.  Nothing else arms writable
+ * interest for it: the auth notices are queued behind the handshake, and
+ * once the idle-socket spin was fixed their interest is dropped whenever
+ * SSL_accept waits to read.  The handshake then sat until an unrelated
+ * event (a late DNS notice, or the peer poking the socket) or the connect
+ * timeout -- which the client saw as an EOF mid-handshake.
+ *
+ * Called after every SSL_accept that reports the handshake still pending.
+ * Anything queued meanwhile gets the writable interest back through
+ * update_write once the handshake completes. */
+static void ssl_handshake_events(struct Client *cptr)
+{
+  socket_events(&(cli_socket(cptr)),
+                SOCK_ACTION_SET | SOCK_EVENT_READABLE
+                | (ssl_want_write(cptr) ? SOCK_EVENT_WRITABLE : 0));
+}
 #endif /* USE_SSL */
 
 /** Attempt to send a sequence of bytes to the connection.
@@ -947,8 +973,12 @@ void add_connection(struct Listener* listener, int fd) {
 /* End Gline */
 
   cli_fd(new_client) = fd;
+  /* Readable from the start: nothing is delivered before this function
+   * returns, and the TLS handshake below is driven by read events (plus
+   * write interest while OpenSSL asks for it -- ssl_handshake_events). */
   if (!socket_add(&(cli_socket(new_client)), client_sock_callback,
-		  (void*) cli_connect(new_client), SS_CONNECTED, 0, fd)) {
+		  (void*) cli_connect(new_client), SS_CONNECTED,
+		  SOCK_EVENT_READABLE, fd)) {
     ++ServerStats->is_ref;
 #ifdef USE_SSL
     ssl_murder(ssl, fd, register_message);
@@ -971,6 +1001,10 @@ void add_connection(struct Listener* listener, int fd) {
       cli_fd(new_client) = -1;
       return;
     }
+    /* The ClientHello may already have been waiting, in which case the
+     * server flight just went out -- possibly only part of it. */
+    if (IsSSLNeedAccept(new_client))
+      ssl_handshake_events(new_client);
   }
 #endif
 
@@ -1787,19 +1821,10 @@ void client_sock_callback(struct Event* ev)
     if (IsSSLNeedAccept(cptr)) {
       int r = ssl_accept(cptr);
       if (r == 1) {
-        /* Handshake still in progress.  The writable interest MUST stay
-         * armed here: an accepted client socket is registered with no
-         * interest at all until DNS/ident/iauth release it
-         * (s_auth.c release_auth_client adds READABLE), so until then
-         * this write event is the only thing that drives ssl_accept.
-         * Dropping it (cd48801, to stop an idle socket spinning the
-         * loop) left a client whose ClientHello arrived after the first
-         * write event with zero interest, and its handshake stalled
-         * until auth completed -- an ident timeout on a client behind a
-         * firewall, so most TLS clients gave up first (prod, 2026-09-18).
-         * The spin an idle TLS socket causes until CONNECTTIMEOUT is
-         * upstream's behaviour and the price until the handshake is
-         * driven by read interest of its own. */
+        /* Still in progress: wait for what OpenSSL needs.  This drops
+         * the writable interest an auth notice may have armed, so an
+         * idle socket (no ClientHello yet) does not spin the loop. */
+        ssl_handshake_events(cptr);
         break;
       } else if (r == 0) {
         SetFlag(cptr, FLAG_DEADSOCKET);
@@ -1828,6 +1853,10 @@ void client_sock_callback(struct Event* ev)
       if (IsSSLNeedAccept(cptr)) {
         int r = ssl_accept(cptr);
         if (r == 1) {
+          /* Usually the ClientHello was just consumed and the server
+           * flight written; when only part of it fit the socket buffer
+           * this arms the writable interest that finishes it. */
+          ssl_handshake_events(cptr);
           break;
         } else if (r == 0) {
           SetFlag(cptr, FLAG_DEADSOCKET);
@@ -1836,6 +1865,9 @@ void client_sock_callback(struct Event* ev)
           ssl_abort(cptr);
           break;
         }
+        /* Handshake done: whatever was queued meanwhile (the auth
+         * notices) needs the writable interest the handshake did not. */
+        update_write(cptr);
       }
       if (s_state(&(con_socket(con))) == SS_CONNECTING)
         completed_connection(cptr);
