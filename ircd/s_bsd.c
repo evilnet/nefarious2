@@ -1787,13 +1787,19 @@ void client_sock_callback(struct Event* ev)
     if (IsSSLNeedAccept(cptr)) {
       int r = ssl_accept(cptr);
       if (r == 1) {
-        /* Handshake still in progress.  Unless OpenSSL is actually
-         * waiting to write, keep the writable interest off: with it
-         * armed, an idle socket (a peer that never sends its
-         * ClientHello) has epoll returning instantly until the connect
-         * timeout.  ET_READ re-arms it once the handshake completes. */
-        if (!ssl_want_write(cptr))
-          socket_events(&(con_socket(con)), SOCK_ACTION_DEL | SOCK_EVENT_WRITABLE);
+        /* Handshake still in progress.  The writable interest MUST stay
+         * armed here: an accepted client socket is registered with no
+         * interest at all until DNS/ident/iauth release it
+         * (s_auth.c release_auth_client adds READABLE), so until then
+         * this write event is the only thing that drives ssl_accept.
+         * Dropping it (cd48801, to stop an idle socket spinning the
+         * loop) left a client whose ClientHello arrived after the first
+         * write event with zero interest, and its handshake stalled
+         * until auth completed -- an ident timeout on a client behind a
+         * firewall, so most TLS clients gave up first (prod, 2026-09-18).
+         * The spin an idle TLS socket causes until CONNECTTIMEOUT is
+         * upstream's behaviour and the price until the handshake is
+         * driven by read interest of its own. */
         break;
       } else if (r == 0) {
         SetFlag(cptr, FLAG_DEADSOCKET);
@@ -1830,10 +1836,6 @@ void client_sock_callback(struct Event* ev)
           ssl_abort(cptr);
           break;
         }
-        /* Handshake done: anything queued meanwhile (the auth notices)
-         * needs the write interest that ET_WRITE dropped while the
-         * handshake waited for the peer. */
-        update_write(cptr);
       }
       if (s_state(&(con_socket(con))) == SS_CONNECTING)
         completed_connection(cptr);
