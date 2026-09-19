@@ -768,6 +768,10 @@ int main(int argc, char **argv) {
 
   hAddClient(&me);
   SetIPv6(&me);
+  /* We advertise the 'r' (rename-capable) SERVER flag on our own SERVER
+   * lines; mirror it locally so scans over GlobalClientList (which
+   * includes &me) see this server as rename-capable too. */
+  SetRenameCapable(&me);
 
   write_pidfile();
   init_counters();
