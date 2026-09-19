@@ -796,6 +796,20 @@ static struct FeatureDesc {
   F_B(CAP_away_notify, 0, 1, 0),
   F_B(CAP_account_notify, 0, 1, 0),
   F_B(CAP_sasl, 0, 1, 0),
+  F_B(CAP_draft_channel_rename, 0, 0, 0),
+  /* Advertised whenever the build supports it; the RENAME_CONSENT feature
+   * gates the relocation BEHAVIOR, not the cap -- negotiating this cap
+   * alone is harmless. */
+  F_B(CAP_evilnet_channel_relocate, 0, 0, 0),
+  /* Off by default: only a services build that disambiguates RENAME
+   * requests from account-stamp notifications on the AC 'R' subcommand
+   * (see the protocol-history comment in m_rename.c) should have this
+   * enabled. */
+  F_B(RENAME_SERVICES, 0, 0, 0),
+  /* relocation mode -- renames move only the issuer and +F users;
+   * see docs/specs/channel-relocate.md in the testnet repo */
+  F_B(RENAME_CONSENT, 0, 0, 0),
+  F_I(RELOCATE_GRACE, 0, 900, 0),
 #ifdef USE_SSL
   F_B(CAP_tls, 0, 1, 0),
 #endif

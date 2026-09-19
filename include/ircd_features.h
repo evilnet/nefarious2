@@ -313,6 +313,16 @@ enum Feature {
   FEAT_CAP_away_notify,
   FEAT_CAP_account_notify,
   FEAT_CAP_sasl,
+  FEAT_CAP_draft_channel_rename,
+  /* Advertised whenever the build supports it; the RENAME_CONSENT feature
+   * gates the relocation BEHAVIOR, not the cap -- negotiating this cap
+   * alone is harmless. */
+  FEAT_CAP_evilnet_channel_relocate,
+  FEAT_RENAME_SERVICES,
+  /* relocation mode -- renames move only the issuer and +F users;
+   * see docs/specs/channel-relocate.md in the testnet repo */
+  FEAT_RENAME_CONSENT,
+  FEAT_RELOCATE_GRACE,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif
