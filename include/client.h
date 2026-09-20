@@ -264,6 +264,7 @@ enum Flag
     FLAG_SSL,                       /**< User is connected via SSL (+z) */
     FLAG_STARTTLS,                  /**< User is connecting with StartTLS */
     FLAG_SSLNEEDACCEPT,             /**< Client needs SSL_accept() to be called again */
+    FLAG_SSLNEEDCONNECT,            /**< Outbound TLS handshake pending: SSL_connect() again */
     FLAG_WEBSOCKET,                 /**< Client is connected via WebSocket */
     FLAG_WSNEEDHANDSHAKE,           /**< WebSocket client needs handshake */
     FLAG_WSTEXT,                    /**< WebSocket uses text frames (not binary) */
@@ -1297,6 +1298,7 @@ struct Client {
 #define IsStartTLS(x)           HasFlag(x, FLAG_STARTTLS)
 /** Return non-zero if the client still needs SSL_accept(). */
 #define IsSSLNeedAccept(x)      HasFlag(x, FLAG_SSLNEEDACCEPT)
+#define IsSSLNeedConnect(x)     HasFlag(x, FLAG_SSLNEEDCONNECT)
 /** Return non-zero if the client is connected via WebSocket. */
 #define IsWebSocket(x)          HasFlag(x, FLAG_WEBSOCKET)
 /** Return non-zero if the client needs WebSocket handshake. */
@@ -1448,6 +1450,7 @@ struct Client {
 #define SetStartTLS(x)          SetFlag(x, FLAG_STARTTLS)
 /** Mark a client as needing SSL_accept(). */
 #define SetSSLNeedAccept(x)     SetFlag(x, FLAG_SSLNEEDACCEPT)
+#define SetSSLNeedConnect(x)    SetFlag(x, FLAG_SSLNEEDCONNECT)
 /** Mark a client as connected via WebSocket. */
 #define SetWebSocket(x)         SetFlag(x, FLAG_WEBSOCKET)
 /** Mark a client as needing WebSocket handshake. */
@@ -1576,6 +1579,7 @@ struct Client {
 #define ClearStartTLS(x)        ClrFlag(x, FLAG_STARTTLS)
 /** Client no longer needs SSL_accept(). */
 #define ClearSSLNeedAccept(x)   ClrFlag(x, FLAG_SSLNEEDACCEPT)
+#define ClearSSLNeedConnect(x)  ClrFlag(x, FLAG_SSLNEEDCONNECT)
 /** Client no longer connected via WebSocket. */
 #define ClearWebSocket(x)       ClrFlag(x, FLAG_WEBSOCKET)
 /** Client no longer needs WebSocket handshake. */
