@@ -296,6 +296,7 @@ extern int m_batch(struct Client*, struct Client*, int, char*[]);
 extern int check_client_batch_timeout(struct Client*);
 extern int ms_multiline(struct Client*, struct Client*, int, char*[]);
 extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
+extern int m_search(struct Client*, struct Client*, int, char*[]);
 extern int ms_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int m_history(struct Client*, struct Client*, int, char*[]);
 extern int has_chathistory_advertisement(struct Client*);

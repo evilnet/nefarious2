@@ -6622,3 +6622,342 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
   return 0;
 }
+
+/* ======================================================================
+ * SEARCH -- soju.im/search
+ * (https://codeberg.org/emersion/soju/src/branch/master/doc/ext/search.md)
+ *
+ *   SEARCH in=<target> [from=<nick>] [text=<words>] [after=<ts>]
+ *          [before=<ts>] [limit=<n>]
+ *
+ * Answered with a batch of type `search`: the matching PRIVMSG / NOTICE
+ * rows in ascending time order, each with msgid and time, or an empty
+ * batch.  Malformed selectors get FAIL SEARCH INVALID_PARAMS.
+ *
+ * Ours is a brute scan of the store: the same walk CHATHISTORY BEFORE
+ * uses, from `before` (default now) back towards `after`, keeping the
+ * newest `limit` matches.  `text` is a case-insensitive substring, no
+ * regular expressions (the spec's ReDoS note).  The presence hook rides
+ * in front of the match so a member who was not there does not find it,
+ * and the reply side runs the same redaction and presence filters as a
+ * CHATHISTORY page.  There is no index: search is bounded by a scan
+ * budget of SEARCH_SCAN_MAX raw rows per request, spent across the
+ * channels searched when `in` is absent; a client wanting more asks
+ * narrower windows.  Without `in`, the channels the requester is in are
+ * searched (private conversations need `in=<nick>`: their keyspace is
+ * not enumerable per requester).  Local store only; a storage peer's
+ * rows are not merged (2026-09-20).
+ * ==================================================================== */
+
+/** Raw rows one SEARCH may examine, over every channel it covers. */
+#define SEARCH_SCAN_MAX 50000
+
+struct SearchMatch {
+  /** The presence hook to run first, when strict presence opened one. */
+  int (*presence_fn)(const struct HistoryMessage *msg, int reverse, void *ctx,
+                     int64_t *skip_to);
+  void *presence_ctx;
+  char from[NICKLEN + 1];   /**< sender nick to match, or empty */
+  const char *text;         /**< substring to match, or NULL */
+  int64_t after_ms;         /**< stop below this (0 = no floor) */
+};
+
+/** Case-insensitive substring, the ircd's case mapping. */
+static const char *search_strcasestr(const char *hay, const char *needle)
+{
+  size_t nlen = strlen(needle);
+  const char *h;
+
+  if (nlen == 0)
+    return hay;
+  for (h = hay; *h; h++) {
+    size_t i;
+    for (i = 0; i < nlen && h[i]; i++)
+      if (ToLower(h[i]) != ToLower(needle[i]))
+        break;
+    if (i == nlen)
+      return h;
+  }
+  return NULL;
+}
+
+/** Walk hook: the presence decision first (it may seek), then the
+ * window floor, the row type and the selectors. */
+static int search_row_hook(const struct HistoryMessage *msg, int reverse,
+                           void *ctx, int64_t *skip_to)
+{
+  struct SearchMatch *sm = (struct SearchMatch *)ctx;
+  int64_t t = (int64_t)history_parse_ms(msg->timestamp);
+
+  /* The walk is newest to oldest: below the floor nothing further counts. */
+  if (sm->after_ms && t && t < sm->after_ms)
+    return -1;
+
+  if (sm->presence_fn) {
+    int v = sm->presence_fn(msg, reverse, sm->presence_ctx, skip_to);
+    if (v != 1)
+      return v;
+  }
+
+  if (msg->type != HISTORY_PRIVMSG && msg->type != HISTORY_NOTICE
+      && msg->type != HISTORY_MULTILINE)
+    return 0;
+
+  if (sm->from[0]) {
+    size_t n = strlen(sm->from);
+    if (ircd_strncmp(msg->sender, sm->from, n) != 0 || msg->sender[n] != '!')
+      return 0;
+  }
+
+  if (sm->text) {
+    const char *body = msg->dyn_content ? msg->dyn_content : msg->content;
+    if (!body || !body[0] || !search_strcasestr(body, sm->text))
+      return 0;
+  }
+
+  return 1;
+}
+
+/** One target's share of a search: the newest @a limit matches before
+ * @a before_unix, within the shared scan budget.  Returns the row count
+ * (the list is ascending) or -1 on a store error. */
+static int search_one_target(struct Client *sptr, const char *lookup_target,
+                             const char *before_unix, int limit,
+                             struct SearchMatch *sm, int *budget,
+                             struct HistoryMessage **out)
+{
+  struct PresenceQueryFilter *pf = NULL;
+  struct HistoryRowFilter filter;
+  struct HistoryRowFilter *phook;
+  int count;
+
+  *out = NULL;
+  if (*budget <= 0)
+    return 0;
+
+  if (open_query_presence(sptr, lookup_target, 0, &pf) < 0)
+    return 0;   /* fail closed: nothing visible here */
+  phook = presence_query_filter_hook(pf);
+
+  memset(&filter, 0, sizeof(filter));
+  sm->presence_fn = phook ? phook->fn : NULL;
+  sm->presence_ctx = phook ? phook->ctx : NULL;
+  filter.fn = search_row_hook;
+  filter.ctx = sm;
+  filter.type_mask = requester_type_mask(sptr);
+  filter.veto = typing_only_veto;
+  filter.scan_max = *budget;
+
+  count = history_query_before(lookup_target, HISTORY_REF_TIMESTAMP,
+                               before_unix, limit, out, &filter);
+  presence_query_filter_close(pf);
+
+  *budget -= filter.scanned;
+  if (count < 0)
+    return -1;
+
+  count = redact_filter_messages(out, count);
+  count = presence_filter_messages(sptr, lookup_target, out, count, 0);
+  return count;
+}
+
+static int search_row_cmp(const void *a, const void *b)
+{
+  const struct HistoryMessage *ma = *(struct HistoryMessage *const *)a;
+  const struct HistoryMessage *mb = *(struct HistoryMessage *const *)b;
+  uint64_t ta = history_parse_ms(ma->timestamp);
+  uint64_t tb = history_parse_ms(mb->timestamp);
+
+  if (ta != tb)
+    return ta < tb ? -1 : 1;
+  return strcmp(ma->msgid, mb->msgid);
+}
+
+/** Send the search batch: @a head ascending, @a count rows.  Channel rows
+ * go to their own channel; rows of the private conversation @a pm_other
+ * (the other party's nick, or NULL) follow their direction. */
+static void search_send(struct Client *sptr, struct HistoryMessage *head,
+                        const char *pm_other)
+{
+  char batchid[32];
+  char iso_time[32];
+  const char *label = cli_label(sptr);
+  const char *bid = NULL;
+  struct HistoryMessage *msg;
+
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
+    generate_batch_id(batchid, sizeof(batchid), sptr);
+    bid = batchid;
+    if (label)
+      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s search", label,
+                    cli_name(&me), batchid);
+    else
+      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s search", cli_name(&me), batchid);
+  }
+
+  for (msg = head; msg; msg = msg->next) {
+    const char *time_str = msg->timestamp;
+    const char *cmd = (msg->type == HISTORY_NOTICE) ? "NOTICE" : "PRIVMSG";
+    const char *target = msg->target;
+
+    if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) == 0)
+      time_str = iso_time;
+    if (pm_other)
+      target = pm_row_is_own(sptr, msg) ? pm_other : cli_name(sptr);
+    send_history_message(sptr, msg, target, bid, time_str, cmd);
+  }
+
+  if (bid)
+    sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
+  else if (label)
+    sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
+}
+
+/** Handle SEARCH (soju.im/search).  parv[1..] are `key=value` selectors;
+ * the last one may carry spaces (a trailing parameter). */
+int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  struct SearchMatch sm;
+  char in[CHANNELLEN + 1] = "";
+  char lookup_target[CHANNELLEN + 1];
+  char before_unix[HISTORY_TIMESTAMP_LEN];
+  char after_unix[HISTORY_TIMESTAMP_LEN];
+  const char *pm_other = NULL;
+  int limit = 0, max_limit;
+  int budget = SEARCH_SCAN_MAX;
+  int i;
+
+  if (!CapActive(sptr, CAP_SOJU_SEARCH))
+    return send_reply(sptr, ERR_UNKNOWNCOMMAND, "SEARCH");
+
+  if (!history_is_available()) {
+    send_fail(sptr, "SEARCH", "INTERNAL_ERROR", "*", "History storage unavailable");
+    return 0;
+  }
+
+  memset(&sm, 0, sizeof(sm));
+  before_unix[0] = '\0';
+  after_unix[0] = '\0';
+
+  for (i = 1; i < parc; i++) {
+    char *eq = strchr(parv[i], '=');
+    const char *key = parv[i];
+    const char *val;
+
+    if (!eq || eq == parv[i]) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", parv[i], "Selectors are key=value");
+      return 0;
+    }
+    *eq = '\0';
+    val = eq + 1;
+
+    if (ircd_strcmp(key, "in") == 0) {
+      ircd_strncpy(in, val, sizeof(in));
+    } else if (ircd_strcmp(key, "from") == 0) {
+      ircd_strncpy(sm.from, val, sizeof(sm.from));
+    } else if (ircd_strcmp(key, "text") == 0) {
+      if (val[0])
+        sm.text = val;
+    } else if (ircd_strcmp(key, "after") == 0) {
+      if (!val[0] || history_iso_to_unix(val, after_unix, sizeof(after_unix)) != 0) {
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "after", "Invalid timestamp");
+        return 0;
+      }
+    } else if (ircd_strcmp(key, "before") == 0) {
+      if (!val[0] || history_iso_to_unix(val, before_unix, sizeof(before_unix)) != 0) {
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "before", "Invalid timestamp");
+        return 0;
+      }
+    } else if (ircd_strcmp(key, "limit") == 0) {
+      limit = atoi(val);
+      if (limit <= 0) {
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "limit", "Invalid limit");
+        return 0;
+      }
+    }
+    /* Unknown selectors are ignored (the spec leaves room for more). */
+  }
+
+  max_limit = feature_int(FEAT_CHATHISTORY_MAX);
+  if (limit <= 0 || limit > max_limit)
+    limit = max_limit;
+  if (after_unix[0])
+    sm.after_ms = (int64_t)history_parse_ms(after_unix);
+  if (!before_unix[0]) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    ircd_snprintf(0, before_unix, sizeof(before_unix), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
+  }
+
+  if (in[0]) {
+    struct HistoryMessage *rows = NULL;
+    int count;
+
+    if (check_history_access(sptr, in, lookup_target, sizeof(lookup_target)) != 0) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "in", "No access to target");
+      return 0;
+    }
+    if (!IsChannelName(in))
+      pm_other = in;
+
+    count = search_one_target(sptr, lookup_target, before_unix, limit, &sm,
+                              &budget, &rows);
+    if (count < 0) {
+      send_fail(sptr, "SEARCH", "INTERNAL_ERROR", "in", "Failed to search history");
+      return 0;
+    }
+    search_send(sptr, rows, pm_other);
+    history_free_messages(rows);
+    return 0;
+  }
+
+  /* No `in`: every channel the requester is in, newest `limit` overall. */
+  {
+    struct Membership *member;
+    struct HistoryMessage **all = NULL;
+    struct HistoryMessage *head = NULL, **tail = &head;
+    int total = 0, cap = 0, keep, k;
+
+    for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
+      struct HistoryMessage *rows = NULL, *m;
+      int count;
+
+      if (IsMemberAlias(member))
+        continue;   /* the primary's membership covers it */
+      if (check_history_access(sptr, member->channel->chname, lookup_target,
+                               sizeof(lookup_target)) != 0)
+        continue;
+      count = search_one_target(sptr, lookup_target, before_unix, limit, &sm,
+                                &budget, &rows);
+      if (count <= 0) {
+        history_free_messages(rows);
+        continue;
+      }
+      if (total + count > cap) {
+        cap = (total + count) * 2;
+        all = (struct HistoryMessage **)MyRealloc(all, cap * sizeof(*all));
+      }
+      for (m = rows; m; m = m->next)
+        all[total++] = m;
+    }
+
+    if (total > 1)
+      qsort(all, total, sizeof(*all), search_row_cmp);
+    keep = total < limit ? total : limit;
+    /* Ascending order; the newest `limit` are the tail of the sort. */
+    for (k = 0; k < total; k++) {
+      all[k]->next = NULL;
+      if (k < total - keep) {
+        history_free_messages(all[k]);
+        continue;
+      }
+      *tail = all[k];
+      tail = &all[k]->next;
+    }
+    MyFree(all);
+    search_send(sptr, head, NULL);
+    history_free_messages(head);
+  }
+  return 0;
+}

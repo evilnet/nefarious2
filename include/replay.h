@@ -180,4 +180,8 @@ extern int replay_pm_pair_for_nick(struct Client *sptr, const char *nick,
  */
 extern int sendq_replay_ok(struct Client *sptr);
 
+/** Is @a m a row @a sptr sent (by account when logged in, else by nick)?
+ * Decides the wire target of a replayed or searched PM row. */
+extern int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m);
+
 #endif /* INCLUDED_replay_h */

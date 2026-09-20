@@ -142,7 +142,7 @@ static struct Client *pm_live_client_for_account(const char *account)
  * client is logged in (the client may have changed nick since the row
  * was stored, and an older nick of their own must not read as the
  * other party); by sender nick otherwise. */
-static int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m)
+int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m)
 {
   char snick[NICKLEN + 1];
   if (IsAccount(sptr) && cli_user(sptr) && cli_user(sptr)->account[0]

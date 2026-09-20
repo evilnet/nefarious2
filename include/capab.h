@@ -95,6 +95,7 @@ enum Capab {
   _CAP(DRAFT_PREAWAY, 0, "draft/pre-away", 0),
   _CAP(DRAFT_MULTILINE, 0, "draft/multiline", 0),
   _CAP(DRAFT_CHATHISTORY, 0, "draft/chathistory", 0),
+  _CAP(SOJU_SEARCH, 0, "soju.im/search", 0),
   _CAP(DRAFT_EVENTPLAYBACK, 0, "draft/event-playback", 0),
   _CAP(DRAFT_REDACT, 0, "draft/message-redaction", 0),
   _CAP(DRAFT_ACCOUNTREG, 0, "draft/account-registration", 0),
