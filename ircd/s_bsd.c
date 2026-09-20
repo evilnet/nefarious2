@@ -395,8 +395,22 @@ static int completed_connection(struct Client* cptr)
       sendto_opmask_butone(0, SNO_OLDSNO, "Connection failed to %s: Unable to select SSL ciphers",
                            cli_name(cptr));
       return 0;
-    } else if (r == 0)
+    } else if (r == 0) {
+      /* TCP is up and the TLS handshake waits on the peer.  Leave the
+       * connect-pending state: its interest is write-only, and an
+       * established socket is always writable, so the loop re-entered
+       * here on every iteration until the peer's flight arrived -- a peer
+       * that accepts and then stalls pinned a core until the connect
+       * timeout.  Wait instead on what OpenSSL asks for (the accept
+       * side's ssl_handshake_events); the read and write handlers bring
+       * the handshake back here while the flag is set. */
+      SetSSLNeedConnect(cptr);
+      if (s_state(&(cli_socket(cptr))) == SS_CONNECTING)
+        socket_state(&(cli_socket(cptr)), SS_CONNECTED);
+      ssl_handshake_events(cptr);
       return 1;
+    }
+    ClearSSLNeedConnect(cptr);
     sslfp = ssl_get_fingerprint(cli_socket(cptr).ssl);
     if (sslfp)
       ircd_strncpy(cli_sslclifp(cptr), sslfp, BUFSIZE+1);
@@ -1096,8 +1110,13 @@ static void client_sock_callback(struct Event* ev)
         break;
       }
     }
-    if (s_state(&(con_socket(con))) == SS_CONNECTING) {
-      completed_connection(cptr);
+    if (s_state(&(con_socket(con))) == SS_CONNECTING || IsSSLNeedConnect(cptr)) {
+      if (!completed_connection(cptr)) {
+        fallback = cli_info(cptr);
+        break;
+      }
+      if (IsSSLNeedConnect(cptr))
+        break;   /* still handshaking: nothing to write yet */
     }
 #endif
     ClrFlag(cptr, FLAG_BLOCKED);
@@ -1129,8 +1148,14 @@ static void client_sock_callback(struct Event* ev)
          * notices) needs the writable interest the handshake did not. */
         update_write(cptr);
       }
-      if (s_state(&(con_socket(con))) == SS_CONNECTING)
-        completed_connection(cptr);
+      if (s_state(&(con_socket(con))) == SS_CONNECTING || IsSSLNeedConnect(cptr)) {
+        if (!completed_connection(cptr)) {
+          fallback = cli_info(cptr);
+          break;
+        }
+        if (IsSSLNeedConnect(cptr))
+          break;   /* still handshaking: nothing to read as data yet */
+      }
 #endif
       Debug((DEBUG_DEBUG, "Reading data from %C", cptr));
       if (read_packet(cptr, 1) == 0) /* error while reading packet */
