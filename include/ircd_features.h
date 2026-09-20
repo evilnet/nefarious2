@@ -362,6 +362,7 @@ enum Feature {
   FEAT_CAP_draft_pre_away,
   FEAT_CAP_draft_multiline,
   FEAT_CAP_draft_chathistory,
+  FEAT_CAP_soju_search,
   FEAT_CAP_draft_event_playback,
   FEAT_CAP_draft_message_redaction,
   FEAT_CAP_draft_account_registration,

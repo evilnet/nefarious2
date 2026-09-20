@@ -633,6 +633,7 @@ static void feature_notify_cap_draft_authtoken(void)
 }
 
 DEFINE_CAP_NOTIFY("multi-prefix", multi_prefix)
+DEFINE_CAP_NOTIFY("soju.im/search", soju_search)
 DEFINE_CAP_NOTIFY("userhost-in-names", userhost_in_names)
 DEFINE_CAP_NOTIFY("extended-join", extended_join)
 DEFINE_CAP_NOTIFY("away-notify", away_notify)
@@ -1309,6 +1310,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_pre_away, 0, 1, feature_notify_cap_draft_pre_away),
   F_B(CAP_draft_multiline, 0, 1, feature_notify_cap_multiline),
   F_B(CAP_draft_chathistory, 0, 1, feature_notify_cap_chathistory),
+  F_B(CAP_soju_search, 0, 1, feature_notify_cap_soju_search),
   F_B(CAP_draft_event_playback, 0, 0, feature_notify_cap_draft_event_playback),
   F_B(CAP_draft_message_redaction, 0, 0, feature_notify_cap_draft_message_redaction),
   F_B(CAP_draft_account_registration, 0, 0, feature_notify_cap_accountreg),
