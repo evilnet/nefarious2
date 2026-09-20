@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include "ircd_features.h"
+#include "handlers.h"
 #include "chathistory_presence.h"
 #include "capab.h"	/* send_cap_notify */
 #include "channel.h"	/* list_set_default */
@@ -808,11 +809,7 @@ feature_notify_chathistory_caps(void)
    * seconds, storage servers only) in sync and push to clients with
    * draft/extended-isupport. */
   add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
-  if (feature_bool(FEAT_CHATHISTORY_STORE))
-    add_isupport_i("evilnet/CHATHISTORYRETENTION",
-                   feature_int(FEAT_CHATHISTORY_RETENTION) * 86400);
-  else
-    del_isupport("evilnet/CHATHISTORYRETENTION");
+  chathistory_update_retention_isupport(0);   /* widest over the reachable stores */
   send_isupport_update();
 
   log_write(LS_SYSTEM, L_INFO, 0,

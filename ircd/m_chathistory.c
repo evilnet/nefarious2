@@ -54,6 +54,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "replay.h"
+#include "s_user.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -3642,6 +3643,60 @@ int server_retention_days(struct Client *server)
   return server_ads[idx]->retention_days;
 }
 
+/** The retention a client of this server can count on: the widest over
+ * the stores it can reach right now -- this server when it stores, and
+ * every linked server advertising storage (CH A S / R; the entry goes
+ * with the link).  Seconds; 0 when some reachable store keeps history
+ * for good; -1 when no store is reachable.  Retention is decided per
+ * server, so the network-wide answer changes with the topology: it
+ * drops the moment a wider store leaves (it may never be back) and rises
+ * when one links or widens.  A client must therefore treat the horizon
+ * as current, never final (2026-09-20). */
+int chathistory_retention_advertised(void)
+{
+  int widest = -1;
+  unsigned int i;
+
+  if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+    int days = feature_int(FEAT_CHATHISTORY_RETENTION);
+    if (days <= 0)
+      return 0;
+    widest = days;
+  }
+  for (i = 0; i < MAX_AD_SERVERS; i++) {
+    const struct ChathistoryAd *ad = server_ads[i];
+    if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+      continue;
+    if (ad->retention_days <= 0)
+      return 0;
+    if (ad->retention_days > widest)
+      widest = ad->retention_days;
+  }
+  return widest < 0 ? -1 : widest * 86400;
+}
+
+/** Keep ISUPPORT evilnet/CHATHISTORYRETENTION at the value above and,
+ * when it changed and @a announce is set, push a fresh 005 to the
+ * clients that negotiated draft/extended-isupport.  Called from the
+ * 005 build, the feature notifiers, and every store advertisement
+ * change: a CH A S (a store linked), a CH A R (one changed its
+ * retention), and the SQUIT that clears a store's entry. */
+void chathistory_update_retention_isupport(int announce)
+{
+  static int last = -2;
+  int now = chathistory_retention_advertised();
+
+  if (now == last)
+    return;
+  last = now;
+  if (now < 0)
+    del_isupport("evilnet/CHATHISTORYRETENTION");
+  else
+    add_isupport_i("evilnet/CHATHISTORYRETENTION", now);
+  if (announce)
+    send_isupport_update();
+}
+
 /** Clear advertisement entry for a server (on SQUIT).
  * @param[in] server Server client.
  */
@@ -3666,6 +3721,7 @@ void clear_server_ad(struct Client *server)
     MyFree(server_ads[idx]);
     server_ads[idx] = NULL;
   }
+  chathistory_update_retention_isupport(1);   /* a store may have left: no grace */
 }
 
 /** Re-flood every known storage advertisement to a newly linked peer,
@@ -6353,6 +6409,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
       /* Propagate to other servers (except source) */
       sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A S %d", retention);
+      chathistory_update_retention_isupport(1);
     }
     else if (subtype[0] == 'R') {
       /* Retention update: R <retention_days> */
@@ -6370,6 +6427,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
       /* Propagate to other servers (except source) */
       sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A R %d", retention);
+      chathistory_update_retention_isupport(1);
     }
     else if (subtype[0] == 'F') {
       /* Full channel sync: F :<channel> <channel> ... (Layer 1) */
