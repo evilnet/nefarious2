@@ -68,6 +68,7 @@ static int is_ulined_server(struct Client *server);
 int has_chathistory_advertisement(struct Client *server);
 void broadcast_channel_advertisement(const char *channel);
 #include <string.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <openssl/evp.h>
 #ifdef USE_ZSTD
@@ -393,6 +394,7 @@ static const char *s2s_to_subcmd(char c)
     case 'W': return "BETWEEN";
     case 'T': return "TARGETS";
     case 'X': return "EXACT";
+    case 'S': return "SEARCH";
     default:  return NULL;
   }
 }
@@ -5631,6 +5633,370 @@ int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time, int limi
   return 0;
 }
 
+/** Raw rows one SEARCH may examine, over every channel it covers. */
+#define SEARCH_SCAN_MAX 50000
+
+struct SearchMatch {
+  /** The presence hook to run first, when strict presence opened one. */
+  int (*presence_fn)(const struct HistoryMessage *msg, int reverse, void *ctx,
+                     int64_t *skip_to);
+  void *presence_ctx;
+  char from[NICKLEN + 1];   /**< sender nick to match, or empty */
+  const char *text;         /**< substring to match, or NULL */
+  int64_t after_ms;         /**< stop below this (0 = no floor) */
+};
+
+/** Case-insensitive substring, the ircd's case mapping. */
+static const char *search_strcasestr(const char *hay, const char *needle)
+{
+  size_t nlen = strlen(needle);
+  const char *h;
+
+  if (nlen == 0)
+    return hay;
+  for (h = hay; *h; h++) {
+    size_t i;
+    for (i = 0; i < nlen && h[i]; i++)
+      if (ToLower(h[i]) != ToLower(needle[i]))
+        break;
+    if (i == nlen)
+      return h;
+  }
+  return NULL;
+}
+
+/** Walk hook: the presence decision first (it may seek), then the
+ * window floor, the row type and the selectors. */
+static int search_row_hook(const struct HistoryMessage *msg, int reverse,
+                           void *ctx, int64_t *skip_to)
+{
+  struct SearchMatch *sm = (struct SearchMatch *)ctx;
+  int64_t t = (int64_t)history_parse_ms(msg->timestamp);
+
+  /* The walk is newest to oldest: below the floor nothing further counts. */
+  if (sm->after_ms && t && t < sm->after_ms)
+    return -1;
+
+  if (sm->presence_fn) {
+    int v = sm->presence_fn(msg, reverse, sm->presence_ctx, skip_to);
+    if (v != 1)
+      return v;
+  }
+
+  if (msg->type != HISTORY_PRIVMSG && msg->type != HISTORY_NOTICE
+      && msg->type != HISTORY_MULTILINE)
+    return 0;
+
+  if (sm->from[0]) {
+    size_t n = strlen(sm->from);
+    if (ircd_strncmp(msg->sender, sm->from, n) != 0 || msg->sender[n] != '!')
+      return 0;
+  }
+
+  if (sm->text) {
+    const char *body = msg->dyn_content ? msg->dyn_content : msg->content;
+    if (!body || !body[0] || !search_strcasestr(body, sm->text))
+      return 0;
+  }
+
+  return 1;
+}
+
+/** One target's share of a search: the newest @a limit matches before
+ * @a before_unix, within the shared scan budget.  Returns the row count
+ * (the list is ascending) or -1 on a store error. */
+/* Selectors on the S2S wire (CH Q ... S ... :<selectors>): "from=<v> text=<v>"
+ * joined by spaces, values escaped like client tags (\s = space, \\ =
+ * backslash) so a text with spaces survives as one parameter.  The
+ * 512-byte P10 body cap bounds them: SEARCH_SEL_MAX leaves room for the
+ * fixed fields. */
+#define SEARCH_SEL_MAX 380
+
+static void search_sel_escape(const char *in, char *out, size_t n)
+{
+  size_t o = 0;
+  for (; *in && o + 2 < n; in++) {
+    if (*in == ' ') { out[o++] = '\\'; out[o++] = 's'; }
+    else if (*in == '\\') { out[o++] = '\\'; out[o++] = '\\'; }
+    else out[o++] = *in;
+  }
+  out[o] = '\0';
+}
+
+static void search_sel_unescape(char *v)
+{
+  char *w = v;
+  for (; *v; v++) {
+    if (*v == '\\' && v[1] == 's') { *w++ = ' '; v++; }
+    else if (*v == '\\' && v[1] == '\\') { *w++ = '\\'; v++; }
+    else *w++ = *v;
+  }
+  *w = '\0';
+}
+
+/** The search walk shared by the local path and the S2S responder: BEFORE
+ * from @a before_unix, the match hook chained behind @a base's presence
+ * hook (if any), @a base's type mask and veto, @a *budget raw rows; the
+ * newest @a limit matches in @a *out, redaction placeholders dropped.
+ * @a *truncated is set when the scan budget cut the window short. */
+static int search_walk(const char *lookup_target, const char *before_unix,
+                       int limit, struct SearchMatch *sm, int *budget,
+                       const struct HistoryRowFilter *base,
+                       struct HistoryMessage **out, int *truncated)
+{
+  struct HistoryRowFilter filter;
+  int count;
+
+  *out = NULL;
+  if (*budget <= 0)
+    return 0;
+  memset(&filter, 0, sizeof(filter));
+  sm->presence_fn = base && base->fn ? base->fn : NULL;
+  sm->presence_ctx = base && base->fn ? base->ctx : NULL;
+  filter.fn = search_row_hook;
+  filter.ctx = sm;
+  filter.type_mask = base ? base->type_mask : 0;
+  filter.veto = base ? base->veto : NULL;
+  filter.veto_ctx = base ? base->veto_ctx : NULL;
+  filter.scan_max = *budget;
+
+  count = history_query_before(lookup_target, HISTORY_REF_TIMESTAMP,
+                               before_unix, limit, out, &filter);
+  *budget -= filter.scanned;
+  if (truncated)
+    *truncated = filter.truncated;
+  if (count < 0)
+    return -1;
+  return redact_filter_messages(out, count);
+}
+
+static int search_one_target(struct Client *sptr, const char *lookup_target,
+                             const char *before_unix, int limit,
+                             struct SearchMatch *sm, int *budget,
+                             struct HistoryMessage **out)
+{
+  struct PresenceQueryFilter *pf = NULL;
+  struct HistoryRowFilter bare, *phook;
+  int count;
+
+  *out = NULL;
+  if (*budget <= 0)
+    return 0;
+
+  if (open_query_presence(sptr, lookup_target, 0, &pf) < 0)
+    return 0;   /* fail closed: nothing visible here */
+  phook = presence_query_filter_hook(pf);
+  if (!phook) {
+    memset(&bare, 0, sizeof(bare));
+    phook = &bare;
+  }
+  phook->type_mask = requester_type_mask(sptr);
+  phook->veto = typing_only_veto;
+  phook->veto_ctx = NULL;
+
+  count = search_walk(lookup_target, before_unix, limit, sm, budget, phook,
+                      out, NULL);
+  presence_query_filter_close(pf);
+  if (count < 0)
+    return -1;
+  return presence_filter_messages(sptr, lookup_target, out, count, 0);
+}
+
+static int search_row_cmp(const void *a, const void *b)
+{
+  const struct HistoryMessage *ma = *(struct HistoryMessage *const *)a;
+  const struct HistoryMessage *mb = *(struct HistoryMessage *const *)b;
+  uint64_t ta = history_parse_ms(ma->timestamp);
+  uint64_t tb = history_parse_ms(mb->timestamp);
+
+  if (ta != tb)
+    return ta < tb ? -1 : 1;
+  return strcmp(ma->msgid, mb->msgid);
+}
+
+/** Send the search batch: @a head ascending, @a count rows.  Channel rows
+ * go to their own channel; rows of the private conversation @a pm_other
+ * (the other party's nick, or NULL) follow their direction. */
+static void search_send(struct Client *sptr, struct HistoryMessage *head,
+                        const char *pm_other, const char *label)
+{
+  char batchid[32];
+  char iso_time[32];
+  const char *bid = NULL;
+  struct HistoryMessage *msg;
+
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
+    generate_batch_id(batchid, sizeof(batchid), sptr);
+    bid = batchid;
+    if (label)
+      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s search", label,
+                    cli_name(&me), batchid);
+    else
+      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s search", cli_name(&me), batchid);
+  }
+
+  for (msg = head; msg; msg = msg->next) {
+    const char *time_str = msg->timestamp;
+    const char *cmd = (msg->type == HISTORY_NOTICE) ? "NOTICE" : "PRIVMSG";
+    const char *target = msg->target;
+
+    if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) == 0)
+      time_str = iso_time;
+    if (pm_other)
+      target = pm_row_is_own(sptr, msg) ? pm_other : cli_name(sptr);
+    send_history_message(sptr, msg, target, bid, time_str, cmd);
+  }
+
+  if (bid)
+    sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
+  else if (label)
+    sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Federated SEARCH: the CHATHISTORY federation path with letter 'S'  */
+/* ---------------------------------------------------------------- */
+
+/** Completion: merge the local and the responders' rows (dedup by msgid),
+ * keep the newest limit, send the search batch.  A responder that timed
+ * out or hit its scan cap is not signalled: the spec has no marker for a
+ * cut scan, and the client narrows its window when a full limit comes
+ * back, exactly as against a single server. */
+static void complete_search_fed(struct FedRequest *req)
+{
+  struct Client *client;
+  struct HistoryMessage *merged, *m, **all;
+  int total = 0, k, keep;
+
+  if (!req || req->response_sent)
+    return;
+  req->response_sent = 1;
+  client = findNUser(req->client_yxx);
+  if (!client)
+    return;
+  /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
+   * the union is sorted and trimmed below. */
+  merged = merge_messages(req->local_msgs, req->fed_msgs, INT_MAX, 0);
+  for (m = merged; m; m = m->next)
+    total++;
+  if (total == 0) {
+    search_send(client, NULL, NULL, req->label[0] ? req->label : NULL);
+    return;
+  }
+  /* merge_messages assumes sorted inputs; responders' rows arrive in
+   * reply order, so sort the union by time and keep the newest limit. */
+  all = (struct HistoryMessage **)MyMalloc(total * sizeof(*all));
+  for (k = 0, m = merged; m; m = m->next)
+    all[k++] = m;
+  qsort(all, total, sizeof(*all), search_row_cmp);
+  keep = total < req->limit ? total : req->limit;
+  merged = NULL;
+  for (k = total - 1; k >= 0; k--) {
+    all[k]->next = NULL;
+    if (k < total - keep) {
+      history_free_messages(all[k]);
+      continue;
+    }
+    all[k]->next = merged;
+    merged = all[k];
+  }
+  MyFree(all);
+  search_send(client, merged, NULL, req->label[0] ? req->label : NULL);
+  history_free_messages(merged);
+}
+
+/** Fan a SEARCH out to every storage server for @a target.  Wire:
+ *   CH Q <target> S T<before> <limit> <reqid> <dest> <T<after>|*> P<yxx> <mask> :<selectors>
+ * Returns the request (which now owns @a local_rows) or NULL when nothing
+ * was dispatched (no stores, federation off, no free slot): the caller
+ * then answers locally.  Search scans, so every store is asked. */
+static struct FedRequest *start_fed_search(struct Client *sptr, const char *target,
+                                           const char *requested,
+                                           const char *before_unix,
+                                           const char *after_unix, int limit,
+                                           const struct SearchMatch *sm,
+                                           struct HistoryMessage *local_rows,
+                                           int local_count)
+{
+  struct FedRequest *req;
+  char reqid[32], sel[BUFSIZE], esc[BUFSIZE];
+  int i, si, server_count;
+  time_t query_time = after_unix && after_unix[0] ? (time_t)strtoul(after_unix, NULL, 10) : 0;
+
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return NULL;
+  server_count = count_storage_servers(target, query_time);
+  if (server_count == 0)
+    return NULL;
+  for (i = 0; i < MAX_FED_REQUESTS; i++)
+    if (!fed_requests[i])
+      break;
+  if (i >= MAX_FED_REQUESTS)
+    return NULL;
+
+  sel[0] = '\0';
+  if (sm->from[0]) {
+    search_sel_escape(sm->from, esc, sizeof(esc));
+    ircd_snprintf(0, sel, sizeof(sel), "from=%s", esc);
+  }
+  if (sm->text) {
+    size_t l = strlen(sel);
+    search_sel_escape(sm->text, esc, sizeof(esc));
+    ircd_snprintf(0, sel + l, sizeof(sel) - l, "%stext=%s", l ? " " : "", esc);
+  }
+
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me), ++fed_reqid_counter);
+  req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+  ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+  ircd_strncpy(req->target, target, sizeof(req->target) - 1);
+  ircd_strncpy(req->requested, requested ? requested : "", sizeof(req->requested) - 1);
+  ircd_snprintf(0, req->client_yxx, sizeof(req->client_yxx), "%s%s",
+                cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+  req->local_msgs = local_rows;
+  req->local_count = local_count;
+  req->servers_pending = server_count;
+  req->start_time = CurrentTime;
+  req->limit = limit;
+  req->keep_oldest = 0;
+  req->completion_cb = complete_search_fed;
+  req->label[0] = '\0';
+  if (cli_label(sptr)[0]) {
+    ircd_strncpy(req->label, cli_label(sptr), sizeof(req->label));
+    cli_label_responded(sptr) = 1;
+  }
+  fed_requests[i] = req;
+  timer_add(timer_init(&req->timer), fed_timeout_callback, (void *)req, TT_RELATIVE,
+            feature_int(FEAT_CHATHISTORY_TIMEOUT));
+  req->timer_active = 1;
+
+  for (si = 0; si < MAX_AD_SERVERS; si++) {
+    struct ChathistoryAd *ad = server_ads[si];
+    struct Client *server;
+    char dest_yxx[4];
+    if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+      continue;
+    inttobase64(dest_yxx, si, 2);
+    server = FindNServer(dest_yxx);
+    if (!server || server == &me)
+      continue;
+    if (is_ulined_server(server))
+      continue;
+    if (query_time != 0 && !server_retention_covers(server, query_time))
+      continue;
+    /* Same trailing shape as a page (ref2, requester token, type mask) so
+     * the responder pages by the requester's presence; the selectors
+     * are the trailing parameter. */
+    /* References ride bare on the wire (a unix "sec.ms" is a timestamp,
+     * a leading letter a msgid, "*" none -- parse_s2s_reference). */
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s S %s %d %s %s %s P%s %x :%s",
+                  target, before_unix, limit, reqid, dest_yxx,
+                  after_unix && after_unix[0] ? after_unix : "*",
+                  req->client_yxx, requester_type_mask(sptr), sel);
+  }
+  return req;
+}
+
 /*
  * ms_chathistory - server message handler for S2S chathistory federation
  *
@@ -5965,6 +6331,69 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * is the HEAD; ascending appends, TAIL (re-review R8). */
       between_desc = history_between_descending(target, ref_type, ref_value,
                                                 ref_type2, ref_value2);
+    } else if (query_subcmd_char == 'S') {
+      /* Federated SEARCH: <before> (unix sec.ms) as the reference, <after>
+       * or * as ref2, the selectors as the trailing parameter (parv[11]), the
+       * requester's presence already opened above.  Rows go back with
+       * the page machinery; E carries T when our scan budget cut the
+       * window short. */
+      struct SearchMatch ssm;
+      struct HistoryMessage *rows = NULL, *r;
+      int budget = SEARCH_SCAN_MAX, truncated = 0, n = 0;
+      char selbuf[BUFSIZE];
+      char before_buf[HISTORY_TIMESTAMP_LEN];
+      memset(&ssm, 0, sizeof(ssm));
+      ircd_strncpy(before_buf, ref_type == HISTORY_REF_TIMESTAMP && ref_value ? ref_value : "",
+                   sizeof(before_buf) - 1);
+      before_buf[sizeof(before_buf) - 1] = '\0';
+      if (ref2) {
+        enum HistoryRefType t2;
+        const char *v2;
+        if (parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_TIMESTAMP && v2)
+          ssm.after_ms = (int64_t)history_parse_ms(v2);
+      }
+      selbuf[0] = '\0';
+      if (parc >= 12 && parv[11])
+        ircd_strncpy(selbuf, parv[11], sizeof(selbuf) - 1);
+      {
+        char *q = selbuf, *tok;
+        while ((tok = q) && *tok) {
+          char *sp = strchr(tok, ' ');
+          if (sp) { *sp = '\0'; q = sp + 1; } else q = tok + strlen(tok);
+          if (0 == strncmp(tok, "from=", 5)) {
+            ircd_strncpy(ssm.from, tok + 5, sizeof(ssm.from));
+            search_sel_unescape(ssm.from);
+          } else if (0 == strncmp(tok, "text=", 5)) {
+            search_sel_unescape(tok + 5);
+            if (tok[5])
+              ssm.text = tok + 5;
+          }
+        }
+      }
+      Debug((DEBUG_DEBUG, "CH Q S: target %s before '%s' after %lld limit %d from '%s' text '%s' reftype %d",
+             target, before_buf, (long long)ssm.after_ms, limit, ssm.from,
+             ssm.text ? ssm.text : "", (int)ref_type));
+      if (!before_buf[0]) {
+        presence_query_filter_close(fed_pf);
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+      n = search_walk(target, before_buf, limit, &ssm, &budget, fed_hook, &rows, &truncated);
+      Debug((DEBUG_DEBUG, "CH Q S: %s -> %d row(s), truncated %d, budget left %d", target, n, truncated, budget));
+      presence_query_filter_close(fed_pf);
+      fed_pf = NULL;
+      if (n < 0) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+      for (r = rows; r; r = r->next)
+        send_ch_response(sptr, reqid, r);
+      if (truncated)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, n);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, n);
+      history_free_messages(rows);
+      return 0;
     } else if (query_subcmd_char == 'X') {
       presence_query_filter_close(fed_pf);
       fed_pf = NULL;
@@ -6707,170 +7136,6 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * rows are not merged (2026-09-20).
  * ==================================================================== */
 
-/** Raw rows one SEARCH may examine, over every channel it covers. */
-#define SEARCH_SCAN_MAX 50000
-
-struct SearchMatch {
-  /** The presence hook to run first, when strict presence opened one. */
-  int (*presence_fn)(const struct HistoryMessage *msg, int reverse, void *ctx,
-                     int64_t *skip_to);
-  void *presence_ctx;
-  char from[NICKLEN + 1];   /**< sender nick to match, or empty */
-  const char *text;         /**< substring to match, or NULL */
-  int64_t after_ms;         /**< stop below this (0 = no floor) */
-};
-
-/** Case-insensitive substring, the ircd's case mapping. */
-static const char *search_strcasestr(const char *hay, const char *needle)
-{
-  size_t nlen = strlen(needle);
-  const char *h;
-
-  if (nlen == 0)
-    return hay;
-  for (h = hay; *h; h++) {
-    size_t i;
-    for (i = 0; i < nlen && h[i]; i++)
-      if (ToLower(h[i]) != ToLower(needle[i]))
-        break;
-    if (i == nlen)
-      return h;
-  }
-  return NULL;
-}
-
-/** Walk hook: the presence decision first (it may seek), then the
- * window floor, the row type and the selectors. */
-static int search_row_hook(const struct HistoryMessage *msg, int reverse,
-                           void *ctx, int64_t *skip_to)
-{
-  struct SearchMatch *sm = (struct SearchMatch *)ctx;
-  int64_t t = (int64_t)history_parse_ms(msg->timestamp);
-
-  /* The walk is newest to oldest: below the floor nothing further counts. */
-  if (sm->after_ms && t && t < sm->after_ms)
-    return -1;
-
-  if (sm->presence_fn) {
-    int v = sm->presence_fn(msg, reverse, sm->presence_ctx, skip_to);
-    if (v != 1)
-      return v;
-  }
-
-  if (msg->type != HISTORY_PRIVMSG && msg->type != HISTORY_NOTICE
-      && msg->type != HISTORY_MULTILINE)
-    return 0;
-
-  if (sm->from[0]) {
-    size_t n = strlen(sm->from);
-    if (ircd_strncmp(msg->sender, sm->from, n) != 0 || msg->sender[n] != '!')
-      return 0;
-  }
-
-  if (sm->text) {
-    const char *body = msg->dyn_content ? msg->dyn_content : msg->content;
-    if (!body || !body[0] || !search_strcasestr(body, sm->text))
-      return 0;
-  }
-
-  return 1;
-}
-
-/** One target's share of a search: the newest @a limit matches before
- * @a before_unix, within the shared scan budget.  Returns the row count
- * (the list is ascending) or -1 on a store error. */
-static int search_one_target(struct Client *sptr, const char *lookup_target,
-                             const char *before_unix, int limit,
-                             struct SearchMatch *sm, int *budget,
-                             struct HistoryMessage **out)
-{
-  struct PresenceQueryFilter *pf = NULL;
-  struct HistoryRowFilter filter;
-  struct HistoryRowFilter *phook;
-  int count;
-
-  *out = NULL;
-  if (*budget <= 0)
-    return 0;
-
-  if (open_query_presence(sptr, lookup_target, 0, &pf) < 0)
-    return 0;   /* fail closed: nothing visible here */
-  phook = presence_query_filter_hook(pf);
-
-  memset(&filter, 0, sizeof(filter));
-  sm->presence_fn = phook ? phook->fn : NULL;
-  sm->presence_ctx = phook ? phook->ctx : NULL;
-  filter.fn = search_row_hook;
-  filter.ctx = sm;
-  filter.type_mask = requester_type_mask(sptr);
-  filter.veto = typing_only_veto;
-  filter.scan_max = *budget;
-
-  count = history_query_before(lookup_target, HISTORY_REF_TIMESTAMP,
-                               before_unix, limit, out, &filter);
-  presence_query_filter_close(pf);
-
-  *budget -= filter.scanned;
-  if (count < 0)
-    return -1;
-
-  count = redact_filter_messages(out, count);
-  count = presence_filter_messages(sptr, lookup_target, out, count, 0);
-  return count;
-}
-
-static int search_row_cmp(const void *a, const void *b)
-{
-  const struct HistoryMessage *ma = *(struct HistoryMessage *const *)a;
-  const struct HistoryMessage *mb = *(struct HistoryMessage *const *)b;
-  uint64_t ta = history_parse_ms(ma->timestamp);
-  uint64_t tb = history_parse_ms(mb->timestamp);
-
-  if (ta != tb)
-    return ta < tb ? -1 : 1;
-  return strcmp(ma->msgid, mb->msgid);
-}
-
-/** Send the search batch: @a head ascending, @a count rows.  Channel rows
- * go to their own channel; rows of the private conversation @a pm_other
- * (the other party's nick, or NULL) follow their direction. */
-static void search_send(struct Client *sptr, struct HistoryMessage *head,
-                        const char *pm_other)
-{
-  char batchid[32];
-  char iso_time[32];
-  const char *label = cli_label(sptr);
-  const char *bid = NULL;
-  struct HistoryMessage *msg;
-
-  if (CapRecipientHas(sptr, CAP_BATCH)) {
-    generate_batch_id(batchid, sizeof(batchid), sptr);
-    bid = batchid;
-    if (label)
-      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s search", label,
-                    cli_name(&me), batchid);
-    else
-      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s search", cli_name(&me), batchid);
-  }
-
-  for (msg = head; msg; msg = msg->next) {
-    const char *time_str = msg->timestamp;
-    const char *cmd = (msg->type == HISTORY_NOTICE) ? "NOTICE" : "PRIVMSG";
-    const char *target = msg->target;
-
-    if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) == 0)
-      time_str = iso_time;
-    if (pm_other)
-      target = pm_row_is_own(sptr, msg) ? pm_other : cli_name(sptr);
-    send_history_message(sptr, msg, target, bid, time_str, cmd);
-  }
-
-  if (bid)
-    sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
-  else if (label)
-    sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
-}
-
 /** Handle SEARCH (soju.im/search).  parv[1..] are `key=value` selectors;
  * the last one may carry spaces (a trailing parameter). */
 int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
@@ -6939,6 +7204,18 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   max_limit = feature_int(FEAT_CHATHISTORY_MAX);
   if (limit <= 0 || limit > max_limit)
     limit = max_limit;
+  /* The selectors also travel S2S in one 512-byte P10 line; refuse an
+   * oversize text here so local and federated behaviour agree. */
+  {
+    char esc[BUFSIZE];
+    size_t n = 0;
+    if (sm.from[0]) { search_sel_escape(sm.from, esc, sizeof(esc)); n += 5 + strlen(esc) + 1; }
+    if (sm.text) { search_sel_escape(sm.text, esc, sizeof(esc)); n += 5 + strlen(esc); }
+    if (n > SEARCH_SEL_MAX) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text", "Selectors too long");
+      return 0;
+    }
+  }
   if (after_unix[0])
     sm.after_ms = (int64_t)history_parse_ms(after_unix);
   if (!before_unix[0]) {
@@ -6965,7 +7242,19 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       send_fail(sptr, "SEARCH", "INTERNAL_ERROR", "in", "Failed to search history");
       return 0;
     }
-    search_send(sptr, rows, pm_other);
+    /* Federation (2026-09-20, docs/features/search.md): a channel's rows
+     * can live on other storage servers (a store that was split holds
+     * rows the others lack), and a page of the same window would fan
+     * out to them -- so does a search, or users could not trust it.
+     * Private conversations and the no-`in` form stay local. */
+    if (IsChannelName(in)) {
+      struct FedRequest *req = start_fed_search(sptr, lookup_target, in,
+                                                before_unix, after_unix,
+                                                limit, &sm, rows, count);
+      if (req)
+        return 0;   /* rows are the request's now; complete_search_fed sends */
+    }
+    search_send(sptr, rows, pm_other, cli_label(sptr));
     history_free_messages(rows);
     return 0;
   }
@@ -7014,7 +7303,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       tail = &all[k]->next;
     }
     MyFree(all);
-    search_send(sptr, head, NULL);
+    search_send(sptr, head, NULL, cli_label(sptr));
     history_free_messages(head);
   }
   return 0;
