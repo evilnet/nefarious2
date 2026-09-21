@@ -171,7 +171,7 @@ crule_cmocka: $(CRULE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CRULE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # history tests - serialization functions (no LMDB required)
-HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../ircd_string.o
+HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../ircd_string.o ../redact_index.o
 history_cmocka: $(HISTORY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 

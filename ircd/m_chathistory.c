@@ -38,6 +38,12 @@
 #include "client.h"
 #include "hash.h"
 #include "history.h"
+#include "redact_index.h"   /* redaction catch-up query (design B) */
+/* m_redact.c (handlers.h cannot be included here -- forward_history_write prototype nit) */
+extern void redact_apply_row(struct Client *src, const char *target, const char *msgid,
+                             const char *redact_msgid, uint64_t time_ms, const char *reason,
+                             const char *sender_str, const char *account_str);
+static void redact_catchup_kick(unsigned int store_num);   /* design B trigger (defined with the catch-up) */
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
@@ -4343,6 +4349,166 @@ static int ch_base64_decode(const char *input, size_t inlen, char **output, size
 }
 
 /** Find a federation request by ID */
+/* ---- redaction catch-up (requester side; design B) ------------------- */
+
+struct RdxScanEmit { struct Client *to; const char *reqid; int n; };
+
+static void rdx_scan_emit_cb(uint64_t time_ms, const char *redact_msgid,
+                             const struct rdx_val *v, void *ctx)
+{
+  struct RdxScanEmit *sc = (struct RdxScanEmit *)ctx;
+  sendcmdto_one(&me, CMD_CHATHISTORY, sc->to, "D %s %llu %s %s %s %s %s :%s", sc->reqid,
+               (unsigned long long)time_ms, redact_msgid, v->target,
+               v->parent_msgid, v->sender, v->account[0] ? v->account : "*",
+               v->reason);
+  sc->n++;
+}
+
+struct RdxCatchup {
+  char     store_yxx[3];
+  int      round;
+  uint64_t start_ms;      /* when this round was issued */
+  uint64_t last_ms;       /* newest row time seen (for a truncated continuation) */
+};
+
+static struct FedRequest *find_fed_request(const char *reqid);
+static void free_fed_request(struct FedRequest *req);
+static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms, int round);
+
+/* A CH D row -> a REDACT HistoryMessage on the request (target carried). */
+static void add_fed_redact(struct FedRequest *req, const struct rdx_reply *rr)
+{
+  struct HistoryMessage *msg, *tail;
+  struct RdxCatchup *rc = (struct RdxCatchup *)req->cb_data;
+  if (req->fed_count >= MAX_FED_MESSAGES) {
+    req->fed_truncated = 1;
+    return;
+  }
+  msg = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
+  ircd_strncpy(msg->msgid, rr->redact_msgid, sizeof(msg->msgid) - 1);
+  history_format_ms(msg->timestamp, sizeof(msg->timestamp), rr->time_ms);
+  ircd_strncpy(msg->target, rr->v.target, sizeof(msg->target) - 1);
+  ircd_strncpy(msg->sender, rr->v.sender, sizeof(msg->sender) - 1);
+  ircd_strncpy(msg->account, rr->v.account, sizeof(msg->account) - 1);
+  msg->type = HISTORY_REDACT;
+  if (rr->v.reason[0])
+    ircd_snprintf(0, msg->content, sizeof(msg->content), "%s :%s", rr->v.parent_msgid, rr->v.reason);
+  else
+    ircd_strncpy(msg->content, rr->v.parent_msgid, sizeof(msg->content) - 1);
+  msg->next = NULL;
+  if (!req->fed_msgs)
+    req->fed_msgs = msg;
+  else {
+    for (tail = req->fed_msgs; tail->next; tail = tail->next) ;
+    tail->next = msg;
+  }
+  req->fed_count++;
+  if (rc && rr->time_ms > rc->last_ms)
+    rc->last_ms = rr->time_ms;
+}
+
+/* Completion: apply every row (idempotent), then move the watermark.  A
+ * truncated reply continues from its newest row for a few rounds; a cut
+ * (timeout) advances nothing. */
+static void complete_redact_catchup(struct FedRequest *req)
+{
+  struct RdxCatchup *rc = (struct RdxCatchup *)req->cb_data;
+  struct HistoryMessage *m;
+  int applied = 0;
+  for (m = req->fed_msgs; m; m = m->next) {
+    char parent[HISTORY_MSGID_LEN];
+    const char *sp = strchr(m->content, ' ');
+    const char *reason = NULL;
+    size_t pl = sp ? (size_t)(sp - m->content) : strlen(m->content);
+    if (pl == 0 || pl >= sizeof parent)
+      continue;
+    memcpy(parent, m->content, pl);
+    parent[pl] = '\0';
+    if (sp) {
+      reason = sp + 1;
+      if (*reason == ':') reason++;
+      if (!*reason) reason = NULL;
+    }
+    redact_apply_row(&me, m->target, parent, m->msgid, history_parse_ms(m->timestamp),
+                     reason, m->sender, m->account);
+    applied++;
+  }
+  if (!rc)
+    return;
+  if (req->cut) {
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s: cut after %d row(s), watermark kept", rc->store_yxx, applied);
+    return;
+  }
+  if (req->fed_truncated && rc->last_ms && rc->round < 8) {
+    history_redact_watermark_set(rc->last_ms);
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s: %d row(s), more -> round %d", rc->store_yxx, applied, rc->round + 1);
+    start_redact_catchup(rc->store_yxx, rc->last_ms, rc->round + 1);
+    return;
+  }
+  history_redact_watermark_set(rc->start_ms);
+  if (applied)
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s: applied %d redaction(s)", rc->store_yxx, applied);
+}
+
+static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms, int round)
+{
+  struct FedRequest *req;
+  struct RdxCatchup *rc;
+  struct Client *server;
+  char reqid[32];
+  int i;
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION) || !history_is_available())
+    return NULL;
+  server = FindNServer(store_yxx);
+  if (!server || server == &me)
+    return NULL;
+  for (i = 0; i < MAX_FED_REQUESTS; i++)
+    if (!fed_requests[i])
+      break;
+  if (i >= MAX_FED_REQUESTS)
+    return NULL;
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me), ++fed_reqid_counter);
+  req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+  rc = (struct RdxCatchup *)MyCalloc(1, sizeof(struct RdxCatchup));
+  ircd_strncpy(rc->store_yxx, store_yxx, sizeof rc->store_yxx);
+  rc->round = round;
+  rc->start_ms = (uint64_t)CurrentTime * 1000ULL;
+  ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+  ircd_strncpy(req->target, "*", sizeof(req->target) - 1);
+  ircd_strncpy(req->client_yxx, cli_yxx(&me), sizeof(req->client_yxx));
+  req->servers_pending = 1;
+  req->start_time = CurrentTime;
+  req->limit = 200;
+  req->completion_cb = complete_redact_catchup;
+  req->cb_data = rc;
+  fed_requests[i] = req;
+  timer_add(timer_init(&req->timer), fed_timeout_callback, (void *)req, TT_RELATIVE,
+            feature_int(FEAT_CHATHISTORY_TIMEOUT));
+  req->timer_active = 1;
+  sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q * D %llu %d %s %s",
+                (unsigned long long)since_ms, req->limit, reqid, store_yxx);
+  Debug((DEBUG_DEBUG, "REDACT catch-up: asked %s since %llu (round %d)",
+         store_yxx, (unsigned long long)since_ms, round));
+  return req;
+}
+
+/* Trigger: a store just (re)advertised itself -- first sight after our
+ * boot, or back after a split.  Ask it for what we may have missed since
+ * our watermark (60 s slack; 0 = everything, bounded per round). */
+static void redact_catchup_kick(unsigned int store_num)
+{
+  char yxx[4];
+  uint64_t wm;
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION) || !history_is_available())
+    return;
+  wm = history_redact_watermark_get();
+  start_redact_catchup(inttobase64(yxx, (int)store_num, 2),
+                       wm > 60000 ? wm - 60000 : 0, 1);
+}
+
 static struct FedRequest *find_fed_request(const char *reqid)
 {
   int i;
@@ -6141,6 +6307,29 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     /* Legacy path (no dest_numeric): propagate to direct links as before.
      * Filter by advertisement (CH A S) and retention window.
      */
+    /* Redaction catch-up: CH Q * D <since_ms> <limit> <reqid> <dest> -- not
+     * a channel query: answer from the redaction index, one CH D line per
+     * redaction since <since_ms>, then E.  Handled before the channel /
+     * presence machinery (target is "*").  A store that was absent asks
+     * this on return (design B, crdt-mesh-redact-catchup.md). */
+    if (query_subcmd_str && query_subcmd_str[0] == 'D' && query_subcmd_str[1] == '\0') {
+      struct RdxScanEmit sc;
+      uint64_t since = (uint64_t)strtoull(ref, NULL, 10);
+      int trunc = 0, lim = (limit > 0 && limit <= 500) ? limit : 200;
+      sc.to = sptr;
+      sc.reqid = reqid;
+      sc.n = 0;
+      if (history_is_available())
+        history_redact_index_scan(since, lim, rdx_scan_emit_cb, &sc, &trunc);
+      Debug((DEBUG_DEBUG, "CH Q D: since %llu -> %d row(s) trunc %d for %s",
+             (unsigned long long)since, sc.n, trunc, reqid));
+      if (trunc)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, sc.n);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, sc.n);
+      return 0;
+    }
+
     if (!dest_numeric) {
       struct DLink *lp;
       time_t query_time = 0;
@@ -6588,6 +6777,18 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     /* Add message to federated results */
     add_fed_message(req, msgid, timestamp, type, sender, account, content);
   }
+  else if (strcmp(subcmd, "D") == 0) {   /* a redaction from the catch-up scan */
+    struct rdx_reply rr;
+    struct FedRequest *req;
+    if (rdx_reply_parse(parc, parv, &rr) != 0)
+      return 0;
+    req = find_fed_request(rr.reqid);
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
+      return 0;
+    }
+    add_fed_redact(req, &rr);
+  }
   else if (strcmp(subcmd, "Z") == 0) {
     /* Compressed Response: Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_compressed>
      * Content is base64-encoded zstd-compressed data for bandwidth savings.
@@ -6832,6 +7033,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->retention_days = retention;
       ad->last_update = CurrentTime;
       absence_close(server_ad_index(sptr));   /* back: close its absence */
+      redact_catchup_kick((unsigned int)server_ad_index(sptr));   /* what did we miss while it was away? */
 
       Debug((DEBUG_DEBUG, "CH A S: Server %s advertises storage with %d day retention",
              cli_name(sptr), retention));

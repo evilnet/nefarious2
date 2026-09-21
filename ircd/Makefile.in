@@ -113,6 +113,7 @@ IRCD_SRC = \
 	gitsync.c \
 	hash.c \
 	history.c \
+	redact_index.c \
 	chathistory_ephemeral.c \
 	chathistory_presence.c \
 	ircd.c \

@@ -37,6 +37,7 @@
 #include "db_txn.h"
 #include "db_types.h"
 #include "history.h"
+#include "redact_index.h"
 #include "ml_content.h"
 #include "client.h"
 #include "channel.h"
@@ -76,6 +77,7 @@ static struct db_cf  *history_cf_msgid = NULL;
 static struct db_cf  *history_cf_targets = NULL;
 static struct db_cf  *history_cf_quotas = NULL;
 static struct db_cf  *history_cf_reply = NULL;
+static struct db_cf  *history_cf_redact = NULL;   /* redaction catch-up index (redact_index.h) */
 
 /** Flag indicating if history is available */
 static int history_available = 0;
@@ -1032,7 +1034,8 @@ int history_init(const char *dbpath)
       || db_cf_open(history_db_env, "msgid_index", &cf_opts, &history_cf_msgid) != DB_OK
       || db_cf_open(history_db_env, "targets", &cf_opts, &history_cf_targets) != DB_OK
       || db_cf_open(history_db_env, "quotas", &cf_opts, &history_cf_quotas) != DB_OK
-      || db_cf_open(history_db_env, "reply_index", &cf_opts, &history_cf_reply) != DB_OK) {
+      || db_cf_open(history_db_env, "reply_index", &cf_opts, &history_cf_reply) != DB_OK
+      || db_cf_open(history_db_env, "redact_index", &cf_opts, &history_cf_redact) != DB_OK) {
     log_write(LS_SYSTEM, L_ERROR, 0, "history: db_cf_open failed: %s",
               db_env_last_error(history_db_env));
     db_env_close(history_db_env);
@@ -1104,6 +1107,7 @@ void history_shutdown(void)
   history_cf_messages = NULL;
   history_cf_msgid = NULL;
   history_cf_targets = NULL;
+  history_cf_redact = NULL;
   history_cf_quotas = NULL;
   history_cf_reply = NULL;
   history_available = 0;
@@ -1450,6 +1454,26 @@ store_retry:
         memcpy(parent_mid, content, len);
         parent_mid[len] = '\0';
         reply_index_put(wb, target, parent_mid, timestamp, msgid);
+        /* Catch-up index (design B): time-ordered so an absent store can
+         * ask for redactions since T on return.  Same batch as the row. */
+        {
+          struct rdx_val rv;
+          unsigned char rkey[RDX_KEY_MAX];
+          char rval[RDX_VAL_MAX];
+          int rkl, rvl;
+          const char *reason = space ? space + 1 : "";
+          if (*reason == ':') reason++;
+          memset(&rv, 0, sizeof rv);
+          ircd_strncpy(rv.target, target, sizeof rv.target);
+          ircd_strncpy(rv.parent_msgid, parent_mid, sizeof rv.parent_msgid);
+          ircd_strncpy(rv.sender, sender ? sender : "", sizeof rv.sender);
+          ircd_strncpy(rv.account, account ? account : "", sizeof rv.account);
+          ircd_strncpy(rv.reason, reason, sizeof rv.reason);
+          rkl = rdx_key_build(rkey, sizeof rkey, history_parse_ms(timestamp), msgid);
+          rvl = rdx_val_pack(rval, sizeof rval, &rv);
+          if (rkl > 0 && rvl > 0 && history_cf_redact)
+            db_writebatch_put(wb, history_cf_redact, rkey, (size_t)rkl, rval, (size_t)rvl);
+        }
       }
     }
   }
@@ -2905,6 +2929,96 @@ void history_set_channel_removed_callback(history_channels_removed_cb cb)
   channel_removed_callback = cb;
 }
 
+/* ---- redaction catch-up index: scan + watermark (design B) ---------- */
+
+/* The watermark lives in the index CF under a key that sorts LAST
+ * (time prefix all-ones) so a forward scan from any real time never
+ * reaches it before the rows, and is skipped by name if it does. */
+static const unsigned char rdx_wm_key[10] =
+  { 0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,'w','m' };
+
+int history_redact_index_scan(uint64_t since_ms, int limit,
+                              history_rdx_cb cb, void *ctx, int *truncated)
+{
+  struct db_iter *it;
+  unsigned char start[RDX_KEY_MAX];
+  int n = 0, rc, skl;
+  if (truncated) *truncated = 0;
+  if (!history_db_env || !history_cf_redact || !cb)
+    return -1;
+  skl = rdx_key_build(start, sizeof start, since_ms, "!");   /* "!" < every msgid char */
+  if (skl < 0)
+    return -1;
+  skl = 8;                                    /* seek on the time prefix alone */
+  it = db_iter_open(history_db_env, history_cf_redact, NULL);
+  if (!it)
+    return -1;
+  for (rc = db_iter_seek(it, start, (size_t)skl);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *k = db_iter_key(it, &klen);
+    const void *v = db_iter_value(it, &vlen);
+    uint64_t t;
+    char rmsgid[RDX_MSGID_MAX];
+    struct rdx_val val;
+    if (klen == sizeof rdx_wm_key && memcmp(k, rdx_wm_key, sizeof rdx_wm_key) == 0)
+      continue;
+    if (rdx_key_parse(k, klen, &t, rmsgid, sizeof rmsgid) != 0)
+      continue;
+    if (rdx_val_parse(v, vlen, &val) != 0)
+      continue;
+    if (limit > 0 && n >= limit) {
+      if (truncated) *truncated = 1;
+      break;
+    }
+    cb(t, rmsgid, &val, ctx);
+    n++;
+  }
+  db_iter_close(it);
+  return n;
+}
+
+uint64_t history_redact_watermark_get(void)
+{
+  struct db_iter *it;
+  uint64_t wm = 0;
+  if (!history_db_env || !history_cf_redact)
+    return 0;
+  it = db_iter_open(history_db_env, history_cf_redact, NULL);
+  if (!it)
+    return 0;
+  if (db_iter_seek(it, rdx_wm_key, sizeof rdx_wm_key) == DB_OK && db_iter_valid(it)) {
+    size_t klen, vlen;
+    const void *k = db_iter_key(it, &klen);
+    const void *v = db_iter_value(it, &vlen);
+    if (klen == sizeof rdx_wm_key && memcmp(k, rdx_wm_key, klen) == 0 && v && vlen < 32) {
+      char tmp[32];
+      memcpy(tmp, v, vlen); tmp[vlen] = '\0';
+      wm = (uint64_t)strtoull(tmp, NULL, 10);
+    }
+  }
+  db_iter_close(it);
+  return wm;
+}
+
+int history_redact_watermark_set(uint64_t ms)
+{
+  struct db_writebatch *wb;
+  char tmp[32];
+  int rc;
+  if (!history_db_env || !history_cf_redact)
+    return -1;
+  wb = db_writebatch_new(history_db_env);
+  if (!wb)
+    return -1;
+  ircd_snprintf(0, tmp, sizeof tmp, "%llu", (unsigned long long)ms);
+  db_writebatch_put(wb, history_cf_redact, rdx_wm_key, sizeof rdx_wm_key, tmp, strlen(tmp));
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  return rc == DB_OK ? 0 : -1;
+}
+
 int history_purge_old(unsigned long max_age_seconds)
 {
   struct db_iter *it;
@@ -2963,6 +3077,21 @@ int history_purge_old(unsigned long max_age_seconds)
 
     if (strcmp(msg_timestamp, cutoff_ts) >= 0)
       continue;  /* not old enough */
+
+    /* A REDACT context row takes its catch-up index entry with it (a store
+     * that no longer holds the row has nothing to redact). */
+    if (msg_msgid[0] != '\0' && history_cf_redact) {
+      size_t vlen;
+      const void *vbase = db_iter_value(it, &vlen);
+      struct HistoryMessage peek;
+      if (vbase && deserialize_message((const char *)vbase, (int)vlen, &peek) == 0
+          && peek.type == HISTORY_REDACT) {
+        unsigned char rkey[RDX_KEY_MAX];
+        int rkl = rdx_key_build(rkey, sizeof rkey, history_parse_ms(msg_timestamp), msg_msgid);
+        if (rkl > 0)
+          db_writebatch_del(wb, history_cf_redact, rkey, (size_t)rkl);
+      }
+    }
 
     /* Stage delete from msgid index and ml_content if we have a msgid */
     if (msg_msgid[0] != '\0') {

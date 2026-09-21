@@ -84,6 +84,7 @@
  *                    non-NULL pointers.
  */
 
+#include <stdint.h>   /* uint64_t in the redact prototypes */
 #include <time.h>
 
 struct Channel;
@@ -313,6 +314,17 @@ extern void broadcast_channel_advertisement(const char*);
 extern void chathistory_init_callbacks(void);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
+/* Apply a channel redaction that reached us from elsewhere the way ms_redact
+ * does (placeholder + ONE context row + member fan-out; idempotent).  The
+ * _row form takes the stored sender/account explicitly (the redaction
+ * catch-up replay keeps the original redacter; NULL = derive from src). */
+extern void redact_apply_remote(struct Client *src, const char *target,
+                                const char *msgid, const char *redact_msgid,
+                                uint64_t time_ms, const char *reason);
+extern void redact_apply_row(struct Client *src, const char *target,
+                             const char *msgid, const char *redact_msgid,
+                             uint64_t time_ms, const char *reason,
+                             const char *sender_str, const char *account_str);
 extern int m_register(struct Client*, struct Client*, int, char*[]);
 extern int m_verify(struct Client*, struct Client*, int, char*[]);
 extern int m_markread(struct Client*, struct Client*, int, char*[]);
