@@ -9086,7 +9086,15 @@ find_s2s_bxm_batch(struct Client *link, const char *batch_id)
   return NULL;
 }
 
-/** Allocate a new BX M batch slot.  Returns NULL if no slot is free. */
+/** A BX M batch whose '-' end token never arrives (the alias vanished on
+ * a peer we cannot see, the batch was abandoned mid-stream) would otherwise
+ * pin its slot until the link Client is freed.  Same window as m_batch.c's
+ * S2S_ML_BATCH_TIMEOUT_S. */
+#define S2S_BXM_BATCH_TIMEOUT_S 60
+static void free_s2s_bxm_batch(struct S2SBxmBatch *b);
+
+/** Allocate a new BX M batch slot.  Returns NULL if no slot is free.
+ * Reaps timed-out batches first (F-MB3 shape). */
 static struct S2SBxmBatch *
 create_s2s_bxm_batch(struct Client *link, const char *batch_id,
                      const char *alias_num, const char *from_num,
@@ -9096,6 +9104,15 @@ create_s2s_bxm_batch(struct Client *link, const char *batch_id,
   int i;
   struct S2SBxmBatch *b;
 
+  for (i = 0; i < MAXCONNECTIONS; i++)
+    if (s2s_bxm_batches[i] &&
+        CurrentTime - s2s_bxm_batches[i]->start_time > S2S_BXM_BATCH_TIMEOUT_S) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "S2S BX M batch %s timed out (%ld s) -- reaping",
+                s2s_bxm_batches[i]->batch_id,
+                (long)(CurrentTime - s2s_bxm_batches[i]->start_time));
+      free_s2s_bxm_batch(s2s_bxm_batches[i]);
+    }
   for (i = 0; i < MAXCONNECTIONS; i++)
     if (!s2s_bxm_batches[i])
       break;
