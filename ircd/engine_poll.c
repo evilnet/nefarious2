@@ -283,6 +283,9 @@ engine_loop(struct Generators* gen)
   struct Socket *sock;
 
   while (running) {
+    /* Engine errors deferred since the last pass (socket_error()) */
+    socket_run_errors();
+
     wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
     /* An OVERDUE next-timer yields a negative wait, and poll() treats every
      * negative timeout as INFINITE — so a quiet node with no fd traffic would

@@ -22,8 +22,12 @@ TESTPROGS = \
 # is enabled (see configure.in's Keycloak block), and the adapter's body is
 # #ifdef USE_LIBKC.  Their build rules stay defined below either way; they
 # are simply never requested.
+#
+# @EPOLL_CMOCKA_TESTPROGS@ is ircd_events_cmocka when the epoll engine is
+# built, and empty otherwise: it links ../engine_epoll.o.
 CMOCKA_TESTPROGS = \
 	@KC_CMOCKA_TESTPROGS@ \
+	@EPOLL_CMOCKA_TESTPROGS@ \
 	ircd_chattr_cmocka \
 	ircd_match_cmocka \
 	ircd_string_cmocka \
@@ -87,6 +91,7 @@ DEP_SRC = \
 	ircd_kc_adapter_cmocka.c \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
+	ircd_events_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -262,6 +267,14 @@ websocket_cmocka: $(WEBSOCKET_CMOCKA_OBJS)
 DB_CASEFOLD_CMOCKA_OBJS = db_casefold_cmocka.o test_stub.o ../db_casefold.o ../ircd_string.o
 db_casefold_cmocka: $(DB_CASEFOLD_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(DB_CASEFOLD_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# ircd_events tests - an engine error never runs a socket's callback
+# inside the socket_add/socket_events/socket_state call that caused it.
+# Links the real event core and epoll engine, and makes real epoll calls
+# fail; the few ircd symbols around them are stubbed in the test.
+IRCD_EVENTS_CMOCKA_OBJS = ircd_events_cmocka.o test_stub.o ../ircd_events.o ../engine_epoll.o
+ircd_events_cmocka: $(IRCD_EVENTS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_EVENTS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@

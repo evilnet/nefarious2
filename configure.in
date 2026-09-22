@@ -403,7 +403,10 @@ if test x"$unet_cv_enable_epoll" != xno; then
          AC_DEFINE([EPOLL_NEED_BODY], 1, [Define to implement epoll system calls])])
     AC_DEFINE([USE_EPOLL], 1, [Define to enable the epoll engine])
     ENGINE_C="engine_epoll.c $ENGINE_C"
+    dnl ircd_events_cmocka links engine_epoll.o and fails epoll calls on purpose
+    EPOLL_CMOCKA_TESTPROGS="ircd_events_cmocka"
 fi
+AC_SUBST([EPOLL_CMOCKA_TESTPROGS])
 
 dnl How to copy one va_list to another?
 AC_CACHE_CHECK([for va_copy], unet_cv_c_va_copy, [AC_LINK_IFELSE(
