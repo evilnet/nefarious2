@@ -30,11 +30,15 @@ static void test_sessid_alone_authorizes(void **state)
   assert_int_equal(bounce_rebind_auth(0, 1, 0), BRA_SESSID);
 }
 
-static void test_acc_ts_alone_authorizes(void **state)
+static void test_acc_ts_alone_no_longer_authorizes(void **state)
 {
   (void)state;
-  /* Task 2 flips this to BRA_NONE. Until then it pins current behaviour. */
-  assert_int_equal(bounce_rebind_auth(0, 0, 1), BRA_ACC_TS);
+  /* Retired 2026-09. The account timestamp is a services-supplied value the
+   * ircd otherwise only couriers, and matching on it is too coarse: two
+   * unrelated non-bouncer connections sharing an account matched each other.
+   * 8cf493c propagates the sessid through burst, which is what this arm was
+   * standing in for. */
+  assert_int_equal(bounce_rebind_auth(0, 0, 1), BRA_NONE);
 }
 
 static void test_sessid_supersedes_origin(void **state)
@@ -72,7 +76,7 @@ int main(void)
     cmocka_unit_test(test_no_signal_refuses),
     cmocka_unit_test(test_origin_alone_authorizes),
     cmocka_unit_test(test_sessid_alone_authorizes),
-    cmocka_unit_test(test_acc_ts_alone_authorizes),
+    cmocka_unit_test(test_acc_ts_alone_no_longer_authorizes),
     cmocka_unit_test(test_sessid_supersedes_origin),
     cmocka_unit_test(test_stronger_signal_wins_over_acc_ts),
     cmocka_unit_test(test_names_are_stable),
