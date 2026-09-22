@@ -11,7 +11,8 @@ enum BounceRebindAuth {
   BRA_NONE = 0,   /**< no signal; the rebind must be refused */
   BRA_ORIGIN,     /**< introducing server matches the session's recorded origin */
   BRA_SESSID,     /**< introducing message carried a matching ,S sessid tag */
-  BRA_ACC_TS      /**< incoming account TS matched the ghost's (weakest) */
+  BRA_ACC_TS      /**< retired 2026-09; never returned. Kept so log lines
+                       written before the retirement remain interpretable. */
 };
 
 /** Decide which signal authorizes this rebind, strongest first.
