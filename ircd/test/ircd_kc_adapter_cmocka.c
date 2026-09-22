@@ -671,6 +671,63 @@ static void unknown_descriptor_is_ignored(void **state)
   assert_client_intact(cfd);
 }
 
+/* A hangup is libkc's to handle: it gets both directions, does the I/O,
+ * sees EOF and closes the socket.  Dropped, a level-triggered hangup is
+ * reported again every loop pass until libkc's own timeout. */
+static void hangup_reaches_libkc(void **state)
+{
+  struct kc_side k = { 0 };
+  int fd;
+
+  (void)state;
+  fd = kc_open(&k, KC_EVENT_READ);
+  k.script = close_self;          /* what libkc does on EOF */
+  dispatch(fd, ET_EOF);
+
+  assert_int_equal(k.reads, 1);
+  assert_int_equal(k.writes, 1);
+  assert_null(ep[fd]);
+  assert_int_equal(adapter_destroys, adapter_adds);
+}
+
+/* The same for a socket error the loop reports (EPOLLERR): libkc gets it,
+ * and can still remove the socket once it has been flagged in error. */
+static void socket_error_reaches_libkc(void **state)
+{
+  struct kc_side k = { 0 };
+  int fd;
+
+  (void)state;
+  fd = kc_open(&k, KC_EVENT_READ | KC_EVENT_WRITE);
+  k.script = close_self;
+  dispatch(fd, ET_ERROR);
+
+  assert_int_equal(k.reads, 1);
+  assert_int_equal(k.writes, 1);
+  assert_null(ep[fd]);
+  assert_int_equal(adapter_destroys, adapter_adds);
+}
+
+/* An error the engine raises while the adapter is inside its own call --
+ * a refused add, a failed interest change -- must not call back into
+ * libkc: libkc is on the stack, and curl refuses recursive calls. */
+static void engine_error_inside_adapter_call_stays_out_of_libkc(void **state)
+{
+  struct kc_side k = { 0 };
+
+  (void)state;
+  k.fd = fake_open();
+  add_fail_next = 1;
+  assert_int_equal(ops->socket_add(k.fd, KC_EVENT_READ, kc_cb, &k), -1);
+  assert_int_equal(k.reads + k.writes, 0);
+
+  assert_int_equal(ops->socket_add(k.fd, KC_EVENT_READ, kc_cb, &k), 0);
+  ep[k.fd] = NULL;                /* its registration vanished underneath */
+  ops->socket_update(k.fd, KC_EVENT_READ | KC_EVENT_WRITE);
+  assert_int_equal(enoent_mods, 1);
+  assert_int_equal(k.reads + k.writes, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -683,6 +740,9 @@ int main(void)
     cmocka_unit_test_setup_teardown(removed_socket_misses_its_pending_event, setup, teardown),
     cmocka_unit_test_setup_teardown(cleanup_releases_every_registration, setup, teardown),
     cmocka_unit_test_setup_teardown(unknown_descriptor_is_ignored, setup, teardown),
+    cmocka_unit_test_setup_teardown(hangup_reaches_libkc, setup, teardown),
+    cmocka_unit_test_setup_teardown(socket_error_reaches_libkc, setup, teardown),
+    cmocka_unit_test_setup_teardown(engine_error_inside_adapter_call_stays_out_of_libkc, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

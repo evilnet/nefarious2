@@ -75,6 +75,12 @@ struct kc_sock_ctx {
  * keyed by nothing but the descriptor: no size limit on the number. */
 static struct kc_sock_ctx *kc_live;
 
+/* Non-zero while the adapter is inside socket_add() or socket_events() on
+ * libkc's behalf.  The engine can raise ET_ERROR from inside those calls
+ * (a refused add, a failed interest change); libkc is on the stack then,
+ * so that error must not call back into it. */
+static int kc_engine_call;
+
 /* Find the live registration for fd */
 static struct kc_sock_ctx *
 find_live(int fd)
@@ -106,26 +112,40 @@ static void
 kc_socket_event_cb(struct Event *ev)
 {
     struct kc_sock_ctx *ctx = (struct kc_sock_ctx *)s_data(ev_socket(ev));
+    int kc_events;
 
     switch (ev_type(ev)) {
     case ET_READ:
+        kc_events = KC_EVENT_READ;
+        break;
     case ET_WRITE:
-        if (!ctx->kc_callback)
-            break;              /* removed while this event was in flight */
-        Debug((DEBUG_INFO, "kc_adapter: socket_event fd=%d type=%s",
-               ctx->fd, ev_type(ev) == ET_READ ? "READ" : "WRITE"));
-        ctx->kc_callback(ctx->fd,
-                          ev_type(ev) == ET_READ ? KC_EVENT_READ : KC_EVENT_WRITE,
-                          ctx->kc_data);
-        /* ctx may be removed now; it stays valid until this event ends */
+        kc_events = KC_EVENT_WRITE;
+        break;
+    case ET_EOF:
+    case ET_ERROR:
+        /* A hangup or a socket error.  libkc has no event for either, so
+         * hand it both directions: it does the I/O, sees EOF or the error,
+         * and closes the socket.  Dropped, a level-triggered hangup was
+         * reported again every loop pass until libkc's own timeout. */
+        if (kc_engine_call)
+            return;             /* raised inside our own call; see above */
+        kc_events = KC_EVENT_READ | KC_EVENT_WRITE;
         break;
     case ET_DESTROY:
         /* No event holds the socket any more; the registration is over. */
         free(ctx);
-        break;
+        return;
     default:
-        break;
+        return;
     }
+
+    if (!ctx->kc_callback)
+        return;                 /* removed while this event was in flight */
+    Debug((DEBUG_INFO, "kc_adapter: socket_event fd=%d type=%s", ctx->fd,
+           ev_type(ev) == ET_READ ? "READ" : ev_type(ev) == ET_WRITE ? "WRITE" :
+           ev_type(ev) == ET_EOF ? "EOF" : "ERROR"));
+    ctx->kc_callback(ctx->fd, kc_events, ctx->kc_data);
+    /* ctx may be removed now; it stays valid until this event ends */
 }
 
 /* Map KC_EVENT flags to Nefarious SOCK_EVENT flags */
@@ -140,6 +160,15 @@ kc_to_sock_events(int kc_events)
     return ev;
 }
 
+/* Set a registration's interest to exactly the given KC_EVENT flags */
+static void
+kc_set_interest(struct kc_sock_ctx *ctx, int events)
+{
+    kc_engine_call++;
+    socket_events(&ctx->sock, SOCK_ACTION_SET | kc_to_sock_events(events));
+    kc_engine_call--;
+}
+
 /* kc_event_ops: socket_add */
 static int
 ircd_kc_socket_add(int fd, int events,
@@ -147,6 +176,7 @@ ircd_kc_socket_add(int fd, int events,
                    void *data)
 {
     struct kc_sock_ctx *ctx;
+    int added;
 
     Debug((DEBUG_INFO, "kc_adapter: socket_add fd=%d events=%d", fd, events));
 
@@ -157,7 +187,7 @@ ircd_kc_socket_add(int fd, int events,
         /* Registered and not removed: only the interest changes */
         ctx->kc_callback = callback;
         ctx->kc_data = data;
-        socket_events(&ctx->sock, SOCK_ACTION_SET | kc_to_sock_events(events));
+        kc_set_interest(ctx, events);
         return 0;
     }
 
@@ -171,8 +201,11 @@ ircd_kc_socket_add(int fd, int events,
     ctx->kc_data = data;
     ctx->fd = fd;
 
-    if (!socket_add(&ctx->sock, kc_socket_event_cb, ctx,
-                    SS_CONNECTED, kc_to_sock_events(events), fd)) {
+    kc_engine_call++;
+    added = socket_add(&ctx->sock, kc_socket_event_cb, ctx,
+                       SS_CONNECTED, kc_to_sock_events(events), fd);
+    kc_engine_call--;
+    if (!added) {
         /* The engine refused it, so there is no registration to delete:
          * unlink the generator socket_add() linked in, and drop it. */
         log_write(LS_SYSTEM, L_ERROR, 0,
@@ -197,7 +230,7 @@ ircd_kc_socket_update(int fd, int events)
     if (!ctx)
         return -1;
 
-    socket_events(&ctx->sock, SOCK_ACTION_SET | kc_to_sock_events(events));
+    kc_set_interest(ctx, events);
     return 0;
 }
 
