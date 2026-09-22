@@ -695,6 +695,13 @@ void add_connection(struct Listener* listener, int fd) {
     close(fd);
 #endif /* USE_SSL */
     cli_fd(new_client) = -1;
+    /* A refused registration raises no event, so nothing has exited the
+     * client: give back its IPcheck charge (the server, not the client,
+     * failed) and free it.  It is on no list yet, and with no fd and no
+     * socket to delete free_client() deallocates it at once. */
+    if (IsIPChecked(new_client))
+      IPcheck_connect_fail(new_client, 1);
+    free_client(new_client);
     return;
   }
 
