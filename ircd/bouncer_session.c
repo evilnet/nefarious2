@@ -26,6 +26,7 @@
 
 #include "bouncer_session.h"
 #include "bouncer_converge.h"
+#include "bouncer_rebind_auth.h"
 #include "websocket.h"
 #include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
@@ -6093,6 +6094,7 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
   struct BouncerSession *session;
   struct Membership *member;
   struct Connection *old_con;
+  enum BounceRebindAuth rebind_auth = BRA_NONE;
   int i;
 
   if (!ghost || !server || !new_numeric || !*new_numeric)
@@ -6149,7 +6151,9 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
                         && cli_user(ghost)->acc_create != 0
                         && incoming_acc_ts == cli_user(ghost)->acc_create);
 
-    if (!origin_match && !sessid_match && !acc_ts_match) {
+    rebind_auth = bounce_rebind_auth(origin_match, sessid_match, acc_ts_match);
+
+    if (rebind_auth == BRA_NONE) {
       Debug((DEBUG_INFO,
              "bounce_rebind: refusing — session %s origin %s != introducing "
              "server %s, no sessid-tag match (wire ,S='%s'), no account-TS "
@@ -6162,20 +6166,11 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
       return -1;
     }
 
-    if (!origin_match && sessid_match) {
-      Debug((DEBUG_INFO,
-             "bounce_rebind: authorizing via sessid-tag match — session %s "
-             "origin %s, introducing server %s carries matching ,S=%s "
-             "(account %s)",
-             session->hs_sessid, session->hs_origin, cli_yxx(server),
-             wire_sessid, cli_user(ghost)->account));
-    } else if (!origin_match && !sessid_match && acc_ts_match) {
-      Debug((DEBUG_INFO,
-             "bounce_rebind: authorizing via account-TS match — session %s "
-             "origin %s, introducing server %s, account %s, TS=%ld",
-             session->hs_sessid, session->hs_origin, cli_yxx(server),
-             cli_user(ghost)->account, (long)incoming_acc_ts));
-    }
+    Debug((DEBUG_INFO,
+           "bounce_rebind: authorizing via %s — session %s origin %s, "
+           "introducing server %s, account %s",
+           bounce_rebind_auth_name(rebind_auth), session->hs_sessid,
+           session->hs_origin, cli_yxx(server), cli_user(ghost)->account));
   }
 
   Debug((DEBUG_INFO,
@@ -6267,8 +6262,9 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
 
   log_write(LS_USER, L_TRACE, 0,
             "Bouncer rebind: ghost %s rebound to remote primary %s on %s "
-            "(session %s)", cli_name(ghost), new_numeric, cli_name(server),
-            session->hs_sessid);
+            "(session %s, authorized via %s)", cli_name(ghost), new_numeric,
+            cli_name(server), session->hs_sessid,
+            bounce_rebind_auth_name(rebind_auth));
 
   return 0;
 }
