@@ -1095,8 +1095,9 @@ fi
 dnl KC_SRC carries the vendored ircd/kc sources into ircd/Makefile.in's
 dnl IRCD_SRC, and KC_CMOCKA_TESTPROGS carries the kc cmocka suites
 dnl (kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka
-dnl kc_cred_derive_cmocka kc_error_classify_cmocka) into
-dnl ircd/test/Makefile.in's CMOCKA_TESTPROGS.  Both are empty unless
+dnl kc_cred_derive_cmocka kc_error_classify_cmocka, plus
+dnl ircd_kc_adapter_cmocka for the event adapter, whose body is
+dnl #ifdef USE_LIBKC) into ircd/test/Makefile.in's CMOCKA_TESTPROGS.  Both are empty unless
 dnl --enable-keycloak: the kc sources need libcurl/libjansson, which are
 dnl only probed (and only added to LIBS) inside this block, so compiling
 dnl them in a disabled build would fail to link.  The kc/*.c files are
@@ -1112,7 +1113,7 @@ if test x"$unet_cv_enable_keycloak" = xyes; then
     [AC_MSG_ERROR([libjansson is required for --enable-keycloak])])
 
   KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_cred_derive.c kc/kc_error_classify.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c"
-  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka"
+  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka ircd_kc_adapter_cmocka"
 
   AC_DEFINE([USE_LIBKC], , [Define if Keycloak support (in-tree ircd/kc) is built])
   AC_MSG_NOTICE([Keycloak support enabled (in-tree ircd/kc)])

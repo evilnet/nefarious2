@@ -16,10 +16,11 @@ TESTPROGS = \
 # CMocka test programs (proper assertions)
 #
 # @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka
-# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka under
-# --enable-keycloak, and empty otherwise: those six link ../kc/*.o, which
-# ircd/Makefile only builds when Keycloak is enabled (see configure.in's
-# Keycloak block).  Their build rules stay defined below either way; they
+# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka
+# ircd_kc_adapter_cmocka under --enable-keycloak, and empty otherwise: the
+# kc suites link ../kc/*.o, which ircd/Makefile only builds when Keycloak
+# is enabled (see configure.in's Keycloak block), and the adapter's body is
+# #ifdef USE_LIBKC.  Their build rules stay defined below either way; they
 # are simply never requested.
 CMOCKA_TESTPROGS = \
 	@KC_CMOCKA_TESTPROGS@ \
@@ -83,6 +84,7 @@ DEP_SRC = \
 	kc_jwt_cmocka.c \
 	kc_cred_derive_cmocka.c \
 	kc_error_classify_cmocka.c \
+	ircd_kc_adapter_cmocka.c \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
 	test_stub.c
@@ -238,6 +240,15 @@ kc_cred_derive_cmocka: $(KC_CRED_DERIVE_CMOCKA_OBJS)
 KC_ERROR_CLASSIFY_CMOCKA_OBJS = kc_error_classify_cmocka.o ../kc/kc_error_classify.o
 kc_error_classify_cmocka: $(KC_ERROR_CLASSIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_ERROR_CLASSIFY_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS)
+
+# ircd_kc_adapter tests - libkc's socket and timer bridge onto the event
+# engine.  The event layer is a fake in the test with the kernel's fd
+# semantics (lowest free number on open, epoll registrations keyed by the
+# number and dropped on close), so an engine call made with a number libkc
+# already gave back is observable.  No libkc objects are linked.
+IRCD_KC_ADAPTER_CMOCKA_OBJS = ircd_kc_adapter_cmocka.o test_stub.o ../ircd_kc_adapter.o
+ircd_kc_adapter_cmocka: $(IRCD_KC_ADAPTER_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_KC_ADAPTER_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # websocket tests - frame decoding and handshake accumulation (#98, #99).
 # Includes websocket.c directly with stubs; needs OpenSSL for the accept key.
 WEBSOCKET_CMOCKA_OBJS = websocket_cmocka.o test_stub.o ../ircd_alloc.o ../ircd_string.o

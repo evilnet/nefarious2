@@ -9,16 +9,32 @@
  *   libkc logging     →  kc_log_ops    →  log_write(LS_SYSTEM, ...)
  *
  * Socket lifecycle:
- *   curl_multi recycles fds during callbacks (DNS socket close → TCP socket
- *   open with same fd number). The adapter handles this with two strategies:
+ *   libkc owns its descriptors.  For each one it registered, it calls
+ *   socket_remove(fd) and only then close(fd): the webhook's conn_close
+ *   and listener teardown, and curl's CURL_POLL_REMOVE, which curl issues
+ *   before closing a socket.  Once close() returns, the kernel may hand
+ *   the number to anyone -- the next accept() on a client listener, an
+ *   ident query, a server link -- and epoll registrations are keyed by
+ *   the number.  So every engine call this adapter makes for a descriptor
+ *   happens before socket_remove returns:
  *
- *   1. FD recycled (remove + re-add same fd): Use socket_reattach() to
- *      re-register with epoll without touching gh_ref/gh_flags. Safe to
- *      call from within callbacks.
+ *   - Each registration has its own context.  socket_remove takes it out
+ *     of the fd lookup and calls socket_del() at once, while the number
+ *     still names libkc's socket, so the engine's EPOLL_CTL_DEL removes
+ *     the right registration.
+ *   - The context is freed on ET_DESTROY, which the event core delivers
+ *     only when no event in flight still holds the socket -- also when
+ *     libkc removes a socket from inside that socket's own callback.
+ *   - A number libkc adds again, even inside the callback that removed it
+ *     (curl recycles descriptors that way), gets a fresh context and a
+ *     fresh registration.
  *
- *   2. Simple removal (no re-add): Defer socket_del to a 0-second timer.
- *      timer_run() executes after engine_loop's event dispatch completes
- *      and all gen_ref's are released.
+ *   The adapter used to keep one embedded Socket per descriptor number and
+ *   defer socket_del to a 0-second timer.  By the time the timer ran,
+ *   libkc had closed the descriptor; if a client had been accepted on the
+ *   same number meanwhile, the stale EPOLL_CTL_DEL removed the client's
+ *   registration, and the client's next interest change failed inside
+ *   send_buffer and took the server down.
  */
 
 #include "config.h"
@@ -45,106 +61,67 @@
  * =============================================================================
  */
 
-#define MAX_KC_SOCKETS 256
-
+/* One registration: from socket_add until its ET_DESTROY. */
 struct kc_sock_ctx {
     struct Socket sock;                        /* Nefarious socket struct */
-    void (*kc_callback)(int fd, int events, void *data);  /* libkc callback */
+    void (*kc_callback)(int fd, int events, void *data);  /* NULL once removed */
     void *kc_data;                             /* libkc callback data */
     int fd;                                    /* file descriptor */
-    int in_use;                                /* slot is active */
-    int pending_remove;                        /* deferred socket_del needed */
+    struct kc_sock_ctx *next;                  /* kc_live linkage */
 };
 
-static struct kc_sock_ctx kc_sockets[MAX_KC_SOCKETS];
+/* Registrations libkc has not removed.  A handful at a time (curl's
+ * connection caps, the webhook listener and its connections), so a list
+ * keyed by nothing but the descriptor: no size limit on the number. */
+static struct kc_sock_ctx *kc_live;
 
-/* Deferred removal timer: fires in timer_run() after engine_loop's
- * event dispatch is complete and all gen_ref's are released. */
-static struct Timer kc_deferred_timer;
-static int kc_deferred_scheduled = 0;
-
-/* Forward declarations */
-static void kc_socket_event_cb(struct Event *ev);
-static unsigned int kc_to_sock_events(int kc_events);
-static void kc_schedule_deferred(void);
-
-/* Find a socket context by fd */
+/* Find the live registration for fd */
 static struct kc_sock_ctx *
-find_sock_ctx(int fd)
+find_live(int fd)
 {
-    if (fd >= 0 && fd < MAX_KC_SOCKETS && kc_sockets[fd].in_use)
-        return &kc_sockets[fd];
+    struct kc_sock_ctx *ctx;
+
+    for (ctx = kc_live; ctx; ctx = ctx->next)
+        if (ctx->fd == fd)
+            return ctx;
     return NULL;
 }
 
-/* Timer callback for deferred socket removals.
- * Runs in timer_run() AFTER engine_loop's event dispatch loop completes,
- * so all gen_ref's have been released and socket_del is safe. */
+/* Take a registration out of the fd lookup */
 static void
-kc_deferred_timer_cb(struct Event *ev)
+unlink_live(struct kc_sock_ctx *ctx)
 {
-    int i;
+    struct kc_sock_ctx **pp;
 
-    switch (ev_type(ev)) {
-    case ET_EXPIRE:
-        kc_deferred_scheduled = 0;
-
-        for (i = 0; i < MAX_KC_SOCKETS; i++) {
-            struct kc_sock_ctx *ctx = &kc_sockets[i];
-
-            if (!ctx->pending_remove || !ctx->in_use)
-                continue;
-
-            Debug((DEBUG_INFO, "kc_adapter: deferred socket_del fd=%d", i));
-            ctx->pending_remove = 0;
-            socket_del(&ctx->sock);
-            ctx->in_use = 0;
+    for (pp = &kc_live; *pp; pp = &(*pp)->next)
+        if (*pp == ctx) {
+            *pp = ctx->next;
+            ctx->next = NULL;
+            return;
         }
-        break;
-
-    case ET_DESTROY:
-        /* Static timer — nothing to free */
-        break;
-
-    default:
-        break;
-    }
-}
-
-/* Schedule the deferred removal timer if not already scheduled */
-static void
-kc_schedule_deferred(void)
-{
-    if (kc_deferred_scheduled)
-        return;
-    kc_deferred_scheduled = 1;
-    timer_add(timer_init(&kc_deferred_timer), kc_deferred_timer_cb, NULL,
-              TT_RELATIVE, 0);
 }
 
 /* Nefarious event callback - translates Event to libkc callback */
 static void
 kc_socket_event_cb(struct Event *ev)
 {
-    struct Socket *sock = ev_socket(ev);
-    struct kc_sock_ctx *ctx = (struct kc_sock_ctx *)s_data(sock);
-
-    if (!ctx || !ctx->kc_callback)
-        return;
+    struct kc_sock_ctx *ctx = (struct kc_sock_ctx *)s_data(ev_socket(ev));
 
     switch (ev_type(ev)) {
     case ET_READ:
     case ET_WRITE:
+        if (!ctx->kc_callback)
+            break;              /* removed while this event was in flight */
         Debug((DEBUG_INFO, "kc_adapter: socket_event fd=%d type=%s",
                ctx->fd, ev_type(ev) == ET_READ ? "READ" : "WRITE"));
         ctx->kc_callback(ctx->fd,
                           ev_type(ev) == ET_READ ? KC_EVENT_READ : KC_EVENT_WRITE,
                           ctx->kc_data);
+        /* ctx may be removed now; it stays valid until this event ends */
         break;
     case ET_DESTROY:
-        /* Socket being destroyed by event engine - clean up our tracking */
-        if (ctx->fd >= 0 && ctx->fd < MAX_KC_SOCKETS)
-            ctx->in_use = 0;
+        /* No event holds the socket any more; the registration is over. */
+        free(ctx);
         break;
     default:
         break;
@@ -173,51 +150,40 @@ ircd_kc_socket_add(int fd, int events,
 
     Debug((DEBUG_INFO, "kc_adapter: socket_add fd=%d events=%d", fd, events));
 
-    if (fd < 0 || fd >= MAX_KC_SOCKETS) {
-        log_write(LS_SYSTEM, L_ERROR, 0,
-                  "kc_adapter: socket_add fd=%d out of range (max %d)",
-                  fd, MAX_KC_SOCKETS);
+    if (fd < 0)
         return -1;
-    }
 
-    ctx = &kc_sockets[fd];
-
-    if (ctx->in_use && ctx->pending_remove) {
-        /* Strategy A: FD recycled — curl removed the old socket and is
-         * re-adding the same fd (e.g., DNS close → TCP open with same fd).
-         *
-         * Cancel the deferred remove. Use socket_reattach() to re-register
-         * with epoll without touching gh_ref/gh_flags, then update the
-         * event interest mask. The Socket struct stays alive. */
-        Debug((DEBUG_INFO, "kc_adapter: socket_reattach fd=%d events=%d", fd, events));
-        ctx->pending_remove = 0;
+    if ((ctx = find_live(fd))) {
+        /* Registered and not removed: only the interest changes */
         ctx->kc_callback = callback;
         ctx->kc_data = data;
-        socket_reattach(&ctx->sock, fd);
-        socket_events(&ctx->sock, kc_to_sock_events(events));
+        socket_events(&ctx->sock, SOCK_ACTION_SET | kc_to_sock_events(events));
         return 0;
     }
 
-    if (ctx->in_use) {
-        /* Already tracked, not pending remove — just update */
-        ctx->kc_callback = callback;
-        ctx->kc_data = data;
-        socket_events(&ctx->sock, kc_to_sock_events(events));
-        return 0;
-    }
-
-    /* Brand new fd — fresh registration */
-    memset(ctx, 0, sizeof(*ctx));
+    /* New descriptor, or a number libkc removed and is using again: a
+     * fresh registration either way.  A removed one is not reused -- it
+     * may still be held by the event that is running right now. */
+    ctx = calloc(1, sizeof(*ctx));
+    if (!ctx)
+        return -1;
     ctx->kc_callback = callback;
     ctx->kc_data = data;
     ctx->fd = fd;
 
-    if (socket_add(&ctx->sock, kc_socket_event_cb, ctx,
-                   SS_CONNECTED, kc_to_sock_events(events), fd) < 0) {
+    if (!socket_add(&ctx->sock, kc_socket_event_cb, ctx,
+                    SS_CONNECTED, kc_to_sock_events(events), fd)) {
+        /* The engine refused it, so there is no registration to delete:
+         * unlink the generator socket_add() linked in, and drop it. */
+        log_write(LS_SYSTEM, L_ERROR, 0,
+                  "kc_adapter: event engine refused fd=%d", fd);
+        gen_dequeue(&ctx->sock);
+        free(ctx);
         return -1;
     }
 
-    ctx->in_use = 1;
+    ctx->next = kc_live;
+    kc_live = ctx;
     return 0;
 }
 
@@ -225,11 +191,13 @@ ircd_kc_socket_add(int fd, int events,
 static int
 ircd_kc_socket_update(int fd, int events)
 {
-    struct kc_sock_ctx *ctx = find_sock_ctx(fd);
+    struct kc_sock_ctx *ctx = find_live(fd);
+
+    /* Never added, or already removed: the number may be someone else's */
     if (!ctx)
         return -1;
 
-    socket_events(&ctx->sock, kc_to_sock_events(events));
+    socket_events(&ctx->sock, SOCK_ACTION_SET | kc_to_sock_events(events));
     return 0;
 }
 
@@ -237,22 +205,20 @@ ircd_kc_socket_update(int fd, int events)
 static void
 ircd_kc_socket_remove(int fd)
 {
-    struct kc_sock_ctx *ctx = find_sock_ctx(fd);
+    struct kc_sock_ctx *ctx = find_live(fd);
     if (!ctx)
         return;
 
     Debug((DEBUG_INFO, "kc_adapter: socket_remove fd=%d", fd));
 
-    /* Strategy B: Defer socket_del to a 0-second timer.
-     * socket_del is unsafe during event dispatch (clears GEN_ACTIVE while
-     * engine_loop holds a gen_ref). The timer fires in timer_run() after
-     * all socket events are processed and gen_ref's released.
-     *
-     * If socket_add is called for this fd before the timer fires
-     * (fd recycling), Strategy A kicks in and cancels the deferred remove. */
-    ctx->pending_remove = 1;
-    ctx->kc_callback = NULL;  /* Stop delivering events */
-    kc_schedule_deferred();
+    /* Delete it from the engine now, while fd still names libkc's socket:
+     * libkc closes it as soon as we return, and the next accept() may get
+     * the same number.  If an event on this socket is running (libkc
+     * removing it from its own callback), the event core holds the
+     * destroy until that event ends; ET_DESTROY then frees ctx. */
+    unlink_live(ctx);
+    ctx->kc_callback = NULL;
+    socket_del(&ctx->sock);
 }
 
 /*
@@ -411,8 +377,7 @@ static const struct kc_log_ops ircd_kc_log_ops = {
 void
 ircd_kc_adapter_init(void)
 {
-    memset(kc_sockets, 0, sizeof(kc_sockets));
-    kc_deferred_scheduled = 0;
+    kc_live = NULL;
 }
 
 const struct kc_event_ops *
@@ -430,16 +395,13 @@ ircd_kc_get_log_ops(void)
 void
 ircd_kc_adapter_cleanup(void)
 {
-    int i;
-    for (i = 0; i < MAX_KC_SOCKETS; i++) {
-        if (kc_sockets[i].in_use) {
-            socket_del(&kc_sockets[i].sock);
-            kc_sockets[i].in_use = 0;
-        }
-    }
-    if (kc_deferred_scheduled) {
-        timer_del(&kc_deferred_timer);
-        kc_deferred_scheduled = 0;
+    while (kc_live) {
+        struct kc_sock_ctx *ctx = kc_live;
+
+        kc_live = ctx->next;
+        ctx->next = NULL;
+        ctx->kc_callback = NULL;
+        socket_del(&ctx->sock);
     }
 }
 
