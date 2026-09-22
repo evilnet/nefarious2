@@ -282,6 +282,9 @@ engine_loop(struct Generators* gen)
   struct Socket *sock;
 
   while (running) {
+    /* Engine errors deferred since the last pass (socket_error()) */
+    socket_run_errors();
+
     wait = timer_next(gen) ? (timer_next(gen) - CurrentTime) * 1000 : -1;
 
     Debug((DEBUG_INFO, "poll: delay: %Tu (%Tu) %d", timer_next(gen),
