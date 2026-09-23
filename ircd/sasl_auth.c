@@ -399,6 +399,29 @@ static void poscache_invalidate_user(const char *username)
   }
 }
 
+/** Drop every positive entry carrying this Keycloak id (compact form).
+ * The entry for a user who logged out minutes ago still answers their
+ * password; a delete or reset names that user only by id. */
+static void poscache_invalidate_id(const char *kc_id)
+{
+  unsigned int i;
+
+  for (i = 0; i < AUTHCACHE_BUCKETS; i++) {
+    struct poscache_entry **pp = &poscache_table[i];
+    struct poscache_entry *e;
+
+    while ((e = *pp) != NULL) {
+      if (e->kc_id[0] && 0 == strcmp(e->kc_id, kc_id)) {
+        *pp = e->next;
+        MyFree(e);
+        cache_stats.pos_invalidations++;
+      } else {
+        pp = &e->next;
+      }
+    }
+  }
+}
+
 /** Sweep expired entries from both caches. Called periodically. */
 static void authcache_expire_sweep(void)
 {
@@ -483,6 +506,17 @@ void sasl_cache_invalidate_user(const char *username)
   poscache_invalidate_user(username);
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL AUTH CACHE: Invalidated caches for user %s", username);
+}
+
+/** Invalidate the positive cache by Keycloak id.  The negative cache is
+ * keyed by name only (a failed login has no id) and is left alone. */
+void sasl_cache_invalidate_id(const char *kc_id)
+{
+  if (!authcache_initialized || !kc_id || !kc_id[0])
+    return;
+  poscache_invalidate_id(kc_id);
+  log_write(LS_SYSTEM, L_DEBUG, 0,
+            "SASL AUTH CACHE: Invalidated positive entries for id %s", kc_id);
 }
 
 /** Get auth cache statistics. */

@@ -161,6 +161,7 @@ struct sasl_cache_stats {
 
 /** Invalidate all auth cache entries for a user (called from webhook handler). */
 extern void sasl_cache_invalidate_user(const char *username);
+extern void sasl_cache_invalidate_id(const char *kc_id);
 
 /** Get auth cache statistics. */
 extern void sasl_cache_stats_get(struct sasl_cache_stats *out);

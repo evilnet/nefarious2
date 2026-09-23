@@ -21,6 +21,7 @@
 
 /* Common includes needed by both USE_LIBKC and stub/P10 handler paths */
 #include "sasl_webhook.h"
+#include "account_id.h"
 #include "sasl_auth.h"
 #include "client.h"
 #include "ircd_log.h"
@@ -468,25 +469,37 @@ void sasl_webhook_stats_get(struct sasl_webhook_stats *out)
  * This handler is independent of USE_LIBKC since any server
  * can receive CI messages from a peer that has webhook support.
  *
- * Format: <servernumeric> CI <username>
+ * Format: <servernumeric> CI <username|*> [<kc_id>]
+ *
+ * The name form is the original; the id form (step 5's compact Keycloak
+ * id) reaches a server that never saw a client for the user, whose
+ * positive cache may still hold their password.  "*" stands for "no
+ * name".  A receiver without the id form ignores the second parameter and
+ * finds nothing under "*"; the message is relayed as received.
  */
 int ms_cacheinval(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
-  const char *username;
+  const char *username, *kc_id;
 
   if (parc < 2)
     return 0;
 
   username = parv[1];
+  kc_id = (parc > 2 && account_id_valid(parv[2])) ? parv[2] : NULL;
 
   log_write(LS_SYSTEM, L_DEBUG, 0,
-            "CI: Cache invalidation for %s from %C", username, sptr);
+            "CI: Cache invalidation for %s id %s from %C",
+            username, kc_id ? kc_id : "-", sptr);
 
-  /* Invalidate local auth caches for this user */
-  sasl_cache_invalidate_user(username);
+  if (0 != strcmp(username, "*"))
+    sasl_cache_invalidate_user(username);
+  if (kc_id)
+    sasl_cache_invalidate_id(kc_id);
 
-  /* Relay to all other servers (flood-fill) */
-  sendcmdto_serv_butone_v3(sptr, CMD_CACHEINVAL, cptr, "%s", username);
+  if (kc_id)
+    sendcmdto_serv_butone_v3(sptr, CMD_CACHEINVAL, cptr, "%s %s", username, kc_id);
+  else
+    sendcmdto_serv_butone_v3(sptr, CMD_CACHEINVAL, cptr, "%s", username);
 
   return 0;
 }
