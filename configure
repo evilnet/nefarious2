@@ -651,6 +651,7 @@ IRCDOWN
 IRCDMODE
 SYMLINK
 INSTALL_RULE
+EPOLL_CMOCKA_TESTPROGS
 ENGINE_C
 YFLAGS
 YACC
@@ -4730,7 +4731,6 @@ ac_compile='$CC -c $CFLAGS $CPPFLAGS conftest.$ac_ext >&5'
 ac_link='$CC -o conftest$ac_exeext $CFLAGS $CPPFLAGS $LDFLAGS conftest.$ac_ext $LIBS >&5'
 ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
-
 am_cv_prog_cc_stdc=$ac_cv_prog_cc_stdc
 
 
@@ -7695,7 +7695,9 @@ rm -f core conftest.err conftest.$ac_objext conftest.beam \
 printf "%s\n" "#define USE_EPOLL 1" >>confdefs.h
 
     ENGINE_C="engine_epoll.c $ENGINE_C"
+        EPOLL_CMOCKA_TESTPROGS="ircd_events_cmocka"
 fi
+
 
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for va_copy" >&5
 printf %s "checking for va_copy... " >&6; }
@@ -9623,8 +9625,8 @@ esac
 fi
 
 
-  KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_cred_derive.c kc/kc_error_classify.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c"
-  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka"
+  KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_cred_derive.c kc/kc_error_classify.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c webhook_subject.c"
+  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka ircd_kc_adapter_cmocka webhook_subject_cmocka"
 
 
 printf "%s\n" "#define USE_LIBKC /**/" >>confdefs.h
@@ -9898,7 +9900,6 @@ DEFS=-DHAVE_CONFIG_H
 
 ac_libobjs=
 ac_ltlibobjs=
-U=
 for ac_i in : $LIBOBJS; do test "x$ac_i" = x: && continue
   # 1. Remove the extension, and $U if already installed.
   ac_script='s/\$U\././;s/\.o$//;s/\.obj$//'

@@ -15,7 +15,7 @@ TESTPROGS = \
 
 # CMocka test programs (proper assertions)
 #
-# @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka
+# @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka ... webhook_subject_cmocka
 # kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka
 # ircd_kc_adapter_cmocka under --enable-keycloak, and empty otherwise: the
 # kc suites link ../kc/*.o, which ircd/Makefile only builds when Keycloak
@@ -51,8 +51,7 @@ CMOCKA_TESTPROGS = \
 	webpush_line_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka \
-	account_id_cmocka \
-	webhook_subject_cmocka
+	account_id_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
