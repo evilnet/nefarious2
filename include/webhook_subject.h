@@ -20,6 +20,7 @@ enum WebhookSubjectKind {
   WH_SUBJECT_DISABLE,         /**< USER/UPDATE whose representation carries enabled:false */
   WH_SUBJECT_ENABLE,          /**< USER/UPDATE carrying enabled:true (log only) */
   WH_SUBJECT_PASSWORD_RESET,  /**< USER/ACTION users/<uuid>/reset-password */
+  WH_SUBJECT_CREDENTIAL_REMOVED, /**< users/<uuid>/credentials/<id>, DELETE or ACTION: a credential is gone */
   WH_SUBJECT_LOGOUT           /**< USER/ACTION users/<uuid>/logout (log only) */
 };
 
@@ -33,7 +34,11 @@ struct WebhookSubject {
 };
 
 /** Decide what ev asks for.  out is always filled (kind NONE when there is
- * nothing to do, including a subject nobody can name).
+ * nothing to do, including a subject nobody can name).  Only the bare path
+ * "users/<uuid>" (or no path at all, a synthetic name-carrying event) is
+ * the user; a DELETE or UPDATE on a sub-resource of the user (a federated
+ * identity link, a consent, a group) is nothing to do, and a credential
+ * removal is a cache purge.
  * @return 1 when out->kind != WH_SUBJECT_NONE. */
 extern int webhook_subject_resolve(const struct kc_webhook_event *ev,
                                    struct WebhookSubject *out);

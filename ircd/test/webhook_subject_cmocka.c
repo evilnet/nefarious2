@@ -1,8 +1,8 @@
 /* cmocka suite for the pure webhook subject decision
  * (include/webhook_subject.h), over the real USER admin-event shapes the
- * bed realm produced (the json files under fixtures/webhook; five are
+ * bed realm produced (the json files under fixtures/webhook; nine are
  * synthetic and say so in their names: -disable, -disable-bare, -actor-named,
- * -bad-path, -root-username).  Run from ircd/test: the fixture path is relative to
+ * -bad-path, -root-username, -federated-identity, -credential, -subpath).  Run from ircd/test: the fixture path is relative to
  * srcdir, as the test-cmocka gate does. */
 #include <stdarg.h>
 #include <stddef.h>
@@ -175,6 +175,43 @@ static void test_non_user_resources_and_null(void **state)
   assert_string_equal(webhook_subject_kind_name(WH_SUBJECT_DISABLE), "disable");
 }
 
+static void test_subresource_delete_or_update_is_not_the_user(void **state)
+{
+  struct fixture f; struct WebhookSubject s;
+  (void)state;
+  /* Review focus 3, the case the first pass missed: Keycloak records the
+   * removal of a user's federated identity link as USER/DELETE on
+   * users/<uuid>/federated-identity/<provider>.  Only the bare path is the
+   * user's own deletion. */
+  load(&f, "user-delete-federated-identity.json");
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 0);
+  assert_int_equal(s.kind, WH_SUBJECT_NONE);
+  unload(&f);
+  load(&f, "user-update-subpath.json");
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 0);
+  assert_int_equal(s.kind, WH_SUBJECT_NONE);
+  unload(&f);
+}
+
+static void test_credential_removal_purges(void **state)
+{
+  struct fixture f; struct WebhookSubject s;
+  (void)state;
+  /* An admin removing the password credential leaves nothing behind it in
+   * Keycloak, but the positive cache still answers the old password; the
+   * path users/<uuid>/credentials/<id> is a purge whichever operation
+   * Keycloak recorded. */
+  load(&f, "user-delete-credential.json");
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 1);
+  assert_int_equal(s.kind, WH_SUBJECT_CREDENTIAL_REMOVED);
+  assert_int_equal((int)strlen(s.kc_id), ACCOUNT_ID_LEN);
+  unload(&f);
+  load(&f, "user-action-credential.json");
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 1);
+  assert_int_equal(s.kind, WH_SUBJECT_CREDENTIAL_REMOVED);
+  unload(&f);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -185,6 +222,8 @@ int main(void)
     cmocka_unit_test(test_actor_and_bad_path_are_nothing),
     cmocka_unit_test(test_root_username_still_resolves),
     cmocka_unit_test(test_non_user_resources_and_null),
+    cmocka_unit_test(test_subresource_delete_or_update_is_not_the_user),
+    cmocka_unit_test(test_credential_removal_purges),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

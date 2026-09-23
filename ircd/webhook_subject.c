@@ -14,14 +14,20 @@
 #include <jansson.h>
 #include <string.h>
 
-static int path_ends_with(const char *path, const char *suffix)
+/** What follows "users/<uuid>" in the path: "" for the user itself,
+ * "/reset-password", "/credentials/<id>", ...; NULL when the path does not
+ * name a well-formed user (then user_id is NULL too). */
+static const char *user_subpath(const struct kc_webhook_event *ev)
 {
-  size_t lp, ls;
-  if (!path || !suffix)
-    return 0;
-  lp = strlen(path);
-  ls = strlen(suffix);
-  return lp >= ls && 0 == strcmp(path + lp - ls, suffix);
+  size_t lu;
+  if (!ev->resource_path || !ev->user_id)
+    return NULL;
+  if (0 != strncmp(ev->resource_path, "users/", 6))
+    return NULL;
+  lu = strlen(ev->user_id);
+  if (0 != strncmp(ev->resource_path + 6, ev->user_id, lu))
+    return NULL;
+  return ev->resource_path + 6 + lu;
 }
 
 int webhook_subject_resolve(const struct kc_webhook_event *ev,
@@ -39,30 +45,47 @@ int webhook_subject_resolve(const struct kc_webhook_event *ev,
     (void)account_id_from_uuid(ev->user_id, out->kc_id);
   out->username = ev->username;
 
-  switch (ev->operation_type) {
-  case KC_WH_OP_DELETE:
-    out->kind = WH_SUBJECT_DELETE;
-    break;
-  case KC_WH_OP_UPDATE:
-    /* Keycloak's update carries the fields it changed: an absent
-     * "enabled" was not touched (PUT semantics), so only an explicit
-     * false is a disable. */
-    if (ev->representation) {
-      json_t *en = json_object_get(ev->representation, "enabled");
-      if (en && json_is_false(en))
-        out->kind = WH_SUBJECT_DISABLE;
-      else if (en && json_is_true(en))
-        out->kind = WH_SUBJECT_ENABLE;
+  /* Keycloak records every operation under a user's resource as USER:
+   * unlinking a federated identity is USER/DELETE on
+   * users/<uuid>/federated-identity/<provider>, a consent revocation is
+   * USER/DELETE on users/<uuid>/consents/<client>.  Only the bare path is
+   * the user; a synthetic event with no path at all names its subject by
+   * name and counts as the user too. */
+  {
+    const char *sub = user_subpath(ev);
+    int user_only = (!ev->resource_path) || (sub && sub[0] == '\0');
+    int credential = sub && 0 == strncmp(sub, "/credentials/", 13);
+
+    switch (ev->operation_type) {
+    case KC_WH_OP_DELETE:
+      if (credential)
+        out->kind = WH_SUBJECT_CREDENTIAL_REMOVED;
+      else if (user_only)
+        out->kind = WH_SUBJECT_DELETE;
+      break;
+    case KC_WH_OP_UPDATE:
+      /* Keycloak's update carries the fields it changed: an absent
+       * "enabled" was not touched (PUT semantics), so only an explicit
+       * false is a disable. */
+      if (user_only && ev->representation) {
+        json_t *en = json_object_get(ev->representation, "enabled");
+        if (en && json_is_false(en))
+          out->kind = WH_SUBJECT_DISABLE;
+        else if (en && json_is_true(en))
+          out->kind = WH_SUBJECT_ENABLE;
+      }
+      break;
+    case KC_WH_OP_ACTION:
+      if (credential)
+        out->kind = WH_SUBJECT_CREDENTIAL_REMOVED;
+      else if (sub && 0 == strcmp(sub, "/reset-password"))
+        out->kind = WH_SUBJECT_PASSWORD_RESET;
+      else if (sub && 0 == strcmp(sub, "/logout"))
+        out->kind = WH_SUBJECT_LOGOUT;
+      break;
+    default:
+      break;
     }
-    break;
-  case KC_WH_OP_ACTION:
-    if (path_ends_with(ev->resource_path, "/reset-password"))
-      out->kind = WH_SUBJECT_PASSWORD_RESET;
-    else if (path_ends_with(ev->resource_path, "/logout"))
-      out->kind = WH_SUBJECT_LOGOUT;
-    break;
-  default:
-    break;
   }
 
   /* A subject nobody can name is nothing to act on. */
@@ -79,6 +102,7 @@ const char *webhook_subject_kind_name(enum WebhookSubjectKind kind)
   case WH_SUBJECT_DISABLE:        return "disable";
   case WH_SUBJECT_ENABLE:         return "enable";
   case WH_SUBJECT_PASSWORD_RESET: return "reset-password";
+  case WH_SUBJECT_CREDENTIAL_REMOVED: return "credential-removed";
   case WH_SUBJECT_LOGOUT:         return "logout";
   case WH_SUBJECT_NONE:
   default:                        return "none";
