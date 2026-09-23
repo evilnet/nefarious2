@@ -154,8 +154,12 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * IRCv3 spec.  Testing the account too keeps the rule after a failed
    * OAUTHBEARER attempt, which clears the SASL-complete flag below.  A
    * registered client with no account may authenticate with any mechanism.
+   * The rule applies when an exchange starts, not to the data lines of one
+   * in progress (a local session, or a cookie for the IAuth and P10 tiers;
+   * both are cleared when the exchange completes or is aborted).
    */
-  if (IsSASLComplete(cptr) || IsAccount(cptr)) {
+  if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)
+      && (IsSASLComplete(cptr) || IsAccount(cptr))) {
     /* Only allow re-authentication for token-based mechanisms */
     if (ircd_strcmp(parv[1], "OAUTHBEARER") != 0) {
       if (CapActive(cptr, CAP_STANDARDREPLIES))
