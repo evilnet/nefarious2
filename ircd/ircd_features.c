@@ -1179,7 +1179,11 @@ static struct FeatureDesc {
   F_I(WEBHOOK_PORT, 0, 0, 0),
   F_S(WEBHOOK_SECRET, FEAT_NODISP, "", 0),
   F_B(WEBHOOK_KILL_ON_DISABLE, 0, 0, 0),
-  F_B(WEBHOOK_KILL_ON_DELETE, 0, 1, 0),
+  /* Default OFF: deauth (AC U) propagates correctly network-wide, a
+   * local-only kill does not.  Forced network-wide disconnect needs its
+   * own design -- see the open design item in
+   * .claude/para/projects/2026-09-22-bouncer-deauth-correctness.md */
+  F_B(WEBHOOK_KILL_ON_DELETE, 0, 0, 0),
   F_I(SNOMASK_DEFAULT, 0, SNO_DEFAULT, 0),
   F_I(SNOMASK_OPERDEFAULT, 0, SNO_OPERDEFAULT, 0),
   F_S(TPATH, FEAT_CASE | FEAT_MYOPER, "ircd.tune", 0),

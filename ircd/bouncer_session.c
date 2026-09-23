@@ -2127,13 +2127,23 @@ int bounce_session_assert_invariant(struct BouncerSession *session,
      * slot after burst-time yield). */
     if (!IsAccount(p)
         || 0 != ircd_strcmp(cli_account(p), session->hs_account)) {
+      /* A deauthed-but-live client is NOT a recycled heap slot: the
+       * account was cleared under it on purpose (webhook / AC U) while
+       * hs_client still points at a perfectly valid Client.  Nulling
+       * defensively in that case can leave bounce_hold_expire with a
+       * NULL ghost and an immortal accountless client holding a nick.
+       * Tag the two cases apart so the field can tell us which occurs.
+       * See B-5 in
+       * .claude/para/projects/keycloak-webhook-audit-2026-09.md */
       log_write(LS_USER, L_WARNING, 0,
                 "session_invariant[%s]: session %s (account=%s) hs_client "
-                "%s has account=%s — heap-aliased dangling pointer; "
-                "nulling defensively",
+                "%s has account=%s — %s; nulling defensively",
                 site ? site : "?", session->hs_sessid, session->hs_account,
                 cli_name(p),
-                IsAccount(p) ? cli_account(p) : "<none>");
+                IsAccount(p) ? cli_account(p) : "<none>",
+                IsUser(p) && !IsAccount(p)
+                  ? "LIVE-DEAUTHED live client"
+                  : "heap-aliased dangling pointer");
       /* Defensive null — can't recover the right primary from here, but
        * we can at least stop pointing at the wrong Client.  Next
        * resume_check will hit the orphan-reclaim branch. */
@@ -2643,6 +2653,22 @@ void bounce_clear_legacy_faces_for_peer(const char *peer_yxx)
         }
       }
     }
+  }
+}
+
+/** See include/bouncer_session.h. */
+void bounce_null_alias_primary_pointing_at(struct Client *gone)
+{
+  struct Client *cptr;
+
+  if (!gone)
+    return;
+
+  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+    if (!IsBouncerAlias(cptr) || !cli_user(cptr))
+      continue;
+    if (cli_user(cptr)->alias_primary == gone)
+      cli_user(cptr)->alias_primary = NULL;
   }
 }
 
@@ -5707,7 +5733,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
 #ifdef USE_SSL
   /* Step 10: Update FLAG_SSL and channel nonsslusers counters */
   {
-    int was_ssl = IsSSL(ghost);
+    int was_ssl = IsSSL(ghost) ? 1 : 0;   /* flag beyond bit 31: never store the mask in an int */
     int now_ssl = (con_socket(ghost_con).ssl != NULL);
     if (now_ssl && !was_ssl) {
       SetSSL(ghost);
@@ -6753,6 +6779,166 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
  * @param[in] field   Field name (host, realname, fakehost, etc.).
  * @param[in] value   New value for the field.
  */
+/** See include/bouncer_session.h. */
+int bounce_account_deauth_apply(struct Client *acptr)
+{
+  struct AccountSessions *as;
+  struct BouncerSession *sess;
+  const char *account;
+
+  assert(0 != acptr);
+  assert(0 != cli_user(acptr));
+  assert(0 != cli_user(acptr)->account[0]);
+  account = cli_user(acptr)->account;
+
+  /* Tell the aliases FIRST, for every session of the account:
+   * bounce_emit_alias_update walks a session's roster through
+   * bounce_get_session(), so it must run before the sessions are
+   * destroyed below and before ClearAccount (it bails on
+   * !IsAccount(primary)).  With it after the destroy loop the emit found
+   * no session and cleared nothing -- on both callers.  And the loop
+   * below takes every session of the account, not only acptr's, so a
+   * sibling session's aliases would be left unheard if only acptr's
+   * were told. */
+  as = bounce_find_by_account(account);
+  for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext) {
+    struct Client *primary = sess->hs_client;
+    if (primary && IsAccount(primary) && !IsBouncerAlias(primary))
+      bounce_emit_alias_update(primary, "account", "");
+  }
+
+  /* Destroy every session of the account before clearing it.  Re-lookup
+   * each iteration because bounce_destroy() may free the AccountSessions
+   * struct when the last session is removed.
+   *
+   * When acptr is the ghost of a held session, the account going away
+   * leaves nothing to revive into: the session's aliases are exited the
+   * way a KILL of the ghost would take them.  The ghost itself is the
+   * caller's to exit (see the return value) -- the caller is still using
+   * it, and only its own server may exit it (exit_client() on a remote
+   * client is B-2; the home server gets the same AC U). */
+  while ((sess = bounce_find_any_session(account)) != NULL) {
+    if (sess->hs_client == acptr && IsBouncerHold(acptr) && MyConnect(acptr)) {
+      int i;
+      for (i = sess->hs_alias_count - 1; i >= 0; i--) {
+        struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+        if (alias)
+          exit_client(alias, alias, &me, "Account deauthorized");
+      }
+    }
+    sess->hs_client = NULL;
+    bounce_destroy(sess);
+  }
+
+  /* Clear all persisted metadata for this account from the store and
+   * free in-memory metadata entries.  Must happen while the account
+   * string is still set so the lookup key is valid. */
+  metadata_clear_client(acptr);
+
+  /* Decrement authusers for all channels this user is in.
+   * channel_account_adjust skips CHFL_ALIAS memberships, so a deauth
+   * addressed at an alias numeric cannot steal counts the alias never
+   * added. */
+  channel_account_adjust(acptr, -1);
+
+  /* Strict-presence anchor transfer: account -> session, closing the
+   * account-anchored open interval (deauth previously left it open
+   * forever -- unbounded forward visibility). */
+  presence_anchor_transfer(acptr, cli_user(acptr)->account, 0,
+                           cli_session_id(acptr), 1);
+
+  ClearAccount(acptr);
+  ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
+  cli_user(acptr)->acc_create = 0;      /* the removed account's, not the next one's */
+  cli_user(acptr)->kc_id[0] = '\0';
+
+  /* A local held ghost now has neither account nor session (a sibling's
+   * deauth may have taken the session first; the ghost still has to go,
+   * or it holds the nick forever with no timer to end it). */
+  return (IsBouncerHold(acptr) && MyConnect(acptr)) ? 1 : 0;
+}
+
+/** See include/bouncer_session.h. */
+void bounce_apply_alias_field(struct Client *alias, enum BounceAliasField id,
+                              const char *value)
+{
+  assert(0 != alias);
+  assert(0 != cli_user(alias));
+  assert(0 != value);
+
+  switch (id) {
+  case BX_ALIAS_FIELD_HOST:
+    ircd_strncpy(cli_user(alias)->host, value, HOSTLEN + 1);
+    break;
+  case BX_ALIAS_FIELD_REALHOST:
+    ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN + 1);
+    break;
+  case BX_ALIAS_FIELD_REALNAME:
+    ircd_strncpy(cli_info(alias), value, REALLEN + 1);
+    break;
+  case BX_ALIAS_FIELD_FAKEHOST:
+    ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN + 1);
+    break;
+  case BX_ALIAS_FIELD_CLOAKHOST:
+    ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN + 1);
+    break;
+  case BX_ALIAS_FIELD_CLOAKIP:
+    ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN + 1);
+    break;
+  case BX_ALIAS_FIELD_USERNAME:
+    ircd_strncpy(cli_user(alias)->username, value, USERLEN + 1);
+    break;
+
+  case BX_ALIAS_FIELD_ACCOUNT:
+    /* Both directions: "" clears, anything else sets.  This case was
+     * absent from the local-apply block, so every account set (SASL
+     * success, AC R, AC M) and every clear (AC U, webhook deauth) was
+     * lost for aliases on the primary's own server. */
+    ircd_strncpy(cli_user(alias)->account, value, ACCOUNTLEN + 1);
+    if (value[0] != '\0')
+      SetAccount(alias);
+    else
+      ClearAccount(alias);
+    break;
+
+  case BX_ALIAS_FIELD_CAPS: {
+    /* Update the BounceAlias entry's ba_caps for this alias.  Walk
+     * the alias's account's sessions, find the matching entry by
+     * full YYXXX numeric, set ba_caps + ba_caps_known.  Sender-side
+     * BX M dispatch consults this to pick BX M vs BX E. */
+    unsigned long caps = strtoul(value, NULL, 16);
+    if (IsAccount(alias)) {
+      struct AccountSessions *as =
+        bounce_find_by_account(cli_user(alias)->account);
+      if (as) {
+        char full_numeric[6];
+        struct BouncerSession *sess;
+        int i;
+        ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                      cli_yxx(cli_user(alias)->server), cli_yxx(alias));
+        for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
+          for (i = 0; i < sess->hs_alias_count; i++) {
+            if (0 == strcmp(sess->hs_aliases[i].ba_numeric, full_numeric)) {
+              sess->hs_aliases[i].ba_caps = (unsigned int)caps;
+              sess->hs_aliases[i].ba_caps_known = 1;
+              /* Persist updated caps (per redesign B.6 lifecycle hook)
+               * so post-restart we know each alias's caps without
+               * waiting for peer's BX U on next link. */
+              bounce_db_put(sess);
+            }
+          }
+        }
+      }
+    }
+    break;
+  }
+
+  case BX_ALIAS_FIELD_UNKNOWN:
+  case BX_ALIAS_FIELD_COUNT:
+    break;
+  }
+}
+
 void bounce_emit_alias_update(struct Client *primary, const char *field,
                               const char *value)
 {
@@ -6772,22 +6958,18 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
     /* Local aliases on this (primary's) server: apply the field update
      * directly. The S2S broadcast below skips us for loop-prevention,
      * so without this pass our own local aliases stay stale. */
-    if (alias && IsBouncerAlias(alias) && MyConnect(alias)) {
-      if (0 == ircd_strcmp(field, "host"))
-        ircd_strncpy(cli_user(alias)->host, value, HOSTLEN + 1);
-      else if (0 == ircd_strcmp(field, "realhost"))
-        ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN + 1);
-      else if (0 == ircd_strcmp(field, "realname"))
-        ircd_strncpy(cli_info(alias), value, REALLEN + 1);
-      else if (0 == ircd_strcmp(field, "fakehost"))
-        ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN + 1);
-      else if (0 == ircd_strcmp(field, "cloakhost"))
-        ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN + 1);
-      else if (0 == ircd_strcmp(field, "cloakip"))
-        ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN + 1);
-      else if (0 == ircd_strcmp(field, "username"))
-        ircd_strncpy(cli_user(alias)->username, value, USERLEN + 1);
-    }
+    if (alias && IsBouncerAlias(alias) && MyConnect(alias))
+      bounce_apply_alias_field(alias, bounce_alias_field_id(field), value);
+
+    /* The account field rides AC U's coherence rules: if the network
+     * cannot be told the account was cleared (legacy accounts have no
+     * AC unregister form), do not tell the aliases either -- a
+     * half-applied clear leaves one session's connections disagreeing
+     * about their own account. */
+    if (bounce_alias_field_id(field) == BX_ALIAS_FIELD_ACCOUNT
+        && value[0] == '\0'
+        && !feature_bool(FEAT_EXTENDED_ACCOUNTS))
+      continue;
 
     sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                           "U %s %s=%s",
@@ -7557,6 +7739,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   ircd_strncpy(cli_info(sptr), cli_info(primary), REALLEN + 1);
   ircd_strncpy(user->account, cli_user(primary)->account, ACCOUNTLEN + 1);
   user->acc_create = cli_user(primary)->acc_create;
+  ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
 
   /* Copy cloaked/fake host (controls what other users see).
    * Do NOT overwrite cli_ip — the alias has its own real socket IP,
@@ -8053,6 +8236,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
       ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
       user->acc_create = cli_user(primary)->acc_create;
+      ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
       user->alias_primary = primary;
       memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
       ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
@@ -8111,6 +8295,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
   ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
   user->acc_create = cli_user(primary)->acc_create;
+  ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
   user->server = alias_server;
   user->alias_primary = primary;
 
@@ -8675,57 +8860,13 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
   }
 
   /* Apply update based on field name */
-  if (0 == ircd_strcmp(field, "host")) {
-    ircd_strncpy(cli_user(alias)->host, value, HOSTLEN + 1);
-  } else if (0 == ircd_strcmp(field, "realhost")) {
-    ircd_strncpy(cli_user(alias)->realhost, value, HOSTLEN + 1);
-  } else if (0 == ircd_strcmp(field, "realname")) {
-    ircd_strncpy(cli_info(alias), value, REALLEN + 1);
-  } else if (0 == ircd_strcmp(field, "fakehost")) {
-    ircd_strncpy(cli_user(alias)->fakehost, value, HOSTLEN + 1);
-  } else if (0 == ircd_strcmp(field, "cloakhost")) {
-    ircd_strncpy(cli_user(alias)->cloakhost, value, HOSTLEN + 1);
-  } else if (0 == ircd_strcmp(field, "cloakip")) {
-    ircd_strncpy(cli_user(alias)->cloakip, value, HOSTLEN + 1);
-  } else if (0 == ircd_strcmp(field, "username")) {
-    ircd_strncpy(cli_user(alias)->username, value, USERLEN + 1);
-  } else if (0 == ircd_strcmp(field, "account")) {
-    ircd_strncpy(cli_user(alias)->account, value, ACCOUNTLEN + 1);
-    if (value[0] != '\0')
-      SetAccount(alias);
+  {
+    enum BounceAliasField fid = bounce_alias_field_id(field);
+    if (fid == BX_ALIAS_FIELD_UNKNOWN)
+      Debug((DEBUG_INFO, "BX U: unknown field '%s' for alias %s",
+             field, alias_numeric));
     else
-      ClearAccount(alias);
-  } else if (0 == ircd_strcmp(field, "caps")) {
-    /* Update the BounceAlias entry's ba_caps for this alias.  Walk
-     * the alias's account's sessions, find the matching entry by
-     * full YYXXX numeric, set ba_caps + ba_caps_known.  Sender-side
-     * BX M dispatch consults this to pick BX M vs BX E. */
-    unsigned long caps = strtoul(value, NULL, 16);
-    if (IsAccount(alias)) {
-      struct AccountSessions *as =
-        bounce_find_by_account(cli_user(alias)->account);
-      if (as) {
-        char full_numeric[6];
-        ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
-                      cli_yxx(cli_user(alias)->server), cli_yxx(alias));
-        struct BouncerSession *sess;
-        int i;
-        for (sess = as->as_sessions; sess; sess = sess->hs_anext) {
-          for (i = 0; i < sess->hs_alias_count; i++) {
-            if (0 == strcmp(sess->hs_aliases[i].ba_numeric, full_numeric)) {
-              sess->hs_aliases[i].ba_caps = (unsigned int)caps;
-              sess->hs_aliases[i].ba_caps_known = 1;
-              /* Persist updated caps (per redesign B.6 lifecycle hook)
-               * so post-restart we know each alias's caps without
-               * waiting for peer's BX U on next link. */
-              bounce_db_put(sess);
-            }
-          }
-        }
-      }
-    }
-  } else {
-    Debug((DEBUG_INFO, "BX U: unknown field '%s' for alias %s", field, alias_numeric));
+      bounce_apply_alias_field(alias, fid, value);
   }
 
 forward:

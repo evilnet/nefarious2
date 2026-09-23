@@ -29,6 +29,9 @@
 #ifndef INCLUDED_ircd_defs_h
 #include "ircd_defs.h"
 #endif
+#ifndef INCLUDED_bouncer_deauth_h
+#include "bouncer_deauth.h"
+#endif
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
 #endif
@@ -1490,5 +1493,67 @@ extern void bounce_db_shutdown(void);
  * @param[in] cptr Client whose session to mark dirty.
  */
 extern void bounce_mark_dirty(struct Client *cptr);
+
+/** Apply one BX U field update to a bouncer alias.
+ *
+ * The single applier for both directions: the local-alias pass inside
+ * bounce_emit_alias_update() (aliases on the primary's own server, which
+ * the S2S broadcast deliberately skips for loop prevention) and the
+ * bounce_alias_update() receiver (aliases reached over BX U).  Having
+ * one body is the point -- the two open-coded dispatches had drifted
+ * two fields apart, so local aliases silently never learned account or
+ * caps changes.
+ *
+ * @param[in] alias  A bouncer alias with cli_user() set.  The caller has
+ *                   already validated IsBouncerAlias().
+ * @param[in] id     Field identity from bounce_alias_field_id().
+ * @param[in] value  New value; "" clears for account.
+ */
+extern void bounce_apply_alias_field(struct Client *alias,
+                                     enum BounceAliasField id,
+                                     const char *value);
+
+/** Apply an account deauthorization to one client, locally.
+ *
+ * The shared body of every deauth: the AC U receiver (ms_account) and
+ * the Keycloak webhook both call it.  They had separate copies and the
+ * copies drifted -- the webhook's omitted the session destroy and the
+ * metadata clear, so the deauthing server kept a revivable session and a
+ * bounce_db record for an account every peer had discarded.
+ *
+ * Does NOT emit anything on the network and does NOT send the
+ * CAP_ACCNOTIFY channel notice: the receiver relays while the originator
+ * broadcasts, and each wraps the notice in its own msgid, so both stay
+ * at the call site.
+ *
+ * The account string is still set on entry and cleared on exit -- the
+ * metadata and presence lookups key off it.  The account timestamp and
+ * the Keycloak id go with it: they are the removed account's, not the
+ * next one's.
+ *
+ * Every session of the account goes, and a held session whose ghost is
+ * acptr loses its aliases too (the way a KILL of the ghost would): with
+ * the account gone there is nothing to revive into.  The ghost itself is
+ * left to the caller, which is still using acptr.
+ *
+ * @param[in] acptr  A client with IsAccount() set.
+ * @return Non-zero when acptr is a local held ghost that the caller must
+ *         now exit (ClearBouncerHold + exit_client) once it is done with
+ *         it: its session is gone and no timer will ever remove it.
+ */
+extern int bounce_account_deauth_apply(struct Client *acptr);
+
+/** Null every alias's alias_primary that points at a departing client.
+ *
+ * The mirror of bounce_null_hs_client_pointing_at() for the other
+ * direction.  exit_client() does not promote or reap aliases when hold
+ * is disabled (bounce_should_hold() returning NULL, e.g. G-line
+ * enforcement), so a surviving alias can outlive its primary; once
+ * free_client() recycles the struct, the next alias->primary rewrite in
+ * ircd_relay.c reads freed memory.
+ *
+ * @param[in] gone  The client being removed.
+ */
+extern void bounce_null_alias_primary_pointing_at(struct Client *gone);
 
 #endif /* INCLUDED_bouncer_session_h */

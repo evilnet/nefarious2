@@ -17,6 +17,9 @@
 #ifndef INCLUDED_ircd_defs_h
 #include "ircd_defs.h"
 #endif
+#ifndef INCLUDED_account_id_h
+#include "account_id.h"      /* ACCOUNT_ID_LEN */
+#endif
 #ifndef INCLUDED_sys_types_h
 #include <sys/types.h>
 #define INCLUDED_sys_types_h
@@ -76,6 +79,8 @@ struct SASLSession {
 
   /* Account creation timestamp from Keycloak (epoch secs, 0 = unknown) */
   time_t             acc_created_at;
+  /* Keycloak user id of the verified identity, compact ("" = not in hand) */
+  char               kc_id[ACCOUNT_ID_LEN + 1];
 };
 
 /** Heap-allocated context for async Keycloak callbacks.
@@ -114,7 +119,7 @@ extern void sasl_session_free(struct Client *sptr);
  *  AC broadcast, hidden host, bouncer alias update, auth_sasl_done.
  */
 extern void sasl_complete_login(struct Client *sptr, const char *account,
-                                time_t acc_create);
+                                time_t acc_create, const char *kc_id);
 
 /** Get the local SASL mechanism list string for CAP advertisement.
  *  @return Comma-separated mechanism string, or NULL if none.

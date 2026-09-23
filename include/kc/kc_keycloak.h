@@ -53,6 +53,8 @@ struct kc_access_token {
     size_t session_state_size;
     char *scope;
     size_t scope_size;
+    char *id_token;               /* OpenID Connect ID token; NULL when the grant did not ask for one */
+    size_t id_token_size;
     long created_at;              /* Account creation time (epoch), from JWT created_at claim */
 };
 
