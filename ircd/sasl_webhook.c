@@ -6,11 +6,15 @@
  * Business-logic callback on top of libkc's kc_webhook TCP/HTTP server.
  *
  * Events handled:
- *   - Password change  → invalidate auth caches for user
- *   - Account delete   → invalidate caches + kill sessions
- *   - Account disable  → invalidate positive cache + optionally kill sessions
+ *   - Password change  → invalidate auth caches for user (by name)
+ *   - Account delete   → caches purged + sessions deauthed (or local sockets
+ *                        killed), the subject resolved by its Keycloak id
+ *   - Account disable  → same, from an update carrying enabled:false
+ *   - Admin reset      → caches purged by Keycloak id
  *   - Cert revoked     → log
  *   - Session logout   → log (future: revoke OAUTHBEARER tokens)
+ * A USER admin event names its subject only by the uuid in resourcePath;
+ * the decision is include/webhook_subject.h.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,6 +46,7 @@
 #include "s_misc.h"
 #include "s_user.h"
 #include "bouncer_deauth.h"
+#include "webhook_subject.h"
 #include "bouncer_session.h"
 
 #include <jansson.h>
@@ -96,10 +101,32 @@ static void deauth_client(struct Client *cptr, const char *reason)
   }
 }
 
+/** Purge the auth caches for a subject here and on every fork server: by
+ * name when the payload names it, by Keycloak id when it carries one.  The
+ * id reaches servers that never saw a client for the user. */
+static void cache_invalidate_subject(const char *username, const char *kc_id)
+{
+  int has_id = (kc_id && kc_id[0]) ? 1 : 0;
+
+  if (username)
+    sasl_cache_invalidate_user(username);
+  if (has_id)
+    sasl_cache_invalidate_id(kc_id);
+
+  if (has_id)
+    sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s %s",
+                             username ? username : "*", kc_id);
+  else if (username)
+    sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", username);
+
+  wh_stats.cache_invalidations++;
+}
+
 /** Classify one client for the account walk (pure decision in
  * bounce_deauth_classify; this only reads the flags). */
 static enum BounceDeauthAction
-deauth_action_for(struct Client *cptr, const char *account, int do_kill)
+deauth_action_for(struct Client *cptr, const char *account, const char *kc_id,
+                  int do_kill)
 {
   struct BounceDeauthSubject subj;
 
@@ -107,8 +134,14 @@ deauth_action_for(struct Client *cptr, const char *account, int do_kill)
   subj.is_user         = IsUser(cptr) ? 1 : 0;
   subj.is_account      = IsAccount(cptr) ? 1 : 0;
   subj.account_matches = (cli_user(cptr)
-                          && 0 == ircd_strcmp(cli_user(cptr)->account,
-                                              account)) ? 1 : 0;
+                          && 0 == ircd_strcmp(cli_user(cptr)->account, account)
+                          /* A name can be reused; an id cannot.  When the
+                           * event and the client both carry one they must
+                           * agree.  A client without one (legacy hop,
+                           * restored ghost) still matches by name: for a
+                           * deauth the safe error is to include it. */
+                          && (!kc_id || !kc_id[0] || !cli_user(cptr)->kc_id[0]
+                              || 0 == strcmp(cli_user(cptr)->kc_id, kc_id))) ? 1 : 0;
   subj.is_alias        = IsBouncerAlias(cptr) ? 1 : 0;
   subj.is_hold         = IsBouncerHold(cptr) ? 1 : 0;
   subj.is_local        = MyConnect(cptr) ? 1 : 0;
@@ -124,7 +157,8 @@ struct deauth_hit {
   enum BounceDeauthAction action;
 };
 
-/** Apply an account deauth or kill to every session of an account.
+/** Apply an account deauth or kill to every session of an account
+ * (matched by id too when known).
  *
  * Sockets are only ever exited LOCALLY: exit_client() on a remote victim
  * emits no KILL while broadcasting a victim-sourced QUIT on every
@@ -141,7 +175,7 @@ struct deauth_hit {
  * pointer, so the walk first records numerics and re-resolves each.
  */
 static void handle_sessions_for_account(const char *account, const char *reason,
-                                         int do_kill)
+                                         int do_kill, const char *kc_id)
 {
   struct Client *cptr;
   struct deauth_hit *hits;
@@ -149,14 +183,14 @@ static void handle_sessions_for_account(const char *account, const char *reason,
 
   /* Pass 1: classify.  Nothing is touched yet, so the list is stable. */
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr))
-    if (deauth_action_for(cptr, account, do_kill) != BOUNCE_DEAUTH_SKIP)
+    if (deauth_action_for(cptr, account, kc_id, do_kill) != BOUNCE_DEAUTH_SKIP)
       count++;
   if (!count)
     return;
 
   hits = (struct deauth_hit *)MyMalloc(count * sizeof(*hits));
   for (cptr = GlobalClientList; cptr && n < count; cptr = cli_next(cptr)) {
-    enum BounceDeauthAction action = deauth_action_for(cptr, account, do_kill);
+    enum BounceDeauthAction action = deauth_action_for(cptr, account, kc_id, do_kill);
     if (action == BOUNCE_DEAUTH_SKIP)
       continue;
     ircd_snprintf(0, hits[n].numeric, sizeof(hits[n].numeric), "%s%s",
@@ -251,9 +285,7 @@ static void handle_credential_event(const struct kc_webhook_event *event)
     log_write(LS_SYSTEM, L_INFO, 0,
               "WEBHOOK: Password change for %s — invalidating auth caches",
               event->username);
-    sasl_cache_invalidate_user(event->username);
-    sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
-    wh_stats.cache_invalidations++;
+    cache_invalidate_subject(event->username, NULL);
   }
   else if (event->operation_type == KC_WH_OP_DELETE && event->representation) {
     /* Credential deleted — check if it's an x509 cert */
@@ -265,78 +297,119 @@ static void handle_credential_event(const struct kc_webhook_event *event)
       /* Future: fingerprint cache invalidation */
     } else {
       /* Password deleted — invalidate caches */
-      sasl_cache_invalidate_user(event->username);
-      sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
-      wh_stats.cache_invalidations++;
+      cache_invalidate_subject(event->username, NULL);
     }
   }
 }
 
-/* ---- User events (delete, disable) ---- */
+/* ---- User events (delete, disable, admin password reset) ---- */
+
+#define WH_SUBJECT_MAX_NAMES 4
+
+/** The account names a subject resolves to: the payload's own name when it
+ * carries one, and the account of every client (local or replica) carrying
+ * the subject's Keycloak id.  Distinct; the cap covers a rename race. */
+static int subject_account_names(const struct WebhookSubject *s,
+                                 char names[][ACCOUNTLEN + 1], int max)
+{
+  struct Client *cptr;
+  int n = 0, i;
+
+  if (s->username && n < max)
+    ircd_strncpy(names[n++], s->username, ACCOUNTLEN + 1);
+  if (!s->kc_id[0])
+    return n;
+
+  for (cptr = GlobalClientList; cptr && n < max; cptr = cli_next(cptr)) {
+    if (!IsUser(cptr) || !IsAccount(cptr) || !cli_user(cptr))
+      continue;
+    if (0 != strcmp(cli_user(cptr)->kc_id, s->kc_id))
+      continue;
+    for (i = 0; i < n; i++)
+      if (0 == ircd_strcmp(names[i], cli_user(cptr)->account))
+        break;
+    if (i == n)
+      ircd_strncpy(names[n++], cli_user(cptr)->account, ACCOUNTLEN + 1);
+  }
+  return n;
+}
+
+/** Deauth (or kill, when the switch is on) every session the subject
+ * resolves to, after purging its caches everywhere. */
+static void deauth_subject(const struct WebhookSubject *s, const char *reason,
+                           enum Feature kill_feature, const char *kill_name)
+{
+  char names[WH_SUBJECT_MAX_NAMES][ACCOUNTLEN + 1];
+  int do_kill = feature_bool(kill_feature);
+  int n, i;
+
+  log_write(LS_SYSTEM, L_INFO, 0,
+            "WEBHOOK: %s: id %s name %s -- invalidating caches",
+            reason, s->kc_id[0] ? s->kc_id : "-", s->username ? s->username : "-");
+  cache_invalidate_subject(s->username, s->kc_id);
+
+  /* Deauth is not implementable under legacy accounts: the legacy AC
+   * grammar has no unregister form, so peers cannot be told, while the
+   * BX U alias propagation would still fire -- leaving one session whose
+   * connections disagree about their own account and a network that
+   * disagrees with us.  A relink then re-teaches the account from the
+   * peer's N token, undoing the local clear.  Refuse loudly instead. */
+  if (!feature_bool(FEAT_EXTENDED_ACCOUNTS) && !do_kill) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "WEBHOOK: %s deauth REFUSED -- EXTENDED_ACCOUNTS is off and %s "
+              "is off; no coherent deauth exists.  Enable one of them.",
+              reason, kill_name);
+    return;
+  }
+
+  n = subject_account_names(s, names, WH_SUBJECT_MAX_NAMES);
+  if (!n) {
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBHOOK: %s: no session carries id %s", reason, s->kc_id);
+    return;
+  }
+  /* Default: deauth (AC U), which propagates network-wide.  The kill
+   * switch escalates to disconnecting LOCAL sockets only. */
+  for (i = 0; i < n; i++)
+    handle_sessions_for_account(names[i], reason, do_kill, s->kc_id);
+}
 
 static void handle_user_event(const struct kc_webhook_event *event)
 {
+  struct WebhookSubject s;
+
   wh_stats.user_events++;
 
-  if (!event->username)
+  if (!webhook_subject_resolve(event, &s)) {
+    log_write(LS_SYSTEM, L_DEBUG, 0,
+              "WEBHOOK: USER/%s for %s: nothing to do",
+              event->operation_type_str ? event->operation_type_str : "?",
+              event->resource_path ? event->resource_path : "(no path)");
     return;
-
-  if (event->operation_type == KC_WH_OP_DELETE) {
-    /* Account deleted — invalidate caches + deauth or kill sessions */
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "WEBHOOK: Account deleted: %s — invalidating caches",
-              event->username);
-    sasl_cache_invalidate_user(event->username);
-    sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
-    wh_stats.cache_invalidations++;
-
-    /* Deauth is not implementable under legacy accounts: the legacy AC
-     * grammar has no unregister form, so peers cannot be told, while the
-     * BX U alias propagation would still fire -- leaving one session whose
-     * connections disagree about their own account and a network that
-     * disagrees with us.  A relink then re-teaches the account from the
-     * peer's N token, undoing the local clear.  Refuse loudly instead. */
-    if (!feature_bool(FEAT_EXTENDED_ACCOUNTS)
-        && !feature_bool(FEAT_WEBHOOK_KILL_ON_DELETE)) {
-      log_write(LS_SYSTEM, L_WARNING, 0,
-                "WEBHOOK: account %s deauth REFUSED -- EXTENDED_ACCOUNTS is "
-                "off and KILL_ON_DELETE is off; no coherent deauth exists. "
-                "Enable one of them.", event->username);
-      return;
-    }
-
-    /* Default: deauth (AC U), which propagates network-wide.
-     * KILL_ON_DELETE escalates to disconnecting LOCAL sockets only. */
-    handle_sessions_for_account(event->username, "Account deleted",
-                                 feature_bool(FEAT_WEBHOOK_KILL_ON_DELETE));
   }
-  else if (event->operation_type == KC_WH_OP_UPDATE && event->representation) {
-    /* Account updated — check if disabled */
-    json_t *enabled = json_object_get(event->representation, "enabled");
-    if (enabled && json_is_false(enabled)) {
-      log_write(LS_SYSTEM, L_INFO, 0,
-                "WEBHOOK: Account disabled: %s — invalidating caches",
-                event->username);
-      sasl_cache_invalidate_user(event->username);
-      sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
-      wh_stats.cache_invalidations++;
 
-      /* Same rule as the delete arm: no coherent deauth exists under
-       * legacy accounts unless the sockets are disconnected. */
-      if (!feature_bool(FEAT_EXTENDED_ACCOUNTS)
-          && !feature_bool(FEAT_WEBHOOK_KILL_ON_DISABLE)) {
-        log_write(LS_SYSTEM, L_WARNING, 0,
-                  "WEBHOOK: account %s deauth REFUSED -- EXTENDED_ACCOUNTS is "
-                  "off and KILL_ON_DISABLE is off; no coherent deauth exists. "
-                  "Enable one of them.", event->username);
-        return;
-      }
-
-      /* Default: deauth (AC U), which propagates network-wide.
-       * KILL_ON_DISABLE escalates to disconnecting LOCAL sockets only. */
-      handle_sessions_for_account(event->username, "Account disabled",
-                                   feature_bool(FEAT_WEBHOOK_KILL_ON_DISABLE));
-    }
+  switch (s.kind) {
+  case WH_SUBJECT_DELETE:
+    deauth_subject(&s, "Account deleted", FEAT_WEBHOOK_KILL_ON_DELETE, "KILL_ON_DELETE");
+    break;
+  case WH_SUBJECT_DISABLE:
+    deauth_subject(&s, "Account disabled", FEAT_WEBHOOK_KILL_ON_DISABLE, "KILL_ON_DISABLE");
+    break;
+  case WH_SUBJECT_PASSWORD_RESET:
+    /* Keycloak emits no user-level event for an admin reset; this is the
+     * only chance to stop the old password answering from the cache. */
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBHOOK: Admin password reset: id %s name %s -- invalidating caches",
+              s.kc_id[0] ? s.kc_id : "-", s.username ? s.username : "-");
+    cache_invalidate_subject(s.username, s.kc_id);
+    break;
+  case WH_SUBJECT_ENABLE:
+  case WH_SUBJECT_LOGOUT:
+    log_write(LS_SYSTEM, L_DEBUG, 0, "WEBHOOK: USER %s for id %s: noted",
+              webhook_subject_kind_name(s.kind), s.kc_id[0] ? s.kc_id : "-");
+    break;
+  case WH_SUBJECT_NONE:
+    break;
   }
 }
 

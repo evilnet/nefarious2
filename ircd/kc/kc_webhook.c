@@ -853,25 +853,17 @@ dispatch_event(const char *payload, size_t payload_len)
         }
     }
 
-    /* Resolve username from multiple locations:
-     * 1. Root-level "username" (from custom webhook SPI)
-     * 2. authDetails.username
-     * 3. representation.username */
+    /* Resolve the subject's username from the payload:
+     * 1. Root-level "username" (injected by the webhook SPI on user events)
+     * 2. representation.username (a full user representation)
+     * authDetails names the acting admin, never the subject, and is not a
+     * source. */
     {
         json_t *v;
 
         v = json_object_get(root, "username");
         if (v && json_is_string(v)) {
             event.username = json_string_value(v);
-        }
-
-        if (!event.username) {
-            json_t *auth = json_object_get(root, "authDetails");
-            if (auth && json_is_object(auth)) {
-                v = json_object_get(auth, "username");
-                if (v && json_is_string(v))
-                    event.username = json_string_value(v);
-            }
         }
 
         if (!event.username && event.representation) {
