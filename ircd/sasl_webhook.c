@@ -104,14 +104,16 @@ static void deauth_client(struct Client *cptr, const char *reason)
 /** Purge the auth caches for a subject here and on every fork server: by
  * name when the payload names it, by Keycloak id when it carries one.  The
  * id reaches servers that never saw a client for the user. */
-static void cache_invalidate_subject(const char *username, const char *kc_id)
+static int cache_invalidate_subject(const char *username, const char *kc_id,
+                                    char names[][ACCOUNTLEN + 1], int max)
 {
   int has_id = (kc_id && kc_id[0]) ? 1 : 0;
+  int n = 0;
 
   if (username)
     sasl_cache_invalidate_user(username);
   if (has_id)
-    sasl_cache_invalidate_id(kc_id);
+    n = sasl_cache_invalidate_id(kc_id, names, max);
 
   if (has_id)
     sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s %s",
@@ -120,6 +122,7 @@ static void cache_invalidate_subject(const char *username, const char *kc_id)
     sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", username);
 
   wh_stats.cache_invalidations++;
+  return n;
 }
 
 /** Classify one client for the account walk (pure decision in
@@ -285,7 +288,7 @@ static void handle_credential_event(const struct kc_webhook_event *event)
     log_write(LS_SYSTEM, L_INFO, 0,
               "WEBHOOK: Password change for %s — invalidating auth caches",
               event->username);
-    cache_invalidate_subject(event->username, NULL);
+    cache_invalidate_subject(event->username, NULL, NULL, 0);
   }
   else if (event->operation_type == KC_WH_OP_DELETE && event->representation) {
     /* Credential deleted — check if it's an x509 cert */
@@ -297,7 +300,7 @@ static void handle_credential_event(const struct kc_webhook_event *event)
       /* Future: fingerprint cache invalidation */
     } else {
       /* Password deleted — invalidate caches */
-      cache_invalidate_subject(event->username, NULL);
+      cache_invalidate_subject(event->username, NULL, NULL, 0);
     }
   }
 }
@@ -306,47 +309,72 @@ static void handle_credential_event(const struct kc_webhook_event *event)
 
 #define WH_SUBJECT_MAX_NAMES 4
 
-/** The account names a subject resolves to: the payload's own name when it
- * carries one, and the account of every client (local or replica) carrying
- * the subject's Keycloak id.  Distinct; the cap covers a rename race. */
+/** Add a name to the list unless it is there; the cap is a rename race. */
+static int names_add(char names[][ACCOUNTLEN + 1], int n, int max,
+                     const char *name)
+{
+  int i;
+
+  if (!name || !name[0])
+    return n;
+  for (i = 0; i < n; i++)
+    if (0 == ircd_strcmp(names[i], name))
+      return n;
+  if (n >= max) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "WEBHOOK: more than %d account names for one subject; %s not walked",
+              max, name);
+    return n;
+  }
+  ircd_strncpy(names[n++], name, ACCOUNTLEN + 1);
+  return n;
+}
+
+/** Add the account of every client (local or replica) carrying the
+ * subject's Keycloak id.  Continues the list from n. */
 static int subject_account_names(const struct WebhookSubject *s,
-                                 char names[][ACCOUNTLEN + 1], int max)
+                                 char names[][ACCOUNTLEN + 1], int n, int max)
 {
   struct Client *cptr;
-  int n = 0, i;
 
-  if (s->username && n < max)
-    ircd_strncpy(names[n++], s->username, ACCOUNTLEN + 1);
   if (!s->kc_id[0])
     return n;
-
-  for (cptr = GlobalClientList; cptr && n < max; cptr = cli_next(cptr)) {
+  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     if (!IsUser(cptr) || !IsAccount(cptr) || !cli_user(cptr))
       continue;
     if (0 != strcmp(cli_user(cptr)->kc_id, s->kc_id))
       continue;
-    for (i = 0; i < n; i++)
-      if (0 == ircd_strcmp(names[i], cli_user(cptr)->account))
-        break;
-    if (i == n)
-      ircd_strncpy(names[n++], cli_user(cptr)->account, ACCOUNTLEN + 1);
+    n = names_add(names, n, max, cli_user(cptr)->account);
   }
   return n;
 }
 
 /** Deauth (or kill, when the switch is on) every session the subject
- * resolves to, after purging its caches everywhere. */
+ * resolves to, after purging its caches everywhere.
+ *
+ * The subject is reached three ways: the name the payload carries (a
+ * synthetic event, a full representation), the account names the id purge
+ * drops from the positive cache (whoever logged in through local SASL
+ * within SASL_POSCACHE_TTL), and the account of every client carrying the
+ * id.  A session that has none of those -- authenticated through X3, or
+ * behind a legacy hop, or restored from the bouncer DB, all of which carry
+ * no id -- is NOT reached by a real (nameless) event; the warning below is
+ * the operator's cue. */
 static void deauth_subject(const struct WebhookSubject *s, const char *reason,
                            enum Feature kill_feature, const char *kill_name)
 {
   char names[WH_SUBJECT_MAX_NAMES][ACCOUNTLEN + 1];
+  char dropped[WH_SUBJECT_MAX_NAMES][ACCOUNTLEN + 1];
   int do_kill = feature_bool(kill_feature);
-  int n, i;
+  int n = 0, nd, i;
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "WEBHOOK: %s: id %s name %s -- invalidating caches",
             reason, s->kc_id[0] ? s->kc_id : "-", s->username ? s->username : "-");
-  cache_invalidate_subject(s->username, s->kc_id);
+  n = names_add(names, n, WH_SUBJECT_MAX_NAMES, s->username);
+  nd = cache_invalidate_subject(s->username, s->kc_id, dropped, WH_SUBJECT_MAX_NAMES);
+  for (i = 0; i < nd; i++)
+    n = names_add(names, n, WH_SUBJECT_MAX_NAMES, dropped[i]);
 
   /* Deauth is not implementable under legacy accounts: the legacy AC
    * grammar has no unregister form, so peers cannot be told, while the
@@ -362,10 +390,14 @@ static void deauth_subject(const struct WebhookSubject *s, const char *reason,
     return;
   }
 
-  n = subject_account_names(s, names, WH_SUBJECT_MAX_NAMES);
+  n = subject_account_names(s, names, n, WH_SUBJECT_MAX_NAMES);
   if (!n) {
-    log_write(LS_SYSTEM, L_INFO, 0,
-              "WEBHOOK: %s: no session carries id %s", reason, s->kc_id);
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "WEBHOOK: %s: nothing names the subject of id %s -- no client "
+              "carries the id, the cache held no entry, the event carried no "
+              "name.  A session authenticated through X3, a legacy hop, or "
+              "restored from the bouncer DB carries no id and keeps its account.",
+              reason, s->kc_id);
     return;
   }
   /* Default: deauth (AC U), which propagates network-wide.  The kill
@@ -401,7 +433,15 @@ static void handle_user_event(const struct kc_webhook_event *event)
     log_write(LS_SYSTEM, L_INFO, 0,
               "WEBHOOK: Admin password reset: id %s name %s -- invalidating caches",
               s.kc_id[0] ? s.kc_id : "-", s.username ? s.username : "-");
-    cache_invalidate_subject(s.username, s.kc_id);
+    cache_invalidate_subject(s.username, s.kc_id, NULL, 0);
+    break;
+  case WH_SUBJECT_CREDENTIAL_REMOVED:
+    /* An admin removed a credential (the password, a certificate); the
+     * positive cache would keep answering it. */
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "WEBHOOK: Credential removed: id %s name %s -- invalidating caches",
+              s.kc_id[0] ? s.kc_id : "-", s.username ? s.username : "-");
+    cache_invalidate_subject(s.username, s.kc_id, NULL, 0);
     break;
   case WH_SUBJECT_ENABLE:
     /* A re-enabled account may sit in the negative cache from a refused
@@ -412,7 +452,7 @@ static void handle_user_event(const struct kc_webhook_event *event)
     if (s.username) {
       log_write(LS_SYSTEM, L_INFO, 0,
                 "WEBHOOK: Account enabled: %s -- invalidating caches", s.username);
-      cache_invalidate_subject(s.username, NULL);
+      cache_invalidate_subject(s.username, NULL, NULL, 0);
     } else {
       log_write(LS_SYSTEM, L_DEBUG, 0,
                 "WEBHOOK: USER enable for id %s: no name to purge", s.kc_id);
@@ -581,7 +621,7 @@ int ms_cacheinval(struct Client *cptr, struct Client *sptr, int parc, char *parv
   if (0 != strcmp(username, "*"))
     sasl_cache_invalidate_user(username);
   if (kc_id)
-    sasl_cache_invalidate_id(kc_id);
+    sasl_cache_invalidate_id(kc_id, NULL, 0);
 
   if (kc_id)
     sendcmdto_serv_butone_v3(sptr, CMD_CACHEINVAL, cptr, "%s %s", username, kc_id);

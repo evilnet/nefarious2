@@ -161,7 +161,12 @@ struct sasl_cache_stats {
 
 /** Invalidate all auth cache entries for a user (called from webhook handler). */
 extern void sasl_cache_invalidate_user(const char *username);
-extern void sasl_cache_invalidate_id(const char *kc_id);
+/** Invalidate the positive cache by Keycloak id.  When names is given, the
+ * distinct account names of the dropped entries are written to it (up to
+ * max) and their count returned: a session that carries no id can still be
+ * reached under a name the cache knew. */
+extern int sasl_cache_invalidate_id(const char *kc_id,
+                                    char names[][ACCOUNTLEN + 1], int max);
 
 /** Get auth cache statistics. */
 extern void sasl_cache_stats_get(struct sasl_cache_stats *out);
