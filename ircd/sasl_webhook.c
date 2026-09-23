@@ -404,9 +404,23 @@ static void handle_user_event(const struct kc_webhook_event *event)
     cache_invalidate_subject(s.username, s.kc_id);
     break;
   case WH_SUBJECT_ENABLE:
+    /* A re-enabled account may sit in the negative cache from a refused
+     * attempt while it was disabled; that cache is keyed by name, so it
+     * can be purged only when the payload names the user (a console save
+     * does, a bare {"enabled":true} toggle does not -- then the entry
+     * simply expires, SASL_NEGCACHE_TTL). */
+    if (s.username) {
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "WEBHOOK: Account enabled: %s -- invalidating caches", s.username);
+      cache_invalidate_subject(s.username, NULL);
+    } else {
+      log_write(LS_SYSTEM, L_DEBUG, 0,
+                "WEBHOOK: USER enable for id %s: no name to purge", s.kc_id);
+    }
+    break;
   case WH_SUBJECT_LOGOUT:
-    log_write(LS_SYSTEM, L_DEBUG, 0, "WEBHOOK: USER %s for id %s: noted",
-              webhook_subject_kind_name(s.kind), s.kc_id[0] ? s.kc_id : "-");
+    log_write(LS_SYSTEM, L_DEBUG, 0, "WEBHOOK: USER logout for id %s: noted",
+              s.kc_id[0] ? s.kc_id : "-");
     break;
   case WH_SUBJECT_NONE:
     break;
