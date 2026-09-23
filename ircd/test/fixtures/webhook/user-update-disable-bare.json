@@ -1,0 +1,15 @@
+{
+ "id": "fcc57d61-87e4-426c-a662-aeac863d434b",
+ "time": 1790197198720,
+ "realmId": "72322077-24c9-4f3e-95dc-107dd1e180b9",
+ "authDetails": {
+  "realmId": "4108c3b9-81fc-4499-bff2-8bf5ab8b2675",
+  "clientId": "a585207b-9050-424a-a73a-1ca3e3babde7",
+  "userId": "5ae4b3c3-f57e-4ed3-8935-280b74b88f49",
+  "ipAddress": "172.29.0.1"
+ },
+ "operationType": "UPDATE",
+ "resourceType": "USER",
+ "resourcePath": "users/9c59e55f-cb24-4ed6-b84e-a8c80c9eb729",
+ "representation": "{\"enabled\": false}"
+}

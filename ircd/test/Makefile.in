@@ -51,7 +51,8 @@ CMOCKA_TESTPROGS = \
 	webpush_line_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka \
-	account_id_cmocka
+	account_id_cmocka \
+	webhook_subject_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -95,6 +96,7 @@ DEP_SRC = \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
 	account_id_cmocka.c \
+	webhook_subject_cmocka.c \
 	ircd_events_cmocka.c \
 	test_stub.c
 
@@ -277,6 +279,14 @@ db_casefold_cmocka: $(DB_CASEFOLD_CMOCKA_OBJS)
 ACCOUNT_ID_CMOCKA_OBJS = account_id_cmocka.o ../account_id.o ../webpush_keyring.o
 account_id_cmocka: $(ACCOUNT_ID_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(ACCOUNT_ID_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webhook_subject tests - the pure webhook subject decision over real
+# Keycloak admin-event shapes (fixtures/webhook); links no ircd objects
+WEBHOOK_SUBJECT_CMOCKA_OBJS = webhook_subject_cmocka.o ../webhook_subject.o ../account_id.o ../webpush_keyring.o
+webhook_subject_cmocka.o: ${srcdir}/webhook_subject_cmocka.c
+	${CC} ${CFLAGS} ${CPPFLAGS} -DWEBHOOK_FIXTURE_DIR='"${srcdir}/fixtures/webhook"' -c -o $@ ${srcdir}/webhook_subject_cmocka.c
+webhook_subject_cmocka: $(WEBHOOK_SUBJECT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBHOOK_SUBJECT_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS)
 
 # ircd_events tests - an engine error never runs a socket's callback
 # inside the socket_add/socket_events/socket_state call that caused it.

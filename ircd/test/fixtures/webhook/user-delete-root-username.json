@@ -1,0 +1,8 @@
+{
+ "id": "synthetic",
+ "time": 0,
+ "realmId": "testnet",
+ "resourceType": "USER",
+ "operationType": "DELETE",
+ "username": "testaccXu"
+}
