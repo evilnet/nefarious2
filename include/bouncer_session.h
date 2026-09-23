@@ -1535,4 +1535,17 @@ extern void bounce_apply_alias_field(struct Client *alias,
  */
 extern void bounce_account_deauth_apply(struct Client *acptr);
 
+/** Null every alias's alias_primary that points at a departing client.
+ *
+ * The mirror of bounce_null_hs_client_pointing_at() for the other
+ * direction.  exit_client() does not promote or reap aliases when hold
+ * is disabled (bounce_should_hold() returning NULL, e.g. G-line
+ * enforcement), so a surviving alias can outlive its primary; once
+ * free_client() recycles the struct, the next alias->primary rewrite in
+ * ircd_relay.c reads freed memory.
+ *
+ * @param[in] gone  The client being removed.
+ */
+extern void bounce_null_alias_primary_pointing_at(struct Client *gone);
+
 #endif /* INCLUDED_bouncer_session_h */

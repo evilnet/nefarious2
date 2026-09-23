@@ -2646,6 +2646,22 @@ void bounce_clear_legacy_faces_for_peer(const char *peer_yxx)
   }
 }
 
+/** See include/bouncer_session.h. */
+void bounce_null_alias_primary_pointing_at(struct Client *gone)
+{
+  struct Client *cptr;
+
+  if (!gone)
+    return;
+
+  for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
+    if (!IsBouncerAlias(cptr) || !cli_user(cptr))
+      continue;
+    if (cli_user(cptr)->alias_primary == gone)
+      cli_user(cptr)->alias_primary = NULL;
+  }
+}
+
 void bounce_null_hs_client_pointing_at(struct Client *cli)
 {
   int i;
