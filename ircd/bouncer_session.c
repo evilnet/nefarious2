@@ -6112,7 +6112,7 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
     return -1;
   }
 
-  /* Authorization gate: rebind is allowed if any of
+  /* Authorization gate: rebind is allowed if either
    *   (a) introducing server matches the session's recorded hs_origin
    *       (legacy path; legacy peers do not carry the ,S sessid hint),
    *       OR
@@ -6120,23 +6120,19 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
    *       value matches this session's hs_sessid.  Sessid is a UUIDv7 —
    *       only servers that genuinely hold (or replicate) the session
    *       know it, so the match is non-spoofable across BX-aware peers.
-   *       OR
-   *   (c) the incoming account-timestamp matches the held ghost's
-   *       cli_user->acc_create.  Account TS is set by services on
-   *       account REGISTER and never changes for a live account — it's
-   *       a stable per-account identity hash carried in the +r flag.
-   *       This covers the leaf-re-links-during-burst case where neither
-   *       (a) nor (b) holds: the held ghost was created on a different
-   *       server than the peer reintroducing the user, and the peer's
-   *       burst-time N for its local user doesn't propagate ,S (the
-   *       compact-tag emission only carries forward an *incoming* tag,
-   *       which is empty for an originating burst).
    *
-   * Without (a)+(b)+(c), any peer reintroducing a user via N during
-   * burst — even a peer that doesn't run bouncer at all — could hijack
-   * the ghost as soon as the +r account matched.  (c) still gates on a
-   * per-account TS the attacker would have to forge; on an operator-
-   * controlled bus this is acceptable.
+   * Without (a)+(b), any peer reintroducing a user via N during burst —
+   * even a peer that doesn't run bouncer at all — could hijack the ghost
+   * as soon as the +r account matched.
+   *
+   * There used to be a third arm: the incoming account timestamp matching
+   * the ghost's acc_create.  It is retired (bouncer_rebind_auth.c).  It was
+   * a receiver-side fallback (219ab03) meant to go once the sender-side
+   * sessid hint (8cf493c) proved itself, and it is too coarse to authorize
+   * anything: it matches any connection that shares the account, and the
+   * same account is stamped with different timestamps depending on how
+   * the user logged in.  It is still computed so the refusal below can
+   * log it.
    *
    * Per redesign A.2/C.2: sessid is the canonical session identity;
    * hs_origin is historical-only metadata.  Sessid-match supersedes
@@ -6156,9 +6152,9 @@ int bounce_rebind_ghost_to_remote_primary(struct Client *ghost,
     if (rebind_auth == BRA_NONE) {
       Debug((DEBUG_INFO,
              "bounce_rebind: refusing — session %s origin %s != introducing "
-             "server %s, no sessid-tag match (wire ,S='%s'), no account-TS "
-             "match (incoming=%ld ghost=%ld, account %s); peer is not the "
-             "canonical primary",
+             "server %s, no sessid-tag match (wire ,S='%s'); account TS "
+             "incoming=%ld ghost=%ld not consulted (account %s); peer is "
+             "not the canonical primary",
              session->hs_sessid, session->hs_origin, cli_yxx(server),
              wire_sessid ? wire_sessid : "",
              (long)incoming_acc_ts, (long)cli_user(ghost)->acc_create,
