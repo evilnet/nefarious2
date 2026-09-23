@@ -219,6 +219,7 @@ IRCD_SRC = \
 	account_id.c \
 	webpush_attention.c \
 	bouncer_converge.c \
+	bouncer_deauth.c \
 	webpush_line.c \
 	metadata.c \
 	m_rehash.c \
