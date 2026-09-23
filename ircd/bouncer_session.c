@@ -7557,6 +7557,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   ircd_strncpy(cli_info(sptr), cli_info(primary), REALLEN + 1);
   ircd_strncpy(user->account, cli_user(primary)->account, ACCOUNTLEN + 1);
   user->acc_create = cli_user(primary)->acc_create;
+  ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
 
   /* Copy cloaked/fake host (controls what other users see).
    * Do NOT overwrite cli_ip — the alias has its own real socket IP,
@@ -8053,6 +8054,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
       ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
       ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
       user->acc_create = cli_user(primary)->acc_create;
+      ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
       user->alias_primary = primary;
       memcpy(&cli_ip(alias), &cli_ip(primary), sizeof(cli_ip(alias)));
       ircd_strncpy(user->cloakip, cli_user(primary)->cloakip, HOSTLEN + 1);
@@ -8111,6 +8113,7 @@ static int bounce_alias_create(struct Client *cptr, struct Client *sptr,
   ircd_strncpy(cli_info(alias), cli_info(primary), REALLEN + 1);
   ircd_strncpy(user->account, account, ACCOUNTLEN + 1);
   user->acc_create = cli_user(primary)->acc_create;
+  ircd_strncpy(user->kc_id, cli_user(primary)->kc_id, sizeof(user->kc_id));
   user->server = alias_server;
   user->alias_primary = primary;
 
