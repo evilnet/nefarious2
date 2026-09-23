@@ -80,6 +80,7 @@
  */
 #include "config.h"
 
+#include "account_id.h"
 #include "bouncer_session.h"
 #include "client.h"
 #include "ircd.h"
@@ -292,7 +293,16 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           cli_user(acptr)->acc_create = atoi(parv[4]);
           Debug((DEBUG_DEBUG, "Received timestamped account: account \"%s\", "
                  "timestamp %Tu", parv[3], cli_user(acptr)->acc_create));
-        }
+        } else
+          cli_user(acptr)->acc_create = 0;
+
+        /* Fifth parameter: the Keycloak user id, compact.  Anything else
+         * in that slot -- RENAME's marker, a value an older hop cut
+         * short -- is not an id and leaves it unknown. */
+        if (parc > 5 && account_id_valid(parv[5]))
+          ircd_strncpy(cli_user(acptr)->kc_id, parv[5], sizeof(cli_user(acptr)->kc_id));
+        else
+          cli_user(acptr)->kc_id[0] = '\0';
 
         {
           char ac_msgid[64] = "";
@@ -319,13 +329,16 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           }
         }
 
-        if (parc > 4) {
+        if (cli_user(acptr)->kc_id[0])
+          sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s %Tu %s",
+                                acptr, type, parv[3], cli_user(acptr)->acc_create,
+                                cli_user(acptr)->kc_id);
+        else if (parc > 4)
           sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s %s",
                                 acptr, type, parv[3], parv[4]);
-        } else {
+        else
           sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C %c %s",
                                 acptr, type, parv[3]);
-        }
       }
 
       if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
@@ -413,6 +426,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
         }
+        cli_user(acptr)->kc_id[0] = '\0';   /* the reply from services carries no id */
 
         if ((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
             (feature_int(FEAT_HOST_HIDING_STYLE) == 3)) {
