@@ -297,7 +297,7 @@ static struct poscache_entry *poscache_table[AUTHCACHE_BUCKETS];
 
 /** Insert or update a positive cache entry. */
 static void poscache_insert(const char *username, const char *account,
-                            uint64_t hash, time_t created_at)
+                            uint64_t hash, time_t created_at, const char *kc_id)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -307,6 +307,7 @@ static void poscache_insert(const char *username, const char *account,
     if (e->hash == hash) {
       e->timestamp = CurrentTime;
       e->created_at = created_at;
+      ircd_strncpy(e->kc_id, kc_id ? kc_id : "", sizeof(e->kc_id));
       ircd_strncpy(e->account, account, sizeof(e->account));
       return;
     }
@@ -319,6 +320,7 @@ static void poscache_insert(const char *username, const char *account,
   ircd_strncpy(e->account, account, sizeof(e->account));
   e->timestamp = CurrentTime;
   e->created_at = created_at;
+  ircd_strncpy(e->kc_id, kc_id ? kc_id : "", sizeof(e->kc_id));
   e->next = poscache_table[bucket];
   poscache_table[bucket] = e;
   cache_stats.pos_inserts++;
@@ -330,7 +332,7 @@ static void poscache_insert(const char *username, const char *account,
  *  @return 1 if cached (recent success), 0 if not.
  */
 static int poscache_check(uint64_t hash, char *account, size_t account_size,
-                          time_t *created_at)
+                          time_t *created_at, char *kc_id, size_t kc_id_size)
 {
   unsigned int bucket = (unsigned int)(hash % AUTHCACHE_BUCKETS);
   struct poscache_entry *e;
@@ -345,6 +347,8 @@ static int poscache_check(uint64_t hash, char *account, size_t account_size,
         ircd_strncpy(account, e->account, account_size);
         if (created_at)
           *created_at = e->created_at;
+        if (kc_id)
+          ircd_strncpy(kc_id, e->kc_id, kc_id_size);
         cache_stats.pos_hits++;
         return 1;
       }
@@ -584,8 +588,19 @@ void sasl_session_free(struct Client *sptr)
  *   7. auth_sasl_done to unblock registration
  *   8. Clean up SASL session state and timer
  */
+/** The id to announce: the verified user's own, and only when the login
+ * identity IS the verified user.  An impersonated login (authzid granted
+ * by FEAT_SASL_TRUSTED_AUTHZID) carries none: the id in hand belongs to
+ * the verifier, not to the account being logged into. */
+static const char *sasl_id_for(const char *login_as, const char *verified,
+                               const char *verified_id)
+{
+  return (verified_id && verified_id[0] && 0 == ircd_strcmp(login_as, verified))
+         ? verified_id : NULL;
+}
+
 void sasl_complete_login(struct Client *sptr, const char *account,
-                         time_t acc_create)
+                         time_t acc_create, const char *kc_id)
 {
   /* 1. Set account name */
   ircd_strncpy(cli_saslaccount(sptr), account, ACCOUNTLEN + 1);
@@ -604,6 +619,12 @@ void sasl_complete_login(struct Client *sptr, const char *account,
   /* 4. Set account creation time */
   if (acc_create)
     cli_saslacccreate(sptr) = acc_create;
+
+  /* 4b. Keycloak user id: set or cleared on every login, never inherited
+   * from a previous one.  An invalid value counts as none. */
+  ircd_strncpy(cli_saslkcid(sptr),
+               (kc_id && account_id_valid(kc_id)) ? kc_id : "",
+               sizeof(cli_saslkcid(sptr)));
 
   /* 5. Pre-registration hidden host setup */
   if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
@@ -652,6 +673,7 @@ void sasl_complete_login(struct Client *sptr, const char *account,
 
       if (cli_saslacccreate(sptr))
         cli_user(sptr)->acc_create = cli_saslacccreate(sptr);
+      ircd_strncpy(cli_user(sptr)->kc_id, cli_saslkcid(sptr), sizeof(cli_user(sptr)->kc_id));
 
       /* Notify channel members with account-notify capability */
       sendcmdto_common_channels_capab_butone(sptr, CMD_ACCOUNT, sptr,
@@ -660,7 +682,13 @@ void sasl_complete_login(struct Client *sptr, const char *account,
 
       /* Propagate to other servers */
       if (feature_bool(FEAT_EXTENDED_ACCOUNTS)) {
-        if (cli_user(sptr)->acc_create) {
+        if (cli_user(sptr)->kc_id[0]) {
+          /* Fifth parameter: the Keycloak user id.  The timestamp keeps its
+           * place (0 when unknown) so the id is always the fifth. */
+          sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu %s",
+                                sptr, type, cli_user(sptr)->account,
+                                cli_user(sptr)->acc_create, cli_user(sptr)->kc_id);
+        } else if (cli_user(sptr)->acc_create) {
           sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C %c %s %Tu",
                                 sptr, type, cli_user(sptr)->account,
                                 cli_user(sptr)->acc_create);
@@ -748,9 +776,17 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
 
     /* Update auth caches.  Store the verified authcid (never the asserted
      * authzid) so a cache hit can never resolve to an impersonated account. */
+    /* The user's Keycloak id, from the ID token the password grant asked
+     * for (the access token's "sub" depends on a client scope; the ID
+     * token's does not).  Absent -> no id, and everything else as before. */
+    char kcid[ACCOUNT_ID_LEN + 1] = "";
+    char sub[64];
+    if (token && token->id_token && kc_jwt_extract_sub(token->id_token, sub, sizeof(sub)))
+      account_id_from_uuid(sub, kcid);
+
     if (session->cred_hash_valid) {
       poscache_insert(session->authcid, session->authcid, session->cred_hash,
-                      token ? token->created_at : 0);
+                      token ? token->created_at : 0, kcid);
       negcache_remove(session->cred_hash);
     }
 
@@ -758,7 +794,8 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
               "SASL PLAIN: Successful authentication for %s (client %C)",
               login_as, acptr);
     sasl_complete_login(acptr, login_as,
-                        token && token->created_at ? token->created_at : 0);
+                        token && token->created_at ? token->created_at : 0,
+                        sasl_id_for(login_as, session->authcid, kcid));
   } else {
     if (result == KC_UNVERIFIED) {
       /* Account exists and Keycloak is healthy — the account has a pending
@@ -890,14 +927,16 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
     /* 2. Positive cache — accept known-good credentials immediately */
     {
       char cached_account[ACCOUNTLEN + 1];
+      char cached_kcid[ACCOUNT_ID_LEN + 1] = "";
       time_t cached_created_at = 0;
       if (poscache_check(cred_hash, cached_account, sizeof(cached_account),
-                         &cached_created_at)) {
+                         &cached_created_at, cached_kcid, sizeof(cached_kcid))) {
         const char *login_as = sasl_resolve_login_identity(session, cached_account);
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
                   authcid_str, sptr);
-        sasl_complete_login(sptr, login_as, cached_created_at);
+        sasl_complete_login(sptr, login_as, cached_created_at,
+                            sasl_id_for(login_as, cached_account, cached_kcid));
         return 0;
       }
     }
@@ -955,8 +994,14 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL EXTERNAL: Fingerprint matched user %s (client %C)",
               users[0].username, acptr);
-    sasl_complete_login(acptr, users[0].username,
-                        users[0].created_at ? users[0].created_at : 0);
+    {
+      char kcid[ACCOUNT_ID_LEN + 1] = "";
+      if (users[0].id)
+        account_id_from_uuid(users[0].id, kcid);
+      sasl_complete_login(acptr, users[0].username,
+                          users[0].created_at ? users[0].created_at : 0,
+                          kcid[0] ? kcid : NULL);   /* no authzid on this path */
+    }
   } else if (count > 1) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "SASL EXTERNAL: Fingerprint collision — %d users matched (client %C)",
@@ -1147,8 +1192,16 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL OAUTHBEARER: Introspect success for %s (client %C)",
               login_as, acptr);
-    sasl_complete_login(acptr, login_as,
-                        info->created_at ? info->created_at : 0);
+    {
+      /* info->sub is whatever the client's own token carries; a token
+       * minted without the basic scope has none, so no id is announced. */
+      char kcid[ACCOUNT_ID_LEN + 1] = "";
+      if (info->sub)
+        account_id_from_uuid(info->sub, kcid);
+      sasl_complete_login(acptr, login_as,
+                          info->created_at ? info->created_at : 0,
+                          sasl_id_for(login_as, info->username, kcid));
+    }
   } else {
     /* Connectivity errors should degrade health; invalid/inactive tokens should not */
     if (result != KC_SUCCESS && result != KC_FORBIDDEN)
@@ -1254,11 +1307,15 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
     login_as = sasl_resolve_login_identity(session, info->username);
     {
       time_t jwt_created_at = info->created_at ? info->created_at : 0;
+      char kcid[ACCOUNT_ID_LEN + 1] = "";
+      if (info->sub)
+        account_id_from_uuid(info->sub, kcid);   /* the client's own token; none without "sub" */
       log_write(LS_SYSTEM, L_INFO, 0,
                 "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
                 login_as, sptr);
       MyFree(token_nul);
-      sasl_complete_login(sptr, login_as, jwt_created_at);
+      sasl_complete_login(sptr, login_as, jwt_created_at,
+                          sasl_id_for(login_as, info->username, kcid));
       kc_jwt_token_info_free(info);
       return 0;
     }
@@ -1445,6 +1502,9 @@ static void sasl_scram_creds_cb(int result, const struct kc_user *user, void *da
   DupString(session->scram_salt_b64, user->scram_salt);
   session->scram_iterations = user->scram_iterations;
   session->acc_created_at = user->created_at;
+  session->kc_id[0] = '\0';
+  if (user->id)
+    account_id_from_uuid(user->id, session->kc_id);
 
   /* Generate server nonce (18 random bytes → 24 base64 chars) */
   {
@@ -1724,7 +1784,8 @@ static int sasl_scram_complete(struct Client *sptr)
             "SASL SCRAM: Successful authentication for %s (client %C)",
             login_as, sptr);
   sasl_complete_login(sptr, login_as,
-                      session->acc_created_at ? session->acc_created_at : 0);
+                      session->acc_created_at ? session->acc_created_at : 0,
+                      sasl_id_for(login_as, session->authcid, session->kc_id));
   return 0;
 }
 
@@ -1773,6 +1834,9 @@ static void sasl_ecdsa_key_cb(int result, const struct kc_user *user, void *data
   DupString(session->scram_client_first_bare, user->ecdsa_pubkey);
   /* (Reusing scram_client_first_bare to store ecdsa_pubkey — it's just a string slot) */
   session->acc_created_at = user->created_at;
+  session->kc_id[0] = '\0';
+  if (user->id)
+    account_id_from_uuid(user->id, session->kc_id);
 
   /* Generate 32-byte random challenge */
   for (i = 0; i < 32; i++)
@@ -1898,7 +1962,8 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
               "SASL ECDSA: Successful authentication for %s (client %C)",
               login_as, sptr);
     sasl_complete_login(sptr, login_as,
-                        session->acc_created_at ? session->acc_created_at : 0);
+                        session->acc_created_at ? session->acc_created_at : 0,
+                        sasl_id_for(login_as, session->authcid, session->kc_id));
     return 0;
   }
 

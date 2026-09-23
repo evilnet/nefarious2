@@ -248,7 +248,7 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   } else if (reply[0] == 'D') {
     if (data[0] == 'S') {
       /* Success — use shared login completion function */
-      sasl_complete_login(acptr, cli_saslaccount(acptr), cli_saslacccreate(acptr));
+      sasl_complete_login(acptr, cli_saslaccount(acptr), cli_saslacccreate(acptr), NULL);   /* the wire from X3 carries no id */
       return 0;
     } else if (data[0] == 'F') {
       send_reply(acptr, ERR_SASLFAIL, "");

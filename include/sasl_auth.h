@@ -119,7 +119,7 @@ extern void sasl_session_free(struct Client *sptr);
  *  AC broadcast, hidden host, bouncer alias update, auth_sasl_done.
  */
 extern void sasl_complete_login(struct Client *sptr, const char *account,
-                                time_t acc_create);
+                                time_t acc_create, const char *kc_id);
 
 /** Get the local SASL mechanism list string for CAP advertisement.
  *  @return Comma-separated mechanism string, or NULL if none.
