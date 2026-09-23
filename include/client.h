@@ -26,6 +26,9 @@
 #ifndef INCLUDED_ircd_defs_h
 #include "ircd_defs.h"
 #endif
+#ifndef INCLUDED_account_id_h
+#include "account_id.h"      /* ACCOUNT_ID_LEN */
+#endif
 #ifndef INCLUDED_dbuf_h
 #include "dbuf.h"
 #endif
@@ -567,6 +570,7 @@ struct Client {
   struct Client* cli_saslagent;     /**< SASL agent handling SASL exchange */
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
+  char cli_saslkcid[ACCOUNT_ID_LEN + 1]; /**< SASL authenticated Keycloak user id, compact; "" = none */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
   time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
   struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
@@ -777,6 +781,8 @@ struct Client {
 #define cli_saslaccount(cli)    ((cli)->cli_saslaccount)
 /** Get SASL authenticated account timestamp. */
 #define cli_saslacccreate(cli)  ((cli)->cli_saslacccreate)
+/** Get SASL authenticated Keycloak user id (compact). */
+#define cli_saslkcid(cli)       ((cli)->cli_saslkcid)
 /** Get SASL session cookie. */
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
 /** Get SASL start timestamp. */

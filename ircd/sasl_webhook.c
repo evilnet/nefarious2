@@ -81,6 +81,8 @@ static void deauth_client(struct Client *cptr, const char *reason)
   /* Clear account locally */
   ClearAccount(cptr);
   ircd_strncpy(cli_user(cptr)->account, "", ACCOUNTLEN + 1);
+  cli_user(cptr)->acc_create = 0;      /* the removed account's, not the next one's */
+  cli_user(cptr)->kc_id[0] = '\0';
 
   /* Notify channel members with account-notify capability */
   sendcmdto_common_channels_capab_butone(cptr, CMD_ACCOUNT, cptr,

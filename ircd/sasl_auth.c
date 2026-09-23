@@ -290,6 +290,7 @@ struct poscache_entry {
   char                  account[ACCOUNTLEN + 1];
   time_t                timestamp;
   time_t                created_at;   /**< Account creation time (epoch), 0 = unknown */
+  char                  kc_id[ACCOUNT_ID_LEN + 1]; /**< Keycloak user id, compact; "" = unknown */
 };
 
 static struct poscache_entry *poscache_table[AUTHCACHE_BUCKETS];

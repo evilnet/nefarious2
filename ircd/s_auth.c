@@ -463,6 +463,7 @@ static void auth_complete_sasl(struct Client *client)
     if (cli_saslacccreate(client))
       cli_user(client)->acc_create = cli_saslacccreate(client);
     ircd_strncpy(cli_user(client)->account, cli_saslaccount(client), ACCOUNTLEN + 1);
+    ircd_strncpy(cli_user(client)->kc_id, cli_saslkcid(client), sizeof(cli_user(client)->kc_id));
     SetAccount(client);
   }
 

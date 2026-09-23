@@ -205,6 +205,8 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         ClearAccount(acptr);
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
+        cli_user(acptr)->acc_create = 0;      /* the removed account's, not the next one's */
+        cli_user(acptr)->kc_id[0] = '\0';
 
         {
           char ac_msgid[64] = "";
