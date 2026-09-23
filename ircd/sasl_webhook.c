@@ -38,6 +38,7 @@
 #include "numnicks.h"
 #include "s_misc.h"
 #include "s_user.h"
+#include "bouncer_deauth.h"
 #include "bouncer_session.h"
 
 #include <jansson.h>
@@ -78,9 +79,22 @@ static void deauth_client(struct Client *cptr, const char *reason)
   wh_stats.sessions_killed++;
 }
 
-/** Deauth all IRC sessions logged into the given account.
- *  If kill flag is set, disconnect instead of deauthing.
- *  Walks GlobalClientList — O(n) but account disable/delete is rare.
+/** Apply an account deauth or kill to every LOCAL session of an account.
+ *
+ * Local only, deliberately.  GlobalClientList is network-wide, and
+ * exit_client() on a remote victim emits no KILL while broadcasting a
+ * victim-sourced QUIT on every downlink -- servers on the victim's own
+ * side discard it as wrong-direction, so the account holder stays online
+ * at home and disappears elsewhere, permanently, with no oper-visible
+ * KILL.  Remote sessions are reached by the AC U broadcast, which each
+ * server applies to its own clients.
+ *
+ * Walks GlobalClientList -- O(n), but account disable/delete is rare.
+ *
+ * Iterator note: the saved next is safe because nothing on this path
+ * sets FLAG_KILLED, which is what gates every cross-client exit_client()
+ * in the teardown chain; aliases sit ahead of their primary in the list.
+ * If this path ever sets FLAG_KILLED, re-walk as collect-then-act.
  */
 static void handle_sessions_for_account(const char *account, const char *reason,
                                          int do_kill)
@@ -88,32 +102,57 @@ static void handle_sessions_for_account(const char *account, const char *reason,
   struct Client *cptr, *next;
 
   for (cptr = GlobalClientList; cptr; cptr = next) {
+    struct BounceDeauthSubject subj;
+    enum BounceDeauthAction action;
+
     next = cli_next(cptr);
 
-    if (!IsUser(cptr) || !IsAccount(cptr))
-      continue;
-    if (!cli_user(cptr) || ircd_strcmp(cli_user(cptr)->account, account) != 0)
-      continue;
+    memset(&subj, 0, sizeof(subj));
+    subj.is_user         = IsUser(cptr) ? 1 : 0;
+    subj.is_account      = IsAccount(cptr) ? 1 : 0;
+    subj.account_matches = (cli_user(cptr)
+                            && 0 == ircd_strcmp(cli_user(cptr)->account,
+                                                account)) ? 1 : 0;
+    subj.is_alias        = IsBouncerAlias(cptr) ? 1 : 0;
+    subj.is_hold         = IsBouncerHold(cptr) ? 1 : 0;
+    subj.is_local        = MyConnect(cptr) ? 1 : 0;
 
-    /* Deauth targets the session primary; aliases mirror the primary's
-     * account via the BX U emit inside deauth_client, and a direct
-     * alias deauth would leak the alias numeric to legacy peers via
-     * AC U (aliases are BX C-introduced).  Kills still walk aliases --
-     * every socket of a disabled account must go. */
-    if (!do_kill && IsBouncerAlias(cptr))
-      continue;
+    action = bounce_deauth_classify(&subj, do_kill);
 
-    if (do_kill) {
+    switch (action) {
+    case BOUNCE_DEAUTH_SKIP:
+      break;
+
+    case BOUNCE_DEAUTH_CLEAR_ACCOUNT:
+      log_write(LS_SYSTEM, L_INFO, 0,
+                "WEBHOOK: Deauthing session for %C (account %s): %s",
+                cptr, account, reason);
+      deauth_client(cptr, reason);
+      break;
+
+    case BOUNCE_DEAUTH_KILL_SOCKET:
       log_write(LS_SYSTEM, L_INFO, 0,
                 "WEBHOOK: Killing session for %C (account %s): %s",
                 cptr, account, reason);
       exit_client_msg(cptr, cptr, &me, "%s", reason);
       wh_stats.sessions_killed++;
-    } else {
+      break;
+
+    case BOUNCE_DEAUTH_DESTROY_SESSION: {
+      /* Held ghost: no live socket to notify or kill.  Remove the
+       * session itself, which is what "the account is gone" means for a
+       * hold, and which neither a clear nor exit_client_msg() achieves
+       * (the latter leaves it HOLDING with the DB record intact because
+       * FLAG_KILLED is unset). */
+      struct BouncerSession *sess;
       log_write(LS_SYSTEM, L_INFO, 0,
-                "WEBHOOK: Deauthing session for %C (account %s): %s",
+                "WEBHOOK: Destroying held session for %C (account %s): %s",
                 cptr, account, reason);
-      deauth_client(cptr, reason);
+      while ((sess = bounce_find_any_session(account)) != NULL)
+        bounce_destroy(sess);
+      wh_stats.sessions_killed++;
+      break;
+    }
     }
   }
 }
@@ -172,7 +211,8 @@ static void handle_user_event(const struct kc_webhook_event *event)
     sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
     wh_stats.cache_invalidations++;
 
-    /* Default: deauth (AC U). KILL_ON_DELETE escalates to disconnect. */
+    /* Default: deauth (AC U), which propagates network-wide.
+     * KILL_ON_DELETE escalates to disconnecting LOCAL sockets only. */
     handle_sessions_for_account(event->username, "Account deleted",
                                  feature_bool(FEAT_WEBHOOK_KILL_ON_DELETE));
   }
@@ -187,7 +227,8 @@ static void handle_user_event(const struct kc_webhook_event *event)
       sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
       wh_stats.cache_invalidations++;
 
-      /* Default: deauth (AC U). KILL_ON_DISABLE escalates to disconnect. */
+      /* Default: deauth (AC U), which propagates network-wide.
+       * KILL_ON_DISABLE escalates to disconnecting LOCAL sockets only. */
       handle_sessions_for_account(event->username, "Account disabled",
                                    feature_bool(FEAT_WEBHOOK_KILL_ON_DISABLE));
     }
