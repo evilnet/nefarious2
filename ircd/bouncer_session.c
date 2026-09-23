@@ -2127,13 +2127,23 @@ int bounce_session_assert_invariant(struct BouncerSession *session,
      * slot after burst-time yield). */
     if (!IsAccount(p)
         || 0 != ircd_strcmp(cli_account(p), session->hs_account)) {
+      /* A deauthed-but-live client is NOT a recycled heap slot: the
+       * account was cleared under it on purpose (webhook / AC U) while
+       * hs_client still points at a perfectly valid Client.  Nulling
+       * defensively in that case can leave bounce_hold_expire with a
+       * NULL ghost and an immortal accountless client holding a nick.
+       * Tag the two cases apart so the field can tell us which occurs.
+       * See B-5 in
+       * .claude/para/projects/keycloak-webhook-audit-2026-09.md */
       log_write(LS_USER, L_WARNING, 0,
                 "session_invariant[%s]: session %s (account=%s) hs_client "
-                "%s has account=%s — heap-aliased dangling pointer; "
-                "nulling defensively",
+                "%s has account=%s — %s; nulling defensively",
                 site ? site : "?", session->hs_sessid, session->hs_account,
                 cli_name(p),
-                IsAccount(p) ? cli_account(p) : "<none>");
+                IsAccount(p) ? cli_account(p) : "<none>",
+                IsUser(p) && !IsAccount(p)
+                  ? "LIVE-DEAUTHED live client"
+                  : "heap-aliased dangling pointer");
       /* Defensive null — can't recover the right primary from here, but
        * we can at least stop pointing at the wrong Client.  Next
        * resume_check will hit the orphan-reclaim branch. */
