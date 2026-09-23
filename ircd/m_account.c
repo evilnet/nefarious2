@@ -238,7 +238,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         metadata_load_account(acptr, parv[3]);
 
         {
-          int was_account = IsAccount(acptr);
+          int was_account = IsAccount(acptr) ? 1 : 0;   /* flag beyond bit 31: never store the mask in an int */
           char presence_old_acct[ACCOUNTLEN + 1];
           ircd_strncpy(presence_old_acct, cli_user(acptr)->account,
                        sizeof(presence_old_acct));

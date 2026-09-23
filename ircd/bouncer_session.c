@@ -5733,7 +5733,7 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
 #ifdef USE_SSL
   /* Step 10: Update FLAG_SSL and channel nonsslusers counters */
   {
-    int was_ssl = IsSSL(ghost);
+    int was_ssl = IsSSL(ghost) ? 1 : 0;   /* flag beyond bit 31: never store the mask in an int */
     int now_ssl = (con_socket(ghost_con).ssl != NULL);
     if (now_ssl && !was_ssl) {
       SetSSL(ghost);
