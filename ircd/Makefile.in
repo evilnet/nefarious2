@@ -216,6 +216,7 @@ IRCD_SRC = \
 	webpush_mute.c \
 	webpush_expiry.c \
 	webpush_keyring.c \
+	account_id.c \
 	webpush_attention.c \
 	bouncer_converge.c \
 	webpush_line.c \

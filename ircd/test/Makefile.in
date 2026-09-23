@@ -49,7 +49,8 @@ CMOCKA_TESTPROGS = \
 	bouncer_converge_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
-	db_casefold_cmocka
+	db_casefold_cmocka \
+	account_id_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -91,6 +92,7 @@ DEP_SRC = \
 	ircd_kc_adapter_cmocka.c \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
+	account_id_cmocka.c \
 	ircd_events_cmocka.c \
 	test_stub.c
 
@@ -267,6 +269,12 @@ websocket_cmocka: $(WEBSOCKET_CMOCKA_OBJS)
 DB_CASEFOLD_CMOCKA_OBJS = db_casefold_cmocka.o test_stub.o ../db_casefold.o ../ircd_string.o
 db_casefold_cmocka: $(DB_CASEFOLD_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(DB_CASEFOLD_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# account_id tests - the compact Keycloak user id codec (pure; links the
+# webpush base64url helpers it reuses)
+ACCOUNT_ID_CMOCKA_OBJS = account_id_cmocka.o ../account_id.o ../webpush_keyring.o
+account_id_cmocka: $(ACCOUNT_ID_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(ACCOUNT_ID_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # ircd_events tests - an engine error never runs a socket's callback
 # inside the socket_add/socket_events/socket_state call that caused it.
