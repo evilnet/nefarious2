@@ -91,6 +91,7 @@
 #include "ircd_string.h"
 #include "msg.h"
 #include "numnicks.h"
+#include "s_misc.h"
 #include "s_auth.h"
 #include "s_bsd.h"
 #include "s_debug.h"
@@ -145,6 +146,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 {
   struct Client *acptr;
   char type;
+  int exit_ghost = 0;
 
   if (parc < 3)
     return need_more_params(sptr, "ACCOUNT");
@@ -172,7 +174,7 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                                     "(ACCOUNT Removal)", cli_name(acptr));
         assert(0 != cli_user(acptr)->account[0]);
 
-        bounce_account_deauth_apply(acptr);
+        exit_ghost = bounce_account_deauth_apply(acptr);
 
         {
           char ac_msgid[64] = "";
@@ -201,6 +203,16 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         }
 
         sendcmdto_serv_butone(sptr, CMD_ACCOUNT, cptr, "%C U", acptr);
+
+        /* A local held ghost has nothing left to revive into once its
+         * account is gone; it leaves now that the clear has been relayed
+         * (exit first and the relay would name a client that no longer
+         * exists). */
+        if (exit_ghost) {
+          ClearBouncerHold(acptr);
+          exit_client(acptr, acptr, &me, "Account deauthorized");
+          return 0;
+        }
       } else if (type == 'R' || type == 'M') {
         if (parc < 4)
           return need_more_params(sptr, "ACCOUNT");

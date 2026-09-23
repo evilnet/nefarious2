@@ -6780,19 +6780,55 @@ void bounce_echo_pm_to_session(struct Client *sender, struct Client *target,
  * @param[in] value   New value for the field.
  */
 /** See include/bouncer_session.h. */
-void bounce_account_deauth_apply(struct Client *acptr)
+int bounce_account_deauth_apply(struct Client *acptr)
 {
+  struct AccountSessions *as;
   struct BouncerSession *sess;
+  const char *account;
 
   assert(0 != acptr);
   assert(0 != cli_user(acptr));
   assert(0 != cli_user(acptr)->account[0]);
+  account = cli_user(acptr)->account;
 
-  /* Destroy all bouncer sessions for this account before clearing it.
-   * Re-lookup each iteration because bounce_destroy() may free the
-   * AccountSessions struct when the last session is removed. */
-  while ((sess = bounce_find_any_session(cli_user(acptr)->account)) != NULL)
+  /* Tell the aliases FIRST, for every session of the account:
+   * bounce_emit_alias_update walks a session's roster through
+   * bounce_get_session(), so it must run before the sessions are
+   * destroyed below and before ClearAccount (it bails on
+   * !IsAccount(primary)).  With it after the destroy loop the emit found
+   * no session and cleared nothing -- on both callers.  And the loop
+   * below takes every session of the account, not only acptr's, so a
+   * sibling session's aliases would be left unheard if only acptr's
+   * were told. */
+  as = bounce_find_by_account(account);
+  for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext) {
+    struct Client *primary = sess->hs_client;
+    if (primary && IsAccount(primary) && !IsBouncerAlias(primary))
+      bounce_emit_alias_update(primary, "account", "");
+  }
+
+  /* Destroy every session of the account before clearing it.  Re-lookup
+   * each iteration because bounce_destroy() may free the AccountSessions
+   * struct when the last session is removed.
+   *
+   * When acptr is the ghost of a held session, the account going away
+   * leaves nothing to revive into: the session's aliases are exited the
+   * way a KILL of the ghost would take them.  The ghost itself is the
+   * caller's to exit (see the return value) -- the caller is still using
+   * it, and only its own server may exit it (exit_client() on a remote
+   * client is B-2; the home server gets the same AC U). */
+  while ((sess = bounce_find_any_session(account)) != NULL) {
+    if (sess->hs_client == acptr && IsBouncerHold(acptr) && MyConnect(acptr)) {
+      int i;
+      for (i = sess->hs_alias_count - 1; i >= 0; i--) {
+        struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+        if (alias)
+          exit_client(alias, alias, &me, "Account deauthorized");
+      }
+    }
+    sess->hs_client = NULL;
     bounce_destroy(sess);
+  }
 
   /* Clear all persisted metadata for this account from the store and
    * free in-memory metadata entries.  Must happen while the account
@@ -6811,15 +6847,15 @@ void bounce_account_deauth_apply(struct Client *acptr)
   presence_anchor_transfer(acptr, cli_user(acptr)->account, 0,
                            cli_session_id(acptr), 1);
 
-  /* Emit the alias account-clear BEFORE clearing: bounce_emit_alias_update
-   * bails on !IsAccount(primary), so clearing first silently stranded
-   * every alias with a stale FLAG_ACCOUNT. */
-  bounce_emit_alias_update(acptr, "account", "");
-
   ClearAccount(acptr);
   ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
   cli_user(acptr)->acc_create = 0;      /* the removed account's, not the next one's */
   cli_user(acptr)->kc_id[0] = '\0';
+
+  /* A local held ghost now has neither account nor session (a sibling's
+   * deauth may have taken the session first; the ghost still has to go,
+   * or it holds the nick forever with no timer to end it). */
+  return (IsBouncerHold(acptr) && MyConnect(acptr)) ? 1 : 0;
 }
 
 /** See include/bouncer_session.h. */

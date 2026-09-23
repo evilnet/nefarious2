@@ -1531,9 +1531,17 @@ extern void bounce_apply_alias_field(struct Client *alias,
  * the Keycloak id go with it: they are the removed account's, not the
  * next one's.
  *
+ * Every session of the account goes, and a held session whose ghost is
+ * acptr loses its aliases too (the way a KILL of the ghost would): with
+ * the account gone there is nothing to revive into.  The ghost itself is
+ * left to the caller, which is still using acptr.
+ *
  * @param[in] acptr  A client with IsAccount() set.
+ * @return Non-zero when acptr is a local held ghost that the caller must
+ *         now exit (ClearBouncerHold + exit_client) once it is done with
+ *         it: its session is gone and no timer will ever remove it.
  */
-extern void bounce_account_deauth_apply(struct Client *acptr);
+extern int bounce_account_deauth_apply(struct Client *acptr);
 
 /** Null every alias's alias_primary that points at a departing client.
  *
