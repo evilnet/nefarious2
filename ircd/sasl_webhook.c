@@ -164,7 +164,27 @@ static void handle_sessions_for_account(const char *account, const char *reason,
     n++;
   }
 
-  /* Pass 2: act.  A numeric that no longer resolves was exited by an
+  /* Pass 2: a killed primary takes its whole session down first --
+   * every alias, everywhere, the way a network KILL does -- before any
+   * deauth destroys the record the aliases hang off.  A plain socket
+   * exit would instead hold the session (a ghost that revives on the
+   * next login) or hand it to an alias elsewhere (promotion): the
+   * deleted account would live on. */
+  if (do_kill) {
+    for (i = 0; i < n; i++) {
+      struct BouncerSession *sess;
+      if (hits[i].action != BOUNCE_DEAUTH_KILL_SOCKET)
+        continue;
+      cptr = findNUser(hits[i].numeric);
+      if (!cptr || IsBouncerAlias(cptr))
+        continue;
+      sess = bounce_get_session(cptr);
+      if (sess && sess->hs_client == cptr)
+        bounce_kill_session(sess, reason);
+    }
+  }
+
+  /* Pass 3: act.  A numeric that no longer resolves was exited by an
    * earlier action and is done; one that no longer carries the account
    * was already cleared. */
   for (i = 0; i < n; i++) {
