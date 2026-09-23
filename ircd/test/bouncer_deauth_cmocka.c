@@ -73,6 +73,91 @@ static void test_unknown_and_null_are_unknown(void **state)
   assert_ptr_equal(bounce_alias_field_name(BX_ALIAS_FIELD_COUNT), NULL);
 }
 
+/* A matching, local, live primary: the ordinary case. */
+static struct BounceDeauthSubject subj_primary(void)
+{
+  struct BounceDeauthSubject s;
+  memset(&s, 0, sizeof(s));
+  s.is_user = 1;
+  s.is_account = 1;
+  s.account_matches = 1;
+  s.is_local = 1;
+  return s;
+}
+
+static void test_local_primary_is_cleared_or_killed(void **state)
+{
+  (void)state;
+  struct BounceDeauthSubject s = subj_primary();
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_KILL_SOCKET);
+}
+
+static void test_remote_client_is_never_touched(void **state)
+{
+  (void)state;
+  /* B-2: exit_client() on a remote victim emits no KILL and sends a
+   * victim-sourced QUIT on every downlink, which the victim's own side
+   * discards as wrong-direction -- permanent split-brain.  A remote
+   * client is the other server's job; we reach it with AC U instead. */
+  struct BounceDeauthSubject s = subj_primary();
+  s.is_local = 0;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+}
+
+static void test_held_ghost_destroys_the_session(void **state)
+{
+  (void)state;
+  /* B-6: a held ghost is an IsUser client with an account, so it matched
+   * the old walk.  Deauthing it clears the account out from under the
+   * session's own hs_client; killing it leaves the session HOLDING with
+   * the DB record intact because FLAG_KILLED is unset.  Neither is the
+   * right primitive -- tear the session down explicitly. */
+  struct BounceDeauthSubject s = subj_primary();
+  s.is_hold = 1;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_DESTROY_SESSION);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_DESTROY_SESSION);
+}
+
+static void test_alias_skipped_on_clear_killed_on_kill(void **state)
+{
+  (void)state;
+  /* Aliases mirror the primary's account via bounce_apply_alias_field,
+   * so a direct clear would double-apply and would leak the alias
+   * numeric to legacy peers via AC U (aliases are BX C-introduced).
+   * Kills still take every socket -- whole-session loss is by design
+   * (invariant #6). */
+  struct BounceDeauthSubject s = subj_primary();
+  s.is_alias = 1;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_KILL_SOCKET);
+}
+
+static void test_non_matching_and_non_user_are_skipped(void **state)
+{
+  (void)state;
+  struct BounceDeauthSubject s = subj_primary();
+  s.account_matches = 0;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+
+  s = subj_primary();
+  s.is_user = 0;
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+
+  s = subj_primary();
+  s.is_account = 0;
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+}
+
+static void test_null_subject_is_skipped(void **state)
+{
+  (void)state;
+  assert_int_equal(bounce_deauth_classify(NULL, 0), BOUNCE_DEAUTH_SKIP);
+  assert_int_equal(bounce_deauth_classify(NULL, 1), BOUNCE_DEAUTH_SKIP);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -81,6 +166,12 @@ int main(void)
     cmocka_unit_test(test_field_ids_are_distinct_and_complete),
     cmocka_unit_test(test_round_trips_to_the_wire_name),
     cmocka_unit_test(test_unknown_and_null_are_unknown),
+    cmocka_unit_test(test_local_primary_is_cleared_or_killed),
+    cmocka_unit_test(test_remote_client_is_never_touched),
+    cmocka_unit_test(test_held_ghost_destroys_the_session),
+    cmocka_unit_test(test_alias_skipped_on_clear_killed_on_kill),
+    cmocka_unit_test(test_non_matching_and_non_user_are_skipped),
+    cmocka_unit_test(test_null_subject_is_skipped),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

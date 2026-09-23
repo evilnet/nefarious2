@@ -42,4 +42,40 @@ extern enum BounceAliasField bounce_alias_field_id(const char *field);
  */
 extern const char *bounce_alias_field_name(enum BounceAliasField id);
 
+/** One client, as the deauth walk sees it.  All fields are booleans
+ * taken from the client's flags so the decision is testable without a
+ * Client, a network, or a session table. */
+struct BounceDeauthSubject {
+  int is_user;          /**< IsUser(cptr) */
+  int is_account;       /**< IsAccount(cptr) */
+  int account_matches;  /**< account == the account being deauthed */
+  int is_alias;         /**< IsBouncerAlias(cptr) */
+  int is_hold;          /**< IsBouncerHold(cptr) -- a held ghost */
+  int is_local;         /**< MyConnect(cptr) */
+};
+
+/** What the walk should do with one client. */
+enum BounceDeauthAction {
+  BOUNCE_DEAUTH_SKIP = 0,        /**< leave it entirely alone */
+  BOUNCE_DEAUTH_CLEAR_ACCOUNT,   /**< deauth in place, stay connected */
+  BOUNCE_DEAUTH_KILL_SOCKET,     /**< disconnect this socket */
+  BOUNCE_DEAUTH_DESTROY_SESSION  /**< tear the bouncer session down */
+};
+
+/** Classify one client for an account deauth or kill.
+ *
+ * Locality is the load-bearing gate: a remote client must always be
+ * SKIP.  exit_client() on a remote victim emits no KILL and broadcasts a
+ * victim-sourced QUIT on every downlink, which servers on the victim's
+ * own side discard as wrong-direction -- leaving the account holder
+ * online at home and gone elsewhere.  Remote clients are reached by the
+ * account-level AC U broadcast, which their own server applies.
+ *
+ * @param[in] s        The client's flags (NULL is SKIP).
+ * @param[in] do_kill  Non-zero to disconnect rather than deauth in place.
+ * @return The action to take.
+ */
+extern enum BounceDeauthAction
+bounce_deauth_classify(const struct BounceDeauthSubject *s, int do_kill);
+
 #endif /* INCLUDED_bouncer_deauth_h */

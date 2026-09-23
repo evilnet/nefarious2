@@ -66,3 +66,33 @@ const char *bounce_alias_field_name(enum BounceAliasField id)
     return NULL;
   return field_names[id];
 }
+
+enum BounceDeauthAction
+bounce_deauth_classify(const struct BounceDeauthSubject *s, int do_kill)
+{
+  if (!s)
+    return BOUNCE_DEAUTH_SKIP;
+
+  /* Only registered users carrying the account in question. */
+  if (!s->is_user || !s->is_account || !s->account_matches)
+    return BOUNCE_DEAUTH_SKIP;
+
+  /* Never act on a client we do not own the socket for. */
+  if (!s->is_local)
+    return BOUNCE_DEAUTH_SKIP;
+
+  /* A held ghost has no live socket; the session is the thing to remove,
+   * and neither a clear nor a socket kill accomplishes that. */
+  if (s->is_hold)
+    return BOUNCE_DEAUTH_DESTROY_SESSION;
+
+  if (do_kill)
+    return BOUNCE_DEAUTH_KILL_SOCKET;
+
+  /* Aliases take the account clear through the primary's field
+   * propagation, not directly. */
+  if (s->is_alias)
+    return BOUNCE_DEAUTH_SKIP;
+
+  return BOUNCE_DEAUTH_CLEAR_ACCOUNT;
+}
