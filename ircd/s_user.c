@@ -2603,9 +2603,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 	      cli_user(acptr)->acc_create));
 	{
 	  const char *id = strchr(ts, ':');
-	  if (id && account_id_valid(id + 1))
+	  if (id && account_id_valid(id + 1)) {
 	    ircd_strncpy(cli_user(acptr)->kc_id, id + 1, sizeof(cli_user(acptr)->kc_id));
-	  else
+	    Debug((DEBUG_DEBUG, "Received account id %s in user mode for "
+		   "\"%s\"", cli_user(acptr)->kc_id, account));
+	  } else
 	    cli_user(acptr)->kc_id[0] = '\0';
 	}
       } else

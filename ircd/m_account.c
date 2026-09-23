@@ -299,9 +299,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         /* Fifth parameter: the Keycloak user id, compact.  Anything else
          * in that slot -- RENAME's marker, a value an older hop cut
          * short -- is not an id and leaves it unknown. */
-        if (parc > 5 && account_id_valid(parv[5]))
+        if (parc > 5 && account_id_valid(parv[5])) {
           ircd_strncpy(cli_user(acptr)->kc_id, parv[5], sizeof(cli_user(acptr)->kc_id));
-        else
+          Debug((DEBUG_DEBUG, "Received account id %s for account \"%s\"",
+                 cli_user(acptr)->kc_id, parv[3]));
+        } else
           cli_user(acptr)->kc_id[0] = '\0';
 
         {
