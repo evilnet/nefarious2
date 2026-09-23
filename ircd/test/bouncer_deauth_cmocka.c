@@ -93,15 +93,31 @@ static void test_local_primary_is_cleared_or_killed(void **state)
   assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_KILL_SOCKET);
 }
 
-static void test_remote_client_is_never_touched(void **state)
+static void test_remote_client_is_deauthed_never_killed(void **state)
 {
   (void)state;
-  /* B-2: exit_client() on a remote victim emits no KILL and sends a
-   * victim-sourced QUIT on every downlink, which the victim's own side
-   * discards as wrong-direction -- permanent split-brain.  A remote
-   * client is the other server's job; we reach it with AC U instead. */
+  /* B-2 is about the KILL: exit_client() on a remote victim emits no
+   * KILL and sends a victim-sourced QUIT on every downlink, which the
+   * victim's own side discards as wrong-direction -- permanent
+   * split-brain.  The DEAUTH is legal for a remote client: the local
+   * replica is cleared and AC U from &me reaches its home server, which
+   * runs the full receiver.  So a remote primary is always deauthed,
+   * kill or not, and a remote held ghost too (its home server tears the
+   * session down on AC U); a remote alias is left to its primary. */
   struct BounceDeauthSubject s = subj_primary();
   s.is_local = 0;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
+
+  s = subj_primary();
+  s.is_local = 0;
+  s.is_hold = 1;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
+
+  s = subj_primary();
+  s.is_local = 0;
+  s.is_alias = 1;
   assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
   assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
 }
@@ -167,7 +183,7 @@ int main(void)
     cmocka_unit_test(test_round_trips_to_the_wire_name),
     cmocka_unit_test(test_unknown_and_null_are_unknown),
     cmocka_unit_test(test_local_primary_is_cleared_or_killed),
-    cmocka_unit_test(test_remote_client_is_never_touched),
+    cmocka_unit_test(test_remote_client_is_deauthed_never_killed),
     cmocka_unit_test(test_held_ghost_destroys_the_session),
     cmocka_unit_test(test_alias_skipped_on_clear_killed_on_kill),
     cmocka_unit_test(test_non_matching_and_non_user_are_skipped),

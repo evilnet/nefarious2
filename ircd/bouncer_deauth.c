@@ -77,9 +77,19 @@ bounce_deauth_classify(const struct BounceDeauthSubject *s, int do_kill)
   if (!s->is_user || !s->is_account || !s->account_matches)
     return BOUNCE_DEAUTH_SKIP;
 
-  /* Never act on a client we do not own the socket for. */
+  /* Aliases take the account clear through the primary's field
+   * propagation, not directly; a kill takes every LOCAL socket. */
+  if (s->is_alias)
+    return (do_kill && s->is_local) ? BOUNCE_DEAUTH_KILL_SOCKET
+                                    : BOUNCE_DEAUTH_SKIP;
+
+  /* A client whose socket is not ours is never exited from here (B-2:
+   * exit_client() on a remote victim splits the network), but its
+   * account is still cleared: the local replica now, and the AC U that
+   * follows carries the clear to its home server, which runs the full
+   * receiver -- including the teardown of a held session's ghost. */
   if (!s->is_local)
-    return BOUNCE_DEAUTH_SKIP;
+    return BOUNCE_DEAUTH_CLEAR_ACCOUNT;
 
   /* A held ghost has no live socket; the session is the thing to remove,
    * and neither a clear nor a socket kill accomplishes that. */
@@ -88,11 +98,6 @@ bounce_deauth_classify(const struct BounceDeauthSubject *s, int do_kill)
 
   if (do_kill)
     return BOUNCE_DEAUTH_KILL_SOCKET;
-
-  /* Aliases take the account clear through the primary's field
-   * propagation, not directly. */
-  if (s->is_alias)
-    return BOUNCE_DEAUTH_SKIP;
 
   return BOUNCE_DEAUTH_CLEAR_ACCOUNT;
 }

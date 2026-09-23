@@ -64,12 +64,14 @@ enum BounceDeauthAction {
 
 /** Classify one client for an account deauth or kill.
  *
- * Locality is the load-bearing gate: a remote client must always be
- * SKIP.  exit_client() on a remote victim emits no KILL and broadcasts a
- * victim-sourced QUIT on every downlink, which servers on the victim's
- * own side discard as wrong-direction -- leaving the account holder
- * online at home and gone elsewhere.  Remote clients are reached by the
- * account-level AC U broadcast, which their own server applies.
+ * Locality gates the SOCKET, not the account.  exit_client() on a
+ * remote victim emits no KILL and broadcasts a victim-sourced QUIT on
+ * every downlink, which servers on the victim's own side discard as
+ * wrong-direction -- leaving the account holder online at home and gone
+ * elsewhere -- so a remote client is never KILL_SOCKET.  Its account IS
+ * cleared (CLEAR_ACCOUNT): the local replica loses it and the AC U that
+ * follows reaches its home server, which runs the full receiver.  A
+ * remote alias is SKIP either way; it follows its primary.
  *
  * @param[in] s        The client's flags (NULL is SKIP).
  * @param[in] do_kill  Non-zero to disconnect rather than deauth in place.
