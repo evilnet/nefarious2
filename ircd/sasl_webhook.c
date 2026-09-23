@@ -211,6 +211,21 @@ static void handle_user_event(const struct kc_webhook_event *event)
     sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
     wh_stats.cache_invalidations++;
 
+    /* Deauth is not implementable under legacy accounts: the legacy AC
+     * grammar has no unregister form, so peers cannot be told, while the
+     * BX U alias propagation would still fire -- leaving one session whose
+     * connections disagree about their own account and a network that
+     * disagrees with us.  A relink then re-teaches the account from the
+     * peer's N token, undoing the local clear.  Refuse loudly instead. */
+    if (!feature_bool(FEAT_EXTENDED_ACCOUNTS)
+        && !feature_bool(FEAT_WEBHOOK_KILL_ON_DELETE)) {
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "WEBHOOK: account %s deauth REFUSED -- EXTENDED_ACCOUNTS is "
+                "off and KILL_ON_DELETE is off; no coherent deauth exists. "
+                "Enable one of them.", event->username);
+      return;
+    }
+
     /* Default: deauth (AC U), which propagates network-wide.
      * KILL_ON_DELETE escalates to disconnecting LOCAL sockets only. */
     handle_sessions_for_account(event->username, "Account deleted",
@@ -226,6 +241,17 @@ static void handle_user_event(const struct kc_webhook_event *event)
       sasl_cache_invalidate_user(event->username);
       sendcmdto_serv_butone_v3(&me, CMD_CACHEINVAL, NULL, "%s", event->username);
       wh_stats.cache_invalidations++;
+
+      /* Same rule as the delete arm: no coherent deauth exists under
+       * legacy accounts unless the sockets are disconnected. */
+      if (!feature_bool(FEAT_EXTENDED_ACCOUNTS)
+          && !feature_bool(FEAT_WEBHOOK_KILL_ON_DISABLE)) {
+        log_write(LS_SYSTEM, L_WARNING, 0,
+                  "WEBHOOK: account %s deauth REFUSED -- EXTENDED_ACCOUNTS is "
+                  "off and KILL_ON_DISABLE is off; no coherent deauth exists. "
+                  "Enable one of them.", event->username);
+        return;
+      }
 
       /* Default: deauth (AC U), which propagates network-wide.
        * KILL_ON_DISABLE escalates to disconnecting LOCAL sockets only. */

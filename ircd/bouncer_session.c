@@ -6899,6 +6899,16 @@ void bounce_emit_alias_update(struct Client *primary, const char *field,
     if (alias && IsBouncerAlias(alias) && MyConnect(alias))
       bounce_apply_alias_field(alias, bounce_alias_field_id(field), value);
 
+    /* The account field rides AC U's coherence rules: if the network
+     * cannot be told the account was cleared (legacy accounts have no
+     * AC unregister form), do not tell the aliases either -- a
+     * half-applied clear leaves one session's connections disagreeing
+     * about their own account. */
+    if (bounce_alias_field_id(field) == BX_ALIAS_FIELD_ACCOUNT
+        && value[0] == '\0'
+        && !feature_bool(FEAT_EXTENDED_ACCOUNTS))
+      continue;
+
     sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
                           "U %s %s=%s",
                           sess->hs_aliases[i].ba_numeric, field, value);
