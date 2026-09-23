@@ -31,6 +31,7 @@
 #include "bouncer_session.h"
 #include "s_auth.h"
 #include "s_bsd.h"
+#include "s_debug.h"
 #include "s_misc.h"
 #include "s_user.h"
 #include "metadata.h"
@@ -625,6 +626,8 @@ void sasl_complete_login(struct Client *sptr, const char *account,
   ircd_strncpy(cli_saslkcid(sptr),
                (kc_id && account_id_valid(kc_id)) ? kc_id : "",
                sizeof(cli_saslkcid(sptr)));
+  Debug((DEBUG_DEBUG, "SASL: login as %s with id \"%s\" (%s)", account,
+         kc_id ? kc_id : "", cli_saslkcid(sptr)[0] ? "kept" : "none"));
 
   /* 5. Pre-registration hidden host setup */
   if (((feature_int(FEAT_HOST_HIDING_STYLE) == 1) ||
@@ -780,9 +783,11 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
      * for (the access token's "sub" depends on a client scope; the ID
      * token's does not).  Absent -> no id, and everything else as before. */
     char kcid[ACCOUNT_ID_LEN + 1] = "";
-    char sub[64];
+    char sub[64] = "";
     if (token && token->id_token && kc_jwt_extract_sub(token->id_token, sub, sizeof(sub)))
       account_id_from_uuid(sub, kcid);
+    Debug((DEBUG_DEBUG, "SASL PLAIN: ID token %s, sub \"%s\", compact id \"%s\" for %s",
+           token && token->id_token ? "present" : "absent", sub, kcid, session->authcid));
 
     if (session->cred_hash_valid) {
       poscache_insert(session->authcid, session->authcid, session->cred_hash,
@@ -1198,6 +1203,8 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
       char kcid[ACCOUNT_ID_LEN + 1] = "";
       if (info->sub)
         account_id_from_uuid(info->sub, kcid);
+      Debug((DEBUG_DEBUG, "SASL OAUTHBEARER: introspected sub \"%s\", compact id \"%s\"",
+             info->sub ? info->sub : "", kcid));
       sasl_complete_login(acptr, login_as,
                           info->created_at ? info->created_at : 0,
                           sasl_id_for(login_as, info->username, kcid));
@@ -1310,6 +1317,8 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
       char kcid[ACCOUNT_ID_LEN + 1] = "";
       if (info->sub)
         account_id_from_uuid(info->sub, kcid);   /* the client's own token; none without "sub" */
+      Debug((DEBUG_DEBUG, "SASL OAUTHBEARER: local sub \"%s\", compact id \"%s\"",
+             info->sub ? info->sub : "", kcid));
       log_write(LS_SYSTEM, L_INFO, 0,
                 "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
                 login_as, sptr);
