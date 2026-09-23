@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include <kc/kc_log.h>
+#include <kc/kc_base64.h>
 
 const struct kc_log_ops *kc_get_log_ops(void);
 const struct kc_log_ops *kc_get_log_ops(void) { return NULL; }
@@ -119,6 +120,47 @@ static void test_extract_created_at_handles_malformed(void **state) {
     assert_int_equal(kc_jwt_extract_created_at(NULL), 0);
     assert_int_equal(kc_jwt_extract_created_at("no-dots-here"), 0);
     assert_int_equal(kc_jwt_extract_created_at("only.one-dot"), 0);
+}
+
+/* header.payload.signature with a hand-built payload; only the payload matters here */
+static char *jwt_with_payload(const char *json)
+{
+    char *b64 = NULL, *p, *tok;
+    size_t n = kc_base64_encode_alloc(json, strlen(json), &b64);   /* standard alphabet */
+    assert_non_null(b64);
+    for (p = b64; *p; p++) {                                        /* -> base64url, unpadded */
+        if (*p == '+') *p = '-';
+        else if (*p == '/') *p = '_';
+        else if (*p == '=') { *p = '\0'; break; }
+    }
+    (void)n;
+    tok = malloc(strlen(b64) + 8);
+    sprintf(tok, "e30.%s.sig", b64);                                 /* "e30" = {} */
+    free(b64);
+    return tok;
+}
+
+static void test_extract_sub_present(void **state) {
+    char out[64] = "x";
+    char *tok = jwt_with_payload("{\"sub\":\"6ba7b810-9dad-11d1-80b4-00c04fd430c8\",\"exp\":9999999999}");
+    (void)state;
+    assert_int_equal(kc_jwt_extract_sub(tok, out, sizeof(out)), 1);
+    assert_string_equal(out, "6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+    free(tok);
+}
+
+static void test_extract_sub_absent_or_malformed(void **state) {
+    char out[64] = "x";
+    char *tok = jwt_with_payload("{\"exp\":9999999999}");
+    (void)state;
+    assert_int_equal(kc_jwt_extract_sub(tok, out, sizeof(out)), 0);   /* no sub: not an ID token */
+    assert_string_equal(out, "");
+    free(tok);
+    strcpy(out, "x");
+    assert_int_equal(kc_jwt_extract_sub("not.a.jwt", out, sizeof(out)), 0);
+    assert_string_equal(out, "");
+    assert_int_equal(kc_jwt_extract_sub(NULL, out, sizeof(out)), 0);
+    assert_int_equal(kc_jwt_extract_sub("h.p", NULL, 0), 0);
 }
 
 /*
@@ -331,6 +373,8 @@ int main(void) {
         cmocka_unit_test(test_absent_nbf_is_not_an_error),
         cmocka_unit_test(test_garbage_payload_rejected),
         cmocka_unit_test(test_extract_created_at_handles_malformed),
+        cmocka_unit_test(test_extract_sub_present),
+        cmocka_unit_test(test_extract_sub_absent_or_malformed),
     };
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     const struct CMUnitTest sig_tests[] = {
