@@ -29,6 +29,9 @@
 #ifndef INCLUDED_ircd_defs_h
 #include "ircd_defs.h"
 #endif
+#ifndef INCLUDED_bouncer_deauth_h
+#include "bouncer_deauth.h"
+#endif
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
 #endif
@@ -1490,5 +1493,24 @@ extern void bounce_db_shutdown(void);
  * @param[in] cptr Client whose session to mark dirty.
  */
 extern void bounce_mark_dirty(struct Client *cptr);
+
+/** Apply one BX U field update to a bouncer alias.
+ *
+ * The single applier for both directions: the local-alias pass inside
+ * bounce_emit_alias_update() (aliases on the primary's own server, which
+ * the S2S broadcast deliberately skips for loop prevention) and the
+ * bounce_alias_update() receiver (aliases reached over BX U).  Having
+ * one body is the point -- the two open-coded dispatches had drifted
+ * two fields apart, so local aliases silently never learned account or
+ * caps changes.
+ *
+ * @param[in] alias  A bouncer alias with cli_user() set.  The caller has
+ *                   already validated IsBouncerAlias().
+ * @param[in] id     Field identity from bounce_alias_field_id().
+ * @param[in] value  New value; "" clears for account.
+ */
+extern void bounce_apply_alias_field(struct Client *alias,
+                                     enum BounceAliasField id,
+                                     const char *value);
 
 #endif /* INCLUDED_bouncer_session_h */
