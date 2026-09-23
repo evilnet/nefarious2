@@ -1513,4 +1513,26 @@ extern void bounce_apply_alias_field(struct Client *alias,
                                      enum BounceAliasField id,
                                      const char *value);
 
+/** Apply an account deauthorization to one client, locally.
+ *
+ * The shared body of every deauth: the AC U receiver (ms_account) and
+ * the Keycloak webhook both call it.  They had separate copies and the
+ * copies drifted -- the webhook's omitted the session destroy and the
+ * metadata clear, so the deauthing server kept a revivable session and a
+ * bounce_db record for an account every peer had discarded.
+ *
+ * Does NOT emit anything on the network and does NOT send the
+ * CAP_ACCNOTIFY channel notice: the receiver relays while the originator
+ * broadcasts, and each wraps the notice in its own msgid, so both stay
+ * at the call site.
+ *
+ * The account string is still set on entry and cleared on exit -- the
+ * metadata and presence lookups key off it.  The account timestamp and
+ * the Keycloak id go with it: they are the removed account's, not the
+ * next one's.
+ *
+ * @param[in] acptr  A client with IsAccount() set.
+ */
+extern void bounce_account_deauth_apply(struct Client *acptr);
+
 #endif /* INCLUDED_bouncer_session_h */

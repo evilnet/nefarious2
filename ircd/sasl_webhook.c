@@ -31,8 +31,6 @@
 
 #ifdef USE_LIBKC
 
-#include "channel.h"
-#include "chathistory_presence.h"
 #include "ircd.h"
 #include "ircd_features.h"
 #include "ircd_string.h"
@@ -59,46 +57,25 @@ static void deauth_client(struct Client *cptr, const char *reason)
   if (!IsAccount(cptr) || !cli_user(cptr))
     return;
 
-  /* Send notice to the user explaining what happened */
+  /* Tell the user why before the account goes away. */
   sendcmdto_one(&me, CMD_NOTICE, cptr, "%C :%s", cptr, reason);
 
-  /* Decrement authusers on all channels.  channel_account_adjust
-   * skips CHFL_ALIAS memberships -- alias memberships were never
-   * counted, and the old open-coded loop stole counts whenever the
-   * session walk matched a bouncer alias. */
-  channel_account_adjust(cptr, -1);
+  /* Shared with ms_account's AC U receiver: session destroy, metadata
+   * clear, authusers, presence anchor, alias propagation, account clear. */
+  bounce_account_deauth_apply(cptr);
 
-  /* Strict-presence anchor transfer: account -> session (close the
-   * account-anchored open interval at deauth). */
-  presence_anchor_transfer(cptr, cli_user(cptr)->account, 0,
-                           cli_session_id(cptr), 1);
-
-  /* Notify bouncer aliases BEFORE clearing: bounce_emit_alias_update
-   * bails on !IsAccount(primary), so clearing first stranded every
-   * alias with a stale FLAG_ACCOUNT. */
-  bounce_emit_alias_update(cptr, "account", "");
-
-  /* Clear account locally */
-  ClearAccount(cptr);
-  ircd_strncpy(cli_user(cptr)->account, "", ACCOUNTLEN + 1);
-  cli_user(cptr)->acc_create = 0;      /* the removed account's, not the next one's */
-  cli_user(cptr)->kc_id[0] = '\0';
-
-  /* Notify channel members with account-notify capability */
+  /* Notify channel members with account-notify capability. */
   sendcmdto_common_channels_capab_butone(cptr, CMD_ACCOUNT, cptr,
                                           CAP_ACCNOTIFY, CAP_NONE, "*");
 
-  /* Propagate the account clear.  "AC <numeric> U" is
-   * EXTENDED_ACCOUNTS syntax; the legacy AC grammar has no unregister
-   * form at all (a legacy parser reads "U" as an account name and
-   * raises a protocol violation on the already-registered user), so
-   * under legacy accounts peers cannot be told -- mirror
-   * sasl_auth.c's EXTENDED_ACCOUNTS branching instead of emitting a
-   * token every legacy peer rejects. */
-  if (feature_bool(FEAT_EXTENDED_ACCOUNTS))
-    sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C U", cptr);
+  /* Propagate the account clear.  "AC <numeric> U" is EXTENDED_ACCOUNTS
+   * syntax; the legacy AC grammar has no unregister form at all (a
+   * legacy parser reads "U" as an account name and raises a protocol
+   * violation on the already-registered user).  handle_user_event
+   * refuses a deauth under legacy accounts before reaching here. */
+  sendcmdto_serv_butone(&me, CMD_ACCOUNT, NULL, "%C U", cptr);
 
-  wh_stats.sessions_killed++;  /* reuse counter for deauth+kill */
+  wh_stats.sessions_killed++;
 }
 
 /** Deauth all IRC sessions logged into the given account.
