@@ -617,11 +617,15 @@ static void handle_user_event(const struct kc_webhook_event *event)
     if (s.username) {
       log_write(LS_SYSTEM, L_INFO, 0,
                 "WEBHOOK: Account enabled: %s -- invalidating caches", s.username);
-      cache_invalidate_subject(s.username, NULL, event->id, WH_RELAY_ENABLE, NULL, 0);
     } else {
       log_write(LS_SYSTEM, L_DEBUG, 0,
                 "WEBHOOK: USER enable for id %s: no name to purge", s.kc_id);
     }
+    /* Relayed even without a name: the enable is in this server's
+     * applied-events log (it supersedes an earlier disable of the same
+     * subject in a catch-up), so every peer must hold it too, or the
+     * catch-up would be the first they hear of it. */
+    cache_invalidate_subject(s.username, s.kc_id, event->id, WH_RELAY_ENABLE, NULL, 0);
     break;
   case WH_SUBJECT_LOGOUT:
     log_write(LS_SYSTEM, L_DEBUG, 0, "WEBHOOK: USER logout for id %s: noted",
