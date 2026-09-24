@@ -48,6 +48,13 @@ static size_t      cfg_max_request_size = DEFAULT_MAX_REQUEST_SIZE;
 static int         cfg_max_connections = DEFAULT_MAX_CONNECTIONS;
 static int         cfg_queue_max = DEFAULT_QUEUE_MAX;
 static int         cfg_batch_size = DEFAULT_BATCH_SIZE;
+#define DEFAULT_SIGNATURE_WINDOW 300
+static int         cfg_signature_window = DEFAULT_SIGNATURE_WINDOW;
+static int         cfg_legacy_secret = 0;
+static char       *cfg_realm_name = NULL;
+static void      (*cfg_on_reject)(const char *, const char *, void *) = NULL;
+static void       *cfg_reject_data = NULL;
+static struct kc_replay_ring replay_ring;
 
 /* Listener */
 static int         listener_fd = -1;
@@ -76,6 +83,8 @@ struct wh_conn {
     char        method[16];
     char        path[256];
     char        secret_header[256];   /* X-Webhook-Secret or Authorization value */
+    char        signature_header[192]; /* X-Webhook-Signature value */
+    char        peer[64];             /* Peer address, for logs and the reject callback */
     void       *timeout_handle;       /* Slow-client timeout timer */
 };
 
@@ -103,7 +112,7 @@ static void conn_readable(int fd, int events, void *data);
 static void conn_timeout(void *data);
 static void conn_close(struct wh_conn *conn);
 static int  parse_http_headers(struct wh_conn *conn);
-static int  process_request(struct wh_conn *conn);
+static int process_request(struct wh_conn *conn, const char **msg);
 static void send_response(int fd, int status, const char *message);
 static int  queue_event(const char *payload, size_t len);
 static void process_queue(void *data);
@@ -201,6 +210,14 @@ kc_webhook_init(const struct kc_webhook_config *config,
         ? config->queue_max : DEFAULT_QUEUE_MAX;
     cfg_batch_size = config->batch_size > 0
         ? config->batch_size : DEFAULT_BATCH_SIZE;
+    cfg_signature_window = config->signature_window > 0
+        ? config->signature_window : DEFAULT_SIGNATURE_WINDOW;
+    cfg_legacy_secret = config->legacy_secret ? 1 : 0;
+    free(cfg_realm_name);
+    cfg_realm_name = (config->realm_name && config->realm_name[0]) ? strdup(config->realm_name) : NULL;
+    cfg_on_reject = config->on_reject;
+    cfg_reject_data = config->reject_data;
+    kc_replay_ring_init(&replay_ring);
 
     event_callback = cb;
     event_cb_data = cb_data;
@@ -310,6 +327,10 @@ kc_webhook_shutdown(void)
     cfg_secret = NULL;
     free(cfg_path);
     cfg_path = NULL;
+    free(cfg_realm_name);
+    cfg_realm_name = NULL;
+    cfg_on_reject = NULL;
+    cfg_reject_data = NULL;
 
     event_callback = NULL;
     event_cb_data = NULL;
@@ -394,6 +415,8 @@ listener_readable(int fd, int events, void *data)
     }
 
     conn->fd = client_fd;
+    if (!inet_ntop(AF_INET, &addr.sin_addr, conn->peer, sizeof(conn->peer)))
+        snprintf(conn->peer, sizeof(conn->peer), "?");
     conn->buf_size = 4096;
     conn->buffer = malloc(conn->buf_size);
     if (!conn->buffer) {
@@ -486,11 +509,10 @@ conn_readable(int fd, int events, void *data)
         return;  /* Need more body data */
 
     /* Process the complete request */
-    stats.events_received++;
-    if (process_request(conn) == 0) {
-        send_response(conn->fd, 200, "OK");
-    } else {
-        send_response(conn->fd, 400, "Bad Request");
+    {
+        const char *msg = "OK";
+        int status = process_request(conn, &msg);
+        send_response(conn->fd, status, msg);
     }
 
     conn_close(conn);
@@ -568,6 +590,10 @@ parse_http_headers(struct wh_conn *conn)
             const char *val = p + 17;
             while (*val == ' ') val++;
             snprintf(conn->secret_header, sizeof(conn->secret_header), "%s", val);
+        } else if (strncasecmp(p, "X-Webhook-Signature:", 20) == 0) {
+            const char *val = p + 20;
+            while (*val == ' ') val++;
+            snprintf(conn->signature_header, sizeof(conn->signature_header), "%s", val);
         } else if (strncasecmp(p, "Authorization:", 14) == 0) {
             /* Fall back to Authorization header if no X-Webhook-Secret */
             if (!conn->secret_header[0]) {
@@ -588,23 +614,40 @@ parse_http_headers(struct wh_conn *conn)
  * Request processing
  * =================================================================== */
 
+/* Record a refusal: counters (the caller's), the last cause, a warning and
+ * the ircd's callback.  The HTTP status is the caller's to answer with. */
+static void
+reject(struct wh_conn *conn, const char *cause)
+{
+    stats.last_reject_time = time(NULL);
+    snprintf(stats.last_reject_cause, sizeof(stats.last_reject_cause), "%s", cause);
+    kc_log_warning("kc_webhook: rejected request from %s: %s", conn->peer, cause);
+    if (cfg_on_reject)
+        cfg_on_reject(conn->peer, cause, cfg_reject_data);
+}
+
+/* Returns the HTTP status to answer with; 200 means the event was queued
+ * (or the request was one to ignore).  *msg names the reason otherwise. */
 static int
-process_request(struct wh_conn *conn)
+process_request(struct wh_conn *conn, const char **msg)
 {
     char *body;
     size_t body_len;
+    enum kc_sig_result sig;
+
+    *msg = "OK";
 
     /* Verify method */
     if (strcmp(conn->method, "POST") != 0) {
         kc_log_debug("kc_webhook: ignoring %s request", conn->method);
-        return 0;
+        return 200;
     }
 
     /* Verify path */
     if (cfg_path) {
         if (strcmp(conn->path, cfg_path) != 0) {
             kc_log_debug("kc_webhook: ignoring request to %s", conn->path);
-            return 0;
+            return 200;
         }
     } else {
         /* Default: accept /keycloak-webhook, /webhook, or / */
@@ -612,48 +655,89 @@ process_request(struct wh_conn *conn)
             strcmp(conn->path, "/webhook") != 0 &&
             strcmp(conn->path, "/") != 0) {
             kc_log_debug("kc_webhook: ignoring request to %s", conn->path);
-            return 0;
+            return 200;
         }
     }
 
-    /* Verify secret (fail closed).  A webhook with no configured secret is an
-     * unauthenticated destructive endpoint, so reject every request when none
-     * is set (a loud warning is also logged once at init).  When a secret is
-     * set, compare in constant time (length check, then CRYPTO_memcmp) so the
-     * secret is not leaked through a comparison timing side-channel. */
-    if (!cfg_secret || !cfg_secret[0]) {
-        kc_log_warning("kc_webhook: rejecting event - no webhook secret "
-                       "configured (endpoint disabled until one is set)");
-        stats.events_invalid++;
-        return -1;
-    }
-    {
-        size_t provided_len = strlen(conn->secret_header);
-        size_t expected_len = strlen(cfg_secret);
-        if (provided_len != expected_len ||
-            CRYPTO_memcmp(conn->secret_header, cfg_secret, expected_len) != 0) {
-            kc_log_warning("kc_webhook: invalid/missing secret");
-            stats.events_invalid++;
-            return -1;
-        }
-    }
-
-    /* Find body */
+    /* The body comes first: the signature covers it. */
     body = strstr(conn->buffer, "\r\n\r\n");
     if (!body) {
         stats.events_invalid++;
-        return -1;
+        *msg = "Bad Request";
+        return 400;
     }
     body += 4;
     body_len = conn->content_length;
 
+    /* Authenticate (fail closed).  A webhook with no configured secret is an
+     * unauthenticated destructive endpoint, so reject every request when none
+     * is set (a loud warning is also logged once at init).  Otherwise the
+     * delivery must carry a signature made with the secret, fresh within the
+     * window; the plain secret header alone passes only while legacy_secret
+     * is set (the window between deploying a signing SPI and this ircd). */
+    if (!cfg_secret || !cfg_secret[0]) {
+        stats.events_rejected_auth++;
+        reject(conn, "no secret configured");
+        *msg = "Unauthorized";
+        return 401;
+    }
+    sig = kc_webhook_sig_verify(cfg_secret, conn->signature_header, body, body_len,
+                                (long long)time(NULL), cfg_signature_window, NULL);
+    if (sig != KC_SIG_OK) {
+        size_t provided_len = strlen(conn->secret_header);
+        size_t expected_len = strlen(cfg_secret);
+        if (sig == KC_SIG_MISSING && cfg_legacy_secret
+            && provided_len == expected_len
+            && CRYPTO_memcmp(conn->secret_header, cfg_secret, expected_len) == 0) {
+            stats.events_unsigned_legacy++;
+        } else {
+            stats.events_rejected_auth++;
+            reject(conn, kc_sig_result_name(sig));
+            *msg = "Unauthorized";
+            return 401;
+        }
+    }
+
+    /* A genuine signature says nothing about a captured delivery played back,
+     * or about an event from another realm the same SPI serves: both are
+     * refused here, at HTTP time, by the event id and the realm name. */
+    {
+        json_t *root = json_loadb(body, body_len, 0, NULL);
+        if (root) {
+            json_t *idv = json_object_get(root, "id");
+            json_t *rn = json_object_get(root, "realmName");
+            const char *id = (idv && json_is_string(idv)) ? json_string_value(idv) : NULL;
+            if (kc_replay_ring_seen(&replay_ring, id, (long long)time(NULL), cfg_signature_window)) {
+                stats.events_replayed++;
+                reject(conn, "replay");
+                json_decref(root);
+                *msg = "Unauthorized";
+                return 401;
+            }
+            if (cfg_realm_name && rn && json_is_string(rn)
+                && strcmp(json_string_value(rn), cfg_realm_name) != 0) {
+                stats.events_rejected_realm++;
+                reject(conn, "realm");
+                json_decref(root);
+                *msg = "Forbidden";
+                return 403;
+            }
+            json_decref(root);
+        }
+        /* A body that is not JSON is queued and refused by the parser as
+         * before (events_invalid), with the signature already checked. */
+    }
+
+    stats.events_received++;      /* authenticated, fresh, ours */
+
     /* Queue for async processing */
     if (queue_event(body, body_len) < 0) {
         stats.events_dropped++;
-        return -1;
+        *msg = "Service Unavailable";
+        return 503;
     }
 
-    return 0;
+    return 200;
 }
 
 static void
@@ -670,6 +754,7 @@ send_response(int fd, int status, const char *message)
     case 404: status_text = "Not Found"; break;
     case 408: status_text = "Request Timeout"; break;
     case 413: status_text = "Payload Too Large"; break;
+    case 503: status_text = "Service Unavailable"; break;
     case 500: status_text = "Internal Server Error"; break;
     default:  status_text = "Unknown"; break;
     }

@@ -77,6 +77,9 @@ struct webhook_state {
   int  max_request_size;
   int  queue_max;
   int  batch_size;
+  int  signature_window;                  /* 0 = libkc's default (300 s) */
+  int  legacy_secret;                     /* accept the plain secret header alone (deploy window) */
+  char realm[SC_REALM_LEN];               /* "" = the Keycloak block's realm */
 };
 static struct webhook_state wh_pending;
 static struct webhook_state wh_active;
@@ -109,7 +112,10 @@ static int wh_changed(void)
       || wh_pending.max_connections != wh_active.max_connections
       || wh_pending.max_request_size != wh_active.max_request_size
       || wh_pending.queue_max != wh_active.queue_max
-      || wh_pending.batch_size != wh_active.batch_size;
+      || wh_pending.batch_size != wh_active.batch_size
+      || wh_pending.signature_window != wh_active.signature_window
+      || wh_pending.legacy_secret != wh_active.legacy_secret
+      || strcmp(wh_pending.realm, wh_active.realm);
 }
 
 static int kc_is_configured(const struct keycloak_state *s)
@@ -157,6 +163,17 @@ void sasl_conf_webhook_set_queue_max(int n)
                                            { wh_pending.queue_max = n; wh_pending.seen = 1; }
 void sasl_conf_webhook_set_batch_size(int n)
                                            { wh_pending.batch_size = n; wh_pending.seen = 1; }
+void sasl_conf_webhook_set_signature_window(int n)
+                                           { wh_pending.signature_window = n; wh_pending.seen = 1; }
+void sasl_conf_webhook_set_legacy_secret(int v)
+                                           { wh_pending.legacy_secret = v; wh_pending.seen = 1; }
+void sasl_conf_webhook_set_realm(const char *s)
+                                           { copy_str(wh_pending.realm, sizeof wh_pending.realm, s); wh_pending.seen = 1; }
+
+const char *sasl_conf_keycloak_realm(void)
+{
+  return kc_active.realm[0] ? kc_active.realm : (kc_pending.realm[0] ? kc_pending.realm : NULL);
+}
 
 /* ---- Apply (push pending → active, re-init libkc on change) ---- */
 
@@ -278,8 +295,31 @@ static void wh_apply_now(void)
   cfg.max_connections  = wh_pending.max_connections;
   cfg.queue_max        = wh_pending.queue_max;
   cfg.batch_size       = wh_pending.batch_size;
+  cfg.signature_window = wh_pending.signature_window;
+  cfg.legacy_secret    = wh_pending.legacy_secret;
+  cfg.realm_name       = wh_pending.realm[0] ? wh_pending.realm
+                       : (kc_pending.realm[0] ? kc_pending.realm : NULL);
 
-  if (sasl_webhook_init(cfg.port, cfg.secret) != 0)
+  /* A secret-only change keeps the listener and its counters: wh_changed()
+   * brought us here, so if everything but the secret is as it was, only
+   * the secret moved. */
+  if (wh_active.port == wh_pending.port && wh_active.port != 0
+      && 0 == strcmp(wh_active.vhost, wh_pending.vhost)
+      && 0 == strcmp(wh_active.path, wh_pending.path)
+      && wh_active.max_connections == wh_pending.max_connections
+      && wh_active.max_request_size == wh_pending.max_request_size
+      && wh_active.queue_max == wh_pending.queue_max
+      && wh_active.batch_size == wh_pending.batch_size
+      && wh_active.signature_window == wh_pending.signature_window
+      && wh_active.legacy_secret == wh_pending.legacy_secret
+      && 0 == strcmp(wh_active.realm, wh_pending.realm)) {
+    kc_webhook_set_secret(cfg.secret);
+    memcpy(&wh_active, &wh_pending, sizeof(wh_active));
+    log_write(LS_SYSTEM, L_NOTICE, 0, "WEBHOOK: secret changed; listener and counters kept");
+    return;
+  }
+
+  if (sasl_webhook_init(&cfg) != 0)
     return;                          /* sasl_webhook_init already logged */
 
   memcpy(&wh_active, &wh_pending, sizeof(wh_active));

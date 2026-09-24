@@ -25,6 +25,7 @@
 #include <stddef.h>
 #include <time.h>
 #include <jansson.h>
+#include <kc/kc_webhook_sig.h>
 
 /* Resource types from Keycloak admin events */
 enum kc_webhook_resource_type {
@@ -124,6 +125,11 @@ struct kc_webhook_config {
     int         max_connections;    /* Max concurrent connections (0 = 16 default) */
     int         queue_max;          /* Max queued events (0 = 1000 default) */
     int         batch_size;         /* Events per processing tick (0 = 10 default) */
+    int         signature_window;   /* Accept t within +/- seconds (0 = 300 default) */
+    int         legacy_secret;      /* 1 = accept the plain X-Webhook-Secret header alone (deploy window only) */
+    const char *realm_name;         /* Refuse payloads whose realmName differs (NULL = no check) */
+    void      (*on_reject)(const char *peer, const char *cause, void *data);  /* every refusal, by cause */
+    void       *reject_data;
 };
 
 /* Webhook statistics */
@@ -138,6 +144,12 @@ struct kc_webhook_stats {
     unsigned long connections_rejected; /* Over max_connections */
     unsigned long bytes_received;
     time_t        last_event_time;
+    unsigned long events_rejected_auth;   /* bad or missing signature (or no secret configured) */
+    unsigned long events_rejected_realm;  /* realmName differs from ours */
+    unsigned long events_replayed;        /* event id seen again within the window */
+    unsigned long events_unsigned_legacy; /* accepted on the plain secret header alone (transition) */
+    time_t        last_reject_time;
+    char          last_reject_cause[32];
 };
 
 /*

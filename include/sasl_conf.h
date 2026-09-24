@@ -57,6 +57,11 @@ extern void sasl_conf_webhook_set_max_connections(int n);
 extern void sasl_conf_webhook_set_max_request_size(int n);
 extern void sasl_conf_webhook_set_queue_max(int n);
 extern void sasl_conf_webhook_set_batch_size(int n);
+extern void sasl_conf_webhook_set_signature_window(int n);
+extern void sasl_conf_webhook_set_legacy_secret(int v);
+extern void sasl_conf_webhook_set_realm(const char *s);
+/** The configured Keycloak realm name (active, else pending), or NULL. */
+extern const char *sasl_conf_keycloak_realm(void);
 
 /** Apply pending state.  Called once per yyparse() at end of read_configuration_file().
  * - If a block was parsed, the block values take effect.

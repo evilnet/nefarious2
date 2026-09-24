@@ -532,30 +532,58 @@ static void nef_webhook_handle_event(const struct kc_webhook_event *event,
 
 /* ---- Public API ---- */
 
-int sasl_webhook_init(int port, const char *secret)
+/** The listener refused a request: count it, keep the cause, and tell the
+ * opers -- at most one notice per cause per minute, with the running count,
+ * so a wrong secret or a replay is loud without being a flood. */
+static void webhook_reject_notice(const char *peer, const char *cause, void *data)
+{
+  static const char *const causes[] = { "missing", "malformed", "stale", "mismatch",
+                                        "replay", "realm", "no secret configured" };
+  static time_t last_notice[8];
+  unsigned int i;
+
+  (void)data;
+  wh_stats.rejections++;
+  wh_stats.last_rejection = CurrentTime;
+  ircd_strncpy(wh_stats.last_reject_cause, cause, sizeof(wh_stats.last_reject_cause));
+  for (i = 0; i < 7; i++)
+    if (0 == strcmp(cause, causes[i]))
+      break;
+  if (CurrentTime - last_notice[i] < 60)
+    return;
+  last_notice[i] = CurrentTime;
+  sendto_opmask_butone(0, SNO_UNAUTH,
+                       "WEBHOOK: request from %s rejected: %s (%lu rejections since boot)",
+                       peer, cause, wh_stats.rejections);
+}
+
+int sasl_webhook_init(const struct kc_webhook_config *cfg_in)
 {
   struct kc_webhook_config cfg;
 
-  if (port <= 0)
-    return 0; /* Not an error — just disabled */
+  if (!cfg_in || cfg_in->port <= 0)
+    return 0; /* Not an error -- just disabled */
 
-  memset(&cfg, 0, sizeof(cfg));
-  cfg.port = port;
-  cfg.secret = secret;
-  /* Use libkc defaults for everything else */
+  cfg = *cfg_in;
+  cfg.on_reject = webhook_reject_notice;
+  cfg.reject_data = NULL;
 
   if (kc_webhook_init(&cfg, nef_webhook_handle_event, NULL) != 0) {
     log_write(LS_SYSTEM, L_ERROR, 0,
               "WEBHOOK: Failed to start Keycloak webhook listener on port %d",
-              port);
+              cfg.port);
     return -1;
   }
 
-  memset(&wh_stats, 0, sizeof(wh_stats));
+  /* wh_stats is NOT reset: a rehash keeps the counters. */
   webhook_initialized = 1;
 
   log_write(LS_SYSTEM, L_NOTICE, 0,
-            "WEBHOOK: Keycloak webhook listener started on port %d", port);
+            "WEBHOOK: Keycloak webhook listener on %s:%d path %s; signature required%s; realm %s",
+            cfg.bind_address ? cfg.bind_address : "*", cfg.port,
+            cfg.path ? cfg.path : "(default)",
+            cfg.legacy_secret ? " (plain secret accepted during the deploy window)" : "",
+            cfg.realm_name ? cfg.realm_name : "(not checked)");
   return 0;
 }
 
@@ -576,9 +604,9 @@ void sasl_webhook_stats_get(struct sasl_webhook_stats *out)
 
 #else /* !USE_LIBKC */
 
-int sasl_webhook_init(int port, const char *secret)
+int sasl_webhook_init(const struct kc_webhook_config *cfg)
 {
-  (void)port; (void)secret;
+  (void)cfg;
   return -1;
 }
 
