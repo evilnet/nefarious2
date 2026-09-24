@@ -342,14 +342,17 @@ static void handle_sessions_for_account(const char *account, const char *reason,
       } else if (!sess) {
         /* Every server receives the event now, and a sibling session's
          * AC U from its own server destroys every session of the account
-         * here before this pass runs.  The aliases still hang off the
-         * primary by pointer; exit them the way bounce_kill_session does
-         * (an alias exit is BX X, not a KILL, so B-2 does not apply), one
-         * at a time because each exit unlinks it from the list. */
+         * here before this pass runs.  The LOCAL aliases still hang off
+         * the primary by pointer; exit them the way bounce_kill_session
+         * does, one at a time because each exit unlinks it from the list.
+         * A remote alias is its home server's: an exit_client here would
+         * broadcast its BX X everywhere but toward that home (the B-2
+         * hole), and without a session record no session-level X follows
+         * to reach it. */
         struct Client *alias;
         for (;;) {
           for (alias = GlobalClientList; alias; alias = cli_next(alias))
-            if (IsBouncerAlias(alias) && cli_alias_primary(alias) == cptr)
+            if (IsBouncerAlias(alias) && MyConnect(alias) && cli_alias_primary(alias) == cptr)
               break;
           if (!alias)
             break;
@@ -522,6 +525,10 @@ static void deauth_subject(const struct WebhookSubject *s, const char *event_id,
   wh_stats.cache_invalidations++;
   relay_event(names_join(names, n, joined, sizeof(joined)), s->kc_id, event_id,
               webhook_relay_kind_for(s->kind));
+  /* The entry was recorded before the names were known (the dedupe comes
+   * first); a catch-up must carry them too. */
+  if (event_id)
+    webhook_eventlog_set_names(event_id, n ? joined : NULL);
 
   /* Deauth is not implementable under legacy accounts: the legacy AC
    * grammar has no unregister form, so peers cannot be told, while the
@@ -968,6 +975,12 @@ static void apply_relay(const struct WebhookRelay *r, struct Client *sptr, struc
 #else
   (void)n;   /* a build without the Keycloak client purges and forwards only */
 #endif
+  /* This server's catch-ups carry the merged list: what came on the line
+   * plus what was resolved here. */
+  if (n) {
+    char merged[WH_EVENTLOG_NAMES_LEN];
+    webhook_eventlog_set_names(r->event_id, names_join(names, n, merged, sizeof(merged)));
+  }
   if (r->catchup)
     wh_stats.applied_catchup++;
   else

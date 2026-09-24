@@ -51,6 +51,7 @@ struct WebhookEventLogEntry {
   char   kc_id[ACCOUNT_ID_LEN + 1];   /**< "" when unknown */
   char   names[WH_EVENTLOG_NAMES_LEN]; /**< the resolved account names, comma-joined; "" when none */
   time_t applied;
+  unsigned long seq;                  /**< insertion order: the tie-break for entries applied in the same second */
 };
 
 /** Size (or re-size) the log; keeps nothing.  0 = the default size. */
@@ -69,6 +70,10 @@ extern int webhook_eventlog_record(const char *id, char kind, const char *kc_id,
                                    const char *names, time_t now);
 /** 1 when the id is in the log. */
 extern int webhook_eventlog_seen(const char *id);
+/** Replace the names of a recorded event (the sender resolves them after
+ * recording it, the receiver merges its own); NULL or "*" leave them alone.
+ * @return 1 when the id is in the log, 0 otherwise. */
+extern int webhook_eventlog_set_names(const char *id, const char *names);
 
 /** Emit the entries applied at or after @a oldest, oldest first, at most
  * @a max of them.  @return the number emitted. */

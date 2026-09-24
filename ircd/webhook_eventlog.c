@@ -26,6 +26,7 @@ static struct WebhookEventLogEntry *ring = NULL;
 static unsigned int ring_cap = 0;
 static unsigned int ring_next = 0;    /* the slot the next new entry takes */
 static unsigned int ring_count = 0;
+static unsigned long ring_seq = 0;    /* insertion counter: orders entries applied in the same second */
 
 void webhook_eventlog_init(unsigned int capacity)
 {
@@ -100,6 +101,7 @@ int webhook_eventlog_record(const char *id, char kind, const char *kc_id,
   if (names && strcmp(names, "*") != 0)
     snprintf(e->names, sizeof(e->names), "%s", names);
   e->applied = now;
+  e->seq = ++ring_seq;
 
   ring_next = (ring_next + 1) % ring_cap;
   if (ring_count < ring_cap)
@@ -114,12 +116,31 @@ int webhook_eventlog_seen(const char *id)
   return find_slot(id) >= 0;
 }
 
+int webhook_eventlog_set_names(const char *id, const char *names)
+{
+  int slot;
+
+  if (!ring || !id || !id[0])
+    return 0;
+  slot = find_slot(id);
+  if (slot < 0)
+    return 0;
+  if (names && names[0] && strcmp(names, "*") != 0)
+    snprintf(ring[slot].names, sizeof(ring[slot].names), "%s", names);
+  return 1;
+}
+
+/** Oldest first; entries applied in the same second keep their insertion
+ * order (the sort may not be stable, and a wrapped ring puts a newer entry
+ * in a lower slot). */
 static int by_applied(const void *a, const void *b)
 {
   const struct WebhookEventLogEntry *ea = *(const struct WebhookEventLogEntry *const *)a;
   const struct WebhookEventLogEntry *eb = *(const struct WebhookEventLogEntry *const *)b;
   if (ea->applied < eb->applied) return -1;
   if (ea->applied > eb->applied) return 1;
+  if (ea->seq < eb->seq) return -1;
+  if (ea->seq > eb->seq) return 1;
   return 0;
 }
 
