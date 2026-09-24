@@ -459,26 +459,39 @@ void store_private_history(struct Client *sptr, struct Client *acptr,
    * client_tags appended below cannot carry a forged sid marker and
    * the auth check can rely on this one. */
   {
-    char tagbuf[768];
+    char tagbuf[800];
+    size_t pos = 0;
     const char *eph_sessid = NULL;
     if (!IsAccount(sptr) && cli_session_id(sptr)[0])
       eph_sessid = cli_session_id(sptr);
     else if (!IsAccount(acptr) && cli_session_id(acptr)[0])
       eph_sessid = cli_session_id(acptr);
 
-    if (eph_sessid) {
-      ircd_snprintf(0, tagbuf, sizeof(tagbuf),
-                    "+evilnet.github.io/sid=%s%s%s",
-                    eph_sessid,
-                    (client_tags && *client_tags) ? ";" : "",
-                    client_tags ? client_tags : "");
-      history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
-                            account, type, text, tagbuf);
-    } else {
-      /* Both parties authed (or sessid unavailable) — store as before. */
-      history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
-                            account, type, text, client_tags);
-    }
+    if (eph_sessid)
+      pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
+                           "+evilnet.github.io/sid=%s", eph_sessid);
+
+    /* Both parties' session ids, beside the sender's account: a row is a
+     * message from one SESSION to another, and the naming of the
+     * conversation later may stand a live client in for a stored nick
+     * only when it is the same session (a bouncer primary and its
+     * aliases share the id), never merely the same account -- an account
+     * can be online under several nicks at once.  Stripped on playback
+     * with the sid marker (strip_internal_tags); the vendor namespace is
+     * reserved at tag capture, so a client cannot forge them. */
+    if (cli_session_id(sptr)[0])
+      pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
+                           "%s+evilnet.github.io/ssid=%s", pos ? ";" : "",
+                           cli_session_id(sptr));
+    if (cli_session_id(acptr)[0])
+      pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
+                           "%s+evilnet.github.io/rsid=%s", pos ? ";" : "",
+                           cli_session_id(acptr));
+    if (client_tags && *client_tags)
+      pos += ircd_snprintf(0, tagbuf + pos, sizeof(tagbuf) - pos,
+                           "%s%s", pos ? ";" : "", client_tags);
+    history_store_message(msgid, timestamp, target, cli_name(acptr), sender,
+                          account, type, text, pos ? tagbuf : client_tags);
   }
 }
 #endif /* USE_ROCKSDB */
