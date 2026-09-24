@@ -30,6 +30,8 @@
 #include "client.h"
 #include "ircd_log.h"
 #include "msg.h"
+#include "ircd_reply.h"
+#include "s_stats.h"
 #include "send.h"
 
 #include <string.h>
@@ -596,6 +598,40 @@ void sasl_webhook_shutdown(void)
   }
 }
 
+void sasl_webhook_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  struct kc_webhook_stats t;
+
+  (void)sd; (void)param;
+  if (!webhook_initialized) {
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :WEBHOOK listener not running (no Webhook block, or port 0)");
+    return;
+  }
+  kc_webhook_stats_get(&t);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :WEBHOOK listener: %lu connections (%lu active, %lu refused over the limit), %lu bytes",
+             t.connections_total, t.connections_active, t.connections_rejected, t.bytes_received);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Events: %lu authenticated, %lu processed, %lu invalid, %lu dropped (queue %lu)",
+             t.events_received, t.events_processed, t.events_invalid, t.events_dropped, t.queue_depth);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Refused: %lu bad or missing signature, %lu replayed, %lu other realm, "
+             "%lu plain-secret (transition)",
+             t.events_rejected_auth, t.events_replayed, t.events_rejected_realm, t.events_unsigned_legacy);
+  if (t.last_reject_time)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :  Last refusal: %s, %lld s ago",
+               t.last_reject_cause, (long long)(CurrentTime - t.last_reject_time));
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Handler: %lu user events, %lu credential events, %lu session events; "
+             "%lu cache purges, %lu deauths or kills",
+             wh_stats.user_events, wh_stats.credential_events, wh_stats.session_events,
+             wh_stats.cache_invalidations, wh_stats.sessions_killed);
+  if (t.last_event_time)
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :  Last event: %lld s ago",
+               (long long)(CurrentTime - t.last_event_time));
+}
+
 void sasl_webhook_stats_get(struct sasl_webhook_stats *out)
 {
   if (out)
@@ -611,6 +647,13 @@ int sasl_webhook_init(const struct kc_webhook_config *cfg)
 }
 
 void sasl_webhook_shutdown(void) {}
+
+void sasl_webhook_report_stats(struct Client *to, const struct StatDesc *sd, char *param)
+{
+  (void)sd; (void)param;
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :WEBHOOK built without libkc (--disable-keycloak): no listener");
+}
 
 void sasl_webhook_stats_get(struct sasl_webhook_stats *out)
 {

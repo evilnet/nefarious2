@@ -53,4 +53,8 @@ extern void sasl_webhook_shutdown(void);
 /** Get webhook statistics. */
 extern void sasl_webhook_stats_get(struct sasl_webhook_stats *out);
 
+/** STATS webhook: the listener's transport counters and refusals by cause,
+ *  then the handler's counters. */
+extern void sasl_webhook_report_stats(struct Client *to, const struct StatDesc *sd, char *param);
+
 #endif /* INCLUDED_sasl_webhook_h */

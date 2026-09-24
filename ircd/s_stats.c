@@ -51,6 +51,7 @@
 #include "s_serv.h"
 #include "s_stats.h"
 #include "authtoken.h"
+#include "sasl_webhook.h"
 #include "webpush.h"
 #include "s_user.h"
 #include "send.h"
@@ -745,6 +746,9 @@ struct StatDesc statsinfo[] = {
   { ' ', "webpush", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     webpush_report_stats, 0,
     "WEBPUSH VAPID key ring and subscription statistics." },
+  { ' ', "webhook", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
+    sasl_webhook_report_stats, 0,
+    "Keycloak webhook listener: transport, refusals, handler counters." },
   { ' ', "authtoken", STAT_FLAG_OPERFEAT, FEAT_LAST_F,
     authtoken_report_stats, 0,
     "AUTHTOKEN services, token counts and JWT public keys." },
