@@ -319,8 +319,13 @@ static void wh_apply_now(void)
     return;
   }
 
-  if (sasl_webhook_init(&cfg) != 0)
-    return;                          /* sasl_webhook_init already logged */
+  if (sasl_webhook_init(&cfg) != 0) {
+    /* The old listener is gone and the new one never came up: forget the
+     * active state, so the next rehash tries again even with unchanged
+     * values (wh_changed() would otherwise call it a no-op). */
+    memset(&wh_active, 0, sizeof(wh_active));
+    return;                          /* sasl_webhook_init already logged and noticed */
+  }
 
   memcpy(&wh_active, &wh_pending, sizeof(wh_active));
 }

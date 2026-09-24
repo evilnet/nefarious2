@@ -634,6 +634,7 @@ process_request(struct wh_conn *conn, const char **msg)
     char *body;
     size_t body_len;
     enum kc_sig_result sig;
+    long long now, t_sig;
 
     *msg = "OK";
 
@@ -681,8 +682,10 @@ process_request(struct wh_conn *conn, const char **msg)
         *msg = "Unauthorized";
         return 401;
     }
+    now = (long long)time(NULL);
+    t_sig = now;                    /* the plain-header transition path has no signature time */
     sig = kc_webhook_sig_verify(cfg_secret, conn->signature_header, body, body_len,
-                                (long long)time(NULL), cfg_signature_window, NULL);
+                                now, cfg_signature_window, &t_sig);
     if (sig != KC_SIG_OK) {
         size_t provided_len = strlen(conn->secret_header);
         size_t expected_len = strlen(cfg_secret);
@@ -707,7 +710,7 @@ process_request(struct wh_conn *conn, const char **msg)
             json_t *idv = json_object_get(root, "id");
             json_t *rn = json_object_get(root, "realmName");
             const char *id = (idv && json_is_string(idv)) ? json_string_value(idv) : NULL;
-            if (kc_replay_ring_seen(&replay_ring, id, (long long)time(NULL), cfg_signature_window)) {
+            if (kc_replay_ring_seen(&replay_ring, id, t_sig, now, cfg_signature_window)) {
                 stats.events_replayed++;
                 reject(conn, "replay");
                 json_decref(root);
@@ -721,6 +724,12 @@ process_request(struct wh_conn *conn, const char **msg)
                 json_decref(root);
                 *msg = "Forbidden";
                 return 403;
+            }
+            if (!rn || !json_is_string(rn)) {
+                /* A pre-signing SPI names no realm: accepted, but counted so
+                 * the rollout (and a stray old SPI) stays visible. */
+                stats.events_no_realm++;
+                kc_log_debug("kc_webhook: event %s names no realm", id ? id : "(no id)");
             }
             json_decref(root);
         }

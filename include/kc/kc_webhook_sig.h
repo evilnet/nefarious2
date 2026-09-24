@@ -37,8 +37,12 @@ struct kc_replay_ring {
 
 void kc_replay_ring_init(struct kc_replay_ring *r);
 
-/* 1 = id was seen within window_s of now (a replay).  0 = new; remembered.
- * NULL or empty ids are never replays. */
-int  kc_replay_ring_seen(struct kc_replay_ring *r, const char *id, long long now, int window_s);
+/* 1 = this id was already seen with a signature (made at t) that is still
+ * fresh at now: a replay.  0 = new, or an old sighting whose signature has
+ * gone stale (the sender signed the id again); remembered, an old sighting
+ * refreshed in place.  The ring lives by the signature's own time, so an id
+ * stays refusable exactly as long as its signature stays fresh, whatever the
+ * sender's clock skew.  NULL or empty ids are never replays. */
+int  kc_replay_ring_seen(struct kc_replay_ring *r, const char *id, long long t, long long now, int window_s);
 
 #endif /* KC_WEBHOOK_SIG_H */

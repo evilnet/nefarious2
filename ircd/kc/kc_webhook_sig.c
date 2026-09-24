@@ -103,7 +103,7 @@ void kc_replay_ring_init(struct kc_replay_ring *r)
     memset(r, 0, sizeof(*r));
 }
 
-int kc_replay_ring_seen(struct kc_replay_ring *r, const char *id, long long now, int window_s)
+int kc_replay_ring_seen(struct kc_replay_ring *r, const char *id, long long t, long long now, int window_s)
 {
     int i;
 
@@ -111,13 +111,14 @@ int kc_replay_ring_seen(struct kc_replay_ring *r, const char *id, long long now,
         return 0;
     for (i = 0; i < KC_REPLAY_RING; i++) {
         if (r->id[i][0] && strcmp(r->id[i], id) == 0) {
-            if (window_s <= 0 || (now - r->t[i] <= window_s && r->t[i] - now <= window_s))
-                return 1;
-            break;      /* an old sighting: remember it afresh below */
+            if (window_s <= 0 || now - r->t[i] <= window_s)
+                return 1;       /* that signature is still fresh: a replay */
+            r->t[i] = t;        /* signed again after its window: refreshed in place */
+            return 0;
         }
     }
     snprintf(r->id[r->next], sizeof(r->id[r->next]), "%s", id);
-    r->t[r->next] = now;
+    r->t[r->next] = t;
     r->next = (r->next + 1) % KC_REPLAY_RING;
     return 0;
 }

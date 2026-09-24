@@ -54,17 +54,43 @@ static void test_replay_is_refused(void **s)
   char id[40];
   (void)s;   /* Review focus 2 */
   kc_replay_ring_init(&r);
-  assert_int_equal(kc_replay_ring_seen(&r, "e1", T, 300), 0);
-  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 5, 300), 1);
-  assert_int_equal(kc_replay_ring_seen(&r, "e2", T + 5, 300), 0);
-  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 400, 300), 0);   /* outside the window: not a replay */
+  /* (id, signature time t, receipt time now, window) */
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T, T, 300), 0);
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T, T + 5, 300), 1);
+  assert_int_equal(kc_replay_ring_seen(&r, "e2", T + 5, T + 5, 300), 0);
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 400, T + 400, 300), 0);   /* re-signed after the window: not a replay */
   for (i = 0; i < KC_REPLAY_RING + 5; i++) {
     snprintf(id, sizeof(id), "x%d", i);
-    kc_replay_ring_seen(&r, id, T, 300);
+    kc_replay_ring_seen(&r, id, T, T, 300);
   }
-  assert_int_equal(kc_replay_ring_seen(&r, "x0", T, 300), 0);         /* evicted, remembered again */
-  assert_int_equal(kc_replay_ring_seen(&r, "x0", T, 300), 1);
-  assert_int_equal(kc_replay_ring_seen(&r, NULL, T, 300), 0);
+  assert_int_equal(kc_replay_ring_seen(&r, "x0", T, T, 300), 0);         /* evicted, remembered again */
+  assert_int_equal(kc_replay_ring_seen(&r, "x0", T, T, 300), 1);
+  assert_int_equal(kc_replay_ring_seen(&r, NULL, T, T, 300), 0);
+}
+
+/* Review finding 3a: an id re-signed after its window is remembered afresh
+ * in place, so a replay of THAT sighting is still refused. */
+static void test_replay_after_resign_is_refused(void **s)
+{
+  struct kc_replay_ring r;
+  (void)s;
+  kc_replay_ring_init(&r);
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T, T, 300), 0);
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 400, T + 400, 300), 0);   /* the SPI signed it again */
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 400, T + 405, 300), 1);   /* a copy of that one: replay */
+}
+
+/* Review finding 3b: the ring lives by the signature's own time, so an id
+ * stays refusable for exactly as long as its signature stays fresh, whatever
+ * the SPI's clock skew. */
+static void test_replay_ring_keeps_signature_time(void **s)
+{
+  struct kc_replay_ring r;
+  (void)s;
+  kc_replay_ring_init(&r);
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 200, T, 300), 0);          /* SPI clock 200 s ahead */
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 200, T + 350, 300), 1);    /* signature still fresh: replay */
+  assert_int_equal(kc_replay_ring_seen(&r, "e1", T + 200, T + 501, 300), 0);    /* signature stale now: no longer a replay (verify refuses it as stale) */
 }
 
 int main(void)
@@ -74,6 +100,8 @@ int main(void)
     cmocka_unit_test(test_stale_timestamp_is_refused),
     cmocka_unit_test(test_wrong_secret_body_or_shape),
     cmocka_unit_test(test_replay_is_refused),
+    cmocka_unit_test(test_replay_after_resign_is_refused),
+    cmocka_unit_test(test_replay_ring_keeps_signature_time),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

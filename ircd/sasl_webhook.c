@@ -31,6 +31,7 @@
 #include "ircd_log.h"
 #include "msg.h"
 #include "ircd_reply.h"
+#include "numeric.h"
 #include "s_stats.h"
 #include "send.h"
 
@@ -43,7 +44,6 @@
 #include "ircd_alloc.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
-#include "numeric.h"
 #include "numnicks.h"
 #include "s_misc.h"
 #include "s_user.h"
@@ -571,9 +571,18 @@ int sasl_webhook_init(const struct kc_webhook_config *cfg_in)
   cfg.reject_data = NULL;
 
   if (kc_webhook_init(&cfg, nef_webhook_handle_event, NULL) != 0) {
+    /* kc_webhook_init closed the previous listener before it failed: no
+     * event arrives until a rehash brings one up, STATS webhook says so, and
+     * every oper hears it (a silent dead listener is what P0-4 set out to end). */
+    webhook_initialized = 0;
     log_write(LS_SYSTEM, L_ERROR, 0,
-              "WEBHOOK: Failed to start Keycloak webhook listener on port %d",
-              cfg.port);
+              "WEBHOOK: Failed to start Keycloak webhook listener on %s:%d; "
+              "no events are received until a rehash brings it back",
+              cfg.bind_address ? cfg.bind_address : "*", cfg.port);
+    sendto_opmask_butone(0, SNO_OLDSNO,
+                         "WEBHOOK: listener failed to start on %s:%d; Keycloak events are "
+                         "NOT received until a rehash brings it back (see STATS webhook)",
+                         cfg.bind_address ? cfg.bind_address : "*", cfg.port);
     return -1;
   }
 
@@ -605,10 +614,14 @@ void sasl_webhook_report_stats(struct Client *to, const struct StatDesc *sd, cha
   (void)sd; (void)param;
   if (!webhook_initialized) {
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
-               "W :WEBHOOK listener not running (no Webhook block, or port 0)");
+               "W :WEBHOOK listener NOT RUNNING (no Webhook block, port 0, or the last start "
+               "failed: see the log; a rehash retries)");
     return;
   }
   kc_webhook_stats_get(&t);
+  if (!kc_webhook_is_running())
+    send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+               "W :WEBHOOK listener NOT RUNNING (socket closed); the counters below are the last listener's");
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "W :WEBHOOK listener: %lu connections (%lu active, %lu refused over the limit), %lu bytes",
              t.connections_total, t.connections_active, t.connections_rejected, t.bytes_received);
@@ -619,6 +632,9 @@ void sasl_webhook_report_stats(struct Client *to, const struct StatDesc *sd, cha
              "W :  Refused: %lu bad or missing signature, %lu replayed, %lu other realm, "
              "%lu plain-secret (transition)",
              t.events_rejected_auth, t.events_replayed, t.events_rejected_realm, t.events_unsigned_legacy);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Without realmName: %lu (accepted; a pre-signing SPI names no realm)",
+             t.events_no_realm);
   if (t.last_reject_time)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :  Last refusal: %s, %lld s ago",
                t.last_reject_cause, (long long)(CurrentTime - t.last_reject_time));
