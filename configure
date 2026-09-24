@@ -9625,8 +9625,8 @@ esac
 fi
 
 
-  KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_cred_derive.c kc/kc_error_classify.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c webhook_subject.c"
-  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka ircd_kc_adapter_cmocka webhook_subject_cmocka"
+  KC_SRC="kc/kc.c kc/kc_base64.c kc/kc_cache.c kc/kc_cred_derive.c kc/kc_error_classify.c kc/kc_http.c kc/kc_http_sync.c kc/kc_jwt.c kc/kc_keycloak.c kc/kc_url.c kc/kc_webhook.c kc/kc_webhook_sig.c webhook_subject.c"
+  KC_CMOCKA_TESTPROGS="kc_url_cmocka kc_base64_cmocka kc_cache_cmocka kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka ircd_kc_adapter_cmocka webhook_subject_cmocka kc_webhook_sig_cmocka"
 
 
 printf "%s\n" "#define USE_LIBKC /**/" >>confdefs.h
