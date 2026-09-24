@@ -668,9 +668,13 @@ void sasl_complete_login(struct Client *sptr, const char *account,
   if (cli_auth(sptr))
     auth_set_account(cli_auth(sptr), cli_saslaccount(sptr));
 
-  /* 4. Set account creation time */
-  if (acc_create)
-    cli_saslacccreate(sptr) = acc_create;
+  /* 4. Account timestamp.  This is X3's registration date when the SASL
+   * exchange was relayed through X3 (m_sasl.c hands back what X3 sent) and
+   * 0 for a local Keycloak login: Keycloak's creation time is the
+   * directory's date, not X3's, and X3 refuses a stamp that differs from
+   * the date it knows, so the ircd stamps nothing of its own.  Set on every
+   * login, never inherited from a previous one on the same connection. */
+  cli_saslacccreate(sptr) = acc_create;
 
   /* 4b. Keycloak user id: set or cleared on every login, never inherited
    * from a previous one.  An invalid value counts as none. */
@@ -725,8 +729,9 @@ void sasl_complete_login(struct Client *sptr, const char *account,
 
       bounce_emit_alias_update(sptr, "account", cli_user(sptr)->account);
 
-      if (cli_saslacccreate(sptr))
-        cli_user(sptr)->acc_create = cli_saslacccreate(sptr);
+      /* X3's stamp on the relay path, 0 for a local login (step 4 above);
+       * a re-authentication drops whatever the previous account carried. */
+      cli_user(sptr)->acc_create = cli_saslacccreate(sptr);
       ircd_strncpy(cli_user(sptr)->kc_id, cli_saslkcid(sptr), sizeof(cli_user(sptr)->kc_id));
 
       /* Notify channel members with account-notify capability */
@@ -842,7 +847,7 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
 
     if (session->cred_hash_valid) {
       poscache_insert(session->authcid, session->authcid, session->cred_hash,
-                      token ? token->created_at : 0, kcid);
+                      0, kcid);
       negcache_remove(session->cred_hash);
     }
 
@@ -850,7 +855,7 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
               "SASL PLAIN: Successful authentication for %s (client %C)",
               login_as, acptr);
     sasl_complete_login(acptr, login_as,
-                        token && token->created_at ? token->created_at : 0,
+                        0,
                         sasl_id_for(login_as, session->authcid, kcid));
   } else {
     if (result == KC_UNVERIFIED) {
@@ -991,7 +996,7 @@ static int sasl_handle_plain(struct Client *sptr, const unsigned char *decoded, 
         log_write(LS_SYSTEM, L_DEBUG, 0,
                   "SASL PLAIN: Positive cache hit for %s (client %C)",
                   authcid_str, sptr);
-        sasl_complete_login(sptr, login_as, cached_created_at,
+        sasl_complete_login(sptr, login_as, 0,
                             sasl_id_for(login_as, cached_account, cached_kcid));
         return 0;
       }
@@ -1055,7 +1060,7 @@ static void sasl_external_cb(int result, const struct kc_user *users, int count,
       if (users[0].id)
         account_id_from_uuid(users[0].id, kcid);
       sasl_complete_login(acptr, users[0].username,
-                          users[0].created_at ? users[0].created_at : 0,
+                          0,
                           kcid[0] ? kcid : NULL);   /* no authzid on this path */
     }
   } else if (count > 1) {
@@ -1257,7 +1262,7 @@ static void sasl_oauth_introspect_cb(int result, const struct kc_token_info *inf
       Debug((DEBUG_DEBUG, "SASL OAUTHBEARER: introspected sub \"%s\", compact id \"%s\"",
              info->sub ? info->sub : "", kcid));
       sasl_complete_login(acptr, login_as,
-                          info->created_at ? info->created_at : 0,
+                          0,
                           sasl_id_for(login_as, info->username, kcid));
     }
   } else {
@@ -1364,7 +1369,6 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
 
     login_as = sasl_resolve_login_identity(session, info->username);
     {
-      time_t jwt_created_at = info->created_at ? info->created_at : 0;
       char kcid[ACCOUNT_ID_LEN + 1] = "";
       if (info->sub)
         account_id_from_uuid(info->sub, kcid);   /* the client's own token; none without "sub" */
@@ -1374,7 +1378,7 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
                 "SASL OAUTHBEARER: JWT validated locally for %s (client %C)",
                 login_as, sptr);
       MyFree(token_nul);
-      sasl_complete_login(sptr, login_as, jwt_created_at,
+      sasl_complete_login(sptr, login_as, 0,
                           sasl_id_for(login_as, info->username, kcid));
       kc_jwt_token_info_free(info);
       return 0;
@@ -1844,7 +1848,7 @@ static int sasl_scram_complete(struct Client *sptr)
             "SASL SCRAM: Successful authentication for %s (client %C)",
             login_as, sptr);
   sasl_complete_login(sptr, login_as,
-                      session->acc_created_at ? session->acc_created_at : 0,
+                      0,
                       sasl_id_for(login_as, session->authcid, session->kc_id));
   return 0;
 }
@@ -2022,7 +2026,7 @@ static int sasl_ecdsa_client_response(struct Client *sptr,
               "SASL ECDSA: Successful authentication for %s (client %C)",
               login_as, sptr);
     sasl_complete_login(sptr, login_as,
-                        session->acc_created_at ? session->acc_created_at : 0,
+                        0,
                         sasl_id_for(login_as, session->authcid, session->kc_id));
     return 0;
   }
