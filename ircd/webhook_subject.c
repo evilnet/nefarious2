@@ -30,6 +30,25 @@ static const char *user_subpath(const struct kc_webhook_event *ev)
   return ev->resource_path + 6 + lu;
 }
 
+/* A name that can travel on the P10 wire as one token and match a cache
+ * entry: no byte at or below space, no colon, no DEL, and at most
+ * WH_USERNAME_MAX bytes (this module cannot include the ircd's ACCOUNTLEN;
+ * 32 is above every account length the fork carries and below any token
+ * limit).  Anything else is not a name. */
+#define WH_USERNAME_MAX 32
+static int username_usable(const char *u)
+{
+  size_t i;
+  if (!u || !u[0])
+    return 0;
+  for (i = 0; u[i]; i++) {
+    unsigned char c = (unsigned char)u[i];
+    if (i >= WH_USERNAME_MAX || c <= ' ' || c == ':' || c == 0x7f)
+      return 0;
+  }
+  return 1;
+}
+
 int webhook_subject_resolve(const struct kc_webhook_event *ev,
                             struct WebhookSubject *out)
 {
@@ -43,7 +62,7 @@ int webhook_subject_resolve(const struct kc_webhook_event *ev,
    * malformed one leaves kc_id empty (account_id_from_uuid writes nothing). */
   if (ev->user_id)
     (void)account_id_from_uuid(ev->user_id, out->kc_id);
-  out->username = ev->username;
+  out->username = username_usable(ev->username) ? ev->username : NULL;
 
   /* Keycloak records every operation under a user's resource as USER:
    * unlinking a federated identity is USER/DELETE on

@@ -212,6 +212,27 @@ static void test_credential_removal_purges(void **state)
   unload(&f);
 }
 
+static void test_bad_username_is_dropped(void **state)
+{
+  struct fixture f; struct WebhookSubject s;
+  (void)state;
+  /* Review focus 4: a payload's name reaches the P10 wire (CI, AC U) and the
+   * cache lookups; anything that cannot travel as one token is not a name. */
+  load(&f, "user-delete-root-username.json");
+  f.ev.username = "has space";
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 0);     /* no id, no usable name */
+  f.ev.username = "colon:inside";
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 0);
+  f.ev.username = "ctrl\x01char";
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 0);
+  f.ev.username = "this-name-is-far-longer-than-any-account-name-the-ircd-will-ever-carry";
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 0);
+  f.ev.username = "fine_name-1";
+  assert_int_equal(webhook_subject_resolve(&f.ev, &s), 1);
+  assert_string_equal(s.username, "fine_name-1");
+  unload(&f);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -224,6 +245,7 @@ int main(void)
     cmocka_unit_test(test_non_user_resources_and_null),
     cmocka_unit_test(test_subresource_delete_or_update_is_not_the_user),
     cmocka_unit_test(test_credential_removal_purges),
+    cmocka_unit_test(test_bad_username_is_dropped),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
