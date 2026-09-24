@@ -160,3 +160,24 @@ time_t webhook_eventlog_oldest(void)
       oldest = ring[i].applied;
   return oldest;
 }
+
+int webhook_relay_parse(int parc, char *parv[], struct WebhookRelay *out)
+{
+  if (!parv || !out || parc < 5)
+    return 0;
+  if (!parv[1] || !parv[1][0] || !parv[2] || !parv[2][0] || !parv[3] || !parv[4])
+    return 0;
+  if (!webhook_eventlog_valid_id(parv[3]))
+    return 0;
+  if (parv[4][0] == '\0' || parv[4][1] != '\0' || !webhook_eventlog_valid_kind(parv[4][0]))
+    return 0;
+  if (parc >= 6 && (!parv[5] || strcmp(parv[5], "B") != 0))
+    return 0;
+
+  out->username = strcmp(parv[1], "*") == 0 ? NULL : parv[1];
+  out->kc_id    = strcmp(parv[2], "*") == 0 ? NULL : parv[2];
+  out->event_id = parv[3];
+  out->kind     = parv[4][0];
+  out->catchup  = parc >= 6;
+  return 1;
+}

@@ -138,9 +138,56 @@ static void test_entry_carries_kind_id_and_name(void **s)
   assert_string_equal(l.ids[0], UUID);
 }
 
+/* Review focus 1: what a relay line must carry to be applied, and what is
+ * refused without touching anything.  parv[0] is the command, as the ircd
+ * parser hands it over. */
+static void test_relay_parse_accepts_the_wire_forms(void **s)
+{
+  struct WebhookRelay r;
+  char *five[] = { "CI", "alice", "kcid22", "0b4a2f0e-1d4c-4c4a-9a1e-000000000001", "D" };
+  char *six[]  = { "CI", "*", "*", "evt-2", "X", "B" };
+  (void)s;
+  memset(&r, 0, sizeof(r));
+  assert_int_equal(webhook_relay_parse(5, five, &r), 1);
+  assert_string_equal(r.username, "alice");
+  assert_string_equal(r.kc_id, "kcid22");
+  assert_string_equal(r.event_id, "0b4a2f0e-1d4c-4c4a-9a1e-000000000001");
+  assert_int_equal(r.kind, 'D');
+  assert_int_equal(r.catchup, 0);
+  memset(&r, 0, sizeof(r));
+  assert_int_equal(webhook_relay_parse(6, six, &r), 1);
+  assert_null(r.username);                 /* "*" = no name */
+  assert_null(r.kc_id);                    /* "*" = no id */
+  assert_string_equal(r.event_id, "evt-2");
+  assert_int_equal(r.kind, 'X');
+  assert_int_equal(r.catchup, 1);
+}
+
+static void test_relay_parse_rejects_junk(void **s)
+{
+  struct WebhookRelay r;
+  char *four[]     = { "CI", "alice", "kcid22", "evt" };
+  char *badkind[]  = { "CI", "alice", "kcid22", "evt", "Z" };
+  char *badid[]    = { "CI", "alice", "kcid22", "has space", "D" };
+  char *longid[]   = { "CI", "alice", "*", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "D" };
+  char *badmark[]  = { "CI", "*", "*", "evt", "D", "Q" };
+  char *emptyname[] = { "CI", "", "*", "evt", "D" };
+  (void)s;
+  assert_int_equal(webhook_relay_parse(4, four, &r), 0);
+  assert_int_equal(webhook_relay_parse(5, badkind, &r), 0);
+  assert_int_equal(webhook_relay_parse(5, badid, &r), 0);
+  assert_int_equal(webhook_relay_parse(5, longid, &r), 0);
+  assert_int_equal(webhook_relay_parse(6, badmark, &r), 0);
+  assert_int_equal(webhook_relay_parse(5, emptyname, &r), 0);
+  assert_int_equal(webhook_relay_parse(5, NULL, &r), 0);
+  assert_int_equal(webhook_relay_parse(5, badkind, NULL), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_relay_parse_accepts_the_wire_forms),
+    cmocka_unit_test(test_relay_parse_rejects_junk),
     cmocka_unit_test(test_record_then_seen),
     cmocka_unit_test(test_log_evicts_oldest_at_capacity),
     cmocka_unit_test(test_since_orders_oldest_first_and_stops_at_window),

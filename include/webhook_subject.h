@@ -12,6 +12,7 @@
 #define INCLUDED_webhook_subject_h
 
 #include "account_id.h"
+#include "webhook_eventlog.h"   /* the WH_RELAY_* kind letters */
 #include "kc/kc_webhook.h"
 
 enum WebhookSubjectKind {
@@ -45,5 +46,12 @@ extern int webhook_subject_resolve(const struct kc_webhook_event *ev,
 
 /** A short lower-case name for logs ("delete", "disable", ...). */
 extern const char *webhook_subject_kind_name(enum WebhookSubjectKind kind);
+
+/** The kind letter a CI relay carries for a subject kind (webhook plan 4),
+ * 0 for the kinds that are log-only here and are not relayed. */
+extern char webhook_relay_kind_for(enum WebhookSubjectKind kind);
+/** The subject kind a relay's letter stands for; WH_SUBJECT_NONE for a
+ * purge-only line ('P') or anything unknown. */
+extern enum WebhookSubjectKind webhook_subject_kind_for_relay(char kind);
 
 #endif /* INCLUDED_webhook_subject_h */

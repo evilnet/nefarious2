@@ -233,6 +233,27 @@ static void test_bad_username_is_dropped(void **state)
   unload(&f);
 }
 
+/* Webhook plan 4: the kind letter a relay carries maps to and from the
+ * subject kind; the two log-only kinds are not relayed. */
+static void test_relay_kind_round_trip(void **s)
+{
+  (void)s;
+  assert_int_equal(webhook_relay_kind_for(WH_SUBJECT_DELETE), 'D');
+  assert_int_equal(webhook_relay_kind_for(WH_SUBJECT_DISABLE), 'X');
+  assert_int_equal(webhook_relay_kind_for(WH_SUBJECT_ENABLE), 'E');
+  assert_int_equal(webhook_relay_kind_for(WH_SUBJECT_PASSWORD_RESET), 'R');
+  assert_int_equal(webhook_relay_kind_for(WH_SUBJECT_CREDENTIAL_REMOVED), 'C');
+  assert_int_equal(webhook_relay_kind_for(WH_SUBJECT_LOGOUT), 0);
+  assert_int_equal(webhook_relay_kind_for(WH_SUBJECT_NONE), 0);
+  assert_int_equal(webhook_subject_kind_for_relay('D'), WH_SUBJECT_DELETE);
+  assert_int_equal(webhook_subject_kind_for_relay('X'), WH_SUBJECT_DISABLE);
+  assert_int_equal(webhook_subject_kind_for_relay('E'), WH_SUBJECT_ENABLE);
+  assert_int_equal(webhook_subject_kind_for_relay('R'), WH_SUBJECT_PASSWORD_RESET);
+  assert_int_equal(webhook_subject_kind_for_relay('C'), WH_SUBJECT_CREDENTIAL_REMOVED);
+  assert_int_equal(webhook_subject_kind_for_relay('P'), WH_SUBJECT_NONE);   /* purge only: no subject action */
+  assert_int_equal(webhook_subject_kind_for_relay('Z'), WH_SUBJECT_NONE);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -246,6 +267,7 @@ int main(void)
     cmocka_unit_test(test_subresource_delete_or_update_is_not_the_user),
     cmocka_unit_test(test_credential_removal_purges),
     cmocka_unit_test(test_bad_username_is_dropped),
+    cmocka_unit_test(test_relay_kind_round_trip),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

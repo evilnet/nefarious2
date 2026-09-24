@@ -76,4 +76,21 @@ extern unsigned int webhook_eventlog_count(void);
 /** The earliest applied time in the log, 0 when empty. */
 extern time_t webhook_eventlog_oldest(void);
 
+/** A relay line as it travels the wire:
+ *  CI <username|*> <kc_id|*> <event_id> <kind> [B]
+ *  The trailing B marks a catch-up line sent at end of burst. */
+struct WebhookRelay {
+  const char *username;   /**< NULL when the line says "*" */
+  const char *kc_id;      /**< NULL when the line says "*" (its alphabet is the caller's check) */
+  const char *event_id;
+  char        kind;
+  int         catchup;
+};
+
+/** Parse parv[1..] of a five- or six-parameter CI.  @return 1 and fill
+ * @a out, or 0 when the line is not one to apply (too short, an event id
+ * or kind that may not travel the wire, an empty name, a marker other
+ * than B). */
+extern int webhook_relay_parse(int parc, char *parv[], struct WebhookRelay *out);
+
 #endif /* INCLUDED_webhook_eventlog_h */

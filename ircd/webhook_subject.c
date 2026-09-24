@@ -127,3 +127,30 @@ const char *webhook_subject_kind_name(enum WebhookSubjectKind kind)
   default:                        return "none";
   }
 }
+
+char webhook_relay_kind_for(enum WebhookSubjectKind kind)
+{
+  switch (kind) {
+  case WH_SUBJECT_DELETE:             return WH_RELAY_DELETE;
+  case WH_SUBJECT_DISABLE:            return WH_RELAY_DISABLE;
+  case WH_SUBJECT_ENABLE:             return WH_RELAY_ENABLE;
+  case WH_SUBJECT_PASSWORD_RESET:     return WH_RELAY_RESET;
+  case WH_SUBJECT_CREDENTIAL_REMOVED: return WH_RELAY_CREDENTIAL;
+  case WH_SUBJECT_LOGOUT:
+  case WH_SUBJECT_NONE:
+  default:                            return 0;
+  }
+}
+
+enum WebhookSubjectKind webhook_subject_kind_for_relay(char kind)
+{
+  switch (kind) {
+  case WH_RELAY_DELETE:     return WH_SUBJECT_DELETE;
+  case WH_RELAY_DISABLE:    return WH_SUBJECT_DISABLE;
+  case WH_RELAY_ENABLE:     return WH_SUBJECT_ENABLE;
+  case WH_RELAY_RESET:      return WH_SUBJECT_PASSWORD_RESET;
+  case WH_RELAY_CREDENTIAL: return WH_SUBJECT_CREDENTIAL_REMOVED;
+  case WH_RELAY_PURGE:
+  default:                  return WH_SUBJECT_NONE;
+  }
+}
