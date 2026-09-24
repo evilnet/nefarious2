@@ -118,6 +118,46 @@ static void relay_event(const char *username, const char *kc_id,
   }
 }
 
+struct catchup_ctx {
+  struct Client *peer;
+  unsigned int   sent;
+};
+
+static void catchup_emit(const struct WebhookEventLogEntry *e, void *data)
+{
+  struct catchup_ctx *ctx = (struct catchup_ctx *)data;
+
+  sendcmdto_one(&me, CMD_CACHEINVAL, ctx->peer, "%s %s %s %c B",
+                e->names[0] ? e->names : "*", e->kc_id[0] ? e->kc_id : "*",
+                e->id, e->kind);
+  ctx->sent++;
+}
+
+/** Catch a newly linked peer up on the events applied here within the
+ * window, oldest first, as catch-up relay lines (the trailing B): it
+ * applies what it lacks and forwards it on, drops what it has.  A disable
+ * that a later enable of the same subject superseded goes as a purge only.
+ * Both ends of a relink do this, so what either side applied during a
+ * split converges. */
+void sasl_webhook_link_catchup(struct Client *cptr)
+{
+  struct catchup_ctx ctx;
+  time_t window = (time_t)feature_int(FEAT_WEBHOOK_EVENTLOG_WINDOW);
+
+  if (!IsIRCv3Aware(cptr))
+    return;
+  eventlog_ensure();
+  ctx.peer = cptr;
+  ctx.sent = 0;
+  webhook_eventlog_catchup(CurrentTime - window, catchup_emit, &ctx,
+                           (unsigned int)feature_int(FEAT_WEBHOOK_EVENTLOG_SIZE));
+  if (ctx.sent) {
+    wh_stats.catchup_sent += ctx.sent;
+    log_write(LS_SYSTEM, L_INFO, 0, "WEBHOOK: caught %C up on %u applied events",
+              cptr, ctx.sent);
+  }
+}
+
 #ifdef USE_LIBKC
 
 #include "ircd_alloc.h"

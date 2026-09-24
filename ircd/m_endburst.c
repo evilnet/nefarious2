@@ -85,6 +85,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "chathistory_presence.h"
+#include "sasl_webhook.h"
 #include "client.h"
 #include "handlers.h"
 #include "hash.h"
@@ -186,6 +187,12 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * line as a parse error -- up to 20000 of them per relink (audit P4). */
     if (IsIRCv3Aware(sptr))
       presence_burst_sync(sptr);
+
+    /* Webhook plan 4: catch the peer up on the Keycloak events applied
+     * here while it was away (netsplit, downtime, a new server); it
+     * drops what it has and forwards what it lacks.  Self-gated on
+     * IsIRCv3Aware inside. */
+    sasl_webhook_link_catchup(sptr);
 
     /* Advertise chathistory storage capability (CH A S) to newly linked server.
      * Only advertise if we have CHATHISTORY_STORE enabled - this indicates we

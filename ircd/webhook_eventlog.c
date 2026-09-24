@@ -123,12 +123,26 @@ static int by_applied(const void *a, const void *b)
   return 0;
 }
 
-unsigned int webhook_eventlog_since(time_t oldest,
-                                    void (*emit)(const struct WebhookEventLogEntry *, void *),
-                                    void *data, unsigned int max)
+/** Two entries are about the same subject when both carry the Keycloak id
+ * and it matches, or neither does and the names match. */
+static int same_subject(const struct WebhookEventLogEntry *a, const struct WebhookEventLogEntry *b)
+{
+  if (a->kc_id[0] && b->kc_id[0])
+    return strcmp(a->kc_id, b->kc_id) == 0;
+  if (a->kc_id[0] || b->kc_id[0])
+    return 0;
+  return a->names[0] && strcmp(a->names, b->names) == 0;
+}
+
+/** The ordered walk behind since() and catchup(): entries applied at or
+ * after @a oldest, oldest first.  With @a compact, a disable followed by
+ * an enable of the same subject is emitted as a purge only. */
+static unsigned int walk(time_t oldest,
+                         void (*emit)(const struct WebhookEventLogEntry *, void *),
+                         void *data, unsigned int max, int compact)
 {
   const struct WebhookEventLogEntry **order;
-  unsigned int i, n = 0, sent = 0;
+  unsigned int i, j, n = 0, sent = 0;
 
   if (!ring || !emit || !ring_count || !max)
     return 0;
@@ -139,10 +153,36 @@ unsigned int webhook_eventlog_since(time_t oldest,
     if (ring[i].applied >= oldest)
       order[n++] = &ring[i];
   qsort(order, n, sizeof(*order), by_applied);
-  for (i = 0; i < n && sent < max; i++, sent++)
+  for (i = 0; i < n && sent < max; i++, sent++) {
+    if (compact && order[i]->kind == WH_RELAY_DISABLE) {
+      for (j = i + 1; j < n; j++)
+        if (order[j]->kind == WH_RELAY_ENABLE && same_subject(order[i], order[j]))
+          break;
+      if (j < n) {
+        struct WebhookEventLogEntry purge = *order[i];
+        purge.kind = WH_RELAY_PURGE;
+        emit(&purge, data);
+        continue;
+      }
+    }
     emit(order[i], data);
+  }
   free(order);
   return sent;
+}
+
+unsigned int webhook_eventlog_since(time_t oldest,
+                                    void (*emit)(const struct WebhookEventLogEntry *, void *),
+                                    void *data, unsigned int max)
+{
+  return walk(oldest, emit, data, max, 0);
+}
+
+unsigned int webhook_eventlog_catchup(time_t oldest,
+                                      void (*emit)(const struct WebhookEventLogEntry *, void *),
+                                      void *data, unsigned int max)
+{
+  return walk(oldest, emit, data, max, 1);
 }
 
 unsigned int webhook_eventlog_count(void)

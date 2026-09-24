@@ -64,6 +64,11 @@ extern void sasl_webhook_shutdown(void);
 /** Get webhook statistics. */
 extern void sasl_webhook_stats_get(struct sasl_webhook_stats *out);
 
+/** Catch a newly linked IRCv3-aware peer up on the events applied here
+ *  within WEBHOOK_EVENTLOG_WINDOW (webhook plan 4); called at the end of
+ *  its burst. */
+extern void sasl_webhook_link_catchup(struct Client *cptr);
+
 /** STATS webhook: the listener's transport counters and refusals by cause,
  *  then the handler's counters. */
 extern void sasl_webhook_report_stats(struct Client *to, const struct StatDesc *sd, char *param);

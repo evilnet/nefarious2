@@ -75,6 +75,13 @@ extern int webhook_eventlog_seen(const char *id);
 extern unsigned int webhook_eventlog_since(time_t oldest,
                                            void (*emit)(const struct WebhookEventLogEntry *, void *),
                                            void *data, unsigned int max);
+/** The same walk for a newly linked peer: a disable whose subject a later
+ * entry enabled again is emitted as a purge only (kind P), so the peer
+ * never deauths a re-enabled user; a delete is never superseded.  The
+ * subject is the Keycloak id when both entries carry one, else the names. */
+extern unsigned int webhook_eventlog_catchup(time_t oldest,
+                                             void (*emit)(const struct WebhookEventLogEntry *, void *),
+                                             void *data, unsigned int max);
 /** Entries in the log. */
 extern unsigned int webhook_eventlog_count(void);
 /** The earliest applied time in the log, 0 when empty. */

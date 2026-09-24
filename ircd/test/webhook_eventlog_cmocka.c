@@ -144,6 +144,48 @@ static void test_entry_carries_kind_id_and_name(void **s)
   assert_string_equal(l.names[1], "");
 }
 
+struct kind_list { char kinds[8]; unsigned int n; };
+
+static void collect_kinds(const struct WebhookEventLogEntry *e, void *data)
+{
+  struct kind_list *l = (struct kind_list *)data;
+  if (l->n < 8)
+    l->kinds[l->n] = e->kind;
+  l->n++;
+}
+
+/* Bouncer pass H5: a catch-up must not replay a disable that a later
+ * enable of the same subject superseded (the relinking peer would deauth
+ * a re-enabled user); it goes as a purge only.  A delete is never
+ * superseded; another subject's enable changes nothing. */
+static void test_since_enable_supersedes_disable(void **s)
+{
+  struct kind_list l;
+  (void)s;
+  webhook_eventlog_init(8);
+  webhook_eventlog_record("x1", 'X', "kc-a", "alice", T);          /* disabled ... */
+  webhook_eventlog_record("d1", 'D', "kc-b", "bob", T + 1);        /* deleted: stays */
+  webhook_eventlog_record("x2", 'X', "", "carol", T + 2);          /* disabled, by name only ... */
+  webhook_eventlog_record("e1", 'E', "kc-a", "alice", T + 3);      /* ... alice enabled again */
+  webhook_eventlog_record("e2", 'E', "", "carol", T + 4);          /* ... carol enabled again */
+  webhook_eventlog_record("x3", 'X', "kc-d", "dave", T + 5);       /* disabled, never enabled: stays */
+  webhook_eventlog_record("e3", 'E', "kc-z", "zed", T + 6);        /* someone else's enable */
+  memset(&l, 0, sizeof(l));
+  assert_int_equal(webhook_eventlog_catchup(T, collect_kinds, &l, 8), 7);
+  assert_int_equal(l.n, 7);
+  assert_int_equal(l.kinds[0], 'P');   /* x1: superseded by e1 (same id) */
+  assert_int_equal(l.kinds[1], 'D');   /* d1 */
+  assert_int_equal(l.kinds[2], 'P');   /* x2: superseded by e2 (same name, no id) */
+  assert_int_equal(l.kinds[3], 'E');
+  assert_int_equal(l.kinds[4], 'E');
+  assert_int_equal(l.kinds[5], 'X');   /* x3: no later enable for dave */
+  assert_int_equal(l.kinds[6], 'E');
+  /* The plain walk is untouched: the disable is still a disable there. */
+  memset(&l, 0, sizeof(l));
+  assert_int_equal(webhook_eventlog_since(T, collect_kinds, &l, 8), 7);
+  assert_int_equal(l.kinds[0], 'X');
+}
+
 /* Review focus 1: what a relay line must carry to be applied, and what is
  * refused without touching anything.  parv[0] is the command, as the ircd
  * parser hands it over. */
@@ -192,6 +234,7 @@ static void test_relay_parse_rejects_junk(void **s)
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_since_enable_supersedes_disable),
     cmocka_unit_test(test_relay_parse_accepts_the_wire_forms),
     cmocka_unit_test(test_relay_parse_rejects_junk),
     cmocka_unit_test(test_record_then_seen),
