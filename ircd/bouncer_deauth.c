@@ -84,12 +84,15 @@ bounce_deauth_classify(const struct BounceDeauthSubject *s, int do_kill)
                                     : BOUNCE_DEAUTH_SKIP;
 
   /* A client whose socket is not ours is never exited from here (B-2:
-   * exit_client() on a remote victim splits the network), but its
-   * account is still cleared: the local replica now, and the AC U that
-   * follows carries the clear to its home server, which runs the full
-   * receiver -- including the teardown of a held session's ghost. */
+   * exit_client() on a remote victim splits the network).  Its ACCOUNT is
+   * its home server's job too: every server receives the event -- the
+   * direct delivery, a peer's relay, or the catch-up at link time -- and
+   * clears the sessions it owns, including the teardown of a held
+   * session's ghost (webhook plan 4).  remote_ok restores the old
+   * network-wide clear (the local replica now, the AC U carries it home)
+   * for a single receiver that has to cover everyone. */
   if (!s->is_local)
-    return BOUNCE_DEAUTH_CLEAR_ACCOUNT;
+    return s->remote_ok ? BOUNCE_DEAUTH_CLEAR_ACCOUNT : BOUNCE_DEAUTH_SKIP;
 
   /* A held ghost has no live socket; the session is the thing to remove,
    * and neither a clear nor a socket kill accomplishes that. */

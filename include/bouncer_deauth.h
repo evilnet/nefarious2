@@ -52,6 +52,10 @@ struct BounceDeauthSubject {
   int is_alias;         /**< IsBouncerAlias(cptr) */
   int is_hold;          /**< IsBouncerHold(cptr) -- a held ghost */
   int is_local;         /**< MyConnect(cptr) */
+  int remote_ok;        /**< 1 = clear a remote client's account here too (the
+                             network-wide walk of a single receiver); 0 = a
+                             remote client is its home server's job, which
+                             receives the same event (webhook plan 4) */
 };
 
 /** What the walk should do with one client. */

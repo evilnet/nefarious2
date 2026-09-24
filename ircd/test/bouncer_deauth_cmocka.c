@@ -96,30 +96,63 @@ static void test_local_primary_is_cleared_or_killed(void **state)
 static void test_remote_client_is_deauthed_never_killed(void **state)
 {
   (void)state;
-  /* B-2 is about the KILL: exit_client() on a remote victim emits no
-   * KILL and sends a victim-sourced QUIT on every downlink, which the
-   * victim's own side discards as wrong-direction -- permanent
-   * split-brain.  The DEAUTH is legal for a remote client: the local
-   * replica is cleared and AC U from &me reaches its home server, which
-   * runs the full receiver.  So a remote primary is always deauthed,
-   * kill or not, and a remote held ghost too (its home server tears the
-   * session down on AC U); a remote alias is left to its primary. */
+  /* With remote_ok (the network-wide walk of a single receiver): B-2 is
+   * about the KILL: exit_client() on a remote victim emits no KILL and
+   * sends a victim-sourced QUIT on every downlink, which the victim's own
+   * side discards as wrong-direction -- permanent split-brain.  The
+   * DEAUTH is legal for a remote client: the local replica is cleared and
+   * AC U from &me reaches its home server, which runs the full receiver.
+   * So a remote primary is deauthed, kill or not, and a remote held ghost
+   * too (its home server tears the session down on AC U); a remote alias
+   * is left to its primary. */
   struct BounceDeauthSubject s = subj_primary();
   s.is_local = 0;
+  s.remote_ok = 1;
   assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
   assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
 
   s = subj_primary();
   s.is_local = 0;
+  s.remote_ok = 1;
   s.is_hold = 1;
   assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
   assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
 
   s = subj_primary();
   s.is_local = 0;
+  s.remote_ok = 1;
   s.is_alias = 1;
   assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
   assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+}
+
+/* Webhook plan 4: every server receives every event and acts on what it
+ * owns, so a remote client -- primary, held ghost or alias -- is its home
+ * server's job and is SKIPped here unless remote_ok says otherwise. */
+static void test_remote_client_is_skipped_by_default(void **state)
+{
+  (void)state;
+  struct BounceDeauthSubject s = subj_primary();
+  s.is_local = 0;
+  assert_int_equal(s.remote_ok, 0);
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+
+  s = subj_primary();
+  s.is_local = 0;
+  s.is_hold = 1;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+
+  s = subj_primary();
+  s.is_local = 0;
+  s.is_alias = 1;
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_SKIP);
+  assert_int_equal(bounce_deauth_classify(&s, 1), BOUNCE_DEAUTH_SKIP);
+
+  /* The local client of the same shape is still acted on. */
+  s = subj_primary();
+  assert_int_equal(bounce_deauth_classify(&s, 0), BOUNCE_DEAUTH_CLEAR_ACCOUNT);
 }
 
 static void test_held_ghost_destroys_the_session(void **state)
@@ -188,6 +221,7 @@ int main(void)
     cmocka_unit_test(test_alias_skipped_on_clear_killed_on_kill),
     cmocka_unit_test(test_non_matching_and_non_user_are_skipped),
     cmocka_unit_test(test_null_subject_is_skipped),
+    cmocka_unit_test(test_remote_client_is_skipped_by_default),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
