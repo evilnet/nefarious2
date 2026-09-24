@@ -120,24 +120,6 @@ static int pm_half_is_session_id(const char *s, size_t len)
   return 1;
 }
 
-/** The live client logged into @a account, if any.  First match on the
- * global list: a bouncer primary and its aliases share the account and
- * the nick, so any of them will do. */
-static struct Client *pm_live_client_for_account(const char *account)
-{
-  struct Client *acptr;
-  if (!account || !*account)
-    return NULL;
-  for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-    if (!IsUser(acptr) || !IsAccount(acptr) || !cli_user(acptr))
-      continue;
-    if (cli_user(acptr)->account[0]
-        && ircd_strcmp(cli_user(acptr)->account, account) == 0)
-      return acptr;
-  }
-  return NULL;
-}
-
 /** Is @a m a row the replaying client sent?  By sender account when the
  * client is logged in (the client may have changed nick since the row
  * was stored, and an older nick of their own must not read as the
@@ -153,12 +135,15 @@ int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m)
   return ircd_strcmp(snick, cli_name(sptr)) == 0;
 }
 
-/** Derive the other party's nick for a PM page.  The page can span
- * months of one pair key, so rows carry whatever nicks both sides had
- * at the time: identify the caller's own rows by identity, take the
- * NEWEST row the other party sent, and show that party under their
- * current nick when they are online -- a client that opens the
- * conversation under a stale nick fragments it. */
+/** Derive the other party's nick for a PM page from the rows alone.  The
+ * page can span months of one pair key, so rows carry whatever nicks
+ * both sides had at the time: identify the caller's own rows by
+ * identity, take the NEWEST row the other party sent and name them as it
+ * does; if they never wrote, the nick the caller addressed.  A
+ * conversation is with a nick.  The account's connections are not
+ * interchangeable -- an account can be online under several nicks at
+ * once, a bouncer session plus an alt on a legacy server that cannot join
+ * it -- so nothing here looks at who is online under the account. */
 static int pm_other_nick_from_messages(struct Client *sptr,
                                        const struct HistoryMessage *msgs,
                                        char *buf, size_t buflen)
@@ -178,12 +163,7 @@ static int pm_other_nick_from_messages(struct Client *sptr,
   }
 
   if (other) {
-    struct Client *live = other->account[0]
-                          ? pm_live_client_for_account(other->account) : NULL;
-    if (live)
-      ircd_strncpy(buf, cli_name(live), buflen);
-    else
-      pm_sender_nick(other, buf, buflen);
+    pm_sender_nick(other, buf, buflen);
     return 1;
   }
   if (own) {
@@ -239,12 +219,13 @@ static int replay_set_target_from_storage(struct Client *sptr,
     named = 1;   /* real nick from the stream */
   } else {
     /* No usable row: the other half of the key is an identity, an
-     * account or a session id.  A live client on that account gives a
-     * nick; otherwise the raw half stands and the caller decides. */
+     * account or a session id.  An account name is a label a person
+     * would recognise; a session id is not, and nobody online is
+     * consulted for a nick (a conversation is with a nick, not with
+     * whoever holds the account right now). */
     size_t left_len = (size_t)(colon - storage_target);
     const char *other;
     size_t olen;
-    struct Client *live;
 
     if (history_pm_identity_matches(sptr, storage_target, left_len)) {
       other = colon + 1;
@@ -258,13 +239,8 @@ static int replay_set_target_from_storage(struct Client *sptr,
     memcpy(rs->other_nick, other, olen);
     rs->other_nick[olen] = '\0';
 
-    live = pm_live_client_for_account(rs->other_nick);
-    if (live) {
-      ircd_strncpy(rs->other_nick, cli_name(live), sizeof(rs->other_nick));
-      named = 1;
-    } else if (!pm_half_is_session_id(rs->other_nick, strlen(rs->other_nick))) {
+    if (!pm_half_is_session_id(rs->other_nick, strlen(rs->other_nick)))
       named = 1;   /* an account name: a label a person would recognise */
-    }
   }
   ircd_strncpy(rs->target, rs->other_nick, sizeof(rs->target));
   return named;
@@ -277,12 +253,15 @@ int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
   struct Client *live;
   char half[CHANNELLEN + 1];
   int named = 0;
+  /* Rows first, then the account-name label.  Nobody online under the
+   * account is consulted: a conversation is with a nick, and an
+   * account's connections are not interchangeable. */
 
   if (!colon || !buf || buflen == 0)
     return 0;
   buf[0] = '\0';
 
-  /* The other half of the key, and the live client on that account. */
+  /* The other half of the key: an account, or a session id. */
   {
     size_t left_len = (size_t)(colon - pair_key);
     const char *other;
@@ -299,15 +278,11 @@ int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
       return 0;
     memcpy(half, other, olen);
     half[olen] = '\0';
-    live = pm_live_client_for_account(half);
-    if (live) {
-      ircd_strncpy(buf, cli_name(live), buflen);
-      named = 1;
-    }
   }
 
-  /* Else the newest rows: the other party's nick as they last used it. */
-  if (!named) {
+  /* The newest rows: the nick the other party held this conversation
+   * with, as they wrote it, else the nick the caller addressed. */
+  {
     struct HistoryMessage *msgs = NULL;
     if (history_query_latest(pair_key, HISTORY_REF_NONE, NULL, 20, &msgs, NULL) > 0
         && msgs) {
@@ -315,6 +290,7 @@ int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
       history_free_messages(msgs);
     }
   }
+
 
   /* Else an account name is still a label; a session id is not. */
   if (!named && !pm_half_is_session_id(half, strlen(half))) {
