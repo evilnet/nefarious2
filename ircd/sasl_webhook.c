@@ -635,6 +635,9 @@ void sasl_webhook_report_stats(struct Client *to, const struct StatDesc *sd, cha
   send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
              "W :  Without realmName: %lu (accepted; a pre-signing SPI names no realm)",
              t.events_no_realm);
+  send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG,
+             "W :  Duplicates: %lu (the SPI's re-signed retries of accepted events: answered 200, not acted on)",
+             t.events_duplicate);
   if (t.last_reject_time)
     send_reply(to, SND_EXPLICIT | RPL_STATSDEBUG, "W :  Last refusal: %s, %lld s ago",
                t.last_reject_cause, (long long)(CurrentTime - t.last_reject_time));

@@ -635,6 +635,7 @@ process_request(struct wh_conn *conn, const char **msg)
     size_t body_len;
     enum kc_sig_result sig;
     long long now, t_sig;
+    char event_id[40] = "";         /* the id the ring remembered, to forget on a full queue */
 
     *msg = "OK";
 
@@ -710,13 +711,9 @@ process_request(struct wh_conn *conn, const char **msg)
             json_t *idv = json_object_get(root, "id");
             json_t *rn = json_object_get(root, "realmName");
             const char *id = (idv && json_is_string(idv)) ? json_string_value(idv) : NULL;
-            if (kc_replay_ring_seen(&replay_ring, id, t_sig, now, cfg_signature_window)) {
-                stats.events_replayed++;
-                reject(conn, "replay");
-                json_decref(root);
-                *msg = "Unauthorized";
-                return 401;
-            }
+
+            /* The realm first: an event refused here was never accepted, so
+             * it takes no place in the ring. */
             if (cfg_realm_name && rn && json_is_string(rn)
                 && strcmp(json_string_value(rn), cfg_realm_name) != 0) {
                 stats.events_rejected_realm++;
@@ -731,6 +728,30 @@ process_request(struct wh_conn *conn, const char **msg)
                 stats.events_no_realm++;
                 kc_log_debug("kc_webhook: event %s names no realm", id ? id : "(no id)");
             }
+
+            /* The ring holds the ids we accepted with their newest signature
+             * time.  A copy signed no later than that is a replay; a copy the
+             * SPI signed again later is its own retry of an event we already
+             * queued (its answer was lost): answered 200 so the retries stop,
+             * not queued again. */
+            switch (kc_replay_ring_check(&replay_ring, id, t_sig)) {
+            case KC_RING_REPLAY:
+                stats.events_replayed++;
+                reject(conn, "replay");
+                json_decref(root);
+                *msg = "Unauthorized";
+                return 401;
+            case KC_RING_DUPLICATE:
+                stats.events_duplicate++;
+                kc_log_debug("kc_webhook: event %s delivered again with a newer signature: "
+                             "the sender's retry, not queued again", id);
+                json_decref(root);
+                return 200;
+            case KC_RING_NEW:
+                if (id)
+                    snprintf(event_id, sizeof(event_id), "%s", id);
+                break;
+            }
             json_decref(root);
         }
         /* A body that is not JSON is queued and refused by the parser as
@@ -742,6 +763,7 @@ process_request(struct wh_conn *conn, const char **msg)
     /* Queue for async processing */
     if (queue_event(body, body_len) < 0) {
         stats.events_dropped++;
+        kc_replay_ring_forget(&replay_ring, event_id);   /* never accepted: the retry is new */
         *msg = "Service Unavailable";
         return 503;
     }

@@ -149,6 +149,7 @@ struct kc_webhook_stats {
     unsigned long events_replayed;        /* event id seen again within the window */
     unsigned long events_unsigned_legacy; /* accepted on the plain secret header alone (transition) */
     unsigned long events_no_realm;        /* accepted without a realmName (a pre-signing SPI) */
+    unsigned long events_duplicate;       /* the sender's re-signed retries of accepted events: answered 200, not queued */
     time_t        last_reject_time;
     char          last_reject_cause[32];
 };

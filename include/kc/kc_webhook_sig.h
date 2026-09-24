@@ -31,18 +31,27 @@ const char *kc_sig_result_name(enum kc_sig_result r);
 #define KC_REPLAY_RING 256
 struct kc_replay_ring {
     char      id[KC_REPLAY_RING][40];
-    long long t[KC_REPLAY_RING];
+    long long t[KC_REPLAY_RING];      /* newest signature time accepted for that id */
     int       next;
+};
+
+enum kc_ring_verdict {
+    KC_RING_NEW = 0,     /* first sighting of the id: remembered */
+    KC_RING_DUPLICATE,   /* same id, a newer signature: the sender signed it again (its retry); remembered */
+    KC_RING_REPLAY       /* same id, a signature no newer than the last accepted one: a copy played back */
 };
 
 void kc_replay_ring_init(struct kc_replay_ring *r);
 
-/* 1 = this id was already seen with a signature (made at t) that is still
- * fresh at now: a replay.  0 = new, or an old sighting whose signature has
- * gone stale (the sender signed the id again); remembered, an old sighting
- * refreshed in place.  The ring lives by the signature's own time, so an id
- * stays refusable exactly as long as its signature stays fresh, whatever the
- * sender's clock skew.  NULL or empty ids are never replays. */
-int  kc_replay_ring_seen(struct kc_replay_ring *r, const char *id, long long t, long long now, int window_s);
+/* Classify a request whose signature already verified, by its event id and
+ * the signature's time t.  Only a holder of the secret can make a newer
+ * valid signature, so a known id with a newer t is the sender's own retry
+ * (answer it, do not act again); anything not newer is a replay.  NULL or
+ * empty ids are always new and are not remembered. */
+enum kc_ring_verdict kc_replay_ring_check(struct kc_replay_ring *r, const char *id, long long t);
+
+/* Drop an id the caller could not act on after all (the queue was full), so
+ * the sender's retry is new rather than a duplicate that would be dropped. */
+void kc_replay_ring_forget(struct kc_replay_ring *r, const char *id);
 
 #endif /* KC_WEBHOOK_SIG_H */

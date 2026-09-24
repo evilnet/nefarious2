@@ -103,22 +103,38 @@ void kc_replay_ring_init(struct kc_replay_ring *r)
     memset(r, 0, sizeof(*r));
 }
 
-int kc_replay_ring_seen(struct kc_replay_ring *r, const char *id, long long t, long long now, int window_s)
+enum kc_ring_verdict kc_replay_ring_check(struct kc_replay_ring *r, const char *id, long long t)
 {
     int i;
 
     if (!r || !id || !id[0])
-        return 0;
+        return KC_RING_NEW;
     for (i = 0; i < KC_REPLAY_RING; i++) {
         if (r->id[i][0] && strcmp(r->id[i], id) == 0) {
-            if (window_s <= 0 || now - r->t[i] <= window_s)
-                return 1;       /* that signature is still fresh: a replay */
-            r->t[i] = t;        /* signed again after its window: refreshed in place */
-            return 0;
+            if (t > r->t[i]) {
+                r->t[i] = t;            /* the sender signed it again: its retry */
+                return KC_RING_DUPLICATE;
+            }
+            return KC_RING_REPLAY;      /* no newer than the last accepted copy */
         }
     }
     snprintf(r->id[r->next], sizeof(r->id[r->next]), "%s", id);
     r->t[r->next] = t;
     r->next = (r->next + 1) % KC_REPLAY_RING;
-    return 0;
+    return KC_RING_NEW;
+}
+
+void kc_replay_ring_forget(struct kc_replay_ring *r, const char *id)
+{
+    int i;
+
+    if (!r || !id || !id[0])
+        return;
+    for (i = 0; i < KC_REPLAY_RING; i++) {
+        if (r->id[i][0] && strcmp(r->id[i], id) == 0) {
+            r->id[i][0] = '\0';
+            r->t[i] = 0;
+            return;
+        }
+    }
 }
