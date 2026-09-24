@@ -218,6 +218,7 @@ IRCD_SRC = \
 	webpush_expiry.c \
 	webpush_keyring.c \
 	account_id.c \
+	webhook_eventlog.c \
 	webpush_attention.c \
 	bouncer_converge.c \
 	bouncer_deauth.c \

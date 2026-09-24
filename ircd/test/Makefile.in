@@ -51,7 +51,8 @@ CMOCKA_TESTPROGS = \
 	webpush_line_cmocka \
 	websocket_cmocka \
 	db_casefold_cmocka \
-	account_id_cmocka
+	account_id_cmocka \
+	webhook_eventlog_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -84,6 +85,7 @@ DEP_SRC = \
 	webpush_attention_cmocka.c \
 	bouncer_converge_cmocka.c \
 	bouncer_deauth_cmocka.c \
+	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
 	kc_url_cmocka.c \
 	kc_base64_cmocka.c \
@@ -419,6 +421,14 @@ bouncer_deauth_test.o: ../bouncer_deauth.c ../../include/bouncer_deauth.h
 BOUNCER_DEAUTH_CMOCKA_OBJS = bouncer_deauth_cmocka.o bouncer_deauth_test.o
 bouncer_deauth_cmocka: $(BOUNCER_DEAUTH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_DEAUTH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webhook_eventlog tests - the applied-events log is pure (no ircd deps, no jansson)
+webhook_eventlog_test.o: ../webhook_eventlog.c ../../include/webhook_eventlog.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../webhook_eventlog.c
+
+WEBHOOK_EVENTLOG_CMOCKA_OBJS = webhook_eventlog_cmocka.o webhook_eventlog_test.o
+webhook_eventlog_cmocka: $(WEBHOOK_EVENTLOG_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBHOOK_EVENTLOG_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webpush_line tests - the module is pure (no ircd deps)
 webpush_line_test.o: ../webpush_line.c ../../include/webpush_line.h
