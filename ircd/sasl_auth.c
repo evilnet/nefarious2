@@ -1390,6 +1390,20 @@ static int sasl_handle_oauthbearer(struct Client *sptr, const unsigned char *dec
     info = NULL;
   }
 
+  /* A verdict the local check is sure of -- not a JWT at all, a bad
+   * signature, expired -- is final: asking Keycloak to introspect the
+   * same bytes can only say the same, at the cost of a round trip per
+   * attempt from whoever is sending them.  Only what local validation
+   * could not decide (no key, no username, a fetch failure) goes on to
+   * introspection. */
+  if (rc == KC_FORBIDDEN) {
+    MyFree(token_nul);
+    log_write(LS_SYSTEM, L_INFO, 0,
+              "SASL OAUTHBEARER: token rejected by local validation for %C", sptr);
+    send_reply(sptr, ERR_SASLFAIL, ": invalid token");
+    return -1;
+  }
+
   /* Strategy 2: Fall back to async token introspection */
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL OAUTHBEARER: JWT local validation failed (rc=%d), "
