@@ -31,6 +31,17 @@ struct sasl_webhook_stats {
   unsigned long rejections;            /* refusals the listener reported (all causes) */
   time_t        last_rejection;
   char          last_reject_cause[32];
+  /* Webhook plan 4: every server receives every event; these say which
+   * path each applied event came by and what was dropped as already applied. */
+  unsigned long applied_direct;        /* applied from a delivery to this server */
+  unsigned long applied_relay;         /* applied from a peer's CI relay */
+  unsigned long applied_catchup;       /* applied from a peer's catch-up at link time */
+  unsigned long already_direct;        /* deliveries dropped: already applied */
+  unsigned long already_relay;         /* relays (and catch-up lines) dropped: already applied */
+  unsigned long relays_sent;           /* five-parameter CI lines this server originated */
+  unsigned long relays_forwarded;      /* relays passed on after applying */
+  unsigned long catchup_sent;          /* catch-up lines sent to newly linked peers */
+  unsigned long catchup_received;
 };
 
 struct kc_webhook_config;

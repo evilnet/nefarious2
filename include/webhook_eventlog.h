@@ -29,6 +29,10 @@
 
 /** Longest event id kept, with its terminator (Keycloak's are 36-char uuids). */
 #define WH_EVENT_ID_LEN 40
+/** Names a relay carries for one event (the payload's, the ones the id
+ * purge dropped, the accounts of clients carrying the id), comma-joined. */
+#define WH_RELAY_MAX_NAMES 4
+#define WH_EVENTLOG_NAMES_LEN (WH_RELAY_MAX_NAMES * (ACCOUNTLEN + 1))
 /** Defaults for the WEBHOOK_EVENTLOG_SIZE / _WINDOW features. */
 #define WH_EVENTLOG_DEFAULT_SIZE   1024
 #define WH_EVENTLOG_DEFAULT_WINDOW 86400
@@ -45,7 +49,7 @@ struct WebhookEventLogEntry {
   char   id[WH_EVENT_ID_LEN];
   char   kind;
   char   kc_id[ACCOUNT_ID_LEN + 1];   /**< "" when unknown */
-  char   username[ACCOUNTLEN + 1];    /**< "" when unknown */
+  char   names[WH_EVENTLOG_NAMES_LEN]; /**< the resolved account names, comma-joined; "" when none */
   time_t applied;
 };
 
@@ -62,7 +66,7 @@ extern int webhook_eventlog_valid_kind(char kind);
  * @return 0 when it was recorded now (or the id is not valid: nothing
  *         stored), 1 when it was already there (nothing changed). */
 extern int webhook_eventlog_record(const char *id, char kind, const char *kc_id,
-                                   const char *username, time_t now);
+                                   const char *names, time_t now);
 /** 1 when the id is in the log. */
 extern int webhook_eventlog_seen(const char *id);
 

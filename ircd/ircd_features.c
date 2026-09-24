@@ -1179,6 +1179,8 @@ static struct FeatureDesc {
   F_I(WEBHOOK_PORT, 0, 0, 0),
   F_S(WEBHOOK_SECRET, FEAT_NODISP, "", 0),
   F_B(WEBHOOK_KILL_ON_DISABLE, 0, 0, 0),
+  F_I(WEBHOOK_EVENTLOG_SIZE, 0, 1024, 0),      /* applied-events log entries (webhook plan 4) */
+  F_I(WEBHOOK_EVENTLOG_WINDOW, 0, 86400, 0),   /* seconds of it a newly linked peer is caught up on */
   /* Default OFF: deauth (AC U) propagates correctly network-wide, a
    * local-only kill does not.  Forced network-wide disconnect needs its
    * own design -- see the open design item in

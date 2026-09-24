@@ -51,13 +51,15 @@ static void test_log_evicts_oldest_at_capacity(void **s)
   assert_true(webhook_eventlog_oldest() == T + 1);
 }
 
-struct seen_list { char ids[8][WH_EVENT_ID_LEN]; unsigned int n; };
+struct seen_list { char ids[8][WH_EVENT_ID_LEN]; char names[8][WH_EVENTLOG_NAMES_LEN]; unsigned int n; };
 
 static void collect(const struct WebhookEventLogEntry *e, void *data)
 {
   struct seen_list *l = (struct seen_list *)data;
-  if (l->n < 8)
+  if (l->n < 8) {
     snprintf(l->ids[l->n], WH_EVENT_ID_LEN, "%s", e->id);
+    snprintf(l->names[l->n], WH_EVENTLOG_NAMES_LEN, "%s", e->names);
+  }
   l->n++;
 }
 
@@ -126,16 +128,20 @@ static void test_valid_id_and_kind(void **s)
   assert_int_equal(webhook_eventlog_valid_kind('d'), 0);
 }
 
-/* The entry keeps what a catch-up line needs: kind, Keycloak id, name. */
+/* The entry keeps what a catch-up line needs: kind, Keycloak id, and the
+ * resolved names (comma-joined; "*" on the wire means none). */
 static void test_entry_carries_kind_id_and_name(void **s)
 {
   struct seen_list l;
   (void)s;
   webhook_eventlog_init(2);
-  webhook_eventlog_record(UUID, 'X', "kcid1", "alice", T);
+  webhook_eventlog_record(UUID, 'X', "kcid1", "alice,bob", T);
+  webhook_eventlog_record("e-none", 'D', "kcid2", "*", T + 1);
   memset(&l, 0, sizeof(l));
-  assert_int_equal(webhook_eventlog_since(T, collect, &l, 8), 1);
+  assert_int_equal(webhook_eventlog_since(T, collect, &l, 8), 2);
   assert_string_equal(l.ids[0], UUID);
+  assert_string_equal(l.names[0], "alice,bob");
+  assert_string_equal(l.names[1], "");
 }
 
 /* Review focus 1: what a relay line must carry to be applied, and what is

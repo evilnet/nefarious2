@@ -82,7 +82,7 @@ static int find_slot(const char *id)
 }
 
 int webhook_eventlog_record(const char *id, char kind, const char *kc_id,
-                            const char *username, time_t now)
+                            const char *names, time_t now)
 {
   struct WebhookEventLogEntry *e;
 
@@ -97,8 +97,8 @@ int webhook_eventlog_record(const char *id, char kind, const char *kc_id,
   e->kind = kind;
   if (kc_id)
     snprintf(e->kc_id, sizeof(e->kc_id), "%s", kc_id);
-  if (username)
-    snprintf(e->username, sizeof(e->username), "%s", username);
+  if (names && strcmp(names, "*") != 0)
+    snprintf(e->names, sizeof(e->names), "%s", names);
   e->applied = now;
 
   ring_next = (ring_next + 1) % ring_cap;
