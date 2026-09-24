@@ -31,6 +31,18 @@ static void test_token_endpoint(void **state) {
     free(u);
 }
 
+static void test_introspect_endpoint(void **state) {
+    (void)state;
+    /* Keycloak's introspection endpoint lives under /token/; the bare
+     * /openid-connect/introspect answers 405 (and a JSON body libkc used
+     * to read as "inactive"). */
+    char *u = kc_url_introspect(R);
+    assert_non_null(u);
+    assert_string_equal(u,
+        "http://keycloak:8080/realms/afternet/protocol/openid-connect/token/introspect");
+    free(u);
+}
+
 static void test_jwks_endpoint(void **state) {
     (void)state;
     char *u = kc_url_jwks(R);
@@ -97,6 +109,7 @@ static void test_group_by_path_keeps_slashes(void **state) {
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_token_endpoint),
+        cmocka_unit_test(test_introspect_endpoint),
         cmocka_unit_test(test_jwks_endpoint),
         cmocka_unit_test(test_user_by_id),
         cmocka_unit_test(test_user_by_username_exact),
