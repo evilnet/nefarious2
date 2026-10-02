@@ -630,6 +630,11 @@ int ssl_starttls(struct Client *cptr)
   if (!cli_socket(cptr).ssl) {
     cli_socket(cptr).ssl = SSL_new(ssl_server_ctx);
     SSL_set_fd(cli_socket(cptr).ssl, cli_socket(cptr).s_fd);
+    /* A write that went want-write is retried from wherever the caller
+     * kept the bytes (the WebSocket stash copies them): the same data from
+     * another address must be acceptable, or the retry is a "bad write
+     * retry" and the connection dies. */
+    SSL_set_mode(cli_socket(cptr).ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     ssl_set_nonblocking(cli_socket(cptr).ssl);
     SetSSLNeedAccept(cptr);
   }
@@ -649,6 +654,7 @@ void ssl_add_connection(struct Listener *listener, int fd)
     return;
   }
   SSL_set_fd(ssl, fd);
+  SSL_set_mode(ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
   /* Dedicated WebSocket listeners serve browsers, and Chromium cancels a
    * JS-initiated WebSocket handshake outright when the server requests a
@@ -979,6 +985,7 @@ int ssl_connect(struct Socket* sock, struct ConfItem *aconf)
   if (!sock->ssl) {
     sock->ssl = SSL_new(ssl_client_ctx);
     SSL_set_fd(sock->ssl, sock->s_fd);
+    SSL_set_mode(sock->ssl, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
     SSL_set_connect_state(sock->ssl);
 
     if (!EmptyString(aconf->sslciphers))
