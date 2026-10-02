@@ -738,16 +738,41 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
 {
   /* Never interleave with a pending blocked TLS write or a stashed
    * partial frame: OpenSSL requires the retry SSL_write to present the
-   * SAME buffer (else SSL_ERROR_SSL "bad write retry" kills the
-   * connection), and a plaintext partial frame must be completed before
-   * any new bytes.  All callers are best-effort: WS PING responses are
-   * re-askable and close/keepalive frames are optional. */
+   * same data (the SSL objects run with ACCEPT_MOVING_WRITE_BUFFER, so
+   * the same bytes from another address will do; a different frame is
+   * SSL_ERROR_SSL "bad write retry" and the connection is killed), and a
+   * plaintext partial frame must be completed before any new bytes.  All
+   * callers are best-effort: WS PING responses are re-askable and
+   * close/keepalive frames are optional. */
   if (IsBlocked(cptr) || con_ws_txrem(cli_connect(cptr)))
     return 0;
 #ifdef USE_SSL
   if (cli_socket(cptr).ssl) {
     int result = SSL_write(cli_socket(cptr).ssl, data, len);
-    return (result > 0) ? 1 : 0;
+    if (result > 0)
+      return 1;
+    {
+      int se = SSL_get_error(cli_socket(cptr).ssl, result);
+      if (se == SSL_ERROR_WANT_WRITE || se == SSL_ERROR_WANT_READ) {
+        /* OpenSSL now holds this frame as ITS pending write; the next
+         * SSL_write on the socket must present the same bytes or it is
+         * a bad write retry.  Returning silently here left exactly that
+         * behind: the keepalive PING (or a PONG to a client PING) went
+         * pending while the peer had stopped acknowledging -- a phone
+         * asleep, its small socket buffer full and the IRC queue empty --
+         * and the next data line was the kill.  Stash the frame where the
+         * data path completes partial frames first, and mark the socket
+         * blocked so the writable event retries it. */
+        struct Connection *wcon = cli_connect(cptr);
+        con_ws_txrem(wcon) = (char *)MyMalloc(len);
+        memcpy(con_ws_txrem(wcon), data, len);
+        con_ws_txrem_len(wcon) = len;
+        con_ws_txrem_pos(wcon) = 0;
+        SetFlag(cptr, FLAG_BLOCKED);
+        update_write(cptr);
+      }
+      return 0;
+    }
   }
 #endif
   {
