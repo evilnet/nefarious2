@@ -326,6 +326,64 @@ static void ssl_handshake_events(struct Client *cptr)
 }
 #endif /* USE_SSL */
 
+/** Complete a WebSocket frame left pending on the wire.
+ * Writes the remainder of con_ws_txrem from where the last attempt
+ * stopped.  OpenSSL is retried from the stash, not from the buffer the
+ * frame was first offered from; the SSL objects run with
+ * ACCEPT_MOVING_WRITE_BUFFER so the same bytes at another address are
+ * accepted.
+ * @param[in] cptr WebSocket client with a pending frame.
+ * @param[in,out] wrote_out Incremented by the bytes written here when
+ * the frame completes; when it does not, the bytes are accounted to
+ * sendB here and *wrote_out is reset to 0.
+ * @return 1 when the frame is complete (the stash is freed), 0 when it
+ * is still pending (FLAG_BLOCKED set) or the socket died
+ * (FLAG_DEADSOCKET set).
+ */
+int ws_flush_txrem(struct Client *cptr, unsigned int *wrote_out)
+{
+  struct Connection *wcon = cli_connect(cptr);
+  unsigned int remlen = (unsigned)(con_ws_txrem_len(wcon) - con_ws_txrem_pos(wcon));
+  unsigned int wrote = 0;
+  IOResult r = IO_BLOCKED;
+
+  assert(0 != con_ws_txrem(wcon));
+#ifdef USE_SSL
+  if (cli_socket(cptr).ssl) {
+    int sr = SSL_write(cli_socket(cptr).ssl,
+                       con_ws_txrem(wcon) + con_ws_txrem_pos(wcon), remlen);
+    if (sr > 0) { wrote = (unsigned)sr; r = IO_SUCCESS; }
+    else {
+      int se = SSL_get_error(cli_socket(cptr).ssl, sr);
+      r = (se == SSL_ERROR_WANT_WRITE || se == SSL_ERROR_WANT_READ)
+            ? IO_BLOCKED : IO_FAILURE;
+    }
+  } else
+#endif
+    r = os_send_nonb(cli_fd(cptr), con_ws_txrem(wcon) + con_ws_txrem_pos(wcon),
+                     remlen, &wrote);
+  if (wrote) {
+    *wrote_out += wrote;
+    con_ws_txrem_pos(wcon) += (int)wrote;
+  }
+  if (con_ws_txrem_pos(wcon) >= con_ws_txrem_len(wcon)) {
+    MyFree(con_ws_txrem(wcon));
+    con_ws_txrem(wcon) = NULL;
+    con_ws_txrem_len(wcon) = con_ws_txrem_pos(wcon) = 0;
+    return 1;
+  }
+  cli_sendB(cptr) += *wrote_out;
+  cli_sendB(&me)  += *wrote_out;
+  *wrote_out = 0;
+  if (r == IO_FAILURE) {
+    cli_error(cptr) = errno;
+    SetFlag(cptr, FLAG_DEADSOCKET);
+    return 0;
+  }
+  SetFlag(cptr, FLAG_BLOCKED);
+  return 0;
+}
+
 /** Attempt to send a sequence of bytes to the connection.
  * As a side effect, updates \a cptr's FLAG_BLOCKED setting
  * and sendB/sendK fields.
@@ -375,48 +433,14 @@ unsigned int deliver_it(struct Client *cptr, struct MsgQ *buf)
     unsigned int consumed = 0;  /* input bytes whose frames were FULLY written */
     struct Connection *wcon = cli_connect(cptr);
 
-    /* A previous flush left a partially-written frame on the wire
-     * (plaintext short write).  Its line was already consumed from the
-     * queue, so the REST of that exact frame must go out before any new
-     * frame -- resending from the frame start would corrupt the stream. */
-    if (con_ws_txrem(wcon)) {
-      unsigned int remlen = (unsigned)(con_ws_txrem_len(wcon) - con_ws_txrem_pos(wcon));
-      unsigned int wrote = 0;
-      IOResult r = IO_BLOCKED;
-#ifdef USE_SSL
-      if (cli_socket(cptr).ssl) {
-        int sr = SSL_write(cli_socket(cptr).ssl,
-                           con_ws_txrem(wcon) + con_ws_txrem_pos(wcon), remlen);
-        if (sr > 0) { wrote = (unsigned)sr; r = IO_SUCCESS; }
-        else {
-          int se = SSL_get_error(cli_socket(cptr).ssl, sr);
-          r = (se == SSL_ERROR_WANT_WRITE || se == SSL_ERROR_WANT_READ)
-                ? IO_BLOCKED : IO_FAILURE;
-        }
-      } else
-#endif
-        r = os_send_nonb(cli_fd(cptr), con_ws_txrem(wcon) + con_ws_txrem_pos(wcon),
-                         remlen, &wrote);
-      if (wrote) {
-        total_ws_written += wrote;
-        con_ws_txrem_pos(wcon) += (int)wrote;
-      }
-      if (con_ws_txrem_pos(wcon) >= con_ws_txrem_len(wcon)) {
-        MyFree(con_ws_txrem(wcon));
-        con_ws_txrem(wcon) = NULL;
-        con_ws_txrem_len(wcon) = con_ws_txrem_pos(wcon) = 0;
-      } else {
-        cli_sendB(cptr) += total_ws_written;
-        cli_sendB(&me)  += total_ws_written;
-        if (r == IO_FAILURE) {
-          cli_error(cptr) = errno;
-          SetFlag(cptr, FLAG_DEADSOCKET);
-          return 0;
-        }
-        SetFlag(cptr, FLAG_BLOCKED);
-        return 0;  /* remainder still pending; nothing new consumed */
-      }
-    }
+    /* A previous flush left a frame pending on the wire: a plaintext
+     * short write, or an out-of-band frame (keepalive PING, PONG) that
+     * went want-write inside OpenSSL.  Its bytes precede everything still
+     * queued, so the REST of that exact frame must go out before any new
+     * frame -- resending from the frame start would corrupt the stream,
+     * and a different frame is OpenSSL's "bad write retry". */
+    if (con_ws_txrem(wcon) && !ws_flush_txrem(cptr, &total_ws_written))
+      return 0;  /* still pending (or dead); nothing new consumed */
 
     /* Get data from message queue as iovecs */
     iovcnt = msgq_mapiov(buf, iov, IOV_MAX, &bytes_count);

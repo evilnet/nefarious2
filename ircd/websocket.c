@@ -776,8 +776,25 @@ static int ws_send_raw(struct Client *cptr, const unsigned char *data, int len)
   }
 #endif
   {
-    unsigned int bytes_sent;
-    return (os_send_nonb(cli_fd(cptr), (char *)data, len, &bytes_sent) == IO_SUCCESS) ? 1 : 0;
+    unsigned int bytes_sent = 0;
+    IOResult r = os_send_nonb(cli_fd(cptr), (char *)data, len, &bytes_sent);
+    if (r == IO_SUCCESS && bytes_sent >= (unsigned)len)
+      return 1;
+    if (r == IO_FAILURE)
+      return 0;
+    /* A short (or blocked) plaintext write: the bytes already on the
+     * wire are the head of this frame, so the rest must follow before
+     * any other frame. */
+    {
+      struct Connection *wcon = cli_connect(cptr);
+      con_ws_txrem(wcon) = (char *)MyMalloc(len);
+      memcpy(con_ws_txrem(wcon), data, len);
+      con_ws_txrem_len(wcon) = len;
+      con_ws_txrem_pos(wcon) = (int)bytes_sent;
+      SetFlag(cptr, FLAG_BLOCKED);
+      update_write(cptr);
+    }
+    return 0;
   }
 }
 

@@ -1126,6 +1126,29 @@ void send_queued(struct Client *to)
   if (IsBlocked(to) || !can_send(to))
     return;                     /* Don't bother */
 
+  /* An out-of-band WebSocket frame (keepalive PING, PONG) can be left
+   * pending with NOTHING queued behind it; the loop below would then
+   * never reach deliver_it and the frame would wait for the next line.
+   * Complete it now that the socket is writable. */
+  if (IsWebSocket(to) && con_ws_txrem(cli_connect(to))
+      && 0 == MsgQLength(&(cli_sendQ(to)))) {
+    unsigned int wrote = 0;
+
+    if (!ws_flush_txrem(to, &wrote)) {
+      if (IsDead(to)) {
+        char tmp[512];
+        sprintf(tmp,"Write error: %s", ((cli_sslerror(to)) ? (cli_sslerror(to)) :
+                ((strerror(cli_error(to))) ? (strerror(cli_error(to))) : "Unknown error")) );
+        dead_link(to, tmp);
+      }
+      else
+        update_write(to);
+      return;
+    }
+    cli_sendB(to) += wrote;
+    cli_sendB(&me) += wrote;
+  }
+
   while (MsgQLength(&(cli_sendQ(to))) > 0) {
     unsigned int len;
 
