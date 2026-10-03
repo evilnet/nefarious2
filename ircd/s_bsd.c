@@ -328,10 +328,9 @@ static void ssl_handshake_events(struct Client *cptr)
 
 /** Complete a WebSocket frame left pending on the wire.
  * Writes the remainder of con_ws_txrem from where the last attempt
- * stopped.  OpenSSL is retried from the stash, not from the buffer the
- * frame was first offered from; the SSL objects run with
- * ACCEPT_MOVING_WRITE_BUFFER so the same bytes at another address are
- * accepted.
+ * stopped.  OpenSSL is retried from the stash, which is the very buffer
+ * the frame was first offered from (ws_send_raw writes from its heap
+ * copy), as the retry-same-buffer rule requires.
  * @param[in] cptr WebSocket client with a pending frame.
  * @param[in,out] wrote_out Incremented by the bytes written here when
  * the frame completes; when it does not, the bytes are accounted to

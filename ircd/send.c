@@ -1216,6 +1216,20 @@ void send_buffer(struct Client* to, struct MsgBuf* buf, int prio)
   if (!can_send(to))
     return;
 
+  /* A blocked TLS socket has a record OpenSSL still holds pending, and
+   * the retry must present that same record first.  msgq_mapiov maps the
+   * priority queue ahead of the normal queue, so a priority line queued
+   * now (the ping check's PING, a WALLOPS, a services line under
+   * FLUSH_ULINE_IMMEDIATE) would reach SSL_write before the pending
+   * record: SSL_ERROR_SSL "bad write retry", and the connection is killed
+   * with "Write error: Internal OpenSSL error or protocol error".  It
+   * cannot be flushed early anyway while the socket is blocked, so queue
+   * it in order. */
+#ifdef USE_SSL
+  if (prio && IsBlocked(to) && cli_socket(to).ssl)
+    prio = 0;
+#endif
+
   if (MsgQLength(&(cli_sendQ(to))) > get_sendq(to)) {
     if (IsServer(to))
       sendto_opmask_butone(0, SNO_OLDSNO, "Max SendQ limit exceeded for %C: "
