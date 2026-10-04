@@ -313,6 +313,8 @@ enum Feature {
   FEAT_CAP_away_notify,
   FEAT_CAP_account_notify,
   FEAT_CAP_sasl,
+  FEAT_CAP_draft_channel_rename,
+  FEAT_RENAME_SERVICES,
 #ifdef USE_SSL
   FEAT_CAP_tls,
 #endif

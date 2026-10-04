@@ -941,6 +941,14 @@ struct Message msgtab[] = {
     ""
   },
   {
+    MSG_RENAME,
+    TOK_RENAME,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_rename, ms_rename, m_rename, m_ignore },
+    "<oldchannel> <newchannel> [:<reason>] - Rename a channel"
+  },
+  {
     MSG_WATCH,
     TOK_WATCH,
     0, MAXPARA, MFLG_SLOW, 0, NULL,

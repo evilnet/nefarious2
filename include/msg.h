@@ -336,6 +336,10 @@ struct Client;
 #define TOK_ACCOUNT		"AC"
 #define CMD_ACCOUNT		MSG_ACCOUNT, TOK_ACCOUNT
 
+#define MSG_RENAME	"RENAME"	/* RENA */
+#define TOK_RENAME	"RN"
+#define CMD_RENAME	MSG_RENAME, TOK_RENAME
+
 #define MSG_ASLL               "ASLL"          /* ASLL */
 #define TOK_ASLL               "LL"
 #define CMD_ASLL               MSG_ASLL, TOK_ASLL
