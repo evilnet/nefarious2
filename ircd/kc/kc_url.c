@@ -41,7 +41,9 @@ kc_url_token(struct kc_realm r)
 char *
 kc_url_introspect(struct kc_realm r)
 {
-    static const char tmpl[] = "%s/realms/%s/protocol/openid-connect/introspect";
+    /* Keycloak serves introspection under the token endpoint; the bare
+     * .../openid-connect/introspect answers 405 with a JSON body. */
+    static const char tmpl[] = "%s/realms/%s/protocol/openid-connect/token/introspect";
     if (!r.base_url || !r.realm) return NULL;
 
     int len = snprintf(NULL, 0, tmpl, r.base_url, r.realm) + 1;

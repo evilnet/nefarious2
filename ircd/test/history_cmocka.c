@@ -235,6 +235,73 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
     return -1;
 }
 
+/* ========== redaction catch-up index (redact_index.c, design B) ========== */
+#include "redact_index.h"
+
+static void test_rdx_key_roundtrip_and_order(void **state)
+{
+  unsigned char a[RDX_KEY_MAX], b[RDX_KEY_MAX];
+  uint64_t t; char m[RDX_MSGID_MAX];
+  int la, lb;
+  (void)state;
+  la = rdx_key_build(a, sizeof a, 1789962797402ULL, "AIAAAaDCGMFaNc");
+  lb = rdx_key_build(b, sizeof b, 1789962797403ULL, "AAAAAaDCGMFaNa");
+  assert_true(la > 8 && lb > 8);
+  /* later time sorts after, whatever the msgid bytes */
+  assert_true(memcmp(a, b, 8) < 0);
+  assert_int_equal(0, rdx_key_parse(a, (size_t)la, &t, m, sizeof m));
+  assert_true(t == 1789962797402ULL);
+  assert_string_equal(m, "AIAAAaDCGMFaNc");
+  assert_int_equal(-1, rdx_key_build(a, sizeof a, 1, ""));
+  assert_int_equal(-1, rdx_key_parse(a, 8, &t, m, sizeof m));
+}
+
+static void test_rdx_val_roundtrip(void **state)
+{
+  struct rdx_val v, o;
+  char buf[RDX_VAL_MAX];
+  int l;
+  (void)state;
+  memset(&v, 0, sizeof v);
+  strcpy(v.target, "#chan"); strcpy(v.parent_msgid, "ADAAAaDCF3KvTd");
+  strcpy(v.sender, "bob!b@h.example"); strcpy(v.account, "bob"); strcpy(v.reason, "gate reason");
+  l = rdx_val_pack(buf, sizeof buf, &v);
+  assert_true(l > 0);
+  assert_int_equal(0, rdx_val_parse(buf, (size_t)l, &o));
+  assert_string_equal(o.target, "#chan"); assert_string_equal(o.parent_msgid, "ADAAAaDCF3KvTd");
+  assert_string_equal(o.sender, "bob!b@h.example"); assert_string_equal(o.account, "bob");
+  assert_string_equal(o.reason, "gate reason");
+  /* empty account + empty reason survive */
+  v.account[0] = '\0'; v.reason[0] = '\0';
+  l = rdx_val_pack(buf, sizeof buf, &v);
+  assert_true(l > 0);
+  assert_int_equal(0, rdx_val_parse(buf, (size_t)l, &o));
+  assert_string_equal(o.account, ""); assert_string_equal(o.reason, "");
+  /* a value without the four separators is malformed */
+  assert_int_equal(-1, rdx_val_parse("#chan", 5, &o));
+}
+
+static void test_rdx_reply_parse(void **state)
+{
+  char *pv[10] = { "CH", "D", "AD7", "1789962797402", "AIAAAaDCGMFaNc", "#chan",
+                   "AIAAAaDCGKw4Nb", "bob!b@h", "*", "gate reason" };
+  struct rdx_reply r;
+  (void)state;
+  assert_int_equal(0, rdx_reply_parse(10, pv, &r));
+  assert_string_equal(r.reqid, "AD7");
+  assert_true(r.time_ms == 1789962797402ULL);
+  assert_string_equal(r.redact_msgid, "AIAAAaDCGMFaNc");
+  assert_string_equal(r.v.target, "#chan");
+  assert_string_equal(r.v.parent_msgid, "AIAAAaDCGKw4Nb");
+  assert_string_equal(r.v.account, "");          /* "*" = none */
+  assert_string_equal(r.v.reason, "gate reason");
+  assert_int_equal(0, rdx_reply_parse(9, pv, &r));   /* no reason param */
+  assert_string_equal(r.v.reason, "");
+  assert_int_equal(-1, rdx_reply_parse(8, pv, &r));  /* short */
+  pv[3] = "0";
+  assert_int_equal(-1, rdx_reply_parse(10, pv, &r)); /* no time */
+}
+
 /* ========== build_key Tests ========== */
 
 static void test_build_key_target_only(void **state)
@@ -890,7 +957,10 @@ int main(void)
 {
     const struct CMUnitTest tests[] = {
         /* build_key tests */
-        cmocka_unit_test(test_build_key_target_only),
+        cmocka_unit_test(test_rdx_key_roundtrip_and_order),
+    cmocka_unit_test(test_rdx_val_roundtrip),
+    cmocka_unit_test(test_rdx_reply_parse),
+    cmocka_unit_test(test_build_key_target_only),
         cmocka_unit_test(test_build_key_with_timestamp),
         cmocka_unit_test(test_build_key_with_msgid),
         cmocka_unit_test(test_build_key_buffer_too_small),

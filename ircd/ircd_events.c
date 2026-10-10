@@ -649,7 +649,83 @@ socket_add(struct Socket* sock, EventCallBack call, void* data,
   sock->s_events = events & SOCK_EVENT_MASK;
   sock->s_fd = fd;
 
-  return (*evInfo.engine->eng_add)(sock); /* tell engine about it */
+  if (!(*evInfo.engine->eng_add)(sock)) { /* tell engine about it */
+    /* Refused.  The caller learns it from the return value -- no event is
+     * raised -- and frees its structure without socket_del(), so nothing
+     * may be left pointing at it: unlink it again. */
+    gen_dequeue(sock);
+    return 0;
+  }
+  return 1;
+}
+
+/** Number of sockets flagged GEN_ERR_PENDING. */
+static unsigned int socket_errors;
+
+/** Forget a socket's undelivered engine error. */
+static void
+socket_error_drop(struct Socket* sock)
+{
+  if (sock->s_header.gh_flags & GEN_ERR_PENDING) {
+    sock->s_header.gh_flags &= ~GEN_ERR_PENDING;
+    socket_errors--;
+  }
+}
+
+/** Report an engine error on a socket from outside the event loop.
+ * Engines call this when an operation made on a caller's behalf fails --
+ * socket_state(), socket_events(), or setting up a registration.  The
+ * socket's callback does not run here: the caller may be deep inside other
+ * work (a send, a walk over a channel's members) holding pointers that the
+ * callback would free.  The socket is flagged in error at once, so further
+ * state and interest changes are skipped, and socket_run_errors() delivers
+ * the ET_ERROR from the event loop.
+ * @param[in] sock Socket the engine failed on.
+ * @param[in] err The engine's errno, delivered as the event's data.
+ */
+void
+socket_error(struct Socket* sock, int err)
+{
+  assert(0 != sock);
+
+  if (sock->s_header.gh_flags & (GEN_DESTROY | GEN_ERR_PENDING))
+    return;
+
+  Debug((DEBUG_LIST, "Deferring error %d on socket %d (%p)", err,
+         s_fd(sock), sock));
+
+  sock->s_header.gh_flags |= GEN_ERROR | GEN_ERR_PENDING;
+  sock->s_error = err;
+  socket_errors++;
+}
+
+/** Deliver the engine errors socket_error() deferred.  Every engine loop
+ * calls this once per pass, between dispatches, where no callback is on
+ * the stack.  An error raised while these are delivered (a callback's own
+ * sends) is delivered in the same call.  Pending sockets are found on the
+ * socket list, which a socket leaves before its ET_DESTROY, so a destroyed
+ * socket is never reached.
+ */
+void
+socket_run_errors(void)
+{
+  struct GenHeader* gen;
+
+  while (socket_errors > 0) {
+    for (gen = evInfo.gens.g_socket; gen; gen = gen->gh_next)
+      if (gen->gh_flags & GEN_ERR_PENDING)
+        break;
+
+    if (!gen) { /* every flagged socket is listed; never reached */
+      log_write(LS_SYSTEM, L_CRIT, 0, "socket_run_errors: %u pending engine "
+                "errors, no socket flagged; resetting", socket_errors);
+      socket_errors = 0;
+      break;
+    }
+
+    socket_error_drop((struct Socket*) gen);
+    event_generate(ET_ERROR, gen, ((struct Socket*) gen)->s_error);
+  }
 }
 
 /** Deletes (or marks for deletion) a socket generator.
@@ -662,6 +738,8 @@ socket_del(struct Socket* sock)
   assert(!(sock->s_header.gh_flags & GEN_DESTROY));
   assert(0 != evInfo.engine);
   assert(0 != evInfo.engine->eng_closing);
+
+  socket_error_drop(sock); /* deleted: no error left to report */
 
   /* tell engine socket is going away */
   (*evInfo.engine->eng_closing)(sock);
@@ -688,6 +766,8 @@ socket_del_keepfd(struct Socket* sock)
   assert(!(sock->s_header.gh_flags & GEN_DESTROY));
   assert(0 != evInfo.engine);
   assert(0 != evInfo.engine->eng_closing);
+
+  socket_error_drop(sock); /* deleted: no error left to report */
 
   /* Unregister from engine WITH valid fd so epoll_ctl(DEL, fd) runs. */
   (*evInfo.engine->eng_closing)(sock);
@@ -730,11 +810,17 @@ socket_reattach(struct Socket* sock, int fd)
    * the epoll set automatically). */
   (*evInfo.engine->eng_closing)(sock);
 
+  /* An error belonged to the old descriptor: drop one still undelivered,
+   * and let interest changes reach the engine again for the new one. */
+  socket_error_drop(sock);
+  sock->s_header.gh_flags &= ~GEN_ERROR;
+
   /* Update the fd */
   sock->s_fd = fd;
 
   /* Re-register with the engine under the new fd.  gh_ref, gh_flags,
-   * gh_call, gh_data, and list linkage are all preserved. */
+   * gh_call, gh_data, and list linkage are all preserved.  A refusal is
+   * reported by the return value alone, as for socket_add(). */
   return (*evInfo.engine->eng_add)(sock);
 }
 
@@ -928,6 +1014,7 @@ gen_flags(unsigned int flags)
     NM(GEN_ACTIVE),
     NM(GEN_READD),
     NM(GEN_ERROR),
+    NM(GEN_ERR_PENDING),
     NE
   };
 

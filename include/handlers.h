@@ -84,6 +84,7 @@
  *                    non-NULL pointers.
  */
 
+#include <stdint.h>   /* uint64_t in the redact prototypes */
 #include <time.h>
 
 struct Channel;
@@ -296,10 +297,13 @@ extern int m_batch(struct Client*, struct Client*, int, char*[]);
 extern int check_client_batch_timeout(struct Client*);
 extern int ms_multiline(struct Client*, struct Client*, int, char*[]);
 extern int m_chathistory(struct Client*, struct Client*, int, char*[]);
+extern int m_search(struct Client*, struct Client*, int, char*[]);
 extern int ms_chathistory(struct Client*, struct Client*, int, char*[]);
 extern int m_history(struct Client*, struct Client*, int, char*[]);
 extern int has_chathistory_advertisement(struct Client*);
 extern int server_retention_days(struct Client*);
+extern int chathistory_retention_advertised(void);
+extern void chathistory_update_retention_isupport(int announce);
 extern int server_retention_covers(struct Client*, time_t);
 extern void clear_server_ad(struct Client*);
 extern void chathistory_report_ads(struct Client*, const struct StatDesc*, char*);
@@ -310,6 +314,17 @@ extern void broadcast_channel_advertisement(const char*);
 extern void chathistory_init_callbacks(void);
 extern int m_redact(struct Client*, struct Client*, int, char*[]);
 extern int ms_redact(struct Client*, struct Client*, int, char*[]);
+/* Apply a channel redaction that reached us from elsewhere the way ms_redact
+ * does (placeholder + ONE context row + member fan-out; idempotent).  The
+ * _row form takes the stored sender/account explicitly (the redaction
+ * catch-up replay keeps the original redacter; NULL = derive from src). */
+extern void redact_apply_remote(struct Client *src, const char *target,
+                                const char *msgid, const char *redact_msgid,
+                                uint64_t time_ms, const char *reason);
+extern void redact_apply_row(struct Client *src, const char *target,
+                             const char *msgid, const char *redact_msgid,
+                             uint64_t time_ms, const char *reason,
+                             const char *sender_str, const char *account_str);
 extern int m_register(struct Client*, struct Client*, int, char*[]);
 extern int m_verify(struct Client*, struct Client*, int, char*[]);
 extern int m_markread(struct Client*, struct Client*, int, char*[]);

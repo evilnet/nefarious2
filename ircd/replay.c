@@ -120,29 +120,89 @@ static int pm_half_is_session_id(const char *s, size_t len)
   return 1;
 }
 
-/** The live client logged into @a account, if any.  First match on the
- * global list: a bouncer primary and its aliases share the account and
- * the nick, so any of them will do. */
-static struct Client *pm_live_client_for_account(const char *account)
+/** The value of internal tag @a name ("+evilnet.github.io/ssid=") in a
+ * row's client_tags, or "" -- server-injected, first occurrence. */
+static void pm_tag_value(const char *tags, const char *name, char *buf, size_t buflen)
+{
+  size_t nlen = strlen(name);
+  const char *p = tags;
+
+  buf[0] = '\0';
+  while (p && *p) {
+    const char *end = strchr(p, ';');
+    size_t len = end ? (size_t)(end - p) : strlen(p);
+    if (len > nlen && memcmp(p, name, nlen) == 0) {
+      size_t vlen = len - nlen;
+      if (vlen >= buflen) vlen = buflen - 1;
+      memcpy(buf, p + nlen, vlen);
+      buf[vlen] = '\0';
+      return;
+    }
+    p = end ? end + 1 : p + len;
+  }
+}
+
+/** The live client holding @a nick, when it is the party the row named:
+ * on @a account when the row has one, else in @a sessid's session. */
+static struct Client *pm_nick_held_by(const char *nick, const char *account,
+                                      const char *sessid)
+{
+  struct Client *acptr = (nick && *nick) ? FindUser(nick) : NULL;
+  if (!acptr || !cli_user(acptr))
+    return NULL;
+  if (account && *account)
+    return (IsAccount(acptr) && ircd_strcmp(cli_user(acptr)->account, account) == 0)
+           ? acptr : NULL;
+  return (sessid && *sessid && strcmp(cli_session_id(acptr), sessid) == 0)
+         ? acptr : NULL;
+}
+
+/** A live client of the SAME session as the row's party: same account
+ * (when the row has one) and the same session id.  A bouncer primary
+ * and its aliases share the id; a same-account alt on a legacy server,
+ * which cannot join the session, does not, and must never be taken for
+ * it (user, 2026-09-24: an account's connections are not
+ * interchangeable). */
+static struct Client *pm_same_session_client(const char *account, const char *sessid)
 {
   struct Client *acptr;
-  if (!account || !*account)
+  if (!sessid || !*sessid)
     return NULL;
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr)) {
-    if (!IsUser(acptr) || !IsAccount(acptr) || !cli_user(acptr))
+    if (!IsUser(acptr) || !cli_user(acptr))
       continue;
-    if (cli_user(acptr)->account[0]
-        && ircd_strcmp(cli_user(acptr)->account, account) == 0)
-      return acptr;
+    if (strcmp(cli_session_id(acptr), sessid) != 0)
+      continue;
+    if (account && *account
+        && !(IsAccount(acptr) && ircd_strcmp(cli_user(acptr)->account, account) == 0))
+      continue;
+    return acptr;
   }
   return NULL;
+}
+
+/** The half of pair key @a key that is not the caller's identity. */
+static void pm_other_half(struct Client *sptr, const char *key, char *buf, size_t buflen)
+{
+  const char *colon = strchr(key, ':');
+  size_t left_len = colon ? (size_t)(colon - key) : strlen(key);
+  const char *other = key;
+  size_t olen = left_len;
+
+  if (colon && history_pm_identity_matches(sptr, key, left_len)) {
+    other = colon + 1;
+    olen = strlen(other);
+  }
+  if (olen >= buflen) olen = buflen - 1;
+  memcpy(buf, other, olen);
+  buf[olen] = '\0';
 }
 
 /** Is @a m a row the replaying client sent?  By sender account when the
  * client is logged in (the client may have changed nick since the row
  * was stored, and an older nick of their own must not read as the
  * other party); by sender nick otherwise. */
-static int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m)
+int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m)
 {
   char snick[NICKLEN + 1];
   if (IsAccount(sptr) && cli_user(sptr) && cli_user(sptr)->account[0]
@@ -153,12 +213,18 @@ static int pm_row_is_own(struct Client *sptr, const struct HistoryMessage *m)
   return ircd_strcmp(snick, cli_name(sptr)) == 0;
 }
 
-/** Derive the other party's nick for a PM page.  The page can span
- * months of one pair key, so rows carry whatever nicks both sides had
- * at the time: identify the caller's own rows by identity, take the
- * NEWEST row the other party sent, and show that party under their
- * current nick when they are online -- a client that opens the
- * conversation under a stale nick fragments it. */
+/** Derive the other party's nick for a PM page from the rows.  The page
+ * can span months of one pair key, so rows carry whatever nicks both
+ * sides had at the time: identify the caller's own rows by identity,
+ * take the NEWEST row the other party sent (else the nick the caller
+ * addressed) and name them, in this order: the SAME SESSION under its
+ * current nick (a bouncer session that renamed itself; its aliases share
+ * the session id the row carries); else a session on that account still
+ * holding the historical nick; else the historical nick as written.
+ * Never merely the same account under another nick: an account can be
+ * online under several nicks at once, a bouncer session plus an alt on a
+ * legacy server that cannot join it, and a conversation is with a nick
+ * (user, 2026-09-24). */
 static int pm_other_nick_from_messages(struct Client *sptr,
                                        const struct HistoryMessage *msgs,
                                        char *buf, size_t buflen)
@@ -178,16 +244,33 @@ static int pm_other_nick_from_messages(struct Client *sptr,
   }
 
   if (other) {
-    struct Client *live = other->account[0]
-                          ? pm_live_client_for_account(other->account) : NULL;
-    if (live)
-      ircd_strncpy(buf, cli_name(live), buflen);
+    char snick[NICKLEN + 1], ssid[S2S_SESSID_BUFSIZE];
+    struct Client *same;
+
+    pm_sender_nick(other, snick, sizeof(snick));
+    pm_tag_value(other->client_tags, "+evilnet.github.io/ssid=", ssid, sizeof(ssid));
+    if ((same = pm_same_session_client(other->account, ssid)))
+      ircd_strncpy(buf, cli_name(same), buflen);        /* the same session, under its current nick */
+    else if (pm_nick_held_by(snick, other->account, ssid))
+      ircd_strncpy(buf, snick, buflen);                 /* a session on that account holding the historical nick */
     else
-      pm_sender_nick(other, buf, buflen);
+      ircd_strncpy(buf, snick, buflen);                 /* the historical nick, as written */
     return 1;
   }
   if (own) {
-    ircd_strncpy(buf, own->original_target, buflen);
+    char half[CHANNELLEN + 1], rsid[S2S_SESSID_BUFSIZE];
+    struct Client *same;
+    const char *account;
+
+    pm_other_half(sptr, own->target, half, sizeof(half));
+    account = pm_half_is_session_id(half, strlen(half)) ? NULL : half;
+    pm_tag_value(own->client_tags, "+evilnet.github.io/rsid=", rsid, sizeof(rsid));
+    if ((same = pm_same_session_client(account, rsid)))
+      ircd_strncpy(buf, cli_name(same), buflen);        /* the same session, under its current nick */
+    else if (pm_nick_held_by(own->original_target, account, rsid))
+      ircd_strncpy(buf, own->original_target, buflen);  /* a session on that account holding the nick the caller addressed */
+    else
+      ircd_strncpy(buf, own->original_target, buflen);  /* the historical nick, as written */
     return 1;
   }
   return 0;
@@ -239,12 +322,13 @@ static int replay_set_target_from_storage(struct Client *sptr,
     named = 1;   /* real nick from the stream */
   } else {
     /* No usable row: the other half of the key is an identity, an
-     * account or a session id.  A live client on that account gives a
-     * nick; otherwise the raw half stands and the caller decides. */
+     * account or a session id.  An account name is a label a person
+     * would recognise; a session id is not, and nobody online is
+     * consulted for a nick (a conversation is with a nick, not with
+     * whoever holds the account right now). */
     size_t left_len = (size_t)(colon - storage_target);
     const char *other;
     size_t olen;
-    struct Client *live;
 
     if (history_pm_identity_matches(sptr, storage_target, left_len)) {
       other = colon + 1;
@@ -258,13 +342,8 @@ static int replay_set_target_from_storage(struct Client *sptr,
     memcpy(rs->other_nick, other, olen);
     rs->other_nick[olen] = '\0';
 
-    live = pm_live_client_for_account(rs->other_nick);
-    if (live) {
-      ircd_strncpy(rs->other_nick, cli_name(live), sizeof(rs->other_nick));
-      named = 1;
-    } else if (!pm_half_is_session_id(rs->other_nick, strlen(rs->other_nick))) {
+    if (!pm_half_is_session_id(rs->other_nick, strlen(rs->other_nick)))
       named = 1;   /* an account name: a label a person would recognise */
-    }
   }
   ircd_strncpy(rs->target, rs->other_nick, sizeof(rs->target));
   return named;
@@ -277,12 +356,15 @@ int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
   struct Client *live;
   char half[CHANNELLEN + 1];
   int named = 0;
+  /* Rows first, then the account-name label.  Nobody online under the
+   * account is consulted: a conversation is with a nick, and an
+   * account's connections are not interchangeable. */
 
   if (!colon || !buf || buflen == 0)
     return 0;
   buf[0] = '\0';
 
-  /* The other half of the key, and the live client on that account. */
+  /* The other half of the key: an account, or a session id. */
   {
     size_t left_len = (size_t)(colon - pair_key);
     const char *other;
@@ -299,15 +381,11 @@ int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
       return 0;
     memcpy(half, other, olen);
     half[olen] = '\0';
-    live = pm_live_client_for_account(half);
-    if (live) {
-      ircd_strncpy(buf, cli_name(live), buflen);
-      named = 1;
-    }
   }
 
-  /* Else the newest rows: the other party's nick as they last used it. */
-  if (!named) {
+  /* The newest rows: the nick the other party held this conversation
+   * with, as they wrote it, else the nick the caller addressed. */
+  {
     struct HistoryMessage *msgs = NULL;
     if (history_query_latest(pair_key, HISTORY_REF_NONE, NULL, 20, &msgs, NULL) > 0
         && msgs) {
@@ -315,6 +393,7 @@ int replay_pm_display_nick(struct Client *sptr, const char *pair_key,
       history_free_messages(msgs);
     }
   }
+
 
   /* Else an account name is still a label; a session id is not. */
   if (!named && !pm_half_is_session_id(half, strlen(half))) {

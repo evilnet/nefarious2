@@ -191,6 +191,8 @@ static struct lexer_token {
   TOKEN(MAXREQUESTSIZE),
   TOKEN(QUEUEMAX),
   TOKEN(BATCHSIZE),
+  TOKEN(SIGNATUREWINDOW),
+  TOKEN(LEGACYSECRET),
 #undef TOKEN
   { "ssl", SSLTOK },
   { "administrator", ADMIN },

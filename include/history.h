@@ -452,6 +452,15 @@ extern int history_redact_message(const char *target, const char *msgid);
  * REDACT context row reference it?
  * @return 1 if redacted, 0 if not, -1 on error. */
 extern int history_message_is_redacted(const char *target, const char *msgid);
+/* Redaction catch-up index (design B; redact_index.h): rows since @a since_ms
+ * in time order, at most @a limit (0 = all); *truncated set when cut short. */
+struct rdx_val;
+typedef void (*history_rdx_cb)(uint64_t time_ms, const char *redact_msgid,
+                               const struct rdx_val *v, void *ctx);
+extern int history_redact_index_scan(uint64_t since_ms, int limit,
+                                     history_rdx_cb cb, void *ctx, int *truncated);
+extern uint64_t history_redact_watermark_get(void);
+extern int history_redact_watermark_set(uint64_t ms);
 
 /** Query context messages (reactions, redacts) for a set of parent msgids.
  * Looks up the reply index to find TAGMSG(+draft/react) and REDACT events

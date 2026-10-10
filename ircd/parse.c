@@ -979,6 +979,14 @@ struct Message msgtab[] = {
     "subcommand target ref [ref] limit - Query message history"
   },
   {
+    MSG_SEARCH,
+    TOK_SEARCH,
+    0, MAXPARA, MFLG_SLOW, 0, NULL,
+    /* UNREG, CLIENT, SERVER, OPER, SERVICE */
+    { m_unregistered, m_search, m_ignore, m_search, m_ignore },
+    "in=<target> [from=<nick>] [text=<words>] [after=<ts>] [before=<ts>] [limit=<n>] - Search message history (soju.im/search)"
+  },
+  {
     MSG_HISTORY,
     TOK_HISTORY,
     0, MAXPARA, MFLG_SLOW, 0, NULL,
@@ -1129,7 +1137,7 @@ struct Message msgtab[] = {
     TOK_AUTHENTICATE,
     0, MAXPARA, MFLG_UNREG | MFLG_NOSHUN, 0, NULL,
     /* UNREG, CLIENT, SERVER, OPER, SERVICE */
-    { m_authenticate, m_registered, m_ignore, m_registered, m_ignore },
+    { m_authenticate, m_authenticate, m_ignore, m_authenticate, m_ignore },
     ""
   },
   {

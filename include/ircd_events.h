@@ -96,6 +96,7 @@ struct GenHeader {
 #define GEN_ACTIVE	0x0004	/**< generator is active */
 #define GEN_READD	0x0008	/**< generator (timer) must be re-added */
 #define GEN_ERROR	0x0010	/**< an error occurred on the generator */
+#define GEN_ERR_PENDING	0x0020	/**< socket: engine error awaits the loop */
 
 /** Socket event generator.
  * Note: The socket state overrides the socket event mask; that is, if
@@ -109,6 +110,7 @@ struct Socket {
   enum SocketState s_state;	/**< state socket's in */
   unsigned int	   s_events;	/**< events socket is interested in */
   int		   s_fd;	/**< file descriptor for socket */
+  int		   s_error;	/**< errno awaiting delivery (GEN_ERR_PENDING) */
 #ifdef USE_SSL
   SSL*             ssl;         /**< if not NULL, use SSL routines on socket */
 #endif /* USE_SSL */
@@ -304,6 +306,8 @@ void socket_del_keepfd(struct Socket* sock);
 int socket_reattach(struct Socket* sock, int fd);
 void socket_state(struct Socket* sock, enum SocketState state);
 void socket_events(struct Socket* sock, unsigned int events);
+void socket_error(struct Socket* sock, int err);
+void socket_run_errors(void);
 
 const char* engine_name(void);
 

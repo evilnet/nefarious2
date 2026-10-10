@@ -26,6 +26,9 @@
 #ifndef INCLUDED_ircd_defs_h
 #include "ircd_defs.h"
 #endif
+#ifndef INCLUDED_account_id_h
+#include "account_id.h"      /* ACCOUNT_ID_LEN */
+#endif
 #ifndef INCLUDED_dbuf_h
 #include "dbuf.h"
 #endif
@@ -264,6 +267,7 @@ enum Flag
     FLAG_SSL,                       /**< User is connected via SSL (+z) */
     FLAG_STARTTLS,                  /**< User is connecting with StartTLS */
     FLAG_SSLNEEDACCEPT,             /**< Client needs SSL_accept() to be called again */
+    FLAG_SSLNEEDCONNECT,            /**< Outbound TLS handshake pending: SSL_connect() again */
     FLAG_WEBSOCKET,                 /**< Client is connected via WebSocket */
     FLAG_WSNEEDHANDSHAKE,           /**< WebSocket client needs handshake */
     FLAG_WSTEXT,                    /**< WebSocket uses text frames (not binary) */
@@ -566,6 +570,7 @@ struct Client {
   struct Client* cli_saslagent;     /**< SASL agent handling SASL exchange */
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
+  char cli_saslkcid[ACCOUNT_ID_LEN + 1]; /**< SASL authenticated Keycloak user id, compact; "" = none */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
   time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
   struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
@@ -776,6 +781,8 @@ struct Client {
 #define cli_saslaccount(cli)    ((cli)->cli_saslaccount)
 /** Get SASL authenticated account timestamp. */
 #define cli_saslacccreate(cli)  ((cli)->cli_saslacccreate)
+/** Get SASL authenticated Keycloak user id (compact). */
+#define cli_saslkcid(cli)       ((cli)->cli_saslkcid)
 /** Get SASL session cookie. */
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
 /** Get SASL start timestamp. */
@@ -1297,6 +1304,7 @@ struct Client {
 #define IsStartTLS(x)           HasFlag(x, FLAG_STARTTLS)
 /** Return non-zero if the client still needs SSL_accept(). */
 #define IsSSLNeedAccept(x)      HasFlag(x, FLAG_SSLNEEDACCEPT)
+#define IsSSLNeedConnect(x)     HasFlag(x, FLAG_SSLNEEDCONNECT)
 /** Return non-zero if the client is connected via WebSocket. */
 #define IsWebSocket(x)          HasFlag(x, FLAG_WEBSOCKET)
 /** Return non-zero if the client needs WebSocket handshake. */
@@ -1448,6 +1456,7 @@ struct Client {
 #define SetStartTLS(x)          SetFlag(x, FLAG_STARTTLS)
 /** Mark a client as needing SSL_accept(). */
 #define SetSSLNeedAccept(x)     SetFlag(x, FLAG_SSLNEEDACCEPT)
+#define SetSSLNeedConnect(x)    SetFlag(x, FLAG_SSLNEEDCONNECT)
 /** Mark a client as connected via WebSocket. */
 #define SetWebSocket(x)         SetFlag(x, FLAG_WEBSOCKET)
 /** Mark a client as needing WebSocket handshake. */
@@ -1576,6 +1585,7 @@ struct Client {
 #define ClearStartTLS(x)        ClrFlag(x, FLAG_STARTTLS)
 /** Client no longer needs SSL_accept(). */
 #define ClearSSLNeedAccept(x)   ClrFlag(x, FLAG_SSLNEEDACCEPT)
+#define ClearSSLNeedConnect(x)  ClrFlag(x, FLAG_SSLNEEDCONNECT)
 /** Client no longer connected via WebSocket. */
 #define ClearWebSocket(x)       ClrFlag(x, FLAG_WEBSOCKET)
 /** Client no longer needs WebSocket handshake. */

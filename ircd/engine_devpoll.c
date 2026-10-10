@@ -162,7 +162,7 @@ set_events(struct Socket* sock, unsigned int events)
 	   s_fd(sock), sock));
 
     if (write(devpoll_fd, &pfd, sizeof(pfd)) != sizeof(pfd)) {
-      event_generate(ET_ERROR, sock, errno); /* report error */
+      socket_error(sock, errno); /* delivered by the loop, not here */
       return;
     }
 
@@ -183,7 +183,7 @@ set_events(struct Socket* sock, unsigned int events)
 	 sock_flags(s_events(sock))));
 
   if (write(devpoll_fd, &pfd, sizeof(pfd)) != sizeof(pfd)) {
-    event_generate(ET_ERROR, sock, errno); /* report error */
+    socket_error(sock, errno); /* delivered by the loop, not here */
     return;
   }
 
@@ -299,6 +299,9 @@ engine_loop(struct Generators* gen)
   polls = (struct pollfd *)MyMalloc(sizeof(struct pollfd) * polls_count);
 
   while (running) {
+    /* Engine errors deferred since the last pass (socket_error()) */
+    socket_run_errors();
+
     if ((i = feature_int(FEAT_POLLS_PER_LOOP)) >= 20 && i != polls_count) {
       polls = (struct pollfd *)MyRealloc(polls, sizeof(struct pollfd) * i);
       polls_count = i;

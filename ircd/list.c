@@ -341,6 +341,7 @@ void free_client(struct Client* cptr)
    * stragglers.  Idempotent — a second sweep is a fast token-hash walk
    * that finds nothing. */
   bounce_null_hs_client_pointing_at(cptr);
+  bounce_null_alias_primary_pointing_at(cptr);
 
   Debug((DEBUG_LIST, "Freeing client %s [%p], connection %p", cli_name(cptr),
 	 cptr, cli_connect(cptr)));
@@ -554,6 +555,7 @@ void remove_client_from_list(struct Client *cptr)
    * invariant unbypassable by construction — every Client free in the
    * codebase routes through remove_client_from_list or free_client. */
   bounce_null_hs_client_pointing_at(cptr);
+  bounce_null_alias_primary_pointing_at(cptr);
 
   /* Only try remove cptr from the list if it IS in the list.
    * cli_next(cptr) cannot be NULL here, as &me is always the end

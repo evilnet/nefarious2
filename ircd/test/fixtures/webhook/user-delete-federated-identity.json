@@ -1,0 +1,14 @@
+{
+ "id": "f9a431ea-bba5-5f11-aef0-d7e9cbe83314",
+ "time": 1790197209696,
+ "realmId": "57c68983-035c-56d4-b5db-a0b06fee4f73",
+ "authDetails": {
+  "realmId": "75b95eae-6976-56db-b030-e53ed3109213",
+  "clientId": "6cc65216-e3a7-593b-bb07-cedc16ff242d",
+  "userId": "9bfea746-c0d4-5f23-a40b-d5a303af7fdf",
+  "ipAddress": "192.0.2.1"
+ },
+ "operationType": "DELETE",
+ "resourceType": "USER",
+ "resourcePath": "users/c09cc672-bf57-5997-8757-11cee81ddaa2/federated-identity/github"
+}

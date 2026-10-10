@@ -463,6 +463,7 @@ static void auth_complete_sasl(struct Client *client)
     if (cli_saslacccreate(client))
       cli_user(client)->acc_create = cli_saslacccreate(client);
     ircd_strncpy(cli_user(client)->account, cli_saslaccount(client), ACCOUNTLEN + 1);
+    ircd_strncpy(cli_user(client)->kc_id, cli_saslkcid(client), sizeof(cli_user(client)->kc_id));
     SetAccount(client);
   }
 
@@ -1480,13 +1481,15 @@ void start_auth(struct Client* client)
   assert(0 != client);
   Debug((DEBUG_INFO, "Beginning auth request on client %p", client));
 
-  /* Register with event handlers. */
+  /* Register with event handlers.  The socket's event interest is
+   * add_connection's: readable from registration, and while a TLS
+   * handshake is pending whatever OpenSSL asks for (writable interest
+   * armed there must survive this call). */
   cli_lasttime(client) = CurrentTime;
   cli_since(client) = CurrentTime;
   if (cli_fd(client) > HighestFd)
     HighestFd = cli_fd(client);
   LocalClientArray[cli_fd(client)] = client;
-  socket_events(&(cli_socket(client)), SOCK_ACTION_SET | SOCK_EVENT_READABLE);
 
   /* Allocate the AuthRequest. */
 #define AUTH_FREELIST_MARKER ((struct AuthRequest*)0xDEADBEEF)

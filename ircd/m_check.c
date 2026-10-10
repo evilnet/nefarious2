@@ -270,7 +270,10 @@ void checkUsers(struct Client *sptr, struct Channel *chptr, int flags) {
       else
          ircd_snprintf(0, oplvl, sizeof(oplvl), "   ");
 
-      if ((c = IsAccount(acptr)) != 0) ++authed;
+      /* IsAccount() yields the flag word masked; the account flag sits
+       * beyond bit 31 on this tree, so storing it in an int gave 0 and
+       * CHECK never showed anyone's account.  Normalise to a boolean. */
+      if ((c = IsAccount(acptr) ? 1 : 0) != 0) ++authed;
 
       if ((flags & CHECK_SHOWUSERS) || ((flags & CHECK_OPSONLY) && opped)) {
         ircd_snprintf(0, outbuf, sizeof(outbuf), "%s%c", acptr->cli_info, COLOR_OFF);

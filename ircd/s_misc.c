@@ -726,6 +726,7 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
    * pointing at the dying Client so subsequent recompute/lookup paths
    * don't UAF-deref. */
   bounce_null_hs_client_pointing_at(bcptr);
+  bounce_null_alias_primary_pointing_at(bcptr);
 
   /*
    * Update IPregistry

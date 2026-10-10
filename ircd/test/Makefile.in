@@ -15,14 +15,19 @@ TESTPROGS = \
 
 # CMocka test programs (proper assertions)
 #
-# @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka
-# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka under
-# --enable-keycloak, and empty otherwise: those six link ../kc/*.o, which
-# ircd/Makefile only builds when Keycloak is enabled (see configure.in's
-# Keycloak block).  Their build rules stay defined below either way; they
+# @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka ... webhook_subject_cmocka
+# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka
+# ircd_kc_adapter_cmocka under --enable-keycloak, and empty otherwise: the
+# kc suites link ../kc/*.o, which ircd/Makefile only builds when Keycloak
+# is enabled (see configure.in's Keycloak block), and the adapter's body is
+# #ifdef USE_LIBKC.  Their build rules stay defined below either way; they
 # are simply never requested.
+#
+# @EPOLL_CMOCKA_TESTPROGS@ is ircd_events_cmocka when the epoll engine is
+# built, and empty otherwise: it links ../engine_epoll.o.
 CMOCKA_TESTPROGS = \
 	@KC_CMOCKA_TESTPROGS@ \
+	@EPOLL_CMOCKA_TESTPROGS@ \
 	ircd_chattr_cmocka \
 	ircd_match_cmocka \
 	ircd_string_cmocka \
@@ -41,9 +46,13 @@ CMOCKA_TESTPROGS = \
 	webpush_expiry_cmocka \
 	webpush_keyring_cmocka \
 	webpush_attention_cmocka \
+	bouncer_converge_cmocka \
+	bouncer_deauth_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
-	db_casefold_cmocka
+	db_casefold_cmocka \
+	account_id_cmocka \
+	webhook_eventlog_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -74,6 +83,9 @@ DEP_SRC = \
 	webpush_expiry_cmocka.c \
 	webpush_keyring_cmocka.c \
 	webpush_attention_cmocka.c \
+	bouncer_converge_cmocka.c \
+	bouncer_deauth_cmocka.c \
+	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
 	kc_url_cmocka.c \
 	kc_base64_cmocka.c \
@@ -81,8 +93,13 @@ DEP_SRC = \
 	kc_jwt_cmocka.c \
 	kc_cred_derive_cmocka.c \
 	kc_error_classify_cmocka.c \
+	ircd_kc_adapter_cmocka.c \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
+	account_id_cmocka.c \
+	webhook_subject_cmocka.c \
+	kc_webhook_sig_cmocka.c \
+	ircd_events_cmocka.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -169,7 +186,7 @@ crule_cmocka: $(CRULE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CRULE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # history tests - serialization functions (no LMDB required)
-HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../ircd_string.o
+HISTORY_CMOCKA_OBJS = history_cmocka.o test_stub.o ../ircd_string.o ../redact_index.o
 history_cmocka: $(HISTORY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
@@ -236,6 +253,15 @@ kc_cred_derive_cmocka: $(KC_CRED_DERIVE_CMOCKA_OBJS)
 KC_ERROR_CLASSIFY_CMOCKA_OBJS = kc_error_classify_cmocka.o ../kc/kc_error_classify.o
 kc_error_classify_cmocka: $(KC_ERROR_CLASSIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_ERROR_CLASSIFY_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS)
+
+# ircd_kc_adapter tests - libkc's socket and timer bridge onto the event
+# engine.  The event layer is a fake in the test with the kernel's fd
+# semantics (lowest free number on open, epoll registrations keyed by the
+# number and dropped on close), so an engine call made with a number libkc
+# already gave back is observable.  No libkc objects are linked.
+IRCD_KC_ADAPTER_CMOCKA_OBJS = ircd_kc_adapter_cmocka.o test_stub.o ../ircd_kc_adapter.o
+ircd_kc_adapter_cmocka: $(IRCD_KC_ADAPTER_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_KC_ADAPTER_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # websocket tests - frame decoding and handshake accumulation (#98, #99).
 # Includes websocket.c directly with stubs; needs OpenSSL for the accept key.
 WEBSOCKET_CMOCKA_OBJS = websocket_cmocka.o test_stub.o ../ircd_alloc.o ../ircd_string.o
@@ -249,6 +275,33 @@ websocket_cmocka: $(WEBSOCKET_CMOCKA_OBJS)
 DB_CASEFOLD_CMOCKA_OBJS = db_casefold_cmocka.o test_stub.o ../db_casefold.o ../ircd_string.o
 db_casefold_cmocka: $(DB_CASEFOLD_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(DB_CASEFOLD_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# account_id tests - the compact Keycloak user id codec (pure; links the
+# webpush base64url helpers it reuses)
+ACCOUNT_ID_CMOCKA_OBJS = account_id_cmocka.o ../account_id.o ../webpush_keyring.o
+account_id_cmocka: $(ACCOUNT_ID_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(ACCOUNT_ID_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webhook_subject tests - the pure webhook subject decision over real
+# Keycloak admin-event shapes (fixtures/webhook); links no ircd objects
+WEBHOOK_SUBJECT_CMOCKA_OBJS = webhook_subject_cmocka.o ../webhook_subject.o ../account_id.o ../webpush_keyring.o
+webhook_subject_cmocka.o: ${srcdir}/webhook_subject_cmocka.c
+	${CC} ${CFLAGS} ${CPPFLAGS} -DWEBHOOK_FIXTURE_DIR='"${srcdir}/fixtures/webhook"' -c -o $@ ${srcdir}/webhook_subject_cmocka.c
+webhook_subject_cmocka: $(WEBHOOK_SUBJECT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBHOOK_SUBJECT_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS)
+
+# kc_webhook_sig tests - signature verification and the replay ring (pure; OpenSSL)
+KC_WEBHOOK_SIG_CMOCKA_OBJS = kc_webhook_sig_cmocka.o ../kc/kc_webhook_sig.o
+kc_webhook_sig_cmocka: $(KC_WEBHOOK_SIG_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(KC_WEBHOOK_SIG_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS)
+
+# ircd_events tests - an engine error never runs a socket's callback
+# inside the socket_add/socket_events/socket_state call that caused it.
+# Links the real event core and epoll engine, and makes real epoll calls
+# fail; the few ircd symbols around them are stubbed in the test.
+IRCD_EVENTS_CMOCKA_OBJS = ircd_events_cmocka.o test_stub.o ../ircd_events.o ../engine_epoll.o
+ircd_events_cmocka: $(IRCD_EVENTS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(IRCD_EVENTS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
@@ -352,6 +405,30 @@ webpush_attention_test.o: ../webpush_attention.c ../../include/webpush_attention
 WEBPUSH_ATTENTION_CMOCKA_OBJS = webpush_attention_cmocka.o webpush_attention_test.o
 webpush_attention_cmocka: $(WEBPUSH_ATTENTION_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_ATTENTION_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# bouncer_converge tests - the module is pure (no ircd deps)
+bouncer_converge_test.o: ../bouncer_converge.c ../../include/bouncer_converge.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../bouncer_converge.c
+
+BOUNCER_CONVERGE_CMOCKA_OBJS = bouncer_converge_cmocka.o bouncer_converge_test.o
+bouncer_converge_cmocka: $(BOUNCER_CONVERGE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(BOUNCER_CONVERGE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# bouncer_deauth tests - the module is pure (no ircd deps)
+bouncer_deauth_test.o: ../bouncer_deauth.c ../../include/bouncer_deauth.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../bouncer_deauth.c
+
+BOUNCER_DEAUTH_CMOCKA_OBJS = bouncer_deauth_cmocka.o bouncer_deauth_test.o
+bouncer_deauth_cmocka: $(BOUNCER_DEAUTH_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(BOUNCER_DEAUTH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webhook_eventlog tests - the applied-events log is pure (no ircd deps, no jansson)
+webhook_eventlog_test.o: ../webhook_eventlog.c ../../include/webhook_eventlog.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../webhook_eventlog.c
+
+WEBHOOK_EVENTLOG_CMOCKA_OBJS = webhook_eventlog_cmocka.o webhook_eventlog_test.o
+webhook_eventlog_cmocka: $(WEBHOOK_EVENTLOG_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBHOOK_EVENTLOG_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webpush_line tests - the module is pure (no ircd deps)
 webpush_line_test.o: ../webpush_line.c ../../include/webpush_line.h

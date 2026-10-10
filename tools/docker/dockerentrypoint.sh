@@ -81,8 +81,28 @@ fi
 # Optionally wrap with valgrind if NEFARIOUS_VALGRIND=1
 if [ "${NEFARIOUS_VALGRIND:-0}" = "1" ]; then
     echo "Running with Valgrind (NEFARIOUS_VALGRIND=1)"
+    # One log per start, named for the binary and the start time.  valgrind
+    # names a core <log-file>.core.<pid>, and the pid is always 1 here, so a
+    # fixed log name was overwritten by the next start and its cores could
+    # not be told apart.  A core can only be read with the exact binary that
+    # wrote it, and a rebuild replaces that binary, so keep a copy next to
+    # the cores -- and drop kept copies that no core refers to.
+    CORES=/home/nefarious/ircd/cores
+    BIN=$(readlink -f "$1")
+    STAMP=$(basename "$BIN")
+    VGLOG="$CORES/valgrind.$STAMP.$(date -u +%Y%m%dT%H%M%SZ).log"
+    if [ "$1" == "/home/nefarious/bin/ircd" ]; then
+        for kept in "$CORES"/ircd.*; do
+            [ -e "$kept" ] || continue
+            k=$(basename "$kept")
+            [ "$k" = "$STAMP" ] && continue
+            compgen -G "$CORES/valgrind.$k.*.core.*" > /dev/null || rm -f "$kept"
+        done
+        [ -e "$CORES/$STAMP" ] || cp -p "$BIN" "$CORES/$STAMP"
+    fi
+    echo "Valgrind log: $VGLOG"
     exec valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes \
-        --log-file=/home/nefarious/ircd/cores/valgrind.log "$@"
+        --log-file="$VGLOG" "$@"
 else
     exec "$@"
 fi

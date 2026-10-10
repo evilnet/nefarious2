@@ -756,3 +756,45 @@ kc_jwt_extract_created_at(const char *token)
     json_decref(root);
     return result;
 }
+
+int
+kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
+{
+    const char *dot1, *dot2, *sub;
+    char *payload_b64, *payload;
+    size_t payload_b64_len, payload_len = 0;
+    json_error_t error;
+    json_t *root, *claim;
+    int ok = 0;
+
+    if (out && out_size)
+        out[0] = '\0';
+    if (!token || !out || !out_size)
+        return 0;
+
+    /* Payload sits between the first and second '.' */
+    if (!(dot1 = strchr(token, '.')) || !(dot2 = strchr(dot1 + 1, '.')))
+        return 0;
+    payload_b64_len = dot2 - dot1 - 1;
+    if (!(payload_b64 = malloc(payload_b64_len + 1)))
+        return 0;
+    memcpy(payload_b64, dot1 + 1, payload_b64_len);
+    payload_b64[payload_b64_len] = '\0';
+    payload = base64url_decode_alloc(payload_b64, &payload_len);
+    free(payload_b64);
+    if (!payload)
+        return 0;
+    root = json_loadb(payload, payload_len, 0, &error);
+    free(payload);
+    if (!root)
+        return 0;
+
+    claim = json_object_get(root, "sub");
+    if (json_is_string(claim) && (sub = json_string_value(claim)) && *sub
+        && strlen(sub) < out_size) {
+        strcpy(out, sub);
+        ok = 1;
+    }
+    json_decref(root);
+    return ok;
+}

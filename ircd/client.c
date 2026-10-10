@@ -296,8 +296,16 @@ client_report_privs(struct Client *to, struct Client *client)
   int found1 = 0;
   int i;
 
-  mb = msgq_make(to, rpl_str(RPL_PRIVS), cli_name(&me), cli_name(to),
-		 cli_name(client));
+  if (MyConnect(to))
+    mb = msgq_make(to, rpl_str(RPL_PRIVS), cli_name(&me), cli_name(to),
+		   cli_name(client));
+  else
+    /* Toward a SERVER link the numeric must be P10 server form -- source and
+     * target as numerics -- exactly as send_reply builds one ("%:#C %s %C %v",
+     * and RPL_PRIVS's own format is "%s :").  The client-form line this used to
+     * build reached the peer only by its lenient name-prefix parse. */
+    mb = msgq_make(cli_from(to), "%:#C %s %C %s :", &me,
+		   get_error_numeric(RPL_PRIVS)->str, to, cli_name(client));
 
   for (i = 0; privtab[i].name; i++)
     if (HasPriv(client, privtab[i].priv))

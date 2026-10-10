@@ -23,6 +23,7 @@
 #include "config.h"
 
 #include "ircd_features.h"
+#include "handlers.h"
 #include "chathistory_presence.h"
 #include "capab.h"	/* send_cap_notify */
 #include "channel.h"	/* list_set_default */
@@ -633,6 +634,7 @@ static void feature_notify_cap_draft_authtoken(void)
 }
 
 DEFINE_CAP_NOTIFY("multi-prefix", multi_prefix)
+DEFINE_CAP_NOTIFY("soju.im/search", soju_search)
 DEFINE_CAP_NOTIFY("userhost-in-names", userhost_in_names)
 DEFINE_CAP_NOTIFY("extended-join", extended_join)
 DEFINE_CAP_NOTIFY("away-notify", away_notify)
@@ -807,11 +809,7 @@ feature_notify_chathistory_caps(void)
    * seconds, storage servers only) in sync and push to clients with
    * draft/extended-isupport. */
   add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
-  if (feature_bool(FEAT_CHATHISTORY_STORE))
-    add_isupport_i("evilnet/CHATHISTORYRETENTION",
-                   feature_int(FEAT_CHATHISTORY_RETENTION) * 86400);
-  else
-    del_isupport("evilnet/CHATHISTORYRETENTION");
+  chathistory_update_retention_isupport(0);   /* widest over the reachable stores */
   send_isupport_update();
 
   log_write(LS_SYSTEM, L_INFO, 0,
@@ -1181,7 +1179,13 @@ static struct FeatureDesc {
   F_I(WEBHOOK_PORT, 0, 0, 0),
   F_S(WEBHOOK_SECRET, FEAT_NODISP, "", 0),
   F_B(WEBHOOK_KILL_ON_DISABLE, 0, 0, 0),
-  F_B(WEBHOOK_KILL_ON_DELETE, 0, 1, 0),
+  F_I(WEBHOOK_EVENTLOG_SIZE, 0, 1024, 0),      /* applied-events log entries (webhook plan 4) */
+  F_I(WEBHOOK_EVENTLOG_WINDOW, 0, 86400, 0),   /* seconds of it a newly linked peer is caught up on */
+  /* Default OFF: deauth (AC U) propagates correctly network-wide, a
+   * local-only kill does not.  Forced network-wide disconnect needs its
+   * own design -- see the open design item in
+   * .claude/para/projects/2026-09-22-bouncer-deauth-correctness.md */
+  F_B(WEBHOOK_KILL_ON_DELETE, 0, 0, 0),
   F_I(SNOMASK_DEFAULT, 0, SNO_DEFAULT, 0),
   F_I(SNOMASK_OPERDEFAULT, 0, SNO_OPERDEFAULT, 0),
   F_S(TPATH, FEAT_CASE | FEAT_MYOPER, "ircd.tune", 0),
@@ -1309,6 +1313,7 @@ static struct FeatureDesc {
   F_B(CAP_draft_pre_away, 0, 1, feature_notify_cap_draft_pre_away),
   F_B(CAP_draft_multiline, 0, 1, feature_notify_cap_multiline),
   F_B(CAP_draft_chathistory, 0, 1, feature_notify_cap_chathistory),
+  F_B(CAP_soju_search, 0, 1, feature_notify_cap_soju_search),
   F_B(CAP_draft_event_playback, 0, 0, feature_notify_cap_draft_event_playback),
   F_B(CAP_draft_message_redaction, 0, 0, feature_notify_cap_draft_message_redaction),
   F_B(CAP_draft_account_registration, 0, 0, feature_notify_cap_accountreg),
@@ -1419,7 +1424,6 @@ static struct FeatureDesc {
   F_I(WEBSOCKET_PING_INTERVAL, 0, 30, 0),
   F_B(MSGID, 0, 1, 0),
   F_B(P10_MESSAGE_TAGS, 0, 0, 0),
-  F_B(PRESENCE_AGGREGATION, 0, 0, 0),
   F_S(AWAY_STAR_MSG, FEAT_NULL, "Away", 0),
   F_I(AWAY_THROTTLE, 0, 0, 0),
   F_B(METADATA_BURST, 0, 1, 0),

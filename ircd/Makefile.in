@@ -87,7 +87,8 @@ UMKPASSWD_SRC = ${CRYPTO_SRC} \
 	memdebug.c \
 	umkpasswd.c
 
-# The KC_SRC list below is the vendored ircd/kc/*.c sources.  configure
+# The KC_SRC list below is the vendored ircd/kc/*.c sources plus
+# webhook_subject.c (its header includes kc/kc_webhook.h, so jansson).  configure
 # substitutes them only under --enable-keycloak, and nothing otherwise:
 # unlike every other optional consumer (sasl_auth.c, ircd_kc_adapter.c,
 # ...) the kc/ sources are verbatim from evilnet/libkc and carry no
@@ -113,6 +114,7 @@ IRCD_SRC = \
 	gitsync.c \
 	hash.c \
 	history.c \
+	redact_index.c \
 	chathistory_ephemeral.c \
 	chathistory_presence.c \
 	ircd.c \
@@ -215,7 +217,11 @@ IRCD_SRC = \
 	webpush_mute.c \
 	webpush_expiry.c \
 	webpush_keyring.c \
+	account_id.c \
+	webhook_eventlog.c \
 	webpush_attention.c \
+	bouncer_converge.c \
+	bouncer_deauth.c \
 	webpush_line.c \
 	metadata.c \
 	m_rehash.c \

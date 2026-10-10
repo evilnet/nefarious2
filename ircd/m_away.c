@@ -144,6 +144,68 @@ int user_set_away(struct User* user, char* message)
   return (user->away != 0);
 }
 
+/** The away text to show @a viewer for a stored away @a away: the star
+ *  itself to a draft/pre-away client, FEAT_AWAY_STAR_MSG to any other.
+ *  "An away message of * should be treated as though the connection did
+ *  not exist at all": a pre-away client recognises the star and prints
+ *  nothing; a legacy client needs words. */
+const char *away_text_for(struct Client *viewer, const char *away)
+{
+  const char *word;
+
+  if (!away || away[0] != '*' || away[1] != '\0')
+    return away;
+  if (viewer && MyConnect(viewer) && CapActive(viewer, CAP_DRAFT_PREAWAY))
+    return away;
+  word = feature_str(FEAT_AWAY_STAR_MSG);
+  return (word && *word) ? word : away;
+}
+
+static int away_is_star(const char *text)
+{
+  return text && text[0] == '*' && text[1] == '\0';
+}
+
+/** away-notify to every local member of @a sptr's channels except @a one,
+ *  the star going as a star to draft/pre-away clients and as
+ *  FEAT_AWAY_STAR_MSG to the rest.  @a text NULL or "" is "back". */
+void away_notify_common(struct Client *sptr, struct Client *one,
+                        const char *text)
+{
+  if (!away_is_star(text)) {
+    sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, one,
+                                           CAP_AWAYNOTIFY, CAP_NONE, ":%s",
+                                           text ? text : "");
+    return;
+  }
+  sendcmdto_set_extra_withcap(CAP_DRAFT_PREAWAY);
+  sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, one,
+                                         CAP_AWAYNOTIFY, CAP_NONE, ":*");
+  sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, one,
+                                         CAP_AWAYNOTIFY, CAP_DRAFT_PREAWAY,
+                                         ":%s", away_text_for(NULL, text));
+}
+
+/** The same for one channel (a JOIN announcing an existing away). */
+void away_notify_channel(struct Client *sptr, struct Channel *chptr,
+                         const char *text)
+{
+  if (!away_is_star(text)) {
+    sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, NULL,
+                                           SKIP_CHGHOST, CAP_AWAYNOTIFY,
+                                           CAP_NONE, ":%s", text ? text : "");
+    return;
+  }
+  sendcmdto_set_extra_withcap(CAP_DRAFT_PREAWAY);
+  sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, NULL,
+                                         SKIP_CHGHOST, CAP_AWAYNOTIFY,
+                                         CAP_NONE, ":*");
+  sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, NULL,
+                                         SKIP_CHGHOST, CAP_AWAYNOTIFY,
+                                         CAP_DRAFT_PREAWAY, ":%s",
+                                         away_text_for(NULL, text));
+}
+
 
 /*
  * m_away - generic message handler
@@ -163,16 +225,41 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   int is_away;
   int is_away_star = 0;
   int throttle;
+  struct BouncerSession *bsess = NULL;
 
   assert(0 != cptr);
   assert(cptr == sptr);
 
+  /* A connection that belongs to a bouncer session sets its OWN away
+   * state, and the session's effective state -- what the network sees
+   * -- is aggregated over every connection of the session below.  Not
+   * optional: the pre-away star, its per-viewer substitution, the
+   * per-connection replication (BX U aw=) and webpush attention all
+   * assume it.  Until 2026-09-18 this hung on a FEAT_PRESENCE_AGGREGATION
+   * flag that defaulted off, and a session member falling through to
+   * the plain path below broadcast a per-connection away from its own
+   * numeric: its siblings saw their own nick go away while WHOIS, which
+   * resolves to the primary, said present.
+   *
+   * A user can be IsAccount() with sessions persisted on their account
+   * from other connections; if this connection is not part of one there
+   * is nothing to aggregate across, so it takes the plain path. */
+  if (IsAccount(sptr) && bounce_enabled_for(sptr)
+      && bounce_has_sessions(cli_account(sptr))) {
+    /* Alias /away -- look up the session via the alias's primary so
+     * aggregation considers this alias's con_pre_away.
+     * bounce_get_session keys on hs_client which is the primary. */
+    struct Client *anchor =
+        (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
+            ? cli_alias_primary(sptr) : sptr;
+    bsess = bounce_get_session(anchor);
+  }
+
   /* Check AWAY throttle - silently drop if too soon after last change.
-   * Skip throttle in the presence aggregation path: the aggregation path's
-   * effective-state change detection already suppresses redundant broadcasts. */
+   * Not in the session path: its effective-state change detection
+   * already suppresses redundant broadcasts. */
   throttle = feature_int(FEAT_AWAY_THROTTLE);
-  if (throttle > 0 &&
-      !(feature_bool(FEAT_PRESENCE_AGGREGATION) && bounce_enabled_for(cptr))) {
+  if (throttle > 0 && !bsess) {
     if (CurrentTime < cli_nextaway(cptr)) {
       /* Too soon - silently ignore (no error to avoid spam) */
       return 0;
@@ -184,36 +271,11 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Check for AWAY * (hidden connection) before processing */
   if (away_message && away_message[0] == '*' && away_message[1] == '\0') {
     is_away_star = 1;
-    /* Use configured fallback message for away-star */
-    if (feature_str(FEAT_AWAY_STAR_MSG)) {
-      away_message = (char *)feature_str(FEAT_AWAY_STAR_MSG);
-    }
+    /* Kept as the star; non-pre-away clients see FEAT_AWAY_STAR_MSG at
+     * emission (away_text_for / away_notify_common). */
   }
 
-  /* Presence aggregation path — only when bouncer is active for this account
-   * AND this specific connection has an attached session. A user can be
-   * IsAccount() with sessions persisted on their account from other
-   * connections, but if this connection isn't part of a session there's
-   * nothing coherent to aggregate across — fall through to the normal
-   * broadcast path instead. Previously this branch was taken on the
-   * outer account-level predicate and then the broadcast was gated on
-   * `if (bsess)`, which silently dropped the S2S AWAY and the local
-   * away-notify while still sending RPL_NOWAWAY to the client.
-   */
-  {
-    struct BouncerSession *bsess = NULL;
-    if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(sptr)
-        && bounce_enabled_for(sptr) && bounce_has_sessions(cli_account(sptr))) {
-      /* Alias /away — look up the session via the alias's primary so
-       * presence aggregation considers this alias's con_pre_away.
-       * bounce_get_session keys on hs_client which is the primary. */
-      struct Client *anchor =
-          (IsBouncerAlias(sptr) && cli_alias_primary(sptr))
-              ? cli_alias_primary(sptr) : sptr;
-      bsess = bounce_get_session(anchor);
-    }
-
-    if (bsess) {
+  if (bsess) {
     int new_effective = 0;
     char new_msg[AWAYLEN + 1];
     int is_away = !EmptyString(away_message);
@@ -267,8 +329,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         else
           eff_msg = new_msg[0] ? new_msg : (char *)away_message;
       } else
-        eff_msg = feature_str(FEAT_AWAY_STAR_MSG)
-                    ? feature_str(FEAT_AWAY_STAR_MSG) : "*";
+        eff_msg = (char *)"*"; /* the star itself; substituted per viewer at emission */
 
       user_set_away(cli_user(sptr), (char *)eff_msg);
 
@@ -319,24 +380,19 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
             sendcmdto_want_s2s_tags(1);
           sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s",
                                 eff_msg ? eff_msg : "");
-          sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
-                                                 CAP_AWAYNOTIFY, CAP_NONE,
-                                                 ":%s",
-                                                 eff_msg ? eff_msg : "");
+          away_notify_common(sptr, sptr, eff_msg);
         } else {
-          /* All connections AWAY * — user is effectively away.
-           * Broadcast with the AWAY_STAR_MSG fallback.  "Hidden" means
+          /* All connections AWAY * — user is effectively away with an
+           * unspecified reason.  The wire carries the star (servers and
+           * draft/pre-away clients keep it; other clients are shown
+           * FEAT_AWAY_STAR_MSG when we write to them).  "Hidden" means
            * these connections don't count as present for aggregation,
            * NOT that the user becomes invisible to the network. */
-          const char *star_msg = feature_str(FEAT_AWAY_STAR_MSG);
-          if (!star_msg) star_msg = "*";
           if (away_msgid[0])
             sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
             sendcmdto_want_s2s_tags(1);
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", star_msg);
-          sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr,
-                                                 CAP_AWAYNOTIFY, CAP_NONE,
-                                                 ":%s", star_msg);
+          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":*");
+          away_notify_common(sptr, sptr, "*");
         }
 
         sendcmdto_set_client_msgid(NULL);
@@ -351,7 +407,6 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       /* If effective state and message both unchanged: suppress broadcast */
     }
     return 0;
-    }
   }
 
   /* Non-aggregated path — used when there is no bouncer session for
@@ -378,8 +433,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
       }
       send_reply(sptr, RPL_NOWAWAY);
-      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE,
-                                             ":%s", away_message);
+      away_notify_common(sptr, sptr, away_message);
     }
     else {
       if (away_msgid[0])
@@ -419,10 +473,8 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Check for AWAY * (hidden connection) from P10 */
   if (away_message && away_message[0] == '*' && away_message[1] == '\0') {
     is_away_star = 1;
-    /* Use configured fallback message for away-star */
-    if (feature_str(FEAT_AWAY_STAR_MSG)) {
-      away_message = (char *)feature_str(FEAT_AWAY_STAR_MSG);
-    }
+    /* Kept as the star; non-pre-away clients see FEAT_AWAY_STAR_MSG at
+     * emission (away_text_for / away_notify_common). */
   }
 
   /* Alias-source AWAY relay — rewrite to primary so the away state
@@ -496,9 +548,7 @@ int ms_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * but the actual trigger was an alias on leaf), primary's IRC client
      * needs to learn the new state — it didn't initiate this. */
     if (is_away)
-      sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, NULL,
-                                             CAP_AWAYNOTIFY, CAP_NONE,
-                                             ":%s", away_message);
+      away_notify_common(sptr, NULL, away_message);
     else
       sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, NULL,
                                              CAP_AWAYNOTIFY, CAP_NONE, "");
@@ -536,14 +586,10 @@ int mu_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     con_pre_away(con) = 0;
     con_pre_away_msg(con)[0] = '\0';
   } else if (away_message[0] == '*' && away_message[1] == '\0') {
-    /* AWAY * = away-star (hidden connection, doesn't count as present) */
+    /* AWAY * = away-star (hidden connection, doesn't count as present);
+     * kept as the star, substituted per viewer at emission */
     con_pre_away(con) = 2;
-    /* Use configured away-star message as fallback */
-    if (feature_str(FEAT_AWAY_STAR_MSG)) {
-      ircd_strncpy(con_pre_away_msg(con), feature_str(FEAT_AWAY_STAR_MSG), AWAYLEN + 1);
-    } else {
-      con_pre_away_msg(con)[0] = '\0';
-    }
+    ircd_strncpy(con_pre_away_msg(con), "*", AWAYLEN + 1);
   } else {
     /* AWAY :message = normal away */
     con_pre_away(con) = 1;

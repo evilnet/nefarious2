@@ -270,6 +270,9 @@ engine_loop(struct Generators* gen)
   struct Socket *sock;
 
   while (running) {
+    /* Engine errors deferred since the last pass (socket_error()) */
+    socket_run_errors();
+
     read_set = global_read_set; /* all hail structure copy!! */
     write_set = global_write_set;
 

@@ -379,6 +379,80 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
  * @param[in] parv Argument vector.
  * @return CPTR_KILLED if client was squit, else 0.
  */
+/* Apply a channel redaction that reached us from elsewhere (P10 REDACT, or
+ * the redaction catch-up replay): placeholder the row, store ONE REDACT
+ * context row under the origin's redact_msgid/time (one-time-per-message),
+ * fan out to local members with the capability.  Idempotent: a repeat (two
+ * servers or two users redacting the same message, or the catch-up query
+ * replaying one we already applied) is still shown locally but stores no
+ * second row.  @a sender_str / @a account_str name the stored redacter
+ * explicitly (catch-up); NULL derives them from @a src. */
+void redact_apply_row(struct Client *src, const char *target,
+                      const char *msgid, const char *redact_msgid,
+                      uint64_t time_ms, const char *reason,
+                      const char *sender_str, const char *account_str)
+{
+  struct Channel *chptr;
+
+  if (!IsChannelName(target) || !(chptr = FindChannel(target)))
+    return;
+  /* Store keys are the canonical spelling (see m_redact). */
+  target = chptr->chname;
+  /* Redact message: strip content but keep entry for context */
+  if (history_is_available())
+    history_redact_message(target, msgid);
+
+  if (history_is_available()
+      && history_message_is_redacted(target, msgid) != 1) {
+    char timestamp[32];
+    char sender[HISTORY_SENDER_LEN];
+    char redact_content[512];
+
+    ircd_snprintf(0, timestamp, sizeof(timestamp), "%llu.%03llu",
+                  (unsigned long long)(time_ms / 1000),
+                  (unsigned long long)(time_ms % 1000));
+
+    if (sender_str && sender_str[0])
+      ircd_strncpy(sender, sender_str, sizeof(sender));
+    else if (cli_user(src))
+      ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
+                    cli_name(src), cli_user(src)->username,
+                    cli_user(src)->host);
+    else
+      ircd_strncpy(sender, cli_name(src), sizeof(sender));
+
+    if (reason && reason[0])
+      ircd_snprintf(0, redact_content, sizeof(redact_content),
+                    "%s :%s", msgid, reason);
+    else
+      ircd_snprintf(0, redact_content, sizeof(redact_content),
+                    "%s", msgid);
+
+    history_store_message(redact_msgid, timestamp, target, NULL, sender,
+                          account_str ? account_str
+                          : ((cli_user(src) && cli_user(src)->account[0])
+                             ? cli_user(src)->account : ""),
+                          HISTORY_REDACT, redact_content, NULL);
+  }
+
+  /* Set msgid for live channel broadcast */
+  if (feature_bool(FEAT_MSGID))
+    sendcmdto_set_client_event(redact_msgid, time_ms);
+
+  /* Propagate to channel members with capability */
+  propagate_redact_to_channel(src, chptr, target, msgid, reason);
+
+  /* Clear msgid override so it doesn't leak into the next tagged send */
+  sendcmdto_set_client_msgid(NULL);
+}
+
+void redact_apply_remote(struct Client *src, const char *target,
+                         const char *msgid, const char *redact_msgid,
+                         uint64_t time_ms, const char *reason)
+{
+  redact_apply_row(src, target, msgid, redact_msgid, time_ms, reason, NULL, NULL);
+}
+
 int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *target;
@@ -396,77 +470,23 @@ int ms_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     reason = parv[3];
 
   /* For channels, propagate to members and other servers */
-  if (IsChannelName(target)) {
-    chptr = FindChannel(target);
-    if (chptr) {
-      /* Store keys are the canonical spelling (see m_redact). */
-      target = chptr->chname;
-      /* Redact message: strip content but keep entry for context */
-      if (history_is_available()) {
-        history_redact_message(target, msgid);
-      }
+  if (IsChannelName(target) && (chptr = FindChannel(target))) {
+    char redact_msgid[HISTORY_MSGID_LEN];
+    uint64_t time_ms;
 
-      /* Use incoming S2S msgid for the REDACT event, or generate new */
-      {
-        char redact_msgid[HISTORY_MSGID_LEN];
-        uint64_t time_ms;
+    target = chptr->chname;
+    /* Use incoming S2S msgid for the REDACT event, or generate new */
+    if (cli_s2s_msgid(cptr)[0])
+      ircd_strncpy(redact_msgid, cli_s2s_msgid(cptr), sizeof(redact_msgid));
+    else
+      generate_msgid(redact_msgid, sizeof(redact_msgid));
+    time_ms = history_event_time_ms(cptr);   /* origin tag time, else HLC */
 
-        if (cli_s2s_msgid(cptr)[0])
-          ircd_strncpy(redact_msgid, cli_s2s_msgid(cptr), sizeof(redact_msgid));
-        else
-          generate_msgid(redact_msgid, sizeof(redact_msgid));
+    redact_apply_remote(sptr, target, msgid, redact_msgid, time_ms, reason);
 
-        time_ms = history_event_time_ms(cptr);   /* origin tag time, else HLC */
-
-        /* Store REDACT event in history -- once.  A repeat arriving over
-         * the network (two servers or two users redacting the same message)
-         * is still shown to local members and relayed, but a message has
-         * one REDACT context row. */
-        if (history_is_available()
-            && history_message_is_redacted(target, msgid) != 1) {
-          char timestamp[32];
-          char sender[HISTORY_SENDER_LEN];
-          char redact_content[512];
-
-          ircd_snprintf(0, timestamp, sizeof(timestamp), "%llu.%03llu",
-                        (unsigned long long)(time_ms / 1000),
-                        (unsigned long long)(time_ms % 1000));
-
-          if (cli_user(sptr))
-            ircd_snprintf(0, sender, sizeof(sender), "%s!%s@%s",
-                          cli_name(sptr), cli_user(sptr)->username,
-                          cli_user(sptr)->host);
-          else
-            ircd_strncpy(sender, cli_name(sptr), sizeof(sender));
-
-          if (reason && reason[0])
-            ircd_snprintf(0, redact_content, sizeof(redact_content),
-                          "%s :%s", msgid, reason);
-          else
-            ircd_snprintf(0, redact_content, sizeof(redact_content),
-                          "%s", msgid);
-
-          history_store_message(redact_msgid, timestamp, target, NULL, sender,
-                                (cli_user(sptr) && cli_user(sptr)->account[0])
-                                  ? cli_user(sptr)->account : "",
-                                HISTORY_REDACT, redact_content, NULL);
-        }
-
-        /* Set msgid for live channel broadcast */
-        if (feature_bool(FEAT_MSGID))
-          sendcmdto_set_client_event(redact_msgid, time_ms);
-
-        /* Propagate to channel members with capability */
-        propagate_redact_to_channel(sptr, chptr, target, msgid, reason);
-
-        /* Clear msgid override so it doesn't leak into the next tagged send */
-        sendcmdto_set_client_msgid(NULL);
-
-        /* Set S2S tags for server relay */
-        sendcmdto_set_s2s_tags(time_ms, redact_msgid);
-        sendcmdto_want_s2s_tags(1);
-      }
-    }
+    /* Set S2S tags for server relay */
+    sendcmdto_set_s2s_tags(time_ms, redact_msgid);
+    sendcmdto_want_s2s_tags(1);
   }
 
   /* Propagate to other servers */

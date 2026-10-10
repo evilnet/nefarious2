@@ -25,6 +25,7 @@
  * @version $Id: s_user.c 1919 2009-07-31 02:04:15Z entrope $
  */
 #include "config.h"
+#include "account_id.h"
 
 #include "s_user.h"
 #include "webpush.h"
@@ -837,10 +838,13 @@ int register_user(struct Client *cptr, struct Client *sptr)
       int pre_away_type = con_pre_away(cli_connect(sptr));
       if (pre_away_type) {
         if (pre_away_type == 2) {
-          /* AWAY * - set away but with empty message (hidden connection) */
+          /* AWAY * - away with an unspecified reason, stored as the star
+           * (shown to non-pre-away clients as FEAT_AWAY_STAR_MSG at
+           * emission, see away_text_for). */
           if (!user->away) {
-            user->away = (char*) MyMalloc(1);
-            user->away[0] = '\0';
+            user->away = (char*) MyMalloc(2);
+            user->away[0] = '*';
+            user->away[1] = '\0';
           }
           /* Don't broadcast AWAY * to servers - it's a hidden connection */
         } else {
@@ -1632,7 +1636,7 @@ int whisper(struct Client* source, const char* nick, const char* channel,
   else
   {
     if (cli_user(dest)->away)
-      send_reply(source, RPL_AWAY, cli_name(dest), cli_user(dest)->away);
+      send_reply(source, RPL_AWAY, cli_name(dest), away_text_for(source, cli_user(dest)->away));
     sendcmdto_one(source, CMD_PRIVATE, dest, "%C :%s", dest, text);
   }
   return 0;
@@ -1829,9 +1833,7 @@ hide_hostmask(struct Client *cptr)
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
       if (cli_user(cptr)->away)
-        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, SKIP_CHGHOST,
-                                               CAP_AWAYNOTIFY, CAP_NONE, ":%s",
-                                               cli_user(cptr)->away);
+        away_notify_channel(cptr, chan->channel, cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
@@ -1932,9 +1934,7 @@ unhide_hostmask(struct Client *cptr)
                                          IsAccount(cptr) ? cli_account(cptr) : "*",
                                          cli_info(cptr));
       if (cli_user(cptr)->away)
-        sendcmdto_channel_capab_butserv_butone(cptr, CMD_AWAY, chan->channel, NULL, SKIP_CHGHOST,
-                                               CAP_AWAYNOTIFY, CAP_NONE, ":%s",
-                                               cli_user(cptr)->away);
+        away_notify_channel(cptr, chan->channel, cli_user(cptr)->away);
     }
     if (IsChanOp(chan) && IsHalfOp(chan) && HasVoice(chan))
       sendcmdto_channel_butserv_butone(&his, CMD_MODE, chan->channel, cptr, SKIP_CHGHOST,
@@ -2601,7 +2601,17 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 	Debug((DEBUG_DEBUG, "Received timestamped account in user mode; "
 	      "account \"%s\", timestamp %Tu", account,
 	      cli_user(acptr)->acc_create));
-      }
+	{
+	  const char *id = strchr(ts, ':');
+	  if (id && account_id_valid(id + 1)) {
+	    ircd_strncpy(cli_user(acptr)->kc_id, id + 1, sizeof(cli_user(acptr)->kc_id));
+	    Debug((DEBUG_DEBUG, "Received account id %s in user mode for "
+		   "\"%s\"", cli_user(acptr)->kc_id, account));
+	  } else
+	    cli_user(acptr)->kc_id[0] = '\0';
+	}
+      } else
+	cli_user(acptr)->kc_id[0] = '\0';   /* +r arrived without one */
       ircd_strncpy(cli_user(acptr)->account, account, len);
       /* P1 A3 residue: eager metadata load for a live client that just
        * attached an account via SVSMODE/server MODE +r.  Guarded on
@@ -2769,13 +2779,19 @@ char *umode_str(struct Client *cptr)
       ; /* Empty loop */
     m--; /* back up over nul-termination */
 
-    if (cli_user(cptr)->acc_create) {
-      char nbuf[20];
+    if (cli_user(cptr)->acc_create || cli_user(cptr)->kc_id[0]) {
+      char nbuf[24 + ACCOUNT_ID_LEN];
       Debug((DEBUG_DEBUG, "Sending timestamped account in user mode for "
 	     "account \"%s\"; timestamp %Tu", cli_user(cptr)->account,
 	     cli_user(cptr)->acc_create));
-      ircd_snprintf(0, t = nbuf, sizeof(nbuf), ":%Tu",
-		    cli_user(cptr)->acc_create);
+      /* ":ts" as before; with an id, ":ts:id" -- ts is 0 when unknown so
+       * the id is always the third field. */
+      if (cli_user(cptr)->kc_id[0])
+        ircd_snprintf(0, t = nbuf, sizeof(nbuf), ":%Tu:%s",
+                      cli_user(cptr)->acc_create, cli_user(cptr)->kc_id);
+      else
+        ircd_snprintf(0, t = nbuf, sizeof(nbuf), ":%Tu",
+                      cli_user(cptr)->acc_create);
       while ((*m++ = *t++))
 	; /* Empty loop */
       m--; /* back up over nul-termination */
@@ -3442,18 +3458,16 @@ void init_isupport(void)
     add_isupport_i("CHATHISTORY", feature_int(FEAT_CHATHISTORY_MAX));
     add_isupport_s("MSGREFTYPES", "timestamp,msgid");
     /* Fork extension: how far back this server keeps history, in
-     * seconds, so a client does not page past the horizon (a goguma
+     * seconds: the widest retention over the stores this server can reach
+     * (chathistory_retention_advertised), so a client does not page past
+     * the horizon (a goguma
      * kept asking for May with a pre-repack msgid, 2026-09-08).  A hint,
      * not a permission: older requests are still answered honestly.
      * Storage servers only; federated peers may keep more or less.
      * Vendor-prefixed like draft/ICON (network-icon spec): fork-only
      * tokens belong under evilnet/ (bare RELOCATE predates that rule;
      * VAPID is draft/webpush's own).  See docs/features/chathistory.md. */
-    if (feature_bool(FEAT_CHATHISTORY_STORE))
-      add_isupport_i("evilnet/CHATHISTORYRETENTION",
-                     feature_int(FEAT_CHATHISTORY_RETENTION) * 86400);
-    else
-      del_isupport("evilnet/CHATHISTORYRETENTION");
+    chathistory_update_retention_isupport(0);   /* widest over the reachable stores */
   }
 
   /* IRCv3 draft/FILEHOST (PR #562): the upload URL, when an Authtoken

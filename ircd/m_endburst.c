@@ -85,6 +85,7 @@
 #include "capab.h"
 #include "channel.h"
 #include "chathistory_presence.h"
+#include "sasl_webhook.h"
 #include "client.h"
 #include "handlers.h"
 #include "hash.h"
@@ -187,6 +188,12 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
     if (IsIRCv3Aware(sptr))
       presence_burst_sync(sptr);
 
+    /* Webhook plan 4: catch the peer up on the Keycloak events applied
+     * here while it was away (netsplit, downtime, a new server); it
+     * drops what it has and forwards what it lacks.  Self-gated on
+     * IsIRCv3Aware inside. */
+    sasl_webhook_link_catchup(sptr);
+
     /* Advertise chathistory storage capability (CH A S) to newly linked server.
      * Only advertise if we have CHATHISTORY_STORE enabled - this indicates we
      * actually store messages locally, not just handle queries.
@@ -207,25 +214,6 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * hub is exactly the topology that needs it (re-review R11). */
     if (IsIRCv3Aware(sptr))
       chathistory_reflood_ads(sptr);
-
-    /* Forward cached SASL mechanism list to newly linked server.
-     * The SASL M broadcast from services only fires once when services
-     * first links.  Servers that link later miss it, so we re-send
-     * the cached mechanisms from the SASL server.
-     */
-    {
-      const char *mechs = get_sasl_mechanisms();
-      if (mechs) {
-        const char *sasl_server_name = feature_str(FEAT_SASL_SERVER);
-        struct Client *sasl_server = NULL;
-        if (strcmp(sasl_server_name, "*"))
-          sasl_server = find_match_server((char *)sasl_server_name);
-        else
-          sasl_server = &me;
-        if (sasl_server)
-          sendcmdto_one(sasl_server, CMD_SASL, sptr, "* * M :%s", mechs);
-      }
-    }
   }
 
   /* Check if the linking server is the SASL server (for legacy X3 support).

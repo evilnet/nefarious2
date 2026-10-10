@@ -204,7 +204,7 @@ set_or_clear(struct Socket* sock, unsigned int clear, unsigned int set)
   }
 
   if (kevent(kqueue_id, chglist, i, 0, 0, 0) < 0 && errno != EBADF)
-    event_generate(ET_ERROR, sock, errno); /* report error */
+    socket_error(sock, errno); /* delivered by the loop, not here */
 }
 
 /** Add a socket to the event engine.
@@ -318,6 +318,9 @@ engine_loop(struct Generators* gen)
   events = (struct kevent *)MyMalloc(sizeof(struct kevent) * events_count);
 
   while (running) {
+    /* Engine errors deferred since the last pass (socket_error()) */
+    socket_run_errors();
+
     if ((i = feature_int(FEAT_POLLS_PER_LOOP)) >= 20 && i != events_count) {
       events = (struct kevent *)MyRealloc(events, sizeof(struct kevent) * i);
       events_count = i;

@@ -163,6 +163,10 @@ static struct kc_access_token *parse_access_token(json_t *json)
     if (tok->scope)
         tok->scope_size = strlen(tok->scope);
 
+    tok->id_token = json_get_string(json, "id_token");
+    if (tok->id_token)
+        tok->id_token_size = strlen(tok->id_token);
+
     tok->expires_in = json_get_long(json, "expires_in", 0);
     tok->refresh_expires_in = json_get_long(json, "refresh_expires_in", 0);
 
@@ -1351,11 +1355,11 @@ int kc_user_verify_password(const char *username, const char *password,
     }
 
     body_len = snprintf(NULL, 0,
-        "grant_type=password&client_id=%s&client_secret=%s&username=%s&password=%s",
+        "grant_type=password&scope=openid&client_id=%s&client_secret=%s&username=%s&password=%s",
         g_config.client_id, g_config.client_secret, escaped_user, escaped_pass);
     body = malloc(body_len + 1);
     snprintf(body, body_len + 1,
-        "grant_type=password&client_id=%s&client_secret=%s&username=%s&password=%s",
+        "grant_type=password&scope=openid&client_id=%s&client_secret=%s&username=%s&password=%s",
         g_config.client_id, g_config.client_secret, escaped_user, escaped_pass);
 
     curl_free(escaped_user);
@@ -1590,6 +1594,10 @@ void kc_access_token_free(struct kc_access_token *token)
     if (token->refresh_token) {
         memset(token->refresh_token, 0, token->refresh_token_size);
         free(token->refresh_token);
+    }
+    if (token->id_token) {
+        memset(token->id_token, 0, token->id_token_size);
+        free(token->id_token);
     }
     free(token->token_type);
     free(token->session_state);

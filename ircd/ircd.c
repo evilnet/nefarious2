@@ -433,6 +433,7 @@ void server_die(const char *message)
 {
   /* log_write will send out message to both log file and as server notice */
   log_write(LS_SYSTEM, L_CRIT, 0, "Server terminating: %s", message);
+  stop_listeners();      /* refuse new connections before the slow part */
   bounce_db_shutdown();  /* Persist bouncer sessions before closing connections */
   metadata_shutdown();   /* close the metadata/readmarkers RocksDB env */
   flush_connections(0);
@@ -474,6 +475,7 @@ void server_restart(const char *message)
 
   sendto_opmask_butone(0, SNO_OLDSNO, "Restarting server: %s", message);
   Debug((DEBUG_NOTICE, "Restarting server..."));
+  stop_listeners();      /* refuse new connections before the slow part */
   bounce_db_shutdown();  /* Persist bouncer sessions before closing connections */
   metadata_shutdown();   /* close the metadata/readmarkers RocksDB env */
   flush_connections(0);

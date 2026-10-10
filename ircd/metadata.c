@@ -1325,8 +1325,9 @@ struct MetadataEntry *metadata_get_client(struct Client *cptr, const char *key)
   if (!cptr || !key)
     return NULL;
 
-  /* Handle virtual presence keys for presence aggregation */
-  if (feature_bool(FEAT_PRESENCE_AGGREGATION) && IsAccount(cptr)) {
+  /* Handle virtual presence keys for a bouncer session's aggregated
+   * presence (nothing to show for a connection outside a session). */
+  if (IsAccount(cptr)) {
     struct BouncerSession *session = bounce_get_session(cptr);
 
     /* Handle presence key - returns state only (present/away/away-star) */

@@ -10,6 +10,7 @@
 #ifndef KC_JWT_H
 #define KC_JWT_H
 
+#include <stddef.h>          /* size_t */
 #include <kc/kc_realm.h>     /* for struct kc_realm */
 
 /* Forward declaration — defined in kc_keycloak.h (libkc) or keycloak.h (X3) */
@@ -58,5 +59,13 @@ void kc_jwt_token_info_free(struct kc_token_info *info);
  * @return epoch seconds, or 0 if claim not present or parsing fails
  */
 long kc_jwt_extract_created_at(const char *token);
+
+/**
+ * Extract the "sub" claim -- the Keycloak user id -- from a JWT (the ID
+ * token of a password grant) without validation: Keycloak minted it in
+ * reply to the credentials we just sent.
+ * @return 1 and the claim in out, or 0 with out empty when absent/malformed.
+ */
+int kc_jwt_extract_sub(const char *token, char *out, size_t out_size);
 
 #endif /* KC_JWT_H */

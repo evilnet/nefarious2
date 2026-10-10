@@ -38,6 +38,12 @@
 #include "client.h"
 #include "hash.h"
 #include "history.h"
+#include "redact_index.h"   /* redaction catch-up query (design B) */
+/* m_redact.c (handlers.h cannot be included here -- forward_history_write prototype nit) */
+extern void redact_apply_row(struct Client *src, const char *target, const char *msgid,
+                             const char *redact_msgid, uint64_t time_ms, const char *reason,
+                             const char *sender_str, const char *account_str);
+static void redact_catchup_kick(unsigned int store_num);   /* design B trigger (defined with the catch-up) */
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_compress.h"
@@ -54,6 +60,7 @@
 #include "numeric.h"
 #include "numnicks.h"
 #include "replay.h"
+#include "s_user.h"
 #include "s_bsd.h"
 #include "s_conf.h"
 #include "s_debug.h"
@@ -67,6 +74,7 @@ static int is_ulined_server(struct Client *server);
 int has_chathistory_advertisement(struct Client *server);
 void broadcast_channel_advertisement(const char *channel);
 #include <string.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <openssl/evp.h>
 #ifdef USE_ZSTD
@@ -392,6 +400,7 @@ static const char *s2s_to_subcmd(char c)
     case 'W': return "BETWEEN";
     case 'T': return "TARGETS";
     case 'X': return "EXACT";
+    case 'S': return "SEARCH";
     default:  return NULL;
   }
 }
@@ -628,9 +637,11 @@ static struct HistoryRowFilter *query_row_filter(struct Client *sptr,
 }
 
 /** Copy @a in to @a out without the server's own PM-history markers
- * (`+evilnet.github.io/sid=` and the legacy `+afternet.org/sid=`).  They
- * exist for the ephemeral participant check in check_history_access and
- * carry a session id that is nobody else's business.
+ * (`+evilnet.github.io/sid=` and the legacy `+afternet.org/sid=`, and the
+ * sender's and recipient's `ssid=` / `rsid=`).  They exist for the
+ * ephemeral participant check in check_history_access and for naming a
+ * conversation after the right session (replay.c), and carry session ids
+ * that are nobody else's business.
  * @return @a out (empty when nothing else was there). */
 static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
 {
@@ -643,6 +654,8 @@ static const char *strip_internal_tags(const char *in, char *out, size_t outsz)
     const char *end = strchr(in, ';');
     size_t len = end ? (size_t)(end - in) : strlen(in);
     int internal = (len >= 22 && memcmp(in, "+evilnet.github.io/sid", 22) == 0)
+                   || (len >= 23 && memcmp(in, "+evilnet.github.io/ssid", 23) == 0)
+                   || (len >= 23 && memcmp(in, "+evilnet.github.io/rsid", 23) == 0)
                    || (len >= 17 && memcmp(in, "+afternet.org/sid", 17) == 0);
     if (!internal && len > 0 && pos + len + 2 <= outsz) {
       if (pos)
@@ -3642,6 +3655,60 @@ int server_retention_days(struct Client *server)
   return server_ads[idx]->retention_days;
 }
 
+/** The retention a client of this server can count on: the widest over
+ * the stores it can reach right now -- this server when it stores, and
+ * every linked server advertising storage (CH A S / R; the entry goes
+ * with the link).  Seconds; 0 when some reachable store keeps history
+ * for good; -1 when no store is reachable.  Retention is decided per
+ * server, so the network-wide answer changes with the topology: it
+ * drops the moment a wider store leaves (it may never be back) and rises
+ * when one links or widens.  A client must therefore treat the horizon
+ * as current, never final (2026-09-20). */
+int chathistory_retention_advertised(void)
+{
+  int widest = -1;
+  unsigned int i;
+
+  if (feature_bool(FEAT_CHATHISTORY_STORE)) {
+    int days = feature_int(FEAT_CHATHISTORY_RETENTION);
+    if (days <= 0)
+      return 0;
+    widest = days;
+  }
+  for (i = 0; i < MAX_AD_SERVERS; i++) {
+    const struct ChathistoryAd *ad = server_ads[i];
+    if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+      continue;
+    if (ad->retention_days <= 0)
+      return 0;
+    if (ad->retention_days > widest)
+      widest = ad->retention_days;
+  }
+  return widest < 0 ? -1 : widest * 86400;
+}
+
+/** Keep ISUPPORT evilnet/CHATHISTORYRETENTION at the value above and,
+ * when it changed and @a announce is set, push a fresh 005 to the
+ * clients that negotiated draft/extended-isupport.  Called from the
+ * 005 build, the feature notifiers, and every store advertisement
+ * change: a CH A S (a store linked), a CH A R (one changed its
+ * retention), and the SQUIT that clears a store's entry. */
+void chathistory_update_retention_isupport(int announce)
+{
+  static int last = -2;
+  int now = chathistory_retention_advertised();
+
+  if (now == last)
+    return;
+  last = now;
+  if (now < 0)
+    del_isupport("evilnet/CHATHISTORYRETENTION");
+  else
+    add_isupport_i("evilnet/CHATHISTORYRETENTION", now);
+  if (announce)
+    send_isupport_update();
+}
+
 /** Clear advertisement entry for a server (on SQUIT).
  * @param[in] server Server client.
  */
@@ -3666,6 +3733,7 @@ void clear_server_ad(struct Client *server)
     MyFree(server_ads[idx]);
     server_ads[idx] = NULL;
   }
+  chathistory_update_retention_isupport(1);   /* a store may have left: no grace */
 }
 
 /** Re-flood every known storage advertisement to a newly linked peer,
@@ -4285,6 +4353,166 @@ static int ch_base64_decode(const char *input, size_t inlen, char **output, size
 }
 
 /** Find a federation request by ID */
+/* ---- redaction catch-up (requester side; design B) ------------------- */
+
+struct RdxScanEmit { struct Client *to; const char *reqid; int n; };
+
+static void rdx_scan_emit_cb(uint64_t time_ms, const char *redact_msgid,
+                             const struct rdx_val *v, void *ctx)
+{
+  struct RdxScanEmit *sc = (struct RdxScanEmit *)ctx;
+  sendcmdto_one(&me, CMD_CHATHISTORY, sc->to, "D %s %llu %s %s %s %s %s :%s", sc->reqid,
+               (unsigned long long)time_ms, redact_msgid, v->target,
+               v->parent_msgid, v->sender, v->account[0] ? v->account : "*",
+               v->reason);
+  sc->n++;
+}
+
+struct RdxCatchup {
+  char     store_yxx[3];
+  int      round;
+  uint64_t start_ms;      /* when this round was issued */
+  uint64_t last_ms;       /* newest row time seen (for a truncated continuation) */
+};
+
+static struct FedRequest *find_fed_request(const char *reqid);
+static void free_fed_request(struct FedRequest *req);
+static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms, int round);
+
+/* A CH D row -> a REDACT HistoryMessage on the request (target carried). */
+static void add_fed_redact(struct FedRequest *req, const struct rdx_reply *rr)
+{
+  struct HistoryMessage *msg, *tail;
+  struct RdxCatchup *rc = (struct RdxCatchup *)req->cb_data;
+  if (req->fed_count >= MAX_FED_MESSAGES) {
+    req->fed_truncated = 1;
+    return;
+  }
+  msg = (struct HistoryMessage *)MyCalloc(1, sizeof(struct HistoryMessage));
+  ircd_strncpy(msg->msgid, rr->redact_msgid, sizeof(msg->msgid) - 1);
+  history_format_ms(msg->timestamp, sizeof(msg->timestamp), rr->time_ms);
+  ircd_strncpy(msg->target, rr->v.target, sizeof(msg->target) - 1);
+  ircd_strncpy(msg->sender, rr->v.sender, sizeof(msg->sender) - 1);
+  ircd_strncpy(msg->account, rr->v.account, sizeof(msg->account) - 1);
+  msg->type = HISTORY_REDACT;
+  if (rr->v.reason[0])
+    ircd_snprintf(0, msg->content, sizeof(msg->content), "%s :%s", rr->v.parent_msgid, rr->v.reason);
+  else
+    ircd_strncpy(msg->content, rr->v.parent_msgid, sizeof(msg->content) - 1);
+  msg->next = NULL;
+  if (!req->fed_msgs)
+    req->fed_msgs = msg;
+  else {
+    for (tail = req->fed_msgs; tail->next; tail = tail->next) ;
+    tail->next = msg;
+  }
+  req->fed_count++;
+  if (rc && rr->time_ms > rc->last_ms)
+    rc->last_ms = rr->time_ms;
+}
+
+/* Completion: apply every row (idempotent), then move the watermark.  A
+ * truncated reply continues from its newest row for a few rounds; a cut
+ * (timeout) advances nothing. */
+static void complete_redact_catchup(struct FedRequest *req)
+{
+  struct RdxCatchup *rc = (struct RdxCatchup *)req->cb_data;
+  struct HistoryMessage *m;
+  int applied = 0;
+  for (m = req->fed_msgs; m; m = m->next) {
+    char parent[HISTORY_MSGID_LEN];
+    const char *sp = strchr(m->content, ' ');
+    const char *reason = NULL;
+    size_t pl = sp ? (size_t)(sp - m->content) : strlen(m->content);
+    if (pl == 0 || pl >= sizeof parent)
+      continue;
+    memcpy(parent, m->content, pl);
+    parent[pl] = '\0';
+    if (sp) {
+      reason = sp + 1;
+      if (*reason == ':') reason++;
+      if (!*reason) reason = NULL;
+    }
+    redact_apply_row(&me, m->target, parent, m->msgid, history_parse_ms(m->timestamp),
+                     reason, m->sender, m->account);
+    applied++;
+  }
+  if (!rc)
+    return;
+  if (req->cut) {
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s: cut after %d row(s), watermark kept", rc->store_yxx, applied);
+    return;
+  }
+  if (req->fed_truncated && rc->last_ms && rc->round < 8) {
+    history_redact_watermark_set(rc->last_ms);
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s: %d row(s), more -> round %d", rc->store_yxx, applied, rc->round + 1);
+    start_redact_catchup(rc->store_yxx, rc->last_ms, rc->round + 1);
+    return;
+  }
+  history_redact_watermark_set(rc->start_ms);
+  if (applied)
+    log_write(LS_SYSTEM, L_NOTICE, 0,
+              "REDACT catch-up from %s: applied %d redaction(s)", rc->store_yxx, applied);
+}
+
+static struct FedRequest *start_redact_catchup(const char *store_yxx, uint64_t since_ms, int round)
+{
+  struct FedRequest *req;
+  struct RdxCatchup *rc;
+  struct Client *server;
+  char reqid[32];
+  int i;
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION) || !history_is_available())
+    return NULL;
+  server = FindNServer(store_yxx);
+  if (!server || server == &me)
+    return NULL;
+  for (i = 0; i < MAX_FED_REQUESTS; i++)
+    if (!fed_requests[i])
+      break;
+  if (i >= MAX_FED_REQUESTS)
+    return NULL;
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me), ++fed_reqid_counter);
+  req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+  rc = (struct RdxCatchup *)MyCalloc(1, sizeof(struct RdxCatchup));
+  ircd_strncpy(rc->store_yxx, store_yxx, sizeof rc->store_yxx);
+  rc->round = round;
+  rc->start_ms = (uint64_t)CurrentTime * 1000ULL;
+  ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+  ircd_strncpy(req->target, "*", sizeof(req->target) - 1);
+  ircd_strncpy(req->client_yxx, cli_yxx(&me), sizeof(req->client_yxx));
+  req->servers_pending = 1;
+  req->start_time = CurrentTime;
+  req->limit = 200;
+  req->completion_cb = complete_redact_catchup;
+  req->cb_data = rc;
+  fed_requests[i] = req;
+  timer_add(timer_init(&req->timer), fed_timeout_callback, (void *)req, TT_RELATIVE,
+            feature_int(FEAT_CHATHISTORY_TIMEOUT));
+  req->timer_active = 1;
+  sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q * D %llu %d %s %s",
+                (unsigned long long)since_ms, req->limit, reqid, store_yxx);
+  Debug((DEBUG_DEBUG, "REDACT catch-up: asked %s since %llu (round %d)",
+         store_yxx, (unsigned long long)since_ms, round));
+  return req;
+}
+
+/* Trigger: a store just (re)advertised itself -- first sight after our
+ * boot, or back after a split.  Ask it for what we may have missed since
+ * our watermark (60 s slack; 0 = everything, bounded per round). */
+static void redact_catchup_kick(unsigned int store_num)
+{
+  char yxx[4];
+  uint64_t wm;
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION) || !history_is_available())
+    return;
+  wm = history_redact_watermark_get();
+  start_redact_catchup(inttobase64(yxx, (int)store_num, 2),
+                       wm > 60000 ? wm - 60000 : 0, 1);
+}
+
 static struct FedRequest *find_fed_request(const char *reqid)
 {
   int i;
@@ -5575,6 +5803,370 @@ int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time, int limi
   return 0;
 }
 
+/** Raw rows one SEARCH may examine, over every channel it covers. */
+#define SEARCH_SCAN_MAX 50000
+
+struct SearchMatch {
+  /** The presence hook to run first, when strict presence opened one. */
+  int (*presence_fn)(const struct HistoryMessage *msg, int reverse, void *ctx,
+                     int64_t *skip_to);
+  void *presence_ctx;
+  char from[NICKLEN + 1];   /**< sender nick to match, or empty */
+  const char *text;         /**< substring to match, or NULL */
+  int64_t after_ms;         /**< stop below this (0 = no floor) */
+};
+
+/** Case-insensitive substring, the ircd's case mapping. */
+static const char *search_strcasestr(const char *hay, const char *needle)
+{
+  size_t nlen = strlen(needle);
+  const char *h;
+
+  if (nlen == 0)
+    return hay;
+  for (h = hay; *h; h++) {
+    size_t i;
+    for (i = 0; i < nlen && h[i]; i++)
+      if (ToLower(h[i]) != ToLower(needle[i]))
+        break;
+    if (i == nlen)
+      return h;
+  }
+  return NULL;
+}
+
+/** Walk hook: the presence decision first (it may seek), then the
+ * window floor, the row type and the selectors. */
+static int search_row_hook(const struct HistoryMessage *msg, int reverse,
+                           void *ctx, int64_t *skip_to)
+{
+  struct SearchMatch *sm = (struct SearchMatch *)ctx;
+  int64_t t = (int64_t)history_parse_ms(msg->timestamp);
+
+  /* The walk is newest to oldest: below the floor nothing further counts. */
+  if (sm->after_ms && t && t < sm->after_ms)
+    return -1;
+
+  if (sm->presence_fn) {
+    int v = sm->presence_fn(msg, reverse, sm->presence_ctx, skip_to);
+    if (v != 1)
+      return v;
+  }
+
+  if (msg->type != HISTORY_PRIVMSG && msg->type != HISTORY_NOTICE
+      && msg->type != HISTORY_MULTILINE)
+    return 0;
+
+  if (sm->from[0]) {
+    size_t n = strlen(sm->from);
+    if (ircd_strncmp(msg->sender, sm->from, n) != 0 || msg->sender[n] != '!')
+      return 0;
+  }
+
+  if (sm->text) {
+    const char *body = msg->dyn_content ? msg->dyn_content : msg->content;
+    if (!body || !body[0] || !search_strcasestr(body, sm->text))
+      return 0;
+  }
+
+  return 1;
+}
+
+/** One target's share of a search: the newest @a limit matches before
+ * @a before_unix, within the shared scan budget.  Returns the row count
+ * (the list is ascending) or -1 on a store error. */
+/* Selectors on the S2S wire (CH Q ... S ... :<selectors>): "from=<v> text=<v>"
+ * joined by spaces, values escaped like client tags (\s = space, \\ =
+ * backslash) so a text with spaces survives as one parameter.  The
+ * 512-byte P10 body cap bounds them: SEARCH_SEL_MAX leaves room for the
+ * fixed fields. */
+#define SEARCH_SEL_MAX 380
+
+static void search_sel_escape(const char *in, char *out, size_t n)
+{
+  size_t o = 0;
+  for (; *in && o + 2 < n; in++) {
+    if (*in == ' ') { out[o++] = '\\'; out[o++] = 's'; }
+    else if (*in == '\\') { out[o++] = '\\'; out[o++] = '\\'; }
+    else out[o++] = *in;
+  }
+  out[o] = '\0';
+}
+
+static void search_sel_unescape(char *v)
+{
+  char *w = v;
+  for (; *v; v++) {
+    if (*v == '\\' && v[1] == 's') { *w++ = ' '; v++; }
+    else if (*v == '\\' && v[1] == '\\') { *w++ = '\\'; v++; }
+    else *w++ = *v;
+  }
+  *w = '\0';
+}
+
+/** The search walk shared by the local path and the S2S responder: BEFORE
+ * from @a before_unix, the match hook chained behind @a base's presence
+ * hook (if any), @a base's type mask and veto, @a *budget raw rows; the
+ * newest @a limit matches in @a *out, redaction placeholders dropped.
+ * @a *truncated is set when the scan budget cut the window short. */
+static int search_walk(const char *lookup_target, const char *before_unix,
+                       int limit, struct SearchMatch *sm, int *budget,
+                       const struct HistoryRowFilter *base,
+                       struct HistoryMessage **out, int *truncated)
+{
+  struct HistoryRowFilter filter;
+  int count;
+
+  *out = NULL;
+  if (*budget <= 0)
+    return 0;
+  memset(&filter, 0, sizeof(filter));
+  sm->presence_fn = base && base->fn ? base->fn : NULL;
+  sm->presence_ctx = base && base->fn ? base->ctx : NULL;
+  filter.fn = search_row_hook;
+  filter.ctx = sm;
+  filter.type_mask = base ? base->type_mask : 0;
+  filter.veto = base ? base->veto : NULL;
+  filter.veto_ctx = base ? base->veto_ctx : NULL;
+  filter.scan_max = *budget;
+
+  count = history_query_before(lookup_target, HISTORY_REF_TIMESTAMP,
+                               before_unix, limit, out, &filter);
+  *budget -= filter.scanned;
+  if (truncated)
+    *truncated = filter.truncated;
+  if (count < 0)
+    return -1;
+  return redact_filter_messages(out, count);
+}
+
+static int search_one_target(struct Client *sptr, const char *lookup_target,
+                             const char *before_unix, int limit,
+                             struct SearchMatch *sm, int *budget,
+                             struct HistoryMessage **out)
+{
+  struct PresenceQueryFilter *pf = NULL;
+  struct HistoryRowFilter bare, *phook;
+  int count;
+
+  *out = NULL;
+  if (*budget <= 0)
+    return 0;
+
+  if (open_query_presence(sptr, lookup_target, 0, &pf) < 0)
+    return 0;   /* fail closed: nothing visible here */
+  phook = presence_query_filter_hook(pf);
+  if (!phook) {
+    memset(&bare, 0, sizeof(bare));
+    phook = &bare;
+  }
+  phook->type_mask = requester_type_mask(sptr);
+  phook->veto = typing_only_veto;
+  phook->veto_ctx = NULL;
+
+  count = search_walk(lookup_target, before_unix, limit, sm, budget, phook,
+                      out, NULL);
+  presence_query_filter_close(pf);
+  if (count < 0)
+    return -1;
+  return presence_filter_messages(sptr, lookup_target, out, count, 0);
+}
+
+static int search_row_cmp(const void *a, const void *b)
+{
+  const struct HistoryMessage *ma = *(struct HistoryMessage *const *)a;
+  const struct HistoryMessage *mb = *(struct HistoryMessage *const *)b;
+  uint64_t ta = history_parse_ms(ma->timestamp);
+  uint64_t tb = history_parse_ms(mb->timestamp);
+
+  if (ta != tb)
+    return ta < tb ? -1 : 1;
+  return strcmp(ma->msgid, mb->msgid);
+}
+
+/** Send the search batch: @a head ascending, @a count rows.  Channel rows
+ * go to their own channel; rows of the private conversation @a pm_other
+ * (the other party's nick, or NULL) follow their direction. */
+static void search_send(struct Client *sptr, struct HistoryMessage *head,
+                        const char *pm_other, const char *label)
+{
+  char batchid[32];
+  char iso_time[32];
+  const char *bid = NULL;
+  struct HistoryMessage *msg;
+
+  if (CapRecipientHas(sptr, CAP_BATCH)) {
+    generate_batch_id(batchid, sizeof(batchid), sptr);
+    bid = batchid;
+    if (label)
+      sendrawto_one(sptr, "@label=%s :%s " MSG_BATCH_CMD " +%s search", label,
+                    cli_name(&me), batchid);
+    else
+      sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " +%s search", cli_name(&me), batchid);
+  }
+
+  for (msg = head; msg; msg = msg->next) {
+    const char *time_str = msg->timestamp;
+    const char *cmd = (msg->type == HISTORY_NOTICE) ? "NOTICE" : "PRIVMSG";
+    const char *target = msg->target;
+
+    if (history_unix_to_iso(msg->timestamp, iso_time, sizeof(iso_time)) == 0)
+      time_str = iso_time;
+    if (pm_other)
+      target = pm_row_is_own(sptr, msg) ? pm_other : cli_name(sptr);
+    send_history_message(sptr, msg, target, bid, time_str, cmd);
+  }
+
+  if (bid)
+    sendrawto_one(sptr, ":%s " MSG_BATCH_CMD " -%s", cli_name(&me), batchid);
+  else if (label)
+    sendrawto_one(sptr, "@label=%s :%s ACK", label, cli_name(&me));
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Federated SEARCH: the CHATHISTORY federation path with letter 'S'  */
+/* ---------------------------------------------------------------- */
+
+/** Completion: merge the local and the responders' rows (dedup by msgid),
+ * keep the newest limit, send the search batch.  A responder that timed
+ * out or hit its scan cap is not signalled: the spec has no marker for a
+ * cut scan, and the client narrows its window when a full limit comes
+ * back, exactly as against a single server. */
+static void complete_search_fed(struct FedRequest *req)
+{
+  struct Client *client;
+  struct HistoryMessage *merged, *m, **all;
+  int total = 0, k, keep;
+
+  if (!req || req->response_sent)
+    return;
+  req->response_sent = 1;
+  client = findNUser(req->client_yxx);
+  if (!client)
+    return;
+  /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
+   * the union is sorted and trimmed below. */
+  merged = merge_messages(req->local_msgs, req->fed_msgs, INT_MAX, 0);
+  for (m = merged; m; m = m->next)
+    total++;
+  if (total == 0) {
+    search_send(client, NULL, NULL, req->label[0] ? req->label : NULL);
+    return;
+  }
+  /* merge_messages assumes sorted inputs; responders' rows arrive in
+   * reply order, so sort the union by time and keep the newest limit. */
+  all = (struct HistoryMessage **)MyMalloc(total * sizeof(*all));
+  for (k = 0, m = merged; m; m = m->next)
+    all[k++] = m;
+  qsort(all, total, sizeof(*all), search_row_cmp);
+  keep = total < req->limit ? total : req->limit;
+  merged = NULL;
+  for (k = total - 1; k >= 0; k--) {
+    all[k]->next = NULL;
+    if (k < total - keep) {
+      history_free_messages(all[k]);
+      continue;
+    }
+    all[k]->next = merged;
+    merged = all[k];
+  }
+  MyFree(all);
+  search_send(client, merged, NULL, req->label[0] ? req->label : NULL);
+  history_free_messages(merged);
+}
+
+/** Fan a SEARCH out to every storage server for @a target.  Wire:
+ *   CH Q <target> S T<before> <limit> <reqid> <dest> <T<after>|*> P<yxx> <mask> :<selectors>
+ * Returns the request (which now owns @a local_rows) or NULL when nothing
+ * was dispatched (no stores, federation off, no free slot): the caller
+ * then answers locally.  Search scans, so every store is asked. */
+static struct FedRequest *start_fed_search(struct Client *sptr, const char *target,
+                                           const char *requested,
+                                           const char *before_unix,
+                                           const char *after_unix, int limit,
+                                           const struct SearchMatch *sm,
+                                           struct HistoryMessage *local_rows,
+                                           int local_count)
+{
+  struct FedRequest *req;
+  char reqid[32], sel[BUFSIZE], esc[BUFSIZE];
+  int i, si, server_count;
+  time_t query_time = after_unix && after_unix[0] ? (time_t)strtoul(after_unix, NULL, 10) : 0;
+
+  if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
+    return NULL;
+  server_count = count_storage_servers(target, query_time);
+  if (server_count == 0)
+    return NULL;
+  for (i = 0; i < MAX_FED_REQUESTS; i++)
+    if (!fed_requests[i])
+      break;
+  if (i >= MAX_FED_REQUESTS)
+    return NULL;
+
+  sel[0] = '\0';
+  if (sm->from[0]) {
+    search_sel_escape(sm->from, esc, sizeof(esc));
+    ircd_snprintf(0, sel, sizeof(sel), "from=%s", esc);
+  }
+  if (sm->text) {
+    size_t l = strlen(sel);
+    search_sel_escape(sm->text, esc, sizeof(esc));
+    ircd_snprintf(0, sel + l, sizeof(sel) - l, "%stext=%s", l ? " " : "", esc);
+  }
+
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me), ++fed_reqid_counter);
+  req = (struct FedRequest *)MyCalloc(1, sizeof(struct FedRequest));
+  ircd_strncpy(req->reqid, reqid, sizeof(req->reqid) - 1);
+  ircd_strncpy(req->target, target, sizeof(req->target) - 1);
+  ircd_strncpy(req->requested, requested ? requested : "", sizeof(req->requested) - 1);
+  ircd_snprintf(0, req->client_yxx, sizeof(req->client_yxx), "%s%s",
+                cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
+  req->local_msgs = local_rows;
+  req->local_count = local_count;
+  req->servers_pending = server_count;
+  req->start_time = CurrentTime;
+  req->limit = limit;
+  req->keep_oldest = 0;
+  req->completion_cb = complete_search_fed;
+  req->label[0] = '\0';
+  if (cli_label(sptr)[0]) {
+    ircd_strncpy(req->label, cli_label(sptr), sizeof(req->label));
+    cli_label_responded(sptr) = 1;
+  }
+  fed_requests[i] = req;
+  timer_add(timer_init(&req->timer), fed_timeout_callback, (void *)req, TT_RELATIVE,
+            feature_int(FEAT_CHATHISTORY_TIMEOUT));
+  req->timer_active = 1;
+
+  for (si = 0; si < MAX_AD_SERVERS; si++) {
+    struct ChathistoryAd *ad = server_ads[si];
+    struct Client *server;
+    char dest_yxx[4];
+    if (!ad || !ad->has_advertisement || !ad->is_storage_server)
+      continue;
+    inttobase64(dest_yxx, si, 2);
+    server = FindNServer(dest_yxx);
+    if (!server || server == &me)
+      continue;
+    if (is_ulined_server(server))
+      continue;
+    if (query_time != 0 && !server_retention_covers(server, query_time))
+      continue;
+    /* Same trailing shape as a page (ref2, requester token, type mask) so
+     * the responder pages by the requester's presence; the selectors
+     * are the trailing parameter. */
+    /* References ride bare on the wire (a unix "sec.ms" is a timestamp,
+     * a leading letter a msgid, "*" none -- parse_s2s_reference). */
+    sendcmdto_one(&me, CMD_CHATHISTORY, server, "Q %s S %s %d %s %s %s P%s %x :%s",
+                  target, before_unix, limit, reqid, dest_yxx,
+                  after_unix && after_unix[0] ? after_unix : "*",
+                  req->client_yxx, requester_type_mask(sptr), sel);
+  }
+  return req;
+}
+
 /*
  * ms_chathistory - server message handler for S2S chathistory federation
  *
@@ -5719,6 +6311,29 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     /* Legacy path (no dest_numeric): propagate to direct links as before.
      * Filter by advertisement (CH A S) and retention window.
      */
+    /* Redaction catch-up: CH Q * D <since_ms> <limit> <reqid> <dest> -- not
+     * a channel query: answer from the redaction index, one CH D line per
+     * redaction since <since_ms>, then E.  Handled before the channel /
+     * presence machinery (target is "*").  A store that was absent asks
+     * this on return (design B, crdt-mesh-redact-catchup.md). */
+    if (query_subcmd_str && query_subcmd_str[0] == 'D' && query_subcmd_str[1] == '\0') {
+      struct RdxScanEmit sc;
+      uint64_t since = (uint64_t)strtoull(ref, NULL, 10);
+      int trunc = 0, lim = (limit > 0 && limit <= 500) ? limit : 200;
+      sc.to = sptr;
+      sc.reqid = reqid;
+      sc.n = 0;
+      if (history_is_available())
+        history_redact_index_scan(since, lim, rdx_scan_emit_cb, &sc, &trunc);
+      Debug((DEBUG_DEBUG, "CH Q D: since %llu -> %d row(s) trunc %d for %s",
+             (unsigned long long)since, sc.n, trunc, reqid));
+      if (trunc)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, sc.n);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, sc.n);
+      return 0;
+    }
+
     if (!dest_numeric) {
       struct DLink *lp;
       time_t query_time = 0;
@@ -5909,6 +6524,69 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
        * is the HEAD; ascending appends, TAIL (re-review R8). */
       between_desc = history_between_descending(target, ref_type, ref_value,
                                                 ref_type2, ref_value2);
+    } else if (query_subcmd_char == 'S') {
+      /* Federated SEARCH: <before> (unix sec.ms) as the reference, <after>
+       * or * as ref2, the selectors as the trailing parameter (parv[11]), the
+       * requester's presence already opened above.  Rows go back with
+       * the page machinery; E carries T when our scan budget cut the
+       * window short. */
+      struct SearchMatch ssm;
+      struct HistoryMessage *rows = NULL, *r;
+      int budget = SEARCH_SCAN_MAX, truncated = 0, n = 0;
+      char selbuf[BUFSIZE];
+      char before_buf[HISTORY_TIMESTAMP_LEN];
+      memset(&ssm, 0, sizeof(ssm));
+      ircd_strncpy(before_buf, ref_type == HISTORY_REF_TIMESTAMP && ref_value ? ref_value : "",
+                   sizeof(before_buf) - 1);
+      before_buf[sizeof(before_buf) - 1] = '\0';
+      if (ref2) {
+        enum HistoryRefType t2;
+        const char *v2;
+        if (parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_TIMESTAMP && v2)
+          ssm.after_ms = (int64_t)history_parse_ms(v2);
+      }
+      selbuf[0] = '\0';
+      if (parc >= 12 && parv[11])
+        ircd_strncpy(selbuf, parv[11], sizeof(selbuf) - 1);
+      {
+        char *q = selbuf, *tok;
+        while ((tok = q) && *tok) {
+          char *sp = strchr(tok, ' ');
+          if (sp) { *sp = '\0'; q = sp + 1; } else q = tok + strlen(tok);
+          if (0 == strncmp(tok, "from=", 5)) {
+            ircd_strncpy(ssm.from, tok + 5, sizeof(ssm.from));
+            search_sel_unescape(ssm.from);
+          } else if (0 == strncmp(tok, "text=", 5)) {
+            search_sel_unescape(tok + 5);
+            if (tok[5])
+              ssm.text = tok + 5;
+          }
+        }
+      }
+      Debug((DEBUG_DEBUG, "CH Q S: target %s before '%s' after %lld limit %d from '%s' text '%s' reftype %d",
+             target, before_buf, (long long)ssm.after_ms, limit, ssm.from,
+             ssm.text ? ssm.text : "", (int)ref_type));
+      if (!before_buf[0]) {
+        presence_query_filter_close(fed_pf);
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+      n = search_walk(target, before_buf, limit, &ssm, &budget, fed_hook, &rows, &truncated);
+      Debug((DEBUG_DEBUG, "CH Q S: %s -> %d row(s), truncated %d, budget left %d", target, n, truncated, budget));
+      presence_query_filter_close(fed_pf);
+      fed_pf = NULL;
+      if (n < 0) {
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        return 0;
+      }
+      for (r = rows; r; r = r->next)
+        send_ch_response(sptr, reqid, r);
+      if (truncated)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, n);
+      else
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, n);
+      history_free_messages(rows);
+      return 0;
     } else if (query_subcmd_char == 'X') {
       presence_query_filter_close(fed_pf);
       fed_pf = NULL;
@@ -6102,6 +6780,18 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
     /* Add message to federated results */
     add_fed_message(req, msgid, timestamp, type, sender, account, content);
+  }
+  else if (strcmp(subcmd, "D") == 0) {   /* a redaction from the catch-up scan */
+    struct rdx_reply rr;
+    struct FedRequest *req;
+    if (rdx_reply_parse(parc, parv, &rr) != 0)
+      return 0;
+    req = find_fed_request(rr.reqid);
+    if (!req) {
+      forward_fed_reply(sptr, cptr, parc, parv);
+      return 0;
+    }
+    add_fed_redact(req, &rr);
   }
   else if (strcmp(subcmd, "Z") == 0) {
     /* Compressed Response: Z <reqid> <msgid> <ts> <type> <sender> <account> :<b64_compressed>
@@ -6347,12 +7037,14 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       ad->retention_days = retention;
       ad->last_update = CurrentTime;
       absence_close(server_ad_index(sptr));   /* back: close its absence */
+      redact_catchup_kick((unsigned int)server_ad_index(sptr));   /* what did we miss while it was away? */
 
       Debug((DEBUG_DEBUG, "CH A S: Server %s advertises storage with %d day retention",
              cli_name(sptr), retention));
 
       /* Propagate to other servers (except source) */
       sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A S %d", retention);
+      chathistory_update_retention_isupport(1);
     }
     else if (subtype[0] == 'R') {
       /* Retention update: R <retention_days> */
@@ -6370,6 +7062,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
 
       /* Propagate to other servers (except source) */
       sendcmdto_serv_butone_v3(sptr, CMD_CHATHISTORY, cptr, "A R %d", retention);
+      chathistory_update_retention_isupport(1);
     }
     else if (subtype[0] == 'F') {
       /* Full channel sync: F :<channel> <channel> ... (Layer 1) */
@@ -6620,5 +7313,204 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     }
   }
 
+  return 0;
+}
+
+/* ======================================================================
+ * SEARCH -- soju.im/search
+ * (https://codeberg.org/emersion/soju/src/branch/master/doc/ext/search.md)
+ *
+ *   SEARCH in=<target> [from=<nick>] [text=<words>] [after=<ts>]
+ *          [before=<ts>] [limit=<n>]
+ *
+ * Answered with a batch of type `search`: the matching PRIVMSG / NOTICE
+ * rows in ascending time order, each with msgid and time, or an empty
+ * batch.  Malformed selectors get FAIL SEARCH INVALID_PARAMS.
+ *
+ * Ours is a brute scan of the store: the same walk CHATHISTORY BEFORE
+ * uses, from `before` (default now) back towards `after`, keeping the
+ * newest `limit` matches.  `text` is a case-insensitive substring, no
+ * regular expressions (the spec's ReDoS note).  The presence hook rides
+ * in front of the match so a member who was not there does not find it,
+ * and the reply side runs the same redaction and presence filters as a
+ * CHATHISTORY page.  There is no index: search is bounded by a scan
+ * budget of SEARCH_SCAN_MAX raw rows per request, spent across the
+ * channels searched when `in` is absent; a client wanting more asks
+ * narrower windows.  Without `in`, the channels the requester is in are
+ * searched (private conversations need `in=<nick>`: their keyspace is
+ * not enumerable per requester).  Local store only; a storage peer's
+ * rows are not merged (2026-09-20).
+ * ==================================================================== */
+
+/** Handle SEARCH (soju.im/search).  parv[1..] are `key=value` selectors;
+ * the last one may carry spaces (a trailing parameter). */
+int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
+{
+  struct SearchMatch sm;
+  char in[CHANNELLEN + 1] = "";
+  char lookup_target[CHANNELLEN + 1];
+  char before_unix[HISTORY_TIMESTAMP_LEN];
+  char after_unix[HISTORY_TIMESTAMP_LEN];
+  const char *pm_other = NULL;
+  int limit = 0, max_limit;
+  int budget = SEARCH_SCAN_MAX;
+  int i;
+
+  if (!CapActive(sptr, CAP_SOJU_SEARCH))
+    return send_reply(sptr, ERR_UNKNOWNCOMMAND, "SEARCH");
+
+  if (!history_is_available()) {
+    send_fail(sptr, "SEARCH", "INTERNAL_ERROR", "*", "History storage unavailable");
+    return 0;
+  }
+
+  memset(&sm, 0, sizeof(sm));
+  before_unix[0] = '\0';
+  after_unix[0] = '\0';
+
+  for (i = 1; i < parc; i++) {
+    char *eq = strchr(parv[i], '=');
+    const char *key = parv[i];
+    const char *val;
+
+    if (!eq || eq == parv[i]) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", parv[i], "Selectors are key=value");
+      return 0;
+    }
+    *eq = '\0';
+    val = eq + 1;
+
+    if (ircd_strcmp(key, "in") == 0) {
+      ircd_strncpy(in, val, sizeof(in));
+    } else if (ircd_strcmp(key, "from") == 0) {
+      ircd_strncpy(sm.from, val, sizeof(sm.from));
+    } else if (ircd_strcmp(key, "text") == 0) {
+      if (val[0])
+        sm.text = val;
+    } else if (ircd_strcmp(key, "after") == 0) {
+      if (!val[0] || history_iso_to_unix(val, after_unix, sizeof(after_unix)) != 0) {
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "after", "Invalid timestamp");
+        return 0;
+      }
+    } else if (ircd_strcmp(key, "before") == 0) {
+      if (!val[0] || history_iso_to_unix(val, before_unix, sizeof(before_unix)) != 0) {
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "before", "Invalid timestamp");
+        return 0;
+      }
+    } else if (ircd_strcmp(key, "limit") == 0) {
+      limit = atoi(val);
+      if (limit <= 0) {
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "limit", "Invalid limit");
+        return 0;
+      }
+    }
+    /* Unknown selectors are ignored (the spec leaves room for more). */
+  }
+
+  max_limit = feature_int(FEAT_CHATHISTORY_MAX);
+  if (limit <= 0 || limit > max_limit)
+    limit = max_limit;
+  /* The selectors also travel S2S in one 512-byte P10 line; refuse an
+   * oversize text here so local and federated behaviour agree. */
+  {
+    char esc[BUFSIZE];
+    size_t n = 0;
+    if (sm.from[0]) { search_sel_escape(sm.from, esc, sizeof(esc)); n += 5 + strlen(esc) + 1; }
+    if (sm.text) { search_sel_escape(sm.text, esc, sizeof(esc)); n += 5 + strlen(esc); }
+    if (n > SEARCH_SEL_MAX) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text", "Selectors too long");
+      return 0;
+    }
+  }
+  if (after_unix[0])
+    sm.after_ms = (int64_t)history_parse_ms(after_unix);
+  if (!before_unix[0]) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    ircd_snprintf(0, before_unix, sizeof(before_unix), "%lu.%03lu",
+                  (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
+  }
+
+  if (in[0]) {
+    struct HistoryMessage *rows = NULL;
+    int count;
+
+    if (check_history_access(sptr, in, lookup_target, sizeof(lookup_target)) != 0) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "in", "No access to target");
+      return 0;
+    }
+    if (!IsChannelName(in))
+      pm_other = in;
+
+    count = search_one_target(sptr, lookup_target, before_unix, limit, &sm,
+                              &budget, &rows);
+    if (count < 0) {
+      send_fail(sptr, "SEARCH", "INTERNAL_ERROR", "in", "Failed to search history");
+      return 0;
+    }
+    /* Federation (2026-09-20, docs/features/search.md): a channel's rows
+     * can live on other storage servers (a store that was split holds
+     * rows the others lack), and a page of the same window would fan
+     * out to them -- so does a search, or users could not trust it.
+     * Private conversations and the no-`in` form stay local. */
+    if (IsChannelName(in)) {
+      struct FedRequest *req = start_fed_search(sptr, lookup_target, in,
+                                                before_unix, after_unix,
+                                                limit, &sm, rows, count);
+      if (req)
+        return 0;   /* rows are the request's now; complete_search_fed sends */
+    }
+    search_send(sptr, rows, pm_other, cli_label(sptr));
+    history_free_messages(rows);
+    return 0;
+  }
+
+  /* No `in`: every channel the requester is in, newest `limit` overall. */
+  {
+    struct Membership *member;
+    struct HistoryMessage **all = NULL;
+    struct HistoryMessage *head = NULL, **tail = &head;
+    int total = 0, cap = 0, keep, k;
+
+    for (member = cli_user(sptr)->channel; member; member = member->next_channel) {
+      struct HistoryMessage *rows = NULL, *m;
+      int count;
+
+      if (IsMemberAlias(member))
+        continue;   /* the primary's membership covers it */
+      if (check_history_access(sptr, member->channel->chname, lookup_target,
+                               sizeof(lookup_target)) != 0)
+        continue;
+      count = search_one_target(sptr, lookup_target, before_unix, limit, &sm,
+                                &budget, &rows);
+      if (count <= 0) {
+        history_free_messages(rows);
+        continue;
+      }
+      if (total + count > cap) {
+        cap = (total + count) * 2;
+        all = (struct HistoryMessage **)MyRealloc(all, cap * sizeof(*all));
+      }
+      for (m = rows; m; m = m->next)
+        all[total++] = m;
+    }
+
+    if (total > 1)
+      qsort(all, total, sizeof(*all), search_row_cmp);
+    keep = total < limit ? total : limit;
+    /* Ascending order; the newest `limit` are the tail of the sort. */
+    for (k = 0; k < total; k++) {
+      all[k]->next = NULL;
+      if (k < total - keep) {
+        history_free_messages(all[k]);
+        continue;
+      }
+      *tail = all[k];
+      tail = &all[k]->next;
+    }
+    MyFree(all);
+    search_send(sptr, head, NULL, cli_label(sptr));
+    history_free_messages(head);
+  }
   return 0;
 }

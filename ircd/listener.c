@@ -444,6 +444,33 @@ void close_listener(struct Listener* listener)
   free_listener(listener);
 }
 
+/** Stop accepting connections: close every listening socket but keep the
+ * Listener structures, which attached clients still point at.  For the
+ * shutdown paths.  The database shutdowns that follow there can take
+ * seconds, during which a listener left open kept accepting: those
+ * connections were never served (the event loop was not running), and
+ * the ports stayed held against the replacement process.  A closed
+ * socket refuses at once, so a reconnecting client meets the new server
+ * or a clean refusal, never a socket that sits until exit. */
+void stop_listeners(void)
+{
+  struct Listener* listener;
+
+  for (listener = ListenerPollList; listener; listener = listener->next) {
+    FlagClr(&listener->flags, LISTEN_ACTIVE);
+    if (-1 < listener->fd_v4) {
+      socket_del(&listener->socket_v4);
+      close(listener->fd_v4);
+      listener->fd_v4 = -1;
+    }
+    if (-1 < listener->fd_v6) {
+      socket_del(&listener->socket_v6);
+      close(listener->fd_v6);
+      listener->fd_v6 = -1;
+    }
+  }
+}
+
 /** Close all inactive listeners. */
 void close_listeners(void)
 {
