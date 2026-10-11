@@ -115,6 +115,7 @@ extern char *umode_str(struct Client *cptr);
 extern void user_apply_umode_str(struct Client *cptr, const char *modes);
 extern void send_umode(struct Client *cptr, struct Client *sptr,
                        struct Flags *old, int sendset);
+extern void send_umode_signon(struct Client *sptr);
 extern void set_snomask(struct Client *, unsigned int, int);
 extern int is_snomask(char *);
 extern int check_target_limit(struct Client *sptr, void *target, const char *name,
