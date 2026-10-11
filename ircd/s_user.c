@@ -628,6 +628,10 @@ int register_user(struct Client *cptr, struct Client *sptr)
           sendcmdto_one(ghost, CMD_NICK, ghost, "%s", cli_name(ghost));
         }
 
+        /* The new socket takes over the ghost's user modes (+o, +x,
+         * +s ...); tell it what they are, as registration would. */
+        send_umode_signon(ghost);
+
         /* Replay channel state */
         bounce_send_channel_state(ghost);
 
@@ -985,7 +989,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
   /* Send user mode to client */
   if (MyUser(sptr))
   {
-    static struct Flags flags; /* automatically initialized to zeros */
     struct SLink *lp;
 
     if (cli_webirc(sptr) && !EmptyString(cli_webirc(sptr)))
@@ -1034,34 +1037,8 @@ int register_user(struct Client *cptr, struct Client *sptr)
                       cli_continentcode(sptr), cli_countryname(sptr));
     }
 
-    /* To avoid sending +r to the client due to auth-on-connect, set
-     * the "old" FLAG_ACCOUNT bit to match the client's value.
-     */
-    if (IsAccount(cptr))
-      FlagSet(&flags, FLAG_ACCOUNT);
-    else
-      FlagClr(&flags, FLAG_ACCOUNT);
-    if (IsCloakHost(cptr))
-      FlagSet(&flags, FLAG_CLOAKHOST);
-    else
-      FlagClr(&flags, FLAG_CLOAKHOST);
-    if (IsCloakIP(cptr))
-      FlagSet(&flags, FLAG_CLOAKIP);
-    else
-      FlagClr(&flags, FLAG_CLOAKIP);
-    if (IsFakeHost(cptr))
-      FlagSet(&flags, FLAG_FAKEHOST);
-    else
-      FlagClr(&flags, FLAG_FAKEHOST);
-    if (IsSetHost(cptr))
-      FlagSet(&flags, FLAG_SETHOST);
-    else
-      FlagClr(&flags, FLAG_SETHOST);
     client_set_privs(sptr, NULL);
-    send_umode(cptr, sptr, &flags, ALL_UMODES);
-    if ((cli_snomask(sptr) != feature_int(FEAT_SNOMASK_DEFAULT)) &&
-        HasFlag(sptr, FLAG_SERVNOTICE))
-      send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
+    send_umode_signon(sptr);
 
     if ((connclass = get_client_class_conf(sptr)) != NULL)
     {
@@ -2952,6 +2929,47 @@ void send_umode(struct Client *cptr, struct Client *sptr, struct Flags *old,
     *m = '\0';
   if (*umodeBuf && cptr && *(cli_name(sptr)))
     sendcmdto_one(sptr, CMD_MODE, cptr, "%s %s", cli_name(sptr), umodeBuf);
+}
+
+/** Tell a newly signed-on connection the user modes it holds, and its
+ * server notice mask when that is not the default for what it is.  The
+ * end of registration does this; a bouncer revive or alias attach must
+ * too, since the connection takes over modes it never set itself (a
+ * services auto-oper's +o, +x, +s ...) and has no other way to learn
+ * them short of asking.
+ * @param[in] sptr Local user to tell.
+ */
+void send_umode_signon(struct Client *sptr)
+{
+  struct Flags flags;
+  unsigned int snodefault;
+
+  memset(&flags, 0, sizeof(flags));
+
+  /* To avoid sending +r to the client due to auth-on-connect, set
+   * the "old" FLAG_ACCOUNT bit to match the client's value.  The
+   * host-hiding flags are never shown to the client either.
+   */
+  if (IsAccount(sptr))
+    FlagSet(&flags, FLAG_ACCOUNT);
+  if (IsCloakHost(sptr))
+    FlagSet(&flags, FLAG_CLOAKHOST);
+  if (IsCloakIP(sptr))
+    FlagSet(&flags, FLAG_CLOAKIP);
+  if (IsFakeHost(sptr))
+    FlagSet(&flags, FLAG_FAKEHOST);
+  if (IsSetHost(sptr))
+    FlagSet(&flags, FLAG_SETHOST);
+  send_umode(sptr, sptr, &flags, ALL_UMODES);
+
+  /* As the reply to MODE <nick> does: the mask is news only when it is
+   * not what +s alone implies.  A zero mask is not announced: an alias
+   * of a remote primary has none until BX K brings it. */
+  snodefault = IsAnOper(sptr) ? feature_int(FEAT_SNOMASK_OPERDEFAULT)
+                              : feature_int(FEAT_SNOMASK_DEFAULT);
+  if (HasFlag(sptr, FLAG_SERVNOTICE) && cli_snomask(sptr) &&
+      cli_snomask(sptr) != snodefault)
+    send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
 }
 
 /**
