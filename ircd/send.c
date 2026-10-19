@@ -1307,6 +1307,8 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
   struct MsgBuf *mb;
   struct Client *cptr;
   char s2s_tagbuf[128];
+  char tagbuf[512];
+  char *tags;
   int prio;
 
   to = cli_from(to);
@@ -1354,8 +1356,22 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
     s2s_msgid_override[0] = '\0';  /* Clear even if not used */
     s2s_sessid_override[0] = '\0';  /* Clear even if not used */
     s2s_time_override = 0;
-    mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
-                   &vd);
+    /* A line to a client inside the labeled-response batch its command
+     * opened is part of that response: tag it the way send_reply() tags
+     * the numerics around it (@batch, @time).  Untagged, it sits outside
+     * the batch and a client collecting the response by batch id drops it
+     * (the STATS help list, STATS w, VERSION's library notices).  Only the
+     * synchronous batch labeled_batch_start() opened -- an async LIST
+     * keeps cli_batch_id set across event-loop turns, and unrelated lines
+     * must not join it. */
+    tags = (MyConnect(to) && cli_labeled_batch(to))
+         ? format_message_tags_for_ex(tagbuf, sizeof(tagbuf), from, to, NULL)
+         : NULL;
+    if (tags)
+      mb = msgq_make(to, "%s%:#C %s %v", tags, from, cmd, &vd);
+    else
+      mb = msgq_make(to, "%:#C %s %v", from, IsServer(to) || IsMe(to) ? tok : cmd,
+                     &vd);
   }
 
   va_end(vd.vd_args);
