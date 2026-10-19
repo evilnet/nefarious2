@@ -23,6 +23,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -2178,9 +2179,11 @@ int sasl_start(struct Client *sptr, const char *mechanism)
     sendrawto_one(sptr, MSG_AUTHENTICATE " +");
 
     /* Start timeout timer */
-    if (!t_active(&cli_sasltimeout(sptr)))
-      timer_add(timer_init(&cli_sasltimeout(sptr)), sasl_local_timeout_cb, (void *)sptr,
+    if (!t_active(&cli_sasltimeout(sptr))) {
+      cli_freeflag(sptr) |= FREEFLAG_SASLTIMER;
+      timer_add(&cli_sasltimeout(sptr), sasl_local_timeout_cb, cli_connect(sptr),
                 TT_RELATIVE, feature_int(FEAT_SASL_TIMEOUT));
+    }
 
     return 0;
   }
@@ -2352,16 +2355,30 @@ int sasl_abort_local(struct Client *sptr)
 
 /* ---- Timeout callback for local SASL ---- */
 
+/* The timer lives in the client's Connection and keeps it allocated
+ * (FREEFLAG_SASLTIMER) until ET_DESTROY, like con_proc: the abort
+ * below resumes registration, which may exit the client, and
+ * timer_run() still touches the timer after the callback returns. */
 static void sasl_local_timeout_cb(struct Event *ev)
 {
   struct Client *cptr;
+  struct Connection *con;
 
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
+  assert(ET_DESTROY == ev_type(ev) || ET_EXPIRE == ev_type(ev));
 
-  if (ev_type(ev) == ET_EXPIRE) {
-    cptr = (struct Client *)t_data(ev_timer(ev));
+  con = (struct Connection *)t_data(ev_timer(ev));
+  cptr = con_client(con);
 
+  assert(0 == cptr || con == cli_connect(cptr));
+
+  if (ev_type(ev) == ET_DESTROY) {
+    con_freeflag(con) &= ~FREEFLAG_SASLTIMER;
+
+    if (!con_freeflag(con) && !cptr)
+      free_connection(con); /* client is being destroyed */
+  } else if (cptr) {
     if (cli_saslsession(cptr)) {
       /* Local SASL timeout */
       log_write(LS_SYSTEM, L_INFO, 0,
