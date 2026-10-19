@@ -7985,6 +7985,11 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
    * METADATA SUB round-trip. */
   metadata_burst_self_to_client(sptr);
 
+  /* Step 3 copied the primary's user modes, privileges and snomask onto
+   * the alias; tell its client what it is attached as, the way
+   * register_user() does for a fresh connection. */
+  send_umode_signon(sptr);
+
   /* Informational NOTE */
   sendrawto_one(sptr,
     ":%s NOTE BOUNCER ALIAS_ATTACHED :Attached to session %s as alias on %s",
