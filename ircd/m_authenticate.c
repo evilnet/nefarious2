@@ -88,6 +88,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
+#include "list.h"
 #include "ircd_snprintf.h"
 #include "msg.h"
 #include "numeric.h"
@@ -128,6 +129,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       do {
         cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
       } while (!cli_saslcookie(cptr));
+      if (cli_auth(cptr))
+        auth_sasl_start(cli_auth(cptr));
       first = 1;
     }
 
@@ -151,9 +154,11 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       auth_send_sasl_data(cptr, parv[1]);
     }
 
-    if (!t_active(&cli_sasltimeout(cptr)))
-      timer_add(timer_init(&cli_sasltimeout(cptr)), sasl_timeout_callback, (void*) cptr,
+    if (!t_active(&cli_sasltimeout(cptr))) {
+      cli_freeflag(cptr) |= FREEFLAG_SASLTIMER;
+      timer_add(&cli_sasltimeout(cptr), sasl_timeout_callback, cli_connect(cptr),
                 TT_RELATIVE, feature_int(FEAT_SASL_TIMEOUT));
+    }
 
     return 0;
   }
@@ -180,6 +185,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     do {
       cli_saslcookie(cptr) = ircrandom() & 0x7fffffff;
     } while (!cli_saslcookie(cptr));
+    if (cli_auth(cptr))
+      auth_sasl_start(cli_auth(cptr));
     first = 1;
   }
 
@@ -228,28 +235,48 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
     }
   }
 
-  if (!t_active(&cli_sasltimeout(cptr)))
-    timer_add(timer_init(&cli_sasltimeout(cptr)), sasl_timeout_callback, (void*) cptr,
+  if (!t_active(&cli_sasltimeout(cptr))) {
+    cli_freeflag(cptr) |= FREEFLAG_SASLTIMER;
+    timer_add(&cli_sasltimeout(cptr), sasl_timeout_callback, cli_connect(cptr),
               TT_RELATIVE, feature_int(FEAT_SASL_TIMEOUT));
+  }
 
   return 0;
 }
 
 /** Timeout a given SASL auth request.
- * @param[in] ev A timer event whose associated data is the expired
- *   struct AuthRequest.
+ * The timer lives in the client's Connection and keeps it allocated
+ * (FREEFLAG_SASLTIMER) until the ET_DESTROY event, the same way the
+ * process timer does: resuming registration from ET_EXPIRE may exit
+ * the client, and timer_run() still touches the timer afterwards.
+ * @param[in] ev A timer event whose associated data is the
+ *   struct Connection.
  */
 static void sasl_timeout_callback(struct Event* ev)
 {
   struct Client *cptr;
+  struct Connection *con;
 
   assert(0 != ev_timer(ev));
   assert(0 != t_data(ev_timer(ev)));
+  assert(ET_DESTROY == ev_type(ev) || ET_EXPIRE == ev_type(ev));
 
-  if (ev_type(ev) == ET_EXPIRE) {
-    cptr = (struct Client*) t_data(ev_timer(ev));
+  con = (struct Connection*) t_data(ev_timer(ev));
+  cptr = con_client(con);
 
-   abort_sasl(cptr, 1);
+  assert(0 == cptr || con == cli_connect(cptr));
+
+  if (ev_type(ev) == ET_DESTROY) {
+    con_freeflag(con) &= ~FREEFLAG_SASLTIMER;
+
+    if (!con_freeflag(con) && !cptr)
+      free_connection(con); /* client is being destroyed */
+  } else if (cptr) {
+    abort_sasl(cptr, 1);
+    /* SASL no longer holds registration; let it continue.  This may
+     * exit cptr; nothing below touches it. */
+    if (cli_auth(cptr))
+      auth_sasl_done(cli_auth(cptr));
   }
 }
 
