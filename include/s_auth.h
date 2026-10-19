@@ -52,6 +52,7 @@ extern int auth_cap_start(struct AuthRequest *auth);
 extern int auth_cap_done(struct AuthRequest *auth);
 extern void auth_sasl_start(struct AuthRequest *auth);
 extern int auth_sasl_done(struct AuthRequest *auth);
+extern void auth_sasl_clear(struct AuthRequest *auth);
 extern void auth_end_loc(struct AuthRequest *auth);
 extern void destroy_auth_request(struct AuthRequest *req);
 extern void auth_detach_client(struct AuthRequest *auth);

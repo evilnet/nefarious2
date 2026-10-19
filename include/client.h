@@ -425,6 +425,7 @@ struct Connection
                                       client */
   struct Timer        con_proc;      /**< process latent messages from
                                       client */
+  struct Timer        con_sasltimeout; /**< timeout timer for SASL */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) — for bouncer
                                         sessions this becomes the union of all
@@ -573,7 +574,6 @@ struct Client {
   char cli_saslkcid[ACCOUNT_ID_LEN + 1]; /**< SASL authenticated Keycloak user id, compact; "" = none */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
   time_t cli_saslstart;             /**< When SASL authentication started (for stale response detection) */
-  struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
   struct SASLSession* cli_saslsession; /**< Local SASL session state (NULL if not using local path) */
 
   /* IRCv3 draft/account-registration */
@@ -788,7 +788,7 @@ struct Client {
 /** Get SASL start timestamp. */
 #define cli_saslstart(cli)      ((cli)->cli_saslstart)
 /** Get Timer for SASL timeout. */
-#define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
+#define cli_sasltimeout(cli)     con_sasltimeout(cli_connect(cli))
 /** Get local SASL session (may be NULL). */
 #define cli_saslsession(cli)     ((cli)->cli_saslsession)
 /** Get the REGISTER in-flight cookie (nonzero => a chain is outstanding). */
@@ -969,6 +969,8 @@ struct Client {
 #define con_socket(con)		((con)->con_socket)
 /** Get the Timer for processing more data from the connection. */
 #define con_proc(con)		((con)->con_proc)
+/** Get the SASL timeout timer for the connection. */
+#define con_sasltimeout(con)	((con)->con_sasltimeout)
 /** Get the peer's capabilities for the connection. */
 #define con_capab(con)          (&(con)->con_capab)
 /** Get the active capabilities for the connection (union for bouncer sessions). */
@@ -1625,6 +1627,7 @@ struct Client {
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */
 #define FREEFLAG_TIMER	0x0002	/**< timer needs to be freed */
+#define FREEFLAG_SASLTIMER	0x0004	/**< SASL timer needs to be freed */
 
 /* server notice stuff */
 

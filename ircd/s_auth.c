@@ -1834,6 +1834,18 @@ int auth_sasl_done(struct AuthRequest *auth)
   return check_auth_finished(auth);
 }
 
+/** Drop the SASL hold without re-checking registration.
+ * For callers that already run inside check_auth_finished() (the
+ * abort in auth_complete_sasl()) or while the client is being torn
+ * down (exit_client()), where resuming registration would be wrong.
+ * @param[in] auth Authorization request for client.
+ */
+void auth_sasl_clear(struct AuthRequest *auth)
+{
+  assert(auth != NULL);
+  FlagClr(&auth->flags, AR_SASL_PENDING);
+}
+
 /** Check if IAuth is configured to handle SASL authentication.
  * @return Non-zero if IAuth handles SASL, zero otherwise.
  */
