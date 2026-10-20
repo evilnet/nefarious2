@@ -606,15 +606,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
         /* Post-registration fakelag credit: modern clients burst init
          * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
          * the default ~10s cli_since headroom covers only ~5 of them.
-         * Start the client in surplus -- every command is still CHARGED
-         * (credit, not exemption), the one-shot grace just raises the
-         * initial burst budget; recvq byte caps still bound the wire.
+         * A credit the first charges absorb (fakelag_charge()) -- every
+         * command is still CHARGED (credit, not exemption), the one-shot
+         * grace just raises the initial burst budget; recvq byte caps still
+         * bound the wire.  Not a clock set below now: read_packet() floors
+         * the clock to the last read time and would erase that.
    * Authenticated clients only: an anonymous connection (the
    * drive-by/WS-flood surface) keeps the classic ~5-command burst. */
         {
           int grace = feature_int(FEAT_POSTREG_GRACE);
           if (grace > 0 && IsAccount(ghost))
-            cli_since(ghost) = CurrentTime - grace;
+            cli_lagcredit(ghost) = grace;
         }
 
         /* IRCv3 draft/metadata-2: mirror the normal-path self-metadata
@@ -818,15 +820,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
     /* Post-registration fakelag credit: modern clients burst init
      * commands (MONITOR, METADATA SUB, WHO, MODE...) right after 001;
      * the default ~10s cli_since headroom covers only ~5 of them.
-     * Start the client in surplus -- every command is still CHARGED
-     * (credit, not exemption), the one-shot grace just raises the
-     * initial burst budget; recvq byte caps still bound the wire.
+     * A credit the first charges absorb (fakelag_charge()) -- every
+     * command is still CHARGED (credit, not exemption), the one-shot
+     * grace just raises the initial burst budget; recvq byte caps still
+     * bound the wire.  Not a clock set below now: read_packet() floors
+     * the clock to the last read time and would erase that.
    * Authenticated clients only: an anonymous connection (the
    * drive-by/WS-flood surface) keeps the classic ~5-command burst. */
     {
       int grace = feature_int(FEAT_POSTREG_GRACE);
       if (grace > 0 && IsAccount(sptr))
-        cli_since(sptr) = CurrentTime - grace;
+        cli_lagcredit(sptr) = grace;
     }
 
     /* IRCv3 draft/metadata-2: burst client's own metadata after registration.
