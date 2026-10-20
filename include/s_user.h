@@ -93,6 +93,8 @@ extern int set_user_mode(struct Client *cptr, struct Client *sptr,
 extern void do_oper(struct Client* cptr, struct Client* sptr,
                     struct ConfItem* aconf, int flags);
 extern int user_set_away(struct User *user, char *message);
+extern int away_apply(struct Client *cptr, struct Client *sptr,
+                      char *away_message, int interactive);
 /* draft/pre-away: a user whose every connection said AWAY * is stored and
  * relayed as away "*"; only a client that did not negotiate draft/pre-away
  * is shown FEAT_AWAY_STAR_MSG instead, at the moment we write to it. */

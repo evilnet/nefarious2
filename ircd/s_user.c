@@ -632,6 +632,16 @@ int register_user(struct Client *cptr, struct Client *sptr)
          * +s ...); tell it what they are, as registration would. */
         send_umode_signon(ghost);
 
+        /* The reviving socket's pre-registration AWAY (draft/pre-away),
+         * carried over by bounce_revive(); applied here as the fresh
+         * path does after the MOTD.  Through away_apply() so the
+         * session re-aggregates and the channels get away-notify. */
+        if (con_pre_away(cli_connect(ghost)))
+          away_apply(ghost, ghost,
+                     con_pre_away(cli_connect(ghost)) == 2
+                       ? (char *)"*" : con_pre_away_msg(cli_connect(ghost)),
+                     0);
+
         /* Replay channel state */
         bounce_send_channel_state(ghost);
 
@@ -837,36 +847,17 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (IsIPChecked(sptr))
       IPcheck_connect_succeeded(sptr);
 
-    /* Apply pre-away state if set (IRCv3 draft/pre-away) */
-    {
-      int pre_away_type = con_pre_away(cli_connect(sptr));
-      if (pre_away_type) {
-        if (pre_away_type == 2) {
-          /* AWAY * - away with an unspecified reason, stored as the star
-           * (shown to non-pre-away clients as FEAT_AWAY_STAR_MSG at
-           * emission, see away_text_for). */
-          if (!user->away) {
-            user->away = (char*) MyMalloc(2);
-            user->away[0] = '*';
-            user->away[1] = '\0';
-          }
-          /* Don't broadcast AWAY * to servers - it's a hidden connection */
-        } else {
-          /* Normal away with message */
-          unsigned int len = strlen(con_pre_away_msg(cli_connect(sptr)));
-          if (user->away)
-            MyFree(user->away);
-          user->away = (char*) MyMalloc(len + 1);
-          strcpy(user->away, con_pre_away_msg(cli_connect(sptr)));
-          /* Broadcast to servers */
-          sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", user->away);
-        }
-        /* Clear pre-away state */
-        con_pre_away(cli_connect(sptr)) = 0;
-        con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-
-      }
-    }
+    /* Apply a pre-registration AWAY (IRCv3 draft/pre-away) the way a
+     * live AWAY is applied: own state, session aggregation and
+     * replication, network broadcast.  con_pre_away stays set -- it IS
+     * this connection's own state, and the aggregation reads it;
+     * clearing it here made a pre-away AWAY * count as present.  No
+     * numerics: the pre-registration AWAY got none either. */
+    if (con_pre_away(cli_connect(sptr)))
+      away_apply(sptr, sptr,
+                 con_pre_away(cli_connect(sptr)) == 2
+                   ? (char *)"*" : con_pre_away_msg(cli_connect(sptr)),
+                 0);
 
     /* Replay channel state and chathistory after session resume. */
     if (auto_resumed && auto_session) {
