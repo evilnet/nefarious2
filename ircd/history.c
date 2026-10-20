@@ -1407,14 +1407,20 @@ store_retry:
     if (rc != DB_OK) goto store_wb_fail;
   }
 
-  /* target → last-timestamp (folded key, like the message rows).  Only
-   * MESSAGE rows bump it: TARGETS is "ordered by the time of the latest
-   * message" (spec), and bumping on JOIN/PART/MODE/... floated churning
+  /* target → last-timestamp (folded key, like the message rows).
+   * Message rows bump it: TARGETS is "ordered by the time of the latest
+   * message" (spec), and bumping on JOIN/PART/KICK/MODE floated churning
    * channels to the top and listed event-only channels as conversations
-   * (audit 2026-09-06 #23/#28). */
+   * (audit 2026-09-06 #23/#28).  A REDACT and a TOPIC change bump it too
+   * (user decision 2026-10-20): both change what a reader of the
+   * conversation sees, and a client that orders its catch-up with
+   * TARGETS and skips a target whose stamp it already holds would
+   * otherwise keep a deleted message on screen, or miss the topic, in
+   * a channel quiet since.  KICK stays out. */
   if (type == HISTORY_PRIVMSG || type == HISTORY_NOTICE
       || type == HISTORY_TAGMSG || type == HISTORY_MULTILINE
-      || type == HISTORY_GAP) {
+      || type == HISTORY_GAP
+      || type == HISTORY_REDACT || type == HISTORY_TOPIC) {
     char tkey[CHANNELLEN + 2];
     struct db_val cur = { NULL, 0 };
     int newer = 1;
