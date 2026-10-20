@@ -2872,8 +2872,12 @@ static void complete_targets_fed(struct FedRequest *req)
   filter_targets_window(&merged, ctx->ts1, ctx->ts2);
 
   /* Send to client with access filtering and limit enforcement */
+  /* Complete only if nothing was cut: a storage server that timed out
+   * or capped its rows (fed_truncated) leaves targets unlisted, and the
+   * end tag would tell the client it may skip them. */
   send_targets_batch(client, merged, req->limit, req->label,
-                     ctx->local_count + ctx->fed_count < req->limit);
+                     ctx->local_count + ctx->fed_count < req->limit
+                     && !req->fed_truncated);
 
   history_free_targets(merged);
 }
