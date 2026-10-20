@@ -498,6 +498,9 @@ struct BouncerSession {
   unsigned int hs_attach_count;       /**< Number of times resumed from HOLDING */
   unsigned int hs_connect_count;      /**< Total connections (resumes + alias attaches) */
   time_t hs_total_active;             /**< Cumulative active time (seconds) */
+  time_t hs_attach_time;              /**< When the primary last got a live
+                                         socket (0 = none); the stretch
+                                         hs_total_active accrues at hold */
   struct Timer hs_hold_timer;         /**< Expiry timer for HOLDING state */
   struct Timer hs_promote_timer;      /**< 0-tick deferred-promote timer
                                        *   (cross-server clean-QUIT path)
@@ -824,7 +827,7 @@ extern int bounce_attach(struct BouncerSession *session, struct Client *cptr);
  * @param[in] session Session to detach.
  * @return 0 on success.
  */
-extern int bounce_detach(struct BouncerSession *session);
+extern time_t bounce_hold_remaining(struct BouncerSession *session);
 
 /** Destroy a session entirely.
  * @param[in] session Session to destroy.

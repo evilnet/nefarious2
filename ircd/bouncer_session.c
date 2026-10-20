@@ -682,6 +682,9 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
 /* ---------------------------------------------------------------- */
 
 /** Timer callback: session hold has expired. */
+static void bounce_arm_hold_timer(struct BouncerSession *session, time_t min_delay);
+static void bounce_emit_connect_count(struct BouncerSession *session);
+
 static void bounce_hold_expire(struct Event *ev)
 {
   struct BouncerSession *session;
@@ -718,6 +721,13 @@ static void bounce_hold_expire(struct Event *ev)
 
   if (session->hs_state != BOUNCE_HOLDING)
     return; /* Already resumed or destroyed */
+
+  /* The timer fires at the points the decayed hold can change, not only
+   * at the deadline: while time remains, re-arm and wait. */
+  if (bounce_hold_remaining(session) > 0) {
+    bounce_arm_hold_timer(session, 1);
+    return;
+  }
 
   Debug((DEBUG_INFO, "Bouncer: hold expired for %s session %s",
          session->hs_account, session->hs_sessid));
@@ -1422,6 +1432,7 @@ int bounce_create(struct Client *cptr, struct BouncerSession **out)
   session->hs_attach_count = 0;
   session->hs_connect_count = 1; /* Initial connection counts */
   session->hs_total_active = 0;
+  session->hs_attach_time = CurrentTime;
 
   /* Add to hash tables */
   token_hash_add(session);
@@ -1785,7 +1796,9 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
   session->hs_attach_count++;
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
+  session->hs_attach_time = CurrentTime;
   session->hs_disconnect_time = 0;
+  bounce_emit_connect_count(session);
 
   /* Record connect event in connection history */
   bounce_history_connect(session, cli_sock_ip(cptr), cli_sockhost(cptr));
@@ -1808,46 +1821,116 @@ int bounce_attach(struct BouncerSession *session, struct Client *cptr)
  * hold times.  This rewards active use — a mobile device connecting as an
  * alias counts the same as a full resume from HOLDING.
  */
-static time_t bounce_compute_hold_time(struct BouncerSession *session)
+/** The hold a session has earned, before idle decay: base, plus a
+ * quarter of base per connection, plus an hour per 24 h attached, capped
+ * at BOUNCER_MAX_HOLD.  A session that never connected gets base. */
+static time_t bounce_hold_earned(struct BouncerSession *session)
 {
   time_t base = feature_int(FEAT_BOUNCER_SESSION_HOLD);  /* default 4h */
   time_t max  = feature_int(FEAT_BOUNCER_MAX_HOLD);      /* default 14d */
   time_t computed;
-  int decay_pct;
 
-  /* Never-used sessions get base hold only */
   if (session->hs_connect_count == 0)
     return base;
 
-  /* Scale by connection count: each connection adds 25% of base, capped at max */
   computed = base + (base * session->hs_connect_count / 4);
 
-  /* Additional bonus for cumulative active time: 1h per 24h active */
   if (session->hs_total_active > 0)
     computed += (session->hs_total_active / 86400) * 3600;
 
-  /* Idle decay: configurable via BOUNCER_HOLD_DECAY_PERCENT (0 = disabled) */
-  decay_pct = feature_int(FEAT_BOUNCER_HOLD_DECAY_PERCENT);
-  if (decay_pct > 0 && session->hs_disconnect_time > 0) {
+  return (computed > max) ? max : computed;
+}
+
+/** The hold a holding session gets, after idle decay (spec: the
+ * adaptive hold, "Idle decay").  After BOUNCER_HOLD_DECAY_PERCENT of the
+ * earned hold has passed idle, the part that remained at that point
+ * halves for every further quarter of the earned hold spent idle; the
+ * total never drops below base.  Before the grace point, or with decay
+ * off, this is the earned hold.  For an active session it is what the
+ * session would get if it were held now. */
+static time_t bounce_compute_hold_time(struct BouncerSession *session)
+{
+  time_t base = feature_int(FEAT_BOUNCER_SESSION_HOLD);
+  time_t earned = bounce_hold_earned(session);
+  int decay_pct = feature_int(FEAT_BOUNCER_HOLD_DECAY_PERCENT);
+
+  if (decay_pct > 0 && session->hs_state == BOUNCE_HOLDING
+      && session->hs_disconnect_time > 0) {
     time_t idle = CurrentTime - session->hs_disconnect_time;
-    time_t decay_start = computed * decay_pct / 100;
-    if (idle > decay_start) {
-      time_t over = idle - decay_start;
-      time_t decay_unit = computed / 4;
-      if (decay_unit > 0) {
-        int halvings = over / decay_unit;
-        if (halvings > 0) {
-          time_t remaining = computed - idle;
-          int i;
-          for (i = 0; i < halvings && remaining > base; i++)
-            remaining = remaining / 2;
-          computed = idle + ((remaining > base) ? remaining : base);
-        }
-      }
+    time_t decay_start = earned * decay_pct / 100;
+    time_t decay_unit = earned / 4;
+    if (idle > decay_start && decay_unit > 0) {
+      time_t remaining = earned - decay_start;
+      time_t halvings = (idle - decay_start) / decay_unit;
+      time_t computed;
+      while (halvings-- > 0 && remaining > 0)
+        remaining /= 2;
+      computed = decay_start + remaining;
+      return computed < base ? base : computed;
     }
   }
+  return earned;
+}
 
-  return (computed > max) ? max : computed;
+/** Seconds until a holding session expires, by the decayed hold; 0 when
+ * it is not holding or is overdue.  The single source for the timer,
+ * BOUNCER LIST/INFO and /CHECK, so they cannot disagree. */
+time_t bounce_hold_remaining(struct BouncerSession *session)
+{
+  time_t deadline;
+
+  if (session->hs_state != BOUNCE_HOLDING || session->hs_disconnect_time <= 0)
+    return 0;
+  deadline = session->hs_disconnect_time + bounce_compute_hold_time(session);
+  return deadline > CurrentTime ? deadline - CurrentTime : 0;
+}
+
+/** Add the stretch since the primary got its socket to the session's
+ * active time.  Called at hold; the DB save adds the open stretch
+ * without closing it. */
+static void bounce_accrue_active(struct BouncerSession *session)
+{
+  if (session->hs_attach_time > 0 && CurrentTime > session->hs_attach_time)
+    session->hs_total_active += CurrentTime - session->hs_attach_time;
+  session->hs_attach_time = 0;
+}
+
+/** Arm (or re-arm, from inside bounce_hold_expire) the hold timer.  With
+ * decay on, the hold shrinks while the session sits idle, so the timer
+ * fires at the next point the decayed hold can change -- the grace
+ * point, then each decay-unit boundary -- and bounce_hold_expire()
+ * re-evaluates; without decay it fires at the deadline.  min_delay
+ * bounds how soon (restore gives a settling period). */
+static void bounce_arm_hold_timer(struct BouncerSession *session, time_t min_delay)
+{
+  time_t remaining = bounce_hold_remaining(session);
+  time_t delay = remaining;
+  int decay_pct = feature_int(FEAT_BOUNCER_HOLD_DECAY_PERCENT);
+
+  if (decay_pct > 0 && remaining > 0 && session->hs_disconnect_time > 0) {
+    time_t earned = bounce_hold_earned(session);
+    time_t idle = CurrentTime - session->hs_disconnect_time;
+    time_t decay_start = earned * decay_pct / 100;
+    time_t decay_unit = earned / 4;
+    time_t next;
+    if (idle < decay_start)
+      next = decay_start - idle;
+    else if (decay_unit > 0)
+      next = decay_unit - ((idle - decay_start) % decay_unit);
+    else
+      next = remaining;
+    if (next < delay)
+      delay = next;
+  }
+  if (delay < min_delay)
+    delay = min_delay;
+  if (delay < 1)
+    delay = 1;
+
+  if (!t_active(&session->hs_hold_timer))
+    timer_init(&session->hs_hold_timer);
+  timer_add(&session->hs_hold_timer, bounce_hold_expire,
+            (void *)session, TT_RELATIVE, delay);
 }
 
 /** Public wrapper for adaptive hold time computation. */
@@ -1856,52 +1939,6 @@ time_t bounce_compute_hold_time_ext(struct BouncerSession *session)
   return bounce_compute_hold_time(session);
 }
 
-/** Detach a client from its session (disconnect). */
-int bounce_detach(struct BouncerSession *session)
-{
-  time_t hold_time;
-
-  assert(0 != session);
-
-  /* Update activity counters before detach */
-  if (session->hs_last_active > 0)
-    session->hs_total_active += CurrentTime - session->hs_last_active;
-
-  session->hs_client = NULL;
-  session->hs_disconnect_time = CurrentTime;
-
-  /* Check if hold is enabled for this session */
-  if (session->hs_hold_override == 0) {
-    /* Explicit no-hold override */
-    Debug((DEBUG_INFO, "Bouncer: destroy@detach-no-hold-override sess=%s",
-           session->hs_sessid));
-    bounce_broadcast(session, 'X', NULL);
-    bounce_destroy(session);
-    return 0;
-  }
-
-  if (session->hs_hold_override < 0 &&
-      !feature_bool(FEAT_BOUNCER_DEFAULT_HOLD)) {
-    /* No override, and network default is no-hold */
-    Debug((DEBUG_INFO, "Bouncer: destroy@detach-default-no-hold sess=%s",
-           session->hs_sessid));
-    bounce_broadcast(session, 'X', NULL);
-    bounce_destroy(session);
-    return 0;
-  }
-
-  /* Enter HOLDING state */
-  session->hs_state = BOUNCE_HOLDING;
-  session->hs_enforced = 0; /* Phase 3: no live connection = no class enforcement */
-
-  /* Start hold timer with adaptive duration */
-  hold_time = bounce_compute_hold_time(session);
-  timer_init(&session->hs_hold_timer);
-  timer_add(&session->hs_hold_timer, bounce_hold_expire,
-            (void *)session, TT_RELATIVE, hold_time);
-
-  return 0;
-}
 
 /** Destroy a session entirely. */
 void bounce_destroy(struct BouncerSession *session)
@@ -2777,6 +2814,9 @@ static int bounce_db_put(struct BouncerSession *session)
   else
     rec.bsr_last_msg_time = (int64_t)session->hs_last_msg_time;
   rec.bsr_total_active = (int64_t)session->hs_total_active;
+  if (session->hs_state == BOUNCE_ACTIVE && session->hs_attach_time > 0
+      && CurrentTime > session->hs_attach_time)
+    rec.bsr_total_active += (int64_t)(CurrentTime - session->hs_attach_time);
   rec.bsr_attach_count = session->hs_attach_count;
   rec.bsr_connect_count = session->hs_connect_count;
   if (ghost) {
@@ -3527,15 +3567,8 @@ int bounce_db_restore(void)
      * MAX_HOLD is the absolute ceiling for the expiry check above;
      * the actual timer should match what bounce_hold_client() would use.
      */
-    {
-      time_t adaptive_hold = bounce_compute_hold_time(session);
-      remaining = adaptive_hold - elapsed;
-      if (remaining < 10)
-        remaining = 10; /* minimum 10s grace period */
-    }
-    timer_init(&session->hs_hold_timer);
-    timer_add(&session->hs_hold_timer, bounce_hold_expire,
-              (void *)session, TT_RELATIVE, remaining);
+    bounce_arm_hold_timer(session, 10); /* minimum 10s settling period */
+    remaining = bounce_hold_remaining(session);
 
     restored++;
     log_write(LS_SYSTEM, L_INFO, 0, "bouncer_persist: restored session %s (%s) ghost=%s remaining=%Tu",
@@ -3755,6 +3788,12 @@ void bounce_burst(struct Client *cptr)
                       s->hs_attach_count, s->hs_total_active,
                       chanbuf);
       }
+      /* The connection count is not on the BS C line (positional, kept
+       * as is for older peers); it rides on BX U like la= and aw=. */
+      if (s->hs_client && cli_user(s->hs_client) && cli_user(s->hs_client)->server)
+        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, cptr, "U %s%s cc=%u",
+                      cli_yxx(cli_user(s->hs_client)->server),
+                      cli_yxx(s->hs_client), s->hs_connect_count);
       /* Follow with BS O if this session carries an oper grant, so
        * the newly-linked peer records it on its session.  Without
        * the burst replay, a grant set before the link existed would
@@ -5230,6 +5269,21 @@ struct BouncerSession *bounce_should_hold(struct Client *cptr)
   return NULL;
 }
 
+/** Tell the BX-aware peers a session's connection count (BX U cc=), so a
+ * replica that later becomes the holder arms the same earned hold. */
+static void bounce_emit_connect_count(struct BouncerSession *session)
+{
+  char full_numeric[16];
+  struct Client *primary = session->hs_client;
+
+  if (!primary || !cli_user(primary) || !cli_user(primary)->server)
+    return;
+  ircd_snprintf(0, full_numeric, sizeof(full_numeric), "%s%s",
+                cli_yxx(cli_user(primary)->server), cli_yxx(primary));
+  sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, NULL,
+                        "U %s cc=%u", full_numeric, session->hs_connect_count);
+}
+
 /** Transition a client to bouncer HOLDING state (ghost mode).
  * This is called from s_bsd.c when a disconnect is detected and
  * bounce_should_hold() returned a session.
@@ -5246,7 +5300,6 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
 {
   struct BouncerSession *session;
   struct Membership *member;
-  int hold_time;
 
   session = bounce_should_hold(cptr);
   if (!session)
@@ -5287,11 +5340,10 @@ int bounce_hold_client(struct Client *cptr, const char *comment)
   session->hs_ghost_numeric[sizeof(session->hs_ghost_numeric) - 1] = '\0';  /* redundant: strlcpy already terminates */
   /* hs_client still points to cptr (now a ghost) */
 
-  /* Start hold timer */
-  hold_time = feature_int(FEAT_BOUNCER_SESSION_HOLD);
-  timer_init(&session->hs_hold_timer);
-  timer_add(&session->hs_hold_timer, bounce_hold_expire,
-            (void *)session, TT_RELATIVE, hold_time);
+  /* The stretch this socket was attached becomes active time, then the
+   * hold is the earned one (spec: adaptive hold), not the flat base. */
+  bounce_accrue_active(session);
+  bounce_arm_hold_timer(session, 1);
 
   /* Broadcast detach to all servers (sends channel list for cross-server) */
   bounce_broadcast(session, 'D', NULL);
@@ -5813,7 +5865,9 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   session->hs_attach_count++;
   session->hs_connect_count++;
   session->hs_last_active = CurrentTime;
+  session->hs_attach_time = CurrentTime;
   session->hs_disconnect_time = 0;
+  bounce_emit_connect_count(session);
 
   /* Phase 3 hs_enforced: a reviving client on a CRFLAG_BOUNCER class
    * re-enforces the session.  temp_con (now transplanted) is the
@@ -8844,6 +8898,18 @@ static int bounce_alias_update(struct Client *cptr, struct Client *sptr,
               && la > sess->hs_aliases[i].ba_last_active)
             sess->hs_aliases[i].ba_last_active = la;
       }
+    }
+    goto forward;
+  }
+  if (0 == strncmp(field_value, "cc=", 3)) {
+    struct Client *who = bx_find_user_strict(alias_numeric);
+    unsigned int cc = (unsigned int)strtoul(field_value + 3, NULL, 10);
+    if (who && IsUser(who) && IsAccount(who) && !IsBouncerAlias(who) && cc > 0) {
+      struct AccountSessions *as = bounce_find_by_account(cli_user(who)->account);
+      struct BouncerSession *sess;
+      for (sess = as ? as->as_sessions : NULL; sess; sess = sess->hs_anext)
+        if (sess->hs_client == who)
+          sess->hs_connect_count = cc;
     }
     goto forward;
   }
