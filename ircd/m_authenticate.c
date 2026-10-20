@@ -136,14 +136,18 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
           send_reply(cptr, ERR_SASLFAIL, "");
         else
           send_reply(cptr, ERR_SASLABORTED);
-        sasl_abort_local(cptr);
-        return 0;
+        /* Resumes registration; may exit cptr, so return its result. */
+        return sasl_abort_local(cptr);
       }
       /* Notify IAuth if applicable */
       if (auth_iauth_handles_sasl())
         auth_send_sasl_abort(cptr);
-      /* abort_sasl handles P10 notification and state cleanup */
+      /* abort_sasl handles P10 notification and state cleanup; it only
+       * drops the registration hold, so resume registration here.  This
+       * may exit cptr, so return its result. */
       abort_sasl(cptr, 0);
+      if (cli_auth(cptr))
+        return auth_sasl_done(cli_auth(cptr));
     }
     return 0;
   }
