@@ -822,11 +822,12 @@ void checkClient(struct Client *sptr, struct Client *acptr, int flags)
                send_reply(sptr, RPL_DATASTR, outbuf);
             }
             if (t_active(&session->hs_hold_timer)) {
-               time_t remaining = t_expire(&session->hs_hold_timer) - CurrentTime;
-               if (remaining < 0) remaining = 0;
+               /* The timer may fire earlier to re-evaluate idle decay;
+                * the expiry is the decayed deadline. */
+               time_t remaining = bounce_hold_remaining(session);
                ircd_snprintf(0, outbuf, sizeof(outbuf),
                              "   Hold expires:: %s (%ldm %lds remaining)",
-                             myctime(t_expire(&session->hs_hold_timer)),
+                             myctime(CurrentTime + remaining),
                              remaining / 60, remaining % 60);
                send_reply(sptr, RPL_DATASTR, outbuf);
             }
