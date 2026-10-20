@@ -381,6 +381,13 @@ void free_client(struct Client* cptr)
             }
             abort_sasl(acptr, 0);  /* 0 = not a timeout, just abort */
             aborted++;
+            cli_saslagent(acptr) = NULL;
+            /* abort_sasl only drops the registration hold; resume it,
+             * or the client waits for the registration timeout.  This
+             * may exit acptr; nothing below touches it. */
+            if (cli_auth(acptr))
+              auth_sasl_done(cli_auth(acptr));
+            continue;
           }
           cli_saslagent(acptr) = NULL;
         }

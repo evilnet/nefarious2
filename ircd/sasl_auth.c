@@ -2203,8 +2203,7 @@ int sasl_continue(struct Client *sptr, const char *data)
    * with dummy data or "*".  Either way, we send ERR_SASLFAIL and clean up. */
   if (session->state == SASL_STATE_FAILED) {
     send_reply(sptr, ERR_SASLFAIL, "");
-    sasl_abort_local(sptr);
-    return 0;
+    return sasl_abort_local(sptr);
   }
 
   /* Only accept data in states that expect client messages.
@@ -2246,8 +2245,7 @@ int sasl_continue(struct Client *sptr, const char *data)
       size_t new_alloc = session->data_len + chunk_len + 1;
       if (new_alloc > SASL_DATA_MAX) {
         send_reply(sptr, ERR_SASLTOOLONG);
-        sasl_abort_local(sptr);
-        return 0;
+        return sasl_abort_local(sptr);
       }
       session->accumulated_data = (char *)MyRealloc(session->accumulated_data, new_alloc);
       session->data_alloc = new_alloc;
@@ -2275,8 +2273,7 @@ dispatch:
       if (!sasl_base64_decode(session->accumulated_data, decoded,
                               sizeof(decoded) - 1, &decoded_len)) {
         send_reply(sptr, ERR_SASLFAIL, ": base64 decode failed");
-        sasl_abort_local(sptr);
-        return 0;
+        return sasl_abort_local(sptr);
       }
     }
     /* Null-terminate — SCRAM handlers use strstr/strlen on decoded text */
@@ -2287,43 +2284,37 @@ dispatch:
       case SASL_MECH_PLAIN:
         rc = sasl_handle_plain(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_EXTERNAL:
         rc = sasl_handle_external(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_OAUTHBEARER:
         rc = sasl_handle_oauthbearer(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_SCRAM_SHA256:
         rc = sasl_handle_scram(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
       case SASL_MECH_ECDSA:
         rc = sasl_handle_ecdsa(sptr, decoded, decoded_len);
         if (rc < 0) {
-          sasl_abort_local(sptr);
-          return 0;
+          return sasl_abort_local(sptr);
         }
         break;
 #endif
       default:
         send_reply(sptr, ERR_SASLFAIL, ": unsupported mechanism");
-        sasl_abort_local(sptr);
-        return 0;
+        return sasl_abort_local(sptr);
     }
   }
 
@@ -2346,9 +2337,11 @@ int sasl_abort_local(struct Client *sptr)
   cli_saslstart(sptr) = 0;
   sasl_session_free(sptr);
 
-  /* Unblock registration */
+  /* Unblock registration.  The result is whether sptr survived it
+   * (CPTR_KILLED when registration exits the client); a handler that
+   * returns this to the parser must not touch sptr afterwards. */
   if (cli_auth(sptr))
-    auth_sasl_done(cli_auth(sptr));
+    return auth_sasl_done(cli_auth(sptr));
 
   return 0;
 }
