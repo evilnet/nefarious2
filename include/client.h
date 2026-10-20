@@ -384,6 +384,9 @@ struct Connection
   time_t              con_nextaway;  /**< Next time an AWAY change is allowed */
   time_t              con_lasttime;  /**< Last time data read from socket */
   time_t              con_since;     /**< Last time we accepted a command */
+  int                 con_lagcredit; /**< Fake-lag seconds still to be
+                                        absorbed before con_since is
+                                        charged (post-registration grace) */
   struct MsgQ         con_sendQ;     /**< Outgoing message queue */
   struct DBuf         con_recvQ;     /**< Incoming data yet to be parsed */
   unsigned int        con_sendM;     /**< Stats: protocol messages sent */
@@ -631,6 +634,8 @@ struct Client {
 #define cli_lasttime(cli)	con_lasttime(cli_connect(cli))
 /** Get time we last parsed something from the client. */
 #define cli_since(cli)		con_since(cli_connect(cli))
+/** Get the client's unspent fake-lag credit. */
+#define cli_lagcredit(cli)	con_lagcredit(cli_connect(cli))
 /** Get time client was created. */
 #define cli_firsttime(cli)	((cli)->cli_firsttime)
 /** Get time client last changed nickname. */
@@ -915,6 +920,8 @@ struct Client {
 #define con_lasttime(con)       ((con)->con_lasttime)
 /** Get last time we accepted a command from the connection. */
 #define con_since(con)          ((con)->con_since)
+/** Get the connection's unspent fake-lag credit. */
+#define con_lagcredit(con)      ((con)->con_lagcredit)
 /** Get SendQ for connection. */
 #define con_sendQ(con)		((con)->con_sendQ)
 /** Get RecvQ for connection. */

@@ -42,6 +42,7 @@ CMOCKA_TESTPROGS = \
 	chathistory_presence_cmocka \
 	recv_classify_cmocka \
 	register_throttle_cmocka \
+	fakelag_cmocka \
 	webpush_mute_cmocka \
 	webpush_expiry_cmocka \
 	webpush_keyring_cmocka \
@@ -79,6 +80,7 @@ DEP_SRC = \
 	chathistory_presence_cmocka.c \
 	recv_classify_cmocka.c \
 	register_throttle_cmocka.c \
+	fakelag_cmocka.c \
 	webpush_mute_cmocka.c \
 	webpush_expiry_cmocka.c \
 	webpush_keyring_cmocka.c \
@@ -214,6 +216,11 @@ register_throttle_test.o: ../register_throttle.c ../../include/register_throttle
 REGISTER_THROTTLE_CMOCKA_OBJS = register_throttle_cmocka.o register_throttle_test.o
 register_throttle_cmocka: $(REGISTER_THROTTLE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(REGISTER_THROTTLE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# fake-lag credit: header-only (include/fakelag.h)
+FAKELAG_CMOCKA_OBJS = fakelag_cmocka.o
+fakelag_cmocka: $(FAKELAG_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(FAKELAG_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # kc_url tests - vendored libkc URL builders.  kc_url.c calls
 # curl_easy_escape in kc_url_group_by_path, hence -lcurl.  The test

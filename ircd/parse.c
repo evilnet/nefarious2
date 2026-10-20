@@ -38,6 +38,7 @@
 #include "ircd_alloc.h"
 #include "ircd_chattr.h"
 #include "ircd_features.h"
+#include "fakelag.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
@@ -1667,7 +1668,7 @@ parse_client(struct Client *cptr, char *buffer, char *bufend)
      * .claude/para/projects/multiline-cooldown.md.
      */
     if (!cli_ml_batch_id(cptr)[0])
-      cli_since(cptr) += lag;
+      cli_since(cptr) += fakelag_charge(&cli_lagcredit(cptr), lag);
   }
   /*
    * Allow only 1 msg per 2 seconds
