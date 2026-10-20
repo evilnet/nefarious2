@@ -208,19 +208,27 @@ void away_notify_channel(struct Client *sptr, struct Channel *chptr,
 
 
 /*
- * m_away - generic message handler
- * - Added 14 Dec 1988 by jto.
- *
- * parv[0] = sender prefix
- * parv[1] = away message
- *
  * FEAT_AWAY_THROTTLE: Minimum seconds between AWAY changes (0 = disabled).
  * Prevents scripts that reset away message every few seconds from
- * generating excessive network traffic.
+ * generating excessive network traffic.  Applied in away_apply() for a
+ * client's own AWAY only.
  */
-int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+/** Apply an away state to a local user as the AWAY command would:
+ * per-connection own state, session aggregation and replication
+ * (bounce_note_away_state), the network broadcast and away-notify.
+ * @param[in] cptr Connection the change came in on (== sptr).
+ * @param[in] sptr User whose state changes.
+ * @param[in] away_message New message; empty or NULL = present; "*" =
+ *   away-star (draft/pre-away).
+ * @param[in] interactive Non-zero for a client's own AWAY: the throttle
+ *   applies and RPL_NOWAWAY/RPL_UNAWAY are sent.  Zero when registration
+ *   applies a pre-registration AWAY (draft/pre-away), which got no
+ *   numerics then and gets none now.
+ * @return Zero.
+ */
+int away_apply(struct Client *cptr, struct Client *sptr, char *away_message,
+               int interactive)
 {
-  char* away_message = parv[1];
   int was_away = cli_user(sptr)->away != 0;
   int is_away;
   int is_away_star = 0;
@@ -259,7 +267,7 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
    * Not in the session path: its effective-state change detection
    * already suppresses redundant broadcasts. */
   throttle = feature_int(FEAT_AWAY_THROTTLE);
-  if (throttle > 0 && !bsess) {
+  if (interactive && throttle > 0 && !bsess) {
     if (CurrentTime < cli_nextaway(cptr)) {
       /* Too soon - silently ignore (no error to avoid spam) */
       return 0;
@@ -275,30 +283,34 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * emission (away_text_for / away_notify_common). */
   }
 
+  /* Update the connection's OWN away state, on every path: a session
+   * aggregates from it and the replicas read it (BX U aw=), and a
+   * connection that joins a session later brings it along.  Stored in
+   * con_pre_away/con_pre_away_msg so it survives effective-state
+   * updates to cli_user->away. */
+  if (is_away_star) {
+    con_pre_away(cli_connect(sptr)) = 2;
+    con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+  } else if (!EmptyString(away_message)) {
+    con_pre_away(cli_connect(sptr)) = 1;
+    ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN + 1);
+  } else {
+    con_pre_away(cli_connect(sptr)) = 0;
+    con_pre_away_msg(cli_connect(sptr))[0] = '\0';
+  }
+
   if (bsess) {
     int new_effective = 0;
     char new_msg[AWAYLEN + 1];
     int is_away = !EmptyString(away_message);
 
-    /* Update per-connection away state.
-     * Store both the state and the message in con_pre_away/con_pre_away_msg
-     * so they survive effective-state updates to cli_user->away. */
-    if (is_away_star) {
-      con_pre_away(cli_connect(sptr)) = 2;
-      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-    } else if (is_away) {
-      con_pre_away(cli_connect(sptr)) = 1;
-      ircd_strncpy(con_pre_away_msg(cli_connect(sptr)), away_message, AWAYLEN + 1);
-    } else {
-      con_pre_away(cli_connect(sptr)) = 0;
-      con_pre_away_msg(cli_connect(sptr))[0] = '\0';
-    }
-
     /* Send the appropriate reply to the user */
     if (is_away || is_away_star) {
-      send_reply(sptr, RPL_NOWAWAY);
+      if (interactive)
+        send_reply(sptr, RPL_NOWAWAY);
     } else {
-      send_reply(sptr, RPL_UNAWAY);
+      if (interactive)
+        send_reply(sptr, RPL_UNAWAY);
     }
     /* Other servers judge attention (webpush) and aggregate away from
      * each connection's OWN state; the effective state broadcast below
@@ -432,7 +444,8 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
           sendcmdto_want_s2s_tags(1);
         sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, ":%s", away_message);
       }
-      send_reply(sptr, RPL_NOWAWAY);
+      if (interactive)
+        send_reply(sptr, RPL_NOWAWAY);
       away_notify_common(sptr, sptr, away_message);
     }
     else {
@@ -440,13 +453,29 @@ int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
         sendcmdto_set_s2s_tags(away_time_ms, away_msgid);
         sendcmdto_want_s2s_tags(1);
       sendcmdto_serv_butone(sptr, CMD_AWAY, cptr, "");
-      send_reply(sptr, RPL_UNAWAY);
+      if (interactive)
+        send_reply(sptr, RPL_UNAWAY);
       sendcmdto_common_channels_capab_butone(sptr, CMD_AWAY, sptr, CAP_AWAYNOTIFY, CAP_NONE, "");
     }
 
     sendcmdto_set_client_msgid(NULL);
   }
   return 0;
+}
+
+/*
+ * m_away - generic message handler
+ * - Added 14 Dec 1988 by jto.
+ *
+ * parv[0] = sender prefix
+ * parv[1] = away message
+ */
+int m_away(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
+{
+  assert(0 != cptr);
+  assert(cptr == sptr);
+
+  return away_apply(cptr, sptr, parv[1], 1);
 }
 
 /*

@@ -5648,6 +5648,15 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
    * timestamp and ID to reflect this new connection. */
   bounce_accumulate_and_reset_primary(session, ghost);
   cli_firsttime(ghost) = cli_firsttime(temp);
+
+  /* The new socket's pre-registration AWAY (draft/pre-away).  Only when
+   * it declared one: a socket that said nothing leaves the ghost's own
+   * state as it was (an AWAY set before the hold survives the revive). */
+  if (con_pre_away(temp_con)) {
+    con_pre_away(ghost_con) = con_pre_away(temp_con);
+    ircd_strncpy(con_pre_away_msg(ghost_con), con_pre_away_msg(temp_con),
+                 AWAYLEN + 1);
+  }
   /* Record connect event in connection history */
   bounce_history_connect(session, con_sock_ip(ghost_con),
                          cli_sockhost(ghost));
