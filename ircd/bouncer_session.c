@@ -3023,6 +3023,9 @@ static struct Client *bounce_create_ghost(struct BounceSessionRecord *rec)
   ghost = make_client(NULL, STAT_UNKNOWN);
   if (!ghost)
     return NULL;
+  /* Never registered: the zeroed fake-lag cache would read as "off". */
+  cli_lag_min(ghost) = -2;
+  cli_lag_factor(ghost) = -2;
 
   /* Create User struct */
   user = make_user(ghost);
@@ -5692,6 +5695,17 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   det_confs_butmask(ghost, 0);
   con_confs(ghost_con) = con_confs(temp_con);
   con_confs(temp_con) = NULL;
+
+  /* The class values cached on the ghost's Connection belong to the class
+   * it registered under -- or, for a ghost restored from the DB, to no
+   * class at all: a zeroed Connection caches fake lag 0, which reads as
+   * "fake lag off", and a restored ghost never passes register_user()'s
+   * reset.  The reviving socket brought its own confs: look them up
+   * again, as register_user() and OPER do. */
+  con_lag_min(ghost_con) = -2;
+  con_lag_factor(ghost_con) = -2;
+  con_max_sendq(ghost_con) = 0;
+  con_max_recvq(ghost_con) = 0;
 
   /* Step 6b: Reset data counters and update connection identity.
    * Ghost's data counters may be stale from a prior connection (or from
