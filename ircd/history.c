@@ -64,6 +64,7 @@
 #include <time.h>
 #include <stdint.h>
 #include <sys/time.h>
+#include "history_stamp.h"
 
 /* Forward declarations for quota functions */
 static int quota_increment(const char *channel, const char *account);
@@ -1266,6 +1267,35 @@ static int msgid_index_resolve(const char *msgid, const char *target,
   return (rc == 0) ? 0 : -1;
 }
 
+/** Stage a target's TARGETS-index stamp on \a wb, keeping the later of
+ * the stamp held and \a timestamp.  max(), not a blind overwrite: a row
+ * arriving late with an OLDER stamp (S2S lag, CH W, a relayed QUIT, a
+ * multiline batch from another server) must not move the target's
+ * "latest" backwards.  Every store path goes through here.
+ * @return DB_OK, or the failing db status / -1 for a bad target.
+ */
+static int stage_target_stamp(struct db_writebatch *wb, const char *target,
+                              const char *timestamp)
+{
+  char tkey[CHANNELLEN + 2];
+  struct db_val cur = { NULL, 0 };
+  int newer = 1;
+  int tlen = build_target_key(tkey, sizeof(tkey), target);
+
+  if (tlen < 0)
+    return -1;
+  if (db_get(history_db_env, history_cf_targets, tkey, (size_t)tlen,
+             NULL, &cur) == DB_OK && cur.base && cur.len > 0) {
+    newer = history_stamp_newer(timestamp, strlen(timestamp),
+                                (const char *)cur.base, cur.len);
+    db_val_free(&cur);
+  }
+  if (!newer)
+    return DB_OK;
+  return db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
+                           timestamp, strlen(timestamp));
+}
+
 /** Stage deletion of @a msgid's index rows for @a target: the exact
  * new-scheme row plus the legacy bare-key row (shared across targets
  * -- legacy rows can't be split; they only shrink toward extinction). */
@@ -1421,28 +1451,8 @@ store_retry:
       || type == HISTORY_TAGMSG || type == HISTORY_MULTILINE
       || type == HISTORY_GAP
       || type == HISTORY_REDACT || type == HISTORY_TOPIC) {
-    char tkey[CHANNELLEN + 2];
-    struct db_val cur = { NULL, 0 };
-    int newer = 1;
-    int tlen = build_target_key(tkey, sizeof(tkey), target);
-    if (tlen < 0) { rc = -1; goto store_wb_fail; }
-    /* max(), not a blind overwrite: a row arriving late with an OLDER
-     * stamp (S2S lag, CH W, a relayed QUIT) must not move the target's
-     * "latest" backwards.  Stamps are fixed-width "sec.mmm", so a byte
-     * compare orders them. */
-    if (db_get(history_db_env, history_cf_targets, tkey, (size_t)tlen,
-               NULL, &cur) == DB_OK && cur.base && cur.len > 0) {
-      size_t nl = strlen(timestamp);
-      size_t cl = cur.len;
-      int c = memcmp(timestamp, cur.base, nl < cl ? nl : cl);
-      newer = (c > 0) || (c == 0 && nl > cl);
-      db_val_free(&cur);
-    }
-    if (newer) {
-      rc = db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
-                             timestamp, strlen(timestamp));
-      if (rc != DB_OK) goto store_wb_fail;
-    }
+    rc = stage_target_stamp(wb, target, timestamp);
+    if (rc != DB_OK) goto store_wb_fail;
   }
 
   /* Index reply references for draft/chathistory-context lookups.
@@ -1616,13 +1626,9 @@ store_ml_retry:
     if (rc != DB_OK) goto store_ml_fail;
   }
 
-  {
-    char tkey[CHANNELLEN + 2];
-    int tlen = build_target_key(tkey, sizeof(tkey), target);
-    if (tlen < 0) { rc = -1; goto store_ml_fail; }
-    rc = db_writebatch_put(wb, history_cf_targets, tkey, (size_t)tlen,
-                           timestamp, strlen(timestamp));
-  }
+  /* Same max() rule as single messages: a batch relayed late from
+   * another server must not move the target's latest time back. */
+  rc = stage_target_stamp(wb, target, timestamp);
   if (rc != DB_OK) goto store_ml_fail;
 
   rc = db_writebatch_commit(wb, /*sync_durably=*/0);
