@@ -6,7 +6,8 @@
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
-#include <openssl/hmac.h>
+#include <openssl/core_names.h>
+#include <openssl/params.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,8 +30,11 @@ enum kc_sig_result kc_webhook_sig_verify(const char *secret, const char *header,
     size_t i, tl;
     long long t;
     unsigned char given[32], mac[32];
-    unsigned int mac_len = 0;
-    HMAC_CTX *ctx;
+    size_t mac_len = 0;
+    EVP_MAC *hmac;
+    EVP_MAC_CTX *ctx;
+    OSSL_PARAM params[2];
+    int ok;
 
     if (!secret || !secret[0])
         return KC_SIG_MISMATCH;
@@ -67,18 +71,23 @@ enum kc_sig_result kc_webhook_sig_verify(const char *secret, const char *header,
     if (window_s > 0 && (now - t > window_s || t - now > window_s))
         return KC_SIG_STALE;
 
-    ctx = HMAC_CTX_new();
-    if (!ctx)
+    /* HMAC-SHA256 through EVP_MAC (OpenSSL 3): the HMAC_CTX calls are
+     * deprecated since 3.0.  Streaming, so the body is not copied. */
+    hmac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+    ctx = hmac ? EVP_MAC_CTX_new(hmac) : NULL;
+    params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
+                                                 (char *)"SHA256", 0);
+    params[1] = OSSL_PARAM_construct_end();
+    ok = ctx
+        && EVP_MAC_init(ctx, (const unsigned char *)secret, strlen(secret), params) == 1
+        && EVP_MAC_update(ctx, (const unsigned char *)tbuf, tl) == 1
+        && EVP_MAC_update(ctx, (const unsigned char *)".", 1) == 1
+        && EVP_MAC_update(ctx, (const unsigned char *)body, body_len) == 1
+        && EVP_MAC_final(ctx, mac, &mac_len, sizeof(mac)) == 1;
+    EVP_MAC_CTX_free(ctx);
+    EVP_MAC_free(hmac);
+    if (!ok)
         return KC_SIG_MISMATCH;
-    if (HMAC_Init_ex(ctx, secret, (int)strlen(secret), EVP_sha256(), NULL) != 1
-        || HMAC_Update(ctx, (const unsigned char *)tbuf, tl) != 1
-        || HMAC_Update(ctx, (const unsigned char *)".", 1) != 1
-        || HMAC_Update(ctx, (const unsigned char *)body, body_len) != 1
-        || HMAC_Final(ctx, mac, &mac_len) != 1) {
-        HMAC_CTX_free(ctx);
-        return KC_SIG_MISMATCH;
-    }
-    HMAC_CTX_free(ctx);
     if (mac_len != 32 || CRYPTO_memcmp(mac, given, 32) != 0)
         return KC_SIG_MISMATCH;
     if (t_out)
