@@ -147,5 +147,6 @@ extern void send_isupport_update(void);
 void do_names(struct Client* sptr, struct Channel* chptr, int filter);
 
 extern int abort_sasl(struct Client* cptr, int timeout);
+extern void sasl_resume_registration_later(struct Client *cptr);
 
 #endif /* INCLUDED_s_user_h */

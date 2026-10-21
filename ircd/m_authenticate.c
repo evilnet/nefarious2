@@ -375,3 +375,23 @@ static void sasl_timeout_callback(struct Event* ev)
   }
 }
 
+/** Resume a client's registration from the event loop rather than from
+ * the caller's stack.  The SASL timer is re-armed to fire at once; its
+ * callback finds the exchange already cleared (abort_sasl() is then a
+ * no-op) and calls auth_sasl_done().  For callers that must not run
+ * registration inline, such as free_client() of a services server that
+ * split mid-exchange: registration broadcasts to the network and may
+ * exit clients.
+ * @param[in] cptr Local client whose SASL hold was dropped.
+ */
+void sasl_resume_registration_later(struct Client *cptr)
+{
+  if (!MyConnect(cptr) || !cli_auth(cptr))
+    return;
+  if (t_active(&cli_sasltimeout(cptr)))
+    timer_del(&cli_sasltimeout(cptr));
+  cli_freeflag(cptr) |= FREEFLAG_SASLTIMER;
+  timer_add(&cli_sasltimeout(cptr), sasl_timeout_callback, cli_connect(cptr),
+            TT_RELATIVE, 0);
+}
+
