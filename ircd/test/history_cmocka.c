@@ -21,6 +21,7 @@
 /* Include necessary headers */
 #include "ircd_defs.h"
 #include "ircd_chattr.h"
+#include "history_stamp.h"
 
 /* Define constants from history.c */
 #define KEY_SEP '\0'
@@ -953,6 +954,32 @@ static void test_parse_reference_case_sensitive(void **state)
 
 /* ========== Main ========== */
 
+/* TARGETS index max() rule (history_stamp_newer): a row stored late with
+ * an older stamp must not move a target's latest time backwards. */
+static void test_stamp_newer_orders_by_time(void **state)
+{
+  (void)state;
+  assert_true(history_stamp_newer("1792600200.500", 14, "1792600200.499", 14));
+  assert_false(history_stamp_newer("1792600200.499", 14, "1792600200.500", 14));
+  assert_false(history_stamp_newer("1792600200.500", 14, "1792600200.500", 14));
+}
+
+static void test_stamp_newer_late_older_row_loses(void **state)
+{
+  (void)state;
+  /* the newest message is held; a multiline batch stamped a second earlier
+   * arrives afterwards over S2S */
+  assert_false(history_stamp_newer("1792600199.900", 14, "1792600200.100", 14));
+}
+
+static void test_stamp_newer_longer_seconds_wins(void **state)
+{
+  (void)state;
+  assert_true(history_stamp_newer("10000000000.000", 15, "9999999999.999", 14) ||
+              history_stamp_newer("10000000000.000", 15, "1000000000.000", 14));
+  assert_true(history_stamp_newer("1792600200.5001", 15, "1792600200.500", 14));
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -992,6 +1019,9 @@ int main(void)
         cmocka_unit_test(test_sentinel_escape_of_escape_byte),
         cmocka_unit_test(test_forward_encode_split_roundtrip),
         cmocka_unit_test(test_forward_encode_blocks_injection),
+        cmocka_unit_test(test_stamp_newer_orders_by_time),
+        cmocka_unit_test(test_stamp_newer_late_older_row_loses),
+        cmocka_unit_test(test_stamp_newer_longer_seconds_wins),
         cmocka_unit_test(test_multiline_ref_is_type_keyed),
         cmocka_unit_test(test_reserved_vendor_tag),
         cmocka_unit_test(test_deserialize_all_message_types),
