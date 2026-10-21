@@ -310,6 +310,7 @@ struct Connection
                                       client */
   struct Timer        con_proc;      /**< process latent messages from
                                       client */
+  struct Timer        con_sasltimeout; /**< timeout timer for SASL */
   struct CapSet       con_capab;     /**< Client capabilities (from us) */
   struct CapSet       con_active;    /**< Active capabilities (to us) */
   struct AuthRequest* con_auth;      /**< Auth request for client */
@@ -366,7 +367,6 @@ struct Client {
   char cli_saslaccount[ACCOUNTLEN + 1]; /**< SASL authenticated account name */
   time_t cli_saslacccreate;         /**< SASL authenticate account timestamp */
   unsigned int cli_saslcookie;      /**< SASL session cookie */
-  struct Timer cli_sasltimeout;     /**< timeout timer for SASL */
 };
 
 /** Magic constant to identify valid Client structures. */
@@ -461,7 +461,7 @@ struct Client {
 /** Get SASL session cookie. */
 #define cli_saslcookie(cli)     ((cli)->cli_saslcookie)
 /** Get Timer for SASL timeout. */
-#define cli_sasltimeout(cli)     ((cli)->cli_sasltimeout)
+#define cli_sasltimeout(cli)     con_sasltimeout(cli_connect(cli))
 
 /** Get number of incoming bytes queued for client. */
 #define cli_count(cli)		con_count(cli_connect(cli))
@@ -612,6 +612,8 @@ struct Client {
 #define con_socket(con)		((con)->con_socket)
 /** Get the Timer for processing more data from the connection. */
 #define con_proc(con)		((con)->con_proc)
+/** Get the SASL timeout timer for the connection. */
+#define con_sasltimeout(con)	((con)->con_sasltimeout)
 /** Get the peer's capabilities for the connection. */
 #define con_capab(con)          (&(con)->con_capab)
 /** Get the active capabilities for the connection. */
@@ -1046,6 +1048,7 @@ struct Client {
 /* free flags */
 #define FREEFLAG_SOCKET	0x0001	/**< socket needs to be freed */
 #define FREEFLAG_TIMER	0x0002	/**< timer needs to be freed */
+#define FREEFLAG_SASLTIMER	0x0004	/**< SASL timer needs to be freed */
 
 /* server notice stuff */
 

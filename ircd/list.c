@@ -147,6 +147,7 @@ static struct Connection* alloc_connection(void)
 
   memset(con, 0, sizeof(struct Connection));
   timer_init(&(con_proc(con)));
+  timer_init(&(con_sasltimeout(con)));
 
   return con;
 }
@@ -162,6 +163,8 @@ static void dealloc_connection(struct Connection* con)
   assert(con_verify(con));
   assert(!t_active(&(con_proc(con))));
   assert(!t_onqueue(&(con_proc(con))));
+  assert(!t_active(&(con_sasltimeout(con))));
+  assert(!t_onqueue(&(con_sasltimeout(con))));
 
   Debug((DEBUG_LIST, "Deallocating connection %p", con));
 
@@ -303,6 +306,8 @@ void free_client(struct Client* cptr)
 	socket_del(&(cli_socket(cptr))); /* queue a socket delete */
       if (cli_freeflag(cptr) & FREEFLAG_TIMER)
 	timer_del(&(cli_proc(cptr))); /* queue a timer delete */
+      if (cli_freeflag(cptr) & FREEFLAG_SASLTIMER)
+	timer_del(&(cli_sasltimeout(cptr))); /* queue a timer delete */
     }
   }
 

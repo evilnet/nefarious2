@@ -209,6 +209,13 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     cli_saslcookie(acptr) = 0;
     if (t_active(&cli_sasltimeout(acptr)))
       timer_del(&cli_sasltimeout(acptr));
+
+    /* Unblock registration if SASL was holding it.  The result says
+     * whether acptr survived registration; cptr is the server link,
+     * so it must not be returned from here. */
+    if (cli_auth(acptr))
+      auth_sasl_done(cli_auth(acptr));
+    return 0;
   } else if (reply[0] == 'M')
     return send_reply(acptr, ERR_SASLMECHS, data);
 
@@ -248,6 +255,13 @@ int abort_sasl(struct Client* cptr, int timeout) {
     cli_saslagentref(cli_saslagent(cptr))--;
   cli_saslagent(cptr) = NULL;
   cli_saslcookie(cptr) = 0;
+
+  /* Drop the registration hold.  Do not resume registration from
+   * here: auth_complete_sasl() calls this from inside
+   * check_auth_finished(), and exit_client() calls it on a client
+   * that is already closing.  The SASL timeout resumes explicitly. */
+  if (cli_auth(cptr))
+    auth_sasl_clear(cli_auth(cptr));
 
   return 0;
 }
