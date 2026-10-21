@@ -1325,6 +1325,28 @@ unhide_hostmask(struct Client *cptr)
   return 0;
 }
 
+/** Is \a id an account id as it appears on the wire (22 base64url
+ * characters)?  Anything else in that slot is not one and is dropped.
+ * @param[in] id Candidate string.
+ * @return Non-zero if \a id is an account id.
+ */
+int account_id_valid(const char *id)
+{
+  int i;
+
+  if (!id)
+    return 0;
+  for (i = 0; id[i]; i++) {
+    char c = id[i];
+    /* The base64url alphabet, spelled out: IsAlnum() also takes the
+     * characters above 'Z' and 'z' that are letters in a nickname. */
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+          || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+      return 0;
+  }
+  return i == ACCOUNT_ID_LEN;
+}
+
 /** Set a user's mode.  This function checks that \a cptr is trying to
  * set his own mode, prevents local users from setting inappropriate
  * modes through this function, and applies any other side effects of
@@ -1757,7 +1779,18 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 	Debug((DEBUG_DEBUG, "Received timestamped account in user mode; "
 	      "account \"%s\", timestamp %Tu", account,
 	      cli_user(acptr)->acc_create));
-      }
+	{
+	  /* account:ts:id -- the id is carried through as announced. */
+	  const char *id = strchr(ts, ':');
+	  if (id && account_id_valid(id + 1)) {
+	    ircd_strncpy(cli_user(acptr)->kc_id, id + 1, sizeof(cli_user(acptr)->kc_id));
+	    Debug((DEBUG_DEBUG, "Received account id %s in user mode for "
+		   "\"%s\"", cli_user(acptr)->kc_id, account));
+	  } else
+	    cli_user(acptr)->kc_id[0] = '\0';
+	}
+      } else
+	cli_user(acptr)->kc_id[0] = '\0';   /* +r arrived without one */
       ircd_strncpy(cli_user(acptr)->account, account, len);
   }
 
@@ -1911,13 +1944,19 @@ char *umode_str(struct Client *cptr)
       ; /* Empty loop */
     m--; /* back up over nul-termination */
 
-    if (cli_user(cptr)->acc_create) {
-      char nbuf[20];
+    if (cli_user(cptr)->acc_create || cli_user(cptr)->kc_id[0]) {
+      char nbuf[24 + ACCOUNT_ID_LEN];
       Debug((DEBUG_DEBUG, "Sending timestamped account in user mode for "
 	     "account \"%s\"; timestamp %Tu", cli_user(cptr)->account,
 	     cli_user(cptr)->acc_create));
-      ircd_snprintf(0, t = nbuf, sizeof(nbuf), ":%Tu",
-		    cli_user(cptr)->acc_create);
+      /* ":ts" as before; with an id, ":ts:id" -- ts is 0 when unknown so
+       * the id is always the third field. */
+      if (cli_user(cptr)->kc_id[0])
+	ircd_snprintf(0, t = nbuf, sizeof(nbuf), ":%Tu:%s",
+		      cli_user(cptr)->acc_create, cli_user(cptr)->kc_id);
+      else
+	ircd_snprintf(0, t = nbuf, sizeof(nbuf), ":%Tu",
+		      cli_user(cptr)->acc_create);
       while ((*m++ = *t++))
 	; /* Empty loop */
       m--; /* back up over nul-termination */

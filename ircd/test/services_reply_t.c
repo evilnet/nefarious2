@@ -141,6 +141,14 @@ void auth_sasl_clear(struct AuthRequest *auth)
 {
 }
 
+/* m_account.c asks whether an account stamp's third field is a well
+ * formed account id (s_user.c, not linked here); these cases carry none. */
+int account_id_valid(const char *id)
+{
+  (void)id;
+  return 0;
+}
+
 void auth_end_loc(struct AuthRequest *auth)
 {
 }
