@@ -851,18 +851,6 @@ int register_user(struct Client *cptr, struct Client *sptr)
     if (IsIPChecked(sptr))
       IPcheck_connect_succeeded(sptr);
 
-    /* Apply a pre-registration AWAY (IRCv3 draft/pre-away) the way a
-     * live AWAY is applied: own state, session aggregation and
-     * replication, network broadcast.  con_pre_away stays set -- it IS
-     * this connection's own state, and the aggregation reads it;
-     * clearing it here made a pre-away AWAY * count as present.  No
-     * numerics: the pre-registration AWAY got none either. */
-    if (con_pre_away(cli_connect(sptr)))
-      away_apply(sptr, sptr,
-                 con_pre_away(cli_connect(sptr)) == 2
-                   ? (char *)"*" : con_pre_away_msg(cli_connect(sptr)),
-                 0);
-
     /* Replay channel state and chathistory after session resume. */
     if (auto_resumed && auto_session) {
       if (auto_resumed == 1)
@@ -978,6 +966,20 @@ int register_user(struct Client *cptr, struct Client *sptr)
    * primary when resolving hs_client. */
   if (auto_session && auto_session->hs_client == sptr)
     bounce_broadcast(auto_session, 'A', cli_yxx(sptr));
+
+  /* Apply a pre-registration AWAY (IRCv3 draft/pre-away) the way a live
+   * AWAY is applied: own state, session aggregation and replication,
+   * network broadcast.  Here, after the N and BS A above: the AWAY and
+   * BX U aw= it sends name the user and its session, and a peer that has
+   * not had the introduction drops them as from an unknown numeric.
+   * con_pre_away stays set -- it IS this connection's own state, and the
+   * aggregation reads it.  No numerics: the pre-registration AWAY got
+   * none either. */
+  if (MyUser(sptr) && con_pre_away(cli_connect(sptr)))
+    away_apply(sptr, sptr,
+               con_pre_away(cli_connect(sptr)) == 2
+                 ? (char *)"*" : con_pre_away_msg(cli_connect(sptr)),
+               0);
 
   clear_privs(sptr);
 
