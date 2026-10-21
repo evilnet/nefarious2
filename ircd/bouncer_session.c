@@ -4941,6 +4941,12 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
      * longer hold any local Client" via runtime checks, not hs_origin.
      * Snapshot pre-update; the swap to `alias` happens next. */
     int we_were_holding_primary = (old_primary && MyConnect(old_primary));
+    /* Close the attached stretch of the outgoing primary (nothing when
+     * the session was held: the hold closed it) and open the new one if
+     * the promoted alias is ours; a remote one starts its own stretch on
+     * its server when BX P arrives. */
+    bounce_accrue_active(session);
+    session->hs_attach_time = MyConnect(alias) ? CurrentTime : 0;
     session->hs_client = alias;
     session->hs_state = BOUNCE_ACTIVE;
     session->hs_last_active = CurrentTime;
@@ -7667,6 +7673,9 @@ static int bounce_alias_promote(struct Client *cptr, struct Client *sptr,
       bsess->hs_state = BOUNCE_ACTIVE;
       bsess->hs_last_active = CurrentTime;
       bsess->hs_disconnect_time = 0;
+      /* The promoted connection is ours: its attached stretch starts now
+       * and accrues when this server holds the session. */
+      bsess->hs_attach_time = MyConnect(new_client) ? CurrentTime : 0;
       /* Update remaining aliases' alias_primary */
       for (k = 0; k < bsess->hs_alias_count; k++) {
         struct Client *sibling = findNUser(bsess->hs_aliases[k].ba_numeric);
