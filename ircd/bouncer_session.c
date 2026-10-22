@@ -28,6 +28,7 @@
 #include "bouncer_converge.h"
 #include "bouncer_rebind_auth.h"
 #include "account_id.h"
+#include "exit_reason.h"
 #include "websocket.h"
 #include "chathistory_ephemeral.h"
 #include "chathistory_presence.h"
@@ -688,6 +689,7 @@ static struct BouncerSession *bounce_find_by_token_sessid(const char *account,
 static void bounce_arm_hold_timer(struct BouncerSession *session, time_t min_delay);
 static void bounce_emit_connect_count(struct BouncerSession *session);
 static void bounce_emit_total_active(struct BouncerSession *session);
+static void bounce_repair_realname(struct Client *ghost, const char *realname);
 
 static void bounce_hold_expire(struct Event *ev)
 {
@@ -5852,6 +5854,20 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
       ClearServNotice(ghost);
   }
 
+  /* The reused Connection still records how the previous socket died:
+   * a later death of this one reported that socket's SSL error (even on
+   * plain TCP) or its dead_link() reason. */
+  con_error(ghost_con) = 0;
+  con_sslerror(ghost_con) = NULL;
+  con_exit_reason(ghost_con)[0] = '\0';
+
+  /* A realname dead_link() wrote over before 2026-10 ("Write error: ...")
+   * was kept, persisted and replayed as the user's name: the reviving
+   * connection's USER line has the real one (user decision 2026-10-21). */
+  if (cli_user(temp) && exit_reason_is_clobbered_info(cli_info(ghost))
+      && cli_info(temp)[0] && !exit_reason_is_clobbered_info(cli_info(temp)))
+    bounce_repair_realname(ghost, cli_info(temp));
+
   /* The login just proved its Keycloak id: a ghost without one (restored
    * from a pre-v12 record, logged in through X3) adopts it (user decision
    * 2026-10-21) and so do its aliases here; the next burst carries it.  A
@@ -7378,6 +7394,25 @@ static void bounce_strip_oper_privs(struct Client *cptr)
     MyFree(cli_user(cptr)->opername);
     cli_user(cptr)->opername = NULL;
   }
+}
+
+/** Give revived @a ghost its real realname back, spread as SETNAME is
+ * (m_setname.c): the BX-aware servers by SETNAME, the legacy ones by SI
+ * (stock ms_svsinfo takes it from any server), this server's aliases, and
+ * the channel members that asked for setname. */
+static void bounce_repair_realname(struct Client *ghost, const char *realname)
+{
+  log_write(LS_USER, L_INFO, 0, "Bouncer: %s's realname \"%s\" was an old "
+            "exit reason; repaired to \"%s\" from the reviving connection",
+            cli_name(ghost), cli_info(ghost), realname);
+  ircd_strncpy(cli_info(ghost), realname, REALLEN + 1);
+  sendcmdto_serv_butone_v3(ghost, CMD_SETNAME, NULL, ":%s", cli_info(ghost));
+  sendcmdto_legacy_serv_butone(&me, CMD_SVSINFO, NULL, "%C :%s", ghost,
+                               cli_info(ghost));
+  bounce_emit_alias_update(ghost, "realname", cli_info(ghost));
+  sendcmdto_common_channels_capab_butone(ghost, CMD_SETNAME, ghost,
+                                         CAP_SETNAME, CAP_NONE,
+                                         ":%s", cli_info(ghost));
 }
 
 /** Look up the global O:line config item by name (CONF_OPERATOR only).

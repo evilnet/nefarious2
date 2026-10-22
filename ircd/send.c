@@ -1032,13 +1032,15 @@ static void dead_link(struct Client *to, char *notice)
   client_drop_sendq(cli_connect(to));
 
   /*
-   * Keep a copy of the last comment, for later use...
+   * Keep the reason for the exit message (exit_dead_client, the socket
+   * callbacks).  Never in cli_info: that is the user's realname, which a
+   * held session keeps, persists and replays.
    */
-  ircd_strncpy(cli_info(to), notice, REALLEN + 1);
+  ircd_strncpy(cli_exit_reason(to), notice, EXITREASONLEN + 1);
 
   if (!IsUser(to) && !IsUnknown(to) && !HasFlag(to, FLAG_CLOSING))
-    sendto_opmask_butone(0, SNO_OLDSNO, "%s for %s", cli_info(to), cli_name(to));
-  Debug((DEBUG_ERROR, cli_info(to)));
+    sendto_opmask_butone(0, SNO_OLDSNO, "%s for %s", cli_exit_reason(to), cli_name(to));
+  Debug((DEBUG_ERROR, "%s", cli_exit_reason(to)));
 }
 
 /** Test whether we can send to a client.

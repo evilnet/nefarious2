@@ -718,6 +718,38 @@ static int completed_connection(struct Client* cptr)
   return (IsDead(cptr)) ? 0 : 1;
 }
 
+/** Why @a cptr's socket died, as dead_link() recorded it, or @a dflt.
+ * (These read cli_info -- the realname -- when nothing was recorded, so a
+ * socket error could quit a user with their own realname.) */
+static const char *dead_reason(struct Client *cptr, const char *dflt)
+{
+  return (cptr && cli_connect(cptr) && cli_exit_reason(cptr)[0])
+         ? cli_exit_reason(cptr) : dflt;
+}
+
+/** Exit a client whose socket died -- or hold it, when it is the primary
+ * of a bouncer session that holds: the decision client_sock_callback()
+ * makes for an EOF or a read error.  A write error or a sendQ overflow is
+ * a dropped connection too (user decision 2026-10-21); the parse loops and
+ * check_pings() exited it outright, and a session with no other
+ * connection ended with it.
+ * @param[in] cptr Local client marked dead.
+ * @param[in] dflt Exit message when dead_link() recorded none.
+ * @return CPTR_KILLED when the client is gone, 0 when it is held.
+ */
+int exit_dead_client(struct Client *cptr, const char *dflt)
+{
+  const char *msg = dead_reason(cptr, dflt);
+
+  if (IsUser(cptr) && !IsBouncerAlias(cptr)) {
+    if (IsBouncerHold(cptr))
+      return 0;
+    if (bounce_should_hold(cptr) && bounce_hold_client(cptr, msg) == 0)
+      return 0;
+  }
+  return exit_client(cptr, cptr, &me, (char *)msg);
+}
+
 /** Close the physical connection.  Side effects: MyConnect(cptr)
  * becomes false and cptr->from becomes NULL.
  * @param cptr Client to disconnect.
@@ -1720,7 +1752,7 @@ void client_sock_callback(struct Event* ev)
   struct Client* cptr;
   struct Connection* con;
   char *fmt = "%s";
-  char *fallback = 0;
+  const char *fallback = 0;
 
   assert(0 != ev_socket(ev));
 
@@ -1781,11 +1813,11 @@ void client_sock_callback(struct Event* ev)
 
   case ET_CONNECT: /* socket connection completed */
     if (!completed_connection(cptr) || IsDead(cptr))
-      fallback = cli_info(cptr);
+      fallback = dead_reason(cptr, "Connection failed");
     break;
 
   case ET_ERROR: /* an error occurred */
-    fallback = cli_info(cptr);
+    fallback = dead_reason(cptr, "Socket error");
     cli_error(cptr) = ev_data(ev);
     /* If the OS told us we have a bad file descriptor, we should
      * record that for future reference.
@@ -1850,7 +1882,7 @@ void client_sock_callback(struct Event* ev)
     }
     if (s_state(&(con_socket(con))) == SS_CONNECTING || IsSSLNeedConnect(cptr)) {
       if (!completed_connection(cptr)) {
-        fallback = cli_info(cptr);
+        fallback = dead_reason(cptr, "Connection failed");
         break;
       }
       if (IsSSLNeedConnect(cptr))
@@ -1890,7 +1922,7 @@ void client_sock_callback(struct Event* ev)
       }
       if (s_state(&(con_socket(con))) == SS_CONNECTING || IsSSLNeedConnect(cptr)) {
         if (!completed_connection(cptr)) {
-          fallback = cli_info(cptr);
+          fallback = dead_reason(cptr, "Connection failed");
           break;
         }
         if (IsSSLNeedConnect(cptr))
