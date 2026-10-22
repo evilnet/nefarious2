@@ -5767,8 +5767,12 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   ircd_strncpy(cli_wsorigin(ghost), cli_wsorigin(temp),
                sizeof(cli_wsorigin(ghost)) - 1);
 
-  /* Step 11: Clear holding flags on ghost */
-  if (was_holding) {
+  /* Step 11: Clear holding flags on ghost.  Also on the relay-only
+   * (ACTIVE) path when the ghost still carries them: a revived client
+   * that kept FLAG_BOUNCER_HOLD reads as held to everything after
+   * (deauth classified it as a held ghost and exited it; deferred-items
+   * B4, a hardening -- no reproduced case). */
+  if (was_holding || IsBouncerHold(ghost)) {
     ClearBouncerHold(ghost);
     /* Step 12: Clear CHFL_HOLDING on all channel memberships */
     if (cli_user(ghost)) {
