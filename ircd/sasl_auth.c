@@ -625,6 +625,20 @@ void sasl_session_free(struct Client *sptr)
   cli_saslsession(sptr) = NULL;
 }
 
+#ifdef USE_LIBKC
+/** The id to announce: the verified user's own, and only when the login
+ * identity IS the verified user.  An impersonated login (authzid granted
+ * by FEAT_SASL_TRUSTED_AUTHZID) carries none: the id in hand belongs to
+ * the verifier, not to the account being logged into.  Keycloak logins
+ * only (every caller is in the USE_LIBKC block below). */
+static const char *sasl_id_for(const char *login_as, const char *verified,
+                               const char *verified_id)
+{
+  return (verified_id && verified_id[0] && 0 == ircd_strcmp(login_as, verified))
+         ? verified_id : NULL;
+}
+#endif /* USE_LIBKC */
+
 /* ---- sasl_complete_login: shared between local and P10 paths ---- */
 
 /** Complete a successful SASL login.
@@ -641,17 +655,6 @@ void sasl_session_free(struct Client *sptr)
  *   7. auth_sasl_done to unblock registration
  *   8. Clean up SASL session state and timer
  */
-/** The id to announce: the verified user's own, and only when the login
- * identity IS the verified user.  An impersonated login (authzid granted
- * by FEAT_SASL_TRUSTED_AUTHZID) carries none: the id in hand belongs to
- * the verifier, not to the account being logged into. */
-static const char *sasl_id_for(const char *login_as, const char *verified,
-                               const char *verified_id)
-{
-  return (verified_id && verified_id[0] && 0 == ircd_strcmp(login_as, verified))
-         ? verified_id : NULL;
-}
-
 void sasl_complete_login(struct Client *sptr, const char *account,
                          time_t acc_create, const char *kc_id)
 {
