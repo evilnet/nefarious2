@@ -626,6 +626,30 @@ void sasl_session_free(struct Client *sptr)
 }
 
 #ifdef USE_LIBKC
+/** A Keycloak login that yields no id (no ID token in the grant reply --
+ * the client lacks the openid scope -- or a sub that is not a UUID) logs
+ * in fail-open: the account works, but the webhook and X3 can reach it by
+ * name only.  Said at WARNING, at most once a minute with the count of the
+ * ones in between, since a misconfigured client does it for every login. */
+static void sasl_warn_no_id(const char *authcid, int had_id_token)
+{
+  static time_t last;
+  static unsigned int quiet;
+
+  if (last && CurrentTime - last < 60) {
+    quiet++;
+    return;
+  }
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "SASL PLAIN: no Keycloak id for %s (%s); logged in without one "
+            "(%u more since the last notice)", authcid,
+            had_id_token ? "the ID token's sub is not a UUID"
+                         : "no ID token in the grant reply: client scope openid?",
+            quiet);
+  last = CurrentTime;
+  quiet = 0;
+}
+
 /** The id to announce: the verified user's own, and only when the login
  * identity IS the verified user.  An impersonated login (authzid granted
  * by FEAT_SASL_TRUSTED_AUTHZID) carries none: the id in hand belongs to
@@ -848,6 +872,8 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token, void 
       account_id_from_uuid(sub, kcid);
     Debug((DEBUG_DEBUG, "SASL PLAIN: ID token %s, sub \"%s\", compact id \"%s\" for %s",
            token && token->id_token ? "present" : "absent", sub, kcid, session->authcid));
+    if (!kcid[0])
+      sasl_warn_no_id(session->authcid, token && token->id_token);
 
     if (session->cred_hash_valid) {
       poscache_insert(session->authcid, session->authcid, session->cred_hash,
