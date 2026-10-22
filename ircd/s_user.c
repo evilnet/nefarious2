@@ -2098,9 +2098,21 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
             int mwhat = MODE_ADD;
             unsigned int mi;
             for (pp = &parv[2]; *pp && pp < &parv[parc]; pp++) {
+              char **mode_arg = pp;  /* last parameter this mode string used */
               for (mm = *pp; *mm; mm++) {
                 if (*mm == '+') { mwhat = MODE_ADD; continue; }
                 if (*mm == '-') { mwhat = MODE_DEL; continue; }
+                /* The modes that take an argument consume the next
+                 * parameter, as the parse below does: an account, a
+                 * cloaked host or a sethost is not a string of mode
+                 * letters (the 'o' in a host set +o on the replica, and
+                 * the sync handed it to the local aliases). */
+                if (mode_arg + 1 < &parv[parc] && *(mode_arg + 1)
+                    && ((*mm == 's' && is_snomask(*(mode_arg + 1)))
+                        || (mwhat == MODE_ADD
+                            && (*mm == 'r' || *mm == 'C' || *mm == 'c'
+                                || *mm == 'f' || *mm == 'h'))))
+                  mode_arg++;
                 for (mi = 0; mi < USERMODELIST_SIZE; mi++) {
                   if (userModeList[mi].c == *mm) {
                     if (mwhat == MODE_ADD)
@@ -2111,6 +2123,7 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
                   }
                 }
               }
+              pp = mode_arg;
             }
             bounce_sync_session_umodes(acptr);
           }
