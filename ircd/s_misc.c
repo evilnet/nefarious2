@@ -600,11 +600,6 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
      * freed Client.  Idempotent; no-op if not queued. */
     bounce_remove_pending_registration(bcptr);
   }
-  /* Frontier-introducer cleanup: dying primary mustn't leave a stale
-   * pending-canon entry that would later try to emit N to legacy peers
-   * for a freed Client*.  Idempotent. */
-  bounce_pending_canon_unregister(bcptr);
-
   /* Legacy-face cleanup: if this Client was recorded as a session's
    * legacy face on any peer, clear that entry so the next emit re-
    * introduces a live face.  Walk all sessions for the account; for

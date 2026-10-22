@@ -121,24 +121,6 @@ void sendcmdto_set_alias_source(struct Client *alias)
   s2s_alias_source = alias;
 }
 
-/** Frontier introducer gate (per design intent #135 + #254).
- *
- * When set, the next sendcmdto_serv_butone / sendcmdto_flag_serv_butone
- * call skips peers that are neither IRCv3-aware nor services — i.e.,
- * the legacy-user peers.  Used by register_user for fresh
- * bouncer-account users so the BX-aware ring sees the introduction
- * and can converge via D.2 at-N-time, while legacy peers don't see
- * it until canonical-primary status is confirmed (via
- * bounce_pending_canon_emit_now from the periodic tick).
- *
- * Auto-clears after one consumed broadcast. */
-static int s2s_skip_legacy_canon = 0;
-
-void sendcmdto_set_skip_legacy_canon(void)
-{
-  s2s_skip_legacy_canon = 1;
-}
-
 /** Override batch ID for forwarded label responses.
  * When non-empty, format_message_tags_for_ex() uses this instead of
  * cli_batch_id(to). Takes priority over use_batch. Auto-cleared after use.
@@ -1859,15 +1841,6 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
        * (collision-kill on the gate-held peer). */
       if (IsBurstGated(lp->value.cptr))
         continue;
-      /* Frontier-introducer gate: when caller staged
-       * s2s_skip_legacy_canon, skip non-IRCv3-aware non-services peers
-       * for this broadcast.  The deferred legacy emission is handled
-       * later by bounce_pending_canon_emit_now from the periodic tick. */
-      if (s2s_skip_legacy_canon
-          && !IsIRCv3Aware(lp->value.cptr)
-          && !IsService(lp->value.cptr))
-        continue;
-
       if (mb_legacy && !IsIRCv3Aware(lp->value.cptr)) {
         send_mb = mb_legacy;
         send_mb_alias = mb_alias_legacy;
@@ -1881,7 +1854,6 @@ void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
       else
         send_buffer(lp->value.cptr, send_mb, 0);
     }
-    s2s_skip_legacy_canon = 0;  /* auto-clear after consumption */
 
     if (mb_legacy)
       msgq_clean(mb_legacy);
