@@ -5936,14 +5936,19 @@ int bounce_revive(struct BouncerSession *session, struct Client *temp)
   bounce_emit_connect_count(session);
 
   /* The held socket's server notice mask went with it (close_connection
-   * zeroes it; bounce_hold_client kept it): give it back, or the revived
-   * connection keeps +s with a zero mask -- no server notices, and
-   * MODE <me> answers "008 <me> 0 :: Server notice mask (0x0)" (field
-   * report 2026-10-21).  Before register_user's send_umode_signon, so
-   * the 008 there reports it. */
-  if (HasFlag(ghost, FLAG_SERVNOTICE) && !cli_snomask(ghost)
-      && session->hs_snomask_known && session->hs_snomask)
+   * zeroes it; bounce_hold_client kept it, BX K may have changed it since):
+   * give the session's back, or the revived connection keeps +s with a
+   * zero mask -- no server notices, and MODE <me> answers
+   * "008 <me> 0 :: Server notice mask (0x0)" (field report 2026-10-21).
+   * +s follows the mask.  Before register_user's send_umode_signon, so the
+   * 008 there reports it. */
+  if (session->hs_snomask_known) {
     set_snomask(ghost, session->hs_snomask, SNO_SET);
+    if (cli_snomask(ghost))
+      SetServNotice(ghost);
+    else
+      ClearServNotice(ghost);
+  }
 
   /* Phase 3 hs_enforced: a reviving client on a CRFLAG_BOUNCER class
    * re-enforces the session.  temp_con (now transplanted) is the
@@ -7236,6 +7241,12 @@ static void bounce_copy_umodes(struct Client *from, struct Client *to)
   int i;
 
   for (i = 0; umode_sync_flags[i] >= 0; i++) {
+    /* +s is known only where the connection is: P10 never carries it,
+     * so a remote Client's flag says nothing (its server sends the mask
+     * and the flag by BX K).  Copied from a remote source it would clear
+     * +s on every local member at each umode change of the primary. */
+    if (umode_sync_flags[i] == FLAG_SERVNOTICE && !MyConnect(from))
+      continue;
     if (HasFlag(from, umode_sync_flags[i]))
       SetFlag(to, umode_sync_flags[i]);
     else
@@ -7248,6 +7259,124 @@ static void bounce_copy_umodes(struct Client *from, struct Client *to)
    * convert-in-place case (an already-counted client converted to a remote alias
    * becomes ineligible and releases its prior count). */
   userstats_count_sync(to);
+}
+
+/** The server notice mask of session member @a cptr as this server knows
+ * it: a live local connection's own (0 without +s), a local held ghost's
+ * as bounce_hold_client() saved it.  A remote Client's is not known here
+ * -- its cli_snomask is its uplink link's Connection field, and P10 never
+ * carries +s -- so *known is 0 and its own server is the one to say.
+ * @param[in] cptr Session member.
+ * @param[in] sess Its session.
+ * @param[out] known Set to 1 when the returned mask is meaningful.
+ * @return The mask.
+ */
+static unsigned int bounce_member_snomask(struct Client *cptr,
+                                          struct BouncerSession *sess,
+                                          int *known)
+{
+  *known = 0;
+  if (!cptr || !MyConnect(cptr) || !IsUser(cptr))
+    return 0;
+  if (IsBouncerHold(cptr)) {
+    if (!sess || !sess->hs_snomask_known)
+      return 0;
+    *known = 1;
+    return sess->hs_snomask;
+  }
+  *known = 1;
+  return HasFlag(cptr, FLAG_SERVNOTICE) ? cli_snomask(cptr) : 0;
+}
+
+/** Take a Lamport stamp for a change of @a sess's mask made on this
+ * server: the clock, but past the last stamp seen, so a change made after
+ * one received is ordered after it whatever the servers' clocks say. */
+static void bounce_stamp_snomask(struct BouncerSession *sess)
+{
+  time_t ts = CurrentTime;
+
+  if (ts <= sess->hs_snomask_ts)
+    ts = sess->hs_snomask_ts + 1;
+  sess->hs_snomask_ts = ts;
+  ircd_strncpy(sess->hs_snomask_origin, cli_yxx(&me),
+               sizeof(sess->hs_snomask_origin));
+}
+
+/** Is a change of @a sess's mask stamped @a ts by server @a origin later
+ * than the last one taken?  The lower server numeric wins a tie, the same
+ * answer on every server, so crossing changes converge. */
+static int bounce_snomask_later(const struct BouncerSession *sess,
+                                time_t ts, const char *origin)
+{
+  if (ts != sess->hs_snomask_ts)
+    return ts > sess->hs_snomask_ts;
+  return strcmp(origin, sess->hs_snomask_origin) < 0;
+}
+
+/** Tell the BX-aware server of remote session member @a target the
+ * session's mask and its stamp (BX K), routed toward it.  The numeric is
+ * the full YYXXX: the receiver resolves it with bx_find_user_strict. */
+static void bounce_send_member_snomask(struct Client *target,
+                                       struct BouncerSession *sess)
+{
+  struct Client *peer;
+
+  if (!target || MyConnect(target) || !cli_user(target)
+      || !cli_user(target)->server)
+    return;
+  peer = cli_from(target);
+  if (!peer || !IsServer(peer) || !IsIRCv3Aware(peer))
+    return;
+  sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, target, "K %s%s %u %Tu",
+                cli_yxx(cli_user(target)->server), cli_yxx(target),
+                sess->hs_snomask, sess->hs_snomask_ts);
+}
+
+/** Give live local session member @a cptr the session's mask @a mask:
+ * +s iff it is non-zero.  With @a tell, the client hears what changed --
+ * for a mask that arrived by BX K, which it did not ask for and has no
+ * other way to learn (send_umode_signon ran before it arrived).  The
+ * session sync among one server's own members stays silent, as it is
+ * for every other mode (deferred-items register). */
+static void bounce_put_member_snomask(struct Client *cptr, unsigned int mask,
+                                      int tell)
+{
+  int had = HasFlag(cptr, FLAG_SERVNOTICE) ? 1 : 0;
+  unsigned int old = cli_snomask(cptr);
+
+  assert(MyConnect(cptr));
+  /* As set_user_mode: HIS_SNOTICES_OPER_ONLY keeps a non-oper from
+   * taking +s, not from keeping it (a -o leaves it, clamped). */
+  if (mask && !had && feature_bool(FEAT_HIS_SNOTICES_OPER_ONLY)
+      && !IsAnOper(cptr))
+    mask = 0;
+  /* set_snomask() clamps a non-oper's mask to SNO_USER. */
+  set_snomask(cptr, mask, SNO_SET);
+  if (cli_snomask(cptr))
+    SetServNotice(cptr);
+  else
+    ClearServNotice(cptr);
+
+  if (!tell)
+    return;
+  if (had != (HasFlag(cptr, FLAG_SERVNOTICE) ? 1 : 0))
+    sendcmdto_one(cptr, CMD_MODE, cptr, "%s %s", cli_name(cptr),
+                  HasFlag(cptr, FLAG_SERVNOTICE) ? "+s" : "-s");
+  if (cli_snomask(cptr) && cli_snomask(cptr) != old)
+    send_reply(cptr, RPL_SNOMASK, cli_snomask(cptr), cli_snomask(cptr));
+}
+
+/** Clamp live local member @a cptr's mask to what it may still hold --
+ * after it lost +o by a path that does not carry the mask (a remote
+ * primary's -o arrives as a flag; a BS O clear): set_user_mode's -o keeps
+ * +s and strips the oper-only bits, and so does this. */
+static void bounce_reclamp_snomask(struct Client *cptr)
+{
+  if (!cptr || !MyConnect(cptr) || IsBouncerHold(cptr))
+    return;
+  set_snomask(cptr, cli_snomask(cptr), SNO_SET); /* clamps a non-oper's to SNO_USER */
+  if (!cli_snomask(cptr))
+    ClearServNotice(cptr);
 }
 
 /** Look up the global O:line config item by name (CONF_OPERATOR only).
@@ -7321,23 +7450,36 @@ static void bounce_apply_oper_grant(struct Client *cptr,
    * ghost revivals, and any other non-/OPER grant entry. */
   SetFlag(cptr, FLAG_WALLOP);
   SetFlag(cptr, FLAG_DEBUG);
-  if (sess->hs_snomask_known) {
-    /* The oper's own mask, kept with the session (saved at hold,
-     * persisted): what they had, not the O:line default -- and no +s if
-     * they had turned it off (user, 2026-10-21: the mask comes back
-     * wherever +o does). */
-    if (sess->hs_snomask) {
-      SetFlag(cptr, FLAG_SERVNOTICE);
-      set_snomask(cptr, sess->hs_snomask & SNO_ALL, SNO_SET);
+  {
+    unsigned int mask;
+
+    if (sess->hs_snomask_known) {
+      /* The oper's own mask, kept with the session (saved at hold,
+       * persisted, carried by BX K): what they had, not the O:line
+       * default -- and no +s if they had turned it off (user,
+       * 2026-10-21: the mask comes back wherever +o does). */
+      mask = sess->hs_snomask & SNO_ALL;
+    } else {
+      /* None recorded (a pre-v11 record): the O:line's, added to what
+       * the client holds, as do_oper does; the session records it, so a
+       * BX C answer and a later hold carry it. */
+      mask = (ConfSnoMask(aconf) | aconf->snomask) & SNO_ALL;
+      if (!mask)
+        mask = feature_int(FEAT_SNOMASK_OPERDEFAULT);
+      if (!IsBouncerHold(cptr))
+        mask |= cli_snomask(cptr);
+      sess->hs_snomask = mask;
+      sess->hs_snomask_known = 1;
+      bounce_stamp_snomask(sess);
     }
-  } else {
-    unsigned int snomask = ConfSnoMask(aconf) & SNO_ALL;
-    snomask |= aconf->snomask & SNO_ALL;
-    SetFlag(cptr, FLAG_SERVNOTICE);
-    if (snomask)
-      set_snomask(cptr, snomask, SNO_ADD);
+    if (mask)
+      SetFlag(cptr, FLAG_SERVNOTICE);
     else
-      set_snomask(cptr, feature_int(FEAT_SNOMASK_OPERDEFAULT), SNO_ADD);
+      ClrFlag(cptr, FLAG_SERVNOTICE);
+    /* A held ghost (restored from the DB) stays out of the opsarray, as
+     * every held ghost is: the revive gives it the session's mask. */
+    if (!IsBouncerHold(cptr))
+      set_snomask(cptr, mask, SNO_SET);
   }
   if (cli_user(cptr)) {
     if (cli_user(cptr)->opername)
@@ -7366,6 +7508,9 @@ static void bounce_clear_oper_locally(struct Client *cptr)
   client_set_privs(cptr, NULL);   /* clears propagate privilege */
   clear_privs(cptr);
   cli_handler(cptr) = CLIENT_HANDLER;
+  /* The oper-only notice bits go with +o (set_user_mode's -o strips them
+   * the same way). */
+  bounce_reclamp_snomask(cptr);
   if (cli_user(cptr) && cli_user(cptr)->opername) {
     MyFree(cli_user(cptr)->opername);
     cli_user(cptr)->opername = NULL;
@@ -7458,38 +7603,16 @@ void bounce_sync_session_umodes(struct Client *source)
 
   primary = sess->hs_client;
 
-  /* The session's own copy of the mask follows a local member's (the
-   * live one; a held ghost's was zeroed with its socket), marked dirty
-   * so a restart restores the current one. */
-  if (MyConnect(source) && !IsBouncerHold(source)) {
-    unsigned int mask = HasFlag(source, FLAG_SERVNOTICE) ? cli_snomask(source) : 0;
-    if (!sess->hs_snomask_known || sess->hs_snomask != mask) {
-      sess->hs_snomask = mask;
-      sess->hs_snomask_known = 1;
-      bounce_mark_dirty(source);
-    }
-  }
-
-  /* Apply source's umode/privs/snomask to one target Client.  Self
+  /* Apply source's umode flags and privs to one target Client.  Self
    * (source == target) is skipped — bounce_copy_umodes would be wasted
-   * work. */
+   * work.  The server notice mask is bounce_sync_session_snomask's. */
 #define APPLY_TO(target) do {                                              \
   struct Client *_t = (target);                                            \
   if (_t && _t != source && IsUser(_t)) {                                  \
     bounce_copy_umodes(source, _t);                                        \
-    if (MyConnect(_t)) {                                                   \
-      if (IsOper(source)) {                                                \
-        memcpy(&cli_privs(_t), &cli_privs(source), sizeof(cli_privs(_t))); \
-        cli_handler(_t) = OPER_HANDLER;                                    \
-      }                                                                    \
-      set_snomask(_t, cli_snomask(source), SNO_SET);                       \
-    } else {                                                               \
-      struct Client *_peer = cli_from(_t);                                 \
-      if (_peer && IsServer(_peer) && IsIRCv3Aware(_peer)) {               \
-        sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, _t,                       \
-                      "K %s %u", cli_yxx(_t),                              \
-                      cli_snomask(source));                                \
-      }                                                                    \
+    if (MyConnect(_t) && IsOper(source)) {                                 \
+      memcpy(&cli_privs(_t), &cli_privs(source), sizeof(cli_privs(_t)));   \
+      cli_handler(_t) = OPER_HANDLER;                                      \
     }                                                                      \
   }                                                                        \
 } while (0)
@@ -7506,6 +7629,66 @@ void bounce_sync_session_umodes(struct Client *source)
   }
 
 #undef APPLY_TO
+
+  bounce_sync_session_snomask(source);
+}
+
+/** The server notice mask half of a session sync.
+ *
+ * A mask is known only where its connection is (bounce_member_snomask).
+ * From a local @a source, the mask it holds is the session's: the
+ * session keeps it (stamped, marked dirty for a restart), the other local
+ * members get it, and the other members' servers get it by BX K -- only
+ * when it changed (a new alias learns it from the BX C answer).  From a
+ * remote source (a server MODE for a remote primary; set_user_mode acting
+ * on one) nothing is known here: its own server sends BX K, and the local
+ * members only have theirs clamped to what they still may hold, since a
+ * -o of the primary arrives as a flag without the mask.
+ * @param[in] source Session member whose state changed.
+ */
+void bounce_sync_session_snomask(struct Client *source)
+{
+  struct BouncerSession *sess;
+  struct Client *member;
+  unsigned int mask;
+  int known;
+  int changed = 0;
+  int i;
+
+  if (!source || !IsUser(source))
+    return;
+  sess = bounce_get_session(source);
+  if (!sess)
+    return;
+
+  mask = bounce_member_snomask(source, sess, &known);
+  if (known && !IsBouncerHold(source)
+      && (!sess->hs_snomask_known || sess->hs_snomask != mask)) {
+    sess->hs_snomask = mask;
+    sess->hs_snomask_known = 1;
+    bounce_stamp_snomask(sess);
+    changed = 1;
+    bounce_mark_dirty(source);
+  }
+
+  for (i = -1; i < sess->hs_alias_count; i++) {
+    member = (i < 0) ? sess->hs_client
+                     : findNUser(sess->hs_aliases[i].ba_numeric);
+    if (!member || member == source || !IsUser(member))
+      continue;
+    if (i >= 0 && !IsBouncerAlias(member))
+      continue;
+    if (MyConnect(member)) {
+      if (IsBouncerHold(member))
+        continue;   /* its mask went with its socket; the session has it */
+      if (known)
+        bounce_put_member_snomask(member, mask, 0);
+      else
+        bounce_reclamp_snomask(member);
+    } else if (known && changed) {
+      bounce_send_member_snomask(member, sess);
+    }
+  }
 }
 
 /* ---------------------------------------------------------------- */
@@ -7953,11 +8136,22 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   if (IsOper(primary)) {
     memcpy(&cli_privs(sptr), &cli_privs(primary), sizeof(cli_privs(sptr)));
     cli_handler(sptr) = OPER_HANDLER;
-    /* Sync snomask so alias is in opsarray for server notice delivery.
-     * Only works when primary is local (has real snomask). Remote primary
-     * case is handled by BX K from the primary's server. */
-    if (cli_snomask(primary))
-      set_snomask(sptr, cli_snomask(primary), SNO_SET);
+  }
+
+  /* The session's server notice mask, where this server knows it (a local
+   * primary; bounce_member_snomask) -- +s follows it.  An alias of a
+   * remote primary learns it from the primary's server: its BX C answer
+   * is a BX K. */
+  {
+    int known;
+    unsigned int mask = bounce_member_snomask(primary, session, &known);
+    if (known) {
+      set_snomask(sptr, mask, SNO_SET);
+      if (cli_snomask(sptr))
+        SetServNotice(sptr);
+      else
+        ClearServNotice(sptr);
+    }
   }
 
   /* Re-assert the alias's own SSL state — bounce_copy_umodes copies the
@@ -8630,11 +8824,25 @@ track_alias:
     Debug((DEBUG_INFO, "BX C: empty chanlist for alias %s", alias_numeric));
   }
 
-  /* If primary is local and opered, send BX K so the alias's server
-   * adds it to opsarray for server notice delivery. */
-  if (MyUser(primary) && cli_snomask(primary)) {
-    sendcmdto_serv_butone(&me, CMD_BOUNCER_TRANSFER, cptr,
-                          "K %s %u", alias_numeric, cli_snomask(primary));
+  /* The primary is ours: the alias's server learns the session's server
+   * notice mask (and so +s) from us -- the only server that knows it.
+   * Toward the alias, i.e. back over cptr (this used to go to every link
+   * BUT cptr and never arrived), and before the session move below
+   * promotes the alias and retires a held ghost, whose own mask
+   * close_connection() zeroed: bounce_member_snomask() reads the saved
+   * one for it. */
+  if (MyUser(primary) && session) {
+    int known;
+    unsigned int mask = bounce_member_snomask(primary, session, &known);
+    if (known && (!session->hs_snomask_known || session->hs_snomask != mask)) {
+      /* A live primary whose mask was never synced (+s set before the
+       * session existed): the session takes it now, stamped here. */
+      session->hs_snomask = mask;
+      session->hs_snomask_known = 1;
+      bounce_stamp_snomask(session);
+    }
+    if (known && mask)
+      bounce_send_member_snomask(alias, session);
   }
 
   Debug((DEBUG_INFO, "BX C: created alias %s for primary %s (%s)",
@@ -10013,52 +10221,96 @@ void bounce_drain_pending_registrations(void)
 /* BX K: Sync snomask to alias                                       */
 /* ---------------------------------------------------------------- */
 
-/** Set the snomask on a bouncer alias.
- * Sent by the primary's server (which has the authoritative oper state)
- * to ensure aliases on other servers are added to opsarray and receive
- * server notices (oper notices, glines, connection notices, etc.).
+/** Set a session member's server notice mask (and so +s).
+ * Sent by the server where the session's mask is known -- where the
+ * member that changed it, or the primary a new alias attached to, is
+ * connected -- to each other member's server, routed toward the member,
+ * so every server delivers its own server notices to its own members.
  *
- * Format: BX K <alias_numeric> <snomask_decimal>
+ * Format: BX K <member_numeric YYXXX> <snomask_decimal>
+ *
+ * The member may be an alias or the primary.  A live local member gets
+ * the mask, +s iff it is non-zero, and is told; a local held ghost's mask
+ * went with its socket, so the session keeps it for the revive.  Nothing
+ * is synced onward from here: the sender addresses every member itself.
  */
 static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
                                 int parc, char *parv[])
 {
-  struct Client *alias;
+  struct Client *target;
+  struct BouncerSession *sess;
   unsigned int snomask;
+  time_t ts;
   int is_replay = bx_drain_in_progress;
 
   if (parc < 4)
     return protocol_violation(sptr, "BX K requires 2 parameters");
 
-  alias = bx_find_user_strict(parv[2]);
-  if (!alias || !IsBouncerAlias(alias)) {
-    /* Burst race: defer the local snomask-set for replay when BX C
-     * arrives for this alias.  Forward to other servers immediately
-     * on first arrival (they may have BX C state already); replay
-     * skips forward since the original arrival already broadcast. */
-    if (!is_replay)
-      defer_bx_for_alias(parv[2], cptr, sptr, parc, parv);
-    if (!is_replay)
-      sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                            "K %s %s", parv[2], parv[3]);
+  /* Older fork servers sent the 3-char client half of the numeric; it
+   * resolves nowhere, and deferring it only filled the pending table and
+   * broadcast it into every link. */
+  if (strlen(parv[2]) != 5) {
+    Debug((DEBUG_INFO, "BX K: dropping short numeric %s", parv[2]));
     return 0;
   }
 
-  snomask = (unsigned int)atoi(parv[3]);
-
-  /* Only set snomask on local aliases — remote ones will receive
-   * the forwarded BX K and handle it themselves. */
-  if (MyConnect(alias)) {
-    set_snomask(alias, snomask, SNO_SET);
-    Debug((DEBUG_INFO, "BX K: set snomask %u on alias %s (%s)",
-           snomask, cli_name(alias), parv[2]));
+  target = bx_find_user_strict(parv[2]);
+  if (!target || !IsUser(target)) {
+    /* Burst race: defer the local snomask-set for replay when BX C
+     * arrives for this alias.  Forward to the other BX-aware servers on
+     * first arrival (they may have BX C state already); replay skips
+     * the forward since the original arrival already broadcast. */
+    if (!is_replay) {
+      defer_bx_for_alias(parv[2], cptr, sptr, parc, parv);
+      sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
+                               "K %s %s%s%s", parv[2], parv[3],
+                               parc > 4 ? " " : "", parc > 4 ? parv[4] : "");
+    }
+    return 0;
   }
 
-  /* Forward only on first arrival.  Replay re-running the broadcast
-   * would duplicate it on the network. */
-  if (!is_replay)
-    sendcmdto_serv_butone(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                          "K %s %s", parv[2], parv[3]);
+  if (!MyConnect(target)) {
+    /* On its way to the member's server, first arrival only.  Never back
+     * where it came from: a relay that broadcasts (an older server) would
+     * otherwise bounce it between us. */
+    if (!is_replay && cli_from(target) != cptr)
+      sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, target, "K %s %s%s%s",
+                    parv[2], parv[3],
+                    parc > 4 ? " " : "", parc > 4 ? parv[4] : "");
+    return 0;
+  }
+
+  sess = bounce_get_session(target);
+  if (!sess || (!IsBouncerAlias(target) && sess->hs_client != target))
+    return 0;   /* not a session member here */
+
+  snomask = (unsigned int)strtoul(parv[3], NULL, 10);
+  ts = (parc > 4) ? (time_t)strtoul(parv[4], NULL, 10) : 0;
+  if (!bounce_snomask_later(sess, ts, cli_yxx(sptr))) {
+    /* An older change crossing a newer one: whoever made the newer one
+     * has sent it everywhere, this one included. */
+    Debug((DEBUG_INFO, "BX K: %s %u stamp %Tu from %s is older than %Tu",
+           parv[2], snomask, ts, cli_name(sptr), sess->hs_snomask_ts));
+    return 0;
+  }
+  sess->hs_snomask_ts = ts;
+  ircd_strncpy(sess->hs_snomask_origin, cli_yxx(sptr),
+               sizeof(sess->hs_snomask_origin));
+
+  if (IsBouncerHold(target)) {
+    /* Its mask went with its socket: the revive applies the session's. */
+    sess->hs_snomask = snomask;
+    sess->hs_snomask_known = 1;
+    sess->hs_dirty = 1;
+    bounce_start_dirty_persist_timer();
+  } else {
+    bounce_put_member_snomask(target, snomask, 1);
+    sess->hs_snomask = HasFlag(target, FLAG_SERVNOTICE) ? cli_snomask(target) : 0;
+    sess->hs_snomask_known = 1;
+    bounce_mark_dirty(target);
+  }
+  Debug((DEBUG_INFO, "BX K: snomask %u on %s (%s)", snomask,
+         cli_name(target), parv[2]));
   return 0;
 }
 

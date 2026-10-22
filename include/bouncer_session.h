@@ -548,6 +548,15 @@ struct BouncerSession {
    * recorded (a session restored from a pre-v11 record). */
   unsigned int hs_snomask;
   int hs_snomask_known;
+  /* The order of the mask's changes across servers (not persisted): a
+   * Lamport stamp -- this server's clock, but past the last stamp seen --
+   * taken at every change made here, and the server that made it.  BX K
+   * carries both; a receiver keeps the later change, the lower server
+   * numeric on a tie, so two servers changing it at once (an /OPER on an
+   * alias and the O:line mask the primary's server derives for the +o it
+   * relays) settle on the same mask. */
+  time_t hs_snomask_ts;
+  char hs_snomask_origin[3];
 
   int hs_dirty;                       /**< Session state changed, needs periodic persist */
   time_t hs_restore_deadline;         /**< Restore-pending expiry: a HOLDING ghost
@@ -819,6 +828,7 @@ extern void bounce_emit_alias_update(struct Client *primary,
  * @param[in] primary The primary client whose modes changed.
  */
 extern void bounce_sync_session_umodes(struct Client *source);
+extern void bounce_sync_session_snomask(struct Client *source);
 
 /** Echo an outgoing PM/NOTICE to all other members of the sender's session.
  * @param[in] sender  Client that sent the PM (primary or alias).
