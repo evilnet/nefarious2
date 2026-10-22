@@ -364,6 +364,11 @@ struct ForwardedLabel {
   enum ForwardedLabelState fl_state;       /**< Current state */
 };
 
+/** Longest exit reason kept for a dying socket (con_exit_reason): room
+ * for "Write error: " and a full OpenSSL reason, which the realname's
+ * REALLEN cut short ("... protocol er"). */
+#define EXITREASONLEN 127
+
 /** Represents a local connection.
  * This contains a lot of stuff irrelevant to server connections, but
  * those are so rare as to not be worth special-casing.
@@ -423,6 +428,10 @@ struct Connection
                                         error that caused this clients
                                         socket to close. */
   char*               con_sslerror;  /**< SSL Error. */
+  /** Why the socket died (dead_link): read where the exit message is
+   * built.  dead_link() used to write it into the realname, which a held
+   * session then kept, persisted and replayed as the user's name. */
+  char                con_exit_reason[EXITREASONLEN + 1];
 
   struct Socket       con_socket;    /**< socket descriptor for
                                       client */
@@ -819,6 +828,8 @@ struct Client {
 #define cli_error(cli)		con_error(cli_connect(cli))
 /** Get last SSL error string. */
 #define cli_sslerror(cli)       con_sslerror(cli_connect(cli))
+/** Get why a client's socket died ("" while it has not). */
+#define cli_exit_reason(cli)    con_exit_reason(cli_connect(cli))
 /** Get server notice mask for the client. */
 #define cli_snomask(cli)	con_snomask(cli_connect(cli))
 /** Get next time a nick change is allowed for the client. */
@@ -906,6 +917,8 @@ struct Client {
 #define con_error(con)		((con)->con_error)
 /** Get last SSL error string. */
 #define con_sslerror(con)       ((con)->con_sslerror)
+/** Get why a connection's socket died ("" while it has not). */
+#define con_exit_reason(con)    ((con)->con_exit_reason)
 /** Get sentalong marker for connection. */
 #define con_sentalong(con)      ((con)->con_sentalong)
 /** Get server notice mask for connection. */

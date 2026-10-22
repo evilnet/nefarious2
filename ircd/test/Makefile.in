@@ -49,6 +49,7 @@ CMOCKA_TESTPROGS = \
 	webpush_attention_cmocka \
 	bouncer_converge_cmocka \
 	bouncer_rebind_auth_cmocka \
+	exit_reason_cmocka \
 	bouncer_deauth_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
@@ -88,6 +89,7 @@ DEP_SRC = \
 	webpush_attention_cmocka.c \
 	bouncer_converge_cmocka.c \
 	bouncer_rebind_auth_cmocka.c \
+	exit_reason_cmocka.c \
 	bouncer_deauth_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
@@ -446,6 +448,14 @@ bouncer_rebind_auth_test.o: ../bouncer_rebind_auth.c ../../include/bouncer_rebin
 BOUNCER_REBIND_AUTH_CMOCKA_OBJS = bouncer_rebind_auth_cmocka.o bouncer_rebind_auth_test.o
 bouncer_rebind_auth_cmocka: $(BOUNCER_REBIND_AUTH_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BOUNCER_REBIND_AUTH_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# exit_reason tests - the module is pure (no ircd deps)
+exit_reason_test.o: ../exit_reason.c ../../include/exit_reason.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../exit_reason.c
+
+EXIT_REASON_CMOCKA_OBJS = exit_reason_cmocka.o exit_reason_test.o
+exit_reason_cmocka: $(EXIT_REASON_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(EXIT_REASON_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webpush_line tests - the module is pure (no ircd deps)
 webpush_line_test.o: ../webpush_line.c ../../include/webpush_line.h
