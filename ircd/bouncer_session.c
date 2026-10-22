@@ -7216,6 +7216,27 @@ static void bounce_reclamp_snomask(struct Client *cptr)
     ClearServNotice(cptr);
 }
 
+/** Take what being an oper gave local connection @a cptr -- privileges,
+ * OPER_HANDLER, the opername -- once it is no oper.  The session sync
+ * used to copy them onto the other connections at +o and never take them
+ * back at -o: they kept running oper commands, and the ones that assert
+ * IsAnOper (KILL, CLOSE, CONNECT ...) aborted the server (deferred-items
+ * B2, 2026-10-21).  The mode flags and the counters are the caller's
+ * (bounce_copy_umodes / userstats_count_sync); this is the rest. */
+static void bounce_strip_oper_privs(struct Client *cptr)
+{
+  if (!cptr || !MyConnect(cptr) || IsAnOper(cptr))
+    return;
+  client_set_privs(cptr, NULL);   /* clears every privilege */
+  clear_privs(cptr);
+  if (cli_handler(cptr) == OPER_HANDLER)
+    cli_handler(cptr) = CLIENT_HANDLER;
+  if (cli_user(cptr) && cli_user(cptr)->opername) {
+    MyFree(cli_user(cptr)->opername);
+    cli_user(cptr)->opername = NULL;
+  }
+}
+
 /** Look up the global O:line config item by name (CONF_OPERATOR only).
  * Returns NULL if no matching opername is configured locally.  Used by
  * the session-grant restoration path on alias promotion: when the new
@@ -7342,16 +7363,10 @@ static void bounce_clear_oper_locally(struct Client *cptr)
   /* Reconcile the counter now that +o is cleared (flag-keyed: decrements iff
    * this client was actually counted). */
   userstats_count_sync(cptr);
-  client_set_privs(cptr, NULL);   /* clears propagate privilege */
-  clear_privs(cptr);
-  cli_handler(cptr) = CLIENT_HANDLER;
+  bounce_strip_oper_privs(cptr);
   /* The oper-only notice bits go with +o (set_user_mode's -o strips them
    * the same way). */
   bounce_reclamp_snomask(cptr);
-  if (cli_user(cptr) && cli_user(cptr)->opername) {
-    MyFree(cli_user(cptr)->opername);
-    cli_user(cptr)->opername = NULL;
-  }
 }
 
 /** Apply or clear a session's oper grant on every locally-attached
@@ -7447,9 +7462,12 @@ void bounce_sync_session_umodes(struct Client *source)
   struct Client *_t = (target);                                            \
   if (_t && _t != source && IsUser(_t)) {                                  \
     bounce_copy_umodes(source, _t);                                        \
-    if (MyConnect(_t) && IsOper(source)) {                                 \
-      memcpy(&cli_privs(_t), &cli_privs(source), sizeof(cli_privs(_t)));   \
-      cli_handler(_t) = OPER_HANDLER;                                      \
+    if (MyConnect(_t)) {                                                   \
+      if (IsAnOper(source)) {                                              \
+        memcpy(&cli_privs(_t), &cli_privs(source), sizeof(cli_privs(_t))); \
+        cli_handler(_t) = OPER_HANDLER;                                    \
+      } else                                                               \
+        bounce_strip_oper_privs(_t);                                       \
     }                                                                      \
   }                                                                        \
 } while (0)
@@ -7970,7 +7988,7 @@ int bounce_setup_local_alias(struct Client *sptr, struct BouncerSession *session
   /* Copy oper privileges from primary so HasPriv() works correctly.
    * Without this, umode_str() strips +o (PRIV_PROPAGATE check) and
    * oper commands are denied on the alias connection. */
-  if (IsOper(primary)) {
+  if (IsAnOper(primary)) {   /* a local oper (+O) too */
     memcpy(&cli_privs(sptr), &cli_privs(primary), sizeof(cli_privs(sptr)));
     cli_handler(sptr) = OPER_HANDLER;
   }
