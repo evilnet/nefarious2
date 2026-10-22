@@ -246,8 +246,6 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
           ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
           SetAccount(acptr);
 
-          bounce_emit_alias_update(acptr, "account", cli_user(acptr)->account);
-
           /* Count this member's channels only on a false->true account
            * transition.  An account CHANGE ('M') arrives with the user
            * already counted -- the old unconditional loop double-counted
@@ -282,6 +280,17 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
                  cli_user(acptr)->kc_id, parv[3]));
         } else
           cli_user(acptr)->kc_id[0] = '\0';
+
+        /* The aliases follow, once the primary carries the account's ts
+         * and id (they take both with the name).  The primary's own server
+         * tells the network (BX U account=); elsewhere that update may
+         * have come first and left the aliases with the primary's previous
+         * ts and id, so they catch up from it here -- either order ends
+         * the same, and only one server broadcasts. */
+        if (MyConnect(acptr))
+          bounce_emit_alias_update(acptr, "account", cli_user(acptr)->account);
+        else
+          bounce_sync_alias_identity(acptr);
 
         {
           char ac_msgid[64] = "";

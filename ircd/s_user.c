@@ -30,6 +30,7 @@
 #include "s_user.h"
 #include "webpush.h"
 #include "bouncer_session.h"
+#include "bouncer_rebind_auth.h"
 #include "history.h"
 #include "capab.h"
 #include "IPcheck.h"
@@ -551,6 +552,36 @@ int register_user(struct Client *cptr, struct Client *sptr)
           saved_since_time = (idle > 0) ? idle : active->hs_last_active;
           revive_target = active;
         }
+      }
+
+      /* A different Keycloak user under this account name (the account
+       * was deleted and recreated): the held session is not this
+       * login's (user decision 2026-10-21).  A held session with no
+       * other connection ends -- its user is gone -- and this connection
+       * registers fresh; one with aliases elsewhere is only refused (a
+       * KILL-style teardown would have to reach them; deferred-items).
+       * A ghost without an id adopts the login's (bounce_revive). */
+      if (revive_target && revive_target->hs_client
+          && cli_user(revive_target->hs_client)
+          && bounce_rebind_kc_conflict(cli_user(revive_target->hs_client)->kc_id,
+                                       cli_user(sptr)->kc_id)) {
+        struct Client *stale = revive_target->hs_client;
+        log_write(LS_USER, L_INFO, 0,
+                  "Bouncer: not reviving %s for %s: the session carries Keycloak id "
+                  "%s, the login %s%s", cli_name(stale), cli_account(sptr),
+                  cli_user(stale)->kc_id, cli_user(sptr)->kc_id,
+                  (revive_target->hs_state == BOUNCE_HOLDING
+                   && revive_target->hs_alias_count == 0)
+                    ? "; ending the stale session" : "");
+        if (revive_target->hs_state == BOUNCE_HOLDING
+            && revive_target->hs_alias_count == 0 && IsBouncerHold(stale)) {
+          bounce_kill_session(revive_target,
+                              "Session ended: its Keycloak account was replaced");
+          ClearBouncerHold(stale);
+          exit_client(stale, stale, &me,
+                      "Session ended: its Keycloak account was replaced");
+        }
+        revive_target = NULL;
       }
 
       if (revive_target && bounce_revive(revive_target, sptr) == 0) {
