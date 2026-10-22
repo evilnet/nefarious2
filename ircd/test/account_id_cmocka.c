@@ -66,6 +66,9 @@ static void only_22_base64url_chars_are_valid(void **state)
   assert_false(account_id_valid("a6p7gJ2tEdGAtADAT9QwyAA")); /* 23 */
   assert_false(account_id_valid("a6p7gJ2tEdGAtADAT9Qwy="));  /* padding */
   assert_false(account_id_valid("a6p7gJ2tEdGAtADAT9Qw+A"));  /* standard alphabet */
+  /* Bytes above 0x7f are never id characters, whatever the locale. */
+  assert_false(account_id_valid("a6p7gJ2tEdGAtADAT9Qw" "\xe9" "A"));
+  assert_false(account_id_valid("a6p7gJ2tEdGAtADAT9Qw" "\xb5" "A"));
   assert_false(account_id_valid("RENAME"));
   assert_false(account_id_valid(""));
   assert_false(account_id_valid(NULL));
